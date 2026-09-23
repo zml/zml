@@ -92,14 +92,14 @@ const Context = struct {
         const intermediate = self.w2.dim(2) * 2;
         const tokens: i64 = @intCast(self.input.count() / @as(usize, @intCast(hidden)));
         var ids = self.ids.convert(.i32).reshape(.{ tokens, self.topk });
-        var routing_weights = self.weights.convert(.f32).reshape(.{ tokens, self.topk });
+        const routing_weights = self.weights.convert(.f32).reshape(.{ tokens, self.topk });
         if (self.expert_parallel) {
             const partition_id = zml.ops.partitionId().convert(.i32);
             const expert_start = partition_id.scale(experts);
             const expert_end = expert_start.addConstant(experts);
+            // Routes of other ranks get expert -1 and are not computed here.
             const local = ids.cmp(.GE, expert_start).logical(.AND, ids.cmp(.LT, expert_end));
-            ids = local.select(ids.sub(expert_start), zml.Tensor.scalar(0, .i32));
-            routing_weights = local.select(routing_weights, zml.Tensor.scalar(0, .f32));
+            ids = local.select(ids.sub(expert_start), zml.Tensor.scalar(-1, .i32));
         }
         const result = kernels.forward(tokens, hidden, intermediate, experts, self.topk, .{
             .x = self.input.reshape(.{ tokens, hidden }),

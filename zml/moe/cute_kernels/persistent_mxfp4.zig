@@ -39,6 +39,9 @@ pub const Tile = struct {
     b: i64,
     sfa: i64,
     sfb: i64,
+    /// Bytes reserved at `c`. Only the epilogue scratch is used; the wide
+    /// prefill tiles keep just that instead of two full C stages.
+    c_bytes: ?i64 = null,
 
     pub fn of(comptime n: i64) Tile {
         return switch (n) {
@@ -90,8 +93,56 @@ pub const Tile = struct {
                 .sfa = 218112,
                 .sfb = 223232,
             },
+            // Prefill tiles. One expert weight tile feeds 64 or 128 routed
+            // rows instead of 32, which is what keeps large batches from
+            // re-reading the expert weights once per group. They hold only
+            // the epilogue scratch at `c`, so the A/B ring stays deep.
+            64 => .{
+                .n = 64,
+                .stages = 9,
+                .smem_bytes = 232448,
+                .tmem_columns = 256,
+                .empty_barriers = 72,
+                .accumulator_full = 144,
+                .accumulator_empty = 160,
+                .tmem_dealloc = 176,
+                .tmem_holding = 184,
+                .c = 1024,
+                .c_bytes = 512,
+                .a = 2048,
+                .b = 149504,
+                .sfa = 223232,
+                .sfb = 227840,
+            },
+            128 => .{
+                .n = 128,
+                .stages = 6,
+                .smem_bytes = 204800,
+                .tmem_columns = 512,
+                .empty_barriers = 48,
+                .accumulator_full = 96,
+                .accumulator_empty = 112,
+                .tmem_dealloc = 128,
+                .tmem_holding = 136,
+                .c = 1024,
+                .c_bytes = 512,
+                .a = 2048,
+                .b = 100352,
+                .sfa = 198656,
+                .sfb = 201728,
+            },
             else => @compileError("unsupported MXFP4 tile N"),
         };
+    }
+
+    /// Routed rows an epilogue pass handles: one per warp lane.
+    pub fn chunkRows(self: Tile) i64 {
+        return @min(self.n, 32);
+    }
+
+    /// Epilogue passes over the tile width.
+    pub fn chunks(self: Tile) usize {
+        return @intCast(@divExact(self.n, self.chunkRows()));
     }
 
     const a_stage_bytes = 128 * 128;
@@ -123,7 +174,7 @@ pub const Tile = struct {
             .{ "acc_empty_mbar_ptr", 16, self.accumulator_empty },
             .{ "tmem_dealloc_mbar", 8, self.tmem_dealloc },
             .{ "tmem_holding_buf", 4, self.tmem_holding },
-            .{ "sC", accumulator_stages * self.cStageElements() * 4, self.c },
+            .{ "sC", self.c_bytes orelse accumulator_stages * self.cStageElements() * 4, self.c },
             .{ "sA", s * a_stage_bytes, self.a },
             .{ "sB", s * self.bStageBytes(), self.b },
             .{ "sSFA", s * sf_stage_bytes, self.sfa },
@@ -171,8 +222,10 @@ pub const Epilogue = enum {
     /// quantization straight into the down GEMM's input and 128x4 scale
     /// layouts. Python `fused=1`.
     swiglu_mxfp8,
-    /// Down projection: FP32 rows stored in route order `[routes, m]`,
-    /// skipping padding rows. Python `fused=2`.
+    /// Down projection: BF16 rows stored in route order `[routes, m]`,
+    /// skipping padding rows. Python `fused=2`. BF16 halves the traffic of
+    /// this store and of the top-k reduction that reads it back; the routed
+    /// partial sums are rounded exactly like the reference finalize.
     route_rows,
 };
 
@@ -272,7 +325,7 @@ pub fn downRows(cfg: Config, a: Inputs, route_inverse: zml.Tensor) zml.Tensor {
         .weight_scale = a.weight_scale,
         .input_scale = a.input_scale,
         .route_inverse = route_inverse,
-    }, .{ .output = .init(.{ cfg.routes, cfg.m }, .f32) }, .{ .cfg = cfg, .scalars = &.{ cfg.m, cfg.n, cfg.k, cfg.groups, cfg.experts } }).output;
+    }, .{ .output = .init(.{ cfg.routes, cfg.m }, .bf16) }, .{ .cfg = cfg, .scalars = &.{ cfg.m, cfg.n, cfg.k, cfg.groups, cfg.experts } }).output;
 }
 
 fn typed(type_: *const mlir.Type) struct { mlir_type: cute.ArgSpec.MlirTypeSpec } {
@@ -287,7 +340,7 @@ const device_name = "mxfp4_sm100_persistent_grouped_gemm";
 
 fn buildProgram(b: *B, cfg: Config) cute.FinishError!void {
     return switch (cfg.n) {
-        inline 8, 16, 32 => |n| switch (cfg.epilogue) {
+        inline 8, 16, 32, 64, 128 => |n| switch (cfg.epilogue) {
             inline else => |epilogue| buildTiledProgram(b, cfg, comptime Tile.of(n), epilogue),
         },
         else => std.debug.panic("unsupported MXFP4 tile N {d}", .{cfg.n}),
@@ -378,7 +431,7 @@ const EpilogueTypes = struct {
             .weights = b.memrefType(.f32, .gmem, 16, b.layoutType(b.layoutSpec(@max(cfg.routes, 1), 1))),
             .q = b.memrefType(.f8e4m3fn, .gmem, 16, b.layoutType(b.layoutSpec(.{ cfg.routedRows(), activations }, .{ activations, 1 }))),
             .s = b.memrefType(.i8, .gmem, 16, b.layoutType(b.layoutSpec(.{ cfg.groups, @divExact(activations, 32) * 128 }, .{ @divExact(activations, 32) * 128, 1 }))),
-            .rows = b.memrefType(.f32, .gmem, 16, b.layoutType(b.layoutSpec(.{ @max(cfg.routes, 1), cfg.m }, .{ cfg.m, 1 }))),
+            .rows = b.memrefType(.bf16, .gmem, 16, b.layoutType(b.layoutSpec(.{ @max(cfg.routes, 1), cfg.m }, .{ cfg.m, 1 }))),
         };
     }
 };
@@ -500,7 +553,7 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
             .weight_scale = operands.weight_scale,
             .input_scale = operands.input_scale,
             .route_inverse = .{ .ptr = cute.DType.i32 },
-            .output = .{ .ptr = cute.DType.f32 },
+            .output = .{ .ptr = cute.DType.bf16 },
             .problem_m = shape.problem_m,
             .problem_n = shape.problem_n,
             .problem_k = shape.problem_k,
@@ -699,6 +752,36 @@ const PersistentWork = struct {
     executed: V,
 };
 
+/// Direct routing (one token) runs one single-row group per route. Routes
+/// owned by other expert-parallel ranks carry expert -1: the persistent tiles
+/// cover the valid routes only, in route order, so they do not occupy a wave.
+const DirectRoutes = struct {
+    expert_ids: cute.View,
+    routes: usize,
+
+    fn count(self: DirectRoutes, b: *B) V {
+        var valid = b.cst(.i32, 0);
+        for (0..self.routes) |r| valid = valid.add(self.expertAt(b, r).ge(0).to(.i32));
+        return valid;
+    }
+
+    /// Route of the `k`-th valid route.
+    fn nth(self: DirectRoutes, b: *B, k: V) V {
+        var seen = b.cst(.i32, 0);
+        var route = b.cst(.i32, 0);
+        for (0..self.routes) |r| {
+            const valid = self.expertAt(b, r).ge(0);
+            route = b.select(valid.bitAnd(seen.eq(k)), b.cst(.i32, @as(i32, @intCast(r))), route);
+            seen = seen.add(valid.to(.i32));
+        }
+        return route;
+    }
+
+    fn expertAt(self: DirectRoutes, b: *B, r: usize) V {
+        return self.expert_ids.get(.{b.cst(.i32, @as(i32, @intCast(r)))}, .i32);
+    }
+};
+
 fn persistentWorkAt(
     b: *B,
     linear: V,
@@ -707,6 +790,7 @@ fn persistentWorkAt(
     tiles_m: V,
     div_m: V,
     div_n: V,
+    direct: ?DirectRoutes,
 ) PersistentWork {
     // StaticPersistentTileScheduler uses two first-class FastDivmod objects
     // to decode the column-major (M, N=1, L) problem layout.  Preserve those
@@ -715,10 +799,11 @@ fn persistentWorkAt(
     // values and carry them through every persistent loop.
     const group_and_m = b.fastDivmod(linear, div_m);
     const group_and_n = b.fastDivmod(group_and_m[0], div_n);
+    const group = if (direct) |routes| routes.nth(b, group_and_n[0]) else group_and_n[0];
     return .{
         .m = b.makeWarpUniform(group_and_m[1]),
         .n = b.makeWarpUniform(group_and_n[1]),
-        .group = b.makeWarpUniform(group_and_n[0]),
+        .group = b.makeWarpUniform(group),
         .valid = b.makeWarpUniform(linear.lt(active.mul(tiles_m))),
         .linear = linear,
         .executed = executed,
@@ -734,8 +819,9 @@ fn advancePersistentWork(
     tiles_m: V,
     div_m: V,
     div_n: V,
+    direct: ?DirectRoutes,
 ) PersistentWork {
-    return persistentWorkAt(b, linear.add(persistent_clusters), executed.add(1), active, tiles_m, div_m, div_n);
+    return persistentWorkAt(b, linear.add(persistent_clusters), executed.add(1), active, tiles_m, div_m, div_n, direct);
 }
 
 /// Equivalent to CUTLASS PipelineState.advance().  Keep the index and phase
@@ -793,6 +879,7 @@ fn runTmaProducer(
     active: V,
     tiles_m: V,
     expert_ids: cute.View,
+    direct: ?DirectRoutes,
     partitioned_a_target: cute.View,
     partitioned_b_target: cute.View,
     exec_a: cute.Atom,
@@ -809,7 +896,7 @@ fn runTmaProducer(
     const cta_l = b.cst(.i32, 0);
     const div_m = b.fastDivmodCreate(tiles_m);
     const div_n = b.fastDivmodCreate(1);
-    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.cst(.i32, 0), active, tiles_m, div_m, div_n);
+    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.cst(.i32, 0), active, tiles_m, div_m, div_n, direct);
     const carried = .{
         initial_work.m,        initial_work.n, initial_work.group, initial_work.valid,
         initial_count,         initial_index,  initial_phase,      persistent_clusters,
@@ -859,6 +946,7 @@ fn runTmaProducer(
         tiles.after_carried[13],
         tiles.after_carried[15],
         tiles.after_carried[16],
+        direct,
     );
     tiles.yieldAfter(.{
         next_work.m,
@@ -1135,7 +1223,8 @@ fn runMmaConsumer(
     const persistent_clusters = b.gridDim().z;
     const div_m = b.fastDivmodCreate(tiles_m);
     const div_n = b.fastDivmodCreate(1);
-    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.cst(.i32, 0), active, tiles_m, div_m, div_n);
+    // The MMA warp never reads the group, only the tile count.
+    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.cst(.i32, 0), active, tiles_m, div_m, div_n, null);
     const carried = .{
         initial_work.m,        initial_work.n, initial_work.group, initial_work.valid,
         b.cst(.i32, 0),        b.cst(.i32, 0), b.cst(.i32, 0),     tiled_mma.value(),
@@ -1215,6 +1304,7 @@ fn runMmaConsumer(
         tiles.after_carried[17],
         tiles.after_carried[19],
         tiles.after_carried[20],
+        null,
     );
     tiles.yieldAfter(.{
         next_work.m,
@@ -1284,6 +1374,7 @@ fn runEpilogue(
     tmem_holding: V,
     active: V,
     tiles_m: V,
+    direct: ?DirectRoutes,
     operands: EpilogueOperands,
 ) void {
     const n = tile.n;
@@ -1293,7 +1384,7 @@ fn runEpilogue(
 
     const div_m = b.fastDivmodCreate(tiles_m);
     const div_n = b.fastDivmodCreate(1);
-    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.cst(.i32, 0), active, tiles_m, div_m, div_n);
+    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.cst(.i32, 0), active, tiles_m, div_m, div_n, direct);
     const carried = .{
         initial_work.m,        initial_work.n, initial_work.group, initial_work.valid,
         b.cst(.i32, 0),        b.cst(.i32, 0), b.cst(.i32, 0),     initial_work.linear,
@@ -1326,9 +1417,6 @@ fn runEpilogue(
         .phase = tiles.after_carried[5],
     };
     const stage = accumulator_state.index;
-    // Route metadata does not depend on the accumulator: load it while the
-    // MMA warp is still working on this tile.
-    const routed = routedLanes(b, tile, operands, group);
     b.mbarrierTryWaitParity(barrierAt(b, storage.accumulator_full_barriers, stage), accumulator_state.phase, 10_000_000);
 
     const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, stage);
@@ -1337,21 +1425,35 @@ fn runEpilogue(
         b.makeIntTuple(.{warp.mul(32 * 65536)}),
         b.ptrTy(.f32, .tmem, 0) catch @panic("bad epilogue TMEM pointer"),
     ).value();
-    const values = b.tmemLoadVector(warp_tmem, n, .{ .num_dp = 32, .num_b = 32, .num_rep = @intCast(n) });
-    b.fenceTmemLoad();
-
-    // Registers now own the accumulator values, so all 128 epilogue threads
-    // release this TMEM stage before writing the shared-memory store tile.
-    b.mbarrierArrive(barrierAt(b, storage.accumulator_empty_barriers, stage), 1);
-
-    var columns: [@intCast(n)]V = undefined;
-    inline for (&columns, 0..) |*column, i| column.* = b.vectorExtract(values, i, .i32).bitCast(.f32);
-    switch (epilogue) {
-        .swiglu_mxfp8 => storeTileSwiglu(b, tile, storage, operands, routed, tile_m, group, &columns),
-        .route_rows => storeTileRows(b, tile, operands, routed, tile_m, &columns),
+    // A warp lane holds one routed row, so tiles wider than a warp are drained
+    // 32 rows at a time. The accumulator stage is released once its last chunk
+    // is in registers.
+    const chunk_rows: usize = comptime @intCast(tile.chunkRows());
+    const tile_chunks = comptime tile.chunks();
+    inline for (0..tile_chunks) |chunk| {
+        const chunk_tmem = if (chunk == 0) warp_tmem else b.addOffsetTyped(
+            warp_tmem,
+            b.makeIntTuple(.{@as(i32, @intCast(chunk * chunk_rows))}),
+            b.ptrTy(.f32, .tmem, 0) catch @panic("bad epilogue TMEM pointer"),
+        ).value();
+        // Route metadata does not depend on the accumulator.
+        const routed = routedLanes(b, tile, operands, group, chunk);
+        const values = b.tmemLoadVector(chunk_tmem, @intCast(chunk_rows), .{ .num_dp = 32, .num_b = 32, .num_rep = @intCast(chunk_rows) });
+        b.fenceTmemLoad();
+        if (chunk + 1 == tile_chunks) {
+            // Registers now own the accumulator values, so all 128 epilogue
+            // threads release this TMEM stage before the stores.
+            b.mbarrierArrive(barrierAt(b, storage.accumulator_empty_barriers, stage), 1);
+        }
+        var columns: [@intCast(@min(n, 32))]V = undefined;
+        inline for (&columns, 0..) |*column, i| column.* = b.vectorExtract(values, i, .i32).bitCast(.f32);
+        switch (epilogue) {
+            .swiglu_mxfp8 => storeTileSwiglu(b, tile, storage, operands, routed, tile_m, group, &columns, chunk),
+            .route_rows => storeTileRows(b, tile, operands, routed, tile_m, &columns, chunk),
+        }
     }
     const next_accumulator_state = advancePipeline(b, accumulator_state.index, accumulator_state.phase, accumulator_stages);
-    const next_work = advancePersistentWork(b, tiles.after_carried[6], tiles.after_carried[7], b.gridDim().z, active, tiles_m, div_m, div_n);
+    const next_work = advancePersistentWork(b, tiles.after_carried[6], tiles.after_carried[7], b.gridDim().z, active, tiles_m, div_m, div_n, direct);
     tiles.yieldAfter(.{
         next_work.m,
         next_work.n,
@@ -1392,7 +1494,7 @@ const RoutedLanes = struct {
     weight: ?V,
 };
 
-fn routedLanes(b: *B, comptime tile: Tile, operands: EpilogueOperands, group: V) RoutedLanes {
+fn routedLanes(b: *B, comptime tile: Tile, operands: EpilogueOperands, group: V, comptime chunk: usize) RoutedLanes {
     // Only the up projection applies routing weights.
     const weights = operands.routing_weights;
     if (operands.direct) return .{
@@ -1402,8 +1504,11 @@ fn routedLanes(b: *B, comptime tile: Tile, operands: EpilogueOperands, group: V)
     };
     const lane = b.threadIdx().x.rem(32);
     const count = operands.group_sizes.get(.{group}, .i32);
-    // Lanes past the tile width alias row 0, which is always live.
-    const row_in_group = b.select(lane.lt(@as(i32, @intCast(tile.n))), lane, b.cst(.i32, 0));
+    // Lanes past the tile width alias row 0, which is always live. Wide tiles
+    // run one 32-row chunk at a time, so lane `l` holds row `32 * chunk + l`.
+    const chunk_rows = comptime tile.chunkRows();
+    const in_chunk = b.select(lane.lt(@as(i32, @intCast(chunk_rows))), lane, b.cst(.i32, 0));
+    const row_in_group = if (chunk == 0) in_chunk else in_chunk.add(@as(i32, @intCast(@as(i64, @intCast(chunk)) * chunk_rows)));
     const live = row_in_group.lt(count);
     const inverse = operands.route_inverse.get(.{group.mul(tile.n).add(row_in_group)}, .i32);
     const route = b.select(live, inverse, b.cst(.i32, 0));
@@ -1423,20 +1528,22 @@ fn routedLanes(b: *B, comptime tile: Tile, operands: EpilogueOperands, group: V)
 /// independent rows. Do not duplicate this body under a full-group branch:
 /// ptxas then loses track of convergence at the tile loop's warp-uniform
 /// shuffles, and lanes still outside the gate-lane stores read garbage.
-fn storeTileSwiglu(b: *B, comptime tile: Tile, storage: StageStorage, operands: EpilogueOperands, routed: RoutedLanes, tile_m: V, group: V, columns: []const V) void {
+fn storeTileSwiglu(b: *B, comptime tile: Tile, storage: StageStorage, operands: EpilogueOperands, routed: RoutedLanes, tile_m: V, group: V, columns: []const V, comptime chunk: usize) void {
     // Direct routing has exactly one live row per group.
     if (operands.direct)
-        swigluRows(b, tile, storage, operands, routed, tile_m, group, columns, 1, false)
+        swigluRows(b, tile, storage, operands, routed, tile_m, group, columns, 1, false, chunk)
     else
-        swigluRows(b, tile, storage, operands, routed, tile_m, group, columns, @intCast(tile.n), true);
+        swigluRows(b, tile, storage, operands, routed, tile_m, group, columns, comptime @intCast(tile.chunkRows()), true, chunk);
 }
 
 const swiglu_chunk = 8;
 
 /// The first `live` rows of `storeTileSwiglu`; with `skip_padding`, chunks
 /// of rows past `count` are skipped.
-fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: EpilogueOperands, routed: RoutedLanes, tile_m: V, group: V, columns: []const V, comptime live: usize, comptime skip_padding: bool) void {
-    const n = tile.n;
+fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: EpilogueOperands, routed: RoutedLanes, tile_m: V, group: V, columns: []const V, comptime live: usize, comptime skip_padding: bool, comptime chunk: usize) void {
+    const n = comptime tile.chunkRows();
+    // First routed row of this epilogue pass.
+    const chunk_first: i32 = comptime @intCast(chunk * @as(usize, @intCast(tile.chunkRows())));
     const tid = b.threadIdx().x;
     const lane = tid.rem(32);
     const warp = b.makeWarpUniform(b.makeWarpUniform(tid.div(32)));
@@ -1446,19 +1553,19 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
     // The TMA C staging buffer is unused by this epilogue.
     const scratch_layout = b.layoutSpec(.{ 4, n }, .{ n, 1 });
     const scratch = b.makeViewTyped(storage.c, b.staticLayout(scratch_layout), b.memrefType(.f32, .smem, 1024, b.layoutType(scratch_layout)));
-    const chunks = std.math.divCeil(usize, live, swiglu_chunk) catch unreachable;
+    const row_chunks = std.math.divCeil(usize, live, swiglu_chunk) catch unreachable;
 
     var activations: [@intCast(n)]V = undefined;
     // Lane `c` collects the warp maximum of column `c`.
     var lane_maximum = b.cst(.f32, 0);
-    for (0..chunks) |chunk| {
-        const first = chunk * swiglu_chunk;
+    for (0..row_chunks) |row_chunk| {
+        const first = row_chunk * swiglu_chunk;
         const last = @min(first + swiglu_chunk, live);
         // Row 0 of an active group is always live.
-        const guarded = skip_padding and chunk > 0;
+        const guarded = skip_padding and (row_chunk > 0 or chunk > 0);
         const types: [swiglu_chunk + 1]*const mlir.Type = @splat(f32_type);
         // `@TypeOf` does not evaluate its operand.
-        var guard: ?@TypeOf(b.openIfElse(routed.count, tupleOf(types))) = if (guarded) b.openIfElse(routed.count.gt(@as(i32, @intCast(first))), tupleOf(types)) else null;
+        var guard: ?@TypeOf(b.openIfElse(routed.count, tupleOf(types))) = if (guarded) b.openIfElse(routed.count.gt(chunk_first + @as(i32, @intCast(first))), tupleOf(types)) else null;
         var chunk_maximum = lane_maximum;
         for (columns[first..last], activations[first..last], first..) |value, *activation, column| {
             const c: i32 = @intCast(column);
@@ -1472,8 +1579,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
             result = result.mul(b.shuffleIdx(routed.weight.?, c)).to(.bf16).to(.f32);
             // Odd threads hold no activation and must not raise the maxima.
             activation.* = b.select(is_gate, result, b.cst(.f32, 0));
-            var maximum = activation.*.abs();
-            inline for (.{ 16, 8, 4, 2, 1 }) |offset| maximum = maximum.maximum(b.shuffleXor(maximum, offset));
+            const maximum = b.warpMaxNonNegative(activation.*.abs());
             chunk_maximum = b.select(lane.eq(c), maximum, chunk_maximum);
         }
         if (guard) |*g| {
@@ -1504,43 +1610,43 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
     b.namedBarrier(1, 128);
 
     const activation_index = tile_m.mul(64).add(tid.div(2));
-    for (0..chunks) |chunk| {
-        const first = chunk * swiglu_chunk;
+    for (0..row_chunks) |row_chunk| {
+        const first = row_chunk * swiglu_chunk;
         const last = @min(first + swiglu_chunk, live);
-        var guard: ?@TypeOf(b.openIf(routed.count)) = if (skip_padding and chunk > 0) b.openIf(routed.count.gt(@as(i32, @intCast(first)))) else null;
+        var guard: ?@TypeOf(b.openIf(routed.count)) = if (skip_padding and (chunk > 0 or first > 0)) b.openIf(routed.count.gt(chunk_first + @as(i32, @intCast(first)))) else null;
         var inverses: [swiglu_chunk]V = undefined;
         for (inverses[0 .. last - first], first..) |*inverse, column| inverse.* = b.shuffleIdx(scale.inverse, @as(i32, @intCast(column)));
         var gate_lane = b.openIf(is_gate);
         for (activations[first..last], inverses[0 .. last - first], first..) |activation, inverse, column| {
             const quantized = activation.mul(inverse).maximum(-448.0).minimum(448.0).to(.f8e4m3fn);
-            operands.q.?.set(.{ first_row.add(@as(i32, @intCast(column))), activation_index }, quantized);
+            operands.q.?.set(.{ first_row.add(chunk_first + @as(i32, @intCast(column))), activation_index }, quantized);
         }
         gate_lane.yieldThen(.{});
         if (guard) |*g| g.yieldThen(.{});
     }
 
     // Warps 0 and 2 each own one 32-activation block of this tile.
-    var scale_lane = b.openIf(warp.rem(2).eq(0).bitAnd(lane.lt(routed.count)));
+    var scale_lane = b.openIf(warp.rem(2).eq(0).bitAnd(lane.add(chunk_first).lt(routed.count)));
     const block = tile_m.mul(2).add(warp.div(2));
-    const swizzled = block.div(4).mul(512).add(lane.rem(32).mul(16)).add(lane.div(32).mul(4)).add(block.rem(4));
+    const swizzled = block.div(4).mul(512).add(lane.mul(16)).add(chunk * 4).add(block.rem(4));
     operands.s.?.set(.{ group, swizzled }, scale.exponent.to(.i8));
     scale_lane.yieldThen(.{});
 }
 
 /// Python `down_epilogue`: store each live routed row at its token/top-k
 /// route, so the final reduction reads rows in route order.
-fn storeTileRows(b: *B, comptime tile: Tile, operands: EpilogueOperands, routed: RoutedLanes, tile_m: V, columns: []const V) void {
-    _ = tile;
+fn storeTileRows(b: *B, comptime tile: Tile, operands: EpilogueOperands, routed: RoutedLanes, tile_m: V, columns: []const V, comptime chunk: usize) void {
+    const chunk_first: i32 = comptime @intCast(chunk * @as(usize, @intCast(tile.chunkRows())));
     const output_column = tile_m.mul(128).add(b.threadIdx().x);
     if (operands.direct) {
-        operands.rows.?.set(.{ routed.route, output_column }, columns[0]);
+        operands.rows.?.set(.{ routed.route, output_column }, columns[0].to(.bf16));
         return;
     }
     var routes: [32]V = undefined;
     for (routes[0..columns.len], 0..) |*route, column| route.* = b.shuffleIdx(routed.route, @as(i32, @intCast(column)));
     for (columns, routes[0..columns.len], 0..) |value, route, column| {
-        var live = if (column == 0) null else b.openIf(routed.count.gt(@as(i32, @intCast(column))));
-        operands.rows.?.set(.{ route, output_column }, value);
+        var live: ?@TypeOf(b.openIf(routed.count)) = if (column == 0 and chunk == 0) null else b.openIf(routed.count.gt(chunk_first + @as(i32, @intCast(column))));
+        operands.rows.?.set(.{ route, output_column }, value.to(.bf16));
         if (live) |*l| l.yieldThen(.{});
     }
 }
@@ -1665,7 +1771,8 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
 
     const expert_ids: cute.View = .{ .inner = d.expert_ids.inner, .kernel = b };
     const active_count: cute.View = .{ .inner = d.active_count.inner, .kernel = b };
-    const active = if (cfg.direct) b.cst(.i32, cfg.groups) else active_count.get(.{0}, .i32);
+    const direct: ?DirectRoutes = if (cfg.direct) .{ .expert_ids = expert_ids, .routes = @intCast(cfg.groups) } else null;
+    const active = if (direct) |routes| routes.count(b) else active_count.get(.{0}, .i32);
 
     // Match CUTLASS PipelineTmaUmma/PipelineUmmaAsync initialization.  Warp 0
     // owns initialization, and one elected lane initializes each complete
@@ -1697,7 +1804,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     // PDL allows this grid to launch early, so wait before the first TMA read.
     b.waitForDependency();
     switch (k_tiles) {
-        inline 18, 40 => |kt| runTmaProducer(b, tile, kt, storage, active, d.tiles_m, expert_ids, partitioned_a.targets[0], partitioned_b.targets[0], exec_a, exec_b, exec_sfa, exec_sfb),
+        inline 18, 40 => |kt| runTmaProducer(b, tile, kt, storage, active, d.tiles_m, expert_ids, direct, partitioned_a.targets[0], partitioned_b.targets[0], exec_a, exec_b, exec_sfa, exec_sfb),
         else => std.debug.panic("unsupported MXFP4 reduction tile count {d}", .{k_tiles}),
     }
     tma_warp.yieldThen(.{});
@@ -1719,7 +1826,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     alloc_warp.yieldThen(.{});
     b.namedBarrier(2, 160);
     switch (epilogue) {
-        .swiglu_mxfp8 => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, .{
+        .swiglu_mxfp8 => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, direct, .{
             .group_sizes = view(b, d.group_sizes),
             .route_inverse = view(b, d.route_inverse),
             .routing_weights = view(b, d.routing_weights),
@@ -1728,7 +1835,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
             .direct = cfg.direct,
             .group_rows = cfg.groupRows(),
         }),
-        .route_rows => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, .{
+        .route_rows => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, direct, .{
             .group_sizes = view(b, d.group_sizes),
             .route_inverse = view(b, d.route_inverse),
             .rows = view(b, d.rows),

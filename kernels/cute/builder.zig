@@ -2483,6 +2483,25 @@ pub const Builder = struct {
 
     /// `cute.arch.shuffle_sync_bfly`: exchange a scalar with the lane at
     /// `lane_id ^ offset` in the current warp.
+    /// Warp-wide maximum of a non-negative float, as one `redux.sync` instead
+    /// of a shuffle reduction: IEEE bit patterns of non-negative floats order
+    /// like unsigned integers.
+    pub fn warpMaxNonNegative(self: *Builder, value: Value) Value {
+        const dtype = value.dtype();
+        if (dtypeBitwidth(dtype) != 32) @panic("warpMaxNonNegative requires a 32-bit scalar");
+        const bits = if (dtype == .i32) value else value.bitCast(.i32);
+        const reduced = self.emit(mlir.Operation.make(self.ctx, "llvm.inline_asm", .{
+            .operands = .{ .flat = &.{bits.inner} },
+            .results = .{ .flat = &.{.int(self.ctx, .i32)} },
+            .attributes = &.{
+                .named(self.ctx, "asm_string", .string(self.ctx, "redux.sync.max.u32 $0, $1, 0xffffffff;")),
+                .named(self.ctx, "constraints", .string(self.ctx, "=r,r")),
+            },
+            .location = self.loc(),
+        }));
+        return if (dtype == .i32) reduced else reduced.bitCast(dtype);
+    }
+
     pub fn shuffleXor(self: *Builder, value: Value, offset: i32) Value {
         const dtype = value.dtype();
         if (dtypeBitwidth(dtype) != 32) @panic("shuffleXor currently requires a 32-bit scalar");
