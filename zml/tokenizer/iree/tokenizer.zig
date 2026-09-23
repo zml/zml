@@ -568,7 +568,7 @@ pub const Normalizer = struct {
         return norm;
     }
 
-    fn init(allocator: std.mem.Allocator, sequence: []const Kind) !Normalizer {
+    pub fn init(allocator: std.mem.Allocator, sequence: []const Kind) !Normalizer {
         if (sequence.len < 0) return error.EmptySequence;
 
         if (sequence.len == 1) {
@@ -705,13 +705,16 @@ test "normalizer from Hugging Face" {
 test "normalizer sequence" {
     const allocator = std.testing.allocator;
 
-    var normalizer = try Normalizer.init(allocator, &.{.{ .Strip = .both }});
+    var normalizer = try Normalizer.init(allocator, &.{
+        .{ .Strip = .both },
+        .Lowercase,
+    });
     defer normalizer.deinit();
 
-    const res = try normalizer.normalize(allocator, "hello ");
+    const res = try normalizer.normalize(allocator, "    helLO WoRLD    ");
     defer allocator.free(res);
 
-    try std.testing.expectEqualSlices(u8, "hello", res);
+    try std.testing.expectEqualSlices(u8, "hello world", res);
 }
 
 test "normalizer preserves whitespace across output and sequence boundaries" {
