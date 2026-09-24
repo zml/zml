@@ -1646,7 +1646,16 @@ pub const Data = struct {
         try writer.print("Sharding(name={s})\n", .{self.name});
 
         try writer.writeAll("Bindings:\n");
-        for (self.logical.axes.slice(), self.logical.intents.slice(), self.bindings.slice()) |l_tag, l_intent, bind| {
+        for (self.bindings.slice()) |bound| {
+            try writer.print("  - {s} [", .{bound.logical});
+            for (bound.axes.slice()) |ax_id| {
+                const ax = self.view.axes.get(@intFromEnum(ax_id));
+                try writer.print(".{{{s} mask={} num_partitions={}}}", .{ ax.name, bound.mask, bound.num_partitions });
+                try writer.writeAll(", ");
+            }
+            try writer.writeAll("]\n");
+        }
+        for (self.logical.axes.slice(), self.logical.intents.slice()) |l_tag, l_intent| {
             try writer.print("  - {s} ({s}) -> ", .{ l_tag, @tagName(l_intent) });
 
             if (self.binding(l_tag)) |bound| {

@@ -2610,6 +2610,11 @@ fn manualComputationInternal(
 
     const local_input_shapes = try arena.alloc(Shape, input_shapes.len);
     const local_output_shapes = try arena.alloc(Shape, outputs.len);
+    const log = std.log.scoped(.@"zml/Compiler");
+    ctx.pushLocation(@src(), stdx.meta.fnName(body_fn));
+    defer ctx.popLocation();
+    const manual_axis_names = try arena.alloc([]const u8, partition_axes.len);
+    for (partition_axes, manual_axis_names) |axis, *axis_name| axis_name.* = std.mem.span(axis);
     if (ctx.manualAxesConflict(sharding, partition_axes)) |conflict| {
         std.debug.panic(
             "manualComputation cannot make logical axis '{s}' in sharding '{s}' manual: it resolves to mesh axis '{s}', " ++
@@ -2618,6 +2623,9 @@ fn manualComputationInternal(
             .{ conflict.logical_axis, sharding.data.name, conflict.resolved_axis },
         );
     }
+
+    log.info("manualComputation(sharding={s}, axes={f}) --> start", .{ sharding.data.name, stdx.fmt.strings(manual_axis_names) });
+    defer log.info("manualComputation(sharding={s}, axes={f}) <-- end", .{ sharding.data.name, stdx.fmt.strings(manual_axis_names) });
 
     for (input_shapes, 0..) |shape, i| {
         if (shape.isFullyReplicated()) {
