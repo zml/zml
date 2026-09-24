@@ -27,8 +27,8 @@ pub const Inputs = struct {
 
 /// The kernels are tuned for the DeepSeek V4.1 expert geometry, shared by the
 /// main MoE and the D-Spark drafter. Expert count and top-k are parameters.
-pub fn isSupported(tokens: i64, hidden: i64, intermediate: i64) bool {
-    return hidden == 5120 and intermediate == 2304 and tokens >= 1 and tokens <= 16384;
+pub fn isSupported(hidden: i64, intermediate: i64) bool {
+    return hidden == 5120 and intermediate == 2304;
 }
 
 /// Route each token/top-k pair to its own one-row group instead of grouping
@@ -98,51 +98,22 @@ fn route(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, n
         .experts = experts,
         .global_experts = experts,
         .topk = topk,
-        .swiglu_limit = 10,
+        // Unused: only the routing and scheduling kernels of that config run.
+        .swiglu_limit = 0,
     };
     const schedule = triton_mxfp4.kernels.scheduleForCute(cfg, flat_ids.reshape(.{ tokens, topk }), groups, n);
     return .{ .groups = groups, .route_map = schedule.route_map, .route_inverse = schedule.route_inverse, .schedule = schedule.schedule };
 }
 
-/// Pack E8M0 weight scales in the exact 128x4 swizzle consumed by the TMA
-/// scale-factor descriptor. Loaders apply this once at load time.
-pub fn packWeightScales(scales: zml.Tensor) zml.Tensor {
-    const experts = scales.dim(0);
-    const rows = scales.dim(1);
-    const groups = scales.dim(2);
-    const packed_scales = scales.reshape(.{ experts, @divExact(rows, 128), 4, 32, @divExact(groups, 4), 4 })
-        .transpose(.{ 0, 1, 4, 3, 2, 5 });
-    return withShapeOf(packed_scales, scales);
-}
-
-/// Inverse of `packWeightScales`: recover the linear `[E, rows, k/32]` layout.
-pub fn unpackWeightScales(scales: zml.Tensor) zml.Tensor {
-    const experts = scales.dim(0);
-    const rows = scales.dim(1);
-    const groups = scales.dim(2);
-    const linear_scales = scales.reshape(.{ experts, @divExact(rows, 128), @divExact(groups, 4), 32, 4, 4 })
-        .transpose(.{ 0, 1, 4, 3, 2, 5 });
-    return withShapeOf(linear_scales, scales);
-}
-
-/// The swizzle only permutes scales within an expert, so the result keeps the
-/// input tags and partitioning. `reshape` alone resets the partitioning, and
-/// expert-parallel callers would then see unsharded scales.
-fn withShapeOf(swizzled: zml.Tensor, scales: zml.Tensor) zml.Tensor {
-    var result = swizzled.reshape(scales.shape());
-    result._shape = scales.shape();
-    return result;
-}
-
 /// `[tokens, hidden]` BF16 output of the MoE layer.
-pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, a: Inputs) zml.Tensor {
-    return forwardWithTile(tokens, hidden, intermediate, experts, topk, a, null);
+pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs) zml.Tensor {
+    return forwardWithTile(tokens, hidden, intermediate, experts, topk, swiglu_limit, a, null);
 }
 
 /// `forward` with an explicit GEMM tile N, for tuning. `null` selects it from
 /// the batch size.
-pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, a: Inputs, tile_n: ?i64) zml.Tensor {
-    if (!isSupported(tokens, hidden, intermediate)) @panic("unsupported SM100 CuTe MoE shape");
+pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs, tile_n: ?i64) zml.Tensor {
+    if (!isSupported(hidden, intermediate)) @panic("unsupported SM100 CuTe MoE shape");
     const n = tile_n orelse tileN(tokens, experts, topk);
     const direct = isDirect(tokens);
     const routing = route(tokens, hidden, intermediate, experts, topk, n, direct, a.ids);
@@ -158,6 +129,7 @@ pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64
         .epilogue = .swiglu_mxfp8,
         .routes = routes,
         .direct = direct,
+        .swiglu_limit = swiglu_limit,
     };
     var down_cfg = up_cfg;
     down_cfg.m = hidden;

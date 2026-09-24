@@ -243,6 +243,9 @@ pub const Config = struct {
     epilogue: Epilogue,
     /// Token/top-k routes; sizes the route-indexed epilogue operands.
     routes: i64,
+    /// Clamp applied to both halves of the fused SwiGLU. Emitted as an IR
+    /// constant, so a threaded value costs exactly what a literal did.
+    swiglu_limit: f32 = 10.0,
     /// Ungrouped routing: group `g` is route `g` and holds one live row.
     /// `schedule` is then just the `[routes]` expert ids; its size and
     /// active-count sections and `route_inverse` are not read.
@@ -1404,6 +1407,8 @@ const EpilogueOperands = struct {
     direct: bool,
     /// `Config.groupRows`.
     group_rows: i64 = 0,
+    /// `Config.swiglu_limit`.
+    swiglu_limit: f32 = 10.0,
 };
 
 /// Warps 0-3 drain each TMEM accumulator stage into registers, release it to
@@ -1612,8 +1617,9 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
         for (columns[first..last], activations[first..last], first..) |value, *activation, column| {
             const c: i32 = @intCast(column);
             // The reference model rounds the projection to BF16.
-            const gate = value.to(.bf16).to(.f32).minimum(10.0);
-            const up_value = b.shuffleXor(value, 1).to(.bf16).to(.f32).maximum(-10.0).minimum(10.0);
+            const limit = operands.swiglu_limit;
+            const gate = value.to(.bf16).to(.f32).minimum(limit);
+            const up_value = b.shuffleXor(value, 1).to(.bf16).to(.f32).maximum(-limit).minimum(limit);
             // up * SiLU(gate), with the hardware approximations Python's
             // fastmath selects: exp(-g) = 2^(-g * log2 e).
             const exp_neg = b.unaryF32("ex2.approx.ftz.f32", gate.mul(-std.math.log2e));
@@ -1876,6 +1882,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
             .s = view(b, d.s),
             .direct = cfg.direct,
             .group_rows = cfg.groupRows(),
+            .swiglu_limit = cfg.swiglu_limit,
         }),
         .route_rows => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, direct, .{
             .group_sizes = view(b, d.group_sizes),

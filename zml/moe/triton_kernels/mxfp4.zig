@@ -129,7 +129,6 @@ const ScheduleConfig = struct {
 // Two symbols for one kernel: both backends can run in the same process, and
 // distinct names keep them apart in profiles.
 const Schedule = tri.Kernel(ScheduleConfig, .{ .name = "mxfp4_triton_schedule", .inputs = &.{ "ids", "counts", "pos" }, .outputs = &.{ "map", "perm", "sched" }, .run = scheduleGroups });
-const CuteSchedule = tri.Kernel(ScheduleConfig, .{ .name = "mxfp4_triton_cute_schedule", .inputs = &.{ "ids", "counts", "pos" }, .outputs = &.{ "map", "perm", "sched" }, .run = scheduleGroups });
 const GateUp = tri.Kernel(GemmConfig, .{ .name = "mxfp4_triton_up", .inputs = &.{ "q", "s", "w", "ws", "ids", "rw", "map", "sched" }, .outputs = &.{ "mid", "ms" }, .run = gateUp });
 const Down = tri.Kernel(GemmConfig, .{ .name = "mxfp4_triton_down", .inputs = &.{ "mid", "ms", "w", "ws", "ids", "sched" }, .outputs = &.{"d"}, .run = down });
 const Combine = tri.Kernel(Config, .{ .name = "mxfp4_triton_combine", .inputs = &.{ "d", "ids", "perm", "rw" }, .outputs = &.{"y"}, .run = combine });
@@ -172,7 +171,7 @@ pub fn scheduleForCute(c: Config, ids: zml.Tensor, capacity: i64, group: i64) st
         );
         break :blk .{ .counts = scanned.counts, .pos = scanned.pos };
     };
-    const s = CuteSchedule.call(
+    const s = Schedule.call(
         .{ .ids = ids, .counts = r.counts, .pos = r.pos },
         .{
             .map = .init(.{capacity * group}, .i32),
