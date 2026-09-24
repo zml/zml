@@ -15,6 +15,8 @@ const Args = struct {
     activations: ?[]const u8 = null,
     compare_cpu: bool = false,
     transformer_only: bool = false,
+    head_only: bool = false,
+    seqlen: usize = 16,
 
     pub const help =
         \\Use llama_tests --model=<path> --activations=<path>
@@ -26,6 +28,8 @@ const Args = struct {
         \\   --activations=<path>      Path to activation safetensors
         \\   --compare-cpu             Compare actual model layers against CPU
         \\   --transformer-only        Skip individual components with --compare-cpu
+        \\   --head-only               Compare greedy output-head tokens only
+        \\   --seqlen=<number>         CPU comparison sequence length (default: 16)
         \\
     ;
 };
@@ -35,11 +39,15 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
 
-    if (args.transformer_only and !args.compare_cpu) return error.RequiresCompareCpu;
+    if ((args.transformer_only or args.head_only) and !args.compare_cpu) return error.RequiresCompareCpu;
     if (!args.compare_cpu and args.activations == null) return error.MissingActivations;
+
+    if (args.seqlen == 0 or (args.transformer_only and args.head_only)) return error.InvalidComparisonOptions;
 
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
+    if (args.compare_cpu and platform.target == .cpu) return error.CpuComparisonRequiresAccelerator;
+    std.log.info("Testing platform: {s}", .{@tagName(platform.target)});
 
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
     defer repo.close(io);
@@ -66,7 +74,7 @@ pub fn main(init: std.process.Init) !void {
         defer cpu_progress.end();
         var cpu_buffers = try repo_model.loadBuffers(allocator, io, cpu, &store, &cpu_progress, cpu_shardings);
         defer repo_model.unloadBuffers(&cpu_buffers, allocator);
-        try compareCpu(allocator, io, platform, cpu, repo_model.inner, &model_buffers, &cpu_buffers, args.transformer_only);
+        try compareCpu(allocator, io, platform, cpu, repo_model.inner, &model_buffers, &cpu_buffers, args);
     } else {
         try run(allocator, io, platform, args.activations orelse return error.MissingActivations, repo_model.inner, &model_buffers, platform.replicated_sharding);
     }
@@ -166,10 +174,10 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *cons
     return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
 }
 
-fn compareCpu(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: model.Model, actual: *model.Buffers, expected: *model.Buffers, transformer_only: bool) !void {
+fn compareCpu(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: model.Model, actual: *model.Buffers, expected: *model.Buffers, args: Args) !void {
     const token_ids = [_]u32{ 128000, 3923, 374, 279, 6864, 315, 9822, 30, 0, 1, 127, 1024, 8192, 32768, 65536, 128255 };
-    if (!transformer_only) try compareLayer(allocator, io, platform, cpu, "embedding", mdl.model.embed_tokens, actual.model.embed_tokens, expected.model.embed_tokens, .init(.{ .s = token_ids.len }, .u32), std.mem.sliceAsBytes(&token_ids), .exact_match);
-    const shape = zml.Shape.init(.{ .s = 16, .d = mdl.config.hidden_size }, .bf16);
+    if (!args.transformer_only and !args.head_only) try compareLayer(allocator, io, platform, cpu, "embedding", mdl.model.embed_tokens, actual.model.embed_tokens, expected.model.embed_tokens, .init(.{ .s = token_ids.len }, .u32), std.mem.sliceAsBytes(&token_ids), .exact_match);
+    const shape = zml.Shape.init(.{ .s = args.seqlen, .d = mdl.config.hidden_size }, .bf16);
     const data = try allocator.alloc(u16, shape.count());
     defer allocator.free(data);
     for (data, 0..) |*bits, i| {
@@ -177,10 +185,22 @@ fn compareCpu(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform,
         bits.* = @truncate(@as(u32, @bitCast(value)) >> 16);
     }
     const bytes = std.mem.sliceAsBytes(data);
+    if (args.head_only) {
+        try compareLayer(allocator, io, platform, cpu, "greedy output head", model.LmHead.init(mdl), .{
+            .lm_head = actual.lm_head,
+            .embed_tokens = actual.model.embed_tokens,
+            .norm = actual.model.norm,
+        }, .{
+            .lm_head = expected.lm_head,
+            .embed_tokens = expected.model.embed_tokens,
+            .norm = expected.model.norm,
+        }, shape, bytes, .exact_match);
+        return;
+    }
     const layer = mdl.model.layers[0];
     const a = actual.model.layers[0];
     const e = expected.model.layers[0];
-    if (!transformer_only) {
+    if (!args.transformer_only and !args.head_only) {
         try compareLayer(allocator, io, platform, cpu, "input_layernorm", layer.input_layernorm, a.input_layernorm, e.input_layernorm, shape, bytes, .{ .absolute_tolerance = 0.02, .relative_tolerance = 0.02, .minimum_close_fraction = 1 });
         inline for (.{ "q_proj", "k_proj", "v_proj", "o_proj" }) |name| {
             try compareLayer(allocator, io, platform, cpu, name, @field(layer.self_attn, name), @field(a.self_attn, name), @field(e.self_attn, name), shape, bytes, .{ .absolute_tolerance = 0.05, .relative_tolerance = 0.02, .minimum_close_fraction = 1 });
@@ -207,7 +227,16 @@ fn compareLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
     const Layer = @TypeOf(layer);
     const Call = struct {
         fn forward(l: Layer, x: zml.Tensor) zml.Tensor {
-            return if (Layer == zml.nn.Linear) l.forward(x, x.dtype()) else Layer.forward(l, x);
+            if (Layer == model.LmHead) {
+                const hidden = l.norm.forward(x);
+                const logits = if (l.lm_head) |linear|
+                    linear.forward(hidden, hidden.dtype()).rename(.{ .dout = .voc })
+                else
+                    l.embed_tokens.weight.withTags(.{ .voc, .d }).dot(hidden, .d);
+                return logits.argMax(.voc).indices.squeeze(.voc);
+            } else {
+                return if (Layer == zml.nn.Linear) l.forward(x, x.dtype()) else Layer.forward(l, x);
+            }
         }
     };
     std.log.info("Comparing {s} with CPU", .{name});
