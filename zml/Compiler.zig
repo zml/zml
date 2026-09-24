@@ -40,9 +40,12 @@ partitioning: Sharding.Partitioning,
 mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
 
 scopes: stdx.BoundedArray(Scope, 16) = .empty,
-manual_computation_depth: usize = 0,
 unknown_location: *const mlir.Location,
 location: *const mlir.Location,
+
+manual_axes: stdx.BoundedArray([]const u8, 8) = .empty,
+// An empty-axis manual computation still provides a scope for custom calls.
+in_manual_computation: bool = false,
 
 channel_id: i64 = 0,
 composite_id: i64 = 0,
@@ -291,6 +294,41 @@ test pushLocation {
     compiler.popLocation();
 
     try std.testing.expectEqual(unknown_location, compiler.location);
+}
+
+pub const ManualAxisConflict = struct {
+    dimension: usize,
+    logical_axis: Shape.Tag,
+    resolved_axis: []const u8,
+};
+
+pub const ManualAxesConflict = struct {
+    logical_axis: Shape.Tag,
+    resolved_axis: []const u8,
+};
+
+pub fn manualAxesConflict(self: *const Compiler, sharding: Sharding, logical_axes: []const Shape.Tag) ?ManualAxesConflict {
+    for (logical_axes) |logical_axis| {
+        const resolved_axes = sharding.resolvedAxisNames(&.{logical_axis});
+        for (resolved_axes.constSlice()) |resolved_axis| {
+            for (self.manual_axes.constSlice()) |manual_axis| {
+                if (std.mem.eql(u8, resolved_axis, manual_axis)) {
+                    return .{ .logical_axis = logical_axis, .resolved_axis = resolved_axis };
+                }
+            }
+        }
+    }
+    return null;
+}
+
+pub fn manualAxisConflict(self: *const Compiler, sharding: Sharding, shape: Shape) ?ManualAxisConflict {
+    for (shape._partitioning.constSlice(), 0..) |spec, dimension| {
+        if (spec != .axis) continue;
+        if (self.manualAxesConflict(sharding, &.{spec.axis})) |conflict| {
+            return .{ .dimension = dimension, .logical_axis = conflict.logical_axis, .resolved_axis = conflict.resolved_axis };
+        }
+    }
+    return null;
 }
 
 pub fn nextChannelId(self: *Compiler) i64 {

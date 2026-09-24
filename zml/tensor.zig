@@ -168,6 +168,19 @@ pub const Tensor = struct {
                 .{ self, partitioned_shape, stdx.fmt.slice(ctx.partitioning.shardings) },
             ),
         };
+        if (ctx.manualAxisConflict(sharding, partitioned_shape)) |conflict| {
+            std.debug.panic(
+                "Tensor.withPartitioning cannot partition dimension '{s}' on logical axis '{s}' in sharding '{s}': it resolves to mesh axis '{s}', " ++
+                    "which is already manual in an enclosing manualComputation. The tensor is already local along this axis. " ++
+                    "Remove this partitioning from withPartitioning inside the body; specify it on the manualComputation inputs and outputs instead. Tensor shape: {f}",
+                .{ partitioned_shape.debugTag(conflict.dimension), conflict.logical_axis, sharding.data.name, conflict.resolved_axis, self.shape() },
+            );
+        }
+        return self.withPartitionedShape(partitioned_shape, sharding);
+    }
+
+    fn withPartitionedShape(self: Tensor, partitioned_shape: Shape, sharding: Sharding) Tensor {
+        const ctx = Compiler.current();
         const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
 
         const op_result = switch (ctx.partitioning.partitioner) {
@@ -220,10 +233,11 @@ pub const Tensor = struct {
             ),
         });
 
+        const val = self.value();
         const op = dialects.stablehlo.custom_call(
             ctx.mlir_ctx,
-            &.{self.value()},
-            &.{self.value().type_()},
+            &.{val},
+            &.{val.type_()},
             .{
                 .call_target_name = "annotate_device_placement",
                 .has_side_effect = true,
@@ -322,7 +336,13 @@ pub const Tensor = struct {
         }.onMemory, kind, &tensors);
     }
 
-    /// Returns a Tensor with new tag names.
+    /// Return a Tensor with new tag names.
+    ///
+    /// Takes a mapping of old names to new names.
+    ///
+    /// ```
+    /// Tensor(.{ .a = 10, .b = 20 }).rename(.{ .b = .batch }); // .{ .a = 10, .batch = 20 };
+    /// ```
     pub fn rename(self: Tensor, renames: anytype) Tensor {
         var res = self;
         res._shape = self._shape.rename(renames);
@@ -1987,10 +2007,7 @@ pub const Tensor = struct {
                 start + s.len
             else
                 s.end;
-            const res: Slice = .{ .start = start, .end = end, .step = s.step, .singleton = s.singleton };
-            stdx.debug.assert(start < end, "Slice {f} is invalid for axis of dimension {d} (resolved to {f})", .{ s, d, res });
-            stdx.debug.assert(end <= d, "Slice {f} is invalid for axis of dimension {d} (resolved to {f})", .{ s, d, res });
-            return res;
+            return .{ .start = start, .end = end, .step = s.step, .singleton = s.singleton };
         }
 
         const to_the_end = std.math.maxInt(i64);
@@ -2085,10 +2102,11 @@ pub const Tensor = struct {
         var res_shape: Shape = self._shape;
 
         for (axes_, slices_) |a, s| {
-            stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} on axis {}", .{ s.step, a });
-            stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} on axis {}", .{ s.step, a });
+            stdx.debug.assert(s.step > 0, "{f}.slice({d}, {f}) expects 'step' to be positive, got {d}", .{ self, a, s, s.step });
 
-            const args: Slice = s.absolute(self.dim(a));
+            const d = self.dim(a);
+            const args: Slice = s.absolute(d);
+            stdx.debug.assert(0 <= args.start and args.start < args.end and args.end <= d, "{f}.slice({d}, {f}) is out of bound (resolved to {f})", .{ self, a, s, args });
             start_indices[a] = args.start;
             limit_indices[a] = args.end;
             strides[a] = args.step;
@@ -2120,7 +2138,7 @@ pub const Tensor = struct {
 
         const x: Tensor = .init(.{ 2, 5 }, .f32);
 
-        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, @ptrCast(&[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
         defer x_buffer.deinit();
 
         // Wrap slice to hide the anytype in the signature.
@@ -4589,6 +4607,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         const full_name = std.fmt.allocPrint(ctx.arena.allocator(), "{s}: {f}", .{ name, input.shape() }) catch @panic("OOM");
         defer ctx.arena.allocator().free(full_name);
+        const sharding_axes: Shape.TagsArray = input._shape.partitioningAxes();
         switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
                 ops.manualComputation((struct {
@@ -4598,7 +4617,7 @@ pub const Tensor = struct {
                     fn body(body_ctx: @This(), _: void) void {
                         ops.customCall("zml$print", body_ctx.input, {}, .{ .name = body_ctx.name }, .{ .has_side_effect = true });
                     }
-                }).body, .{ .input = input, .name = full_name }, {});
+                }).body, .{ .input = input, .name = full_name }, {}, sharding_axes.constSlice());
             },
             .oneapi, .neuron => {},
         }

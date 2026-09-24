@@ -68,7 +68,7 @@ pub fn fusedExperts(
     };
 
     return if (expert_parallelism)
-        zml.ops.manualComputation(Context.body, context, input.shape())
+        zml.ops.manualComputation(Context.body, context, input.shape(), .experts)
     else
         context.body(input.shape());
 }

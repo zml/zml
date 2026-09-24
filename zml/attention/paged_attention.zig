@@ -979,7 +979,7 @@ test "Triton sparse MLA value ranks and padded queries" {
                 .scale = 1,
                 .num_kv_splits = case.num_kv_splits,
             } },
-            .{},
+            .{ .shardings = platform.shardings.values() },
         );
         defer exe.deinit();
 
