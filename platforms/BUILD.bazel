@@ -9,6 +9,7 @@ PLATFORMS = {
     "neuron": False,
     "oneapi": False,
     "metal": False,
+    "furiosa": False,
 }
 
 [
@@ -59,6 +60,7 @@ config_setting(
         "tpu",
         "neuron",
         "oneapi",
+        "furiosa",
     ]
 ]
 
