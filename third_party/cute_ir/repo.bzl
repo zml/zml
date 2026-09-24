@@ -9,8 +9,14 @@ def repo():
         commit = "098de2a652cf8f00fd70b2df54051c7eccbb855a",
         build_file = Label("//third_party/cute_ir:cute_ir.bazel"),
         strip_prefix = "cutlass_compiler",
-        # The DSL spells a dynamic leaf it knows to be a multiple of N as
-        # `?{div=N}`; the release's cutegen reads only the width.
-        patches = [Label("//third_party/cute_ir:cutegen_dynamic_divisibility.patch")],
+        patches = [
+            # `cute.slice` upstream only infers tuple and layout results; the
+            # MoE kernels slice memrefs and coordinate tensors with explicit
+            # result types.
+            Label("//third_party/cute_ir:slice_tensor.patch"),
+            # The DSL spells a dynamic leaf it knows to be a multiple of N as
+            # `?{div=N}`; the release's cutegen reads only the width.
+            Label("//third_party/cute_ir:cutegen_dynamic_divisibility.patch"),
+        ],
         patch_args = ["-p2"],
     )
