@@ -71,7 +71,7 @@ pub const Backend = enum {
         return switch (platform.target) {
             .cuda => switch (if (zml.platform.cuda.computeCapability(platform)) |cc| cc.major else 0) {
                 10 => switch (weights_dtype) {
-                    .u8, .i8 => .triton_mxfp4,
+                    .u8, .i8 => if (cute_mxfp4.isAvailable(platform)) .cute_mxfp4 else .triton_mxfp4,
                     .f4e2m1 => .triton,
                     else => error.UnsupportedDataType,
                 },
