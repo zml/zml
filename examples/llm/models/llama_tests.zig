@@ -12,7 +12,9 @@ pub const std_options: std.Options = .{
 
 const Args = struct {
     model: []const u8,
-    activations: []const u8,
+    activations: ?[]const u8 = null,
+    compare_cpu: bool = false,
+    transformer_only: bool = false,
 
     pub const help =
         \\Use llama_tests --model=<path> --activations=<path>
@@ -22,6 +24,8 @@ const Args = struct {
         \\ Options:
         \\   --model=<path>            Path to the model repository
         \\   --activations=<path>      Path to activation safetensors
+        \\   --compare-cpu             Compare actual model layers against CPU
+        \\   --transformer-only        Skip individual components with --compare-cpu
         \\
     ;
 };
@@ -30,6 +34,9 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
+
+    if (args.transformer_only and !args.compare_cpu) return error.RequiresCompareCpu;
+    if (!args.compare_cpu and args.activations == null) return error.MissingActivations;
 
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
@@ -49,9 +56,20 @@ pub fn main(init: std.process.Init) !void {
 
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
-    progress.end();
+    defer progress.end();
 
-    try run(allocator, io, platform, args.activations, repo_model.inner, &model_buffers, platform.replicated_sharding);
+    if (args.compare_cpu) {
+        const cpu = try zml.Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } });
+        defer cpu.deinit(allocator, io);
+        const cpu_shardings = try common.Shardings.init(cpu);
+        var cpu_progress = progress.start("CPU reference weights", 1);
+        defer cpu_progress.end();
+        var cpu_buffers = try repo_model.loadBuffers(allocator, io, cpu, &store, &cpu_progress, cpu_shardings);
+        defer repo_model.unloadBuffers(&cpu_buffers, allocator);
+        try compareCpu(allocator, io, platform, cpu, repo_model.inner, &model_buffers, &cpu_buffers, args.transformer_only);
+    } else {
+        try run(allocator, io, platform, args.activations orelse return error.MissingActivations, repo_model.inner, &model_buffers, platform.replicated_sharding);
+    }
 }
 
 fn run(
@@ -146,4 +164,104 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *cons
     _ = try reader.interface.readSliceAll(host_bytes);
 
     return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
+}
+
+fn compareCpu(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: model.Model, actual: *model.Buffers, expected: *model.Buffers, transformer_only: bool) !void {
+    const token_ids = [_]u32{ 128000, 3923, 374, 279, 6864, 315, 9822, 30, 0, 1, 127, 1024, 8192, 32768, 65536, 128255 };
+    if (!transformer_only) try compareLayer(allocator, io, platform, cpu, "embedding", mdl.model.embed_tokens, actual.model.embed_tokens, expected.model.embed_tokens, .init(.{ .s = token_ids.len }, .u32), std.mem.sliceAsBytes(&token_ids), .exact_match);
+    const shape = zml.Shape.init(.{ .s = 16, .d = mdl.config.hidden_size }, .bf16);
+    const data = try allocator.alloc(u16, shape.count());
+    defer allocator.free(data);
+    for (data, 0..) |*bits, i| {
+        const value: f32 = @as(f32, @floatFromInt(@as(i32, @intCast((i * 17 + 13) % 113)) - 56)) / 64.0;
+        bits.* = @truncate(@as(u32, @bitCast(value)) >> 16);
+    }
+    const bytes = std.mem.sliceAsBytes(data);
+    const layer = mdl.model.layers[0];
+    const a = actual.model.layers[0];
+    const e = expected.model.layers[0];
+    if (!transformer_only) {
+        try compareLayer(allocator, io, platform, cpu, "input_layernorm", layer.input_layernorm, a.input_layernorm, e.input_layernorm, shape, bytes, .{ .absolute_tolerance = 0.02, .relative_tolerance = 0.02, .minimum_close_fraction = 1 });
+        inline for (.{ "q_proj", "k_proj", "v_proj", "o_proj" }) |name| {
+            try compareLayer(allocator, io, platform, cpu, name, @field(layer.self_attn, name), @field(a.self_attn, name), @field(e.self_attn, name), shape, bytes, .{ .absolute_tolerance = 0.05, .relative_tolerance = 0.02, .minimum_close_fraction = 1 });
+        }
+        try compareLayer(allocator, io, platform, cpu, "mlp", layer.mlp, a.mlp, e.mlp, shape, bytes, .{ .absolute_tolerance = 0.1, .relative_tolerance = 0.03, .minimum_close_fraction = 1 });
+    }
+    std.log.info("Comparing full transformer layer with CPU", .{});
+    var reference = try runTransformer(allocator, io, cpu, mdl, e, shape, bytes);
+    defer reference.hidden.deinit();
+    defer model.KvCache.deinitBuffer(&reference.kv_cache);
+    var result = try runTransformer(allocator, io, platform, mdl, a, shape, bytes);
+    defer result.hidden.deinit();
+    defer model.KvCache.deinitBuffer(&result.kv_cache);
+    std.log.info("Comparing KV values", .{});
+    try zml.testing.expectClose(io, result.kv_cache.v, reference.kv_cache.v, .{ .absolute_tolerance = 0.03, .relative_tolerance = 0.02, .minimum_close_fraction = 1 });
+    std.log.info("Comparing KV keys", .{});
+    try zml.testing.expectClose(io, result.kv_cache.k, reference.kv_cache.k, .{ .absolute_tolerance = 0.03, .relative_tolerance = 0.02, .minimum_close_fraction = 1 });
+    std.log.info("Comparing layer hidden state", .{});
+    try zml.testing.expectClose(io, result.hidden, reference.hidden, .{ .absolute_tolerance = 0.1, .relative_tolerance = 0.03, .minimum_close_fraction = 1 });
+    std.log.info("PASS full transformer layer", .{});
+}
+
+fn compareLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, name: []const u8, layer: anytype, actual_weights: zml.Bufferized(@TypeOf(layer)), reference_weights: zml.Bufferized(@TypeOf(layer)), shape: zml.Shape, data: []const u8, opts: zml.testing.CompareOpts) !void {
+    const Layer = @TypeOf(layer);
+    const Call = struct {
+        fn forward(l: Layer, x: zml.Tensor) zml.Tensor {
+            return if (Layer == zml.nn.Linear) l.forward(x, x.dtype()) else Layer.forward(l, x);
+        }
+    };
+    std.log.info("Comparing {s} with CPU", .{name});
+    var results: [2]zml.Buffer = undefined;
+    var count: usize = 0;
+    defer for (results[0..count]) |*buffer| buffer.deinit();
+    for ([_]*zml.Platform{ cpu, platform }, [_]zml.Bufferized(Layer){ reference_weights, actual_weights }, 0..) |target, weights, i| {
+        var input = try zml.Buffer.fromBytes(io, target, shape, .replicated, data);
+        defer input.deinit();
+        const exe = try target.compileFn(allocator, io, Call.forward, .{ layer, zml.Tensor.fromShape(shape) }, .{ .shardings = target.shardings.values() });
+        defer exe.deinit();
+        var args = try exe.args(allocator);
+        defer args.deinit(allocator);
+        args.set(.{ weights, input });
+        var output = try exe.results(allocator);
+        defer output.deinit(allocator);
+        exe.call(args, &output);
+        results[i] = output.get(zml.Buffer);
+        count += 1;
+    }
+    try zml.testing.expectClose(io, results[1], results[0], opts);
+    std.log.info("PASS {s}", .{name});
+}
+
+fn runTransformer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: model.Model, weights: zml.Bufferized(model.TransformerLayer), shape: zml.Shape, data: []const u8) !zml.Bufferized(model.TransformerLayer.Output) {
+    const kv_shape = zml.Shape.init(.{ .layer = mdl.model.layers.len, .k = shape.dim(.s), .h = mdl.config.num_key_value_heads, .hd = mdl.config.hidden_size / mdl.config.num_attention_heads }, .bf16);
+    const kv = model.KvCache.init(kv_shape);
+    const exe = try zml.FnExe(model.TransformerLayer.forward).compile(allocator, io, platform, .{ .shardings = platform.shardings.values() }, .{.{
+        .layer = mdl.model.layers[0],
+        .hidden = zml.Tensor.fromShape(shape),
+        .token_index = zml.Tensor.init(.{}, .u32),
+        .kv_cache = kv,
+        .kv_cache_index = zml.Tensor.init(.{}, .u32),
+        .attention_metadata = .vanilla,
+        .attention_parameters = .vanilla,
+    }});
+    defer exe.deinit();
+    var runner = try zml.FnExe(model.TransformerLayer.forward).Runner(.{.layer}).init(&exe, allocator, .{ .layer = weights });
+    defer runner.deinit(allocator);
+    var hidden = try zml.Buffer.fromBytes(io, platform, shape, .replicated, data);
+    errdefer hidden.deinit();
+    const zeros = try allocator.alloc(u8, kv_shape.byteSize());
+    defer allocator.free(zeros);
+    @memset(zeros, 0);
+    var cache: model.KvCache.Buffer = .{
+        .k = try zml.Buffer.fromBytes(io, platform, kv_shape, .replicated, zeros),
+        .v = try zml.Buffer.fromBytes(io, platform, kv_shape, .replicated, zeros),
+    };
+    errdefer model.KvCache.deinitBuffer(&cache);
+    var zero = try zml.Buffer.scalar(io, platform, 0, .u32);
+    defer zero.deinit();
+    runner.run(io, .{
+        .inputs = .{ .hidden = hidden, .token_index = zero, .kv_cache = cache, .kv_cache_index = zero, .attention_metadata = .vanilla },
+        .outputs = .{ .hidden = &hidden, .kv_cache = &cache },
+    });
+    return .{ .hidden = hidden, .kv_cache = cache };
 }
