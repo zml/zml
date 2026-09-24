@@ -84,6 +84,13 @@ jobs:
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
+            build --experimental_disk_cache_gc_max_size=100G
+            build --experimental_disk_cache_gc_max_age=14d
+            build --experimental_disk_cache_gc_idle_delay=1m
+            common --experimental_action_cache_gc_max_age=14d
+            common --experimental_action_cache_gc_idle_delay=1m
+            common --repo_contents_cache_gc_max_age=14d
+            common --repo_contents_cache_gc_idle_delay=1m
             ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common --config=remote' || '' }}
             ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
             ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common:remote --remote_download_outputs=minimal' || '' }}
