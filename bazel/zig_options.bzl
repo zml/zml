@@ -7,8 +7,9 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 ZigOption = provider(
     doc = "A Zig option's configured value and allowed string values.",
     fields = {
+        "name": "The flag's target name, or this option's target name for explicit values.",
         "module_name": "The Bazel module declaring the flag, or empty when unavailable.",
-        "value": "The configured build setting value.",
+        "value": "The configured build setting or explicit value.",
         "type": "The Zig integer type, or None for other flag types.",
         "allowed_values": "Allowed values for string flags; an empty list allows any string. None for other flag types.",
         "enum_name": "Optional exported enum type name for a constrained string flag.",
@@ -16,50 +17,43 @@ ZigOption = provider(
     },
 )
 
-_MAKE_VARIABLE_ATTR = attr.string(
-    doc = "Optional Make variable name exposed to rules that list this flag in toolchains.",
-)
+_FlagInfo = provider(fields = ["allowed_values"])
 
-_MODULE_NAME_ATTR = attr.string(
-    doc = "Declaring module name, captured by zig_option during package evaluation.",
-)
+def _flag_info_impl(_target, ctx):
+    return [_FlagInfo(allowed_values = getattr(ctx.rule.attr, "values", []))]
 
-_SCOPE_ATTR = attr.string(
-    doc = "The scope indicates where a flag can propagate to",
-    default = "target",
-)
+_flag_info = aspect(implementation = _flag_info_impl)
 
-def _flag_impl(ctx):
-    value = ctx.build_setting_value
-    providers = [
-        BuildSettingInfo(value = value),
-        ZigOption(
-            module_name = ctx.attr.module_name,
-            value = value,
-            type = getattr(ctx.attr, "type", None),
-            allowed_values = getattr(ctx.attr, "values", None),
-            enum_name = getattr(ctx.attr, "enum_name", ""),
-            nullable = getattr(ctx.attr, "nullable", False),
-        ),
-    ]
-    if ctx.attr.make_variable:
-        providers.append(platform_common.TemplateVariableInfo({
-            ctx.attr.make_variable: str(value).lower() if type(value) == "bool" else str(value),
-        }))
-    return providers
-
-def _string_impl(ctx):
-    if ctx.attr.nullable and ctx.attr.values:
+def _zig_option_impl(ctx):
+    flag = ctx.attr.flag
+    if ctx.attr.value_source == "flag":
+        if flag == None:
+            fail("flag must resolve to a build setting")
+        value = flag[BuildSettingInfo].value
+    else:
+        value = getattr(ctx.attr, ctx.attr.value_source)
+    if not (types.is_bool(value) or types.is_int(value) or types.is_string(value)):
+        fail("Zig options require an integer, boolean, or string value")
+    allowed_values = None
+    if types.is_string(value):
+        allowed_values = flag[_FlagInfo].allowed_values if flag else []
+    if ctx.attr.type and not types.is_int(value):
+        fail("type is only supported for integer options")
+    if ctx.attr.nullable and not types.is_string(value):
+        fail("nullable is only supported for string options")
+    if ctx.attr.nullable and allowed_values:
         fail("nullable strings cannot have enum values")
-    if ctx.attr.enum_name and not ctx.attr.values:
-        fail("enum_name requires nonempty values")
-    if ctx.attr.values and ctx.build_setting_value not in ctx.attr.values:
-        fail("{}: invalid value '{}'; expected one of {}".format(
-            ctx.label,
-            ctx.build_setting_value,
-            ctx.attr.values,
-        ))
-    return _flag_impl(ctx)
+    if ctx.attr.enum_name and not allowed_values:
+        fail("enum_name requires a string flag with nonempty values")
+    return [ZigOption(
+        name = flag.label.name if flag else ctx.label.name,
+        module_name = "",
+        value = value,
+        type = (ctx.attr.type or "usize") if types.is_int(value) else None,
+        allowed_values = allowed_values,
+        enum_name = ctx.attr.enum_name,
+        nullable = ctx.attr.nullable,
+    )]
 
 def _zig_string(value):
     # JSON and Zig differ in their control-character and Unicode escapes.
@@ -76,7 +70,7 @@ def _zig_options_impl(ctx):
     names = {}
     for setting in ctx.attr.settings:
         option = setting[ZigOption]
-        name = setting.label.name
+        name = option.name
         if name in names:
             fail("Duplicate Zig declaration: {}".format(name))
         names[name] = True
@@ -120,7 +114,7 @@ def zig_options(name, settings, **kwargs):
 
     Args:
         name: Library target name; the generated source is <name>.zig.
-        settings: Option flags; target names become quoted Zig constant names.
+        settings: zig_option targets; flag names or explicit option names become quoted Zig constants.
         **kwargs: Attributes forwarded to zig_library, except main which is generated.
     """
     if "main" in kwargs:
@@ -135,71 +129,42 @@ def zig_options(name, settings, **kwargs):
     )
     zig_library(name = name, main = ":" + name + "_source", **kwargs)
 
-def zig_option(name, build_setting_default, type = None, values = None, enum_name = None, **kwargs):
-    """Define a command-line option, inferring its kind from the default.
-
-    Args:
-        name: Flag target name and generated Zig constant name.
-        build_setting_default: Integer, boolean, or string default value.
-        type: Zig integer type; defaults to usize. Only valid for integers.
-        values: Allowed string values, emitted as enum fields when nonempty.
-        enum_name: Optional exported enum type name; requires a string with nonempty values.
-        **kwargs: Attributes forwarded to the underlying flag rule.
-    """
-    if type != None and not types.is_int(build_setting_default):
-        fail("type is only supported for integer options")
-    if values != None and not types.is_string(build_setting_default):
-        fail("values is only supported for string options")
-    if enum_name != None and (not types.is_string(build_setting_default) or not values):
-        fail("enum_name requires a string option with nonempty values")
-    if types.is_bool(build_setting_default):
-        flag = bool_flag
-    elif types.is_int(build_setting_default):
-        flag = int_flag
-        kwargs["type"] = type if type != None else "usize"
-    elif types.is_string(build_setting_default):
-        flag = string_flag
-        kwargs["values"] = values if values != None else []
-        kwargs["enum_name"] = enum_name if enum_name != None else ""
-    else:
-        fail("Zig options require an integer, boolean, or string default")
-    flag(name = name, build_setting_default = build_setting_default, module_name = native.module_name() or "", **kwargs)
-
-int_flag = rule(
-    implementation = _flag_impl,
-    build_setting = config.int(flag = True),
+_zig_option = rule(
+    implementation = _zig_option_impl,
     attrs = {
-        "type": attr.string(default = "usize", doc = "Zig integer type, such as usize, u32, or i64."),
-        "module_name": _MODULE_NAME_ATTR,
-        "make_variable": _MAKE_VARIABLE_ATTR,
-        "scope": _SCOPE_ATTR,
-    },
-    doc = "An integer build setting that can be set on the command line",
-)
-
-bool_flag = rule(
-    implementation = _flag_impl,
-    build_setting = config.bool(flag = True),
-    attrs = {
-        "module_name": _MODULE_NAME_ATTR,
-        "make_variable": _MAKE_VARIABLE_ATTR,
-        "scope": _SCOPE_ATTR,
-    },
-    doc = "A boolean build setting that can be set on the command line",
-)
-
-string_flag = rule(
-    implementation = _string_impl,
-    build_setting = config.string(flag = True),
-    attrs = {
+        "flag": attr.label(
+            providers = [BuildSettingInfo],
+            aspects = [_flag_info],
+            doc = "Boolean, integer, or string build setting. An aspect discovers allowed string values.",
+        ),
+        "bool": attr.bool(),
+        "string": attr.string(),
+        "int": attr.int(),
+        "value_source": attr.string(mandatory = True, values = ["flag", "bool", "string", "int"]),
+        "type": attr.string(doc = "Zig integer type; defaults to usize. Only valid for integer options."),
         "nullable": attr.bool(doc = "Emit an optional string; an empty value becomes null. Cannot be combined with values."),
         "enum_name": attr.string(doc = "Optional exported Zig enum type name; requires nonempty values."),
-        "module_name": _MODULE_NAME_ATTR,
-        "values": attr.string_list(
-            doc = "The list of allowed values for this setting. An error is raised if any other value is given.",
-        ),
-        "make_variable": _MAKE_VARIABLE_ATTR,
-        "scope": _SCOPE_ATTR,
     },
-    doc = "A string-typed build setting that can be set on the command line",
+    doc = "Expose a build setting or explicit value as a Zig option, named after the flag or this target respectively.",
 )
+
+def zig_option(name, flag = None, bool = None, string = None, int = None, **kwargs):
+    """Expose exactly one build setting or explicit value as a Zig option.
+
+    Args:
+        name: Target name; also the generated Zig constant name for explicit values.
+        flag: Boolean, integer, or string build setting to read.
+        bool: Explicit boolean value, which may use select().
+        string: Explicit string value, which may use select().
+        int: Explicit integer value, which may use select().
+        **kwargs: Attributes forwarded to the rule, including type, nullable, and enum_name.
+    """
+    sources = {key: value for key, value in {
+        "flag": flag,
+        "bool": bool,
+        "string": string,
+        "int": int,
+    }.items() if value != None}
+    if len(sources) != 1:
+        fail("zig_option requires exactly one of flag, bool, string, or int")
+    _zig_option(name = name, value_source = sources.keys()[0], **dict(sources, **kwargs))

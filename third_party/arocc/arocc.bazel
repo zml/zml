@@ -4,32 +4,32 @@ load("@zml//bazel:zig_options.bzl", "zig_option", "zig_options")
 
 zig_option(
     name = "enable_linker_build_id",
-    build_setting_default = False,
+    bool = False,
 )
 
 zig_option(
     name = "linker",
-    build_setting_default = "",
+    string = "",
 )
 
 zig_option(
     name = "sysroot",
-    build_setting_default = "",
+    string = "",
 )
 
 zig_option(
     name = "gcc_install_prefix",
-    build_setting_default = "",
+    string = "",
 )
 
 zig_option(
     name = "rtlib",
-    build_setting_default = "",
+    string = "",
 )
 
 zig_option(
     name = "unwindlib",
-    build_setting_default = "",
+    string = "",
 )
 
 zig_options(
@@ -46,27 +46,27 @@ zig_options(
 
 zig_option(
     name = "enable_tracy",
-    build_setting_default = False,
+    bool = False,
 )
 
 zig_option(
     name = "enable_tracy_callstack",
-    build_setting_default = False,
+    bool = False,
 )
 
 zig_option(
     name = "enable_tracy_allocation",
-    build_setting_default = False,
+    bool = False,
 )
 
 zig_option(
     name = "debug_allocations",
-    build_setting_default = False,
+    bool = False,
 )
 
 zig_option(
     name = "version_str",
-    build_setting_default = "<redacted>",
+    string = "<redacted>",
 )
 
 zig_options(

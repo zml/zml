@@ -12,7 +12,7 @@ const stdx = @import("stdx");
 const log = std.log.scoped(.@"zml/platforms/rocm");
 
 pub fn isEnabled() bool {
-    return platforms_options.rocm;
+    return platforms_options.rocm_enabled;
 }
 
 fn hasRocmDevices(io: std.Io) bool {

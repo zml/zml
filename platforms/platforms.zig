@@ -33,7 +33,7 @@ pub const Platform = enum {
 
     pub fn isEnabled(target: Platform) bool {
         return switch (target) {
-            inline else => |tag| @field(platforms_options, @tagName(tag)),
+            inline else => |tag| @field(platforms_options, @tagName(tag) ++ "_enabled"),
         };
     }
 

@@ -1,28 +1,34 @@
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
 load("@zml//bazel:zig_options.bzl", "zig_option", "zig_options")
 
 zig_option(
     name = "backend",
-    build_setting_default = "",
+    string = "",
     nullable = True,
 )
 
-zig_option(
+string_flag(
     name = "resolve_beneath_mode",
     build_setting_default = "strict",
-    enum_name = "ResolveBeneathMode",
     values = ["strict", "best_effort"],
 )
 
-zig_option(name = "no_hacks", build_setting_default = False)
-zig_option(name = "task_migration", build_setting_default = True)
-zig_option(name = "scheduler_metrics", build_setting_default = False)
+zig_option(
+    name = "resolve_beneath_mode_option",
+    flag = ":resolve_beneath_mode",
+    enum_name = "ResolveBeneathMode",
+)
+
+zig_option(name = "no_hacks", bool = False)
+zig_option(name = "task_migration", bool = True)
+zig_option(name = "scheduler_metrics", bool = False)
 
 zig_options(
     name = "zio_options",
     settings = [
         ":backend",
-        ":resolve_beneath_mode",
+        ":resolve_beneath_mode_option",
         ":no_hacks",
         ":task_migration",
         ":scheduler_metrics",

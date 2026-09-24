@@ -96,7 +96,7 @@ pub fn instance() !Instance {
 }
 
 pub fn isEnabled() bool {
-    return platforms_options.neuron;
+    return platforms_options.neuron_enabled;
 }
 
 fn hasNeuronDevice(io: std.Io) bool {
