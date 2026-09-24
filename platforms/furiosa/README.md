@@ -28,7 +28,8 @@ only the CPU reference and final comparison run on the host.
 
 Validation on 2026-09-24: `bazel test //... --jobs=16 --config=debug` passes all
 24 targets on CPU, and the LLM/attention binaries build with Furiosa enabled.
-The plugin loads and reports an eight-PE device. Native attention currently
-reaches a vendor fused Elementwise tactic error; the 8B model reaches an
-unsupported RMSNorm power operation in the prefill layer. These are active
-backend gaps, not passing model execution results.
+The plugin loads and reports an eight-PE device. With the companion XLA fixes,
+all six vanilla attention comparisons pass on eight PEs (F32/BF16, prefill,
+offset prefill, decode). `--dtype=bf16` or `--dtype=f32` can select one dtype.
+Full 8B execution remains in progress; the prefill layer currently exposes a
+large scalar-broadcast tactic failure.
