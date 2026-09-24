@@ -682,15 +682,15 @@ pub const Platform = struct {
         // inline cause `default` is a huge ass struct allocated on the stack,
         // and toMemoryLayout returns slices into it.
         // There is probably a better way of doing this,
-        // but given it's compiled out (except for TPU), I'm not gonna care for now.
+        // The queried layout can include backend-specific tiling.
         return switch (platform.target) {
-            .tpu => {
-                if (comptime !Target.tpu.isEnabled()) unreachable;
+            .tpu, .furiosa => {
+                if (comptime !Target.tpu.isEnabled() and !Target.furiosa.isEnabled()) unreachable;
                 const element_type = pjrtx.bufferTypeFromDtype(dtype);
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal, .furiosa => .{
+            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal => .{
                 // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
