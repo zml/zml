@@ -10,6 +10,10 @@ const platforms_options = @import("platforms/options");
 const rocm = @import("platforms/rocm");
 const tpu = @import("platforms/tpu");
 
+/// Hardware architecture and native matrix arithmetic, independent of runtimes.
+pub const capabilities = @import("capabilities.zig");
+pub const ComputeCapability = capabilities.ComputeCapability;
+
 const platforms = @This();
 
 pub const Platform = enum {

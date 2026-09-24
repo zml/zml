@@ -24,6 +24,7 @@ Ready to write some code? Try starting with [your first model in ZML](./tutorial
 ## Learn more...
 
 - [ZML Concepts](./learn/concepts.md) : **Tensors, Models, Executables, etc. explained**
+- [Hardware Capabilities](./learn/hardware-capabilities.md) : **Architecture detection and native matrix instruction selection**
 
 ## Contribute
 

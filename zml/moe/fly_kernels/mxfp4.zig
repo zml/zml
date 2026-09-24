@@ -1,9 +1,12 @@
 const std = @import("std");
+
 const zml = @import("../../zml.zig");
 const Tensor = zml.Tensor;
 const fly = zml.kernel.fly;
 const Value = fly.Value;
 const Builder = fly.Builder;
+
+pub const matrixInstruction: @import("platforms").capabilities.matmul.Instruction = .mfma_f32_16x16x16bf16_1k;
 
 /// The caller owns route localization, activation and reduction.
 /// `expert_ids` contains local bank indices, including -1 for remote experts.
@@ -184,14 +187,7 @@ fn run(b: *Builder, cfg: Config) fly.FinishError!void {
     };
     const initial = loader.load(b, b.constant(.i64, 0), b.constant(.i64, 0));
     b.barrier();
-    const atom = b.mmaAtom((fly.rocdl.MmaOpCDNA3MFMAType.get(b.ctx, .{
-        .m = 16,
-        .n = 16,
-        .k = 16,
-        .elemTyA = fly.DType.bf16.toMlir(b.ctx),
-        .elemTyB = fly.DType.bf16.toMlir(b.ctx),
-        .elemTyAcc = fly.DType.f32.toMlir(b.ctx),
-    }) catch return error.InvalidMlir).type_());
+    const atom = b.mmaAtom((fly.mmaAtomType(b.ctx, matrixInstruction) catch return error.InvalidMlir));
     var k = b.openFor(b.constant(.i64, 0), cfg.k, 128, .{ zeros, zeros, initial.words, initial.scale });
     const read_base = k.iv.divUnsigned(128).bitAnd(1).mul(cfg.stage_elements);
     const write_base = k.iv.divUnsigned(128).bitAnd(1).bitXor(1).mul(cfg.stage_elements);

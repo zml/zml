@@ -1,4 +1,5 @@
 const std = @import("std");
+const matmul = @import("platforms/matmul");
 
 const dialects = @import("mlir/dialects");
 const arith = dialects.arith;
@@ -1607,75 +1608,78 @@ test "vectorAdd builds, verifies and re-parses" {
     try std.testing.expect(reparsed.operation().verify());
 }
 
-/// The matrix atom a device family provides. CDNA has MFMA over f32; RDNA has
-/// WMMA, whose verifier requires M=N=K=16 and rejects f32 operands, so the
-/// operand type and the K tile change with the family, not just the mnemonic.
-pub const MmaFlavor = enum {
-    cdna3_mfma,
-    gfx11_wmma,
-    gfx120x_wmma,
+/// The Fly dialect type family that lowers an instruction. Exhaustive so a
+/// new catalog form is reviewed here; null means this pinned builder has no atom.
+pub const MmaAtomFamily = enum { cdna3_mfma, gfx11_wmma, gfx12_wmma };
 
-    /// MFMA takes f32 operands at 16x16x4; both WMMAs take f16 at 16x16x16.
-    pub fn atomType(self: MmaFlavor, ctx: *mlir.Context) *const mlir.Type {
-        const operand = self.operandDType().toMlir(ctx);
-        const acc: *const mlir.Type = .float(ctx, .f32);
-        return switch (self) {
-            .cdna3_mfma => (fly.rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
-                .m = 16,
-                .n = 16,
-                .k = 4,
-                .elemTyA = operand,
-                .elemTyB = operand,
-                .elemTyAcc = acc,
-            }) catch unreachable).type_(),
-            inline .gfx11_wmma, .gfx120x_wmma => |f| blk: {
-                const T = if (f == .gfx11_wmma) fly.rocdl.MmaOpGFX11WMMAType else fly.rocdl.MmaOpGFX120XWMMAType;
-                break :blk (T.get(ctx, .{
-                    .m = 16,
-                    .n = 16,
-                    .k = 16,
-                    .elemTyA = operand,
-                    .elemTyB = operand,
-                    .elemTyAcc = acc,
-                }) catch unreachable).type_();
-            },
+pub fn mmaAtomFamily(instruction: matmul.Instruction) ?MmaAtomFamily {
+    return switch (instruction) {
+        .mfma_f32_16x16x4f32, .mfma_f32_16x16x16bf16_1k => .cdna3_mfma,
+        .gfx11_wmma_f16_f32 => .gfx11_wmma,
+        .gfx12_wmma_f16_f32 => .gfx12_wmma,
+        .wmma_f16_f16, .wmma_f16_f32, .mma_f16_f16, .mma_f16_f32, .mma_i8_i32, .mma_i4_i32, .mma_bf16_f32, .mma_tf32_f32, .mma_fp8_f32, .mma_f8f6f4_f32, .mma_mxf8f6f4_f32, .mma_nvfp4_f32, .tcgen05_f8f6f4_f32, .tcgen05_mxf8f6f4_f32, .tcgen05_nvfp4_f32, .tcgen05_nvfp4_k96_f32, .wgmma_f16_f32, .wgmma_bf16_f32, .wgmma_tf32_f32, .wgmma_fp8_f32, .mfma_f32_f16, .mfma_f32_bf16, .mfma_i32_i8, .gfx940_mfma_i32_i8, .mfma_f32_fp8_fnuz, .mfma_f32_fp8, .mfma_scale_f32_f8f6f4, .mfma_scale_f32_mxf8f6f4, .gfx11_wmma_bf16_f32, .gfx11_wmma_i8_i32, .gfx11_wmma_i4_i32, .gfx12_wmma_bf16_f32, .gfx12_wmma_i8_i32, .gfx12_wmma_i4_i32, .gfx12_wmma_fp8_f32, .dpas_simd8_f16_f16, .dpas_simd8_f16_f32, .dpas_simd8_bf16_f32, .dpas_simd8_i8_i32, .dpas_simd16_f16_f16, .dpas_simd16_f16_f32, .dpas_simd16_bf16_f32, .dpas_simd16_i8_i32 => null,
+    };
+}
+
+/// Lower only the instruction forms implemented by this pinned Fly builder.
+/// Hardware presence and backend lowering are deliberately separate checks.
+pub fn mmaAtomType(ctx: *mlir.Context, instruction: matmul.Instruction) error{ UnsupportedInstruction, InvalidMlir }!*const mlir.Type {
+    const family = mmaAtomFamily(instruction) orelse return error.UnsupportedInstruction;
+    const desc = instruction.description();
+    const shape = desc.native_shapes[0];
+    var formats = desc.formats.iterator();
+    const operand = switch (formats.next().?) {
+        .f32 => DType.f32,
+        .bf16 => DType.bf16,
+        .f16 => DType.f16,
+        else => return error.UnsupportedInstruction,
+    };
+    return switch (family) {
+        inline else => |f| blk: {
+            const T = switch (f) {
+                .cdna3_mfma => rocdl.MmaOpCDNA3MFMAType,
+                .gfx11_wmma => rocdl.MmaOpGFX11WMMAType,
+                .gfx12_wmma => rocdl.MmaOpGFX120XWMMAType,
+            };
+            break :blk (T.get(ctx, .{
+                .m = @as(i32, shape.m),
+                .n = @as(i32, shape.n),
+                .k = @as(i32, shape.k),
+                .elemTyA = operand.toMlir(ctx),
+                .elemTyB = operand.toMlir(ctx),
+                .elemTyAcc = DType.f32.toMlir(ctx),
+            }) catch return error.InvalidMlir).type_();
+        },
+    };
+}
+
+/// Tuning for emitTiledMma, chosen by its caller rather than by the hardware catalog.
+pub const TiledMmaConfig = struct {
+    instruction: matmul.Instruction,
+    block_k: i64,
+    atoms: [3]i64 = .{ 2, 2, 1 },
+    buffer_copies: bool,
+
+    pub fn atomType(self: TiledMmaConfig, ctx: *mlir.Context) *const mlir.Type {
+        return mmaAtomType(ctx, self.instruction) catch @panic("Unsupported Fly matrix atom");
+    }
+
+    pub fn operandDType(self: TiledMmaConfig) DType {
+        var formats = self.instruction.description().formats.iterator();
+        return switch (formats.next().?) {
+            .f32 => .f32,
+            .f16 => .f16,
+            .bf16 => .bf16,
+            else => @panic("Unsupported tiled-MMA operand format"),
         };
     }
 
-    /// A and B operand type. The accumulator is f32 either way.
-    pub fn operandDType(self: MmaFlavor) DType {
-        return switch (self) {
-            .cdna3_mfma => .f32,
-            .gfx11_wmma, .gfx120x_wmma => .f16,
-        };
+    pub fn atomThreads(self: TiledMmaConfig) i32 {
+        return self.instruction.description().execution.issuingThreads();
     }
 
-    /// Threads one atom occupies: MFMA runs on a wave64, WMMA on a wave32.
-    /// Checked against the dialect's own `mma_atom.thr_layout` below.
-    pub fn atomThreads(self: MmaFlavor) i32 {
-        return switch (self) {
-            .cdna3_mfma => 64,
-            .gfx11_wmma, .gfx120x_wmma => 32,
-        };
-    }
-
-    /// `emitTiledMma` lays the atom out (2,2,1), so a block is four of them.
-    pub fn blockThreads(self: MmaFlavor) i32 {
-        return 4 * self.atomThreads();
-    }
-
-    /// The block tile's K, a multiple of the atom's K.
-    pub fn blockK(self: MmaFlavor) i64 {
-        return switch (self) {
-            .cdna3_mfma => 8,
-            .gfx11_wmma, .gfx120x_wmma => 16,
-        };
-    }
-
-    /// Buffer copies are CDNA-only: FlyROCDL declares no RDNA copy atom, so
-    /// RDNA moves through the core universal copy over plain tensors.
-    fn hasBufferCopy(self: MmaFlavor) bool {
-        return self == .cdna3_mfma;
+    pub fn blockThreads(self: TiledMmaConfig) i32 {
+        return @intCast(self.atoms[0] * self.atoms[1] * self.atoms[2] * self.atomThreads());
     }
 };
 
@@ -1687,32 +1691,37 @@ fn tile2(b: *Builder, x: i64, y: i64) Tile {
     return .{ .modes = modes };
 }
 
-/// C = A @ B^T in one block of 256 threads, tiled (2,2,1) over the family's
-/// matrix atom.
-pub fn emitTiledMma(b: *Builder, flavor: MmaFlavor, a_in: Value, b_in: Value, c_out: Value) void {
+/// C = A @ B^T in one block, tiled over the caller's selected matrix atom.
+pub fn emitTiledMma(b: *Builder, flavor: TiledMmaConfig, a_in: Value, b_in: Value, c_out: Value) void {
     const block_m = 64;
     const block_n = 64;
-    const block_k = flavor.blockK();
+    const block_k = flavor.block_k;
 
     const tid = b.threadId(.x);
     const bid = b.blockId(.x);
 
-    const A = if (flavor.hasBufferCopy()) b.bufferTensor(a_in) else a_in;
-    const B = if (flavor.hasBufferCopy()) b.bufferTensor(b_in) else b_in;
-    const C = if (flavor.hasBufferCopy()) b.bufferTensor(c_out) else c_out;
+    const A = if (flavor.buffer_copies) b.bufferTensor(a_in) else a_in;
+    const B = if (flavor.buffer_copies) b.bufferTensor(b_in) else b_in;
+    const C = if (flavor.buffer_copies) b.bufferTensor(c_out) else c_out;
 
     const bA = A.zippedDivide(tile2(b, block_m, block_k)).slice(.{ null, bid });
     const bB = B.zippedDivide(tile2(b, block_n, block_k)).slice(.{ null, bid });
     const bC = C.zippedDivide(tile2(b, block_m, block_n)).slice(.{ null, bid });
 
     const mma_atom = b.mmaAtom(flavor.atomType(b.ctx));
-    const tiled_mma = b.tiledMma(mma_atom, L(.{ 2, 2, 1 }, .{ 1, 2, 0 }), null);
+    const atom_shape = b.alloc(IntTuple, 3);
+    const atom_stride = b.alloc(IntTuple, 3);
+    for (flavor.atoms, 0..) |count, i| atom_shape[i] = .static(count);
+    atom_stride[0] = .static(1);
+    atom_stride[1] = .static(flavor.atoms[0]);
+    atom_stride[2] = .static(if (flavor.atoms[2] == 1) 0 else flavor.atoms[0] * flavor.atoms[1]);
+    const tiled_mma = b.tiledMma(mma_atom, Layout{ .shape = .{ .tup = atom_shape }, .stride = .{ .tup = atom_stride } }, null);
 
     // A and B move at the operand type, C at the f32 accumulator type. One
     // element per instruction: a WMMA fragment's values are strided in memory,
     // so a wider copy would move the wrong neighbours.
-    const copy_ab: Builder.CopyOp = if (flavor.hasBufferCopy()) .{ .buffer_copy = 32 } else .{ .universal = @intCast(flavor.operandDType().bitWidth()) };
-    const copy_c: Builder.CopyOp = if (flavor.hasBufferCopy()) .{ .buffer_copy = 32 } else .{ .universal = @intCast(c_out.elemDType().bitWidth()) };
+    const copy_ab: Builder.CopyOp = if (flavor.buffer_copies) .{ .buffer_copy = 32 } else .{ .universal = @intCast(flavor.operandDType().bitWidth()) };
+    const copy_c: Builder.CopyOp = if (flavor.buffer_copies) .{ .buffer_copy = 32 } else .{ .universal = @intCast(c_out.elemDType().bitWidth()) };
     const atom_ab = b.copyAtom(copy_ab, flavor.operandDType());
     const atom_c = b.copyAtom(copy_c, c_out.elemDType());
 
@@ -1756,7 +1765,7 @@ test "tiledMma builds, verifies and re-parses" {
         .b = .{ .tensor = .{ .dtype = .f32, .dims = &.{ 64, 8 } } },
         .c = .{ .tensor = .{ .dtype = .f32, .dims = &.{ 64, 64 } } },
     });
-    emitTiledMma(&b, .cdna3_mfma, a.a, a.b, a.c);
+    emitTiledMma(&b, .{ .instruction = .mfma_f32_16x16x4f32, .block_k = 8, .buffer_copies = true }, a.a, a.b, a.c);
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
 
@@ -1781,20 +1790,41 @@ test "tiledMma builds, verifies and re-parses" {
     try std.testing.expect(reparsed.operation().verify());
 }
 
-test "MmaFlavor.atomThreads matches the dialect" {
+test "catalog matrix shapes and threads match Fly dialect atoms" {
     const ctx = try testContext();
     defer ctx.deinit();
-    inline for (std.meta.fields(MmaFlavor)) |field| {
-        const flavor: MmaFlavor = @enumFromInt(field.value);
-        const atom = try fly.types.MmaAtomType.get(ctx, .{ .mmaOp = flavor.atomType(ctx) });
-        // `mma_atom.thr_layout` is the wavefront an atom occupies; the launch
-        // geometry is derived from it, so a wrong table silently corrupts C.
+    inline for (.{ .mfma_f32_16x16x4f32, .mfma_f32_16x16x16bf16_1k, .gfx11_wmma_f16_f32, .gfx12_wmma_f16_f32 }) |tag| {
+        const instruction: matmul.Instruction = tag;
+        const desc = instruction.description();
+        const atom = try fly.types.MmaAtomType.get(ctx, .{ .mmaOp = try mmaAtomType(ctx, instruction) });
         const threads = switch (atom.getThrLayout().getShape().getLeaf()) {
             .static => |v| v,
             else => return error.TestUnexpectedResult,
         };
-        try std.testing.expectEqual(@as(i64, flavor.atomThreads()), threads);
+        try std.testing.expectEqual(@as(i64, desc.execution.issuingThreads()), threads);
+        const mnk = atom.getShapeMNK();
+        inline for (.{ "m", "n", "k" }, 0..) |axis, i| {
+            try std.testing.expectEqual(@as(i64, @field(desc.native_shapes[0], axis)), mnk.getElement(i).getLeaf().static);
+        }
+        var formats = desc.formats.iterator();
+        const dtype = switch (formats.next().?) {
+            .f32 => "f32",
+            .bf16 => "bf16",
+            .f16 => "f16",
+            else => unreachable,
+        };
+        const printed = try std.fmt.allocPrint(std.testing.allocator, "{f}", .{atom});
+        defer std.testing.allocator.free(printed);
+        const types = try std.fmt.allocPrint(std.testing.allocator, "({s}, {s}) -> f32", .{ dtype, dtype });
+        defer std.testing.allocator.free(types);
+        try std.testing.expect(std.mem.indexOf(u8, printed, types) != null);
     }
+    const rdna3 = try fly.types.MmaAtomType.get(ctx, .{ .mmaOp = try mmaAtomType(ctx, .gfx11_wmma_f16_f32) });
+    const rdna4 = try fly.types.MmaAtomType.get(ctx, .{ .mmaOp = try mmaAtomType(ctx, .gfx12_wmma_f16_f32) });
+    try std.testing.expect(!rdna3.getThrValLayoutA().eql(rdna4.getThrValLayoutA()));
+    try std.testing.expectError(error.UnsupportedInstruction, mmaAtomType(ctx, .mma_bf16_f32));
+    try std.testing.expectEqual(null, mmaAtomFamily(.mma_bf16_f32));
+    try std.testing.expectEqual(MmaAtomFamily.cdna3_mfma, mmaAtomFamily(.mfma_f32_16x16x16bf16_1k).?);
 }
 
 test "tiledMma builds for the RDNA WMMA atom" {
@@ -1803,13 +1833,13 @@ test "tiledMma builds for the RDNA WMMA atom" {
 
     var b = try Builder.open(std.testing.allocator, ctx, "tiled_mma_wmma");
     defer b.deinit();
-    const k = MmaFlavor.gfx11_wmma.blockK();
+    const k = 16;
     const a = try b.declareArgs(.{
         .a = .{ .tensor = .{ .dtype = .f16, .dims = &.{ 64, k } } },
         .b = .{ .tensor = .{ .dtype = .f16, .dims = &.{ 64, k } } },
         .c = .{ .tensor = .{ .dtype = .f32, .dims = &.{ 64, 64 } } },
     });
-    emitTiledMma(&b, .gfx11_wmma, a.a, a.b, a.c);
+    emitTiledMma(&b, .{ .instruction = .gfx11_wmma_f16_f32, .block_k = 16, .buffer_copies = false }, a.a, a.b, a.c);
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
 

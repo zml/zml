@@ -62,6 +62,13 @@ fn resolveOutputOperandAliases(
 }
 
 pub const triton = struct {
+    pub fn isAvailable(p: *const platform_.Platform) bool {
+        return switch (p.target) {
+            .cuda, .rocm, .oneapi => true,
+            .cpu, .tpu, .neuron, .metal => false,
+        };
+    }
+
     pub const Builder = triton_builder.Builder;
     pub const Value = triton_builder.Value;
     pub const DType = triton_builder.DType;
@@ -620,21 +627,51 @@ pub const cute = struct {
 };
 
 pub const fly = struct {
-    /// Threads per wavefront: 64 on CDNA, 32 on RDNA.
-    pub fn waveSize(p: *const platform_.Platform) i32 {
-        const cc = platform_.rocm.computeCapability(p) orelse return 64;
-        return switch (cc.architecture()) {
-            .cdna1, .cdna2, .cdna3, .cdna4 => 64,
-            .rdna2, .rdna3, .rdna3_5, .rdna4 => 32,
+    /// The pinned Fly compiler needs a recognized ROCm device with a known wave
+    /// mode. Matrix kernels additionally check their atom with supportsMmaAtom.
+    pub fn isAvailable(p: *const platform_.Platform) bool {
+        return switch (p.target) {
+            .rocm => if (p.capability) |cc| cc.executionCapabilities() != null else false,
+            .cpu, .cuda, .tpu, .neuron, .oneapi, .metal => false,
         };
     }
 
-    /// The plugin sizes a block in wavefronts, so a thread count has to divide
-    /// evenly: a kernel's layouts are built for an exact number of threads and
-    /// spare ones would partition out of range.
+    /// Fly lowers this instruction's atom on this device. Each atom family is
+    /// admitted per architecture once validated on hardware; the catalog form
+    /// and a lowering for the family are not enough on their own.
+    pub fn supportsMmaAtom(p: *const platform_.Platform, instruction: platform_.capabilities.matmul.Instruction) bool {
+        if (!isAvailable(p)) return false;
+        const cc = p.capability.?;
+        if (!cc.supportsMatmulInstruction(instruction)) return false;
+        const arch = switch (cc) {
+            .rocm => |rocm| rocm.architecture(),
+            .cpu, .cuda, .tpu, .neuron, .oneapi, .metal => return false,
+        };
+        return switch (fly_builder.mmaAtomFamily(instruction) orelse return false) {
+            // FlyROCDL/CDNA3 atoms are validated on MI300 only. CDNA2 and CDNA4
+            // expose the same instructions but have not run these kernels.
+            .cdna3_mfma => switch (arch) {
+                .cdna3 => true,
+                .cdna1, .cdna2, .cdna4, .rdna2, .rdna3, .rdna3_5, .rdna4 => false,
+            },
+            .gfx11_wmma => switch (arch) {
+                .rdna3, .rdna3_5 => true,
+                .cdna1, .cdna2, .cdna3, .cdna4, .rdna2, .rdna4 => false,
+            },
+            .gfx12_wmma => switch (arch) {
+                .rdna4 => true,
+                .cdna1, .cdna2, .cdna3, .cdna4, .rdna2, .rdna3, .rdna3_5 => false,
+            },
+        };
+    }
+
+    /// Fly uses the smallest supported subgroup width for launch sizing.
+    /// The GPU execution probe below checks this against the compiler output.
     fn warpsFor(p: *const platform_.Platform, threads: i32) i32 {
-        const wave = waveSize(p);
-        if (@rem(threads, wave) != 0) {
+        if (!isAvailable(p)) @panic("zml.kernel.fly: Fly kernels require a recognized ROCm device");
+        const execution = p.capability.?.executionCapabilities().?;
+        const wave: i32 = std.mem.min(u16, execution.subgroup_sizes);
+        if (threads <= 0 or @rem(threads, wave) != 0) {
             std.debug.panic("zml.kernel.fly: {d} threads is not a multiple of the {d}-wide wavefront", .{ threads, wave });
         }
         return @divExact(threads, wave);
@@ -647,20 +684,12 @@ pub const fly = struct {
     pub const TiledCopy = fly_builder.TiledCopy;
     pub const TiledMma = fly_builder.TiledMma;
     pub const Arch = fly_builder.Arch;
-    pub const MmaFlavor = fly_builder.MmaFlavor;
+    pub const TiledMmaConfig = fly_builder.TiledMmaConfig;
+    pub const mmaAtomType = fly_builder.mmaAtomType;
+    pub const MmaAtomFamily = fly_builder.MmaAtomFamily;
+    pub const mmaAtomFamily = fly_builder.mmaAtomFamily;
     pub const rocdl = fly_builder.rocdl;
 
-    /// The matrix atom this device provides, or null when it has none: WMMA
-    /// arrived with RDNA3, so gfx1030 has no matrix instruction at all.
-    pub fn mmaFlavor(p: *const platform_.Platform) ?MmaFlavor {
-        const cc = platform_.rocm.computeCapability(p) orelse return .cdna3_mfma;
-        return switch (cc.architecture()) {
-            .cdna1, .cdna2, .cdna3, .cdna4 => .cdna3_mfma,
-            .rdna3, .rdna3_5 => .gfx11_wmma,
-            .rdna4 => .gfx120x_wmma,
-            .rdna2 => null,
-        };
-    }
     pub const layout = fly_builder.layout;
     pub const Layout = fly_builder.Layout;
     pub const Tile = fly_builder.Tile;
@@ -842,7 +871,7 @@ test "fly kernel emits a module XLA can parse" {
 
 /// C = A @ B^T with one MFMA-tiled block.
 const FlyTiledMma = struct {
-    const Cfg = struct { flavor: fly.MmaFlavor };
+    const Cfg = struct { flavor: fly.TiledMmaConfig };
     const K = fly.Kernel(Cfg, .{
         .name = "tiled_mma",
         .inputs = &.{ "a", "b" },
@@ -855,6 +884,36 @@ const FlyTiledMma = struct {
         fly_builder.emitTiledMma(b, cfg.flavor, a.a, a.b, a.c);
     }
 };
+
+/// Read the compiled wave mode and launch dimensions rather than assuming the
+/// backend interprets num_warps the same way as the hardware catalog.
+const FlyExecutionProbe = struct {
+    const K = fly.Kernel(void, .{
+        .name = "execution_probe",
+        .inputs = &.{"dummy"},
+        .outputs = &.{"output"},
+        .run = run,
+    });
+
+    fn run(b: *fly.Builder, _: void) fly.FinishError!void {
+        const wave = b.emit(mlir.Operation.make(b.ctx, "rocdl.wavefrontsize", .{
+            .results = .{ .flat = &.{fly.DType.i32.toMlir(b.ctx)} },
+            .location = b.loc(),
+        }));
+        var first = b.openIf(b.threadId(.x).cmp(.eq, 0));
+        const args = K.args(b);
+        args.output.set(0, wave);
+        args.output.set(1, b.blockDim(.x));
+        first.yieldThen(.{});
+    }
+};
+
+test "Fly execution probe emits the compiler wave-size query" {
+    const shapes = [_]Shape{ .init(.{1}, .f32), .init(.{2}, .i32) };
+    const ir = try FlyExecutionProbe.K.emit(std.testing.allocator, {}, &shapes);
+    defer std.testing.allocator.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "rocdl.wavefrontsize") != null);
+}
 
 test "fly kernels run on rocm" {
     const zml = @import("zml.zig");
@@ -877,6 +936,22 @@ test "fly kernels run on rocm" {
             return out.toSliceAlloc(std.testing.allocator, std.testing.io);
         }
     }.f;
+
+    {
+        const Probe = struct {
+            pub fn forward(dummy: Tensor, _: Tensor) Tensor {
+                return FlyExecutionProbe.K.call(.{ .dummy = dummy }, .{ .output = Shape.init(.{2}, .i32) }, .{
+                    .cfg = {},
+                    .grid = .{ 1, 1, 1 },
+                    .threads = 128,
+                }).output;
+            }
+        };
+        var result = try call(Probe.forward, platform, .init(.{1}, .f32), &[_]f32{0}, .init(.{1}, .f32), &[_]f32{0});
+        defer result.free(allocator);
+        const expected_wave = @divExact(@as(i32, 128), fly.warpsFor(platform, 128));
+        try std.testing.expectEqualSlices(i32, &.{ expected_wave, 128 }, result.items(i32));
+    }
 
     // vector add: elementwise over a ragged (100, 1000), predicated at the edge.
     {
@@ -905,19 +980,22 @@ test "fly kernels run on rocm" {
         for (host.items(f32), 0..) |v, i| try std.testing.expectEqual(ha[i] + hb[i], v);
     }
 
-    // tiled mma: C = A @ B^T in one block of 256 threads, over whatever matrix
-    // atom this device has. CDNA multiplies f32 through MFMA; RDNA3+ has WMMA,
-    // whose verifier rejects f32 operands, so the operand type and K come from
-    // the flavour rather than being written into the test.
-    if (fly.mmaFlavor(platform)) |flavor| switch (flavor) {
-        inline else => |f| {
+    // Each example configuration pairs a supported instruction with its own
+    // tiling and copy policy. Operand types and atom threads come from the catalog.
+    const examples = [_]fly.TiledMmaConfig{
+        .{ .instruction = .mfma_f32_16x16x4f32, .block_k = 8, .buffer_copies = true },
+        .{ .instruction = .gfx11_wmma_f16_f32, .block_k = 16, .buffer_copies = false },
+        .{ .instruction = .gfx12_wmma_f16_f32, .block_k = 16, .buffer_copies = false },
+    };
+    inline for (examples) |f| {
+        if (fly.supportsMmaAtom(platform, f.instruction)) {
             const Elem = switch (comptime f.operandDType()) {
                 .f32 => f32,
                 .f16 => f16,
                 else => @compileError("unhandled MMA operand type"),
             };
             const M, const N = .{ 64, 64 };
-            const Kd = comptime f.blockK();
+            const Kd = comptime f.block_k;
             const operand_dtype: DataType = switch (comptime f.operandDType()) {
                 .f32 => .f32,
                 .f16 => .f16,
@@ -951,8 +1029,8 @@ test "fly kernels run on rocm" {
                 for (0..Kd) |k| acc += @as(f32, ha[m * Kd + k]) * @as(f32, hb[n * Kd + k]);
                 try std.testing.expectApproxEqAbs(acc, out[m * N + n], tol);
             };
-        },
-    };
+        }
+    }
 }
 
 test "cute kernel emits the module the CuTe compiler takes" {
@@ -1006,4 +1084,49 @@ test "cuda_tile kernel emits a module XLA can parse" {
     try std.testing.expect(std.mem.indexOf(u8, ir, "entry @add_one(") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "load_view_tko") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "store_view_tko") != null);
+}
+
+test "Fly launch sizing follows hardware wave modes" {
+    var p: platform_.Platform = undefined;
+    p.target = .rocm;
+    p.capability = .{ .rocm = .gfx942 };
+    try std.testing.expectEqual(@as(i32, 4), fly.warpsFor(&p, 256));
+    p.capability = .{ .rocm = .gfx1100 };
+    try std.testing.expectEqual(@as(i32, 4), fly.warpsFor(&p, 128));
+    p.capability = .{ .rocm = .gfx1200 };
+    try std.testing.expectEqual(@as(i32, 8), fly.warpsFor(&p, 256));
+    // Launch sizing never guesses: unrecognized or non-ROCm devices are declined.
+    p.capability = null;
+    try std.testing.expect(!fly.isAvailable(&p));
+    p.target = .cuda;
+    p.capability = .{ .cuda = .sm90 };
+    try std.testing.expect(!fly.isAvailable(&p));
+}
+
+test "Fly matrix atoms are admitted per validated architecture" {
+    const Rocm = platform_.capabilities.Rocm;
+    var p: platform_.Platform = undefined;
+    p.target = .rocm;
+    const cases = .{
+        .{ Rocm.gfx942, true, false, false },
+        .{ Rocm.gfx908, false, false, false },
+        .{ Rocm.gfx90a, false, false, false },
+        .{ Rocm.gfx950, false, false, false },
+        .{ Rocm.gfx1030, false, false, false },
+        .{ Rocm.gfx1100, false, true, false },
+        .{ Rocm.gfx1151, false, true, false },
+        .{ Rocm.gfx1201, false, false, true },
+    };
+    inline for (cases) |case| {
+        p.capability = .{ .rocm = case[0] };
+        try std.testing.expect(fly.isAvailable(&p));
+        try std.testing.expectEqual(case[1], fly.supportsMmaAtom(&p, .mfma_f32_16x16x16bf16_1k));
+        try std.testing.expectEqual(case[1], fly.supportsMmaAtom(&p, .mfma_f32_16x16x4f32));
+        try std.testing.expectEqual(case[2], fly.supportsMmaAtom(&p, .gfx11_wmma_f16_f32));
+        try std.testing.expectEqual(case[3], fly.supportsMmaAtom(&p, .gfx12_wmma_f16_f32));
+        // Present in the catalog on every CDNA, but this builder has no atom for it.
+        try std.testing.expect(!fly.supportsMmaAtom(&p, .mfma_f32_f16));
+    }
+    p.capability = null;
+    try std.testing.expect(!fly.supportsMmaAtom(&p, .mfma_f32_16x16x16bf16_1k));
 }

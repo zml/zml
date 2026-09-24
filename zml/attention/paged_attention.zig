@@ -41,11 +41,11 @@ pub const Backend = enum {
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
             .stablehlo => true,
-            .triton => platform.target != .cpu,
+            .triton => zml.kernel.triton.isAvailable(platform),
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
             .cuda_fa2 => platform.target == .cuda,
-            .cuda_fa3 => if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(.{ .major = 9, .minor = 0 }) else false,
+            .cuda_fa3 => flashattn.fa3.isAvailable(platform),
         };
     }
 };
@@ -314,6 +314,7 @@ test "Backend.auto selects mosaic_tpu on TPU" {
     const platform: zml.Platform = .{
         .arena = undefined,
         .target = .tpu,
+        .capability = .tpu,
         .pjrt_api = undefined,
         .pjrt_client = undefined,
         .state = zml.platform.State.init(.tpu),
@@ -332,6 +333,7 @@ test "Backend.auto selects triton on oneAPI" {
     const platform: zml.Platform = .{
         .arena = undefined,
         .target = .oneapi,
+        .capability = .{ .oneapi = .pvc },
         .pjrt_api = undefined,
         .pjrt_client = undefined,
         .state = zml.platform.State.init(.oneapi),

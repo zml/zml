@@ -4,14 +4,14 @@ const platforms = @import("platforms");
 
 const zml = @import("../zml.zig");
 const stdx = zml.stdx;
-pub const triton_mxfp4 = @import("triton_mxfp4.zig");
 pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
+pub const fly = @import("fly_kernels/moe.zig");
+const fused_experts = @import("fused_experts.zig");
 pub const metal = @import("metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
 pub const triton = @import("triton.zig");
-pub const fly = @import("fly_kernels/moe.zig");
-const fused_experts = @import("fused_experts.zig");
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
+pub const triton_mxfp4 = @import("triton_mxfp4.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -38,15 +38,15 @@ pub const Backend = enum {
                     .flashinfer_cutlass
                 else
                     .triton,
-                .f4e2m1 => if (cutlass_flashinfer.isNvfp4Supported(platform))
+                .f4e2m1 => if (cutlass_flashinfer.isAvailableWithNvfp4(platform))
                     .flashinfer_cutlass
                 else
                     return error.UnsupportedDataType,
-                .f8e4m3fn, .f8e4m3fnuz, .f8e8m0, .f16, .f32 => .triton,
+                .f16, .f32, .f8e4m3fn, .f8e4m3fnuz => .triton,
                 else => error.UnsupportedDataType,
             },
             .rocm => switch (weights_dtype) {
-                .bf16, .f16, .f32, .f8e4m3fn, .f8e4m3fnuz, .f8e8m0 => .triton,
+                .bf16, .f16, .f32, .f8e4m3fn, .f8e4m3fnuz => .triton,
                 else => error.UnsupportedDataType,
             },
             .oneapi => switch (weights_dtype) {
@@ -61,37 +61,22 @@ pub const Backend = enum {
                 .bf16, .f16, .f32, .f4e2m1, .u8, .f8e4m3fn => .metal,
                 else => error.UnsupportedDataType,
             },
-            else => error.UnimplementedMoEBackend,
+            .cpu, .neuron => error.UnimplementedMoEBackend,
         };
     }
 
     pub fn autoMxfp4(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
-        return switch (platform.target) {
-            .cuda => switch (if (zml.platform.cuda.computeCapability(platform)) |cc| cc.major else 0) {
-                10 => switch (weights_dtype) {
-                    .u8, .i8 => .triton_mxfp4,
-                    .f4e2m1 => .triton,
-                    else => error.UnsupportedDataType,
-                },
-                else => switch (weights_dtype) {
-                    .u8, .i8, .f4e2m1 => .triton,
-                    else => error.UnsupportedDataType,
-                },
-            },
-            .rocm => switch (zml.platform.rocm.computeCapability(platform) orelse return .triton) {
-                .gfx942 => switch (weights_dtype) {
-                    .u8, .i8, .f4e2m1 => .fly,
-                    else => error.UnsupportedDataType,
-                },
-                else => switch (weights_dtype) {
-                    .u8, .i8, .f4e2m1 => .triton,
-                    else => error.UnsupportedDataType,
-                },
-            },
-            else => switch (weights_dtype) {
-                .u8, .i8, .f4e2m1 => .triton,
+        if (!zml.kernel.triton.isAvailable(platform)) return error.UnimplementedMoEBackend;
+        if (triton_mxfp4.isAvailable(platform)) {
+            return switch (weights_dtype) {
+                .u8, .i8 => .triton_mxfp4,
+                .f4e2m1 => .triton,
                 else => error.UnsupportedDataType,
-            },
+            };
+        }
+        return switch (weights_dtype) {
+            .u8, .i8, .f4e2m1 => if (Backend.fly.isAvailable(platform)) .fly else .triton,
+            else => error.UnsupportedDataType,
         };
     }
 
@@ -99,14 +84,8 @@ pub const Backend = enum {
         return switch (backend) {
             .triton_mxfp4 => triton_mxfp4.isAvailable(platform),
             .flashinfer_cutlass => cutlass_flashinfer.isAvailable(platform),
-            .fly => switch (platform.target) {
-                .rocm => zml.platform.rocm.computeCapability(platform) == .gfx942,
-                else => false,
-            },
-            .triton => switch (platform.target) {
-                .cuda, .rocm, .oneapi => true,
-                else => false,
-            },
+            .fly => fly.isAvailable(platform),
+            .triton => zml.kernel.triton.isAvailable(platform),
             .mosaic_tpu => platform.target == .tpu,
             .metal => platform.target == .metal,
         };

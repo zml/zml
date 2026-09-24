@@ -58,14 +58,16 @@ pub const FusedExpertsArgs = struct {
 };
 
 pub fn fusedExperts(opts: FusedExpertsArgs, comptime backend: zml.moe.Backend) !Tensor {
+    const platform = zml.Compiler.current().platform;
     const Impl = switch (backend) {
         .fly => fly,
         .triton => triton,
         else => @compileError("unsupported fused-experts backend"),
     };
-    if (backend == .fly and (!backend.isAvailable(zml.Compiler.current().platform) or !fly.supports(opts))) {
+    if (backend == .fly and (!backend.isAvailable(platform) or !fly.supports(opts))) {
         return fusedExperts(opts, .triton);
     }
+    if (!backend.isAvailable(platform)) return error.UnsupportedPlatform;
 
     const hidden_states = opts.hidden_states;
     const topk_weights = opts.topk_weights;
