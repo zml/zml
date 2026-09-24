@@ -4,6 +4,13 @@ const zml = @import("zml");
 // Exercise the exact attention entry point used by Llama, with deterministic
 // host inputs so the test does not depend on accelerator random-number support.
 pub fn main(init: std.process.Init) !void {
+    const args = zml.stdx.flags.parse(init.minimal.args, struct {
+        dtype: ?zml.DataType = null,
+        pub const help = "Compare Llama vanilla SDPA with CPU; optionally --dtype=f32 or --dtype=bf16";
+    });
+    if (args.dtype) |dtype| {
+        if (dtype != .f32 and dtype != .bf16) return error.UnsupportedTestDtype;
+    }
     const allocator = init.gpa;
     const io = init.io;
     const platform = try zml.Platform.init(allocator, io, .furiosa, .{});
@@ -13,6 +20,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (zml.attention.Backend.auto(platform) != .vanilla) return error.ExpectedVanillaAttention;
     for ([_]zml.DataType{ .f32, .bf16 }) |dtype| {
+        if (args.dtype != null and args.dtype.? != dtype) continue;
         // Prefill, a chunk at a nonzero cache offset, and single-token decode.
         for ([_]struct { queries: i64, offset: u32 }{
             .{ .queries = 8, .offset = 0 },
