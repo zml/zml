@@ -2624,19 +2624,42 @@ fn manualComputationInternal(
     const input_shardings = try arena.alloc(Sharding, input_shapes.len);
     const output_shardings = try arena.alloc(Sharding, outputs.len);
 
+    // using explicit logger, because this can be annoying to debug
+    const log = std.log.scoped(.@"zml/Compiler");
+
+    ctx.pushLocation(@src(), stdx.meta.fnName(body_fn));
+    defer ctx.popLocation();
+
     var valid_shardings = std.ArrayList(Sharding).empty;
     for (ctx.partitioning.shardings) |candidate| candidate: {
         for (partition_axes) |logical_axis| {
-            if (candidate.data.binding(logical_axis) == null) break :candidate;
+            if (candidate.data.binding(logical_axis) == null) {
+                log.warn("sharding {s} doesn't cover {s}", .{ candidate.data.name, logical_axis });
+                break :candidate;
+            }
+            log.debug("sharding {s} covers {s}", .{ candidate.data.name, logical_axis });
         }
-        for (input_shapes) |shape| {
-            if (!candidate.data.covers(shape)) break :candidate;
-            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch break :candidate;
+        for (0.., input_shapes) |i, shape| {
+            if (!candidate.data.covers(shape)) {
+                log.debug("sharding {s} doesn't cover input {d} {f}", .{ candidate.data.name, i, shape });
+                break :candidate;
+            }
+            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch {
+                log.debug("sharding {s} failed to cover input {d} {f}", .{ candidate.data.name, i, shape });
+                break :candidate;
+            };
         }
-        for (outputs) |shape| {
-            if (!candidate.data.covers(shape)) break :candidate;
-            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch break :candidate;
+        for (0.., outputs) |i, shape| {
+            if (!candidate.data.covers(shape)) {
+                log.debug("sharding {s} doesn't cover output {d} {f}", .{ candidate.data.name, i, shape });
+                break :candidate;
+            }
+            _ = candidate.shardedShapeForAxes(shape, partition_axes) catch {
+                log.debug("sharding {s} failed to cover output {d} {f}", .{ candidate.data.name, i, shape });
+                break :candidate;
+            };
         }
+        log.debug("sharding {s} is accepted {f} !", .{ candidate.data.name, candidate });
         try valid_shardings.append(arena, candidate);
     }
     const manual_axis_names = try arena.alloc([]const u8, partition_axes.len);
@@ -2655,6 +2678,9 @@ fn manualComputationInternal(
             .{ conflict.logical_axis, computation_sharding.data.name, conflict.resolved_axis },
         );
     }
+
+    log.info("manualComputation(sharding={s}, axes={f}) --> start", .{ computation_sharding.data.name, stdx.fmt.strings(manual_axis_names) });
+    defer log.info("manualComputation(sharding={s}, axes={f}) <-- end", .{ computation_sharding.data.name, stdx.fmt.strings(manual_axis_names) });
 
     for (input_shapes, 0..) |shape, i| {
         input_shardings[i] = computation_sharding;
