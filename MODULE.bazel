@@ -318,6 +318,7 @@ use_repo(
     "translate-c",
     "uucode",
     "xla",
+    "zig-protobuf",
     "zigimg",
     "zio",
     "zls",

@@ -1,62 +1,57 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const hlo = @import("@xla//xla/service:hlo_proto");
+const hlo = @import("@xla//xla/service:hlo_proto").proto;
 const log = std.log.scoped(.hlo2json);
 
 const json_writer = @import("json_writer.zig");
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    var args = std.process.args();
-    _ = args.next();
-
-    const input_json_path = args.next() orelse "/Users/guw/Documents/monorepo/pretty_xla/rope.hlo.pb";
-    const output_json_path = args.next() orelse try std.mem.joinZ(arena.allocator(), "", &.{ input_json_path, ".json" });
-
-    const output_file = try std.fs.cwd().createFileZ(output_json_path, .{});
-    defer output_file.close();
-    var writer = std.io.bufferedWriter(output_file.writer());
-    try convertFile(arena.allocator(), input_json_path, writer.writer());
-    try writer.flush();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(allocator);
+    if (args.len < 2 or args.len > 3) {
+        std.debug.print("Usage: hlo2json <input.hlo.pb> [output.json]\n", .{});
+        return error.InvalidArguments;
+    }
+    if (init.environ_map.get("BUILD_WORKING_DIRECTORY")) |path| {
+        var dir = try std.Io.Dir.openDirAbsolute(init.io, path, .{});
+        defer dir.close(init.io);
+        try std.process.setCurrentDir(init.io, dir);
+    }
+    const output_path = if (args.len == 3) args[2] else try std.fmt.allocPrint(allocator, "{s}.json", .{args[1]});
+    // Decode before opening the output, so invalid input cannot truncate it.
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    try convertFile(allocator, init.io, args[1], &output.writer);
+    const file = try std.Io.Dir.cwd().createFile(init.io, output_path, .{});
+    defer file.close(init.io);
+    try file.writeStreamingAll(init.io, output.written());
 }
 
-pub fn convertFile(allocator: std.mem.Allocator, input_hlo_path: []const u8, writer: anytype) !void {
-    const input_file = try std.fs.cwd().openFile(input_hlo_path, .{});
-    var reader = std.io.bufferedReader(input_file.reader());
-    const file_size = (try input_file.stat()).size;
-
-    const file_content = try std.heap.page_allocator.alloc(u8, file_size);
-    _ = try reader.reader().readAll(file_content);
-    defer std.heap.page_allocator.free(file_content);
-
+pub fn convertFile(allocator: std.mem.Allocator, io: std.Io, input_hlo_path: []const u8, writer: *std.Io.Writer) !void {
+    const input_file = try std.Io.Dir.cwd().openFile(io, input_hlo_path, .{});
+    defer input_file.close(io);
+    var buffer: [8192]u8 = undefined;
+    var reader = input_file.reader(io, &buffer);
     var proto_arena = std.heap.ArenaAllocator.init(allocator);
     defer proto_arena.deinit();
-
-    const proto = try hlo.HloProto.decode(file_content, proto_arena.allocator());
-
-    var converter: Converter = .{ .allocator = allocator };
+    const proto = try hlo.HloProto.decode(&reader.interface, proto_arena.allocator());
+    var converter: Converter = .{ .allocator = proto_arena.allocator() };
     try converter.emitModule(writer, proto);
 }
 
-threadlocal var py_writer = std.ArrayList(u8).init(std.heap.page_allocator);
+threadlocal var py_writer: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
 
 pub const Slice = extern struct { ptr: u64 = 0, len: u64 = 0 };
 
 pub export fn convertHloToJson(input_hlo_path_ptr: [*]const u8, len: u32) Slice {
     const input_hlo_path = input_hlo_path_ptr[0..len];
-    if (py_writer.capacity == 0) py_writer.ensureTotalCapacity(std.heap.page_size_min * 4) catch return .{};
-    py_writer.shrinkRetainingCapacity(0);
-
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    convertFile(arena.allocator(), input_hlo_path, py_writer.writer()) catch |err| {
+    py_writer.clearRetainingCapacity();
+    var threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    convertFile(std.heap.page_allocator, threaded.io(), input_hlo_path, &py_writer.writer) catch |err| {
         log.err("Failed to read hlo file: {s} ({})", .{ input_hlo_path, err });
         return .{};
     };
-    return .{ .ptr = @intFromPtr(py_writer.items.ptr), .len = py_writer.items.len };
+    return .{ .ptr = @intFromPtr(py_writer.written().ptr), .len = py_writer.written().len };
 }
 
 const State = enum {
@@ -69,8 +64,6 @@ const State = enum {
 pub const Converter = struct {
     line_count: u32 = 0,
     state: State = .header,
-    out_buf: std.BoundedArray(u8, 1024) = .{},
-    namespaces: std.BoundedArray([]const u8, 128) = .{},
 
     allocator: std.mem.Allocator,
     // Map instruction id to its instruction.
@@ -119,7 +112,7 @@ pub const Converter = struct {
             try self.instructions.ensureUnusedCapacity(self.allocator, computation.instructions.items.len);
             for (computation.instructions.items) |*instr| {
                 self.instructions.putAssumeCapacityNoClobber(instr.id, instr);
-                if (std.mem.eql(u8, instr.opcode.getSlice(), "fusion") and instr.called_computation_ids.items.len > 0) {
+                if (std.mem.eql(u8, instr.opcode, "fusion") and instr.called_computation_ids.items.len > 0) {
                     const callee = instr.called_computation_ids.items[0];
                     _ = try self.computation_caller.getOrPutValue(self.allocator, callee, instr);
                 }
@@ -128,44 +121,41 @@ pub const Converter = struct {
 
         const W = @TypeOf(writer);
         var top_level = try json_writer.dict(writer);
-        defer top_level.close();
 
-        try top_level.write("label", module.name.getSlice());
+        try top_level.write("label", module.name);
         var graphs = try top_level.openList("graphs");
-        defer graphs.close();
 
         for (module.computations.items) |computation| {
             var graph = try graphs.openDict();
-            defer graph.close();
             try self.emitComputation(W, &graph, computation);
+            try graph.close();
         }
+        try graphs.close();
+        try top_level.close();
     }
 
     pub fn emitComputation(self: *const Converter, Writer: type, graph: *json_writer.Dict(Writer), computation: hlo.HloComputationProto) !void {
         const comp_caller = self.computation_caller.get(computation.id);
         // The name of the caller node is better cause computation name is typically just "fusion".
-        try graph.write("id", if (comp_caller) |caller| caller.name.getSlice() else computation.name.getSlice());
+        try graph.write("id", if (comp_caller) |caller| caller.name else computation.name);
 
         var nodes = try graph.openList("nodes");
-        defer nodes.close();
         for (computation.instructions.items) |instr| {
-            if (std.mem.eql(u8, instr.opcode.getSlice(), "get-tuple-element")) continue;
+            if (std.mem.eql(u8, instr.opcode, "get-tuple-element")) continue;
             var node = try nodes.openDict();
-            defer node.close();
             // node name + attrs
             try node.writeTemplate("id", "\"{d}\"", .{instr.id});
             try node.write("namespace", "");
-            try node.writeTemplate("label", "\"{}\"", .{self.instrLabel(instr)});
+            try node.write("label", try std.fmt.allocPrint(self.allocator, "{f}", .{self.instrLabel(instr)}));
             {
                 var attrs = try node.openList("attrs");
-                defer attrs.close();
                 try self.writeAttr(Writer, &attrs, instr, comp_caller);
+                try attrs.close();
             }
 
             {
                 var outputs = try node.openList("outputsMetadata");
-                defer outputs.close();
-                const out_shape = instr.shape.?.*;
+                const out_shape = instr.shape.?;
                 var out_shapes: []const @TypeOf(out_shape) = &.{out_shape};
                 if (out_shapes[0].element_type == .TUPLE) {
                     out_shapes = out_shapes[0].tuple_shapes.items;
@@ -173,22 +163,22 @@ pub const Converter = struct {
 
                 for (0.., out_shapes) |o, o_shape| {
                     try outputs.writeTemplate(
-                        \\{{"id":"{d}","attrs":[{{"key":"tensor_shape","value":"{}"}}]}}
+                        \\{{"id":"{d}","attrs":[{{"key":"tensor_shape","value":"{f}"}}]}}
                     , .{ o, InstrShape{ .shape = &o_shape } });
                 }
+                try outputs.close();
             }
 
             // node edges
             {
                 var edges = try node.openList("incomingEdges");
-                defer edges.close();
                 for (instr.operand_ids.items, 0..) |input_id, i| {
                     const input_instr = self.instructions.get(input_id) orelse continue;
 
                     // The source node, and output_id to handle when input node produces several values.
                     var source_id: i64 = input_id;
                     var source_output_id: i64 = 0;
-                    if (std.mem.eql(u8, input_instr.opcode.getSlice(), "get-tuple-element")) {
+                    if (std.mem.eql(u8, input_instr.opcode, "get-tuple-element")) {
                         source_id = input_instr.operand_ids.items[0];
                         source_output_id = input_instr.tuple_index;
                     }
@@ -197,37 +187,34 @@ pub const Converter = struct {
                         \\{{"sourceNodeId":"{d}","sourceNodeOutputId":"{d}", "targetNodeInputId":"{d}"}}
                     , .{ source_id, source_output_id, i });
                 }
+                try edges.close();
             }
 
             if (instr.called_computation_ids.items.len > 0) {
                 var subpgraphs = try node.openList("subgraphIds");
-                defer subpgraphs.close();
                 for (instr.called_computation_ids.items) |called| {
                     if (self.computation_caller.get(called)) |meta| {
-                        try subpgraphs.write(meta.name.getSlice());
+                        try subpgraphs.write(meta.name);
                     } else {
                         const called_comp = self.computations.get(called).?;
-                        try subpgraphs.write(called_comp.name.getSlice());
+                        try subpgraphs.write(called_comp.name);
                     }
                 }
+                try subpgraphs.close();
             }
+            try node.close();
         }
+        try nodes.close();
     }
 
     pub fn writeAttr(self: *const Converter, Writer: type, list: *json_writer.List(Writer), instr: hlo.HloInstructionProto, comp_caller: ?*const hlo.HloInstructionProto) !void {
         if (instr.metadata) |meta| {
-            try list.writeTemplate(
-                \\{{"key":"loc","value":"{s}:{d}"}}
-            , .{ meta.source_file.getSlice(), meta.source_line });
-            if (!meta.op_name.isEmpty()) {
-                try list.writeTemplate(
-                    \\{{"key":"op_name","value":"{s}:{s}"}}
-                , .{ meta.op_type.getSlice(), meta.op_name.getSlice() });
+            try list.write(.{ .key = "loc", .value = try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ meta.source_file, meta.source_line }) });
+            if (meta.op_name.len != 0) {
+                try list.write(.{ .key = "op_name", .value = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ meta.op_type, meta.op_name }) });
             }
-            if (!meta.deduplicated_name.isEmpty()) {
-                try list.writeTemplate(
-                    \\{{"key":"deduplicated_name","value":"{s}"}}
-                , .{meta.deduplicated_name.getSlice()});
+            if (meta.deduplicated_name.len != 0) {
+                try list.write(.{ .key = "deduplicated_name", .value = meta.deduplicated_name });
             }
             // stack_frame_id doesn't seem interesting
         }
@@ -244,12 +231,10 @@ pub const Converter = struct {
             // I'm using subgraph to represent fusion blocks, but with the current UI it means we can't
             // link between a subgraph input and the caller argument in the main graph.
             if (instr.parameter_number >= caller.operand_ids.items.len) return;
-            if (std.mem.eql(u8, instr.opcode.getSlice(), "parameter")) {
+            if (std.mem.eql(u8, instr.opcode, "parameter")) {
                 const arg = caller.operand_ids.items[@intCast(instr.parameter_number)];
                 if (self.instructions.get(arg)) |arg_instr| {
-                    try list.writeTemplate(
-                        \\{{"key":"aka","value":"{s}"}}
-                    , .{self.instrLabel(arg_instr.*)});
+                    try list.write(.{ .key = "aka", .value = try std.fmt.allocPrint(self.allocator, "{f}", .{self.instrLabel(arg_instr.*)}) });
                 }
             }
         }
@@ -266,30 +251,25 @@ const InstrLabel = struct {
 
     pub fn format(
         self: InstrLabel,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
         const instr = self.instr;
         const converter = self.converter;
-        const opcode = instr.opcode.getSlice();
+        const opcode = instr.opcode;
         if (std.mem.eql(u8, opcode, "parameter")) {
             return try writer.print("Parameter {d}", .{instr.parameter_number});
         }
 
         if (std.mem.eql(u8, opcode, "constant") and instr.literal != null) {
-            return try renderLiteral(writer, instr.literal.?.*);
+            return try renderLiteral(writer, instr.literal.?);
         }
 
         if (std.mem.eql(u8, opcode, "fusion")) {
-            return try writer.print("{s}", .{instr.name.getSlice()});
+            return try writer.print("{s}", .{instr.name});
         }
 
         if (std.mem.eql(u8, opcode, "custom-call")) {
-            return try writer.print("{s}", .{instr.name.getSlice()});
+            return try writer.print("{s}", .{instr.name});
         }
 
         if (std.mem.eql(u8, opcode, "reduce")) r: {
@@ -297,22 +277,22 @@ const InstrLabel = struct {
             // Complex reduction don't give a name cause it's probably misleading.
             if (reducer.instructions.items.len > 3) break :r;
             const root = self.converter.instructions.get(reducer.root_id).?;
-            const reduce_label = if (std.mem.eql(u8, root.opcode.getSlice(), "compare"))
-                root.comparison_direction.getSlice()
+            const reduce_label = if (std.mem.eql(u8, root.opcode, "compare"))
+                root.comparison_direction
             else
-                root.opcode.getSlice();
-            return try writer.print("{s}.{s}", .{ instr.opcode.getSlice(), reduce_label });
+                root.opcode;
+            return try writer.print("{s}.{s}", .{ instr.opcode, reduce_label });
         }
 
         if (std.mem.eql(u8, opcode, "get-tuple-element")) {
             const tuple_instr = self.converter.instructions.get(instr.operand_ids.items[0]).?.*;
-            return try writer.print("{s}[{d}]", .{ self.converter.instrLabel(tuple_instr), instr.tuple_index });
+            return try writer.print("{f}[{d}]", .{ self.converter.instrLabel(tuple_instr), instr.tuple_index });
         }
 
         // The HLO instruction name contains usually the opcode, e.g. "%add.42" is
         // an add instruction.  In this case we render just the name.
-        if (std.mem.startsWith(u8, instr.name.getSlice(), opcode)) {
-            var name = instr.name.getSlice();
+        if (std.mem.startsWith(u8, instr.name, opcode)) {
+            var name = instr.name;
             if (name.len > opcode.len) {
                 if (std.fmt.parseInt(u64, name[opcode.len + 1 ..], 10)) |_| {
                     name = opcode;
@@ -321,33 +301,29 @@ const InstrLabel = struct {
             return try writer.writeAll(name);
         }
 
-        return try writer.print("{s}.{s}", .{ instr.name.getSlice(), instr.opcode.getSlice() });
+        return try writer.print("{s}.{s}", .{ instr.name, instr.opcode });
     }
 };
 
 const InstrShape = struct {
-    shape: std.meta.FieldType(hlo.HloInstructionProto, .shape),
+    shape: *const hlo.ShapeProto,
 
     pub fn format(
         self: InstrShape,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
+        writer: *std.Io.Writer,
     ) !void {
-        _ = fmt;
-        _ = options;
 
         // Use syntax supported by the frontend. The "tensor<>" won't be displayed, only what's inside.
         try writer.writeAll("tensor<");
-        const dims = self.shape.?.dimensions.items;
+        const dims = self.shape.dimensions.items;
         for (dims) |d| {
             try writer.print("{d}x", .{d});
         }
-        try writer.print("{s}>", .{@tagName(self.shape.?.element_type)});
+        try writer.print("{s}>", .{@tagName(self.shape.element_type)});
     }
 };
 
-const LiteralProto = @TypeOf(hlo.HloInstructionProto.init().literal.?.*);
+const LiteralProto = hlo.LiteralProto;
 
 fn renderLiteral(writer: anytype, literal: LiteralProto) !void {
     const dtype = literal.shape.?.element_type;
@@ -367,33 +343,43 @@ fn renderLiteral(writer: anytype, literal: LiteralProto) !void {
         // .S1 => ,
         // .S2 => ,
         // .S4 => ,
-        .S8 => try writer.print("{d}", .{std.mem.bytesAsSlice(i8, literal.s8s.getSlice())[0..n]}),
-        .S16 => try writer.print("{d}", .{std.mem.bytesAsSlice(i16, literal.s16s.getSlice())[0..n]}),
-        .S32 => try writer.print("{d}", .{literal.s32s.items[0..n]}),
-        .S64 => try writer.print("{d}", .{literal.s64s.items[0..n]}),
+        .S8 => try renderValues(writer, "d", std.mem.bytesAsSlice(i8, literal.s8s), n),
+        .S16 => try renderValues(writer, "d", std.mem.bytesAsSlice(i16, literal.s16s), n),
+        .S32 => try renderValues(writer, "d", literal.s32s.items, n),
+        .S64 => try renderValues(writer, "d", literal.s64s.items, n),
         // .U1 => ,
         // .U2 => ,
         // .U4 => ,
-        .U8 => try writer.print("{d}", .{literal.u8s.getSlice()[0..n]}),
-        .U16 => try writer.print("{d}", .{std.mem.bytesAsSlice(u16, literal.u16s.getSlice())[0..n]}),
-        .U32 => try writer.print("{d}", .{literal.u32s.items[0..n]}),
-        .U64 => try writer.print("{d}", .{literal.u64s.items[0..n]}),
-        .F32 => try writer.print("{e}", .{literal.f32s.items[0..n]}),
-        .F64 => try writer.print("{e}", .{literal.f64s.items[0..n]}),
-        .F16 => try writer.print("{e}", .{std.mem.bytesAsSlice(f16, literal.f16s.getSlice())[0..n]}),
-        .BF16 => try writer.print("{e}", .{std.mem.bytesAsSlice(BFloat16, literal.bf16s.getSlice())[0..n]}),
-        .F8E5M2 => try writer.print("{e}", .{std.mem.bytesAsSlice(F8E5M2, literal.f8e5m2s.getSlice())[0..n]}),
-        .F8E5M2FNUZ => try writer.print("{e}", .{std.mem.bytesAsSlice(F8E5M2, literal.f8e5m2fnuzs.getSlice())[0..n]}),
-        .F8E3M4 => try writer.print("{e}", .{std.mem.bytesAsSlice(F8E3M4, literal.f8e3m4s.getSlice())[0..n]}),
-        .F8E4M3 => try writer.print("{e}", .{std.mem.bytesAsSlice(F8E4M3, literal.f8e4m3s.getSlice())[0..n]}),
-        .F8E4M3FN => try writer.print("{e}", .{std.mem.bytesAsSlice(F8E4M3, literal.f8e4m3fns.getSlice())[0..n]}),
-        .F8E4M3FNUZ => try writer.print("{e}", .{std.mem.bytesAsSlice(F8E4M3, literal.f8e4m3fnuzs.getSlice())[0..n]}),
-        .F8E4M3B11FNUZ => try writer.print("{e}", .{std.mem.bytesAsSlice(F8E4M3, literal.f8e4m3b11fnuzs.getSlice())[0..n]}),
+        .U8 => try renderValues(writer, "d", literal.u8s, n),
+        .U16 => try renderValues(writer, "d", std.mem.bytesAsSlice(u16, literal.u16s), n),
+        .U32 => try renderValues(writer, "d", literal.u32s.items, n),
+        .U64 => try renderValues(writer, "d", literal.u64s.items, n),
+        .F32 => try renderValues(writer, "e", literal.f32s.items, n),
+        .F64 => try renderValues(writer, "e", literal.f64s.items, n),
+        .F16 => try renderValues(writer, "e", std.mem.bytesAsSlice(f16, literal.f16s), n),
+        .BF16 => try renderValues(writer, "e", std.mem.bytesAsSlice(BFloat16, literal.bf16s), n),
+        .F8E5M2 => try renderValues(writer, "e", std.mem.bytesAsSlice(F8E5M2, literal.f8e5m2s), n),
+        .F8E5M2FNUZ => try renderValues(writer, "e", std.mem.bytesAsSlice(F8E5M2, literal.f8e5m2fnuzs), n),
+        .F8E3M4 => try renderValues(writer, "e", std.mem.bytesAsSlice(F8E3M4, literal.f8e3m4s), n),
+        .F8E4M3 => try renderValues(writer, "e", std.mem.bytesAsSlice(F8E4M3, literal.f8e4m3s), n),
+        .F8E4M3FN => try renderValues(writer, "e", std.mem.bytesAsSlice(F8E4M3, literal.f8e4m3fns), n),
+        .F8E4M3FNUZ => try renderValues(writer, "e", std.mem.bytesAsSlice(F8E4M3, literal.f8e4m3fnuzs), n),
+        .F8E4M3B11FNUZ => try renderValues(writer, "e", std.mem.bytesAsSlice(F8E4M3, literal.f8e4m3b11fnuzs), n),
         // C64 = 15;
         // C128 = 18;
         else => _ = try writer.writeAll("???"),
     }
     try writer.print(", {s})", .{@tagName(dtype)});
+}
+
+fn renderValues(writer: *std.Io.Writer, comptime fmt: []const u8, values: anytype, n: usize) std.Io.Writer.Error!void {
+    try writer.writeAll("{ ");
+    for (values[0..@min(n, values.len)], 0..) |value, i| {
+        if (i != 0) try writer.writeAll(", ");
+        const number = if (@typeInfo(@TypeOf(value)) == .@"struct") value.toF32() else value;
+        try writer.print("{" ++ fmt ++ "}", .{number});
+    }
+    try writer.writeAll(" }");
 }
 
 fn FloatType(exponent_bits: u8, mantissa_bits: u8) type {
@@ -422,11 +408,11 @@ fn FloatType(exponent_bits: u8, mantissa_bits: u8) type {
             return @bitCast(vf32);
         }
 
-        fn f32Mantissa(self: Self) std.meta.FieldType(Float32, .mantissa) {
+        fn f32Mantissa(self: Self) @FieldType(Float32, "mantissa") {
             @setRuntimeSafety(false);
-            const f32_mantissa_bits = @bitSizeOf(std.meta.FieldType(Float32, .mantissa));
+            const f32_mantissa_bits = @bitSizeOf(@FieldType(Float32, "mantissa"));
 
-            const Res = std.meta.FieldType(Float32, .mantissa);
+            const Res = @FieldType(Float32, "mantissa");
             return @shlExact(@as(Res, self.mantissa), f32_mantissa_bits - mantissa_bits);
         }
 
@@ -437,12 +423,9 @@ fn FloatType(exponent_bits: u8, mantissa_bits: u8) type {
 
         pub fn format(
             self: @This(),
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
+            writer: *std.Io.Writer,
         ) !void {
-            _ = options;
-            try writer.print("{" ++ fmt ++ "}", .{self.toF32()});
+            try writer.print("{e}", .{self.toF32()});
         }
     };
 }
@@ -451,3 +434,89 @@ const Float32 = FloatType(8, 23);
 const F8E5M2 = FloatType(5, 2);
 const F8E4M3 = FloatType(4, 3);
 const F8E3M4 = FloatType(3, 4);
+
+test "decode HLO and emit Model Explorer graphs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // Exercise the mutually recursive XLA messages through binary decoding.
+    var physical_shape: hlo.ShapeProto = .{ .element_type = .F32 };
+    var layout: hlo.LayoutProto = .{ .physical_shape = &physical_shape };
+    const shape: hlo.ShapeProto = .{ .element_type = .F32, .layout = &layout };
+    var instructions = [_]hlo.HloInstructionProto{
+        .{ .id = 1, .name = "parameter.1", .opcode = "parameter", .shape = shape },
+        .{
+            .id = 2,
+            .name = "constant.2",
+            .opcode = "constant",
+            .shape = shape,
+            .literal = .{ .shape = shape, .f32s = .{ .items = @constCast(&[_]f32{2.5}), .capacity = 1 } },
+        },
+        .{
+            .id = 3,
+            .name = "call\"\\\n",
+            .opcode = "custom-call",
+            .shape = shape,
+            .operand_ids = .{ .items = @constCast(&[_]i64{ 1, 2 }), .capacity = 2 },
+            .metadata = .{ .source_file = "a\"\\b.zig", .source_line = 42, .op_name = "op\nname", .op_type = "type" },
+        },
+    };
+    var computations = [_]hlo.HloComputationProto{.{
+        .id = 1,
+        .name = "entry",
+        .root_id = 3,
+        .instructions = .{ .items = &instructions, .capacity = instructions.len },
+    }};
+    const proto: hlo.HloProto = .{ .hlo_module = .{
+        .name = "module",
+        .computations = .{ .items = &computations, .capacity = computations.len },
+    } };
+    var encoded: std.Io.Writer.Allocating = .init(allocator);
+    try proto.encode(&encoded.writer, allocator);
+    var reader: std.Io.Reader = .fixed(encoded.written());
+    const decoded = try hlo.HloProto.decode(&reader, allocator);
+    try std.testing.expectEqual(.F32, decoded.hlo_module.?.computations.items[0].instructions.items[0].shape.?.layout.?.physical_shape.?.element_type);
+
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    var converter: Converter = .{ .allocator = allocator };
+    try converter.emitModule(&output.writer, decoded);
+    const json = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
+    const root = json.value.object;
+    try std.testing.expectEqualStrings("module", root.get("label").?.string);
+    const graph = root.get("graphs").?.array.items[0].object;
+    try std.testing.expectEqualStrings("entry", graph.get("id").?.string);
+    const nodes = graph.get("nodes").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), nodes.len);
+    try std.testing.expectEqualStrings("Parameter 0", nodes[0].object.get("label").?.string);
+    try std.testing.expectEqualStrings("constant({ 2.5e0 }, F32)", nodes[1].object.get("label").?.string);
+    try std.testing.expectEqualStrings("call\"\\\n", nodes[2].object.get("label").?.string);
+    const attrs = nodes[2].object.get("attrs").?.array.items;
+    try std.testing.expectEqualStrings("a\"\\b.zig:42", attrs[0].object.get("value").?.string);
+    try std.testing.expectEqualStrings("type:op\nname", attrs[1].object.get("value").?.string);
+    const edges = nodes[2].object.get("incomingEdges").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), edges.len);
+    try std.testing.expectEqualStrings("1", edges[0].object.get("sourceNodeId").?.string);
+    try std.testing.expectEqualStrings("1", edges[1].object.get("targetNodeInputId").?.string);
+    const outputs = nodes[0].object.get("outputsMetadata").?.array.items;
+    try std.testing.expectEqualStrings("tensor<F32>", outputs[0].object.get("attrs").?.array.items[0].object.get("value").?.string);
+}
+
+test "missing HLO module and truncated protobuf are rejected" {
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var converter: Converter = .{ .allocator = std.testing.allocator };
+    try std.testing.expectError(error.NoModule, converter.emitModule(&output.writer, .{}));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var reader: std.Io.Reader = .fixed("\x0a\x05\x01");
+    if (hlo.HloProto.decode(&reader, arena.allocator())) |_| {
+        return error.ExpectedDecodeError;
+    } else |_| {}
+}
+
+test "JSON closing delimiters propagate writer failures" {
+    var buffer: [1]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var object = try json_writer.dict(&writer);
+    try std.testing.expectError(error.WriteFailed, object.close());
+}

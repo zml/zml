@@ -1,0 +1,68 @@
+--- a/bootstrapped-generator/main.zig
++++ b/bootstrapped-generator/main.zig
+@@ -167,6 +167,12 @@
+                 );
+                 return;
+             }
++        }
++
++        // Collect the complete graph before emitting any fields: mutually
++        // recursive messages may be declared later or in another file.
++        for (self.req.proto_file.items) |file| {
++            try self.collectMessageDependencies(allocator, file.package.?, file.message_type.items);
+         }
+ 
+         for (self.req.proto_file.items) |file| {
+@@ -521,7 +527,7 @@
+                         // Check if the field type is self-referential
+                         if (field.type_name) |type_name| {
+                             const dep_name = type_name[1..]; // Remove leading dot
+-                            if (std.mem.eql(u8, dep_name, fqn.buf) or isAncestorFqn(dep_name, fqn.buf)) {
++                            if (try self.messageReaches(allocator, dep_name, fqn.buf) or isAncestorFqn(dep_name, fqn.buf)) {
+                                 prefix = "?*";
+                             } else {
+                                 prefix = "?";
+@@ -1019,6 +1025,43 @@
+         }
+     }
+ 
++    fn collectMessageDependencies(
++        self: *GenerationContext,
++        allocator: std.mem.Allocator,
++        parent: []const u8,
++        messages: []const descriptor.DescriptorProto,
++    ) anyerror!void {
++        for (messages) |message| {
++            const name = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ parent, message.name.? });
++            var deps: std.ArrayList([]const u8) = .empty;
++            for (message.field.items) |field| {
++                // Repeated messages already have indirection through ArrayList.
++                if (field.type == .TYPE_MESSAGE and !isRepeated(field)) {
++                    try deps.append(allocator, field.type_name.?[1..]);
++                }
++            }
++            try self.message_deps.put(name, deps);
++            try self.collectMessageDependencies(allocator, name, message.nested_type.items);
++        }
++    }
++
++    fn messageReaches(self: *GenerationContext, allocator: std.mem.Allocator, from: []const u8, target: []const u8) !bool {
++        var pending: std.ArrayList([]const u8) = .empty;
++        defer pending.deinit(allocator);
++        var visited: std.StringHashMap(void) = .init(allocator);
++        defer visited.deinit();
++        try pending.append(allocator, from);
++        while (pending.pop()) |name| {
++            if (std.mem.eql(u8, name, target)) return true;
++            const entry = try visited.getOrPut(name);
++            if (entry.found_existing) continue;
++            if (self.message_deps.get(name)) |deps| {
++                try pending.appendSlice(allocator, deps.items);
++            }
++        }
++        return false;
++    }
++
+     /// Analyzes message dependencies to detect self-referential messages
+     fn analyzeMessageDependencies(
+         self: *GenerationContext,

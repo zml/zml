@@ -3,18 +3,18 @@ const log = std.log.scoped(.json_writer);
 
 pub const State = enum(u8) { empty, in, closed };
 
-pub fn dict(writer: anytype) @TypeOf(writer).Error!Dict(@TypeOf(writer)) {
+pub fn dict(writer: anytype) std.Io.Writer.Error!Dict(@TypeOf(writer)) {
     var top_level: List(@TypeOf(writer)) = .{ .writer = writer };
     return try top_level.openDict();
 }
 
-pub fn list(writer: anytype) @TypeOf(writer).Error!List(@TypeOf(writer)) {
+pub fn list(writer: anytype) std.Io.Writer.Error!List(@TypeOf(writer)) {
     var top_level: List(@TypeOf(writer)) = .{ .writer = writer };
     return try top_level.openList();
 }
 
 pub fn Dict(Writer: type) type {
-    const Error = Writer.Error;
+    const Error = std.Io.Writer.Error;
 
     return struct {
         writer: Writer,
@@ -25,33 +25,29 @@ pub fn Dict(Writer: type) type {
         pub fn write(self: *D, key: []const u8, x: anytype) Error!void {
             std.debug.assert(self.state != .closed);
             const comma = if (self.state == .empty) "" else ",";
-            try std.fmt.format(self.writer, "{s}\"{s}\":", .{ comma, key });
-            try std.json.stringify(x, .{}, self.writer);
+            try self.writer.print("{s}\"{s}\":", .{ comma, key });
+            try std.json.Stringify.value(x, .{}, self.writer);
             self.state = .in;
         }
 
         pub fn writeTemplate(self: *D, key: []const u8, comptime template: []const u8, args: anytype) Error!void {
             std.debug.assert(self.state != .closed);
             const comma = if (self.state == .empty) "" else ",";
-            try std.fmt.format(self.writer, "{s}\"{s}\":", .{ comma, key });
-            try std.fmt.format(self.writer, template, args);
+            try self.writer.print("{s}\"{s}\":", .{ comma, key });
+            try self.writer.print(template, args);
             self.state = .in;
         }
 
-        pub fn close(self: *D) void {
+        pub fn close(self: *D) Error!void {
             std.debug.assert(self.state != .closed);
-            self.writer.writeAll("}") catch {
-                // No error allow to use close in a defer block.
-                // But here we swallow the error which can go undetected if this was the last character of the file.
-                // To do this properly we would need to specialized for a specific writer
-            };
+            try self.writer.writeAll("}");
             self.state = .closed;
         }
 
         pub fn openList(self: *D, key: []const u8) Error!List(Writer) {
             std.debug.assert(self.state != .closed);
             const comma = if (self.state == .empty) "" else ",";
-            try std.fmt.format(self.writer, "{s}\"{s}\":[", .{ comma, key });
+            try self.writer.print("{s}\"{s}\":[", .{ comma, key });
             self.state = .in;
             return .{ .writer = self.writer };
         }
@@ -59,7 +55,7 @@ pub fn Dict(Writer: type) type {
         pub fn openDict(self: *D, key: []const u8) Error!D {
             std.debug.assert(self.state != .closed);
             const comma = if (self.state == .empty) "" else ",";
-            try std.fmt.format(self.writer, "{s}\"{s}\":{{", .{ comma, key });
+            try self.writer.print("{s}\"{s}\":{{", .{ comma, key });
             self.state = .in;
             return .{ .writer = self.writer };
         }
@@ -67,7 +63,7 @@ pub fn Dict(Writer: type) type {
 }
 
 pub fn List(Writer: type) type {
-    const Error = Writer.Error;
+    const Error = std.Io.Writer.Error;
 
     return struct {
         writer: Writer,
@@ -79,7 +75,7 @@ pub fn List(Writer: type) type {
             std.debug.assert(self.state != .closed);
             const comma = if (self.state == .empty) "" else ",";
             try self.writer.writeAll(comma);
-            try std.json.stringify(x, .{}, self.writer);
+            try std.json.Stringify.value(x, .{}, self.writer);
             self.state = .in;
         }
 
@@ -87,22 +83,20 @@ pub fn List(Writer: type) type {
             std.debug.assert(self.state != .closed);
             const comma = if (self.state == .empty) "" else ",";
             try self.writer.writeAll(comma);
-            try std.fmt.format(self.writer, template, args);
+            try self.writer.print(template, args);
             self.state = .in;
         }
 
-        pub fn close(self: *L) void {
+        pub fn close(self: *L) Error!void {
             std.debug.assert(self.state != .closed);
-            self.writer.writeAll("]") catch {
-                // we swallow the error which can go undetected if this was the last character
-            };
+            try self.writer.writeAll("]");
             self.state = .closed;
         }
 
         pub fn openList(self: *L) Error!L {
             std.debug.assert(self.state != .closed);
             const comma = if (self.state == .empty) "" else ",";
-            try std.fmt.format(self.writer, "{s}[", .{comma});
+            try self.writer.print("{s}[", .{comma});
             self.state = .in;
             return .{ .writer = self.writer };
         }
