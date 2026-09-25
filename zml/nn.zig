@@ -453,6 +453,10 @@ test normalizeL2 {
 pub const RopeOpts = struct {
     layout: Layout = .real_im_pass,
     scaling: Scaling = .{ .default = .{} },
+    /// Precompute rotations for integer positions in [0, cache_length).
+    /// Callers must keep every position in this interval. Null computes them
+    /// dynamically and permits the usual floating-point position inputs.
+    cache_length: ?u32 = null,
 
     /// There are 3 layouts corresponding to how to split `x` in real/imag/passthrough parts.
     /// The hard part is that HF models don't specify the layout they use.
@@ -610,20 +614,51 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
         break :blk idx;
     } else blk: {
         stdx.debug.assert(x.shape().hasTags(.{ .s, .hd }), "rope expects x argument to have both .s and .hd axes got: rope(x={f})", .{x});
-        break :blk Tensor.arange(.{ .end = x.dim(.s) }, .f32).withTags(.{.s});
+        if (opts.cache_length) |length| stdx.debug.assert(x.dim(.s) <= length, "rope sequence exceeds cached positions", .{});
+        break :blk Tensor.arange(.{ .end = x.dim(.s) }, if (opts.cache_length != null) .u32 else .f32).withTags(.{.s});
     };
 
     const rotary_dim: u32 = opts.scaling.partialRotaryDim(head_dim);
     stdx.debug.assert(rotary_dim > 0 and @mod(rotary_dim, 2) == 0, "partial rope expects a even head dim (.hd), got {d}", .{rotary_dim});
 
     const x_real, const x_imag, const x_pass = zml.nn.splitRealImgPass(x, opts.layout, rotary_dim);
-    const inv_freq = invFreq(head_dim, opts).withTags(.{.hd});
-
-    // compute sin and cos in f32 before downcasting to x type.
-    const inv_freq_pos = zml.Tensor.outer(idx.convert(.f32), inv_freq);
-    const scaling = opts.scaling.attentionScaling();
-    const cos = inv_freq_pos.cos().scale(scaling).convert(x.dtype()).broad(x_real.shape());
-    const sin = inv_freq_pos.sin().scale(scaling).convert(x.dtype()).broad(x_real.shape());
+    const cos, const sin = if (opts.cache_length) |length| cached: {
+        stdx.debug.assert(length > 0 and idx.dtype().isInteger(), "cached rope requires integer positions and a nonempty cache", .{});
+        const allocator = zml.Compiler.current().allocator;
+        const frequencies = allocator.alloc(f32, rotary_dim / 2) catch @panic("OOM");
+        defer allocator.free(frequencies);
+        _invFreq(opts, frequencies, @intCast(@divExact(head_dim, 2)));
+        const elements = @as(usize, length) * frequencies.len;
+        const cos_values = allocator.alloc(f32, elements) catch @panic("OOM");
+        defer allocator.free(cos_values);
+        const sin_values = allocator.alloc(f32, elements) catch @panic("OOM");
+        defer allocator.free(sin_values);
+        const scaling = opts.scaling.attentionScaling();
+        for (0..length) |position| {
+            for (frequencies, 0..) |frequency, frequency_index| {
+                const angle: f32 = @as(f32, @floatFromInt(position)) * frequency;
+                const i = position * frequencies.len + frequency_index;
+                cos_values[i] = @cos(angle) * scaling;
+                sin_values[i] = @sin(angle) * scaling;
+            }
+        }
+        const table_shape = Shape.init(.{ .rope_position = length, .hd = rotary_dim / 2 }, .f32);
+        const cos_table = Tensor.constantTensor(table_shape, @ptrCast(cos_values)).convert(x.dtype());
+        const sin_table = Tensor.constantTensor(table_shape, @ptrCast(sin_values)).convert(x.dtype());
+        break :cached .{
+            cos_table.gather(.{ .rope_position = idx }, .{}).broad(x_real.shape()),
+            sin_table.gather(.{ .rope_position = idx }, .{}).broad(x_real.shape()),
+        };
+    } else dynamic: {
+        const inv_freq = invFreq(head_dim, opts).withTags(.{.hd});
+        // Compute sin and cos in f32 before downcasting to x type.
+        const inv_freq_pos = zml.Tensor.outer(idx.convert(.f32), inv_freq);
+        const scaling = opts.scaling.attentionScaling();
+        break :dynamic .{
+            inv_freq_pos.cos().scale(scaling).convert(x.dtype()).broad(x_real.shape()),
+            inv_freq_pos.sin().scale(scaling).convert(x.dtype()).broad(x_real.shape()),
+        };
+    };
 
     // apply rotation
     const y_real = x_real.mul(cos).sub(x_imag.mul(sin));
@@ -1047,6 +1082,52 @@ test rope {
     defer res2.deinit();
 
     try zml.testing.expectClose(std.testing.io, res1, res2, .{});
+
+    var exe_cached = try platform.compileFn(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved, .cache_length = 5 } }, .{});
+    defer exe_cached.deinit();
+    var cached = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_cached, Local._fwd, .{x_buffer});
+    defer cached.deinit();
+    try zml.testing.expectClose(std.testing.io, res1, cached, .{});
+}
+
+test "rope: cached integer positions match direct rotation" {
+    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const Local = struct {
+        fn forward(x: Tensor, positions: Tensor, opts: RopeOpts) Tensor {
+            return rope(x, positions, opts);
+        }
+    };
+    const x: Tensor = .init(.{ .b = 1, .s = 5, .hd = 8 }, .f32);
+    const positions: Tensor = .init(.{ .s = 5 }, .u32);
+    const x_values: [5][8]f32 = @splat(.{ 1.0, 0.1, -1.0, -0.5, 0.25, -0.75, 0.0, 2.0 });
+    var x_buffer = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_values));
+    defer x_buffer.deinit();
+    const indices = [_]u32{ 0, 1, 127, 257, 1023 };
+    var positions_buffer = try zml.Buffer.fromBytes(io, platform, positions.shape(), .replicated, std.mem.sliceAsBytes(&indices));
+    defer positions_buffer.deinit();
+    const scalings = [_]RopeOpts.Scaling{
+        .{ .default = .{} },
+        .{ .llama3 = .{ .factor = 8, .low_freq_factor = 1, .high_freq_factor = 4, .original_max_position_embeddings = 8192, .rope_theta = 500_000 } },
+        .{ .yarn = .{ .factor = 4, .original_max_position_embeddings = 512, .attention_factor = 1.2, .partial_rotary_factor = 0.5 } },
+    };
+    for ([_]RopeOpts.Layout{ .real_im_pass, .real_pass_im_pass, .interleaved }) |layout| {
+        for (scalings) |scaling| {
+            const direct_opts: RopeOpts = .{ .layout = layout, .scaling = scaling };
+            var cached_opts = direct_opts;
+            cached_opts.cache_length = 1024;
+            var direct_exe = try platform.compileFn(allocator, io, Local.forward, .{ x, positions, direct_opts }, .{});
+            defer direct_exe.deinit();
+            var cached_exe = try platform.compileFn(allocator, io, Local.forward, .{ x, positions, cached_opts }, .{});
+            defer cached_exe.deinit();
+            var direct = try zml.testing.autoCall(allocator, io, &direct_exe, Local.forward, .{ x_buffer, positions_buffer });
+            defer direct.deinit();
+            var cached = try zml.testing.autoCall(allocator, io, &cached_exe, Local.forward, .{ x_buffer, positions_buffer });
+            defer cached.deinit();
+            try zml.testing.expectClose(io, direct, cached, .{ .absolute_tolerance = 1e-5, .relative_tolerance = 1e-5 });
+        }
+    }
 }
 
 test "rope: Proportional" {
