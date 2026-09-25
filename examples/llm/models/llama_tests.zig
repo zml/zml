@@ -444,10 +444,23 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
         done += 1;
     }
     if (args.seqlen == 1) std.log.info("Whole-forward argmax: device={}, CPU={}", .{ try outputs[1].tokens.getValue(u32, io), try outputs[0].tokens.getValue(u32, io) });
-    try zml.testing.expectClose(io, outputs[1].tokens, outputs[0].tokens, .exact_match);
+    var comparison_failed = false;
+    zml.testing.expectClose(io, outputs[1].tokens, outputs[0].tokens, .exact_match) catch |err| switch (err) {
+        error.TestUnexpectedResult => comparison_failed = true,
+        else => return err,
+    };
     const tolerance: zml.testing.CompareOpts = .{ .absolute_tolerance = 0.03, .relative_tolerance = 0.02, .minimum_close_fraction = 1 };
-    try zml.testing.expectClose(io, outputs[1].kv_cache.k, outputs[0].kv_cache.k, tolerance);
-    try zml.testing.expectClose(io, outputs[1].kv_cache.v, outputs[0].kv_cache.v, tolerance);
+    inline for (.{ "k", "v" }) |field| {
+        const actual = @field(outputs[1].kv_cache, field);
+        const reference = @field(outputs[0].kv_cache, field);
+        zml.testing.expectClose(io, actual, reference, tolerance) catch |err| switch (err) {
+            error.TestUnexpectedResult => {
+                comparison_failed = true;
+                try reportCacheLayers(allocator, io, field, actual, reference, args, tolerance);
+            },
+            else => return err,
+        };
+    }
     for ([_]zml.Buffer{ outputs[1].kv_cache.k, outputs[1].kv_cache.v }) |buffer| {
         const host = try buffer.toSliceAlloc(allocator, io);
         defer host.free(allocator);
@@ -458,7 +471,39 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
             if (host.items(u16)[i] != bits) return error.UntouchedCacheChanged;
         }
     }
+    if (comparison_failed) return error.TestUnexpectedResult;
     std.log.info("PASS whole forward: exact argmax, KV tolerance, untouched cache bits", .{});
+}
+
+// Preserve the failing test status while showing where errors first enter the
+// updated cache. An argmax mismatch must not hide the transformer diagnostics.
+fn reportCacheLayers(allocator: std.mem.Allocator, io: std.Io, field: []const u8, actual: zml.Buffer, reference: zml.Buffer, args: Args, tolerance: zml.testing.CompareOpts) !void {
+    const a = try actual.toSliceAlloc(allocator, io);
+    defer a.free(allocator);
+    const b = try reference.toSliceAlloc(allocator, io);
+    defer b.free(allocator);
+    const shape = actual.shape();
+    const rows: usize = @intCast(shape.dim(.k));
+    const width: usize = @intCast(shape.dim(.h) * shape.dim(.hd));
+    for (0..@intCast(shape.dim(.layer))) |layer| {
+        var max_error: f32 = 0;
+        var bad: usize = 0;
+        for (args.token_offset..args.token_offset + args.seqlen) |position| {
+            const start = (layer * rows + position) * width;
+            for (a.items(u16)[start..][0..width], b.items(u16)[start..][0..width]) |left, right| {
+                const x: f32 = @bitCast(@as(u32, left) << 16);
+                const y: f32 = @bitCast(@as(u32, right) << 16);
+                if (!std.math.isFinite(x) or !std.math.isFinite(y)) {
+                    bad += 1;
+                    continue;
+                }
+                const err = @abs(x - y);
+                max_error = @max(max_error, err);
+                if (err > tolerance.absolute_tolerance + tolerance.relative_tolerance * @max(@abs(x), @abs(y))) bad += 1;
+            }
+        }
+        std.log.info("KV {s} layer {}: updated max_abs={}, outside_tolerance={}/{}", .{ field, layer, max_error, bad, args.seqlen * width });
+    }
 }
 
 // Measures the complete decode executable and synchronous token readback. It

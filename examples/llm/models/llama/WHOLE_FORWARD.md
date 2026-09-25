@@ -109,3 +109,34 @@ The new larger graph and packed weight arguments changed the compiled program;
 the specific operations or layout choices responsible have not been isolated.
 Internal task chunking is compiler scheduling inside one EDF, not multiple XLA
 executables. Evidence: local `internals/full-forward/decode-profile.log`.
+
+## Comparison diagnostics after removing packing
+
+The historical packed run stopped at its first argmax mismatch, so it did not
+establish whether the transformer KV outputs matched CPU. The comparison now
+checks both KV components after an argmax mismatch and reports each layer's
+maximum absolute error and number of updated entries outside tolerance. This
+helps distinguish errors already present in the transformer from differences
+in the final normalization, projection or argmax. Nonfinite entries count as
+failures. Untouched cache storage is still checked bit for bit.
+
+The acceptance criteria are unchanged: exact argmax, absolute KV tolerance
+0.03 plus relative tolerance 0.02, and every KV element must pass. A mismatch
+still returns `TestUnexpectedResult`; other errors are propagated immediately.
+The added reporting does not change the compiled model or benchmark timing.
+
+Validation on 2026-09-25:
+
+| Check | Why | Result |
+|---|---|---|
+| Zig formatting | Keep the diagnostic changes consistent with repository style | Applied |
+| `bazel-9.1.1 build //examples/llm:llama_tests --@zml//platforms:furiosa=true --jobs=16 --config=debug` | Compile the revised error handling and per-layer BF16 cache inspection | Pass; 7.858 seconds, log in [testdata/diagnostic-build.log](testdata/diagnostic-build.log) |
+| Full separate-weight forward CPU comparison and three 100-token decode trials | Verify correctness and measure performance without packed weight slices | Still compiling when this diagnostic change was committed; no result yet |
+
+The running full-model process started before this diagnostic rebuild. If it
+fails, rerun the rebuilt test using the compiler cache to obtain per-layer
+reports. The separate-weight TCL SHA256 is
+`748a8f3972ffb90bce92db7a331f9064c69cf8419b00b22186d4fcc8384597c8`;
+its live log is
+`/home/steeve/.local/state/xla-rngd/internals/indirect-args/llama-full.log`.
+Hardware execution of the new failure-reporting path is not yet verified.
