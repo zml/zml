@@ -74,8 +74,8 @@ pub fn main(init: std.process.Init) !void {
         .hidden = zml.Tensor.fromShape(hidden_shape),
     }});
     defer head_exe.deinit();
-    var buffers = try loaded.loadBuffers(allocator, io, platform, &store, &progress, shardings);
-    defer loaded.unloadBuffers(&buffers, allocator);
+    var buffers = try loaded.loadUnpackedBuffers(allocator, io, platform, &store, &progress, shardings);
+    defer loaded.unloadUnpackedBuffers(&buffers, allocator);
     var embed = try zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}).init(&embed_exe, allocator, .{
         .embedding = .{ .embed_tokens = buffers.model.embed_tokens },
     });

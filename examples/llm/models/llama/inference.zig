@@ -4,6 +4,7 @@ const zml = @import("zml");
 
 const common = @import("../common.zig");
 const model = @import("model.zig");
+const weight_packing = @import("packed_weights.zig");
 
 const log = std.log.scoped(.llama);
 const Phase = common.Phase;
@@ -86,13 +87,12 @@ pub const CompiledModel = struct {
         io: std.Io,
         platform: *const zml.Platform,
         loaded_model: *const model.LoadedModel,
-        llama_model: model.Model,
         parameters: CompilationParameters,
         progress: *std.Progress.Node,
     ) !CompiledModel {
-        const prefill = try compileKernel(allocator, io, platform, llama_model, parameters, @intCast(parameters.prefill_tokens.dim(.s)), parameters.prefill_attention_parameters, .prefill, progress);
+        const prefill = try compileKernel(allocator, io, platform, loaded_model.packing.weights, parameters, @intCast(parameters.prefill_tokens.dim(.s)), parameters.prefill_attention_parameters, .prefill, progress);
         errdefer prefill.deinit();
-        const decode = try compileKernel(allocator, io, platform, llama_model, parameters, @intCast(parameters.decode_tokens.dim(.s)), parameters.decode_attention_parameters, .decode, progress);
+        const decode = try compileKernel(allocator, io, platform, loaded_model.packing.weights, parameters, @intCast(parameters.decode_tokens.dim(.s)), parameters.decode_attention_parameters, .decode, progress);
 
         return .{
             .loaded_model = loaded_model,
@@ -110,99 +110,62 @@ pub const CompiledModel = struct {
 
 pub const Inference = CompiledModel;
 
-pub const KernelExe = struct {
-    embed: zml.FnExe(model.EmbedTokens.forward),
-    layer: zml.FnExe(model.TransformerBlock.forward),
-    sample: zml.FnExe(model.LmHead.forward),
-    layer_count: usize,
+pub const Forward = struct {
+    pub const Input = struct {
+        weights: weight_packing.Weights,
+        tokens: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: model.KvCache,
+        rng: zml.Tensor.Rng,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
+    };
 
-    pub fn deinit(self: *const KernelExe) void {
-        self.embed.deinit();
-        self.layer.deinit();
-        self.sample.deinit();
+    pub const Output = struct {
+        tokens: zml.Tensor,
+        kv_cache: model.KvCache,
+        rng: zml.Tensor.Rng,
+    };
+
+    pub fn forward(input: Input) Output {
+        const tokens, const kv_cache, const rng = input.weights.unpack().forward(
+            input.tokens,
+            input.token_index,
+            input.kv_cache,
+            input.rng,
+            input.attention_metadata,
+            input.attention_parameters,
+        );
+        return .{ .tokens = tokens, .kv_cache = kv_cache, .rng = rng };
     }
 };
 
+pub const KernelExe = zml.FnExe(Forward.forward);
+
 pub const KernelRunner = struct {
-    embed: zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}),
-    layers: []zml.FnExe(model.TransformerBlock.forward).Runner(.{.layers}),
-    sample: zml.FnExe(model.LmHead.forward).Runner(.{.lm_head}),
+    forward: KernelExe.Runner(.{.weights}),
 
-    layer_count: usize,
-
-    pub fn init(allocator: std.mem.Allocator, exe: *const KernelExe, buffers: *const model.Buffers) !KernelRunner {
-        var embed = try zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}).init(&exe.embed, allocator, .{
-            .embedding = .{ .embed_tokens = buffers.model.embed_tokens },
-        });
-        errdefer embed.deinit(allocator);
-
-        const layers = try allocator.alloc(zml.FnExe(model.TransformerBlock.forward).Runner(.{.layers}), @divExact(buffers.model.layers.len, exe.layer_count));
-        errdefer allocator.free(layers);
-        var initialized_layers: usize = 0;
-        errdefer for (layers[0..initialized_layers]) |*layer| layer.deinit(allocator);
-        for (layers, 0..) |*layer, i| {
-            const start = i * exe.layer_count;
-            layer.* = try zml.FnExe(model.TransformerBlock.forward).Runner(.{.layers}).init(&exe.layer, allocator, .{ .layers = buffers.model.layers[start..][0..exe.layer_count] });
-            initialized_layers += 1;
-        }
-
-        var sample = try zml.FnExe(model.LmHead.forward).Runner(.{.lm_head}).init(&exe.sample, allocator, .{
-            .lm_head = .{
-                .lm_head = buffers.lm_head,
-                .embed_tokens = buffers.model.embed_tokens,
-                .norm = buffers.model.norm,
-            },
-        });
-        errdefer sample.deinit(allocator);
-
-        return .{ .embed = embed, .layers = layers, .sample = sample, .layer_count = exe.layer_count };
+    pub fn init(allocator: std.mem.Allocator, exe: *const KernelExe, buffers: *const weight_packing.Buffers) !KernelRunner {
+        return .{ .forward = try .init(exe, allocator, .{ .weights = buffers.* }) };
     }
 
     pub fn deinit(self: *KernelRunner, allocator: std.mem.Allocator) void {
-        self.embed.deinit(allocator);
-        for (self.layers) |*layer| layer.deinit(allocator);
-        allocator.free(self.layers);
-        self.sample.deinit(allocator);
+        self.forward.deinit(allocator);
     }
 };
 
-pub fn run(runner: *KernelRunner, args: Args, kv_cache_index_buffers: []const zml.Buffer) void {
-    var hidden_buffer: zml.Buffer = undefined;
-    runner.embed.run(args.io, .{
+pub fn run(runner: *KernelRunner, args: Args) void {
+    runner.forward.run(args.io, .{
         .inputs = .{
             .tokens = args.tokens_buf.*,
-        },
-        .outputs = .{ .hidden = &hidden_buffer },
-    });
-    defer hidden_buffer.deinit();
-
-    for (runner.layers, 0..) |*layer, i| {
-        const kv_cache_index_buffer = kv_cache_index_buffers[i * runner.layer_count];
-        var previous_hidden = hidden_buffer;
-        layer.run(args.io, .{
-            .inputs = .{
-                .hidden = hidden_buffer,
-                .token_index = args.token_index_buf.*,
-                .kv_cache = args.kv_cache_buffers.*,
-                .kv_cache_index = kv_cache_index_buffer,
-                .attention_metadata = args.attention_metadata_buffers.*,
-            },
-            .outputs = .{
-                .hidden = &hidden_buffer,
-                .kv_cache = args.kv_cache_buffers,
-            },
-        });
-        if (layer.exe.platform.target == .furiosa) previous_hidden.deinit();
-    }
-
-    runner.sample.run(args.io, .{
-        .inputs = .{
-            .hidden = hidden_buffer,
-            .tokens = args.tokens_buf.*,
+            .token_index = args.token_index_buf.*,
+            .kv_cache = args.kv_cache_buffers.*,
             .rng = args.rng_buffers.*,
+            .attention_metadata = args.attention_metadata_buffers.*,
         },
         .outputs = .{
             .tokens = args.tokens_buf,
+            .kv_cache = args.kv_cache_buffers,
             .rng = args.rng_buffers,
         },
     });
@@ -212,133 +175,29 @@ fn compileKernel(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
-    llama_model: model.Model,
+    weights: weight_packing.Weights,
     parameters: CompilationOptions,
     seqlen: usize,
     attention_parameters: zml.attention.Parameters,
     phase: Phase,
     progress: *std.Progress.Node,
 ) !KernelExe {
-    const embed = try compileEmbed(allocator, io, platform, llama_model.model.embed_tokens, parameters, seqlen, phase, progress);
-    errdefer embed.deinit();
-    // BF16 benefits from eight layers per launch. FP8 scale arguments and
-    // larger native intermediates make four-layer blocks preferable there.
-    const block_size: usize = if (llama_model.config.zml_weight_storage == null and llama_model.model.layers.len % 8 == 0) 8 else 4;
-    const layer_count: usize = if (platform.target == .furiosa and phase == .decode and llama_model.model.layers.len % block_size == 0) block_size else 1;
-    const layer = try compileLayer(allocator, io, platform, llama_model, parameters, seqlen, attention_parameters, phase, progress, layer_count);
-    errdefer layer.deinit();
-    const sample = try compileSample(allocator, io, platform, llama_model, parameters, seqlen, phase, progress);
-    errdefer sample.deinit();
-    return .{ .embed = embed, .layer = layer, .sample = sample, .layer_count = layer_count };
-}
-
-fn compileEmbed(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    embed_tokens: zml.nn.TokenEmbedding,
-    parameters: CompilationOptions,
-    seqlen: usize,
-    phase: Phase,
-    progress: *std.Progress.Node,
-) !zml.FnExe(model.EmbedTokens.forward) {
     progress.increaseEstimatedTotalItems(1);
-    var node = progress.start(phase.startMessage("embed_tokens"), 1);
+    var node = progress.start(phase.startMessage("forward"), 1);
     defer node.end();
-
     const from: std.Io.Timestamp = .now(io, .awake);
-    defer phase.logCompileDone(log, "embed_tokens", io, from);
+    defer phase.logCompileDone(log, "forward", io, from);
 
-    const tokens: zml.Tensor = .init(.{ .s = seqlen }, .u32);
-
-    return zml.FnExe(model.EmbedTokens.forward).compile(allocator, io, platform, .{
+    return KernelExe.compile(allocator, io, platform, .{
         .shardings = &parameters.shardings.all(),
-        .program_name = phase.programName("llama", "embed_tokens"),
+        .program_name = phase.programName("llama", "forward"),
     }, .{.{
-        .embedding = .{ .embed_tokens = embed_tokens },
-        .tokens = tokens,
-    }});
-}
-
-fn compileLayer(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    llama_model: model.Model,
-    parameters: CompilationOptions,
-    seqlen: usize,
-    attention_parameters: zml.attention.Parameters,
-    phase: Phase,
-    progress: *std.Progress.Node,
-    layer_count: usize,
-) !zml.FnExe(model.TransformerBlock.forward) {
-    progress.increaseEstimatedTotalItems(1);
-
-    var node = progress.start(phase.startMessage("transformer layer"), 1);
-    defer node.end();
-
-    const from: std.Io.Timestamp = .now(io, .awake);
-    defer phase.logCompileDone(log, "transformer layer", io, from);
-
-    const hidden: zml.Tensor = .fromShape(zml.Shape.init(
-        .{ .s = seqlen, .d = llama_model.config.hidden_size },
-        llama_model.model.embed_tokens.weight.dtype(),
-    ).withPartitioning(.{ .d = .replicated }));
-
-    const kv_cache_index: zml.Tensor = .init(.{}, .u32);
-
-    return zml.FnExe(model.TransformerBlock.forward).compile(
-        allocator,
-        io,
-        platform,
-        .{
-            .shardings = &parameters.shardings.all(),
-            .program_name = phase.programName("llama", "layer"),
-        },
-        .{.{
-            .layers = llama_model.model.layers[0..layer_count],
-            .hidden = hidden,
-            .token_index = parameters.token_index,
-            .kv_cache = parameters.kv_cache,
-            .kv_cache_index = kv_cache_index,
-            .attention_metadata = parameters.attention_metadata,
-            .attention_parameters = attention_parameters,
-        }},
-    );
-}
-
-fn compileSample(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    llama_model: model.Model,
-    parameters: CompilationOptions,
-    seqlen: usize,
-    phase: Phase,
-    progress: *std.Progress.Node,
-) !zml.FnExe(model.LmHead.forward) {
-    progress.increaseEstimatedTotalItems(1);
-
-    var node = progress.start(phase.startMessage("lm_head"), 1);
-    defer node.end();
-
-    const from: std.Io.Timestamp = .now(io, .awake);
-    defer phase.logCompileDone(log, "lm_head", io, from);
-
-    const hidden: zml.Tensor = .fromShape(zml.Shape.init(
-        .{ .s = seqlen, .d = llama_model.config.hidden_size },
-        llama_model.model.embed_tokens.weight.dtype(),
-    ).withPartitioning(.{ .d = .replicated }));
-
-    const tokens: zml.Tensor = .init(.{ .s = seqlen }, .u32);
-
-    return zml.FnExe(model.LmHead.forward).compile(allocator, io, platform, .{
-        .shardings = &parameters.shardings.all(),
-        .program_name = phase.programName("llama", "lm_head"),
-    }, .{.{
-        .lm_head = model.LmHead.init(llama_model),
-        .hidden = hidden,
-        .tokens = tokens,
+        .weights = weights,
+        .tokens = zml.Tensor.init(.{ .s = seqlen }, .u32),
+        .token_index = parameters.token_index,
+        .kv_cache = parameters.kv_cache,
         .rng = parameters.rng,
+        .attention_metadata = parameters.attention_metadata,
+        .attention_parameters = attention_parameters,
     }});
 }
