@@ -1244,14 +1244,14 @@ test "tokenId lookup" {
     try std.testing.expect(tokenizer.tokenId("") == null);
 }
 
-test "tokenId <-> tokenText" {
+test "tokenId <-> decode" {
     const allocator = std.testing.allocator;
 
     var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
     defer tokenizer.deinit();
 
     for ([_][]const u8{ "[UNK]", "hello", "world", "foo", "bar" }) |text| {
-        try std.testing.expectEqualSlices(u8, text, tokenizer.tokenText(tokenizer.tokenId(text).?).?);
+        try std.testing.expectEqualSlices(u8, text, tokenizer.decode(tokenizer.tokenId(text).?).?);
     }
 }
 
