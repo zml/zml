@@ -1,0 +1,15 @@
+load("@zml//bazel:zig_proto_library.bzl", "zig_proto_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+zig_binary(
+    name = "hlo2json",
+    main = "hlo2json.zig",
+    srcs = ["json_writer.zig"],
+    deps = [":hlo_proto"],
+)
+
+zig_proto_library(
+    name = "hlo_proto",
+    import_name = "@xla//xla/service:hlo_proto",
+    deps = ["@xla//xla/service:hlo_proto"],
+)
