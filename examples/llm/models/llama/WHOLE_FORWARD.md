@@ -62,3 +62,26 @@ Build validation passed for `//examples/llm`, `//examples/llm:llama_tests` and
 The benchmark changes were rebuilt with the `llama_tests` target. The captured
 decode TCL SHA256 is
 `efa80d98893c6605d47af8b8291bd1604e9ae79c0b6834575247c91b55ad8848`.
+
+## Initial slowdown diagnosis
+
+A separate diagnostic run enabled `XLA_FURIOSA_TRACE_EXECUTION=1`,
+`XLA_FURIOSA_PROFILE=1`, `XLA_FURIOSA_PROFILE_LEVEL=info` and
+`XLA_FURIOSA_PROFILE_COUNT=1`, using eight timed iterations. It is not the
+unprofiled throughput measurement above. The first invocation was profiled;
+subsequent invocations provided host launch timing.
+
+The EDF has binary shape `[1, 2, 5, 784128]`: five internal task chunks per
+cluster in a single executable. The first invocation's task spans sum to
+35,122,644/35,114,919 cycles across the two clusters. Including gaps between
+chunks gives 36,247,632/36,240,036 cycles. Subsequent native launches have median
+wait time 18,625 microseconds; argument preparation and submission together are
+typically about 15 microseconds. Thus native execution dominates the roughly
+18.9 ms per token, rather than host argument binding or the removed layer loop.
+
+The prior eight-layer candidate had two chunks and about 6.4 million task cycles
+per invocation, repeated four times plus separate embedding/head execution.
+The new larger graph and packed weight arguments changed the compiled program;
+the specific operations or layout choices responsible have not been isolated.
+Internal task chunking is compiler scheduling inside one EDF, not multiple XLA
+executables. Evidence: local `internals/full-forward/decode-profile.log`.
