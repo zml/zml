@@ -17,6 +17,8 @@ const Args = struct {
     transformer_only: bool = false,
     head_only: bool = false,
     seqlen: usize = 16,
+    cache_seqlen: ?usize = null,
+    token_offset: u32 = 0,
 
     pub const help =
         \\Use llama_tests --model=<path> --activations=<path>
@@ -30,6 +32,8 @@ const Args = struct {
         \\   --transformer-only        Skip individual components with --compare-cpu
         \\   --head-only               Compare greedy output-head tokens only
         \\   --seqlen=<number>         CPU comparison sequence length (default: 16)
+        \\   --cache-seqlen=<number>   Transformer KV-cache length (default: seqlen)
+        \\   --token-offset=<number>   Transformer query position (default: 0)
         \\
     ;
 };
@@ -43,6 +47,8 @@ pub fn main(init: std.process.Init) !void {
     if (!args.compare_cpu and args.activations == null) return error.MissingActivations;
 
     if (args.seqlen == 0 or (args.transformer_only and args.head_only)) return error.InvalidComparisonOptions;
+    const cache_seqlen = args.cache_seqlen orelse args.seqlen;
+    if (cache_seqlen < args.seqlen or args.token_offset > cache_seqlen - args.seqlen) return error.InvalidComparisonOptions;
 
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
@@ -207,11 +213,12 @@ fn compareCpu(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform,
         }
         try compareLayer(allocator, io, platform, cpu, "mlp", layer.mlp, a.mlp, e.mlp, shape, bytes, .{ .absolute_tolerance = 0.1, .relative_tolerance = 0.03, .minimum_close_fraction = 1 });
     }
-    std.log.info("Comparing full transformer layer with CPU", .{});
-    var reference = try runTransformer(allocator, io, cpu, mdl, e, shape, bytes);
+    const cache_seqlen = args.cache_seqlen orelse args.seqlen;
+    std.log.info("Comparing full transformer layer with CPU (query={d}, cache={d}, offset={d})", .{ args.seqlen, cache_seqlen, args.token_offset });
+    var reference = try runTransformer(allocator, io, cpu, mdl, e, shape, bytes, cache_seqlen, args.token_offset);
     defer reference.hidden.deinit();
     defer model.KvCache.deinitBuffer(&reference.kv_cache);
-    var result = try runTransformer(allocator, io, platform, mdl, a, shape, bytes);
+    var result = try runTransformer(allocator, io, platform, mdl, a, shape, bytes, cache_seqlen, args.token_offset);
     defer result.hidden.deinit();
     defer model.KvCache.deinitBuffer(&result.kv_cache);
     std.log.info("Comparing KV values", .{});
@@ -261,8 +268,8 @@ fn compareLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
     std.log.info("PASS {s}", .{name});
 }
 
-fn runTransformer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: model.Model, weights: zml.Bufferized(model.TransformerLayer), shape: zml.Shape, data: []const u8) !zml.Bufferized(model.TransformerLayer.Output) {
-    const kv_shape = zml.Shape.init(.{ .layer = mdl.model.layers.len, .k = shape.dim(.s), .h = mdl.config.num_key_value_heads, .hd = mdl.config.hidden_size / mdl.config.num_attention_heads }, .bf16);
+fn runTransformer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: model.Model, weights: zml.Bufferized(model.TransformerLayer), shape: zml.Shape, data: []const u8, cache_seqlen: usize, token_offset: u32) !zml.Bufferized(model.TransformerLayer.Output) {
+    const kv_shape = zml.Shape.init(.{ .layer = mdl.model.layers.len, .k = cache_seqlen, .h = mdl.config.num_key_value_heads, .hd = mdl.config.hidden_size / mdl.config.num_attention_heads }, .bf16);
     const kv = model.KvCache.init(kv_shape);
     const exe = try zml.FnExe(model.TransformerLayer.forward).compile(allocator, io, platform, .{ .shardings = platform.shardings.values() }, .{.{
         .layer = mdl.model.layers[0],
@@ -288,8 +295,10 @@ fn runTransformer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
     errdefer model.KvCache.deinitBuffer(&cache);
     var zero = try zml.Buffer.scalar(io, platform, 0, .u32);
     defer zero.deinit();
+    var position = try zml.Buffer.scalar(io, platform, token_offset, .u32);
+    defer position.deinit();
     runner.run(io, .{
-        .inputs = .{ .hidden = hidden, .token_index = zero, .kv_cache = cache, .kv_cache_index = zero, .attention_metadata = .vanilla },
+        .inputs = .{ .hidden = hidden, .token_index = position, .kv_cache = cache, .kv_cache_index = zero, .attention_metadata = .vanilla },
         .outputs = .{ .hidden = &hidden, .kv_cache = &cache },
     });
     return .{ .hidden = hidden, .kv_cache = cache };
