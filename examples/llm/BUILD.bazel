@@ -30,6 +30,14 @@ zig_binary(
 )
 
 zig_binary(
+    name = "llama_logits",
+    srcs = glob(["**/*.zig"]),
+    main = "models/llama_logits.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
     name = "llama_attention_tests",
     main = "models/llama_attention_tests.zig",
     deps = ["//zml"],

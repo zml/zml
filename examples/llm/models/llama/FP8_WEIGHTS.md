@@ -48,4 +48,7 @@ Three single-card runs generated the same 100-token counting sequence at
 77.3, 77.3 and 77.4 tok/s; the BF16 regression run reached 61.3 tok/s. Full-layer comparisons against the CPU using
 the same quantized weights pass for 128-token prefill and one-token decode at
 positions 0 and 127. Those checks verify execution correctness, not retained
-language-model quality; broader quality evaluation remains outstanding.
+language-model quality. A separate [sampled quality comparison](QUALITY.md)
+scores 8192 next-token predictions: perplexity rises from 18.6501 to 18.9461
+(+1.5875%), with 95.7764% top-token agreement. Broader quality evaluation remains
+outstanding.
