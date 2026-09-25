@@ -112,8 +112,9 @@ pub const Inference = CompiledModel;
 
 pub const KernelExe = struct {
     embed: zml.FnExe(model.EmbedTokens.forward),
-    layer: zml.FnExe(model.TransformerLayer.forward),
+    layer: zml.FnExe(model.TransformerBlock.forward),
     sample: zml.FnExe(model.LmHead.forward),
+    layer_count: usize,
 
     pub fn deinit(self: *const KernelExe) void {
         self.embed.deinit();
@@ -124,8 +125,10 @@ pub const KernelExe = struct {
 
 pub const KernelRunner = struct {
     embed: zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}),
-    layers: []zml.FnExe(model.TransformerLayer.forward).Runner(.{.layer}),
+    layers: []zml.FnExe(model.TransformerBlock.forward).Runner(.{.layers}),
     sample: zml.FnExe(model.LmHead.forward).Runner(.{.lm_head}),
+
+    layer_count: usize,
 
     pub fn init(allocator: std.mem.Allocator, exe: *const KernelExe, buffers: *const model.Buffers) !KernelRunner {
         var embed = try zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}).init(&exe.embed, allocator, .{
@@ -133,12 +136,13 @@ pub const KernelRunner = struct {
         });
         errdefer embed.deinit(allocator);
 
-        const layers = try allocator.alloc(zml.FnExe(model.TransformerLayer.forward).Runner(.{.layer}), buffers.model.layers.len);
+        const layers = try allocator.alloc(zml.FnExe(model.TransformerBlock.forward).Runner(.{.layers}), @divExact(buffers.model.layers.len, exe.layer_count));
         errdefer allocator.free(layers);
         var initialized_layers: usize = 0;
         errdefer for (layers[0..initialized_layers]) |*layer| layer.deinit(allocator);
-        for (layers, buffers.model.layers) |*layer, layer_buffers| {
-            layer.* = try zml.FnExe(model.TransformerLayer.forward).Runner(.{.layer}).init(&exe.layer, allocator, .{ .layer = layer_buffers });
+        for (layers, 0..) |*layer, i| {
+            const start = i * exe.layer_count;
+            layer.* = try zml.FnExe(model.TransformerBlock.forward).Runner(.{.layers}).init(&exe.layer, allocator, .{ .layers = buffers.model.layers[start..][0..exe.layer_count] });
             initialized_layers += 1;
         }
 
@@ -151,7 +155,7 @@ pub const KernelRunner = struct {
         });
         errdefer sample.deinit(allocator);
 
-        return .{ .embed = embed, .layers = layers, .sample = sample };
+        return .{ .embed = embed, .layers = layers, .sample = sample, .layer_count = exe.layer_count };
     }
 
     pub fn deinit(self: *KernelRunner, allocator: std.mem.Allocator) void {
@@ -172,7 +176,8 @@ pub fn run(runner: *KernelRunner, args: Args, kv_cache_index_buffers: []const zm
     });
     defer hidden_buffer.deinit();
 
-    for (runner.layers, kv_cache_index_buffers) |*layer, kv_cache_index_buffer| {
+    for (runner.layers, 0..) |*layer, i| {
+        const kv_cache_index_buffer = kv_cache_index_buffers[i * runner.layer_count];
         var previous_hidden = hidden_buffer;
         layer.run(args.io, .{
             .inputs = .{
@@ -216,11 +221,15 @@ fn compileKernel(
 ) !KernelExe {
     const embed = try compileEmbed(allocator, io, platform, llama_model.model.embed_tokens, parameters, seqlen, phase, progress);
     errdefer embed.deinit();
-    const layer = try compileLayer(allocator, io, platform, llama_model, parameters, seqlen, attention_parameters, phase, progress);
+    // BF16 benefits from eight layers per launch. FP8 scale arguments and
+    // larger native intermediates make four-layer blocks preferable there.
+    const block_size: usize = if (llama_model.config.zml_weight_storage == null and llama_model.model.layers.len % 8 == 0) 8 else 4;
+    const layer_count: usize = if (platform.target == .furiosa and phase == .decode and llama_model.model.layers.len % block_size == 0) block_size else 1;
+    const layer = try compileLayer(allocator, io, platform, llama_model, parameters, seqlen, attention_parameters, phase, progress, layer_count);
     errdefer layer.deinit();
     const sample = try compileSample(allocator, io, platform, llama_model, parameters, seqlen, phase, progress);
     errdefer sample.deinit();
-    return .{ .embed = embed, .layer = layer, .sample = sample };
+    return .{ .embed = embed, .layer = layer, .sample = sample, .layer_count = layer_count };
 }
 
 fn compileEmbed(
@@ -261,7 +270,8 @@ fn compileLayer(
     attention_parameters: zml.attention.Parameters,
     phase: Phase,
     progress: *std.Progress.Node,
-) !zml.FnExe(model.TransformerLayer.forward) {
+    layer_count: usize,
+) !zml.FnExe(model.TransformerBlock.forward) {
     progress.increaseEstimatedTotalItems(1);
 
     var node = progress.start(phase.startMessage("transformer layer"), 1);
@@ -277,7 +287,7 @@ fn compileLayer(
 
     const kv_cache_index: zml.Tensor = .init(.{}, .u32);
 
-    return zml.FnExe(model.TransformerLayer.forward).compile(
+    return zml.FnExe(model.TransformerBlock.forward).compile(
         allocator,
         io,
         platform,
@@ -286,7 +296,7 @@ fn compileLayer(
             .program_name = phase.programName("llama", "layer"),
         },
         .{.{
-            .layer = llama_model.model.layers[0],
+            .layers = llama_model.model.layers[0..layer_count],
             .hidden = hidden,
             .token_index = parameters.token_index,
             .kv_cache = parameters.kv_cache,

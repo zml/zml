@@ -451,6 +451,35 @@ pub const TransformerLayer = struct {
     }
 };
 
+pub const TransformerBlock = struct {
+    pub const Input = struct {
+        layers: []const TransformerLayer,
+        hidden: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: KvCache,
+        kv_cache_index: zml.Tensor,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
+    };
+
+    pub fn forward(input: Input) TransformerLayer.Output {
+        stdx.debug.assert(input.layers.len > 0, "Transformer block must contain at least one layer", .{});
+        var result: TransformerLayer.Output = .{ .hidden = input.hidden, .kv_cache = input.kv_cache };
+        for (input.layers, 0..) |layer, i| {
+            result = TransformerLayer.forward(.{
+                .layer = layer,
+                .hidden = result.hidden,
+                .token_index = input.token_index,
+                .kv_cache = result.kv_cache,
+                .kv_cache_index = if (i == 0) input.kv_cache_index else input.kv_cache_index.addConstant(i),
+                .attention_metadata = input.attention_metadata,
+                .attention_parameters = input.attention_parameters,
+            });
+        }
+        return result;
+    }
+};
+
 const RmsNorm = struct {
     weight: zml.Tensor,
     eps: f32,
