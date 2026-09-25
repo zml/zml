@@ -173,6 +173,7 @@ pub fn run(runner: *KernelRunner, args: Args, kv_cache_index_buffers: []const zm
     defer hidden_buffer.deinit();
 
     for (runner.layers, kv_cache_index_buffers) |*layer, kv_cache_index_buffer| {
+        var previous_hidden = hidden_buffer;
         layer.run(args.io, .{
             .inputs = .{
                 .hidden = hidden_buffer,
@@ -186,6 +187,7 @@ pub fn run(runner: *KernelRunner, args: Args, kv_cache_index_buffers: []const zm
                 .kv_cache = args.kv_cache_buffers,
             },
         });
+        if (layer.exe.platform.target == .furiosa) previous_hidden.deinit();
     }
 
     runner.sample.run(args.io, .{

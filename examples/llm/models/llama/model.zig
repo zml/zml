@@ -446,7 +446,11 @@ pub const TransformerLayer = struct {
             .add(x1)
             .withPartitioning(.{ .d = .replicated });
 
-        return .{ .hidden = x2.reuseBuffer(x0), .kv_cache = updated_kv_cache };
+        // Furiosa computes the residual into a separate native output. Returning
+        // that buffer avoids a device copy back into x0 after every layer.
+        // Its inference runner releases the previous hidden buffer explicitly.
+        const hidden = if (zml.Compiler.current().platform.target == .furiosa) x2 else x2.reuseBuffer(x0);
+        return .{ .hidden = hidden, .kv_cache = updated_kv_cache };
     }
 };
 
