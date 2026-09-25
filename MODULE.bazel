@@ -197,6 +197,14 @@ pip.parse(
 )
 use_repo(pip, "xprof")
 
+pip.parse(
+    download_only = True,
+    hub_name = "model_explorer_py_deps",
+    python_version = "3.12",
+    requirements_lock = "//model_explorer:requirements.lock.txt",
+)
+use_repo(pip, "model_explorer_py_deps")
+
 cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_plugin")
 use_repo(cpu, "libzml_cpu_darwin_amd64", "libzml_cpu_darwin_arm64", "libzml_cpu_linux_amd64")
 

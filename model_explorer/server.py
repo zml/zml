@@ -14,9 +14,10 @@
 # ==============================================================================
 
 """
-Run me with `bazel run //pretty_xla:server -- $PWD`
+Run me with `bazel run //model_explorer:server -- $PWD`
 """
 
+import html
 import json
 import logging
 import os
@@ -49,8 +50,8 @@ app = flask.Flask(__name__)
 log = logging.getLogger(__name__)
 
 
-URL_TEMPLATE = f"/?data=%7B%22models%22:%5B%7B%22url%22:%22__DOT_PATH__%22,%22adapterId%22:%22__EXTENSION__%22%7D%5D,%22nodeData%22:%5B%5D,%22uiState%22:%7B%22paneStates%22:%5B%7B%22deepestExpandedGroupNodeIds%22:%5B%5D,%22selectedNodeId%22:%22%22,%22selectedGraphId%22:%22main%22,%22selectedCollectionLabel%22:%22module_0002.llama.LlamaLM.forward.cpu_after_optimizations.dot%22,%22widthFraction%22:1,%22selected%22:false,%22flattenLayers%22:false%7D%5D%7D%7D&renderer=webgl&show_open_in_new_tab=0&internal_colab=0&ess=0&eetr=0"
 
+config = ModelExplorerConfig()
 server_directive_dispatcher = ServerDirectiveDispatcher()
 
 # Load extensions.
@@ -59,12 +60,6 @@ extension_manager = model_explorer.extension_manager.ExtensionManager([])
 extension_manager.load_extensions()
 # Remove tensorflow extensions that create conflict when opening .hlo.pb files.
 extension_manager.extensions = [ext for ext in extension_manager.extensions if "pb" not in ext.metadata.fileExts]
-extension_manager.extensions.append(model_explorer.extension_manager.RegisteredExtension(
-        type="adapter",
-        ext_class=hlo2json.XlaDotAdapter,
-        metadata=hlo2json.XlaDotAdapter.metadata,
-    )
-)
 extension_manager.extensions.append(model_explorer.extension_manager.RegisteredExtension(
         type="adapter",
         ext_class=hlo2json.HloAdapter,
@@ -83,12 +78,10 @@ for extension in extension_metadata_list:
 
 def find_files(base_dir):
     """
-    Recursively find all files ending with '.dot' within base_dir.
+    Recursively find HLO protobuf and MLIR files within base_dir.
     Returns a generator of file paths as strings.
     """
     base_path = Path(base_dir)
-    for path_obj in base_path.rglob("*.dot"):
-        yield str(path_obj)
     for path_obj in base_path.rglob("*.hlo.pb"):
         yield str(path_obj)
     for path_obj in base_path.rglob("*.mlir"):
@@ -98,17 +91,14 @@ def find_files(base_dir):
 def path_to_url(p):
     if p.endswith(".hlo.pb"):
         extension = "model_explorer_hlo"
-    elif p.endswith(".dot"):
-        extension = "model_explorer_pretty_xla"
     elif p.endswith(".mlir"):
-        extension = "model_explorer_builtin_mlir"
+        extension = "builtin_mlir"
     else:
         extension = "default"
 
-    url = URL_TEMPLATE
-    url = url.replace("__DOT_PATH__", urllib.parse.quote(p))
-    url = url.replace("__EXTENSION__", extension)
-    return url
+    data = {"models": [{"url": p, "adapterId": extension}], "nodeData": []}
+    return "/?" + urllib.parse.urlencode({"data": json.dumps(data), "renderer": "webgl"})
+
 
 
 @app.route("/list")
@@ -123,7 +113,7 @@ def list_files():
         """
     for p in sorted(find_files(ROOT_DIR)):
         clean_p = p[len(ROOT_DIR) :].strip("/")
-        ret += f'<li><a target="_blank" href="{path_to_url(p)}">{clean_p}</a></li>'
+        ret += f'<li><a target="_blank" href="{html.escape(path_to_url(p), quote=True)}">{html.escape(clean_p)}</a></li>'
     ret += """
         </ul>
       </body>

@@ -1,34 +1,45 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 load(":zig_proto_library.bzl", "zig_proto_library")
 
-load("@rules_python//python:pip.bzl", "compile_pip_requirements")
-load("@rules_python//python:py_binary.bzl", "py_binary")
-load("@rules_python//python:py_library.bzl", "py_library")
-
-# bazel run //pretty_xla:requirements.update
-# Note this is overkill, it pulls module like IPython or numpy we don't use,
-# but are mentionned by model-explorer requirements.
-# To workaround this we could only depend on "@pypi_pretty_xla//ai_edge_model_explorer:data"
-# which is the html/js used by the UI and ai-edge-model-explorer-adapter which is bare bone
-# then re-implement the rest.
-# Which could be a plus considering how messing the python code of model-explorer is.
-compile_pip_requirements(
+uv_lock(
     name = "requirements",
-    timeout = "long",
-    requirements_in = "requirements.in",
-    requirements_txt = "requirements.lock.txt",
+    srcs = ["requirements.in"],
+    out = "requirements.lock.txt",
+    args = ["--upgrade"],
+    tags = ["manual"],
+)
+
+py_library(
+    name = "server_lib",
+    srcs = [
+        "hlo2json.py",
+        "server.py",
+    ],
+    data = [":hlo2json"],
+    imports = ["."],
+    deps = [
+        "@model_explorer_py_deps//ai_edge_model_explorer:pkg",
+        "@model_explorer_py_deps//flask:pkg",
+        "@model_explorer_py_deps//requests:pkg",
+        "@rules_python//python/runfiles",
+    ],
 )
 
 py_binary(
     name = "server",
-    srcs = ["server.py", "hlo2json.py"],
-    imports = ["."],
-    data = [":pretty_xla_lib"],
-    deps = [
-        "@pypi_pretty_xla//flask:pkg",
-        "@pypi_pretty_xla//requests:pkg",
-        "@pypi_pretty_xla//ai_edge_model_explorer:pkg",
-    ],
+    srcs = ["server.py"],
+    deps = [":server_lib"],
+)
+
+py_test(
+    name = "server_test",
+    size = "small",
+    srcs = ["server_test.py"],
+    deps = [":server_lib"],
 )
 
 zig_binary(

@@ -35,6 +35,26 @@ pub fn convertFile(allocator: std.mem.Allocator, io: std.Io, input_hlo_path: []c
     defer proto_arena.deinit();
     const proto = try hlo.HloProto.decode(&reader.interface, proto_arena.allocator());
     var converter: Converter = .{ .allocator = proto_arena.allocator() };
+    const suffix = ".after_spmd_partitioner.hlo.pb";
+    if (std.mem.endsWith(u8, input_hlo_path, suffix)) {
+        const sibling = try std.fmt.allocPrint(proto_arena.allocator(), "{s}.before_optimizations.hlo.pb", .{input_hlo_path[0 .. input_hlo_path.len - suffix.len]});
+        if (std.Io.Dir.cwd().openFile(io, sibling, .{})) |file| {
+            defer file.close(io);
+            var ref_buffer: [8192]u8 = undefined;
+            var ref_reader = file.reader(io, &ref_buffer);
+            const reference = try hlo.HloProto.decode(&ref_reader.interface, proto_arena.allocator());
+            if (reference.hlo_module) |module| {
+                if (proto.hlo_module != null and std.mem.eql(u8, module.name, proto.hlo_module.?.name)) {
+                    for (module.computations.items) |*comp| {
+                        if (comp.id == module.entry_computation_id) converter.reference = comp;
+                    }
+                }
+            }
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
+    }
     try converter.emitModule(writer, proto);
 }
 
@@ -75,10 +95,14 @@ pub const Converter = struct {
     computations: std.AutoArrayHashMapUnmanaged(i64, *const hlo.HloComputationProto) = .{},
     reduce_name: std.AutoArrayHashMapUnmanaged(i64, *const hlo.HloInstructionProto) = .{},
 
+    reference: ?*const hlo.HloComputationProto = null,
+    entry_id: i64 = -1,
+
     const Assigned = struct { physical: i64, start: i64, len: i64 };
 
     pub fn emitModule(self: *Converter, writer: anytype, hlo_proto: hlo.HloProto) !void {
         const module = hlo_proto.hlo_module orelse return error.NoModule;
+        self.entry_id = module.entry_computation_id;
 
         if (hlo_proto.buffer_assignment) |buffer_assignement| {
             // Logical buffer id to instruction id
@@ -162,9 +186,25 @@ pub const Converter = struct {
                 }
 
                 for (0.., out_shapes) |o, o_shape| {
-                    try outputs.writeTemplate(
-                        \\{{"id":"{d}","attrs":[{{"key":"tensor_shape","value":"{f}"}}]}}
-                    , .{ o, InstrShape{ .shape = &o_shape } });
+                    var output = try outputs.openDict();
+                    try output.write("id", try std.fmt.allocPrint(self.allocator, "{d}", .{o}));
+                    var attrs = try output.openList("attrs");
+                    try attrs.write(.{ .key = "tensor_shape", .value = try std.fmt.allocPrint(self.allocator, "{f}", .{InstrShape{ .shape = &o_shape }}) });
+                    if (logicalBytes(o_shape)) |bytes| try attrs.write(.{ .key = "local logical bytes", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{bytes}) });
+                    if (computation.id == self.entry_id) {
+                        if (self.referenceInstruction(instr)) |ref| {
+                            if (ref.shape) |global| {
+                                if (global.element_type != .TUPLE and o_shape.element_type == global.element_type and global.dimensions.items.len == o_shape.dimensions.items.len) {
+                                    try attrs.write(.{ .key = "pre-SPMD shape", .value = try std.fmt.allocPrint(self.allocator, "{f}", .{InstrShape{ .shape = &global }}) });
+                                    try attrs.write(.{ .key = "shape source", .value = try std.fmt.allocPrint(self.allocator, "before_optimizations: {s} ({s})", .{ ref.name, if (std.mem.eql(u8, instr.opcode, "parameter")) "parameter number" else "operation provenance; may describe an earlier value" }) });
+                                    if (ref.sharding) |sharding| try attrs.write(.{ .key = "pre-SPMD sharding", .value = try shardingText(self.allocator, sharding) });
+                                }
+                            }
+                        }
+                    }
+                    try attrs.write(.{ .key = "recorded sharding", .value = if (instr.sharding) |sharding| try shardingText(self.allocator, sharding) else "unknown (not recorded after partitioning)" });
+                    try attrs.close();
+                    try output.close();
                 }
                 try outputs.close();
             }
@@ -208,6 +248,27 @@ pub const Converter = struct {
     }
 
     pub fn writeAttr(self: *const Converter, Writer: type, list: *json_writer.List(Writer), instr: hlo.HloInstructionProto, comp_caller: ?*const hlo.HloInstructionProto) !void {
+        try list.write(.{ .key = "instruction", .value = instr.name });
+        try list.write(.{ .key = "opcode", .value = instr.opcode });
+        if (instr.custom_call_target.len > 0) try list.write(.{ .key = "custom call target", .value = instr.custom_call_target });
+        if (isCollective(instr.opcode)) {
+            try list.write(.{ .key = "channel", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{instr.channel_id}) });
+            try list.write(.{ .key = "global device IDs", .value = if (instr.use_global_device_ids) "true" else "false" });
+            if (instr.replica_group_list) |groups| try list.write(.{ .key = "collective groups (XLA proto)", .value = try std.fmt.allocPrint(self.allocator, "{any}", .{groups}) });
+            if (instr.replica_groups.items.len > 0) try list.write(.{ .key = "replica groups", .value = try std.fmt.allocPrint(self.allocator, "{any}", .{instr.replica_groups.items}) });
+            if (instr.dimensions.items.len > 0) try list.write(.{ .key = "collective dimensions", .value = try std.fmt.allocPrint(self.allocator, "{any}", .{instr.dimensions.items}) });
+            for (instr.operand_ids.items, 0..) |id, index| {
+                if (self.instructions.get(id)) |operand| {
+                    if (operand.shape) |shape| {
+                        if (logicalBytes(shape)) |bytes| try list.write(.{ .key = try std.fmt.allocPrint(self.allocator, "input {d} payload bytes per device", .{index}), .value = try std.fmt.allocPrint(self.allocator, "{d}", .{bytes}) });
+                    }
+                }
+            }
+            if (instr.shape) |shape| {
+                if (logicalBytes(shape)) |bytes| try list.write(.{ .key = "output payload bytes per device", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{bytes}) });
+            }
+            try list.write(.{ .key = "traffic accounting", .value = "Logical payload, not measured wire traffic. Algorithm, protocol and topology are not specified by this HLO." });
+        }
         if (instr.metadata) |meta| {
             try list.write(.{ .key = "loc", .value = try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ meta.source_file, meta.source_line }) });
             if (meta.op_name.len != 0) {
@@ -240,6 +301,24 @@ pub const Converter = struct {
         }
     }
 
+    fn referenceInstruction(self: *const Converter, instr: hlo.HloInstructionProto) ?*const hlo.HloInstructionProto {
+        const reference = self.reference orelse return null;
+        var result: ?*const hlo.HloInstructionProto = null;
+        for (reference.instructions.items) |*candidate| {
+            const matches = if (std.mem.eql(u8, instr.opcode, "parameter"))
+                std.mem.eql(u8, candidate.opcode, "parameter") and candidate.parameter_number == instr.parameter_number
+            else if (instr.metadata) |meta|
+                meta.op_name.len > 0 and std.mem.eql(u8, candidate.name, meta.op_name)
+            else
+                false;
+            if (matches) {
+                if (result != null) return null;
+                result = candidate;
+            }
+        }
+        return result;
+    }
+
     fn instrLabel(self: *const Converter, instr: hlo.HloInstructionProto) InstrLabel {
         return .{ .instr = instr, .converter = self };
     }
@@ -269,8 +348,10 @@ const InstrLabel = struct {
         }
 
         if (std.mem.eql(u8, opcode, "custom-call")) {
-            return try writer.print("{s}", .{instr.name});
+            return try writer.print("custom-call: {s}", .{instr.custom_call_target});
         }
+
+        if (std.mem.eql(u8, opcode, "copy") or isCollective(opcode)) return writer.writeAll(opcode);
 
         if (std.mem.eql(u8, opcode, "reduce")) r: {
             const reducer = converter.computations.get(instr.called_computation_ids.items[0]).?;
@@ -519,4 +600,45 @@ test "JSON closing delimiters propagate writer failures" {
     var writer: std.Io.Writer = .fixed(&buffer);
     var object = try json_writer.dict(&writer);
     try std.testing.expectError(error.WriteFailed, object.close());
+}
+
+fn isCollective(opcode: []const u8) bool {
+    inline for (.{ "all-gather", "all-reduce", "reduce-scatter", "all-to-all", "collective-permute", "collective-broadcast" }) |name| {
+        if (std.mem.eql(u8, opcode, name)) return true;
+    }
+    return false;
+}
+
+fn logicalBytes(shape: hlo.ShapeProto) ?u64 {
+    for (shape.is_dynamic_dimension.items) |dynamic| if (dynamic) return null;
+    const bits: u64 = switch (shape.element_type) {
+        .PRED, .S8, .U8 => 8,
+        .S16, .U16, .F16, .BF16 => 16,
+        .S32, .U32, .F32 => 32,
+        .S64, .U64, .F64, .C64 => 64,
+        .C128 => 128,
+        else => return null,
+    };
+    var size = bits;
+    for (shape.dimensions.items) |dim| {
+        if (dim < 0) return null;
+        size = std.math.mul(u64, size, @intCast(dim)) catch return null;
+    }
+    return std.math.divCeil(u64, size, 8) catch null;
+}
+
+fn shardingText(allocator: std.mem.Allocator, sharding: hlo.OpSharding) ![]const u8 {
+    if (sharding.named_sharding != null) return std.fmt.allocPrint(allocator, "named: {any}", .{sharding.named_sharding.?});
+    if (sharding.type == .REPLICATED) return "replicated across the partition group";
+    if (sharding.type != .OTHER) return std.fmt.allocPrint(allocator, "{s}", .{@tagName(sharding.type)});
+    var replication: i64 = 1;
+    const dims = sharding.tile_assignment_dimensions.items;
+    if (sharding.replicate_on_last_tile_dim and dims.len > 0) {
+        replication = dims[dims.len - 1];
+    } else if (sharding.last_tile_dims.items.len <= dims.len) {
+        for (sharding.last_tile_dims.items, dims[dims.len - sharding.last_tile_dims.items.len ..]) |kind, dim| {
+            if (kind == .REPLICATED) replication = std.math.mul(i64, replication, dim) catch return error.InvalidSharding;
+        }
+    }
+    return std.fmt.allocPrint(allocator, "tiles={any}; replication factor={d}; subgroup types={any}; devices={any}; iota reshape={any}; iota transpose={any}", .{ dims, replication, sharding.last_tile_dims.items, sharding.tile_assignment_devices.items, sharding.iota_reshape_dims.items, sharding.iota_transpose_perm.items });
 }
