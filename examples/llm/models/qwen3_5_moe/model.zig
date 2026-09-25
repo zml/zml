@@ -150,9 +150,9 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         _ = backend;
-        const moe_dtype = self.inner.text_model.layers[0].moe.gate_up_proj.weight.dtype();
-        log.info("Moe dtype : {}", .{moe_dtype});
-        const moe_backend = try zml.moe.Backend.auto(platform, moe_dtype);
+        const moe_gate_up = self.inner.text_model.layers[0].moe.gate_up_proj;
+        log.info("Moe dtype : {}", .{moe_gate_up.weight.dtype()});
+        const moe_backend = try zml.moe.Backend.auto(platform, moe_gate_up.quantizationScheme(), moe_gate_up.weight.dtype());
         const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), moe_backend, shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
