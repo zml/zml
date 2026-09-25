@@ -37,7 +37,7 @@ const Args = struct {
         \\   --compare-cpu             Compare actual model layers against CPU
         \\   --transformer-only        Skip individual components with --compare-cpu
         \\   --platform=<name>         Explicit test platform (default: auto)
-        \\   --forward-only            Compare the single packed-weight forward with an unpacked CPU reference
+        \\   --forward-only            Compare the complete forward with an independent CPU reference
         \\   --benchmark-iterations=<n> Time three full-forward decode trials before comparison (four warmups, default: 0)
         \\   --head-only               Compare greedy output-head tokens only
         \\   --seqlen=<number>         CPU comparison sequence length (default: 16)
@@ -86,8 +86,8 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var model_buffers = try repo_model.loadUnpackedBuffers(allocator, io, platform, &store, &progress, shardings);
-    defer repo_model.unloadUnpackedBuffers(&model_buffers, allocator);
+    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
+    defer repo_model.unloadBuffers(&model_buffers, allocator);
     defer progress.end();
 
     if (args.compare_cpu) {
@@ -96,8 +96,8 @@ pub fn main(init: std.process.Init) !void {
         const cpu_shardings = try common.Shardings.init(cpu);
         var cpu_progress = progress.start("CPU reference weights", 1);
         defer cpu_progress.end();
-        var cpu_buffers = try repo_model.loadUnpackedBuffers(allocator, io, cpu, &store, &cpu_progress, cpu_shardings);
-        defer repo_model.unloadUnpackedBuffers(&cpu_buffers, allocator);
+        var cpu_buffers = try repo_model.loadBuffers(allocator, io, cpu, &store, &cpu_progress, cpu_shardings);
+        defer repo_model.unloadBuffers(&cpu_buffers, allocator);
         try compareCpu(allocator, io, platform, cpu, repo_model.inner, &model_buffers, &cpu_buffers, args);
     } else {
         try run(allocator, io, platform, args.activations orelse return error.MissingActivations, repo_model.inner, &model_buffers, platform.replicated_sharding);
@@ -381,7 +381,6 @@ const ReferenceForward = struct {
 };
 
 fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: *model.LoadedModel, store: *zml.io.TensorStore, progress: *std.Progress.Node, args: Args, shardings: common.Shardings) !void {
-    const packing = @import("llama/packed_weights.zig");
     const cpu = try zml.Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } });
     defer cpu.deinit(allocator, io);
     const cpu_shardings = try common.Shardings.init(cpu);
@@ -391,9 +390,9 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
     const tokens = zml.Tensor.init(.{ .s = args.seqlen }, .u32);
     const position = zml.Tensor.init(.{}, .u32);
     const rng: zml.Tensor.Rng = .init();
-    std.log.info("Comparing whole forward: {} layers, {} packed weight arguments, query={}, cache={}, offset={}", .{ mdl.inner.model.layers.len, mdl.packing.weights.tensors.len, args.seqlen, cache_seqlen, args.token_offset });
+    std.log.info("Comparing whole forward: {} layers, {} separate weight arguments, query={}, cache={}, offset={}", .{ mdl.inner.model.layers.len, zml.meta.count(zml.Tensor, &mdl.inner), args.seqlen, cache_seqlen, args.token_offset });
 
-    const actual_exe = try zml.FnExe(inference.Forward.forward).compile(allocator, io, platform, .{ .shardings = &shardings.all(), .program_name = "llama_full_forward_comparison" }, .{.{ .weights = mdl.packing.weights, .tokens = tokens, .token_index = position, .kv_cache = kv, .rng = rng, .attention_metadata = .vanilla, .attention_parameters = .vanilla }});
+    const actual_exe = try zml.FnExe(inference.Forward.forward).compile(allocator, io, platform, .{ .shardings = &shardings.all(), .program_name = "llama_full_forward_comparison" }, .{.{ .weights = mdl.inner, .tokens = tokens, .token_index = position, .kv_cache = kv, .rng = rng, .attention_metadata = .vanilla, .attention_parameters = .vanilla }});
     defer actual_exe.deinit();
     const reference_exe = try zml.FnExe(ReferenceForward.forward).compile(allocator, io, cpu, .{ .shardings = &cpu_shardings.all() }, .{.{ .weights = mdl.inner, .tokens = tokens, .token_index = position, .kv_cache = kv, .rng = rng }});
     defer reference_exe.deinit();
@@ -428,14 +427,14 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
         var rng_buffer = try zml.Tensor.Rng.initBuffer(io, target, .replicated, 0);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffer);
         if (i == 0) {
-            var reference_weights = try mdl.loadUnpackedBuffers(allocator, io, cpu, store, progress, cpu_shardings);
-            defer mdl.unloadUnpackedBuffers(&reference_weights, allocator);
+            var reference_weights = try mdl.loadBuffers(allocator, io, cpu, store, progress, cpu_shardings);
+            defer mdl.unloadBuffers(&reference_weights, allocator);
             var runner = try zml.FnExe(ReferenceForward.forward).Runner(.{.weights}).init(&reference_exe, allocator, .{ .weights = reference_weights });
             defer runner.deinit(allocator);
             runner.run(io, .{ .inputs = .{ .tokens = token_buffer, .token_index = pos, .kv_cache = cache, .rng = rng_buffer }, .outputs = .{ .tokens = &token_buffer, .kv_cache = &cache, .rng = &rng_buffer } });
         } else {
-            var actual_weights = try mdl.packing.load(allocator, io, platform, store, progress, &shardings.all());
-            defer packing.Plan.unload(&actual_weights, allocator);
+            var actual_weights = try mdl.loadBuffers(allocator, io, platform, store, progress, shardings);
+            defer mdl.unloadBuffers(&actual_weights, allocator);
             if (args.benchmark_iterations > 0) try benchmarkFullForward(allocator, io, platform, &actual_exe, actual_weights, kv, mdl.inner.config.bos_token_id, args.benchmark_iterations);
             var runner = try zml.FnExe(inference.Forward.forward).Runner(.{.weights}).init(&actual_exe, allocator, .{ .weights = actual_weights });
             defer runner.deinit(allocator);
@@ -466,7 +465,7 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
 // excludes compilation, weight upload, prefill, tokenization and terminal IO.
 // Each trial starts from BOS and feeds every predicted token into the next
 // call, including after EOS, to keep the timed workload fixed.
-fn benchmarkFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, exe: *const inference.KernelExe, weights: @import("llama/packed_weights.zig").Buffers, kv: model.KvCache, bos: u32, iterations: usize) !void {
+fn benchmarkFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, exe: *const inference.KernelExe, weights: model.Buffers, kv: model.KvCache, bos: u32, iterations: usize) !void {
     const warmups = 4;
     const positions = try allocator.alloc(zml.Buffer, warmups + iterations);
     defer allocator.free(positions);

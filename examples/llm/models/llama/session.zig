@@ -27,7 +27,7 @@ pub const Session = struct {
         platform: *const zml.Platform,
         tokenizer: zml.tokenizer.Tokenizer,
         compiled_model: *inference.CompiledModel,
-        model_buffers: *@import("packed_weights.zig").Buffers,
+        model_buffers: *model.Buffers,
     ) !Session {
         const shardings = &compiled_model.params.shardings;
         var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, shardings.model);

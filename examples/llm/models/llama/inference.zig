@@ -4,7 +4,6 @@ const zml = @import("zml");
 
 const common = @import("../common.zig");
 const model = @import("model.zig");
-const weight_packing = @import("packed_weights.zig");
 
 const log = std.log.scoped(.llama);
 const Phase = common.Phase;
@@ -90,9 +89,9 @@ pub const CompiledModel = struct {
         parameters: CompilationParameters,
         progress: *std.Progress.Node,
     ) !CompiledModel {
-        const prefill = try compileKernel(allocator, io, platform, loaded_model.packing.weights, parameters, @intCast(parameters.prefill_tokens.dim(.s)), parameters.prefill_attention_parameters, .prefill, progress);
+        const prefill = try compileKernel(allocator, io, platform, loaded_model.inner, parameters, @intCast(parameters.prefill_tokens.dim(.s)), parameters.prefill_attention_parameters, .prefill, progress);
         errdefer prefill.deinit();
-        const decode = try compileKernel(allocator, io, platform, loaded_model.packing.weights, parameters, @intCast(parameters.decode_tokens.dim(.s)), parameters.decode_attention_parameters, .decode, progress);
+        const decode = try compileKernel(allocator, io, platform, loaded_model.inner, parameters, @intCast(parameters.decode_tokens.dim(.s)), parameters.decode_attention_parameters, .decode, progress);
 
         return .{
             .loaded_model = loaded_model,
@@ -112,7 +111,7 @@ pub const Inference = CompiledModel;
 
 pub const Forward = struct {
     pub const Input = struct {
-        weights: weight_packing.Weights,
+        weights: model.Model,
         tokens: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: model.KvCache,
@@ -128,7 +127,7 @@ pub const Forward = struct {
     };
 
     pub fn forward(input: Input) Output {
-        const tokens, const kv_cache, const rng = input.weights.unpack().forward(
+        const tokens, const kv_cache, const rng = input.weights.forward(
             input.tokens,
             input.token_index,
             input.kv_cache,
@@ -145,7 +144,7 @@ pub const KernelExe = zml.FnExe(Forward.forward);
 pub const KernelRunner = struct {
     forward: KernelExe.Runner(.{.weights}),
 
-    pub fn init(allocator: std.mem.Allocator, exe: *const KernelExe, buffers: *const weight_packing.Buffers) !KernelRunner {
+    pub fn init(allocator: std.mem.Allocator, exe: *const KernelExe, buffers: *const model.Buffers) !KernelRunner {
         return .{ .forward = try .init(exe, allocator, .{ .weights = buffers.* }) };
     }
 
@@ -175,7 +174,7 @@ fn compileKernel(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
-    weights: weight_packing.Weights,
+    weights: model.Model,
     parameters: CompilationOptions,
     seqlen: usize,
     attention_parameters: zml.attention.Parameters,
