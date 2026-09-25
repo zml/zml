@@ -33,67 +33,50 @@ pub const Backend = enum {
     mosaic_tpu,
     metal,
 
-    pub fn auto(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
+    pub fn auto(platform: *const zml.Platform, scheme: ?zml.Quantization.Scheme, dtype: zml.DataType) !Backend {
+        // Keep the dtype as an argument because non scheme-specific backends may depend on it later
+        _ = dtype;
         return switch (platform.target) {
-            .cuda => switch (weights_dtype) {
-                .bf16 => if (cutlass_flashinfer.isAvailable(platform))
-                    .flashinfer_cutlass
-                else
-                    .triton,
-                .f4e2m1 => if (cutlass_flashinfer.isNvfp4Supported(platform))
-                    .flashinfer_cutlass
-                else
-                    return error.UnsupportedDataType,
-                .f8e4m3fn, .f8e4m3fnuz, .f8e8m0, .f16, .f32 => .triton,
-                else => error.UnsupportedDataType,
+            .cuda => b: {
+                const s = scheme orelse break :b .triton;
+                break :b switch (s) {
+                    .mxfp4 => if (cute_mxfp4.isAvailable(platform))
+                        .cute_mxfp4
+                    else if (triton_mxfp4.isAvailable(platform))
+                        .triton_mxfp4
+                    else
+                        .triton,
+                    .nvfp4 => if (cutlass_flashinfer.isNvfp4Supported(platform))
+                        .flashinfer_cutlass
+                    else
+                        error.UnsupportedQuantization,
+                    .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .triton,
+                };
             },
-            .rocm => switch (weights_dtype) {
-                .bf16, .f16, .f32, .f8e4m3fn, .f8e4m3fnuz, .f8e8m0 => .triton,
-                else => error.UnsupportedDataType,
+            .rocm => b: {
+                const s = scheme orelse break :b .triton;
+                break :b switch (s) {
+                    .mxfp4 => if (zml.platform.rocm.computeCapability(platform) == .gfx942) .fly else .triton,
+                    .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .triton,
+                    .nvfp4 => error.UnsupportedQuantization,
+                };
             },
-            .oneapi => switch (weights_dtype) {
-                .bf16, .f16, .f32 => .triton,
-                else => error.UnsupportedDataType,
+            .oneapi => b: {
+                const s = scheme orelse break :b .triton;
+                break :b switch (s) {
+                    .mxfp4 => .triton,
+                    .nvfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => error.UnsupportedQuantization,
+                };
             },
-            .tpu => switch (weights_dtype) {
-                .bf16, .f16, .f32 => .mosaic_tpu,
-                else => error.UnsupportedDataType,
-            },
-            .metal => switch (weights_dtype) {
-                .bf16, .f16, .f32, .f4e2m1, .u8, .f8e4m3fn => .metal,
-                else => error.UnsupportedDataType,
+            .tpu => if (scheme == null) .mosaic_tpu else error.UnsupportedQuantization,
+            .metal => b: {
+                const s = scheme orelse break :b .metal;
+                break :b switch (s) {
+                    .nvfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 => .metal,
+                    .mxfp4 => error.UnsupportedQuantization,
+                };
             },
             else => error.UnimplementedMoEBackend,
-        };
-    }
-
-    pub fn autoMxfp4(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
-        return switch (platform.target) {
-            .cuda => switch (if (zml.platform.cuda.computeCapability(platform)) |cc| cc.major else 0) {
-                10 => switch (weights_dtype) {
-                    .u8, .i8 => if (cute_mxfp4.isAvailable(platform)) .cute_mxfp4 else .triton_mxfp4,
-                    .f4e2m1 => .triton,
-                    else => error.UnsupportedDataType,
-                },
-                else => switch (weights_dtype) {
-                    .u8, .i8, .f4e2m1 => .triton,
-                    else => error.UnsupportedDataType,
-                },
-            },
-            .rocm => switch (zml.platform.rocm.computeCapability(platform) orelse return .triton) {
-                .gfx942 => switch (weights_dtype) {
-                    .u8, .i8, .f4e2m1 => .fly,
-                    else => error.UnsupportedDataType,
-                },
-                else => switch (weights_dtype) {
-                    .u8, .i8, .f4e2m1 => .triton,
-                    else => error.UnsupportedDataType,
-                },
-            },
-            else => switch (weights_dtype) {
-                .u8, .i8, .f4e2m1 => .triton,
-                else => error.UnsupportedDataType,
-            },
         };
     }
 
