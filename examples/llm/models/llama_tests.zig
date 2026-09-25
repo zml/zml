@@ -297,9 +297,11 @@ fn runTransformer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
     defer zero.deinit();
     var position = try zml.Buffer.scalar(io, platform, token_offset, .u32);
     defer position.deinit();
+    var previous_hidden = hidden;
     runner.run(io, .{
         .inputs = .{ .hidden = hidden, .token_index = position, .kv_cache = cache, .kv_cache_index = zero, .attention_metadata = .vanilla },
         .outputs = .{ .hidden = &hidden, .kv_cache = &cache },
     });
+    if (platform.target == .furiosa) previous_hidden.deinit();
     return .{ .hidden = hidden, .kv_cache = cache };
 }
