@@ -195,4 +195,9 @@ pub const SentencePieceProcessor = opaque {
     pub fn tokenId(self: *SentencePieceProcessor, token: []const u8) u32 {
         return @intCast(c.SentencePieceProcessor_PieceToId(@ptrCast(self), ffi.ZigSlice.from(token)));
     }
+
+    pub fn decode(self: *SentencePieceProcessor, token_id: u32) ?[]const u8 {
+        if (token_id >= @as(u32, @intCast(c.SentencePieceProcessor_GetPieceSize(@ptrCast(self))))) return null;
+        return ffi.ZigSlice.to(u8, c.SentencePieceProcessor_IdToPiece(@ptrCast(self), @intCast(token_id)));
+    }
 };

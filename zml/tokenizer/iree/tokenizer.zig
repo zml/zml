@@ -149,6 +149,18 @@ pub const Tokenizer = struct {
         return if (id < 0) null else @intCast(id);
     }
 
+    pub fn decode(self: *const Tokenizer, token_id: u32) ?[]const u8 {
+        const vocab = c.iree_tokenizer_vocab(self.inner);
+        if (vocab == null) return null;
+
+        if (token_id > std.math.maxInt(i32)) return null;
+
+        const text = c.iree_tokenizer_vocab_token_text(vocab, @intCast(token_id));
+        if (text.data == null) return null;
+
+        return text.data[0..text.size];
+    }
+
     pub const Encoder = struct {
         tokenizer: *const Tokenizer,
         state_storage: []u8,
@@ -1230,6 +1242,17 @@ test "tokenId lookup" {
     try std.testing.expectEqual(@as(u32, 4), tokenizer.tokenId("bar").?);
     try std.testing.expect(tokenizer.tokenId("nonexistent") == null);
     try std.testing.expect(tokenizer.tokenId("") == null);
+}
+
+test "tokenId <-> decode" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
+    defer tokenizer.deinit();
+
+    for ([_][]const u8{ "[UNK]", "hello", "world", "foo", "bar" }) |text| {
+        try std.testing.expectEqualSlices(u8, text, tokenizer.decode(tokenizer.tokenId(text).?).?);
+    }
 }
 
 test "writer with pre-allocated output writer" {
