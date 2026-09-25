@@ -1,3 +1,4 @@
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
@@ -44,9 +45,15 @@ py_test(
 
 zig_binary(
     name = "hlo2json",
-    srcs = ["json_writer.zig"],
+    srcs = [
+        "dump_context.zig",
+        "json_writer.zig",
+    ],
     main = "hlo2json.zig",
-    deps = [":hlo_proto"],
+    deps = [
+        ":dump_context_proto",
+        ":hlo_proto",
+    ],
 )
 
 zig_proto_library(
@@ -58,7 +65,24 @@ zig_proto_library(
 
 zig_test(
     name = "test",
-    srcs = ["json_writer.zig"],
+    srcs = [
+        "dump_context.zig",
+        "json_writer.zig",
+    ],
     main = "hlo2json.zig",
-    deps = [":hlo_proto"],
+    deps = [
+        ":dump_context_proto",
+        ":hlo_proto",
+    ],
+)
+
+proto_library(
+    name = "dump_context_schema",
+    srcs = ["dump_context.proto"],
+)
+
+zig_proto_library(
+    name = "dump_context_proto",
+    proto_package = "zml_context",
+    deps = [":dump_context_schema"],
 )

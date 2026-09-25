@@ -83,6 +83,50 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(collections[0]["label"], "smoke")
             self.assertEqual(collections[0]["graphs"], [])
 
+    def test_optional_dump_context(self):
+        def varint(value):
+            data = bytearray()
+            while value > 127:
+                data.append((value & 127) | 128)
+                value >>= 7
+            data.append(value)
+            return bytes(data)
+
+        def field(number, value):
+            if isinstance(value, int):
+                return varint(number << 3) + varint(value)
+            if isinstance(value, str):
+                value = value.encode()
+            return varint((number << 3) | 2) + varint(len(value)) + value
+
+        # Minimal HLO with one scalar F32 all-reduce, channel 3.
+        instruction = field(1, "reduce") + field(2, "all-reduce") + field(3, field(2, 11)) + field(26, 3)
+        computation = field(1, "entry") + field(2, instruction)
+        proto = field(1, field(1, "context") + field(3, computation))
+        with tempfile.TemporaryDirectory() as directory:
+            stem = Path(directory) / "module_0001.context"
+            path = Path(str(stem) + ".after_spmd_partitioner.hlo.pb")
+            path.write_bytes(proto)
+
+            def attrs():
+                graph = self.convert(path, "model_explorer_hlo")[0]["graphs"][0]
+                return {a["key"]: a["value"] for a in graph["nodes"][0]["attrs"]}
+
+            self.assertNotIn("GPU topology (PJRT)", attrs())
+            stem.mkdir()
+            gpu = field(3, "test GPU") + field(4, 1) + field(5, 1) + field(6, 2)
+            topology = field(9, field(1, "type.googleapis.com/xla.GpuTopologyProto") + field(2, gpu))
+            (stem / "topology.pb").write_bytes(topology)
+            final = Path(str(stem) + ".sm_8.9_gpu_after_optimizations.hlo.pb")
+            final.write_bytes(proto)
+            enriched = attrs()
+            self.assertIn("test GPU", enriched["GPU topology (PJRT)"])
+            self.assertIn("matched by opcode and channel 3", enriched["optimized collective"])
+            (stem / "topology.pb").write_bytes(b"\xff")
+            self.assertIn("topology diagnostic", attrs())
+            Path(str(stem) + ".sm_9.0_gpu_after_optimizations.hlo.pb").write_bytes(proto)
+            self.assertIn("Multiple optimized", attrs()["optimized HLO diagnostic"])
+
     def test_mlir_conversion(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.mlir"

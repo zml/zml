@@ -3,6 +3,7 @@ const std = @import("std");
 const hlo = @import("@xla//xla/service:hlo_proto").proto;
 const log = std.log.scoped(.hlo2json);
 
+const dump_context = @import("dump_context.zig");
 const json_writer = @import("json_writer.zig");
 
 pub fn main(init: std.process.Init) !void {
@@ -55,6 +56,11 @@ pub fn convertFile(allocator: std.mem.Allocator, io: std.Io, input_hlo_path: []c
             else => return err,
         }
     }
+    if (proto.hlo_module) |module| {
+        converter.context.load(proto_arena.allocator(), io, input_hlo_path, module.name) catch |err| {
+            log.warn("Could not load optional dump context: {s}", .{@errorName(err)});
+        };
+    }
     try converter.emitModule(writer, proto);
 }
 
@@ -95,6 +101,7 @@ pub const Converter = struct {
     computations: std.AutoArrayHashMapUnmanaged(i64, *const hlo.HloComputationProto) = .{},
     reduce_name: std.AutoArrayHashMapUnmanaged(i64, *const hlo.HloInstructionProto) = .{},
 
+    context: dump_context.Context = .{},
     reference: ?*const hlo.HloComputationProto = null,
     entry_id: i64 = -1,
 
@@ -254,7 +261,7 @@ pub const Converter = struct {
         if (isCollective(instr.opcode)) {
             try list.write(.{ .key = "channel", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{instr.channel_id}) });
             try list.write(.{ .key = "global device IDs", .value = if (instr.use_global_device_ids) "true" else "false" });
-            if (instr.replica_group_list) |groups| try list.write(.{ .key = "collective groups (XLA proto)", .value = try std.fmt.allocPrint(self.allocator, "{any}", .{groups}) });
+            if (instr.replica_group_list) |groups| try list.write(.{ .key = "collective groups (XLA proto)", .value = try collectiveGroupsText(self.allocator, groups) });
             if (instr.replica_groups.items.len > 0) try list.write(.{ .key = "replica groups", .value = try std.fmt.allocPrint(self.allocator, "{any}", .{instr.replica_groups.items}) });
             if (instr.dimensions.items.len > 0) try list.write(.{ .key = "collective dimensions", .value = try std.fmt.allocPrint(self.allocator, "{any}", .{instr.dimensions.items}) });
             for (instr.operand_ids.items, 0..) |id, index| {
@@ -267,7 +274,32 @@ pub const Converter = struct {
             if (instr.shape) |shape| {
                 if (logicalBytes(shape)) |bytes| try list.write(.{ .key = "output payload bytes per device", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{bytes}) });
             }
-            try list.write(.{ .key = "traffic accounting", .value = "Logical payload, not measured wire traffic. Algorithm, protocol and topology are not specified by this HLO." });
+            if (collectiveGroupSize(instr)) |count| {
+                try list.write(.{ .key = "devices per collective group", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{count}) });
+                if (instr.operand_ids.items.len == 1 and count > 0) {
+                    if (self.instructions.get(instr.operand_ids.items[0])) |operand| {
+                        if (operand.shape) |shape| {
+                            if (logicalBytes(shape)) |bytes| {
+                                if (ringSendBytes(instr.opcode, bytes, count)) |traffic| {
+                                    try list.write(.{ .key = "estimated ring send bytes per device", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{traffic}) });
+                                    try list.write(.{ .key = "estimated ring receive bytes per device", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{traffic}) });
+                                    try list.write(.{ .key = "estimate model", .value = "Ideal ring, no protocol overhead: gather=(P-1)*input; reduce=2*(P-1)*input/P. Not a runtime measurement." });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (std.mem.eql(u8, instr.opcode, "all-reduce")) {
+                try list.write(.{ .key = "collective result", .value = "reduced value replicated within each collective group; input may contain partial sums" });
+                if (instr.called_computation_ids.items.len == 1) {
+                    if (self.computations.get(instr.called_computation_ids.items[0])) |reducer| {
+                        if (self.instructions.get(reducer.root_id)) |root| try list.write(.{ .key = "reduction root opcode", .value = root.opcode });
+                    }
+                }
+            }
+            try self.context.writeAttrs(self.allocator, list, instr);
+            try list.write(.{ .key = "traffic accounting", .value = "Logical payload and ideal-ring estimates for this HLO stage, not measured executable traffic. See optimized collective and sibling diagnostics." });
         }
         if (instr.metadata) |meta| {
             try list.write(.{ .key = "loc", .value = try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ meta.source_file, meta.source_line }) });
@@ -348,7 +380,7 @@ const InstrLabel = struct {
         }
 
         if (std.mem.eql(u8, opcode, "custom-call")) {
-            return try writer.print("custom-call: {s}", .{instr.custom_call_target});
+            return try writer.print("custom-call: {s}", .{if (instr.custom_call_target.len > 0) instr.custom_call_target else instr.name});
         }
 
         if (std.mem.eql(u8, opcode, "copy") or isCollective(opcode)) return writer.writeAll(opcode);
@@ -570,10 +602,10 @@ test "decode HLO and emit Model Explorer graphs" {
     try std.testing.expectEqual(@as(usize, 3), nodes.len);
     try std.testing.expectEqualStrings("Parameter 0", nodes[0].object.get("label").?.string);
     try std.testing.expectEqualStrings("constant({ 2.5e0 }, F32)", nodes[1].object.get("label").?.string);
-    try std.testing.expectEqualStrings("call\"\\\n", nodes[2].object.get("label").?.string);
+    try std.testing.expectEqualStrings("custom-call: call\"\\\n", nodes[2].object.get("label").?.string);
     const attrs = nodes[2].object.get("attrs").?.array.items;
-    try std.testing.expectEqualStrings("a\"\\b.zig:42", attrs[0].object.get("value").?.string);
-    try std.testing.expectEqualStrings("type:op\nname", attrs[1].object.get("value").?.string);
+    try std.testing.expectEqualStrings("a\"\\b.zig:42", attrs[2].object.get("value").?.string);
+    try std.testing.expectEqualStrings("type:op\nname", attrs[3].object.get("value").?.string);
     const edges = nodes[2].object.get("incomingEdges").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), edges.len);
     try std.testing.expectEqualStrings("1", edges[0].object.get("sourceNodeId").?.string);
@@ -641,4 +673,105 @@ fn shardingText(allocator: std.mem.Allocator, sharding: hlo.OpSharding) ![]const
         }
     }
     return std.fmt.allocPrint(allocator, "tiles={any}; replication factor={d}; subgroup types={any}; devices={any}; iota reshape={any}; iota transpose={any}", .{ dims, replication, sharding.last_tile_dims.items, sharding.tile_assignment_devices.items, sharding.iota_reshape_dims.items, sharding.iota_transpose_perm.items });
+}
+
+const ReplicaGroupList = @typeInfo(@FieldType(hlo.HloInstructionProto, "replica_group_list")).optional.child;
+
+fn collectiveGroupsText(allocator: std.mem.Allocator, groups: ReplicaGroupList) ![]const u8 {
+    switch (groups) {
+        .collective_device_list => |list| return std.fmt.allocPrint(allocator, "explicit groups: {any}", .{list.replica_groups.items}),
+        .iota_collective_device_list => |list| return std.fmt.allocPrint(allocator, "{d} groups of {d}; iota reshape={any}, transpose={any}", .{ list.num_replica_groups, list.num_devices_per_group, list.iota_reshape_dims.items, list.iota_transpose_perm.items }),
+        .mesh_axes_replica_group_list => |list| {
+            var text: std.Io.Writer.Allocating = .init(allocator);
+            if (list.mesh) |mesh| {
+                try text.writer.writeAll("mesh[");
+                for (mesh.axes.items, 0..) |axis, i| try text.writer.print("{s}{s}={d}", .{ if (i > 0) ", " else "", axis.name, axis.size });
+                try text.writer.writeAll("]; collective axes[");
+                for (list.axes.items, 0..) |axis, i| {
+                    try text.writer.print("{s}{d}", .{ if (i > 0) ", " else "", axis.mesh_axis_index });
+                    if (axis.sub_axis_info) |sub| try text.writer.print("(pre={d}, size={d})", .{ sub.pre_size, sub.size });
+                }
+                try text.writer.print("]; devices={any}", .{mesh.device_ids.items});
+                if (mesh.device_ids.items.len == 0) try text.writer.writeAll(" (implicit iota order)");
+                if (mesh.iota_transform) |transform| try text.writer.print(" reshape={any}, transpose={any}", .{ transform.reshape_dims.items, transform.transpose_perm.items });
+            } else try text.writer.writeAll("unknown mesh");
+            return text.toOwnedSlice();
+        },
+    }
+}
+
+fn collectiveGroupSize(instr: hlo.HloInstructionProto) ?u64 {
+    if (instr.replica_group_list) |groups| switch (groups) {
+        .collective_device_list => |list| return uniformGroupSize(list.replica_groups.items),
+        .iota_collective_device_list => |list| return if (list.num_devices_per_group > 0) @intCast(list.num_devices_per_group) else null,
+        .mesh_axes_replica_group_list => |list| {
+            const mesh = list.mesh orelse return null;
+            var count: u64 = 1;
+            for (list.axes.items) |axis| {
+                if (axis.mesh_axis_index < 0 or axis.mesh_axis_index >= mesh.axes.items.len) return null;
+                const size = if (axis.sub_axis_info) |sub| sub.size else mesh.axes.items[@intCast(axis.mesh_axis_index)].size;
+                if (size <= 0) return null;
+                count = std.math.mul(u64, count, @intCast(size)) catch return null;
+            }
+            return count;
+        },
+    };
+    return uniformGroupSize(instr.replica_groups.items);
+}
+
+fn uniformGroupSize(groups: []const hlo.ReplicaGroup) ?u64 {
+    if (groups.len == 0 or groups[0].replica_ids.items.len == 0) return null;
+    const size = groups[0].replica_ids.items.len;
+    for (groups) |group| if (group.replica_ids.items.len != size) return null;
+    return size;
+}
+
+fn ringSendBytes(opcode: []const u8, bytes: u64, count: u64) ?u64 {
+    if (count == 0) return null;
+    const product = std.math.mul(u64, bytes, count - 1) catch return null;
+    if (std.mem.eql(u8, opcode, "all-gather")) return product;
+    if (std.mem.eql(u8, opcode, "all-reduce")) {
+        const doubled = std.math.mul(u64, product, 2) catch return null;
+        if (doubled % count != 0) return null;
+        return doubled / count;
+    }
+    return null;
+}
+
+test "logical payloads and ideal ring traffic" {
+    var dims = [_]i64{ 1, 16, 4, 128 };
+    var shape: hlo.ShapeProto = .{ .element_type = .BF16, .dimensions = .{ .items = &dims, .capacity = dims.len } };
+    try std.testing.expectEqual(@as(?u64, 16384), logicalBytes(shape));
+    try std.testing.expectEqual(@as(?u64, 16384), ringSendBytes("all-gather", 16384, 2));
+    try std.testing.expectEqual(@as(?u64, 131072), ringSendBytes("all-reduce", 131072, 2));
+    try std.testing.expectEqual(@as(?u64, 0), ringSendBytes("all-reduce", 131072, 1));
+    try std.testing.expectEqual(@as(?u64, null), ringSendBytes("all-gather", std.math.maxInt(u64), 3));
+    var dynamic = [_]bool{true};
+    shape.is_dynamic_dimension = .{ .items = &dynamic, .capacity = 1 };
+    try std.testing.expectEqual(@as(?u64, null), logicalBytes(shape));
+}
+
+test "explicit partial replication and missing collective groups" {
+    var dims = [_]i64{ 2, 1, 4 };
+    const description = try shardingText(std.testing.allocator, .{ .type = .OTHER, .tile_assignment_dimensions = .{ .items = &dims, .capacity = 3 }, .replicate_on_last_tile_dim = true });
+    defer std.testing.allocator.free(description);
+    try std.testing.expect(std.mem.indexOf(u8, description, "replication factor=4") != null);
+    try std.testing.expectEqual(@as(?u64, null), collectiveGroupSize(.{}));
+}
+
+test "global references match parameter numbers and reject ambiguous provenance" {
+    var candidates = [_]hlo.HloInstructionProto{
+        .{ .name = "arg", .opcode = "parameter", .parameter_number = 3 },
+        .{ .name = "dot.1", .opcode = "dot" },
+        .{ .name = "dot.1", .opcode = "dot" },
+    };
+    const reference: hlo.HloComputationProto = .{ .instructions = .{ .items = &candidates, .capacity = candidates.len } };
+    const converter: Converter = .{ .allocator = std.testing.allocator, .reference = &reference };
+    try std.testing.expect(converter.referenceInstruction(.{ .opcode = "parameter", .parameter_number = 3 }) == &candidates[0]);
+    try std.testing.expect(converter.referenceInstruction(.{ .metadata = .{ .op_name = "dot.1" } }) == null);
+    try std.testing.expect(converter.referenceInstruction(.{ .name = "arg", .opcode = "parameter", .parameter_number = 4 }) == null);
+}
+
+test {
+    _ = dump_context;
 }
