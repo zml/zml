@@ -5,26 +5,49 @@ output projection and sampling together. Prefill and decode each have one XLA
 executable. There is no host-side layer grouping. Greedy sampling is the CLI
 default (`--topk=1`). The final normalization runs once in `LmHead`.
 
-The current Furiosa opt-runtime launch protocol permits 119 address arguments,
-including runtime statics. Packing equally shaped checkpoint weights into 32
-buffers keeps the full BF16 Llama 3.1 8B invocation below that limit. Upload uses
-`BufferedMemoryWriter`; constant slices recover individual weights inside the
-compiled graph. Packing preserves dtype and original partition annotations and
-does not quantize weights. Component tests retain the unpacked loader.
+Weights now use the ordinary loader and remain **291 separate tensors**. The
+packing plan, packed tensor type, concatenation writer and graph-side unpacking
+slices have been removed. `Forward.Input.weights` is `model.Model`, and inference,
+session, component tests and logits all use `model.Buffers` and `loadBuffers`.
+The entire forward pass still compiles together. Argmax remains the default.
 
-## Validation and current limitation
+Furiosa bridge/11 handles address indirection internally when a program exceeds
+119 inline arguments. It supports up to 480 arguments including runtime statics
+on one card. The wrapper reconstructs the task argument array from a device
+address table; it does not concatenate or copy weight payloads. Detailed ABI,
+limits, test evidence and failed experiments are committed in the XLA checkout:
+`xla/stream_executor/furiosa/opt_runtime/INDIRECT_ARGUMENTS.md`.
 
-The packed whole-forward graph passes the unpacked whole-forward CPU reference
-at query length 1, cache length 128 and position 127: exact argmax, existing KV
+## Validation after packing removal
+
+- `//examples/llm`, `//examples/llm:llama_tests` and
+  `//examples/llm:llama_logits` build with Bazel 9.1.1,
+  `--@zml//platforms:furiosa=true --config=debug`.
+- A forced-indirect eight-layer bridge comparison passes at layers 24–31,
+  query length 1, cache length 128 and position 127, checking hidden states, KV
+  updates and untouched cache entries. This is a component validation, not
+  grouped production inference.
+- The bridge's independent PJRT hardware test passes with 150 separate inputs
+  and 150 separate outputs, across changing data and reversed input bindings.
+- The new complete 32-layer forward with 291 separate weight arguments is
+  compiling at this commit. Full-model correctness and throughput are pending.
+  No new rate is claimed. The captured TCL SHA256 is
+  `748a8f3972ffb90bce92db7a331f9064c69cf8419b00b22186d4fcc8384597c8`;
+  the log is `/home/steeve/.local/state/xla-rngd/internals/indirect-args/llama-full.log`.
+
+## Historical packed-weight validation
+
+The removed packed whole-forward graph passed the unpacked CPU reference at
+query length 1, cache length 128 and position 127: exact argmax, existing KV
 tolerances (absolute 0.03, relative 0.02, all elements), and exact preservation
-of untouched cache entries. CPU reference and actual weights are loaded and
-released sequentially to bound host memory.
+of untouched cache entries. CPU reference and actual weights were loaded and
+released sequentially to bound host memory; that sequencing remains in the
+comparison harness.
 
-The corresponding RNGD executable compiles and runs, but **does not pass the
-CPU comparison**: it returns token 323 where the CPU returns 311. The test exits
-with an error; no tolerance was relaxed. Full-prefill compilation and normal
-prompt generation with the new architecture remain unverified. These results
-do not establish correct full-model inference on RNGD.
+The packed RNGD executable compiled and ran but **failed the CPU comparison**:
+it returned token 323 where CPU returned 311. No tolerance was relaxed. The
+following measurements describe that removed implementation. Neither they nor
+the successful component tests establish correct current full-model inference.
 
 ## Provisional decode benchmark, 2026-09-25
 
@@ -41,6 +64,7 @@ not terminate these fixed-length trials. Compilation, uploads, prefill,
 tokenization and terminal rendering are excluded. This is a decode benchmark,
 not a validated chat-generation rate; the correctness failure above remains.
 
+The same benchmark command now exercises separate weights and requires bridge/11.
 After sourcing the SDK environment and setting `XLA_FURIOSA_PJRT_LIBRARY` and
 `XLA_FURIOSA_COMPILER_CACHE` as usual:
 
@@ -52,8 +76,8 @@ bazel-bin/examples/llm/llama_tests \
   --token-offset=127 --benchmark-iterations=100
 ```
 
-The command logs throughput before performing the correctness comparison and
-currently exits nonzero. Evidence is retained locally in
+The command logs throughput before performing the correctness comparison.
+The historical packed run exited nonzero; the new result is pending. Evidence is retained locally in
 `/home/steeve/.local/state/xla-rngd/internals/full-forward/decode-benchmark.log`.
 The successful CPU-only check is `packing-cpu-sequential.log` in that directory.
 

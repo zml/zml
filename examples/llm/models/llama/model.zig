@@ -5,7 +5,6 @@ const stdx = zml.stdx;
 
 const common = @import("../common.zig");
 const inference = @import("inference.zig");
-const weight_packing = @import("packed_weights.zig");
 
 const log = std.log.scoped(.llama);
 
@@ -43,7 +42,6 @@ const Options = struct {
 
 pub const LoadedModel = struct {
     inner: Model,
-    packing: weight_packing.Plan,
     parsed_config: std.json.Parsed(Config),
 
     pub fn init(
@@ -64,17 +62,13 @@ pub const LoadedModel = struct {
             .max_seq_len = parsed_config.value.max_position_embeddings,
         };
 
-        var inner = try Model.init(allocator, store, parsed_config.value, options);
-        errdefer inner.deinit(allocator);
         return .{
-            .inner = inner,
-            .packing = try .init(allocator, inner),
+            .inner = try Model.init(allocator, store, parsed_config.value, options),
             .parsed_config = parsed_config,
         };
     }
 
     pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
-        self.packing.deinit();
         self.inner.deinit(allocator);
         self.parsed_config.deinit();
     }
@@ -87,30 +81,12 @@ pub const LoadedModel = struct {
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
         shardings: common.Shardings,
-    ) !weight_packing.Buffers {
-        return self.packing.load(allocator, io, platform, store, progress, &shardings.all());
-    }
-
-    pub fn unloadBuffers(_: *const LoadedModel, buffers: *weight_packing.Buffers, allocator: std.mem.Allocator) void {
-        weight_packing.Plan.unload(buffers, allocator);
-    }
-
-    // Component tests retain the checkpoint's individual weight buffers as an
-    // independent reference for the packed whole-model inference path.
-    pub fn loadUnpackedBuffers(
-        self: *const LoadedModel,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *zml.io.TensorStore,
-        progress: *std.Progress.Node,
-        shardings: common.Shardings,
     ) !Buffers {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
 
         var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
-        errdefer self.unloadUnpackedBuffers(&buffers, allocator);
+        errdefer self.unloadBuffers(&buffers, allocator);
 
         var loader: zml.io.Loader = try .init(allocator, platform, .{
             .dma_chunks = 32,
@@ -131,7 +107,7 @@ pub const LoadedModel = struct {
         return buffers;
     }
 
-    pub fn unloadUnpackedBuffers(_: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
+    pub fn unloadBuffers(_: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         if (buffers.lm_head) |*lm_head| Projection.unloadBuffers(lm_head);
         Llama.unloadBuffers(&buffers.model, allocator);
     }
