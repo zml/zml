@@ -142,9 +142,7 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
     };
 }
 
-pub fn quantizeMxfp4(x: Tensor, axis: anytype, dtype: DataType, scale_dtype: DataType) QuantizedInput {
-    stdx.debug.assert(dtype == .f4e2m1, "expected E2M1 FP4 dtype, got {s}", .{@tagName(dtype)});
-    stdx.debug.assert(scale_dtype == .f8e8m0, "expected E8M0 scale dtype, got {s}", .{@tagName(scale_dtype)});
+pub fn quantizeMxfp4(x: Tensor, axis: anytype) QuantizedInput {
     stdx.debug.assert(@mod(x.dim(axis), mx_block_size) == 0, "MXFP4 activation width must be divisible by {}, got {f}", .{ mx_block_size, x.shape() });
 
     const grouped = x.convert(.f32).splitAxis(axis, .{ .mx_ks = -1, .mx_block = mx_block_size });
@@ -154,16 +152,24 @@ pub fn quantizeMxfp4(x: Tensor, axis: anytype, dtype: DataType, scale_dtype: Dat
     return .{
         .values = grouped.div(scales.broad(grouped.shape()))
             .clamp(.scalar(-6, .f32), .scalar(6, .f32))
-            .convert(dtype)
-            .reshape(x.shape().withDtype(dtype)),
-        .scales = scales.reshape(x.shape().setDim(axis, @divExact(x.dim(axis), mx_block_size)).withDtype(.f32)).convert(scale_dtype),
+            .convert(.f4e2m1)
+            .reshape(x.shape().withDtype(.f4e2m1)),
+        .scales = scales.reshape(x.shape().setDim(axis, @divExact(x.dim(axis), mx_block_size)).withDtype(.f32)).convert(.f8e8m0),
         .global_scale = null,
     };
 }
 
-pub fn quantizeMxfp8(x: Tensor, axis: anytype, dtype: DataType, scale_dtype: DataType) QuantizedInput {
-    stdx.debug.assert(scale_dtype == .f8e8m0, "expected E8M0 scale dtype, got {s}", .{@tagName(scale_dtype)});
-    return quantizeBlockFp8(x, axis, mx_block_size, dtype, scale_dtype);
+pub fn quantizeMxfp8(x: Tensor, axis: anytype, platform: *const Platform) QuantizedInput {
+    const dtype: DataType = switch (platform.target) {
+        .cuda => .f8e4m3fn,
+        .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
+            .cdna4, .rdna4 => .f8e4m3fn,
+            .cdna3 => .f8e4m3fnuz,
+            .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => return null,
+        } else return null,
+        else => return null,
+    };
+    return quantizeBlockFp8(x, axis, mx_block_size, dtype, .f8e8m0);
 }
 
 fn ceilPowerOfTwo(raw_scale: Tensor) Tensor {
