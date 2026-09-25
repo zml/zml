@@ -17,7 +17,7 @@ const Args = struct {
     model: []const u8,
     prompt: ?[]const u8 = null,
     seqlen: u32 = 2048,
-    topk: u32 = 4,
+    topk: u32 = 1,
     backend: ?zml.attention.Backend = null,
     attnd_ip: ?[]const u8 = null,
     profile: bool = false,
@@ -31,7 +31,7 @@ const Args = struct {
         \\   --model=<path>      Path to the model repository (required)
         \\   --prompt=<string>   Prompt to use for generation (default: none)
         \\   --seqlen=<number>   Sequence length (default: 2048)
-        \\   --topk=<number>     Top-k sampling cutoff (default: 4)
+        \\   --topk=<number>     Top-k sampling cutoff (default: 1)
         \\   --backend=<text>    Attention backend to use ([vanilla, attnd, nki, cuda_fa2, cuda_fa3], default: auto-selection)
         \\   --attnd-ip=<addr>   Register and prefer the `attnd` backend at the provided `IP:PORT`
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
