@@ -184,9 +184,9 @@ pub const Tokenizer = union(Tokenizers) {
         };
     }
 
-    pub fn tokenText(self: *const Tokenizer, token_id: u32) ?[]const u8 {
+    pub fn decode(self: *const Tokenizer, token_id: u32) ?[]const u8 {
         return switch (self.*) {
-            inline else => |v| v.tokenText(token_id),
+            inline else => |v| v.decode(token_id),
         };
     }
 };

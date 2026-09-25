@@ -149,7 +149,7 @@ pub const Tokenizer = struct {
         return if (id < 0) null else @intCast(id);
     }
 
-    pub fn tokenText(self: *const Tokenizer, token_id: u32) ?[]const u8 {
+    pub fn decode(self: *const Tokenizer, token_id: u32) ?[]const u8 {
         const vocab = c.iree_tokenizer_vocab(self.inner);
         if (vocab == null) return null;
 
