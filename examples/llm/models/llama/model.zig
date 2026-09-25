@@ -21,6 +21,7 @@ pub const Config = struct {
     rms_norm_eps: f32,
     hf_rope_impl: bool = true,
     tie_word_embeddings: bool = false,
+    zml_weight_storage: ?enum { fp8_e4m3fn_pow2_channel } = null,
     rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
 
     pub const EosTokens = union(enum) {
@@ -52,6 +53,9 @@ pub const LoadedModel = struct {
     ) !LoadedModel {
         const parsed_config = try common.parseConfig(Config, allocator, io, repo);
         errdefer parsed_config.deinit();
+        if (parsed_config.value.zml_weight_storage != null) {
+            log.info("FP8 transformer weight storage; activations, embeddings and output head remain BF16", .{});
+        }
 
         const options: Options = .{
             .sampling_strategy = generation.sampling_strategy,
@@ -104,7 +108,7 @@ pub const LoadedModel = struct {
     }
 
     pub fn unloadBuffers(_: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        if (buffers.lm_head) |*lm_head| zml.nn.Linear.unloadBuffers(lm_head);
+        if (buffers.lm_head) |*lm_head| Projection.unloadBuffers(lm_head);
         Llama.unloadBuffers(&buffers.model, allocator);
     }
 
@@ -129,7 +133,7 @@ pub const Buffers = zml.Bufferized(Model);
 /// Llama architecture, using huggingface transformers naming.
 /// Dimensions of activations: {.b, .s, .d}
 pub const Model = struct {
-    lm_head: ?zml.nn.Linear,
+    lm_head: ?Projection,
     model: Llama,
 
     gen_opts: zml.nn.SamplingStrategy = .{},
@@ -141,14 +145,7 @@ pub const Model = struct {
         config: Config,
         options: Options,
     ) !Model {
-        const lm_head: ?zml.nn.Linear = if (store.withPrefix("lm_head").maybeCreateTensor(
-            "weight",
-            .{ .dout, .d },
-            .{ .dout = .model, .d = .replicated },
-        )) |weight|
-            .init(weight, null, .d)
-        else
-            null;
+        const lm_head = Projection.maybeInit(store.withPrefix("lm_head"), .{ .dout = .model, .d = .replicated });
 
         return .{
             .lm_head = lm_head,
@@ -196,7 +193,7 @@ pub const Model = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
-        if (self.lm_head) |*lm_head| zml.nn.Linear.unloadBuffers(lm_head);
+        if (self.lm_head) |*lm_head| Projection.unloadBuffers(lm_head);
         Llama.unloadBuffers(&self.model, allocator);
     }
 
@@ -334,7 +331,7 @@ pub const EmbedTokens = struct {
 };
 
 pub const LmHead = struct {
-    lm_head: ?zml.nn.Linear,
+    lm_head: ?Projection,
     embed_tokens: zml.nn.TokenEmbedding,
     norm: RmsNorm,
     gen_opts: zml.nn.SamplingStrategy,
@@ -367,7 +364,7 @@ pub const LmHead = struct {
 
         var logits = blk: {
             if (self.lm_head) |lm_head| {
-                break :blk lm_head.forward(hidden, hidden.dtype()).rename(.{ .dout = .d });
+                break :blk lm_head.forward(hidden).rename(.{ .dout = .d });
             } else {
                 break :blk self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(hidden, .d);
             }
@@ -477,16 +474,45 @@ const RmsNorm = struct {
     }
 };
 
+/// Optional per-output-channel scales for FP8 checkpoint weights. Activations,
+/// dot results and the rest of the model retain their existing dtype.
+const Projection = struct {
+    linear: zml.nn.Linear,
+    weight_scale: ?zml.Tensor = null,
+
+    fn maybeInit(store: zml.io.TensorStore.View, partitioning: anytype) ?Projection {
+        const weight = store.maybeCreateTensor("weight", .{ .dout, .d }, partitioning) orelse return null;
+        const scale = store.maybeCreateTensor("weight_scale", .{.dout}, .{ .dout = .model });
+        if (scale) |value| {
+            stdx.debug.assert(weight.dtype() == .f8e4m3fn and value.dtype() == .f32 and value.dim(.dout) == weight.dim(.dout), "Expected E4M3FN weights with an F32 scale per output channel", .{});
+        }
+        return .{ .linear = .init(weight, null, .d), .weight_scale = scale };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Projection)) void {
+        zml.Buffer.deinitAll(Projection, self);
+    }
+
+    pub fn forward(self: Projection, input: zml.Tensor) zml.Tensor {
+        const dtype = input.dtype();
+        const result = self.linear.forward(input, dtype);
+        const scale = self.weight_scale orelse return result;
+        // The conversion utility uses power-of-two scales, so scaling the BF16
+        // result does not add rounding except at the dtype's range boundaries.
+        return result.convert(.f32).mul(scale.broad(result.shape().withDtype(.f32))).convert(dtype);
+    }
+};
+
 const Mlp = struct {
-    up_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    down_proj: zml.nn.Linear, // (hidden_dim -> dim)
+    up_proj: Projection, // (dim -> hidden_dim)
+    gate_proj: Projection, // (dim -> hidden_dim)
+    down_proj: Projection, // (hidden_dim -> dim)
 
     pub fn init(store: zml.io.TensorStore.View) Mlp {
         return .{
-            .up_proj = .init(store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .gate_proj = .init(store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .down_proj = .init(store.createTensor("down_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
+            .up_proj = Projection.maybeInit(store.withPrefix("up_proj"), .{ .dout = .model }).?,
+            .gate_proj = Projection.maybeInit(store.withPrefix("gate_proj"), .{ .dout = .model }).?,
+            .down_proj = Projection.maybeInit(store.withPrefix("down_proj"), .{ .d = .model }).?,
         };
     }
 
@@ -495,22 +521,22 @@ const Mlp = struct {
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        const proj = self.up_proj.forward(x, x.dtype());
-        var output = self.gate_proj.forward(x, x.dtype());
+        const proj = self.up_proj.forward(x);
+        var output = self.gate_proj.forward(x);
         output = output.silu().mul(proj).rename(.{ .dout = .d });
-        return self.down_proj.forward(output, output.dtype());
+        return self.down_proj.forward(output);
     }
 };
 
 const SelfAttn = struct {
-    q_proj: zml.nn.Linear,
-    k_proj: zml.nn.Linear,
-    v_proj: zml.nn.Linear,
+    q_proj: Projection,
+    k_proj: Projection,
+    v_proj: Projection,
 
     q_norm: ?RmsNorm,
     k_norm: ?RmsNorm,
 
-    o_proj: zml.nn.Linear,
+    o_proj: Projection,
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,
@@ -519,10 +545,10 @@ const SelfAttn = struct {
         var rope_scaling = config.rope_scaling;
         rope_scaling.setRopeTheta(config.rope_theta);
         return .{
-            .q_proj = .init(store.createTensor("q_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .k_proj = .init(store.createTensor("k_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .v_proj = .init(store.createTensor("v_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .o_proj = .init(store.createTensor("o_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
+            .q_proj = Projection.maybeInit(store.withPrefix("q_proj"), .{ .dout = .model }).?,
+            .k_proj = Projection.maybeInit(store.withPrefix("k_proj"), .{ .dout = .model }).?,
+            .v_proj = Projection.maybeInit(store.withPrefix("v_proj"), .{ .dout = .model }).?,
+            .o_proj = Projection.maybeInit(store.withPrefix("o_proj"), .{ .d = .model }).?,
             // TODO(Corentin): fix that
             .q_norm = null,
             .k_norm = null,
@@ -561,9 +587,9 @@ const SelfAttn = struct {
         // This avoids paying gather-style collectives independently for each projection.
         const x_qkv = x.withPartitioning(.{ .d = .replicated });
 
-        var q = self.q_proj.forward(x_qkv, x_qkv.dtype()).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
-        var k = self.k_proj.forward(x_qkv, x_qkv.dtype()).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
-        var v = self.v_proj.forward(x_qkv, x_qkv.dtype()).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
+        var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
+        var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
+        var v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
 
         // In self-attention, .s axis is used both for keys and queries.
         const pos_index = b: {
@@ -613,7 +639,7 @@ const SelfAttn = struct {
         );
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        const delta = self.o_proj.forward(attn, attn.dtype())
+        const delta = self.o_proj.forward(attn)
             .rename(.{ .dout = .d })
             .withPartitioning(.{ .d = .replicated });
         return .{ delta, new_kv_cache };

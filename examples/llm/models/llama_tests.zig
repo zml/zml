@@ -237,7 +237,7 @@ fn compareLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
             if (Layer == model.LmHead) {
                 const hidden = l.norm.forward(x);
                 const logits = if (l.lm_head) |linear|
-                    linear.forward(hidden, hidden.dtype()).rename(.{ .dout = .voc })
+                    linear.forward(hidden).rename(.{ .dout = .voc })
                 else
                     l.embed_tokens.weight.withTags(.{ .voc, .d }).dot(hidden, .d);
                 return logits.argMax(.voc).indices.squeeze(.voc);
