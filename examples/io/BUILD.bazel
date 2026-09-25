@@ -1,5 +1,5 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
 
 zig_binary(
     name = "playground",
@@ -7,4 +7,35 @@ zig_binary(
     data = [],
     main = "main.zig",
     deps = ["//zml"],
+)
+
+zig_library(
+    name = "tensor_tree",
+    main = "tensor_tree.zig",
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "safetensor-explorer",
+    srcs = ["tensor_tree.zig"],
+    main = "safetensor_explorer.zig",
+    deps = [
+        "//zml",
+        "@libvaxis//:vaxis",
+    ],
+)
+
+zig_test(
+    name = "tensor_tree_test",
+    deps = [":tensor_tree"],
+)
+
+zig_test(
+    name = "safetensor_explorer_test",
+    srcs = ["tensor_tree.zig"],
+    main = "safetensor_explorer.zig",
+    deps = [
+        "//zml",
+        "@libvaxis//:vaxis",
+    ],
 )
