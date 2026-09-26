@@ -45,6 +45,16 @@ Logs are retained at
 `/home/steeve/.local/state/xla-rngd/furiosa2/zml/{cold,warm-1,warm-2,warm-3}.log`
 and copied into the companion XLA backend's experiments directory.
 
+With the subsequent BF16 lowering and bridge/13, the same benchmark also
+accepts `--dtype=bf16`. Its finite-input reference rounds the addition to BF16
+using round-to-nearest-even before negating; it checks output bits after timing.
+For `--size=14336 --dtype=bf16 --iterations=1000`, three warmed invocations
+measured 51.711, 49.040 and 59.449 us per execution, with 94.327–99.850 ms cached
+compilation/load. Each selected furiosa2 and passed correctness checks with the
+TCL compiler path disabled. These are microbenchmark latencies, not Llama tok/s.
+The companion XLA `2026-09-26-bf16` experiment retains the logs and SDK layout
+failures found while extending the emitter.
+
 ## Llama status
 
 The existing one-XLA-executable forward pass, vanilla attention, argmax sampling,
@@ -61,7 +71,11 @@ Model/tokenizer selection succeeded and the whole prefill forward reached the
 new compiler. It stopped with `FURIOSA2 requires an F32 array result`, because
 the initial vISA emitter only handles a small F32 elementwise subset. BF16,
 multi-output units, contractions, reductions, indexing, and native memory helpers
-remain backend work. **Llama does not generate tokens on furiosa2 yet; these
+were still backend work at that point. BF16 elementwise arithmetic, conversions,
+tuple outputs and native memory helpers now pass hardware tests. The latest
+Llama attempt stops at the embedding unit's `u32[128]` token indices; gather,
+RMSNorm reduction/broadcast and contraction lowering remain unfinished.
+**Llama does not generate tokens on furiosa2 yet; these
 microbenchmark numbers are not tok/s measurements.**
 
 ## Validation
