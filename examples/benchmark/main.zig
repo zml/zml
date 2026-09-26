@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
 
     const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);
     if (cli_args.iterations == 0) return error.InvalidIterations;
-    if (cli_args.operation == .add_negate and cli_args.dtype != .f32) return error.AddNegateRequiresF32;
+    if (cli_args.operation == .add_negate and cli_args.dtype != .f32 and cli_args.dtype != .bf16) return error.AddNegateRequiresF32OrBF16;
 
     const a_shape = switch (cli_args.operation) {
         .matmul => zml.Shape.init(.{ .m = cli_args.size, .k = cli_args.size }, cli_args.dtype)
@@ -115,8 +115,21 @@ pub fn main(init: std.process.Init) !void {
         defer rhs.free(allocator);
         const actual = try result.?.toSliceAlloc(allocator, io);
         defer actual.free(allocator);
-        for (lhs.items(f32), rhs.items(f32), actual.items(f32)) |a_value, b_value, value| {
-            if (value != -(a_value + b_value)) return error.IncorrectAddNegate;
+        switch (cli_args.dtype) {
+            .f32 => for (lhs.items(f32), rhs.items(f32), actual.items(f32)) |a_value, b_value, value| {
+                if (value != -(a_value + b_value)) return error.IncorrectAddNegate;
+            },
+            .bf16 => {
+                const BFloat16 = zml.floats.BFloat16;
+                for (lhs.items(BFloat16), rhs.items(BFloat16), actual.items(BFloat16)) |a_value, b_value, value| {
+                    // These finite inputs require round-to-nearest-even at
+                    // the BF16 addition, followed by a sign-bit flip.
+                    const bits: u32 = @bitCast(a_value.toF32() + b_value.toF32());
+                    const rounded: u16 = @intCast((bits + 0x7fff + ((bits >> 16) & 1)) >> 16);
+                    if (@as(u16, @bitCast(value)) != rounded ^ 0x8000) return error.IncorrectAddNegate;
+                }
+            },
+            else => unreachable,
         }
         log.info("Verified every add/negate result against host inputs", .{});
     }
