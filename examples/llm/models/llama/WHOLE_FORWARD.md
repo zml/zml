@@ -202,3 +202,21 @@ full-prefill SDK compile currently uses about 52 GiB, so a CPU full-model
 reference must wait to avoid overlapping their memory demands. The diagnostic
 build ran during prefill compilation, not during any throughput measurement.
 The idle Bazel server was shut down after the build to release memory.
+
+
+## BF16 bandwidth estimate
+
+Furiosa's official RNGD specification lists 1.5 TB/s HBM3 bandwidth:
+https://developer.furiosa.ai/latest/en/overview/rngd.html (checked 2026-09-26).
+Checkpoint safetensors headers give 13,958,643,712 bytes for transformer
+projection weights, 1,050,673,152 bytes for the output head and 532,480 bytes for
+normalizations. Reading these once per token totals 15,009,849,344 bytes.
+At the advertised bandwidth this alone takes 10.0066 ms, or 99.9344 tok/s.
+The 62.34 tok/s measurement corresponds to 935.714 logical weight GB/s.
+
+This is an analytical estimate, **not measured HBM traffic or utilization**.
+It excludes embedding lookup, KV/activation/scratch transfers and any retained
+on-chip weights; it assumes ordinary single-token dense inference without
+compression. Thus roughly 100 tok/s on the original BF16 checkpoint is near the
+ideal weight-read limit. This does not change the target or authorize switching
+precision. Evidence is `testdata/bf16-bandwidth-estimate.json`.
