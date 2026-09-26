@@ -428,6 +428,11 @@ fn compareLayerwise(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Pla
             try dumpLayerBuffer(allocator, io, directory, layer, "reference-hidden", reference.hidden);
             try dumpLayerBuffer(allocator, io, directory, layer, "local-hidden", local.hidden);
             try dumpLayerBuffer(allocator, io, directory, layer, "propagated-hidden", propagated.hidden);
+            inline for (.{ "k", "v" }) |field| {
+                try dumpLayerBuffer(allocator, io, directory, layer, "reference-" ++ field, @field(reference.kv_cache, field));
+                try dumpLayerBuffer(allocator, io, directory, layer, "local-" ++ field, @field(local.kv_cache, field));
+                try dumpLayerBuffer(allocator, io, directory, layer, "propagated-" ++ field, @field(propagated.kv_cache, field));
+            }
         }
         const next_reference = try reference.hidden.toSliceAlloc(allocator, io);
         defer next_reference.free(allocator);
@@ -521,6 +526,11 @@ fn compareStages(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfo
         results[index] = .{ .stages = stages, .rms = rms, .kv_cache = cache };
         done += 1;
         if (dump_dir) |directory| {
+            inline for (.{ "k", "v" }) |field| {
+                const name = try std.fmt.allocPrint(allocator, "{s}-stage-{s}", .{ if (index == 0) "cpu" else "device", field });
+                defer allocator.free(name);
+                try dumpLayerBuffer(allocator, io, directory, layer, name, @field(cache, field));
+            }
             for (stages, 0..) |stage, stage_index| {
                 const name = try std.fmt.allocPrint(allocator, "{s}-stage-{}", .{ if (index == 0) "cpu" else "device", stage_index });
                 defer allocator.free(name);
