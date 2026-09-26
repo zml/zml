@@ -356,7 +356,14 @@ const ReferenceForward = struct {
         rng: zml.Tensor.Rng,
     };
 
-    fn forward(input: Input) inference.Forward.Output {
+    const Output = struct {
+        tokens: zml.Tensor,
+        kv_cache: model.KvCache,
+        rng: zml.Tensor.Rng,
+        logits: zml.Tensor,
+    };
+
+    fn forward(input: Input) Output {
         const embedded = model.EmbedTokens.forward(.{
             .embedding = .{ .embed_tokens = input.weights.model.embed_tokens },
             .tokens = input.tokens,
@@ -370,13 +377,19 @@ const ReferenceForward = struct {
             .attention_metadata = .vanilla,
             .attention_parameters = .vanilla,
         });
-        const sampled = model.LmHead.forward(.{
-            .lm_head = model.LmHead.init(input.weights),
-            .hidden = transformed.hidden,
-            .tokens = input.tokens,
-            .rng = input.rng,
-        });
-        return .{ .tokens = sampled.tokens, .kv_cache = transformed.kv_cache, .rng = sampled.rng };
+        const head = model.LmHead.init(input.weights);
+        const hidden = head.norm.forward(transformed.hidden.withPartialTags(.{ .s, .d }));
+        const logits = if (head.lm_head) |projection|
+            projection.forward(hidden).rename(.{ .dout = .voc })
+        else
+            head.embed_tokens.weight.withTags(.{ .voc, .d }).dot(hidden, .d);
+        const next_tokens, const next_rng = zml.nn.sampleTokens(logits, head.gen_opts, input.rng);
+        return .{
+            .tokens = next_tokens.convert(input.tokens.dtype()).reuseBuffer(input.tokens),
+            .kv_cache = transformed.kv_cache,
+            .rng = next_rng,
+            .logits = logits.transpose(.{ .s, .voc }),
+        };
     }
 };
 
@@ -408,6 +421,9 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
     for (token_data, 0..) |*token, i| token.* = @intCast(1000 + i);
 
     var outputs: [2]zml.Bufferized(inference.Forward.Output) = undefined;
+    var reference_logits: zml.Buffer = undefined;
+    var have_reference_logits = false;
+    defer if (have_reference_logits) reference_logits.deinit();
     var done: usize = 0;
     defer for (outputs[0..done]) |*out| {
         out.tokens.deinit();
@@ -431,7 +447,8 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
             defer mdl.unloadBuffers(&reference_weights, allocator);
             var runner = try zml.FnExe(ReferenceForward.forward).Runner(.{.weights}).init(&reference_exe, allocator, .{ .weights = reference_weights });
             defer runner.deinit(allocator);
-            runner.run(io, .{ .inputs = .{ .tokens = token_buffer, .token_index = pos, .kv_cache = cache, .rng = rng_buffer }, .outputs = .{ .tokens = &token_buffer, .kv_cache = &cache, .rng = &rng_buffer } });
+            runner.run(io, .{ .inputs = .{ .tokens = token_buffer, .token_index = pos, .kv_cache = cache, .rng = rng_buffer }, .outputs = .{ .tokens = &token_buffer, .kv_cache = &cache, .rng = &rng_buffer, .logits = &reference_logits } });
+            have_reference_logits = true;
         } else {
             var actual_weights = try mdl.loadBuffers(allocator, io, platform, store, progress, shardings);
             defer mdl.unloadBuffers(&actual_weights, allocator);
@@ -443,7 +460,25 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
         outputs[i] = .{ .tokens = token_buffer, .kv_cache = cache, .rng = rng_buffer };
         done += 1;
     }
-    if (args.seqlen == 1) std.log.info("Whole-forward argmax: device={}, CPU={}", .{ try outputs[1].tokens.getValue(u32, io), try outputs[0].tokens.getValue(u32, io) });
+    if (args.seqlen == 1) {
+        const actual_token = try outputs[1].tokens.getValue(u32, io);
+        const expected_token = try outputs[0].tokens.getValue(u32, io);
+        std.log.info("Whole-forward argmax: device={}, CPU={}", .{ actual_token, expected_token });
+        const logits = try reference_logits.toSliceAlloc(allocator, io);
+        defer logits.free(allocator);
+        const values = logits.items(u16);
+        if (actual_token >= values.len or expected_token >= values.len) return error.InvalidToken;
+        const actual_score: f32 = @bitCast(@as(u32, values[actual_token]) << 16);
+        const expected_score: f32 = @bitCast(@as(u32, values[expected_token]) << 16);
+        var higher: usize = 0;
+        var tied: usize = 0;
+        for (values) |bits| {
+            const score: f32 = @bitCast(@as(u32, bits) << 16);
+            if (score > actual_score) higher += 1;
+            if (score == actual_score) tied += 1;
+        }
+        std.log.info("CPU logits: expected token score={}, device token score={}, gap={}, scores_above_device={}, scores_tied_with_device={}", .{ expected_score, actual_score, expected_score - actual_score, higher, tied });
+    }
     var comparison_failed = false;
     zml.testing.expectClose(io, outputs[1].tokens, outputs[0].tokens, .exact_match) catch |err| switch (err) {
         error.TestUnexpectedResult => comparison_failed = true,
