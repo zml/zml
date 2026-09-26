@@ -69,10 +69,12 @@ pub const CompilationOptions = CompilationParameters;
 pub const Args = struct {
     io: std.Io,
     tokens_buf: *zml.Buffer,
+    tokens_output_buf: ?*zml.Buffer = null,
     token_index_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
     attention_metadata_buffers: *const zml.Bufferized(zml.attention.Metadata),
+    last_token_index_buf: ?*const zml.Buffer = null,
 };
 
 pub const CompiledModel = struct {
@@ -118,6 +120,7 @@ pub const Forward = struct {
         rng: zml.Tensor.Rng,
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
+        last_token_index: ?zml.Tensor = null,
     };
 
     pub const Output = struct {
@@ -127,6 +130,23 @@ pub const Forward = struct {
     };
 
     pub fn forward(input: Input) Output {
+        if (input.last_token_index) |last_token_index| {
+            const hidden, const kv_cache = input.weights.model.forward(
+                input.tokens,
+                input.token_index,
+                input.kv_cache,
+                input.attention_metadata,
+                input.attention_parameters,
+            );
+            const sample = model.LmHead.forward(.{
+                .lm_head = .init(input.weights),
+                .hidden = hidden,
+                .tokens = input.tokens,
+                .rng = input.rng,
+                .last_token_index = last_token_index,
+            });
+            return .{ .tokens = sample.tokens, .kv_cache = kv_cache, .rng = sample.rng };
+        }
         const tokens, const kv_cache, const rng = input.weights.forward(
             input.tokens,
             input.token_index,
@@ -161,9 +181,10 @@ pub fn run(runner: *KernelRunner, args: Args) void {
             .kv_cache = args.kv_cache_buffers.*,
             .rng = args.rng_buffers.*,
             .attention_metadata = args.attention_metadata_buffers.*,
+            .last_token_index = if (args.last_token_index_buf) |buffer| buffer.* else null,
         },
         .outputs = .{
-            .tokens = args.tokens_buf,
+            .tokens = args.tokens_output_buf orelse args.tokens_buf,
             .kv_cache = args.kv_cache_buffers,
             .rng = args.rng_buffers,
         },
@@ -198,5 +219,6 @@ fn compileKernel(
         .rng = parameters.rng,
         .attention_metadata = parameters.attention_metadata,
         .attention_parameters = attention_parameters,
+        .last_token_index = if (phase.isPrefill()) zml.Tensor.init(.{}, .u32) else null,
     }});
 }

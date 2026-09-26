@@ -5,6 +5,12 @@ output projection and sampling together. Prefill and decode each have one XLA
 executable. There is no host-side layer grouping. Greedy sampling is the CLI
 default (`--topk=1`). The final normalization runs once in `LmHead`.
 
+Production prefill now selects the final prompt hidden-state row before final
+normalization, vocabulary projection and sampling. Transformer/KV computation
+still covers the complete prefill shape. The selection remains inside the one
+forward executable. CPU session validation passes; RNGD validation of this
+prefill optimization is pending, as detailed below.
+
 Weights now use the ordinary loader and remain **291 separate tensors**. The
 packing plan, packed tensor type, concatenation writer and graph-side unpacking
 slices have been removed. `Forward.Input.weights` is `model.Model`, and inference,
@@ -329,3 +335,55 @@ their elapsed times are diagnostic runtimes, not inference benchmarks.
 This establishes regression coverage for the session-position fix. Full
 32-layer RNGD generation and the separate full-forward numerical investigation
 remain pending; this small CPU case is not evidence for their completion.
+
+## Project only the final prompt position during prefill
+
+The session previously projected all padded prefill positions to vocabulary
+logits and sampled all positions, then downloaded the predictions and used only
+`prompt_length - 1`. At a 128-token prefill shape this created 128 vocabulary
+rows, although only one prediction is needed to start decoding.
+
+Production prefill now receives an additional scalar `last_token_index`, binds
+the existing position buffer for `prompt_length - 1`, and gathers that hidden
+row before final normalization and the output head. All embedding, transformer,
+KV updates, row selection, head and sampling remain in a single XLA forward
+executable. Weights remain separate and vanilla attention is unchanged. Decode
+retains the existing computation and in-place token-buffer reuse.
+
+Prefill returns a separate one-token buffer. The original prompt buffer is
+retained and explicitly freed; it must not be overwritten by the smaller
+non-donated result. The host reads only the predicted token. Empty or oversized
+prompts are rejected before constructing the input buffer. For stochastic
+sampling, selecting only one row can change RNG advancement; current validation
+and the requested inference configuration use argmax.
+
+The CPU `--session-only` regression keeps an independent full-sequence,
+all-position output head as its reference. In addition to checking five
+generated tokens and all computed KV entries, it now runs production prefill
+for every prefix length 1 through 8 and compares the selected prediction with
+the corresponding full-sequence result. This covers the first, interior and
+last positions of the compiled prefill shape.
+
+Validation commands:
+
+```sh
+bazel-9.1.1 build //examples/llm:llama_tests \
+  --@zml//platforms:furiosa=true --jobs=1 --config=debug
+bazel-bin/examples/llm/llama_tests --platform=cpu \
+  --model=/var/models/meta-llama/Llama-3.1-8B-Instruct \
+  --session-only --layers=1 --seqlen=8
+```
+
+The final build passes (9.030 s); the expanded regression passes in 4.67 s,
+peak RSS 5,782,176 KiB. An initial version passed the original session check
+in 3.00 s; source review then caught the need to retain the non-donated input
+buffer separately before the final regression. All build/run logs and resource
+reports are committed as `testdata/prefill-last-token-*`, including existing
+libunwind warnings. Zig formatting and `git diff --check` pass.
+
+The CLI binary was deliberately not rebuilt during this change: the live
+full-prefill compiler and queued corrected-position baseline generation runs
+continue with their original graph/binary. `llama_tests` contains the new code.
+Full 32-layer RNGD validation, compilation cost and prefill latency for the
+one-row head remain pending. This is an elimination of unused prefill work,
+not a measured improvement to the provisional 62.34 tok/s decode result.

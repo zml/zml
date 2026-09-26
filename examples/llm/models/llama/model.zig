@@ -351,6 +351,7 @@ pub const LmHead = struct {
         hidden: zml.Tensor,
         tokens: zml.Tensor,
         rng: zml.Tensor.Rng,
+        last_token_index: ?zml.Tensor = null,
     };
 
     pub const Output = struct {
@@ -361,7 +362,13 @@ pub const LmHead = struct {
     pub fn forward(input: Input) Output {
         const self = input.lm_head;
         const tokens = input.tokens.withPartialTags(.{.s});
-        const hidden = self.norm.forward(input.hidden.withPartialTags(.{ .s, .d }));
+        var hidden = input.hidden.withPartialTags(.{ .s, .d });
+        if (input.last_token_index) |index| {
+            // Prefill needs all transformer positions for KV, but only the
+            // last prompt position needs a vocabulary projection and sampling.
+            hidden = hidden.gather(.{ .s = index }, .{}).reshape(.{ .s = 1, .d = hidden.dim(.d) });
+        }
+        hidden = self.norm.forward(hidden);
 
         var logits = blk: {
             if (self.lm_head) |lm_head| {
@@ -375,7 +382,11 @@ pub const LmHead = struct {
             logits = logits.rename(.{ .d = .voc });
 
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_opts, input.rng);
-        return .{ .tokens = next_tokens.convert(tokens.dtype()).reuseBuffer(tokens), .rng = new_rng };
+        const predicted = next_tokens.convert(tokens.dtype());
+        return .{
+            .tokens = if (input.last_token_index == null) predicted.reuseBuffer(tokens) else predicted,
+            .rng = new_rng,
+        };
     }
 };
 

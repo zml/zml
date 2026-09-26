@@ -152,7 +152,22 @@ fn compareSession(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
     defer zml.Tensor.Rng.deinitBuffer(&reference_rng);
     var metadata = try compiled.params.attention_metadata.initBuffer(io, platform, shardings.model);
     defer zml.attention.Metadata.deinitBuffer(&metadata);
-    var runner = try inference.KernelRunner.init(allocator, &compiled.prefill, &weights);
+    // Keep all position predictions in the independent causal reference;
+    // production prefill projects only its requested final prompt position.
+    const reference_exe = try inference.KernelExe.compile(allocator, io, platform, .{
+        .shardings = &shardings.all(),
+        .program_name = "llama_session_causal_reference",
+    }, .{.{
+        .weights = subset.inner,
+        .tokens = compiled.params.prefill_tokens,
+        .token_index = compiled.params.token_index,
+        .kv_cache = compiled.params.kv_cache,
+        .rng = compiled.params.rng,
+        .attention_metadata = compiled.params.attention_metadata,
+        .attention_parameters = compiled.params.prefill_attention_parameters,
+    }});
+    defer reference_exe.deinit();
+    var runner = try inference.KernelRunner.init(allocator, &reference_exe, &weights);
     defer runner.deinit(allocator);
     inference.run(&runner, .{
         .io = io,
@@ -188,7 +203,11 @@ fn compareSession(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
             }
         }
     }
-    std.log.info("PASS session feedback: {} layers, {} prompt tokens, {} generated tokens; causal tokens and computed KV entries match", .{ args.layers, prompt.len, tokens.items.len - prompt.len });
+    for (1..tokens.items.len + 1) |prefix_len| {
+        try session.runPrefill(tokens.items[0..prefix_len]);
+        try std.testing.expectEqual(expected_tokens.items(u32)[prefix_len - 1], session.last_generated_token);
+    }
+    std.log.info("PASS session feedback: {} layers, {} prompt tokens, {} generated tokens; causal tokens and computed KV entries match; last-token prefill matches all {} prefix lengths", .{ args.layers, prompt.len, tokens.items.len - prompt.len, tokens.items.len });
 }
 
 fn run(
