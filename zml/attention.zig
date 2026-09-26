@@ -31,7 +31,7 @@ pub const Backend = enum {
             },
             .neuron => .nki,
             .metal => .metal_fa,
-            .cpu, .rocm, .tpu, .oneapi, .furiosa => .vanilla,
+            .cpu, .rocm, .tpu, .oneapi, .furiosa, .furiosa2 => .vanilla,
         };
     }
 

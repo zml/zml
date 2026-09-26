@@ -49,7 +49,7 @@ pub const Partitioner = union(enum) {
 
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal, .furiosa => .shardy,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal, .furiosa, .furiosa2 => .shardy,
         };
     }
 };
@@ -714,7 +714,7 @@ pub const PhysicalMesh = struct {
             .tpu => &.{ .link_x, .link_y, .link_z },
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
             .cuda, .rocm => &.{.link},
-            .cpu, .metal, .furiosa => &.{.bus},
+            .cpu, .metal, .furiosa, .furiosa2 => &.{.bus},
             .oneapi => &.{ .link, .bus },
         };
     }
@@ -920,7 +920,7 @@ pub const PhysicalMesh = struct {
             .cuda, .rocm => gpu(allocator, platform_devices),
             .tpu => tpu(allocator, platform_devices),
             .neuron => return neuron(allocator, platform_devices),
-            .oneapi, .metal, .furiosa => cpu(allocator, platform_devices),
+            .oneapi, .metal, .furiosa, .furiosa2 => cpu(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 

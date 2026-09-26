@@ -708,7 +708,7 @@ fn runTransformer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
         .inputs = .{ .hidden = hidden, .token_index = position, .kv_cache = cache, .kv_cache_index = layer_index, .attention_metadata = .vanilla },
         .outputs = .{ .hidden = &hidden, .kv_cache = &cache },
     });
-    if (platform.target == .furiosa) previous_hidden.deinit();
+    if (platform.target == .furiosa or platform.target == .furiosa2) previous_hidden.deinit();
     // Check untouched cache storage exactly, independently of the floating
     // tolerance used for newly computed keys and values.
     const query_length: usize = @intCast(shape.dim(.s));

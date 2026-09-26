@@ -1,0 +1,14 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "furiosa2",
+    import_name = "platforms/furiosa2",
+    main = "furiosa2.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+        "//platforms:options",
+        "//platforms/furiosa",
+    ],
+)
