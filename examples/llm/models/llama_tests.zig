@@ -17,6 +17,8 @@ const Args = struct {
     activations: ?[]const u8 = null,
     compare_cpu: bool = false,
     transformer_only: bool = false,
+    layerwise: bool = false,
+    layerwise_stages: bool = false,
     head_only: bool = false,
     forward_only: bool = false,
     session_only: bool = false,
@@ -38,6 +40,8 @@ const Args = struct {
         \\   --activations=<path>      Path to activation safetensors
         \\   --compare-cpu             Compare actual model layers against CPU
         \\   --transformer-only        Skip individual components with --compare-cpu
+        \\   --layerwise               Diagnose per-layer and accumulated errors from token 1000
+        \\   --layerwise-stages        Also expose attention/MLP stages with --layerwise
         \\   --platform=<name>         Explicit test platform (default: auto)
         \\   --session-only            Check the CPU session feedback loop against a causal full-sequence forward
         \\   --forward-only            Compare the complete forward with an independent CPU reference
@@ -58,6 +62,8 @@ pub fn main(init: std.process.Init) !void {
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
 
     if ((args.transformer_only or args.head_only or args.forward_only) and !args.compare_cpu) return error.RequiresCompareCpu;
+    if (args.layerwise and (!args.compare_cpu or args.forward_only or args.head_only or args.session_only or args.first_layer != 0 or args.seqlen != 1)) return error.InvalidLayerwiseOptions;
+    if (args.layerwise_stages and !args.layerwise) return error.InvalidLayerwiseOptions;
     if (!args.compare_cpu and !args.session_only and args.activations == null) return error.MissingActivations;
 
     if (args.seqlen == 0 or (args.transformer_only and args.head_only)) return error.InvalidComparisonOptions;
@@ -305,6 +311,7 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *cons
 }
 
 fn compareCpu(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: model.Model, actual: *model.Buffers, expected: *model.Buffers, args: Args) !void {
+    if (args.layerwise) return compareLayerwise(allocator, io, platform, cpu, mdl, actual, expected, args);
     const token_ids = [_]u32{ 128000, 3923, 374, 279, 6864, 315, 9822, 30, 0, 1, 127, 1024, 8192, 32768, 65536, 128255 };
     if (!args.transformer_only and !args.head_only) try compareLayer(allocator, io, platform, cpu, "embedding", mdl.model.embed_tokens, actual.model.embed_tokens, expected.model.embed_tokens, .init(.{ .s = token_ids.len }, .u32), std.mem.sliceAsBytes(&token_ids), .exact_match);
     const shape = zml.Shape.init(.{ .s = args.seqlen, .d = mdl.config.hidden_size }, .bf16);
@@ -354,6 +361,231 @@ fn compareCpu(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform,
     std.log.info("Comparing layer hidden state", .{});
     try zml.testing.expectClose(io, result.hidden, reference.hidden, .{ .absolute_tolerance = 0.1, .relative_tolerance = 0.03, .minimum_close_fraction = 1 });
     std.log.info("PASS full transformer layer", .{});
+}
+
+// Diagnose a layer with the exact CPU input as well as with all prior device
+// outputs. This is separate from the unchanged whole-forward correctness gate.
+fn compareLayerwise(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: model.Model, actual: *model.Buffers, expected: *model.Buffers, args: Args) !void {
+    if (args.layers == 0 or args.layers > mdl.model.layers.len) return error.InvalidLayerCount;
+    const cache_seqlen = args.cache_seqlen orelse args.seqlen;
+    const shape = zml.Shape.init(.{ .s = 1, .d = mdl.config.hidden_size }, .bf16);
+    const embed_exe = try zml.FnExe(model.EmbedTokens.forward).compile(allocator, io, cpu, .{ .shardings = cpu.shardings.values() }, .{.{
+        .embedding = .{ .embed_tokens = mdl.model.embed_tokens },
+        .tokens = zml.Tensor.init(.{ .s = 1 }, .u32),
+    }});
+    defer embed_exe.deinit();
+    var embed = try zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}).init(&embed_exe, allocator, .{
+        .embedding = .{ .embed_tokens = expected.model.embed_tokens },
+    });
+    defer embed.deinit(allocator);
+    const token = [_]u32{1000};
+    var tokens = try zml.Buffer.fromBytes(io, cpu, .init(.{ .s = 1 }, .u32), .replicated, std.mem.sliceAsBytes(&token));
+    defer tokens.deinit();
+    var embedded: zml.Buffer = undefined;
+    embed.run(io, .{ .inputs = .{ .tokens = tokens }, .outputs = .{ .hidden = &embedded } });
+    defer embedded.deinit();
+    const initial = try embedded.toSliceAlloc(allocator, io);
+    defer initial.free(allocator);
+    const reference_bytes = try allocator.dupe(u8, initial.bytes);
+    defer allocator.free(reference_bytes);
+    const propagated_bytes = try allocator.dupe(u8, initial.bytes);
+    defer allocator.free(propagated_bytes);
+    var failed = false;
+    const hidden_tolerance: zml.testing.CompareOpts = .{ .absolute_tolerance = 0.1, .relative_tolerance = 0.03, .minimum_close_fraction = 1 };
+    const cache_tolerance: zml.testing.CompareOpts = .{ .absolute_tolerance = 0.03, .relative_tolerance = 0.02, .minimum_close_fraction = 1 };
+    const row_size = mdl.config.num_key_value_heads * (mdl.config.hidden_size / mdl.config.num_attention_heads);
+    for (0..args.layers) |layer| {
+        std.log.info("Layerwise layer {}: CPU input and propagated input, position {}", .{ layer, args.token_offset });
+        if (args.layerwise_stages) try compareStages(allocator, io, platform, cpu, mdl, actual.model.layers[layer], expected.model.layers[layer], shape, reference_bytes, cache_seqlen, args.token_offset, layer);
+        var reference = try runTransformer(allocator, io, cpu, mdl, expected.model.layers[layer..][0..1], shape, reference_bytes, cache_seqlen, args.token_offset, layer);
+        defer reference.hidden.deinit();
+        defer model.KvCache.deinitBuffer(&reference.kv_cache);
+        var local = try runTransformer(allocator, io, platform, mdl, actual.model.layers[layer..][0..1], shape, reference_bytes, cache_seqlen, args.token_offset, layer);
+        defer local.hidden.deinit();
+        defer model.KvCache.deinitBuffer(&local.kv_cache);
+        var propagated = try runTransformer(allocator, io, platform, mdl, actual.model.layers[layer..][0..1], shape, propagated_bytes, cache_seqlen, args.token_offset, layer);
+        defer propagated.hidden.deinit();
+        defer model.KvCache.deinitBuffer(&propagated.kv_cache);
+        failed = !(try reportBf16Region(allocator, io, "local hidden", layer, local.hidden, reference.hidden, 0, shape.count(), hidden_tolerance)) or failed;
+        failed = !(try reportBf16Region(allocator, io, "propagated hidden", layer, propagated.hidden, reference.hidden, 0, shape.count(), hidden_tolerance)) or failed;
+        inline for (.{ "k", "v" }) |field| {
+            const start = (layer * cache_seqlen + args.token_offset) * row_size;
+            failed = !(try reportBf16Region(allocator, io, "local " ++ field, layer, @field(local.kv_cache, field), @field(reference.kv_cache, field), start, row_size, cache_tolerance)) or failed;
+            failed = !(try reportBf16Region(allocator, io, "propagated " ++ field, layer, @field(propagated.kv_cache, field), @field(reference.kv_cache, field), start, row_size, cache_tolerance)) or failed;
+        }
+        const next_reference = try reference.hidden.toSliceAlloc(allocator, io);
+        defer next_reference.free(allocator);
+        const next_propagated = try propagated.hidden.toSliceAlloc(allocator, io);
+        defer next_propagated.free(allocator);
+        @memcpy(reference_bytes, next_reference.bytes);
+        @memcpy(propagated_bytes, next_propagated.bytes);
+    }
+    if (failed) return error.TestUnexpectedResult;
+    std.log.info("PASS layerwise tolerances (does not replace whole-forward comparison)", .{});
+}
+
+const LayerStages = struct {
+    const Output = struct { stages: [11]zml.Tensor, rms: [3]zml.Tensor, kv_cache: model.KvCache };
+    fn forward(input: model.TransformerLayer.Input) Output {
+        const layer = input.layer;
+        const x = input.hidden.withPartitioning(.{ .d = .replicated });
+        const normalized = layer.input_layernorm.forward(x);
+        const attention, const cache = layer.self_attn.forward(normalized, input.token_index, input.kv_cache, input.kv_cache_index, input.attention_metadata, input.attention_parameters);
+        const residual = x.add(attention).withPartitioning(.{ .d = .replicated });
+        const post_norm = layer.post_attention_layernorm.forward(residual);
+        const xf = residual.convert(.f32);
+        const variance = xf.powByConst(2).mean(.d);
+        const inverse = zml.Tensor.rsqrt(variance.addConstant(layer.post_attention_layernorm.eps));
+        const scaled = xf.mul(inverse.broad(xf.shape()));
+        const gate = layer.mlp.gate_proj.forward(post_norm);
+        const up = layer.mlp.up_proj.forward(post_norm);
+        const sigmoid = gate.sigmoid();
+        const silu = gate.mul(sigmoid);
+        const product = silu.mul(up);
+        const mlp = layer.mlp.forward(post_norm).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+        return .{ .stages = .{ normalized, attention, residual, post_norm, gate, up, sigmoid, silu, product, mlp, mlp.add(residual) }, .rms = .{ variance, inverse, scaled }, .kv_cache = cache };
+    }
+};
+
+fn compareStages(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: model.Model, actual: zml.Bufferized(model.TransformerLayer), expected: zml.Bufferized(model.TransformerLayer), shape: zml.Shape, bytes: []const u8, cache_seqlen: usize, token_offset: u32, layer: usize) !void {
+    const kv_shape = zml.Shape.init(.{ .layer = mdl.model.layers.len, .k = cache_seqlen, .h = mdl.config.num_key_value_heads, .hd = mdl.config.hidden_size / mdl.config.num_attention_heads }, .bf16);
+    const cache_data = try allocator.alloc(u16, kv_shape.count());
+    defer allocator.free(cache_data);
+    for (cache_data, 0..) |*bits, i| {
+        const value: f32 = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13 + 7) % 17)) - 8)) / 64.0;
+        bits.* = @truncate(@as(u32, @bitCast(value)) >> 16);
+    }
+    var results: [2]zml.Bufferized(LayerStages.Output) = undefined;
+    var done: usize = 0;
+    defer for (results[0..done]) |*out| {
+        for (&out.stages) |*stage| stage.deinit();
+        for (&out.rms) |*stage| stage.deinit();
+        model.KvCache.deinitBuffer(&out.kv_cache);
+    };
+    for ([_]*zml.Platform{ cpu, platform }, [_]zml.Bufferized(model.TransformerLayer){ expected, actual }, 0..) |target, weights, index| {
+        const exe = try zml.FnExe(LayerStages.forward).compile(allocator, io, target, .{ .shardings = target.shardings.values() }, .{.{
+            .layer = mdl.model.layers[layer],
+            .hidden = zml.Tensor.fromShape(shape),
+            .token_index = zml.Tensor.init(.{}, .u32),
+            .kv_cache = model.KvCache.init(kv_shape),
+            .kv_cache_index = zml.Tensor.init(.{}, .u32),
+            .attention_metadata = .vanilla,
+            .attention_parameters = .vanilla,
+        }});
+        defer exe.deinit();
+        var runner = try zml.FnExe(LayerStages.forward).Runner(.{.layer}).init(&exe, allocator, .{ .layer = weights });
+        defer runner.deinit(allocator);
+        var hidden = try zml.Buffer.fromBytes(io, target, shape, .replicated, bytes);
+        defer hidden.deinit();
+        var pos = try zml.Buffer.scalar(io, target, token_offset, .u32);
+        defer pos.deinit();
+        var layer_index = try zml.Buffer.scalar(io, target, layer, .u32);
+        defer layer_index.deinit();
+        var cache: model.KvCache.Buffer = .{
+            .k = try zml.Buffer.fromBytes(io, target, kv_shape, .replicated, std.mem.sliceAsBytes(cache_data)),
+            .v = try zml.Buffer.fromBytes(io, target, kv_shape, .replicated, std.mem.sliceAsBytes(cache_data)),
+        };
+        errdefer model.KvCache.deinitBuffer(&cache);
+        var stages: [11]zml.Buffer = undefined;
+        var rms: [3]zml.Buffer = undefined;
+        runner.run(io, .{
+            .inputs = .{ .hidden = hidden, .token_index = pos, .kv_cache = cache, .kv_cache_index = layer_index, .attention_metadata = .vanilla },
+            .outputs = .{ .stages = &stages, .rms = &rms, .kv_cache = &cache },
+        });
+        results[index] = .{ .stages = stages, .rms = rms, .kv_cache = cache };
+        done += 1;
+    }
+    for ([_][]const u8{ "input norm", "attention", "residual", "post norm", "gate", "up", "sigmoid", "silu", "product", "MLP", "stage hidden" }, 0..) |name, i| {
+        _ = try reportBf16Region(allocator, io, name, layer, results[1].stages[i], results[0].stages[i], 0, results[0].stages[i].shape().count(), .exact_match);
+    }
+    try reportProjectionRoundoff(allocator, io, "gate", layer, expected.mlp.gate_proj.linear.weight, results[1].stages[3], results[0].stages[3], results[1].stages[4], results[0].stages[4]);
+    try reportProjectionRoundoff(allocator, io, "up", layer, expected.mlp.up_proj.linear.weight, results[1].stages[3], results[0].stages[3], results[1].stages[5], results[0].stages[5]);
+    for ([_][]const u8{ "variance", "rsqrt", "scaled" }, 0..) |name, i| {
+        const a = try results[1].rms[i].toSliceAlloc(allocator, io);
+        defer a.free(allocator);
+        const b = try results[0].rms[i].toSliceAlloc(allocator, io);
+        defer b.free(allocator);
+        var max_abs: f32 = 0;
+        var max_rel: f32 = 0;
+        for (a.items(f32), b.items(f32)) |x, y| {
+            if (!std.math.isFinite(x) or !std.math.isFinite(y)) return error.NonFiniteRms;
+            max_abs = @max(max_abs, @abs(x - y));
+            max_rel = @max(max_rel, @abs(x - y) / @max(1e-30, @abs(y)));
+        }
+        std.log.info("Layerwise RMS {s} layer {}: max_abs={}, max_rel={}, device_first={}, CPU_first={}", .{ name, layer, max_abs, max_rel, a.items(f32)[0], b.items(f32)[0] });
+    }
+}
+
+// An independent FP64 dot for mismatching outputs, using the CPU input. This
+// only isolates dot rounding when the preceding post-norm inputs match exactly.
+fn reportProjectionRoundoff(allocator: std.mem.Allocator, io: std.Io, name: []const u8, layer: usize, weight: zml.Buffer, actual_input: zml.Buffer, input: zml.Buffer, actual: zml.Buffer, reference: zml.Buffer) !void {
+    if (weight.shape().dtype() != .bf16 or input.shape().dim(.s) != 1) return;
+    const a = try actual.toSliceAlloc(allocator, io);
+    defer a.free(allocator);
+    const b = try reference.toSliceAlloc(allocator, io);
+    defer b.free(allocator);
+    const x = try input.toSliceAlloc(allocator, io);
+    defer x.free(allocator);
+    const device_x = try actual_input.toSliceAlloc(allocator, io);
+    defer device_x.free(allocator);
+    if (!std.mem.eql(u8, device_x.bytes, x.bytes)) {
+        std.log.info("Layerwise dot {s} layer {}: FP64 check skipped because post-norm inputs differ", .{ name, layer });
+        return;
+    }
+    const w = try weight.toSliceAlloc(allocator, io);
+    defer w.free(allocator);
+    const cols: usize = @intCast(weight.shape().dim(.d));
+    std.debug.assert(cols == x.items(u16).len);
+    std.debug.assert(w.items(u16).len == cols * a.items(u16).len);
+    var reported: usize = 0;
+    for (a.items(u16), b.items(u16), 0..) |device_bits, cpu_bits, row| {
+        if (device_bits == cpu_bits) continue;
+        var sum: f64 = 0;
+        for (x.items(u16), w.items(u16)[row * cols ..][0..cols]) |x_bits, w_bits| {
+            const xf: f32 = @bitCast(@as(u32, x_bits) << 16);
+            const wf: f32 = @bitCast(@as(u32, w_bits) << 16);
+            sum += @as(f64, xf) * @as(f64, wf);
+        }
+        const device_value: f32 = @bitCast(@as(u32, device_bits) << 16);
+        const cpu_value: f32 = @bitCast(@as(u32, cpu_bits) << 16);
+        const device_error = @abs(@as(f64, device_value) - sum);
+        const cpu_error = @abs(@as(f64, cpu_value) - sum);
+        const closer: []const u8 = if (device_error < cpu_error) "device" else if (cpu_error < device_error) "CPU" else "tie";
+        std.log.info("Layerwise dot {s} layer {} row {}: FP64={}, device={} (bits={x}), CPU={} (bits={x}), closer={s}", .{ name, layer, row, sum, device_value, device_bits, cpu_value, cpu_bits, closer });
+        reported += 1;
+        if (reported == 16) break;
+    }
+}
+
+fn reportBf16Region(allocator: std.mem.Allocator, io: std.Io, name: []const u8, layer: usize, actual: zml.Buffer, reference: zml.Buffer, start: usize, count: usize, tolerance: zml.testing.CompareOpts) !bool {
+    const a = try actual.toSliceAlloc(allocator, io);
+    defer a.free(allocator);
+    const b = try reference.toSliceAlloc(allocator, io);
+    defer b.free(allocator);
+    var different: usize = 0;
+    var bad: usize = 0;
+    var finite = true;
+    var max_abs: f32 = 0;
+    var sum_squared: f64 = 0;
+    for (a.items(u16)[start..][0..count], b.items(u16)[start..][0..count]) |x, y| {
+        const xf: f32 = @bitCast(@as(u32, x) << 16);
+        const yf: f32 = @bitCast(@as(u32, y) << 16);
+        different += @intFromBool(x != y);
+        if (!std.math.isFinite(xf) or !std.math.isFinite(yf)) {
+            finite = false;
+            bad += 1;
+            continue;
+        }
+        const err = @abs(xf - yf);
+        max_abs = @max(max_abs, err);
+        sum_squared += @as(f64, err) * err;
+        bad += @intFromBool(err > tolerance.absolute_tolerance + tolerance.relative_tolerance * @max(@abs(xf), @abs(yf)));
+    }
+    const close_fraction = @as(f32, @floatFromInt(count - bad)) / @as(f32, @floatFromInt(count));
+    const passed = finite and close_fraction >= tolerance.minimum_close_fraction;
+    const rmse = @sqrt(sum_squared / @as(f64, @floatFromInt(count)));
+    std.log.info("Layerwise {s} layer {}: max_abs={}, rmse={}, different={}/{}, close_fraction={}, finite={}, pass={}", .{ name, layer, max_abs, rmse, different, count, close_fraction, finite, passed });
+    return passed;
 }
 
 fn compareLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, name: []const u8, layer: anytype, actual_weights: zml.Bufferized(@TypeOf(layer)), reference_weights: zml.Bufferized(@TypeOf(layer)), shape: zml.Shape, data: []const u8, opts: zml.testing.CompareOpts) !void {
