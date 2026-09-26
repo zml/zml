@@ -70,3 +70,37 @@ and analysis live in the companion XLA checkout under
 Local compiler dumps remain under
 `~/.local/state/xla-rngd/internals/compilation-units/position127-audit/`.
 No production precision, model weights, tolerances or throughput claim changed.
+
+## Model-computed history diagnostic
+
+`--forward-only --compare-cpu --prefill-history` replaces the synthetic cache
+prefix with a CPU-computed prefix, then supplies identical initial K/V bytes
+to both decode paths. It requires a one-token query at a nonzero offset.
+The prefix uses deterministic valid token IDs `1000..1000+offset-1`; these are
+not a natural-language prompt. The query remains token 1000 so that history
+is the only input changed from the synthetic test. Unused cache rows retain
+their original bit pattern and are checked before and after decoding.
+
+With the same Furiosa environment and `--xla_allow_excess_precision=false`:
+
+```sh
+bazel-bin/examples/llm/llama_tests --platform=furiosa \
+  --model=/var/models/meta-llama/Llama-3.1-8B-Instruct --compare-cpu \
+  --forward-only --prefill-history --seqlen=1 --cache-seqlen=128 --token-offset=127
+```
+
+The 32-layer run agrees on argmax token 198 and passes the value-cache and
+untouched-cache checks. Keys still fail the existing tolerance, starting at
+layer 9, with maximum error 0.09375. This rules out synthetic history as the
+sole cause; it does not establish the cause of every numerical discrepancy.
+CPU-created history deliberately isolates one decode query and does not test
+Furiosa prefill or full session feedback.
+
+Regression runs without the flag preserve the previous results: position 127
+fails with argmax 323 and maximum key/value errors 0.109375/0.04296875;
+position 0 passes exact argmax 76944, KV tolerance and untouched-cache checks.
+The initial helper run aborted before decoding because it passed a replicated
+sharding for a cache tensor tagged with the model partition. The helper now
+uses the registered model sharding. The final build and Zig format check pass.
+Complete run records, including that setup failure, are retained in the XLA
+checkout's `prefill-history-audit` experiment. No gate or tolerance was waived.

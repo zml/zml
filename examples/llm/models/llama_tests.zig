@@ -21,6 +21,7 @@ const Args = struct {
     layerwise_stages: bool = false,
     head_only: bool = false,
     forward_only: bool = false,
+    prefill_history: bool = false,
     session_only: bool = false,
     benchmark_iterations: usize = 0,
     platform: ?zml.Target = null,
@@ -45,6 +46,7 @@ const Args = struct {
         \\   --platform=<name>         Explicit test platform (default: auto)
         \\   --session-only            Check the CPU session feedback loop against a causal full-sequence forward
         \\   --forward-only            Compare the complete forward with an independent CPU reference
+        \\   --prefill-history         Seed forward comparison with a CPU-computed token prefix
         \\   --benchmark-iterations=<n> Time three full-forward decode trials before comparison (four warmups, default: 0)
         \\   --head-only               Compare greedy output-head tokens only
         \\   --seqlen=<number>         CPU comparison sequence length (default: 16)
@@ -62,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
 
     if ((args.transformer_only or args.head_only or args.forward_only) and !args.compare_cpu) return error.RequiresCompareCpu;
+    if (args.prefill_history and (!args.forward_only or args.token_offset == 0 or args.seqlen != 1)) return error.InvalidPrefillHistoryOptions;
     if (args.layerwise and (!args.compare_cpu or args.forward_only or args.head_only or args.session_only or args.first_layer != 0 or args.seqlen != 1)) return error.InvalidLayerwiseOptions;
     if (args.layerwise_stages and !args.layerwise) return error.InvalidLayerwiseOptions;
     if (!args.compare_cpu and !args.session_only and args.activations == null) return error.MissingActivations;
@@ -750,10 +753,13 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
 
     const cache_data = try allocator.alloc(u16, kv_shape.count());
     defer allocator.free(cache_data);
+    const value_cache_data = try allocator.alloc(u16, kv_shape.count());
+    defer allocator.free(value_cache_data);
     for (cache_data, 0..) |*bits, i| {
         const value: f32 = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13 + 7) % 17)) - 8)) / 64.0;
         bits.* = @truncate(@as(u32, @bitCast(value)) >> 16);
     }
+    @memcpy(value_cache_data, cache_data);
     const token_data = try allocator.alloc(u32, args.seqlen);
     defer allocator.free(token_data);
     for (token_data, 0..) |*token, i| token.* = @intCast(1000 + i);
@@ -769,11 +775,16 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
         zml.Tensor.Rng.deinitBuffer(&out.rng);
     };
     for ([_]*zml.Platform{ cpu, platform }, 0..) |target, i| {
+        var weights = try mdl.loadBuffers(allocator, io, target, store, progress, if (i == 0) cpu_shardings else shardings);
+        defer mdl.unloadBuffers(&weights, allocator);
+        if (i == 0 and args.prefill_history) {
+            try seedPrefillHistory(allocator, io, cpu, cpu_shardings.model, mdl.inner, weights, kv, args.token_offset, cache_data, value_cache_data);
+        }
         var token_buffer = try zml.Buffer.fromBytes(io, target, tokens.shape(), .replicated, std.mem.sliceAsBytes(token_data));
         errdefer token_buffer.deinit();
         var cache: model.KvCache.Buffer = .{
             .k = try zml.Buffer.fromBytes(io, target, kv_shape, .replicated, std.mem.sliceAsBytes(cache_data)),
-            .v = try zml.Buffer.fromBytes(io, target, kv_shape, .replicated, std.mem.sliceAsBytes(cache_data)),
+            .v = try zml.Buffer.fromBytes(io, target, kv_shape, .replicated, std.mem.sliceAsBytes(value_cache_data)),
         };
         errdefer model.KvCache.deinitBuffer(&cache);
         var pos = try zml.Buffer.scalar(io, target, args.token_offset, .u32);
@@ -781,17 +792,13 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
         var rng_buffer = try zml.Tensor.Rng.initBuffer(io, target, .replicated, 0);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffer);
         if (i == 0) {
-            var reference_weights = try mdl.loadBuffers(allocator, io, cpu, store, progress, cpu_shardings);
-            defer mdl.unloadBuffers(&reference_weights, allocator);
-            var runner = try zml.FnExe(ReferenceForward.forward).Runner(.{.weights}).init(&reference_exe, allocator, .{ .weights = reference_weights });
+            var runner = try zml.FnExe(ReferenceForward.forward).Runner(.{.weights}).init(&reference_exe, allocator, .{ .weights = weights });
             defer runner.deinit(allocator);
             runner.run(io, .{ .inputs = .{ .tokens = token_buffer, .token_index = pos, .kv_cache = cache, .rng = rng_buffer }, .outputs = .{ .tokens = &token_buffer, .kv_cache = &cache, .rng = &rng_buffer, .logits = &reference_logits } });
             have_reference_logits = true;
         } else {
-            var actual_weights = try mdl.loadBuffers(allocator, io, platform, store, progress, shardings);
-            defer mdl.unloadBuffers(&actual_weights, allocator);
-            if (args.benchmark_iterations > 0) try benchmarkFullForward(allocator, io, platform, &actual_exe, actual_weights, kv, mdl.inner.config.bos_token_id, args.benchmark_iterations);
-            var runner = try zml.FnExe(inference.Forward.forward).Runner(.{.weights}).init(&actual_exe, allocator, .{ .weights = actual_weights });
+            if (args.benchmark_iterations > 0) try benchmarkFullForward(allocator, io, platform, &actual_exe, weights, kv, mdl.inner.config.bos_token_id, args.benchmark_iterations);
+            var runner = try zml.FnExe(inference.Forward.forward).Runner(.{.weights}).init(&actual_exe, allocator, .{ .weights = weights });
             defer runner.deinit(allocator);
             runner.run(io, .{ .inputs = .{ .tokens = token_buffer, .token_index = pos, .kv_cache = cache, .rng = rng_buffer, .attention_metadata = .vanilla }, .outputs = .{ .tokens = &token_buffer, .kv_cache = &cache, .rng = &rng_buffer } });
         }
@@ -834,11 +841,11 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
             else => return err,
         };
     }
-    for ([_]zml.Buffer{ outputs[1].kv_cache.k, outputs[1].kv_cache.v }) |buffer| {
+    for ([_]zml.Buffer{ outputs[1].kv_cache.k, outputs[1].kv_cache.v }, [_][]const u16{ cache_data, value_cache_data }) |buffer, initial_cache| {
         const host = try buffer.toSliceAlloc(allocator, io);
         defer host.free(allocator);
         const row_size: usize = @intCast(kv_shape.dim(.h) * kv_shape.dim(.hd));
-        for (cache_data, 0..) |bits, i| {
+        for (initial_cache, 0..) |bits, i| {
             const pos = (i / row_size) % cache_seqlen;
             if (pos >= args.token_offset and pos < args.token_offset + args.seqlen) continue;
             if (host.items(u16)[i] != bits) return error.UntouchedCacheChanged;
@@ -846,6 +853,64 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
     }
     if (comparison_failed) return error.TestUnexpectedResult;
     std.log.info("PASS whole forward: exact argmax, KV tolerance, untouched cache bits", .{});
+}
+
+// Give both decode paths exactly the same model-computed history. This
+// diagnostic isolates the next query; it does not test device prefill or waive
+// the original synthetic-cache comparison. Tokens are deterministic IDs, not
+// a natural-language prompt.
+fn seedPrefillHistory(allocator: std.mem.Allocator, io: std.Io, cpu: *zml.Platform, sharding: zml.Sharding, mdl: model.Model, weights: model.Buffers, kv: model.KvCache, length: u32, keys: []u16, values: []u16) !void {
+    const History = struct {
+        fn forward(w: model.Model, tokens: zml.Tensor, cache: model.KvCache) model.KvCache {
+            const embedded = model.EmbedTokens.forward(.{
+                .embedding = .{ .embed_tokens = w.model.embed_tokens },
+                .tokens = tokens,
+            });
+            return model.TransformerBlock.forward(.{
+                .layers = w.model.layers,
+                .hidden = embedded.hidden,
+                .token_index = zml.Tensor.scalar(0, .u32),
+                .kv_cache = cache,
+                .kv_cache_index = zml.Tensor.scalar(0, .u32),
+                .attention_metadata = .vanilla,
+                .attention_parameters = .vanilla,
+            }).kv_cache;
+        }
+    };
+    const token_shape = zml.Shape.init(.{ .s = length }, .u32);
+    const data = try allocator.alloc(u32, length);
+    defer allocator.free(data);
+    for (data, 0..) |*token, i| token.* = @intCast(1000 + i);
+    var tokens = try zml.Buffer.fromBytes(io, cpu, token_shape, .replicated, std.mem.sliceAsBytes(data));
+    defer tokens.deinit();
+    var cache: model.KvCache.Buffer = .{
+        .k = try zml.Buffer.fromBytes(io, cpu, kv.k.shape(), sharding, std.mem.sliceAsBytes(keys)),
+        .v = try zml.Buffer.fromBytes(io, cpu, kv.v.shape(), sharding, std.mem.sliceAsBytes(values)),
+    };
+    defer model.KvCache.deinitBuffer(&cache);
+    const exe = try cpu.compileFn(allocator, io, History.forward, .{ mdl, zml.Tensor.fromShape(token_shape), kv }, .{ .shardings = cpu.shardings.values(), .program_name = "llama_cpu_prefill_history" });
+    defer exe.deinit();
+    var arguments = try exe.args(allocator);
+    defer arguments.deinit(allocator);
+    arguments.set(.{ weights, tokens, cache });
+    var results = try exe.results(allocator);
+    defer results.deinit(allocator);
+    exe.call(arguments, &results);
+    cache = results.get(model.KvCache.Buffer);
+    for ([_]zml.Buffer{ cache.k, cache.v }, [_][]u16{ keys, values }) |buffer, destination| {
+        const host = try buffer.toSliceAlloc(allocator, io);
+        defer host.free(allocator);
+        const width: usize = @intCast(kv.k.shape().dim(.h) * kv.k.shape().dim(.hd));
+        const capacity: usize = @intCast(kv.k.shape().dim(.k));
+        for (host.items(u16), destination, 0..) |bits, old, i| {
+            const position_in_cache = (i / width) % capacity;
+            if (position_in_cache >= length) try std.testing.expectEqual(old, bits);
+            const value: f32 = @bitCast(@as(u32, bits) << 16);
+            if (!std.math.isFinite(value)) return error.NonFinitePrefillHistory;
+        }
+        @memcpy(destination, host.items(u16));
+    }
+    std.log.info("Seeded both decode paths with identical CPU-computed history: {} layers, {} tokens (IDs 1000..{}); query token=1000", .{ mdl.model.layers.len, length, 999 + length });
 }
 
 // Preserve the failing test status while showing where errors first enter the
