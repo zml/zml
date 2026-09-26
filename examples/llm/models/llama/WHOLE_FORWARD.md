@@ -255,3 +255,36 @@ compiler resident memory was about 20.5 GiB versus roughly 50 GiB in the first
 attempt. Completion, final peak memory and generation throughput are pending.
 The log is `internals/indirect-args/llama-generation-worker16.log`. The compiler
 PID 1291658 also has OOM score 1000. No jemalloc preload is enabled.
+
+## Correct feedback position in the CLI decode loop
+
+Source inspection found that `Session.runDecode` appended its generated token
+before choosing the token-position buffer. With a prompt of N tokens, the first
+predicted token belongs at position N, but the loop fed it into the model at
+position N+1. This skipped one KV slot and used the wrong RoPE position on every
+decode call. Prefill had populated the skipped slot with a padding token's KV.
+
+The loop now captures the token's position before appending it, then uses that
+position when feeding the token back. The context-length stop condition is
+unchanged. This fixes host input selection without changing the compiled
+forward function, weights, precision, attention or executable boundaries.
+The independent `benchmarkFullForward` loop already supplies positions 0, 1,
+2, ... directly and is unaffected; its provisional 62.34 tok/s measurement
+does not exercise this CLI bug. Historical CLI generation logs predate this
+fix and do not establish correct cache-position handling.
+
+Zig formatting, `git diff --check` and the following build passed:
+
+```sh
+bazel-9.1.1 build //examples/llm --@zml//platforms:furiosa=true --jobs=1 --config=debug
+```
+
+The build took 31.221 seconds; evidence is
+`testdata/decode-position-build.log`. Two corrected CLI generation runs are
+queued after the current full-prefill compilation/generation and the serial
+argmax regression. They require the captured prefill EDF and a passing argmax
+test; otherwise they skip rather than retry an unresolved compile or hardware
+failure. Runtime validation is pending at this commit. The still-running
+generation process has the old host loop; its result must not be presented as
+validation of this fix. Corrected logs will be
+`internals/indirect-args/llama-generation-position-fixed-{1,2}.log`.

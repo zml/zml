@@ -194,13 +194,16 @@ pub const Session = struct {
             try stdout.writeAll(try decoder.feedOne(last_token_id, decoder_out_buffer));
             try stdout.flush();
 
+            // The token fed back below occupies the current end of the
+            // sequence. Appending it must not advance its RoPE/KV position.
+            const token_position = all_tokens.items.len;
             try all_tokens.append(self.allocator, last_token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
             inference.run(&self.decode, .{
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
-                .token_index_buf = &self.token_index_buffers[all_tokens.items.len],
+                .token_index_buf = &self.token_index_buffers[token_position],
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
                 .attention_metadata_buffers = &attention_metadata_buffers,
