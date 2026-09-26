@@ -133,6 +133,7 @@ pub const Session = struct {
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
+        if (all_tokens.len == 0 or all_tokens.len > self.seqlen) return error.InvalidPromptLength;
         const prefill_tokens_slice: zml.Slice = try .alloc(self.allocator, .init(.{self.seqlen}, .u32));
         defer prefill_tokens_slice.free(self.allocator);
         @memset(prefill_tokens_slice.items(u32), 0);
@@ -153,17 +154,19 @@ pub const Session = struct {
         };
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
+        var predicted_token: zml.Buffer = undefined;
         inference.run(&self.prefill, .{
             .io = self.io,
             .tokens_buf = &prefill_tokens_buffer,
+            .tokens_output_buf = &predicted_token,
             .token_index_buf = &self.token_index_buffers[0],
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
             .attention_metadata_buffers = &attention_metadata_buffers,
+            .last_token_index_buf = &self.token_index_buffers[all_tokens.len - 1],
         });
-        try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
-
-        self.last_generated_token = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
+        defer predicted_token.deinit();
+        self.last_generated_token = try predicted_token.getValue(u32, self.io);
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {

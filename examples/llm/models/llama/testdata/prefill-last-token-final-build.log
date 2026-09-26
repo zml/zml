@@ -1,0 +1,15 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //examples/llm:llama_tests (0 packages loaded, 0 targets configured)
+Analyzing: target //examples/llm:llama_tests (0 packages loaded, 0 targets configured)
+
+INFO: Analyzed target //examples/llm:llama_tests (0 packages loaded, 0 targets configured).
+[1 / 4] zig build-lib //examples/llm:llama_tests; 1s local
+[2 / 4] [Prepa] Linking examples/llm/llama_tests
+INFO: Found 1 target...
+Target //examples/llm:llama_tests up-to-date:
+  bazel-bin/examples/llm/llama_tests
+INFO: Elapsed time: 9.102s, Critical Path: 8.85s
+INFO: 4 processes: 2 internal, 1 local, 1 processwrapper-sandbox.
+INFO: Build completed successfully, 4 total actions
