@@ -220,3 +220,38 @@ on-chip weights; it assumes ordinary single-token dense inference without
 compression. Thus roughly 100 tok/s on the original BF16 checkpoint is near the
 ideal weight-read limit. This does not change the target or authorize switching
 precision. Evidence is `testdata/bf16-bandwidth-estimate.json`.
+
+
+## Logit-margin result and prefill memory failure
+
+The rebuilt position-127 comparison completed in 28.110 seconds and still
+failed the original assertions. CPU logits for both token 311 (its argmax)
+and token 323 (the device result) are **2.328125**. No CPU score is higher and
+exactly two scores share that value. Thus the device token belongs to the CPU's
+tied maximum; this does not establish whether the device logits also tie or
+whether small accumulated differences changed their ordering. The KV errors
+are unchanged. No tolerance or tie-breaking criterion has been relaxed.
+The command, exit status and full diagnostics are committed in
+`testdata/llama-full-logit-margin127*`.
+
+The first complete 128-token prefill compilation failed during
+`prelower -> postlower` when the kernel OOM killer terminated `furiosa-tcc`
+PID 1287605 at 2026-09-26 07:03:10 UTC. The kernel recorded 61,490,924 KiB
+anonymous RSS; host swap was exhausted. No prefill EDF or generation result
+was produced. A manual SIGTERM was attempted after observing resource
+exhaustion, but the compiler had already exited; the command returned
+`No such process`. Its OOM score had been raised to 1000 to prefer that process
+over the session. Failed CLI/compiler logs and the kernel OOM lines are
+committed as `testdata/prefill-default-oom-*`.
+
+The logit-margin comparison was queued using a Linux process descriptor for the
+existing generation process and started only after that process exited, keeping
+the large CPU reference separate from SDK compilation.
+
+A new prefill attempt uses the same TCL source, shape, model, eight-candidate
+search policy, compiler and cache with **RAYON_NUM_THREADS=16** set only in the
+compiler wrapper. The inference process does not inherit this override. Early
+compiler resident memory was about 20.5 GiB versus roughly 50 GiB in the first
+attempt. Completion, final peak memory and generation throughput are pending.
+The log is `internals/indirect-args/llama-generation-worker16.log`. The compiler
+PID 1291658 also has OOM score 1000. No jemalloc preload is enabled.
