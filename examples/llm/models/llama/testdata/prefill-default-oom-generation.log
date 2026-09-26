@@ -1,0 +1,103 @@
+warning(zml/vfs/hf): No Hugging Face authentication token found in environment or home config; proceeding without authentication.
+warning(zml/vfs/s3): S3 initialized without full credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY). Access will be unauthenticated. Using default endpoint: https://s3.amazonaws.com (set AWS_ENDPOINT_URL or AWS_ENDPOINT_URL_S3). Using default region: us-east-1 (set AWS_REGION or AWS_DEFAULT_REGION).
+info(pjrt): Loading: libpjrt_c_api_furiosa_plugin.so...
+info(pjrt): Loaded: libpjrt_c_api_furiosa_plugin.so
+warning(zml): PJRT FFI extension not available for furiosa
+info(llm): 
+platform: furiosa
+version: 0.115
+extensions:
+├─ memory_descriptions
+└─ layouts
+plugin attributes:
+├─ xla_version: 2
+├─ stablehlo_current_version: 1.20.0
+└─ stablehlo_minimum_version: 0.9.0
+devices:
+└─ Furiosa RNGD (pe0-7) (furiosa:0 (chip=0, pe0-7))
+   ├─ chip_id: 0
+   ├─ pe_end: 7
+   ├─ pe_start: 0
+   └─ memories:
+      └─ memory: PjRtStreamExecutorMemory(id=0, device=furiosa:0 (chip=0, pe0-7))
+
+info(llm): Selected backend: .vanilla
+info(llm): Resolving model repository..
+info(llm): Initializing model..
+info(llm): Detected model type: .llama
+info(llm): Loaded tokenizer [327.506ms]
+warning(pjrt): [PJRT_Device_MemoryStats] Unimplemented: GetAllocatorStats is not supported
+warning(pjrt): [PJRT_Client_Compile] Internal: FURIOSA single-program compilation of llm_llama_prefill_forward failed; no per-output or per-operation fallback was used. XLA_FURIOSA_ALLOW_STAGED_FALLBACK=1 enables the slower compatibility path. Compiler diagnostic: furiosa-tcc failed (63232): [1/13] 🔍   Compiling from tcl to dfg
+Done in 20.360107s
+[2/13] 🔍   Compiling from dfg to primitive
+Done in 1.384011s
+[3/13] 🔍   Compiling from primitive to kernelized
+Done in 0.58801615s
+[4/13] 🔍   Compiling from kernelized to prelower
+Done in 0.34564757s
+[5/13] 🔍   Compiling from prelower to postlower
+
+error(zml/Compiler): Pjrt failed to compile the following MLIR (error.Internal):
+#loc = [unknown]
+module @llm_llama_prefill_forward attributes {mhlo.num_partitions = 1 : i32, mhlo.num_replicas = 1 : i32} {
+  sdy.mesh @model = <["bus"=1]> [unknown]
+  sdy.mesh @experts = <["bus"=1]> [unknown]
+  sdy.mesh @replicated = <["bus"=1]> [unknown]
+  func.func public @main(%arg0: tensor<128256x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {}]>} [unknown], %arg1: tensor<128256x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}, {"bus"}]>} [unknown], %arg2: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg3: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg4: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg5: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg6: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg7: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg8: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg9: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg10: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg11: tensor<4096x14336xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg12: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg13: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg14: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg15: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg16: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg17: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg18: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg19: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg20: tensor<4096x14336xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg21: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg22: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg23: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg24: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg25: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg26: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg27: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg28: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg29: tensor<4096x14336xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg30: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg31: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg32: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg33: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg34: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg35: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg36: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg37: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg38: tensor<4096x14336xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg39: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg40: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg41: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg42: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg43: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg44: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg45: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg46: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg47: tensor<4096x14336xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg48: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg49: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg50: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg51: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg52: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg53: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg54: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg55: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg56: tensor<4096x14336xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg57: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg58: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg59: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg60: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg61: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg62: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg63: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg64: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg65: tensor<4096x14336xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg66: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg67: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg68: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg69: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg70: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg71: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg72: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg73: tensor<14336x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg74: tensor<4096x14336xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg75: tensor<4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{}], replicated={"bus"}>} [unknown], %arg76: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg77: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg78: tensor<1024x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{"bus"}, {?}]>} [unknown], %arg79: tensor<4096x4096xbf16> {sdy.sharding = #sdy.sharding<@model, [{?}, {"bus"}]>} [unknown], %arg80: tensor<4096xbf16> {sd...<truncated>
+warning(zml/Compiler): To see the full .mlir, set `zml.Compiler.Options.xla_dump_to`
+info(llama): Compiled prefill forward [19m36.151s]
+error: Internal
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/pjrt/pjrt.zig:336:9: 0x60ca6f1a8127 in toApiError (examples_Sllm_Cllm)
+        return switch (code) {
+        ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/pjrt/pjrt.zig:81:5: 0x60ca6ebb82c7 in interpretPjrtError (examples_Sllm_Cllm)
+    return err_code;
+    ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/pjrt/pjrt.zig:179:13: 0x60ca6ebb831f in innerCall (examples_Sllm_Cllm)
+            return interpretPjrtError(self, pjrt_error, @tagName(method));
+            ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/pjrt/pjrt.zig:185:9: 0x60ca6ebb8392 in call (examples_Sllm_Cllm)
+        try innerCall(self, method, @ptrCast(&ret));
+        ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/pjrt/pjrt.zig:463:21: 0x60ca6ebb8454 in compileRaw (examples_Sllm_Cllm)
+        const ret = try api.call(.PJRT_Client_Compile, .{
+                    ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/external/rules_zig++zig+zig_0.16.0_x86_64-linux/lib/std/Io.zig:1200:52: 0x60ca6ebb7603 in await (examples_Sllm_Cllm)
+            const any_future = f.any_future orelse return f.result;
+                                                   ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/pjrt/pjrt.zig:479:9: 0x60ca6ebb74f2 in compile (examples_Sllm_Cllm)
+        return future.await(io);
+        ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/zml/pjrtx.zig:40:25: 0x60ca6ebb735f in compile (examples_Sllm_Cllm)
+        return @ptrCast(try client.compile(api, io, .{
+                        ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/zml/Compiler.zig:916:31: 0x60ca6ebb44b7 in compileModuleToPjrtExecutable (examples_Sllm_Cllm)
+    const loaded_executable = try pjrtx.Client.compile(
+                              ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/zml/Compiler.zig:430:9: 0x60ca6efadf1c in compileInternal__anon_166949 (examples_Sllm_Cllm)
+        return err;
+        ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/zml/Compiler.zig:353:5: 0x60ca6efabf09 in compile__anon_166947 (examples_Sllm_Cllm)
+    return switch (platform.io_impl) {
+    ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/zml/Compiler.zig:340:13: 0x60ca6efabc3b in compile (examples_Sllm_Cllm)
+            return Compiler.compile(allocator, io, platform, func, args, opts);
+            ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/zml/exe.zig:414:30: 0x60ca6efabb52 in compile (examples_Sllm_Cllm)
+            return .{ .raw = try Compiler.Typed(function_).compile(allocator, io, platform, opts, args) };
+                             ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/examples/llm/models/llama/inference.zig:190:5: 0x60ca6e91c8f6 in compileKernel (examples_Sllm_Cllm)
+    return KernelExe.compile(allocator, io, platform, .{
+    ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/examples/llm/models/llama/inference.zig:92:25: 0x60ca6e91cb74 in init (examples_Sllm_Cllm)
+        const prefill = try compileKernel(allocator, io, platform, loaded_model.inner, parameters, @intCast(parameters.prefill_tokens.dim(.s)), parameters.prefill_attention_parameters, .prefill, progress);
+                        ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/examples/llm/models/llama/model.zig:127:9: 0x60ca6e91cf46 in compile (examples_Sllm_Cllm)
+        return inference.CompiledModel.init(allocator, io, platform, self, params, progress);
+        ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/examples/llm/models.zig:88:17: 0x60ca6e9239bf in compile (examples_Sllm_Cllm)
+                try m.compile(allocator, io, platform, backend, shardings, seqlen, progress),
+                ^
+/home/steeve/.cache/bazel/_bazel_steeve/68d3a1965b9ff3a6d57f41bd7e72b011/execroot/_main/examples/llm/main.zig:138:24: 0x60ca6e9682e7 in main (examples_Sllm_Cllm)
+    compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
+                       ^
