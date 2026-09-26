@@ -1,0 +1,143 @@
+warning(zml/vfs/hf): No Hugging Face authentication token found in environment or home config; proceeding without authentication.
+warning(zml/vfs/s3): S3 initialized without full credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY). Access will be unauthenticated. Using default endpoint: https://s3.amazonaws.com (set AWS_ENDPOINT_URL or AWS_ENDPOINT_URL_S3). Using default region: us-east-1 (set AWS_REGION or AWS_DEFAULT_REGION).
+info(pjrt): Loading: libpjrt_c_api_furiosa_plugin.so...
+info(pjrt): Loaded: libpjrt_c_api_furiosa_plugin.so
+warning(zml): PJRT FFI extension not available for furiosa
+info(llm): 
+platform: furiosa
+version: 0.115
+extensions:
+├─ memory_descriptions
+└─ layouts
+plugin attributes:
+├─ xla_version: 2
+├─ stablehlo_current_version: 1.20.0
+└─ stablehlo_minimum_version: 0.9.0
+devices:
+└─ Furiosa RNGD (pe0-7) (furiosa:0 (chip=0, pe0-7))
+   ├─ chip_id: 0
+   ├─ pe_end: 7
+   ├─ pe_start: 0
+   └─ memories:
+      └─ memory: PjRtStreamExecutorMemory(id=0, device=furiosa:0 (chip=0, pe0-7))
+
+info(llm): Selected backend: .vanilla
+info(llm): Resolving model repository..
+info(llm): Initializing model..
+info(llm): Detected model type: .llama
+info(llm): Loaded tokenizer [329.124ms]
+warning(pjrt): [PJRT_Device_MemoryStats] Unimplemented: GetAllocatorStats is not supported
+RNGD compilation units: 42 unique, 195 invocations, budget=256, temporary_bytes=27557888
+RNGD compiled unit 1/42: 0.173 s, 191176 bytes
+RNGD compiled unit 2/42: 0.152 s, 54643 bytes
+RNGD compiled unit 3/42: 0.160 s, 216190 bytes
+RNGD compiled unit 4/42: 0.157 s, 77890 bytes
+RNGD compiled unit 5/42: 0.175 s, 2911719 bytes
+RNGD compiled unit 6/42: 0.155 s, 749563 bytes
+RNGD compiled unit 7/42: 0.157 s, 54643 bytes
+RNGD compiled unit 8/42: 0.163 s, 167577 bytes
+RNGD compiled unit 9/42: 0.175 s, 2911719 bytes
+RNGD compiled unit 10/42: 0.170 s, 54643 bytes
+RNGD compiled unit 11/42: 0.159 s, 54643 bytes
+RNGD compiled unit 12/42: 0.158 s, 54643 bytes
+RNGD compiled unit 13/42: 0.169 s, 54643 bytes
+RNGD compiled unit 14/42: 0.159 s, 54643 bytes
+RNGD compiled unit 15/42: 0.160 s, 54643 bytes
+RNGD compiled unit 16/42: 0.158 s, 54643 bytes
+RNGD compiled unit 17/42: 0.156 s, 54643 bytes
+RNGD compiled unit 18/42: 0.163 s, 54643 bytes
+RNGD compiled unit 19/42: 0.160 s, 54643 bytes
+RNGD compiled unit 20/42: 0.161 s, 54643 bytes
+RNGD compiled unit 21/42: 0.164 s, 54643 bytes
+RNGD compiled unit 22/42: 0.159 s, 54643 bytes
+RNGD compiled unit 23/42: 0.159 s, 54643 bytes
+RNGD compiled unit 24/42: 0.152 s, 54643 bytes
+RNGD compiled unit 25/42: 0.148 s, 54643 bytes
+RNGD compiled unit 26/42: 0.162 s, 54643 bytes
+RNGD compiled unit 27/42: 0.155 s, 54643 bytes
+RNGD compiled unit 28/42: 0.160 s, 54643 bytes
+RNGD compiled unit 29/42: 0.157 s, 54643 bytes
+RNGD compiled unit 30/42: 0.151 s, 54643 bytes
+RNGD compiled unit 31/42: 0.162 s, 54643 bytes
+RNGD compiled unit 32/42: 0.153 s, 54643 bytes
+RNGD compiled unit 33/42: 0.162 s, 54643 bytes
+RNGD compiled unit 34/42: 0.160 s, 54643 bytes
+RNGD compiled unit 35/42: 0.162 s, 54643 bytes
+RNGD compiled unit 36/42: 0.156 s, 54643 bytes
+RNGD compiled unit 37/42: 0.155 s, 54643 bytes
+RNGD compiled unit 38/42: 0.156 s, 54643 bytes
+RNGD compiled unit 39/42: 0.156 s, 54643 bytes
+RNGD compiled unit 40/42: 0.161 s, 915767 bytes
+RNGD compiled unit 41/42: 0.160 s, 1275 bytes
+RNGD compiled unit 42/42: 0.195 s, 9728886 bytes
+info(llama): Compiled prefill forward [7.065s]
+warning(pjrt): [PJRT_Device_MemoryStats] Unimplemented: GetAllocatorStats is not supported
+RNGD compilation units: 46 unique, 199 invocations, budget=256, temporary_bytes=25184768
+RNGD compiled unit 1/46: 0.157 s, 296963 bytes
+RNGD compiled unit 2/46: 0.162 s, 1275 bytes
+RNGD compiled unit 3/46: 0.163 s, 144377 bytes
+RNGD compiled unit 4/46: 0.163 s, 81988 bytes
+RNGD compiled unit 5/46: 0.160 s, 309280 bytes
+RNGD compiled unit 6/46: 0.156 s, 1271 bytes
+RNGD compiled unit 7/46: 0.162 s, 309280 bytes
+RNGD compiled unit 8/46: 0.160 s, 87889 bytes
+RNGD compiled unit 9/46: 0.155 s, 54914 bytes
+RNGD compiled unit 10/46: 0.158 s, 713574 bytes
+RNGD compiled unit 11/46: 0.165 s, 385684 bytes
+RNGD compiled unit 12/46: 0.161 s, 99320 bytes
+RNGD compiled unit 13/46: 0.157 s, 87889 bytes
+RNGD compiled unit 14/46: 0.151 s, 637980 bytes
+RNGD compiled unit 15/46: 0.159 s, 99320 bytes
+RNGD compiled unit 16/46: 0.160 s, 99320 bytes
+RNGD compiled unit 17/46: 0.162 s, 99320 bytes
+RNGD compiled unit 18/46: 0.161 s, 99320 bytes
+RNGD compiled unit 19/46: 0.157 s, 99320 bytes
+RNGD compiled unit 20/46: 0.154 s, 99320 bytes
+RNGD compiled unit 21/46: 0.161 s, 99320 bytes
+RNGD compiled unit 22/46: 0.160 s, 99320 bytes
+RNGD compiled unit 23/46: 0.156 s, 99320 bytes
+RNGD compiled unit 24/46: 0.155 s, 99320 bytes
+RNGD compiled unit 25/46: 0.165 s, 99320 bytes
+RNGD compiled unit 26/46: 0.164 s, 99320 bytes
+RNGD compiled unit 27/46: 0.158 s, 99320 bytes
+RNGD compiled unit 28/46: 0.166 s, 99320 bytes
+RNGD compiled unit 29/46: 0.160 s, 99320 bytes
+RNGD compiled unit 30/46: 0.152 s, 99320 bytes
+RNGD compiled unit 31/46: 0.160 s, 99320 bytes
+RNGD compiled unit 32/46: 0.158 s, 99320 bytes
+RNGD compiled unit 33/46: 0.162 s, 99320 bytes
+RNGD compiled unit 34/46: 0.154 s, 99320 bytes
+RNGD compiled unit 35/46: 0.151 s, 99320 bytes
+RNGD compiled unit 36/46: 0.159 s, 99320 bytes
+RNGD compiled unit 37/46: 0.161 s, 99320 bytes
+RNGD compiled unit 38/46: 0.157 s, 99320 bytes
+RNGD compiled unit 39/46: 0.159 s, 99320 bytes
+RNGD compiled unit 40/46: 0.163 s, 99320 bytes
+RNGD compiled unit 41/46: 0.158 s, 99320 bytes
+RNGD compiled unit 42/46: 0.158 s, 99320 bytes
+RNGD compiled unit 43/46: 0.160 s, 99320 bytes
+RNGD compiled unit 44/46: 0.164 s, 99320 bytes
+RNGD compiled unit 45/46: 0.162 s, 637657 bytes
+RNGD compiled unit 46/46: 0.201 s, 9885257 bytes
+info(llama): Compiled decode forward [7.643s]
+info(llama): Loaded weights [14.96GiB, 8.864s, 1.69GiB/s]
+
+
+                    ██╗
+         ███╗   ███╗██║
+ ███████╗████╗ ████║██║
+ ╚══███╔╝██╔████╔██║██║  .ai
+   ███╔╝ ██║╚██╔╝██║███████╗
+  ███╔╝  ██║ ╚═╝ ██║╚══════╝
+ ███████╗╚═╝     ╚═╝
+ ╚══════╝
+
+
+
+[2mprefill...[0m          Here it goes:
+
+1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+
+[36mdecode[0m [2m2.422s · 43.3tok/s[0m
+
+

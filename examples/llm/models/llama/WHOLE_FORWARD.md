@@ -427,3 +427,41 @@ Staged fallback, profiling, forced indirection and experimental compiler
 overrides are unset. Pending logs/results are under
 `/home/steeve/.local/state/xla-rngd/internals/indirect-args/llama-final-prompt-*`;
 these queued runs are not yet correctness or speed evidence.
+
+
+## Releasing replaced inputs when donation is declined (2026-09-26)
+
+`inference.run` now destroys the old KV, RNG and replaced token buffer handles
+once the complete forward has been enqueued. `Results.fill` overwrites output
+variables without destroying previous handles, so callers must preserve and
+release those themselves. Donation is optional: without this cleanup, a backend
+that declines donation retains the old device allocations each decode step.
+PJRT keeps pending input allocations alive after caller handles are destroyed.
+For prefill's distinct token output, the original token input remains with its
+caller; only an output that replaces that input triggers token cleanup here.
+
+The XLA Furiosa unit compiler now declines optional aliases before PJRT binds
+result storage, removing the whole-cache copy-back that these aliases otherwise
+require. This remains one XLA forward, BF16 weights, vanilla attention and
+argmax sampling. No weight packing was restored.
+
+Validation used the same debug frontend configuration as the prior CLI:
+
+```sh
+bazel build //examples/llm --@zml//platforms:furiosa=true --config=debug --jobs=8
+```
+
+`zig fmt --check examples/llm/models/llama/inference.zig` passed with the Bazel
+Zig 0.16 toolchain. `testdata/optional-alias-build.log` records the successful
+build. An initial default build was cancelled before completion because it did
+not enable Furiosa. A subsequent optimized Furiosa build succeeded but was not
+used for the final measurement; the debug configuration above matches the
+previous benchmark configuration.
+
+`testdata/optional-alias-owned{.log,-result.json}` records the exact generation
+command, environment and CLI/plugin/runtime hashes. Llama generated the same
+counting sequence through 34 in the 128-token context, exited successfully, and
+reported **2.422 s / 43.3 tok/s** with the input-handle cleanup included. This is
+an end-to-end generation smoke test, not a new CPU numerical comparison or the
+100 tok/s target. The initial run before caller cleanup reported 43.5 tok/s but
+was not accepted as the final implementation because of retained old inputs.
