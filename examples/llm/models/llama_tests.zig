@@ -24,6 +24,7 @@ const Args = struct {
     prefill_history: bool = false,
     session_only: bool = false,
     benchmark_iterations: usize = 0,
+    benchmark_block_iterations: usize = 0,
     platform: ?zml.Target = null,
     seqlen: usize = 16,
     cache_seqlen: ?usize = null,
@@ -48,6 +49,7 @@ const Args = struct {
         \\   --forward-only            Compare the complete forward with an independent CPU reference
         \\   --prefill-history         Seed forward comparison with a CPU-computed token prefix
         \\   --benchmark-iterations=<n> Time three full-forward decode trials before comparison (four warmups, default: 0)
+        \\   --benchmark-block-iterations=<n> Time fixed query blocks; reports positions/s, not generated tokens/s
         \\   --head-only               Compare greedy output-head tokens only
         \\   --seqlen=<number>         CPU comparison sequence length (default: 16)
         \\   --cache-seqlen=<number>   Transformer KV-cache length (default: seqlen)
@@ -73,6 +75,7 @@ pub fn main(init: std.process.Init) !void {
     const cache_seqlen = args.cache_seqlen orelse args.seqlen;
     if (cache_seqlen < args.seqlen or args.token_offset > cache_seqlen - args.seqlen) return error.InvalidComparisonOptions;
     if (args.benchmark_iterations > 0 and (!args.forward_only or args.seqlen != 1 or cache_seqlen < 4 or args.benchmark_iterations > cache_seqlen - 4)) return error.InvalidBenchmarkOptions;
+    if (args.benchmark_block_iterations > 0 and (!args.forward_only or args.benchmark_iterations > 0 or args.benchmark_block_iterations > 1000)) return error.InvalidBenchmarkOptions;
 
     const platform: *zml.Platform = if (args.platform) |target| try .init(allocator, io, target, .{ .cpu = .{ .device_count = 1 } }) else try .auto(allocator, io, .{ .cpu = .{ .device_count = 1 } });
     defer platform.deinit(allocator, io);
@@ -798,6 +801,7 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
             have_reference_logits = true;
         } else {
             if (args.benchmark_iterations > 0) try benchmarkFullForward(allocator, io, platform, &actual_exe, weights, kv, mdl.inner.config.bos_token_id, args.benchmark_iterations);
+            if (args.benchmark_block_iterations > 0) try benchmarkForwardBlock(allocator, io, platform, &actual_exe, weights, kv, token_data, args.token_offset, args.benchmark_block_iterations);
             var runner = try zml.FnExe(inference.Forward.forward).Runner(.{.weights}).init(&actual_exe, allocator, .{ .weights = weights });
             defer runner.deinit(allocator);
             runner.run(io, .{ .inputs = .{ .tokens = token_buffer, .token_index = pos, .kv_cache = cache, .rng = rng_buffer, .attention_metadata = .vanilla }, .outputs = .{ .tokens = &token_buffer, .kv_cache = &cache, .rng = &rng_buffer } });
@@ -805,13 +809,20 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
         outputs[i] = .{ .tokens = token_buffer, .kv_cache = cache, .rng = rng_buffer };
         done += 1;
     }
-    if (args.seqlen == 1) {
-        const actual_token = try outputs[1].tokens.getValue(u32, io);
-        const expected_token = try outputs[0].tokens.getValue(u32, io);
-        std.log.info("Whole-forward argmax: device={}, CPU={}", .{ actual_token, expected_token });
-        const logits = try reference_logits.toSliceAlloc(allocator, io);
-        defer logits.free(allocator);
-        const values = logits.items(u16);
+    const actual_tokens = try outputs[1].tokens.toSliceAlloc(allocator, io);
+    defer actual_tokens.free(allocator);
+    const expected_tokens = try outputs[0].tokens.toSliceAlloc(allocator, io);
+    defer expected_tokens.free(allocator);
+    const logits = try reference_logits.toSliceAlloc(allocator, io);
+    defer logits.free(allocator);
+    const vocabulary = try std.math.divExact(usize, logits.items(u16).len, args.seqlen);
+    for (actual_tokens.items(u32), expected_tokens.items(u32), 0..) |actual_token, expected_token, row| {
+        if (args.seqlen == 1) {
+            std.log.info("Whole-forward argmax: device={}, CPU={}", .{ actual_token, expected_token });
+        } else {
+            std.log.info("Whole-forward argmax row {}: device={}, CPU={}", .{ row, actual_token, expected_token });
+        }
+        const values = logits.items(u16)[row * vocabulary ..][0..vocabulary];
         if (actual_token >= values.len or expected_token >= values.len) return error.InvalidToken;
         const actual_score: f32 = @bitCast(@as(u32, values[actual_token]) << 16);
         const expected_score: f32 = @bitCast(@as(u32, values[expected_token]) << 16);
@@ -941,6 +952,52 @@ fn reportCacheLayers(allocator: std.mem.Allocator, io: std.Io, field: []const u8
             }
         }
         std.log.info("KV {s} layer {}: updated max_abs={}, outside_tolerance={}/{}", .{ field, layer, max_error, bad, args.seqlen * width });
+    }
+}
+
+// Repeats a fixed query block at a fixed position in an initially zero cache.
+// Fresh token buffers are prepared before timing because the executable donates
+// them. This measures verification capacity, not autoregressive generation or
+// speculative acceptance. All positions are sampled and read back each call.
+fn benchmarkForwardBlock(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, exe: *const inference.KernelExe, weights: model.Buffers, kv: model.KvCache, token_data: []const u32, offset: u32, iterations: usize) !void {
+    const warmups = 4;
+    var position = try zml.Buffer.scalar(io, platform, offset, .u32);
+    defer position.deinit();
+    var runner = try inference.KernelExe.Runner(.{.weights}).init(exe, allocator, .{ .weights = weights });
+    defer runner.deinit(allocator);
+    const cache_shape = kv.k.shape().withPartitioning(.{});
+    const zero_cache = try allocator.alloc(u8, cache_shape.byteSize());
+    defer allocator.free(zero_cache);
+    @memset(zero_cache, 0);
+    const expected = try allocator.alloc(u32, token_data.len);
+    defer allocator.free(expected);
+    for (0..3) |trial| {
+        const tokens = try allocator.alloc(zml.Buffer, warmups + iterations);
+        defer allocator.free(tokens);
+        var initialized: usize = 0;
+        defer for (tokens[0..initialized]) |*token| token.deinit();
+        for (tokens) |*token| {
+            token.* = try zml.Buffer.fromBytes(io, platform, .init(.{ .s = token_data.len }, .u32), .replicated, std.mem.sliceAsBytes(token_data));
+            initialized += 1;
+        }
+        var cache: model.KvCache.Buffer = .{
+            .k = try zml.Buffer.fromBytes(io, platform, cache_shape, .replicated, zero_cache),
+            .v = try zml.Buffer.fromBytes(io, platform, cache_shape, .replicated, zero_cache),
+        };
+        defer model.KvCache.deinitBuffer(&cache);
+        var rng = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, 0);
+        defer zml.Tensor.Rng.deinitBuffer(&rng);
+        var start: std.Io.Timestamp = undefined;
+        for (tokens, 0..) |*token, i| {
+            if (i == warmups) start = .now(io, .awake);
+            runner.run(io, .{ .inputs = .{ .tokens = token.*, .token_index = position, .kv_cache = cache, .rng = rng, .attention_metadata = .vanilla }, .outputs = .{ .tokens = token, .kv_cache = &cache, .rng = &rng } });
+            const host = try token.toSliceAlloc(allocator, io);
+            defer host.free(allocator);
+            if (i == 0) @memcpy(expected, host.items(u32)) else try std.testing.expectEqualSlices(u32, expected, host.items(u32));
+        }
+        const duration = start.untilNow(io, .awake);
+        const seconds = @as(f64, @floatFromInt(duration.toNanoseconds())) / 1e9;
+        std.log.info("Fixed-block forward trial {}: query={}, offset={}, calls={}, {d:.3} ms/call, {d:.2} positions/s; stable outputs={any}; not generated tokens/s", .{ trial + 1, token_data.len, offset, iterations, seconds * 1000 / @as(f64, @floatFromInt(iterations)), @as(f64, @floatFromInt(iterations * token_data.len)) / seconds, expected });
     }
 }
 
