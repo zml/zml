@@ -29,9 +29,11 @@ limits, test evidence and failed experiments are committed in the XLA checkout:
   grouped production inference.
 - The bridge's independent PJRT hardware test passes with 150 separate inputs
   and 150 separate outputs, across changing data and reversed input bindings.
-- The new complete 32-layer forward with 291 separate weight arguments is
-  compiling at this commit. Full-model correctness and throughput are pending.
-  No new rate is claimed. The captured TCL SHA256 is
+- The complete 32-layer forward with 291 separate weights compiles and runs.
+  It passes CPU comparison at position 0, but fails at position 127. Three
+  unprofiled 100-token decode trials measured 61.83, 62.34 and 62.45 tok/s.
+  These are provisional decode timings, not validated text-generation rates.
+  Details and evidence follow below. The captured TCL SHA256 is
   `748a8f3972ffb90bce92db7a331f9064c69cf8419b00b22186d4fcc8384597c8`;
   the log is `/home/steeve/.local/state/xla-rngd/internals/indirect-args/llama-full.log`.
 
@@ -140,3 +142,42 @@ reports. The separate-weight TCL SHA256 is
 its live log is
 `/home/steeve/.local/state/xla-rngd/internals/indirect-args/llama-full.log`.
 Hardware execution of the new failure-reporting path is not yet verified.
+
+
+## Separate-weight full-forward results (2026-09-26 review)
+
+The SDK compile completed on September 25 in **1136.8638 seconds** (18m57s).
+The main `prelower -> postlower` phase took 886.66724 seconds. The source hash
+above identifies the program. The EDF is about 57 MiB. No staged fallback or
+forced-indirect flag was enabled: the 291 separate weights select bridge/11's
+address table automatically.
+
+| Experiment | Why | Result |
+|---|---|---|
+| Unprofiled, three 100-token autoregressive decode trials | Measure the full executable after removing weight packing, with no concurrent compiler or build | 61.83 / 62.34 / 62.45 tok/s; median 62.34, about 18% above the historical packed median |
+| CPU comparison, position 127, deterministic nonzero prior KV | Exercise the complete transformer with attention to the populated cache | **Fail**: device argmax 323, CPU 311; both KV components also exceed the existing tolerance |
+| Diagnostic rerun, position 127, cached executable | Locate differences rather than stopping at argmax | Layer 0 keys exact; key tolerance first exceeded at layer 5, value tolerance at layer 22; all untouched cache bits preserved |
+| CPU comparison, position 0 | Check the same complete program without attending to prior cache positions | **Pass**: exact argmax 76944, KV tolerance and untouched cache bits |
+| Info-level device profile plus launch tracing, position-0 run | Separate native execution from address-table and host overhead | Five internal chunks; task cycles 28,283,178 / 28,280,253; spans including gaps 30,037,186 / 30,035,322 across the two clusters |
+
+The position-127 updated-key maximum absolute error is 0.125, and the
+updated-value maximum is 0.056152344. Differences accumulate across layers;
+this does not yet identify an incorrect primitive or establish acceptable
+full-model numerical accuracy. Acceptance tolerances were not changed.
+The improved failure-reporting path was exercised and returned a failing status.
+
+The separate profile run used `XLA_FURIOSA_PROFILE=1`,
+`XLA_FURIOSA_PROFILE_LEVEL=info`, `XLA_FURIOSA_PROFILE_COUNT=1`,
+`XLA_FURIOSA_TRACE_EXECUTION=1`, `--token-offset=0` and
+`--benchmark-iterations=8`. Median ordinary launch measurements were 55.31 us
+for arguments, 2.925 us for submission and 15,565.637 us waiting for completion.
+The address table remains small compared with execution. Profiled wall time is
+not used as the throughput claim. Removing packing also changes compiler layout
+choices, so these results do not isolate the cost of graph slices alone.
+
+Raw logs are committed in `testdata/separate-{compile,benchmark,diagnostics,profile-position0}.log`.
+The next real-generation run uses the normal LLM CLI with `--seqlen=128`,
+`--backend=vanilla`, `--topk=1` and prompt
+`Count from 1 to 100, separated by commas.` Its full prefill graph is compiling;
+no generation result is claimed yet. The approximately 100 tok/s objective and
+position-127 correctness investigation remain open.
