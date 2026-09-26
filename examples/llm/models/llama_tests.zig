@@ -19,6 +19,7 @@ const Args = struct {
     transformer_only: bool = false,
     layerwise: bool = false,
     layerwise_stages: bool = false,
+    layerwise_dump_dir: ?[]const u8 = null,
     head_only: bool = false,
     forward_only: bool = false,
     prefill_history: bool = false,
@@ -36,6 +37,7 @@ const Args = struct {
         \\Use llama_tests --model=<path> --activations=<path>
         \\
         \\ Validate the LLaMA implementation against activation fixtures.
+        \\   --layerwise-dump-dir=<path> Save optional BF16 stage/hidden buffers for layerwise comparisons
         \\
         \\ Options:
         \\   --model=<path>            Path to the model repository
@@ -67,7 +69,8 @@ pub fn main(init: std.process.Init) !void {
 
     if ((args.transformer_only or args.head_only or args.forward_only) and !args.compare_cpu) return error.RequiresCompareCpu;
     if (args.prefill_history and (!args.forward_only or args.token_offset == 0 or args.seqlen != 1)) return error.InvalidPrefillHistoryOptions;
-    if (args.layerwise and (!args.compare_cpu or args.forward_only or args.head_only or args.session_only or args.first_layer != 0 or args.seqlen != 1)) return error.InvalidLayerwiseOptions;
+    if (args.layerwise and (!args.compare_cpu or args.forward_only or args.head_only or args.session_only or args.first_layer != 0)) return error.InvalidLayerwiseOptions;
+    if (args.layerwise_dump_dir != null and !args.layerwise) return error.InvalidLayerwiseOptions;
     if (args.layerwise_stages and !args.layerwise) return error.InvalidLayerwiseOptions;
     if (!args.compare_cpu and !args.session_only and args.activations == null) return error.MissingActivations;
 
@@ -374,18 +377,20 @@ fn compareCpu(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform,
 fn compareLayerwise(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: model.Model, actual: *model.Buffers, expected: *model.Buffers, args: Args) !void {
     if (args.layers == 0 or args.layers > mdl.model.layers.len) return error.InvalidLayerCount;
     const cache_seqlen = args.cache_seqlen orelse args.seqlen;
-    const shape = zml.Shape.init(.{ .s = 1, .d = mdl.config.hidden_size }, .bf16);
+    const shape = zml.Shape.init(.{ .s = args.seqlen, .d = mdl.config.hidden_size }, .bf16);
     const embed_exe = try zml.FnExe(model.EmbedTokens.forward).compile(allocator, io, cpu, .{ .shardings = cpu.shardings.values() }, .{.{
         .embedding = .{ .embed_tokens = mdl.model.embed_tokens },
-        .tokens = zml.Tensor.init(.{ .s = 1 }, .u32),
+        .tokens = zml.Tensor.init(.{ .s = args.seqlen }, .u32),
     }});
     defer embed_exe.deinit();
     var embed = try zml.FnExe(model.EmbedTokens.forward).Runner(.{.embedding}).init(&embed_exe, allocator, .{
         .embedding = .{ .embed_tokens = expected.model.embed_tokens },
     });
     defer embed.deinit(allocator);
-    const token = [_]u32{1000};
-    var tokens = try zml.Buffer.fromBytes(io, cpu, .init(.{ .s = 1 }, .u32), .replicated, std.mem.sliceAsBytes(&token));
+    const token_data = try allocator.alloc(u32, args.seqlen);
+    defer allocator.free(token_data);
+    for (token_data, 0..) |*token, i| token.* = @intCast(1000 + i);
+    var tokens = try zml.Buffer.fromBytes(io, cpu, .init(.{ .s = args.seqlen }, .u32), .replicated, std.mem.sliceAsBytes(token_data));
     defer tokens.deinit();
     var embedded: zml.Buffer = undefined;
     embed.run(io, .{ .inputs = .{ .tokens = tokens }, .outputs = .{ .hidden = &embedded } });
@@ -402,7 +407,7 @@ fn compareLayerwise(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Pla
     const row_size = mdl.config.num_key_value_heads * (mdl.config.hidden_size / mdl.config.num_attention_heads);
     for (0..args.layers) |layer| {
         std.log.info("Layerwise layer {}: CPU input and propagated input, position {}", .{ layer, args.token_offset });
-        if (args.layerwise_stages) try compareStages(allocator, io, platform, cpu, mdl, actual.model.layers[layer], expected.model.layers[layer], shape, reference_bytes, cache_seqlen, args.token_offset, layer);
+        if (args.layerwise_stages) try compareStages(allocator, io, platform, cpu, mdl, actual.model.layers[layer], expected.model.layers[layer], shape, reference_bytes, cache_seqlen, args.token_offset, layer, args.layerwise_dump_dir);
         var reference = try runTransformer(allocator, io, cpu, mdl, expected.model.layers[layer..][0..1], shape, reference_bytes, cache_seqlen, args.token_offset, layer);
         defer reference.hidden.deinit();
         defer model.KvCache.deinitBuffer(&reference.kv_cache);
@@ -416,8 +421,13 @@ fn compareLayerwise(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Pla
         failed = !(try reportBf16Region(allocator, io, "propagated hidden", layer, propagated.hidden, reference.hidden, 0, shape.count(), hidden_tolerance)) or failed;
         inline for (.{ "k", "v" }) |field| {
             const start = (layer * cache_seqlen + args.token_offset) * row_size;
-            failed = !(try reportBf16Region(allocator, io, "local " ++ field, layer, @field(local.kv_cache, field), @field(reference.kv_cache, field), start, row_size, cache_tolerance)) or failed;
-            failed = !(try reportBf16Region(allocator, io, "propagated " ++ field, layer, @field(propagated.kv_cache, field), @field(reference.kv_cache, field), start, row_size, cache_tolerance)) or failed;
+            failed = !(try reportBf16Region(allocator, io, "local " ++ field, layer, @field(local.kv_cache, field), @field(reference.kv_cache, field), start, row_size * args.seqlen, cache_tolerance)) or failed;
+            failed = !(try reportBf16Region(allocator, io, "propagated " ++ field, layer, @field(propagated.kv_cache, field), @field(reference.kv_cache, field), start, row_size * args.seqlen, cache_tolerance)) or failed;
+        }
+        if (args.layerwise_dump_dir) |directory| {
+            try dumpLayerBuffer(allocator, io, directory, layer, "reference-hidden", reference.hidden);
+            try dumpLayerBuffer(allocator, io, directory, layer, "local-hidden", local.hidden);
+            try dumpLayerBuffer(allocator, io, directory, layer, "propagated-hidden", propagated.hidden);
         }
         const next_reference = try reference.hidden.toSliceAlloc(allocator, io);
         defer next_reference.free(allocator);
@@ -453,7 +463,17 @@ const LayerStages = struct {
     }
 };
 
-fn compareStages(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: model.Model, actual: zml.Bufferized(model.TransformerLayer), expected: zml.Bufferized(model.TransformerLayer), shape: zml.Shape, bytes: []const u8, cache_seqlen: usize, token_offset: u32, layer: usize) !void {
+fn dumpLayerBuffer(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, layer: usize, name: []const u8, buffer: zml.Buffer) !void {
+    try std.Io.Dir.cwd().createDirPath(io, directory);
+    const path = try std.fmt.allocPrint(allocator, "{s}/layer-{}-{s}.bin", .{ directory, layer, name });
+    defer allocator.free(path);
+    const host = try buffer.toSliceAlloc(allocator, io);
+    defer host.free(allocator);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = host.bytes });
+    std.log.info("Layerwise dump: {s}, shape={f}", .{ path, buffer.shape() });
+}
+
+fn compareStages(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: model.Model, actual: zml.Bufferized(model.TransformerLayer), expected: zml.Bufferized(model.TransformerLayer), shape: zml.Shape, bytes: []const u8, cache_seqlen: usize, token_offset: u32, layer: usize, dump_dir: ?[]const u8) !void {
     const kv_shape = zml.Shape.init(.{ .layer = mdl.model.layers.len, .k = cache_seqlen, .h = mdl.config.num_key_value_heads, .hd = mdl.config.hidden_size / mdl.config.num_attention_heads }, .bf16);
     const cache_data = try allocator.alloc(u16, kv_shape.count());
     defer allocator.free(cache_data);
@@ -500,6 +520,13 @@ fn compareStages(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfo
         });
         results[index] = .{ .stages = stages, .rms = rms, .kv_cache = cache };
         done += 1;
+        if (dump_dir) |directory| {
+            for (stages, 0..) |stage, stage_index| {
+                const name = try std.fmt.allocPrint(allocator, "{s}-stage-{}", .{ if (index == 0) "cpu" else "device", stage_index });
+                defer allocator.free(name);
+                try dumpLayerBuffer(allocator, io, directory, layer, name, stage);
+            }
+        }
     }
     for ([_][]const u8{ "input norm", "attention", "residual", "post norm", "gate", "up", "sigmoid", "silu", "product", "MLP", "stage hidden" }, 0..) |name, i| {
         _ = try reportBf16Region(allocator, io, name, layer, results[1].stages[i], results[0].stages[i], 0, results[0].stages[i].shape().count(), .exact_match);

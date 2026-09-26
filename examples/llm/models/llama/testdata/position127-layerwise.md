@@ -17,6 +17,20 @@ bit-identical post-norm inputs and skip otherwise. Extra output roots can affect
 fusion, so these diagnostics do not replace the original whole-forward test.
 Production remains one public executable per complete forward pass.
 
+The diagnostic also supports multi-token `--seqlen` values. It initializes IDs
+`1000..1000+seqlen-1` and checks all updated cache rows, preserving the original
+tolerances. Optional `--layerwise-dump-dir=<path>` writes BF16 stage/hidden
+buffers for cross-run comparisons; default runs do not write these files.
+Stage outputs can change native fusion and rounding. Compare their results
+with the separately executed layer before attributing a discrepancy.
+
+The XLA repository's `batch-prefix-audit` experiment records widths 1, 2, and 4
+at offset zero. CPU width-two/width-four prefix hidden states are bit-identical
+through all 32 layers. Device differences start in layer zero, row zero, in
+the standalone layer but disappear when intermediate stage outputs are added.
+All local CPU-input checks pass tolerance; propagated checks still fail.
+These observations do not waive the whole-forward or position-127 gates.
+
 Build with the Furiosa platform explicitly enabled:
 
 ```sh
