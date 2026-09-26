@@ -1,0 +1,24 @@
+Starting local Bazel server (9.1.1) and connecting to it...
+Computing main repo mapping: 
+Loading: 
+Loading: 7 packages loaded
+Analyzing: target //examples/llm:llama_tests (12 packages loaded, 6 targets configured)
+Analyzing: target //examples/llm:llama_tests (12 packages loaded, 6 targets configured)
+
+Analyzing: target //examples/llm:llama_tests (362 packages loaded, 15947 targets configured)
+
+Analyzing: target //examples/llm:llama_tests (391 packages loaded, 62551 targets configured, 16 aspect applications)
+
+Analyzing: target //examples/llm:llama_tests (407 packages loaded, 89157 targets configured, 151 aspect applications)
+
+INFO: Analyzed target //examples/llm:llama_tests (407 packages loaded, 91500 targets configured, 257 aspect applications).
+[6 / 42] checking cached actions
+[6,432 / 6,435] [Prepa] zig build-lib //examples/llm:llama_tests
+[6,432 / 6,435] zig build-lib //examples/llm:llama_tests; 1s local
+[6,433 / 6,435] [Prepa] Linking examples/llm/llama_tests
+INFO: Found 1 target...
+Target //examples/llm:llama_tests up-to-date:
+  bazel-bin/examples/llm/llama_tests
+INFO: Elapsed time: 17.637s, Critical Path: 8.79s
+INFO: 4 processes: 6431 action cache hit, 2 internal, 1 local, 1 processwrapper-sandbox.
+INFO: Build completed successfully, 4 total actions

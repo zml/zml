@@ -288,3 +288,44 @@ failure. Runtime validation is pending at this commit. The still-running
 generation process has the old host loop; its result must not be presented as
 validation of this fix. Corrected logs will be
 `internals/indirect-args/llama-generation-position-fixed-{1,2}.log`.
+
+### Focused session regression and negative control
+
+`llama_tests --session-only` exercises the actual `Session.runPrefill` and
+`Session.runDecode` on CPU. It uses a borrowed layer subset of the original
+checkpoint to keep memory bounded, with the original embedding, output head,
+tokenizer and selected layer weights. Production model configuration is not
+changed. The checked case has one layer, an eight-token context, three initial
+tokens (1000, 1001, 1002) and five generated tokens.
+
+The reference runs a causal full-sequence forward over the completed token
+sequence. Every generated token must equal the preceding position's reference
+prediction. Both KV components are compared at every position computed by the
+session (all except the final emitted token, which has not been fed back).
+The usual absolute 0.03 / relative 0.02 tolerance applies to all checked KV
+elements. This tests the host session loop independently of its incremental
+position selection.
+
+```sh
+bazel-bin/examples/llm/llama_tests --platform=cpu \
+  --model=/var/models/meta-llama/Llama-3.1-8B-Instruct \
+  --session-only --layers=1 --seqlen=8
+```
+
+| Run | Purpose | Result |
+|---|---|---|
+| Corrected loop | Check tokens and computed KV against a causal reference | Pass; 2.80 s, peak RSS 5,791,680 KiB |
+| Temporary `token_position + 1` mutation | Reproduce the old off-by-one behavior and verify test sensitivity | Fail at the second generated token: reference 25252, actual 119040 |
+| Restored corrected loop, rebuilt test binary | Ensure the mutation was removed and the checked artifact contains the fix | Pass; 2.71 s, peak RSS 5,804,132 KiB |
+
+The mutation was confined to the test build and reverted immediately; the
+already-built corrected LLM CLI was not replaced. Its exact patch is committed
+as `testdata/session-position-plus-one.patch`, alongside `session-*.log`, resource
+reports and the negative exit status. These logs include existing libunwind
+warnings during CPU JIT compilation. Zig formatting and `git diff --check`
+also pass. The tests ran while the thread-limited SDK prefill compile continued;
+their elapsed times are diagnostic runtimes, not inference benchmarks.
+
+This establishes regression coverage for the session-position fix. Full
+32-layer RNGD generation and the separate full-forward numerical investigation
+remain pending; this small CPU case is not evidence for their completion.
