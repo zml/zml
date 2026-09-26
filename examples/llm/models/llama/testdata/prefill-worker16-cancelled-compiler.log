@@ -1,0 +1,9 @@
+[1/13] 🔍   Compiling from tcl to dfg
+Done in 20.360785s
+[2/13] 🔍   Compiling from dfg to primitive
+Done in 1.3812271s
+[3/13] 🔍   Compiling from primitive to kernelized
+Done in 0.56814575s
+[4/13] 🔍   Compiling from kernelized to prelower
+Done in 0.2923333s
+[5/13] 🔍   Compiling from prelower to postlower

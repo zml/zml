@@ -387,3 +387,43 @@ continue with their original graph/binary. `llama_tests` contains the new code.
 Full 32-layer RNGD validation, compilation cost and prefill latency for the
 one-row head remain pending. This is an elimination of unused prefill work,
 not a measured improvement to the provisional 62.34 tok/s decode result.
+
+### Superseded prefill cancellation and updated CLI validation
+
+The 16-worker compile of the old all-position prefill head was explicitly
+cancelled with SIGTERM after 2h39m46s in `prelower -> postlower`, with about
+34 GiB RSS. This was a change of experiment to the CPU-validated final-prompt
+head above, not a compiler crash, OOM, successful compile, or numerical result.
+No EDF was produced. The old CLI exited 1; its deferred timing log misleadingly
+says `Compiled prefill forward` before reporting `Internal`. Preserve the
+return code and missing EDF when interpreting that line.
+
+The terminal logs and cancellation record are committed as
+`testdata/prefill-worker16-cancelled-{compiler,generation}.log` and
+`testdata/prefill-worker16-cancelled.json`. The record includes the verified
+process command, signal rationale and process status. The first default-thread
+attempt's kernel OOM remains a separate failure.
+
+After the card was released, the standalone nearby-tie argmax test passed on
+both four/eight-PE RNGD configurations (plus its host test, 3.665 s total).
+XLA's `testdata/argmax-tie/serial-hardware*` records the result. The two queued
+old-graph corrected-position generation runs skipped because the required
+prefill EDF did not exist; they did not execute inference.
+
+The CLI containing `ef0a32c` was then rebuilt successfully with
+`bazel-9.1.1 build //examples/llm --@zml//platforms:furiosa=true --jobs=1
+--config=debug` in 25.385 s (`testdata/prefill-last-token-cli-build.log`). Two
+updated full-model generation runs are queued after the isolated decode-IR
+capture process (PID 1304517 at queue creation). A process descriptor prevents
+PID-reuse races; a binary SHA256 check prevents accidentally running a later
+build. The second run executes only if the first succeeds. No extra compiler
+or inference job is launched concurrently by this queue.
+
+The queued CLI arguments are `--model=/var/models/meta-llama/Llama-3.1-8B-Instruct
+--seqlen=128 --backend=vanilla --topk=1 --prompt='Count from 1 to 100, separated
+by commas.'`. It uses the installed bridge/11 runtime and the current XLA PJRT
+plugin, the compiler-only 16-worker wrapper, and the existing compiler cache.
+Staged fallback, profiling, forced indirection and experimental compiler
+overrides are unset. Pending logs/results are under
+`/home/steeve/.local/state/xla-rngd/internals/indirect-args/llama-final-prompt-*`;
+these queued runs are not yet correctness or speed evidence.
