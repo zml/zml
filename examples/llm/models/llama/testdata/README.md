@@ -14,8 +14,9 @@ acceptance criteria and interpretation are in [WHOLE_FORWARD.md](../WHOLE_FORWAR
 The packed implementation was removed in `bad504f`. These historical logs explain
 why packing removal and better failure diagnostics were investigated; they do
 not establish the correctness or speed of the current separate-weight graph.
-The separate-weight full-model compile is still in progress. Its result must be
-recorded independently when available.
+The separate-weight results are recorded in `separate-*.log` and the corresponding
+section of `WHOLE_FORWARD.md`: position 0 passes, position 127 fails, and the
+unprofiled median decode rate is provisionally 62.34 tok/s.
 
 The XLA repository records bridge/11 implementation details, experiments and
 hardware evidence in `xla/stream_executor/furiosa/opt_runtime/INDIRECT_ARGUMENTS.md`
