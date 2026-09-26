@@ -1,0 +1,23 @@
+	Command being timed: "bazel-bin/examples/llm/llama_tests --platform=cpu --model=/var/models/meta-llama/Llama-3.1-8B-Instruct --session-only --layers=1 --seqlen=8"
+	User time (seconds): 6.56
+	System time (seconds): 5.66
+	Percent of CPU this job got: 436%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:02.80
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 5791680
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 4234485
+	Voluntary context switches: 7318
+	Involuntary context switches: 528
+	Swaps: 0
+	File system inputs: 1830136
+	File system outputs: 8
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

@@ -1,0 +1,11 @@
+--- a/examples/llm/models/llama/session.zig
++++ b/examples/llm/models/llama/session.zig
+@@ -203,7 +203,7 @@
+             inference.run(&self.decode, .{
+                 .io = self.io,
+                 .tokens_buf = &current_token_buffer,
+-                .token_index_buf = &self.token_index_buffers[token_position],
++                .token_index_buf = &self.token_index_buffers[token_position + 1],
+                 .kv_cache_buffers = &self.kv_cache_buffers,
+                 .rng_buffers = &self.rng_buffers,
+                 .attention_metadata_buffers = &attention_metadata_buffers,

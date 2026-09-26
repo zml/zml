@@ -6,6 +6,7 @@ const common = @import("common.zig");
 const llama = @import("llama.zig");
 const model = @import("llama/model.zig");
 const inference = @import("llama/inference.zig");
+const llama_session = @import("llama/session.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -18,6 +19,7 @@ const Args = struct {
     transformer_only: bool = false,
     head_only: bool = false,
     forward_only: bool = false,
+    session_only: bool = false,
     benchmark_iterations: usize = 0,
     platform: ?zml.Target = null,
     seqlen: usize = 16,
@@ -37,6 +39,7 @@ const Args = struct {
         \\   --compare-cpu             Compare actual model layers against CPU
         \\   --transformer-only        Skip individual components with --compare-cpu
         \\   --platform=<name>         Explicit test platform (default: auto)
+        \\   --session-only            Check the CPU session feedback loop against a causal full-sequence forward
         \\   --forward-only            Compare the complete forward with an independent CPU reference
         \\   --benchmark-iterations=<n> Time three full-forward decode trials before comparison (four warmups, default: 0)
         \\   --head-only               Compare greedy output-head tokens only
@@ -55,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
 
     if ((args.transformer_only or args.head_only or args.forward_only) and !args.compare_cpu) return error.RequiresCompareCpu;
-    if (!args.compare_cpu and args.activations == null) return error.MissingActivations;
+    if (!args.compare_cpu and !args.session_only and args.activations == null) return error.MissingActivations;
 
     if (args.seqlen == 0 or (args.transformer_only and args.head_only)) return error.InvalidComparisonOptions;
     const cache_seqlen = args.cache_seqlen orelse args.seqlen;
@@ -80,6 +83,13 @@ pub fn main(init: std.process.Init) !void {
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     const shardings: common.Shardings = try .init(platform);
 
+    if (args.session_only) {
+        defer progress.end();
+        if (platform.target != .cpu or args.compare_cpu or args.forward_only or args.seqlen < 5 or args.layers == 0 or args.layers > repo_model.inner.model.layers.len) return error.InvalidSessionComparison;
+        try compareSession(allocator, io, platform, &repo_model, &store, repo, &progress, shardings, args);
+        return;
+    }
+
     if (args.forward_only) {
         defer progress.end();
         try compareFullForward(allocator, io, platform, &repo_model, &store, &progress, args, shardings);
@@ -102,6 +112,83 @@ pub fn main(init: std.process.Init) !void {
     } else {
         try run(allocator, io, platform, args.activations orelse return error.MissingActivations, repo_model.inner, &model_buffers, platform.replicated_sharding);
     }
+}
+
+// Keep this focused host-loop regression small enough to run while the SDK
+// compiles the full model. Both paths use actual checkpoint weights and the
+// production full-forward executable; the reference recomputes the entire
+// causal sequence instead of feeding tokens through Session.runDecode.
+fn compareSession(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: *model.LoadedModel, store: *zml.io.TensorStore, repo: std.Io.Dir, progress: *std.Progress.Node, shardings: common.Shardings, args: Args) !void {
+    var subset = mdl.*;
+    subset.inner.model.layers = mdl.inner.model.layers[0..args.layers];
+    var compiled = try subset.compile(allocator, io, platform, .vanilla, shardings, args.seqlen, progress);
+    defer compiled.deinit();
+    var weights = try subset.loadBuffers(allocator, io, platform, store, progress, shardings);
+    defer subset.unloadBuffers(&weights, allocator);
+    const tokenizer_file = try repo.openFile(io, "tokenizer.json", .{});
+    defer tokenizer_file.close(io);
+    var reader = tokenizer_file.reader(io, &.{});
+    const tokenizer_bytes = try reader.interface.readAlloc(allocator, try tokenizer_file.length(io));
+    defer allocator.free(tokenizer_bytes);
+    var tokenizer = try zml.tokenizer.Tokenizer.fromBytes(allocator, tokenizer_bytes);
+    defer tokenizer.deinit();
+    var session = try llama_session.Session.init(allocator, io, platform, tokenizer, &compiled, &weights);
+    defer session.deinit();
+    const prompt = [_]u32{ 1000, 1001, 1002 };
+    var tokens: std.ArrayList(u32) = .empty;
+    defer tokens.deinit(allocator);
+    try tokens.appendSlice(allocator, &prompt);
+    try session.runPrefill(tokens.items);
+    var text = std.Io.Writer.Allocating.init(allocator);
+    defer text.deinit();
+    try session.runDecode(&tokens, &text.writer);
+    if (tokens.items.len != args.seqlen) return error.SessionEndedEarly;
+
+    var predicted = try zml.Buffer.fromBytes(io, platform, compiled.params.prefill_tokens.shape(), .replicated, std.mem.sliceAsBytes(tokens.items));
+    defer predicted.deinit();
+    var reference_cache = try compiled.params.kv_cache.initBuffer(io, platform, shardings.model);
+    defer model.KvCache.deinitBuffer(&reference_cache);
+    var reference_rng = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, 0);
+    defer zml.Tensor.Rng.deinitBuffer(&reference_rng);
+    var metadata = try compiled.params.attention_metadata.initBuffer(io, platform, shardings.model);
+    defer zml.attention.Metadata.deinitBuffer(&metadata);
+    var runner = try inference.KernelRunner.init(allocator, &compiled.prefill, &weights);
+    defer runner.deinit(allocator);
+    inference.run(&runner, .{
+        .io = io,
+        .tokens_buf = &predicted,
+        .token_index_buf = &session.token_index_buffers[0],
+        .kv_cache_buffers = &reference_cache,
+        .rng_buffers = &reference_rng,
+        .attention_metadata_buffers = &metadata,
+    });
+    const expected_tokens = try predicted.toSliceAlloc(allocator, io);
+    defer expected_tokens.free(allocator);
+    try std.testing.expectEqualSlices(u32, expected_tokens.items(u32)[prompt.len - 1 .. tokens.items.len - 1], tokens.items[prompt.len..]);
+    inline for (.{ "k", "v" }) |field| {
+        const a = try @field(session.kv_cache_buffers, field).toSliceAlloc(allocator, io);
+        defer a.free(allocator);
+        const b = try @field(reference_cache, field).toSliceAlloc(allocator, io);
+        defer b.free(allocator);
+        const shape = compiled.params.kv_cache.k.shape();
+        const width: usize = @intCast(shape.dim(.h) * shape.dim(.hd));
+        // The last emitted token has not been fed back, so only positions
+        // through length-2 have been computed by both paths.
+        for (0..args.layers) |layer| {
+            for (0..tokens.items.len - 1) |position| {
+                const start = (layer * args.seqlen + position) * width;
+                for (a.items(u16)[start..][0..width], b.items(u16)[start..][0..width], 0..) |left, right, lane| {
+                    const x: f32 = @bitCast(@as(u32, left) << 16);
+                    const y: f32 = @bitCast(@as(u32, right) << 16);
+                    if (!std.math.isFinite(x) or !std.math.isFinite(y) or @abs(x - y) > 0.03 + 0.02 * @max(@abs(x), @abs(y))) {
+                        std.log.err("Session KV {s}: layer {}, position {}, lane {}: actual={}, reference={}", .{ field, layer, position, lane, x, y });
+                        return error.TestUnexpectedResult;
+                    }
+                }
+            }
+        }
+    }
+    std.log.info("PASS session feedback: {} layers, {} prompt tokens, {} generated tokens; causal tokens and computed KV entries match", .{ args.layers, prompt.len, tokens.items.len - prompt.len });
 }
 
 fn run(
