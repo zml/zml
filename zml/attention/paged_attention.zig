@@ -34,7 +34,7 @@ pub const Backend = enum {
             .tpu => .mosaic_tpu,
             .metal => .metal,
             .cpu => .stablehlo,
-            .neuron, .furiosa => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
+            .neuron, .furiosa, .furiosa2 => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }
 

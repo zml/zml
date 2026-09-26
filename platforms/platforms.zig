@@ -3,6 +3,7 @@ const std = @import("std");
 const cpu = @import("platforms/cpu");
 const cuda = @import("platforms/cuda");
 const furiosa = @import("platforms/furiosa");
+const furiosa2 = @import("platforms/furiosa2");
 const metal = @import("platforms/metal");
 const neuron = @import("platforms/neuron");
 const oneapi = @import("platforms/oneapi");
@@ -22,6 +23,7 @@ pub const Platform = enum {
     oneapi,
     metal,
     furiosa,
+    furiosa2,
 
     pub fn selectFirstAcceleratorEnabled() error{Unavailable}!Platform {
         inline for (@typeInfo(Platform).@"enum".fields) |field| {

@@ -11,6 +11,7 @@ PLATFORMS = {
     "oneapi": False,
     "metal": False,
     "furiosa": False,
+    "furiosa2": False,
 }
 
 [
@@ -70,6 +71,7 @@ zig_options(
         "neuron",
         "oneapi",
         "furiosa",
+        "furiosa2",
     ]
 ]
 

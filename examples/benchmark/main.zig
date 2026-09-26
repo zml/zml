@@ -8,6 +8,10 @@ pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
     return a.dot(b, .k).withPartitioning(.{ .m = .m, .n = .replicated });
 }
 
+pub fn addNegate(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+    return a.add(b).negate();
+}
+
 pub fn main(init: std.process.Init) !void {
     const CliArgs = struct {
         pub const help =
@@ -15,6 +19,8 @@ pub fn main(init: std.process.Init) !void {
         ;
         size: usize = 4096,
         dtype: zml.DataType = .f16,
+        operation: enum { matmul, add_negate } = .matmul,
+        iterations: usize = 1,
     };
 
     const allocator = init.gpa;
@@ -31,11 +37,20 @@ pub fn main(init: std.process.Init) !void {
     ));
 
     const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);
+    if (cli_args.iterations == 0) return error.InvalidIterations;
+    if (cli_args.operation == .add_negate and cli_args.dtype != .f32) return error.AddNegateRequiresF32;
 
-    const a_shape = zml.Shape.init(.{ .m = cli_args.size, .k = cli_args.size }, cli_args.dtype)
-        .withPartitioning(.{ .m = .m, .k = .replicated });
-    const b_shape = zml.Shape.init(.{ .k = cli_args.size, .n = cli_args.size }, cli_args.dtype)
-        .withPartitioning(.{ .k = .replicated, .n = .n });
+    const a_shape = switch (cli_args.operation) {
+        .matmul => zml.Shape.init(.{ .m = cli_args.size, .k = cli_args.size }, cli_args.dtype)
+            .withPartitioning(.{ .m = .m, .k = .replicated }),
+        .add_negate => zml.Shape.init(.{ .m = cli_args.size }, cli_args.dtype)
+            .withPartitioning(.{ .m = .m }),
+    };
+    const b_shape = switch (cli_args.operation) {
+        .matmul => zml.Shape.init(.{ .k = cli_args.size, .n = cli_args.size }, cli_args.dtype)
+            .withPartitioning(.{ .k = .replicated, .n = .n }),
+        .add_negate => a_shape,
+    };
 
     const a: zml.Tensor = .fromShape(a_shape);
     const b: zml.Tensor = .fromShape(b_shape);
@@ -44,7 +59,10 @@ pub fn main(init: std.process.Init) !void {
         log.info("⏱️ Compiling benchmark...", .{});
         const now: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Compiled benchmark [{f}]", .{now.untilNow(io, .awake)});
-        break :blk try platform.compileFn(allocator, io, benchmark, .{ a, b }, .{ .shardings = &.{benchmark_sharding} });
+        break :blk switch (cli_args.operation) {
+            .matmul => try platform.compileFn(allocator, io, benchmark, .{ a, b }, .{ .shardings = &.{benchmark_sharding} }),
+            .add_negate => try platform.compileFn(allocator, io, addNegate, .{ a, b }, .{ .shardings = &.{benchmark_sharding} }),
+        };
     };
     defer exe.deinit();
 
@@ -71,27 +89,46 @@ pub fn main(init: std.process.Init) !void {
         exe.call(exe_args, &exe_results);
         var result = exe_results.get(zml.Buffer);
         defer result.deinit();
+        try result.await(io);
     }
 
     // call our executable module
     const run_start: std.Io.Timestamp = .now(io, .awake);
-    exe.call(exe_args, &exe_results);
-    var result = exe_results.get(zml.Buffer);
-    _ = try result.await(io);
-    defer result.deinit();
+    var result: ?zml.Buffer = null;
+    defer if (result) |*buffer| buffer.deinit();
+    for (0..cli_args.iterations) |_| {
+        if (result) |*buffer| buffer.deinit();
+        exe.call(exe_args, &exe_results);
+        result = exe_results.get(zml.Buffer);
+        try result.?.await(io);
+    }
     const elapsed = run_start.untilNow(io, .awake);
     const elapsed_ns = elapsed.toNanoseconds();
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
 
     log.info("✅ Benchmark done!", .{});
 
-    const floating_op_count = 2 * cli_args.size * cli_args.size * cli_args.size;
-    const flops = @as(f64, @floatFromInt(floating_op_count)) / elapsed_s;
-    log.info("Dot product size: {d}x{d} - Datatype: {s} - Elapsed: {f} - {d:.3} GFLOP/s", .{
-        cli_args.size,
-        cli_args.size,
-        @tagName(cli_args.dtype),
-        elapsed,
+    if (cli_args.operation == .add_negate) {
+        const lhs = try a_buffer.toSliceAlloc(allocator, io);
+        defer lhs.free(allocator);
+        const rhs = try b_buffer.toSliceAlloc(allocator, io);
+        defer rhs.free(allocator);
+        const actual = try result.?.toSliceAlloc(allocator, io);
+        defer actual.free(allocator);
+        for (lhs.items(f32), rhs.items(f32), actual.items(f32)) |a_value, b_value, value| {
+            if (value != -(a_value + b_value)) return error.IncorrectAddNegate;
+        }
+        log.info("Verified every add/negate result against host inputs", .{});
+    }
+    const floating_op_count = switch (cli_args.operation) {
+        .matmul => 2 * cli_args.size * cli_args.size * cli_args.size,
+        .add_negate => 2 * cli_args.size,
+    };
+    const flops = @as(f64, @floatFromInt(floating_op_count * cli_args.iterations)) / elapsed_s;
+    log.info("Operation: {s} - Size: {d} - Datatype: {s} - Iterations: {d} - Total: {f} - Mean: {d:.3} us - {d:.3} GFLOP/s", .{
+        @tagName(cli_args.operation), cli_args.size,
+        @tagName(cli_args.dtype),     cli_args.iterations,
+        elapsed,                      elapsed_s * 1_000_000 / @as(f64, @floatFromInt(cli_args.iterations)),
         flops / 1_000_000_000,
     });
 }
