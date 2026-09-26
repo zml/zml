@@ -20,7 +20,9 @@ Production remains one public executable per complete forward pass.
 The diagnostic also supports multi-token `--seqlen` values. It initializes IDs
 `1000..1000+seqlen-1` and checks all updated cache rows, preserving the original
 tolerances. Optional `--layerwise-dump-dir=<path>` writes BF16 stage/hidden
-buffers for cross-run comparisons; default runs do not write these files.
+buffers and the already-returned KV caches for cross-run comparisons; default
+runs do not write these files. Reading those cache outputs does not add graph
+roots or change the compiled forward function.
 Stage outputs can change native fusion and rounding. Compare their results
 with the separately executed layer before attributing a discrepancy.
 
@@ -30,6 +32,17 @@ through all 32 layers. Device differences start in layer zero, row zero, in
 the standalone layer but disappear when intermediate stage outputs are added.
 All local CPU-input checks pass tolerance; propagated checks still fail.
 These observations do not waive the whole-forward or position-127 gates.
+
+The follow-up `first-position-attention` audit narrows the first standalone
+width-two/width-four cache difference to V element 758 at position zero,
+one BF16 step (0.00000762939453125). Instrumented V agrees across widths.
+With the instrumented normalization input and original weight row, the exact
+rational dot is just below the midpoint between those adjacent BF16 values.
+CPU width one also chooses the upper value. This supports accumulation-order
+sensitivity, but the standalone normalization input is not exposed, and this
+does not prove the cause of every propagated or whole-forward discrepancy.
+All 75 previously captured stage/hidden buffers remain byte-identical
+after adding the cache dumps; all three first-layer runs pass local tolerances.
 
 Build with the Furiosa platform explicitly enabled:
 
