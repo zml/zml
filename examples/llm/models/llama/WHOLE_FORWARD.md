@@ -181,3 +181,24 @@ The next real-generation run uses the normal LLM CLI with `--seqlen=128`,
 `Count from 1 to 100, separated by commas.` Its full prefill graph is compiling;
 no generation result is claimed yet. The approximately 100 tok/s objective and
 position-127 correctness investigation remain open.
+
+## CPU logit-margin diagnostic
+
+The position-127 token mismatch alone does not show whether the winning tokens
+have nearly equal logits or a large score difference. The independently
+composed CPU reference now also returns its logits. For a single-token query,
+the test reports the CPU score of both the expected token and the device's
+chosen token, their difference, and how many CPU vocabulary scores are higher
+than or tied with the device token. These are CPU scores, not device logits.
+The Furiosa forward graph and its outputs remain unchanged, so this diagnostic
+can reuse the already compiled EDF. The test still fails on the same argmax
+and KV criteria.
+
+`bazel-9.1.1 build //examples/llm:llama_tests --@zml//platforms:furiosa=true
+--jobs=1 --config=debug` passed in 56.489 seconds; Zig formatting and
+`git diff --check` passed. The build log is committed as
+`testdata/logit-diagnostic-build.log`. Runtime validation is pending: the
+full-prefill SDK compile currently uses about 52 GiB, so a CPU full-model
+reference must wait to avoid overlapping their memory demands. The diagnostic
+build ran during prefill compilation, not during any throughput measurement.
+The idle Bazel server was shut down after the build to release memory.
