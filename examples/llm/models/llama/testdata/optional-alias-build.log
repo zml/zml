@@ -1,0 +1,18 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+WARNING: Build options --//platforms:cpu and --compilation_mode have changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+Analyzing: target //examples/llm:llm (0 packages loaded, 0 targets configured)
+Analyzing: target //examples/llm:llm (0 packages loaded, 0 targets configured)
+
+INFO: Analyzed target //examples/llm:llm (0 packages loaded, 76444 targets configured, 257 aspect applications).
+[5,990 / 6,390] [Prepa] zig build-lib //examples/llm:llm
+[6,434 / 6,437] zig build-lib //examples/llm:llm; 1s local
+[6,434 / 6,437] zig build-lib //examples/llm:llm; 10s local
+[6,435 / 6,437] [Prepa] Linking examples/llm/llm
+INFO: Found 1 target...
+Target //examples/llm:llm up-to-date:
+  bazel-bin/examples/llm/llm
+INFO: Elapsed time: 16.628s, Critical Path: 15.21s
+INFO: 4 processes: 6433 action cache hit, 2 internal, 1 local, 1 processwrapper-sandbox.
+INFO: Build completed successfully, 4 total actions

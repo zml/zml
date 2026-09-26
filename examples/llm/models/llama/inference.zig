@@ -174,6 +174,14 @@ pub const KernelRunner = struct {
 };
 
 pub fn run(runner: *KernelRunner, args: Args) void {
+    // Donation is optional. Release replaced input handles even if the backend
+    // chooses distinct result storage; PJRT retains pending execution inputs.
+    var previous_cache = args.kv_cache_buffers.*;
+    defer model.KvCache.deinitBuffer(&previous_cache);
+    var previous_rng = args.rng_buffers.*;
+    defer zml.Tensor.Rng.deinitBuffer(&previous_rng);
+    var previous_tokens = args.tokens_buf.*;
+    defer if ((args.tokens_output_buf orelse args.tokens_buf) == args.tokens_buf) previous_tokens.deinit();
     runner.forward.run(args.io, .{
         .inputs = .{
             .tokens = args.tokens_buf.*,
