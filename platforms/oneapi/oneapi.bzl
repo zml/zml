@@ -1,15 +1,14 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-PJRT_ONEAPI_RELEASE = "manual-2026-09-08T13-23-00Z"
-PJRT_ONEAPI_ARTIFACT_SHA256 = "c0c429f435a31207cb976636a9fa2d11b420ddc65bdde325e0ae736afb47a9b7"
-PJRT_ONEAPI_ARTIFACT_URL = "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-oneapi_linux-amd64.tar.gz".format(
-    release = PJRT_ONEAPI_RELEASE,
-)
+_PLUGIN_ONEAPI_URL = "https://mirror.zml.ai/plugins/202609301700.135.1.f7a73483aa8a/zml-oneapi-linux-amd64.tar.zst"
+_PLUGIN_ONEAPI_SHA256 = "2437fd3abc23913f1b3d38ea74c3ddd04a73961b56f89165ba4346cfd75eacde"
 
 ONEAPI_VERSION = "2026.1"
+
 # www.intel.com/content/www/us/en/developer/tools/oneapi/onednn-download.html
 ONEAPI_DNNL_VERSION = "2026.0"
+
 # https://github.com/uxlfoundation/onetbb
 ONEAPI_TBB_VERSION = "2023.1"
 ONEAPI_TCM_VERSION = "1.5"
@@ -290,8 +289,8 @@ def _oneapi_impl(mctx):
     http_archive(
         name = "libzml_oneapi",
         build_file = "libzml_oneapi.BUILD.bazel",
-        sha256 = PJRT_ONEAPI_ARTIFACT_SHA256,
-        url = PJRT_ONEAPI_ARTIFACT_URL,
+        sha256 = _PLUGIN_ONEAPI_SHA256,
+        url = _PLUGIN_ONEAPI_URL,
     )
 
     for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
