@@ -50,7 +50,7 @@ const Args = struct {
         \\   --platform=<name>         Explicit test platform (default: auto)
         \\   --session-only            Check the CPU session feedback loop against a causal full-sequence forward
         \\   --forward-only            Compare the complete forward with an independent CPU reference
-        \\   --prefill-history         Seed forward comparison with a CPU-computed token prefix
+        \\   --prefill-history         Seed forward/layerwise comparison with a CPU-computed prefix
         \\   --reference-f64-dots      Diagnostic CPU reference: accumulate dots in F64, retain BF16 results
         \\   --benchmark-iterations=<n> Time three full-forward decode trials before comparison (four warmups, default: 0)
         \\   --benchmark-block-iterations=<n> Time fixed query blocks; reports positions/s, not generated tokens/s
@@ -70,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
 
     if ((args.transformer_only or args.head_only or args.forward_only) and !args.compare_cpu) return error.RequiresCompareCpu;
-    if (args.prefill_history and (!args.forward_only or args.token_offset == 0 or args.seqlen != 1)) return error.InvalidPrefillHistoryOptions;
+    if (args.prefill_history and (!(args.forward_only or args.layerwise) or args.token_offset == 0 or args.seqlen != 1)) return error.InvalidPrefillHistoryOptions;
     if (args.reference_f64_dots and !args.forward_only) return error.RequiresForwardComparison;
     if (args.layerwise and (!args.compare_cpu or args.forward_only or args.head_only or args.session_only or args.first_layer != 0)) return error.InvalidLayerwiseOptions;
     if (args.layerwise_dump_dir != null and !args.layerwise) return error.InvalidLayerwiseOptions;
@@ -360,10 +360,10 @@ fn compareCpu(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform,
     const cache_seqlen = args.cache_seqlen orelse args.seqlen;
     std.log.info("Transformer block layers: {} at {}", .{ args.layers, args.first_layer });
     std.log.info("Comparing full transformer layer with CPU (query={d}, cache={d}, offset={d})", .{ args.seqlen, cache_seqlen, args.token_offset });
-    var reference = try runTransformer(allocator, io, cpu, mdl, expected.model.layers[args.first_layer..][0..args.layers], shape, bytes, cache_seqlen, args.token_offset, args.first_layer);
+    var reference = try runTransformer(allocator, io, cpu, mdl, expected.model.layers[args.first_layer..][0..args.layers], shape, bytes, cache_seqlen, args.token_offset, args.first_layer, null);
     defer reference.hidden.deinit();
     defer model.KvCache.deinitBuffer(&reference.kv_cache);
-    var result = try runTransformer(allocator, io, platform, mdl, actual.model.layers[args.first_layer..][0..args.layers], shape, bytes, cache_seqlen, args.token_offset, args.first_layer);
+    var result = try runTransformer(allocator, io, platform, mdl, actual.model.layers[args.first_layer..][0..args.layers], shape, bytes, cache_seqlen, args.token_offset, args.first_layer, null);
     defer result.hidden.deinit();
     defer model.KvCache.deinitBuffer(&result.kv_cache);
     std.log.info("Comparing KV values", .{});
@@ -408,16 +408,36 @@ fn compareLayerwise(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Pla
     const hidden_tolerance: zml.testing.CompareOpts = .{ .absolute_tolerance = 0.1, .relative_tolerance = 0.03, .minimum_close_fraction = 1 };
     const cache_tolerance: zml.testing.CompareOpts = .{ .absolute_tolerance = 0.03, .relative_tolerance = 0.02, .minimum_close_fraction = 1 };
     const row_size = mdl.config.num_key_value_heads * (mdl.config.hidden_size / mdl.config.num_attention_heads);
+    var history: ?CacheInput = null;
+    defer if (history) |seed| {
+        allocator.free(seed.k);
+        allocator.free(seed.v);
+    };
+    if (args.prefill_history) {
+        const kv_shape = zml.Shape.init(.{ .layer = mdl.model.layers.len, .k = cache_seqlen, .h = mdl.config.num_key_value_heads, .hd = mdl.config.hidden_size / mdl.config.num_attention_heads }, .bf16);
+        const keys = try allocator.alloc(u16, kv_shape.count());
+        errdefer allocator.free(keys);
+        const values = try allocator.alloc(u16, kv_shape.count());
+        errdefer allocator.free(values);
+        for (keys, 0..) |*bits, i| {
+            const value: f32 = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13 + 7) % 17)) - 8)) / 64.0;
+            bits.* = @truncate(@as(u32, @bitCast(value)) >> 16);
+        }
+        @memcpy(values, keys);
+        const cpu_sharding = cpu.shardings.get("model") orelse return error.MissingModelSharding;
+        try seedPrefillHistory(allocator, io, cpu, cpu_sharding, mdl, expected.*, model.KvCache.init(kv_shape), args.token_offset, keys, values);
+        history = .{ .k = keys, .v = values };
+    }
     for (0..args.layers) |layer| {
         std.log.info("Layerwise layer {}: CPU input and propagated input, position {}", .{ layer, args.token_offset });
-        if (args.layerwise_stages) try compareStages(allocator, io, platform, cpu, mdl, actual.model.layers[layer], expected.model.layers[layer], shape, reference_bytes, cache_seqlen, args.token_offset, layer, args.layerwise_dump_dir);
-        var reference = try runTransformer(allocator, io, cpu, mdl, expected.model.layers[layer..][0..1], shape, reference_bytes, cache_seqlen, args.token_offset, layer);
+        if (args.layerwise_stages) try compareStages(allocator, io, platform, cpu, mdl, actual.model.layers[layer], expected.model.layers[layer], shape, reference_bytes, cache_seqlen, args.token_offset, layer, args.layerwise_dump_dir, history);
+        var reference = try runTransformer(allocator, io, cpu, mdl, expected.model.layers[layer..][0..1], shape, reference_bytes, cache_seqlen, args.token_offset, layer, history);
         defer reference.hidden.deinit();
         defer model.KvCache.deinitBuffer(&reference.kv_cache);
-        var local = try runTransformer(allocator, io, platform, mdl, actual.model.layers[layer..][0..1], shape, reference_bytes, cache_seqlen, args.token_offset, layer);
+        var local = try runTransformer(allocator, io, platform, mdl, actual.model.layers[layer..][0..1], shape, reference_bytes, cache_seqlen, args.token_offset, layer, history);
         defer local.hidden.deinit();
         defer model.KvCache.deinitBuffer(&local.kv_cache);
-        var propagated = try runTransformer(allocator, io, platform, mdl, actual.model.layers[layer..][0..1], shape, propagated_bytes, cache_seqlen, args.token_offset, layer);
+        var propagated = try runTransformer(allocator, io, platform, mdl, actual.model.layers[layer..][0..1], shape, propagated_bytes, cache_seqlen, args.token_offset, layer, history);
         defer propagated.hidden.deinit();
         defer model.KvCache.deinitBuffer(&propagated.kv_cache);
         failed = !(try reportBf16Region(allocator, io, "local hidden", layer, local.hidden, reference.hidden, 0, shape.count(), hidden_tolerance)) or failed;
@@ -572,7 +592,7 @@ fn dumpLayerBuffer(allocator: std.mem.Allocator, io: std.Io, directory: []const 
     std.log.info("Layerwise dump: {s}, shape={f}", .{ path, buffer.shape() });
 }
 
-fn compareStages(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: model.Model, actual: zml.Bufferized(model.TransformerLayer), expected: zml.Bufferized(model.TransformerLayer), shape: zml.Shape, bytes: []const u8, cache_seqlen: usize, token_offset: u32, layer: usize, dump_dir: ?[]const u8) !void {
+fn compareStages(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: model.Model, actual: zml.Bufferized(model.TransformerLayer), expected: zml.Bufferized(model.TransformerLayer), shape: zml.Shape, bytes: []const u8, cache_seqlen: usize, token_offset: u32, layer: usize, dump_dir: ?[]const u8, history: ?CacheInput) !void {
     const kv_shape = zml.Shape.init(.{ .layer = mdl.model.layers.len, .k = cache_seqlen, .h = mdl.config.num_key_value_heads, .hd = mdl.config.hidden_size / mdl.config.num_attention_heads }, .bf16);
     const cache_data = try allocator.alloc(u16, kv_shape.count());
     defer allocator.free(cache_data);
@@ -609,8 +629,8 @@ fn compareStages(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfo
         var layer_index = try zml.Buffer.scalar(io, target, layer, .u32);
         defer layer_index.deinit();
         var cache: model.KvCache.Buffer = .{
-            .k = try zml.Buffer.fromBytes(io, target, kv_shape, .replicated, std.mem.sliceAsBytes(cache_data)),
-            .v = try zml.Buffer.fromBytes(io, target, kv_shape, .replicated, std.mem.sliceAsBytes(cache_data)),
+            .k = try zml.Buffer.fromBytes(io, target, kv_shape, .replicated, std.mem.sliceAsBytes(if (history) |seed| seed.k else cache_data)),
+            .v = try zml.Buffer.fromBytes(io, target, kv_shape, .replicated, std.mem.sliceAsBytes(if (history) |seed| seed.v else cache_data)),
         };
         errdefer model.KvCache.deinitBuffer(&cache);
         var stages: [11]zml.Buffer = undefined;
@@ -799,7 +819,11 @@ fn compareLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
     std.log.info("PASS {s}", .{name});
 }
 
-fn runTransformer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: model.Model, weights: []const zml.Bufferized(model.TransformerLayer), shape: zml.Shape, data: []const u8, cache_seqlen: usize, token_offset: u32, first_layer: usize) !zml.Bufferized(model.TransformerLayer.Output) {
+// Borrowed host cache contents. Every invocation uploads a fresh copy so
+// local-input and propagated-input comparisons start from identical history.
+const CacheInput = struct { k: []const u16, v: []const u16 };
+
+fn runTransformer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: model.Model, weights: []const zml.Bufferized(model.TransformerLayer), shape: zml.Shape, data: []const u8, cache_seqlen: usize, token_offset: u32, first_layer: usize, history: ?CacheInput) !zml.Bufferized(model.TransformerLayer.Output) {
     const kv_shape = zml.Shape.init(.{ .layer = mdl.model.layers.len, .k = cache_seqlen, .h = mdl.config.num_key_value_heads, .hd = mdl.config.hidden_size / mdl.config.num_attention_heads }, .bf16);
     const kv = model.KvCache.init(kv_shape);
     const exe = try zml.FnExe(model.TransformerBlock.forward).compile(allocator, io, platform, .{ .shardings = platform.shardings.values() }, .{.{
@@ -823,10 +847,11 @@ fn runTransformer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
         const value: f32 = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13 + 7) % 17)) - 8)) / 64.0;
         bits.* = @truncate(@as(u32, @bitCast(value)) >> 16);
     }
-    const cache_bytes = std.mem.sliceAsBytes(cache_data);
+    const keys = if (history) |seed| seed.k else cache_data;
+    const values = if (history) |seed| seed.v else cache_data;
     var cache: model.KvCache.Buffer = .{
-        .k = try zml.Buffer.fromBytes(io, platform, kv_shape, .replicated, cache_bytes),
-        .v = try zml.Buffer.fromBytes(io, platform, kv_shape, .replicated, cache_bytes),
+        .k = try zml.Buffer.fromBytes(io, platform, kv_shape, .replicated, std.mem.sliceAsBytes(keys)),
+        .v = try zml.Buffer.fromBytes(io, platform, kv_shape, .replicated, std.mem.sliceAsBytes(values)),
     };
     errdefer model.KvCache.deinitBuffer(&cache);
     var layer_index = try zml.Buffer.scalar(io, platform, first_layer, .u32);
@@ -842,11 +867,11 @@ fn runTransformer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
     // Check untouched cache storage exactly, independently of the floating
     // tolerance used for newly computed keys and values.
     const query_length: usize = @intCast(shape.dim(.s));
-    for ([_]zml.Buffer{ cache.k, cache.v }) |buffer| {
+    for ([_]zml.Buffer{ cache.k, cache.v }, [_][]const u16{ keys, values }) |buffer, initial_cache| {
         const host = try buffer.toSliceAlloc(allocator, io);
         defer host.free(allocator);
         const row_size: usize = @intCast(kv_shape.dim(.h) * kv_shape.dim(.hd));
-        for (cache_data, 0..) |bits, i| {
+        for (initial_cache, 0..) |bits, i| {
             const row = i / row_size;
             const layer = row / cache_seqlen;
             const position_in_cache = row % cache_seqlen;

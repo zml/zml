@@ -119,6 +119,18 @@ occurs without RNGD. They do not clear the existing model gate or establish
 whole-model accuracy. See the XLA `2026-09-27-f64-reference` experiment for
 commands, calibration failures and memory reports.
 
+`--layerwise --prefill-history` now uses that same CPU-computed token prefix
+for each layer's CPU, local-device and propagated-device comparisons. With
+32 layers at position eight, all 96 local-input hidden/key/value checks pass
+with both default and strict CPU precision. With propagated inputs, strict
+precision produces 61 key failures and no hidden/value failures; its per-layer
+key failure counts and maxima match the recorded whole-forward comparison.
+Default precision produces 194 key, two value and one hidden failures in this
+layerwise diagnostic, so its metrics do not match the default whole forward.
+Both runs correctly exit 1. These results reproduce accumulated drift using
+model-computed history, without clearing the original whole-forward gate.
+The XLA `2026-09-27-layerwise-history` experiment retains commands and logs.
+
 ## Validation
 
 - `bazel build //... --@zml//platforms:furiosa2=true`: all 168 targets passed.
