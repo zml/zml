@@ -23,6 +23,7 @@ const Args = struct {
     head_only: bool = false,
     forward_only: bool = false,
     prefill_history: bool = false,
+    reference_f64_dots: bool = false,
     session_only: bool = false,
     benchmark_iterations: usize = 0,
     benchmark_block_iterations: usize = 0,
@@ -50,6 +51,7 @@ const Args = struct {
         \\   --session-only            Check the CPU session feedback loop against a causal full-sequence forward
         \\   --forward-only            Compare the complete forward with an independent CPU reference
         \\   --prefill-history         Seed forward comparison with a CPU-computed token prefix
+        \\   --reference-f64-dots      Diagnostic CPU reference: accumulate dots in F64, retain BF16 results
         \\   --benchmark-iterations=<n> Time three full-forward decode trials before comparison (four warmups, default: 0)
         \\   --benchmark-block-iterations=<n> Time fixed query blocks; reports positions/s, not generated tokens/s
         \\   --head-only               Compare greedy output-head tokens only
@@ -69,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
 
     if ((args.transformer_only or args.head_only or args.forward_only) and !args.compare_cpu) return error.RequiresCompareCpu;
     if (args.prefill_history and (!args.forward_only or args.token_offset == 0 or args.seqlen != 1)) return error.InvalidPrefillHistoryOptions;
+    if (args.reference_f64_dots and !args.forward_only) return error.RequiresForwardComparison;
     if (args.layerwise and (!args.compare_cpu or args.forward_only or args.head_only or args.session_only or args.first_layer != 0)) return error.InvalidLayerwiseOptions;
     if (args.layerwise_dump_dir != null and !args.layerwise) return error.InvalidLayerwiseOptions;
     if (args.layerwise_stages and !args.layerwise) return error.InvalidLayerwiseOptions;
@@ -453,12 +456,59 @@ const AttentionStages = struct {
     const Output = struct { bf16: [10]zml.Tensor, f32: [2]zml.Tensor };
 
     fn forward(input: model.TransformerLayer.Input, normalized: zml.Tensor) Output {
+        return withPrecision(input, normalized, false).observations;
+    }
+
+    fn projection(self: anytype, x: zml.Tensor, f64_dots: bool) zml.Tensor {
+        if (!f64_dots) return self.forward(x);
+        std.debug.assert(self.weight_scale == null and self.linear.bias == null and self.linear.quantization == null);
+        std.debug.assert(x.dtype() == .bf16 and self.linear.weight.dtype() == .bf16);
+        return roundF64Dot(self.linear.forward(x.convert(.f64), .f64));
+    }
+
+    fn dot(lhs: zml.Tensor, rhs: zml.Tensor, axis: anytype, f64_dots: bool) zml.Tensor {
+        if (!f64_dots) return lhs.dot(rhs, axis);
+        return roundF64Dot(lhs.convert(.f64).dot(rhs.convert(.f64), axis));
+    }
+
+    // Round the binary64 significand directly, without F32 or BF16 arithmetic
+    // that can double-round or flush subnormals in the CPU backend.
+    fn roundF64Dot(x: zml.Tensor) zml.Tensor {
+        const raw = x.bitCast(.u64);
+        const magnitude = raw.logical(.AND, zml.Tensor.scalar(0x7fffffffffffffff, .u64).broad(raw.shape()));
+        const shift = zml.Tensor.scalar(45, .u64).broad(raw.shape());
+        const one = zml.Tensor.scalar(1, .u64).broad(raw.shape());
+        const retained = magnitude.shiftRightLogical(shift);
+        const rounded = magnitude.addConstant((@as(u64, 1) << 44) - 1).add(retained.logical(.AND, one));
+        var bits = rounded.shiftRightLogical(shift).subConstant(896 * 128).convert(.u16);
+
+        // BF16 subnormals have a fixed quantum of 2^-133. Rounding in units
+        // of that quantum also handles the transition to minimum normal.
+        const scaled = x.abs().mul(zml.Tensor.scalar(0x1p133, .f64).broad(x.shape()));
+        const truncated = scaled.convert(.u16);
+        const fraction = scaled.sub(truncated.convert(.f64));
+        const half = zml.Tensor.scalar(0.5, .f64).broad(x.shape());
+        const one16 = zml.Tensor.scalar(1, .u16).broad(truncated.shape());
+        const odd = truncated.logical(.AND, one16).cmp(.EQ, one16);
+        const up = fraction.cmp(.GT, half).logical(.OR, fraction.cmp(.EQ, half).logical(.AND, odd));
+        const subnormal = up.select(truncated.addConstant(1), truncated);
+        bits = x.abs().cmp(.LT, zml.Tensor.scalar(0x1p-126, .f64).broad(x.shape())).select(subnormal, bits);
+        const infinity = zml.Tensor.scalar(0x7f80, .u16).broad(bits.shape());
+        bits = x.abs().cmp(.GE, zml.Tensor.scalar(0x1.ffp127, .f64).broad(x.shape())).select(infinity, bits);
+        const sign = raw.shiftRightLogical(zml.Tensor.scalar(48, .u64).broad(raw.shape())).convert(.u16)
+            .logical(.AND, zml.Tensor.scalar(0x8000, .u16).broad(bits.shape()));
+        bits = bits.logical(.OR, sign);
+        bits = x.cmp(.NE, x).select(zml.Tensor.scalar(0x7fc0, .u16).broad(bits.shape()), bits);
+        return bits.bitCast(.bf16);
+    }
+
+    fn withPrecision(input: model.TransformerLayer.Input, normalized: zml.Tensor, f64_dots: bool) struct { observations: Output, kv_cache: model.KvCache } {
         const self = input.layer.self_attn;
         const heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
         const x = normalized.withPartitioning(.{ .d = .replicated });
-        const qp = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
-        const kp = self.k_proj.forward(x).splitAxis(-1, .{ .h = heads, .hd = .auto });
-        const vp = self.v_proj.forward(x).splitAxis(-1, .{ .h = heads, .hd = .auto });
+        const qp = projection(self.q_proj, x, f64_dots).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
+        const kp = projection(self.k_proj, x, f64_dots).splitAxis(-1, .{ .h = heads, .hd = .auto });
+        const vp = projection(self.v_proj, x, f64_dots).splitAxis(-1, .{ .h = heads, .hd = .auto });
         var q = qp;
         var k = kp;
         if (self.q_norm) |norm| q = norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
@@ -476,16 +526,16 @@ const AttentionStages = struct {
         const split_q = q.splitAxis(.h, .{ .h = keys.dim(.h), .hq = .auto });
         const scale: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(keys.dim(.hd))));
         const scaled_keys = keys.mul(zml.Tensor.scalar(scale, keys.dtype()));
-        const scores = split_q.dot(scaled_keys, .hd);
+        const scores = dot(split_q, scaled_keys, .hd, f64_dots);
         const mask = zml.nn.causalAttnMask(.{ .q = keys.dim(.k), .k = keys.dim(.k) }, q.dtype(), null)
             .gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, q.dtype()), input.token_index.appendAxes(.{.coord}), .{});
         const logits = scores.add(mask.broad(scores.shape())).convert(.f32);
         const probabilities_f32 = logits.softmax(.k);
         const probabilities = probabilities_f32.convert(q.dtype());
-        const context = probabilities.dot(values, .k).transpose(split_q.shape()).merge(.{ .h = .{ .h, .hq } });
-        const output = self.o_proj.forward(context.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s }))
+        const context = dot(probabilities, values, .k, f64_dots).transpose(split_q.shape()).merge(.{ .h = .{ .h, .hq } });
+        const output = projection(self.o_proj, context.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s }), f64_dots)
             .rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
-        return .{ .bf16 = .{ qp, kp, vp, q, k, scaled_keys, scores, probabilities, context, output }, .f32 = .{ logits, probabilities_f32 } };
+        return .{ .observations = .{ .bf16 = .{ qp, kp, vp, q, k, scaled_keys, scores, probabilities, context, output }, .f32 = .{ logits, probabilities_f32 } }, .kv_cache = cache };
     }
 };
 
@@ -852,11 +902,146 @@ const ReferenceForward = struct {
             .logits = logits.transpose(.{ .s, .voc }),
         };
     }
+
+    // A separate CPU diagnostic: retain BF16 between operations and change
+    // only dot accumulation. The default reference remains the model code.
+    fn f64Block(input: model.TransformerBlock.Input) model.TransformerLayer.Output {
+        std.debug.assert(zml.Compiler.current().platform.target == .cpu);
+        var result: model.TransformerLayer.Output = .{ .hidden = input.hidden, .kv_cache = input.kv_cache };
+        for (input.layers, 0..) |layer, i| {
+            const x = result.hidden.withPartitioning(.{ .d = .replicated });
+            const attention = AttentionStages.withPrecision(.{
+                .layer = layer,
+                .hidden = x,
+                .token_index = input.token_index,
+                .kv_cache = result.kv_cache,
+                .kv_cache_index = input.kv_cache_index.addConstant(i),
+                .attention_metadata = .vanilla,
+                .attention_parameters = .vanilla,
+            }, layer.input_layernorm.forward(x), true);
+            const residual = x.add(attention.observations.bf16[9]).withPartitioning(.{ .d = .replicated });
+            const normalized = layer.post_attention_layernorm.forward(residual);
+            const up = AttentionStages.projection(layer.mlp.up_proj, normalized, true);
+            const gate = AttentionStages.projection(layer.mlp.gate_proj, normalized, true);
+            const product = gate.silu().mul(up).rename(.{ .dout = .d });
+            const output = AttentionStages.projection(layer.mlp.down_proj, product, true)
+                .rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated }).add(residual);
+            result = .{ .hidden = output, .kv_cache = attention.kv_cache };
+        }
+        return result;
+    }
 };
+
+// Bound widened-weight memory by executing one CPU reference layer at a time.
+// This does not change the accelerator's single compiled forward executable.
+fn runF64Reference(allocator: std.mem.Allocator, io: std.Io, cpu: *zml.Platform, mdl: model.Model, weights: model.Buffers, tokens: *zml.Buffer, position: zml.Buffer, cache: *model.KvCache.Buffer, rng: *zml.Bufferized(zml.Tensor.Rng)) !zml.Buffer {
+    const Calls = struct {
+        fn embedding(weight: zml.nn.TokenEmbedding, ids: zml.Tensor) zml.Tensor {
+            return model.EmbedTokens.forward(.{ .embedding = .{ .embed_tokens = weight }, .tokens = ids }).hidden;
+        }
+
+        fn head(head_model: model.LmHead, input: zml.Tensor, ids: zml.Tensor, random: zml.Tensor.Rng) struct { tokens: zml.Tensor, rng: zml.Tensor.Rng, logits: zml.Tensor } {
+            const normalized = head_model.norm.forward(input.withPartialTags(.{ .s, .d }));
+            const logits = if (head_model.lm_head) |projection|
+                AttentionStages.projection(projection, normalized, true).rename(.{ .dout = .voc })
+            else
+                AttentionStages.dot(head_model.embed_tokens.weight.withTags(.{ .voc, .d }), normalized, .d, true);
+            const next, const next_rng = zml.nn.sampleTokens(logits, head_model.gen_opts, random);
+            return .{ .tokens = next.convert(ids.dtype()).reuseBuffer(ids), .rng = next_rng, .logits = logits.transpose(.{ .s, .voc }) };
+        }
+    };
+    var embedding_exe = try cpu.compileFn(allocator, io, Calls.embedding, .{ mdl.model.embed_tokens, zml.Tensor.fromShape(tokens.shape()) }, .{ .shardings = cpu.shardings.values() });
+    defer embedding_exe.deinit();
+    var hidden = try zml.testing.autoCall(allocator, io, &embedding_exe, Calls.embedding, .{ weights.model.embed_tokens, tokens.* });
+    defer hidden.deinit();
+    const block_exe = try zml.FnExe(ReferenceForward.f64Block).compile(allocator, io, cpu, .{ .shardings = cpu.shardings.values(), .program_name = "llama_f64_reference_layer" }, .{.{
+        .layers = mdl.model.layers[0..1],
+        .hidden = zml.Tensor.fromShape(hidden.shape()),
+        .token_index = zml.Tensor.fromShape(position.shape()),
+        .kv_cache = model.KvCache.init(cache.k.shape()),
+        .kv_cache_index = zml.Tensor.init(.{}, .u32),
+        .attention_metadata = .vanilla,
+        .attention_parameters = .vanilla,
+    }});
+    defer block_exe.deinit();
+    for (weights.model.layers, 0..) |_, i| {
+        var runner = try zml.FnExe(ReferenceForward.f64Block).Runner(.{.layers}).init(&block_exe, allocator, .{ .layers = weights.model.layers[i..][0..1] });
+        defer runner.deinit(allocator);
+        var index = try zml.Buffer.scalar(io, cpu, i, .u32);
+        defer index.deinit();
+        var previous = hidden;
+        runner.run(io, .{ .inputs = .{ .hidden = hidden, .token_index = position, .kv_cache = cache.*, .kv_cache_index = index, .attention_metadata = .vanilla }, .outputs = .{ .hidden = &hidden, .kv_cache = cache } });
+        previous.deinit();
+        try hidden.await(io);
+        std.log.info("F64 reference layer {}/{} complete", .{ i + 1, weights.model.layers.len });
+    }
+    var head_exe = try cpu.compileFn(allocator, io, Calls.head, .{ model.LmHead.init(mdl), zml.Tensor.fromShape(hidden.shape()), zml.Tensor.fromShape(tokens.shape()), zml.Tensor.Rng.init() }, .{ .shardings = cpu.shardings.values(), .program_name = "llama_f64_reference_head" });
+    defer head_exe.deinit();
+    const head_weights: zml.Bufferized(model.LmHead) = .{ .lm_head = weights.lm_head, .embed_tokens = weights.model.embed_tokens, .norm = weights.model.norm };
+    const result = try zml.testing.autoCall(allocator, io, &head_exe, Calls.head, .{ head_weights, hidden, tokens.*, rng.* });
+    tokens.* = result.tokens;
+    rng.* = result.rng;
+    return result.logits;
+}
+
+fn checkF64Rounding(allocator: std.mem.Allocator, io: std.Io, cpu: *zml.Platform) !void {
+    const Convert = struct {
+        fn forward(x: zml.Tensor) zml.Tensor {
+            return AttentionStages.roundF64Dot(x);
+        }
+    };
+    const Decode = struct {
+        fn bf16(bits: u16) f64 {
+            const exponent: u64 = bits >> 7;
+            const mantissa: u64 = bits & 127;
+            if (exponent == 0) return @as(f64, @floatFromInt(mantissa)) * 0x1p-133;
+            return @bitCast(((exponent + 896) << 52) | (mantissa << 45));
+        }
+    };
+    // Every adjacent finite BF16 pair: immediately below, at, and above the
+    // midpoint, for both signs. Includes subnormals and exponent boundaries.
+    const specials = [_]f64{ 0.0, -0.0, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), 0x1.ffp127, -0x1.ffp127 };
+    const special_bits = [_]u16{ 0, 0x8000, 0x7f80, 0xff80, 0x7fc0, 0x7f80, 0xff80 };
+    const data = try allocator.alloc(f64, 0x7f7f * 6 + specials.len);
+    defer allocator.free(data);
+    const expected = try allocator.alloc(u16, data.len);
+    defer allocator.free(expected);
+    for (0..0x7f7f) |i| {
+        const low: u16 = @intCast(i);
+        const high = low + 1;
+        const midpoint = (Decode.bf16(low) + Decode.bf16(high)) / 2.0;
+        const samples = [_]f64{ std.math.nextAfter(f64, midpoint, 0.0), midpoint, std.math.nextAfter(f64, midpoint, std.math.inf(f64)) };
+        const answers = [_]u16{ low, if (low & 1 == 0) low else high, high };
+        for (samples, answers, 0..) |sample, answer, j| {
+            data[i * 6 + j] = sample;
+            expected[i * 6 + j] = answer;
+            data[i * 6 + j + 3] = -sample;
+            expected[i * 6 + j + 3] = answer | 0x8000;
+        }
+    }
+    @memcpy(data[0x7f7f * 6 ..], &specials);
+    @memcpy(expected[0x7f7f * 6 ..], &special_bits);
+    var buffer = try zml.Buffer.fromBytes(io, cpu, .init(.{data.len}, .f64), .replicated, std.mem.sliceAsBytes(data));
+    defer buffer.deinit();
+    var exe = try cpu.compileFn(allocator, io, Convert.forward, .{zml.Tensor.fromShape(buffer.shape())}, .{});
+    defer exe.deinit();
+    var result = try zml.testing.autoCall(allocator, io, &exe, Convert.forward, .{buffer});
+    defer result.deinit();
+    const host = try result.toSliceAlloc(allocator, io);
+    defer host.free(allocator);
+    for (expected, host.items(u16), 0..) |want, actual, i| {
+        if (want != actual) {
+            std.log.err("F64 rounding calibration index {}: input={}, expected=0x{x}, actual=0x{x}", .{ i, data[i], want, actual });
+            return error.TestExpectedEqual;
+        }
+    }
+    std.log.info("PASS F64-to-BF16 midpoint calibration; F64 dots are diagnostic, existing gates remain unchanged", .{});
+}
 
 fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: *model.LoadedModel, store: *zml.io.TensorStore, progress: *std.Progress.Node, args: Args, shardings: common.Shardings) !void {
     const cpu = try zml.Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } });
     defer cpu.deinit(allocator, io);
+    if (args.reference_f64_dots) try checkF64Rounding(allocator, io, cpu);
     const cpu_shardings = try common.Shardings.init(cpu);
     const cache_seqlen = args.cache_seqlen orelse args.seqlen;
     const kv_shape = zml.Shape.init(.{ .layer = mdl.inner.model.layers.len, .k = cache_seqlen, .h = mdl.inner.config.num_key_value_heads, .hd = mdl.inner.config.hidden_size / mdl.inner.config.num_attention_heads }, .bf16);
@@ -868,8 +1053,8 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
 
     const actual_exe = try zml.FnExe(inference.Forward.forward).compile(allocator, io, platform, .{ .shardings = &shardings.all(), .program_name = "llama_full_forward_comparison" }, .{.{ .weights = mdl.inner, .tokens = tokens, .token_index = position, .kv_cache = kv, .rng = rng, .attention_metadata = .vanilla, .attention_parameters = .vanilla }});
     defer actual_exe.deinit();
-    const reference_exe = try zml.FnExe(ReferenceForward.forward).compile(allocator, io, cpu, .{ .shardings = &cpu_shardings.all() }, .{.{ .weights = mdl.inner, .tokens = tokens, .token_index = position, .kv_cache = kv, .rng = rng }});
-    defer reference_exe.deinit();
+    const reference_exe = if (args.reference_f64_dots) null else try zml.FnExe(ReferenceForward.forward).compile(allocator, io, cpu, .{ .shardings = &cpu_shardings.all() }, .{.{ .weights = mdl.inner, .tokens = tokens, .token_index = position, .kv_cache = kv, .rng = rng }});
+    defer if (reference_exe) |exe| exe.deinit();
 
     const cache_data = try allocator.alloc(u16, kv_shape.count());
     defer allocator.free(cache_data);
@@ -911,8 +1096,11 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
         defer pos.deinit();
         var rng_buffer = try zml.Tensor.Rng.initBuffer(io, target, .replicated, 0);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffer);
-        if (i == 0) {
-            var runner = try zml.FnExe(ReferenceForward.forward).Runner(.{.weights}).init(&reference_exe, allocator, .{ .weights = weights });
+        if (i == 0 and args.reference_f64_dots) {
+            reference_logits = try runF64Reference(allocator, io, cpu, mdl.inner, weights, &token_buffer, pos, &cache, &rng_buffer);
+            have_reference_logits = true;
+        } else if (i == 0) {
+            var runner = try zml.FnExe(ReferenceForward.forward).Runner(.{.weights}).init(&reference_exe.?, allocator, .{ .weights = weights });
             defer runner.deinit(allocator);
             runner.run(io, .{ .inputs = .{ .tokens = token_buffer, .token_index = pos, .kv_cache = cache, .rng = rng_buffer }, .outputs = .{ .tokens = &token_buffer, .kv_cache = &cache, .rng = &rng_buffer, .logits = &reference_logits } });
             have_reference_logits = true;
@@ -980,7 +1168,11 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
         }
     }
     if (comparison_failed) return error.TestUnexpectedResult;
-    std.log.info("PASS whole forward: exact argmax, KV tolerance, untouched cache bits", .{});
+    if (args.reference_f64_dots) {
+        std.log.info("PASS F64-dot diagnostic: exact argmax, KV tolerance, untouched cache bits (does not replace default reference)", .{});
+    } else {
+        std.log.info("PASS whole forward: exact argmax, KV tolerance, untouched cache bits", .{});
+    }
 }
 
 // Give both decode paths exactly the same model-computed history. This
