@@ -73,6 +73,14 @@ history test retains the same 109 key-cache values outside tolerance. The XLA
 `2026-09-27-hbm-stores` experiment records all results, including an isolated
 candidate's faster 16.2 tok/s result that is not the integrated performance claim.
 
+Retaining decode projection inputs and outputs in SRAM subsequently raises
+the integrated result to **17.27–17.31 tok/s**, measured in six 64-token trials
+across two processes. A fresh preceding baseline measured 15.37–15.38 tok/s.
+All 119 hardware tests and six host targets pass; the position-zero comparison
+and chat example pass. The history comparison retains the same 109 failing
+keys and per-layer maxima. The XLA `2026-09-27-projection-sram` experiment
+records controlled variants, schedule evidence and integrated results.
+
 ```sh
 export XLA_FURIOSA_COMPILER=/nonexistent/tcl-compiler
 bazel run //examples/llm --@zml//platforms:furiosa2=true -- \
