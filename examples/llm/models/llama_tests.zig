@@ -24,6 +24,8 @@ const Args = struct {
     forward_only: bool = false,
     prefill_history: bool = false,
     reference_f64_dots: bool = false,
+    decode_comparison_steps: usize = 0,
+    decode_comparison_prompt: ?[]const u8 = null,
     session_only: bool = false,
     benchmark_iterations: usize = 0,
     benchmark_block_iterations: usize = 0,
@@ -53,6 +55,8 @@ const Args = struct {
         \\   --session-only            Check the CPU session feedback loop against a causal full-sequence forward
         \\   --forward-only            Compare the complete forward with an independent CPU reference
         \\   --prefill-history         Seed forward/layerwise comparison with a CPU-computed prefix
+        \\   --decode-comparison-steps=<n> Diagnostic teacher-forced decode against CPU, with independent caches
+        \\   --decode-comparison-prompt=<text> Plain text after BOS for that diagnostic (required)
         \\   --reference-f64-dots      Diagnostic CPU reference: accumulate dots in F64, retain BF16 results
         \\   --benchmark-iterations=<n> Time three full-forward decode trials before comparison (four warmups, default: 0)
         \\   --benchmark-block-iterations=<n> Time fixed query blocks; reports positions/s, not generated tokens/s
@@ -73,6 +77,8 @@ pub fn main(init: std.process.Init) !void {
 
     if ((args.transformer_only or args.head_only or args.forward_only) and !args.compare_cpu) return error.RequiresCompareCpu;
     if (args.prefill_history and (!(args.forward_only or args.layerwise) or args.token_offset == 0 or args.seqlen != 1)) return error.InvalidPrefillHistoryOptions;
+    if (args.decode_comparison_steps > 0 and (!args.forward_only or args.seqlen != 1 or args.token_offset != 0 or args.prefill_history or args.reference_f64_dots or args.benchmark_iterations != 0 or args.benchmark_block_iterations != 0 or args.decode_comparison_prompt == null)) return error.InvalidDecodeComparisonOptions;
+    if (args.decode_comparison_prompt != null and args.decode_comparison_steps == 0) return error.InvalidDecodeComparisonOptions;
     if (args.reference_f64_dots and !args.forward_only) return error.RequiresForwardComparison;
     if (args.layerwise and (!args.compare_cpu or args.forward_only or args.head_only or args.session_only or args.first_layer != 0)) return error.InvalidLayerwiseOptions;
     if (args.layerwise_dump_dir != null and !args.layerwise) return error.InvalidLayerwiseOptions;
@@ -118,7 +124,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.forward_only) {
         defer progress.end();
-        try compareFullForward(allocator, io, platform, &repo_model, &store, &progress, args, shardings);
+        try compareFullForward(allocator, io, platform, &repo_model, &store, repo, &progress, args, shardings);
         return;
     }
 
@@ -1071,7 +1077,134 @@ fn checkF64Rounding(allocator: std.mem.Allocator, io: std.Io, cpu: *zml.Platform
     std.log.info("PASS F64-to-BF16 midpoint calibration; F64 dots are diagnostic, existing gates remain unchanged", .{});
 }
 
-fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: *model.LoadedModel, store: *zml.io.TensorStore, progress: *std.Progress.Node, args: Args, shardings: common.Shardings) !void {
+// Keep the production accelerator forward unchanged. CPU generates a reference
+// continuation; both backends then see exactly those token IDs while each builds
+// its own KV history. This isolates numerical drift from different input text.
+// This opt-in diagnostic does not replace the default whole-forward KV gate.
+fn compareDecodeTrajectory(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, cpu: *zml.Platform, mdl: *model.LoadedModel, store: *zml.io.TensorStore, repo: std.Io.Dir, progress: *std.Progress.Node, args: Args, shardings: common.Shardings, cpu_shardings: common.Shardings, kv: model.KvCache, actual_exe: *const inference.KernelExe, reference_exe: *const zml.FnExe(ReferenceForward.forward)) !void {
+    if (mdl.inner.gen_opts.topk > 1) return error.DecodeComparisonRequiresArgmax;
+    const tokenizer_file = try repo.openFile(io, "tokenizer.json", .{});
+    defer tokenizer_file.close(io);
+    var reader = tokenizer_file.reader(io, &.{});
+    const tokenizer_bytes = try reader.interface.readAlloc(allocator, try tokenizer_file.length(io));
+    defer allocator.free(tokenizer_bytes);
+    var tokenizer = try zml.tokenizer.Tokenizer.fromBytes(allocator, tokenizer_bytes);
+    defer tokenizer.deinit();
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+    const prompt = try encoder.encodeAlloc(allocator, args.decode_comparison_prompt.?);
+    defer allocator.free(prompt);
+    const cache_length: usize = @intCast(kv.k.dim(.k));
+    // One BOS plus plain prompt tokens; the last prompt position predicts the
+    // first continuation token, so calls = prompt.len + continuation length.
+    if (prompt.len >= cache_length or args.decode_comparison_steps > cache_length - prompt.len) return error.DecodeComparisonExceedsCache;
+    const calls = prompt.len + args.decode_comparison_steps;
+    const input_ids = try allocator.alloc(u32, calls);
+    defer allocator.free(input_ids);
+    input_ids[0] = mdl.inner.config.bos_token_id;
+    @memcpy(input_ids[1..][0..prompt.len], prompt);
+    const predictions = try allocator.alloc(u32, calls);
+    defer allocator.free(predictions);
+    const vocabulary: usize = @intCast(mdl.inner.model.embed_tokens.weight.dim(0));
+    const cpu_logits = try allocator.alloc(u16, try std.math.mul(usize, calls, vocabulary));
+    defer allocator.free(cpu_logits);
+    const cache_shape = kv.k.shape().withPartitioning(.{});
+    const zero_cache = try allocator.alloc(u8, cache_shape.byteSize());
+    defer allocator.free(zero_cache);
+    @memset(zero_cache, 0);
+    std.log.info("Decode diagnostic: {} layers, {} prompt tokens including BOS, {} continuation predictions, cache={}; plain text, no chat template; independent caches, CPU token feedback", .{ mdl.inner.model.layers.len, prompt.len + 1, args.decode_comparison_steps, cache_length });
+    var mismatches: usize = 0;
+    var continuation_mismatches: usize = 0;
+    var max_score_gap: f32 = 0;
+    for ([_]*zml.Platform{ cpu, platform }, 0..) |target, side| {
+        var weights = try mdl.loadBuffers(allocator, io, target, store, progress, if (side == 0) cpu_shardings else shardings);
+        defer mdl.unloadBuffers(&weights, allocator);
+        var cache: model.KvCache.Buffer = .{
+            .k = try zml.Buffer.fromBytes(io, target, cache_shape, .replicated, zero_cache),
+            .v = try zml.Buffer.fromBytes(io, target, cache_shape, .replicated, zero_cache),
+        };
+        defer model.KvCache.deinitBuffer(&cache);
+        var rng = try zml.Tensor.Rng.initBuffer(io, target, .replicated, 0);
+        defer zml.Tensor.Rng.deinitBuffer(&rng);
+        if (side == 0) {
+            var runner = try zml.FnExe(ReferenceForward.forward).Runner(.{.weights}).init(reference_exe, allocator, .{ .weights = weights });
+            defer runner.deinit(allocator);
+            for (0..calls) |position| {
+                var token = try zml.Buffer.fromBytes(io, target, .init(.{ .s = 1 }, .u32), .replicated, std.mem.asBytes(&input_ids[position]));
+                defer token.deinit();
+                var index = try zml.Buffer.scalar(io, target, position, .u32);
+                defer index.deinit();
+                var logits: zml.Buffer = undefined;
+                var previous_cache = cache;
+                var previous_rng = rng;
+                var previous_token = token;
+                runner.run(io, .{ .inputs = .{ .tokens = token, .token_index = index, .kv_cache = cache, .rng = rng }, .outputs = .{ .tokens = &token, .kv_cache = &cache, .rng = &rng, .logits = &logits } });
+                model.KvCache.deinitBuffer(&previous_cache);
+                zml.Tensor.Rng.deinitBuffer(&previous_rng);
+                previous_token.deinit();
+                defer logits.deinit();
+                predictions[position] = try token.getValue(u32, io);
+                if (predictions[position] >= vocabulary) return error.InvalidToken;
+                if (position >= prompt.len and position + 1 < calls) input_ids[position + 1] = predictions[position];
+                const scores = try logits.toSliceAlloc(allocator, io);
+                defer scores.free(allocator);
+                if (scores.items(u16).len != vocabulary) return error.UnexpectedLogitShape;
+                @memcpy(cpu_logits[position * vocabulary ..][0..vocabulary], scores.items(u16));
+                std.log.info("CPU decode reference: position={}, input={}, predicted={}", .{ position, input_ids[position], predictions[position] });
+            }
+        } else {
+            var runner = try inference.KernelRunner.init(allocator, actual_exe, &weights);
+            defer runner.deinit(allocator);
+            const metadata: zml.Bufferized(zml.attention.Metadata) = .vanilla;
+            for (input_ids, predictions, 0..) |input_id, expected, position| {
+                var token = try zml.Buffer.fromBytes(io, target, .init(.{ .s = 1 }, .u32), .replicated, std.mem.asBytes(&input_id));
+                defer token.deinit();
+                var index = try zml.Buffer.scalar(io, target, position, .u32);
+                defer index.deinit();
+                inference.run(&runner, .{ .io = io, .tokens_buf = &token, .token_index_buf = &index, .kv_cache_buffers = &cache, .rng_buffers = &rng, .attention_metadata_buffers = &metadata });
+                const actual = try token.getValue(u32, io);
+                if (actual >= vocabulary) return error.InvalidToken;
+                const scores = cpu_logits[position * vocabulary ..][0..vocabulary];
+                const expected_score: f32 = @bitCast(@as(u32, scores[expected]) << 16);
+                const actual_score: f32 = @bitCast(@as(u32, scores[actual]) << 16);
+                var runner_up: f32 = -std.math.inf(f32);
+                var rank: usize = 0;
+                for (scores, 0..) |bits, id| {
+                    const score: f32 = @bitCast(@as(u32, bits) << 16);
+                    if (!std.math.isFinite(score)) return error.NonfiniteReferenceLogit;
+                    if (id != expected) runner_up = @max(runner_up, score);
+                    if (score > actual_score) rank += 1;
+                }
+                if (actual != expected) {
+                    mismatches += 1;
+                    if (position >= prompt.len) continuation_mismatches += 1;
+                }
+                max_score_gap = @max(max_score_gap, expected_score - actual_score);
+                std.log.info("Decode agreement: position={}, continuation={}, input={}, device={}, CPU={}, CPU_argmax_margin={}, CPU_score_gap={}, CPU_scores_above_device={}", .{ position, position >= prompt.len, input_id, actual, expected, expected_score - runner_up, expected_score - actual_score, rank });
+            }
+        }
+        // All active cache entries must remain finite; padding must retain its
+        // original bits. These checks do not impose a new numerical tolerance.
+        inline for (.{ "k", "v" }) |field| {
+            const host = try @field(cache, field).toSliceAlloc(allocator, io);
+            defer host.free(allocator);
+            const width: usize = @intCast(cache_shape.dim(.h) * cache_shape.dim(.hd));
+            for (host.items(u16), 0..) |bits, i| {
+                const position = (i / width) % cache_length;
+                if (position >= calls) {
+                    if (bits != 0) return error.UntouchedCacheChanged;
+                } else {
+                    const value: f32 = @bitCast(@as(u32, bits) << 16);
+                    if (!std.math.isFinite(value)) return error.NonfiniteCache;
+                }
+            }
+        }
+    }
+    std.log.info("Decode diagnostic result: argmax_mismatches={}/{}, continuation_mismatches={}/{}, max_CPU_score_gap={}; finite active caches and unchanged padding; default KV gate remains separate", .{ mismatches, calls, continuation_mismatches, args.decode_comparison_steps, max_score_gap });
+    if (mismatches != 0) return error.TestUnexpectedResult;
+}
+
+fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: *model.LoadedModel, store: *zml.io.TensorStore, repo: std.Io.Dir, progress: *std.Progress.Node, args: Args, shardings: common.Shardings) !void {
     const cpu = try zml.Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } });
     defer cpu.deinit(allocator, io);
     if (args.reference_f64_dots) try checkF64Rounding(allocator, io, cpu);
@@ -1088,6 +1221,10 @@ fn compareFullForward(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
     defer actual_exe.deinit();
     const reference_exe = if (args.reference_f64_dots) null else try zml.FnExe(ReferenceForward.forward).compile(allocator, io, cpu, .{ .shardings = &cpu_shardings.all() }, .{.{ .weights = mdl.inner, .tokens = tokens, .token_index = position, .kv_cache = kv, .rng = rng }});
     defer if (reference_exe) |exe| exe.deinit();
+    if (args.decode_comparison_steps > 0) {
+        try compareDecodeTrajectory(allocator, io, platform, cpu, mdl, store, repo, progress, args, shardings, cpu_shardings, kv, &actual_exe, &reference_exe.?);
+        return;
+    }
 
     const cache_data = try allocator.alloc(u16, kv_shape.count());
     defer allocator.free(cache_data);

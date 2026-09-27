@@ -465,3 +465,60 @@ reported **2.422 s / 43.3 tok/s** with the input-handle cleanup included. This i
 an end-to-end generation smoke test, not a new CPU numerical comparison or the
 100 tok/s target. The initial run before caller cleanup reported 43.5 tok/s but
 was not accepted as the final implementation because of retained old inputs.
+
+## Independent-cache decode agreement diagnostic (2026-09-27)
+
+`llama_tests --forward-only --decode-comparison-steps=N` compares predictions
+across multiple positions. The CPU reference first consumes BOS and a plain-text
+prompt, then feeds back its own argmax predictions. The selected backend consumes
+that same sequence of input token IDs, while maintaining its own KV cache from
+position zero. No reference KV entries are copied into the device path. This
+isolates accumulated numerical differences from differences in the input text.
+
+The selected backend runs the unchanged production `inference.Forward.forward`
+with vanilla attention and separate BF16 weight arguments. The reference adds
+logits to its outputs so the diagnostic can report the CPU argmax margin, the
+CPU score gap for the device-selected token, and how many CPU scores exceed it.
+A positive gap is evidence of a changed prediction, not a device-logit error
+measurement: the production device executable does not return logits here.
+
+```sh
+bazel build //examples/llm:llama_tests --@zml//platforms:furiosa2=true
+bazel-bin/examples/llm/llama_tests \
+  --model=/var/models/meta-llama/Llama-3.1-8B-Instruct \
+  --platform=furiosa2 --furiosa-pe-count=8 --compare-cpu --forward-only \
+  --seqlen=1 --cache-seqlen=128 --layers=32 \
+  --decode-comparison-steps=64 \
+  --decode-comparison-prompt='The capital of France is'
+```
+
+Use the installed FURIOSA2 plugin, compiler and runtime environment variables
+for that command. The prompt uses the checkpoint tokenizer, BOS and plain text;
+it does not apply the chat template. The diagnostic consumes prompt positions
+one at a time. It continues for the requested fixed number of predictions even
+if an end token appears. It is neither a prefill performance benchmark nor a
+measure of free-running generation agreement after a first differing token.
+
+Every position is logged, including prompt positions. It returns an error for
+any differing argmax, nonfinite active cache value or modified unused cache bit.
+It does **not** replace or relax the original per-element whole-forward KV
+comparison: omitting both `--decode-comparison-*` flags preserves that check.
+The two diagnostic flags must be used together, with query length one, offset
+zero, and no history seeding, F64 reference or benchmark mode. The requested
+prompt plus continuation must fit the cache.
+
+CPU and device runs load weights sequentially to limit peak memory. The device
+path uses the production `inference.run` helper to release replaced input buffer
+handles, including when donation is declined. The reference loop performs the
+same cleanup explicitly while retaining its additional logits result.
+
+Validation on Llama 3.1 8B Instruct matches CPU at all 222 eight-PE positions
+across France, science and code prompts, including all 192 continuation
+predictions. The France prompt also matches on four PEs (69/69 positions), and
+the final CPU control matches 13/13 positions. A repeat after the input-handle
+cleanup preserves all France predictions. The default position-zero check
+still passes, and populated history still fails with its prior 32-layer error
+metrics. Build, Zig format and invalid-option checks pass. Full commands,
+logs, source/binary hashes, the initial lifecycle issue and per-position
+analysis are retained in the XLA repository under
+`xla/pjrt/furiosa2/experiments/2026-09-27-decode-agreement/`.
