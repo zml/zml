@@ -33,15 +33,18 @@ pub const Backend = enum {
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
             .metal => .metal,
-            .cpu => .stablehlo,
-            .neuron, .furiosa, .furiosa2, .furiosa3 => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
+            .cpu, .furiosa, .furiosa2, .furiosa3 => .stablehlo,
+            .neuron => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }
 
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
             .stablehlo => true,
-            .triton => platform.target != .cpu,
+            .triton => switch (platform.target) {
+                .cuda, .rocm, .oneapi => true,
+                else => false,
+            },
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
             .cuda_fa2 => platform.target == .cuda,
@@ -308,6 +311,18 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
             else => stablehlo_pagedAttention(params, q, kv_cache, opts),
         },
     };
+}
+
+test "Triton availability follows GPU targets" {
+    for (std.enums.values(zml.platform.Target)) |target| {
+        var platform: zml.Platform = undefined;
+        platform.target = target;
+        const expected = switch (target) {
+            .cuda, .rocm, .oneapi => true,
+            else => false,
+        };
+        try std.testing.expectEqual(expected, Backend.triton.isAvailable(&platform));
+    }
 }
 
 test "Backend.auto selects mosaic_tpu on TPU" {

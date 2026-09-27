@@ -88,7 +88,7 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
-            .cuda, .rocm, .oneapi, .tpu => {
+            .cuda, .rocm, .oneapi, .tpu, .furiosa, .furiosa2, .furiosa3 => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
                     "pinned_host".len => .host_pinned,
@@ -98,7 +98,6 @@ pub const Memory = struct {
                 return zml_kind == kind_;
             },
             .cpu, .neuron, .metal => return true,
-            .furiosa, .furiosa2, .furiosa3 => return kind_ == .device,
         }
     }
 
