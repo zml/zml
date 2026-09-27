@@ -19,7 +19,8 @@ pub fn main(init: std.process.Init) !void {
         ;
         size: usize = 4096,
         dtype: zml.DataType = .f16,
-        operation: enum { matmul, add_negate } = .matmul,
+        operation: enum { matmul, projection, add_negate } = .matmul,
+        rows: usize = 128,
         iterations: usize = 1,
     };
 
@@ -38,10 +39,13 @@ pub fn main(init: std.process.Init) !void {
 
     const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);
     if (cli_args.iterations == 0) return error.InvalidIterations;
+    if (cli_args.operation == .projection and (cli_args.rows == 0 or cli_args.size == 0 or cli_args.dtype != .bf16)) return error.ProjectionRequiresRowsAndBF16;
     if (cli_args.operation == .add_negate and cli_args.dtype != .f32 and cli_args.dtype != .bf16) return error.AddNegateRequiresF32OrBF16;
 
     const a_shape = switch (cli_args.operation) {
         .matmul => zml.Shape.init(.{ .m = cli_args.size, .k = cli_args.size }, cli_args.dtype)
+            .withPartitioning(.{ .m = .m, .k = .replicated }),
+        .projection => zml.Shape.init(.{ .m = cli_args.rows, .k = cli_args.size }, cli_args.dtype)
             .withPartitioning(.{ .m = .m, .k = .replicated }),
         .add_negate => zml.Shape.init(.{ .m = cli_args.size }, cli_args.dtype)
             .withPartitioning(.{ .m = .m }),
@@ -49,6 +53,8 @@ pub fn main(init: std.process.Init) !void {
     const b_shape = switch (cli_args.operation) {
         .matmul => zml.Shape.init(.{ .k = cli_args.size, .n = cli_args.size }, cli_args.dtype)
             .withPartitioning(.{ .k = .replicated, .n = .n }),
+        .projection => zml.Shape.init(.{ .n = cli_args.size, .k = cli_args.size }, cli_args.dtype)
+            .withPartitioning(.{ .n = .n, .k = .replicated }),
         .add_negate => a_shape,
     };
 
@@ -60,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
         const now: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Compiled benchmark [{f}]", .{now.untilNow(io, .awake)});
         break :blk switch (cli_args.operation) {
-            .matmul => try platform.compileFn(allocator, io, benchmark, .{ a, b }, .{ .shardings = &.{benchmark_sharding} }),
+            .matmul, .projection => try platform.compileFn(allocator, io, benchmark, .{ a, b }, .{ .shardings = &.{benchmark_sharding} }),
             .add_negate => try platform.compileFn(allocator, io, addNegate, .{ a, b }, .{ .shardings = &.{benchmark_sharding} }),
         };
     };
@@ -133,8 +139,30 @@ pub fn main(init: std.process.Init) !void {
         }
         log.info("Verified every add/negate result against host inputs", .{});
     }
+    if (cli_args.operation == .projection) {
+        const BFloat16 = zml.floats.BFloat16;
+        const lhs = try a_buffer.toSliceAlloc(allocator, io);
+        defer lhs.free(allocator);
+        const rhs = try b_buffer.toSliceAlloc(allocator, io);
+        defer rhs.free(allocator);
+        const actual = try result.?.toSliceAlloc(allocator, io);
+        defer actual.free(allocator);
+        // createRandomBuffer fills each float buffer with one value. Check
+        // that premise before using its analytical dot reference. Varied
+        // operands are covered by the backend's hardware projection tests.
+        const a_value = lhs.items(BFloat16)[0].toF32();
+        const b_value = rhs.items(BFloat16)[0].toF32();
+        for (lhs.items(BFloat16)) |value| if (value.toF32() != a_value) return error.NonuniformProjectionInput;
+        for (rhs.items(BFloat16)) |value| if (value.toF32() != b_value) return error.NonuniformProjectionInput;
+        const expected = (a_value * b_value) * @as(f32, @floatFromInt(cli_args.size));
+        const bits: u32 = @bitCast(expected);
+        const rounded: u16 = @intCast((bits + 0x7fff + ((bits >> 16) & 1)) >> 16);
+        for (actual.items(BFloat16)) |value| if (@as(u16, @bitCast(value)) != rounded) return error.IncorrectProjection;
+        log.info("Verified every projection result for {d}x{d} @ {d}x{d}^T", .{ cli_args.rows, cli_args.size, cli_args.size, cli_args.size });
+    }
     const floating_op_count = switch (cli_args.operation) {
         .matmul => 2 * cli_args.size * cli_args.size * cli_args.size,
+        .projection => 2 * cli_args.rows * cli_args.size * cli_args.size,
         .add_negate => 2 * cli_args.size,
     };
     const flops = @as(f64, @floatFromInt(floating_op_count * cli_args.iterations)) / elapsed_s;
