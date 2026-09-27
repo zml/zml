@@ -81,6 +81,14 @@ and chat example pass. The history comparison retains the same 109 failing
 keys and per-layer maxima. The XLA `2026-09-27-projection-sram` experiment
 records controlled variants, schedule evidence and integrated results.
 
+The shared runtime's bridge/14 adds native eight-PE copy/zero helpers, with
+hardware validation of queued lifetimes and a direct projection across both
+clusters (XLA commit `22c1280188`, `2026-09-27-eight-pe-runtime` experiment).
+Furiosa2's production compiler still requires four PEs. ZML regression trials
+with this runtime measure **17.29, 17.31, 17.30 tok/s**; position zero passes,
+and populated history retains the same 109 key-cache failures. This runtime
+foundation does not yet enable eight-PE model compilation.
+
 ```sh
 export XLA_FURIOSA_COMPILER=/nonexistent/tcl-compiler
 bazel run //examples/llm --@zml//platforms:furiosa2=true -- \
