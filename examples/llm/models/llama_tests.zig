@@ -28,6 +28,7 @@ const Args = struct {
     benchmark_iterations: usize = 0,
     benchmark_block_iterations: usize = 0,
     platform: ?zml.Target = null,
+    furiosa_pe_count: ?u8 = null,
     seqlen: usize = 16,
     cache_seqlen: ?usize = null,
     token_offset: u32 = 0,
@@ -48,6 +49,7 @@ const Args = struct {
         \\   --layerwise               Diagnose per-layer and accumulated errors from token 1000
         \\   --layerwise-stages        Also expose attention/MLP stages with --layerwise
         \\   --platform=<name>         Explicit test platform (default: auto)
+        \\   --furiosa-pe-count=<4|8>   Override Furiosa/Furiosa2 PE topology
         \\   --session-only            Check the CPU session feedback loop against a causal full-sequence forward
         \\   --forward-only            Compare the complete forward with an independent CPU reference
         \\   --prefill-history         Seed forward/layerwise comparison with a CPU-computed prefix
@@ -83,7 +85,13 @@ pub fn main(init: std.process.Init) !void {
     if (args.benchmark_iterations > 0 and (!args.forward_only or args.seqlen != 1 or cache_seqlen < 4 or args.benchmark_iterations > cache_seqlen - 4)) return error.InvalidBenchmarkOptions;
     if (args.benchmark_block_iterations > 0 and (!args.forward_only or args.benchmark_iterations > 0 or args.benchmark_block_iterations > 1000)) return error.InvalidBenchmarkOptions;
 
-    const platform: *zml.Platform = if (args.platform) |target| try .init(allocator, io, target, .{ .cpu = .{ .device_count = 1 } }) else try .auto(allocator, io, .{ .cpu = .{ .device_count = 1 } });
+    var platform_options: zml.platform.CreateOptions = .{ .cpu = .{ .device_count = 1 } };
+    if (args.furiosa_pe_count) |pes| {
+        if (pes != 4 and pes != 8) return error.InvalidPeCount;
+        platform_options.furiosa.pe_count = pes;
+        platform_options.furiosa2.pe_count = pes;
+    }
+    const platform: *zml.Platform = if (args.platform) |target| try .init(allocator, io, target, platform_options) else try .auto(allocator, io, platform_options);
     defer platform.deinit(allocator, io);
     if (args.compare_cpu and !args.forward_only and platform.target == .cpu) return error.CpuComparisonRequiresAccelerator;
     std.log.info("Testing platform: {s}", .{@tagName(platform.target)});

@@ -3,9 +3,10 @@
 `furiosa2` loads the separate vISA PJRT plugin while sharing Furiosa's device
 memory, sharding, layout queries, vanilla attention selection, and asynchronous
 execution behavior. Enable it with `--@zml//platforms:furiosa2=true` and set
-`XLA_FURIOSA2_PJRT_LIBRARY`. The initial compiler supports four PEs, so
-`CreateOptions.furiosa2.pe_count` defaults to four; the original Furiosa default
-remains eight.
+`XLA_FURIOSA2_PJRT_LIBRARY`. The compiler supports four or eight PEs.
+`CreateOptions.furiosa2.pe_count` still defaults to four; the original Furiosa
+default remains eight. Both `examples/llm` and `examples/llm:llama_tests` accept
+`--furiosa-pe-count=8` to select the larger topology. Eight PEs require bridge/14.
 
 ## Verified ZML benchmark
 
@@ -89,16 +90,25 @@ with this runtime measure **17.29, 17.31, 17.30 tok/s**; position zero passes,
 and populated history retains the same 109 key-cache failures. This runtime
 foundation does not yet enable eight-PE model compilation.
 
+The subsequent compiler integration enables eight-PE Llama execution and
+distributes decode projections across both clusters, including split-K dots.
+Six 64-token trials measure **21.71–21.81 tok/s**, versus a fresh four-PE
+**17.31–17.34 tok/s** baseline. The 122-test PJRT suite passes separately on
+both hardware topologies; seven host targets pass. The position-zero comparison passes.
+The populated-history check retains exactly the same 109 failing keys and all
+32 per-layer error maxima/counts. The XLA `2026-09-27-eight-pe-emitter`
+experiment records the sources, execution plan, intermediate results and logs.
+
 ```sh
 export XLA_FURIOSA_COMPILER=/nonexistent/tcl-compiler
 bazel run //examples/llm --@zml//platforms:furiosa2=true -- \
   --model=/var/models/meta-llama/Llama-3.1-8B-Instruct \
-  --backend=vanilla --seqlen=128 --topk=1 \
+  --backend=vanilla --seqlen=128 --topk=1 --furiosa-pe-count=8 \
   --prompt='What is the capital of France?'
 
 bazel run //examples/llm:llama_tests --@zml//platforms:furiosa2=true -- \
   --model=/var/models/meta-llama/Llama-3.1-8B-Instruct \
-  --platform=furiosa2 --compare-cpu --forward-only \
+  --platform=furiosa2 --furiosa-pe-count=8 --compare-cpu --forward-only \
   --seqlen=1 --cache-seqlen=128 --layers=32 --benchmark-iterations=64
 ```
 
