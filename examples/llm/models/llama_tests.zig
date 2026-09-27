@@ -445,8 +445,52 @@ fn compareLayerwise(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Pla
     std.log.info("PASS layerwise tolerances (does not replace whole-forward comparison)", .{});
 }
 
+// Diagnostic copy of the vanilla attention dataflow. Keep the production
+// attention output as a separate observation so the copy cannot replace the
+// operation being investigated. Neither model execution nor tolerances change.
+const AttentionStages = struct {
+    const names = [_][]const u8{ "q projection", "k projection", "v projection", "q rope", "k rope", "scaled keys", "qk scores", "probabilities bf16", "context", "diagnostic output" };
+    const Output = struct { bf16: [10]zml.Tensor, f32: [2]zml.Tensor };
+
+    fn forward(input: model.TransformerLayer.Input, normalized: zml.Tensor) Output {
+        const self = input.layer.self_attn;
+        const heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
+        const x = normalized.withPartitioning(.{ .d = .replicated });
+        const qp = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
+        const kp = self.k_proj.forward(x).splitAxis(-1, .{ .h = heads, .hd = .auto });
+        const vp = self.v_proj.forward(x).splitAxis(-1, .{ .h = heads, .hd = .auto });
+        var q = qp;
+        var k = kp;
+        if (self.q_norm) |norm| q = norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
+        if (self.k_norm) |norm| k = norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
+        const base = zml.Tensor.arange(.{ .end = x.dim(.s) }, input.token_index.dtype()).withTags(.{.s}).broad(zml.Shape.init(.{ .s = x.dim(.s) }, input.token_index.dtype()));
+        const positions = base.add(input.token_index.broad(base.shape()));
+        var rope_opts = self.rope_opts;
+        const target = zml.Compiler.current().platform.target;
+        if (target == .furiosa or target == .furiosa2) rope_opts.cache_length = @intCast(input.kv_cache.k.dim(.k));
+        q = zml.nn.rope(q, positions, rope_opts).rename(.{ .s = .q });
+        k = zml.nn.rope(k, positions, rope_opts).rename(.{ .s = .k });
+        const cache = input.kv_cache.updateAt(k, vp.rename(.{ .s = .k }), input.token_index, input.kv_cache_index);
+        const keys = cache.keysAt(input.kv_cache_index).convert(q.dtype());
+        const values = cache.valuesAt(input.kv_cache_index).convert(q.dtype());
+        const split_q = q.splitAxis(.h, .{ .h = keys.dim(.h), .hq = .auto });
+        const scale: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(keys.dim(.hd))));
+        const scaled_keys = keys.mul(zml.Tensor.scalar(scale, keys.dtype()));
+        const scores = split_q.dot(scaled_keys, .hd);
+        const mask = zml.nn.causalAttnMask(.{ .q = keys.dim(.k), .k = keys.dim(.k) }, q.dtype(), null)
+            .gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, q.dtype()), input.token_index.appendAxes(.{.coord}), .{});
+        const logits = scores.add(mask.broad(scores.shape())).convert(.f32);
+        const probabilities_f32 = logits.softmax(.k);
+        const probabilities = probabilities_f32.convert(q.dtype());
+        const context = probabilities.dot(values, .k).transpose(split_q.shape()).merge(.{ .h = .{ .h, .hq } });
+        const output = self.o_proj.forward(context.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s }))
+            .rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+        return .{ .bf16 = .{ qp, kp, vp, q, k, scaled_keys, scores, probabilities, context, output }, .f32 = .{ logits, probabilities_f32 } };
+    }
+};
+
 const LayerStages = struct {
-    const Output = struct { stages: [11]zml.Tensor, rms: [3]zml.Tensor, kv_cache: model.KvCache };
+    const Output = struct { stages: [11]zml.Tensor, rms: [3]zml.Tensor, attention: AttentionStages.Output, kv_cache: model.KvCache };
     fn forward(input: model.TransformerLayer.Input) Output {
         const layer = input.layer;
         const x = input.hidden.withPartitioning(.{ .d = .replicated });
@@ -464,7 +508,7 @@ const LayerStages = struct {
         const silu = gate.mul(sigmoid);
         const product = silu.mul(up);
         const mlp = layer.mlp.forward(post_norm).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
-        return .{ .stages = .{ normalized, attention, residual, post_norm, gate, up, sigmoid, silu, product, mlp, mlp.add(residual) }, .rms = .{ variance, inverse, scaled }, .kv_cache = cache };
+        return .{ .stages = .{ normalized, attention, residual, post_norm, gate, up, sigmoid, silu, product, mlp, mlp.add(residual) }, .rms = .{ variance, inverse, scaled }, .attention = AttentionStages.forward(input, normalized), .kv_cache = cache };
     }
 };
 
@@ -491,6 +535,8 @@ fn compareStages(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfo
     defer for (results[0..done]) |*out| {
         for (&out.stages) |*stage| stage.deinit();
         for (&out.rms) |*stage| stage.deinit();
+        for (&out.attention.bf16) |*stage| stage.deinit();
+        for (&out.attention.f32) |*stage| stage.deinit();
         model.KvCache.deinitBuffer(&out.kv_cache);
     };
     for ([_]*zml.Platform{ cpu, platform }, [_]zml.Bufferized(model.TransformerLayer){ expected, actual }, 0..) |target, weights, index| {
@@ -519,17 +565,28 @@ fn compareStages(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfo
         errdefer model.KvCache.deinitBuffer(&cache);
         var stages: [11]zml.Buffer = undefined;
         var rms: [3]zml.Buffer = undefined;
+        var attention: zml.Bufferized(AttentionStages.Output) = undefined;
         runner.run(io, .{
             .inputs = .{ .hidden = hidden, .token_index = pos, .kv_cache = cache, .kv_cache_index = layer_index, .attention_metadata = .vanilla },
-            .outputs = .{ .stages = &stages, .rms = &rms, .kv_cache = &cache },
+            .outputs = .{ .stages = &stages, .rms = &rms, .attention = &attention, .kv_cache = &cache },
         });
-        results[index] = .{ .stages = stages, .rms = rms, .kv_cache = cache };
+        results[index] = .{ .stages = stages, .rms = rms, .attention = attention, .kv_cache = cache };
         done += 1;
         if (dump_dir) |directory| {
             inline for (.{ "k", "v" }) |field| {
                 const name = try std.fmt.allocPrint(allocator, "{s}-stage-{s}", .{ if (index == 0) "cpu" else "device", field });
                 defer allocator.free(name);
                 try dumpLayerBuffer(allocator, io, directory, layer, name, @field(cache, field));
+            }
+            for (attention.bf16, 0..) |stage, stage_index| {
+                const name = try std.fmt.allocPrint(allocator, "{s}-attention-{}", .{ if (index == 0) "cpu" else "device", stage_index });
+                defer allocator.free(name);
+                try dumpLayerBuffer(allocator, io, directory, layer, name, stage);
+            }
+            for (attention.f32, 0..) |stage, stage_index| {
+                const name = try std.fmt.allocPrint(allocator, "{s}-attention-f32-{}", .{ if (index == 0) "cpu" else "device", stage_index });
+                defer allocator.free(name);
+                try dumpLayerBuffer(allocator, io, directory, layer, name, stage);
             }
             for (stages, 0..) |stage, stage_index| {
                 const name = try std.fmt.allocPrint(allocator, "{s}-stage-{}", .{ if (index == 0) "cpu" else "device", stage_index });
@@ -540,6 +597,29 @@ fn compareStages(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfo
     }
     for ([_][]const u8{ "input norm", "attention", "residual", "post norm", "gate", "up", "sigmoid", "silu", "product", "MLP", "stage hidden" }, 0..) |name, i| {
         _ = try reportBf16Region(allocator, io, name, layer, results[1].stages[i], results[0].stages[i], 0, results[0].stages[i].shape().count(), .exact_match);
+    }
+    for (0..2) |index| {
+        // The diagnostic expansion must agree with the unchanged production
+        // attention computation on the same backend, including BF16 boundaries.
+        try zml.testing.expectClose(io, results[index].attention.bf16[9], results[index].stages[1], .exact_match);
+    }
+    for (AttentionStages.names, 0..) |name, i| {
+        _ = try reportBf16Region(allocator, io, name, layer, results[1].attention.bf16[i], results[0].attention.bf16[i], 0, results[0].attention.bf16[i].shape().count(), .exact_match);
+    }
+    for ([_][]const u8{ "masked logits", "probabilities f32" }, 0..) |name, i| {
+        const actual_values = try results[1].attention.f32[i].toSliceAlloc(allocator, io);
+        defer actual_values.free(allocator);
+        const reference_values = try results[0].attention.f32[i].toSliceAlloc(allocator, io);
+        defer reference_values.free(allocator);
+        var different: usize = 0;
+        var max_abs: f32 = 0;
+        for (actual_values.items(f32), reference_values.items(f32)) |a, b| {
+            if (a == b) continue;
+            if (!std.math.isFinite(a) or !std.math.isFinite(b)) return error.NonFiniteAttentionDifference;
+            different += 1;
+            max_abs = @max(max_abs, @abs(a - b));
+        }
+        std.log.info("Layerwise attention {s} layer {}: different={}/{}, max_abs={}", .{ name, layer, different, actual_values.items(f32).len, max_abs });
     }
     try reportProjectionRoundoff(allocator, io, "gate", layer, expected.mlp.gate_proj.linear.weight, results[1].stages[3], results[0].stages[3], results[1].stages[4], results[0].stages[4]);
     try reportProjectionRoundoff(allocator, io, "up", layer, expected.mlp.up_proj.linear.weight, results[1].stages[3], results[0].stages[3], results[1].stages[5], results[0].stages[5]);

@@ -55,28 +55,44 @@ TCL compiler path disabled. These are microbenchmark latencies, not Llama tok/s.
 The companion XLA `2026-09-26-bf16` experiment retains the logs and SDK layout
 failures found while extending the emitter.
 
-## Llama status
+## Llama status, 2026-09-27
 
-The existing one-XLA-executable forward pass, vanilla attention, argmax sampling,
-and original weights remain the target. The initial attempt used:
+Llama 3.1 8B Instruct now compiles both prefill and decode and generates text
+through the vISA plugin. Original BF16 weights, vanilla attention, argmax and
+one public XLA executable per forward are retained. No TCL fallback or weight
+packing is used. With a 128-position cache on four PEs, three warmed 64-token
+full-forward decode trials measured **14.23, 14.27 and 14.35 tok/s**, including
+synchronous token readback but excluding compilation and weight upload. This
+is an untuned baseline, substantially below the original TCL backend.
 
 ```sh
+export XLA_FURIOSA_COMPILER=/nonexistent/tcl-compiler
 bazel run //examples/llm --@zml//platforms:furiosa2=true -- \
   --model=/var/models/meta-llama/Llama-3.1-8B-Instruct \
   --backend=vanilla --seqlen=128 --topk=1 \
   --prompt='What is the capital of France?'
+
+bazel run //examples/llm:llama_tests --@zml//platforms:furiosa2=true -- \
+  --model=/var/models/meta-llama/Llama-3.1-8B-Instruct \
+  --platform=furiosa2 --compare-cpu --forward-only \
+  --seqlen=1 --cache-seqlen=128 --layers=32 --benchmark-iterations=64
 ```
 
-Model/tokenizer selection succeeded and the whole prefill forward reached the
-new compiler. It stopped with `FURIOSA2 requires an F32 array result`, because
-the initial vISA emitter only handles a small F32 elementwise subset. BF16,
-multi-output units, contractions, reductions, indexing, and native memory helpers
-were still backend work at that point. BF16 elementwise arithmetic, conversions,
-tuple outputs and native memory helpers now pass hardware tests. The latest
-Llama attempt stops at the embedding unit's `u32[128]` token indices; gather,
-RMSNorm reduction/broadcast and contraction lowering remain unfinished.
-**Llama does not generate tokens on furiosa2 yet; these
-microbenchmark numbers are not tok/s measurements.**
+The position-zero full-forward comparison passes exact argmax, the existing
+KV tolerances, and untouched-cache checks. At position eight with identical
+CPU-computed history, argmax still matches but some key-cache elements exceed
+tolerance. Disabling CPU excess precision reduces but does not eliminate that
+failure. Neither tolerances nor defaults have changed. The companion XLA
+`xla/pjrt/furiosa2/experiments/2026-09-27-llama` directory retains both passing
+and failing results and the benchmark's binary provenance.
+
+The opt-in `llama_tests --layerwise --layerwise-stages` diagnostic now exposes
+Q/K/V projections, rotary outputs, scaled keys, attention scores, softmax
+probabilities, context and output projection. It verifies that its diagnostic
+attention expansion exactly matches the existing production attention on
+each backend. These exact-match statistics identify rounding differences;
+they do not replace or waive the whole-forward tolerance gate. Use
+`--layerwise-dump-dir=<path>` to save the raw BF16/F32 intermediates.
 
 ## Validation
 
