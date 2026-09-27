@@ -102,6 +102,23 @@ each backend. These exact-match statistics identify rounding differences;
 they do not replace or waive the whole-forward tolerance gate. Use
 `--layerwise-dump-dir=<path>` to save the raw BF16/F32 intermediates.
 
+`--forward-only --reference-f64-dots` adds a separate CPU diagnostic that
+accumulates projections and attention contractions in F64, then rounds their
+results to BF16. The default reference and tolerances are unchanged. It first
+checks 195,841 BF16 rounding cases; direct CPU F64-to-BF16 conversion double
+rounds at some midpoints, so this diagnostic rounds the significand explicitly.
+The CPU reference executes one layer at a time to bound widened-weight memory;
+the accelerator still executes its complete compiled forward.
+
+At position eight with CPU-computed history and
+`XLA_FLAGS=--xla_allow_excess_precision=false`, furiosa2 versus this reference
+has 79 key and one value elements outside tolerance. The ordinary CPU forward
+versus the same reference also fails (64 key elements); both match argmax 1001.
+These results establish that this accumulated-error tolerance failure also
+occurs without RNGD. They do not clear the existing model gate or establish
+whole-model accuracy. See the XLA `2026-09-27-f64-reference` experiment for
+commands, calibration failures and memory reports.
+
 ## Validation
 
 - `bazel build //... --@zml//platforms:furiosa2=true`: all 168 targets passed.
