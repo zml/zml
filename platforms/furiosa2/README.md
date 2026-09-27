@@ -65,6 +65,14 @@ full-forward decode trials measured **14.23, 14.27 and 14.35 tok/s**, including
 synchronous token readback but excluding compilation and weight upload. This
 is an untuned baseline, substantially below the original TCL backend.
 
+A subsequent vISA emitter change redistributes large computed BF16 tensors
+in device SRAM before writing them to HBM. Two processes, each with three
+64-token trials, measure **15.21–15.45 tok/s** with the same four-PE model setup.
+The position-zero comparison and real chat example pass; the position-eight
+history test retains the same 109 key-cache values outside tolerance. The XLA
+`2026-09-27-hbm-stores` experiment records all results, including an isolated
+candidate's faster 16.2 tok/s result that is not the integrated performance claim.
+
 ```sh
 export XLA_FURIOSA_COMPILER=/nonexistent/tcl-compiler
 bazel run //examples/llm --@zml//platforms:furiosa2=true -- \
