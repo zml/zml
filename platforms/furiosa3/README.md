@@ -22,10 +22,17 @@ builds both components and selects the SDK and plugin paths for this host:
 ```
 
 Validation: `bazel build //... --@zml//platforms:furiosa3=true --jobs=16`
-builds all 169 targets. Whole 32-layer Llama 3.1 8B position-0 forward passes
-CPU argmax, KV tolerance and untouched-cache checks on four and eight PEs.
-Eight-PE decode harness trials measure 59.4, 59.3 and 60.1 tok/s with original
-BF16 weights, vanilla attention, argmax, cache length 128 and both cache
-fusion options enabled. These do not establish long-context CPU equivalence.
-Further generation and compiler evidence is recorded in the companion XLA
+builds all 169 targets. The exact launcher above generates the requested
+counting sequence at 63.7–64.4 tok/s on all eight PEs, with original BF16
+weights, vanilla attention, argmax and cache length 128. The context limit
+includes the prompt; the example stops at 34. With compiled units cached,
+prefill and decode compilation take about 3.4s and 3.7s respectively.
+
+Embedding, batched RMSNorm, Q/K/V/O projections, MLP and an eight-token
+transformer pass CPU comparisons including KV. A whole 32-layer decode check
+using BOS + "Hello" and four continuation predictions matches CPU argmax at
+all five tested positions, with finite active caches and unchanged padding.
+These do not establish long-context CPU equivalence. Hardware regression
+suites pass all 16 tests on both four and eight PEs. Further evidence and
+compiler failure reproductions are in the companion XLA checkout's
 `xla/pjrt/furiosa3/experiments/2026-09-27-llama` directory.
