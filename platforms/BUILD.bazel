@@ -11,6 +11,7 @@ PLATFORMS = {
     "metal": False,
     "furiosa": False,
     "furiosa2": False,
+    "furiosa3": False,
 }
 
 [
@@ -63,6 +64,7 @@ config_setting(
         "oneapi",
         "furiosa",
         "furiosa2",
+        "furiosa3",
     ]
 ]
 

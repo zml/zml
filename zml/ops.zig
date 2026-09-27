@@ -1146,7 +1146,7 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
     const ctx = Compiler.current();
     switch (ctx.platform.target) {
         .neuron => {},
-        .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .furiosa2 => {
+        .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .furiosa2, .furiosa3 => {
             stdx.debug.panic("neuronNki is only available on Neuron, got {s}", .{@tagName(ctx.platform.target)});
         },
     }
@@ -2151,7 +2151,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveIntegerScalarBroadcast(self: Tensor, output_shape: Shape) ?Tensor {
         switch (Compiler.current().platform.target) {
             .neuron => {},
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .furiosa2 => return null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .furiosa2, .furiosa3 => return null,
         }
 
         if (self.rank() != 0 or output_shape.rank() == 0 or !self.dtype().isInteger()) return null;
@@ -2170,7 +2170,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveGatherFillSemantics(indices: []Tensor) void {
         switch (Compiler.current().platform.target) {
             .neuron => {},
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .furiosa2 => return,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .furiosa2, .furiosa3 => return,
         }
 
         const active_lanes = activeLanesForFillDropIndices(indices) orelse return;
@@ -2182,7 +2182,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveScatterDropSemantics(indices: []Tensor, updates: anytype, opts: Tensor.ScatterOpts, update_values: *[updates.len]*const mlir.Value) void {
         const active_lanes: ?Tensor = switch (Compiler.current().platform.target) {
             .neuron => if (opts.update_fn == Tensor.ScatterOpts.increment) activeLanesForFillDropIndices(indices) else null,
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .furiosa2 => null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .furiosa2, .furiosa3 => null,
         };
 
         if (active_lanes) |active| replaceInactiveIndirectIndices(indices, active);

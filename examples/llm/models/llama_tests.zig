@@ -51,7 +51,7 @@ const Args = struct {
         \\   --layerwise               Diagnose per-layer and accumulated errors from token 1000
         \\   --layerwise-stages        Also expose attention/MLP stages with --layerwise
         \\   --platform=<name>         Explicit test platform (default: auto)
-        \\   --furiosa-pe-count=<4|8>   Override Furiosa/Furiosa2 PE topology
+        \\   --furiosa-pe-count=<4|8>   Override Furiosa PE topology
         \\   --session-only            Check the CPU session feedback loop against a causal full-sequence forward
         \\   --forward-only            Compare the complete forward with an independent CPU reference
         \\   --prefill-history         Seed forward/layerwise comparison with a CPU-computed prefix
@@ -96,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
         if (pes != 4 and pes != 8) return error.InvalidPeCount;
         platform_options.furiosa.pe_count = pes;
         platform_options.furiosa2.pe_count = pes;
+        platform_options.furiosa3.pe_count = pes;
     }
     const platform: *zml.Platform = if (args.platform) |target| try .init(allocator, io, target, platform_options) else try .auto(allocator, io, platform_options);
     defer platform.deinit(allocator, io);
@@ -551,7 +552,7 @@ const AttentionStages = struct {
         const positions = base.add(input.token_index.broad(base.shape()));
         var rope_opts = self.rope_opts;
         const target = zml.Compiler.current().platform.target;
-        if (target == .furiosa or target == .furiosa2) rope_opts.cache_length = @intCast(input.kv_cache.k.dim(.k));
+        if (target == .furiosa or target == .furiosa2 or target == .furiosa3) rope_opts.cache_length = @intCast(input.kv_cache.k.dim(.k));
         q = zml.nn.rope(q, positions, rope_opts).rename(.{ .s = .q });
         k = zml.nn.rope(k, positions, rope_opts).rename(.{ .s = .k });
         const cache = input.kv_cache.updateAt(k, vp.rename(.{ .s = .k }), input.token_index, input.kv_cache_index);
@@ -877,7 +878,7 @@ fn runTransformer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
         .inputs = .{ .hidden = hidden, .token_index = position, .kv_cache = cache, .kv_cache_index = layer_index, .attention_metadata = .vanilla },
         .outputs = .{ .hidden = &hidden, .kv_cache = &cache },
     });
-    if (platform.target == .furiosa or platform.target == .furiosa2) previous_hidden.deinit();
+    if (platform.target == .furiosa or platform.target == .furiosa2 or platform.target == .furiosa3) previous_hidden.deinit();
     // Check untouched cache storage exactly, independently of the floating
     // tolerance used for newly computed keys and values.
     const query_length: usize = @intCast(shape.dim(.s));

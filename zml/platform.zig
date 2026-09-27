@@ -39,7 +39,7 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         return error.MissingDevices;
     }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa, .furiosa2 => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa, .furiosa2, .furiosa3 => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
                 return error.InvalidDeviceCount;
@@ -98,7 +98,7 @@ pub const Memory = struct {
                 return zml_kind == kind_;
             },
             .cpu, .neuron, .metal => return true,
-            .furiosa, .furiosa2 => return kind_ == .device,
+            .furiosa, .furiosa2, .furiosa3 => return kind_ == .device,
         }
     }
 
@@ -212,7 +212,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa, .furiosa2 => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa, .furiosa2, .furiosa3 => device.id(),
     };
 }
 
@@ -245,6 +245,7 @@ pub const State = union(Target) {
     metal: void,
     furiosa: void,
     furiosa2: void,
+    furiosa3: void,
 
     pub const CudaState = struct {
         fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
@@ -268,6 +269,7 @@ pub const State = union(Target) {
             .metal => .{ .metal = {} },
             .furiosa => .{ .furiosa = {} },
             .furiosa2 => .{ .furiosa2 = {} },
+            .furiosa3 => .{ .furiosa3 = {} },
         };
     }
 
@@ -415,6 +417,7 @@ pub const Platform = struct {
             .metal,
             .furiosa,
             .furiosa2,
+            .furiosa3,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -687,8 +690,8 @@ pub const Platform = struct {
         // There is probably a better way of doing this,
         // The queried layout can include backend-specific tiling.
         return switch (platform.target) {
-            .tpu, .furiosa, .furiosa2 => {
-                if (comptime !Target.tpu.isEnabled() and !Target.furiosa.isEnabled() and !Target.furiosa2.isEnabled()) unreachable;
+            .tpu, .furiosa, .furiosa2, .furiosa3 => {
+                if (comptime !Target.tpu.isEnabled() and !Target.furiosa.isEnabled() and !Target.furiosa2.isEnabled() and !Target.furiosa3.isEnabled()) unreachable;
                 const element_type = pjrtx.bufferTypeFromDtype(dtype);
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
@@ -729,6 +732,7 @@ pub const CreateOptions = struct {
     neuron: struct {} = .{},
     furiosa: Furiosa = .{},
     furiosa2: Furiosa = .{ .pe_count = 4 },
+    furiosa3: Furiosa = .{ .pe_count = 4 },
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     io_impl: Platform.IoImpl = .threaded,
@@ -822,6 +826,7 @@ pub const CreateOptions = struct {
             .cpu => self.cpu.writeNamedValues(&values),
             .furiosa => self.furiosa.writeNamedValues(&values),
             .furiosa2 => self.furiosa2.writeNamedValues(&values),
+            .furiosa3 => self.furiosa3.writeNamedValues(&values),
             .cuda => self.cuda.writeNamedValues(target, &values),
             .rocm => self.rocm.writeNamedValues(target, &values),
             .oneapi => self.oneapi.writeNamedValues(target, &values),
