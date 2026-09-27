@@ -208,8 +208,8 @@ pub const Tensor = struct {
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal, .furiosa, .furiosa2, .furiosa3 => return self,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cpu, .neuron, .metal, .furiosa, .furiosa2 => return self,
+            .cuda, .rocm, .tpu, .oneapi, .furiosa3 => {},
         }
 
         const frontend_attributes: *const mlir.Attribute = .dict(ctx.mlir_ctx, &.{
@@ -274,8 +274,8 @@ pub const Tensor = struct {
     pub fn toMemoryAll(flat_tensors: anytype, kind: Memory.Kind) @TypeOf(flat_tensors) {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal, .furiosa, .furiosa2, .furiosa3 => return flat_tensors,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cpu, .neuron, .metal, .furiosa, .furiosa2 => return flat_tensors,
+            .cuda, .rocm, .tpu, .oneapi, .furiosa3 => {},
         }
 
         var copy = flat_tensors;
@@ -292,8 +292,8 @@ pub const Tensor = struct {
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal, .furiosa, .furiosa2, .furiosa3 => return self,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cpu, .neuron, .metal, .furiosa, .furiosa2 => return self,
+            .cuda, .rocm, .tpu, .oneapi, .furiosa3 => {},
         }
 
         if (ctx.currentScope().id_to_argument.get(self.id) == null) {
@@ -311,8 +311,8 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             // Only one memory kind on those platform
-            .cpu, .neuron, .metal, .furiosa, .furiosa2, .furiosa3 => return,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cpu, .neuron, .metal, .furiosa, .furiosa2 => return,
+            .cuda, .rocm, .tpu, .oneapi, .furiosa3 => {},
         }
 
         meta.visit(struct {
