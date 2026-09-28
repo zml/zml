@@ -39,6 +39,13 @@ collectives. The linked default reaches a matched 63.7–63.8 tok/s; experimenta
 producer/collective fusion regresses to 59.7 and is off by default. The older
 argmax measurements below are a different configuration.
 
+The XLA handoff also preserves unfinished, off-by-default runtime experiments.
+Leave `XLA_FURIOSA_CACHE_LINK_BINDINGS` and `XLA_FURIOSA_COALESCE_TASKS` unset:
+the cache has no demonstrated speedup, and task coalescing currently rejects
+contraction and top-k tests. The installed runtime remains the validated
+baseline. The [dispatch report](https://github.com/zml/xla-private/blob/steeve/furiosa/xla/pjrt/furiosa3/experiments/2026-09-28-runtime-dispatch/README.md)
+records the failures and continuation steps. The 100 tok/s target is not met.
+
 Set `XLA_FURIOSA_VISIBLE_DEVICES=0` or `=1` for one card, or `=0,1` for both.
 The runtime requires ascending physical IDs. Set `ZML_CHECKOUT`,
 `FURIOSA_SDK_DIR` and `LLAMA_MODEL` when using the companion launcher elsewhere.
