@@ -124,11 +124,6 @@ pub const Partitioning = struct {
         return sharding.shardedShape(shape);
     }
 
-    pub fn numPartitionsForLogicalAxis(self: Partitioning, shape: Shape, logical_axis: anytype) !i64 {
-        const sharding = try self.selectSharding(shape);
-        return sharding.data.numPartitionsForLogicalAxis(logical_axis);
-    }
-
     pub fn shardableDim(self: Partitioning, shape: Shape, axis: anytype, must_divide: i64) !DimSharding {
         const ax = shape.axis(axis);
         const spec = shape.partition(ax);
@@ -138,32 +133,14 @@ pub const Partitioning = struct {
         return sharding.shardableDim(shape.dim(ax), spec.axis, must_divide);
     }
 
-    pub fn selectSharding(self: Partitioning, shape: Shape) error{NoSuitableSharding}!Sharding {
-        return pickSharding(self.shardings, shape, .any_covering) orelse error.NoSuitableSharding;
-    }
-
     fn primarySharding(self: Partitioning) Sharding {
         return self.shardings[0];
     }
 };
 
-pub const SelectShardingMode = enum {
-    any_covering,
-    explicit_axis_binding,
-};
-
-pub fn pickSharding(shardings: []const Sharding, shape: Shape, mode: SelectShardingMode) ?Sharding {
-    if (mode == .explicit_axis_binding and !shapeHasAxisPartition(shape)) return null;
-
-    for (shardings) |sharding| {
-        if (sharding.data.covers(shape)) return sharding;
-    }
-    return null;
-}
-
 fn shapeHasAxisPartition(shape: Shape) bool {
     for (0..shape.rank()) |ax| {
-        if (shape.partition(ax) == .axis) return true;
+        if (shape.partition(ax).partitionAxis()) |_| return true;
     }
     return false;
 }
@@ -1272,9 +1249,13 @@ pub const Data = struct {
     folds: Folds,
     folds_consumed: std.EnumSet(PhysicalAxisTag),
 
-    pub fn binding(self: *const Data, tag: Shape.Tag) ?[]const PhysicalAxisTag {
-        for (self.bindings.slice()) |*b| {
-            if (b.logical == tag) return b.physical.slice();
+    pub fn binding(self: *const Data, mesh_axis: usize) []const PhysicalAxisTag {
+        return self.bindings.get(mesh_axis).physical.slice();
+    }
+
+    pub fn resolveLogicalAxis(self: *const Data, tag: Shape.Tag) ?u8 {
+        for (0.., self.bindings.slice()) |i, *b| {
+            if (b.logical == tag) return @truncate(i);
         }
         return null;
     }
@@ -1369,7 +1350,8 @@ pub const Data = struct {
 
     pub fn numPartitionsForLogicalAxis(self: *const Data, logical_axis: anytype) i64 {
         const logical_tag = Shape.toTag(logical_axis);
-        const bound_axes = self.binding(logical_tag) orelse return 1;
+        const logical_ax = self.resolveLogicalAxis(logical_tag) orelse std.debug.panic("sharding {f} has no axis {s}", .{ self, logical_tag });
+        const bound_axes = self.binding(logical_ax);
 
         var physical_axes: std.EnumSet(PhysicalAxisTag) = .empty;
         for (bound_axes) |bound_axis| {
@@ -1395,16 +1377,6 @@ pub const Data = struct {
 
     pub fn numDevices(self: *const Data) i32 {
         return self.numPartitions() * self.numReplicas();
-    }
-
-    pub fn covers(sharding: *const Data, shape: Shape) bool {
-        for (shape._partitioning.slice()) |partitioning| {
-            switch (partitioning) {
-                .axis => |tag| if (sharding.binding(tag) == null) return false,
-                else => {},
-            }
-        }
-        return true;
     }
 
     pub fn sdyMeshAttr(self: *const Data, allocator: std.mem.Allocator) ![]const u8 {
@@ -1441,16 +1413,15 @@ pub const Data = struct {
             var dim_axes: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
             const spec = shape.partition(ax);
 
-            if (spec == .axis) {
-                if (self.binding(spec.axis)) |binding_| {
-                    for (binding_) |p_tag| {
-                        for (view.axes.slice(), 0..) |v_ax, i| {
-                            // Only use the axis if it's bound and hasn't been consumed by a previous dimension
-                            if (v_ax.contains(p_tag) and !globally_used.contains(v_ax.tag)) {
-                                dim_axes.appendAssumeCapacity(i);
-                                globally_used.insert(v_ax.tag);
-                                used_mask[i] = true;
-                            }
+            if (spec.partitionAxis()) |mesh_ax| {
+                const binding_ = self.bindings.get(mesh_ax);
+                for (binding_.physical.slice()) |p_tag| {
+                    for (view.axes.slice(), 0..) |v_ax, i| {
+                        // Only use the axis if it's bound and hasn't been consumed by a previous dimension
+                        if (v_ax.contains(p_tag) and !globally_used.contains(v_ax.tag)) {
+                            dim_axes.appendAssumeCapacity(i);
+                            globally_used.insert(v_ax.tag);
+                            used_mask[i] = true;
                         }
                     }
                 }
@@ -1494,24 +1465,20 @@ pub const Data = struct {
         for (0.., dimensions) |ax, *d| {
             const spec = shape.partition(ax);
             d.* = switch (spec) {
-                .axis => |logical_tag| d: {
-                    if (data.binding(logical_tag)) |_| {
-                        const dim_phys_indices = mapping.axes_per_dim.get(ax);
-                        if (dim_phys_indices.len == 0) {
-                            break :d .replicated(ctx);
-                        } else {
-                            const axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, dim_phys_indices.len);
-                            for (dim_phys_indices.slice(), 0..) |p_idx, i| {
-                                axes[i] = .named(ctx, @tagName(mapping.view.axes.get(p_idx).tag));
-                            }
-                            break :d .closed(ctx, axes);
-                        }
-                    } else {
-                        break :d .open(ctx, &.{});
-                    }
-                },
                 .replicated => .replicated(ctx),
                 .open, .unknown => if (all_replicated) .replicated(ctx) else .open(ctx, &.{}),
+                else => d: {
+                    const dim_phys_indices = mapping.axes_per_dim.get(ax);
+                    if (dim_phys_indices.len == 0) {
+                        break :d .replicated(ctx);
+                    } else {
+                        const axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, dim_phys_indices.len);
+                        for (dim_phys_indices.slice(), 0..) |p_idx, i| {
+                            axes[i] = .named(ctx, @tagName(mapping.view.axes.get(p_idx).tag));
+                        }
+                        break :d .closed(ctx, axes);
+                    }
+                },
             };
         }
 
@@ -1530,7 +1497,7 @@ pub const Data = struct {
 
         var has_sharding = false;
         for (0..shape.rank()) |ax| {
-            if (shape.partition(ax) == .axis) {
+            if (shape.partition(ax).partitionAxis() != null) {
                 has_sharding = true;
                 break;
             }
@@ -1618,19 +1585,19 @@ pub const Data = struct {
         for (self.logical.axes.slice(), self.logical.intents.slice()) |l_tag, l_intent| {
             try writer.print("  - {s} ({s}) -> ", .{ l_tag, @tagName(l_intent) });
 
-            if (self.binding(l_tag)) |axes| {
-                if (axes.len == 0) {
-                    try writer.writeAll("replicated\n");
-                } else {
-                    for (axes, 0..) |p, i| {
-                        if (i > 0) try writer.writeAll(", ");
-                        try writer.writeAll(@tagName(p));
-                    }
-                    try writer.writeAll("\n");
-                }
-            } else {
-                try writer.writeAll("unbound\n");
-            }
+            // if (self.binding(l_tag)) |axes| {
+            //     if (axes.len == 0) {
+            //         try writer.writeAll("replicated\n");
+            //     } else {
+            //         for (axes, 0..) |p, i| {
+            //             if (i > 0) try writer.writeAll(", ");
+            //             try writer.writeAll(@tagName(p));
+            //         }
+            //         try writer.writeAll("\n");
+            //     }
+            // } else {
+            //     try writer.writeAll("unbound\n");
+            // }
         }
 
         const view = self.physicalView();
@@ -1953,15 +1920,12 @@ fn axisSplit(
     const dim = shape.dim(axis_index);
     const spec = shape.partition(axis_index);
 
-    switch (spec) {
-        .axis => |logical_tag| {
-            const binding = sharding.data.binding(logical_tag) orelse return error.MissingLogicalBinding;
+    return if (spec.partitionAxis()) |mesh_axis| {
+        const binding = sharding.data.binding(mesh_axis);
 
-            // Calculate the split based on the physical coordinates of the current device.
-            return try calculateSplit(sharding, dim, binding, used_axes);
-        },
-        else => return .empty,
-    }
+        // Calculate the split based on the physical coordinates of the current device.
+        return try calculateSplit(sharding, dim, binding, used_axes);
+    } else .empty;
 }
 
 fn calculateSplit(

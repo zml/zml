@@ -328,6 +328,46 @@ pub fn allocPrint(self: *Compiler, comptime fmt: []const u8, args: anytype) []u8
     return std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch self.abortOOM();
 }
 
+pub fn resolveSharding(compiler: *Compiler, logical_axes: anytype) Sharding {
+    if (@TypeOf(logical_axes) != []const Shape.Tag) {
+        const comp_tags = comptime Shape.parseTags(logical_axes);
+        const parsed_tags: []const Shape.Tag = comptime comp_tags.constSlice();
+        return compiler.resolveSharding(parsed_tags);
+    }
+
+    var ok_sharding: ?Sharding = null;
+    for (compiler.partitioning.shardings) |sharding| {
+        var covers_all: bool = true;
+        for (logical_axes) |ax| {
+            const logical_ax = Shape.toTag(ax);
+            var covers_this: bool = false;
+            for (sharding.data.bindings.slice()) |binding| {
+                if (std.mem.eql(u8, std.mem.span(binding.logical), std.mem.span(logical_ax))) {
+                    covers_this = true;
+                    break;
+                }
+            }
+            covers_all = covers_all and covers_this;
+        }
+        if (covers_all) {
+            if (ok_sharding) |first_match| {
+                stdx.debug.panic(
+                    \\Found two shardings covering axes: {any}, expected exacty one.
+                    \\- First match: {f}
+                    \\- Second match: {f}
+                , .{ logical_axes, first_match, sharding });
+            }
+            ok_sharding = sharding;
+        }
+    }
+
+    return ok_sharding orelse stdx.debug.panic(
+        \\Found no shardings covering axes: {any}, expected exacty one.
+        \\Try passing more shardings to `zml.compile`.
+        \\Known shardings: {f}
+    , .{ logical_axes, stdx.fmt.slice(compiler.partitioning.shardings) });
+}
+
 pub fn Typed(comptime func: anytype) type {
     return struct {
         pub fn compile(
@@ -582,16 +622,10 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
 
             defer ctx.current_argument_id += 1;
 
-            const input_sharding = ctx.compiler.partitioning.selectSharding(packed_shape) catch |err| switch (err) {
-                error.NoSuitableSharding => std.debug.panic(
-                    "Failed to resolve sharding for input {f}({d}) because it's using unknown sharding. Pass more shardings to `platform.compile`. Known shardings: {f}",
-                    .{ packed_shape, ctx.current_argument_id, stdx.fmt.slice(ctx.compiler.partitioning.shardings) },
-                ),
-            };
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
                 .shape = og_shape,
-                .sharding = input_sharding,
+                .sharding = tensor.sharding.resolve(ctx.compiler.platform),
                 .value = value,
             });
         }
@@ -625,9 +659,9 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
 
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
-                .shape = og_shape,
+                .shape = packed_shape,
                 // Note: the panic should have been triggered during createBlockArguments or emitMlir
-                .sharding = ctx.compiler.partitioning.selectSharding(packed_shape) catch @panic("failed to resolve output sharding"),
+                .sharding = tensor.sharding.resolve(ctx.compiler.platform),
                 .value = value,
             });
         }

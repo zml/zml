@@ -30,6 +30,7 @@ pub const Tensor = struct {
     auto_broadcast: bool = false,
     _shape: Shape,
     _value: ?*const mlir.Value = null,
+    sharding: Sharding = .replicated,
 
     const ResolvedAxis = u3;
 
@@ -106,7 +107,6 @@ pub const Tensor = struct {
             sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
         }
         sh._tags.appendNTimes(Shape.TagUnknown, n) catch unreachable;
-        sh._partitioning.appendNTimes(.unknown, n) catch unreachable;
 
         return .{ ._shape = sh, ._value = val, .id = nextTensorId() };
     }
@@ -153,7 +153,17 @@ pub const Tensor = struct {
         return res;
     }
 
+    pub fn withSharding(self: Tensor, new_sharding: Sharding) Tensor {
+        var res: Tensor = self;
+        res.sharding = new_sharding;
+        return res;
+    }
+
     pub fn withPartitioning(self: Tensor, axes_: anytype) Tensor {
+        return self.reshard(self.sharding, axes_);
+    }
+
+    pub fn reshard(self: Tensor, sharding_: Sharding, axes_: anytype) Tensor {
         const partitioned_shape = self._shape.withPartitioning(axes_);
 
         const ctx = Compiler.currentOrNull() orelse {
@@ -162,13 +172,7 @@ pub const Tensor = struct {
             return res;
         };
 
-        const sharding = ctx.partitioning.selectSharding(partitioned_shape) catch |err| switch (err) {
-            error.NoSuitableSharding => std.debug.panic(
-                "{f}.withPartitioning({f}) failed to resolve because it's using unknown sharding. Pass more shardings to `zml.compile`. Known shardings: {f}",
-                .{ self, partitioned_shape, stdx.fmt.slice(ctx.partitioning.shardings) },
-            ),
-        };
-        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
+        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding_) catch @panic("OOM");
 
         const op_result = switch (ctx.partitioning.partitioner) {
             .shardy => blk: {

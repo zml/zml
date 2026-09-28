@@ -140,8 +140,7 @@ const Context = struct {
 };
 
 pub fn causalAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_offset: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-    const ctx = zml.Compiler.current();
-    const num_partitions = ctx.partitioning.numPartitionsForLogicalAxis(q.shape(), .model) catch unreachable;
+    const num_partitions = q.sharding.numPartitionsForLogicalAxis(.model);
 
     const actual_k, const actual_v = if (parameters.is_prefill)
         .{ k, v }
