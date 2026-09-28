@@ -21,6 +21,36 @@ builds both components and selects the SDK and plugin paths for this host:
   --prompt='Count from 1 to 100, separated by commas.'
 ```
 
+## Current handoff (2026-09-28)
+
+Use ZML branch `steeve/wip/furiosa` together with `steeve/furiosa` in
+`zml/xla-private`. The tested ZML implementation is `3866ec6`; subsequent
+handoff changes are documentation only. Both checkouts are required.
+
+The companion [engineering handoff](https://github.com/zml/xla-private/blob/steeve/furiosa/xla/pjrt/furiosa3/HANDOFF.md)
+contains pinned setup versions, architecture, source ownership, current flags,
+exact test commands, benchmark distinctions, known gaps and next steps.
+The [documentation index](https://github.com/zml/xla-private/blob/steeve/furiosa/xla/pjrt/furiosa3/DOCUMENTATION_INDEX.md)
+links the complete experiment history. These links require private-repository access.
+
+The current launcher uses BF16 weights, vanilla SDPA, top-k 16, seqlen 256 and
+eight PEs per card. Two-card tensor parallelism uses XLA/Shardy and device-only
+collectives. The linked default reaches a matched 63.7–63.8 tok/s; experimental
+producer/collective fusion regresses to 59.7 and is off by default. The older
+argmax measurements below are a different configuration.
+
+Set `XLA_FURIOSA_VISIBLE_DEVICES=0` or `=1` for one card, or `=0,1` for both.
+The runtime requires ascending physical IDs. Set `ZML_CHECKOUT`,
+`FURIOSA_SDK_DIR` and `LLAMA_MODEL` when using the companion launcher elsewhere.
+
+The last full ZML validation ran all 24 Bazel test targets on Furiosa3 with CPU
+disabled (177 core passes, 18 platform skips, zero failures). This preceded the
+latest TP work; the handoff separates that result from newer native hardware
+checks. Use `--nocache_test_results` after changing the external plugin library.
+Qwen 3.5/Gated DeltaNet and general scaled-dot/MXFP4 are not validated by this path.
+
+## Historical initial Llama validation
+
 Validation: `bazel build //... --@zml//platforms:furiosa3=true --jobs=16`
 builds all 169 targets. The exact launcher above generates the requested
 counting sequence at 63.7–64.4 tok/s on all eight PEs, with original BF16
