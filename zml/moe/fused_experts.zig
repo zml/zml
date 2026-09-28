@@ -39,6 +39,68 @@ pub const Parameters = struct {
     }
 };
 
+pub fn fusedExperts(
+    input: zml.Tensor,
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
+    gate_up: zml.nn.Linear,
+    down: zml.nn.Linear,
+    opts: zml.moe.Options,
+    parameters: Parameters,
+    comptime backend: zml.moe.Backend,
+) zml.Tensor {
+    const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
+    // TODO(Corentin): Better error message
+    const layout = backend.expertsLayout(gate_up_scheme) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+    const args: FusedExpertsArgs = .{
+        .hidden_states = input,
+        .gate_up = gate_up,
+        .down = down,
+        .topk_weights = topk_weights,
+        .topk_ids = topk_ids,
+        .activation = parameters.activation,
+        .activation_threshold = opts.activation_threshold,
+        .quantize_input = opts.quantize_input,
+        .gate_up_layout = layout.gate_up,
+        .routing_weight_placement = opts.routing_weight_placement,
+    };
+    const expert_partition = gate_up.weight.shape().partition(.expert);
+
+    if (!expert_partition.eql(.init(.experts))) {
+        return fusedExpertsImpl(args, backend) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+    }
+
+    return zml.ops.manualComputation(
+        (struct {
+            args: FusedExpertsArgs,
+            global_num_experts: i64,
+
+            fn call(self: @This(), _: zml.Shape) zml.Tensor {
+                const local_args = self.args;
+                const local_num_experts = local_args.gate_up.weight.dim(.expert);
+                const partition_id = zml.ops.partitionId().convert(.i32);
+                const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
+
+                // Map global expert ids to local ids, or -1 for experts outside this partition.
+                const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
+                    .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
+                var mapped_args = local_args;
+                mapped_args.expert_map = local_expert_mask.select(
+                    global_expert_ids.sub(expert_start),
+                    zml.Tensor.scalar(-1, .i32),
+                );
+
+                const local_output = fusedExpertsImpl(mapped_args, backend) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+                const local_reshaped = local_output.reshape(local_args.hidden_states.shape().dims()).withTags(.{ .b, .s, .d });
+                return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
+            }
+        }).call,
+        .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert) },
+        input.shape(),
+    );
+}
+
 pub const ProjectionLayout = enum { concatenated, interleaved };
 pub const RoutingWeightPlacement = enum { before_down, after_down };
 
@@ -57,14 +119,14 @@ pub const FusedExpertsArgs = struct {
     routing_weight_placement: RoutingWeightPlacement,
 };
 
-pub fn fusedExperts(opts: FusedExpertsArgs, comptime backend: zml.moe.Backend) !Tensor {
+pub fn fusedExpertsImpl(opts: FusedExpertsArgs, comptime backend: zml.moe.Backend) !Tensor {
     const Impl = switch (backend) {
         .fly => fly,
         .triton => triton,
         else => @compileError("unsupported fused-experts backend"),
     };
     if (backend == .fly and (!backend.isAvailable(zml.Compiler.current().platform) or !fly.supports(opts))) {
-        return fusedExperts(opts, .triton);
+        return fusedExpertsImpl(opts, .triton);
     }
 
     const hidden_states = opts.hidden_states;
@@ -437,7 +499,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
             }
             const route = Tensor.arange(.{ .end = 2 }, .i32).reshape(.{ .b = 1, .s = 1, .top_expert = 2 })
                 .broad(Shape.init(.{ .b = 1, .s = x.dim(.s), .top_expert = 2 }, .i32));
-            return fusedExperts(.{
+            return fusedExpertsImpl(.{
                 .hidden_states = x,
                 .gate_up = gate_up,
                 .down = down,
