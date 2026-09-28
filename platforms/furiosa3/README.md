@@ -39,12 +39,14 @@ collectives. The linked default reaches a matched 63.7–63.8 tok/s; experimenta
 producer/collective fusion regresses to 59.7 and is off by default. The older
 argmax measurements below are a different configuration.
 
-The XLA handoff also preserves unfinished, off-by-default runtime experiments.
-Leave `XLA_FURIOSA_CACHE_LINK_BINDINGS` and `XLA_FURIOSA_COALESCE_TASKS` unset:
-the cache has no demonstrated speedup, and task coalescing currently rejects
-contraction and top-k tests. The installed runtime remains the validated
-baseline. The [dispatch report](https://github.com/zml/xla-private/blob/steeve/furiosa/xla/pjrt/furiosa3/experiments/2026-09-28-runtime-dispatch/README.md)
-records the failures and continuation steps. The 100 tok/s target is not met.
+The XLA backend now uses ThreeFry for ZML's two-word `RNG_DEFAULT` state;
+explicit algorithm requests are unchanged. This changes the default sequence
+for the same seed. The [latest dispatch report](https://github.com/zml/xla-private/blob/steeve/furiosa/xla/pjrt/furiosa3/experiments/2026-09-28-coalesced-dispatch/README.md)
+records an **83.5 tok/s median** candidate with opt-in task coalescing and shared
+code, against a matched old Philox control of 63.6. That rate requires rebuilding
+the runtime and setting the report's experimental flags. Dispatch experiments
+remain off by default, and the installed runtime has not been replaced. The
+100 tok/s target is not met; older measurements above use the prior default.
 
 Set `XLA_FURIOSA_VISIBLE_DEVICES=0` or `=1` for one card, or `=0,1` for both.
 The runtime requires ascending physical IDs. Set `ZML_CHECKOUT`,
