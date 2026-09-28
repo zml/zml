@@ -47,7 +47,7 @@ pub fn fusedExperts(
     stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "cute_mxfp4 expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
     stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "cute_mxfp4 expects down weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
 
-    const expert_parallelism = gate_up.weight.shape().partition(.expert).eql(.init(.experts));
+    const expert_parallelism = gate_up.weight.shape().partition(.expert).isSharded();
     const hidden = down.weight.dim(1);
     const intermediate = down.weight.dim(2) * 2;
 

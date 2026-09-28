@@ -1415,7 +1415,7 @@ pub const Data = struct {
             var dim_axes: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
             const spec = shape.partition(ax);
 
-            if (spec.partitionAxis()) |mesh_ax| {
+            if (spec.meshAxis()) |mesh_ax| {
                 const binding_ = self.bindings.get(mesh_ax);
                 for (binding_.physical.slice()) |p_tag| {
                     for (view.axes.slice(), 0..) |v_ax, i| {
@@ -1499,7 +1499,7 @@ pub const Data = struct {
 
         var has_sharding = false;
         for (0..shape.rank()) |ax| {
-            if (shape.partition(ax).partitionAxis() != null) {
+            if (shape.partition(ax).isSharded()) {
                 has_sharding = true;
                 break;
             }
@@ -1922,7 +1922,7 @@ fn axisSplit(
     const dim = shape.dim(axis_index);
     const spec = shape.partition(axis_index);
 
-    return if (spec.partitionAxis()) |mesh_axis| {
+    return if (spec.meshAxis()) |mesh_axis| {
         const binding = sharding.data.binding(mesh_axis);
 
         // Calculate the split based on the physical coordinates of the current device.
@@ -2135,11 +2135,13 @@ test "sharding: suggest strategy realization" {
     });
 
     const strategy: Strategy = .suggest(logical, &physical);
+    const sharding_data: Data = try .init("suggested_mesh", &physical, logical, strategy);
+    const sharding: Sharding = .{ .data = &sharding_data };
 
     try runner.run(.{
-        .sharding = try .init("suggested_mesh", &physical, logical, strategy),
+        .sharding = sharding_data,
         .shape = Shape.init(.{ .batch = 4, .model = 4 }, .f32)
-            .withPartitioning(.{ .batch = .batch, .model = .model }),
+            .withPartitioning(sharding, .{ .batch = .batch, .model = .model }),
         .expected_sdy = "#sdy.sharding<@suggested_mesh, [{\"link_z\"}, {\"link_x\"}], replicated={\"link_y\"}>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 2 }, .{ 0, 2 } } }, // x0, y0, z0
