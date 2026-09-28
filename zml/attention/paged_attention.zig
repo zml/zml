@@ -203,6 +203,7 @@ pub const AttentionOptions = struct {
     is_causal: bool = true,
     sliding_window: i32 = -1,
     scale: ?f32 = null,
+    sink: ?zml.Tensor = null,
 };
 
 pub const KvCache = union(enum) {
