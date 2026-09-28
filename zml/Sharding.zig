@@ -1238,6 +1238,8 @@ pub const PhysicalView = struct {
 };
 
 pub const Data = struct {
+    pub const zml_no_meta_visit: void = {};
+
     name: []const u8,
     physical: *const PhysicalMesh,
     logical: LogicalMesh,
