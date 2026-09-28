@@ -30,7 +30,7 @@ pub const ExpertsLayout = struct {
     pub const Packing = enum {
         /// Experts stacked as stored in the checkpoint.
         plain,
-        /// Block scales swizzled to the 128x4 tensor-core layout of `cute_mxfp4.packWeightScales`.
+        /// Block scales swizzled to the 128x4 tensor-core layout (rows tiled by 4x32, columns by 4).
         swizzled_scales,
         /// Weights, block scales and global scales in the FlashInfer CUTLASS NVFP4 layout.
         flashinfer_nvfp4,
