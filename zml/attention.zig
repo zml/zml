@@ -4,6 +4,7 @@ pub const attnd = @import("attention/attnd.zig");
 pub const fly = @import("attention/fly_kernels/sparse_mla.zig");
 pub const flashattn = @import("attention/flashattn.zig");
 pub const metal = @import("attention/metal_attention.zig");
+pub const furiosa = @import("attention/furiosa.zig");
 pub const nki = @import("attention/nki/attention.zig");
 pub const paged_attention = @import("attention/paged_attention.zig");
 pub const tpu = @import("attention/tpu_attention.zig");
@@ -17,6 +18,7 @@ test {
 
 pub const Backend = enum {
     vanilla,
+    furiosa_fa,
     attnd,
     nki,
     cuda_fa2,
@@ -31,7 +33,8 @@ pub const Backend = enum {
             },
             .neuron => .nki,
             .metal => .metal_fa,
-            .cpu, .rocm, .tpu, .oneapi, .furiosa, .furiosa2, .furiosa3 => .vanilla,
+            .furiosa3 => .furiosa_fa,
+            .cpu, .rocm, .tpu, .oneapi, .furiosa, .furiosa2 => .vanilla,
         };
     }
 
@@ -41,6 +44,7 @@ pub const Backend = enum {
             .attnd => true, // attnd runs over network
             .nki => platform.target == .neuron,
             .metal_fa => platform.target == .metal,
+            .furiosa_fa => platform.target == .furiosa3,
             .cuda_fa2 => platform.target == .cuda,
             .cuda_fa3 => if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(.{ .major = 9, .minor = 0 }) else false,
         };
@@ -49,6 +53,7 @@ pub const Backend = enum {
 
 pub const Parameters = union(Backend) {
     vanilla: void,
+    furiosa_fa: void,
     attnd: attnd.Parameters,
     nki: nki.Parameters,
     cuda_fa2: flashattn.fa2.Parameters,
@@ -57,6 +62,7 @@ pub const Parameters = union(Backend) {
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
+        furiosa_fa: void,
         attnd: void,
         nki: nki.Parameters,
         cuda_fa2: flashattn.fa2.Parameters.InitOptions,
@@ -66,6 +72,7 @@ pub const Parameters = union(Backend) {
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
+                .furiosa_fa => .{ .furiosa_fa = {} },
                 .attnd => @panic("Must be initialized manually"),
                 .nki => .{ .nki = .init() },
                 .cuda_fa2 => .{ .cuda_fa2 = .{} },
@@ -78,6 +85,7 @@ pub const Parameters = union(Backend) {
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
+            .furiosa_fa => .{ .furiosa_fa = {} },
             .attnd => @panic("Must be initialized manually"),
             .nki => |v| .{ .nki = v },
             .cuda_fa2 => |v| .{ .cuda_fa2 = .init(v) },
@@ -89,6 +97,7 @@ pub const Parameters = union(Backend) {
 
 pub const Metadata = union(Backend) {
     vanilla: void,
+    furiosa_fa: void,
     attnd: attnd.Metadata,
     nki: void,
     cuda_fa2: flashattn.fa2.Metadata,
@@ -97,6 +106,7 @@ pub const Metadata = union(Backend) {
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
+        furiosa_fa: void,
         attnd: void,
         nki: void,
         cuda_fa2: flashattn.fa2.Metadata.InitOptions,
@@ -106,6 +116,7 @@ pub const Metadata = union(Backend) {
         pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
+                .furiosa_fa => .{ .furiosa_fa = {} },
                 .attnd => .{ .attnd = {} },
                 .nki => .{ .nki = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
@@ -118,6 +129,7 @@ pub const Metadata = union(Backend) {
     pub fn init(opts: InitOptions) Metadata {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
+            .furiosa_fa => .{ .furiosa_fa = {} },
             .attnd => @panic("Must be initialized manually"),
             .nki => .{ .nki = {} },
             .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
@@ -129,6 +141,7 @@ pub const Metadata = union(Backend) {
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(Metadata) {
         return switch (self) {
             .vanilla => .{ .vanilla = {} },
+            .furiosa_fa => .{ .furiosa_fa = {} },
             .nki => .{ .nki = {} },
             inline else => |v, tag| @unionInit(zml.Bufferized(Metadata), @tagName(tag), try v.initBuffer(io, platform, sharding)),
         };
@@ -136,7 +149,7 @@ pub const Metadata = union(Backend) {
 
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
         switch (self.*) {
-            .vanilla => {},
+            .vanilla, .furiosa_fa => {},
             .attnd => |*v| attnd.Metadata.deinitBuffer(v),
             .nki => {},
             .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
@@ -170,6 +183,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
             break :b attn_output;
         },
+        .furiosa_fa => furiosa.attention(q, k, v, token_index),
         .attnd => attnd.causalAttention(q, k, v, token_index, metadata.attnd, parameters.attnd),
         .nki => |params| nki.attention(q, k, v, token_index, params),
         .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),

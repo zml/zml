@@ -1292,6 +1292,25 @@ test "triton" {
     try std.testing.expectEqual(expected_result_b, cpu_result_1.items(f32)[0]);
 }
 
+/// Embed a pure tensor-level TCL MLIR module. `main` must match the shard-local
+/// operand/result types. Furiosa3 verifies and inlines the bytecode into the
+/// enclosing compilation unit, so this call adds no separate runtime launch.
+pub fn furiosaTcl(inputs: anytype, output: Shape, module: *const mlir.Module) Tensor {
+    const compiler = Compiler.current();
+    stdx.debug.assert(compiler.platform.target == .furiosa3, "TCL bytecode requires Furiosa3", .{});
+    var values: [inputs.len]*const mlir.Value = undefined;
+    inline for (inputs, 0..) |input, i| values[i] = input.value();
+    var bytecode: std.Io.Writer.Allocating = .init(compiler.allocator);
+    defer bytecode.deinit();
+    module.operation().writeBytecode(.{ .desired_emit_version = 0 }, &bytecode.writer) catch @panic("Unable to serialize TCL MLIR");
+    const op = dialects.stablehlo.custom_call(compiler.mlir_ctx, &values, &.{mlirx.Type.rankedTensor(compiler.mlir_ctx, output)}, .{
+        .call_target_name = "furiosa.tcl.mlir",
+        .backend_config = .{ .original = bytecode.written() },
+        .has_side_effect = false,
+    }, compiler.location).appendTo(compiler.currentScope().block);
+    return Tensor._result(output, op.result(0));
+}
+
 pub const CudaTileOps = struct {
     name: []const u8,
     ir: []const u8,

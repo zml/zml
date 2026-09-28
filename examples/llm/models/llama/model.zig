@@ -664,7 +664,7 @@ const SelfAttn = struct {
                 .conversation_id = attention_metadata.attnd.conversation_id,
                 .num_tokens = attention_metadata.attnd.num_tokens,
             } },
-            .vanilla => attention_metadata,
+            .vanilla, .furiosa_fa => attention_metadata,
             .cuda_fa2 => attention_metadata,
             .cuda_fa3 => attention_metadata,
             .nki => attention_metadata,
