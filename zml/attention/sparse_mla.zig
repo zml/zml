@@ -136,6 +136,7 @@ pub fn launchConfig(paged_opts: Options, topk_count: usize, cu_count_: usize) Co
 pub fn pagedAttention(parameters: triton.paged.Parameters, q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: MlaOptions) zml.Tensor {
     const output_shape = q.shape().set(.hd, opts.value_rank);
     return zml.ops.manualComputation(
+        q.sharding,
         (struct {
             q: zml.Tensor,
             kv_cache: zml.Tensor,

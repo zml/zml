@@ -616,12 +616,12 @@ pub const KvCache = struct {
 
     pub const Buffer = zml.Bufferized(KvCache);
 
-    pub fn init(kv_shape: zml.Shape) KvCache {
-        const sharded_shape = kv_shape.withPartitioning(.{ .h = .model });
+    pub fn init(kv_shape: zml.Shape, sharding: zml.Sharding) KvCache {
+        const sharded_shape = kv_shape.withPartitioning(sharding, .{ .h = .model });
 
         return .{
-            .k = .fromShape(sharded_shape),
-            .v = .fromShape(sharded_shape),
+            .k = zml.Tensor.fromShape(sharded_shape).withSharding(sharding),
+            .v = zml.Tensor.fromShape(sharded_shape).withSharding(sharding),
         };
     }
 

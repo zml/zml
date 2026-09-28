@@ -381,12 +381,13 @@ test "device round-trip" {
         .{ 56, 57, 58, 59, 60, 61, 62, 63 },
     };
 
+    const model_sharding: zml.Sharding = platform.shardings.get("model").?;
     const x_h: zml.Slice = .init(.withPartitioning(
         .init(.{ .b = 8, .d = 8 }, .u32),
+        model_sharding,
         .{ .b = .model },
     ), std.mem.asBytes(&x));
     // no free: x_h is stack allocated
-    const model_sharding: zml.Sharding = platform.shardings.get("model").?;
     const x_d: zml.Buffer = try .fromSlice(io, platform, x_h, model_sharding);
     try std.testing.expectEqual(platform.devices.len, x_d.numShards());
 

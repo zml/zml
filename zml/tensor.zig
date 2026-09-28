@@ -164,11 +164,12 @@ pub const Tensor = struct {
     }
 
     pub fn reshard(self: Tensor, sharding_: Sharding, axes_: anytype) Tensor {
-        const partitioned_shape = self._shape.withPartitioning(axes_);
+        const partitioned_shape = self._shape.withPartitioning(sharding_, axes_);
 
         const ctx = Compiler.currentOrNull() orelse {
             var res = self;
             res._shape = partitioned_shape;
+            res.sharding = sharding_;
             return res;
         };
 
@@ -205,7 +206,29 @@ pub const Tensor = struct {
             },
         };
 
-        return _result(partitioned_shape, op_result);
+        return _result(partitioned_shape, op_result).withSharding(sharding_);
+    }
+
+    test "withPartitioning uses the tensor sharding and reshard retains its replacement" {
+        const data: Sharding.Data = .{
+            .name = "tensor_partitioning_test",
+            .physical = undefined,
+            .logical = .mesh(.{ .model = .high_bandwidth }),
+            .bindings = .init(&.{.{ .logical = "model", .physical = .init(&.{.link_x}) }}),
+            .folds = .empty,
+            .folds_consumed = .empty,
+        };
+        var replacement_data = data;
+        replacement_data.name = "replacement";
+        const sharding: Sharding = .{ .data = &data };
+        const replacement: Sharding = .{ .data = &replacement_data };
+        const input = Tensor.init(.{ .h = 8 }, .f32).withSharding(sharding);
+        const partitioned = input.withPartitioning(.{ .h = .model });
+        try std.testing.expectEqual(sharding.data, partitioned.sharding.data);
+        try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), partitioned.shape().partition(.h));
+        const resharded = input.reshard(replacement, .{ .h = .model });
+        try std.testing.expectEqual(replacement.data, resharded.sharding.data);
+        try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), resharded.shape().partition(.h));
     }
 
     /// Copy the given tensor to the specified memory.
@@ -4595,7 +4618,7 @@ pub const Tensor = struct {
         defer ctx.arena.allocator().free(full_name);
         switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
-                ops.manualComputation((struct {
+                ops.manualComputation(input.sharding, (struct {
                     input: Tensor,
                     name: []const u8,
 

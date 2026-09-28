@@ -1488,14 +1488,14 @@ const DirectMemoryWriterDeviceTest = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
 
-    fn run(self: DirectMemoryWriterDeviceTest, scenario: Scenario) !void {
+    fn run(self: DirectMemoryWriterDeviceTest, scenario: Scenario, partitioning: anytype) !void {
         var platform = Platform.auto(self.allocator, self.io, scenario.create_options) catch return error.SkipZigTest;
         defer platform.deinit(self.allocator, self.io);
 
         const sharding: Sharding.Data = try .init(scenario.name, &platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
         try self.runDirectMemoryWriter(
             platform,
-            scenario.shape,
+            scenario.shape.withPartitioning(.{ .data = &sharding }, partitioning),
             .{ .data = &sharding },
             scenario.write_mode,
             scenario.writable_slice_min_len,
@@ -1596,11 +1596,10 @@ test "DirectMemoryWriter: replicated with auto topology" {
             .physical_mesh = .auto,
             .cpu = .{ .device_count = 4 },
         },
-        .shape = Shape.init(.{ .rows = 8, .cols = 128 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .replicated }),
+        .shape = Shape.init(.{ .rows = 8, .cols = 128 }, .f32),
         .logical_mesh = .mesh(.{ .x = .high_bandwidth }),
         .strategy = .parseBindings(.{ .x = .link_x }),
-    });
+    }, .{ .rows = .replicated, .cols = .replicated });
 }
 
 test "DirectMemoryWriter: 1D model split with 2x2 physical mesh" {
@@ -1615,11 +1614,10 @@ test "DirectMemoryWriter: 1D model split with 2x2 physical mesh" {
             .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .model }),
+        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = .parseBindings(.{ .model = .link_x }),
-    });
+    }, .{ .rows = .replicated, .cols = .model });
 }
 
 test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
@@ -1634,14 +1632,13 @@ test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
             .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
-        .shape = Shape.init(.{ .batch = 8, .model = 1024 }, .f32)
-            .withPartitioning(.{ .batch = .batch, .model = .model }),
+        .shape = Shape.init(.{ .batch = 8, .model = 1024 }, .f32),
         .logical_mesh = .mesh(.{
             .batch = .low_bandwidth,
             .model = .high_bandwidth,
         }),
         .strategy = .parseBindings(.{ .batch = .link_x, .model = .link_y }),
-    });
+    }, .{ .batch = .batch, .model = .model });
 }
 
 test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
@@ -1656,14 +1653,14 @@ test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
             .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
-        .shape = Shape.init(.{ .model = 4096 }, .f32).withPartitioning(.{ .model = .model }),
+        .shape = Shape.init(.{ .model = 4096 }, .f32),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = blk: {
             var strategy: Sharding.Strategy = .parseBindings(.{ .model = .link_x });
             strategy.addFold(.link_x, &.{ .link_x, .link_y });
             break :blk strategy;
         },
-    });
+    }, .{ .model = .model });
 }
 
 test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
@@ -1678,14 +1675,13 @@ test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
             .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .model }),
+        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = .parseBindings(.{ .model = .link_x }),
         .write_mode = .writable_slice_greedy,
         .writable_slice_min_len = 64,
         .pool_chunk_size = 1024,
-    });
+    }, .{ .rows = .replicated, .cols = .model });
 }
 
 test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
@@ -1700,8 +1696,7 @@ test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
             .physical_mesh = .{ .custom = buildMesh2x2x2 },
             .cpu = .{ .device_count = 8 },
         },
-        .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32)
-            .withPartitioning(.{ .batch = .replicated, .model = .model }),
+        .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32),
         .logical_mesh = .mesh(.{
             .batch = .low_bandwidth,
             .model = .high_bandwidth,
@@ -1711,7 +1706,7 @@ test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
             strategy.addFold(.link_x, &.{ .link_x, .link_z });
             break :blk strategy;
         },
-    });
+    }, .{ .batch = .replicated, .model = .model });
 }
 
 test "MemoryWriter can produce a host pinned buffer" {
@@ -1725,10 +1720,9 @@ test "MemoryWriter can produce a host pinned buffer" {
         .create_options = .{
             .physical_mesh = .{ .custom = buildMesh2 },
         },
-        .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32)
-            .withPartitioning(.{ .batch = .replicated, .model = .model }),
+        .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = .parseBindings(.{ .model = .link_x }),
         .memory = .host_pinned,
-    });
+    }, .{ .batch = .replicated, .model = .model });
 }

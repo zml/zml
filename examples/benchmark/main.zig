@@ -33,12 +33,12 @@ pub fn main(init: std.process.Init) !void {
     const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);
 
     const a_shape = zml.Shape.init(.{ .m = cli_args.size, .k = cli_args.size }, cli_args.dtype)
-        .withPartitioning(.{ .m = .m, .k = .replicated });
+        .withPartitioning(benchmark_sharding, .{ .m = .m, .k = .replicated });
     const b_shape = zml.Shape.init(.{ .k = cli_args.size, .n = cli_args.size }, cli_args.dtype)
-        .withPartitioning(.{ .k = .replicated, .n = .n });
+        .withPartitioning(benchmark_sharding, .{ .k = .replicated, .n = .n });
 
-    const a: zml.Tensor = .fromShape(a_shape);
-    const b: zml.Tensor = .fromShape(b_shape);
+    const a: zml.Tensor = zml.Tensor.fromShape(a_shape).withSharding(benchmark_sharding);
+    const b: zml.Tensor = zml.Tensor.fromShape(b_shape).withSharding(benchmark_sharding);
 
     var exe = blk: {
         log.info("⏱️ Compiling benchmark...", .{});

@@ -364,15 +364,16 @@ test pagedAttention {
     const batch_size = active_batch_size + 1;
     const query_token_count = prefill_token_count + num_decode;
     const dt: zml.DataType = .bf16;
+    const model_sharding = platform.shardings.get("model").?;
     const partition = .{ .hkv = .model };
     const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache } = .{
-        .q = .withPartitioning(.init(.{ .b = query_token_count, .hkv = 4, .hg = 4, .hd = 32 }, dt), partition),
-        .k = .withPartitioning(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt), partition),
-        .v = .withPartitioning(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt), partition),
+        .q = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hg = 4, .hd = 32 }, dt)).withSharding(model_sharding).withPartitioning(partition),
+        .k = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt)).withSharding(model_sharding).withPartitioning(partition),
+        .v = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt)).withSharding(model_sharding).withPartitioning(partition),
         .kv_cache = .{
             .split = .{
-                .k = .withPartitioning(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt), partition),
-                .v = .withPartitioning(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt), partition),
+                .k = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt)).withSharding(model_sharding).withPartitioning(partition),
+                .v = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt)).withSharding(model_sharding).withPartitioning(partition),
             },
         },
     };
