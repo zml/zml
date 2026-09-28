@@ -313,20 +313,21 @@ pub const fa2 = struct {
                 .merge(.{ .tot = .{ .tot, .ngroups } });
         }
 
-        const q_sharded = q.withPartitioning(.{ .h = .model });
-        const model_partitions: i32 = @intCast(ctx.partitioning.numPartitionsForLogicalAxis(q_sharded.shape(), .model) catch std.debug.panic("cu_fa2 attention backend requires a .model sharding", .{}));
+        const attn_sdy = ctx.resolveSharding(.{.model});
+        const q_sharded = q.reshard(attn_sdy, .{ .h = .model });
+        const model_partitions: i32 = @intCast(attn_sdy.numPartitionsForLogicalAxis(.model) );
 
         const output = fa2_mha_varlen_fwd.call(
             .{
                 .q = q_sharded,
-                .k = k.withPartitioning(.{ .h = .model }),
-                .v = v.withPartitioning(.{ .h = .model }),
+                .k = k.reshard(attn_sdy, .{ .h = .model }),
+                .v = v.reshard(attn_sdy, .{ .h = .model }),
                 .cu_seqlens_q = cu_seqlens_q,
                 .cu_seqlens_k = cu_seqlens_k,
                 .seqused_k = seqused_k,
-                .softmax_lse = metadata.softmax_lse.withPartitioning(.{ .h = .model }),
-                .softmax_lse_accum = metadata.softmax_lse_accum.withPartitioning(.{ .h = .model }),
-                .out_accum = metadata.out_accum.withPartitioning(.{ .h = .model }),
+                .softmax_lse = metadata.softmax_lse.reshard(attn_sdy, .{ .h = .model }),
+                .softmax_lse_accum = metadata.softmax_lse_accum.reshard(attn_sdy, .{ .h = .model }),
+                .out_accum = metadata.out_accum.reshard(attn_sdy, .{ .h = .model }),
             },
             .{
                 .o = q_sharded.shape(),
@@ -909,7 +910,10 @@ pub const paged_fa2 = struct {
         const head_dim = q.dim(.hd);
         const num_heads = num_head_groups * num_kv_heads;
         // FIXME: remove unreachable and propagate error correctly.
-        const num_heads_per_shard = @divExact(num_heads, ctx.partitioning.numPartitionsForLogicalAxis(q.shape(), .model) catch unreachable);
+
+        const attn_sdy = ctx.resolveSharding(.{.model});
+        const model_partitions: i32 = @intCast(attn_sdy.numPartitionsForLogicalAxis(.model));
+        const num_heads_per_shard = @divExact(num_heads, model_partitions);
 
         const o = switch (parameters) {
             .decode => |decode_parameters| b: {

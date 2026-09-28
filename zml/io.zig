@@ -366,6 +366,7 @@ pub const Loader = struct {
     pub const LoadError = error{TransformedTensorNotDelivered};
 
     pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) LoadError!void {
+        _ = shardings; // autofix
         const tensor_count = meta.count(Tensor, model);
 
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
@@ -406,7 +407,7 @@ pub const Loader = struct {
                 if (sources.transformed) continue;
             }
 
-            self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, shardings, opts });
+            self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, opts });
         }
     }
 
@@ -428,14 +429,14 @@ pub const Loader = struct {
         loader.group.async(io, defaultCallback, .{ loader, io, &tensor, buffer, store, shardings, opts });
     }
 
-    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
+    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, opts: LoadOpts) void {
         const sources = store.getSourcesById(tensor.id) orelse {
             std.log.debug("Failed to get sources for tensor with id: {}", .{tensor.id});
             return;
         };
         stdx.debug.assert(!sources.transformed and sources.tensors.len == 1, "Tensor {} is transformed or has {} sources; `load` only streams single-source tensors", .{ tensor.id, sources.tensors.len });
 
-        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, shardings, opts) catch |e| {
+        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, tensor.sharding, opts) catch |e| {
             log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
             unreachable;
         };
@@ -457,16 +458,11 @@ pub const Loader = struct {
         shape: Shape,
         buffer: *Buffer,
         memory: Memory.Kind,
-        shardings: []const Sharding,
+        sharding: Sharding,
         opts: LoadOpts,
     ) !void {
         var reader = try source.reader(io, &.{}, .{});
         defer reader.deinit();
-
-        const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
-            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
-            break :blk self.platform.replicated_sharding;
-        };
 
         var writer = try MemoryWriter.init(
             self.allocator,

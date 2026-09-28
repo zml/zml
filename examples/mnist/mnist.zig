@@ -66,7 +66,10 @@ const Mnist = struct {
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
         var x = input.flatten().convert(.f32).withTags(.{.d});
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
-        for (layers) |layer| {
+        const compiler = zml.Compiler.current();
+        for (0.., layers) |i, layer| {
+            compiler.pushLocationFmt(@src(), "layer[{d}]", .{i});
+            defer compiler.popLocation();
             x = layer.forward(x);
         }
         return x.argMax(0).indices.convert(.u8);
