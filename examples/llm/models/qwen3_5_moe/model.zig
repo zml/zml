@@ -779,7 +779,6 @@ pub const Moe = struct {
             self.down_proj,
             .{
                 .quantize_input = false,
-                .gate_up_layout = .split,
                 .routing_weight_placement = .after_down,
             },
             moe_parameters,

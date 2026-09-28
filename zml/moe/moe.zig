@@ -13,10 +13,29 @@ pub const triton = @import("triton.zig");
 pub const fly = @import("fly_kernels/moe.zig");
 const fused_experts = @import("fused_experts.zig");
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
+pub const ProjectionLayout = fused_experts.ProjectionLayout;
 
 test {
     std.testing.refAllDecls(@This());
 }
+
+/// How a backend expects the expert weights to be stored
+/// The packer writes this layout and forwardMoe reads it
+pub const ExpertsLayout = struct {
+    /// Column order of the fused gate/up projection.
+    gate_up: ProjectionLayout,
+    /// Backend specific transformation of the weights and scales.
+    packing: Packing,
+
+    pub const Packing = enum {
+        /// Experts stacked as stored in the checkpoint.
+        plain,
+        /// Block scales swizzled to the 128x4 tensor-core layout of `cute_mxfp4.packWeightScales`.
+        swizzled_scales,
+        /// Weights, block scales and global scales in the FlashInfer CUTLASS NVFP4 layout.
+        flashinfer_nvfp4,
+    };
+};
 
 pub const ActivationMode = enum {
     silu,
@@ -95,6 +114,17 @@ pub const Backend = enum {
             },
             .mosaic_tpu => platform.target == .tpu,
             .metal => platform.target == .metal,
+        };
+    }
+
+    /// The layout contract the expert weights must have for a given backend with scheme
+    pub fn expertsLayout(backend: Backend, scheme: ?zml.Quantization.Scheme) !ExpertsLayout {
+        return switch (backend) {
+            .cute_mxfp4 => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
+            .triton_mxfp4 => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else error.UnsupportedQuantization,
+            .flashinfer_cutlass => if (scheme == .nvfp4) .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 } else error.UnsupportedQuantization,
+            .mosaic_tpu, .metal => .{ .gate_up = .concatenated, .packing = .plain },
+            .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
     }
 
@@ -182,8 +212,6 @@ pub const Options = struct {
     activation_threshold: ?f32 = null,
     /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
     quantize_input: bool,
-    /// Gate/up layout; FlashInfer, Mosaic and Metal require split columns.
-    gate_up_layout: fused_experts.GateUpLayout,
     /// Where routing weights are applied; FlashInfer, Mosaic and Metal require after_down.
     routing_weight_placement: fused_experts.RoutingWeightPlacement,
 };
@@ -198,15 +226,11 @@ pub fn forwardMoe(
     parameters: Parameters,
 ) !zml.Tensor {
     switch (parameters) {
-        .triton, .fly => {},
+        .triton, .fly, .cute_mxfp4, .triton_mxfp4 => {},
         .flashinfer_cutlass, .mosaic_tpu, .metal => {
             stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
-            stdx.debug.assert(opts.gate_up_layout == .split, "Non-Triton MoE backends require split gate/up columns", .{});
             stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
             stdx.debug.assert(opts.activation_threshold == null, "Activation thresholds require the Triton MoE backend", .{});
-        },
-        .cute_mxfp4, .triton_mxfp4 => {
-            stdx.debug.assert(opts.gate_up_layout == .interleaved, "Triton MXFP4 MoE backends require interleaved gate/up columns", .{});
         },
     }
 
@@ -432,6 +456,7 @@ pub fn forwardMoe(
             );
         },
         inline .triton, .fly => |p, backend| b: {
+            const layout = try backend.expertsLayout(gate_up_scheme);
             const args: fused_experts.FusedExpertsArgs = .{
                 .hidden_states = input,
                 .gate_up = gate_up,
@@ -441,7 +466,7 @@ pub fn forwardMoe(
                 .activation = p.activation,
                 .activation_threshold = opts.activation_threshold,
                 .quantize_input = opts.quantize_input,
-                .gate_up_layout = opts.gate_up_layout,
+                .gate_up_layout = layout.gate_up,
                 .routing_weight_placement = opts.routing_weight_placement,
             };
             const expert_partition = gate_up.weight.shape().partition(.expert);
