@@ -39,7 +39,7 @@ pub const Parameters = struct {
     }
 };
 
-pub const GateUpLayout = enum { split, interleaved };
+pub const ProjectionLayout = enum { concatenated, interleaved };
 pub const RoutingWeightPlacement = enum { before_down, after_down };
 
 pub const FusedExpertsArgs = struct {
@@ -53,7 +53,7 @@ pub const FusedExpertsArgs = struct {
     activation_threshold: ?f32 = null,
     /// Use FP8 activations for FP8 weights; false keeps BF16 activations.
     quantize_input: bool,
-    gate_up_layout: GateUpLayout,
+    gate_up_layout: ProjectionLayout,
     routing_weight_placement: RoutingWeightPlacement,
 };
 
@@ -166,7 +166,7 @@ pub fn fusedExperts(opts: FusedExpertsArgs, comptime backend: zml.moe.Backend) !
     return output.reshape(.{ .b = b, .token = s, .out = down.dim(.out) });
 }
 
-fn applyExpertActivation(input: Tensor, mode: Parameters.ActivationMode, activation_threshold: ?f32, layout: GateUpLayout) Tensor {
+fn applyExpertActivation(input: Tensor, mode: Parameters.ActivationMode, activation_threshold: ?f32, layout: ProjectionLayout) Tensor {
     const x = input.convert(.f32);
     if (mode == .relu) {
         const clipped = if (activation_threshold) |limit| x.minimum(Tensor.scalar(limit, x.dtype())) else x;
@@ -175,7 +175,7 @@ fn applyExpertActivation(input: Tensor, mode: Parameters.ActivationMode, activat
 
     const mid = @divFloor(x.dim(.out), 2);
     var gate, var up = switch (layout) {
-        .split => .{ x.slice(.out, .{ .end = mid }), x.slice(.out, .{ .start = mid }) },
+        .concatenated => .{ x.slice(.out, .{ .end = mid }), x.slice(.out, .{ .start = mid }) },
         .interleaved => .{ x.slice(.out, .{ .start = 0, .step = 2 }), x.slice(.out, .{ .start = 1, .step = 2 }) },
     };
     if (activation_threshold) |limit_| {
@@ -190,23 +190,23 @@ fn applyExpertActivation(input: Tensor, mode: Parameters.ActivationMode, activat
     };
 }
 
-test "SwiGLU uses FP32 math for split and interleaved BF16 inputs" {
+test "SwiGLU uses FP32 math for concatenated and interleaved BF16 inputs" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = zml.testing.env();
     const Local = struct {
-        fn forward(x: Tensor, layout: GateUpLayout, threshold: ?f32) Tensor {
+        fn forward(x: Tensor, layout: ProjectionLayout, threshold: ?f32) Tensor {
             return applyExpertActivation(x, .silu, threshold, layout);
         }
     };
     const x: Tensor = .init(.{ .token = 1, .out = 6 }, .bf16);
     const gates = [_]f32{ 0.75, -1.25, 3.5 };
     const ups = [_]f32{ 0.875, -2.25, 4.5 };
-    for ([_]GateUpLayout{ .split, .interleaved }) |layout| {
+    for ([_]ProjectionLayout{ .concatenated, .interleaved }) |layout| {
         var values: [6]zml.floats.BFloat16 = undefined;
         for (gates, ups, 0..) |gate, up, i| {
-            values[if (layout == .split) i else 2 * i] = .fromF32(gate);
-            values[if (layout == .split) i + 3 else 2 * i + 1] = .fromF32(up);
+            values[if (layout == .concatenated) i else 2 * i] = .fromF32(gate);
+            values[if (layout == .concatenated) i + 3 else 2 * i + 1] = .fromF32(up);
         }
         var input = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&values));
         defer input.deinit();
@@ -233,7 +233,7 @@ test "ReLU squared activation preserves width and applies threshold before squar
     const platform = zml.testing.env();
     const Local = struct {
         fn forward(x: Tensor, threshold: ?f32) Tensor {
-            return applyExpertActivation(x, .relu, threshold, .split);
+            return applyExpertActivation(x, .relu, threshold, .concatenated);
         }
     };
     const x: Tensor = .init(.{ .token = 1, .out = 5 }, .f32);
@@ -400,11 +400,11 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
     const platform = zml.testing.env();
     if (platform.target != .cuda) return error.SkipZigTest;
     const Local = struct {
-        fn forward(x: Tensor, layout: GateUpLayout, placement: RoutingWeightPlacement, storage_dtype: DataType) Tensor {
+        fn forward(x: Tensor, layout: ProjectionLayout, placement: RoutingWeightPlacement, storage_dtype: DataType) Tensor {
             const fp4 = storage_dtype != .bf16;
             const columns = Tensor.arange(.{ .end = 256 }, .i32).withTags(.{.dout});
             const is_gate = switch (layout) {
-                .split => columns.cmp(.LT, Tensor.scalar(128, .i32)),
+                .concatenated => columns.cmp(.LT, Tensor.scalar(128, .i32)),
                 .interleaved => columns.remainder(Tensor.scalar(2, .i32)).cmp(.EQ, Tensor.scalar(0, .i32)),
             };
             const dtype: DataType = if (fp4) .u8 else .bf16;
@@ -457,7 +457,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
         @memset(host.items(zml.floats.BFloat16), .fromF32(1.0 / 128.0));
         var input = try zml.Buffer.fromSlice(io, platform, host, .replicated);
         defer input.deinit();
-        for ([_]GateUpLayout{ .split, .interleaved }) |layout| {
+        for ([_]ProjectionLayout{ .concatenated, .interleaved }) |layout| {
             for ([_]RoutingWeightPlacement{ .before_down, .after_down }) |placement| {
                 var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, layout, placement, storage_dtype }, .{});
                 defer exe.deinit();

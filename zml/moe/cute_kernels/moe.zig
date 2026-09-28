@@ -16,10 +16,10 @@ pub const Inputs = struct {
     /// `[tokens, topk]` FP32.
     routing_weights: zml.Tensor,
     w1: zml.Tensor,
-    /// `w1` scales in the 128x4 layout of `packWeightScales`.
+    /// `w1` scales in the 128x4 tensor-core layout (rows tiled by 4x32, columns by 4).
     s1: zml.Tensor,
     w2: zml.Tensor,
-    /// `w2` scales in the 128x4 layout of `packWeightScales`.
+    /// `w2` scales in the 128x4 tensor-core layout (rows tiled by 4x32, columns by 4).
     s2: zml.Tensor,
     /// `[tokens, topk]` local expert ids.
     ids: zml.Tensor,

@@ -11,17 +11,6 @@ test {
 
 pub const Parameters = triton_mxfp4.Parameters;
 
-/// Pack E8M0 weight scales in the exact 128x4 swizzle consumed by the TMA
-/// scale-factor descriptor. Loaders apply this once at load time.
-pub fn packWeightScales(scales: zml.Tensor) zml.Tensor {
-    const experts = scales.dim(0);
-    const rows = scales.dim(1);
-    const groups = scales.dim(2);
-    var packed_scales = scales.reshape(.{ experts, @divExact(rows, 128), 4, 32, @divExact(groups, 4), 4 })
-        .transpose(.{ 0, 1, 4, 3, 2, 5 });
-    return packed_scales.reshape(scales.shape()).withPartitioning(.{ .expert = .experts });
-}
-
 pub fn isAvailable(platform: *const zml.Platform) bool {
     if (platform.target != .cuda) return false;
     const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
