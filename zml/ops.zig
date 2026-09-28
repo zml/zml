@@ -762,8 +762,8 @@ test "if" {
 
     {
         const pred: Tensor = .init(.{}, .i32);
-        const a: Tensor = .init(.{ 4, 4 }, .f32);
-        const b: Tensor = .init(.{ 4, 4 }, .f32);
+        const a: Tensor = .init(.{ 8, 8 }, .f32);
+        const b: Tensor = .init(.{ 8, 8 }, .f32);
         const mod = try platform.compileFn(allocator, std.testing.io, IfMod._fwd, .{ pred, a, b }, .{});
         defer mod.deinit();
     }
@@ -842,8 +842,8 @@ test if2 {
 
     {
         const pred: Tensor = .init(.{}, .i32);
-        const a: Tensor = .init(.{ 4, 4 }, .f32);
-        const b: Tensor = .init(.{ 4, 4 }, .f32);
+        const a: Tensor = .init(.{ 8, 8 }, .f32);
+        const b: Tensor = .init(.{ 8, 8 }, .f32);
         const mod = try platform.compileFn(allocator, std.testing.io, IfMod._fwd, .{ pred, a, b }, .{});
         defer mod.deinit();
     }
