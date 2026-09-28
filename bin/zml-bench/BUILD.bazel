@@ -1,0 +1,49 @@
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
+
+zig_library(
+    name = "bench",
+    srcs = [
+        "config.zig",
+        "metrics.zig",
+    ],
+    main = "bench.zig",
+)
+
+zig_binary(
+    name = "zml-bench",
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":bench",
+        ":tui",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":bench"],
+)
+
+py_test(
+    name = "integration_test",
+    size = "small",
+    srcs = ["integration_test.py"],
+    args = ["$(location :zml-bench)"],
+    data = [":zml-bench"],
+)
+
+zig_library(
+    name = "tui",
+    srcs = ["output_view.zig"],
+    main = "tui.zig",
+    deps = [
+        ":bench",
+        "@libvaxis//:vaxis",
+    ],
+)
+
+zig_test(
+    name = "tui_test",
+    deps = [":tui"],
+)
