@@ -208,8 +208,8 @@ pub const Tensor = struct {
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal, .furiosa, .furiosa2 => return self,
-            .cuda, .rocm, .tpu, .oneapi, .furiosa3 => {},
+            .cpu, .neuron, .metal => return self,
+            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
         const frontend_attributes: *const mlir.Attribute = .dict(ctx.mlir_ctx, &.{
@@ -269,13 +269,44 @@ pub const Tensor = struct {
         try zml.testing.expectClose(std.testing.io, x_h, x_d, .exact_match);
     }
 
+    test "bulk memory placement preserves pinned input and device output" {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+        const io = std.testing.io;
+
+        const inputs: [8]f32 = .{ -3.0, -2, -1, 1, 2, 3, 5, -5 };
+        const x_t = Tensor.init(.{8}, .f32);
+
+        const Local = struct {
+            fn memcpyH2D(x: Tensor) Tensor {
+                const tensors = .{x};
+                Tensor.onMemoryAll(tensors, .host_pinned);
+                return Tensor.toMemoryAll(tensors, .device)[0];
+            }
+        };
+
+        const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcpyH2D, .{x_t}, platform, .{});
+        defer exe.deinit();
+
+        var x_h = try zml.Buffer.fromBytesOpts(io, platform, x_t.shape(), .replicated, @ptrCast(&inputs), .{ .memory = .host_pinned });
+        defer x_h.deinit();
+
+        const x_h_ptr: [*]f32 = @ptrCast(@alignCast(x_h.opaqueDevicePtr(0)));
+        try std.testing.expectEqualSlices(f32, &inputs, x_h_ptr[0..8]);
+
+        var x_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcpyH2D, .{x_h});
+        defer x_d.deinit();
+
+        try zml.testing.expectClose(std.testing.io, x_h, x_d, .exact_match);
+    }
+
     /// Copy all the given tensor to the specified memory.
     /// The input struct is copied on the stack, so it must be a simple flat struct without pointers.
     pub fn toMemoryAll(flat_tensors: anytype, kind: Memory.Kind) @TypeOf(flat_tensors) {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal, .furiosa, .furiosa2 => return flat_tensors,
-            .cuda, .rocm, .tpu, .oneapi, .furiosa3 => {},
+            .cpu, .neuron, .metal => return flat_tensors,
+            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
         var copy = flat_tensors;
@@ -292,8 +323,8 @@ pub const Tensor = struct {
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal, .furiosa, .furiosa2 => return self,
-            .cuda, .rocm, .tpu, .oneapi, .furiosa3 => {},
+            .cpu, .neuron, .metal => return self,
+            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
         if (ctx.currentScope().id_to_argument.get(self.id) == null) {
@@ -311,8 +342,8 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             // Only one memory kind on those platform
-            .cpu, .neuron, .metal, .furiosa, .furiosa2 => return,
-            .cuda, .rocm, .tpu, .oneapi, .furiosa3 => {},
+            .cpu, .neuron, .metal => return,
+            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
         meta.visit(struct {
@@ -3641,7 +3672,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .furiosa2, .furiosa3 => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice(a, .{ .end = k });
@@ -4600,7 +4631,7 @@ pub const Tensor = struct {
                     }
                 }).body, .{ .input = input, .name = full_name }, {});
             },
-            .oneapi, .neuron, .furiosa, .furiosa2, .furiosa3 => {},
+            .oneapi, .neuron, .furiosa => {},
         }
     }
 

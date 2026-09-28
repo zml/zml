@@ -39,7 +39,7 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         return error.MissingDevices;
     }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa, .furiosa2, .furiosa3 => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
                 return error.InvalidDeviceCount;
@@ -88,7 +88,7 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
-            .cuda, .rocm, .oneapi, .tpu, .furiosa, .furiosa2, .furiosa3 => {
+            .cuda, .rocm, .oneapi, .tpu, .furiosa => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
                     "pinned_host".len => .host_pinned,
@@ -211,7 +211,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa, .furiosa2, .furiosa3 => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa => device.id(),
     };
 }
 
@@ -243,8 +243,6 @@ pub const State = union(Target) {
     oneapi: void,
     metal: void,
     furiosa: void,
-    furiosa2: void,
-    furiosa3: void,
 
     pub const CudaState = struct {
         fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
@@ -267,8 +265,6 @@ pub const State = union(Target) {
             .oneapi => .{ .oneapi = {} },
             .metal => .{ .metal = {} },
             .furiosa => .{ .furiosa = {} },
-            .furiosa2 => .{ .furiosa2 = {} },
-            .furiosa3 => .{ .furiosa3 = {} },
         };
     }
 
@@ -305,6 +301,11 @@ pub const Platform = struct {
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
+        if (target == .furiosa and !std.mem.eql(u8, pjrt_client.platformName(api), "furiosa")) {
+            log.err("Expected Furiosa PJRT client, got {s}", .{pjrt_client.platformName(api)});
+            pjrt_client.deinit(api);
+            return error.InvalidPlatform;
+        }
         const pjrt_devices = pjrt_client.addressableDevices(api);
         try validateDeviceCount(target, pjrt_devices.len);
         if (pjrt_devices.len > MAX_NUM_DEVICES) {
@@ -415,12 +416,15 @@ pub const Platform = struct {
             .oneapi,
             .metal,
             .furiosa,
-            .furiosa2,
-            .furiosa3,
             .cpu,
         };
         return for (ordered_targets) |target| {
-            break init(allocator, io, target, options) catch continue;
+            break init(allocator, io, target, options) catch |err| {
+                // An enabled Furiosa plugin must not silently fall back to CPU
+                // after a packaging, compatibility, or client creation error.
+                if (target == .furiosa and err != error.Unavailable) return err;
+                continue;
+            };
         } else error.Unavailable;
     }
 
@@ -689,8 +693,8 @@ pub const Platform = struct {
         // There is probably a better way of doing this,
         // The queried layout can include backend-specific tiling.
         return switch (platform.target) {
-            .tpu, .furiosa, .furiosa2, .furiosa3 => {
-                if (comptime !Target.tpu.isEnabled() and !Target.furiosa.isEnabled() and !Target.furiosa2.isEnabled() and !Target.furiosa3.isEnabled()) unreachable;
+            .tpu, .furiosa => {
+                if (comptime !Target.tpu.isEnabled() and !Target.furiosa.isEnabled()) unreachable;
                 const element_type = pjrtx.bufferTypeFromDtype(dtype);
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
@@ -730,14 +734,12 @@ pub const CreateOptions = struct {
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     furiosa: Furiosa = .{},
-    furiosa2: Furiosa = .{ .pe_count = 4 },
-    furiosa3: Furiosa = .{ .pe_count = 4 },
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     io_impl: Platform.IoImpl = .threaded,
 
     pub const Furiosa = struct {
-        pe_count: u8 = 8,
+        pe_count: u8 = 4,
 
         fn writeNamedValues(self: Furiosa, values: *std.ArrayList(pjrt.NamedValue)) void {
             values.appendAssumeCapacity(.init(.int64, "pe_count", self.pe_count));
@@ -824,8 +826,6 @@ pub const CreateOptions = struct {
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
             .furiosa => self.furiosa.writeNamedValues(&values),
-            .furiosa2 => self.furiosa2.writeNamedValues(&values),
-            .furiosa3 => self.furiosa3.writeNamedValues(&values),
             .cuda => self.cuda.writeNamedValues(target, &values),
             .rocm => self.rocm.writeNamedValues(target, &values),
             .oneapi => self.oneapi.writeNamedValues(target, &values),
@@ -1059,5 +1059,15 @@ test "platform defaultMemoryLayout is boring" {
                 .tile_dims_sizes = &.{},
             },
         });
+    }
+}
+
+test "Furiosa client options serialize default and explicit topology" {
+    var storage: [8]pjrt.NamedValue = undefined;
+    for ([_]CreateOptions{ .{}, .{ .furiosa = .{ .pe_count = 8 } } }, [_]i64{ 4, 8 }) |options, expected| {
+        const values = options.toNamedValues(.furiosa, &storage);
+        try std.testing.expectEqual(@as(usize, 1), values.len);
+        try std.testing.expectEqualStrings("pe_count", values[0].name());
+        try std.testing.expectEqual(expected, values[0].value().int64);
     }
 }

@@ -4,7 +4,7 @@
 vanilla attention and writes BF16 logits for every input position. It uses the
 same embedding, transformer layers, weights and normalization as generation,
 but exports the complete vocabulary distribution instead of sampling a token.
-Each embedding, layer and head compilation produces one native TCL/EDF program.
+This diagnostic exporter is separate from whole-forward generation.
 
 `quality.py` prepares uniformly spaced windows from a pinned WikiText-2 raw test
 revision, then scores next-token perplexity, KL divergence and top-token agreement
@@ -21,16 +21,17 @@ python3 examples/llm/models/llama/quality.py prepare \
   --model=/var/models/meta-llama/Llama-3.1-8B-Instruct \
   --output=/tmp/llama-quality --seqlen=128 --windows=64
 
-bazel build //examples/llm:llama_logits \
-  --@zml//platforms:furiosa=true --config=debug
-
-# Set the SDK environment and XLA_FURIOSA_PJRT_LIBRARY as for generation.
-unset XLA_FURIOSA_ALLOW_STAGED_FALLBACK
-bazel-bin/examples/llm/llama_logits \
+# Prepare the SDK and override using platforms/furiosa/README.md.
+unset XLA_FURIOSA_PJRT_LIBRARY
+bazel run --override_repository=libzml_furiosa=/home/kevin/furiosa/xla-override \
+  --@zml//platforms:furiosa=true --@zml//platforms:cpu=false --config=debug \
+  //examples/llm:llama_logits -- \
   --model=/var/models/meta-llama/Llama-3.1-8B-Instruct \
   --tokens=/tmp/llama-quality/tokens.u32 --seqlen=128 \
   --output=/tmp/llama-quality/bf16.logits
-bazel-bin/examples/llm/llama_logits \
+bazel run --override_repository=libzml_furiosa=/home/kevin/furiosa/xla-override \
+  --@zml//platforms:furiosa=true --@zml//platforms:cpu=false --config=debug \
+  //examples/llm:llama_logits -- \
   --model=/path/to/llama-fp8-weights \
   --tokens=/tmp/llama-quality/tokens.u32 --seqlen=128 \
   --output=/tmp/llama-quality/fp8.logits
@@ -52,7 +53,10 @@ stable log probabilities in float64. At 64 windows of length 128 and vocabulary
 128256, each file occupies about 2 GiB. These transfers are outside generation
 throughput measurements.
 
-## Measured weight-only FP8 comparison
+## Historical weight-only FP8 comparison
+
+These earlier-backend results are historical; current typed-backend FP8 execution
+and quality have not been established by this refactor.
 
 On Llama 3.1 8B Instruct, 64 windows of 128 predictions (8192 total) gave:
 

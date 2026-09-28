@@ -39,3 +39,16 @@ bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/
 - `--prompt=<string>`: Optional. Runs a single prompt instead of opening the interactive chat loop.
 - `--seqlen=<number>`: Optional. Maximum sequence length. Defaults to `2048`.
 - `--backend=<vanilla|cuda_fa2|cuda_fa3>`: Optional. Attention backend. If omitted, the program auto-selects one for the current platform.
+
+## Furiosa
+
+Build and package the typed TCL plugin using the [Furiosa guide](../../platforms/furiosa/README.md),
+then export its SDK environment. With the plugin environment override unset:
+
+```sh
+bazel run --override_repository=libzml_furiosa=/home/kevin/furiosa/xla-override \
+  --jobs=16 --@zml//platforms:furiosa=true --@zml//platforms:cpu=false \
+  //examples/llm -- --model=/var/models/meta-llama/Llama-3.1-8B-Instruct \
+  --furiosa-pe-count=8 --backend=vanilla --seqlen=128 --topk=1 \
+  --prompt='Count from 1 to 20, separated by commas.'
+```

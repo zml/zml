@@ -459,7 +459,7 @@ pub const TransformerLayer = struct {
         // that buffer avoids a device copy back into x0 after every layer.
         // Standalone layer callers own the previous hidden buffer; within the
         // whole forward graph this is an internal compiler-managed value.
-        const hidden = if (zml.Compiler.current().platform.target == .furiosa or zml.Compiler.current().platform.target == .furiosa2 or zml.Compiler.current().platform.target == .furiosa3) x2 else x2.reuseBuffer(x0);
+        const hidden = if (zml.Compiler.current().platform.target == .furiosa) x2 else x2.reuseBuffer(x0);
         return .{ .hidden = hidden, .kv_cache = updated_kv_cache };
     }
 };
@@ -642,7 +642,7 @@ const SelfAttn = struct {
         if (self.q_norm) |norm| q = norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         if (self.k_norm) |norm| k = norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         var rope_opts = self.rope_opts;
-        if (zml.Compiler.current().platform.target == .furiosa or zml.Compiler.current().platform.target == .furiosa2 or zml.Compiler.current().platform.target == .furiosa3) {
+        if (zml.Compiler.current().platform.target == .furiosa) {
             // Valid query positions fit the KV cache. Reuse precomputed
             // rotations instead of reducing sine/cosine arguments every layer.
             rope_opts.cache_length = @intCast(kv_cache.k.dim(.k));

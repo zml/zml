@@ -1,4 +1,11 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "libzml_furiosa",
+    data = ["@libzml_furiosa"],
+    tags = ["manual"],
+)
 
 zig_library(
     name = "furiosa",
@@ -7,7 +14,12 @@ zig_library(
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
+        "//bazel",
         "//pjrt",
         "//platforms:options",
-    ],
+        "//stdx",
+    ] + select({
+        "//platforms:furiosa.enabled": [":libzml_furiosa"],
+        "//conditions:default": [],
+    }),
 )

@@ -205,3 +205,10 @@ zig_test(
     name = "test",
     deps = ["//zml"],
 )
+
+zig_test(
+    name = "furiosa_8pe_test",
+    main = "furiosa_test.zig",
+    tags = ["manual"],
+    deps = ["//zml"],
+)

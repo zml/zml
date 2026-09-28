@@ -647,7 +647,7 @@ pub const MemoryWriter = union(enum) {
             .cuda, .rocm, .oneapi => .{
                 .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, memory),
             },
-            .furiosa, .furiosa2, .furiosa3 => .{
+            .furiosa => .{
                 .buffered = try .init(allocator, io, platform, shape, sharding, buffer, memory),
             },
             .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
@@ -1761,9 +1761,13 @@ test "BufferedMemoryWriter preserves pinned host placement on one device" {
     try writer.interface.writeAll(std.mem.sliceAsBytes(&values));
     try writer.interface.flush();
     defer buffer.deinit();
+    // CPU aliases host memory kinds to device memory. Compare against the
+    // requested memory's PJRT kind; Furiosa still requires pinned_host here.
+    const expected_kind = platform.devices[0].memory(.host_pinned).?.pjrt_memory.kind(platform.pjrt_api);
+    if (platform.target == .furiosa) try std.testing.expectEqual(pjrt.Memory.Kind.host_pinned, expected_kind);
     for (buffer._shards.constSlice()) |shard| {
         const memory = shard.memory(platform.pjrt_api);
-        try std.testing.expectEqual(pjrt.Memory.Kind.host_pinned, memory.kind(platform.pjrt_api));
+        try std.testing.expectEqual(expected_kind, memory.kind(platform.pjrt_api));
     }
     var result = try buffer.toSliceAlloc(std.testing.allocator, std.testing.io);
     defer result.free(std.testing.allocator);

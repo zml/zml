@@ -89,8 +89,6 @@ pub fn main(init: std.process.Init) !void {
     if (args.furiosa_pe_count) |pes| {
         if (pes != 4 and pes != 8) return error.InvalidPeCount;
         platform_options.furiosa.pe_count = pes;
-        platform_options.furiosa2.pe_count = pes;
-        platform_options.furiosa3.pe_count = pes;
     }
     const platform: *zml.Platform = try .auto(allocator, io, platform_options);
     defer platform.deinit(allocator, io);

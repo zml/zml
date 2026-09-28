@@ -33,7 +33,7 @@ pub const Backend = enum {
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
             .metal => .metal,
-            .cpu, .furiosa, .furiosa2, .furiosa3 => .stablehlo,
+            .cpu, .furiosa => .stablehlo,
             .neuron => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }

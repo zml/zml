@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
     const windows = token_bytes.len / window_bytes;
     const platform = try zml.Platform.auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
-    if (platform.target != .furiosa and platform.target != .furiosa2 and platform.target != .furiosa3) return error.FuriosaRequired;
+    if (platform.target != .furiosa) return error.FuriosaRequired;
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
     defer repo.close(io);
     var registry = try zml.safetensors.TensorRegistry.fromRepo(allocator, io, repo);
