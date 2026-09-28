@@ -4199,7 +4199,7 @@ pub const Tensor = struct {
         res_shape._dims.replaceRange(a, 1, &.{ d, d }) catch unreachable;
         res_shape._tags.replaceRange(a, 1, &.{ @tagName(new_tags[0]), @tagName(new_tags[1]) }) catch unreachable;
         // TODO(Corentin): Not sure about that
-        res_shape._partitioning.replaceRange(a, 1, &.{ p, p }) catch unreachable;
+        res_shape._partitioning = res_shape._partitioning.insert(a, p);
 
         const values = self.insertAxes(a + 1, .{new_tags[1]}).broad(res_shape);
         const zeros = Tensor.constant(self.dtype().zero()).broad(res_shape);

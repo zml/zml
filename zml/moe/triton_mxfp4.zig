@@ -50,7 +50,7 @@ pub fn fusedExperts(
         return error.UnsupportedWeightLayout;
     }
 
-    const expert_parallelism = gate_up.weight.shape().partition(.expert).eql(.init(.experts));
+    const expert_parallelism = gate_up.weight.shape().partition(.expert).isSharded();
 
     const context: Context = .{
         .input = input,

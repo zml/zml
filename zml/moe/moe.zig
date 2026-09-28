@@ -264,7 +264,7 @@ pub fn forwardMoe(
 
                 // TODO(Corentin): Do error checking on nvfp4
                 // Also, maybe pass `zml.nn.Linear` directly
-                if (expert_partition.eql(.init(.experts))) {
+                if (expert_partition.isSharded()) {
                     break :b zml.ops.manualComputation(
                         (struct {
                             input: zml.Tensor,
@@ -372,7 +372,7 @@ pub fn forwardMoe(
                 );
             }
 
-            if (expert_partition.eql(.init(.experts))) {
+            if (expert_partition.isSharded()) {
                 break :b zml.ops.manualComputation(
                     (struct {
                         input: zml.Tensor,
@@ -471,7 +471,7 @@ pub fn forwardMoe(
             };
             const expert_partition = gate_up.weight.shape().partition(.expert);
 
-            if (!expert_partition.eql(.init(.experts))) {
+            if (!expert_partition.isSharded()) {
                 break :b try fused_experts.fusedExperts(args, backend);
             }
 
@@ -508,7 +508,7 @@ pub fn forwardMoe(
         .mosaic_tpu => b: {
             const expert_partition = gate_up.weight.shape().partition(.expert);
 
-            if (expert_partition.eql(.init(.experts))) {
+            if (expert_partition.isSharded()) {
                 const global_num_experts = down.weight.dim(.expert);
                 const partial_output = zml.ops.manualComputation(
                     (struct {
