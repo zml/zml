@@ -25,7 +25,7 @@ builds both components and selects the SDK and plugin paths for this host:
 
 Use ZML branch `steeve/wip/furiosa` together with `steeve/furiosa` in
 `zml/xla-private`. The tested ZML implementation is `3866ec6`; subsequent
-handoff changes are documentation only. Both checkouts are required.
+handoff changes were documentation only until the RNG statistical-test update below. Both checkouts are required.
 
 The companion [engineering handoff](https://github.com/zml/xla-private/blob/steeve/furiosa/xla/pjrt/furiosa3/HANDOFF.md)
 contains pinned setup versions, architecture, source ownership, current flags,
@@ -52,10 +52,16 @@ Set `XLA_FURIOSA_VISIBLE_DEVICES=0` or `=1` for one card, or `=0,1` for both.
 The runtime requires ascending physical IDs. Set `ZML_CHECKOUT`,
 `FURIOSA_SDK_DIR` and `LLAMA_MODEL` when using the companion launcher elsewhere.
 
-The last full ZML validation ran all 24 Bazel test targets on Furiosa3 with CPU
-disabled (177 core passes, 18 platform skips, zero failures). This preceded the
-latest TP work; the handoff separates that result from newer native hardware
-checks. Use `--nocache_test_results` after changing the external plugin library.
+The latest `bazel test //zml/...` rerun passes all three test targets on card 0
+with CPU disabled (177 core passes, 18 platform skips, both tokenizer targets
+passing). It uses the ThreeFry default plus experimental runtime coalescing,
+code sharing and paired argument copies. The two RNG statistical tests now
+use sample-size-derived tolerances: their original tight bounds failed for
+ThreeFry even though its bits and states exactly match XLA's CPU evaluator.
+The companion report retains both the failures and passing rerun. The older
+full `//...` validation covered 24 Bazel test targets before the latest TP work.
+On shared machines, set `RULES_ZIG_CACHE_PREFIX_LINUX` to a private writable
+path, for example `/tmp/zig-cache-$USER`, to avoid the shared cache's ownership. Use `--nocache_test_results` after changing the external plugin library.
 Qwen 3.5/Gated DeltaNet and general scaled-dot/MXFP4 are not validated by this path.
 
 ## Historical initial Llama validation

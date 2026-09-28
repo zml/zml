@@ -837,22 +837,29 @@ pub const Tensor = struct {
             // Check the Rng state has been modified.
             try std.testing.expect(try rand._state.getValue(u128, std.testing.io) != 1234);
 
-            // Check the mean and variance are close to theoritical values.
+            // DEFAULT may select different random algorithms on different platforms.
+            // Use five standard errors for finite-sample moments, not a tolerance
+            // fitted to one seed. Uniform excess kurtosis is -6/5, so the
+            // asymptotic variance of the sample variance is (4/5)*sigma^4/n.
+            const n = 1024.0;
+            const population_variance = 12.0 * 12.0 / 12.0;
             const mean_ = try stats.mean.getValue(f32, std.testing.io);
-            try std.testing.expectApproxEqAbs(4, mean_, 0.03);
+            try std.testing.expectApproxEqAbs(4, mean_, 5 * @sqrt(population_variance / n));
 
             const variance = try stats.variance.getValue(f32, std.testing.io);
-            try std.testing.expectApproxEqAbs(12.0 * 12.0 / 12.0, variance, 0.01);
+            try std.testing.expectApproxEqAbs(population_variance, variance, 5 * population_variance * @sqrt(0.8 / n) + population_variance / n);
 
             // Check that no value is outside of the interval
             // and we have samples close to the edges.
             const min_ = try stats.min.getValue(f32, std.testing.io);
             try std.testing.expect(min_ >= -2);
-            try std.testing.expectApproxEqAbs(-2, min_, 0.05);
+            // P(no sample within width*14/n of an edge) < exp(-14).
+            const edge_tolerance = 12.0 * 14.0 / n;
+            try std.testing.expectApproxEqAbs(-2, min_, edge_tolerance);
 
             const max_ = try stats.max.getValue(f32, std.testing.io);
             try std.testing.expect(max_ < 10);
-            try std.testing.expectApproxEqAbs(10, max_, 0.05);
+            try std.testing.expectApproxEqAbs(10, max_, edge_tolerance);
         }
 
         /// Returns a Tensor of the given shape, filled with floating point numbers sampled from a normal distribution.
@@ -946,13 +953,18 @@ pub const Tensor = struct {
             // Check the Rng state has been modified.
             try std.testing.expect(try rand._state.getValue(i128, std.testing.io) != 1234);
 
-            // Check the mean and variance are close to theoritical values.
+            // Five standard errors for 4096 samples, independent of DEFAULT's
+            // backend-specific algorithm. Gumbel excess kurtosis is 12/5,
+            // giving sample-variance variance (22/5)*sigma^4/n asymptotically.
+            // Include the bias from dividing the squared deviations by n.
+            const n = 1024.0 * 4.0;
+            const pi = std.math.pi;
+            const population_variance = pi * pi / 6.0;
             const mean_ = try stats.mean.getValue(f32, std.testing.io);
-            try std.testing.expectApproxEqAbs(0.5772, mean_, 0.02);
+            try std.testing.expectApproxEqAbs(0.5772156649, mean_, 5 * @sqrt(population_variance / n));
 
             const variance = try stats.variance.getValue(f32, std.testing.io);
-            const pi = std.math.pi;
-            try std.testing.expectApproxEqAbs(pi * pi / 6.0, variance, 0.03);
+            try std.testing.expectApproxEqAbs(population_variance, variance, 5 * population_variance * @sqrt(4.4 / n) + population_variance / n);
 
             // Check the distribution obtained with the gumbel trick matches the target distribution.
             const actual_dist = try stats.actual_dist.getValue([4]f32, std.testing.io);
@@ -960,7 +972,8 @@ pub const Tensor = struct {
                 // We normalize tgt_dist to make it a well formed distribution.
                 // We didn't do it before calling gumbel, because the gumbel trick
                 // doesn't require normalized distributions as input.
-                try std.testing.expectApproxEqAbs(tgt / 10.0, actual, 0.05);
+                const probability = tgt / 10.0;
+                try std.testing.expectApproxEqAbs(probability, actual, 5 * @sqrt(probability * (1 - probability) / 1024));
             }
         }
     };
