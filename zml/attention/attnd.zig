@@ -163,6 +163,7 @@ pub fn causalAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_offset
     }, .bytes);
 
     const out = targets.attnd.call(
+        q.sharding,
         .{ .mqkv = packed_input },
         .{
             .attn = q.shape(),

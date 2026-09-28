@@ -608,11 +608,7 @@ pub const SelfAttn = struct {
         const x_qkv = x.withPartitioning(.{ .d = .replicated });
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
-        const kv_head_sharding = zml.Compiler.current().partitioning.shardableDim(
-            k.shape().withPartitioning(.{ .h = .model }),
-            .h,
-            q.dim(.h),
-        ) catch unreachable;
+        const kv_head_sharding = k.sharding.shardableDim(k.dim(.h), .model, q.dim(.h));
 
         q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
         gate = gate.withPartitioning(.{ .s = .replicated, .d_out_proj = .model });
@@ -645,7 +641,7 @@ pub const SelfAttn = struct {
             k,
             v,
             token_index,
-            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads)),
+            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads), x.sharding),
             zml.attention.Parameters.init(.fromBackend(.vanilla)),
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
@@ -1152,12 +1148,12 @@ pub const KvCache = struct {
             }, dtype);
             const kv_head_sharding = model_sharding.shardableDim(kv_shape.dim(.h), .model, config.text_config.num_attention_heads);
             const sharded_kv_shape = switch (kv_head_sharding) {
-                .sharded => |heads| kv_shape.setDim(.h, heads.dim).withPartitioning(.{ .h = .model }),
-                .replicated => kv_shape.withPartitioning(.{ .h = .replicated }),
+                .sharded => |heads| kv_shape.setDim(.h, heads.dim).withPartitioning(model_sharding, .{ .h = .model }),
+                .replicated => kv_shape.withPartitioning(model_sharding, .{ .h = .replicated }),
             };
             return .{
-                .k = .fromShape(sharded_kv_shape),
-                .v = .fromShape(sharded_kv_shape),
+                .k = zml.Tensor.fromShape(sharded_kv_shape).withSharding(model_sharding),
+                .v = zml.Tensor.fromShape(sharded_kv_shape).withSharding(model_sharding),
                 .layer_index = .init(.{}, .u32),
             };
         }
@@ -1238,7 +1234,7 @@ pub const KvCache = struct {
         recurrent_state: zml.Tensor,
         layer_index: zml.Tensor,
 
-        pub fn init(config: Config, batch_dim: i64, conv_dtype: zml.DataType, recurrent_dtype: zml.DataType) GatedDeltaNetCache {
+        pub fn init(config: Config, batch_dim: i64, conv_dtype: zml.DataType, recurrent_dtype: zml.DataType, model_sharding: zml.Sharding) GatedDeltaNetCache {
             const num_linear_attn_layers = countLayers(config.text_config.layer_types, .linear_attention);
             const conv_dim = 2 * config.text_config.linear_num_key_heads * config.text_config.linear_key_head_dim + config.text_config.linear_num_value_heads * config.text_config.linear_value_head_dim;
             const conv_state_shape = zml.Shape.init(.{
@@ -1254,11 +1250,11 @@ pub const KvCache = struct {
                 .khd = config.text_config.linear_key_head_dim,
                 .vhd = config.text_config.linear_value_head_dim,
             }, recurrent_dtype);
-            const sharded_conv_state_shape = conv_state_shape.withPartitioning(.{ .mix = .model });
-            const sharded_recurrent_state_shape = recurrent_state_shape.withPartitioning(.{ .vh = .model });
+            const sharded_conv_state_shape = conv_state_shape.withPartitioning(model_sharding, .{ .mix = .model });
+            const sharded_recurrent_state_shape = recurrent_state_shape.withPartitioning(model_sharding, .{ .vh = .model });
             return .{
-                .conv_state = .fromShape(sharded_conv_state_shape),
-                .recurrent_state = .fromShape(sharded_recurrent_state_shape),
+                .conv_state = zml.Tensor.fromShape(sharded_conv_state_shape).withSharding(model_sharding),
+                .recurrent_state = zml.Tensor.fromShape(sharded_recurrent_state_shape).withSharding(model_sharding),
                 .layer_index = .init(.{}, .u32),
             };
         }

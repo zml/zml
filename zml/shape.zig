@@ -669,7 +669,7 @@ pub const Shape = struct {
             ),
         );
 
-        const shape = Shape.init(.{ .a = 10, .c = 12, .b = 11 }, .f32).withPartitioning(.{ .a = .mesh_axis_0, .c = .mesh_axis_2, .b = .open }).transpose(.{ 0, 2, 1 });
+        const shape = Shape.init(.{ .a = 10, .c = 12, .b = 11 }, .f32).withPartitioning(test_sharding, .{ .a = .batch, .c = .colors, .b = .open }).transpose(.{ 0, 2, 1 });
         try testing.expect(shape.eqlWithTags(Shape.init(.{ .a = 10, .b = 11, .c = 12 }, .f32)));
         try testing.expectEqualDeep(PartitionArray.init(&.{ .mesh_axis_0, .open, .mesh_axis_2 }), shape._partitioning);
     }
@@ -781,18 +781,38 @@ pub const Shape = struct {
     }
 
     const Sharding = @import("Sharding.zig");
+    // These tests only resolve logical names; placement does not use this fixture.
+    const test_sharding: Sharding = .{ .data = &.{
+        .name = "shape_test",
+        .physical = undefined,
+        .logical = .mesh(.{ .batch = .balanced, .feature = .balanced, .colors = .balanced }),
+        .bindings = .init(&.{
+            .{ .logical = "batch", .physical = .init(&.{.link_x}) },
+            .{ .logical = "feature", .physical = .init(&.{.link_y}) },
+            .{ .logical = "colors", .physical = .init(&.{.link_z}) },
+        }),
+        .folds = .empty,
+        .folds_consumed = .empty,
+    } };
     pub fn withPartitioning(self: Shape, sharding: Sharding, specs: anytype) Shape {
         const T = @TypeOf(specs);
 
-        var res = self.withDefaultPartitioning(); // todo add test for this new change
+        var res = self.withDefaultPartitioning();
 
         if (stdx.meta.isStruct(T)) {
             inline for (std.meta.fields(T)) |field| {
-                const mesh_axis = sharding.resolve(@field(specs, field.name));
+                const value = @field(specs, field.name);
+                const spec: PartitionSpec = if (@TypeOf(value) == PartitionSpec) value else switch (value) {
+                    .replicated => .replicated,
+                    .unknown => .unknown,
+                    .open => .open,
+                    else => .sharded(@intCast(sharding.data.resolveLogicalAxis(toTag(value)) orelse
+                        stdx.debug.panic("Sharding '{s}' has no logical axis '{s}'", .{ sharding.data.name, toTag(value) }))),
+                };
                 const axis_ = res.axisFromTagMaybe(toTag(field));
 
                 if (axis_) |ax| {
-                    res._partitioning = res._partitioning.set(ax, .sharded(mesh_axis));
+                    res._partitioning = res._partitioning.set(ax, spec);
                 } else {
                     stdx.debug.panic("Partitioning axis {s} not found", .{field.name});
                 }
@@ -801,22 +821,11 @@ pub const Shape = struct {
             stdx.debug.panic("Expected a struct of enum literals, got: {any}", .{T});
         }
 
-        // Check that no mesh axis is used to partition multiple tensor dimensions.
-        var used_mesh_axes: stdx.BoundedArray(Tag, constants.MAX_RANK) = .empty;
-
+        var used_mesh_axes: std.StaticBitSet(MAX_RANK) = .initEmpty();
         for (0..res.rank()) |ax| {
-            const spec = res._partitioning.get(ax);
-            const axis_tag = spec.toTag();
-
-            if (std.mem.indexOfScalar(Tag, used_mesh_axes.constSlice(), axis_tag)) |_| {
-                stdx.debug.panic("Mesh axis '{s}' used to partition multiple tensor dimensions. This is not allowed.", .{axis_tag});
-            }
-
-            switch (spec) {
-                .unknown => {},
-                .open => {},
-                .replicated => {},
-                .axis => used_mesh_axes.appendAssumeCapacity(axis_tag),
+            if (res.partition(ax).meshAxis()) |mesh_axis| {
+                stdx.debug.assert(!used_mesh_axes.isSet(mesh_axis), "Mesh axis {d} used to partition multiple tensor dimensions", .{mesh_axis});
+                used_mesh_axes.set(mesh_axis);
             }
         }
 
@@ -824,60 +833,62 @@ pub const Shape = struct {
     }
 
     test withPartitioning {
-        var shape = Shape.init(.{ .a = 10, .b = 20, .c = 30 }, .f32).withPartitioning(.{ .c = .feature, .a = .batch });
-        try testing.expectEqualSlices(PartitionSpec, &.{ .init(.batch), .unknown, .init(.feature) }, shape._partitioning.toArray()[0..shape.rank()]);
+        var shape = Shape.init(.{ .a = 10, .b = 20, .c = 30 }, .f32).withPartitioning(test_sharding, .{ .c = .feature, .a = .batch });
+        try testing.expectEqualSlices(PartitionSpec, &.{ .sharded(0), .unknown, .sharded(1) }, shape._partitioning.toArray()[0..shape.rank()]);
 
         shape = shape.withDefaultPartitioning();
         try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .unknown, .unknown }, shape._partitioning.toArray()[0..shape.rank()]);
 
-        shape = shape.withPartitioning(.{ .a = .batch, .b = .open, .c = .feature });
-        try testing.expectEqualSlices(PartitionSpec, &.{ .init(.batch), .open, .init(.feature) }, shape._partitioning.toArray()[0..shape.rank()]);
+        shape = shape.withPartitioning(test_sharding, .{ .a = .batch, .b = .open, .c = .feature });
+        try testing.expectEqualSlices(PartitionSpec, &.{ .sharded(0), .open, .sharded(1) }, shape._partitioning.toArray()[0..shape.rank()]);
     }
 
-    pub fn mapPartitioningAxes(self: Shape, mapping: anytype) Shape {
+    test "withPartitioning resolves names against the supplied sharding and resets old specs" {
+        var other_data = test_sharding.data.*;
+        std.mem.swap(Sharding.Binding, &other_data.bindings.buffer[0], &other_data.bindings.buffer[1]);
+        const other_sharding: Sharding = .{ .data = &other_data };
+        const shape = Shape.init(.{ .a = 8, .b = 16, .c = 32 }, .f32);
+        const first = shape.withPartitioning(test_sharding, .{ .a = .batch, .b = .feature, .c = .open });
+        const second = first.withPartitioning(other_sharding, .{ .a = .batch });
+        try testing.expectEqual(PartitionSpec.sharded(0), first.partition(.a));
+        try testing.expectEqual(PartitionSpec.sharded(1), second.partition(.a));
+        try testing.expectEqual(PartitionSpec.unknown, second.partition(.b));
+        try testing.expectEqual(PartitionSpec.unknown, second.partition(.c));
+        const special = shape.withPartitioning(.replicated, .{ .a = .replicated, .b = .unknown, .c = .open });
+        try testing.expectEqualSlices(PartitionSpec, &.{ .replicated, .unknown, .open }, special._partitioning.toArray()[0..3]);
+    }
+
+    pub fn mapPartitioningAxes(self: Shape, sharding: Sharding, mapping: anytype) Shape {
         const T = @TypeOf(mapping);
         stdx.debug.assertComptime(stdx.meta.isStruct(T), "Mapping must be a struct, e.g., .{ .old_axis = .new_axis }", .{});
-
         var res = self;
         for (0..self.rank()) |ax| {
-            var spec = self._partitioning.get(ax);
-            switch (spec) {
-                .unknown => {},
-                .open => {},
-                .replicated => {},
-                .axis => |*old_axis_tag| {
-                    inline for (std.meta.fields(T)) |field| {
-                        const logical_axis_in_map = toTag(field);
-
-                        if (std.mem.eql(u8, std.mem.span(old_axis_tag.*), std.mem.span(logical_axis_in_map))) {
-                            const physical_axis_from_map = @field(mapping, field.name);
-                            spec = PartitionSpec.init(physical_axis_from_map);
-                            break;
-                        }
-                    }
-                },
+            const mesh_axis = self.partition(ax).meshAxis() orelse continue;
+            inline for (std.meta.fields(T)) |field| {
+                const old_axis = sharding.data.resolveLogicalAxis(toTag(field)) orelse
+                    stdx.debug.panic("Sharding '{s}' has no logical axis '{s}'", .{ sharding.data.name, field.name });
+                if (mesh_axis == old_axis) {
+                    const new_tag = toTag(@field(mapping, field.name));
+                    const new_axis = sharding.data.resolveLogicalAxis(new_tag) orelse
+                        stdx.debug.panic("Sharding '{s}' has no logical axis '{s}'", .{ sharding.data.name, new_tag });
+                    res._partitioning = res._partitioning.set(ax, .sharded(@intCast(new_axis)));
+                    break;
+                }
             }
-            res._partitioning = res._partitioning.set(ax, spec);
         }
         return res;
     }
 
     test mapPartitioningAxes {
-        const logical_shape = Shape.init(.{ .batch = 64, .seq = 128, .features = 512 }, .f32).withPartitioning(.{
-            .batch = .data,
-            .seq = .replicated,
-            .features = .model,
-        });
-
-        const physical_shape = logical_shape.mapPartitioningAxes(.{ .data = .x, .model = .y });
-
-        try testing.expect(physical_shape.partition(.batch).eql(.init(.x)));
-        try testing.expect(physical_shape.partition(.features).eql(.init(.y)));
-        try testing.expect(physical_shape.partition(.seq).eql(.replicated));
-
-        const partial_mapped_shape = logical_shape.mapPartitioningAxes(.{ .data = .z });
-        try testing.expect(partial_mapped_shape.partition(.batch).eql(.init(.z)));
-        try testing.expect(partial_mapped_shape.partition(.features).eql(.init(.model)));
+        const shape = Shape.init(.{ .batch = 64, .seq = 128, .features = 512 }, .f32)
+            .withPartitioning(test_sharding, .{ .batch = .batch, .seq = .replicated, .features = .feature });
+        const mapped = shape.mapPartitioningAxes(test_sharding, .{ .batch = .feature, .feature = .batch });
+        try testing.expectEqual(PartitionSpec.sharded(1), mapped.partition(.batch));
+        try testing.expectEqual(PartitionSpec.sharded(0), mapped.partition(.features));
+        try testing.expectEqual(PartitionSpec.replicated, mapped.partition(.seq));
+        const partial = shape.mapPartitioningAxes(test_sharding, .{ .batch = .colors });
+        try testing.expectEqual(PartitionSpec.sharded(2), partial.partition(.batch));
+        try testing.expectEqual(shape.partition(.features), partial.partition(.features));
     }
 
     pub fn withDefaultPartitioning(self: Shape) Shape {
@@ -889,10 +900,10 @@ pub const Shape = struct {
     test withDefaultPartitioning {
         var shape = Shape.init(.{ 10, 20, 30 }, .f32);
         try testing.expectEqual(3, shape.rank());
-        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .unknown, .unknown }, shape._partitioning.toArray()[0..shape.rank()]);
+        try testing.expectEqualSlices(PartitionSpec, &.{ .replicated, .replicated, .replicated }, shape._partitioning.toArray()[0..shape.rank()]);
 
-        shape = shape.withPartitioning(.{ ._1 = .batch });
-        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .init(.batch), .unknown }, shape._partitioning.toArray()[0..shape.rank()]);
+        shape = shape.withPartitioning(test_sharding, .{ ._1 = .batch });
+        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .sharded(0), .unknown }, shape._partitioning.toArray()[0..shape.rank()]);
 
         shape = shape.withDefaultPartitioning();
         try testing.expectEqual(3, shape.rank());
@@ -908,10 +919,10 @@ pub const Shape = struct {
     test withReplicatedPartitioning {
         var shape = Shape.init(.{ 10, 20, 30 }, .f32);
         try testing.expectEqual(3, shape.rank());
-        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .unknown, .unknown }, shape._partitioning.toArray()[0..shape.rank()]);
+        try testing.expectEqualSlices(PartitionSpec, &.{ .replicated, .replicated, .replicated }, shape._partitioning.toArray()[0..shape.rank()]);
 
-        shape = shape.withPartitioning(.{ ._1 = .batch });
-        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .init(.batch), .unknown }, shape._partitioning.toArray()[0..shape.rank()]);
+        shape = shape.withPartitioning(test_sharding, .{ ._1 = .batch });
+        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .sharded(0), .unknown }, shape._partitioning.toArray()[0..shape.rank()]);
 
         shape = shape.withReplicatedPartitioning();
         try testing.expectEqual(3, shape.rank());
@@ -921,16 +932,16 @@ pub const Shape = struct {
     pub fn hasAtLeastOnePartitionedAxis(self: Shape) bool {
         for (0..self.rank()) |ax| {
             const spec = self._partitioning.get(ax);
-            if (spec == .axis) return true;
+            if (spec.isSharded()) return true;
         }
         return false;
     }
 
     test hasAtLeastOnePartitionedAxis {
-        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(.{ .a = .x, .b = .replicated });
+        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(test_sharding, .{ .a = .batch, .b = .replicated });
         try testing.expect(shape.hasAtLeastOnePartitionedAxis());
 
-        shape = shape.withPartitioning(.{ .a = .replicated, .b = .replicated });
+        shape = shape.withPartitioning(test_sharding, .{ .a = .replicated, .b = .replicated });
         try testing.expect(!shape.hasAtLeastOnePartitionedAxis());
 
         shape = shape.withDefaultPartitioning();
@@ -940,19 +951,16 @@ pub const Shape = struct {
     pub fn isFullyPartitioned(self: Shape) bool {
         for (0..self.rank()) |ax| {
             const spec = self._partitioning.get(ax);
-            switch (spec) {
-                .replicated, .open, .unknown => return false,
-                .axis => {},
-            }
+            if (!spec.isSharded()) return false;
         }
         return true;
     }
 
     test isFullyPartitioned {
-        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(.{ .a = .x, .b = .y });
+        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(test_sharding, .{ .a = .batch, .b = .feature });
         try testing.expect(shape.isFullyPartitioned());
 
-        shape = shape.withPartitioning(.{ .a = .x, .b = .replicated });
+        shape = shape.withPartitioning(test_sharding, .{ .a = .batch, .b = .replicated });
         try testing.expect(!shape.isFullyPartitioned());
 
         shape = shape.withDefaultPartitioning();
@@ -970,13 +978,13 @@ pub const Shape = struct {
     }
 
     test isFullyReplicated {
-        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(.{ .a = .replicated, .b = .replicated });
+        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(test_sharding, .{ .a = .replicated, .b = .replicated });
         try testing.expect(shape.isFullyReplicated());
 
-        shape = shape.withPartitioning(.{ .a = .replicated, .b = .unknown });
+        shape = shape.withPartitioning(test_sharding, .{ .a = .replicated, .b = .unknown });
         try testing.expect(shape.isFullyReplicated());
 
-        shape = shape.withPartitioning(.{ .a = .x, .b = .replicated });
+        shape = shape.withPartitioning(test_sharding, .{ .a = .batch, .b = .replicated });
         try testing.expect(!shape.isFullyReplicated());
     }
 
@@ -985,29 +993,29 @@ pub const Shape = struct {
     }
 
     test partition {
-        const shape = Shape.init(.{ .a = 10, .b = 20, .c = 30 }, .f32).withPartitioning(.{ .a = .batch, .b = .open, .c = .feature });
-        try testing.expectEqual(PartitionSpec.init(.batch), shape.partition(.a));
+        const shape = Shape.init(.{ .a = 10, .b = 20, .c = 30 }, .f32).withPartitioning(test_sharding, .{ .a = .batch, .b = .open, .c = .feature });
+        try testing.expectEqual(PartitionSpec.sharded(0), shape.partition(.a));
         try testing.expectEqual(.open, shape.partition(.b));
-        try testing.expectEqual(PartitionSpec.init(.feature), shape.partition(.c));
+        try testing.expectEqual(PartitionSpec.sharded(1), shape.partition(.c));
     }
 
     pub fn containsPartitionSpec(self: Shape, part: PartitionSpec) bool {
         for (0..self.rank()) |ax| {
             const dim_part = self._partitioning.get(ax);
-            if (dim_part.eql(part)) return true;
+            if (dim_part == part) return true;
         }
         return false;
     }
 
     test containsPartitionSpec {
-        var shape = Shape.init(.{ .a = 10, .b = 20, .c = 30, .d = 40 }, .f32).withPartitioning(.{ .a = .batch, .b = .open, .c = .feature });
-        try testing.expect(shape.containsPartitionSpec(.init(.batch)));
+        var shape = Shape.init(.{ .a = 10, .b = 20, .c = 30, .d = 40 }, .f32).withPartitioning(test_sharding, .{ .a = .batch, .b = .open, .c = .feature });
+        try testing.expect(shape.containsPartitionSpec(.sharded(0)));
         try testing.expect(shape.containsPartitionSpec(.open));
         try testing.expect(!shape.containsPartitionSpec(.replicated));
         try testing.expect(shape.containsPartitionSpec(.unknown));
 
         shape = shape.withDefaultPartitioning();
-        try testing.expect(!shape.containsPartitionSpec(.init(.batch)));
+        try testing.expect(!shape.containsPartitionSpec(.sharded(0)));
         try testing.expect(shape.containsPartitionSpec(.unknown));
         try testing.expect(!shape.containsPartitionSpec(.replicated));
         try testing.expect(!shape.containsPartitionSpec(.open));
@@ -1270,9 +1278,24 @@ pub const Shape = struct {
         const first_axis_to_merge = axes_to_merge.get(0);
         const num_axes_to_merge = axes_to_merge.len;
 
-        var new_shape = self;
+        var merged_dim: i64 = 1;
+        var merged_spec: PartitionSpec = .unknown;
+        for (axes_to_merge.constSlice()) |ax| {
+            merged_dim *= self.dim(ax);
+            const spec = self.partition(ax);
+            if (spec.isSharded() or spec == .open) {
+                merged_spec = .open;
+            } else if (spec == .replicated and merged_spec != .open) {
+                merged_spec = .replicated;
+            }
+        }
 
-        new_shape._dims.replaceRange(first_axis_to_merge, num_axes_to_merge, &.{1}) catch @panic("mergeAxis failed on dims");
+        var new_shape = self;
+        for (1..num_axes_to_merge) |_| {
+            new_shape._partitioning = new_shape._partitioning.orderedRemove(first_axis_to_merge);
+        }
+        new_shape._partitioning = new_shape._partitioning.set(first_axis_to_merge, merged_spec);
+        new_shape._dims.replaceRange(first_axis_to_merge, num_axes_to_merge, &.{merged_dim}) catch @panic("mergeAxis failed on dims");
         new_shape._tags.replaceRange(first_axis_to_merge, num_axes_to_merge, &.{toTag(axis_)}) catch @panic("mergeAxis failed on tags");
 
         return new_shape;
@@ -1309,23 +1332,23 @@ pub const Shape = struct {
     test "mergeAxis partitioning" {
         // Merging a partitioned axis with a replicated one -> open
         const shape1 = Shape.init(.{ .a = 5, .b = 2, .c = 3 }, .f32)
-            .withPartitioning(.{ .a = .replicated, .b = .x, .c = .replicated });
+            .withPartitioning(test_sharding, .{ .a = .replicated, .b = .batch, .c = .replicated });
         const merged1 = shape1.mergeAxis(.ab, .{ .a, .b });
-        try testing.expect(merged1.partition(.ab).eql(.open));
+        try testing.expect(merged1.partition(.ab) == .open);
         try testing.expect(merged1.dim(.ab) == 10);
         try testing.expect(merged1.rank() == 2);
 
         // Merging two replicated axes -> replicated
         const shape2 = Shape.init(.{ .a = 5, .b = 2, .c = 3 }, .f32)
-            .withPartitioning(.{ .a = .replicated, .b = .replicated, .c = .y });
+            .withPartitioning(test_sharding, .{ .a = .replicated, .b = .replicated, .c = .feature });
         const merged2 = shape2.mergeAxis(.ab, .{ .a, .b });
-        try testing.expect(merged2.partition(.ab).eql(.replicated));
-        try testing.expect(merged2.partition(.c).eql(.init(.y)));
+        try testing.expect(merged2.partition(.ab) == .replicated);
+        try testing.expect(merged2.partition(.c) == PartitionSpec.sharded(1));
 
         // Merging two unknown axes -> unknown
-        const shape3 = Shape.init(.{ .a = 5, .b = 2, .c = 3 }, .f32); // default is .unknown
+        const shape3 = Shape.init(.{ .a = 5, .b = 2, .c = 3 }, .f32).withDefaultPartitioning();
         const merged3 = shape3.mergeAxis(.ab, .{ .a, .b });
-        try testing.expect(merged3.partition(.ab).eql(.unknown));
+        try testing.expect(merged3.partition(.ab) == .unknown);
     }
 
     pub fn mergeAxes(self: Shape, axes_: anytype) Shape {
@@ -1537,6 +1560,7 @@ pub const Shape = struct {
             for (0.., specs) |i, spec| {
                 res = res.set(i, spec);
             }
+            return res;
         }
 
         pub fn replicated(rank_: usize) PartitionArray {
@@ -1659,7 +1683,7 @@ pub const Shape = struct {
         /// Extract the mesh axis along which we are sharded. Null if not sharded.
         pub fn meshAxis(self: PartitionSpec) ?u3 {
             const ax = @intFromEnum(self);
-            return if (ax < @intFromEnum(PartitionSpec.replicated)) ax else null;
+            return if (ax < @intFromEnum(PartitionSpec.replicated)) @intCast(ax) else null;
         }
 
         pub fn isSharded(self: PartitionSpec) bool {

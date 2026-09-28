@@ -52,6 +52,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             .withPartitioning(.{ .row = .replicated, .col = .replicated });
 
         return zml.ops.manualComputation(
+            q.sharding,
             (struct {
                 q: zml.Tensor,
                 k: zml.Tensor,
@@ -85,6 +86,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
     }
 
     return zml.ops.manualComputation(
+        q.sharding,
         (struct {
             q: zml.Tensor,
             k: zml.Tensor,

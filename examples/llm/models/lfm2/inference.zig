@@ -28,7 +28,7 @@ pub const CompilationParameters = struct {
                 .k = seqlen,
                 .h = config.num_key_value_heads,
                 .hd = config.hidden_size / config.num_attention_heads,
-            }, mdl.embed_tokens.weight.dtype())),
+            }, mdl.embed_tokens.weight.dtype()), shardings.model),
             .conv = .init(.init(.{
                 .layer = mdl.num_conv_layers,
                 .batch = 1,
@@ -42,7 +42,7 @@ pub const CompilationParameters = struct {
             .batch_dim = 1,
             .rng = .init(),
             .cache = cache,
-            .attention_metadata = .init(.fromBackend(backend, seqlen, config.num_attention_heads)),
+            .attention_metadata = .init(.fromBackend(backend, seqlen, config.num_attention_heads), shardings.model),
             .attention_parameters = .init(.fromBackend(backend)),
             .seqlen = seqlen,
             .shardings = shardings,

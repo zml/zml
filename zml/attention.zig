@@ -116,13 +116,13 @@ pub const Metadata = union(Backend) {
         }
     };
 
-    pub fn init(opts: InitOptions) Metadata {
+    pub fn init(opts: InitOptions, sharding: zml.Sharding) Metadata {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
             .attnd => @panic("Must be initialized manually"),
             .nki => .{ .nki = {} },
-            .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
-            .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o) },
+            .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o, sharding) },
+            .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o, sharding) },
             .metal_fa => .{ .metal_fa = .init() },
         };
     }
@@ -292,7 +292,7 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
             else => if (!backend.isAvailable(platform)) continue,
         }
 
-        const metadata: Metadata = .init(.fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)));
+        const metadata: Metadata = .init(.fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)), platform.shardings.get("model").?);
         const parameters: Parameters = .init(.fromBackend(backend));
         const exe = try platform.compileFn(
             allocator,

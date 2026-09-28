@@ -649,7 +649,6 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
 
         fn cb(ctx: *@This(), tensor: *const Tensor) !void {
             const og_shape = tensor.shape();
-            const packed_shape = og_shape.packedShape();
             var value = ctx.scope.id_to_argument.get(tensor.id) orelse
                 tensor._value orelse
                 @panic("no value found for output tensor");
@@ -660,7 +659,9 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
 
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
-                .shape = packed_shape,
+                // const packed_shape = og_shape.packedShape();
+                // TODO: clarify why this og_shape and not packedShape()
+                .shape = og_shape,
                 // Note: the panic should have been triggered during createBlockArguments or emitMlir
                 .sharding = tensor.sharding.resolve(ctx.compiler.platform),
                 .value = value,

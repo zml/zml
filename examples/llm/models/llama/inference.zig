@@ -32,11 +32,11 @@ pub const CompilationParameters = struct {
                 .k = seqlen,
                 .h = config.num_key_value_heads,
                 .hd = head_dim,
-            }, mdl.model.embed_tokens.weight.dtype())),
+            }, mdl.model.embed_tokens.weight.dtype()), shardings.model),
             .rng = .init(),
             .attention_metadata = switch (backend) {
                 .attnd => .{ .attnd = .init() },
-                else => .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
+                else => .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads)), shardings.model),
             },
             .prefill_attention_parameters = switch (backend) {
                 .attnd => .{ .attnd = .init(.{
