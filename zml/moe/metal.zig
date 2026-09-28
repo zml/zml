@@ -1,4 +1,5 @@
 const std = @import("std");
+const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 const Tensor = zml.Tensor;
@@ -108,6 +109,47 @@ fn applyDownGlobalScale(output: Tensor, global_scale: ?Tensor, expert_ids: Tenso
         .appendAxes(.{.d})
         .broad(output.shape().withDtype(.f32));
     return output.convert(.f32).mul(selected).convert(output.dtype());
+}
+
+pub fn fusedExperts(
+    input: zml.Tensor,
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
+    gate_up: zml.nn.Linear,
+    down: zml.nn.Linear,
+    opts: zml.moe.Options,
+    parameters: Parameters,
+) zml.Tensor {
+    stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
+    stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
+    stdx.debug.assert(opts.activation_threshold == null, "Activation thresholds require the Triton MoE backend", .{});
+
+    const gate_up_scales: ?zml.Tensor = if (gate_up.quantization) |q| q.scales else null;
+    const gate_up_global_scale: ?zml.Tensor = if (gate_up.quantization) |q| (if (q.global_scale) |scale| scale.asMultiplier() else null) else null;
+
+    const down_scales: ?zml.Tensor = if (down.quantization) |q| q.scales else null;
+    const down_global_scale: ?zml.Tensor = if (down.quantization) |q| (if (q.global_scale) |scale| scale.asMultiplier() else null) else null;
+
+    const gate_up_weight_unpacked = zml.moe.unpackedWeight(gate_up);
+    const down_weight_unpacked = zml.moe.unpackedWeight(down);
+
+    return fusedExpertsImpl(
+        input,
+        gate_up_weight_unpacked,
+        down_weight_unpacked,
+        topk_weights,
+        topk_ids,
+        .{
+            .activation = parameters.activation,
+            .global_num_experts = gate_up_weight_unpacked.dim(.expert),
+            .w1_scale = gate_up_scales,
+            .w2_scale = down_scales,
+            .w1_global_scale = gate_up_global_scale,
+            .w2_global_scale = down_global_scale,
+            .w1_bias = gate_up.bias,
+            .w2_bias = down.bias,
+        },
+    ) catch |e| stdx.debug.panic("fusedExpertsImpl failed: {}", .{e});
 }
 
 pub fn fusedExpertsImpl(
