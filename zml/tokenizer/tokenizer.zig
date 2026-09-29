@@ -3,14 +3,11 @@ const std = @import("std");
 pub const iree = @import("iree");
 pub const sentencepiece = @import("sentencepiece");
 
-pub const homemade = @import("homemade.zig");
-
 const log = std.log.scoped(.@"zml/tokenizer");
 
 const Tokenizers = enum {
     iree,
     sentencepiece,
-    homemade,
 };
 
 pub const Tokenizer = union(Tokenizers) {
@@ -19,7 +16,6 @@ pub const Tokenizer = union(Tokenizers) {
 
         iree: iree.Normalizer,
         sentencepiece: void,
-        homemade: void,
 
         pub fn deinit(self: *Normalizer) void {
             switch (self.*) {
@@ -39,7 +35,6 @@ pub const Tokenizer = union(Tokenizers) {
     pub const Encoder = union(Tokenizers) {
         iree: iree.Tokenizer.Encoder,
         sentencepiece: sentencepiece.Encoder,
-        homemade: homemade.Encoder,
 
         pub fn deinit(self: *Encoder) void {
             switch (self.*) {
@@ -81,7 +76,6 @@ pub const Tokenizer = union(Tokenizers) {
     pub const Decoder = union(Tokenizers) {
         iree: iree.Tokenizer.Decoder,
         sentencepiece: sentencepiece.Decoder,
-        homemade: homemade.Decoder,
 
         pub fn deinit(self: *Decoder) void {
             switch (self.*) {
@@ -126,7 +120,6 @@ pub const Tokenizer = union(Tokenizers) {
 
     iree: iree.Tokenizer,
     sentencepiece: *sentencepiece.SentencePieceProcessor,
-    homemade: *homemade.Tokenizer,
 
     pub fn fromFile(allocator: std.mem.Allocator, io: std.Io, model: []const u8) !Tokenizer {
         if (std.mem.endsWith(u8, model, ".pb")) {
