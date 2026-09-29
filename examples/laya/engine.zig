@@ -171,6 +171,18 @@ pub const Engine = struct {
         };
     }
 
+    /// Decoded text of one token, for display. Special tokens keep their name.
+    pub fn tokenText(self: *Engine, arena: std.mem.Allocator, id: u32) []const u8 {
+        var decoder = self.tokenizer.decoder() catch return "?";
+        defer decoder.deinit();
+        const text = decoder.decodeAlloc(arena, &.{id}) catch return "?";
+        if (text.items.len > 0) return text.items;
+        inline for (.{ "cls", "sep", "pad", "mask" }, .{ "[CLS]", "[SEP]", "[PAD]", "[MASK]" }) |field, name| {
+            if (@field(self.special, field) == id) return name;
+        }
+        return "";
+    }
+
     fn bufferFrom(self: *Engine, shape: anytype, bytes: []const u8) !zml.Buffer {
         return .fromBytes(self.io, self.platform, zml.Shape.init(shape, .u32), .replicated, bytes);
     }

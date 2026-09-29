@@ -5,6 +5,7 @@ const stdx = zml.stdx;
 
 const Engine = @import("engine.zig").Engine;
 const prompt = @import("prompt.zig");
+const server = @import("server.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -19,11 +20,14 @@ const Args = struct {
     seqlen: ?u32 = null,
     dtype: Dtype = .f32,
     show_prompt: bool = false,
+    serve: ?u16 = null,
+    host: []const u8 = "127.0.0.1",
 
     const Dtype = enum { f32, f16, bf16 };
 
     pub const help =
         \\ Use laya --model=<path> --state=<json|@file> --questions=<json|@file> [options]
+        \\     laya --model=<path> --serve=<port>
         \\
         \\ Answer typed questions (choice / score / noul) about a state with a Laya decision model.
         \\ No tokens are generated: every question is one encoder forward pass.
@@ -37,6 +41,8 @@ const Args = struct {
         \\   --dtype=<f32|f16|bf16>
         \\                         Activation dtype (default: f32)
         \\   --show-prompt         Log the token ids and marker positions of each question
+        \\   --serve=<port>        Serve the interactive demo and the /v1/decide API on this port
+        \\   --host=<address>      Address to listen on with --serve (default: 127.0.0.1)
         \\
     ;
 };
@@ -83,6 +89,10 @@ pub fn main(init: std.process.Init) !void {
         },
     });
     defer engine.deinit();
+
+    if (args.serve) |port| {
+        return server.serve(allocator, init.io, engine, args.host, port);
+    }
 
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();

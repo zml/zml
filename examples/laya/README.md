@@ -48,6 +48,37 @@ Add the usual platform flags to run on an accelerator, e.g. `--@zml//platforms:c
 | `--dtype=f32\|f16\|bf16` | `f32`                   | activation dtype; use `f16`/`bf16` on GPUs only, the CPU backend emulates them slowly |
 | `--show-prompt`        | off                       | log the token ids and marker positions                |
 
+## Interactive demo
+
+```bash
+bazel run //examples/laya -- --model=hf://convaiinnovations/laya --serve=9000
+```
+
+Then open <http://localhost:9000>. The page is embedded in the binary (`demo.html`) and has no external dependencies.
+
+* **Presets**: support ticket, product review, moderation and agent routing examples.
+* **Question editor**: add `choice` / `score` / yes-no questions, type an option and press Enter, or click `{ } JSON`
+  to edit the raw questions.
+* **Decide** (or <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Enter</kbd>): an animated pipeline follows the pass through
+  tokenize, ModernBERT, decision head and calibration. Then probability bars, confidence rings, the score needle and
+  the act/escalate flag animate in.
+* **What the model read**: expands the exact prompt tokens with the `[MASK]` option markers highlighted.
+* **Interaction guide**: a 5-step spotlight tour runs on the first visit. Reopen it with `? Guide` or <kbd>?</kbd>,
+  navigate with <kbd>←</kbd>/<kbd>→</kbd> and close it with <kbd>Esc</kbd>.
+
+The server also exposes the API directly:
+
+```bash
+curl -s localhost:9000/v1/decide -H 'content-type: application/json' -d '{
+  "state": "The app crashes every time I open settings.",
+  "questions": {"team": {"type": "choice", "instructions": "Which team?", "criteria": ["billing", "engineering", "sales"]}}
+}'
+```
+
+The response is the CLI output plus `prompts`, which lists the decoded tokens and marker positions of each question.
+`GET /v1/health` reports the platform and sequence length. The server listens on `127.0.0.1` by default; use
+`--host=0.0.0.0` to expose it.
+
 ## Questions format
 
 ```json

@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laya on ZML</title>
+<style>
+:root {
+  --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1b16; --muted: #6b675d; --line: #e4e1d8;
+  --accent: #e2562b; --accent-soft: #fbe3da; --good: #1f8a5b; --warn: #b7791f; --bad: #c0392b;
+  --token: #efece4; --marker: #e2562b; --shadow: 0 1px 2px rgba(0,0,0,.05), 0 8px 24px rgba(0,0,0,.06);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14130f; --panel: #1d1c17; --ink: #f1eee6; --muted: #a39e91; --line: #2f2d26;
+    --accent: #ff7a4d; --accent-soft: #3a2219; --token: #2a2822; --shadow: 0 1px 2px rgba(0,0,0,.4);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14130f; --panel: #1d1c17; --ink: #f1eee6; --muted: #a39e91; --line: #2f2d26;
+  --accent: #ff7a4d; --accent-soft: #3a2219; --token: #2a2822; --shadow: 0 1px 2px rgba(0,0,0,.4);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+header { display: flex; align-items: center; gap: 12px; padding: 16px 24px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 18px; margin: 0; letter-spacing: -.01em; }
+header h1 span { color: var(--accent); }
+.tag { font-size: 12px; color: var(--muted); }
+.spacer { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-size: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.dot.ok { background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 25%, transparent); }
+.dot.down { background: var(--bad); }
+.icon-btn { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+main { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 20px; padding: 20px 24px 40px; max-width: 1400px; margin: 0 auto; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } header { padding: 12px 16px; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 16px; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+.col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.chip { border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 4px 12px; cursor: pointer; font-size: 13px; transition: .15s; }
+.chip:hover, .chip.active { border-color: var(--accent); color: var(--accent); }
+textarea { width: 100%; min-height: 150px; resize: vertical; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--bg); font-family: var(--mono); font-size: 13px; }
+textarea:focus, input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.q { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 10px; background: var(--bg); animation: pop .25s ease; }
+.q-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.q input[type=text], .q select { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--panel); min-width: 0; }
+.q .qid { width: 120px; font-family: var(--mono); font-size: 13px; }
+.q .ins { flex: 1; width: 100%; }
+.opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.opt { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-size: 13px; }
+.opt button { border: 0; background: none; cursor: pointer; color: var(--muted); padding: 0 6px; }
+.opt-add { border: 1px dashed var(--line); border-radius: 999px; padding: 3px 10px; background: none; font-size: 13px; width: 170px; }
+.rm { margin-left: auto; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 18px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.btn { border: 1px solid var(--line); background: var(--panel); border-radius: 10px; padding: 8px 14px; cursor: pointer; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; padding: 10px 20px; box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent); }
+.btn.primary:disabled { opacity: .6; cursor: progress; }
+kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; color: var(--muted); }
+
+/* Pipeline animation */
+.pipeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; position: relative; }
+.stage { border: 1px solid var(--line); border-radius: 10px; padding: 10px; text-align: center; font-size: 12px; color: var(--muted); background: var(--bg); transition: .3s; position: relative; overflow: hidden; }
+.stage b { display: block; font-size: 13px; color: var(--ink); }
+.stage.active { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
+.stage.active::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 25%, transparent), transparent); animation: sweep 1s linear infinite; }
+.stage.done { border-color: var(--good); }
+.stats { display: flex; gap: 16px; margin-top: 10px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+.stats b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/* Results */
+.result { border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 12px; background: var(--bg); animation: rise .4s ease both; }
+.result-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.result-head .id { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.result-head .answer { font-size: 20px; font-weight: 700; letter-spacing: -.01em; }
+.badge { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; padding: 2px 8px; border-radius: 999px; background: var(--token); color: var(--muted); }
+.gauge { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.ring { --v: 0; width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; color: var(--ink);
+  background: radial-gradient(closest-side, var(--bg) 72%, transparent 73% 100%), conic-gradient(var(--c, var(--good)) calc(var(--v) * 1%), var(--line) 0); transition: --v .8s; }
+.bars { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.bar { display: grid; grid-template-columns: minmax(80px, 180px) 1fr 52px; gap: 10px; align-items: center; font-size: 13px; }
+.bar .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar .track { height: 10px; background: var(--token); border-radius: 999px; overflow: hidden; }
+.bar .fill { height: 100%; width: 0; background: var(--muted); border-radius: 999px; transition: width .9s cubic-bezier(.2,.8,.2,1); }
+.bar.win .fill { background: var(--accent); }
+.bar.win .label { font-weight: 600; }
+.bar .pct { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.scale { position: relative; height: 26px; margin-top: 14px; }
+.scale .axis { position: absolute; left: 0; right: 0; top: 12px; height: 2px; background: var(--line); }
+.scale .needle { position: absolute; top: 2px; width: 22px; height: 22px; margin-left: -11px; border-radius: 50%; background: var(--accent); left: 0; transition: left 1s cubic-bezier(.2,.8,.2,1); box-shadow: 0 0 0 4px var(--accent-soft); }
+.act { margin-top: 10px; font-size: 12px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+.act .flag { padding: 1px 8px; border-radius: 999px; font-weight: 600; }
+.act .flag.go { background: color-mix(in srgb, var(--good) 18%, transparent); color: var(--good); }
+.act .flag.esc { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+details { margin-top: 10px; }
+summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.tokens { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 8px; max-height: 180px; overflow: auto; }
+.tok { font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius: 4px; background: var(--token); white-space: pre; opacity: 0; animation: tokin .25s ease forwards; }
+.tok.special { color: var(--muted); }
+.tok.marker { background: var(--marker); color: #fff; font-weight: 700; }
+.empty { text-align: center; color: var(--muted); padding: 40px 10px; }
+.empty .big { font-size: 40px; }
+.error { border: 1px solid var(--bad); color: var(--bad); border-radius: 10px; padding: 10px 12px; font-size: 13px; margin-bottom: 12px; }
+.banner { display: none; margin: 16px 24px 0; padding: 12px 16px; border-radius: 12px; border: 1px solid var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); font-size: 14px; }
+.banner code { font-family: var(--mono); font-size: 12px; background: var(--token); padding: 2px 6px; border-radius: 6px; }
+
+/* Guided tour */
+.tour-mask { position: fixed; inset: 0; z-index: 50; pointer-events: none; }
+.tour-hole { position: fixed; border-radius: 14px; box-shadow: 0 0 0 9999px rgba(0,0,0,.62); transition: all .35s ease; pointer-events: none; outline: 2px solid var(--accent); }
+.tour-tip { position: fixed; z-index: 51; width: min(340px, calc(100vw - 32px)); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 20px 50px rgba(0,0,0,.25); padding: 16px; transition: top .35s ease, left .35s ease; animation: pop .25s ease; }
+.tour-tip h3 { margin: 0 0 6px; font-size: 16px; }
+.tour-tip p { margin: 0 0 12px; font-size: 14px; color: var(--muted); }
+.tour-tip .steps { display: flex; gap: 4px; }
+.tour-tip .steps i { width: 6px; height: 6px; border-radius: 50%; background: var(--line); }
+.tour-tip .steps i.on { background: var(--accent); }
+
+@keyframes pop { from { transform: scale(.97); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes rise { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+@keyframes tokin { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@property --v { syntax: "<number>"; inherits: false; initial-value: 0; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Laya <span>on ZML</span></h1>
+  <span class="tag">typed decisions in one forward pass — no tokens generated</span>
+  <div class="spacer"></div>
+  <span class="pill" id="health"><span class="dot"></span><span>connecting…</span></span>
+  <button class="icon-btn" id="theme" title="Toggle theme">◐</button>
+  <button class="icon-btn" id="help" title="Interaction guide (?)">? Guide</button>
+</header>
+<div class="banner" id="offline">
+  The demo page is not connected to a Laya server. Start one with
+  <code>bazel run //examples/laya -- --model=hf://convaiinnovations/laya --serve=9000</code>
+  and open <code>http://localhost:9000</code>.
+</div>
+
+<main>
+  <div class="col">
+    <section class="card" id="state-card">
+      <h2>1 · State</h2>
+      <div class="presets" id="presets"></div>
+      <textarea id="state" spellcheck="false" aria-label="State (JSON or text)"></textarea>
+    </section>
+
+    <section class="card" id="questions-card">
+      <h2>2 · Questions <span class="spacer"></span><button class="btn" id="raw-toggle" style="padding:2px 10px;font-size:12px">{ } JSON</button></h2>
+      <div id="questions"></div>
+      <textarea id="questions-raw" spellcheck="false" style="display:none;min-height:260px" aria-label="Questions JSON"></textarea>
+      <div class="row">
+        <button class="btn" data-add="choice">+ choice</button>
+        <button class="btn" data-add="score">+ score</button>
+        <button class="btn" data-add="noul">+ yes / no</button>
+      </div>
+    </section>
+
+    <div class="row" id="run-row">
+      <button class="btn primary" id="run">Decide ▸</button>
+      <span class="tag"><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
+    </div>
+  </div>
+
+  <div class="col">
+    <section class="card" id="pipeline-card">
+      <h2>3 · One forward pass</h2>
+      <div class="pipeline">
+        <div class="stage" data-stage="0"><b>Tokenize</b>prompt + [MASK] markers</div>
+        <div class="stage" data-stage="1"><b>ModernBERT</b>28 layers · ZML</div>
+        <div class="stage" data-stage="2"><b>Decision head</b>score each marker</div>
+        <div class="stage" data-stage="3"><b>Calibrate</b>temperature + confidence</div>
+      </div>
+      <div class="stats">
+        <span>latency <b id="stat-latency">–</b></span>
+        <span>input tokens <b id="stat-tokens">–</b></span>
+        <span>output tokens <b>0</b></span>
+        <span>questions <b id="stat-q">–</b></span>
+      </div>
+    </section>
+
+    <section class="card" id="results-card">
+      <h2>4 · Decisions</h2>
+      <div id="results"><div class="empty"><div class="big">⚖️</div>Pick a preset and press <b>Decide</b>.</div></div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+
+const PRESETS = {
+  "Support ticket": {
+    state: { channel: "email", subject: "Charged twice for September",
+      body: "Hi, our card was charged two times for the September invoice. Please send back the extra payment before Friday, it's blocking our month-end close." },
+    questions: {
+      team: { type: "choice", instructions: "Which team should handle this support ticket?",
+        criteria: { billing: "charges, invoices, refunds", engineering: "bugs, crashes, outages", sales: "pricing, upgrades, new contracts", other: "anything else" } },
+      urgency: { type: "score", instructions: "How urgent is this ticket?", criteria: ["can wait", "this week", "today: blocking or deadline"] },
+      refund: { type: "noul", instructions: "The customer asks to get money back." },
+    },
+  },
+  "Product review": {
+    state: "Battery life is incredible, easily two days. The camera is fine in daylight but falls apart at night, and the charger stopped working after a week.",
+    questions: {
+      sentiment: { type: "choice", instructions: "Overall sentiment of the review", criteria: ["positive", "mixed", "negative"] },
+      rating: { type: "score", instructions: "Star rating the reviewer would give", criteria: ["1 star", "2 stars", "3 stars", "4 stars", "5 stars"] },
+      defect: { type: "noul", instructions: "The review reports a broken or defective part." },
+    },
+  },
+  "Moderation": {
+    state: { user: "anon_42", message: "Great write-up! If anyone wants the slides, DM me and I'll send the link." },
+    questions: {
+      policy: { type: "choice", instructions: "Does this chat message violate a community policy?",
+        criteria: { none: "normal, friendly message", spam: "ads, scams, unsolicited links", harassment: "insults or threats", nsfw: "adult content" } },
+      needs_review: { type: "noul", instructions: "A human moderator should look at this message." },
+    },
+  },
+  "Agent routing": {
+    state: { conversation: [{ role: "user", content: "Can you move my 3pm with Dana to tomorrow morning and let her know?" }] },
+    questions: {
+      tool: { type: "choice", instructions: "Which tool should the assistant call first?",
+        criteria: { calendar_update: "change an existing event", send_email: "write to someone", web_search: "look up information", none: "just answer" } },
+      clarify: { type: "noul", instructions: "The request is too ambiguous to act on without asking a follow-up question." },
+    },
+  },
+};
+
+let questions = {};
+let rawMode = false;
+
+function loadPreset(name) {
+  const p = PRESETS[name];
+  $("#state").value = typeof p.state === "string" ? p.state : JSON.stringify(p.state, null, 2);
+  questions = structuredClone(p.questions);
+  $$(".chip", $("#presets")).forEach(c => c.classList.toggle("active", c.textContent === name));
+  renderQuestions();
+  store.set("laya.preset", name);
+}
+
+function optionList(q) {
+  if (q.type === "noul") return [];
+  if (Array.isArray(q.criteria)) return q.criteria.map(c => ({ label: c, desc: null }));
+  return Object.entries(q.criteria || {}).map(([label, desc]) => ({ label, desc }));
+}
+
+function setOptions(q, list) {
+  if (q.type === "score" || list.every(o => !o.desc)) q.criteria = list.map(o => o.label);
+  else q.criteria = Object.fromEntries(list.map(o => [o.label, o.desc]));
+}
+
+function renderQuestions() {
+  $("#questions-raw").value = JSON.stringify(questions, null, 2);
+  const root = $("#questions");
+  root.innerHTML = "";
+  for (const [id, q] of Object.entries(questions)) {
+    const el = document.createElement("div");
+    el.className = "q";
+    el.innerHTML = `
+      <div class="q-row">
+        <input type="text" class="qid" value="${esc(id)}" aria-label="Question id">
+        <select aria-label="Question type">
+          <option value="choice">choice</option><option value="score">score</option><option value="noul">yes / no</option>
+        </select>
+        <button class="rm" title="Remove question">×</button>
+      </div>
+      <div class="q-row"><input type="text" class="ins" value="${esc(q.instructions)}" placeholder="Instructions" aria-label="Instructions"></div>
+      <div class="opts"></div>`;
+    $("select", el).value = q.type;
+    const opts = $(".opts", el);
+    if (q.type === "noul") {
+      opts.innerHTML = `<span class="tag">answers <b>true</b> / <b>false</b> with P(true)</span>`;
+    } else {
+      const list = optionList(q);
+      list.forEach((o, i) => {
+        const chip = document.createElement("span");
+        chip.className = "opt";
+        chip.title = o.desc || "";
+        chip.innerHTML = `${q.type === "score" ? `<b>${i}</b>&nbsp;` : ""}${esc(o.label)}<button aria-label="Remove option">×</button>`;
+        $("button", chip).onclick = () => { list.splice(i, 1); setOptions(q, list); renderQuestions(); };
+        opts.append(chip);
+      });
+      const add = document.createElement("input");
+      add.className = "opt-add";
+      add.placeholder = q.type === "score" ? "+ level, Enter" : "+ option, Enter";
+      add.onkeydown = e => {
+        if (e.key === "Enter" && add.value.trim()) {
+          e.preventDefault();
+          list.push({ label: add.value.trim(), desc: null }); setOptions(q, list); renderQuestions();
+          $$(".opt-add")[Object.keys(questions).indexOf(id)]?.focus();
+        }
+      };
+      opts.append(add);
+    }
+    $(".qid", el).onchange = e => { const nid = e.target.value.trim() || id; if (nid !== id) { questions = renameKey(questions, id, nid); renderQuestions(); } };
+    $(".ins", el).oninput = e => { q.instructions = e.target.value; $("#questions-raw").value = JSON.stringify(questions, null, 2); };
+    $("select", el).onchange = e => {
+      const list = optionList(q);
+      q.type = e.target.value;
+      if (q.type === "noul") delete q.criteria;
+      else setOptions(q, list.length ? list : [{ label: "yes" }, { label: "no" }]);
+      renderQuestions();
+    };
+    $(".rm", el).onclick = () => { delete questions[id]; renderQuestions(); };
+    root.append(el);
+  }
+}
+
+function renameKey(obj, from, to) {
+  return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k === from ? to : k, v]));
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+function addQuestion(type) {
+  let n = 1; while (questions[`${type}_${n}`]) n++;
+  const q = { type, instructions: "" };
+  if (type === "choice") q.criteria = ["option A", "option B"];
+  if (type === "score") q.criteria = ["low", "medium", "high"];
+  questions[`${type}_${n}`] = q;
+  renderQuestions();
+  $$(".q .ins").at(-1)?.focus();
+}
+
+function readState() {
+  const text = $("#state").value;
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+function readQuestions() {
+  if (rawMode) questions = JSON.parse($("#questions-raw").value);
+  return questions;
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function setStage(i) {
+  $$(".stage").forEach((s, j) => { s.classList.toggle("active", j === i); s.classList.toggle("done", j < i); });
+}
+
+async function run() {
+  const btn = $("#run");
+  if (btn.disabled) return;
+  let body;
+  try { body = JSON.stringify({ state: readState(), questions: readQuestions() }); }
+  catch (e) { return showError(`Questions JSON is invalid: ${e.message}`); }
+
+  btn.disabled = true; btn.textContent = "Deciding…";
+  $("#results").innerHTML = "";
+  setStage(0);
+  const t0 = performance.now();
+  try {
+    const request = fetch("/v1/decide", { method: "POST", headers: { "content-type": "application/json" }, body });
+    await sleep(180); setStage(1);
+    const res = await request;
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+    setStage(2); await sleep(220);
+    setStage(3); await sleep(180);
+    setStage(4);
+    $("#stat-latency").textContent = `${data.latency_ms.toFixed(0)} ms`;
+    $("#stat-tokens").textContent = data.usage.input_tokens;
+    $("#stat-q").textContent = Object.keys(data.answers).length;
+    renderResults(data);
+  } catch (e) {
+    setStage(-1);
+    showError(e.message.includes("fetch") ? "Cannot reach the Laya server. Is it running?" : e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = "Decide ▸";
+    console.debug("round trip", performance.now() - t0);
+  }
+}
+
+function showError(message) {
+  $("#results").innerHTML = `<div class="error">⚠️ ${esc(message)}</div>`;
+}
+
+function renderResults(data) {
+  const root = $("#results");
+  Object.entries(data.answers).forEach(([id, a], idx) => {
+    const el = document.createElement("div");
+    el.className = "result";
+    el.style.animationDelay = `${idx * 120}ms`;
+    const conf = Math.round(a.confidence * 100);
+    const color = conf >= 75 ? "var(--good)" : conf >= 45 ? "var(--warn)" : "var(--bad)";
+    const headline = a.type === "choice" ? esc(a.choice)
+      : a.type === "score" ? `${a.score.toFixed(2)} <span class="tag">/ ${Object.keys(a.legend).length - 1}</span>`
+      : (a.noul >= 0.5 ? "true" : "false");
+    el.innerHTML = `
+      <div class="result-head">
+        <span class="answer">${headline}</span>
+        <span class="badge">${a.type === "noul" ? "yes / no" : a.type}</span>
+        <span class="id">${esc(id)}</span>
+        <span class="gauge">confidence <span class="ring" style="--c:${color}">${conf}%</span></span>
+      </div>
+      <div class="bars"></div>
+      ${a.type === "score" ? `<div class="scale"><div class="axis"></div><div class="needle"></div></div>` : ""}
+      <div class="act">act / escalate head:
+        <span class="flag ${a.action.act_probability >= 0.5 ? "go" : "esc"}">${a.action.act_probability >= 0.5 ? "act" : "escalate"}</span>
+        P(act) = ${a.action.act_probability.toFixed(3)}
+      </div>
+      <details><summary>What the model read (${data.prompts?.[id]?.tokens.length ?? 0} tokens, [MASK] markers highlighted)</summary><div class="tokens"></div></details>`;
+
+    const rows = a.type === "choice" ? Object.entries(a.probabilities)
+      : a.type === "score" ? Object.entries(a.probabilities).map(([k, v]) => [`${k} · ${a.legend[k]}`, v])
+      : [["true", a.noul], ["false", 1 - a.noul]];
+    const best = Math.max(...rows.map(r => r[1]));
+    const bars = $(".bars", el);
+    for (const [label, p] of rows) {
+      const bar = document.createElement("div");
+      bar.className = "bar" + (p === best ? " win" : "");
+      bar.innerHTML = `<span class="label" title="${esc(label)}">${esc(label)}</span><div class="track"><div class="fill"></div></div><span class="pct">0%</span>`;
+      bars.append(bar);
+      requestAnimationFrame(() => requestAnimationFrame(() => { $(".fill", bar).style.width = `${(p * 100).toFixed(1)}%`; }));
+      countUp($(".pct", bar), p * 100);
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      $(".ring", el).style.setProperty("--v", conf);
+      const needle = $(".needle", el);
+      if (needle) needle.style.left = `${(a.score / (Object.keys(a.legend).length - 1)) * 100}%`;
+    }));
+
+    const prompt = data.prompts?.[id];
+    const details = $("details", el);
+    details.addEventListener("toggle", () => {
+      const box = $(".tokens", el);
+      if (!details.open || box.childElementCount || !prompt) return;
+      const markers = new Set(prompt.markers);
+      prompt.tokens.forEach((t, i) => {
+        const span = document.createElement("span");
+        span.className = "tok" + (markers.has(i) ? " marker" : /^\[(CLS|SEP|MASK|PAD)\]$/.test(t) ? " special" : "");
+        span.textContent = t;
+        span.title = `#${i}`;
+        span.style.animationDelay = `${Math.min(i * 6, 900)}ms`;
+        box.append(span);
+      });
+    });
+    root.append(el);
+  });
+}
+
+function countUp(el, target) {
+  const start = performance.now();
+  const tick = now => {
+    const k = Math.min(1, (now - start) / 900);
+    el.textContent = `${(target * (1 - Math.pow(1 - k, 3))).toFixed(1)}%`;
+    if (k < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+async function checkHealth() {
+  const pill = $("#health");
+  try {
+    const res = await fetch("/v1/health");
+    const h = await res.json();
+    pill.innerHTML = `<span class="dot ok"></span><span>ZML · ${esc(h.platform)} · seqlen ${h.seqlen}</span>`;
+    $("#offline").style.display = "none";
+  } catch {
+    pill.innerHTML = `<span class="dot down"></span><span>server offline</span>`;
+    $("#offline").style.display = "block";
+  }
+}
+
+/* Interaction guide */
+const TOUR = [
+  { el: "#state-card", title: "1 · Describe the situation", text: "Paste any text or JSON: an email, a chat, an agent's state. Presets load ready-made examples." },
+  { el: "#questions-card", title: "2 · Ask typed questions", text: "choice picks one label, score returns an expected level, yes / no returns P(true). Type an option and press Enter to add it; click × to remove. Use { } JSON to edit everything at once." },
+  { el: "#run-row", title: "3 · Decide", text: "Press Decide or ⌘/Ctrl + Enter. Each question is one encoder forward pass compiled by ZML — nothing is generated, so the answer is always valid." },
+  { el: "#pipeline-card", title: "Watch the pass", text: "The prompt is tokenized with one [MASK] marker per option, runs through 28 ModernBERT layers and the decision head, then gets calibrated." },
+  { el: "#results-card", title: "Read the decision", text: "Bars show calibrated probabilities, the ring shows confidence, and the act / escalate head says whether to trust it. Open “What the model read” to see the tokens." },
+];
+let tourStep = -1;
+
+function startTour() { tourStep = 0; drawTour(); }
+function endTour() { tourStep = -1; $(".tour-mask")?.remove(); $(".tour-tip")?.remove(); store.set("laya.tour", "done"); }
+
+function drawTour() {
+  const step = TOUR[tourStep];
+  const target = $(step.el);
+  const tall = target.getBoundingClientRect().height > innerHeight * 0.7;
+  target.scrollIntoView({ block: tall ? "start" : "center", behavior: "smooth" });
+  let mask = $(".tour-mask");
+  if (!mask) {
+    mask = document.createElement("div"); mask.className = "tour-mask"; mask.innerHTML = `<div class="tour-hole"></div>`;
+    document.body.append(mask);
+  }
+  $(".tour-tip")?.remove();
+  const tip = document.createElement("div");
+  tip.className = "tour-tip"; tip.setAttribute("role", "dialog"); tip.setAttribute("aria-label", step.title);
+  tip.innerHTML = `<h3>${step.title}</h3><p>${step.text}</p>
+    <div class="row"><span class="steps">${TOUR.map((_, i) => `<i class="${i === tourStep ? "on" : ""}"></i>`).join("")}</span>
+    <span class="spacer" style="flex:1"></span>
+    <button class="btn" data-t="skip">Skip</button>
+    ${tourStep > 0 ? `<button class="btn" data-t="prev">Back</button>` : ""}
+    <button class="btn primary" data-t="next" style="padding:8px 14px">${tourStep === TOUR.length - 1 ? "Done" : "Next"}</button></div>`;
+  document.body.append(tip);
+  tip.onclick = e => {
+    const t = e.target.dataset.t;
+    if (t === "skip") endTour();
+    if (t === "prev") { tourStep--; drawTour(); }
+    if (t === "next") { if (++tourStep >= TOUR.length) endTour(); else drawTour(); }
+  };
+  $('[data-t="next"]', tip).focus({ preventScroll: true });
+  placeTour();
+  for (const ms of [150, 400, 800]) setTimeout(placeTour, ms);
+}
+
+function placeTour() {
+  if (tourStep < 0) return;
+  const r = $(TOUR[tourStep].el).getBoundingClientRect();
+  const hole = $(".tour-hole"), tip = $(".tour-tip");
+  Object.assign(hole.style, { top: `${r.top - 6}px`, left: `${r.left - 6}px`, width: `${r.width + 12}px`, height: `${r.height + 12}px` });
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  let top = r.bottom + 14, left = Math.min(Math.max(16, r.left), innerWidth - tw - 16);
+  if (top + th > innerHeight - 16) top = Math.max(16, r.top - th - 14);
+  if (top < 16 || top + th > innerHeight) top = innerHeight - th - 16;
+  Object.assign(tip.style, { top: `${top}px`, left: `${left}px` });
+}
+
+/* Wiring */
+for (const name of Object.keys(PRESETS)) {
+  const chip = document.createElement("button");
+  chip.className = "chip"; chip.textContent = name; chip.onclick = () => loadPreset(name);
+  $("#presets").append(chip);
+}
+$$("[data-add]").forEach(b => b.onclick = () => addQuestion(b.dataset.add));
+$("#run").onclick = run;
+$("#help").onclick = startTour;
+$("#raw-toggle").onclick = () => {
+  if (rawMode) {
+    try { questions = JSON.parse($("#questions-raw").value); } catch (e) { return showError(`Questions JSON is invalid: ${e.message}`); }
+  }
+  rawMode = !rawMode;
+  $("#questions").style.display = rawMode ? "none" : "";
+  $("#questions-raw").style.display = rawMode ? "" : "none";
+  $$("[data-add]").forEach(b => b.disabled = rawMode);
+  renderQuestions();
+};
+$("#theme").onclick = () => {
+  const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.dataset.theme = dark ? "light" : "dark";
+  store.set("laya.theme", document.documentElement.dataset.theme);
+};
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); }
+  if (tourStep >= 0 && e.key === "Escape") endTour();
+  if (tourStep >= 0 && e.key === "ArrowRight") { if (++tourStep >= TOUR.length) endTour(); else drawTour(); }
+  if (tourStep > 0 && e.key === "ArrowLeft") { tourStep--; drawTour(); }
+  if (e.key === "?" && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) startTour();
+});
+addEventListener("resize", placeTour);
+addEventListener("scroll", placeTour, { passive: true });
+
+const theme = store.get("laya.theme");
+if (theme) document.documentElement.dataset.theme = theme;
+loadPreset(PRESETS[store.get("laya.preset")] ? store.get("laya.preset") : "Support ticket");
+checkHealth();
+if (store.get("laya.tour") !== "done") setTimeout(startTour, 600);
+</script>
+</body>
+</html>
