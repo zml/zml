@@ -13,6 +13,9 @@ const log = std.log.scoped(.@"zml/safetensors");
 
 const BYTES_HEADER = 8;
 
+/// Upper bound on the decimal digits of an array index appended to a key path.
+const max_int_digits = std.fmt.count("{d}", .{std.math.maxInt(usize)});
+
 pub const FileType = enum {
     index,
     safetensors,
@@ -780,8 +783,11 @@ fn stringToDtype(safetensor_type: []const u8) !DataType {
 
 fn parseMetadata(allocator: std.mem.Allocator, val: std.json.Value) !Metadatas {
     var metadatas: Metadatas = .{};
-    var prefix_buf: [1024]u8 = undefined;
-    var prefix = StringBuilder.initBuffer(&prefix_buf);
+    // Key paths are built from file-supplied names, so the buffer has to grow
+    // with them rather than assume a fixed capacity.
+    var prefix: StringBuilder = .empty;
+    defer prefix.deinit(allocator);
+    try prefix.ensureTotalCapacity(allocator, 1024);
 
     try populateMetadata(allocator, &prefix, val, &metadatas);
 
@@ -829,8 +835,9 @@ fn populateMetadata(allocator: std.mem.Allocator, prefix: *StringBuilder, val: s
                 for (v.items, 0..) |item, i| {
                     const old_len = prefix.items.len;
                     if (prefix.items.len > 0) {
-                        prefix.appendAssumeCapacity('.');
+                        try prefix.append(allocator, '.');
                     }
+                    try prefix.ensureUnusedCapacity(allocator, max_int_digits);
                     prefix.items.len += std.fmt.printInt(prefix.unusedCapacitySlice(), i, 10, .lower, .{});
                     try populateMetadata(allocator, prefix, item, metadatas);
                     prefix.items.len = old_len;
@@ -842,9 +849,9 @@ fn populateMetadata(allocator: std.mem.Allocator, prefix: *StringBuilder, val: s
             while (obj_iter.next()) |entry| {
                 const old_len = prefix.items.len;
                 if (prefix.items.len > 0) {
-                    prefix.appendAssumeCapacity('.');
+                    try prefix.append(allocator, '.');
                 }
-                prefix.appendSliceAssumeCapacity(entry.key_ptr.*);
+                try prefix.appendSlice(allocator, entry.key_ptr.*);
                 try populateMetadata(allocator, prefix, entry.value_ptr.*, metadatas);
                 prefix.items.len = old_len;
             }
@@ -869,4 +876,37 @@ fn validSlice(v: std.json.Array) ?std.meta.Tag(std.json.Value) {
     }
 
     return item_type;
+}
+
+test "metadata key longer than the prefix buffer" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // `__metadata__` keys come straight from the file, a repository we did not
+    // author can make them arbitrarily long.
+    const long_key = "k" ** 2000;
+
+    var json_header: StringBuilder = .empty;
+    defer json_header.deinit(allocator);
+    try json_header.appendSlice(allocator, "{\"__metadata__\":{\"");
+    try json_header.appendSlice(allocator, long_key);
+    try json_header.appendSlice(allocator, "\":\"v\"}}");
+
+    var file_bytes: StringBuilder = .empty;
+    defer file_bytes.deinit(allocator);
+    var len_bytes: [BYTES_HEADER]u8 = undefined;
+    std.mem.writeInt(u64, &len_bytes, json_header.items.len, .little);
+    try file_bytes.appendSlice(allocator, &len_bytes);
+    try file_bytes.appendSlice(allocator, json_header.items);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = file_bytes.items });
+
+    var registry: TensorRegistry = try .fromRepo(allocator, io, tmp.dir);
+    defer registry.deinit();
+
+    const value = registry.metadata.get(long_key) orelse return error.MetadataKeyMissing;
+    try std.testing.expectEqualStrings("v", value.string);
 }
