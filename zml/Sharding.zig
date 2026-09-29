@@ -1116,11 +1116,6 @@ pub const LogicalMesh = struct {
 };
 
 pub const PhysicalList = stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK);
-pub const Binding = struct {
-    logical: Shape.Tag,
-    physical: PhysicalList,
-};
-pub const Bindings = stdx.BoundedArray(Binding, MAX_MESH_RANK);
 
 pub const Fold = struct {
     target: PhysicalAxisTag,
@@ -1169,19 +1164,19 @@ pub const Data = struct {
     logical: LogicalMesh,
 
     /// Compact binding table: logical axis -> physical axes
-    bindings: Bindings,
+    bindings: stdx.BoundedArray(PhysicalList, MAX_MESH_RANK),
 
     /// Explicit folding rules: kept axis -> ordered source axes.
     folds: Folds,
     folds_consumed: std.EnumSet(PhysicalAxisTag),
 
     pub fn binding(self: *const Data, mesh_axis: usize) []const PhysicalAxisTag {
-        return self.bindings.get(mesh_axis).physical.slice();
+        return self.bindings.get(mesh_axis).slice();
     }
 
     pub fn resolveLogicalAxis(self: *const Data, tag: Shape.Tag) ?u8 {
-        for (0.., self.bindings.slice()) |i, *b| {
-            if (std.mem.eql(u8, std.mem.span(b.logical), std.mem.span(tag))) return @truncate(i);
+        for (0.., self.logical.axes.slice()) |i, logical_axis| {
+            if (std.mem.eql(u8, std.mem.span(logical_axis), std.mem.span(tag))) return @truncate(i);
         }
         return null;
     }
@@ -1196,16 +1191,16 @@ pub const Data = struct {
         if (axis_order.len == 0) return error.InvalidPhysicalMesh;
         if (strategy.bindings.len == 0) return error.InvalidStrategy;
 
-        var bindings: Bindings = .empty;
-
-        for (logical.axes.slice()) |logical_axis| {
-            bindings.appendAssumeCapacity(.{ .logical = logical_axis, .physical = .empty });
+        // Create one binding per logical axis
+        var bindings: @FieldType(Data, "bindings") = .empty;
+        for (logical.axes.slice()) |_| {
+            bindings.appendAssumeCapacity(.empty);
         }
 
         for (strategy.bindings.slice()) |strat_binding| {
-            for (bindings.slice()) |*binding_| {
-                if (binding_.logical == strat_binding.logical) {
-                    binding_.physical = strat_binding.physical;
+            for (logical.axes.slice(), bindings.slice()) |logical_axis, *binding_| {
+                if (logical_axis == strat_binding.logical) {
+                    binding_.* = strat_binding.physical;
                     break;
                 }
             } else {
@@ -1353,7 +1348,7 @@ pub const Data = struct {
 
             if (spec.meshAxis()) |mesh_ax| {
                 const binding_ = self.bindings.get(mesh_ax);
-                for (binding_.physical.slice()) |p_tag| {
+                for (binding_.slice()) |p_tag| {
                     for (view.axes.slice(), 0..) |v_ax, i| {
                         // Only use the axis if it's bound and hasn't been consumed by a previous dimension
                         if (v_ax.contains(p_tag) and !globally_used.contains(v_ax.tag)) {
@@ -1520,21 +1515,17 @@ pub const Data = struct {
         try writer.print("Sharding(name={s})\n", .{self.name});
 
         try writer.writeAll("Bindings:\n");
-        for (self.logical.axes.slice(), self.logical.intents.slice()) |l_tag, l_intent| {
+        for (self.logical.axes.slice(), self.logical.intents.slice(), self.bindings.slice()) |l_tag, l_intent, bind| {
             try writer.print("  - {s} ({s}) -> ", .{ l_tag, @tagName(l_intent) });
 
-            if (self.binding(l_tag)) |axes| {
-                if (axes.len == 0) {
-                    try writer.writeAll("replicated\n");
-                } else {
-                    for (axes, 0..) |p, i| {
-                        if (i > 0) try writer.writeAll(", ");
-                        try writer.writeAll(@tagName(p));
-                    }
-                    try writer.writeAll("\n");
-                }
-            } else {
+            if (bind.len == 0) {
                 try writer.writeAll("unbound\n");
+            } else {
+                for (bind.slice(), 0..) |physical, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.writeAll(@tagName(physical));
+                }
+                try writer.writeAll("\n");
             }
         }
 
@@ -1574,6 +1565,12 @@ pub const Strategy = struct {
         target: PhysicalAxisTag,
         sources: PhysicalList,
     };
+    pub const Binding = struct {
+        logical: Shape.Tag,
+        physical: PhysicalList,
+    };
+
+    pub const Bindings = stdx.BoundedArray(Binding, MAX_MESH_RANK);
     pub const Folding = stdx.BoundedArray(Strategy.Fold, MAX_MESH_RANK);
 
     bindings: Bindings,

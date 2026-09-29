@@ -355,10 +355,10 @@ pub fn resolveSharding(compiler: *const Compiler, logical_axes: anytype) Shardin
     for (compiler.shardings) |sharding| {
         var covers_all: bool = true;
         for (logical_axes) |ax| {
-            const logical_ax = Shape.toTag(ax);
+            const input_axis = Shape.toTag(ax);
             var covers_this: bool = false;
-            for (sharding.data.bindings.slice()) |binding| {
-                if (std.mem.eql(u8, std.mem.span(binding.logical), std.mem.span(logical_ax))) {
+            for (sharding.data.logical.axes.slice()) |existing_axis| {
+                if (std.mem.eql(u8, std.mem.span(existing_axis), std.mem.span(input_axis))) {
                     covers_this = true;
                     break;
                 }

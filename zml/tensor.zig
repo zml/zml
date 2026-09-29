@@ -210,7 +210,7 @@ pub const Tensor = struct {
             .name = "tensor_partitioning_test",
             .physical = undefined,
             .logical = .mesh(.{ .model = .high_bandwidth }),
-            .bindings = .init(&.{.{ .logical = "model", .physical = .init(&.{.link_x}) }}),
+            .bindings = .init(&.{ .init(&.{.link_x}) }),
             .folds = .empty,
             .folds_consumed = .empty,
         };
