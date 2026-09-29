@@ -215,7 +215,7 @@ pub fn main(init: std.process.Init) !void {
             });
             defer loader.deinit();
 
-            try loader.load(io, AllTensorsModel, &model, &buffers, &store, store.meshes, .{ .progress = &progress });
+            try loader.load(io, AllTensorsModel, &model, &buffers, &store, .{ .progress = &progress });
             try loader.await(io);
 
             const took = now.untilNow(io, .awake);

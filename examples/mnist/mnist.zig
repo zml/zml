@@ -49,7 +49,7 @@ const Mnist = struct {
         var loader: zml.io.Loader = try .init(allocator, platform, .default);
         errdefer loader.deinit();
 
-        try loader.load(io, Mnist, self, &buffers, store, &.{}, .{});
+        try loader.load(io, Mnist, self, &buffers, store, .{});
         try loader.await(io);
 
         return buffers;
@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
         log.info("Compiling model....", .{});
         const start: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Compiled model [{f}]", .{start.untilNow(io, .awake)});
-        break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input}, .{ .shardings = store.meshes });
+        break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input}, .{});
     };
     defer exe.deinit();
 

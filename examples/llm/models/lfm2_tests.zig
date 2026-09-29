@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
 
-    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
+    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
     const backend = args.backend orelse zml.attention.Backend.auto(platform);
@@ -158,9 +158,9 @@ const TestContext = struct {
         defer out_buffer_expected.deinit();
 
         const exe = if (comptime @TypeOf(layer) == model.TokenEmbedding)
-            try self.platform.compileFn(self.allocator, self.io, model.TokenEmbedding.forward, .{.{ .embedding = layer, .tokens = in_tensor }}, .{ .shardings = self.activations_store.meshes })
+            try self.platform.compileFn(self.allocator, self.io, model.TokenEmbedding.forward, .{.{ .embedding = layer, .tokens = in_tensor }}, .{ .shardings = &.{self.sharding} })
         else
-            try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .shardings = self.activations_store.meshes });
+            try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .shardings = &.{self.sharding} });
         defer exe.deinit();
 
         var args = try exe.args(self.allocator);
@@ -211,7 +211,7 @@ const TestContext = struct {
         const actual_seq_len: u32 = @intCast(in_tensor.dim(.seq));
         const cache_index_tensor: zml.Tensor = .init(.{}, .u32);
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, actual_seq_len_tensor, model.ConvCache{ .state = cache_tensor }, cache_index_tensor, model.ConvParameters{ .is_prefill = false } }, .{ .shardings = self.activations_store.meshes });
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, actual_seq_len_tensor, model.ConvCache{ .state = cache_tensor }, cache_index_tensor, model.ConvParameters{ .is_prefill = false } }, .{ .shardings = &.{self.sharding} });
         defer exe.deinit();
 
         var args = try exe.args(self.allocator);
@@ -275,7 +275,7 @@ const TestContext = struct {
 
         const cache_index_tensor: zml.Tensor = .init(.{}, .u32);
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, model.KvCache{ .k = key_cache_tensor, .v = value_cache_tensor }, cache_index_tensor, self.attention_metadata, self.attention_parameters }, .{ .shardings = self.activations_store.meshes });
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, model.KvCache{ .k = key_cache_tensor, .v = value_cache_tensor }, cache_index_tensor, self.attention_metadata, self.attention_parameters }, .{ .shardings = &.{self.sharding} });
         defer exe.deinit();
 
         var args = try exe.args(self.allocator);
