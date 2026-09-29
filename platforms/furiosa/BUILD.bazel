@@ -1,9 +1,76 @@
+load("@bazel_lib//lib:copy_file.bzl", "copy_file")
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+load("//bazel:patchelf.bzl", "patchelf")
+
+[
+    patchelf(
+        name = name,
+        src = "@libzml_furiosa//:lib/" + name,
+        set_rpath = "$ORIGIN:$ORIGIN/../toolchain/usr/lib/x86_64-linux-gnu",
+        tags = ["manual"],
+    )
+    for name in [
+        "libpjrt_c_api_furiosa_plugin.so",
+        "libdevice_runtime.so",
+        "libstdc++.so.6",
+        "libunwind.so.1",
+    ]
+]
+
+zig_binary(
+    name = "compiler_launcher",
+    main = "compiler_launcher.zig",
+    tags = ["manual"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+copy_file(
+    name = "gcc_launcher",
+    src = ":compiler_launcher",
+    out = "aarch64-linux-gnu-gcc",
+    is_executable = True,
+    tags = ["manual"],
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":compiler_launcher",
+        ":gcc_launcher",
+        ":libdevice_runtime.so",
+        ":libpjrt_c_api_furiosa_plugin.so",
+        ":libstdc++.so.6",
+        ":libunwind.so.1",
+        "@furiosa_tcc//:compiler",
+        "@furiosa_tcc//:licenses",
+        "@furiosa_toolchain//:files",
+    ],
+    out = "sandbox",
+    add_directory_to_runfiles = True,
+    include_external_repositories = ["**"],
+    replace_prefixes = {
+        "compiler_launcher": "bin/furiosa-tcc",
+        "aarch64-linux-gnu-gcc": "bin/aarch64-linux-gnu-gcc",
+        "furiosa_tcc-2026.3.0.data/scripts": "libexec",
+        "furiosa_tcc-2026.3.0.dist-info": "licenses/furiosa-tcc",
+        "libdevice_runtime.so": "lib",
+        "libpjrt_c_api_furiosa_plugin.so": "lib",
+        "libstdc++.so.6": "lib",
+        "libunwind.so.1": "lib",
+        "usr": "toolchain/usr",
+        "lib": "toolchain/lib",
+    },
+    tags = ["manual"],
+)
 
 cc_library(
     name = "libzml_furiosa",
-    data = ["@libzml_furiosa"],
+    data = [":sandbox"],
     tags = ["manual"],
 )
 

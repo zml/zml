@@ -230,7 +230,7 @@ oneapi = use_extension("//platforms/oneapi:oneapi.bzl", "oneapi_packages")
 use_repo(oneapi, "libzml_oneapi")
 
 furiosa = use_extension("//platforms/furiosa:furiosa.bzl", "furiosa_packages")
-use_repo(furiosa, "libzml_furiosa")
+use_repo(furiosa, "furiosa_tcc", "furiosa_toolchain", "libzml_furiosa")
 
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libzml_tpu")
@@ -328,6 +328,13 @@ llvm.configure(targets = [
 use_repo(llvm, "llvm-project")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
+apt.install(
+    name = "apt_furiosa",
+    lock = "//platforms/furiosa:packages.lock.json",
+    manifest = "//platforms/furiosa:packages.yaml",
+)
+use_repo(apt, "apt_furiosa")
+
 apt.install(
     name = "apt_cpu",
     lock = "//platforms/cpu:packages.lock.json",

@@ -2,12 +2,11 @@
 
 The sole `furiosa` platform uses the typed TCL backend (formerly `furiosa3`).
 The default is four PEs; use `--furiosa-pe-count=8` for eight-PE Llama runs.
-Select topology before creating the first client, in a separate process for each topology.
-Tensor placement annotations, pinned-host transfers, plugin-provided layouts,
-Shardy, asynchronous execution, vanilla attention and StableHLO paged attention
-are retained. Triton attention is unavailable on this platform.
+Select topology before creating the first client, in a separate process for each
+configuration. Multi-chip execution requires eight PEs. Triton attention is
+unavailable; vanilla and StableHLO paged attention remain supported.
 
-## Build and package the PJRT plugin
+## Build and stage the project libraries
 
 Use each checkout's pinned Bazel: XLA 8.7.0 and ZML 9.1.1.
 
@@ -15,89 +14,134 @@ Use each checkout's pinned Bazel: XLA 8.7.0 and ZML 9.1.1.
 cd /home/kevin/furiosa/xla-private
 bazel build --config=hermetic_linux_x86 --jobs=16 \
   //xla/pjrt/furiosa:pjrt_c_api_furiosa_plugin
-
-mkdir -p /home/kevin/furiosa/xla-override/lib
-ln -sfn /home/kevin/furiosa/xla-private/bazel-bin/xla/pjrt/furiosa/libpjrt_c_api_furiosa_plugin.so \
-  /home/kevin/furiosa/xla-override/lib/libpjrt_c_api_furiosa_plugin.so
 ```
 
-The override needs empty `MODULE.bazel` and `REPO.bazel` files and this `BUILD.bazel`:
+This builds the PJRT plugin, not its custom Rust runtime bridge. Build the bridge
+when first preparing the override, or when its contract/generated kernels change:
+
+```sh
+cd /home/kevin/furiosa/xla-private
+bash xla/pjrt/furiosa/install_compiler.sh /home/kevin/furiosa/furiosa-sdk
+bash xla/stream_executor/furiosa/install_sdk.sh /home/kevin/furiosa/furiosa-sdk
+```
+
+The existing installer needs host Rust/Cargo and AArch64 GCC. It builds
+`xla-furiosa-opt-rt/0.8.1 bridge/19`, including copy/zero kernels. This preparation
+step is separate from the application sandbox; ZML never invokes Cargo or these
+installers. A matching already-built bridge can be used instead.
+
+Stage real files into the override. Repeat after rebuilding the plugin or bridge:
+
+```sh
+cd /home/kevin/furiosa/xla-private
+furiosa_plugin="$PWD/bazel-bin/xla/pjrt/furiosa/libpjrt_c_api_furiosa_plugin.so"
+furiosa_override=/home/kevin/furiosa/xla-override
+furiosa_sdk=/home/kevin/furiosa/furiosa-sdk
+mkdir -p "$furiosa_override/lib"
+touch "$furiosa_override/MODULE.bazel" "$furiosa_override/REPO.bazel"
+
+install -m 0755 "$furiosa_plugin" "$furiosa_override/lib/libpjrt_c_api_furiosa_plugin.so.new"
+mv -Tf "$furiosa_override/lib/libpjrt_c_api_furiosa_plugin.so.new" "$furiosa_override/lib/libpjrt_c_api_furiosa_plugin.so"
+install -m 0755 "$furiosa_sdk/libdevice_runtime.so" "$furiosa_override/lib/libdevice_runtime.so.new"
+mv -Tf "$furiosa_override/lib/libdevice_runtime.so.new" "$furiosa_override/lib/libdevice_runtime.so"
+for furiosa_lib in libstdc++.so.6 libunwind.so.1; do
+  furiosa_source=$(ldd "$furiosa_plugin" | awk -v name="$furiosa_lib" '$1 == name { print $3; exit }')
+  test -f "$furiosa_source" || exit 1
+  install -m 0755 "$furiosa_source" "$furiosa_override/lib/$furiosa_lib.new"
+  mv -Tf "$furiosa_override/lib/$furiosa_lib.new" "$furiosa_override/lib/$furiosa_lib"
+done
+```
+
+Create this `/home/kevin/furiosa/xla-override/BUILD.bazel`:
 
 ```starlark
+exports_files([
+    "lib/libpjrt_c_api_furiosa_plugin.so",
+    "lib/libdevice_runtime.so",
+    "lib/libstdc++.so.6",
+    "lib/libunwind.so.1",
+])
+
 filegroup(
     name = "libzml_furiosa",
-    srcs = ["lib/libpjrt_c_api_furiosa_plugin.so"],
+    srcs = glob(["lib/*.so*"]),
     visibility = ["//visibility:public"],
 )
 ```
 
-The repository override supplies the already-built library as runtime data.
-It does not build XLA or install an SDK. The loader follows the plugin symlink
-before loading so XLA's `$ORIGIN` paths still find its toolchain libraries
-(including `libunwind.so.1`). Keep the XLA build output and its `_solib` directory
-available; copying only the `.so` is not a standalone distribution. Rebuild XLA before running ZML after
-plugin changes; the symlink exposes the new output without a separate copy.
-No absolute local path is stored in ZML's module configuration.
-CPU-only builds need neither this override nor the Furiosa SDK.
-Enabling Furiosa without an override reports a missing-plugin diagnostic.
+The plugin's C++ and unwind libraries come from its matching XLA build. The
+runtime's `libgcc_s.so.1` comes from the pinned packages below. ZML patches copies
+of the libraries, so the assembled bundle needs neither XLA's `_solib` directory
+nor the original SDK directory. Staging replaces the previous symlink-only
+workflow; a rebuilt XLA plugin is not picked up until its staged copy is refreshed.
 
-## Run Llama
+## Automatic sandbox
 
-The inspected plugin requires TCC 2026.3.0 and runtime
-`xla-furiosa-opt-rt/0.8.1 bridge/19`, executable format 7, topology generation 1.
-The temporary SDK below must exist, or be replaced with a compatible installation.
-The runtime/compiler are separate from the PJRT shared library.
+Bazel downloads the official TCC 2026.3.0 wheel, verifies its checksum, and
+extracts the native executable. No pip or Python environment is installed.
+AArch64 GCC 13, binutils, headers, and required libraries are extracted from
+checksum-locked Ubuntu Noble packages. Regenerate that lock with:
 
 ```sh
 cd /home/kevin/furiosa/zml
-export XLA_FURIOSA_COMPILER=/tmp/furiosa-integrated-sdk/furiosa-tcc
-export XLA_FURIOSA_RUNTIME_LIBRARY=/tmp/furiosa-integrated-sdk/libdevice_runtime.so
-export XLA_FURIOSA_COMPILER_CACHE=/home/kevin/.local/state/xla-rngd/furiosa/tcl-ir-v7/zml
-export XLA_FURIOSA_VISIBLE_DEVICES=0
-unset XLA_FURIOSA_PJRT_LIBRARY
+bazel run @apt_furiosa//:lock
+```
 
+`//platforms/furiosa:sandbox` combines these dependencies with the override.
+One compiled Zig launcher supplies both compiler entry points, `furiosa-tcc`
+and `aarch64-linux-gnu-gcc`. It uses packaged tools, libraries, and a packaged
+sysroot in the compiler process; no runtime shell launcher is needed.
+The application uses runfiles to locate the bundle, including
+when launched outside the checkout. The validated host baseline is Ubuntu 24.04
+x86-64 (glibc 2.39). The host still provides glibc and its ELF loader,
+the NPU driver, device permissions, and model files. CPU-only builds need no
+Furiosa override. Enabling Furiosa without one reports a setup error.
+
+The loader automatically sets the compiler and runtime paths, replacing inherited
+`XLA_FURIOSA_COMPILER` and `XLA_FURIOSA_RUNTIME_LIBRARY` values. It always loads
+the packaged plugin; `XLA_FURIOSA_PJRT_LIBRARY` is ignored.
+
+The default visible chip is `0`. An explicit `XLA_FURIOSA_VISIBLE_DEVICES` remains
+supported, including ascending `0,1` for multi-chip execution or an empty value
+to hide all chips. An explicit `XLA_FURIOSA_COMPILER_CACHE` is also preserved.
+Otherwise the cache is created under `TEST_TMPDIR`, `XDG_CACHE_HOME`, or
+`$HOME/.cache`, in that order; without those variables an owned temporary
+directory is used. The cache namespace is
+`zml/furiosa/tcc-2026.3.0-bridge19-ir7-gcc13-v1`; bump it when changing the pinned
+toolchain or runtime/image contract. The sandbox itself remains read-only.
+
+## Run Llama
+
+No Furiosa exports or plugin-override unset are required:
+
+```sh
+cd /home/kevin/furiosa/zml
 bazel run --override_repository=libzml_furiosa=/home/kevin/furiosa/xla-override \
-  --jobs=16 --@zml//platforms:furiosa=true --@zml//platforms:cpu=false \
+  --jobs=16 --config=debug \
+  --@zml//platforms:furiosa=true --@zml//platforms:cpu=false \
   //examples/llm -- \
   --model=/var/models/meta-llama/Llama-3.1-8B-Instruct \
   --furiosa-pe-count=8 --backend=vanilla --seqlen=128 --topk=1 \
   --prompt='Count from 1 to 20, separated by commas.'
 ```
 
-The loader resolves `libzml_furiosa/lib/libpjrt_c_api_furiosa_plugin.so` using
-Bazel runfiles and repository mapping, independent of the current directory.
-`XLA_FURIOSA_PJRT_LIBRARY` optionally takes precedence for explicit debugging;
-an invalid path is an error, not a fallback. It does not bypass Bazel packaging.
-Retired variant flags, enums and environment-variable aliases are removed.
-
-Use a fresh compiler-cache namespace and recompile old serialized executables.
-Multi-chip runs require eight PEs and ascending visible devices, e.g. `0,1`.
-Pinned-host transfers require access to `/dev/dma_heap/system` and RNGD devices.
-Task linking and pooling retain plugin defaults; optional fusion remains opt-in.
-The XLA `run_llama.sh` environment-based launcher is outside this migration.
+Old serialized executables require regeneration when their contract changes;
+current executable format is 7 and topology generation is 1. Task linking and
+pooling retain plugin defaults; optional fusion remains opt-in.
 
 ## Validation
 
-See [VALIDATION.md](VALIDATION.md) for results and limitations of this migration.
-For CPU references, enable CPU alongside Furiosa and use
-`//examples/llm:llama_tests -- --platform=furiosa --furiosa-pe-count=4
---compare-cpu --forward-only --layers=32 --seqlen=1 --cache-seqlen=128`
-with the same override and model argument. Repeat with eight PEs in a new process.
-The generation executable does not accept `--platform`.
-Bazel device tests need explicit `--test_env` forwarding for compiler, runtime,
-cache and visible-device variables. Generic tests use the four-PE default.
-Historical throughput figures do not establish current correctness or performance.
-
-For focused eight-PE pinned transfers, repeated execution and input ownership, run this separate test process with the SDK exports above:
+Run the existing eight-PE hardware tests with the packaged compiler and runtime:
 
 ```sh
+cd /home/kevin/furiosa/zml
 bazel test --override_repository=libzml_furiosa=/home/kevin/furiosa/xla-override \
-  --jobs=16 --config=debug --@zml//platforms:furiosa=true --@zml//platforms:cpu=false \
-  --test_env=XLA_FURIOSA_COMPILER --test_env=XLA_FURIOSA_RUNTIME_LIBRARY \
-  --test_env=XLA_FURIOSA_COMPILER_CACHE --test_env=XLA_FURIOSA_VISIBLE_DEVICES=0 \
+  --jobs=16 --config=debug \
+  --@zml//platforms:furiosa=true --@zml//platforms:cpu=false \
   //zml:furiosa_8pe_test
 ```
 
-Repeat with `--test_env=XLA_FURIOSA_VISIBLE_DEVICES=0,1` for the small two-chip
-sharding gate. This manual target fixes PE count at eight and does not alter
-production defaults or the generic test suite's four-PE topology.
+No compiler/runtime/cache `--test_env` forwarding is needed. Repeat the hardware
+test with `--test_env=XLA_FURIOSA_VISIBLE_DEVICES=0,1` for two-chip execution.
+Pinned-host transfers require permission to access `/dev/dma_heap/system` and
+the RNGD devices.
