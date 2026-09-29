@@ -8,6 +8,7 @@ const pjrt = @import("pjrt");
 const platforms = @import("platforms");
 const stdx = @import("stdx");
 
+const constants = @import("constants.zig");
 const Platform = @import("platform.zig").Platform;
 const PlatformDevice = @import("platform.zig").Device;
 const Shape = @import("shape.zig").Shape;
@@ -51,90 +52,6 @@ pub const Partitioner = union(enum) {
         return switch (target) {
             .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal => .shardy,
         };
-    }
-};
-
-pub const Partitioning = struct {
-    partitioner: Partitioner,
-    shardings: []const Sharding,
-
-    pub fn init(partitioner: Partitioner, shardings: []const Sharding) !Partitioning {
-        stdx.debug.assert(shardings.len >= 1, "Waiting at leat 1 sharding strategy to be implemented", .{});
-        var plan: Partitioning = .{ .partitioner = partitioner, .shardings = shardings };
-
-        const first = plan.primarySharding();
-        const partitions = first.data.numPartitions();
-        const replicas = first.data.numReplicas();
-
-        for (shardings[1..]) |s| {
-            if (s.data.numPartitions() != partitions or s.data.numReplicas() != replicas) {
-                // todo: deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
-                return error.InconsistentShardingCardinality;
-            }
-        }
-
-        return plan;
-    }
-
-    pub fn numPartitions(self: Partitioning) i32 {
-        const primary = self.primarySharding();
-        return primary.data.numPartitions();
-    }
-
-    pub fn numReplicas(self: Partitioning) i32 {
-        const primary = self.primarySharding();
-        return primary.data.numReplicas();
-    }
-
-    pub fn numDevices(self: Partitioning) i32 {
-        return self.numPartitions() * self.numReplicas();
-    }
-
-    pub fn deviceAssignment(self: Partitioning, allocator: std.mem.Allocator) ![]usize {
-        return switch (self.partitioner) {
-            .shardy, .gspmd => blk: {
-                const sharding = self.primarySharding();
-                break :blk sharding.data.deviceAssignment(allocator);
-            },
-        };
-    }
-
-    pub fn tensorShardingAttr(
-        self: Partitioning,
-        allocator: std.mem.Allocator,
-        ctx: *mlir.Context,
-        shape: Shape,
-        sharding: Sharding,
-    ) error{OutOfMemory}!*const mlir.Attribute {
-        return switch (self.partitioner) {
-            .shardy => (try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape)).asAttr(),
-            .gspmd => sharding.data.gspmdShardingAttrForShape(allocator, ctx, shape) catch |err| switch (err) {
-                error.WriteFailed => error.OutOfMemory, // We're writing to memory
-                error.OutOfMemory => error.OutOfMemory,
-                // TODO(hugomano): clarify what can trigger this and consider moving the check to the Sharding creation
-                error.MissingDeviceInTile => @panic("MissingDeviceInTile"),
-            },
-        };
-    }
-
-    pub fn localShapeForShape(self: Partitioning, shape: Shape) !Shape {
-        const sharding = try self.selectSharding(shape);
-        const ordered_devices = sharding.devicesInCanonicalOrder();
-        if (ordered_devices.len == 0) return error.InvalidPhysicalMesh;
-        return sharding.shardedShape(shape);
-    }
-
-    pub fn shardableDim(self: Partitioning, shape: Shape, axis: anytype, must_divide: i64) !DimSharding {
-        const ax = shape.axis(axis);
-        const spec = shape.partition(ax);
-        if (spec != .axis) return .replicated;
-
-        const sharding = try self.selectSharding(shape);
-        return sharding.shardableDim(shape.dim(ax), spec.axis, must_divide);
-    }
-
-    fn primarySharding(self: Partitioning) Sharding {
-        return self.shardings[0];
     }
 };
 
@@ -1459,13 +1376,14 @@ pub const Data = struct {
         parent_allocator: std.mem.Allocator,
         ctx: *mlir.Context,
         shape: Shape,
+        partition: PartitionArray,
     ) error{OutOfMemory}!*const dialects.shardy.TensorShardingAttribute {
         var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
         defer arena.deinit();
         const allocator = arena.allocator();
         var any_explicit = false;
         for (0..shape.rank()) |ax| {
-            if (shape.partition(ax) != .unknown) {
+            if (partition.get(ax) != .unknown) {
                 any_explicit = true;
                 break;
             }
@@ -1571,12 +1489,12 @@ pub const Data = struct {
         return .string(ctx, try out.toOwnedSlice());
     }
 
-    pub fn deviceAssignment(self: *const Data, allocator: std.mem.Allocator) ![]usize {
+    pub fn deviceAssignment(self: *const Data, allocator: std.mem.Allocator) ![]u32 {
         const view = self.physicalView();
-        const count: usize = @intCast(view.total_devices);
+        const count: u32 = @intCast(view.total_devices);
 
-        var ids = try allocator.alloc(usize, count);
-        @memset(ids, std.math.maxInt(usize));
+        var ids = try allocator.alloc(u32, count);
+        @memset(ids, std.math.maxInt(u32));
 
         for (self.physical.devices_in_canonical_order) |d| {
             const coords = d.coords;
@@ -1585,7 +1503,7 @@ pub const Data = struct {
         }
 
         for (ids) |id| {
-            if (id == std.math.maxInt(usize)) return error.MissingDeviceInTile;
+            if (id == std.math.maxInt(u32)) return error.MissingDeviceInTile;
         }
 
         return ids;
@@ -1883,6 +1801,170 @@ pub const Placement = struct {
                 .{ axis_label, dim, @tagName(spec), shard_size, shards_count },
             );
         }
+    }
+};
+
+pub const PartitionArray = packed struct {
+    _0: PartitionSpec,
+    _1: PartitionSpec,
+    _2: PartitionSpec,
+    _3: PartitionSpec,
+    _4: PartitionSpec,
+    _5: PartitionSpec,
+    _6: PartitionSpec,
+    _7: PartitionSpec,
+
+    pub const unknown: PartitionArray = splat(.unknown);
+
+    pub const MAX_RANK = constants.MAX_RANK;
+    const Vec = @Vector(MAX_RANK, u4);
+
+    pub fn init(specs: []const PartitionSpec) PartitionArray {
+        var res: PartitionArray = unknown;
+        for (0.., specs) |i, spec| {
+            res = res.set(i, spec);
+        }
+        return res;
+    }
+
+    pub fn replicated(rank_: usize) PartitionArray {
+        std.debug.assert(rank_ <= MAX_RANK);
+        const full_replicated: Vec = @splat(@intFromEnum(PartitionSpec.replicated));
+        const mask = std.simd.iota(u4, 8) < @as(Vec, @splat(@truncate(rank_)));
+        return @bitCast(@select(u4, mask, full_replicated, @as(Vec, @bitCast(unknown))));
+    }
+
+    pub fn splat(spec: PartitionSpec) PartitionArray {
+        const vec: Vec = @splat(@intFromEnum(spec));
+        return @bitCast(vec);
+    }
+
+    pub fn get(array: PartitionArray, ax: usize) PartitionSpec {
+        std.debug.assert(ax < MAX_RANK);
+        const pack: u32 = @bitCast(array);
+        const shift: u5 = @intCast(4 * ax);
+        return @enumFromInt(@as(u4, @truncate(pack >> shift)));
+    }
+
+    pub fn set(array: PartitionArray, ax: usize, spec: PartitionSpec) PartitionArray {
+        std.debug.assert(ax < MAX_RANK);
+        const pack: u32 = @bitCast(array);
+        const shift: u5 = @intCast(4 * ax);
+        const mask = @as(u32, 0xf) << shift;
+        return @bitCast((pack & ~mask) | (@as(u32, @intFromEnum(spec)) << shift));
+    }
+
+    /// Inserts a spec, shifting subsequent slots right and discarding the last slot.
+    pub fn insert(array: PartitionArray, ax: usize, spec: PartitionSpec) PartitionArray {
+        std.debug.assert(ax < MAX_RANK);
+        const pack: u32 = @bitCast(array);
+        const shift: u5 = @intCast(4 * ax);
+        const lower_mask = (@as(u32, 1) << shift) - 1;
+        return @bitCast((pack & lower_mask) | ((pack & ~lower_mask) << 4) | (@as(u32, @intFromEnum(spec)) << shift));
+    }
+
+    /// Removes a spec, shifting subsequent slots left and filling the last with unknown.
+    pub fn orderedRemove(array: PartitionArray, ax: usize) PartitionArray {
+        std.debug.assert(ax < MAX_RANK);
+        const pack: u32 = @bitCast(array);
+        const shift: u5 = @intCast(4 * ax);
+        const lower_mask = (@as(u32, 1) << shift) - 1;
+        return @bitCast((pack & lower_mask) | ((pack >> 4) & ~lower_mask) | (@as(u32, @intFromEnum(PartitionSpec.unknown)) << 28));
+    }
+
+    pub fn toArray(array: PartitionArray) [MAX_RANK]PartitionSpec {
+        var res: [MAX_RANK]PartitionSpec = undefined;
+        for (&res, 0..) |*spec, ax| spec.* = array.get(ax);
+        return res;
+    }
+
+    test "packed access and updates" {
+        try std.testing.expectEqual(32, @bitSizeOf(PartitionArray));
+        try std.testing.expectEqual(4, @sizeOf(PartitionArray));
+        inline for (std.meta.tags(PartitionSpec)) |spec| {
+            const filled = PartitionArray.splat(spec);
+            for (0..MAX_RANK) |ax| {
+                try std.testing.expectEqual(spec, filled.get(ax));
+                const updated = PartitionArray.unknown.set(ax, spec);
+                for (0..MAX_RANK) |i| {
+                    try std.testing.expectEqual(if (i == ax) spec else .unknown, updated.get(i));
+                }
+            }
+        }
+        for (0..MAX_RANK + 1) |rank_| {
+            const parts = PartitionArray.replicated(rank_);
+            for (0..MAX_RANK) |ax| {
+                try std.testing.expectEqual(if (ax < rank_) PartitionSpec.replicated else .unknown, parts.get(ax));
+            }
+        }
+    }
+
+    test "insertion and removal at every slot" {
+        var parts: PartitionArray = .unknown;
+        for (0..MAX_RANK) |ax| parts = parts.set(ax, @enumFromInt(ax));
+        const original = parts.toArray();
+        for (0..MAX_RANK) |ax| {
+            var inserted = original;
+            std.mem.copyBackwards(PartitionSpec, inserted[ax + 1 ..], original[ax .. MAX_RANK - 1]);
+            inserted[ax] = .open;
+            try std.testing.expectEqualSlices(PartitionSpec, &inserted, &parts.insert(ax, .open).toArray());
+
+            var removed = original;
+            std.mem.copyForwards(PartitionSpec, removed[ax .. MAX_RANK - 1], original[ax + 1 ..]);
+            removed[MAX_RANK - 1] = .unknown;
+            try std.testing.expectEqualSlices(PartitionSpec, &removed, &parts.orderedRemove(ax).toArray());
+            try std.testing.expectEqual(parts, parts.orderedRemove(ax).insert(ax, parts.get(ax)));
+        }
+        try std.testing.expectEqual(PartitionArray.unknown, PartitionArray.unknown.orderedRemove(0));
+        const comptime_parts = comptime PartitionArray.unknown.insert(7, .open).orderedRemove(0).set(0, .replicated);
+        try std.testing.expectEqual(PartitionSpec.replicated, comptime_parts.get(0));
+        try std.testing.expectEqual(PartitionSpec.open, comptime_parts.get(6));
+        try std.testing.expectEqual(PartitionSpec.unknown, comptime_parts.get(7));
+    }
+};
+
+/// Describes how a given Shape axis behaves inside a mesh.
+/// Is it replicated ? sharded along a specific logical axis ? or open to replication ?
+pub const PartitionSpec = enum(u4) {
+    mesh_axis_0 = 0,
+    mesh_axis_1 = 1,
+    mesh_axis_2 = 2,
+    mesh_axis_3 = 3,
+    mesh_axis_4 = 4,
+    mesh_axis_5 = 5,
+    mesh_axis_6 = 6,
+    mesh_axis_7 = 7,
+    // an 8D mesh seems already a lot, the max we know about is 3D.
+    replicated = 8,
+
+    unknown = 14,
+    open = 15,
+
+    pub fn sharded(mesh_axis: u3) PartitionSpec {
+        return @enumFromInt(mesh_axis);
+    }
+
+    /// Extract the mesh axis along which we are sharded. Null if not sharded.
+    pub fn meshAxis(self: PartitionSpec) ?u3 {
+        const ax = @intFromEnum(self);
+        return if (ax < @intFromEnum(PartitionSpec.replicated)) @intCast(ax) else null;
+    }
+
+    pub fn isSharded(self: PartitionSpec) bool {
+        return @intFromEnum(self) < @intFromEnum(PartitionSpec.replicated);
+    }
+
+    pub fn isClosed(self: PartitionSpec) bool {
+        return @intFromEnum(self) <= @intFromEnum(PartitionSpec.replicated);
+    }
+
+    test isClosed {
+        try std.testing.expect(PartitionSpec.mesh_axis_2.isClosed());
+        try std.testing.expect(!PartitionSpec.open.isClosed());
+
+        try std.testing.expect(PartitionSpec.replicated.isClosed());
+
+        try std.testing.expect(!PartitionSpec.unknown.isClosed());
     }
 };
 
