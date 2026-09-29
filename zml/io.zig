@@ -72,16 +72,16 @@ pub const TensorStore = struct {
     };
 
     registry: *safetensors.TensorRegistry,
-    meshes: []const Sharding,
+    shardings: []const Sharding,
     id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
-    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, meshes: []const Sharding) TensorStore {
+    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, shardings: []const Sharding) TensorStore {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
             .registry = registry,
-            .meshes = arena.allocator().dupe(Sharding, meshes) catch @panic("OOM"),
+            .shardings = arena.allocator().dupe(Sharding, shardings) catch @panic("OOM"),
             .id_to_sources = .empty,
             .allocator = allocator,
             .arena = arena,
@@ -149,16 +149,17 @@ pub const TensorStore = struct {
 
     pub fn getSharding(store: *const TensorStore, name: @EnumLiteral()) Sharding {
         const name_slice = @tagName(name);
-        for (store.meshes) |mesh| {
+        for (store.shardings) |mesh| {
             if (std.mem.eql(u8, name_slice, mesh.data.name)) {
                 return mesh;
             }
         }
+        if (std.mem.eql(u8, name_slice, "replicated")) return .replicated;
         std.debug.panic(
             \\Found no shardings named {s} in TensorStore.
             \\Try passing more shardings to `zml.TensorStore.fromRegistry`.
             \\Known shardings: {f}
-        , .{ name_slice, stdx.fmt.slice(store.meshes) });
+        , .{ name_slice, stdx.fmt.slice(store.shardings) });
     }
 
     pub const View = struct {
@@ -423,8 +424,7 @@ pub const Loader = struct {
 
     pub const LoadError = error{TransformedTensorNotDelivered};
 
-    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) LoadError!void {
-        _ = shardings; // autofix
+    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, opts: LoadOpts) LoadError!void {
         const tensor_count = meta.count(Tensor, model);
 
         var arena: std.heap.ArenaAllocator = .init(self.allocator);

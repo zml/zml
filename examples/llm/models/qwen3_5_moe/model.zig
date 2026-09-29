@@ -107,7 +107,6 @@ pub const LoadedModel = struct {
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
-        shardings: common.Shardings,
     ) !Buffers {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
@@ -122,8 +121,7 @@ pub const LoadedModel = struct {
         });
         defer loader.deinit();
 
-        const all_shardings = shardings.all();
-        try loader.load(io, Model, &self.inner, &buffers, store, &all_shardings, .{ .progress = progress });
+        try loader.load(io, Model, &self.inner, &buffers, store, .{ .progress = progress });
         try loader.await(io);
 
         const took = now.untilNow(io, .awake);
