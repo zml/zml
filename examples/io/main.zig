@@ -246,7 +246,7 @@ fn printTree(io: std.Io, writer: *std.Io.Writer, dir: std.Io.Dir, prefix: []cons
         const extension = if (is_last) "    " else "│   ";
 
         const size: u64 = switch (entry.kind) {
-            .file => blk: {
+            .file, .sym_link => blk: {
                 const stat = try dir.statFile(io, entry.name, .{});
                 break :blk stat.size;
             },
