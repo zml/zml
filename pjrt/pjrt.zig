@@ -526,6 +526,9 @@ pub const Client = opaque {
         element_type: BufferType,
         layout: MemoryLayout,
         device: ?*const Device = null,
+        /// The memory holding `device_buffer_ptr`. Takes precedence over `device`,
+        /// which designates its default memory.
+        memory: ?*const Memory = null,
         on_delete_callback: *const fn (device_buffer_ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.c) void = &struct {
             fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {}
         }.call,
@@ -546,6 +549,7 @@ pub const Client = opaque {
             .on_delete_callback = args.on_delete_callback,
             .on_delete_callback_arg = args.on_delete_callback_arg,
             .stream = @bitCast(@intFromPtr(args.stream)),
+            .memory = if (args.memory) |memory| memory.inner() else null,
         });
         return @ptrCast(ret.buffer.?);
     }
