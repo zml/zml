@@ -115,13 +115,13 @@ pub const Metadata = union(Backend) {
         }
     };
 
-    pub fn init(opts: InitOptions) Metadata {
+    pub fn init(opts: InitOptions, sharding: zml.Sharding) Metadata {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
             .attnd => @panic("Must be initialized manually"),
             .nki => .{ .nki = {} },
-            .cuda_fa2 => |o| .{ .cuda_fa2 = .init(o) },
-            .cuda_fa3 => |o| .{ .cuda_fa3 = .init(o) },
+            .cuda_fa2 => |o| .{ .cuda_fa2 = .init(o, sharding) },
+            .cuda_fa3 => |o| .{ .cuda_fa3 = .init(o, sharding) },
             .metal_fa => .{ .metal_fa = .init() },
         };
     }
@@ -176,6 +176,32 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
         .metal_fa => metal.attention(q, k, v, token_index, metadata.metal_fa),
     };
+}
+
+test "FlashAttention metadata initializes with explicit sharding outside compilation" {
+    try std.testing.expect(zml.Compiler.currentOrNull() == null);
+    const data: zml.Sharding.Data = .{
+        .name = "metadata_mesh",
+        .physical = undefined,
+        .logical = .mesh(.{ .model = .high_bandwidth }),
+        .bindings = .init(&.{.init(&.{.link_x})}),
+        .folds = .empty,
+        .folds_consumed = .empty,
+    };
+    const sharding: zml.Sharding = .{ .data = &data };
+    inline for (.{ Backend.cuda_fa2, Backend.cuda_fa3 }) |backend| {
+        const metadata: Metadata = .init(.fromBackend(backend, 16, 8), sharding);
+        const cuda_metadata = @field(metadata, @tagName(backend));
+        inline for (std.meta.fields(@TypeOf(cuda_metadata))) |field| {
+            const shape = @field(cuda_metadata, field.name).shape();
+            try std.testing.expectEqual(sharding.data, shape._sharding.data);
+            if (shape.hasTag(.h)) |axis| {
+                try std.testing.expectEqual(zml.Shape.PartitionSpec.sharded(0), shape.partition(axis));
+            } else {
+                try std.testing.expectEqual(zml.Shape.PartitionSpec.replicated, shape.partition(.meta));
+            }
+        }
+    }
 }
 
 test "attention: q=1,qh=64,kh=8" {
@@ -286,7 +312,7 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
             else => if (!backend.isAvailable(platform)) continue,
         }
 
-        const metadata: Metadata = .init(.fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)));
+        const metadata: Metadata = .init(.fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)), platform.shardings.get("model").?);
         const parameters: Parameters = .init(.fromBackend(backend));
         const exe = try platform.compileFn(
             allocator,

@@ -235,16 +235,16 @@ pub const fa2 = struct {
             num_heads: i64,
         };
 
-        pub fn init(opts: InitOptions) Metadata {
+        pub fn init(opts: InitOptions, sharding: zml.Sharding) Metadata {
             return .{
                 .softmax_lse = zml.Tensor.init(.{ .s = opts.seqlen, .h = opts.num_heads, .dummy = 1 }, .f32)
-                    .withPartitioning(.model, .{ .h = .model }),
+                    .withPartitioning(sharding, .{ .h = .model }),
 
                 .softmax_lse_accum = zml.Tensor.init(.{ .dummy = 1, .h = opts.num_heads, .hd = 128 }, .f32)
-                    .withPartitioning(.model, .{ .h = .model }),
+                    .withPartitioning(sharding, .{ .h = .model }),
 
                 .out_accum = zml.Tensor.init(.{ .s = opts.seqlen, .h = opts.num_heads, .hd = 128 }, .f32)
-                    .withPartitioning(.model, .{ .h = .model }),
+                    .withPartitioning(sharding, .{ .h = .model }),
             };
         }
 
@@ -449,16 +449,16 @@ pub const fa3 = struct {
             num_heads: i64,
         };
 
-        pub fn init(opts: InitOptions) Metadata {
+        pub fn init(opts: InitOptions, sharding: zml.Sharding) Metadata {
             return .{
-                .softmax_lse = zml.Tensor.init(.{.h = opts.num_heads * opts.seqlen * 4}, .i8)
-                    .withPartitioning(.model, .{ .h = .model }),
-                .softmax_lse_accum = zml.Tensor.init(.{.h = opts.num_heads * 128 * 4}, .i8)
-                    .withPartitioning(.model, .{ .h = .model }),
-                .out_accum = zml.Tensor.init(.{.h = opts.num_heads * opts.seqlen * 128 * 4}, .i8)
-                    .withPartitioning(.model, .{ .h = .model }),
-                .scheduler_metadata = zml.Tensor.init(.{.meta = 2}, .i32)
-                    .withPartitioning(.model, .{ .meta = .replicated }),
+                .softmax_lse = zml.Tensor.init(.{ .h = opts.num_heads * opts.seqlen * 4 }, .i8)
+                    .withPartitioning(sharding, .{ .h = .model }),
+                .softmax_lse_accum = zml.Tensor.init(.{ .h = opts.num_heads * 128 * 4 }, .i8)
+                    .withPartitioning(sharding, .{ .h = .model }),
+                .out_accum = zml.Tensor.init(.{ .h = opts.num_heads * opts.seqlen * 128 * 4 }, .i8)
+                    .withPartitioning(sharding, .{ .h = .model }),
+                .scheduler_metadata = zml.Tensor.init(.{ .meta = 2 }, .i32)
+                    .withPartitioning(sharding, .{ .meta = .replicated }),
             };
         }
 
