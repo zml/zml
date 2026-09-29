@@ -648,7 +648,7 @@ pub const KvCache = struct {
 
     pub fn init(kv_shape: zml.Shape, sharding: zml.Sharding) KvCache {
         const sharded_shape = kv_shape.withPartitioning(sharding, .{ .h = .model });
-        return .{ .k = zml.Tensor.fromShape(sharded_shape), .v = zml.Tensor.fromShape(sharded_shape) };
+        return .{ .k = .fromShape(sharded_shape), .v = .fromShape(sharded_shape) };
     }
 
     pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(KvCache) {

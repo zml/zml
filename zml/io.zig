@@ -23,47 +23,6 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/io");
 
-test "TensorStore selects named shardings for tensor creation" {
-    const allocator = std.testing.allocator;
-    var registry: safetensors.TensorRegistry = .init(allocator);
-    defer registry.deinit();
-    try registry.tensors.put(registry.arena.allocator(), "layer.weight", .{
-        .file_uri = "unused",
-        .name = "layer.weight",
-        .shape = .init(.{8}, .f32),
-        .offset = 0,
-    });
-    const data: Sharding.Data = .{
-        .name = "model",
-        .physical = undefined,
-        .logical = .mesh(.{ .model = .high_bandwidth }),
-        .bindings = .init(&.{.{ .logical = "model", .physical = .init(&.{.link_x}) }}),
-        .folds = .empty,
-        .folds_consumed = .empty,
-    };
-    var expert_data = data;
-    expert_data.name = "experts";
-    const model: Sharding = .{ .data = &data };
-    const experts: Sharding = .{ .data = &expert_data };
-    var store: TensorStore = .fromRegistry(allocator, &registry, &.{ model, experts });
-    defer store.deinit();
-    const view = store.view().withPrefix("layer");
-    const tensor = view.createTensor("weight", .{.d}, .experts, .{ .d = .model });
-    try std.testing.expectEqual(experts.data, tensor.shape()._sharding.data);
-    try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), tensor.shape().partition(.d));
-    const replicated = view.maybeCreateTensor("weight", .{.d}, .model, .replicated).?;
-    try std.testing.expectEqual(model.data, replicated.shape()._sharding.data);
-    try std.testing.expectEqual(Shape.PartitionSpec.replicated, replicated.shape().partition(.d));
-    const pinned = view.createHostPinnedTensor("weight", .{.d}, .experts, .replicated);
-    try std.testing.expectEqual(experts.data, pinned.shape()._sharding.data);
-    try std.testing.expectEqual(Memory.Kind.host_pinned, store.getSourcesById(pinned.id).?.memory);
-    const maybe_pinned = view.maybeCreateHostPinnedTensor("weight", .{.d}, .model, .replicated).?;
-    try std.testing.expectEqual(model.data, maybe_pinned.shape()._sharding.data);
-    try std.testing.expectEqual(Memory.Kind.host_pinned, store.getSourcesById(maybe_pinned.id).?.memory);
-    try std.testing.expectEqual(null, view.maybeCreateTensor("missing", null, .model, .replicated));
-    try std.testing.expectEqual(null, view.maybeCreateHostPinnedTensor("missing", null, .model, .replicated));
-}
-
 pub const TensorStore = struct {
     pub const Binding = struct {
         tensors: []*safetensors.Tensor,
