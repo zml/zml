@@ -843,7 +843,7 @@ pub const Mla = struct {
         });
         const valid_topk = topk.cmp(.GE, zml.Tensor.zeroes(topk.shape()));
         const safe_topk = zml.Tensor.select(valid_topk, topk, zml.Tensor.zeroes(topk.shape()));
-        const mask = valid_topk.insertAxes(.topk, .{.h});
+        const mask = valid_topk.insertAxes(.topk, .{.h}).rename(.{ .topk = .kv });
         const selected_kv = kv_flat.gather(.{ .kv = safe_topk.rename(.{ .q = .b }) }, .{}).rename(.{ .b = .q, .topk = .kv }).convert(.f32);
 
         const dims = zml.nn.collectDims(.{ .h, .q, .kv, .hd }, &.{ q, kv_flat }, .strict) catch {
