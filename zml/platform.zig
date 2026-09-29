@@ -301,11 +301,6 @@ pub const Platform = struct {
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
-        if (target == .furiosa and !std.mem.eql(u8, pjrt_client.platformName(api), "furiosa")) {
-            log.err("Expected Furiosa PJRT client, got {s}", .{pjrt_client.platformName(api)});
-            pjrt_client.deinit(api);
-            return error.InvalidPlatform;
-        }
         const pjrt_devices = pjrt_client.addressableDevices(api);
         try validateDeviceCount(target, pjrt_devices.len);
         if (pjrt_devices.len > MAX_NUM_DEVICES) {
