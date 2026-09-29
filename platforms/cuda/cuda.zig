@@ -27,7 +27,7 @@ fn findCudaSandbox(
 }
 
 pub fn isEnabled() bool {
-    return platforms_options.cuda;
+    return platforms_options.cuda_enabled;
 }
 
 pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
