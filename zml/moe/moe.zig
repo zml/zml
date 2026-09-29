@@ -266,7 +266,7 @@ pub fn forwardMoe(
                 // Also, maybe pass `zml.nn.Linear` directly
                 if (expert_partition.isSharded()) {
                     break :b zml.ops.manualComputation(
-                        gate_up.weight.shape().sharding,
+                        gate_up.weight.shape()._sharding,
                         (struct {
                             input: zml.Tensor,
                             topk_ids: zml.Tensor,
@@ -375,7 +375,7 @@ pub fn forwardMoe(
 
             if (expert_partition.isSharded()) {
                 break :b zml.ops.manualComputation(
-                    gate_up.weight.shape().sharding,
+                    gate_up.weight.shape()._sharding,
                     (struct {
                         input: zml.Tensor,
                         topk_ids: zml.Tensor,
@@ -478,7 +478,7 @@ pub fn forwardMoe(
             }
 
             break :b zml.ops.manualComputation(
-                gate_up.weight.shape().sharding,
+                gate_up.weight.shape()._sharding,
                 (struct {
                     args: fused_experts.FusedExpertsArgs,
                     global_num_experts: i64,
@@ -514,7 +514,7 @@ pub fn forwardMoe(
             if (expert_partition.isSharded()) {
                 const global_num_experts = down.weight.dim(.expert);
                 const partial_output = zml.ops.manualComputation(
-                    gate_up.weight.shape().sharding,
+                    gate_up.weight.shape()._sharding,
                     (struct {
                         input: zml.Tensor,
                         topk_ids: zml.Tensor,

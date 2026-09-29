@@ -450,7 +450,7 @@ pub const ShortConv = struct {
         return .{
             .in_proj = .init(store.withPrefix("in_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
             .out_proj = .init(store.withPrefix("out_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .replicated, .d = .model }), null, .d),
-            .kernel = store.createTensor("conv.weight", .{ .out, .in, .kernel_size }, .replicated, .replicated),
+            .kernel = store.createTensor("conv.weight", .{ .out, .in, .kernel_size }, .model, .replicated),
             .config = config,
         };
     }

@@ -165,12 +165,12 @@ pub fn main(init: std.process.Init) !void {
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();
 
-            const sharded_sharding: zml.Sharding = try platform.registerSharding(
-                "playground_model",
+            const tensor_parallel: zml.Sharding = try platform.registerSharding(
+                "tp",
                 .mesh(.{ .model = .high_bandwidth }),
             );
 
-            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{ sharded_sharding, platform.replicated_sharding });
+            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{tensor_parallel});
             defer store.deinit();
 
             const AllTensorsModel = struct {
@@ -186,11 +186,11 @@ pub fn main(init: std.process.Init) !void {
             var load_count: usize = 0;
             while (registry_it.next()) |entry| : (load_count += 1) {
                 tensors[load_count] = switch (sharding_type) {
-                    .replicated => store.view().createTensor(entry.key_ptr.*, null, .replicated, .replicated),
+                    .replicated => store.view().createTensor(entry.key_ptr.*, null, .tp, .replicated),
                     .sharded => if (entry.value_ptr.shape.rank() > 0)
-                        store.view().createTensor(entry.key_ptr.*, null, .playground_model, .{ ._0 = .model })
+                        store.view().createTensor(entry.key_ptr.*, null, .tp, .{ ._0 = .model })
                     else
-                        store.view().createTensor(entry.key_ptr.*, null, .replicated, .replicated),
+                        store.view().createTensor(entry.key_ptr.*, null, .tp, .replicated),
                 };
             }
 

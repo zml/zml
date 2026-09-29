@@ -235,19 +235,16 @@ pub const fa2 = struct {
             num_heads: i64,
         };
 
-        pub fn init(opts: InitOptions, sharding: zml.Sharding) Metadata {
+        pub fn init(opts: InitOptions) Metadata {
             return .{
-                .softmax_lse = zml.Tensor.fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 1 }, .f32)
-                    .withTags(.{ .s, .h, .dummy })
-                    .withPartitioning(sharding, .{ .h = .model })),
+                .softmax_lse = zml.Tensor.init(.{ .s = opts.seqlen, .h = opts.num_heads, .dummy = 1 }, .f32)
+                    .withPartitioning(.model, .{ .h = .model }),
 
-                .softmax_lse_accum = zml.Tensor.fromShape(zml.Shape.init(.{ 1, opts.num_heads, 128 }, .f32)
-                    .withTags(.{ .dummy, .h, .hd })
-                    .withPartitioning(sharding, .{ .h = .model })),
+                .softmax_lse_accum = zml.Tensor.init(.{ .dummy = 1, .h = opts.num_heads, .hd = 128 }, .f32)
+                    .withPartitioning(.model, .{ .h = .model }),
 
-                .out_accum = zml.Tensor.fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 128 }, .f32)
-                    .withTags(.{ .s, .h, .hd })
-                    .withPartitioning(sharding, .{ .h = .model })),
+                .out_accum = zml.Tensor.init(.{ .s = opts.seqlen, .h = opts.num_heads, .hd = 128 }, .f32)
+                    .withPartitioning(.model, .{ .h = .model }),
             };
         }
 
@@ -452,16 +449,16 @@ pub const fa3 = struct {
             num_heads: i64,
         };
 
-        pub fn init(opts: InitOptions, sharding: zml.Sharding) Metadata {
+        pub fn init(opts: InitOptions) Metadata {
             return .{
-                .softmax_lse = zml.Tensor.fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 4}, .i8)
-                    .withTags(.{.h}).withPartitioning(sharding, .{ .h = .model })),
-                .softmax_lse_accum = zml.Tensor.fromShape(zml.Shape.init(.{opts.num_heads * 128 * 4}, .i8)
-                    .withTags(.{.h}).withPartitioning(sharding, .{ .h = .model })),
-                .out_accum = zml.Tensor.fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 128 * 4}, .i8)
-                    .withTags(.{.h}).withPartitioning(sharding, .{ .h = .model })),
-                .scheduler_metadata = zml.Tensor.fromShape(zml.Shape.init(.{2}, .i32)
-                    .withTags(.{.meta}).withPartitioning(sharding, .{ .meta = .replicated })),
+                .softmax_lse = zml.Tensor.init(.{.h = opts.num_heads * opts.seqlen * 4}, .i8)
+                    .withPartitioning(.model, .{ .h = .model }),
+                .softmax_lse_accum = zml.Tensor.init(.{.h = opts.num_heads * 128 * 4}, .i8)
+                    .withPartitioning(.model, .{ .h = .model }),
+                .out_accum = zml.Tensor.init(.{.h = opts.num_heads * opts.seqlen * 128 * 4}, .i8)
+                    .withPartitioning(.model, .{ .h = .model }),
+                .scheduler_metadata = zml.Tensor.init(.{.meta = 2}, .i32)
+                    .withPartitioning(.model, .{ .meta = .replicated }),
             };
         }
 
@@ -953,7 +950,7 @@ pub const paged_fa2 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    q.shape().sharding,
+                    q.shape()._sharding,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {
@@ -1039,7 +1036,7 @@ pub const paged_fa2 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    q.shape().sharding,
+                    q.shape()._sharding,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {
@@ -1116,7 +1113,7 @@ pub const paged_fa2 = struct {
 
                 const output_shape_decode = q_decode.shape();
                 var o_decode = zml.ops.manualComputation(
-                    q.shape().sharding,
+                    q.shape()._sharding,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {
@@ -1597,7 +1594,7 @@ pub const paged_fa3 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    q.shape().sharding,
+                    q.shape()._sharding,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {
@@ -1674,7 +1671,7 @@ pub const paged_fa3 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    q.shape().sharding,
+                    q.shape()._sharding,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {
@@ -1741,7 +1738,7 @@ pub const paged_fa3 = struct {
 
                 const decode_output_shape = q_decode.shape();
                 var o_decode = zml.ops.manualComputation(
-                    q.shape().sharding,
+                    q.shape()._sharding,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {

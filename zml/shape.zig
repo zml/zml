@@ -21,7 +21,7 @@ pub const Shape = struct {
     _dims: DimsArray = .empty,
     _tags: TagsArray = UnknownTags,
     _partitioning: PartitionArray = .unknown,
-    sharding: Sharding = .replicated,
+    _sharding: Sharding = .replicated,
 
     pub const Tag = [*:0]const u8;
     pub const TagUnknown = "_".ptr;
@@ -446,7 +446,7 @@ pub const Shape = struct {
     }
 
     pub fn reshape(self: Shape, new_shape_: anytype) Shape {
-        var new_shape: Shape = .{ ._dtype = self.dtype(), .sharding = self.sharding };
+        var new_shape: Shape = .{ ._dtype = self.dtype(), ._sharding = self._sharding };
         new_shape._dims, new_shape._tags = parseDimensions(new_shape_);
         new_shape.inferMissingAxis(self.count()) catch |err| {
             std.debug.panic("Can't reshape {any} to {any}: {t}", .{ self.dims(), new_shape.dims(), err });
@@ -797,15 +797,16 @@ pub const Shape = struct {
     } };
     pub fn withSharding(self: Shape, new_sharding: Sharding) Shape {
         var res = self;
-        res.sharding = new_sharding;
+        res._sharding = new_sharding;
         return res;
     }
 
     pub fn withPartitioning(self: Shape, sharding: Sharding, specs: anytype) Shape {
         const T = @TypeOf(specs);
 
-        var res = self.withDefaultPartitioning();
-        res.sharding = sharding;
+        var res = self;
+        res._partitioning = .unknown;
+        res._sharding = sharding;
 
         if (stdx.meta.isStruct(T)) {
             inline for (std.meta.fields(T)) |field| {
@@ -815,7 +816,7 @@ pub const Shape = struct {
                     .unknown => .unknown,
                     .open => .open,
                     else => .sharded(@intCast(sharding.data.resolveLogicalAxis(toTag(value)) orelse
-                        stdx.debug.panic("Sharding '{s}' has no logical axis '{s}'", .{ sharding.data.name, toTag(value) }))),
+                        stdx.debug.panic("Sharding {f} has no logical axis '{s}'", .{ sharding, toTag(value) }))),
                 };
                 const axis_ = res.axisFromTagMaybe(toTag(field));
 
@@ -858,7 +859,7 @@ pub const Shape = struct {
         const shape = Shape.init(.{ .a = 8, .b = 16, .c = 32 }, .f32);
         const first = shape.withPartitioning(test_sharding, .{ .a = .batch, .b = .feature, .c = .open });
         const second = first.withPartitioning(other_sharding, .{ .a = .batch });
-        try testing.expectEqual(other_sharding.data, second.sharding.data);
+        try testing.expectEqual(other_sharding.data, second._sharding.data);
         try testing.expectEqual(PartitionSpec.sharded(0), first.partition(.a));
         try testing.expectEqual(PartitionSpec.sharded(1), second.partition(.a));
         try testing.expectEqual(PartitionSpec.unknown, second.partition(.b));

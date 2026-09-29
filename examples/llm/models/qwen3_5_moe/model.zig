@@ -605,13 +605,14 @@ pub const SelfAttn = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache.SelfAttnCache,
     ) struct { zml.Tensor, KvCache.SelfAttnCache } {
-        const x_qkv = x.withPartitioning(.model, .{ .d = .replicated });
+        const tp = zml.Compiler.current().getSharding(.model);
+        const x_qkv = x.withPartitioning(tp, .{ .d = .replicated });
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
-        const kv_head_sharding = k.shape().sharding.shardableDim(k.dim(.h), .model, q.dim(.h));
+        const kv_head_sharding = tp.shardableDim(k.dim(.h), .model, q.dim(.h));
 
-        q = q.withPartitioning(.model, .{ .s = .replicated, .h = .model, .hd = .replicated });
-        gate = gate.withPartitioning(.model, .{ .s = .replicated, .d_out_proj = .model });
+        q = q.withPartitioning(tp, .{ .s = .replicated, .h = .model, .hd = .replicated });
+        gate = gate.withPartitioning(tp, .{ .s = .replicated, .d_out_proj = .model });
         k = partitionProjectedKv(k, kv_head_sharding);
         v = partitionProjectedKv(v, kv_head_sharding);
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
@@ -625,14 +626,14 @@ pub const SelfAttn = struct {
         const cos, const sin = self.rotary_embed.getCosAndSin(position_ids, dtype);
         q = self.rotary_embed.applyRope(q, cos, sin);
         k = self.rotary_embed.applyRope(k, cos, sin);
-        q = q.withPartitioning(.model, .{ .s = .replicated, .h = .model, .hd = .replicated });
+        q = q.withPartitioning(tp, .{ .s = .replicated, .h = .model, .hd = .replicated });
         k = partitionProjectedKv(k, kv_head_sharding);
         v = partitionProjectedKv(v, kv_head_sharding);
 
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
-        q = q.rename(.{ .s = .q }).withPartitioning(.model, .{ .q = .replicated, .h = .model, .hd = .replicated });
+        q = q.rename(.{ .s = .q }).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated });
         k = partitionCachedKv(k, kv_head_sharding);
         v = partitionCachedKv(v, kv_head_sharding);
 
@@ -641,12 +642,12 @@ pub const SelfAttn = struct {
             k,
             v,
             token_index,
-            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads), x.shape().sharding),
+            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads)),
             zml.attention.Parameters.init(.fromBackend(.vanilla)),
-        ).withPartitioning(.model, .{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
+        ).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());
-        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d }), gated_output.dtype()).rename(.{ .dout = .d }).withPartitioning(.model, .{ .d = .replicated });
+        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d }), gated_output.dtype()).rename(.{ .dout = .d }).withPartitioning(tp, .{ .d = .replicated });
 
         return .{ projected_output, new_kv_cache };
     }

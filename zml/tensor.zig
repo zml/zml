@@ -220,14 +220,14 @@ pub const Tensor = struct {
         const replacement: Sharding = .{ .data = &replacement_data };
         const input = Tensor.fromShape(Shape.init(.{ .h = 8 }, .f32).withSharding(sharding));
         const shaped = Tensor.fromShape(Shape.init(.{ .h = 8 }, .f32).withPartitioning(sharding, .{ .h = .model }));
-        try std.testing.expectEqual(sharding.data, shaped.shape().sharding.data);
+        try std.testing.expectEqual(sharding.data, shaped.shape()._sharding.data);
         try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), shaped.shape().partition(.h));
-        try std.testing.expectEqual(sharding.data, shaped.shape().reshape(.{ 2, 4 }).sharding.data);
+        try std.testing.expectEqual(sharding.data, shaped.shape().reshape(.{ 2, 4 })._sharding.data);
         const partitioned = input.withPartitioning(sharding, .{ .h = .model });
-        try std.testing.expectEqual(sharding.data, partitioned._shape.sharding.data);
+        try std.testing.expectEqual(sharding.data, partitioned._shape._sharding.data);
         try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), partitioned.shape().partition(.h));
         const resharded = input.withPartitioning(replacement, .{ .h = .model });
-        try std.testing.expectEqual(replacement.data, resharded._shape.sharding.data);
+        try std.testing.expectEqual(replacement.data, resharded._shape._sharding.data);
         try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), resharded.shape().partition(.h));
     }
 
@@ -4618,7 +4618,7 @@ pub const Tensor = struct {
         defer ctx.arena.allocator().free(full_name);
         switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
-                ops.manualComputation(input._shape.sharding, (struct {
+                ops.manualComputation(input._shape._sharding, (struct {
                     input: Tensor,
                     name: []const u8,
 

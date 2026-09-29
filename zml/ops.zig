@@ -2582,7 +2582,7 @@ fn manualComputationInternal(
     const BodyOutputShapesT = stdx.meta.FnParam(body_fn, 1);
 
     const ctx = Compiler.current();
-    const sharding = sharding_.resolve(ctx.platform);
+    const sharding = sharding_.resolveReplicated(ctx.platform);
     const scope = ctx.currentScope();
 
     var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
@@ -2904,7 +2904,7 @@ test "manualComputation uses the explicit mesh for every input and output" {
             .replicated = replicated_input,
             .expected_local_dim = local_shape.dim(.h),
         }, .{ shape, replicated_shape });
-        for (outputs) |output| try std.testing.expectEqual(selected.data, output.shape().sharding.data);
+        for (outputs) |output| try std.testing.expectEqual(selected.data, output.shape()._sharding.data);
         try std.testing.expect(outputs[0].shape().eql(shape));
         try std.testing.expect(outputs[1].shape().eql(replicated_shape));
         if (partitioner == .shardy) {

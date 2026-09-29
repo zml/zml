@@ -27,7 +27,8 @@ var _replicated: [11]u8 align(@alignOf(Data)) = "_replicated".*;
 // special value to make public apis more fluent.
 pub const replicated: Sharding = .{ .data = @ptrCast(&_replicated) };
 
-pub fn resolve(sharding: Sharding, platform: *const Platform) Sharding {
+/// Internal helper to translate the static `zml.Sharding.replicated` into a working Sharding object
+pub fn resolveReplicated(sharding: Sharding, platform: *const Platform) Sharding {
     return if (sharding.data == replicated.data) platform.replicated_sharding else sharding;
 }
 
