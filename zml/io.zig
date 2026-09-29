@@ -23,6 +23,47 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/io");
 
+test "TensorStore selects named shardings for tensor creation" {
+    const allocator = std.testing.allocator;
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try registry.tensors.put(registry.arena.allocator(), "layer.weight", .{
+        .file_uri = "unused",
+        .name = "layer.weight",
+        .shape = .init(.{8}, .f32),
+        .offset = 0,
+    });
+    const data: Sharding.Data = .{
+        .name = "model",
+        .physical = undefined,
+        .logical = .mesh(.{ .model = .high_bandwidth }),
+        .bindings = .init(&.{.{ .logical = "model", .physical = .init(&.{.link_x}) }}),
+        .folds = .empty,
+        .folds_consumed = .empty,
+    };
+    var expert_data = data;
+    expert_data.name = "experts";
+    const model: Sharding = .{ .data = &data };
+    const experts: Sharding = .{ .data = &expert_data };
+    var store: TensorStore = .fromRegistry(allocator, &registry, &.{ model, experts });
+    defer store.deinit();
+    const view = store.view().withPrefix("layer");
+    const tensor = view.createTensor("weight", .{.d}, .experts, .{ .d = .model });
+    try std.testing.expectEqual(experts.data, tensor.shape().sharding.data);
+    try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), tensor.shape().partition(.d));
+    const replicated = view.maybeCreateTensor("weight", .{.d}, .model, .replicated).?;
+    try std.testing.expectEqual(model.data, replicated.shape().sharding.data);
+    try std.testing.expectEqual(Shape.PartitionSpec.replicated, replicated.shape().partition(.d));
+    const pinned = view.createHostPinnedTensor("weight", .{.d}, .experts, .replicated);
+    try std.testing.expectEqual(experts.data, pinned.shape().sharding.data);
+    try std.testing.expectEqual(Memory.Kind.host_pinned, store.getSourcesById(pinned.id).?.memory);
+    const maybe_pinned = view.maybeCreateHostPinnedTensor("weight", .{.d}, .model, .replicated).?;
+    try std.testing.expectEqual(model.data, maybe_pinned.shape().sharding.data);
+    try std.testing.expectEqual(Memory.Kind.host_pinned, store.getSourcesById(maybe_pinned.id).?.memory);
+    try std.testing.expectEqual(null, view.maybeCreateTensor("missing", null, .model, .replicated));
+    try std.testing.expectEqual(null, view.maybeCreateHostPinnedTensor("missing", null, .model, .replicated));
+}
+
 pub const TensorStore = struct {
     pub const Binding = struct {
         tensors: []*safetensors.Tensor,
@@ -31,14 +72,16 @@ pub const TensorStore = struct {
     };
 
     registry: *safetensors.TensorRegistry,
+    meshes: []const Sharding,
     id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
-    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry) TensorStore {
-        const arena: std.heap.ArenaAllocator = .init(allocator);
+    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, meshes: []const Sharding) TensorStore {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
             .registry = registry,
+            .meshes = arena.allocator().dupe(Sharding, meshes) catch @panic("OOM"),
             .id_to_sources = .empty,
             .allocator = allocator,
             .arena = arena,
@@ -104,6 +147,20 @@ pub const TensorStore = struct {
         return .{ .store = self };
     }
 
+    pub fn getSharding(store: *const TensorStore, name: @EnumLiteral()) Sharding {
+        const name_slice = @tagName(name);
+        for (store.meshes) |mesh| {
+            if (std.mem.eql(u8, name_slice, mesh.data.name)) {
+                return mesh;
+            }
+        }
+        std.debug.panic(
+            \\Found no shardings named {s} in TensorStore.
+            \\Try passing more shardings to `zml.TensorStore.fromRegistry`.
+            \\Known shardings: {f}
+        , .{ name_slice, stdx.fmt.slice(store.meshes) });
+    }
+
     pub const View = struct {
         store: *TensorStore,
 
@@ -166,15 +223,15 @@ pub const TensorStore = struct {
             memory: Memory.Kind = .default,
         };
 
-        pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{});
+        pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, sharding: @EnumLiteral(), partitioning: anytype) ?Tensor {
+            return self.maybeCreateTensorInternal(subkey, tagz, sharding, partitioning, .{});
         }
 
-        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{ .memory = .host_pinned });
+        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, sharding: @EnumLiteral(), partitioning: anytype) ?Tensor {
+            return self.maybeCreateTensorInternal(subkey, tagz, sharding, partitioning, .{ .memory = .host_pinned });
         }
 
-        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype, opts: CreateTensorOpts) ?Tensor {
+        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tagz: anytype, sharding_name: @EnumLiteral(), partitioning: anytype, opts: CreateTensorOpts) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             const source = self.store.dupeSource(key) orelse return null;
@@ -183,9 +240,10 @@ pub const TensorStore = struct {
             errdefer self.store.arena.allocator().free(sources);
             sources[0] = source;
 
+            const sharding = self.store.getSharding(sharding_name);
             var shape = source.shape;
             shape = applyTags(shape, tagz);
-            shape = applyPartitioning(shape, partitioning);
+            shape = applyPartitioning(shape, sharding, partitioning);
 
             const tensor: Tensor = .fromShape(shape);
             self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = opts.memory }) catch |e| std.debug.panic("Not handling {} errors", .{e});
@@ -193,13 +251,13 @@ pub const TensorStore = struct {
             return tensor;
         }
 
-        pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{}) orelse
+        pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, sharding: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateTensorInternal(subkey, tagz, sharding, partitioning, .{}) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{ .memory = .host_pinned }) orelse
+        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, sharding: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateTensorInternal(subkey, tagz, sharding, partitioning, .{ .memory = .host_pinned }) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
@@ -216,8 +274,8 @@ pub const TensorStore = struct {
             return shape;
         }
 
-        fn applyPartitioning(shape_: Shape, partitioning: anytype) Shape {
-            var shape = shape_;
+        fn applyPartitioning(shape_: Shape, sharding: Sharding, partitioning: anytype) Shape {
+            var shape = shape_.withSharding(sharding);
 
             if (@TypeOf(partitioning) == @TypeOf(null)) {
                 @compileError("TensorStore.View.createTensor partitioning cannot be null; pass .replicated or an explicit partitioning");
@@ -229,7 +287,7 @@ pub const TensorStore = struct {
                     .replicated => shape = shape.withReplicatedPartitioning(),
                     else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
                 },
-                else => shape = shape.withPartitioning(partitioning),
+                else => shape = shape.withPartitioning(sharding, partitioning),
             }
 
             return shape;
@@ -436,7 +494,7 @@ pub const Loader = struct {
         };
         stdx.debug.assert(!sources.transformed and sources.tensors.len == 1, "Tensor {} is transformed or has {} sources; `load` only streams single-source tensors", .{ tensor.id, sources.tensors.len });
 
-        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, tensor.sharding, opts) catch |e| {
+        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, tensor.shape().sharding, opts) catch |e| {
             log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
             unreachable;
         };

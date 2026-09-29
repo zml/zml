@@ -70,8 +70,8 @@ pub const Shardings = struct {
         }
     }
 
-    pub fn all(self: Shardings) [2]zml.Sharding {
-        return .{ self.model, self.experts };
+    pub fn all(self: Shardings) [3]zml.Sharding {
+        return .{ self.model, self.experts, self.replicated };
     }
 };
 

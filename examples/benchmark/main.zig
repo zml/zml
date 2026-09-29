@@ -5,7 +5,7 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
-    return a.dot(b, .k).withPartitioning(.{ .m = .m, .n = .replicated });
+    return a.dot(b, .k).withPartitioning(.benchmark_mesh, .{ .m = .m, .n = .replicated });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -37,8 +37,8 @@ pub fn main(init: std.process.Init) !void {
     const b_shape = zml.Shape.init(.{ .k = cli_args.size, .n = cli_args.size }, cli_args.dtype)
         .withPartitioning(benchmark_sharding, .{ .k = .replicated, .n = .n });
 
-    const a: zml.Tensor = zml.Tensor.fromShape(a_shape).withSharding(benchmark_sharding);
-    const b: zml.Tensor = zml.Tensor.fromShape(b_shape).withSharding(benchmark_sharding);
+    const a: zml.Tensor = zml.Tensor.fromShape(a_shape);
+    const b: zml.Tensor = zml.Tensor.fromShape(b_shape);
 
     var exe = blk: {
         log.info("⏱️ Compiling benchmark...", .{});

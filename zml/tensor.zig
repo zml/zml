@@ -30,7 +30,6 @@ pub const Tensor = struct {
     auto_broadcast: bool = false,
     _shape: Shape,
     _value: ?*const mlir.Value = null,
-    sharding: Sharding = .replicated,
 
     const ResolvedAxis = u3;
 
@@ -153,29 +152,26 @@ pub const Tensor = struct {
         return res;
     }
 
-    pub fn withSharding(self: Tensor, new_sharding: Sharding) Tensor {
-        var res: Tensor = self;
-        res.sharding = new_sharding;
-        return res;
-    }
+    pub fn withPartitioning(self: Tensor, sharding_: anytype, axes_: anytype) Tensor {
+        if (@TypeOf(sharding_) == @EnumLiteral()) {
+            const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit zml.Sharding object as input");
+            return self.withPartitioning(compiler.getSharding(sharding_), axes_);
+        }
 
-    pub fn withPartitioning(self: Tensor, axes_: anytype) Tensor {
-        return self.reshard(self.sharding, axes_);
-    }
-
-    pub fn reshard(self: Tensor, sharding_: Sharding, axes_: anytype) Tensor {
         const partitioned_shape = self._shape.withPartitioning(sharding_, axes_);
+        return self.withPartitioningInner(sharding_, partitioned_shape);
+    }
 
+    fn withPartitioningInner(self: Tensor, sharding: Sharding, partitioned_shape: Shape) Tensor {
         const ctx = Compiler.currentOrNull() orelse {
             var res = self;
             res._shape = partitioned_shape;
-            res.sharding = sharding_;
             return res;
         };
 
-        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding_) catch @panic("OOM");
+        const attr = ctx.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
 
-        const op_result = switch (ctx.partitioning.partitioner) {
+        const op_result = switch (ctx.partitioner) {
             .shardy => blk: {
                 const op = mlir.Operation.make(ctx.mlir_ctx, "sdy.sharding_constraint", .{
                     .operands = .{ .flat = &.{self.value()} },
@@ -206,10 +202,10 @@ pub const Tensor = struct {
             },
         };
 
-        return _result(partitioned_shape, op_result).withSharding(sharding_);
+        return _result(partitioned_shape, op_result);
     }
 
-    test "withPartitioning uses the tensor sharding and reshard retains its replacement" {
+    test "withPartitioning retains the explicitly selected sharding" {
         const data: Sharding.Data = .{
             .name = "tensor_partitioning_test",
             .physical = undefined,
@@ -222,12 +218,16 @@ pub const Tensor = struct {
         replacement_data.name = "replacement";
         const sharding: Sharding = .{ .data = &data };
         const replacement: Sharding = .{ .data = &replacement_data };
-        const input = Tensor.init(.{ .h = 8 }, .f32).withSharding(sharding);
-        const partitioned = input.withPartitioning(.{ .h = .model });
-        try std.testing.expectEqual(sharding.data, partitioned.sharding.data);
+        const input = Tensor.fromShape(Shape.init(.{ .h = 8 }, .f32).withSharding(sharding));
+        const shaped = Tensor.fromShape(Shape.init(.{ .h = 8 }, .f32).withPartitioning(sharding, .{ .h = .model }));
+        try std.testing.expectEqual(sharding.data, shaped.shape().sharding.data);
+        try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), shaped.shape().partition(.h));
+        try std.testing.expectEqual(sharding.data, shaped.shape().reshape(.{ 2, 4 }).sharding.data);
+        const partitioned = input.withPartitioning(sharding, .{ .h = .model });
+        try std.testing.expectEqual(sharding.data, partitioned._shape.sharding.data);
         try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), partitioned.shape().partition(.h));
-        const resharded = input.reshard(replacement, .{ .h = .model });
-        try std.testing.expectEqual(replacement.data, resharded.sharding.data);
+        const resharded = input.withPartitioning(replacement, .{ .h = .model });
+        try std.testing.expectEqual(replacement.data, resharded._shape.sharding.data);
         try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), resharded.shape().partition(.h));
     }
 
@@ -4333,9 +4333,12 @@ pub const Tensor = struct {
         stdx.debug.assert(self.rank() < constants.MAX_RANK - 1, "toDiagonal expects input up to {d} rank, got {f}", .{ constants.MAX_RANK - 1, self });
         const a = self.axis(axis_);
         const d = self.dim(a);
+        const p = self.shape()._partitioning.get(a);
         var res_shape = self._shape;
         res_shape._dims.replaceRange(a, 1, &.{ d, d }) catch unreachable;
         res_shape._tags.replaceRange(a, 1, &.{ @tagName(new_tags[0]), @tagName(new_tags[1]) }) catch unreachable;
+
+        res_shape._partitioning = res_shape._partitioning.insert(a, p);
 
         const values = self.insertAxes(a + 1, .{new_tags[1]}).broad(res_shape);
         const zeros = Tensor.constant(self.dtype().zero()).broad(res_shape);
@@ -4735,7 +4738,7 @@ pub const Tensor = struct {
         defer ctx.arena.allocator().free(full_name);
         switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
-                ops.manualComputation(input.sharding, (struct {
+                ops.manualComputation(input._shape.sharding, (struct {
                     input: Tensor,
                     name: []const u8,
 

@@ -190,7 +190,7 @@ convert it to a `TensorStore`:
 ```zig
 pub fn main(init: std.process.Init) !void {
     ...
-    var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry);
+    var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry, &.{platform.replicated_sharding});
     defer model_store.deinit();
 }
 ```
@@ -205,18 +205,18 @@ pub fn main(init: std.process.Init) !void {
 
     const mlp: Mlp = .{
         .up_proj = .init(
-            mlp_view.createTensor("up_proj.weight", .{ .dout, .d }, null),
-            mlp_view.maybeCreateTensor("up_proj.bias", .{.dout}, null),
+            mlp_view.createTensor("up_proj.weight", .{ .dout, .d }, .replicated, .replicated),
+            mlp_view.maybeCreateTensor("up_proj.bias", .{.dout}, .replicated, .replicated),
             .d,
         ),
         .gate_proj = .init(
-            mlp_view.createTensor("gate_proj.weight", .{ .dout, .d }, null),
-            mlp_view.maybeCreateTensor("gate_proj.bias", .{.dout}, null),
+            mlp_view.createTensor("gate_proj.weight", .{ .dout, .d }, .replicated, .replicated),
+            mlp_view.maybeCreateTensor("gate_proj.bias", .{.dout}, .replicated, .replicated),
             .d,
         ),
         .down_proj = .init(
-            mlp_view.createTensor("down_proj.weight", .{ .d, .dout }, null),
-            mlp_view.maybeCreateTensor("down_proj.bias", .{.d}, null),
+            mlp_view.createTensor("down_proj.weight", .{ .d, .dout }, .replicated, .replicated),
+            mlp_view.maybeCreateTensor("down_proj.bias", .{.d}, .replicated, .replicated),
             .dout,
         ),
     };
@@ -287,7 +287,7 @@ pub const Wrapper = struct {
 pub fn main(init: std.process.Init) !void {
     ...
 
-    var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry);
+    var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry, &.{platform.replicated_sharding});
     defer activations_store.deinit();
 
     try zml.testing.testLayer(allocator, io, platform, Wrapper{ .mlp = mlp }, .forward, activations_store.view(), "model.model.layers.0.mlp", .{ .mlp = mlp_weights }, &.{}, .{});

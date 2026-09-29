@@ -8,7 +8,6 @@ const pjrt = @import("pjrt");
 const platforms = @import("platforms");
 const stdx = @import("stdx");
 
-const constants = @import("constants.zig");
 const Platform = @import("platform.zig").Platform;
 const PlatformDevice = @import("platform.zig").Device;
 const Shape = @import("shape.zig").Shape;
@@ -1376,14 +1375,13 @@ pub const Data = struct {
         parent_allocator: std.mem.Allocator,
         ctx: *mlir.Context,
         shape: Shape,
-        partition: PartitionArray,
     ) error{OutOfMemory}!*const dialects.shardy.TensorShardingAttribute {
         var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
         defer arena.deinit();
         const allocator = arena.allocator();
         var any_explicit = false;
         for (0..shape.rank()) |ax| {
-            if (partition.get(ax) != .unknown) {
+            if (shape.partition(ax) != .unknown) {
                 any_explicit = true;
                 break;
             }
@@ -1804,168 +1802,9 @@ pub const Placement = struct {
     }
 };
 
-pub const PartitionArray = packed struct {
-    _0: PartitionSpec,
-    _1: PartitionSpec,
-    _2: PartitionSpec,
-    _3: PartitionSpec,
-    _4: PartitionSpec,
-    _5: PartitionSpec,
-    _6: PartitionSpec,
-    _7: PartitionSpec,
-
-    pub const unknown: PartitionArray = splat(.unknown);
-
-    pub const MAX_RANK = constants.MAX_RANK;
-    const Vec = @Vector(MAX_RANK, u4);
-
-    pub fn init(specs: []const PartitionSpec) PartitionArray {
-        var res: PartitionArray = unknown;
-        for (0.., specs) |i, spec| {
-            res = res.set(i, spec);
-        }
-        return res;
-    }
-
-    pub fn replicated(rank_: usize) PartitionArray {
-        std.debug.assert(rank_ <= MAX_RANK);
-        const full_replicated: Vec = @splat(@intFromEnum(PartitionSpec.replicated));
-        const mask = std.simd.iota(u4, 8) < @as(Vec, @splat(@truncate(rank_)));
-        return @bitCast(@select(u4, mask, full_replicated, @as(Vec, @bitCast(unknown))));
-    }
-
-    pub fn splat(spec: PartitionSpec) PartitionArray {
-        const vec: Vec = @splat(@intFromEnum(spec));
-        return @bitCast(vec);
-    }
-
-    pub fn get(array: PartitionArray, ax: usize) PartitionSpec {
-        std.debug.assert(ax < MAX_RANK);
-        const pack: u32 = @bitCast(array);
-        const shift: u5 = @intCast(4 * ax);
-        return @enumFromInt(@as(u4, @truncate(pack >> shift)));
-    }
-
-    pub fn set(array: PartitionArray, ax: usize, spec: PartitionSpec) PartitionArray {
-        std.debug.assert(ax < MAX_RANK);
-        const pack: u32 = @bitCast(array);
-        const shift: u5 = @intCast(4 * ax);
-        const mask = @as(u32, 0xf) << shift;
-        return @bitCast((pack & ~mask) | (@as(u32, @intFromEnum(spec)) << shift));
-    }
-
-    /// Inserts a spec, shifting subsequent slots right and discarding the last slot.
-    pub fn insert(array: PartitionArray, ax: usize, spec: PartitionSpec) PartitionArray {
-        std.debug.assert(ax < MAX_RANK);
-        const pack: u32 = @bitCast(array);
-        const shift: u5 = @intCast(4 * ax);
-        const lower_mask = (@as(u32, 1) << shift) - 1;
-        return @bitCast((pack & lower_mask) | ((pack & ~lower_mask) << 4) | (@as(u32, @intFromEnum(spec)) << shift));
-    }
-
-    /// Removes a spec, shifting subsequent slots left and filling the last with unknown.
-    pub fn orderedRemove(array: PartitionArray, ax: usize) PartitionArray {
-        std.debug.assert(ax < MAX_RANK);
-        const pack: u32 = @bitCast(array);
-        const shift: u5 = @intCast(4 * ax);
-        const lower_mask = (@as(u32, 1) << shift) - 1;
-        return @bitCast((pack & lower_mask) | ((pack >> 4) & ~lower_mask) | (@as(u32, @intFromEnum(PartitionSpec.unknown)) << 28));
-    }
-
-    pub fn toArray(array: PartitionArray) [MAX_RANK]PartitionSpec {
-        var res: [MAX_RANK]PartitionSpec = undefined;
-        for (&res, 0..) |*spec, ax| spec.* = array.get(ax);
-        return res;
-    }
-
-    test "packed access and updates" {
-        try std.testing.expectEqual(32, @bitSizeOf(PartitionArray));
-        try std.testing.expectEqual(4, @sizeOf(PartitionArray));
-        inline for (std.meta.tags(PartitionSpec)) |spec| {
-            const filled = PartitionArray.splat(spec);
-            for (0..MAX_RANK) |ax| {
-                try std.testing.expectEqual(spec, filled.get(ax));
-                const updated = PartitionArray.unknown.set(ax, spec);
-                for (0..MAX_RANK) |i| {
-                    try std.testing.expectEqual(if (i == ax) spec else .unknown, updated.get(i));
-                }
-            }
-        }
-        for (0..MAX_RANK + 1) |rank_| {
-            const parts = PartitionArray.replicated(rank_);
-            for (0..MAX_RANK) |ax| {
-                try std.testing.expectEqual(if (ax < rank_) PartitionSpec.replicated else .unknown, parts.get(ax));
-            }
-        }
-    }
-
-    test "insertion and removal at every slot" {
-        var parts: PartitionArray = .unknown;
-        for (0..MAX_RANK) |ax| parts = parts.set(ax, @enumFromInt(ax));
-        const original = parts.toArray();
-        for (0..MAX_RANK) |ax| {
-            var inserted = original;
-            std.mem.copyBackwards(PartitionSpec, inserted[ax + 1 ..], original[ax .. MAX_RANK - 1]);
-            inserted[ax] = .open;
-            try std.testing.expectEqualSlices(PartitionSpec, &inserted, &parts.insert(ax, .open).toArray());
-
-            var removed = original;
-            std.mem.copyForwards(PartitionSpec, removed[ax .. MAX_RANK - 1], original[ax + 1 ..]);
-            removed[MAX_RANK - 1] = .unknown;
-            try std.testing.expectEqualSlices(PartitionSpec, &removed, &parts.orderedRemove(ax).toArray());
-            try std.testing.expectEqual(parts, parts.orderedRemove(ax).insert(ax, parts.get(ax)));
-        }
-        try std.testing.expectEqual(PartitionArray.unknown, PartitionArray.unknown.orderedRemove(0));
-        const comptime_parts = comptime PartitionArray.unknown.insert(7, .open).orderedRemove(0).set(0, .replicated);
-        try std.testing.expectEqual(PartitionSpec.replicated, comptime_parts.get(0));
-        try std.testing.expectEqual(PartitionSpec.open, comptime_parts.get(6));
-        try std.testing.expectEqual(PartitionSpec.unknown, comptime_parts.get(7));
-    }
-};
-
-/// Describes how a given Shape axis behaves inside a mesh.
-/// Is it replicated ? sharded along a specific logical axis ? or open to replication ?
-pub const PartitionSpec = enum(u4) {
-    mesh_axis_0 = 0,
-    mesh_axis_1 = 1,
-    mesh_axis_2 = 2,
-    mesh_axis_3 = 3,
-    mesh_axis_4 = 4,
-    mesh_axis_5 = 5,
-    mesh_axis_6 = 6,
-    mesh_axis_7 = 7,
-    // an 8D mesh seems already a lot, the max we know about is 3D.
-    replicated = 8,
-
-    unknown = 14,
-    open = 15,
-
-    pub fn sharded(mesh_axis: u3) PartitionSpec {
-        return @enumFromInt(mesh_axis);
-    }
-
-    /// Extract the mesh axis along which we are sharded. Null if not sharded.
-    pub fn meshAxis(self: PartitionSpec) ?u3 {
-        const ax = @intFromEnum(self);
-        return if (ax < @intFromEnum(PartitionSpec.replicated)) @intCast(ax) else null;
-    }
-
-    pub fn isSharded(self: PartitionSpec) bool {
-        return @intFromEnum(self) < @intFromEnum(PartitionSpec.replicated);
-    }
-
-    pub fn isClosed(self: PartitionSpec) bool {
-        return @intFromEnum(self) <= @intFromEnum(PartitionSpec.replicated);
-    }
-
-    test isClosed {
-        try std.testing.expect(PartitionSpec.mesh_axis_2.isClosed());
-        try std.testing.expect(!PartitionSpec.open.isClosed());
-
-        try std.testing.expect(PartitionSpec.replicated.isClosed());
-
-        try std.testing.expect(!PartitionSpec.unknown.isClosed());
-    }
+pub const Partitioning = struct {
+    sharding: Sharding,
+    partition: Shape.PartitionArray,
 };
 
 const AxisSplit = struct {

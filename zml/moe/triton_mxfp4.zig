@@ -57,7 +57,7 @@ pub fn fusedExperts(
     };
 
     return if (expert_parallelism)
-        zml.ops.manualComputation(gate_up.weight.sharding, Context.body, context, input.shape())
+        zml.ops.manualComputation(gate_up.weight.shape().sharding, Context.body, context, input.shape())
     else
         context.body(input.shape());
 }
