@@ -502,7 +502,6 @@ pub const Shape = struct {
     /// Reshape a given shape but keep the same total number of elements.
     /// Partitioning information is generally NOT preserved,
     /// unless input was fully replicated.
-
     pub fn reshape(self: Shape, new_shape_: anytype) Shape {
         const _dims, const _tags = parseDimensions(new_shape_);
         var new_shape: Shape = .{
