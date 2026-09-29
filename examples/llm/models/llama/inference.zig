@@ -36,7 +36,7 @@ pub const CompilationParameters = struct {
             .rng = .init(),
             .attention_metadata = switch (backend) {
                 .attnd => .{ .attnd = .init() },
-                else => .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads)), shardings.model),
+                else => .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
             },
             .prefill_attention_parameters = switch (backend) {
                 .attnd => .{ .attnd = .init(.{

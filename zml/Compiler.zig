@@ -166,7 +166,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
     var needs_replicated: bool = true;
     for (opts.shardings) |sharding| {
         if (sharding.data == platform.replicated_sharding.data) needs_replicated = false;
-        shardings.appendAssumeCapacity(sharding.resolve(platform));
+        shardings.appendAssumeCapacity(sharding.resolveReplicated(platform));
     }
     if (needs_replicated) shardings.appendAssumeCapacity(platform.replicated_sharding);
 
@@ -638,7 +638,7 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
                 .shape = og_shape,
-                .sharding = tensor.shape().sharding.resolve(ctx.compiler.platform),
+                .sharding = tensor.shape()._sharding.resolveReplicated(ctx.compiler.platform),
                 .value = value,
             });
         }
@@ -675,7 +675,7 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
                 // TODO: clarify why this og_shape and not packedShape()
                 .shape = og_shape,
                 // Note: the panic should have been triggered during createBlockArguments or emitMlir
-                .sharding = tensor.shape().sharding.resolve(ctx.compiler.platform),
+                .sharding = tensor._shape._sharding.resolveReplicated(ctx.compiler.platform),
                 .value = value,
             });
         }

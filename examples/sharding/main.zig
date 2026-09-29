@@ -39,7 +39,7 @@ const DemoModel = struct {
 
         const gate = y.scale(0.01).sigmoid();
         return zml.ops.manualComputation(
-            input.shape().sharding,
+            input.shape()._sharding,
             (struct {
                 y: zml.Tensor,
                 gate: zml.Tensor,

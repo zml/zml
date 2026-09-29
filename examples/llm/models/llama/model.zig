@@ -622,8 +622,8 @@ pub const KvCache = struct {
         const sharded_shape = kv_shape.withPartitioning(sharding, .{ .h = .model });
 
         return .{
-            .k = zml.Tensor.fromShape(sharded_shape),
-            .v = zml.Tensor.fromShape(sharded_shape),
+            .k = .fromShape(sharded_shape),
+            .v = .fromShape(sharded_shape),
         };
     }
 

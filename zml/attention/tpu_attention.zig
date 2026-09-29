@@ -230,7 +230,7 @@ pub const mosaic_tpu = struct {
         const prepared = prepareInputs(parameters, q, kv_cache);
 
         const q_out = zml.ops.manualComputation(
-            q.shape().sharding,
+            q.shape()._sharding,
             (struct {
                 q: zml.Tensor,
                 kv_pages: zml.Tensor,

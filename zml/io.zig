@@ -49,16 +49,16 @@ test "TensorStore selects named shardings for tensor creation" {
     defer store.deinit();
     const view = store.view().withPrefix("layer");
     const tensor = view.createTensor("weight", .{.d}, .experts, .{ .d = .model });
-    try std.testing.expectEqual(experts.data, tensor.shape().sharding.data);
+    try std.testing.expectEqual(experts.data, tensor.shape()._sharding.data);
     try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), tensor.shape().partition(.d));
     const replicated = view.maybeCreateTensor("weight", .{.d}, .model, .replicated).?;
-    try std.testing.expectEqual(model.data, replicated.shape().sharding.data);
+    try std.testing.expectEqual(model.data, replicated.shape()._sharding.data);
     try std.testing.expectEqual(Shape.PartitionSpec.replicated, replicated.shape().partition(.d));
     const pinned = view.createHostPinnedTensor("weight", .{.d}, .experts, .replicated);
-    try std.testing.expectEqual(experts.data, pinned.shape().sharding.data);
+    try std.testing.expectEqual(experts.data, pinned.shape()._sharding.data);
     try std.testing.expectEqual(Memory.Kind.host_pinned, store.getSourcesById(pinned.id).?.memory);
     const maybe_pinned = view.maybeCreateHostPinnedTensor("weight", .{.d}, .model, .replicated).?;
-    try std.testing.expectEqual(model.data, maybe_pinned.shape().sharding.data);
+    try std.testing.expectEqual(model.data, maybe_pinned.shape()._sharding.data);
     try std.testing.expectEqual(Memory.Kind.host_pinned, store.getSourcesById(maybe_pinned.id).?.memory);
     try std.testing.expectEqual(null, view.maybeCreateTensor("missing", null, .model, .replicated));
     try std.testing.expectEqual(null, view.maybeCreateHostPinnedTensor("missing", null, .model, .replicated));
@@ -494,14 +494,14 @@ pub const Loader = struct {
         };
         stdx.debug.assert(!sources.transformed and sources.tensors.len == 1, "Tensor {} is transformed or has {} sources; `load` only streams single-source tensors", .{ tensor.id, sources.tensors.len });
 
-        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, tensor.shape().sharding, opts) catch |e| {
+        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, opts) catch |e| {
             log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
             unreachable;
         };
     }
 
-    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: LoadOpts) void {
-        self.loadSingleInner(io, source, shape, buffer, .device, shardings, opts) catch |e| {
+    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, opts: LoadOpts) void {
+        self.loadSingleInner(io, source, shape, buffer, .device, opts) catch |e| {
             log.err("Failed to load tensor {s}: {}", .{ source.name, e });
             loaded.* = false;
             return;
@@ -516,7 +516,6 @@ pub const Loader = struct {
         shape: Shape,
         buffer: *Buffer,
         memory: Memory.Kind,
-        sharding: Sharding,
         opts: LoadOpts,
     ) !void {
         var reader = try source.reader(io, &.{}, .{});
@@ -530,7 +529,7 @@ pub const Loader = struct {
             self.dma_allocators,
             self.dma_chunk_size,
             shape,
-            sharding,
+            shape._sharding,
             buffer,
             memory,
         );
