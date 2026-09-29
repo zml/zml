@@ -1,0 +1,21 @@
+{
+  "team": {
+    "type": "choice",
+    "instructions": "Which team should handle this support ticket?",
+    "criteria": {
+      "billing": "charges, invoices, refunds",
+      "engineering": "bugs, crashes, outages",
+      "sales": "pricing, upgrades, new contracts",
+      "other": "anything else"
+    }
+  },
+  "urgency": {
+    "type": "score",
+    "instructions": "How urgent is this ticket?",
+    "criteria": ["can wait", "this week", "today: blocking or deadline"]
+  },
+  "refund": {
+    "type": "noul",
+    "instructions": "The customer asks to get money back."
+  }
+}
