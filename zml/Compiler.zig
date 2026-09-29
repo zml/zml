@@ -20,7 +20,6 @@ const Platform = @import("platform.zig").Platform;
 const tracer = @import("profiling/tracer.zig");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
-const Partitioning = Sharding.Partitioning;
 const Tensor = @import("tensor.zig").Tensor;
 
 const Compiler = @This();
@@ -35,7 +34,8 @@ mlir_ctx: *mlir.Context,
 mlir_pass_manager: *mlir.PassManager,
 module: *mlir.Module,
 platform: *const Platform,
-partitioning: Sharding.Partitioning,
+meshes: []const Sharding,
+partitioner: Sharding.Partitioner,
 
 mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
 
@@ -170,8 +170,6 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
     }
     if (needs_replicated) shardings.appendAssumeCapacity(platform.replicated_sharding);
 
-    const partitioning = Sharding.Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), shardings.items) catch @panic("OOM");
-
     return .{
         .allocator = allocator,
         .io = io,
@@ -182,7 +180,8 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
         .mlir_known_types = mlir_known_types,
         .module = module,
         .platform = platform,
-        .partitioning = partitioning,
+        .partitioner = opts.partitioner orelse .fromTarget(platform.target),
+        .meshes = shardings.items,
         .location = unknown_location,
         .unknown_location = unknown_location,
     };
@@ -276,7 +275,8 @@ test pushLocation {
         .mlir_known_types = undefined,
         .module = undefined,
         .platform = undefined,
-        .partitioning = undefined,
+        .partitioner = undefined,
+        .meshes = undefined,
         .location = unknown_location,
         .unknown_location = unknown_location,
     };
@@ -336,7 +336,7 @@ pub fn resolveSharding(compiler: *Compiler, logical_axes: anytype) Sharding {
     }
 
     var ok_sharding: ?Sharding = null;
-    for (compiler.partitioning.shardings) |sharding| {
+    for (compiler.meshes) |sharding| {
         var covers_all: bool = true;
         for (logical_axes) |ax| {
             const logical_ax = Shape.toTag(ax);
@@ -365,7 +365,7 @@ pub fn resolveSharding(compiler: *Compiler, logical_axes: anytype) Sharding {
         \\Found no shardings covering axes: {any}, expected exacty one.
         \\Try passing more shardings to `zml.compile`.
         \\Known shardings: {f}
-    , .{ logical_axes, stdx.fmt.slice(compiler.partitioning.shardings) });
+    , .{ logical_axes, stdx.fmt.slice(compiler.meshes) });
 }
 
 pub fn Typed(comptime func: anytype) type {
@@ -462,11 +462,8 @@ pub fn compileInternal(
         },
     };
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compiler.module, compiler.partitioning, opts) catch |err| {
-        compiler.handleCompilationError(io, compiler.arena.allocator(), opts, err, "Pjrt failed to compile the following MLIR");
+    const loaded_executable = compiler.compileModuleToPjrtExecutable() catch |err| {
+        compiler.handleCompilationError(io, compiler.arena.allocator(), err, "Pjrt failed to compile the following MLIR");
         return err;
     };
 
@@ -495,12 +492,11 @@ fn addPartitionerOperations(ctx: *Compiler) !void {
     const allocator = ctx.arena.allocator();
     const mlir_ctx = ctx.mlir_ctx;
     const module = ctx.module;
-    const partitioning = ctx.partitioning;
 
-    switch (partitioning.partitioner) {
+    switch (ctx.partitioner) {
         .gspmd => {},
         .shardy => {
-            for (partitioning.shardings) |sharding| {
+            for (ctx.meshes) |sharding| {
                 const attr_str = try sharding.data.sdyMeshAttr(allocator);
                 defer allocator.free(attr_str);
 
@@ -541,8 +537,8 @@ pub const TensorInfo = struct {
         var attrs: AttributeList = .empty;
 
         const mlir_ctx = compiler.mlir_ctx;
-        const sharding_attr = try compiler.partitioning.tensorShardingAttr(arena, mlir_ctx, info.shape, info.sharding);
-        const name = switch (compiler.partitioning.partitioner) {
+        const sharding_attr = try compiler.tensorShardingAttr(arena, mlir_ctx, info.shape, info.sharding);
+        const name = switch (compiler.partitioner) {
             .gspmd => "mhlo.sharding",
             .shardy => "sdy.sharding",
         };
@@ -783,6 +779,39 @@ fn repack(compiler: *Compiler, scope: *Scope, og_shape: Shape, value: *const mli
     return bit_cast_op.result(0);
 }
 
+fn validateMeshes(meshes: []const Sharding) !Partitioning {
+    stdx.debug.assert(meshes.len >= 1, "Waiting at leat 1 sharding strategy to be implemented", .{});
+
+    const first = meshes[0];
+    const partitions = first.data.numPartitions();
+    const replicas = first.data.numReplicas();
+
+    for (meshes[1..]) |s| {
+        if (s.data.numPartitions() != partitions or s.data.numReplicas() != replicas) {
+            // todo: deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
+            return error.InconsistentShardingCardinality;
+        }
+    }
+
+    return plan;
+}
+
+pub fn tensorShardingAttr(
+    compiler: *const Compiler,
+    x: Tensor,
+    sharding: Sharding,
+) error{OutOfMemory}!*const mlir.Attribute {
+    return switch (compiler.partitioner) {
+        .shardy => (try sharding.data.sdyShardingAttrForShape(compiler.allocator, compiler.mlir_ctx, x._shape, x._partition)).asAttr(),
+        .gspmd => sharding.data.gspmdShardingAttrForShape(compiler.allocator, compiler.mlir_ctx, x._shape) catch |err| switch (err) {
+            error.WriteFailed => error.OutOfMemory, // We're writing to memory
+            error.OutOfMemory => error.OutOfMemory,
+            // TODO(hugomano): clarify what can trigger this and consider moving the check to the Sharding creation
+            error.MissingDeviceInTile => @panic("MissingDeviceInTile"),
+        },
+    };
+}
+
 fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_arena: *c.upb_Arena) !void {
     const result = c.upb_Map_Set(
         map,
@@ -805,21 +834,23 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
     }
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, partitioning: Partitioning, opts: Options) !*pjrt.LoadedExecutable {
-    var upb_alloc: upb.Allocator = .init(arena);
-    const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
-    defer c.upb_Arena_Free(upb_arena);
-
-    const use_shardy_partitioner = switch (partitioning.partitioner) {
+fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.LoadedExecutable {
+    const use_shardy_partitioner = switch (compiler.partitioner) {
         .shardy => true,
         .gspmd => false,
     };
 
-    const num_partitions = partitioning.numPartitions();
-    const num_replicas = partitioning.numReplicas();
+    const platform = compiler.platform;
+    const main_mesh = compiler.meshes[0];
+    const num_partitions = main_mesh.numPartitions();
+    const num_replicas = main_mesh.numReplicas();
 
-    const device_assignment = try partitioning.deviceAssignment(arena);
+    const device_assignment = try main_mesh.deviceAssignment(compiler.allocator);
+    defer compiler.allocator.free(device_assignment);
 
+    var upb_alloc: upb.Allocator = .init(compiler.allocator);
+    const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
+    defer c.upb_Arena_Free(upb_arena);
     const options = blk: {
         const options = try upb.new(c.xla_CompileOptionsProto, upb_arena);
         c.xla_CompileOptionsProto_set_executable_build_options(options, executable_build_options_blk: {
@@ -953,9 +984,9 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
     const loaded_executable = try pjrtx.Client.compile(
         platform.pjrt_client,
         platform.pjrt_api,
-        arena,
-        io,
-        module,
+        compiler.allocator,
+        compiler.io,
+        compiler.module,
         try upb.serialize(options, upb_arena),
     );
     errdefer loaded_executable.deinit();
