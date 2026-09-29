@@ -183,6 +183,12 @@ pub const Tokenizer = union(Tokenizers) {
             inline else => |v| v.tokenId(token),
         };
     }
+
+    pub fn decode(self: *const Tokenizer, token_id: u32) ?[]const u8 {
+        return switch (self.*) {
+            inline else => |v| v.decode(token_id),
+        };
+    }
 };
 
 test {
