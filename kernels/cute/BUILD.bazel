@@ -1,0 +1,24 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "cute_builder",
+    tags = ["manual"],
+    srcs = [
+        "dtype.zig",
+    ],
+    import_name = "kernels/cute/builder",
+    main = "builder.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//kernels/common",
+        "//mlir",
+        "//mlir/dialects",
+        "//mlir/dialects/cute_ir",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":cute_builder"],
+)

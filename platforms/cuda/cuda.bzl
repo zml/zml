@@ -11,8 +11,8 @@ CUDA_VARIANT = "cuda13.3"
 CUDA_REDIST_JSON_SHA256 = "507eddaab1360336bc0fe17b77552e0b7dfe1e74da888671c3a2f5fad7775db1"
 
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
-CUDNN_VERSION = "9.22.0"
-CUDNN_REDIST_JSON_SHA256 = "3dbb9002d52112ef69aa09187f523ef1ff07f8baf3892ee01e540af639d8f55f"
+CUDNN_VERSION = "9.24.0"
+CUDNN_REDIST_JSON_SHA256 = "89a0626f1925d9f4ceb8d6bc0b2de160b30e92afaae5471e6cfbb50234ae5488"
 
 NVSHMEM_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/nvshmem/redist/"
 NVSHMEM_VERSION = "3.6.5"
@@ -202,6 +202,15 @@ NVSHMEM_PACKAGES = {
 }
 
 _UBUNTU_PACKAGES = {
+    "llvm-libunwind1": [
+        """filegroup(
+            name = "libunwind",
+            srcs = select({
+                "@llvm//platforms/config:linux_x86_64": ["usr/lib/x86_64-linux-gnu/libunwind.so.1"],
+                "@llvm//platforms/config:linux_aarch64": ["usr/lib/aarch64-linux-gnu/libunwind.so.1"],
+            }),
+        )""",
+    ],
     "zlib1g": [
         """filegroup(
             name = "zlib1g",
@@ -213,16 +222,14 @@ _UBUNTU_PACKAGES = {
     ],
 }
 
-PJRT_CUDA_RELEASE = "manual-2026-07-31T19-22-00Z"
-
-_PJRT_CUDA_ASSETS = {
+_PLUGINS = {
     "amd64": {
-        "sha256": "c3fe395ed8b0493975e4afeba454e0cbecec7eac540488522fd4523103e353f3",
-        "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-amd64.tar.gz",
+        "sha256": "2b10512d132339c16b38c0e9c76e4271b1b1f533e7988fb4ba019c5864df00db",
+        "url": "https://mirror.zml.ai/plugins/202609250917.103.1.3c8a2e14f8d9/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "3c23c31dbfb3a97ca1bf8558d1e8347431fa30c192236d97de7bd6539d354ca5",
-        "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-arm64.tar.gz",
+        "sha256": "0ed505366b24ea0fc4b4d1137a5c7e76c6dffb056414d93f7f355e2d7ac09475",
+        "url": "https://mirror.zml.ai/plugins/202609250917.103.1.3c8a2e14f8d9/zml-cuda-linux-arm64.tar.zst",
     },
 }
 
@@ -349,19 +356,19 @@ def _cuda_impl(mctx):
             ]),
         )
 
-    for arch, arch_config in _PJRT_CUDA_ASSETS.items():
+    for arch, arch_config in _PLUGINS.items():
         http_archive(
-            name = _repo_name("libpjrt_cuda", arch),
-            build_file = "libpjrt_cuda.BUILD.bazel",
-            url = arch_config["url"].format(release = PJRT_CUDA_RELEASE),
+            name = _repo_name("libzml_cuda", arch),
+            build_file = "libzml_cuda.BUILD.bazel",
+            url = arch_config["url"],
             sha256 = arch_config["sha256"],
         )
 
     return mctx.extension_metadata(
         reproducible = True,
         root_module_direct_deps = [
-            "libpjrt_cuda_linux_amd64",
-            "libpjrt_cuda_linux_arm64",
+            "libzml_cuda_linux_amd64",
+            "libzml_cuda_linux_arm64",
             "cuda_nvml_dev_linux_x86_64",
             "cuda_nvml_dev_linux_sbsa",
             "zlib1g_linux_arm64",

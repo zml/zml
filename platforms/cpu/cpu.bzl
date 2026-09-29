@@ -1,4 +1,5 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 load("//platforms:packages.bzl", "packages")
 
 _BUILD_FILE_DEFAULT_VISIBILITY = """\
@@ -6,47 +7,69 @@ package(default_visibility = ["//visibility:public"])
 """
 
 _BUILD_LINUX = "\n".join([
+    packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+    packages.patchelf(
+        name = "libzml_cpu_so",
+        src = "lib/libzml_cpu.so",
+        set_rpath = "$ORIGIN",
+    ),
     packages.filegroup(
-        name = "libpjrt_cpu",
-        srcs = ["libpjrt_cpu.so"],
+        name = "libzml_cpu",
+        srcs = [":libzml_cpu_so", "@llvm-libunwind1//:libunwind"],
         visibility = ["@zml//platforms/cpu:__subpackages__"],
     ),
 ])
 
 _BUILD_DARWIN = packages.filegroup(
-    name = "libpjrt_cpu",
-    srcs = ["libpjrt_cpu.dylib"],
+    name = "libzml_cpu",
+    srcs = ["lib/libzml_cpu.dylib"],
     visibility = ["@zml//platforms/cpu:__subpackages__"],
 )
 
-def _cpu_pjrt_plugin_impl(mctx):
+def _cpu_plugin_impl(mctx):
+    loaded_packages = packages.read(mctx, ["@zml//platforms/cpu:packages.lock.json"])
+    pkg = loaded_packages["llvm-libunwind1"]["amd64"]
+    http_deb_archive(
+        name = "llvm-libunwind1",
+        urls = pkg["urls"],
+        sha256 = pkg["sha256"],
+        build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + packages.filegroup(
+            name = "libunwind",
+            srcs = ["usr/lib/x86_64-linux-gnu/libunwind.so.1"],
+        ),
+    )
+
     http_archive(
-        name = "libpjrt_cpu_linux_amd64",
+        name = "libzml_cpu_linux_amd64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_LINUX,
-        sha256 = "65e631db0f842845e7799d245a414b361a3c3e77bf4cc0547c20c71f28a9fd70",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-07-03T00-10-30Z/pjrt-cpu_linux-amd64.tar.gz",
+        sha256 = "16f0040b1805864fc0c3e13fe15f8ffccaf885a59b4f625666d2618583c0ac50",
+        url = "https://mirror.zml.ai/plugins/202609250917.103.1.3c8a2e14f8d9/zml-cpu-linux-amd64.tar.zst",
     )
 
     http_archive(
-        name = "libpjrt_cpu_darwin_amd64",
+        name = "libzml_cpu_darwin_amd64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_DARWIN,
-        sha256 = "22130f752abdaaa0f3ff48e71b9191ce74b29cd3fdb0c4784f04e4c4a436f25e",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-07-03T00-10-30Z/pjrt-cpu_darwin-amd64.tar.gz",
+        sha256 = "5da35f0e471a410f3a3edba95f8a849ea017c1ed32c6fab0239a25a5d21acad4",
+        url = "https://mirror.zml.ai/plugins/202609250917.103.1.3c8a2e14f8d9/zml-cpu-darwin-amd64.tar.zst",
     )
 
     http_archive(
-        name = "libpjrt_cpu_darwin_arm64",
+        name = "libzml_cpu_darwin_arm64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_DARWIN,
-        sha256 = "14c85504d801c75fa8d157ce951a2644d8a8d7983346b3ac281aa7f64abf8390",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-07-03T00-10-30Z/pjrt-cpu_darwin-arm64.tar.gz",
+        sha256 = "b0f6a8a1486780a9433b08153d71e0e31ed0e4cde60f200346c687c9346b2d53",
+        url = "https://mirror.zml.ai/plugins/202609250917.103.1.3c8a2e14f8d9/zml-cpu-darwin-arm64.tar.zst",
     )
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = "all",
+        root_module_direct_deps = [
+            "libzml_cpu_linux_amd64",
+            "libzml_cpu_darwin_amd64",
+            "libzml_cpu_darwin_arm64",
+        ],
         root_module_direct_dev_deps = [],
     )
 
-cpu_pjrt_plugin = module_extension(
-    implementation = _cpu_pjrt_plugin_impl,
+cpu_plugin = module_extension(
+    implementation = _cpu_plugin_impl,
 )

@@ -5,12 +5,13 @@ const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/platforms/metal");
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_METAL");
+    return platforms_options.metal_enabled;
 }
 
 fn setMetalToolchainEnv(r: anytype) !void {
@@ -35,7 +36,7 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = try r.rlocation("libpjrt_metal/sandbox", &path_buf) orelse {
+    const sandbox_path = try r.rlocation("libzml_metal/sandbox", &path_buf) orelse {
         log.err("Failed to find sandbox path for Metal runtime", .{});
         return error.FileNotFound;
     };
@@ -46,7 +47,7 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_c_api_gpu_plugin.dylib" });
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libzml_metal.dylib" });
         break :blk pjrt.Api.loadFrom(path);
     };
 }

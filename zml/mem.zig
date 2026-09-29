@@ -22,8 +22,8 @@ pub const DmaAllocator = union(enum) {
     pub fn init(parent: std.mem.Allocator, device: *const Device) DmaAllocator {
         return switch (device.platform.target) {
             .cuda => .{ .dmam = .init(parent, device.platform) },
-            .oneapi, .tpu => .{ .uib = .init(device.memory(.host_pinned).?) },
-            .rocm, .cpu, .neuron, .metal => .{ .passthrough = parent },
+            .rocm, .oneapi, .tpu => .{ .uib = .init(device.memory(.host_pinned).?) },
+            .cpu, .neuron, .metal => .{ .passthrough = parent },
         };
     }
 
@@ -329,7 +329,13 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
     const ModelBufferized = Bufferized(Model);
 
     if (ModelBufferized == Buffer) {
-        bufferized_._shards = .empty;
+        bufferized_.* = .{
+            // I'm not sure I like that. I'd rather set all fields but _shards than leaving most of the m undefined.
+            ._shape = model._shape,
+            ._shards = .empty,
+            ._sharding = undefined,
+            ._platform = undefined,
+        };
         return;
     }
 

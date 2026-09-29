@@ -15,6 +15,7 @@ cc_library(
         "@llvm-project//mlir:CAPILLVM",
         "@llvm-project//mlir:CAPIMath",
         "@llvm-project//mlir:CAPIMemRef",
+        "@llvm-project//mlir:CAPIROCDL",
         "@llvm-project//mlir:CAPISCF",
         "@llvm-project//mlir:CAPITransforms",
         "@llvm-project//mlir:CAPIVector",

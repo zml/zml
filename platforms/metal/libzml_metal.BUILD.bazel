@@ -1,0 +1,17 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        "lib/libzml_metal.dylib",
+    ],
+    add_directory_to_runfiles = False,
+    include_external_repositories = ["**"],
+)
+
+cc_library(
+    name = "libzml_metal",
+    data = [":sandbox"],
+    visibility = ["@zml//platforms/metal:__subpackages__"],
+)

@@ -15,18 +15,18 @@ exports_files([
 # The proxy also initializes the Neuron runtime environment and exposes the
 # sandboxed compiler binaries to libneuronxla 3.0.
 zig_shared_library(
-    name = "libpjrt_neuron",
+    name = "libzml_neuron",
     srcs = ["neuron.zig"],
-    main = "libpjrt_neuron.zig",
+    main = "libzml_neuron.zig",
     target_compatible_with = ["@platforms//os:linux"],
-    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    visibility = ["@libzml_neuron//:__subpackages__"],
     zigopts = ["-fno-stack-check"],
     deps = [
         ":libnrt_headers",
         ":neuron_nrt",
-        ":zmlxneuron",
         "//bazel",
         "//pjrt",
+        "//platforms:options",
         "//stdx",
         "@rules_zig//zig/runfiles",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
@@ -49,14 +49,14 @@ zig_binary(
 runfiles_to_default(
     name = "neuronx-cc_files",
     target_compatible_with = ["@platforms//os:linux"],
-    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    visibility = ["@libzml_neuron//:__subpackages__"],
     deps = [":neuronx-cc"],
 )
 
 runfiles_to_default(
     name = "nki-cc_files",
     target_compatible_with = ["@platforms//os:linux"],
-    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    visibility = ["@libzml_neuron//:__subpackages__"],
     deps = [":nki-cc"],
 )
 
@@ -72,25 +72,13 @@ cc_library(
 )
 
 cc_library(
-    name = "empty",
-    defines = ["ZML_RUNTIME_NEURON_DISABLED"],
-    tags = ["manual"],
-)
-
-cc_library(
-    name = "zmlxneuron",
-    defines = ["ZML_RUNTIME_NEURON"],
-    tags = ["manual"],
-)
-
-cc_library(
     name = "libnrt_headers",
     hdrs = ["nrt.h"],
     tags = ["manual"],
     visibility = [
         "//bin/zml-smi:__subpackages__",
     ],
-    deps = ["@libpjrt_neuron//:libnrt_headers"],
+    deps = ["@libzml_neuron//:libnrt_headers"],
 )
 
 cc_import(
@@ -169,29 +157,28 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
+        "//platforms:options",
     ] + select({
         "//platforms:neuron.enabled": [
             ":libnrt_headers",
             ":neuron_nrt",
-            ":zmlxneuron",
             "//bazel",
             "//stdx",
-            "@libpjrt_neuron",
+            "@libzml_neuron",
             "@rules_zig//zig/runfiles",
         ],
-        "//conditions:default": [":empty"],
+        "//conditions:default": [],
     }),
 )
 
 zig_library(
     name = "topology",
-    data = [":libpjrt_neuron"],
+    data = [":libzml_neuron"],
     import_name = "platforms/neuron/topology",
     main = "topology.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         ":neuron",
-        ":zmlxneuron",
     ],
 )

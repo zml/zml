@@ -6,10 +6,13 @@ version: 1
 sources:
   - channel: bookworm main
     url: https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z
+  - channel: llvm-toolchain-bookworm-23 main
+    url: https://apt.llvm.org/bookworm
 
 archs:
   - "amd64"
   - "arm64"
 
 packages:
+  - "llvm-libunwind1" # LLVM 23 runtime from llvm-toolchain-bookworm-23.
   - "zlib1g"

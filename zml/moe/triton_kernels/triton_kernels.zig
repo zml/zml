@@ -33,9 +33,7 @@ pub const PerTokenGroupQuantFp8 = struct {
         output_dtype: DType,
         scale_dtype: DType,
         block: usize,
-        fp8_min: f32,
-        fp8_max: f32,
-        use_ue8m0: bool,
+        quant_scheme: zml.Quantization.Scheme,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "per_token_group_quant_fp8",
@@ -56,6 +54,11 @@ pub const PerTokenGroupQuantFp8 = struct {
 
         const block: i64 = @intCast(cfg.block);
         const out_dt = cfg.output_dtype;
+        const fp8_max: f32 = switch (out_dt) {
+            .f8e4m3fn => 448.0,
+            .f8e4m3fnuz => 224.0,
+            else => return error.InvalidMlir,
+        };
         const scale_dt = cfg.scale_dtype;
 
         const group_size = b.load(a.group_size_ptr);
@@ -100,21 +103,40 @@ pub const PerTokenGroupQuantFp8 = struct {
         const absmax = b.max(b.absf(y)).maximum(eps);
 
         // scale_raw = _absmax * (1.0 / fp8_max)
-        const scale_raw = absmax.mul(1.0 / cfg.fp8_max);
-        const y_s = if (cfg.use_ue8m0) b.exp2(b.ceil(b.log2(scale_raw))) else scale_raw;
+        const scale_raw = absmax.mul(1.0 / fp8_max);
+        const y_s: Value, const stored_scale: Value = switch (cfg.quant_scheme) {
+            .mxfp8 => blk: {
+                const exponent = b.ceil(b.log2(scale_raw));
+                // E8M0 stores the biased exponent as a byte.
+                break :blk .{ b.exp2(exponent), exponent.add(127).to(.i32).to(.i8) };
+            },
+            .fp8_per_channel, .fp8_per_tensor, .fp8_block128 => .{ scale_raw, scale_raw.to(scale_dt) },
+            .fp8_block32 => blk: {
+                // Match quantizeBlockFp8(..., .f8e8m0), but store the scales as FP32 here.
+                // It is unclear whether power-of-two scaling is best for this kernel,
+                // but it keeps activation quantization consistent with that function.
+                // Round up from the FP32 bits, including values just above a power of two.
+                const bits = b.bitcast(scale_raw, .i32);
+                const exponent = bits.div(0x800000);
+                const fractional = bits.bitAnd(0x7fffff).ne(0).to(.i32);
+                const scale = b.bitcast(exponent.add(fractional).mul(0x800000), .f32);
+                break :blk .{ scale, scale.to(scale_dt) };
+            },
+            .mxfp4, .nvfp4 => unreachable,
+        };
 
         // y_q = clamp(y / y_s, fp8_min, fp8_max).to(output_dtype)
         const y_div = y.div(y_s);
         const clamped = b.clampf(
             y_div,
-            b.splat(cfg.fp8_min, &.{block}),
-            b.splat(cfg.fp8_max, &.{block}),
+            b.splat(-fp8_max, &.{block}),
+            b.splat(fp8_max, &.{block}),
         );
         const y_q = clamped.to(out_dt);
 
         const y_q_ptrs = y_q_ptr_shifted.addPtr(cols_i64);
         b.storeOpts(y_q_ptrs, y_q, .{ .mask = mask });
-        b.store(y_s_ptr_shifted, y_s.to(scale_dt));
+        b.store(y_s_ptr_shifted, stored_scale);
     }
 };
 
@@ -165,8 +187,8 @@ fn writeZerosToOutput(
 // fused_moe_kernel
 // =============================================================================
 
-/// Direct port of Python `fused_moe_kernel`. Bf16 / no-quant / no-bias path
-/// only — errors out for the feature flags that aren't implemented yet.
+/// Routed GEMM supporting BF16, MXFP4, MXFP8, and per-tensor, per-channel, or
+/// 128x128 block-scaled FP8 weights.
 pub const FusedMoe = struct {
     pub const Cfg = struct {
         a_dtype: DType,
@@ -175,49 +197,49 @@ pub const FusedMoe = struct {
         a_scale_dtype: ?DType,
         b_scale_dtype: ?DType,
         b_bias_dtype: ?DType,
-        topk_weights_dtype: ?DType,
+        routing_weights_dtype: ?DType,
         block_size_m: usize,
         block_size_n: usize,
         block_size_k: usize,
         group_size_m: usize,
         top_k: usize,
         naive_block_assignment: bool,
-        mul_routed_weight: bool,
         compute_type: DType,
-        // Validation flags — the kernel rejects configs that set any of
-        // these to true (the body only implements the bf16 / no-quant /
-        // no-bias path).
-        use_fp8_w8a8: bool,
-        use_int8_w8a8: bool,
-        use_int8_w8a16: bool,
-        per_channel_quant: bool,
-        has_bias: bool,
+        quant_scheme: ?zml.Quantization.Scheme,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "fused_moe_kernel",
         .inputs = &.{
-            "a_ptr",            "b_ptr",                "b_bias_ptr",           "a_scale_ptr",                "b_scale_ptr",
-            "topk_weights_ptr", "sorted_token_ids_ptr", "expert_ids_ptr",       "num_tokens_post_padded_ptr", "N_ptr",
-            "K_ptr",            "EM_ptr",               "num_valid_tokens_ptr", "stride_am_ptr",              "stride_be_ptr",
-            "stride_bn_ptr",    "stride_cm_ptr",        "stride_asm_ptr",       "stride_ask_ptr",             "stride_bse_ptr",
-            "stride_bsk_ptr",   "stride_bsn_ptr",       "stride_bbe_ptr",       "stride_bbn_ptr",
+            "a_ptr",               "b_ptr",                "b_bias_ptr",           "a_scale_ptr",                "b_scale_ptr",
+            "routing_weights_ptr", "sorted_token_ids_ptr", "expert_ids_ptr",       "num_tokens_post_padded_ptr", "N_ptr",
+            "K_ptr",               "EM_ptr",               "num_valid_tokens_ptr", "stride_am_ptr",              "stride_be_ptr",
+            "stride_bn_ptr",       "stride_cm_ptr",        "stride_asm_ptr",       "stride_ask_ptr",             "stride_bse_ptr",
+            "stride_bsk_ptr",      "stride_bsn_ptr",       "stride_bbe_ptr",       "stride_bbn_ptr",
         },
         .outputs = &.{"c"},
         .run = run,
     });
     fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
-        if (cfg.use_fp8_w8a8 or cfg.use_int8_w8a8 or cfg.use_int8_w8a16 or cfg.has_bias or cfg.per_channel_quant) {
-            log.err("fused_moe_kernel: unsupported config (fp8/int8/bias/per_channel)", .{});
+        const fp8_block_size: usize = if (cfg.quant_scheme == .fp8_block32) 32 else 128;
+        if ((cfg.quant_scheme == .fp8_block128 or cfg.quant_scheme == .fp8_block32) and cfg.block_size_k != fp8_block_size) {
+            log.err("fused_moe_kernel: block-scaled FP8 requires BLOCK_SIZE_K={}", .{fp8_block_size});
+            return error.InvalidMlir;
+        }
+
+        if ((cfg.quant_scheme == .mxfp4 or cfg.quant_scheme == .mxfp8) and cfg.block_size_k % 32 != 0) {
+            log.err("fused_moe_kernel: MXFP4/MXFP8 require BLOCK_SIZE_K divisible by 32", .{});
             return error.InvalidMlir;
         }
 
         const a = try b.declareArgs(.{
             .a_ptr = .{ .ptr = cfg.a_dtype },
             .b_ptr = .{ .ptr = cfg.b_dtype },
-            .b_bias_ptr = .{ .ptr = cfg.b_bias_dtype orelse cfg.c_dtype },
+            // The fixed signature requires concrete pointer types even for absent,
+            // unused inputs. FP32 matches the caller's placeholder tensors.
+            .b_bias_ptr = .{ .ptr = cfg.b_bias_dtype orelse .f32 },
             .a_scale_ptr = .{ .ptr = cfg.a_scale_dtype orelse .f32 },
             .b_scale_ptr = .{ .ptr = cfg.b_scale_dtype orelse .f32 },
-            .topk_weights_ptr = .{ .ptr = cfg.topk_weights_dtype orelse .f32 },
+            .routing_weights_ptr = .{ .ptr = cfg.routing_weights_dtype orelse .f32 },
             .sorted_token_ids_ptr = .{ .ptr = .i32 },
             .expert_ids_ptr = .{ .ptr = .i32 },
             .num_tokens_post_padded_ptr = .{ .ptr = .i32 },
@@ -242,12 +264,14 @@ pub const FusedMoe = struct {
         const block_size_m: i64 = @intCast(cfg.block_size_m);
         const block_size_n: i64 = @intCast(cfg.block_size_n);
         const block_size_k: i64 = @intCast(cfg.block_size_k);
+        const weight_packing: i64 = if (cfg.quant_scheme == .mxfp4) 2 else 1;
+        const block_size_bk = @divExact(block_size_k, weight_packing);
         const group_size_m: i64 = @intCast(cfg.group_size_m);
         const top_k: i64 = @intCast(cfg.top_k);
         const compute_type = cfg.compute_type;
 
-        // Runtime scalars — load all first, then floor to multiples of 16
-        // (Python loads them as a group then runs the // 16 * 16 sequence).
+        // Matrix dimensions, strides, and padded routing capacity are checked
+        // for 16-element alignment by the caller.
         const n_raw = b.load(a.N_ptr);
         const k_raw = b.load(a.K_ptr);
         const em_raw = b.load(a.EM_ptr);
@@ -352,18 +376,20 @@ pub const FusedMoe = struct {
         // addptr) — matches Python's left-to-right evaluation. Defer extsi
         // for offs_k to after offs_bn's expand_dims/mul (Python emit order).
         const b_ptr_shifted = a.b_ptr.addPtr(off_experts.mul(stride_be_block));
-        const offs_k_col_i32 = b.expandDims(offs_k_i32, 1);
+        // MXFP4 packs two K values per byte; activation K remains unpacked.
+        const offs_bk_i32 = b.arange(0, block_size_bk, .i32);
+        const offs_k_col_i32 = b.expandDims(offs_bk_i32, 1);
         const offs_bn_row = b.expandDims(offs_bn, 0);
         const bn_row = offs_bn_row.mul(stride_bn_block);
         const offs_k_col = offs_k_col_i32.to(.i64);
-        const bk_term = b.broadcastTo(offs_k_col, &.{ block_size_k, block_size_n });
-        const bn_term = b.broadcastTo(bn_row, &.{ block_size_k, block_size_n });
+        const bk_term = b.broadcastTo(offs_k_col, &.{ block_size_bk, block_size_n });
+        const bn_term = b.broadcastTo(bn_row, &.{ block_size_bk, block_size_n });
         const b_ptrs_init = b_ptr_shifted.addPtr(bk_term.add(bn_term));
 
         const acc_init = b.zeros(&.{ block_size_m, block_size_n }, .f32);
 
         // Loop bounds stay i64 because `k_block` is i64. iter_args order
-        // matches Python's TTIR (a_ptrs, b_ptrs, accumulator).
+        // matches Python's TTIR for the matrix and accumulator state.
         const num_k_iters = k_block.cdiv(block_size_k);
         var loop = b.openFor(@as(i64, 0), num_k_iters, @as(i64, 1), .{ a_ptrs_init, b_ptrs_init, acc_init });
         {
@@ -387,17 +413,87 @@ pub const FusedMoe = struct {
                 .other = b.zeros(&.{ block_size_m, block_size_k }, cfg.a_dtype),
             });
 
-            // mask_b = offs_k[:, None] < k_remaining (broadcast to KxN).
-            const offs_k_col_b = b.expandDims(offs_k_i32, 1).to(.i64);
-            const offs_k_lt_b = offs_k_col_b.lt(b.splat(k_remaining, &.{ block_size_k, 1 }));
-            const mask_b = b.broadcastTo(offs_k_lt_b, &.{ block_size_k, block_size_n });
+            const offs_k_col_b = b.expandDims(offs_bk_i32, 1).to(.i64);
+            const offs_k_lt_b = offs_k_col_b.lt(b.splat(k_remaining.cdiv(weight_packing), &.{ block_size_bk, 1 }));
+            const mask_b = b.broadcastTo(offs_k_lt_b, &.{ block_size_bk, block_size_n });
 
             const b_val = b.loadOpts(b_ptrs, .{
                 .mask = mask_b,
-                .other = b.zeros(&.{ block_size_k, block_size_n }, cfg.b_dtype),
+                .other = b.zeros(&.{ block_size_bk, block_size_n }, cfg.b_dtype),
             });
 
-            const new_acc = b.dotOpts(a_val, b_val, acc, .{
+            const new_acc = if (cfg.quant_scheme) |scheme| switch (scheme) {
+                .mxfp4, .mxfp8 => scaled: {
+                    const scale_k = @divExact(block_size_k, 32);
+                    const groups = k_iter.mul(scale_k).add(b.arange(0, scale_k, .i64));
+                    const stride_bse = b.load(a.stride_bse_ptr);
+                    const stride_bsk = b.load(a.stride_bsk_ptr);
+                    const stride_bsn = b.load(a.stride_bsn_ptr);
+                    // dot_scaled expects RHS scales in [N, K/32] order.
+                    const rows = off_experts.mul(stride_bse).add(offs_bn.mul(stride_bsn)).expandDims(1);
+                    const cols = groups.mul(stride_bsk).expandDims(0);
+                    const offsets = b.broadcastTo(rows, &.{ block_size_n, scale_k })
+                        .add(b.broadcastTo(cols, &.{ block_size_n, scale_k }));
+                    const n_mask = b.broadcastTo(offs_bn.lt(n_block).expandDims(1), &.{ block_size_n, scale_k });
+                    const k_mask = b.broadcastTo(groups.lt(k_block.cdiv(32)).expandDims(0), &.{ block_size_n, scale_k });
+                    const scales = b.loadOpts(a.b_scale_ptr.addPtr(offsets), .{
+                        .mask = n_mask.bitAnd(k_mask),
+                        .other = b.full(&.{ block_size_n, scale_k }, 127, .i8),
+                    });
+                    const a_scales: ?Value = if (cfg.a_scale_dtype != null) input_scales: {
+                        const a_rows = offs_token.div(top_k).mul(b.load(a.stride_asm_ptr)).expandDims(1);
+                        const a_cols = groups.mul(b.load(a.stride_ask_ptr)).expandDims(0);
+                        const a_offsets = b.broadcastTo(a_rows, &.{ block_size_m, scale_k })
+                            .add(b.broadcastTo(a_cols, &.{ block_size_m, scale_k }));
+                        const a_mask = b.broadcastTo(token_mask.expandDims(1), &.{ block_size_m, scale_k })
+                            .bitAnd(b.broadcastTo(groups.lt(k_block.cdiv(32)).expandDims(0), &.{ block_size_m, scale_k }));
+                        break :input_scales b.loadOpts(a.a_scale_ptr.addPtr(a_offsets), .{
+                            .mask = a_mask,
+                            .other = b.full(&.{ block_size_m, scale_k }, 127, .i8),
+                        });
+                    } else null;
+                    break :scaled b.dotScaledOpts(a_val, b_val, acc, a_scales, scales, if (a_scales != null) .e4m3 else .bf16, if (scheme == .mxfp4) .e2m1 else .e4m3, .{});
+                },
+                .fp8_per_channel, .fp8_per_tensor => b.dotOpts(a_val, if (cfg.a_scale_dtype != null) b_val else b_val.to(.bf16), acc, .{
+                    .input_precision = .tf32,
+                    .max_num_imprecise_acc = 0,
+                }),
+                .fp8_block32, .fp8_block128 => scaled: {
+                    // Activation scales are [token, K/block] and weight scales are
+                    // [expert, N/block, K/block]. Compute their addresses from the
+                    // loop index; activation scales are optional.
+                    const stride_bse = b.load(a.stride_bse_ptr);
+                    const stride_bsk = b.load(a.stride_bsk_ptr);
+                    const stride_bsn = b.load(a.stride_bsn_ptr);
+                    const b_scale_ptrs = a.b_scale_ptr.addPtr(
+                        off_experts.mul(stride_bse)
+                            .add(offs_bn.div(fp8_block_size).mul(stride_bsn))
+                            .add(k_iter.mul(stride_bsk)),
+                    );
+                    const dot = b.dotOpts(a_val, if (cfg.a_scale_dtype != null) b_val else b_val.to(.bf16), b.zeros(&.{ block_size_m, block_size_n }, .f32), .{
+                        .input_precision = .tf32,
+                        .max_num_imprecise_acc = 0,
+                    });
+                    const b_s = b.loadOpts(b_scale_ptrs, .{
+                        .mask = offs_bn.lt(n_block),
+                        .other = b.zeros(&.{block_size_n}, cfg.b_scale_dtype orelse .f32),
+                    }).to(.f32);
+                    var scaled_dot = dot.mul(b_s.expandDims(0));
+                    if (cfg.a_scale_dtype) |dtype| {
+                        const a_scale_ptrs = a.a_scale_ptr.addPtr(
+                            offs_token.div(top_k).mul(b.load(a.stride_asm_ptr))
+                                .add(k_iter.mul(b.load(a.stride_ask_ptr))),
+                        );
+                        const a_s = b.loadOpts(a_scale_ptrs, .{
+                            .mask = token_mask,
+                            .other = b.zeros(&.{block_size_m}, dtype),
+                        }).to(.f32);
+                        scaled_dot = scaled_dot.mul(a_s.expandDims(1));
+                    }
+                    break :scaled acc.add(scaled_dot);
+                },
+                .nvfp4 => unreachable,
+            } else b.dotOpts(a_val, b_val, acc, .{
                 .input_precision = .tf32,
                 .max_num_imprecise_acc = 0,
             });
@@ -405,17 +501,53 @@ pub const FusedMoe = struct {
             // BLOCK_SIZE_K is `tl.constexpr` → i32 dense splat (stride_ak == 1).
             const bsk_i32: i32 = @intCast(cfg.block_size_k);
             const new_a_ptrs = a_ptrs.addPtr(b.splat(bsk_i32, &.{ block_size_m, block_size_k }));
-            const new_b_ptrs = b_ptrs.addPtr(b.splat(bsk_i32, &.{ block_size_k, block_size_n }));
+            const new_b_ptrs = b_ptrs.addPtr(b.splat(@as(i32, @intCast(block_size_bk)), &.{ block_size_bk, block_size_n }));
 
-            loop.yield(.{ new_a_ptrs, new_b_ptrs, new_acc });
+            loop.yield(.{
+                new_a_ptrs,
+                new_b_ptrs,
+                new_acc,
+            });
         }
         var accumulator = loop.results[2];
 
-        if (cfg.mul_routed_weight) {
-            const tw_dtype = cfg.topk_weights_dtype orelse .f32;
-            const tw_other = b.zeros(&.{block_size_m}, tw_dtype);
-            const tw = b.loadOpts(a.topk_weights_ptr.addPtr(offs_token), .{ .mask = token_mask, .other = tw_other });
-            accumulator = accumulator.mul(tw.expandDims(1));
+        if (cfg.quant_scheme == .fp8_per_channel or cfg.quant_scheme == .fp8_per_tensor) {
+            // These scales are constant along K, so apply them after accumulation.
+            const expert_offset = off_experts.mul(b.load(a.stride_bse_ptr));
+            const offsets = if (cfg.quant_scheme == .fp8_per_channel)
+                expert_offset.add(offs_bn.mul(b.load(a.stride_bsn_ptr)))
+            else
+                b.splat(expert_offset, &.{block_size_n});
+            const scales = b.loadOpts(a.b_scale_ptr.addPtr(offsets), .{
+                .mask = offs_bn.lt(n_block),
+                .other = b.zeros(&.{block_size_n}, cfg.b_scale_dtype.?),
+            }).to(.f32);
+            accumulator = accumulator.mul(scales.expandDims(0));
+            if (cfg.a_scale_dtype) |dtype| {
+                const offsets_a = offs_token.div(top_k).mul(b.load(a.stride_asm_ptr));
+                const scales_a = b.loadOpts(a.a_scale_ptr.addPtr(offsets_a), .{
+                    .mask = token_mask,
+                    .other = b.zeros(&.{block_size_m}, dtype),
+                }).to(.f32);
+                accumulator = accumulator.mul(scales_a.expandDims(1));
+            }
+        }
+
+        if (cfg.b_bias_dtype) |dtype| {
+            const offsets = off_experts.mul(b.load(a.stride_bbe_ptr))
+                .add(offs_bn.mul(b.load(a.stride_bbn_ptr)));
+            const bias = b.loadOpts(a.b_bias_ptr.addPtr(offsets), .{
+                .mask = offs_bn.lt(n_block),
+                .other = b.zeros(&.{block_size_n}, dtype),
+            }).to(.f32);
+            // Bias is in output units and must receive the routing weight too.
+            accumulator = accumulator.add(bias.expandDims(0));
+        }
+
+        if (cfg.routing_weights_dtype) |dtype| {
+            const other = b.zeros(&.{block_size_m}, dtype);
+            const routing_weights = b.loadOpts(a.routing_weights_ptr.addPtr(offs_token), .{ .mask = token_mask, .other = other });
+            accumulator = accumulator.mul(routing_weights.to(.f32).expandDims(1));
         }
 
         accumulator = accumulator.to(compute_type);
@@ -439,6 +571,66 @@ pub const FusedMoe = struct {
         b.storeOpts(c_ptrs, accumulator, .{ .mask = token_mask_full_c.bitAnd(offs_cn_lt_full) });
     }
 };
+
+test "FP8 activation quantization emits float and E8M0 scales" {
+    for ([_]zml.Quantization.Scheme{ .mxfp8, .fp8_per_channel, .fp8_per_tensor, .fp8_block128, .fp8_block32 }) |scheme| {
+        for ([_]DType{ .bf16, .f32 }) |input_dtype| {
+            const ir = try PerTokenGroupQuantFp8.Kernel.emit(std.testing.allocator, .{
+                .input_dtype = input_dtype,
+                .output_dtype = .f8e4m3fn,
+                .scale_dtype = if (scheme == .mxfp8) .i8 else .f32,
+                .block = if (scheme == .mxfp8 or scheme == .fp8_block32) 32 else 256,
+                .quant_scheme = scheme,
+            });
+            defer std.testing.allocator.free(ir);
+            if (scheme == .mxfp8) {
+                try std.testing.expect(std.mem.indexOf(u8, ir, "arith.trunci") != null);
+            }
+        }
+    }
+}
+
+test "FusedMoe emits each FP8 and MXFP4 scaling path" {
+    const allocator = std.testing.allocator;
+    const schemes = [_]?zml.Quantization.Scheme{ null, .mxfp4, .mxfp8, .fp8_per_tensor, .fp8_per_channel, .fp8_block128, .fp8_block32 };
+    for (schemes) |scheme| {
+        for ([_]DType{ .f8e4m3fn, .f8e4m3fnuz }) |fp8_dtype| {
+            if ((scheme == .mxfp4 or scheme == .mxfp8) and fp8_dtype == .f8e4m3fnuz) continue;
+            for ([_]bool{ false, true }) |quantize_input| {
+                if ((scheme == null or scheme == .mxfp4) and quantize_input) continue;
+                for ([_]?DType{ null, .bf16, .f32 }) |bias_dtype| {
+                    const ir = try FusedMoe.Kernel.emit(allocator, .{
+                        .a_dtype = if (quantize_input) fp8_dtype else .bf16,
+                        .b_dtype = if (scheme == .mxfp4) .i8 else if (scheme != null) fp8_dtype else .bf16,
+                        .c_dtype = .bf16,
+                        .a_scale_dtype = if (quantize_input) (if (scheme == .mxfp8) .i8 else .f32) else null,
+                        .b_scale_dtype = if (scheme == .mxfp4 or scheme == .mxfp8) .i8 else if (scheme != null) .f32 else null,
+                        .b_bias_dtype = bias_dtype,
+                        .routing_weights_dtype = .bf16,
+                        .block_size_m = 16,
+                        .block_size_n = 32,
+                        .block_size_k = if (scheme == .fp8_block32) 32 else 128,
+                        .group_size_m = 1,
+                        .top_k = 2,
+                        .naive_block_assignment = false,
+                        .compute_type = .bf16,
+                        .quant_scheme = scheme,
+                    });
+                    defer allocator.free(ir);
+                    if (scheme == .mxfp4 or scheme == .mxfp8) {
+                        try std.testing.expect(std.mem.indexOf(u8, ir, "tt.dot_scaled") != null);
+                    } else {
+                        try std.testing.expect(std.mem.indexOf(u8, ir, "tt.dot_scaled") == null);
+                        try std.testing.expect(std.mem.indexOf(u8, ir, "tt.dot") != null);
+                        if (scheme != null and !quantize_input) {
+                            try std.testing.expect(std.mem.indexOf(u8, ir, "tt.fp_to_fp") != null);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 // =============================================================================
 // moe_align_block_size_kernel

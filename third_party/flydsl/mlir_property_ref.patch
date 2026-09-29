@@ -1,0 +1,384 @@
+diff --git a/lib/Dialect/Fly/IR/FlyOps.cpp b/lib/Dialect/Fly/IR/FlyOps.cpp
+--- a/lib/Dialect/Fly/IR/FlyOps.cpp
++++ b/lib/Dialect/Fly/IR/FlyOps.cpp
+@@ -192,7 +192,7 @@
+   llvm::LogicalResult OP::inferReturnTypes(                                                        \
+       mlir::MLIRContext *context, std::optional<::mlir::Location> location,                        \
+       mlir::ValueRange operands, mlir::DictionaryAttr attributes,                                  \
+-      mlir::OpaqueProperties properties, mlir::RegionRange regions,                                \
++      mlir::PropertyRef properties, mlir::RegionRange regions,                                    \
+       llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes)
+ 
+ //===----------------------------------------------------------------------===//
+diff --git a/lib/Conversion/FlyToROCDL/FlyToROCDL.cpp b/lib/Conversion/FlyToROCDL/FlyToROCDL.cpp
+--- a/lib/Conversion/FlyToROCDL/FlyToROCDL.cpp
++++ b/lib/Conversion/FlyToROCDL/FlyToROCDL.cpp
+@@ -10,6 +10,7 @@
+ #include "mlir/Dialect/SCF/IR/SCF.h"
+ #include "mlir/Dialect/Vector/IR/VectorOps.h"
+ #include "mlir/IR/BuiltinAttributes.h"
++#include "mlir/IR/BuiltinOps.h"
+ #include "mlir/IR/BuiltinTypes.h"
+ #include "mlir/Pass/Pass.h"
+ #include "mlir/Transforms/DialectConversion.h"
+@@ -63,10 +64,10 @@
+ // chosen to avoid collisions with existing globals in the module. Shared by
+ // the static-LDS `make_ptr` and dynamic-LDS `get_dyn_shared` lowerings.
+ static LLVM::GlobalOp createLDSGlobal(ConversionPatternRewriter &rewriter,
+-                                      gpu::GPUModuleOp moduleOp, Location loc, StringRef prefix,
++                                      Block *moduleBody, Location loc, StringRef prefix,
+                                       int64_t nbytes, int64_t align, unsigned addrSpace) {
+   llvm::StringSet<> existingNames;
+-  for (auto globalOp : moduleOp.getBody()->getOps<LLVM::GlobalOp>())
++  for (auto globalOp : moduleBody->getOps<LLVM::GlobalOp>())
+     existingNames.insert(globalOp.getSymName());
+ 
+   unsigned counter = 0;
+@@ -74,7 +75,7 @@
+       prefix, [&](StringRef candidate) { return existingNames.contains(candidate); }, counter);
+ 
+   OpBuilder::InsertionGuard guard(rewriter);
+-  rewriter.setInsertionPointToStart(moduleOp.getBody());
++  rewriter.setInsertionPointToStart(moduleBody);
+ 
+   auto arrayTy = LLVM::LLVMArrayType::get(IntegerType::get(rewriter.getContext(), 8), nbytes);
+   auto globalOp = LLVM::GlobalOp::create(rewriter, loc, arrayTy,
+@@ -127,12 +128,17 @@
+         return rewriter.notifyMatchFailure(
+             op, "shared make_ptr requires allocBytes, allocAlign in dictAttrs");
+ 
+-      auto moduleOp = op->getParentOfType<gpu::GPUModuleOp>();
+-      if (!moduleOp)
++      Block *moduleBody = nullptr;
++      if (auto gpuModule = op->getParentOfType<gpu::GPUModuleOp>()) {
++        moduleBody = gpuModule.getBody();
++      } else if (auto builtinModule = op->getParentOfType<ModuleOp>()) {
++        moduleBody = builtinModule.getBody();
++      }
++      if (!moduleBody)
+         return op->emitError("shared make_ptr must be inside a gpu.module");
+ 
+       LLVM::GlobalOp global =
+-          createLDSGlobal(rewriter, moduleOp, loc, "__shared_alloc", allocBytesAttr.getInt(),
++          createLDSGlobal(rewriter, moduleBody, loc, "__shared_alloc", allocBytesAttr.getInt(),
+                           allocAlignAttr.getInt(), /*addrSpace=*/3);
+       rewriter.replaceOpWithNewOp<LLVM::AddressOfOp>(op, global);
+       return success();
+@@ -169,15 +175,20 @@
+     auto flyPtrTy = cast<fly::PointerType>(op.getResult().getType());
+     unsigned addrSpace = mapAttrToLLVMAddressSpace(flyPtrTy.getAddressSpace());
+ 
+-    auto moduleOp = op->getParentOfType<gpu::GPUModuleOp>();
+-    if (!moduleOp)
++    Block *moduleBody = nullptr;
++    if (auto gpuModule = op->getParentOfType<gpu::GPUModuleOp>()) {
++      moduleBody = gpuModule.getBody();
++    } else if (auto builtinModule = op->getParentOfType<ModuleOp>()) {
++      moduleBody = builtinModule.getBody();
++    }
++    if (!moduleBody)
+       return op->emitError("get_dyn_shared must be inside a gpu.module");
+ 
+     // Dynamic shared memory has a single logical region per kernel; reuse an
+     // existing `[0 x i8]` global if one is already present so multiple
+     // `get_dyn_shared` ops resolve to the same base symbol.
+     LLVM::GlobalOp sharedGlobal;
+-    for (auto globalOp : moduleOp.getBody()->getOps<LLVM::GlobalOp>()) {
++    for (auto globalOp : moduleBody->getOps<LLVM::GlobalOp>()) {
+       if (auto arrayType = dyn_cast<LLVM::LLVMArrayType>(globalOp.getType())) {
+         if (globalOp.getAddrSpace() == addrSpace && arrayType.getNumElements() == 0 &&
+             globalOp.getAlignment().value_or(0) == 1024) {
+@@ -187,7 +198,7 @@
+       }
+     }
+     if (!sharedGlobal) {
+-      sharedGlobal = createLDSGlobal(rewriter, moduleOp, loc, "__dynamic_shared",
++      sharedGlobal = createLDSGlobal(rewriter, moduleBody, loc, "__dynamic_shared",
+                                      /*nbytes=*/0, /*align=*/1024, addrSpace);
+     }
+ 
+@@ -402,10 +413,11 @@
+     if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
+       BufferFatPtr bp(flyPtrTy, ptr);
+       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
++      Attribute aux = rewriter.getI32IntegerAttr(0);
+       ArrayAttr noAttrs;
+       Value loaded = ROCDL::RawPtrBufferLoadOp::create(
+           rewriter, loc, loadTy, bp.bufferRsrc(rewriter, loc), bp.swizzleByteOffset(rewriter, loc),
+-          zero, zero, noAttrs, noAttrs, noAttrs);
++          zero, aux, noAttrs, noAttrs, noAttrs);
+       rewriter.replaceOp(op, loaded);
+       return success();
+     } else {
+@@ -447,9 +459,10 @@
+     if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
+       BufferFatPtr bp(flyPtrTy, ptr);
+       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
++      Attribute aux = rewriter.getI32IntegerAttr(0);
+       ArrayAttr noAttrs;
+       ROCDL::RawPtrBufferStoreOp::create(rewriter, loc, value, bp.bufferRsrc(rewriter, loc),
+-                                         bp.swizzleByteOffset(rewriter, loc), zero, zero, noAttrs,
++                                         bp.swizzleByteOffset(rewriter, loc), zero, aux, noAttrs,
+                                          noAttrs, noAttrs);
+       rewriter.eraseOp(op);
+       return success();
+@@ -747,10 +760,6 @@
+     if (Value tok = op.getAsyncToken())
+       asyncTokenType = tok.getType();
+ 
+-    // There are two relevant builder signatures in this MLIR:
+-    // - (kernel, ..., asyncTokenType, asyncDependencies, clusterSize)
+-    // - (kernel, ..., asyncObject, clusterSize)
+-    // Pick the one that matches the original op structure.
+     if (Value asyncObj = adaptor.getAsyncObject()) {
+       if (!adaptor.getAsyncDependencies().empty())
+         return rewriter.notifyMatchFailure(
+@@ -758,13 +767,14 @@
+ 
+       rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
+           op, kernelRef, grid, block, adaptor.getDynamicSharedMemorySize(),
+-          adaptor.getKernelOperands(), asyncObj, clusterSize);
++          adaptor.getKernelOperands(), asyncTokenType, ValueRange{}, asyncObj, clusterSize);
+       return success();
+     }
+ 
+     rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
+         op, kernelRef, grid, block, adaptor.getDynamicSharedMemorySize(),
+-        adaptor.getKernelOperands(), asyncTokenType, adaptor.getAsyncDependencies(), clusterSize);
++        adaptor.getKernelOperands(), asyncTokenType, adaptor.getAsyncDependencies(),
++        /*asyncObject=*/nullptr, clusterSize);
+     return success();
+   }
+ };
+diff --git a/lib/Dialect/Fly/Transforms/PromoteRegMemToVectorSSA.cpp b/lib/Dialect/Fly/Transforms/PromoteRegMemToVectorSSA.cpp
+--- a/lib/Dialect/Fly/Transforms/PromoteRegMemToVectorSSA.cpp
++++ b/lib/Dialect/Fly/Transforms/PromoteRegMemToVectorSSA.cpp
+@@ -30,11 +30,6 @@
+ template <> struct DenseMapInfo<mlir::fly::MakePtrOp> : DenseMapInfo<mlir::Operation *> {
+   using Base = DenseMapInfo<mlir::Operation *>;
+ 
+-  static mlir::fly::MakePtrOp getEmptyKey() { return mlir::fly::MakePtrOp(Base::getEmptyKey()); }
+-
+-  static mlir::fly::MakePtrOp getTombstoneKey() {
+-    return mlir::fly::MakePtrOp(Base::getTombstoneKey());
+-  }
+ };
+ 
+ } // namespace llvm
+diff --git a/lib/Dialect/FlyROCDL/CDNA3/CopyAtom.cpp b/lib/Dialect/FlyROCDL/CDNA3/CopyAtom.cpp
+--- a/lib/Dialect/FlyROCDL/CDNA3/CopyAtom.cpp
++++ b/lib/Dialect/FlyROCDL/CDNA3/CopyAtom.cpp
+@@ -89,7 +89,7 @@
+   };
+ 
+   // raw buffer load/store cachepolicy (0=cached, 2=nt)
+-  Value aux = arith::ConstantIntOp::create(builder, loc, getCacheModifier(), 32);
++  Attribute aux = builder.getI32IntegerAttr(getCacheModifier());
+   ArrayAttr noAttrs;
+ 
+   auto srcMemTy = srcTyArg ? dyn_cast<fly::MemRefType>(srcTyArg) : fly::MemRefType();
+@@ -313,7 +313,7 @@
+     soffset = arith::DivUIOp::create(builder, loc, bits, eight);
+   }
+ 
+-  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
++  Attribute aux = builder.getI32IntegerAttr(0);
+   Value size = arith::ConstantIntOp::create(builder, loc, sizeBytes, 32);
+ 
+   BufferFatPtr bp(srcMemTy.getPointerType(), src);
+@@ -322,7 +322,7 @@
+ 
+   ArrayAttr noAttrs;
+   ROCDL::RawPtrBufferLoadLdsOp::create(builder, loc, srcRsrc, dst, size, srcOff, soffset, immOffset,
+-                                       zero, noAttrs, noAttrs, noAttrs);
++                                       aux, noAttrs, noAttrs, noAttrs);
+   return success();
+ }
+ 
+@@ -428,7 +428,7 @@
+     soffset = arith::DivUIOp::create(builder, loc, bits, eight);
+   }
+ 
+-  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
++  Attribute aux = builder.getI32IntegerAttr(0);
+   ArrayAttr noAttrs;
+ 
+   AtomicOp op = getAtomicOp().getValue();
+@@ -437,21 +437,21 @@
+   case AtomicOp::Add:
+     if (!isFloat)
+       return failure();
+-    ROCDL::RawPtrBufferAtomicFaddOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
++    ROCDL::RawPtrBufferAtomicFaddOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff, soffset, aux,
+                                             noAttrs, noAttrs, noAttrs);
+     break;
+   case AtomicOp::Max:
+     if (isFloat)
+-      ROCDL::RawPtrBufferAtomicFmaxOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
++      ROCDL::RawPtrBufferAtomicFmaxOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff, soffset, aux,
+                                               noAttrs, noAttrs, noAttrs);
+     else
+-      ROCDL::RawPtrBufferAtomicSmaxOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
++      ROCDL::RawPtrBufferAtomicSmaxOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff, soffset, aux,
+                                               noAttrs, noAttrs, noAttrs);
+     break;
+   case AtomicOp::Min:
+     if (isFloat)
+       return failure();
+-    ROCDL::RawPtrBufferAtomicUminOp::create(builder, loc, src, dstRsrc, dstOff, soffset, zero,
++    ROCDL::RawPtrBufferAtomicUminOp::create(builder, loc, src.getType(), src, dstRsrc, dstOff, soffset, aux,
+                                             noAttrs, noAttrs, noAttrs);
+     break;
+   default:
+diff --git a/lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp b/lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp
+--- a/lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp
++++ b/lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp
+@@ -169,8 +169,8 @@
+ 
+ #define DISPATCH_MFMA_SSA(M_, K_, PRED, OP)                                                        \
+   if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \
+-    auto zeroAttr = builder.getI32IntegerAttr(0);                                                  \
+-    return ROCDL::OP::create(builder, loc, accTy, a, b, c, zeroAttr, zeroAttr, zeroAttr)           \
++    return ROCDL::OP::create(builder, loc, accTy, a, b, c, 0, 0,                                  \
++                             ROCDL::MFMAPermB::none)                                               \
+         .getResult();                                                                              \
+   }
+ 
+diff --git a/lib/Dialect/FlyROCDL/Ops.cpp b/lib/Dialect/FlyROCDL/Ops.cpp
+--- a/lib/Dialect/FlyROCDL/Ops.cpp
++++ b/lib/Dialect/FlyROCDL/Ops.cpp
+@@ -15,7 +15,7 @@
+ LogicalResult GetBufferRsrcOp::inferReturnTypes(MLIRContext *context,
+                                                 std::optional<Location> location,
+                                                 ValueRange operands, DictionaryAttr attributes,
+-                                                OpaqueProperties properties, RegionRange regions,
++                                                PropertyRef properties, RegionRange regions,
+                                                 SmallVectorImpl<Type> &inferredReturnTypes) {
+   auto ptrTy = dyn_cast<PointerType>(operands[0].getType());
+   if (!ptrTy)
+diff --git a/lib/Dialect/FlyROCDL/GFX1250/MmaAtom.cpp b/lib/Dialect/FlyROCDL/GFX1250/MmaAtom.cpp
+--- a/lib/Dialect/FlyROCDL/GFX1250/MmaAtom.cpp
++++ b/lib/Dialect/FlyROCDL/GFX1250/MmaAtom.cpp
+@@ -239,14 +239,12 @@
+   Value res;
+   if constexpr (Variant == WmmaVariant::ModsAllReuse) {
+     // Float path: no sign/clamp operands.
+-    res = WmmaOp::create(builder, loc, accTy,
+-                         /*signA=*/false, a, /*signB=*/false, b,
+-                         /*modC=*/(uint16_t)0, c)
++    res = WmmaOp::create(builder, loc, accTy, a, b, ROCDL::WMMACModifier::none, c,
++                         /*reuseA=*/false, /*reuseB=*/false)
+               .getResult();
+   } else if constexpr (Variant == WmmaVariant::ModsC) {
+     // fp8 path: no sign/clamp operands.
+-    res = WmmaOp::create(builder, loc, accTy, a, b,
+-                         /*modC=*/(uint16_t)0, c,
++    res = WmmaOp::create(builder, loc, accTy, a, b, ROCDL::WMMACModifier::none, c,
+                          /*reuseA=*/false, /*reuseB=*/false)
+               .getResult();
+   } else if constexpr (Variant == WmmaVariant::ModsABClamp) {
+diff --git a/lib/Dialect/FlyROCDL/GFX1250/MmaAtomScale.cpp b/lib/Dialect/FlyROCDL/GFX1250/MmaAtomScale.cpp
+--- a/lib/Dialect/FlyROCDL/GFX1250/MmaAtomScale.cpp
++++ b/lib/Dialect/FlyROCDL/GFX1250/MmaAtomScale.cpp
+@@ -244,15 +244,20 @@
+     // fp4-only form; no fmtA/fmtB operands.
+     if (block16)
+       return ROCDL::wmma_scale16_f32_32x16x128_f4::create(
+-                 builder, loc, accTy, a, b, /*modC=*/(uint16_t)getModC(), c,
+-                 /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
+-                 /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
++                 builder, loc, accTy, a, b,
++                 static_cast<ROCDL::WMMACModifier>(getModC()), c,
++                 static_cast<ROCDL::WMMAMatrixScale>(getOpselA()),
++                 ROCDL::WMMAMatrixScaleFormat::e8, scaleA,
++                 static_cast<ROCDL::WMMAMatrixScale>(getOpselB()),
++                 ROCDL::WMMAMatrixScaleFormat::e8, scaleB,
+                  /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+           .getResult();
+     return ROCDL::wmma_scale_f32_32x16x128_f4::create(
+-               builder, loc, accTy, a, b, /*modC=*/(uint16_t)getModC(), c,
+-               /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
+-               /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
++               builder, loc, accTy, a, b, static_cast<ROCDL::WMMACModifier>(getModC()), c,
++               static_cast<ROCDL::WMMAMatrixScale>(getOpselA()),
++               ROCDL::WMMAMatrixScaleFormat::e8, scaleA,
++               static_cast<ROCDL::WMMAMatrixScale>(getOpselB()),
++               ROCDL::WMMAMatrixScaleFormat::e8, scaleB,
+                /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+         .getResult();
+   }
+@@ -264,17 +269,23 @@
+ 
+   if (block16)
+     return ROCDL::wmma_scale16_f32_16x16x128_f8f6f4::create(
+-               builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b,
+-               /*modC=*/(uint16_t)getModC(), c,
+-               /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
+-               /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
++               builder, loc, accTy, static_cast<ROCDL::MatrixFormat>(*aFmt), a,
++               static_cast<ROCDL::MatrixFormat>(*bFmt), b,
++               static_cast<ROCDL::WMMACModifier>(getModC()), c,
++               static_cast<ROCDL::WMMAMatrixScale>(getOpselA()),
++               ROCDL::WMMAMatrixScaleFormat::e8, scaleA,
++               static_cast<ROCDL::WMMAMatrixScale>(getOpselB()),
++               ROCDL::WMMAMatrixScaleFormat::e8, scaleB,
+                /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+         .getResult();
+   return ROCDL::wmma_scale_f32_16x16x128_f8f6f4::create(
+-             builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b,
+-             /*modC=*/(uint16_t)getModC(), c,
+-             /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
+-             /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
++             builder, loc, accTy, static_cast<ROCDL::MatrixFormat>(*aFmt), a,
++             static_cast<ROCDL::MatrixFormat>(*bFmt), b,
++             static_cast<ROCDL::WMMACModifier>(getModC()), c,
++             static_cast<ROCDL::WMMAMatrixScale>(getOpselA()),
++             ROCDL::WMMAMatrixScaleFormat::e8, scaleA,
++             static_cast<ROCDL::WMMAMatrixScale>(getOpselB()),
++             ROCDL::WMMAMatrixScaleFormat::e8, scaleB,
+              /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+       .getResult();
+ }
+diff --git a/lib/Dialect/FlyROCDL/CDNA4/MmaAtom.cpp b/lib/Dialect/FlyROCDL/CDNA4/MmaAtom.cpp
+--- a/lib/Dialect/FlyROCDL/CDNA4/MmaAtom.cpp
++++ b/lib/Dialect/FlyROCDL/CDNA4/MmaAtom.cpp
+@@ -237,21 +237,17 @@
+   Value scaleB = LLVM::ExtractValueOp::create(
+       builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
+ 
+-  auto cbszAttr = builder.getI32IntegerAttr(*aTypeCode);
+-  auto blgpAttr = builder.getI32IntegerAttr(*bTypeCode);
+-  auto opselAAttr = builder.getI32IntegerAttr(getOpselA());
+-  auto opselBAttr = builder.getI32IntegerAttr(getOpselB());
++  auto cbsz = static_cast<ROCDL::MatrixFormat>(*aTypeCode);
++  auto blgp = static_cast<ROCDL::MatrixFormat>(*bTypeCode);
+ 
+   if (m == 16 && n == 16 && k == 128) {
+-    return ROCDL::mfma_scale_f32_16x16x128_f8f6f4::create(builder, loc, accTy, a, b, c, cbszAttr,
+-                                                          blgpAttr, opselAAttr, scaleA, opselBAttr,
+-                                                          scaleB)
++    return ROCDL::mfma_scale_f32_16x16x128_f8f6f4::create(
++               builder, loc, accTy, a, b, c, cbsz, blgp, getOpselA(), scaleA, getOpselB(), scaleB)
+         .getResult();
+   }
+   if (m == 32 && n == 32 && k == 64) {
+-    return ROCDL::mfma_scale_f32_32x32x64_f8f6f4::create(builder, loc, accTy, a, b, c, cbszAttr,
+-                                                         blgpAttr, opselAAttr, scaleA, opselBAttr,
+-                                                         scaleB)
++    return ROCDL::mfma_scale_f32_32x32x64_f8f6f4::create(
++               builder, loc, accTy, a, b, c, cbsz, blgp, getOpselA(), scaleA, getOpselB(), scaleB)
+         .getResult();
+   }
+ 
+diff --git a/lib/Dialect/FlyROCDL/GFX1250/CopyAtom.cpp b/lib/Dialect/FlyROCDL/GFX1250/CopyAtom.cpp
+--- a/lib/Dialect/FlyROCDL/GFX1250/CopyAtom.cpp
++++ b/lib/Dialect/FlyROCDL/GFX1250/CopyAtom.cpp
+@@ -503,7 +503,7 @@
+       vector::FromElementsOp::create(builder, loc, VectorType::get({8}, builder.getI32Type()),
+                                      ValueRange{zero, zero, zero, zero, zero, zero, zero, zero});
+ 
+-  uint32_t cachePolicy = static_cast<uint32_t>(getCacheModifier());
++  Attribute cachePolicy = builder.getI32IntegerAttr(getCacheModifier());
+   ArrayAttr noAliasScopes;
+   if (isLoad)
+     ROCDL::TensorLoadToLDSOp::create(builder, loc, dgroup0, dgroup1, dg2, dg3, dg4, cachePolicy,

@@ -15,7 +15,7 @@ else
   exit 1
 fi
 
-rocm_root="${runfiles_root}/+rocm_packages+libpjrt_rocm/sandbox"
+rocm_root="${runfiles_root}/+rocm_packages+libzml_rocm/sandbox"
 if [[ ! -d "${rocm_root}" ]]; then
   echo "sandboxed ROCm runtime root not found at ${rocm_root}" >&2
   exit 1

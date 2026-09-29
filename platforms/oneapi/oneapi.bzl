@@ -1,21 +1,27 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-PJRT_ONEAPI_RELEASE = "manual-2026-07-17T21-30-00Z"
-PJRT_ONEAPI_ARTIFACT_SHA256 = "8e28d1ff00e2193a40982294d6b055a8102f49eb2cb46f32a6076f9bb541e8a2"
+PJRT_ONEAPI_RELEASE = "manual-2026-09-08T13-23-00Z"
+PJRT_ONEAPI_ARTIFACT_SHA256 = "c0c429f435a31207cb976636a9fa2d11b420ddc65bdde325e0ae736afb47a9b7"
 PJRT_ONEAPI_ARTIFACT_URL = "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-oneapi_linux-amd64.tar.gz".format(
     release = PJRT_ONEAPI_RELEASE,
 )
 
 ONEAPI_VERSION = "2026.1"
+# www.intel.com/content/www/us/en/developer/tools/oneapi/onednn-download.html
+ONEAPI_DNNL_VERSION = "2026.0"
+# https://github.com/uxlfoundation/onetbb
+ONEAPI_TBB_VERSION = "2023.1"
 ONEAPI_TCM_VERSION = "1.5"
 ONEAPI_UMF_VERSION = "1.1"
 
 ONEAPI_CCL_LIB = "ccl/2022.1/lib"
 ONEAPI_COMPILER_LIB = "compiler/{}/lib".format(ONEAPI_VERSION)
+ONEAPI_DNNL_LIB = "dnnl/{}/lib".format(ONEAPI_DNNL_VERSION)
 ONEAPI_MPI_LIB = "mpi/2021.18/lib"
 ONEAPI_MPI_LIBFABRIC_LIB = "mpi/2021.18/opt/mpi/libfabric/lib"
 ONEAPI_MKL_LIB = "mkl/{}/lib".format(ONEAPI_VERSION)
+ONEAPI_TBB_LIB = "tbb/{}/lib".format(ONEAPI_TBB_VERSION)
 ONEAPI_TCM_LIB = "tcm/{}/lib".format(ONEAPI_TCM_VERSION)
 ONEAPI_UMF_LIB = "umf/{}/lib".format(ONEAPI_UMF_VERSION)
 
@@ -190,6 +196,16 @@ filegroup(
         ONEAPI_MPI_LIB = ONEAPI_MPI_LIB,
         ONEAPI_MPI_LIBFABRIC_LIB = ONEAPI_MPI_LIBFABRIC_LIB,
     ),
+    "intel-oneapi-dnnl-2026.0": """
+filegroup(
+    name = "libdnnl_so_3",
+    srcs = ["{ONEAPI_DNNL_LIB}/libdnnl.so.3.11"],
+)""".format(ONEAPI_DNNL_LIB = ONEAPI_DNNL_LIB),
+    "intel-oneapi-tbb-2023.1": """
+filegroup(
+    name = "libtbb_so_12",
+    srcs = ["{ONEAPI_TBB_LIB}/libtbb.so.12.19"],
+)""".format(ONEAPI_TBB_LIB = ONEAPI_TBB_LIB),
     "intel-oneapi-tcm-1.5": """
 filegroup(
     name = "hwloc",
@@ -264,7 +280,7 @@ filegroup(
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
 }
 
-_ROOT_MODULE_DIRECT_DEPS = ["libpjrt_oneapi"]
+_ROOT_MODULE_DIRECT_DEPS = ["libzml_oneapi"]
 
 def _oneapi_impl(mctx):
     loaded_packages = _read_packages(mctx, [
@@ -272,8 +288,8 @@ def _oneapi_impl(mctx):
     ])
 
     http_archive(
-        name = "libpjrt_oneapi",
-        build_file = "libpjrt_oneapi.BUILD.bazel",
+        name = "libzml_oneapi",
+        build_file = "libzml_oneapi.BUILD.bazel",
         sha256 = PJRT_ONEAPI_ARTIFACT_SHA256,
         url = PJRT_ONEAPI_ARTIFACT_URL,
     )
