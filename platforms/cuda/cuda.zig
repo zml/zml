@@ -5,6 +5,7 @@ const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
 const compat_probe = @import("compat_probe.zig");
@@ -18,15 +19,15 @@ fn findCudaSandbox(
     buffer: *[std.Io.Dir.max_path_bytes]u8,
 ) !?[]const u8 {
     const candidate = switch (builtin.cpu.arch) {
-        .aarch64 => "libpjrt_cuda_linux_arm64/sandbox",
-        .x86_64 => "libpjrt_cuda_linux_amd64/sandbox",
+        .aarch64 => "libzml_cuda_linux_arm64/sandbox",
+        .x86_64 => "libzml_cuda_linux_amd64/sandbox",
         else => return null,
     };
     return try r.rlocation(candidate, buffer);
 }
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_CUDA");
+    return platforms_options.cuda_enabled;
 }
 
 pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
@@ -113,7 +114,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         };
 
         if (cudaCompat) {
-            log.warn("Detected NVIDIA GPU that requires CUDA compatibility libraries.", .{});
+            log.info("Detected NVIDIA GPU that requires CUDA compatibility libraries.", .{});
             var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "compat", "libcuda.so.1" });
             _ = std.c.dlopen(path, .{ .NOW = true }) orelse {
@@ -125,7 +126,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_cuda.so" });
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libzml_cuda.so" });
         break :blk .loadFrom(path);
     };
 }

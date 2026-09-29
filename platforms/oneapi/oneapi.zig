@@ -5,12 +5,13 @@ const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/platforms/oneapi");
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_ONEAPI");
+    return platforms_options.oneapi_enabled;
 }
 
 fn hasOneApiDevice(io: std.Io) bool {
@@ -55,7 +56,7 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = try r.rlocation("libpjrt_oneapi/sandbox", &path_buf) orelse {
+    const sandbox_path = try r.rlocation("libzml_oneapi/sandbox", &path_buf) orelse {
         log.err("Failed to find sandbox path for oneAPI runtime", .{});
         return error.FileNotFound;
     };
@@ -66,7 +67,7 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_oneapi.so" });
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libzml_oneapi.so" });
         break :blk pjrt.Api.loadFrom(path);
     };
 }

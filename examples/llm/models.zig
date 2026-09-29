@@ -88,7 +88,10 @@ pub const LoadedModel = union(ModelType) {
                 try m.compile(allocator, io, platform, backend, shardings, seqlen, progress),
             ),
         };
-        return .{ .inner = inner, .seqlen = @intCast(seqlen) };
+        return .{
+            .inner = inner,
+            .seqlen = @intCast(seqlen),
+        };
     }
 };
 
@@ -110,7 +113,7 @@ pub const CompiledModel = struct {
     }
 
     pub fn newSession(
-        self: *const CompiledModel,
+        self: *CompiledModel,
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,

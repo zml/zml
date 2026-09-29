@@ -1,0 +1,74 @@
+diff --git a/runtime/src/iree/tokenizer/normalizer/sequence.c b/runtime/src/iree/tokenizer/normalizer/sequence.c
+--- a/runtime/src/iree/tokenizer/normalizer/sequence.c
++++ b/runtime/src/iree/tokenizer/normalizer/sequence.c
+@@ -188,6 +188,14 @@
+                             "%" PRIhsz " exceeds maximum %" PRIu32,
+                             flattened_count,
+                             IREE_TOKENIZER_NORMALIZER_SEQUENCE_MAX_DEPTH);
++  }
++
++  // Allocate before transferring ownership, including flattening nested
++  // sequences. On failure the caller must retain all original children.
++  iree_tokenizer_normalizer_sequence_t* normalizer = NULL;
++  if (flattened_count != 1) {
++    IREE_RETURN_IF_ERROR(iree_allocator_malloc(
++        allocator, sizeof(*normalizer), (void**)&normalizer));
+   }
+ 
+   // Build flattened children array, transferring ownership as we go.
+@@ -232,18 +240,6 @@
+     state_size = iree_host_align(state_size, iree_max_align_t);
+     child_state_offsets[i] = state_size;
+     state_size += iree_tokenizer_normalizer_state_size(flattened_children[i]);
+-  }
+-
+-  // Allocate the sequence normalizer.
+-  iree_tokenizer_normalizer_sequence_t* normalizer = NULL;
+-  iree_status_t status = iree_allocator_malloc(allocator, sizeof(*normalizer),
+-                                               (void**)&normalizer);
+-  if (!iree_status_is_ok(status)) {
+-    // Cleanup: we've taken ownership of the children, so free them on failure.
+-    for (iree_host_size_t i = 0; i < flattened_count; ++i) {
+-      iree_tokenizer_normalizer_free(flattened_children[i]);
+-    }
+-    return status;
+   }
+ 
+   // Initialize base.
+@@ -566,6 +562,15 @@
+     if (tile_size > IREE_TOKENIZER_NORMALIZER_SEQUENCE_MIN_BATCH) {
+       // Limit tile to what we can handle in scratch.
+       tile_size = IREE_TOKENIZER_NORMALIZER_SEQUENCE_MIN_BATCH;
++      // Never split a UTF-8 codepoint between child process calls.
++      while (tile_size > 0 &&
++             ((uint8_t)remaining_input.data[tile_size] & 0xC0) == 0x80) {
++        --tile_size;
++      }
++    }
++    iree_tokenizer_normalizer_flags_t tile_flags = flags;
++    if (tile_size < remaining_input.size) {
++      tile_flags &= ~IREE_TOKENIZER_NORMALIZER_FLAG_SEGMENT_END;
+     }
+ 
+     // Process one tile through all children.
+@@ -574,7 +579,7 @@
+     iree_host_size_t tile_consumed = 0;
+     iree_host_size_t tile_written = 0;
+     IREE_RETURN_IF_ERROR(iree_tokenizer_normalizer_sequence_process_tile(
+-        state, tile_input, scratch, scratch_size, remaining_output, flags,
++        state, tile_input, scratch, scratch_size, remaining_output, tile_flags,
+         &tile_consumed, &tile_written));
+ 
+     if (tile_consumed == 0 && tile_written == 0) {
+diff --git a/runtime/src/iree/tokenizer/normalizer/strip.c b/runtime/src/iree/tokenizer/normalizer/strip.c
+--- a/runtime/src/iree/tokenizer/normalizer/strip.c
++++ b/runtime/src/iree/tokenizer/normalizer/strip.c
+@@ -353,7 +353,7 @@
+   }
+ 
+   // Phase 3: Handle segment end.
+-  if (is_segment_end) {
++  if (is_segment_end && in_ptr == in_end) {
+     // Pending whitespace is trailing - discard it.
+     iree_tokenizer_normalizer_strip_clear_pending(state);
+     state->at_start = true;

@@ -2209,7 +2209,7 @@ pub const Builder = struct {
             defer pm.deinit();
             // `canonicalize` folds `x * 1`, `x + 0`, etc.; `cse` then
             // dedupes identical constants and subexpressions. Same
-            // pipeline `zml/module.zig` runs on every compiled module.
+            // pipeline `zml/Compiler.zig` runs on every compiled module.
             const opm = pm.asOpPassManager();
             inline for (.{ "canonicalize", "cse", "canonicalize" }) |pass| {
                 try opm.addPipeline(pass);

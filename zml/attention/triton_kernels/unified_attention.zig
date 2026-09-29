@@ -349,7 +349,7 @@ pub const ReduceSegmentsPtr = struct {
 // ============================================================================
 
 fn ctx() *mlir.Context {
-    return zml.module.CompilationContext.current().mlir_ctx;
+    return zml.Compiler.current().mlir_ctx;
 }
 
 fn isFp8(dt: DType) bool {

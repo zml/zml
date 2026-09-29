@@ -4,7 +4,7 @@ const mlir = @import("mlir");
 const ragged_paged = @import("platforms/tpu/ragged_paged");
 const stdx = @import("stdx");
 
-const CompilationContext = @import("../module.zig").CompilationContext;
+const Compiler = @import("../Compiler.zig");
 const zml = @import("../zml.zig");
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 const ragged_attention = @import("mosaic_tpu_kernels/ragged_attention.zig");
@@ -89,7 +89,7 @@ pub const mosaic_tpu = struct {
         num_seqs: zml.Tensor,
         cfg: ragged_paged.Cfg,
     ) zml.Tensor {
-        const mlir_ctx = CompilationContext.current().mlir_ctx;
+        const mlir_ctx = Compiler.current().mlir_ctx;
         const out = ragged_attention.Kernel.call(
             .{
                 .kv_lens = seq_lens,
@@ -118,8 +118,8 @@ pub const mosaic_tpu = struct {
     }
 
     fn activeSequenceCount(query_start_len: zml.Tensor) zml.Tensor {
-        const start = query_start_len.slice1d(.b, .{ .end = query_start_len.dim(.b) - 1 });
-        const end = query_start_len.slice1d(.b, .{ .start = 1 });
+        const start = query_start_len.slice(.b, .{ .end = query_start_len.dim(.b) - 1 });
+        const end = query_start_len.slice(.b, .{ .start = 1 });
         const query_lens = end.sub(start);
         return query_lens
             .cmp(.GT, .zeroes(query_lens.shape()))
@@ -144,7 +144,7 @@ pub const mosaic_tpu = struct {
             "mosaic_tpu ragged paged attention cannot restore output from head_dim {} to {}",
             .{ restored.dim(.hd), q_template.dim(.hd) },
         );
-        return restored.slice1d(.hd, .{ .end = q_template.dim(.hd) });
+        return restored.slice(.hd, .{ .end = q_template.dim(.hd) });
     }
 
     inline fn alignQueryHeadDimForKernel(q: zml.Tensor, target_head_dim: i64) zml.Tensor {
@@ -223,34 +223,27 @@ pub const mosaic_tpu = struct {
         const prepared = prepareInputs(parameters, q, kv_cache);
 
         const q_out = zml.ops.manualComputation(
-            .{
-                prepared.q,
-                prepared.kv_pages,
-                prepared.seq_lens,
-                prepared.block_table,
-                prepared.query_start_len,
-                prepared.num_seqs,
-            },
-            prepared.q.shape(),
-            .{
-                .opts = opts,
-                .parameters = parameters,
-            },
             (struct {
-                fn body(body_context: anytype, allocator: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
-                    _ = allocator;
-                    stdx.debug.assert(sharded_inputs.len == 6, "mosaic_tpu ragged paged manualComputation expects 6 inputs, got {}", .{sharded_inputs.len});
+                q: zml.Tensor,
+                kv_pages: zml.Tensor,
+                seq_lens: zml.Tensor,
+                block_table: zml.Tensor,
+                query_start_len: zml.Tensor,
+                num_seqs: zml.Tensor,
+                opts: AttentionOptions,
+                parameters: Parameters,
 
+                fn body(self: @This(), output: zml.Shape) zml.Tensor {
                     const prepared_inputs: PreparedInputs = .{
-                        .q = sharded_inputs[0],
-                        .kv_pages = sharded_inputs[1],
-                        .seq_lens = sharded_inputs[2],
-                        .block_table = sharded_inputs[3],
-                        .query_start_len = sharded_inputs[4],
-                        .num_seqs = sharded_inputs[5],
+                        .q = self.q,
+                        .kv_pages = self.kv_pages,
+                        .seq_lens = self.seq_lens,
+                        .block_table = self.block_table,
+                        .query_start_len = self.query_start_len,
+                        .num_seqs = self.num_seqs,
                     };
 
-                    const cfg = buildCfg(prepared_inputs, body_context.parameters, body_context.opts);
+                    const cfg = buildCfg(prepared_inputs, self.parameters, self.opts);
                     const q_out = raggedPagedKernelCall(
                         prepared_inputs.q,
                         prepared_inputs.kv_pages,
@@ -264,6 +257,17 @@ pub const mosaic_tpu = struct {
                     return q_out;
                 }
             }).body,
+            .{
+                .q = prepared.q,
+                .kv_pages = prepared.kv_pages,
+                .seq_lens = prepared.seq_lens,
+                .block_table = prepared.block_table,
+                .query_start_len = prepared.query_start_len,
+                .num_seqs = prepared.num_seqs,
+                .opts = opts,
+                .parameters = parameters,
+            },
+            prepared.q.shape(),
         );
 
         const restored = restoreQueryHeads(q, q_out);

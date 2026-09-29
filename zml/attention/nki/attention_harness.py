@@ -125,10 +125,10 @@ def load_nki_attention_module():
 def add_neuron_tools_to_path():
     runfiles = Runfiles.Create()
     python_neuronx_cc = Path(
-        runfiles.Rlocation("+neuron_packages+libpjrt_neuron/sandbox/bin/python-shims/neuronx-cc")
+        runfiles.Rlocation("+neuron_packages+libzml_neuron/sandbox/bin/python-shims/neuronx-cc")
     )
     neuronx_cc = Path(
-        runfiles.Rlocation("+neuron_packages+libpjrt_neuron/sandbox/bin/neuronx-cc")
+        runfiles.Rlocation("+neuron_packages+libzml_neuron/sandbox/bin/neuronx-cc")
     )
     os.environ["PATH"] = os.pathsep.join(
         (str(python_neuronx_cc.parent), str(neuronx_cc.parent), os.environ["PATH"])

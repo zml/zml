@@ -3,9 +3,8 @@ const builtin = @import("builtin");
 
 const c = @import("c");
 const pjrt = @import("pjrt");
-const platforms = @import("platforms");
-pub const Target = platforms.Platform;
 const stdx = @import("stdx");
+pub const Target = @import("platforms").Platform;
 
 const attention = @import("attention.zig");
 const constants = @import("constants.zig");
@@ -51,10 +50,10 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
 
 fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target) !*const pjrt.Api {
     return switch (target) {
-        inline else => |tag| api_map.get(tag) orelse b: {
+        inline else => |tgt| api_map.get(tgt) orelse b: {
             disableXlaLogs();
-            const api = try platforms.load(allocator, io, tag);
-            api_map.set(tag, api);
+            const api = try tgt.load(allocator, io);
+            api_map.set(tgt, api);
             break :b api;
         },
     };
@@ -234,18 +233,66 @@ fn sortDevicesById(target: Target, devices: []Device) void {
     }
 }
 
+// State union tagged on target platform to handle related resources
+pub const State = union(Target) {
+    cpu: void,
+    cuda: CudaState,
+    rocm: void,
+    tpu: void,
+    neuron: void,
+    oneapi: void,
+    metal: void,
+
+    pub const CudaState = struct {
+        fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
+
+        fn deinit(self: *CudaState) void {
+            if (self.fi_cutlass_moe_runners) |runners| {
+                runners.deinit();
+                self.fi_cutlass_moe_runners = null;
+            }
+        }
+    };
+
+    pub fn init(target: Target) State {
+        return switch (target) {
+            .cpu => .{ .cpu = {} },
+            .cuda => .{ .cuda = .{} },
+            .rocm => .{ .rocm = {} },
+            .tpu => .{ .tpu = {} },
+            .neuron => .{ .neuron = {} },
+            .oneapi => .{ .oneapi = {} },
+            .metal => .{ .metal = {} },
+        };
+    }
+
+    pub fn deinit(self: *State) void {
+        switch (self.*) {
+            .cuda => |*cuda_state| cuda_state.deinit(),
+            else => {},
+        }
+    }
+};
+
 pub const Platform = struct {
     arena: std.heap.ArenaAllocator,
     target: Target,
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
+    state: State,
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
     replicated_sharding: zml.Sharding,
     shardings: std.StringArrayHashMapUnmanaged(zml.Sharding),
+    io_impl: IoImpl,
 
-    pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
+    pub const MAX_NUM_DEVICES: u16 = if (Target.tpu.isEnabled()) 64 else 32;
+
+    pub const IoImpl = enum {
+        threaded,
+        zio,
+    };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
         const api = try loadOrGetApi(allocator, io, target);
@@ -276,12 +323,14 @@ pub const Platform = struct {
                 .target = target,
                 .pjrt_api = api,
                 .pjrt_client = pjrt_client,
+                .state = State.init(target),
                 .shardings = .empty,
                 // set below
                 .devices = undefined,
                 .memories = undefined,
                 .physical_mesh = undefined,
                 .replicated_sharding = undefined,
+                .io_impl = options.io_impl,
             };
             break :platform platform;
         };
@@ -324,6 +373,16 @@ pub const Platform = struct {
                 zml.attention.flashattn.register(platform) catch {
                     log.warn("Failed to register flashattn custom call", .{});
                 };
+                if (zml.moe.cutlass_flashinfer.load(arena, io, platform)) {
+                    zml.moe.cutlass_flashinfer.register(platform) catch |err| {
+                        log.warn(
+                            "Failed to register FlashInfer CUTLASS MoE custom calls: {}",
+                            .{err},
+                        );
+                    };
+                } else |err| {
+                    log.warn("Failed to load FlashInfer CUTLASS MoE: {}", .{err});
+                }
             },
             else => {},
         }
@@ -475,6 +534,9 @@ pub const Platform = struct {
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
         _ = io;
         _ = allocator;
+        if (comptime Target.cuda.isEnabled()) {
+            self.state.deinit();
+        }
         self.physical_mesh.deinit(self.arena.allocator());
         self.pjrt_client.deinit(self.pjrt_api);
         self.arena.deinit();
@@ -489,7 +551,7 @@ pub const Platform = struct {
         args: stdx.meta.Tail(
             std.meta.ArgsTuple(@TypeOf(@field(@TypeOf(model_), @tagName(func)))),
         ),
-        opts: zml.module.CompilationOptions,
+        opts: zml.Compiler.Options,
     ) !Exe {
         return self.compileFn(
             allocator,
@@ -507,7 +569,7 @@ pub const Platform = struct {
         comptime func: anytype,
         model: stdx.meta.Head(std.meta.ArgsTuple(@TypeOf(func))),
         args: stdx.meta.Tail(std.meta.ArgsTuple(@TypeOf(func))),
-        opts: zml.module.CompilationOptions,
+        opts: zml.Compiler.Options,
     ) !Exe {
         return self.compileFn(allocator, io, func, .{model} ++ args, opts);
     }
@@ -518,9 +580,9 @@ pub const Platform = struct {
         io: std.Io,
         comptime func: anytype,
         args: std.meta.ArgsTuple(@TypeOf(func)),
-        opts: zml.module.CompilationOptions,
+        opts: zml.Compiler.Options,
     ) !Exe {
-        return zml.module.compile(allocator, io, func, args, self, opts);
+        return zml.Compiler.compile(allocator, io, self, func, args, opts);
     }
 
     pub fn format(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -619,7 +681,7 @@ pub const Platform = struct {
         // but given it's compiled out (except for TPU), I'm not gonna care for now.
         return switch (platform.target) {
             .tpu => {
-                if (comptime !platforms.isEnabled(.tpu)) unreachable;
+                if (comptime !Target.tpu.isEnabled()) unreachable;
                 const element_type = pjrtx.bufferTypeFromDtype(dtype);
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
@@ -654,11 +716,13 @@ pub const CreateOptions = struct {
     // bump memory fraction from XLA defaults of 75% to 90%.
     // Even on a 8GB GPU it should leave enough space for the platform driver/runtime.
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
-    xla_gpu: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    rocm: XlaGpu = .{ .allocator = .{ .vmm = .{ .memory_fraction = 0.90 } } },
+    cuda: XlaGpu = .{ .allocator = .{ .vmm = .{ .memory_fraction = 0.90 } } },
     tpu: struct {} = .{},
     neuron: struct {} = .{},
-    oneapi: struct {} = .{},
-    metal: struct {} = .{},
+    oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    io_impl: Platform.IoImpl = .threaded,
 
     pub const Cpu = struct {
         device_count: u32,
@@ -672,7 +736,7 @@ pub const CreateOptions = struct {
         allocator: Allocator = .{ .bfc = .{} },
         /// The PJRT C API still exposes this under legacy
         /// `use_tfrt_gpu_client` name.
-        gpu_async_dispatch: bool = true,
+        gpu_async_dispatch: bool = false,
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
         // visible_devices: []const i64 = &.{},
         // node_id
@@ -685,6 +749,8 @@ pub const CreateOptions = struct {
             bfc: Options,
             /// use cudaMallocAsync
             async: Options,
+            /// use virtual memory allocator
+            vmm: VmmOptions,
             /// use raw cuMalloc
             platform,
 
@@ -692,6 +758,10 @@ pub const CreateOptions = struct {
                 preallocate: bool = true,
                 memory_fraction: f32 = 0.90,
                 collective_memory_size_mb: i64 = 0,
+            };
+
+            pub const VmmOptions = struct {
+                memory_fraction: f32 = 0.90,
             };
         };
 
@@ -704,7 +774,7 @@ pub const CreateOptions = struct {
                     values.appendAssumeCapacity(.init(.string, "allocator", switch (self.allocator) {
                         .bfc => "bfc",
                         .async => "cuda_async",
-                        .platform => unreachable,
+                        .platform, .vmm => unreachable,
                     }));
                     values.appendAssumeCapacity(.init(.bool, "preallocate", opt.preallocate));
                     if (opt.memory_fraction > 0) {
@@ -712,6 +782,12 @@ pub const CreateOptions = struct {
                     }
                     if (opt.collective_memory_size_mb > 0) {
                         values.appendAssumeCapacity(.init(.int64, "collective_memory_size", opt.collective_memory_size_mb * 1024 * 1024));
+                    }
+                },
+                .vmm => |opt| {
+                    values.appendAssumeCapacity(.init(.string, "allocator", "vmm"));
+                    if (opt.memory_fraction > 0) {
+                        values.appendAssumeCapacity(.init(.float, "memory_fraction", opt.memory_fraction));
                     }
                 },
             }
@@ -727,7 +803,10 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(target, &values),
+            .cuda => self.cuda.writeNamedValues(target, &values),
+            .rocm => self.rocm.writeNamedValues(target, &values),
+            .oneapi => self.oneapi.writeNamedValues(target, &values),
+            .metal => self.metal.writeNamedValues(target, &values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
@@ -740,14 +819,107 @@ pub const CreateOptions = struct {
 
 // TODO(Corendos): Consider moving that in its own file if its size increase too much.
 pub const cuda = struct {
-    pub fn tryGetComputeCapabilities(platform: *const zml.Platform, device: *const pjrt.Device) ?[]const u8 {
-        stdx.debug.assert(platform.target == .cuda, "tryGetComputeCapabilities expects .cuda platform, got {}", .{platform.target});
+    pub const ComputeCapability = struct {
+        major: u8,
+        minor: u8,
+
+        pub fn parse(text: []const u8) ?ComputeCapability {
+            var parts = std.mem.splitScalar(u8, text, '.');
+            return .{
+                .major = std.fmt.parseInt(u8, parts.first(), 10) catch return null,
+                .minor = std.fmt.parseInt(u8, parts.next() orelse "0", 10) catch return null,
+            };
+        }
+
+        pub fn eql(self: ComputeCapability, other: ComputeCapability) bool {
+            return self.major == other.major and self.minor == other.minor;
+        }
+
+        pub fn atLeast(self: ComputeCapability, other: ComputeCapability) bool {
+            return self.major > other.major or (self.major == other.major and self.minor >= other.minor);
+        }
+
+        pub fn sm(self: ComputeCapability) u16 {
+            return @as(u16, self.major) * 10 + self.minor;
+        }
+    };
+
+    pub fn computeCapability(platform: *const zml.Platform) ?ComputeCapability {
+        if (platform.target != .cuda) return null;
+        const devices = platform.pjrt_client.devices(platform.pjrt_api);
+        if (devices.len == 0) return null;
+
+        const attributes = devices[0].getDescription(platform.pjrt_api).attributes(platform.pjrt_api);
+        return for (attributes) |attr| {
+            if (std.mem.eql(u8, attr.name(), "compute_capability")) {
+                break ComputeCapability.parse(attr.value().string);
+            }
+        } else null;
+    }
+};
+
+pub const rocm = struct {
+    pub const ComputeCapability = enum {
+        /// CDNA1: MI100.
+        gfx908,
+        /// CDNA2: MI200 series.
+        gfx90a,
+        /// CDNA3: MI300 series.
+        gfx942,
+        /// CDNA4: MI350 series.
+        gfx950,
+        /// RDNA2: RX 6000 series.
+        gfx1030,
+        /// RDNA3 (Navi 31): RX 7900 series.
+        gfx1100,
+        /// RDNA3 (Navi 32): RX 7800 and RX 7700 series.
+        gfx1101,
+        /// RDNA3 (Navi 33): RX 7600 series.
+        gfx1102,
+        /// RDNA3 APU: Phoenix.
+        gfx1103,
+        /// RDNA3.5: newer Ryzen AI APUs.
+        gfx1150,
+        /// RDNA4 (Navi 44): RX 9060 family.
+        gfx1200,
+        /// RDNA4 (Navi 48): RX 9070 family.
+        gfx1201,
+
+        pub const Architecture = enum {
+            cdna1,
+            cdna2,
+            cdna3,
+            cdna4,
+            rdna2,
+            rdna3,
+            rdna3_5,
+            rdna4,
+        };
+
+        pub fn architecture(self: ComputeCapability) Architecture {
+            return switch (self) {
+                .gfx908 => .cdna1,
+                .gfx90a => .cdna2,
+                .gfx942 => .cdna3,
+                .gfx950 => .cdna4,
+                .gfx1030 => .rdna2,
+                .gfx1100, .gfx1101, .gfx1102, .gfx1103 => .rdna3,
+                .gfx1150 => .rdna3_5,
+                .gfx1200, .gfx1201 => .rdna4,
+            };
+        }
+    };
+
+    /// Assumes homogeneous devices.
+    pub fn computeCapability(platform: *const zml.Platform) ?ComputeCapability {
+        stdx.debug.assert(platform.target == .rocm, "computeCapability expects .rocm platform, got {}", .{platform.target});
+        const device = platform.pjrt_client.devices(platform.pjrt_api)[0];
         const description = device.getDescription(platform.pjrt_api);
 
         const attributes = description.attributes(platform.pjrt_api);
         return for (attributes) |attr| {
             if (std.mem.eql(u8, attr.name(), "compute_capability")) {
-                break attr.value().string;
+                break std.meta.stringToEnum(ComputeCapability, std.mem.sliceTo(attr.value().string, ':'));
             }
         } else null;
     }
@@ -815,7 +987,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     } else return error.MemoryNotFound;
 
     var pjrt_buffer = try pjrt_client.createViewOfDeviceBuffer(pjrt_api, .{
-        .data = buffer.data,
+        .device_buffer_ptr = buffer.data,
         .dims = shape.dims(),
         .element_type = pjrtx.bufferTypeFromDtype(shape.dtype()),
         .device = device,

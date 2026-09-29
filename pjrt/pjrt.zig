@@ -74,6 +74,13 @@ pub const ApiError = error{
     Unauthenticated,
 };
 
+inline fn interpretPjrtError(api: *const Api, pjrt_error: *Error, context: []const u8) ApiError {
+    defer pjrt_error.deinit(api);
+    const err_code = pjrt_error.getCode(api).toApiError();
+    log.warn("[{s}] {t}: {s}", .{ context, err_code, pjrt_error.getMessage(api) });
+    return err_code;
+}
+
 fn InnerMixin(comptime innerT: type) type {
     return struct {
         fn inner(self: anytype) *innerT {
@@ -169,8 +176,7 @@ pub const Api = struct {
         }
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
-            log.err("[{s}] {s}", .{ @tagName(method), pjrt_error.getMessage(self) });
-            return pjrt_error.getCode(self).toApiError();
+            return interpretPjrtError(self, pjrt_error, @tagName(method));
         }
     }
 
@@ -517,7 +523,7 @@ pub const Client = opaque {
     }
 
     pub const CreateViewOfDeviceBufferArgs = struct {
-        data: *anyopaque,
+        device_buffer_ptr: *anyopaque,
         dims: []const i64,
         element_type: BufferType,
         layout: MemoryLayout,
@@ -533,7 +539,7 @@ pub const Client = opaque {
         const layout = args.layout.toCStruct();
         const ret = try api.call(.PJRT_Client_CreateViewOfDeviceBuffer, .{
             .client = self.inner(),
-            .device_buffer_ptr = @constCast(args.data),
+            .device_buffer_ptr = @constCast(args.device_buffer_ptr),
             .dims = args.dims.ptr,
             .num_dims = args.dims.len,
             .element_type = @intFromEnum(args.element_type),
@@ -1065,6 +1071,35 @@ pub const MemoryLayout = union(MemoryLayoutType) {
             },
         };
     }
+
+    fn fromCStruct(self: c.PJRT_Buffer_MemoryLayout) MemoryLayout {
+        return switch (self.type) {
+            c.PJRT_Buffer_MemoryLayout_Type_Tiled => b: {
+                const tiled = self.unnamed_0.tiled;
+
+                const minor_to_major: []const i64 = if (tiled.minor_to_major == null) &.{} else tiled.minor_to_major[0..tiled.minor_to_major_size];
+                const tile_dims_sizes: []const usize = if (tiled.tile_dim_sizes == null) &.{} else tiled.tile_dim_sizes[0..tiled.num_tiles];
+
+                const tile_dims: []const i64 = if (tiled.tile_dims == null) &.{} else td: {
+                    var tile_dim_len: usize = 0;
+                    for (tile_dims_sizes) |size| tile_dim_len += size;
+                    break :td tiled.tile_dims[0..tile_dim_len];
+                };
+
+                break :b .{
+                    .tiled = .{
+                        .minor_to_major = minor_to_major,
+                        .tile_dims = tile_dims,
+                        .tile_dims_sizes = tile_dims_sizes,
+                    },
+                };
+            },
+            c.PJRT_Buffer_MemoryLayout_Type_Strides => .{
+                .strides = .{ .byte_strides = self.unnamed_0.strides.byte_strides[0..self.unnamed_0.strides.num_byte_strides] },
+            },
+            else => unreachable,
+        };
+    }
 };
 
 pub const DefaultMemoryLayout = struct {
@@ -1262,7 +1297,10 @@ pub const Buffer = opaque {
         const ret = try api.call(.PJRT_Buffer_OpaqueDeviceMemoryDataPointer, .{
             .buffer = self.inner(),
         });
-        return ret.device_memory_ptr.?;
+        return ret.device_memory_ptr orelse {
+            log.err("[PJRT_Buffer_OpaqueDeviceMemoryDataPointer] plugin returned success with null device_memory_ptr", .{});
+            return error.Internal;
+        };
     }
 
     pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64) ApiError!?*Event {
@@ -1301,6 +1339,11 @@ pub const Buffer = opaque {
             .buffer = self.inner(),
         });
     }
+
+    pub fn memoryLayout(self: *const Buffer, api: *const Api) ApiError!MemoryLayout {
+        const ret = try api.call(.PJRT_Buffer_GetMemoryLayout, .{ .buffer = self.inner() });
+        return .fromCStruct(ret.layout);
+    }
 };
 
 pub const Event = opaque {
@@ -1329,7 +1372,8 @@ pub const Event = opaque {
 
     pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
         if (self.isReady(api)) {
-            return;
+            const err = self.getEventError(api) orelse return;
+            return interpretPjrtError(api, err, "PJRT_Event_Await");
         }
 
         const Ctx = struct {
@@ -1346,12 +1390,7 @@ pub const Event = opaque {
         }.call, &ctx);
         ctx.event.waitUncancelable(io);
 
-        if (ctx.err) |e| {
-            defer e.deinit(api);
-            const err_code = e.getCode(api).toApiError();
-            log.err("{t} {s}", .{ err_code, e.getMessage(api) });
-            return err_code;
-        }
+        if (ctx.err) |err| return interpretPjrtError(api, err, "PJRT_Event_OnReady");
     }
 
     pub fn awaitRaw(self: *const Event, api: *const Api) ApiError!void {

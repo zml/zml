@@ -75,10 +75,23 @@ pub const Buffer = struct {
         for (self._shards.constSlice()) |buffer| {
             buffer.deinit(self._platform.pjrt_api);
         }
+        self._shards = .empty;
     }
 
+    /// Given a flat struct (static size, no slices) containing `zml.Buffer`, `deinit` each one of them.
     pub fn deinitAll(T: type, buffers: *mem.Bufferized(T)) void {
         meta.visitFlatStruct(struct {
+            fn deinit(_: void, x: *Buffer) void {
+                x.deinit();
+            }
+        }.deinit, {}, buffers);
+    }
+
+    /// Given an arbitrary struct `deinit` all `zml.Buffer` containing.
+    /// If the struct contains slices of `zml.Buffer` the memory of the slices will NOT be freed,
+    /// This only impacts device memory.
+    pub fn freeDeviceMemoryButKeepHostMetadataMemory(T: type, buffers: *mem.Bufferized(T)) void {
+        meta.visit(struct {
             fn deinit(_: void, x: *Buffer) void {
                 x.deinit();
             }
@@ -112,14 +125,16 @@ pub const Buffer = struct {
     pub fn from(
         io: std.Io,
         platform: *const Platform,
-        sh: Shape,
+        shape_: Shape,
         sharding: Sharding,
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
+        // Use the PJRT shape for everything
+        const sh = shape_.packedShape();
         var res: Buffer = .{
             ._platform = platform,
-            ._shape = sh,
+            ._shape = shape_,
             ._sharding = sharding.resolve(platform),
             ._shards = .empty,
         };
@@ -201,13 +216,15 @@ pub const Buffer = struct {
     pub fn uninitialized(
         _: std.Io,
         platform: *const Platform,
-        sh: Shape,
+        shape_: Shape,
         sharding: Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
+        std.log.debug("uninitialized {f}", .{shape_});
+        const sh = shape_.packedShape();
         var res: Buffer = .{
             ._platform = platform,
-            ._shape = sh,
+            ._shape = shape_,
             ._sharding = sharding.resolve(platform),
             ._shards = .empty,
         };
@@ -277,6 +294,7 @@ pub const Buffer = struct {
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, destination);
 
             if (maybe_event) |event| {
+                defer event.deinit(self._platform.pjrt_api);
                 try event.await(self._platform.pjrt_api, io);
             }
         }
@@ -297,6 +315,7 @@ pub const Buffer = struct {
             const sub_slice = placement.shardSlice(device.coords, slice);
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, shard_slice.data());
             if (maybe_event) |event| {
+                defer event.deinit(self._platform.pjrt_api);
                 try event.await(self._platform.pjrt_api, io);
             }
 
@@ -318,6 +337,30 @@ pub const Buffer = struct {
 
     pub fn opaqueDevicePtr(self: Buffer, device_id: usize) *anyopaque {
         return self._shards.get(device_id).opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
+    }
+
+    /// Creates a view of the given buffer
+    pub fn createView(self: Buffer) !Buffer {
+        const platform = self._platform;
+
+        var view_shards_buffer: [MAX_NUM_SHARDS]*pjrt.Buffer = undefined;
+        var view_shard_list: std.ArrayList(*pjrt.Buffer) = .initBuffer(&view_shards_buffer);
+        errdefer for (view_shard_list.items) |shard| {
+            shard.deinit(platform.pjrt_api);
+        };
+
+        for (self._shards.constSlice()) |shard| {
+            const view_shard = try platform.pjrt_client.createViewOfDeviceBuffer(platform.pjrt_api, .{
+                .device_buffer_ptr = try shard.opaqueDeviceMemoryDataPointer(platform.pjrt_api),
+                .dims = shard.dimensions(platform.pjrt_api),
+                .element_type = shard.elementType(platform.pjrt_api),
+                .layout = try shard.memoryLayout(platform.pjrt_api),
+                .device = try shard.device(platform.pjrt_api),
+            });
+            view_shard_list.appendAssumeCapacity(view_shard);
+        }
+
+        return fromPjrtBuffers(platform, self._shape, self._sharding, view_shard_list.items);
     }
 };
 

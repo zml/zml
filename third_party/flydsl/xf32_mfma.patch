@@ -1,0 +1,25 @@
+diff --git a/lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp b/lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp
+--- a/lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp
++++ b/lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp
+@@ -109,8 +109,12 @@
+ static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
+ 
+ static Type getMfmaABType(MLIRContext *ctx, Type elemTy, int32_t mn, int32_t k = 0) {
+-  if (elemTy.isF32())
++  if (elemTy.isF32()) {
++    // v_mfma_f32_32x32x4_xf32 consumes two packed FP32 inputs per lane.
++    if (mn == 32 && k == 4)
++      return VectorType::get({2}, Float32Type::get(ctx));
+     return Float32Type::get(ctx);
++  }
+   if (elemTy.isF16())
+     return VectorType::get({mn * k / 64}, Float16Type::get(ctx));
+   if (elemTy.isBF16()) {
+@@ -179,6 +183,7 @@
+   DISPATCH_MFMA_SSA(4, 1, elemTyA.isF32(), mfma_f32_4x4x1f32)
+   DISPATCH_MFMA_SSA(32, 2, elemTyA.isF32(), mfma_f32_32x32x2f32)
+   DISPATCH_MFMA_SSA(16, 4, elemTyA.isF32(), mfma_f32_16x16x4f32)
++  DISPATCH_MFMA_SSA(32, 4, elemTyA.isF32(), mfma_f32_32x32x4_xf32)
+ 
+   DISPATCH_MFMA_SSA(32, 4, elemTyA.isF16(), mfma_f32_32x32x4f16)
+   DISPATCH_MFMA_SSA(16, 4, elemTyA.isF16(), mfma_f32_16x16x4f16)

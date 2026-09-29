@@ -5,13 +5,14 @@ const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/platforms/rocm");
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_ROCM");
+    return platforms_options.rocm_enabled;
 }
 
 fn hasRocmDevices(io: std.Io) bool {
@@ -24,6 +25,13 @@ fn hasRocmDevices(io: std.Io) bool {
 fn setupRocmEnv(rocm_data_dir: []const u8) !void {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = c.setenv("ROCM_PATH", try stdx.Io.Dir.path.bufJoinZ(&buf, &.{rocm_data_dir}), 1); // must be zero terminated
+
+    // Use one HIP graph stream to reduce cross-stream synchronization overhead.
+    _ = c.setenv("DEBUG_HIP_FORCE_GRAPH_QUEUES", "1", 0);
+    // Share one hardware queue per device so auxiliary barriers stay on the kernel queue.
+    _ = c.setenv("GPU_MAX_HW_QUEUES", "1", 0);
+    // Disable rocprofiler queue interposition to avoid its dispatch overhead outside profiling.
+    _ = c.setenv("ROCPROFILER_QUEUE_INTERPOSITION", "0", 0);
 }
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
@@ -41,7 +49,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = try r.rlocation("libpjrt_rocm/sandbox", &path_buf) orelse {
+    const sandbox_path = try r.rlocation("libzml_rocm/sandbox", &path_buf) orelse {
         log.err("Failed to find sandbox path for ROCm runtime", .{});
         return error.FileNotFound;
     };
@@ -59,7 +67,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     // executing the destructor. Accessing this variable results in a segmentation fault...
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const lib_path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_rocm.so" });
+        const lib_path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libzml_rocm.so" });
         break :blk .loadFrom(lib_path);
     };
 }

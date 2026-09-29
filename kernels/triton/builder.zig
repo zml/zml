@@ -774,7 +774,7 @@ pub const Builder = struct {
             .i32 => r,
             .i64 => self.extsi(r, dtype),
             .i16, .i8 => self.trunci(r, dtype),
-            .f16, .bf16, .f32, .f64, .f8e4m3fn, .f8e5m2 => self.sitofp(r, dtype),
+            .f16, .bf16, .f32, .f64, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2 => self.sitofp(r, dtype),
             else => @panic("Builder.arange: unsupported dtype"),
         };
     }
@@ -1161,7 +1161,9 @@ pub const Builder = struct {
         } else {
             c, _ = self.broadcast(c, xv);
         }
-        return self.select(c, xv, yv);
+        // Arithmetic broadcasting can widen i1 when the selected values are
+        // integers. The select predicate must remain boolean.
+        return self.select(c.to(.i1), xv, yv);
     }
 
     pub fn divsi(self: *Builder, lhs: Value, rhs: Value) Value {
@@ -1303,8 +1305,10 @@ pub const Builder = struct {
     }
 
     /// Numeric cast with options. Dispatch:
-    ///   - fp↔fp narrow: truncf, except fp8 or custom rounding → tt.fp_to_fp.
-    ///   - fp↔fp wide: extf. i1→fp: uitofp. int↔int: extsi/trunci/bitcast by width.
+    ///   - fp↔fp with fp8: tt.fp_to_fp, with rounding only on downcasts.
+    ///   - other fp↔fp narrow: truncf, except custom rounding → tt.fp_to_fp.
+    ///   - other fp↔fp wide: extf.
+    ///   - i1→fp: uitofp. int↔int: extsi/trunci/bitcast by width.
     pub fn castOpts(self: *Builder, src: Value, dtype: DType, opts: CastOpts) Value {
         if (opts.bitcast) return self.bitcast(src, dtype);
         const cur_elem = src.elemType();
@@ -1316,11 +1320,16 @@ pub const Builder = struct {
         if (cur_is_float and tgt_is_float) {
             const cur_bw = dtypeBitwidth(cur_dtype);
             const tgt_bw = dtypeBitwidth(dtype);
+            const fp8_involved = (cur_dtype == .f8e4m3fn or cur_dtype == .f8e4m3fnuz or cur_dtype == .f8e5m2 or
+                dtype == .f8e4m3fn or dtype == .f8e4m3fnuz or dtype == .f8e5m2);
+            if (fp8_involved) {
+                return self.fpToFpOpts(src, dtype, .{
+                    .rounding = if (tgt_bw < cur_bw) opts.fp_downcast_rounding orelse .rtne else null,
+                });
+            }
             if (tgt_bw > cur_bw) return self.extf(src, dtype);
-            const fp8_involved = (cur_dtype == .f8e4m3fn or cur_dtype == .f8e5m2 or
-                dtype == .f8e4m3fn or dtype == .f8e5m2);
             const custom_rounding = opts.fp_downcast_rounding != null and opts.fp_downcast_rounding.? != .rtne;
-            if (fp8_involved or custom_rounding) {
+            if (custom_rounding) {
                 return self.fpToFpOpts(src, dtype, .{ .rounding = opts.fp_downcast_rounding orelse .rtne });
             }
             return self.truncf(src, dtype);

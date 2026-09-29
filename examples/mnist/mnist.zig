@@ -49,7 +49,7 @@ const Mnist = struct {
         var loader: zml.io.Loader = try .init(allocator, platform, .default);
         errdefer loader.deinit();
 
-        loader.load(io, Mnist, self, &buffers, store, &.{}, .{});
+        try loader.load(io, Mnist, self, &buffers, store, &.{}, .{});
         try loader.await(io);
 
         return buffers;

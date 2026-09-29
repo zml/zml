@@ -37,7 +37,7 @@ pub fn init(allocator: std.mem.Allocator) !AmdSmi {
     const sandbox_path = sandbox.path(&path_buf) orelse return error.AmdSmiUnavailable;
 
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libamd_smi.so.26" });
+    const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libamd_smi.so.27" });
 
     var dynlib: std.DynLib = .{ .inner = .{
         .handle = std.c.dlopen(path, .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {

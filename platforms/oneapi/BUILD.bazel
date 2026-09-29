@@ -6,22 +6,16 @@ zig_shared_library(
     main = "zmlxoneapi.zig",
     shared_lib_name = "libzmlxoneapi.so.0",
     target_compatible_with = ["@platforms//os:linux"],
-    visibility = ["@libpjrt_oneapi//:__subpackages__"],
+    visibility = ["@libzml_oneapi//:__subpackages__"],
     zigopts = ["-fno-stack-check"],
     deps = ["//stdx"],
 )
 
 cc_library(
-    name = "empty",
-    defines = ["ZML_RUNTIME_ONEAPI_DISABLED"],
+    name = "libzml_oneapi",
+    hdrs = ["oneapi.h"],
     tags = ["manual"],
-)
-
-cc_library(
-    name = "libpjrt_oneapi",
-    defines = ["ZML_RUNTIME_ONEAPI"],
-    tags = ["manual"],
-    deps = ["@libpjrt_oneapi"],
+    deps = ["@libzml_oneapi"],
 )
 
 zig_library(
@@ -33,12 +27,13 @@ zig_library(
     deps = [
         "//bazel",
         "//pjrt",
+        "//platforms:options",
         "//stdx",
         "@rules_zig//zig/runfiles",
     ] + select({
         "//platforms:oneapi.enabled": [
-            ":libpjrt_oneapi",
+            ":libzml_oneapi",
         ],
-        "//conditions:default": [":empty"],
+        "//conditions:default": [],
     }),
 )

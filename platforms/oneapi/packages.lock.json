@@ -47,6 +47,17 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
+			"key": "intel-oneapi-dnnl-2026.0_2026.0.2-40_amd64",
+			"name": "intel-oneapi-dnnl-2026.0",
+			"sha256": "4b0f7e23415a695f204f8080328977225759534158d813c2225403f8851433e8",
+			"urls": [
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-dnnl-2026.0-2026.0.2-40_amd64.deb"
+			],
+			"version": "2026.0.2-40"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
 			"key": "intel-oneapi-mkl-core-2026.1_2026.1.0-236_amd64",
 			"name": "intel-oneapi-mkl-core-2026.1",
 			"sha256": "3b230c02fc0ac44f8f71062c20cd883b37c6c1e00940dc0a7f13b02d9c47bd93",
@@ -109,6 +120,17 @@
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-sparse-2026.1-2026.1.0-236_amd64.deb"
 			],
 			"version": "2026.1.0-236"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "intel-oneapi-tbb-2023.1_2023.1.0-151_amd64",
+			"name": "intel-oneapi-tbb-2023.1",
+			"sha256": "f6e4ae469436a8c5ee2250203268344164c9ff455a2207219c75c463aab99a8b",
+			"urls": [
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-tbb-2023.1-2023.1.0-151_amd64.deb"
+			],
+			"version": "2023.1.0-151"
 		},
 		{
 			"arch": "amd64",

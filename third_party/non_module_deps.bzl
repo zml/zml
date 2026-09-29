@@ -1,7 +1,11 @@
 load("//third_party/arocc:repo.bzl", arocc = "repo")
 load("//third_party/cloud_accelerator_diagnostics:repo.bzl", cloud_accelerator_diagnostics = "repo")
 load("//third_party/com_google_sentencepiece:repo.bzl", com_google_sentencepiece = "repo")
+load("//third_party/cuda_tile:repo.bzl", cuda_tile = "repo")
+load("//third_party/cute_ir:repo.bzl", cute_ir = "repo")
 load("//third_party/flashattn:repo.bzl", flashattn = "repo")
+load("//third_party/flashinfer_cutlass_moe:repo.bzl", flashinfer_cutlass_moe = "repo")
+load("//third_party/flydsl:repo.bzl", flydsl = "repo")
 load("//third_party/iree:repo.bzl", iree = "repo")
 load("//third_party/libvaxis:repo.bzl", libvaxis = "repo")
 load("//third_party/linenoise:repo.bzl", linenoise = "repo")
@@ -13,6 +17,7 @@ load("//third_party/translate-c:repo.bzl", translate_c = "repo")
 load("//third_party/uucode:repo.bzl", uucode = "repo")
 load("//third_party/xla:repo.bzl", xla = "repo")
 load("//third_party/zigimg:repo.bzl", zigimg = "repo")
+load("//third_party/zio:repo.bzl", zio = "repo")
 
 def _non_module_deps_impl(mctx):
     cloud_accelerator_diagnostics()
@@ -23,6 +28,7 @@ def _non_module_deps_impl(mctx):
     arocc()
     translate_c()
     flashattn()
+    flashinfer_cutlass_moe()
     linenoise()
     stb()
     zigimg()
@@ -30,11 +36,13 @@ def _non_module_deps_impl(mctx):
     libvaxis()
     mosaic_tpu()
     iree()
+    cuda_tile()
+    flydsl()
+    cute_ir()
+    zio()
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = "all",
-        root_module_direct_dev_deps = [],
     )
 
 non_module_deps = module_extension(
