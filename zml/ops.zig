@@ -2601,6 +2601,12 @@ fn manualComputationInternal(
     const local_input_shapes = try arena.alloc(Shape, input_shapes.len);
     const local_output_shapes = try arena.alloc(Shape, outputs.len);
     for (input_shapes, 0..) |shape, i| {
+        if (shape.isFullyReplicated()) {
+            local_input_shapes[i] = shape;
+            continue;
+        }
+
+        stdx.debug.assert(shape._sharding.eql(sharding), "zml.ops.manualComputation expects all input tensors to use the same sharding {s}, got input {d}: {f} with sharding {s}", .{ sharding_.name(), i, shape, shape._sharding.name() });
         local_input_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
     }
     for (outputs, 0..) |shape, i| {
@@ -2888,8 +2894,8 @@ test "manualComputation uses the explicit mesh for every input and output" {
         const block = mlir.Block.init(&.{}, &.{});
         const scope = comp.pushBlock(block);
         defer scope.pop();
-        const input = Tensor.constant(DataType.f32.constant(1)).broad(shape.withSharding(other));
-        const replicated_input = Tensor.constant(DataType.f32.constant(2)).broad(replicated_shape);
+        const input = Tensor.constant(.{ .f32 = 1 }).broad(shape.withSharding(selected));
+        const replicated_input = Tensor.constant(.{ .f32 = 2 }).broad(replicated_shape);
         const Handler = struct {
             input: Tensor,
             replicated: Tensor,
@@ -2905,6 +2911,10 @@ test "manualComputation uses the explicit mesh for every input and output" {
                 return result;
             }
         };
+        // We have manualComputation using the "selected" sharding.
+        // replicated_input uses the "replicated" sharding,
+        // but this is authorize because whatever the effective partitioning is,
+        // replicated_input will be available on the partition.
         const outputs = manualComputation(selected, Handler.body, .{
             .input = input,
             .replicated = replicated_input,
