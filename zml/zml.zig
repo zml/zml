@@ -15,6 +15,7 @@ pub const tokenizer = @import("zml/tokenizer");
 
 pub const attention = @import("attention.zig");
 pub const Buffer = @import("buffer.zig").Buffer;
+pub const HostStagedBuffer = @import("buffer.zig").HostStagedBuffer;
 pub const Compiler = @import("Compiler.zig");
 pub const constants = @import("constants.zig");
 pub const dtype = @import("dtype.zig");
