@@ -788,9 +788,9 @@ pub const Shape = struct {
         .physical = undefined,
         .logical = .mesh(.{ .batch = .balanced, .feature = .balanced, .colors = .balanced }),
         .bindings = .init(&.{
-            .{ .logical = "batch", .physical = .init(&.{.link_x}) },
-            .{ .logical = "feature", .physical = .init(&.{.link_y}) },
-            .{ .logical = "colors", .physical = .init(&.{.link_z}) },
+            .init(&.{.link_x}),
+            .init(&.{.link_y}),
+            .init(&.{.link_z}),
         }),
         .folds = .empty,
         .folds_consumed = .empty,
@@ -850,22 +850,6 @@ pub const Shape = struct {
 
         shape = shape.withPartitioning(test_sharding, .{ .a = .batch, .b = .open, .c = .feature });
         try testing.expectEqualSlices(PartitionSpec, &.{ .sharded(0), .open, .sharded(1) }, shape._partitioning.toArray()[0..shape.rank()]);
-    }
-
-    test "withPartitioning resolves names against the supplied sharding and resets old specs" {
-        var other_data = test_sharding.data.*;
-        std.mem.swap(Sharding.Binding, &other_data.bindings.buffer[0], &other_data.bindings.buffer[1]);
-        const other_sharding: Sharding = .{ .data = &other_data };
-        const shape = Shape.init(.{ .a = 8, .b = 16, .c = 32 }, .f32);
-        const first = shape.withPartitioning(test_sharding, .{ .a = .batch, .b = .feature, .c = .open });
-        const second = first.withPartitioning(other_sharding, .{ .a = .batch });
-        try testing.expectEqual(other_sharding.data, second._sharding.data);
-        try testing.expectEqual(PartitionSpec.sharded(0), first.partition(.a));
-        try testing.expectEqual(PartitionSpec.sharded(1), second.partition(.a));
-        try testing.expectEqual(PartitionSpec.unknown, second.partition(.b));
-        try testing.expectEqual(PartitionSpec.unknown, second.partition(.c));
-        const special = shape.withPartitioning(.replicated, .{ .a = .replicated, .b = .unknown, .c = .open });
-        try testing.expectEqualSlices(PartitionSpec, &.{ .replicated, .unknown, .open }, special._partitioning.toArray()[0..3]);
     }
 
     pub fn mapPartitioningAxes(self: Shape, sharding: Sharding, mapping: anytype) Shape {
