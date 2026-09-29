@@ -222,10 +222,6 @@ alias(
     name = "lib/libpjrt_c_api_furiosa_plugin.so",
     actual = ":libzml_furiosa",
 )
-alias(
-    name = "share/furiosa/gcc.specs",
-    actual = ":libzml_furiosa",
-)
 """)
     rctx.file("missing.bzl", """
 def _impl(ctx):
