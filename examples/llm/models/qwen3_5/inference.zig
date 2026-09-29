@@ -258,7 +258,7 @@ fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *con
     defer phase.logCompileDone(log, "full attention layer", io, from);
     return zml.FnExe(model.TransformerLayer.forwardSelfAttn).compile(allocator, io, platform, .{ .shardings = &parameters.shardings.all(), .program_name = phase.programName("qwen3_5", "full_attention_layer") }, .{.{
         .layer = mdl.text_model.layers[layer_index],
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.shardings.model),
         .token_index = parameters.token_index,
         .cache = .{
             .k = parameters.kv_cache.self_attn.k,
@@ -276,7 +276,7 @@ fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *c
     defer phase.logCompileDone(log, "linear attention layer", io, from);
     return zml.FnExe(model.TransformerLayer.forwardLinearAttn).compile(allocator, io, platform, .{ .shardings = &parameters.shardings.all(), .program_name = phase.programName("qwen3_5", "linear_attention_layer") }, .{.{
         .layer = mdl.text_model.layers[layer_index],
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.shardings.model),
         .active_length = zml.Tensor.init(.{}, .u32),
         .cache = .{
             .conv_state = parameters.kv_cache.gated_delta_net.conv_state,
@@ -294,17 +294,17 @@ fn compileSample(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.
     defer phase.logCompileDone(log, "sampler", io, from);
     return zml.FnExe(model.Sampler.sampleTokens).compile(allocator, io, platform, .{ .shardings = &parameters.shardings.all(), .program_name = phase.programName("qwen3_5", "sampler") }, .{.{
         .sampler = mdl.sampler(),
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.shardings.model),
         .rng = parameters.rng,
         .token_index = parameters.token_index,
     }});
 }
 
-fn hiddenTensor(mdl: model.Model, seqlen: usize) zml.Tensor {
+fn hiddenTensor(mdl: model.Model, seqlen: usize, sharding: zml.Sharding) zml.Tensor {
     return .fromShape(zml.Shape.init(
         .{ .b = 1, .s = seqlen, .d = mdl.config.text_config.hidden_size },
         mdl.text_model.embed_tokens.weight.dtype(),
-    ).withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .replicated }));
+    ).withPartitioning(sharding, .{ .b = .replicated, .s = .replicated, .d = .replicated }));
 }
 
 fn findFirstLayerIndex(layer_types: []const model.LayerType, target: model.LayerType) ?usize {

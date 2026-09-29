@@ -34,12 +34,12 @@ const DemoModel = struct {
 
         var y = x.dot(self.w, .feature);
         y = y.add(self.b.broad(y.shape()));
-        y = y.withPartitioning(.{ .batch = .data, .hidden = .model });
+        y = y.withPartitioning(.demo_mesh, .{ .batch = .data, .hidden = .model });
         y.print("dense_out");
 
         const gate = y.scale(0.01).sigmoid();
         return zml.ops.manualComputation(
-            input.sharding,
+            input.shape().sharding,
             (struct {
                 y: zml.Tensor,
                 gate: zml.Tensor,
@@ -195,7 +195,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("{f}", .{platform.physical_mesh});
 
     const sharding: zml.Sharding = try platform.registerSharding(
-        "demo_mesh",
+        "dp_mp",
         .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
     );
 
@@ -209,9 +209,9 @@ pub fn main(init: std.process.Init) !void {
     const b_shape = zml.Shape.init(.{ .hidden = 64 }, .f32)
         .withPartitioning(sharding, .{ .hidden = .model });
 
-    const input: zml.Tensor = zml.Tensor.fromShape(input_shape).withSharding(sharding);
-    const w: zml.Tensor = zml.Tensor.fromShape(w_shape).withSharding(sharding);
-    const b: zml.Tensor = zml.Tensor.fromShape(b_shape).withSharding(sharding);
+    const input: zml.Tensor = zml.Tensor.fromShape(input_shape);
+    const w: zml.Tensor = zml.Tensor.fromShape(w_shape);
+    const b: zml.Tensor = zml.Tensor.fromShape(b_shape);
     const model: DemoModel = .init(w, b);
 
     var exe = try platform.compile(

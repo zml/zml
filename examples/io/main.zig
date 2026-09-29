@@ -165,7 +165,12 @@ pub fn main(init: std.process.Init) !void {
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();
 
-            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+            const sharded_sharding: zml.Sharding = try platform.registerSharding(
+                "playground_model",
+                .mesh(.{ .model = .high_bandwidth }),
+            );
+
+            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{ sharded_sharding, platform.replicated_sharding });
             defer store.deinit();
 
             const AllTensorsModel = struct {
@@ -181,20 +186,15 @@ pub fn main(init: std.process.Init) !void {
             var load_count: usize = 0;
             while (registry_it.next()) |entry| : (load_count += 1) {
                 tensors[load_count] = switch (sharding_type) {
-                    .replicated => store.view().createTensor(entry.key_ptr.*, null, .replicated),
+                    .replicated => store.view().createTensor(entry.key_ptr.*, null, .replicated, .replicated),
                     .sharded => if (entry.value_ptr.shape.rank() > 0)
-                        store.view().createTensor(entry.key_ptr.*, null, .{ ._0 = .model })
+                        store.view().createTensor(entry.key_ptr.*, null, .playground_model, .{ ._0 = .model })
                     else
-                        store.view().createTensor(entry.key_ptr.*, null, .replicated),
+                        store.view().createTensor(entry.key_ptr.*, null, .replicated, .replicated),
                 };
             }
 
             const model: AllTensorsModel = .{ .tensors = tensors };
-
-            const sharded_sharding: zml.Sharding = try platform.registerSharding(
-                "playground_model",
-                .mesh(.{ .model = .high_bandwidth }),
-            );
 
             var progress = std.Progress.start(io, .{ .root_name = "zml.examples.load" });
             progress.increaseEstimatedTotalItems(load_count);
@@ -215,7 +215,7 @@ pub fn main(init: std.process.Init) !void {
             });
             defer loader.deinit();
 
-            try loader.load(io, AllTensorsModel, &model, &buffers, &store, &.{sharded_sharding}, .{ .progress = &progress });
+            try loader.load(io, AllTensorsModel, &model, &buffers, &store, store.meshes, .{ .progress = &progress });
             try loader.await(io);
 
             const took = now.untilNow(io, .awake);

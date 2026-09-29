@@ -19,8 +19,8 @@ const Mnist = struct {
 
         pub fn init(store: zml.io.TensorStore.View) Layer {
             return .{
-                .weight = store.createTensor("weight", .{ .d_out, .d }, .replicated),
-                .bias = store.createTensor("bias", .{.d_out}, .replicated),
+                .weight = store.createTensor("weight", .{ .d_out, .d }, .replicated, .replicated),
+                .bias = store.createTensor("bias", .{.d_out}, .replicated, .replicated),
             };
         }
 
@@ -90,14 +90,14 @@ pub fn main(init: std.process.Init) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
     defer registry.deinit();
 
-    // Init model
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
-    defer store.deinit();
-    const mnist_model: Mnist = .init(store.view());
-
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
+
+    // Init model
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{platform.replicated_sharding});
+    defer store.deinit();
+    const mnist_model: Mnist = .init(store.view());
 
     // // Compile model
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
         log.info("Compiling model....", .{});
         const start: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Compiled model [{f}]", .{start.untilNow(io, .awake)});
-        break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input}, .{});
+        break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input}, .{ .shardings = store.meshes });
     };
     defer exe.deinit();
 

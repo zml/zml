@@ -38,20 +38,20 @@ pub fn main(init: std.process.Init) !void {
     defer repo.close(io);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    const shardings: common.Shardings = try .init(platform);
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &shardings.all());
     defer store.deinit();
 
     var repo_model = try llama.LoadedModel.init(allocator, io, repo, store.view(), .{});
     defer repo_model.deinit(allocator);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    const shardings: common.Shardings = try .init(platform);
 
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
     progress.end();
 
-    try run(allocator, io, platform, args.activations, repo_model.inner, &model_buffers, platform.replicated_sharding);
+    try run(allocator, io, platform, args.activations, repo_model.inner, &model_buffers, shardings);
 }
 
 fn run(
@@ -61,12 +61,13 @@ fn run(
     activations_path: []const u8,
     mdl: model.Model,
     model_buffers: *model.Buffers,
-    sharding: zml.Sharding,
+    shardings: common.Shardings,
 ) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
-    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    const sharding = shardings.replicated;
+    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &shardings.all());
     defer activation_store.deinit();
 
     try testLayer(allocator, io, platform, activation_store.view(), "embed_tokens", mdl.model.embed_tokens, model_buffers.model.embed_tokens, sharding, .{ .absolute_tolerance = 1e-3 });
@@ -116,7 +117,7 @@ fn testLayer(
             return if (Layer == zml.nn.Linear) l.forward(x, x.dtype()) else Layer.forward(l, x);
         }
     };
-    const exe = try platform.compileFn(allocator, io, Call.forward, .{ layer, in_tensor }, .{ .shardings = &.{sharding} });
+    const exe = try platform.compileFn(allocator, io, Call.forward, .{ layer, in_tensor }, .{ .shardings = activation_store.store.meshes });
     defer exe.deinit();
 
     var args = try exe.args(allocator);

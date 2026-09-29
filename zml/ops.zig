@@ -66,7 +66,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
     };
 
-    const num_devices = ctx.partitioning.numPartitions();
+    const num_devices = ctx.meshes[0].data.numPartitions();
     if (num_devices <= 1) return inputs;
 
     const reducer_block = b: {
@@ -2601,7 +2601,7 @@ fn manualComputationInternal(
         local_output_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
     }
 
-    return switch (ctx.partitioning.partitioner) {
+    return switch (ctx.partitioner) {
         .shardy => {
             const in_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, input_shapes, sharding);
             const out_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, outputs, sharding);
@@ -2667,7 +2667,7 @@ fn manualComputationInternal(
             // Use the compiler allocator to return memory to the parent
             const sharded_outputs = ctx.alloc(Tensor, outputs.len);
             for (outputs, 0..) |output, i| {
-                sharded_outputs[i] = Tensor._result(output, op.result(i)).withSharding(sharding);
+                sharded_outputs[i] = Tensor._result(output, op.result(i));
             }
             return sharded_outputs;
         },
@@ -2714,7 +2714,7 @@ fn manualComputationInternal(
             const global_values = try arena.alloc(*const mlir.Value, outputs.len);
             const global_types = try arena.alloc(*const mlir.Type, outputs.len);
             for (outputs, 0..) |output_shape, i| {
-                const gspmd_attr = try ctx.partitioning.tensorShardingAttr(arena, ctx.mlir_ctx, output_shape, sharding);
+                const gspmd_attr = try ctx.tensorShardingAttr(arena, ctx.mlir_ctx, output_shape, sharding);
 
                 global_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, output_shape);
                 const shard_to_full = dialects.stablehlo.custom_call(
@@ -2743,7 +2743,7 @@ fn manualComputationInternal(
 
             const sharded_outputs = ctx.alloc(Tensor, outputs.len);
             for (outputs, 0..) |output_shape, i| {
-                sharded_outputs[i] = Tensor._result(output_shape, barrier.result(i)).withSharding(sharding);
+                sharded_outputs[i] = Tensor._result(output_shape, barrier.result(i));
             }
             return sharded_outputs;
         },
@@ -2882,7 +2882,7 @@ test "manualComputation uses the explicit mesh for every input and output" {
         const block = mlir.Block.init(&.{}, &.{});
         const scope = comp.pushBlock(block);
         defer scope.pop();
-        const input = Tensor.constant(DataType.f32.constant(1)).broad(shape).withSharding(other);
+        const input = Tensor.constant(DataType.f32.constant(1)).broad(shape.withSharding(other));
         const replicated_input = Tensor.constant(DataType.f32.constant(2)).broad(replicated_shape);
         const Handler = struct {
             input: Tensor,
@@ -2904,7 +2904,7 @@ test "manualComputation uses the explicit mesh for every input and output" {
             .replicated = replicated_input,
             .expected_local_dim = local_shape.dim(.h),
         }, .{ shape, replicated_shape });
-        for (outputs) |output| try std.testing.expectEqual(selected.data, output.sharding.data);
+        for (outputs) |output| try std.testing.expectEqual(selected.data, output.shape().sharding.data);
         try std.testing.expect(outputs[0].shape().eql(shape));
         try std.testing.expect(outputs[1].shape().eql(replicated_shape));
         if (partitioner == .shardy) {
@@ -3282,7 +3282,7 @@ pub fn typedCustomCall(
         ctx.location,
     ).appendTo(ctx.currentScope().block);
 
-    if (ctx.manual_computation_depth > 0 and ctx.partitioning.partitioner == .gspmd) {
+    if (ctx.manual_computation_depth > 0 and ctx.partitioner == .gspmd) {
         op.setAttributeByName("mhlo.sharding", .string(ctx.mlir_ctx, "{manual}"));
     }
 

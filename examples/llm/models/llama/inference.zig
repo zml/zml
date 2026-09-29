@@ -271,7 +271,7 @@ fn compileLayer(
     const hidden: zml.Tensor = .fromShape(zml.Shape.init(
         .{ .s = seqlen, .d = llama_model.config.hidden_size },
         llama_model.model.embed_tokens.weight.dtype(),
-    ).withPartitioning(.{ .d = .replicated }));
+    ).withPartitioning(parameters.shardings.model, .{ .d = .replicated }));
 
     const kv_cache_index: zml.Tensor = .init(.{}, .u32);
 
@@ -316,7 +316,7 @@ fn compileSample(
     const hidden: zml.Tensor = .fromShape(zml.Shape.init(
         .{ .s = seqlen, .d = llama_model.config.hidden_size },
         llama_model.model.embed_tokens.weight.dtype(),
-    ).withPartitioning(.{ .d = .replicated }));
+    ).withPartitioning(parameters.shardings.model, .{ .d = .replicated }));
 
     const tokens: zml.Tensor = .init(.{ .s = seqlen }, .u32);
 
