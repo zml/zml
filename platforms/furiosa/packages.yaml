@@ -1,0 +1,23 @@
+# Regenerate with: bazel run @apt_furiosa//:lock
+version: 1
+
+sources:
+  - channel: noble main universe
+    url: https://snapshot.ubuntu.com/ubuntu/20260715T000000Z
+  - channel: noble-updates main universe
+    url: https://snapshot.ubuntu.com/ubuntu/20260715T000000Z
+  - channel: noble-security main universe
+    url: https://snapshot.ubuntu.com/ubuntu/20260715T000000Z
+
+  - channel: llvm-toolchain-bookworm-23 main
+    url: https://apt.llvm.org/bookworm
+
+archs:
+  - amd64
+
+packages:
+  - gcc-aarch64-linux-gnu
+  - binutils-aarch64-linux-gnu
+  - libstdc++6
+  - llvm-libunwind1
+  - libc6-dev-arm64-cross
