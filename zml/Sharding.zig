@@ -40,6 +40,14 @@ pub fn devicesInCanonicalOrder(sharding: Sharding) []const Device {
     return sharding.data.physical.devices_in_canonical_order;
 }
 
+pub fn eql(self: Sharding, other: Sharding) bool {
+    return self.data == other.data;
+}
+
+pub fn name(sharding: Sharding) []const u8 {
+    return sharding.data.name;
+}
+
 pub fn format(sharding: Sharding, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     return sharding.data.format(writer);
 }
@@ -1179,7 +1187,7 @@ pub const Data = struct {
     }
 
     pub fn init(
-        name: []const u8,
+        name_: []const u8,
         physical: *const PhysicalMesh,
         logical: LogicalMesh,
         strategy: Strategy,
@@ -1216,7 +1224,7 @@ pub const Data = struct {
         }
 
         return .{
-            .name = name,
+            .name = name_,
             .logical = logical,
             .physical = physical,
             .bindings = bindings,
