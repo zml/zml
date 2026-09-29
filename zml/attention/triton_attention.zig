@@ -356,7 +356,7 @@ pub const paged = struct {
             .use_alibi_slopes = false,
             .use_qq_bias = false,
             .use_softcap = false,
-            .use_sinks = false,
+            .use_sinks = (opts.sink != null),
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .block_q = @intCast(config.block_q),
             .block_m = @intCast(config.block_m),
@@ -377,12 +377,14 @@ pub const paged = struct {
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const num_seqs = parameters.block_table.dim(0);
 
+        const sink = if (opts.sink) |sink| sink.convert(.f32) else dummy;
+
         const output = kernels.KernelUnifiedAttention2dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
-                .sink_ptr = dummy,
+                .sink_ptr = sink,
                 .block_tables_ptr = parameters.block_table,
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
@@ -434,7 +436,7 @@ pub const paged = struct {
             .use_alibi_slopes = false,
             .use_qq_bias = false,
             .use_softcap = false,
-            .use_sinks = false,
+            .use_sinks = (opts.sink != null),
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .block_q = @intCast(config.attention.block_q),
             .block_m = @intCast(config.attention.block_m),
@@ -472,12 +474,15 @@ pub const paged = struct {
             @intCast(paged_attention_opts.num_kv_heads),
             @intCast(config.attention.num_segments_per_seq),
         };
+
+        const sink = if (opts.sink) |sink| sink.convert(.f32) else dummy;
+
         const attn_output = kernels.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
-                .sink_ptr = dummy,
+                .sink_ptr = sink,
                 .block_tables_ptr = parameters.block_table,
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
@@ -545,8 +550,6 @@ pub const paged = struct {
     /// the SIMD16-tuned kernel (compile-time KV strides, cached loads, same-page fast
     /// path) while reusing the shared segment-reduce kernel. See unified_attention_oneapi.zig.
     pub fn pagedAttention3dOneapi(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
-        _ = opts;
-
         const config = select3dConfig(paged_attention_opts);
 
         const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim));
@@ -566,7 +569,7 @@ pub const paged = struct {
             .use_alibi_slopes = false,
             .use_qq_bias = false,
             .use_softcap = false,
-            .use_sinks = false,
+            .use_sinks = (opts.sink != null),
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .block_q = @intCast(config.attention.block_q),
             .block_m = @intCast(config.attention.block_m),
@@ -606,12 +609,15 @@ pub const paged = struct {
         const num_seqs = parameters.block_table.dim(0);
 
         const attn_grid: [3]i32 = .{ @intCast(config.attention.total_q_blocks), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
+
+        const sink = if (opts.sink) |sink| sink.convert(.f32) else dummy;
+
         const attn_output = kernels_oneapi.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
-                .sink_ptr = dummy,
+                .sink_ptr = sink,
                 .block_tables_ptr = parameters.block_table,
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
