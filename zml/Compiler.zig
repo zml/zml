@@ -34,7 +34,7 @@ mlir_ctx: *mlir.Context,
 mlir_pass_manager: *mlir.PassManager,
 module: *mlir.Module,
 platform: *const Platform,
-meshes: []const Sharding,
+shardings: []const Sharding,
 partitioner: Sharding.Partitioner,
 
 mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
@@ -170,7 +170,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
     }
     if (needs_replicated) shardings.appendAssumeCapacity(platform.replicated_sharding);
 
-    validateMeshes(shardings.items) catch |err| stdx.debug.panic("Invalid sharding meshes: {t}", .{err});
+    validateShardings(shardings.items) catch |err| stdx.debug.panic("Invalid sharding shardings: {t}", .{err});
 
     return .{
         .allocator = allocator,
@@ -183,7 +183,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
         .module = module,
         .platform = platform,
         .partitioner = opts.partitioner orelse .fromTarget(platform.target),
-        .meshes = shardings.items,
+        .shardings = shardings.items,
         .location = unknown_location,
         .unknown_location = unknown_location,
     };
@@ -278,7 +278,7 @@ test pushLocation {
         .module = undefined,
         .platform = undefined,
         .partitioner = undefined,
-        .meshes = undefined,
+        .shardings = undefined,
         .location = unknown_location,
         .unknown_location = unknown_location,
     };
@@ -332,7 +332,7 @@ pub fn allocPrint(self: *Compiler, comptime fmt: []const u8, args: anytype) []u8
 
 pub fn getSharding(compiler: *const Compiler, name: @EnumLiteral()) Sharding {
     const name_slice = @tagName(name);
-    for (compiler.meshes) |mesh| {
+    for (compiler.shardings) |mesh| {
         if (std.mem.eql(u8, name_slice, mesh.data.name)) {
             return mesh;
         }
@@ -341,7 +341,7 @@ pub fn getSharding(compiler: *const Compiler, name: @EnumLiteral()) Sharding {
         \\Found no shardings named {s}.
         \\Try passing more shardings to `zml.compile`.
         \\Known shardings: {f}
-    , .{ name_slice, stdx.fmt.slice(compiler.meshes) });
+    , .{ name_slice, stdx.fmt.slice(compiler.shardings) });
 }
 
 pub fn resolveSharding(compiler: *const Compiler, logical_axes: anytype) Sharding {
@@ -352,7 +352,7 @@ pub fn resolveSharding(compiler: *const Compiler, logical_axes: anytype) Shardin
     }
 
     var ok_sharding: ?Sharding = null;
-    for (compiler.meshes) |sharding| {
+    for (compiler.shardings) |sharding| {
         var covers_all: bool = true;
         for (logical_axes) |ax| {
             const logical_ax = Shape.toTag(ax);
@@ -381,7 +381,7 @@ pub fn resolveSharding(compiler: *const Compiler, logical_axes: anytype) Shardin
         \\Found no shardings covering axes: {any}, expected exacty one.
         \\Try passing more shardings to `zml.compile`.
         \\Known shardings: {f}
-    , .{ logical_axes, stdx.fmt.slice(compiler.meshes) });
+    , .{ logical_axes, stdx.fmt.slice(compiler.shardings) });
 }
 
 pub fn Typed(comptime func: anytype) type {
@@ -458,8 +458,8 @@ pub fn compileInternal(
 
     _ = result.func.appendTo(compiler.module.body());
 
-    const num_partitions = compiler.meshes[0].data.numPartitions();
-    const num_replicas = compiler.meshes[0].data.numReplicas();
+    const num_partitions = compiler.shardings[0].data.numPartitions();
+    const num_replicas = compiler.shardings[0].data.numReplicas();
     const num_devices = num_partitions * num_replicas;
 
     compiler.module.operation().setAttributeByName(
@@ -511,7 +511,7 @@ fn addPartitionerOperations(ctx: *Compiler) !void {
     switch (ctx.partitioner) {
         .gspmd => {},
         .shardy => {
-            for (ctx.meshes) |sharding| {
+            for (ctx.shardings) |sharding| {
                 const attr_str = try sharding.data.sdyMeshAttr(allocator);
                 defer allocator.free(attr_str);
 
@@ -794,14 +794,14 @@ fn repack(compiler: *Compiler, scope: *Scope, og_shape: Shape, value: *const mli
     return bit_cast_op.result(0);
 }
 
-fn validateMeshes(meshes: []const Sharding) !void {
-    stdx.debug.assert(meshes.len >= 1, "Waiting at leat 1 sharding strategy to be implemented", .{});
+fn validateShardings(shardings: []const Sharding) !void {
+    stdx.debug.assert(shardings.len >= 1, "Waiting at leat 1 sharding strategy to be implemented", .{});
 
-    const first = meshes[0];
+    const first = shardings[0];
     const partitions = first.data.numPartitions();
     const replicas = first.data.numReplicas();
 
-    for (meshes[1..]) |s| {
+    for (shardings[1..]) |s| {
         if (s.data.numPartitions() != partitions or s.data.numReplicas() != replicas) {
             // todo: deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
             return error.InconsistentShardingCardinality;
@@ -856,7 +856,7 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
     };
 
     const platform = compiler.platform;
-    const main_mesh = compiler.meshes[0];
+    const main_mesh = compiler.shardings[0];
     const num_partitions = main_mesh.data.numPartitions();
     const num_replicas = main_mesh.data.numReplicas();
 

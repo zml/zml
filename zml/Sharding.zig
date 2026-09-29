@@ -1523,19 +1523,19 @@ pub const Data = struct {
         for (self.logical.axes.slice(), self.logical.intents.slice()) |l_tag, l_intent| {
             try writer.print("  - {s} ({s}) -> ", .{ l_tag, @tagName(l_intent) });
 
-            // if (self.binding(l_tag)) |axes| {
-            //     if (axes.len == 0) {
-            //         try writer.writeAll("replicated\n");
-            //     } else {
-            //         for (axes, 0..) |p, i| {
-            //             if (i > 0) try writer.writeAll(", ");
-            //             try writer.writeAll(@tagName(p));
-            //         }
-            //         try writer.writeAll("\n");
-            //     }
-            // } else {
-            //     try writer.writeAll("unbound\n");
-            // }
+            if (self.binding(l_tag)) |axes| {
+                if (axes.len == 0) {
+                    try writer.writeAll("replicated\n");
+                } else {
+                    for (axes, 0..) |p, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writer.writeAll(@tagName(p));
+                    }
+                    try writer.writeAll("\n");
+                }
+            } else {
+                try writer.writeAll("unbound\n");
+            }
         }
 
         const view = self.physicalView();

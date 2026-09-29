@@ -66,7 +66,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
     };
 
-    const num_devices = ctx.meshes[0].data.numPartitions();
+    const num_devices = ctx.shardings[0].data.numPartitions();
     if (num_devices <= 1) return inputs;
 
     const reducer_block = b: {
