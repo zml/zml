@@ -573,6 +573,15 @@ pub const Shape = struct {
         return true;
     }
 
+    test "canBroadcastTo matches tagged axes by name and preserves untagged broadcasting" {
+        // The source's .a axis maps to the target's .a axis after reordering.
+        try testing.expect(Shape.init(.{ .a = 1, .b = 4 }, .f32).canBroadcastTo(Shape.init(.{ .b = 4, .a = 3 }, .f32)));
+
+        // Untagged shapes retain positional broadcasting.
+        try testing.expect(Shape.init(.{ 1, 16 }, .f32).canBroadcastTo(Shape.init(.{ 8, 16 }, .f32)));
+        try testing.expect(!Shape.init(.{ 8, 1 }, .f32).canBroadcastTo(Shape.init(.{ 16, 4 }, .f32)));
+    }
+
     fn canBroadcastToTagged(self: Shape, other: Shape) bool {
         for (self.dims(), self.tags()) |d, t| {
             const other_ax = other.hasTag(t) orelse return false;
