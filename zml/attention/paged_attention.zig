@@ -543,7 +543,7 @@ test pagedAttention {
             // cu_fa2 creates new buffers while other reuse triton buffers.
             defer if (backend == .cuda_fa2) zml.Buffer.deinitAll(Parameters, &parameters_d);
 
-            var output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d });
+            var output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d, .{} });
             defer output_d.deinit();
             results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
         }
