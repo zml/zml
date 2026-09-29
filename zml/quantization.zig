@@ -155,10 +155,10 @@ pub fn quantizeBlockFp8(x: Tensor, axis: anytype, block_size: i64, dtype: DataTy
             .max(.fp8_block),
         .f8e8m0 => blk: {
             const raw_scale = grouped.abs().maximum(.scalar(1e-4, .f32)).scale(1.0 / fp8_max).max(.fp8_block);
+            // Round a positive F32 scale up to a power of two. Adding all
+            // mantissa bits carries into the exponent iff the mantissa is nonzero.
             const bits = raw_scale.bitCast(.u32);
-            const exponent = bits.shiftRightLogical(.scalar(23, .u32));
-            const fractional = bits.logical(.AND, .scalar(0x7fffff, .u32)).cmp(.NE, .scalar(0, .u32)).convert(.u32);
-            break :blk exponent.add(fractional).shiftLeft(.scalar(23, .u32)).bitCast(.f32);
+            break :blk bits.addConstant(0x7fffff).logical(.AND, .scalar(0xff800000, .u32)).bitCast(.f32);
         },
         else => stdx.debug.panic("expected F32 or E8M0 scale dtype, got {s}", .{@tagName(scale_dtype)}),
     };
@@ -401,6 +401,65 @@ test "block FP8 quantization preserves axes and reconstructs constant blocks in 
         for (values.constItems(f32), 0..) |value, i| {
             const scale_index = (i / (256 * 3)) * 6 + ((i / 3) % 256) / 128 * 3 + i % 3;
             try std.testing.expectApproxEqAbs(host[i].toF32(), value * scales.constItems(f32)[scale_index], 1e-6);
+        }
+    }
+}
+
+test "block FP8 E8M0 scales preserve power-of-two boundaries and nonminor axes" {
+    const zml = @import("zml.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    inline for (.{ DataType.f8e4m3fn, DataType.f8e4m3fnuz }) |dtype| {
+        const Local = struct {
+            const Outputs = struct { values: Tensor, scales: Tensor };
+            fn forward(x: Tensor) Outputs {
+                const input = quantizeBlockFp8(x, .k, 32, dtype, .f8e8m0);
+                return .{ .values = input.values.convert(.f32), .scales = input.scales.convert(.f32) };
+            }
+        };
+        const x: Tensor = .init(.{ .b = 2, .k = 256, .s = 3 }, .f32);
+        var exe = try platform.compileFn(allocator, io, Local.forward, .{x}, .{});
+        defer exe.deinit();
+        try zml.testing.expectEqualShapes(x.shape().withDtype(.f32), exe.output_shapes[0]);
+        try zml.testing.expectEqualShapes(x.shape().setDim(.k, 8).withDtype(.f32), exe.output_shapes[1]);
+        const fp8_max: f32 = if (dtype == .f8e4m3fn) 448.0 else 224.0;
+        var host: [2 * 256 * 3]f32 = undefined;
+        var maxima = [_]f32{0} ** (2 * 8 * 3);
+        for (&host, 0..) |*value, i| {
+            const block = (i / 3) % 256 / 32;
+            const scale_index = (i / (256 * 3)) * 24 + block * 3 + i % 3;
+            const boundary = fp8_max * std.math.pow(f32, 2, @as(f32, @floatFromInt(block)) - 4);
+            const bits: u32 = @bitCast(boundary);
+            const magnitude: f32 = switch (i % 3) {
+                0 => @bitCast(bits - 1),
+                1 => boundary,
+                else => @bitCast(bits + 1),
+            };
+            value.* = if (block == 0) 0 else if (block == 1) 1e-30 else magnitude * (if (i % 2 == 0) @as(f32, 1) else -1);
+            maxima[scale_index] = @max(maxima[scale_index], @abs(value.*));
+        }
+        var expected_scales: [2 * 8 * 3]f32 = undefined;
+        for (&expected_scales, maxima) |*scale, maximum| {
+            const raw = @max(maximum, 1e-4) * (1.0 / fp8_max);
+            const bits: u32 = @bitCast(raw);
+            const exponent = (bits >> 23) + @intFromBool(bits & 0x7fffff != 0);
+            scale.* = @bitCast(exponent << 23);
+        }
+        var buffer = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&host));
+        defer buffer.deinit();
+        var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{buffer});
+        defer zml.Buffer.deinitAll(Local.Outputs, &output);
+        var values = try output.values.toSliceAlloc(allocator, io);
+        defer values.free(allocator);
+        var scales = try output.scales.toSliceAlloc(allocator, io);
+        defer scales.free(allocator);
+        try std.testing.expectEqualSlices(f32, &expected_scales, scales.constItems(f32));
+        for (values.constItems(f32), 0..) |value, i| {
+            const scale_index = (i / (256 * 3)) * 24 + ((i / 3) % 256) / 32 * 3 + i % 3;
+            const normalized = std.math.clamp(host[i] / expected_scales[scale_index], -fp8_max, fp8_max);
+            const expected = if (dtype == .f8e4m3fn) zml.floats.Float8E4M3FN.fromF32(normalized).toF32() else zml.floats.Float8E4M3FNUZ.fromF32(normalized).toF32();
+            try std.testing.expectEqual(expected, value);
         }
     }
 }
