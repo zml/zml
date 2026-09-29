@@ -21,6 +21,7 @@ const Args = struct {
     backend: ?zml.attention.Backend = null,
     attnd_ip: ?[]const u8 = null,
     profile: bool = false,
+    benchmark_decode_queue: usize = 0,
     furiosa_pe_count: ?u8 = null,
 
     pub const help =
@@ -36,6 +37,7 @@ const Args = struct {
         \\   --backend=<text>    Attention backend to use ([vanilla, attnd, nki, cuda_fa2, cuda_fa3, furiosa_fa], default: auto-selection)
         \\   --attnd-ip=<addr>   Register and prefer the `attnd` backend at the provided `IP:PORT`
         \\   --furiosa-pe-count=<4|8> Override Furiosa PE topology
+        \\   --benchmark-decode-queue=<n> Llama fixed-length serial/queued diagnostic; seed 0, ignores EOS
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\
     ;
@@ -53,6 +55,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const args = stdx.flags.parse(init.minimal.args, Args);
+    if (args.benchmark_decode_queue > 0 and args.prompt == null) return error.QueueBenchmarkRequiresPrompt;
 
     //
     // Virtual File Systems
@@ -106,6 +109,7 @@ pub fn main(init: std.process.Init) !void {
     } else zml.attention.Backend.auto(platform);
     defer if (args.attnd_ip) |_| zml.attention.attnd.deinit();
     log.info("Selected backend: {}", .{backend});
+    if (args.benchmark_decode_queue > 0 and (platform.target != .furiosa3 or backend != .furiosa_fa)) return error.QueueBenchmarkRequiresFuriosaAttention;
 
     //
     // Model initialization
@@ -129,6 +133,7 @@ pub fn main(init: std.process.Init) !void {
 
     var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);
     defer model.deinit(allocator);
+    if (args.benchmark_decode_queue > 0 and model != .llama) return error.QueueBenchmarkRequiresLlama;
 
     // Defines how the model's tensors are sharded across the available devices.
     const shardings: models.Shardings = try .init(platform);
@@ -180,6 +185,15 @@ pub fn main(init: std.process.Init) !void {
     );
     defer llm_chat.deinit();
 
+    if (args.benchmark_decode_queue > 0) {
+        const prompt_tokens = try llm_chat.session.tokenizePrompt(allocator, prompt);
+        defer allocator.free(prompt_tokens);
+        switch (llm_chat.session.inner) {
+            .llama => |*session| try @import("models/llama/queue_benchmark.zig").run(session, prompt_tokens, args.benchmark_decode_queue),
+            else => return error.QueueBenchmarkRequiresLlama,
+        }
+        return;
+    }
     if (interactive) {
         try llm_chat.runInteractive(prompt);
     } else {
