@@ -640,7 +640,7 @@ pub const SelfAttn = struct {
             k,
             v,
             token_index,
-            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads)),
+            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads), x.shape()._sharding),
             zml.attention.Parameters.init(.fromBackend(.vanilla)),
         ).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 

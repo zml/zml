@@ -152,13 +152,19 @@ pub const Tensor = struct {
         return res;
     }
 
-    pub fn withPartitioning(self: Tensor, sharding_: anytype, axes_: anytype) Tensor {
+    /// Specify the sharding of the input tensor.
+    /// * sharding: zml.Sharding, but during compilation the `.sharding_name` syntax can used to get
+    /// a known sharding from the compilation options.
+    /// * partition spec: a struct where the field names match the axis of the given sharding
+    ///
+    /// eg `x.withPartitioning(tp, .{ .h = .model }))` or `x.withPartitioning(.tp, .{ .h = .model }))`
+    pub fn withPartitioning(self: Tensor, sharding_: anytype, partition_spec: anytype) Tensor {
         if (@TypeOf(sharding_) == @EnumLiteral()) {
             const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit zml.Sharding object as input");
-            return self.withPartitioning(compiler.getSharding(sharding_), axes_);
+            return self.withPartitioning(compiler.getSharding(sharding_), partition_spec);
         }
 
-        const partitioned_shape = self._shape.withPartitioning(sharding_, axes_);
+        const partitioned_shape = self._shape.withPartitioning(sharding_, partition_spec);
         return self.withPartitioningInner(sharding_, partitioned_shape);
     }
 
@@ -210,7 +216,7 @@ pub const Tensor = struct {
             .name = "tensor_partitioning_test",
             .physical = undefined,
             .logical = .mesh(.{ .model = .high_bandwidth }),
-            .bindings = .init(&.{ .init(&.{.link_x}) }),
+            .bindings = .init(&.{.init(&.{.link_x})}),
             .folds = .empty,
             .folds_consumed = .empty,
         };
