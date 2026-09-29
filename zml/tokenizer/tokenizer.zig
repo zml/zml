@@ -3,21 +3,38 @@ const std = @import("std");
 pub const iree = @import("iree");
 pub const sentencepiece = @import("sentencepiece");
 
-pub const homemade = @import("homemade.zig");
-
 const log = std.log.scoped(.@"zml/tokenizer");
 
 const Tokenizers = enum {
     iree,
     sentencepiece,
-    homemade,
 };
 
 pub const Tokenizer = union(Tokenizers) {
+    pub const Normalizer = union(Tokenizers) {
+        pub const Kind = iree.Normalizer.Kind;
+
+        iree: iree.Normalizer,
+        sentencepiece: void,
+
+        pub fn deinit(self: *Normalizer) void {
+            switch (self.*) {
+                .iree => |*n| n.deinit(),
+                else => {},
+            }
+        }
+
+        pub fn normalize(self: *Normalizer, allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+            return switch (self.*) {
+                .iree => |*n| n.normalize(allocator, text),
+                else => error.UnsupportedNormalizer,
+            };
+        }
+    };
+
     pub const Encoder = union(Tokenizers) {
         iree: iree.Tokenizer.Encoder,
         sentencepiece: sentencepiece.Encoder,
-        homemade: homemade.Encoder,
 
         pub fn deinit(self: *Encoder) void {
             switch (self.*) {
@@ -59,7 +76,6 @@ pub const Tokenizer = union(Tokenizers) {
     pub const Decoder = union(Tokenizers) {
         iree: iree.Tokenizer.Decoder,
         sentencepiece: sentencepiece.Decoder,
-        homemade: homemade.Decoder,
 
         pub fn deinit(self: *Decoder) void {
             switch (self.*) {
@@ -104,7 +120,6 @@ pub const Tokenizer = union(Tokenizers) {
 
     iree: iree.Tokenizer,
     sentencepiece: *sentencepiece.SentencePieceProcessor,
-    homemade: *homemade.Tokenizer,
 
     pub fn fromFile(allocator: std.mem.Allocator, io: std.Io, model: []const u8) !Tokenizer {
         if (std.mem.endsWith(u8, model, ".pb")) {
@@ -142,9 +157,29 @@ pub const Tokenizer = union(Tokenizers) {
         };
     }
 
+    pub fn normalizer(self: *const Tokenizer, sequence: []const Normalizer.Kind) !Normalizer {
+        return switch (self.*) {
+            .iree => |*backend| .{ .iree = try backend.normalizer(sequence) },
+            else => error.UnsupportedNormalizer,
+        };
+    }
+
+    pub fn normalizerFromHuggingFaceJson(self: *const Tokenizer, json: []const u8) !Normalizer {
+        return switch (self.*) {
+            .iree => |*backend| .{ .iree = try backend.normalizerFromHuggingFaceJson(json) },
+            else => error.UnsupportedNormalizer,
+        };
+    }
+
     pub fn tokenId(self: *const Tokenizer, token: []const u8) ?u32 {
         return switch (self.*) {
             inline else => |v| v.tokenId(token),
+        };
+    }
+
+    pub fn decode(self: *const Tokenizer, token_id: u32) ?[]const u8 {
+        return switch (self.*) {
+            inline else => |v| v.decode(token_id),
         };
     }
 };

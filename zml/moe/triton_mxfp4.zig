@@ -43,7 +43,12 @@ pub fn fusedExperts(
     const gq = gate_up.quantization orelse return error.UnsupportedQuantization;
     const dq = down.quantization orelse return error.UnsupportedQuantization;
     if (gq.scheme != .mxfp4 or dq.scheme != .mxfp4) return error.UnsupportedQuantization;
-    if ((gate_up.weight.dtype() != .u8 and gate_up.weight.dtype() != .i8) or (down.weight.dtype() != .u8 and down.weight.dtype() != .i8)) return error.UnsupportedWeightLayout;
+    // Weight storage for mxfp4 in HF is expressed as u8 or i8
+    if ((gate_up.weight.dtype() != .u8 and gate_up.weight.dtype() != .i8) or
+        (down.weight.dtype() != .u8 and down.weight.dtype() != .i8))
+    {
+        return error.UnsupportedWeightLayout;
+    }
 
     const expert_parallelism = gate_up.weight.shape().partition(.expert).eql(.init(.experts));
 
@@ -86,9 +91,8 @@ const Context = struct {
         const experts = self.w1.dim(.expert);
         const hidden = self.w2.dim(1);
         const intermediate = self.w2.dim(2) * 2;
-        const tokens: i64 = @intCast(self.input.count() / @as(usize, @intCast(hidden)));
-
-        var ids = self.ids.convert(.i32);
+        var ids = self.ids.convert(.i32).reshape(.{ .token = .auto, .topk = self.topk });
+        const tokens = ids.dim(.token);
         if (self.expert_parallel) {
             const partition_id = zml.ops.partitionId().convert(.i32);
             ids = ids.sub(partition_id.scale(experts));
@@ -107,7 +111,7 @@ const Context = struct {
 
         const result = kernels.forward(cfg, .{
             .x = self.input.reshape(.{ tokens, hidden }),
-            .ids = ids.reshape(.{ tokens, self.topk }),
+            .ids = ids,
             .scales = self.weights.convert(.f32).reshape(.{ tokens, self.topk }),
             .w1 = self.w1,
             .s1 = self.s1,

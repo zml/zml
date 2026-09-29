@@ -171,7 +171,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             break :b attn_output;
         },
         .attnd => attnd.causalAttention(q, k, v, token_index, metadata.attnd, parameters.attnd),
-        .nki => |params| nki.attention(q, k, v, token_index, params),
+        .nki => nki.attention(q, k, v, token_index, parameters.nki),
         .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
         .metal_fa => metal.attention(q, k, v, token_index, metadata.metal_fa),

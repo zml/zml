@@ -430,7 +430,7 @@ pub const Loader = struct {
 
     fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
         const sources = store.getSourcesById(tensor.id) orelse {
-            std.log.warn("Failed to get sources for tensor with id: {}", .{tensor.id});
+            std.log.debug("Failed to get sources for tensor with id: {}", .{tensor.id});
             return;
         };
         stdx.debug.assert(!sources.transformed and sources.tensors.len == 1, "Tensor {} is transformed or has {} sources; `load` only streams single-source tensors", .{ tensor.id, sources.tensors.len });

@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 load("//bazel:zig_options.bzl", "zig_option", "zig_options")
 
@@ -12,30 +13,63 @@ PLATFORMS = {
 }
 
 [
-    zig_option(
+    bool_flag(
         name = runtime,
         build_setting_default = default,
-        scope = "universal",
     )
     for runtime, default in PLATFORMS.items()
+]
+
+[
+    zig_option(
+        name = "{}_enabled".format(runtime),
+        bool = select({
+            "//platforms:{}.enabled".format(runtime): True,
+            "//conditions:default": False,
+        }),
+        visibility = ["//platforms:__pkg__"],
+    )
+    for runtime in PLATFORMS
 ]
 
 zig_options(
     name = "options",
     import_name = "platforms/options",
-    settings = [":" + runtime for runtime in PLATFORMS],
+    settings = [":{}_enabled".format(runtime) for runtime in PLATFORMS],
     visibility = ["//platforms:__subpackages__"],
 )
 
-config_setting(
-    name = "rocm.enabled",
-    constraint_values = [
-        "@platforms//cpu:x86_64",
-        "@platforms//os:linux",
-    ],
-    flag_values = {":rocm": "True"},
-    visibility = ["//visibility:public"],
-)
+# x86_64 and aarch64
+[
+    config_setting(
+        name = "{}.enabled".format(runtime),
+        flag_values = {":{}".format(runtime): "True"},
+        visibility = ["//visibility:public"],
+    )
+    for runtime in [
+        "cpu",
+        "cuda",
+    ]
+]
+
+# x86_64 only
+[
+    config_setting(
+        name = "{}.enabled".format(runtime),
+        constraint_values = [
+            "@platforms//cpu:x86_64",
+            "@platforms//os:linux",
+        ],
+        flag_values = {":{}".format(runtime): "True"},
+        visibility = ["//visibility:public"],
+    )
+    for runtime in [
+        "rocm",
+        "tpu",
+        "neuron",
+        "oneapi",
+    ]
+]
 
 config_setting(
     name = "metal.enabled",
@@ -46,21 +80,6 @@ config_setting(
     flag_values = {":metal": "True"},
     visibility = ["//visibility:public"],
 )
-
-[
-    config_setting(
-        name = "{}.enabled".format(runtime),
-        flag_values = {":{}".format(runtime): "True"},
-        visibility = ["//visibility:public"],
-    )
-    for runtime in [
-        "cpu",
-        "cuda",
-        "tpu",
-        "neuron",
-        "oneapi",
-    ]
-]
 
 zig_library(
     name = "platforms",

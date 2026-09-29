@@ -7,6 +7,7 @@ cc_library(
     hdrs = [
         "Cute.h",
         "CuteAttributes.h",
+        "CuteCompilerAttributes.h",
         "CuteTypes.h",
     ],
     includes = ["../.."],
@@ -17,6 +18,7 @@ cc_library(
     name = "cute_nvgpu",
     hdrs = [
         "CuteNVGPU.h",
+        "CuteNVGPUAttributes.h",
         "CuteNVGPUTypes.h",
     ],
     includes = ["../.."],

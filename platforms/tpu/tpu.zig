@@ -10,7 +10,7 @@ const stdx = @import("stdx");
 const log = std.log.scoped(.@"zml/platforms/tpu");
 
 pub fn isEnabled() bool {
-    return platforms_options.tpu;
+    return platforms_options.tpu_enabled;
 }
 
 /// Check if running on Google Compute Engine, because TPUs will poll the

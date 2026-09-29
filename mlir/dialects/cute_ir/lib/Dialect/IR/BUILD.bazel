@@ -2,18 +2,22 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
+# CuteTypes.cpp is the release's with the compiler's types, attributes and
+# enums added and ratio strides in scaled bases allowed (`1/2@0`, how a 2-CTA
+# TMA partition addresses its halves).
 cc_library(
     name = "dialect",
     srcs = [
-        "CuteDialect.cpp",
-        "CuteOpsPrivate.cpp",
+        "CuteInference.cpp",
+        "CuteOps.cpp",
         "CuteTypes.cpp",
-        "CuteTypesPrivate.cpp",
+        "@cute_ir//:cute_ir/lib/Dialect/IR/CuteAttributes.cpp",
+        "@cute_ir//:cute_ir/lib/Dialect/IR/CuteDialect.cpp",
     ],
     deps = [
-        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/Cute/IR:private_headers",
-        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/Cute/IR:types_all_defs_inc_gen",
-        "@cute_ir//:dialect_support",
+        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/Cute/IR:headers",
+        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/CuteNVGPU/IR:headers",
+        "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:InferTypeOpInterface",

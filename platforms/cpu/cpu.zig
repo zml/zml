@@ -11,7 +11,7 @@ const stdx = @import("stdx");
 const log = std.log.scoped(.@"zml/platforms/cpu");
 
 pub fn isEnabled() bool {
-    return platforms_options.cpu;
+    return platforms_options.cpu_enabled;
 }
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {

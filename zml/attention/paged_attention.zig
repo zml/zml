@@ -5,9 +5,9 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
 const metal = @import("metal_attention.zig");
+const sparse_mla = @import("sparse_mla.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
-const sparse_mla = @import("sparse_mla.zig");
 
 const PagedAttention = @This();
 
@@ -203,6 +203,7 @@ pub const AttentionOptions = struct {
     is_causal: bool = true,
     sliding_window: i32 = -1,
     scale: ?f32 = null,
+    sink: ?zml.Tensor = null,
 };
 
 pub const KvCache = union(enum) {
@@ -322,6 +323,7 @@ test "Backend.auto selects mosaic_tpu on TPU" {
         .physical_mesh = undefined,
         .replicated_sharding = undefined,
         .shardings = .empty,
+        .io_impl = .threaded,
     };
 
     try std.testing.expectEqual(Backend.mosaic_tpu, Backend.auto(&platform));
@@ -339,6 +341,7 @@ test "Backend.auto selects triton on oneAPI" {
         .physical_mesh = undefined,
         .replicated_sharding = undefined,
         .shardings = .empty,
+        .io_impl = .threaded,
     };
 
     try std.testing.expectEqual(Backend.triton, Backend.auto(&platform));
@@ -540,7 +543,7 @@ test pagedAttention {
             // cu_fa2 creates new buffers while other reuse triton buffers.
             defer if (backend == .cuda_fa2) zml.Buffer.deinitAll(Parameters, &parameters_d);
 
-            var output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d });
+            var output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d, .{} });
             defer output_d.deinit();
             results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
         }

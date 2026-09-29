@@ -1372,7 +1372,8 @@ pub const Event = opaque {
 
     pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
         if (self.isReady(api)) {
-            return;
+            const err = self.getEventError(api) orelse return;
+            return interpretPjrtError(api, err, "PJRT_Event_Await");
         }
 
         const Ctx = struct {

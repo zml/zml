@@ -7,7 +7,6 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 const upb = @import("upb");
 const zio = @import("zio");
-const zml_options = @import("zml/options");
 
 const Buffer = @import("buffer.zig").Buffer;
 const DataType = @import("dtype.zig").DataType;
@@ -25,7 +24,7 @@ const Partitioning = Sharding.Partitioning;
 const Tensor = @import("tensor.zig").Tensor;
 
 const Compiler = @This();
-const log = std.log.scoped(.@"zml/compiler");
+const log = std.log.scoped(.@"zml/Compiler");
 
 allocator: std.mem.Allocator,
 io: std.Io,
@@ -42,11 +41,12 @@ mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
 
 scopes: stdx.BoundedArray(Scope, 16) = .empty,
 manual_computation_depth: usize = 0,
+unknown_location: *const mlir.Location,
+location: *const mlir.Location,
 
 channel_id: i64 = 0,
 composite_id: i64 = 0,
 
-var _current_zio: zio.TaskLocal(*Compiler) = .{};
 threadlocal var _current: ?*Compiler = null;
 
 var mlir_global_init_mutex: std.Io.Mutex = .init;
@@ -137,7 +137,8 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
     var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
     mlir_ctx.loadAllAvailableDialects();
 
-    const module = mlir.Module.init(.unknown(mlir_ctx));
+    const unknown_location: *const mlir.Location = .unknown(mlir_ctx);
+    const module = mlir.Module.init(unknown_location);
     module.operation().setAttributeByName("sym_name", .string(mlir_ctx, opts.program_name));
 
     const pass_manager = mlir.PassManager.init(mlir_ctx);
@@ -182,16 +183,13 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
         .module = module,
         .platform = platform,
         .partitioning = partitioning,
+        .location = unknown_location,
+        .unknown_location = unknown_location,
     };
 }
 
 pub fn deinit(self: *Compiler) void {
-    switch (zml_options.io_impl) {
-        .std => {
-            if (_current == self) _current = null;
-        },
-        .zio => {},
-    }
+    if (_current == self) _current = null;
     std.debug.assert(self.scopes.len == 0);
     self.mlir_pass_manager.deinit();
     self.module.deinit();
@@ -214,10 +212,7 @@ pub fn current() *Compiler {
 }
 
 pub fn currentOrNull() ?*Compiler {
-    return switch (zml_options.io_impl) {
-        .std => _current,
-        .zio => _current_zio.get(),
-    };
+    return _current;
 }
 
 pub fn currentScope(self: *Compiler) *Scope {
@@ -228,6 +223,74 @@ pub fn pushBlock(self: *Compiler, block: *mlir.Block) *Scope {
     const scope = Scope.initFromBlock(self, block);
     self.scopes.appendAssumeCapacity(scope);
     return self.currentScope();
+}
+
+/// Change `Compiler.location` by appending a frame to the current stack of locations
+/// Must be followed by a `defer compiler.popLocation`
+pub fn pushLocation(self: *Compiler, location: std.builtin.SourceLocation, name: []const u8) void {
+    var callee: *const mlir.Location = .fromSrc(self.mlir_ctx, location);
+    if (name.len > 0) callee = callee.named(self.mlir_ctx, name);
+    self.location = if (self.location == self.unknown_location) callee else .callSite(callee, self.location);
+}
+
+/// see `zml.Compiler.pushLocation`
+pub fn pushLocationFmt(self: *Compiler, location: std.builtin.SourceLocation, comptime fmt: []const u8, args: anytype) void {
+    const name = std.fmt.allocPrint(self.allocator, fmt, args) catch {
+        return self.pushLocation(location, "<truncated>");
+    };
+    defer self.allocator.free(name);
+
+    return self.pushLocation(location, name);
+}
+
+/// Remove last call frame pushed by `zml.Compiler.pushLocation`
+pub fn popLocation(self: *Compiler) void {
+    switch (self.location.inspect()) {
+        .named => {
+            // We only pushed a named, when there was no parent location
+            self.location = self.unknown_location;
+            return;
+        },
+        .callsite => |callsite| {
+            self.location = callsite.caller();
+            return;
+        },
+        .unknown, .file_line_col, .fused => @panic("unexpected location metadata"),
+    }
+}
+
+test pushLocation {
+    const mlir_registry = mlirRegistry(std.testing.io);
+    var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
+    mlir_ctx.loadAllAvailableDialects();
+
+    const unknown_location: *const mlir.Location = .unknown(mlir_ctx);
+
+    var compiler: Compiler = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .arena = undefined,
+        .mlir_registry = mlir_registry,
+        .mlir_ctx = mlir_ctx,
+        .mlir_pass_manager = undefined,
+        .mlir_known_types = undefined,
+        .module = undefined,
+        .platform = undefined,
+        .partitioning = undefined,
+        .location = unknown_location,
+        .unknown_location = unknown_location,
+    };
+
+    compiler.pushLocation(@src(), "loc1");
+    const loc1 = compiler.location;
+
+    compiler.pushLocation(@src(), "loc2");
+    compiler.popLocation();
+
+    try std.testing.expectEqual(loc1, compiler.location);
+    compiler.popLocation();
+
+    try std.testing.expectEqual(unknown_location, compiler.location);
 }
 
 pub fn nextChannelId(self: *Compiler) i64 {
@@ -287,6 +350,24 @@ pub fn compile(
     args: std.meta.ArgsTuple(@TypeOf(func)),
     opts: Options,
 ) Error!Exe {
+    return switch (platform.io_impl) {
+        .threaded => compileInternal(allocator, io, platform, func, args, opts),
+        .zio => try zio.blockInPlace(struct {
+            fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const Platform, args_: @TypeOf(args), opts_: Options) Error!Exe {
+                return try compileInternal(allocator_, io_, platform_, func, args_, opts_);
+            }
+        }.call, .{ allocator, io, platform, args, opts }),
+    };
+}
+
+pub fn compileInternal(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    comptime func: anytype,
+    args: std.meta.ArgsTuple(@TypeOf(func)),
+    opts: Options,
+) Error!Exe {
     // TODO: Here we have somewhat of a requirement
     // Emitting MLIR requires to have the compiler context available at all times using `Compiler.current()`.
     // If in the future, we inject an Io that is not thread-based, we might have some surprises.
@@ -294,22 +375,23 @@ pub fn compile(
     // I think the correct implementation would be to dispatch `emitMlir` to a thread pool, then wait for the result
     // asynchronously using the provided Io. For now, we'll simply make that blocking as it's not a big deal but keep
     // in mind we might want to revisit that later.
-    _ = io;
-    var st_io: std.Io.Threaded = .init_single_threaded;
-    defer st_io.deinit();
+    //
+    // This is NOT compatible with std.Io.Evented.
+    // It is compatible with zio, hence the blockInPlace above.
 
     const span_name = try tracer.formatSpanName(allocator, "zml.module.compile", .{
         .program_name = opts.program_name,
         .arg_count = args.len,
     });
+
     defer allocator.free(span_name);
     var span = tracer.Span.start(span_name);
     defer span.end();
 
-    var compiler: Compiler = .init(allocator, st_io.io(), platform, opts);
+    var compiler: Compiler = .init(allocator, io, platform, opts);
     defer compiler.deinit();
 
-    var result = emitMlir(&compiler, func, args) catch |err| switch (err) {
+    var result = compiler.emitMlir(func, args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -335,7 +417,7 @@ pub fn compile(
 
     compiler.mlir_pass_manager.runOnOp(compiler.module.operation()) catch |err| switch (err) {
         error.MlirUnexpected => {
-            std.log.err("Failed to canonicalize invalid mlir: \n {f} \n ", .{compiler.module.operation()});
+            compiler.handleCompilationError(io, compiler.arena.allocator(), opts, err, "Failed to canonicalize invalid MLIR");
             @panic("ZML generated invalid mlir. Please open a bug report");
         },
     };
@@ -343,7 +425,11 @@ pub fn compile(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compiler.module, compiler.partitioning, opts);
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compiler.module, compiler.partitioning, opts) catch |err| {
+        compiler.handleCompilationError(io, compiler.arena.allocator(), opts, err, "Pjrt failed to compile the following MLIR");
+        return err;
+    };
+
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
 
     const exe = try Exe.init(
@@ -455,13 +541,10 @@ fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTupl
     var input_info = try createBlockArguments(compiler, fn_scope, &args);
     errdefer input_info.deinit(compiler.allocator);
 
-    var result = switch (zml_options.io_impl) {
-        .std => blk: {
-            compiler.activate();
-            defer compiler.deactivate();
-            break :blk @call(.auto, func, args);
-        },
-        .zio => _current_zio.scoped(compiler, func, args),
+    var result = blk: {
+        compiler.activate();
+        defer compiler.deactivate();
+        break :blk @call(.auto, func, args);
     };
 
     var output_info = try collectOutputInfo(compiler, fn_scope, &result);
@@ -766,16 +849,30 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_unsupported_enable_triton_multi_output_fusion", true, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_update_mode", "SKIP_TEMP", upb_arena);
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_collective_kernels", "", upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_collective_kernels", "COLLECTIVE_KERNEL_ALL_REDUCE", upb_arena);
                 // Add collectives to the default list
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "COLLECTIVES,CONDITIONAL,CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION", upb_arena);
+                // With SKIP_TEMP, captured NCCL collectives can retain stale physical mappings
+                // if VMM reclaims their backing under memory pressure, causing silent corruption.
+                // Enable user buffers to assign color 1 and receive the reclaim exemption:
+                // https://github.com/openxla/xla/pull/46029
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_nccl_user_buffers", true, upb_arena);
+                // Enable for both Blackwell+ and Ampere+
+                // try setXlaOverrideFlag(overrides_map, "xla_gpu_cudnn_gemm_fusion_level", 2, upb_arena);
             },
             .rocm => {
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_update_mode", "SKIP_TEMP", upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_collective_kernels", "", upb_arena);
+                // Only capture all-reduce and all-gather collectives in HIP graphs; other collective types execute outside command buffers since they are unsupported in HIP graphs.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_collectives_command_buffer_filter", "ALLREDUCE,ALLGATHER", upb_arena);
                 // Add collectives to the default list
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "COLLECTIVES,CONDITIONAL,CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION", upb_arena);
+                // With SKIP_TEMP, captured NCCL collectives can retain stale physical mappings
+                // if VMM reclaims their backing under memory pressure, causing silent corruption.
+                // Enable user buffers to assign color 1 and receive the reclaim exemption:
+                // https://github.com/openxla/xla/pull/46029
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_nccl_user_buffers", true, upb_arena);
             },
             .metal => {
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_metal_fast_math", false, upb_arena);
@@ -829,4 +926,56 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
     errdefer loaded_executable.deinit();
 
     return loaded_executable;
+}
+
+fn handleCompilationError(compiler: *Compiler, io: std.Io, allocator: std.mem.Allocator, opts: Options, err: anyerror, msg: []const u8) void {
+    const module_op = compiler.module.operation().fmt(.{ .debug_info = true, .debug_info_pretty_form = true });
+    const truncated_msg = "...<truncated>";
+    var too_big: bool = true;
+
+    const buffer: []u8 = allocator.alloc(u8, 8192) catch {
+        log.err("{s} ({}):\n{f}", .{ msg, err, module_op });
+        return;
+    };
+    defer allocator.free(buffer);
+
+    var buffer_writer: std.Io.Writer = .fixed(buffer);
+    const module_mlir: []const u8 = module_mlir: {
+        module_op.format(&buffer_writer) catch {
+            @memcpy(buffer[8192 - truncated_msg.len ..], truncated_msg);
+            too_big = true;
+            break :module_mlir buffer;
+        };
+        too_big = false;
+        break :module_mlir buffer_writer.buffered();
+    };
+
+    log.err("{s} ({}):\n{s}", .{ msg, err, module_mlir });
+    if (!too_big) return;
+
+    if (opts.xla_dump_to == null) {
+        log.warn("To see the full .mlir, set `zml.Compiler.Options.xla_dump_to`", .{});
+        return;
+    }
+    const xla_dir = opts.xla_dump_to.?;
+    const dir = std.Io.Dir.openDirAbsolute(io, xla_dir, .{}) catch dir: {
+        std.Io.Dir.createDirAbsolute(io, xla_dir, .default_dir) catch |e| {
+            log.err("failed to dump mlir to {s}: {}", .{ xla_dir, e });
+            return;
+        };
+        break :dir std.Io.Dir.openDirAbsolute(io, xla_dir, .{}) catch unreachable;
+    };
+    const filename = std.fmt.allocPrint(allocator, "{s}.mlir", .{opts.program_name}) catch return;
+    const mlir_file = dir.createFile(io, filename, .{ .truncate = true }) catch |e| {
+        log.err("failed to dump mlir to {s}/{s}: {}", .{ xla_dir, filename, e });
+        return;
+    };
+
+    // Reuse the previously allocated buffer
+    var mlir_file_writer = mlir_file.writer(io, buffer);
+    module_op.format(&mlir_file_writer.interface) catch |e| {
+        log.err("Partial mlir dump at: {s}/{s} ({})", .{ xla_dir, filename, e });
+        return;
+    };
+    log.warn("Full .mlir at: {s}/{s}", .{ xla_dir, filename });
 }

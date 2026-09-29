@@ -117,10 +117,76 @@ const GemmConfig = struct {
 
 const Quant = tri.Kernel(Config, .{ .name = "mxfp4_triton_quant", .inputs = &.{"x"}, .outputs = &.{ "q", "s" }, .run = quantInput });
 const Route = tri.Kernel(Config, .{ .name = "mxfp4_triton_route", .inputs = &.{"ids"}, .outputs = &.{ "counts", "pos" }, .run = route });
-const Schedule = tri.Kernel(Config, .{ .name = "mxfp4_triton_schedule", .inputs = &.{ "ids", "counts", "pos" }, .outputs = &.{ "map", "perm", "sched" }, .run = schedule });
+const RouteAtomic = tri.Kernel(Config, .{ .name = "mxfp4_triton_route_atomic", .inputs = &.{ "ids", "zeros" }, .outputs = &.{ "counts", "pos" }, .run = routeAtomic });
+// The same device code serves both backends; only the group geometry differs.
+const ScheduleConfig = struct {
+    moe: Config,
+    /// Expert groups the schedule may fill.
+    capacity: i64,
+    /// Routed rows per expert group, i.e. the consuming GEMM's tile N.
+    group: i64,
+};
+// Two symbols for one kernel: both backends can run in the same process, and
+// distinct names keep them apart in profiles.
+const Schedule = tri.Kernel(ScheduleConfig, .{ .name = "mxfp4_triton_schedule", .inputs = &.{ "ids", "counts", "pos" }, .outputs = &.{ "map", "perm", "sched" }, .run = scheduleGroups });
 const GateUp = tri.Kernel(GemmConfig, .{ .name = "mxfp4_triton_up", .inputs = &.{ "q", "s", "w", "ws", "ids", "rw", "map", "sched" }, .outputs = &.{ "mid", "ms" }, .run = gateUp });
 const Down = tri.Kernel(GemmConfig, .{ .name = "mxfp4_triton_down", .inputs = &.{ "mid", "ms", "w", "ws", "ids", "sched" }, .outputs = &.{"d"}, .run = down });
 const Combine = tri.Kernel(Config, .{ .name = "mxfp4_triton_combine", .inputs = &.{ "d", "ids", "perm", "rw" }, .outputs = &.{"y"}, .run = combine });
+
+/// MXFP4 routing for the CuTe backend (`zml/moe/cute_mxfp4.zig`), whose
+/// persistent GEMMs consume it. It reuses this backend's `route` and
+/// `schedule` kernels with `group`-row expert groups (the CuTe GEMM tile N)
+/// and a compact `capacity`, instead of the fixed `bn` tiles used here.
+/// `route_map` maps routes to routed rows, `route_inverse` rows back to
+/// routes, and `schedule` is `[group experts | group sizes | active group
+/// count]`.
+pub fn scheduleForCute(c: Config, ids: zml.Tensor, capacity: i64, group: i64) struct {
+    route_inverse: zml.Tensor,
+    route_map: zml.Tensor,
+    schedule: zml.Tensor,
+} {
+    c.validate() catch @panic("Invalid MXFP4 MoE configuration");
+    std.debug.assert(capacity > 0);
+    const routes = c.tokens * c.topk;
+    // `route` rescans every route once per expert: cheapest for decode, but
+    // quadratic. Past a few thousand tokens, count with atomics instead.
+    const r: struct { counts: zml.Tensor, pos: zml.Tensor } = if (routes >= atomic_route_threshold) blk: {
+        const counted = RouteAtomic.call(
+            .{ .ids = ids, .zeros = zml.Tensor.zeroes(.init(.{c.experts}, .i32)) },
+            .{ .counts = .init(.{c.experts}, .i32), .pos = .init(.{routes}, .i32) },
+            .{
+                .cfg = c,
+                .grid = .{ @intCast(@divTrunc(routes + route_block - 1, route_block)), 1, 1 },
+                .num_warps = 4,
+                .num_stages = 1,
+                .output_operand_aliases = .{ .counts = .zeros },
+            },
+        );
+        break :blk .{ .counts = counted.counts, .pos = counted.pos };
+    } else blk: {
+        const scanned = Route.call(
+            .{ .ids = ids },
+            .{ .counts = .init(.{c.experts}, .i32), .pos = .init(.{routes}, .i32) },
+            .{ .cfg = c, .grid = .{ @intCast(c.experts), 1, 1 }, .num_warps = 4, .num_stages = 1 },
+        );
+        break :blk .{ .counts = scanned.counts, .pos = scanned.pos };
+    };
+    const s = Schedule.call(
+        .{ .ids = ids, .counts = r.counts, .pos = r.pos },
+        .{
+            .map = .init(.{capacity * group}, .i32),
+            .perm = .init(.{c.tokens * c.topk}, .i32),
+            .sched = .init(.{2 * capacity + 1}, .i32),
+        },
+        .{
+            .cfg = .{ .moe = c, .capacity = capacity, .group = group },
+            .grid = .{ @intCast(@divTrunc(c.tokens * c.topk + 127, 128)), 1, 1 },
+            .num_warps = 4,
+            .num_stages = 1,
+        },
+    );
+    return .{ .route_inverse = s.map, .route_map = s.perm, .schedule = s.sched };
+}
 
 pub fn forward(c: Config, a: Inputs) zml.Tensor {
     c.validate() catch @panic("Invalid MXFP4 MoE configuration");
@@ -159,7 +225,7 @@ pub fn forward(c: Config, a: Inputs) zml.Tensor {
             .{ .ids = a.ids, .counts = r.counts, .pos = r.pos },
             .{ .map = .init(.{tile_count * bn}, .i32), .perm = .init(.{c.tokens * c.topk}, .i32), .sched = .init(.{2 * tile_count + 1}, .i32) },
             .{
-                .cfg = c,
+                .cfg = .{ .moe = c, .capacity = tile_count, .group = bn },
                 .grid = .{ @intCast(@divTrunc(c.tokens * c.topk + 127, 128)), 1, 1 },
                 .num_warps = 4,
                 .num_stages = 1,
@@ -244,14 +310,35 @@ fn route(b: *B, c: Config) tri.FinishError!void {
     b.store(a.counts.addPtr(e), valid.to(.i32).sum());
 }
 
-fn schedule(b: *B, c: Config) tri.FinishError!void {
+const route_block = 1024;
+const atomic_route_threshold = 6 * 2048;
+
+/// Routing for large batches, used by `scheduleForCute`.
+/// Each route takes the next free slot of its expert with an atomic
+/// increment of `counts` (zero-initialized through `zeros`). Slots within an
+/// expert are therefore unordered, which the grouped GEMMs do not care
+/// about: every routed row is computed independently.
+fn routeAtomic(b: *B, c: Config) tri.FinishError!void {
+    const a = try b.declareArgs(.{ .ids = .{ .ptr = .i32 }, .zeros = .{ .ptr = .i32 }, .counts = .{ .ptr = .i32 }, .pos = .{ .ptr = .i32 } });
+    const p = b.programId(.x).mul(route_block).add(ar(b, route_block));
+    const in_range = p.lt(c.tokens * c.topk);
+    const e = ld(b, a.ids.addPtr(p), in_range, .i32, -1).sub(ci(b, c.expert_offset));
+    const valid = in_range.bitAnd(e.ge(0)).bitAnd(e.lt(c.experts));
+    const slot = b.atomicRmwOpts(.add, a.counts.addPtr(e.maximum(0)), b.full(&.{route_block}, 1, .i32), .{ .mask = valid, .sem = .relaxed });
+    b.storeOpts(a.pos.addPtr(p), slot, .{ .mask = valid });
+}
+
+fn scheduleGroups(b: *B, cfg: ScheduleConfig) tri.FinishError!void {
+    const c = cfg.moe;
+    const nt = cfg.capacity;
+    // Route positions are i32 tensors; keep the group size in that type.
+    const group: i32 = @intCast(cfg.group);
     const a = try b.declareArgs(.{ .ids = .{ .ptr = .i32 }, .counts = .{ .ptr = .i32 }, .pos = .{ .ptr = .i32 }, .map = .{ .ptr = .i32 }, .perm = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 } });
-    const nt = tiles(c);
     const p = b.programId(.x).mul(128).add(ar(b, 128));
     const e = ld(b, a.ids.addPtr(p), p.lt(c.tokens * c.topk), .i32, -1).sub(ci(b, c.expert_offset));
     const es = ar(b, pow2(c.experts));
     const counts = ld(b, a.counts.addPtr(es), es.lt(c.experts), .i32, 0);
-    const ts = counts.cdiv(bn);
+    const ts = counts.cdiv(group);
     const starts = ts.cumsum().sub(ts);
     var first = b.openIf(b.programId(.x).eq(0));
     b.store(a.sched.addPtr(2 * nt), ts.sum());
@@ -260,12 +347,12 @@ fn schedule(b: *B, c: Config) tri.FinishError!void {
     const safe = e.maximum(0).minimum(pow2(c.experts) - 1);
     const pos = ld(b, a.pos.addPtr(p), live, .i32, 0);
     const start = starts.gather(safe, 0);
-    const tile = start.add(pos.div(bn));
-    const row = pos.rem(bn);
-    b.storeOpts(a.perm.addPtr(p), b.select(live, tile.mul(bn).add(row), b.full(&.{128}, -1, .i32)), .{ .mask = p.lt(c.tokens * c.topk) });
-    b.storeOpts(a.map.addPtr(tile.mul(bn).add(row)), p, .{ .mask = live });
+    const tile = start.add(pos.div(group));
+    const row = pos.rem(group);
+    b.storeOpts(a.perm.addPtr(p), b.select(live, tile.mul(group).add(row), b.full(&.{128}, -1, .i32)), .{ .mask = p.lt(c.tokens * c.topk) });
+    b.storeOpts(a.map.addPtr(tile.mul(group).add(row)), p, .{ .mask = live });
     b.storeOpts(a.sched.addPtr(tile), e, .{ .mask = live.bitAnd(row.eq(0)) });
-    b.storeOpts(a.sched.addPtr(nt).addPtr(tile), counts.gather(safe, 0).sub(pos).minimum(bn), .{ .mask = live.bitAnd(row.eq(0)) });
+    b.storeOpts(a.sched.addPtr(nt).addPtr(tile), counts.gather(safe, 0).sub(pos).minimum(group), .{ .mask = live.bitAnd(row.eq(0)) });
 }
 
 fn gateUp(b: *B, c: GemmConfig) tri.FinishError!void {

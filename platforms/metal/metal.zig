@@ -11,7 +11,7 @@ const stdx = @import("stdx");
 const log = std.log.scoped(.@"zml/platforms/metal");
 
 pub fn isEnabled() bool {
-    return platforms_options.metal;
+    return platforms_options.metal_enabled;
 }
 
 fn setMetalToolchainEnv(r: anytype) !void {

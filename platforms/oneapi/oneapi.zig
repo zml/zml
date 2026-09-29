@@ -11,7 +11,7 @@ const stdx = @import("stdx");
 const log = std.log.scoped(.@"zml/platforms/oneapi");
 
 pub fn isEnabled() bool {
-    return platforms_options.oneapi;
+    return platforms_options.oneapi_enabled;
 }
 
 fn hasOneApiDevice(io: std.Io) bool {

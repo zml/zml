@@ -3,32 +3,49 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
+licenses(["notice"])  # BSD-3-Clause
+
+# The CuTe dialect of the cutlass_compiler/ tree, as released. The tree that
+# builds it (//mlir/dialects/cute_ir) adds the DSL compiler's own attributes,
+# types and operations and compiles these sources with them.
+CUTE_IR_INCLUDE = "cute_ir/include"
+
+exports_files([
+    "LICENSE.txt",
+    CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteDialect.h",
+    "cute_ir/lib/Dialect/IR/CuteAttributes.cpp",
+    "cute_ir/lib/Dialect/IR/CuteDialect.cpp",
+])
+
+
+# cutegen, the CuTe layout algebra, with the `?{div=N}` leaf added by
+# cutegen_dynamic_divisibility.patch: a dynamic extent the DSL knows to be a
+# multiple of N, which the release's cutegen cannot read.
 cc_library(
     name = "cutegen",
-    hdrs = glob(["cutegen/include/cutegen/**/*.hpp"]),
+    hdrs = glob(["cutegen/include/cutegen/*.hpp"]),
     includes = ["cutegen/include"],
     deps = [
         "@llvm-project//llvm:Support",
-        "@llvm-project//mlir:IR",
         "@llvm-project//mlir:ArithDialect",
-        "@llvm-project//mlir:MathDialect",
+        "@llvm-project//mlir:IR",
         "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:MathDialect",
+        "@llvm-project//mlir:NVVMDialect",
         "@llvm-project//mlir:SCFDialect",
         "@llvm-project//mlir:UBDialect",
-        "@llvm-project//mlir:NVVMDialect",
     ],
 )
 
 td_library(
-    name = "dialect_td",
+    name = "cute_ir_dialect_td",
     srcs = [
-        "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteAttrs.td",
-        "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteDialect.td",
-        "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.td",
-        "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.td",
-        "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteTypes.td",
+        CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteAttrs.td",
+        CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteDialect.td",
+        CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.td",
+        CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteTypes.td",
     ],
-    includes = ["cute_ir/include"],
+    includes = [CUTE_IR_INCLUDE],
     deps = [
         "@llvm-project//mlir:BuiltinDialectTdFiles",
         "@llvm-project//mlir:DataLayoutInterfacesTdFiles",
@@ -39,159 +56,49 @@ td_library(
 )
 
 gentbl_cc_library(
-    name = "dialect_inc_gen",
-    includes = ["."],
+    name = "cute_ir_dialect_inc_gen",
+    includes = [CUTE_IR_INCLUDE],
     tbl_outs = [
         (
             ["-gen-dialect-decls", "-dialect=cute"],
-            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteDialect.h.inc",
+            CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteDialect.h.inc",
         ),
         (
             ["-gen-dialect-defs", "-dialect=cute"],
-            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteDialect.cpp.inc",
+            CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteDialect.cpp.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteDialect.td",
-    deps = [":dialect_td"],
+    td_file = CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteDialect.td",
+    deps = [":cute_ir_dialect_td"],
 )
 
 gentbl_cc_library(
-    name = "type_interfaces_inc_gen",
-    includes = ["."],
+    name = "cute_ir_type_interfaces_inc_gen",
+    includes = [CUTE_IR_INCLUDE],
     tbl_outs = [
         (
             ["-gen-type-interface-decls"],
-            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.h.inc",
+            CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.h.inc",
         ),
         (
             ["-gen-type-interface-defs"],
-            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.cpp.inc",
+            CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.cpp.inc",
         ),
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.td",
-    deps = [":dialect_td"],
+    td_file = CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteTypeInterfaces.td",
+    deps = [":cute_ir_dialect_td"],
 )
 
-gentbl_cc_library(
-    name = "attrs_inc_gen",
-    includes = ["."],
-    tbl_outs = [
-        (
-            ["-gen-attrdef-decls", "-attrdefs-dialect=cute"],
-            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteAttrs.h.inc",
-        ),
-        (
-            ["-gen-attrdef-defs", "-attrdefs-dialect=cute"],
-            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteAttrs.cpp.inc",
-        ),
-    ],
-    tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteAttrs.td",
-    deps = [":dialect_td"],
-)
-
-gentbl_cc_library(
-    name = "ops_inc_gen",
-    includes = ["."],
-    tbl_outs = [
-        (
-            ["-gen-op-decls"],
-            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.h.inc",
-        ),
-        (
-            ["-gen-op-defs"],
-            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.cpp.inc",
-        ),
-    ],
-    tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteOps.td",
-    deps = [":dialect_td"],
-)
-
-# gentbl_cc_library(
-#     name = "ops_inc_gen",
-#     includes = ["cute_ir/include"],
-#     tbl_outs = [
-#         (
-#             ["-gen-op-decls"],
-#             "cute_ir/Dialect/Cute/IR/CuteOps.h.inc",
-#         ),
-#         (
-#             ["-gen-op-defs"],
-#             "cute_ir/Dialect/Cute/IR/CuteOps.cpp.inc",
-#         ),
-#     ],
-#     tblgen = "@llvm-project//mlir:mlir-tblgen",
-#     td_file = "CuteOps.td",
-#     deps = [":tabledefs"],
-# )
-
-gentbl_cc_library(
-    name = "types_decl_inc_gen",
-    includes = ["cute_ir/include"],
-    tbl_outs = [
-        (
-            ["-gen-typedef-decls", "-typedefs-dialect=cute"],
-            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteTypes.h.inc",
-        ),
-    ],
-    tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteTypes.td",
-    deps = [":dialect_td"],
-)
-
-gentbl_cc_library(
-    name = "types_defs_inc_gen",
-    includes = ["cute_ir/include"],
-    tbl_outs = [
-        (
-            ["-gen-typedef-defs", "-typedefs-dialect=cute"],
-            "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteTypes.cpp.inc",
-        ),
-    ],
-    tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteTypes.td",
-    deps = [":dialect_td"],
-)
-
+# The header alone: the attribute, type and operation class declarations it
+# includes are generated by the building tree, which adds the compiler's own.
 cc_library(
-    name = "dialect_headers",
-    hdrs = [
-        "cute_ir/include/cute_ir/Dialect/Cute/IR/CuteDialect.h",
-    ],
-    includes = ["cute_ir/include"],
-    textual_hdrs = ["cute_ir/lib/Dialect/IR/CuteTypes.cpp"],
+    name = "cute_ir_dialect_header",
+    hdrs = [CUTE_IR_INCLUDE + "/cute_ir/Dialect/Cute/IR/CuteDialect.h"],
+    includes = [CUTE_IR_INCLUDE],
     deps = [
-        ":attrs_inc_gen",
-        ":cutegen",
-        ":dialect_inc_gen",
-        ":ops_inc_gen",
-        ":type_interfaces_inc_gen",
-        ":types_decl_inc_gen",
-    ],
-)
-
-cc_library(
-    name = "dialect_support",
-    srcs = [
-        "cute_ir/lib/Dialect/IR/CuteAttributes.cpp",
-        "cute_ir/lib/Dialect/IR/CuteOps.cpp",
-    ],
-    includes = ["cute_ir/include"],
-    deps = [":dialect_headers"],
-)
-
-cc_library(
-    name = "dialect",
-    srcs = [
-        "cute_ir/lib/Dialect/Cute/IR/CuteDialect.cpp",
-        "cute_ir/lib/Dialect/Cute/IR/CuteTypes.cpp",
-    ],
-    deps = [
-        ":dialect_headers",
-        ":dialect_support",
-        ":types_defs_inc_gen",
+        ":cute_ir_dialect_inc_gen",
+        ":cute_ir_type_interfaces_inc_gen",
     ],
 )

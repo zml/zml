@@ -3,8 +3,8 @@ const builtin = @import("builtin");
 
 const c = @import("c");
 const pjrt = @import("pjrt");
-pub const Target = @import("platforms").Platform;
 const stdx = @import("stdx");
+pub const Target = @import("platforms").Platform;
 
 const attention = @import("attention.zig");
 const constants = @import("constants.zig");
@@ -285,8 +285,14 @@ pub const Platform = struct {
     physical_mesh: zml.Sharding.PhysicalMesh,
     replicated_sharding: zml.Sharding,
     shardings: std.StringArrayHashMapUnmanaged(zml.Sharding),
+    io_impl: IoImpl,
 
     pub const MAX_NUM_DEVICES: u16 = if (Target.tpu.isEnabled()) 64 else 32;
+
+    pub const IoImpl = enum {
+        threaded,
+        zio,
+    };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
         const api = try loadOrGetApi(allocator, io, target);
@@ -324,6 +330,7 @@ pub const Platform = struct {
                 .memories = undefined,
                 .physical_mesh = undefined,
                 .replicated_sharding = undefined,
+                .io_impl = options.io_impl,
             };
             break :platform platform;
         };
@@ -715,6 +722,7 @@ pub const CreateOptions = struct {
     neuron: struct {} = .{},
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    io_impl: Platform.IoImpl = .threaded,
 
     pub const Cpu = struct {
         device_count: u32,

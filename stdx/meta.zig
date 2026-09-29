@@ -187,3 +187,24 @@ pub fn Tail(comptime Tuple: type) type {
         else => @compileError("Tail works on tuple type"),
     };
 }
+
+pub fn fnName(comptime func: anytype) []const u8 {
+    const T = @TypeOf(func);
+    std.debug.assert(@typeInfo(T) == .@"fn");
+    const wrapper_name = @typeName(Wrapper(func));
+
+    var it = std.mem.splitSequence(u8, wrapper_name, ".Wrapper((function '");
+    _ = it.first();
+    const rest = it.next().?;
+    return rest[0 .. rest.len - 3];
+}
+
+fn Wrapper(comptime arg: anytype) type {
+    return struct {
+        const stuff = arg;
+    };
+}
+
+test fnName {
+    try std.testing.expectEqualStrings("Tail", fnName(Tail));
+}

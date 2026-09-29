@@ -71,8 +71,18 @@ const c = NaiveElementwiseAdd.call(.{ .gA = a, .gB = b }, .{ .gC = a.shape() }, 
 | `block_idx()`, `block_dim()`, `grid_dim()` | `blockIdx()`, `blockDim()`, `gridDim()`         |
 | `cute.arch.alloc_smem(T, n, align)`        | `b.allocSmem(.f32, n, align)`                   |
 | `cute.arch.sync_threads()`                 | `b.syncThreads()`                               |
+| `cute.arch.shuffle_sync_bfly(v, lane)`     | `b.shuffleXor(v, lane)`                         |
+| `cute.arch.griddepcontrol_launch_dependents()` | `b.launchDependents()`                      |
 | `x.to(Float32)`                            | `x.to(.f32)`                                    |
 | `if cond:` / `for i in range(...)`         | `b.openIf(cond)` / `b.openFor(lb, ub, step, .{})` |
+| `cpasync.make_tiled_tma_atom(...)`         | `b.makeTiledTmaLoadAtom(...)` / `...Typed(...)` |
+| `cpasync.tma_partition(...)`               | `b.tmaPartition(...)`                           |
+| `cute.copy(atom, src, dst)`                | `b.copy(atom, src, dst, pred)`                  |
+| `cute.make_tiled_mma(atom)`                | `b.makeTiledMma(atom, result_type)`             |
+| `tiled_mma.make_fragment_A/B/C(...)`       | `b.mmaMakeFragment(...)`                        |
+| `cute.gemm(...)`                           | `b.gemm(...)`                                   |
+| `cute.arch.alloc_tmem(...)`                | `b.allocTmem(...)`                              |
+| `cute.arch.retrieve_tmem_ptr(...)`         | `b.retrieveTmemPtr(...)`                        |
 
 * **Layouts are static.** `makeLayout` takes Zig slices and emits one
   `cute.static`; the tensor keeps its shape and stride in Zig, so `dim`,
@@ -89,8 +99,33 @@ const c = NaiveElementwiseAdd.call(.{ .gA = a, .gB = b }, .{ .gC = a.shape() }, 
 * **The module is just the kernel.** `finish` prints `module { func.func
   @name(...) {...} }`; the CuTe compiler makes every public function a kernel
   entry, so there is no `gpu.module` or host launch function to write.
-* **Not covered yet:** dynamic shapes, `local_tile`/`local_partition`, tiled
-  copies and fragments (`TensorSSA`), TMA and MMA atoms.
+* **Explicit result types:** Zig covers local tiling, TMA partitioning, tiled
+  copies, tensor-memory fragments, and SM100 block-scaled MMA. CuTe derives
+  their layouts in the compiler, so callers spell out the resulting CuTe type
+  with `View` instead of relying on Python's dynamic type objects.
+* **Not covered yet:** dynamic tensor shapes and automatic CuTe layout algebra.
+* **Typed variants.** Operations whose result type CuTe derives exist in two
+  forms: one takes the result type as MLIR text (`localTile`, `slice`,
+  `tmaPartition`, ...), the `...Typed` one takes an `*mlir.Type` assembled
+  with `layoutSpec`, `memrefType` and `coordTensorType`.
+* **Architecture sections.** `Builder` groups TMA (`cute.nvgpu.cpasync`,
+  SM90+) and tcgen05 / tensor memory (`cute.nvgpu.tcgen05`, SM100) in their
+  own sections; mbarriers, fences and bulk-copy groups sit with `cute.arch`.
+  Each doc comment names its minimum architecture when it is above SM80.
+
+## Programs with a host launch
+
+Kernels that need launch-time CuTe objects (TMA descriptors, tiled MMA atoms,
+scheduler parameters) use `zml.kernel.cute.Program` instead of `Kernel`. Its
+`run` callback emits one `gpu.module` with the `cuda.kernel`s
+(`b.beginFunction(name, .cuda_kernel)`), then a public host `func.func`
+(`b.beginFunction(name, .host)`) that builds those objects from the XLA
+buffers and calls `b.launchEx`. The custom call carries no grid or block:
+XLA runs the host function with the real buffers and launches (or records in
+a command buffer) whatever it launched. `CallOpts.scalars` are passed to the
+host function after the buffers. `zml/moe/cute_kernels/persistent_mxfp4.zig`
+is the reference: a warp-specialized SM100 block-scaled GEMM whose host
+function builds four TMA tensor maps and a PDL launch.
 
 ## The custom call
 

@@ -27,7 +27,7 @@ fn findCudaSandbox(
 }
 
 pub fn isEnabled() bool {
-    return platforms_options.cuda;
+    return platforms_options.cuda_enabled;
 }
 
 pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
@@ -114,7 +114,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         };
 
         if (cudaCompat) {
-            log.warn("Detected NVIDIA GPU that requires CUDA compatibility libraries.", .{});
+            log.info("Detected NVIDIA GPU that requires CUDA compatibility libraries.", .{});
             var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "compat", "libcuda.so.1" });
             _ = std.c.dlopen(path, .{ .NOW = true }) orelse {
