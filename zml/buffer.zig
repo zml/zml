@@ -21,6 +21,7 @@ const log = std.log.scoped(.zml);
 
 test {
     std.testing.refAllDecls(Buffer);
+    std.testing.refAllDecls(Buffer.HostAccessible);
 }
 
 /// Buffer is a multi-dimension array, whose memory is allocated on an accelerator.
@@ -32,6 +33,18 @@ pub const Buffer = struct {
     _platform: *const Platform,
     _shape: Shape,
     _shards: Shards,
+
+    /// Whether executions may donate a buffer, writing their outputs into it.
+    /// `HostAccessible.init` uses it to decide whether devices share allocations.
+    pub const Donation = enum {
+        /// Executions only read the buffer. Unlike XLA's undonatable buffers, the
+        /// host may still rewrite a HostAccessible one between executions.
+        undonatable,
+        /// Executions may donate the buffer, replacing its handles with their outputs.
+        donatable,
+    };
+
+    pub const HostAccessible = @import("buffer/HostAccessible.zig");
 
     pub const MAX_NUM_SHARDS: u16 = Platform.MAX_NUM_DEVICES;
     pub const Shards = stdx.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
@@ -128,35 +141,25 @@ pub const Buffer = struct {
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
-        // Use the PJRT shape for everything
-        const sh = shape_.packedShape();
-        var res: Buffer = .{
-            ._platform = platform,
-            ._shape = shape_,
-            ._shards = .empty,
-        };
-        errdefer for (res._shards.slice()) |shard| {
+        var buffer, const metadata = emptyShell(platform, shape_);
+
+        errdefer for (buffer._shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
         };
 
         stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
-        const slice = Slice.init(sh, data_);
-        const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
-
-        const placement = placementOrPanic(platform, sh);
-        const shard_dims: []const i64 = placement.shape.dims();
-        const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
+        const slice = Slice.init(metadata.shape, data_);
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
             const memory = platform.devices[device.id].memory(opts.memory).?;
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
-                .data = placement.shardPtr(device.coords, slice),
+                .data = metadata.placement.shardPtr(device.coords, slice),
                 .dst = .{ .memory = memory.pjrt_memory },
                 // Constant across devices
-                .layout = layout,
-                .dims = shard_dims,
-                .buffer_type = buffer_type,
+                .layout = metadata.layout,
+                .dims = metadata.placement.shape.dims(),
+                .buffer_type = metadata.ty,
                 .byte_strides = slice.byte_strides.constSlice(),
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             };
@@ -164,14 +167,14 @@ pub const Buffer = struct {
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
             if (event) |ev| ev.deinit(platform.pjrt_api);
 
-            res._shards.appendAssumeCapacity(pjrt_buffer);
+            buffer._shards.appendAssumeCapacity(pjrt_buffer);
         }
 
         if (opts.wait) {
-            try res.await(io);
+            try buffer.await(io);
         }
 
-        return res;
+        return buffer;
     }
 
     /// Copies the given Zig bytes to the accelerator memory and
@@ -217,21 +220,12 @@ pub const Buffer = struct {
         opts: UnitializedOptions,
     ) !Buffer {
         std.log.debug("uninitialized {f}", .{shape_});
-        const sh = shape_.packedShape();
-        var res: Buffer = .{
-            ._platform = platform,
-            ._shape = shape_,
-            ._shards = .empty,
-        };
-        errdefer for (res._shards.slice()) |shard| {
+        var buffer, const metadata = emptyShell(platform, shape_);
+        errdefer for (buffer._shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
         };
 
         stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
-        const element_type = pjrtx.bufferTypeFromDtype(sh.dtype());
-        const placement = placementOrPanic(platform, sh);
-        const shard_dims: []const i64 = placement.shape.dims();
-        const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
             const memory = platform.devices[device.id].memory(opts.memory).?;
@@ -239,16 +233,16 @@ pub const Buffer = struct {
                 // Change for each device
                 .dst = .{ .memory = memory.pjrt_memory },
                 // Constant across devices
-                .layout = layout,
-                .dims = shard_dims,
-                .element_type = element_type,
+                .layout = metadata.layout,
+                .dims = metadata.placement.shape.dims(),
+                .element_type = metadata.ty,
             };
 
             const shard_buffer = try platform.pjrt_client.createUninitializedBuffer(platform.pjrt_api, args);
-            res._shards.appendAssumeCapacity(shard_buffer);
+            buffer._shards.appendAssumeCapacity(shard_buffer);
         }
 
-        return res;
+        return buffer;
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
@@ -402,6 +396,39 @@ test "device round-trip" {
         errdefer std.log.err(" - reference: {d}\n- actual: {d}", .{ x_h, x_h_reborn });
         try zml.testing.expectClose(io, x_h, x_h_reborn, .exact_match);
     }
+}
+
+const PjrtBufferMetadata = struct {
+    shape: Shape,
+    ty: pjrt.BufferType,
+    placement: Sharding.Placement,
+    layout: pjrt.MemoryLayout,
+};
+
+/// Inline because the layout may point to stack memory, as with
+/// `Platform.defaultMemoryLayout`. Outside `Buffer` so that
+/// `Buffer.HostAccessible` can use it without it being part of the API:
+/// zml.zig only exports `Buffer` from this file.
+pub inline fn emptyShell(platform: *const Platform, shape_: Shape) struct { Buffer, PjrtBufferMetadata } {
+    const buf: Buffer = .{
+        ._platform = platform,
+        ._shape = shape_,
+        ._shards = .empty,
+    };
+
+    // Shards use the PJRT shape, which packs sub-byte elements.
+    const packed_shape = shape_.packedShape();
+    const placement = placementOrPanic(platform, packed_shape);
+
+    return .{
+        buf,
+        .{
+            .shape = packed_shape,
+            .ty = pjrtx.bufferTypeFromDtype(packed_shape.dtype()),
+            .placement = placement,
+            .layout = platform.defaultMemoryLayout(placement.shape.dims(), packed_shape.dtype()),
+        },
+    };
 }
 
 fn placementOrPanic(platform: *const Platform, shape: Shape) Sharding.Placement {
