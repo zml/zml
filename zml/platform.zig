@@ -196,6 +196,19 @@ pub const Device = struct {
         return self.pjrt_device.memoryStats(self.platform.pjrt_api) catch .zeroes;
     }
 
+    /// NUMA node closest to the device, when the plugin reports one.
+    pub fn numaNode(self: Device) ?u32 {
+        const attributes = self.pjrt_device.attributes(self.platform.pjrt_api) catch return null;
+        defer attributes.deinit();
+
+        const value = attributes.get("numa_node") orelse return null;
+
+        return switch (value) {
+            .int64 => |node| std.math.cast(u32, node),
+            else => null,
+        };
+    }
+
     pub fn format(self: Device, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{s} ({s})", .{
             self.pjrt_desc.kind(self.platform.pjrt_api),

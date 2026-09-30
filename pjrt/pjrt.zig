@@ -680,6 +680,40 @@ pub const Client = opaque {
 pub const Device = opaque {
     const inner = InnerMixin(c.PJRT_Device).inner;
 
+    pub const Attributes = struct {
+        values: []const NamedValue,
+        state: *c.PJRT_Device_Attributes,
+        deleter: *const fn (?*c.PJRT_Device_Attributes) callconv(.c) void,
+
+        pub fn deinit(self: Attributes) void {
+            self.deleter(self.state);
+        }
+
+        /// String and list values remain valid until this owner is deinitialized.
+        pub fn get(self: Attributes, name: []const u8) ?NamedValue.Value {
+            for (self.values) |attribute| {
+                if (std.mem.eql(u8, attribute.name(), name)) return attribute.value();
+            }
+            return null;
+        }
+    };
+
+    pub fn attributes(self: *const Device, api: *const Api) ApiError!Attributes {
+        const ret = try api.call(.PJRT_Device_GetAttributes, .{ .device = self.inner() });
+
+        const deleter = ret.attributes_deleter.?;
+        errdefer deleter(ret.device_attributes);
+
+        const state = ret.device_attributes.?;
+        std.debug.assert((ret.attributes == null) == (ret.num_attributes == 0));
+
+        return .{
+            .values = if (ret.attributes == null) &.{} else @ptrCast(ret.attributes[0..ret.num_attributes]),
+            .state = state,
+            .deleter = deleter,
+        };
+    }
+
     pub fn getDescription(self: *const Device, api: *const Api) *const DeviceDescription {
         const ret = api.call(.PJRT_Device_GetDescription, .{
             .device = self.inner(),
