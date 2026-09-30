@@ -153,7 +153,11 @@ const Forward = struct {
             .tokens = input.tokens,
             .rng = input.rng,
         });
-        return .{ .tokens = result.tokens, .kv_cache = kv_cache.reuseBuffer(input.kv_cache), .rng = result.rng };
+        return .{
+            .tokens = result.tokens,
+            .kv_cache = kv_cache.reuseBuffer(input.kv_cache),
+            .rng = .{ ._state = result.rng._state.reuseBuffer(input.rng._state) },
+        };
     }
 };
 
@@ -172,21 +176,12 @@ pub const KernelRunner = struct {
 };
 
 pub fn run(runner: *KernelRunner, args: Args) void {
-    // Results replace handles even when PJRT declines optional donation.
-    // Pending execution retains its allocations after these inputs are released.
-    var tokens = args.tokens_buf.*;
-    var kv_cache = args.kv_cache_buffers.*;
-    var rng = args.rng_buffers.*;
-    defer tokens.deinit();
-    defer model.KvCache.deinitBuffer(&kv_cache);
-    defer zml.Tensor.Rng.deinitBuffer(&rng);
-
     runner.forward.run(args.io, .{
         .inputs = .{
-            .tokens = tokens,
+            .tokens = args.tokens_buf.*,
             .token_index = args.token_index_buf.*,
-            .kv_cache = kv_cache,
-            .rng = rng,
+            .kv_cache = args.kv_cache_buffers.*,
+            .rng = args.rng_buffers.*,
             .attention_metadata = args.attention_metadata_buffers.*,
         },
         .outputs = .{

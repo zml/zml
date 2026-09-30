@@ -213,8 +213,6 @@ const TestContext = struct {
         const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, actual_seq_len_tensor, model.ConvCache{ .state = cache_tensor }, cache_index_tensor, model.ConvParameters{ .is_prefill = false } }, .{ .shardings = &.{self.sharding} });
         defer exe.deinit();
 
-        var args = try exe.args(self.allocator);
-        defer args.deinit(self.allocator);
         const conv_cache: zml.Bufferized(model.ConvCache) = .{ .state = cache_buffer };
 
         const actual_seq_len_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{actual_seq_len}));
@@ -225,16 +223,16 @@ const TestContext = struct {
         var cache_index_buf: zml.Buffer = try .fromSlice(self.io, self.platform, cache_index_slice, self.sharding);
         defer cache_index_buf.deinit();
 
-        args.set(.{ layer_buffers, in_buffer, cache_pos_buffer, actual_seq_len_buf, conv_cache, cache_index_buf });
+        var runner = try exe.runner(self.allocator);
+        defer runner.deinit(self.allocator);
+        runner.run(
+            self.io,
+            .{ layer_buffers, in_buffer, cache_pos_buffer, actual_seq_len_buf, conv_cache, cache_index_buf },
+            .{ &in_buffer, &cache_buffer },
+            .{},
+        );
 
-        var res = try exe.results(self.allocator);
-        defer res.deinit(self.allocator);
-        exe.call(self.io, args, &res, .{});
-
-        var out_result = res.get(zml.Buffer);
-        defer out_result.deinit();
-
-        try zml.testing.expectClose(self.io, out_result, out_buffer_expected, opts);
+        try zml.testing.expectClose(self.io, in_buffer, out_buffer_expected, opts);
         std.log.info("Layer {s} passed!", .{name});
     }
 
@@ -277,8 +275,6 @@ const TestContext = struct {
         const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, model.KvCache{ .k = key_cache_tensor, .v = value_cache_tensor }, cache_index_tensor, self.attention_metadata, self.attention_parameters }, .{ .shardings = &.{self.sharding} });
         defer exe.deinit();
 
-        var args = try exe.args(self.allocator);
-        defer args.deinit(self.allocator);
         const kv_cache: zml.Bufferized(model.KvCache) = .{ .k = key_cache_buffer, .v = value_cache_buffer };
 
         var attention_metadata_buffers = try self.attention_metadata.initBuffer(self.io, self.platform, self.sharding);
@@ -287,17 +283,16 @@ const TestContext = struct {
         var cache_index_buf: zml.Buffer = try .scalar(self.io, self.platform, cache_ix, .u32);
         defer cache_index_buf.deinit();
 
-        args.set(.{ layer_buffers, in_buffer, cache_pos_buffer, kv_cache, cache_index_buf, attention_metadata_buffers });
+        var runner = try exe.runner(self.allocator);
+        defer runner.deinit(self.allocator);
+        runner.run(
+            self.io,
+            .{ layer_buffers, in_buffer, cache_pos_buffer, kv_cache, cache_index_buf, attention_metadata_buffers },
+            .{ &in_buffer, &key_cache_buffer, &value_cache_buffer },
+            .{},
+        );
 
-        var res = try exe.results(self.allocator);
-        defer res.deinit(self.allocator);
-        exe.call(self.io, args, &res, .{});
-
-        var out_result, var updated_kv = res.get(struct { zml.Buffer, zml.Bufferized(model.KvCache) });
-        defer out_result.deinit();
-        defer model.KvCache.unloadBuffers(&updated_kv);
-
-        try zml.testing.expectClose(self.io, out_result, out_buffer_expected, opts);
+        try zml.testing.expectClose(self.io, in_buffer, out_buffer_expected, opts);
         std.log.info("Layer {s} passed!", .{name});
     }
 };
