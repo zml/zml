@@ -23,7 +23,8 @@ packaging all required runtime dependencies.
 
 ## Artifact-boundary repro shape
 
-A minimal external repro can exercise this shape today: a `build.zig` wrapper
+A [minimal external repro](https://github.com/ousamabenyounes/zml-bazel-buildzig-repro)
+demonstrates this shape today: a `build.zig` wrapper
 invokes Bazel, discovers the produced artifact with
 `bazel cquery --output=files`, stages the shared library and header, and
 links/tests a Zig consumer against the staged artifact. The same pattern can
