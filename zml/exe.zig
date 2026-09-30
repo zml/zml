@@ -262,6 +262,18 @@ pub const Exe = struct {
         }
     };
 
+    pub fn runOnce(self: *const Exe, allocator: std.mem.Allocator, input_values: anytype, output_refs: anytype) !void {
+        var r = try self.runner(allocator);
+        defer r.deinit(allocator);
+        r.run(input_values, output_refs);
+    }
+
+    pub fn runOnceAndWait(self: *const Exe, allocator: std.mem.Allocator, io: std.Io, input_values: anytype, output_refs: anytype) !void {
+        var r = try self.runner(allocator);
+        defer r.deinit(allocator);
+        r.runAndWait(io, input_values, output_refs);
+    }
+
     pub fn runner(self: *const Exe, allocator: std.mem.Allocator) !Runner {
         return .init(self, allocator);
     }
@@ -290,27 +302,41 @@ pub const Exe = struct {
             self.args.deinit(allocator);
         }
 
-        pub fn run(self: *Runner, input_values: anytype, output_values: anytype) void {
+        pub fn run(self: *Runner, input_values: anytype, output_refs: anytype) void {
             self.args.set(input_values);
             self.exe.call(self.args, &self.results);
-            self.results.fill(output_values);
+            self.results.fill(output_refs);
         }
 
-        pub fn runOpts(self: *Runner, io: std.Io, input_values: anytype, output_values: anytype, opts: CallOpts) void {
+        pub fn runAndWait(self: *Runner, io: std.Io, input_values: anytype, output_refs: anytype) void {
             self.args.set(input_values);
-            self.exe.callOpts(io, self.args, &self.results, opts);
-            self.results.fill(output_values);
+            self.exe.callAndWait(io, self.args, &self.results);
+            self.results.fill(output_refs);
         }
     };
 
-    pub fn internalCall(self: *const Exe, io: ?std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
-        stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
+    pub fn call(self: *const Exe, arguments: Arguments, results_: *Results) void {
+        return self.callInner(null, arguments, results_);
+    }
+
+    pub fn callAndWait(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results) void {
+        return self.callInner(io, arguments, results_);
+    }
+
+    fn callInner(self: *const Exe, wait_io: ?std.Io, arguments: Arguments, results_: *Results) void {
+        var span = tracer.span("zml.exe.call", .{
+            .wait = wait_io != null,
+            .arg_count = arguments.expected_shapes.len,
+            .result_count = results_.expected_shapes.len,
+        });
+        defer span.end();
+
         var events: [Platform.MAX_NUM_DEVICES]?*pjrt.Event = @splat(null);
 
         const partition_events = events[0..@intCast(self.num_partitions)];
         const events_slice: ?[]?*pjrt.Event = switch (self.platform.target) {
             .neuron => partition_events,
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => if (opts.wait) partition_events else null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => if (wait_io) |_| partition_events else null,
         };
 
         self.exe.execute(self.platform.pjrt_api, .{
@@ -331,8 +357,8 @@ pub const Exe = struct {
             .neuron => {
                 for (events_slice.?) |e| {
                     if (e) |ev| {
-                        if (opts.wait) {
-                            ev.await(self.platform.pjrt_api, io.?) catch |err| {
+                        if (wait_io) |io| {
+                            ev.await(self.platform.pjrt_api, io) catch |err| {
                                 std.debug.panic("PJRT execution failed with: {}", .{err});
                             };
                         }
@@ -340,10 +366,10 @@ pub const Exe = struct {
                     }
                 }
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => if (opts.wait) {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => if (wait_io) |io| {
                 for (events_slice.?) |e| {
                     if (e) |ev| {
-                        ev.await(self.platform.pjrt_api, io.?) catch |err| {
+                        ev.await(self.platform.pjrt_api, io) catch |err| {
                             std.debug.panic("PJRT execution failed with: {}", .{err});
                         };
                         ev.deinit(self.platform.pjrt_api);
@@ -351,30 +377,6 @@ pub const Exe = struct {
                 }
             },
         }
-    }
-
-    pub const CallOpts = struct {
-        wait: bool = false,
-    };
-
-    pub fn callOpts(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
-        var span = tracer.span("zml.exe.call", .{
-            .wait = opts.wait,
-            .arg_count = arguments.expected_shapes.len,
-            .result_count = results_.expected_shapes.len,
-        });
-        defer span.end();
-        return self.internalCall(io, arguments, results_, opts);
-    }
-
-    pub fn call(self: *const Exe, arguments: Arguments, results_: *Results) void {
-        var span = tracer.span("zml.exe.call", .{
-            .wait = false,
-            .arg_count = arguments.expected_shapes.len,
-            .result_count = results_.expected_shapes.len,
-        });
-        defer span.end();
-        return self.internalCall(null, arguments, results_, .{});
     }
 };
 
@@ -451,13 +453,20 @@ pub fn FnExe(comptime function_: anytype) type {
                     self.args.deinit(allocator);
                 }
 
-                pub fn run(self: *RunnerSelf, io: std.Io, call: struct {
+                pub const Call = struct {
                     inputs: NonBakedInput,
                     outputs: Output,
-                    opts: Exe.CallOpts = .{},
-                }) void {
+                };
+
+                pub fn run(self: *RunnerSelf, call: Call) void {
                     self.args.set(call.inputs);
-                    self.exe.callOpts(io, self.args, &self.results, call.opts);
+                    self.exe.call(self.args, &self.results);
+                    self.results.fill(call.outputs);
+                }
+
+                pub fn runAndWait(self: *RunnerSelf, io: std.Io, call: Call) void {
+                    self.args.set(call.inputs);
+                    self.exe.callAndWait(io, self.args, &self.results);
                     self.results.fill(call.outputs);
                 }
             };

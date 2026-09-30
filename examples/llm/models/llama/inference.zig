@@ -164,7 +164,7 @@ pub const KernelRunner = struct {
 
 pub fn run(runner: *KernelRunner, args: Args, kv_cache_index_buffers: []const zml.Buffer) void {
     var hidden_buffer: zml.Buffer = undefined;
-    runner.embed.run(args.io, .{
+    runner.embed.run(.{
         .inputs = .{
             .tokens = args.tokens_buf.*,
         },
@@ -173,7 +173,7 @@ pub fn run(runner: *KernelRunner, args: Args, kv_cache_index_buffers: []const zm
     defer hidden_buffer.deinit();
 
     for (runner.layers, kv_cache_index_buffers) |*layer, kv_cache_index_buffer| {
-        layer.run(args.io, .{
+        layer.run(.{
             .inputs = .{
                 .hidden = hidden_buffer,
                 .token_index = args.token_index_buf.*,
@@ -188,7 +188,7 @@ pub fn run(runner: *KernelRunner, args: Args, kv_cache_index_buffers: []const zm
         });
     }
 
-    runner.sample.run(args.io, .{
+    runner.sample.run(.{
         .inputs = .{
             .hidden = hidden_buffer,
             .tokens = args.tokens_buf.*,

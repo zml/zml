@@ -263,7 +263,8 @@ pub const Tensor = struct {
         const x_h_ptr: [*]f32 = @ptrCast(@alignCast(x_h.opaqueDevicePtr(0)));
         try std.testing.expectEqualSlices(f32, &inputs, x_h_ptr[0..8]);
 
-        var x_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcpyH2D, .{x_h});
+        var x_d: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, io, .{x_h}, .{&x_d});
         defer x_d.deinit();
 
         try zml.testing.expectClose(std.testing.io, x_h, x_d, .exact_match);
@@ -406,7 +407,11 @@ pub const Tensor = struct {
             y_memory[dev] = y_d.opaqueDevicePtr(dev);
         }
 
-        const y2_d, const z2_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcopy, .{ x_d, y_d, z_d });
+        var y2_d: zml.Buffer = undefined;
+        var z2_d: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, io, .{ x_d, y_d, z_d }, .{ &y2_d, &z2_d });
+        defer y2_d.deinit();
+        defer z2_d.deinit();
 
         var output_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
         for (0..y2_d.numShards()) |dev| {
@@ -526,7 +531,9 @@ pub const Tensor = struct {
             var input_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&i));
             defer input_buffer.deinit();
 
-            const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.fmod, .{input_buffer});
+            var output: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{input_buffer}, .{&output});
+            defer output.deinit();
 
             try zml.testing.expectClose(std.testing.io, zml.Slice.init(zml.Shape.init(.{6}, .f32), std.mem.sliceAsBytes(&e)), output, .{});
         }
@@ -827,7 +834,9 @@ pub const Tensor = struct {
             var rng_buffer = try Rng.initBuffer(std.testing.io, platform, .replicated, 1234);
             defer rng_buffer._state.deinit();
 
-            var rand, var stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.uniformStats, .{rng_buffer});
+            var rand: zml.Bufferized(Rng) = undefined;
+            var stats: zml.Bufferized(Stats) = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{rng_buffer}, .{ &rand, &stats });
             defer rand._state.deinit();
             defer stats.mean.deinit();
             defer stats.variance.deinit();
@@ -937,7 +946,9 @@ pub const Tensor = struct {
             var tgt_dist_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), .replicated, @ptrCast(&tgt_dist_data));
             defer tgt_dist_buffer.deinit();
 
-            var rand, var stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.gumbelStats, .{ rng_buffer, tgt_dist_buffer });
+            var rand: zml.Bufferized(Rng) = undefined;
+            var stats: zml.Bufferized(Stats) = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ rng_buffer, tgt_dist_buffer }, .{ &rand, &stats });
             defer rand._state.deinit();
             defer stats.mean.deinit();
             defer stats.variance.deinit();
@@ -1283,7 +1294,9 @@ pub const Tensor = struct {
         var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_d.shape(), .replicated, @ptrCast(&x_f32));
         defer x_d_buffer.deinit();
 
-        var x_f4_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
+        var x_f4_xla_d: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_d_buffer}, .{&x_f4_xla_d});
+        defer x_f4_xla_d.deinit();
         const x_f4_xla = try x_f4_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
         defer x_f4_xla.free(std.testing.allocator);
         const x_f4_items = x_f4_xla.items(floats.Float4E2M1.Packed);
@@ -1314,7 +1327,9 @@ pub const Tensor = struct {
         var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_d.shape(), .replicated, std.mem.sliceAsBytes(&x));
         defer x_d_buffer.deinit();
 
-        var x_f8e3_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
+        var x_f8e3_xla_d: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_d_buffer}, .{&x_f8e3_xla_d});
+        defer x_f8e3_xla_d.deinit();
         const x_f8e3_xla = try x_f8e3_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
         defer x_f8e3_xla.free(std.testing.allocator);
 
@@ -1343,7 +1358,8 @@ pub const Tensor = struct {
         var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_u2_t.shape(), .replicated, @ptrCast(&x_u2));
         defer x_d_buffer.deinit();
 
-        var x_u8_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
+        var x_u8_xla_d: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_d_buffer}, .{&x_u8_xla_d});
         defer x_u8_xla_d.deinit();
         const x_u8_xla = try x_u8_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
         defer x_u8_xla.free(std.testing.allocator);
@@ -1371,7 +1387,9 @@ pub const Tensor = struct {
         var x_f4_d: zml.Buffer = try .fromBytes(std.testing.io, platform, x_t.shape(), .replicated, @ptrCast(&x_f4_packed));
         defer x_f4_d.deinit();
 
-        var x_f32_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_f4_d});
+        var x_f32_d: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_f4_d}, .{&x_f32_d});
+        defer x_f32_d.deinit();
         const x_f32_h = try x_f32_d.toSliceAlloc(std.testing.allocator, std.testing.io);
         defer x_f32_h.free(std.testing.allocator);
 
@@ -1612,7 +1630,8 @@ pub const Tensor = struct {
         var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ -0.6884, 1.6795 }));
         defer input_buffer.deinit();
 
-        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.leakyReLU, .{input_buffer});
+        var res: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{input_buffer}, .{&res});
         defer res.deinit();
 
         const expectation: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[2]f32{ -0.0688, 1.6795 }));
@@ -1676,7 +1695,8 @@ pub const Tensor = struct {
         var c_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, c.shape(), .replicated, std.mem.sliceAsBytes(&[3]f32{ 2, 2, 2 }));
         defer c_buffer.deinit();
 
-        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.swiglu, .{ input_buffer, w_buffer, v_buffer, b_buffer, c_buffer });
+        var res: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ input_buffer, w_buffer, v_buffer, b_buffer, c_buffer }, .{&res});
         defer res.deinit();
 
         const output_shape = Shape.init(.{ .c = 3, .e = 3 }, .f32);
@@ -1835,7 +1855,8 @@ pub const Tensor = struct {
         var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, @ptrCast(&[2][5]f32{ .{ 0, 1, 1, 0, 1 }, .{ 3, 1, 0, 2, 1 } }));
         defer x_buffer.deinit();
 
-        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._cumsum, .{x_buffer});
+        var res: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_buffer}, .{&res});
         defer res.deinit();
 
         try std.testing.expectEqual([2][5]f32{ .{ 0, 1, 2, 2, 3 }, .{ 3, 4, 4, 6, 7 } }, try res.getValue([2][5]f32, std.testing.io));
@@ -2147,7 +2168,8 @@ pub const Tensor = struct {
             );
             defer exe.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._slice1dAxis, .{ x_buffer, .{} });
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ x_buffer, .{} }, .{&res});
             defer res.deinit();
 
             try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
@@ -2180,7 +2202,8 @@ pub const Tensor = struct {
             var z_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, z.shape(), .replicated, std.mem.asBytes(&z_value));
             defer z_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.dynSliceResolved, .{ x_buffer, .{ .dyn_start = z_buffer } });
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ x_buffer, .{ .dyn_start = z_buffer } }, .{&res});
             defer res.deinit();
 
             try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
@@ -2304,7 +2327,9 @@ pub const Tensor = struct {
             var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&input_data));
             defer input_buffer.deinit();
 
-            const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.repeat1d, .{input_buffer});
+            var output: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{input_buffer}, .{&output});
+            defer output.deinit();
             try std.testing.expectEqual(expectation, try output.getValue(@TypeOf(expectation), std.testing.io));
         }
     }
@@ -2367,7 +2392,9 @@ pub const Tensor = struct {
             var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&input_data));
             defer input_buffer.deinit();
 
-            const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.stutter1d, .{input_buffer});
+            var output: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{input_buffer}, .{&output});
+            defer output.deinit();
             try std.testing.expectEqual(expectation, try output.getValue(@TypeOf(expectation), std.testing.io));
         }
     }
@@ -2472,7 +2499,9 @@ pub const Tensor = struct {
         );
         defer exe.deinit();
 
-        const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.arange, {});
+        var output: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, {}, .{&output});
+        defer output.deinit();
 
         try zml.testing.expectClose(
             std.testing.io,
@@ -3065,11 +3094,13 @@ pub const Tensor = struct {
             var temp_exe = try zml.module.compile(std.testing.allocator, std.testing.io, temp_func, .{}, platform, .{});
             defer temp_exe.deinit();
 
-            const buffer = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &temp_exe, temp_func, {});
+            var buffer: zml.Buffer = undefined;
+            try temp_exe.runOnceAndWait(std.testing.allocator, std.testing.io, {}, .{&buffer});
             break :b buffer;
         };
         defer operand_buffer.deinit();
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._gatherSlices, .{ operand_buffer, indices_buffer });
+        var result: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ operand_buffer, indices_buffer }, .{&result});
         defer result.deinit();
 
         const expected: zml.Slice = .init(Shape.init(.{ 2, 2, 2, 3 }, .u16), std.mem.sliceAsBytes(&[2][2][2][3]u16{
@@ -3279,7 +3310,8 @@ pub const Tensor = struct {
             var updates_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, updates.shape(), .replicated, std.mem.sliceAsBytes(&[2][3]i32{ .{ 10, 20, 30 }, .{ 70, 80, 90 } }));
             defer updates_buffer.deinit();
 
-            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatter, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer });
+            var result: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer }, .{&result});
             defer result.deinit();
 
             const expected = [3][3]i32{ .{ 10, 21, 32 }, .{ 3, 4, 5 }, .{ 76, 87, 98 } };
@@ -3303,7 +3335,8 @@ pub const Tensor = struct {
             var updates_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, updates.shape(), .replicated, std.mem.sliceAsBytes(&[2]i32{ 20, 70 }));
             defer updates_buffer.deinit();
 
-            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatter, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer });
+            var result: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer }, .{&result});
             defer result.deinit();
 
             const expected = [9]i32{ 0, 1, 22, 3, 4, 5, 6, 77, 8 };
@@ -3335,7 +3368,8 @@ pub const Tensor = struct {
             var values_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, values.shape(), .replicated, std.mem.sliceAsBytes(&@as([2 * 2 * 3 * 2 * 2]u16, @splat(1))));
             defer values_buffer.deinit();
 
-            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatterCB, .{ operand_buffer, start_indices_buffer, values_buffer });
+            var result: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ operand_buffer, start_indices_buffer, values_buffer }, .{&result});
             defer result.deinit();
 
             const expected = [2][3][4][2]u16{
@@ -3441,7 +3475,8 @@ pub const Tensor = struct {
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[1][5]f32{.{ 5.0, 4.1, 7.9, 0, 7.9 }}));
             defer x_buffer.deinit();
 
-            var res = try zml.testing.autoCall(allocator, std.testing.io, &exe, ArgMaxTest._fwd, .{x_buffer});
+            var res: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
+            try exe.runOnceAndWait(allocator, std.testing.io, .{x_buffer}, .{&res});
             defer res.values.deinit();
             defer res.indices.deinit();
             const max_ = res.values.getValue(f32, std.testing.io);
@@ -3455,7 +3490,8 @@ pub const Tensor = struct {
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[1][5]f32{.{ 5.0, std.math.nan(f32), 7.9, 0, 7.9 }}));
             defer x_buffer.deinit();
 
-            var res = try zml.testing.autoCall(allocator, std.testing.io, &exe, ArgMaxTest._fwd, .{x_buffer});
+            var res: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
+            try exe.runOnceAndWait(allocator, std.testing.io, .{x_buffer}, .{&res});
             defer res.values.deinit();
             defer res.indices.deinit();
             const max_ = try res.values.getValue(f32, std.testing.io);
@@ -3509,7 +3545,8 @@ pub const Tensor = struct {
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ -0.9264, 0.7156, 1.0202, 0.3992, 1.2349, 1.0003, -0.1932, 1.3935, 0.7316, 0.0851 }));
             defer x_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_buffer}, .{&res});
             defer res.deinit();
 
             const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
@@ -3534,7 +3571,8 @@ pub const Tensor = struct {
             }));
             defer x_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_buffer}, .{&res});
             defer res.deinit();
 
             const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
@@ -3568,7 +3606,8 @@ pub const Tensor = struct {
             }));
             defer x_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_buffer}, .{&res});
             defer res.deinit();
 
             const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
@@ -3896,17 +3935,9 @@ pub const Tensor = struct {
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_data));
             defer x_buffer.deinit();
 
-            var exe_args = try exe.args(std.testing.allocator);
-            defer exe_args.deinit(std.testing.allocator);
-            exe_args.set(.{x_buffer});
-
-            var results = try exe.results(std.testing.allocator);
-            defer results.deinit(std.testing.allocator);
-            exe.callOpts(std.testing.io, exe_args, &results, .{ .wait = true });
-
             const res = try std.testing.allocator.alloc(zml.Buffer, expectation.len);
             defer std.testing.allocator.free(res);
-            results.fill(res);
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_buffer}, res);
             defer for (res) |*buffer| buffer.deinit();
 
             inline for (expectation, 0..) |expected, i| {
@@ -4034,7 +4065,8 @@ pub const Tensor = struct {
             var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{4}));
             defer ids_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ .a = ids_buffer }, y_buffer });
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ x_buffer, .{ .a = ids_buffer }, y_buffer }, .{&res});
             defer res.deinit();
 
             try std.testing.expectEqual([10]f32{ 0, 1, 2, 3, -1, -1, 6, 7, 8, 9 }, try res.getValue([10]f32, std.testing.io));
@@ -4060,7 +4092,8 @@ pub const Tensor = struct {
             var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{3}));
             defer ids_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, ids_buffer, y_buffer });
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ x_buffer, ids_buffer, y_buffer }, .{&res});
             defer res.deinit();
 
             try std.testing.expectEqualDeep(
@@ -4089,7 +4122,8 @@ pub const Tensor = struct {
             var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{3}));
             defer ids_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, ids_buffer, y_buffer });
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ x_buffer, ids_buffer, y_buffer }, .{&res});
             defer res.deinit();
 
             try std.testing.expectEqualDeep(
@@ -4121,7 +4155,8 @@ pub const Tensor = struct {
             var idx_b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_b.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{3}));
             defer idx_b_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ .a = idx_a_buffer, .b = idx_b_buffer }, y_buffer });
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ x_buffer, .{ .a = idx_a_buffer, .b = idx_b_buffer }, y_buffer }, .{&res});
             defer res.deinit();
 
             try std.testing.expectEqualDeep(
@@ -4153,7 +4188,8 @@ pub const Tensor = struct {
             var idx_b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_b.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{3}));
             defer idx_b_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ idx_a_buffer, idx_b_buffer }, y_buffer });
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ x_buffer, .{ idx_a_buffer, idx_b_buffer }, y_buffer }, .{&res});
             defer res.deinit();
 
             try std.testing.expectEqualDeep(
@@ -4227,7 +4263,8 @@ pub const Tensor = struct {
         var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[2][2]u8{ .{ 1, 2 }, .{ 3, 4 } }));
         defer x_buffer.deinit();
 
-        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._toDiag, .{x_buffer});
+        var res: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_buffer}, .{&res});
         defer res.deinit();
 
         try std.testing.expectEqual(
@@ -4283,7 +4320,8 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, 0 }, platform, .{});
             defer exe.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_buffer}, .{&res});
             defer res.deinit();
 
             try std.testing.expectEqual(
@@ -4299,7 +4337,8 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, 1 }, platform, .{});
             defer exe.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_buffer}, .{&res});
             defer res.deinit();
 
             try std.testing.expectEqual(
@@ -4315,7 +4354,8 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, -1 }, platform, .{});
             defer exe.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            var res: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_buffer}, .{&res});
             defer res.deinit();
 
             try std.testing.expectEqual(
@@ -4459,7 +4499,9 @@ pub const Tensor = struct {
         var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3 }));
         defer y_buffer.deinit();
 
-        var xs, var ys = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._cartesianProduct2, .{ x_buffer, y_buffer });
+        var xs: zml.Buffer = undefined;
+        var ys: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ x_buffer, y_buffer }, .{ &xs, &ys });
         defer xs.deinit();
         defer ys.deinit();
 
@@ -4532,7 +4574,8 @@ pub const Tensor = struct {
         var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3 }));
         defer y_buffer.deinit();
 
-        var z = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._fwd, .{ x_buffer, y_buffer });
+        var z: zml.Buffer = undefined;
+        try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ x_buffer, y_buffer }, .{&z});
         defer z.deinit();
 
         try std.testing.expectEqualDeep(
@@ -4682,7 +4725,8 @@ test "Tensor.maxPool1d" {
     var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&data));
     defer x_buffer.deinit();
 
-    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, MaxPool._fwd, .{x_buffer});
+    var result: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
+    try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_buffer}, .{&result});
     defer result.values.deinit();
     defer result.indices.deinit();
 
@@ -4721,7 +4765,8 @@ test "Tensor.maxPool2d" {
     var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&data));
     defer x_buffer.deinit();
 
-    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, MaxPool._fwd, .{x_buffer});
+    var result: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
+    try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{x_buffer}, .{&result});
     defer result.values.deinit();
     defer result.indices.deinit();
 

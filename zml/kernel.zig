@@ -959,7 +959,8 @@ test "fly kernels run on rocm" {
             defer ba.deinit();
             var bb: zml.Buffer = try .fromBytes(std.testing.io, p, tb.shape(), .replicated, std.mem.sliceAsBytes(hb));
             defer bb.deinit();
-            var out = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ ba, bb });
+            var out: zml.Buffer = undefined;
+            try exe.runOnceAndWait(std.testing.allocator, std.testing.io, .{ ba, bb }, .{&out});
             defer out.deinit();
             return out.toSliceAlloc(std.testing.allocator, std.testing.io);
         }

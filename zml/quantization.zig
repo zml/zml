@@ -391,7 +391,8 @@ test "block FP8 quantization preserves axes and reconstructs constant blocks in 
         }
         var buffer = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&host));
         defer buffer.deinit();
-        var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{buffer});
+        var output: zml.Bufferized(Local.Outputs) = undefined;
+        try exe.runOnceAndWait(allocator, io, .{buffer}, .{&output});
         defer zml.Buffer.deinitAll(Local.Outputs, &output);
         var values = try output.values.toSliceAlloc(allocator, io);
         defer values.free(allocator);
@@ -448,7 +449,8 @@ test "block FP8 E8M0 scales preserve power-of-two boundaries and nonminor axes" 
         }
         var buffer = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&host));
         defer buffer.deinit();
-        var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{buffer});
+        var output: zml.Bufferized(Local.Outputs) = undefined;
+        try exe.runOnceAndWait(allocator, io, .{buffer}, .{&output});
         defer zml.Buffer.deinitAll(Local.Outputs, &output);
         var values = try output.values.toSliceAlloc(allocator, io);
         defer values.free(allocator);
