@@ -169,6 +169,7 @@ pub fn main(init: std.process.Init) !void {
                 "tp",
                 .mesh(.{ .model = .high_bandwidth }),
             );
+            const tp_partitioning: zml.Shape.PartitionArray = .init(&.{.sharded(@intCast(tensor_parallel.data.resolveLogicalAxis("model").?))});
 
             var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{tensor_parallel});
             defer store.deinit();
@@ -186,11 +187,11 @@ pub fn main(init: std.process.Init) !void {
             var load_count: usize = 0;
             while (registry_it.next()) |entry| : (load_count += 1) {
                 tensors[load_count] = switch (sharding_type) {
-                    .replicated => store.view().createTensor(entry.key_ptr.*, null, .tp, .replicated),
+                    .replicated => store.view().createReplicatedTensor(entry.key_ptr.*, null),
                     .sharded => if (entry.value_ptr.shape.rank() > 0)
-                        store.view().createTensor(entry.key_ptr.*, null, .tp, .{ ._0 = .model })
+                        store.view().createTensor(entry.key_ptr.*, null, .tp, tp_partitioning)
                     else
-                        store.view().createTensor(entry.key_ptr.*, null, .tp, .replicated),
+                        store.view().createReplicatedTensor(entry.key_ptr.*, null),
                 };
             }
 

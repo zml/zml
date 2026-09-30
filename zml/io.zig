@@ -179,19 +179,57 @@ pub const TensorStore = struct {
             } else false;
         }
 
-        pub const CreateTensorOpts = struct {
-            memory: Memory.Kind = .default,
-        };
-
-        pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, sharding: @EnumLiteral(), partitioning: anytype) ?Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, sharding, partitioning, .{});
+        /// Creates a zml.Tensor from a specific entry in the store.
+        pub fn createTensor(self: View, subkey: []const u8, tags: anytype, sharding: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateTensor(subkey, tags, sharding, partitioning) orelse
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, sharding: @EnumLiteral(), partitioning: anytype) ?Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, sharding, partitioning, .{ .memory = .host_pinned });
+        pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, sharding: @EnumLiteral(), partitioning: anytype) ?Tensor {
+            const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
+            const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
+            const resolved_sharding = self.store.getSharding(sharding);
+
+            const p: Shape.PartitionArray = if (has_tags) p: {
+                // Parse the partitioning. Theoritically we only need tags + spec, but the function is on a full Shape object
+                var tentative_shape: Shape = .{
+                    ._dtype = undefined,
+                    ._dims = .{ .buffer = @splat(64), .len = parsed_tags.len },
+                    ._tags = parsed_tags,
+                    ._sharding = resolved_sharding,
+                    ._partitioning = undefined,
+                };
+                break :p tentative_shape.parsePartitioning(resolved_sharding, partitioning);
+            } else
+                // We allowed untagged Tensor, but then the PartitionArray must be created manually.
+                partitioning;
+
+            return self.maybeCreateTensorInternal(subkey, parsed_tags.constSlice(), resolved_sharding, p);
         }
 
-        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tagz: anytype, sharding_name: @EnumLiteral(), partitioning: anytype, opts: CreateTensorOpts) ?Tensor {
+        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, sharding: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateHostPinnedTensor(subkey, tags, sharding, partitioning) orelse
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+        }
+
+        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, sharding: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
+            const tensor = self.maybeCreateTensor(subkey, tags, sharding, partitioning);
+            if (tensor) |t| {
+                const storage = self.store.id_to_sources.getPtr(t.id);
+                storage.?.memory = .host_pinned;
+            }
+            return tensor;
+        }
+
+        pub fn createReplicatedTensor(self: View, subkey: []const u8, tags: anytype) Tensor {
+            const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
+            const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
+
+            return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.slice() else null, .replicated, null) orelse
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+        }
+
+        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?[]const Shape.Tag, sharding: Sharding, partitioning: ?Shape.PartitionArray) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             const source = self.store.dupeSource(key) orelse return null;
@@ -200,57 +238,18 @@ pub const TensorStore = struct {
             errdefer self.store.arena.allocator().free(sources);
             sources[0] = source;
 
-            const sharding = self.store.getSharding(sharding_name);
             var shape = source.shape;
-            shape = applyTags(shape, tagz);
-            shape = applyPartitioning(shape, sharding, partitioning);
+            if (tags) |user_tags| {
+                stdx.debug.assert(user_tags.len == source.shape.rank(), "tensor {s} from store has shape {f}, but `createTensor` got only {d} tags: {f}", .{ key, source.shape, user_tags.len, stdx.fmt.stringsZ(user_tags) });
+            }
+            shape._sharding = sharding;
+            // partitioning is only null when called from createReplicatedTensor
+            shape._partitioning = partitioning orelse .replicated(source.shape.rank());
 
             const tensor: Tensor = .fromShape(shape);
-            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = opts.memory }) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;
-        }
-
-        pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, sharding: @EnumLiteral(), partitioning: anytype) Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, sharding, partitioning, .{}) orelse
-                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
-        }
-
-        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, sharding: @EnumLiteral(), partitioning: anytype) Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, sharding, partitioning, .{ .memory = .host_pinned }) orelse
-                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
-        }
-
-        fn applyTags(shape_: Shape, tagz: anytype) Shape {
-            var shape = shape_;
-            if (@TypeOf(tagz) != @TypeOf(null)) {
-                switch (@typeInfo(@TypeOf(tagz))) {
-                    .optional => if (tagz) |t| {
-                        shape = shape.withTags(t);
-                    },
-                    else => shape = shape.withTags(tagz),
-                }
-            }
-            return shape;
-        }
-
-        fn applyPartitioning(shape_: Shape, sharding: Sharding, partitioning: anytype) Shape {
-            var shape = shape_.withSharding(sharding);
-
-            if (@TypeOf(partitioning) == @TypeOf(null)) {
-                @compileError("TensorStore.View.createTensor partitioning cannot be null; pass .replicated or an explicit partitioning");
-            }
-
-            switch (@typeInfo(@TypeOf(partitioning))) {
-                .optional => @compileError("TensorStore.View.createTensor partitioning cannot be optional; pass .replicated or an explicit partitioning"),
-                .enum_literal => switch (partitioning) {
-                    .replicated => shape = shape.withReplicatedPartitioning(),
-                    else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
-                },
-                else => shape = shape.withPartitioning(sharding, partitioning),
-            }
-
-            return shape;
         }
 
         pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape) ?Tensor {
