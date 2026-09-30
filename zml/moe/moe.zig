@@ -37,10 +37,37 @@ pub const ExpertsLayout = struct {
     };
 };
 
-pub const ActivationMode = enum {
-    silu,
-    relu,
+pub const ActivationKind = enum {
+    /// Gelu activation function
     gelu,
+    /// ReLU activation function
+    relu,
+    /// SiLU activation function
+    silu,
+    /// SwiGLU activation function (including clamped/clipped/scaled/biased variants)
+    swiglu,
+    /// SwiGLU activation function with step function
+    swiglu_step,
+    /// GeGlu activation function
+    geglu,
+    /// GeGlu activation function with tanh
+    geglu_tanh,
+};
+
+pub const Activation = union(ActivationKind) {
+    gelu: void,
+    relu: void,
+    silu: void,
+    swiglu: struct {
+        limit: ?f32 = null,
+        scale: ?f32 = null,
+        bias: ?f32 = null,
+    },
+    swiglu_step: struct {
+        limit: ?f32 = null,
+    },
+    geglu: void,
+    geglu_tanh: void,
 };
 
 pub const Backend = enum {
@@ -139,77 +166,8 @@ pub const Backend = enum {
     }
 };
 
-pub const Parameters = union(Backend) {
-    cute_mxfp4: cute_mxfp4.Parameters,
-    triton_mxfp4: triton_mxfp4.Parameters,
-    flashinfer_cutlass: cutlass_flashinfer.Parameters,
-    triton: triton.Parameters,
-    fly: fly.Parameters,
-    mosaic_tpu: mosaic_tpu.Parameters,
-    metal: metal.Parameters,
-
-    pub const InitOptions = union(Backend) {
-        cute_mxfp4: cute_mxfp4.Parameters.InitOptions,
-        triton_mxfp4: triton_mxfp4.Parameters.InitOptions,
-        flashinfer_cutlass: cutlass_flashinfer.Parameters.InitOptions,
-        triton: triton.Parameters.InitOptions,
-        fly: fly.Parameters.InitOptions,
-        mosaic_tpu: mosaic_tpu.Parameters.InitOptions,
-        metal: metal.Parameters.InitOptions,
-
-        pub fn fromBackend(backend: Backend, num_experts_per_tok: u32, activation: ActivationMode) InitOptions {
-            return switch (backend) {
-                inline .cute_mxfp4, .triton_mxfp4 => |backend_tag| @unionInit(InitOptions, @tagName(backend_tag), .{ .num_experts_per_tok = num_experts_per_tok, .activation = activation }),
-                .flashinfer_cutlass => .{ .flashinfer_cutlass = .{
-                    .num_experts_per_tok = num_experts_per_tok,
-                    .activation = switch (activation) {
-                        .silu => .silu,
-                        .relu => .relu,
-                        .gelu => .gelu,
-                    },
-                } },
-                inline .triton, .fly => |backend_tag| @unionInit(InitOptions, @tagName(backend_tag), .{
-                    .num_experts_per_tok = num_experts_per_tok,
-                    .activation = switch (activation) {
-                        .silu => .silu,
-                        .relu => .relu,
-                        .gelu => .gelu,
-                    },
-                }),
-                .mosaic_tpu => .{ .mosaic_tpu = .{
-                    .num_experts_per_tok = num_experts_per_tok,
-                    .activation = switch (activation) {
-                        .silu => .silu,
-                        .relu => .relu,
-                        .gelu => .gelu,
-                    },
-                } },
-                .metal => .{ .metal = .{
-                    .num_experts_per_tok = num_experts_per_tok,
-                    .activation = switch (activation) {
-                        .silu => .silu,
-                        .relu => .relu,
-                        .gelu => .gelu,
-                    },
-                } },
-            };
-        }
-    };
-
-    pub fn init(opts: InitOptions) Parameters {
-        return switch (opts) {
-            .cute_mxfp4 => |v| .{ .cute_mxfp4 = cute_mxfp4.Parameters.init(v) },
-            .triton_mxfp4 => |v| .{ .triton_mxfp4 = triton_mxfp4.Parameters.init(v) },
-            .flashinfer_cutlass => |v| .{ .flashinfer_cutlass = cutlass_flashinfer.Parameters.init(v) },
-            inline .triton, .fly => |v, backend_tag| @unionInit(Parameters, @tagName(backend_tag), fused_experts.Parameters.init(v)),
-            .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Parameters.init(v) },
-            .metal => |v| .{ .metal = metal.Parameters.init(v) },
-        };
-    }
-};
-
 pub const Options = struct {
-    activation_threshold: ?f32 = null,
+    activation: Activation,
     /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
     quantize_input: bool,
     /// Where routing weights are applied; FlashInfer, Mosaic and Metal require after_down.
@@ -222,16 +180,16 @@ pub fn forwardMoe(
     topk_weights: zml.Tensor,
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
+    backend: Backend,
     opts: Options,
-    parameters: Parameters,
 ) !zml.Tensor {
-    return switch (parameters) {
-        .cute_mxfp4 => |p| cute_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, p),
-        .triton_mxfp4 => |p| triton_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, p),
-        .flashinfer_cutlass => |p| cutlass_flashinfer.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, p),
-        inline .triton, .fly => |p, backend| fused_experts.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, p, backend),
-        .mosaic_tpu => |p| mosaic_tpu.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, p),
-        .metal => |p| metal.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, p),
+    return switch (backend) {
+        .cute_mxfp4 => cute_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
+        .triton_mxfp4 => triton_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
+        .flashinfer_cutlass => cutlass_flashinfer.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
+        inline .triton, .fly => |b| fused_experts.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, b),
+        .mosaic_tpu => mosaic_tpu.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
+        .metal => metal.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
     };
 }
 
