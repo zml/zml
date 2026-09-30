@@ -168,6 +168,20 @@ pub const Tensor = struct {
         return self.withPartitioningInner(sharding_, partitioned_shape);
     }
 
+    /// Force the input tensor to be replicated along the given axes.
+    pub fn replicate(self: Tensor, axes_: anytype) Tensor {
+        if (@TypeOf(axes_) != []const u3) {
+            const parsed_axes, _ = self.shape().parseAxes(axes_);
+            return self.replicate(@as([]const u3, parsed_axes.slice()));
+        }
+
+        var replicated = self._shape._partitioning;
+        for (axes_) |ax| replicated = replicated.set(ax, .replicated);
+
+        const partitioned_shape = self._shape.withPartitioning(self._sharding, replicated);
+        return self.withPartitioningInner(self._sharding, partitioned_shape);
+    }
+
     fn withPartitioningInner(self: Tensor, sharding: Sharding, partitioned_shape: Shape) Tensor {
         const ctx = Compiler.currentOrNull() orelse {
             var res = self;
