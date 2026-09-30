@@ -705,6 +705,25 @@ pub const Device = opaque {
         return @intCast(ret.local_hardware_id);
     }
 
+    /// Looks up an int64 device-level attribute. Plugins may report more attributes
+    /// here than in the device description, e.g. `numa_node` for XLA GPU.
+    pub fn int64Attribute(self: *const Device, api: *const Api, name: []const u8) ?i64 {
+        if (@offsetOf(c.PJRT_Api, "PJRT_Device_GetAttributes") >= api.inner.struct_size) return null;
+        if (api.inner.PJRT_Device_GetAttributes == null) return null;
+        const ret = api.call(.PJRT_Device_GetAttributes, .{ .device = self.inner() }) catch return null;
+        defer if (ret.attributes_deleter) |deleter| deleter(ret.device_attributes);
+        if (ret.attributes == null) return null;
+        const attributes: []const NamedValue = @ptrCast(ret.attributes[0..ret.num_attributes]);
+        for (attributes) |attribute| {
+            if (!std.mem.eql(u8, attribute.name(), name)) continue;
+            return switch (attribute.value()) {
+                .int64 => |value| value,
+                else => null,
+            };
+        }
+        return null;
+    }
+
     pub fn addressableMemories(self: *const Device, api: *const Api) []const *Memory {
         const ret = api.call(
             .PJRT_Device_AddressableMemories,

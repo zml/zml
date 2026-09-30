@@ -196,6 +196,12 @@ pub const Device = struct {
         return self.pjrt_device.memoryStats(self.platform.pjrt_api) catch .zeroes;
     }
 
+    /// NUMA node closest to the device, when the plugin reports one.
+    pub fn numaNode(self: Device) ?u32 {
+        const node = self.pjrt_device.int64Attribute(self.platform.pjrt_api, "numa_node") orelse return null;
+        return std.math.cast(u32, node);
+    }
+
     pub fn format(self: Device, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{s} ({s})", .{
             self.pjrt_desc.kind(self.platform.pjrt_api),
@@ -413,6 +419,17 @@ pub const Platform = struct {
         return for (ordered_targets) |target| {
             break init(allocator, io, target, options) catch continue;
         } else error.Unavailable;
+    }
+
+    /// NUMA node shared by all addressable devices, or null if unknown or mixed.
+    pub fn numaNode(self: *const Platform) ?u32 {
+        var node: ?u32 = null;
+        for (self.devices) |device| {
+            const device_node = device.numaNode() orelse return null;
+            if (node != null and node.? != device_node) return null;
+            node = device_node;
+        }
+        return node;
     }
 
     pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
