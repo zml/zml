@@ -1,4 +1,5 @@
 const std = @import("std");
+const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 pub const kernels = @import("triton_kernels/mxfp4.zig");
@@ -9,22 +10,12 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
-pub const Parameters = struct {
-    pub const InitOptions = struct {
-        num_experts_per_tok: u32,
-        activation: zml.moe.ActivationMode,
-    };
-
-    num_experts_per_tok: u32,
-    activation: zml.moe.ActivationMode,
-
-    pub fn init(opts: InitOptions) Parameters {
-        return .{
-            .num_experts_per_tok = opts.num_experts_per_tok,
-            .activation = opts.activation,
-        };
-    }
-};
+pub fn validateOptions(opts: zml.moe.Options) void {
+    stdx.debug.assert(opts.activation == .swiglu, "cute_mxfp4 backend only accepts swiglu activation, got {}", .{opts.activation});
+    stdx.debug.assert(opts.activation.swiglu.limit != null, "cute_mxfp4 backend requires swiglu limit to be set", .{});
+    stdx.debug.assert(opts.activation.swiglu.bias == null, "cute_mxfp4 backend requires swiglu bias to be null", .{});
+    stdx.debug.assert(opts.activation.swiglu.scale == null, "cute_mxfp4 backend requires swiglu scale to be null", .{});
+}
 
 /// Row-major MXFP4 E2M1 weights and linear E8M0 block32 scales.
 /// BF16 activations are quantized on the GPU to FP8 with per-32 E8M0 scales.
@@ -35,9 +26,8 @@ pub fn fusedExperts(
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     options: zml.moe.Options,
-    parameters: Parameters,
 ) !zml.Tensor {
-    if (parameters.activation != .silu) return error.UnsupportedActivation;
+    validateOptions(options);
     if (input.dtype() != .bf16) return error.UnsupportedDataType;
     if (gate_up.bias != null or down.bias != null) return error.UnsupportedBias;
     const gq = gate_up.quantization orelse return error.UnsupportedQuantization;
@@ -61,8 +51,8 @@ pub fn fusedExperts(
         .w2 = down.weight.bitCast(.u8),
         .s2 = dq.scales,
         .global_experts = gate_up.weight.dim(.expert),
-        .topk = parameters.num_experts_per_tok,
-        .limit = options.activation_threshold orelse 0,
+        .topk = ids.dim(.topk),
+        .limit = options.activation.swiglu.limit.?,
         .routing_weight_placement = options.routing_weight_placement,
         .expert_parallel = expert_parallelism,
     };

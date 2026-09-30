@@ -4,14 +4,10 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const Tensor = zml.Tensor;
 
-pub const ActivationMode = enum {
-    silu,
-    relu,
-    gelu,
-};
+const log = std.log.scoped(.moe);
 
 pub const Options = struct {
-    activation: ActivationMode = .silu,
+    activation: zml.moe.Activation,
     global_num_experts: i64 = -1,
     expert_map: ?Tensor = null,
     w1_scale: ?Tensor = null,
@@ -22,22 +18,13 @@ pub const Options = struct {
     w2_bias: ?Tensor = null,
 };
 
-pub const Parameters = struct {
-    num_experts_per_tok: u32,
-    activation: ActivationMode,
-
-    pub const InitOptions = struct {
-        num_experts_per_tok: u32,
-        activation: ActivationMode = .silu,
-    };
-
-    pub fn init(opts: InitOptions) Parameters {
-        return .{
-            .num_experts_per_tok = opts.num_experts_per_tok,
-            .activation = opts.activation,
-        };
-    }
-};
+fn validateOptions(opts: zml.moe.Options) void {
+    stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
+    stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
+    // TODO(Corentin): find where to put that
+    //if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
+    //if (opts.w1_scale != null or opts.w2_scale != null) return error.UnsupportedQuantization;
+}
 
 const QuantMode = enum { none, fp8, nvfp4 };
 
@@ -57,18 +44,50 @@ fn requireScalePair(opts: Options, dtype: zml.DataType) !void {
     if (s1.dtype() != dtype or s2.dtype() != dtype) return error.UnsupportedType;
 }
 
-fn applyActivation(x: Tensor, mode: ActivationMode) Tensor {
-    const mid = @divFloor(x.dim(.out), 2);
-    const gate = x.slice(.out, .{ .end = mid });
-    const up = x.slice(.out, .{ .start = mid });
+// TODO(Corentin): unify between backend that don't fuse activation
+fn applyExpertActivation(input: Tensor, activation: zml.moe.Activation) Tensor {
+    const x = input.convert(.f32);
+    return switch (activation) {
+        .gelu => x.gelu(),
+        .relu => x.relu(),
+        .silu => x.silu(),
+        .swiglu, .swiglu_step, .geglu, .geglu_tanh => b: {
+            const mid = @divFloor(x.dim(.out), 2);
+            var gate = x.slice(.out, .{ .end = mid });
+            var up = x.slice(.out, .{ .start = mid });
 
-    const act = switch (mode) {
-        .silu => gate.silu().mul(up),
-        .gelu => gate.gelu().mul(up),
-        .relu => gate.relu().mul(up),
+            break :b switch (activation) {
+                .swiglu => |parameters| {
+                    stdx.debug.assert(parameters.scale == null, "triton and fly moe backend don't support swiglu scale", .{});
+
+                    const limit: ?zml.Tensor = if (parameters.limit) |limit| .scalar(limit, x.dtype()) else null;
+
+                    // Apply limit on gate and clamp up
+                    gate = if (limit) |l| gate.minimum(l) else gate;
+                    up = if (limit) |l| up.clamp(l.negate(), l) else up;
+
+                    // Apply bias
+                    up = if (parameters.bias) |bias| up.addConstant(bias) else up;
+
+                    break :b gate.silu().mul(up);
+                },
+                .swiglu_step => |parameters| {
+                    gate = gate.silu();
+
+                    const limit: ?zml.Tensor = if (parameters.limit) |limit| .scalar(limit, x.dtype()) else null;
+                    gate = if (limit) |l| gate.minimum(l) else gate;
+                    up = if (limit) |l| up.clamp(l.negate(), l) else up;
+                    break :b gate.mul(up);
+                },
+                .geglu_tanh => gate.gelu().mul(up),
+                .geglu => {
+                    log.warn("The geglu activation function was requested but we only support the tanh approximation", .{});
+                    break :b gate.gelu().mul(up);
+                },
+                else => unreachable, // already treated by the top-level switch
+            };
+        },
     };
-
-    return act.rename(.{ .out = .mid });
 }
 
 fn moeGemm(
@@ -118,11 +137,8 @@ pub fn fusedExperts(
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     opts: zml.moe.Options,
-    parameters: Parameters,
 ) zml.Tensor {
-    stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
-    stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
-    stdx.debug.assert(opts.activation_threshold == null, "Activation thresholds require the Triton MoE backend", .{});
+    validateOptions(opts);
 
     const gate_up_scales: ?zml.Tensor = if (gate_up.quantization) |q| q.scales else null;
     const gate_up_global_scale: ?zml.Tensor = if (gate_up.quantization) |q| (if (q.global_scale) |scale| scale.asMultiplier() else null) else null;
@@ -140,7 +156,7 @@ pub fn fusedExperts(
         topk_weights,
         topk_ids,
         .{
-            .activation = parameters.activation,
+            .activation = opts.activation,
             .global_num_experts = gate_up_weight_unpacked.dim(.expert),
             .w1_scale = gate_up_scales,
             .w2_scale = down_scales,
@@ -217,7 +233,7 @@ pub fn fusedExpertsImpl(
         zml.Shape.init(.{ .r = num_routes, .out = gate_up.dim(.dout) }, act_dtype),
         mode,
     ), opts.w1_global_scale, expert_ids);
-    const activated = applyActivation(gate_up_out, opts.activation);
+    const activated = applyExpertActivation(gate_up_out, opts.activation);
 
     const down_out = try applyDownGlobalScale(moeGemm(
         activated,
