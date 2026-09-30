@@ -228,8 +228,8 @@ _PLUGINS = {
         "url": "https://mirror.zml.ai/plugins/202609301537.129.1.ac4bc67c46bf/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "df853190c31465b67bd1eedb916b955d4395880fd5752b616bc8885799bd5122",
-        "url": "https://mirror.zml.ai/plugins/202609301537.129.1.ac4bc67c46bf/zml-cuda-linux-arm64.tar.zst",
+        "sha256": "0710a45c495a086bfc3fd6f5fbb24ab954119b5404f4c983e5feddc7f30486a6",
+        "url": "file:///home/benjamin/plugins/zml-cuda-linux-arm64-replay3-reviewed.tar.zst",
     },
 }
 
