@@ -15,6 +15,8 @@ const fused_experts = @import("fused_experts.zig");
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
 pub const ProjectionLayout = fused_experts.ProjectionLayout;
 
+const log = std.log.scoped(.moe);
+
 test {
     std.testing.refAllDecls(@This());
 }
@@ -199,4 +201,51 @@ pub fn unpackedWeight(linear: zml.nn.Linear) zml.Tensor {
         zml.nn.unpackFp4(linear.weight, linear.tag, linear.tag)
     else
         linear.weight;
+}
+
+pub fn applyActivation(input: zml.Tensor, activation: zml.moe.Activation, layout: ProjectionLayout) zml.Tensor {
+    const x = input.convert(.f32);
+    return switch (activation) {
+        .gelu => x.gelu(),
+        .relu => x.relu(),
+        .silu => x.silu(),
+        .swiglu, .swiglu_step, .geglu, .geglu_tanh => b: {
+            const mid = @divFloor(x.dim(.out), 2);
+            var gate, var up = switch (layout) {
+                .concatenated => .{ x.slice(.out, .{ .end = mid }), x.slice(.out, .{ .start = mid }) },
+                .interleaved => .{ x.slice(.out, .{ .start = 0, .step = 2 }), x.slice(.out, .{ .start = 1, .step = 2 }) },
+            };
+
+            break :b switch (activation) {
+                .swiglu => |parameters| {
+                    stdx.debug.assert(parameters.scale == null, "triton and fly moe backend don't support swiglu scale", .{});
+
+                    const limit: ?zml.Tensor = if (parameters.limit) |limit| .scalar(limit, x.dtype()) else null;
+
+                    // Apply limit on gate and clamp up
+                    gate = if (limit) |l| gate.minimum(l) else gate;
+                    up = if (limit) |l| up.clamp(l.negate(), l) else up;
+
+                    // Apply bias
+                    up = if (parameters.bias) |bias| up.addConstant(bias) else up;
+
+                    break :b gate.silu().mul(up);
+                },
+                .swiglu_step => |parameters| {
+                    gate = gate.silu();
+
+                    const limit: ?zml.Tensor = if (parameters.limit) |limit| .scalar(limit, x.dtype()) else null;
+                    gate = if (limit) |l| gate.minimum(l) else gate;
+                    up = if (limit) |l| up.clamp(l.negate(), l) else up;
+                    break :b gate.mul(up);
+                },
+                .geglu_tanh => gate.gelu().mul(up),
+                .geglu => {
+                    log.warn("The geglu activation function was requested but we only support the tanh approximation", .{});
+                    break :b gate.gelu().mul(up);
+                },
+                else => unreachable, // already treated by the top-level switch
+            };
+        },
+    };
 }

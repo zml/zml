@@ -223,52 +223,6 @@ pub fn callGmmEp(
     return out.slice(.out, .{ .end = out_n });
 }
 
-// TODO(Corentin): Unify across backends
-fn applyExpertActivation(input: Tensor, activation: zml.moe.Activation) Tensor {
-    const x = input.convert(.f32);
-    return switch (activation) {
-        .gelu => x.gelu(),
-        .relu => x.relu(),
-        .silu => x.silu(),
-        .swiglu, .swiglu_step, .geglu, .geglu_tanh => b: {
-            const mid = @divFloor(x.dim(.out), 2);
-            var gate = x.slice(.out, .{ .end = mid });
-            var up = x.slice(.out, .{ .start = mid });
-
-            break :b switch (activation) {
-                .swiglu => |parameters| {
-                    stdx.debug.assert(parameters.scale == null, "triton and fly moe backend don't support swiglu scale", .{});
-
-                    const limit: ?zml.Tensor = if (parameters.limit) |limit| .scalar(limit, x.dtype()) else null;
-
-                    // Apply limit on gate and clamp up
-                    gate = if (limit) |l| gate.minimum(l) else gate;
-                    up = if (limit) |l| up.clamp(l.negate(), l) else up;
-
-                    // Apply bias
-                    up = if (parameters.bias) |bias| up.addConstant(bias) else up;
-
-                    break :b gate.silu().mul(up);
-                },
-                .swiglu_step => |parameters| {
-                    gate = gate.silu();
-
-                    const limit: ?zml.Tensor = if (parameters.limit) |limit| .scalar(limit, x.dtype()) else null;
-                    gate = if (limit) |l| gate.minimum(l) else gate;
-                    up = if (limit) |l| up.clamp(l.negate(), l) else up;
-                    break :b gate.mul(up);
-                },
-                .geglu_tanh => gate.gelu().mul(up),
-                .geglu => {
-                    log.warn("The geglu activation function was requested but we only support the tanh approximation", .{});
-                    break :b gate.gelu().mul(up);
-                },
-                else => unreachable, // already treated by the top-level switch
-            };
-        },
-    };
-}
-
 pub fn fusedExperts(
     input: zml.Tensor,
     topk_ids: zml.Tensor,
@@ -431,7 +385,7 @@ pub fn fusedExpertsImpl(
         gate_up_out = gate_up_out.add(bias_per_token);
     }
 
-    const activated = applyExpertActivation(gate_up_out, opts.activation);
+    const activated = zml.moe.applyActivation(gate_up_out, opts.activation, .concatenated);
 
     const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
     var down_out = callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)
