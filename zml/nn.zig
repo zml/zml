@@ -293,7 +293,10 @@ test "block128 scaled dot layouts" {
                     buffers[i] = try zml.Buffer.fromSlice(io, platform, slice, .replicated);
                     initialized += 1;
                 }
-                var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{ buffers[0], buffers[1], buffers[2] });
+                var output: zml.Bufferized(Local.Outputs) = undefined;
+                var runner = try exe.runner(allocator);
+                defer runner.deinit(allocator);
+                runner.run(io, .{ buffers[0], buffers[1], buffers[2] }, .{&output}, .{ .wait = true });
                 defer zml.Buffer.deinitAll(Local.Outputs, &output);
                 var expected = try output.expected.toSliceAlloc(allocator, io);
                 defer expected.free(allocator);
@@ -443,7 +446,7 @@ test normalizeL2 {
     var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }));
     defer input_buffer.deinit();
 
-    var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, normalizeL2, .{input_buffer});
+    var res = try exe.eval(std.testing.allocator, std.testing.io, .{input_buffer});
     defer res.deinit();
 
     const expectation: Slice = .init(input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.6937, -0.7203, -0.9360, 0.3520 }));
@@ -963,7 +966,7 @@ test "real/img" {
         var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.interleaved}, .{});
         defer exe.deinit();
 
-        var d_interleaved = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
+        var d_interleaved = try exe.eval(std.testing.allocator, std.testing.io, {});
         defer d_interleaved.deinit();
         try std.testing.expectEqual(20, try d_interleaved.getValue(i32, std.testing.io));
     }
@@ -971,7 +974,7 @@ test "real/img" {
         var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.real_im_pass}, .{});
         defer exe.deinit();
 
-        var d_sequential = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
+        var d_sequential = try exe.eval(std.testing.allocator, std.testing.io, {});
         defer d_sequential.deinit();
         try std.testing.expectEqual(20, try d_sequential.getValue(i32, std.testing.io));
     }
@@ -981,7 +984,7 @@ test "real/img" {
         var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitSeqVoid, .{{}}, .{});
         defer exe.deinit();
 
-        var d_split_seq_void = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeqVoid, {});
+        var d_split_seq_void = try exe.eval(std.testing.allocator, std.testing.io, {});
         defer d_split_seq_void.deinit();
         try std.testing.expectEqual(20, try d_split_seq_void.getValue(i32, std.testing.io));
     }
@@ -991,7 +994,7 @@ test "real/img" {
         var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitSeq, .{}, .{});
         defer exe.deinit();
 
-        var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeq, {});
+        var d_split_seq = try exe.eval(std.testing.allocator, std.testing.io, {});
         defer d_split_seq.deinit();
         try std.testing.expectEqual(20, try d_split_seq.getValue(i32, std.testing.io));
     }
@@ -1000,7 +1003,7 @@ test "real/img" {
         var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Fns.testSplitInterleaved, .{}, .{});
         defer exe.deinit();
 
-        var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitInterleaved, {});
+        var d_split_seq = try exe.eval(std.testing.allocator, std.testing.io, {});
         defer d_split_seq.deinit();
         try std.testing.expectEqual(20, try d_split_seq.getValue(i32, std.testing.io));
     }
@@ -1041,9 +1044,9 @@ test rope {
     var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_values));
     defer x_buffer.deinit();
 
-    var res1 = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_interleaved, Local._fwd, .{x_buffer});
+    var res1 = try exe_interleaved.eval(std.testing.allocator, std.testing.io, .{x_buffer});
     defer res1.deinit();
-    var res2 = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_sequential, Local._fwd, .{x_buffer});
+    var res2 = try exe_sequential.eval(std.testing.allocator, std.testing.io, .{x_buffer});
     defer res2.deinit();
 
     try zml.testing.expectClose(std.testing.io, res1, res2, .{});
@@ -1084,7 +1087,7 @@ test "rope: Proportional" {
     };
     const expected: zml.Slice = .init(x.shape(), std.mem.sliceAsBytes(&expected_h));
 
-    var res = try zml.testing.autoCall(allocator, io, &exe, rope, .{ x_buffer, null });
+    var res = try exe.eval(allocator, io, .{ x_buffer, null });
     defer res.deinit();
     const res_h = try res.toSliceAlloc(allocator, io);
     defer res_h.free(allocator);
@@ -1136,7 +1139,7 @@ test "rope: Yarn with partial_rotary_factor" {
     };
     const expected: zml.Slice = .init(x.shape(), std.mem.sliceAsBytes(&expected_h));
 
-    var res = try zml.testing.autoCall(allocator, io, &exe, rope, .{ x_buffer, null });
+    var res = try exe.eval(allocator, io, .{ x_buffer, null });
     defer res.deinit();
     const res_h = try res.toSliceAlloc(allocator, io);
     defer res_h.free(allocator);
@@ -1225,7 +1228,7 @@ test nearest {
         );
         defer input_3d_basic_buffer.deinit();
 
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_3d_basic_buffer});
+        var result = try exe.eval(std.testing.allocator, std.testing.io, .{input_3d_basic_buffer});
         defer result.deinit();
 
         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 6 }, result.shape().dims());
@@ -1251,7 +1254,7 @@ test nearest {
         }));
         defer input_3d_advanced_buffer.deinit();
 
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_3d_advanced_buffer});
+        var result = try exe.eval(std.testing.allocator, std.testing.io, .{input_3d_advanced_buffer});
         defer result.deinit();
 
         try std.testing.expectEqualSlices(i64, &.{ 2, 3, 8 }, result.shape().dims());
@@ -1285,7 +1288,7 @@ test nearest {
         var input_4d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_basic.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
         defer input_4d_basic_buffer.deinit();
 
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_basic_buffer});
+        var result = try exe.eval(std.testing.allocator, std.testing.io, .{input_4d_basic_buffer});
         defer result.deinit();
 
         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 6, 6 }, result.shape().dims());
@@ -1320,7 +1323,7 @@ test nearest {
         } }));
         defer input_4d_advanced_buffer.deinit();
 
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_advanced_buffer});
+        var result = try exe.eval(std.testing.allocator, std.testing.io, .{input_4d_advanced_buffer});
         defer result.deinit();
 
         try std.testing.expectEqualSlices(i64, &.{ 2, 2, 4, 4 }, result.shape().dims());
@@ -1371,7 +1374,7 @@ test nearest {
         var input_5d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_5d.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
         defer input_5d_buffer.deinit();
 
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_5d_buffer});
+        var result = try exe.eval(std.testing.allocator, std.testing.io, .{input_5d_buffer});
         defer result.deinit();
 
         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 2, 4, 4 }, result.shape().dims());
@@ -1883,12 +1886,14 @@ test "gated delta net" {
     var oversized_length_buffer = try zml.Buffer.scalar(std.testing.io, platform, @as(u32, 3), .u32);
     defer oversized_length_buffer.deinit();
 
-    var result = try zml.testing.autoCall(
-        std.testing.allocator,
+    var result: zml.Bufferized(GatedDeltaNet.Output) = undefined;
+    var runner = try exe.runner(std.testing.allocator);
+    defer runner.deinit(std.testing.allocator);
+    runner.run(
         std.testing.io,
-        &exe,
-        GatedDeltaNet.forward,
         .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer }, oversized_length_buffer },
+        .{&result},
+        .{ .wait = true },
     );
     defer result.outputs.deinit();
     defer result.state.s.deinit();
@@ -1919,12 +1924,12 @@ test "gated delta net" {
 
     var prefix_length_buffer = try zml.Buffer.scalar(std.testing.io, platform, @as(u32, 1), .u32);
     defer prefix_length_buffer.deinit();
-    var prefix_result = try zml.testing.autoCall(
-        std.testing.allocator,
+    var prefix_result: zml.Bufferized(GatedDeltaNet.Output) = undefined;
+    runner.run(
         std.testing.io,
-        &exe,
-        GatedDeltaNet.forward,
         .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer }, prefix_length_buffer },
+        .{&prefix_result},
+        .{ .wait = true },
     );
     defer prefix_result.outputs.deinit();
     defer prefix_result.state.s.deinit();
@@ -2014,7 +2019,10 @@ test sampleTokens {
         var activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), .replicated, std.mem.sliceAsBytes(&logits));
         defer activations_buffer.deinit();
 
-        var sampled, rng_buffer = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, sampleTokens, .{ activations_buffer, rng_buffer });
+        var sampled: zml.Buffer = undefined;
+        var runner = try exe.runner(std.testing.allocator);
+        defer runner.deinit(std.testing.allocator);
+        runner.run(std.testing.io, .{ activations_buffer, rng_buffer }, .{ &sampled, &rng_buffer }, .{ .wait = true });
         defer sampled.deinit();
 
         try zml.testing.expectEqual(expected, try sampled.getValue(i32, std.testing.io));
@@ -2162,7 +2170,11 @@ test sampleTokensDynamic {
         const args, const expected = args_expected;
         var dynamic_sampling_strategy_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .f32, args);
         defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_buffers);
-        var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, fixupLogits, .{ logits_buffer, dynamic_sampling_strategy_buffers });
+        var new_logits: zml.Buffer = undefined;
+        var indices: zml.Buffer = undefined;
+        var runner = try exe.runner(std.testing.allocator);
+        defer runner.deinit(std.testing.allocator);
+        runner.run(std.testing.io, .{ logits_buffer, dynamic_sampling_strategy_buffers }, .{ &new_logits, &indices }, .{ .wait = true });
         defer new_logits.deinit();
         defer indices.deinit();
         try std.testing.expectEqual(top_k_indices, try indices.getValue(@TypeOf(top_k_indices), std.testing.io));
@@ -2186,7 +2198,13 @@ test sampleTokensDynamic {
         var dynamic_sampling_strategy_bf16_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 });
         defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_bf16_buffers);
 
-        var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_bf16, fixupLogits, .{ logits_bf16_buffer, dynamic_sampling_strategy_bf16_buffers });
+        var new_logits: zml.Buffer = undefined;
+        var indices: zml.Buffer = undefined;
+        var runner = try exe_bf16.runner(std.testing.allocator);
+        defer runner.deinit(std.testing.allocator);
+        runner.run(std.testing.io, .{ logits_bf16_buffer, dynamic_sampling_strategy_bf16_buffers }, .{ &new_logits, &indices }, .{ .wait = true });
+        defer new_logits.deinit();
+        defer indices.deinit();
 
         try std.testing.expectEqual([_]i32{ 0, 1, 2, 3 }, try indices.getValue([4]i32, std.testing.io));
         try zml.testing.expectEqual([_]bf16{ boost, nerf, nerf, nerf }, try new_logits.getValue([4]bf16, std.testing.io));

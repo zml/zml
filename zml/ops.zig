@@ -640,7 +640,10 @@ test @"while" {
     var sum_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_sum.shape(), .replicated, std.mem.sliceAsBytes(&[1]i64{0}));
     defer sum_buffer.deinit();
 
-    var results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, While.forward, .{ i_buffer, sum_buffer });
+    var results: zml.Bufferized(While.State) = undefined;
+    var runner = try exe.runner(std.testing.allocator);
+    defer runner.deinit(std.testing.allocator);
+    runner.run(std.testing.io, .{ i_buffer, sum_buffer }, .{&results}, .{ .wait = true });
     defer results.i.deinit();
     defer results.sum.deinit();
 
@@ -1054,7 +1057,7 @@ test "fly custom call, both entry ABIs" {
             defer exe.deinit();
             var buf: zml.Buffer = try .fromBytes(std.testing.io, p, t.shape(), .replicated, std.mem.sliceAsBytes(h));
             defer buf.deinit();
-            var out = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{buf});
+            var out = try exe.eval(std.testing.allocator, std.testing.io, .{buf});
             defer out.deinit();
             return out.toSliceAlloc(std.testing.allocator, std.testing.io);
         }
@@ -1276,7 +1279,10 @@ test "triton" {
     var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), .replicated, std.mem.sliceAsBytes(&[1]f32{3}));
     defer b_buffer.deinit();
 
-    var results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, TritonMod.forward, .{ a_buffer, b_buffer });
+    var results: [2]zml.Buffer = undefined;
+    var runner = try exe.runner(std.testing.allocator);
+    defer runner.deinit(std.testing.allocator);
+    runner.run(std.testing.io, .{ a_buffer, b_buffer }, .{&results}, .{ .wait = true });
     defer results[0].deinit();
     defer results[1].deinit();
 
@@ -1494,7 +1500,7 @@ test "cute" {
     var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
     defer a_buffer.deinit();
 
-    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Mod.forward, .{a_buffer});
+    var result = try exe.eval(std.testing.allocator, std.testing.io, .{a_buffer});
     defer result.deinit();
 
     var host = try result.toSliceAlloc(std.testing.allocator, std.testing.io);
@@ -1553,7 +1559,7 @@ test "cuda_tile" {
     var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
     defer a_buffer.deinit();
 
-    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Mod.forward, .{a_buffer});
+    var result = try exe.eval(std.testing.allocator, std.testing.io, .{a_buffer});
     defer result.deinit();
 
     var host = try result.toSliceAlloc(std.testing.allocator, std.testing.io);
@@ -1620,7 +1626,7 @@ test "cuda_tile grid" {
     var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
     defer a_buffer.deinit();
 
-    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Mod.forward, .{a_buffer});
+    var result = try exe.eval(std.testing.allocator, std.testing.io, .{a_buffer});
     defer result.deinit();
 
     var host = try result.toSliceAlloc(std.testing.allocator, std.testing.io);
@@ -1680,7 +1686,7 @@ test "cuda_tile zeroed_outputs" {
     var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
     defer a_buffer.deinit();
 
-    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Mod.forward, .{a_buffer});
+    var result = try exe.eval(std.testing.allocator, std.testing.io, .{a_buffer});
     defer result.deinit();
 
     var host = try result.toSliceAlloc(std.testing.allocator, std.testing.io);

@@ -362,25 +362,6 @@ fn BufferizedWithArgs(comptime T: type) type {
     return zml.meta.MapType(zml.Tensor, zml.Buffer).map(T);
 }
 
-/// Automatically calls the executable with the given arguments, taking care of arguments and results allocation.
-/// This helper can be used in tests to make the code a bit less verbose.
-/// It doesn't handle pointers in inputs/outputs structs.
-pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Exe, func: anytype, inputs: zml.Bufferized(std.meta.ArgsTuple(@TypeOf(func)))) !zml.Bufferized(stdx.meta.FnReturn(func)) {
-    var args = try exe.args(allocator);
-    defer args.deinit(allocator);
-
-    var results = try exe.results(allocator);
-    defer results.deinit(allocator);
-
-    args.set(inputs);
-    exe.callOpts(io, args, &results, .{ .wait = true });
-
-    var output: zml.Bufferized(stdx.meta.FnReturn(func)) = undefined;
-    results.fill(.{&output});
-
-    return output;
-}
-
 fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
     var count: usize = 0;
     var it = store.store.registry.iterator();
@@ -474,7 +455,7 @@ pub fn testLayer(
 
     exe_args.set(.{ layer_weights, args_buffers });
 
-    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+    exe.call(io, exe_args, &exe_results, .{ .wait = true });
 
     var results = try allocator.alloc(zml.Buffer, output_count);
     defer allocator.free(results);

@@ -161,7 +161,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
             .tokens = args.tokens_buffer.*,
         },
         .outputs = .{ .hidden = &hidden_buffer },
-    });
+    }, .{});
     defer hidden_buffer.deinit();
 
     for (runner.layers, args.layer_index_buffers) |*layer_runner, layer_index_buffer| {
@@ -183,7 +183,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                         .cache = layer_cache,
                     },
                     .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
-                });
+                }, .{});
                 args.kv_cache_buffers.self_attn.k = layer_cache.k;
                 args.kv_cache_buffers.self_attn.v = layer_cache.v;
             },
@@ -204,7 +204,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                         .cache = layer_cache,
                     },
                     .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
-                });
+                }, .{});
                 args.kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
                 args.kv_cache_buffers.gated_delta_net.recurrent_state = layer_cache.recurrent_state;
             },
@@ -222,7 +222,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
             .rng = args.rng_buffers,
             .token_index = args.token_index_buffer,
         },
-    });
+    }, .{});
 }
 
 fn compileKernel(

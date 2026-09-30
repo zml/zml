@@ -544,7 +544,7 @@ pub const Loader = struct {
         var results = try exe.results(arena);
 
         args.set(.{buffers});
-        exe.callOpts(io, args, &results, .{ .wait = true });
+        exe.call(io, args, &results, .{ .wait = true });
 
         buffer.* = results.get(Buffer);
         try self.delivered.put(self.allocator, tensor.id, {});
