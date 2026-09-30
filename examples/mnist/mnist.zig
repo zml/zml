@@ -19,8 +19,8 @@ const Mnist = struct {
 
         pub fn init(store: zml.io.TensorStore.View) Layer {
             return .{
-                .weight = store.createTensor("weight", .{ .d_out, .d }, .replicated, .replicated),
-                .bias = store.createTensor("bias", .{.d_out}, .replicated, .replicated),
+                .weight = store.createReplicatedTensor("weight", .{ .d_out, .d }),
+                .bias = store.createReplicatedTensor("bias", .{.d_out}),
             };
         }
 

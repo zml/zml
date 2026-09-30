@@ -795,48 +795,22 @@ pub const Shape = struct {
         .folds = .empty,
         .folds_consumed = .empty,
     } };
+
     pub fn withSharding(self: Shape, new_sharding: Sharding) Shape {
         var res = self;
         res._sharding = new_sharding;
         return res;
     }
 
-    pub fn withPartitioning(self: Shape, sharding: Sharding, specs: anytype) Shape {
-        const T = @TypeOf(specs);
-
+    pub fn withPartitioning(self: Shape, sharding: Sharding, partitioning: anytype) Shape {
+        if (@TypeOf(partitioning) != Shape.PartitionArray) {
+            return self.withPartitioning(sharding, self.parsePartitioning(sharding, partitioning));
+        }
         var res = self;
-        res._partitioning = .unknown;
         res._sharding = sharding;
+        res._partitioning = partitioning;
 
-        if (stdx.meta.isStruct(T)) {
-            inline for (std.meta.fields(T)) |field| {
-                const value = @field(specs, field.name);
-                const spec: PartitionSpec = if (@TypeOf(value) == PartitionSpec) value else switch (value) {
-                    .replicated => .replicated,
-                    .unknown => .unknown,
-                    .open => .open,
-                    else => .sharded(@intCast(sharding.data.resolveLogicalAxis(toTag(value)) orelse
-                        stdx.debug.panic("Sharding {f} has no logical axis '{s}'", .{ sharding, toTag(value) }))),
-                };
-                const axis_ = res.axisFromTagMaybe(toTag(field));
-
-                if (axis_) |ax| {
-                    res._partitioning = res._partitioning.set(ax, spec);
-                } else {
-                    stdx.debug.panic("Partitioning axis {s} not found", .{field.name});
-                }
-            }
-        } else {
-            stdx.debug.panic("Expected a struct of enum literals, got: {any}", .{T});
-        }
-
-        var used_mesh_axes: std.StaticBitSet(MAX_RANK) = .initEmpty();
-        for (0..res.rank()) |ax| {
-            if (res.partition(ax).meshAxis()) |mesh_axis| {
-                stdx.debug.assert(!used_mesh_axes.isSet(mesh_axis), "Mesh axis {d} used to partition multiple tensor dimensions", .{mesh_axis});
-                used_mesh_axes.set(mesh_axis);
-            }
-        }
+        stdx.debug.assert(partitioning.hasUniqueAxes(), "{f}.withPartitioning({s}, ...) expects mesh axes to be used a most once, got {any}", .{ self, sharding.name(), partitioning.toArray()[0..self.rank()] });
 
         return res;
     }
@@ -850,6 +824,39 @@ pub const Shape = struct {
 
         shape = shape.withPartitioning(test_sharding, .{ .a = .batch, .b = .open, .c = .feature });
         try testing.expectEqualSlices(PartitionSpec, &.{ .sharded(0), .open, .sharded(1) }, shape._partitioning.toArray()[0..shape.rank()]);
+    }
+
+    pub fn parsePartitioning(shape: Shape, sharding: Sharding, partitioning: anytype) Shape.PartitionArray {
+        if (sharding.eql(.replicated)) {
+            return .replicated(shape.rank());
+        }
+
+        var partition_: PartitionArray = .unknown;
+
+        const T = @TypeOf(partitioning);
+        stdx.debug.assertComptime(stdx.meta.isStruct(T), "parsePartitioning expected a struct of enum literals eg {{ .b = .data, .d = .model }}, got: {any}", .{T});
+        inline for (std.meta.fields(T)) |field| {
+            const shape_tag = toTag(field);
+            const shape_ax = shape.axisFromTagMaybe(shape_tag) orelse {
+                std.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ shape, field.name });
+            };
+
+            const value = @field(partitioning, field.name);
+            const spec: PartitionSpec = if (@TypeOf(value) == PartitionSpec) value else switch (value) {
+                .replicated => .replicated,
+                .unknown => .unknown,
+                .open => .open,
+                else => spec: {
+                    const mesh_tag = toTag(value);
+                    const mesh_ax = sharding.data.resolveLogicalAxis(mesh_tag) orelse {
+                        stdx.debug.panic("{f} has no logical axis '{s}'", .{ sharding, mesh_tag });
+                    };
+                    break :spec .sharded(@intCast(mesh_ax));
+                },
+            };
+            partition_ = partition_.set(shape_ax, spec);
+        }
+        return partition_;
     }
 
     pub fn mapPartitioningAxes(self: Shape, sharding: Sharding, mapping: anytype) Shape {
@@ -1606,6 +1613,23 @@ pub const Shape = struct {
             var res: [MAX_RANK]PartitionSpec = undefined;
             for (&res, 0..) |*spec, ax| spec.* = array.get(ax);
             return res;
+        }
+
+        pub fn hasUniqueAxes(array: PartitionArray) bool {
+            var used_mesh_axes: std.StaticBitSet(MAX_RANK) = .initEmpty();
+            for (0..MAX_RANK) |shape_ax| {
+                const spec = array.get(shape_ax);
+                if (spec.meshAxis()) |mesh_axis| {
+                    if (used_mesh_axes.isSet(mesh_axis)) return false;
+                    used_mesh_axes.set(mesh_axis);
+                }
+            }
+            return true;
+        }
+
+        test hasUniqueAxes {
+            try std.testing.expect(hasUniqueAxes(.init(&.{ .mesh_axis_0, .mesh_axis_1, .replicated, .mesh_axis_2 })));
+            try std.testing.expect(!hasUniqueAxes(.init(&.{ .mesh_axis_0, .mesh_axis_1, .replicated, .mesh_axis_0 })));
         }
 
         test "packed access and updates" {

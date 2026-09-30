@@ -446,7 +446,7 @@ pub const ShortConv = struct {
         return .{
             .in_proj = .init(store.withPrefix("in_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
             .out_proj = .init(store.withPrefix("out_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .replicated, .d = .model }), null, .d),
-            .kernel = store.createTensor("conv.weight", .{ .out, .in, .kernel_size }, .model, .replicated),
+            .kernel = store.createReplicatedTensor("conv.weight", .{ .out, .in, .kernel_size }),
             .config = config,
         };
     }
@@ -736,7 +736,7 @@ const RmsNorm = struct {
     tag: zml.Shape.Tag,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32, tag: anytype) RmsNorm {
-        return .{ .weight = store.createTensor("weight", .{tag}, .replicated, .replicated), .eps = eps, .tag = zml.Shape.toTag(tag) };
+        return .{ .weight = store.createReplicatedTensor("weight", .{tag}), .eps = eps, .tag = zml.Shape.toTag(tag) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
