@@ -34,7 +34,7 @@ const DemoModel = struct {
 
         var y = x.dot(self.w, .feature);
         y = y.add(self.b.broad(y.shape()));
-        y = y.withPartitioning(.demo_mesh, .{ .batch = .data, .hidden = .model });
+        y = y.withPartitioning(.dp_mp, .{ .batch = .data, .hidden = .model });
         y.print("dense_out");
 
         const gate = y.scale(0.01).sigmoid();

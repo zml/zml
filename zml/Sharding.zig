@@ -1199,7 +1199,7 @@ pub const Data = struct {
 
         for (strategy.bindings.slice()) |strat_binding| {
             for (logical.axes.slice(), bindings.slice()) |logical_axis, *binding_| {
-                if (logical_axis == strat_binding.logical) {
+                if (std.mem.eql(u8, std.mem.span(logical_axis), std.mem.span(strat_binding.logical))) {
                     binding_.* = strat_binding.physical;
                     break;
                 }

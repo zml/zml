@@ -487,7 +487,7 @@ pub const Loader = struct {
             self.dma_allocators,
             self.dma_chunk_size,
             shape,
-            shape._sharding,
+            shape._sharding.resolveReplicated(self.platform),
             buffer,
             memory,
         );
