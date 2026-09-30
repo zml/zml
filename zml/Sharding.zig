@@ -1395,9 +1395,10 @@ pub const Data = struct {
         const mapping = data.getDimMapping(shape);
         const dimensions = try allocator.alloc(*const dialects.shardy.DimensionShardingAttribute, shape.rank());
 
+        // Note: here we map from the logical axis to physical. Is this a good idea ?
+        // why not stay in logical realm ?
         for (0.., dimensions) |ax, *d| {
-            const spec = shape.partition(ax);
-            d.* = switch (spec) {
+            d.* = switch (shape.partition(ax)) {
                 .replicated => .replicated(ctx),
                 .open, .unknown => if (all_replicated) .replicated(ctx) else .open(ctx, &.{}),
                 else => d: {
