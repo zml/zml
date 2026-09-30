@@ -25,9 +25,14 @@ pub fn fusedExperts(
     opts: zml.moe.Options,
     comptime backend: zml.moe.Backend,
 ) zml.Tensor {
+    stdx.debug.assertComptime(backend == .triton or backend == .fly, "fusedExperts only supports the triton and fly backend", .{});
+
     const gate_up_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
-    // TODO(Corentin): Better error message
-    const layout = backend.expertsLayout(gate_up_scheme) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+    const layout: zml.moe.ExpertsLayout = if (gate_up_scheme == .mxfp4)
+        .{ .gate_up = .interleaved, .packing = .plain }
+    else
+        .{ .gate_up = .concatenated, .packing = .plain };
+
     const args: FusedExpertsArgs = .{
         .hidden_states = input,
         .gate_up = gate_up,
@@ -42,7 +47,7 @@ pub fn fusedExperts(
     const expert_partition = gate_up.weight.shape().partition(.expert);
 
     if (!expert_partition.eql(.init(.experts))) {
-        return fusedExpertsImpl(args, backend) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+        return fusedExpertsImpl(args, backend);
     }
 
     return zml.ops.manualComputation(
@@ -66,7 +71,7 @@ pub fn fusedExperts(
                     zml.Tensor.scalar(-1, .i32),
                 );
 
-                const local_output = fusedExpertsImpl(mapped_args, backend) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+                const local_output = fusedExpertsImpl(mapped_args, backend);
                 const local_reshaped = local_output.reshape(local_args.hidden_states.shape().dims()).withTags(.{ .b, .s, .d });
                 return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
             }
@@ -93,12 +98,13 @@ pub const FusedExpertsArgs = struct {
     routing_weight_placement: RoutingWeightPlacement,
 };
 
-pub fn fusedExpertsImpl(opts: FusedExpertsArgs, comptime backend: zml.moe.Backend) !Tensor {
+pub fn fusedExpertsImpl(opts: FusedExpertsArgs, comptime backend: zml.moe.Backend) Tensor {
     const Impl = switch (backend) {
         .fly => fly,
         .triton => triton,
         else => @compileError("unsupported fused-experts backend"),
     };
+    const backend_name = @tagName(backend);
     if (backend == .fly and (!backend.isAvailable(zml.Compiler.current().platform) or !fly.supports(opts))) {
         return fusedExpertsImpl(opts, .triton);
     }
@@ -114,7 +120,7 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs, comptime backend: zml.moe.Backen
     const gate_up_scheme = opts.gate_up.quantizationScheme();
     const down_scheme = opts.down.quantizationScheme();
     if (gate_up_scheme) |scheme| switch (scheme) {
-        .nvfp4 => return error.UnsupportedQuantization,
+        .nvfp4 => stdx.debug.panic("{s} backend doesn't support gate_up nvfp4 quantization scheme", .{backend_name}),
         .fp8_block128 => launch_config.block_size_k = 128,
         .fp8_block32 => launch_config.block_size_k = 32,
         .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
@@ -122,10 +128,10 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs, comptime backend: zml.moe.Backen
 
     var down_launch_config = launchConfigForTokens(num_tokens);
     if (down_scheme) |scheme| switch (scheme) {
+        .nvfp4 => stdx.debug.panic("{s} backend doesn't support down nvfp4 quantization scheme", .{backend_name}),
         .fp8_block128 => down_launch_config.block_size_k = 128,
         .fp8_block32 => down_launch_config.block_size_k = 32,
         .mxfp4, .mxfp8, .fp8_per_channel, .fp8_per_tensor => {},
-        .nvfp4 => return error.UnsupportedQuantization,
     };
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
@@ -134,22 +140,34 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs, comptime backend: zml.moe.Backen
     const routing_weights = topk_weights.reshape(.{ .token = num_tokens, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
     const ids = topk_ids.reshape(.{ .token = num_tokens, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
-    stdx.debug.assert(hidden.dtype() == .bf16, "expected BF16 hidden states, got {}", .{hidden.dtype()});
-    stdx.debug.assert(if (gate_up_scheme == .mxfp4) gate_up.dtype() == .u8 or gate_up.dtype() == .i8 or gate_up.dtype() == .f4e2m1 else gate_up.dtype() == .bf16 or gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz, "unsupported gate/up weight dtype {}", .{gate_up.dtype()});
-    stdx.debug.assert(if (down_scheme == .mxfp4) down.dtype() == .u8 or down.dtype() == .i8 or down.dtype() == .f4e2m1 else down.dtype() == .bf16 or down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz, "unsupported down weight dtype {}", .{down.dtype()});
-    stdx.debug.assert(routing_weights.dtype() == .f32 or routing_weights.dtype() == .bf16, "expected FP32 or BF16 routing weights, got {}", .{routing_weights.dtype()});
-    stdx.debug.assert(ids.dtype() == .i32, "expected I32 expert ids, got {}", .{ids.dtype()});
+    stdx.debug.assert(hidden.dtype() == .bf16, "{s} backend expected BF16 hidden states, got {}", .{ backend_name, hidden.dtype() });
+    if (gate_up_scheme == .mxfp4) {
+        stdx.debug.assert(gate_up.dtype() == .u8 or gate_up.dtype() == .i8 or gate_up.dtype() == .f4e2m1, "{s} backend expected u8, i8 or f4e2m1 gate_up data type when quantization scheme is mxfp4, got {}", .{ backend_name, gate_up.dtype() });
+    } else {
+        stdx.debug.assert(gate_up.dtype() == .bf16 or gate_up.dtype() == .f8e4m3fn or gate_up.dtype() == .f8e4m3fnuz, "{s} backend expected gate_up data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{ backend_name, gate_up.dtype() });
+    }
+    if (down_scheme == .mxfp4) {
+        stdx.debug.assert(down.dtype() == .u8 or down.dtype() == .i8 or down.dtype() == .f4e2m1, "{s} backend expected u8, i8 or f4e2m1 down data type when quantization scheme is mxfp4, got {}", .{ backend_name, down.dtype() });
+    } else {
+        stdx.debug.assert(down.dtype() == .bf16 or down.dtype() == .f8e4m3fn or down.dtype() == .f8e4m3fnuz, "{s} backend expected down data type to be bf16, fp8e4m3fn or f8e4m3fnuz, got {}", .{ backend_name, down.dtype() });
+    }
+
+    stdx.debug.assert(routing_weights.dtype() == .f32 or routing_weights.dtype() == .bf16, "{s} backend expected f32 or bf16 routing weights, got {}", .{ backend_name, routing_weights.dtype() });
+    stdx.debug.assert(ids.dtype() == .i32, "{s} backend expected i32 expert ids, got {}", .{ backend_name, ids.dtype() });
     const gate_up_k = gate_up.dim(.in) * @as(i64, if (gate_up_scheme == .mxfp4 and gate_up.dtype() != .f4e2m1) 2 else 1);
     const down_k = down.dim(.mid) * @as(i64, if (down_scheme == .mxfp4 and down.dtype() != .f4e2m1) 2 else 1);
-    stdx.debug.assert(hidden.dim(.in) == gate_up_k, "hidden width {} must match gate/up input width {}", .{ hidden.dim(.in), gate_up_k });
-    const activation_reduction: i64 = if (opts.activation == .relu) 1 else 2;
-    stdx.debug.assert(@rem(gate_up.dim(.out), activation_reduction) == 0, "gate/up output width {} must be divisible by {}", .{ gate_up.dim(.out), activation_reduction });
-    stdx.debug.assert(down_k == @divFloor(gate_up.dim(.out), activation_reduction), "down input width {} must match activated width {}", .{ down_k, @divFloor(gate_up.dim(.out), activation_reduction) });
-    stdx.debug.assert(ids.dim(.token) == hidden.dim(.token) and routing_weights.dim(.token) == hidden.dim(.token), "routing ids and weights must match hidden token count {}, got {} and {}", .{ hidden.dim(.token), ids.dim(.token), routing_weights.dim(.token) });
-    stdx.debug.assert(ids.dim(.topk) == routing_weights.dim(.topk), "routing ids and weights must have matching top-k dimensions, got {} and {}", .{ ids.dim(.topk), routing_weights.dim(.topk) });
-    stdx.debug.assert(gate_up.dim(.expert) == down.dim(.expert), "gate/up and down expert counts must match, got {} and {}", .{ gate_up.dim(.expert), down.dim(.expert) });
+    stdx.debug.assert(hidden.dim(.in) == gate_up_k, "{s} backend expected hidden width to match gate/up input width, got {} and {}", .{ backend_name, hidden.dim(.in), gate_up_k });
+    const activation_reduction: i64 = switch (opts.activation) {
+        .gelu, .relu, .silu => 1,
+        .swiglu, .swiglu_step, .geglu, .geglu_tanh => 2,
+    };
+    stdx.debug.assert(@rem(gate_up.dim(.out), activation_reduction) == 0, "{s} backend expected gate/up output width to be divisible by {}, got {}", .{ backend_name, activation_reduction, gate_up.dim(.out) });
+    stdx.debug.assert(down_k == @divFloor(gate_up.dim(.out), activation_reduction), "{s} backend expected down input width to match activated width, got {} and {}", .{ backend_name, down_k, @divFloor(gate_up.dim(.out), activation_reduction) });
+    stdx.debug.assert(ids.dim(.token) == hidden.dim(.token) and routing_weights.dim(.token) == hidden.dim(.token), "{s} backend expected routing ids and weights to match hidden token count, got {}, {} and {}", .{ backend_name, ids.dim(.token), routing_weights.dim(.token), hidden.dim(.token) });
+    stdx.debug.assert(ids.dim(.topk) == routing_weights.dim(.topk), "{s} backend expected routing ids and weights to have matching top-k dimensions, got {} and {}", .{ backend_name, ids.dim(.topk), routing_weights.dim(.topk) });
+    stdx.debug.assert(gate_up.dim(.expert) == down.dim(.expert), "{s} backend expected gate/up and down expert counts to match, got {} and {}", .{ backend_name, gate_up.dim(.expert), down.dim(.expert) });
     if (opts.expert_map) |expert_map|
-        stdx.debug.assert(expert_map.dtype() == .i32 and expert_map.rank() == 1, "expected a rank-1 I32 expert map, got rank {} and dtype {}", .{ expert_map.rank(), expert_map.dtype() });
+        stdx.debug.assert(expert_map.dtype() == .i32 and expert_map.rank() == 1, "{s} backend expected a rank-1 i32 expert map, got rank {} and dtype {}", .{ backend_name, expert_map.rank(), expert_map.dtype() });
 
     const num_experts = if (opts.expert_map) |expert_map| expert_map.dim(.expert) else gate_up.dim(.expert);
     const routing = Impl.prepareRouting(ids, num_experts, @intCast(launch_config.block_size_m));
@@ -461,7 +479,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
                 .routing_weight_placement = placement,
                 .quantize_input = false,
                 .activation = .{ .swiglu = .{} },
-            }, .triton) catch unreachable;
+            }, .triton);
         }
     };
     for ([_]DataType{ .bf16, .u8, .f4e2m1 }) |storage_dtype| {

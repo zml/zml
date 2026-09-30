@@ -184,7 +184,7 @@ pub fn forwardMoe(
     down: zml.nn.Linear,
     backend: Backend,
     opts: Options,
-) !zml.Tensor {
+) zml.Tensor {
     return switch (backend) {
         .cute_mxfp4 => cute_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
         .triton_mxfp4 => triton_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
