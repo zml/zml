@@ -44,52 +44,6 @@ fn requireScalePair(opts: Options, dtype: zml.DataType) !void {
     if (s1.dtype() != dtype or s2.dtype() != dtype) return error.UnsupportedType;
 }
 
-// TODO(Corentin): unify between backend that don't fuse activation
-fn applyExpertActivation(input: Tensor, activation: zml.moe.Activation) Tensor {
-    const x = input.convert(.f32);
-    return switch (activation) {
-        .gelu => x.gelu(),
-        .relu => x.relu(),
-        .silu => x.silu(),
-        .swiglu, .swiglu_step, .geglu, .geglu_tanh => b: {
-            const mid = @divFloor(x.dim(.out), 2);
-            var gate = x.slice(.out, .{ .end = mid });
-            var up = x.slice(.out, .{ .start = mid });
-
-            break :b switch (activation) {
-                .swiglu => |parameters| {
-                    stdx.debug.assert(parameters.scale == null, "triton and fly moe backend don't support swiglu scale", .{});
-
-                    const limit: ?zml.Tensor = if (parameters.limit) |limit| .scalar(limit, x.dtype()) else null;
-
-                    // Apply limit on gate and clamp up
-                    gate = if (limit) |l| gate.minimum(l) else gate;
-                    up = if (limit) |l| up.clamp(l.negate(), l) else up;
-
-                    // Apply bias
-                    up = if (parameters.bias) |bias| up.addConstant(bias) else up;
-
-                    break :b gate.silu().mul(up);
-                },
-                .swiglu_step => |parameters| {
-                    gate = gate.silu();
-
-                    const limit: ?zml.Tensor = if (parameters.limit) |limit| .scalar(limit, x.dtype()) else null;
-                    gate = if (limit) |l| gate.minimum(l) else gate;
-                    up = if (limit) |l| up.clamp(l.negate(), l) else up;
-                    break :b gate.mul(up);
-                },
-                .geglu_tanh => gate.gelu().mul(up),
-                .geglu => {
-                    log.warn("The geglu activation function was requested but we only support the tanh approximation", .{});
-                    break :b gate.gelu().mul(up);
-                },
-                else => unreachable, // already treated by the top-level switch
-            };
-        },
-    };
-}
-
 fn moeGemm(
     x_rows: Tensor,
     w: Tensor,
@@ -233,7 +187,7 @@ pub fn fusedExpertsImpl(
         zml.Shape.init(.{ .r = num_routes, .out = gate_up.dim(.dout) }, act_dtype),
         mode,
     ), opts.w1_global_scale, expert_ids);
-    const activated = applyExpertActivation(gate_up_out, opts.activation);
+    const activated = zml.moe.applyActivation(gate_up_out, opts.activation, .concatenated);
 
     const down_out = try applyDownGlobalScale(moeGemm(
         activated,
