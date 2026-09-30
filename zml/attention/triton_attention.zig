@@ -5,13 +5,16 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const triton = zml.kernel.triton;
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
+const MlaOptions = @import("paged_attention.zig").Mla.Options;
+const sparse_mla = @import("sparse_mla.zig");
 const kernels = @import("triton_kernels/unified_attention.zig");
 const kernels_oneapi = @import("triton_kernels/unified_attention_oneapi.zig");
+const mla_kernels = @import("triton_kernels/unified_sparse_mla.zig");
 
 const log = std.log.scoped(.@"zml/attention/triton");
 
 fn isOneapiTarget() bool {
-    return zml.module.CompilationContext.current().platform.target == .oneapi;
+    return zml.Compiler.current().platform.target == .oneapi;
 }
 
 fn use2dKernel(all_decode: bool, batch_size: usize, num_kv_heads: usize) bool {
@@ -36,8 +39,34 @@ pub const Config2D = struct {
     total_q_blocks: usize,
 };
 
+fn isCudaComputeCapability(expected: zml.platform.cuda.ComputeCapability) bool {
+    const platform = zml.module.CompilationContext.current().platform;
+    return if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(expected) else false;
+}
+
+/// Largest `BLOCK_M * HEAD_SIZE_PADDED` the 2D kernel survives. That product is
+/// the shape of both the query tile and the f32 accumulator carried through the
+/// tile loop; above it the kernel faults with CUDA_ERROR_MISALIGNED_ADDRESS.
+///
+/// Measured on a GB300 with Gemma-4-31B, whose global-attention layers are
+/// head_dim 512 (its sliding ones are 256):
+///
+///   64x256, 32x512, 16x512  ok        64x512, 128x512  fault
+///
+/// The bound is on this product alone. Two things that do *not* move it, so do
+/// not reach for them if a new head size faults: TILE_SIZE, which at 64 pushes
+/// total shared memory to ~160 KB and still passes at BLOCK_M 32 while 64x512
+/// faults at 98 KB; and num_warps, where 8 halves the per-thread register share
+/// and still faults -- which is also why the obvious "the accumulator outgrows
+/// the register file" story cannot be the whole explanation. The underlying
+/// Triton codegen bug is not diagnosed; this only keeps us out of it.
+const max_query_tile_elements: usize = 16 * 1024;
+
 fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
     const max_num_stages_2d: usize = if (options.head_dim <= 128) 4 else 2;
+
+    // Until we test on other platforms, gate the fix to GB300
+    const is_gb300 = isCudaComputeCapability(.{ .major = 10, .minor = 3 });
 
     var num_stages_2d: usize, var num_warps: usize, var tile_size: usize = if (!options.all_decode) .{ 1, 2, 64 } else .{ 3, 2, options.block_size };
 
@@ -49,6 +78,14 @@ fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
             tile_size = 16;
         } else {
             block_m = 128;
+        }
+
+        if (is_gb300) {
+            // Halving BLOCK_M for every doubling of the head keeps that product
+            // constant: 128 at head_dim 128, 64 at 256, 32 at 512. The first two
+            // are the values this branch has always picked.
+            const head_dim_padded = std.math.ceilPowerOfTwoAssert(usize, options.head_dim);
+            block_m = @min(128, max_query_tile_elements / head_dim_padded);
         }
         num_stages_2d = 1;
         num_warps = 4;
@@ -131,10 +168,12 @@ fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     };
 }
 
-fn getCuCount() usize {
-    const platform = zml.module.CompilationContext.current().platform;
-
-    return @intCast(platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count").?.int64);
+pub fn getCuCount() usize {
+    const platform = zml.Compiler.current().platform;
+    if (platform.devices.len == 0) return 1;
+    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 1;
+    if (attribute.int64 <= 0) return 1;
+    return @intCast(attribute.int64);
 }
 
 pub const paged = struct {
@@ -214,38 +253,36 @@ pub const paged = struct {
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         const output = zml.ops.manualComputation(
-            .{
-                q,
-                k_cache,
-                v_cache,
-                parameters.block_table,
-                parameters.seq_lens,
-                parameters.query_start_len,
-            },
-            q.shape(),
-            .{
-                .opts = opts,
-                .options = parameters.options_,
-            },
             (struct {
-                fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
-                    const q_ = sharded_inputs[0];
-                    const k_cache_ = sharded_inputs[1];
-                    const v_cache_ = sharded_inputs[2];
-                    const parameters_: Parameters = .{ .block_table = sharded_inputs[3], .seq_lens = sharded_inputs[4], .query_start_len = sharded_inputs[5], .options_ = ctx_.options };
+                q: zml.Tensor,
+                k_cache: zml.Tensor,
+                v_cache: zml.Tensor,
+                block_table: zml.Tensor,
+                seq_lens: zml.Tensor,
+                query_start_len: zml.Tensor,
+                opts: AttentionOptions,
+                options: Options,
+
+                fn body(self: @This(), _: zml.Shape) zml.Tensor {
+                    const parameters_: Parameters = .{
+                        .block_table = self.block_table,
+                        .seq_lens = self.seq_lens,
+                        .query_start_len = self.query_start_len,
+                        .options_ = self.options,
+                    };
 
                     const cu_count = getCuCount();
-                    const num_heads: usize = @intCast(q_.dim(.hkv) * q_.dim(.hg));
-                    const num_kv_heads: usize = @intCast(k_cache_.dim(.hkv));
+                    const num_heads: usize = @intCast(self.q.dim(.hkv) * self.q.dim(.hg));
+                    const num_kv_heads: usize = @intCast(self.k_cache.dim(.hkv));
                     const num_queries_per_kv: usize = num_heads / num_kv_heads;
                     // Intel decode: pack exactly one GQA group per tile (block_q == 1) so the
                     // single decode query token doesn't carry masked-out fp32 acc lanes.
                     // oneAPI decode keeps one GQA group per tile, padded to a power of two so tt.make_range emits legal Triton IR.
-                    const block_m: usize = if (!ctx_.options.is_prefill and isOneapiTarget())
+                    const block_m: usize = if (!self.options.is_prefill and isOneapiTarget())
                         std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv)
                     else if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
                     const block_q: usize = block_m / num_queries_per_kv;
-                    const num_tokens: usize = @intCast(q_.dim(.b));
+                    const num_tokens: usize = @intCast(self.q.dim(.b));
                     const num_seqs: usize = @intCast(parameters_.block_table.dim(.b));
                     const total_q_blocks: usize = num_tokens / block_q + num_seqs;
                     const target_num_prgms: usize = cu_count * 4;
@@ -253,23 +290,23 @@ pub const paged = struct {
 
                     const paged_attention_opts: PagedAttentionOptions = .{
                         .cu_count = getCuCount(),
-                        .all_decode = !ctx_.options.is_prefill,
+                        .all_decode = !self.options.is_prefill,
                         .num_tokens = num_tokens,
                         .num_heads = num_heads,
                         .num_kv_heads = num_kv_heads,
-                        .head_dim = @intCast(q_.dim(.hd)),
+                        .head_dim = @intCast(self.q.dim(.hd)),
                         .batch_size = @intCast(parameters_.block_table.dim(.b)),
-                        .block_size = @intCast(k_cache_.dim(.k_chunk)),
-                        .num_blocks = @intCast(k_cache_.dim(.page)),
+                        .block_size = @intCast(self.k_cache.dim(.k_chunk)),
+                        .num_blocks = @intCast(self.k_cache.dim(.page)),
                         .max_num_block_per_seq = @intCast(parameters_.block_table.dim(.p)),
-                        .sliding_window = if (ctx_.opts.sliding_window < 0) 0 else @intCast(ctx_.opts.sliding_window),
+                        .sliding_window = if (self.opts.sliding_window < 0) 0 else @intCast(self.opts.sliding_window),
                         .block_m = block_m,
                         .block_q = block_q,
                         .total_q_blocks = total_q_blocks,
                         .target_num_prgms = target_num_prgms,
                         .num_2d_prgms = num_2d_prgms,
-                        .max_seqlen_q = ctx_.options.max_seqlen_q,
-                        .scale = ctx_.opts.scale,
+                        .max_seqlen_q = self.options.max_seqlen_q,
+                        .scale = self.opts.scale,
                     };
 
                     const use_2d_kernel = use2dKernel(
@@ -278,15 +315,26 @@ pub const paged = struct {
                         paged_attention_opts.num_kv_heads,
                     );
                     const output = if (use_2d_kernel)
-                        pagedAttention2d(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts)
+                        pagedAttention2d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
                     else if (isOneapiTarget())
-                        pagedAttention3dOneapi(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts)
+                        pagedAttention3dOneapi(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
                     else
-                        pagedAttention3d(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts);
+                        pagedAttention3d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts);
 
                     return output;
                 }
             }).body,
+            .{
+                .q = q,
+                .k_cache = k_cache,
+                .v_cache = v_cache,
+                .block_table = parameters.block_table,
+                .seq_lens = parameters.seq_lens,
+                .query_start_len = parameters.query_start_len,
+                .opts = opts,
+                .options = parameters.options_,
+            },
+            q.shape(),
         );
 
         return output;
@@ -308,7 +356,7 @@ pub const paged = struct {
             .use_alibi_slopes = false,
             .use_qq_bias = false,
             .use_softcap = false,
-            .use_sinks = false,
+            .use_sinks = (opts.sink != null),
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .block_q = @intCast(config.block_q),
             .block_m = @intCast(config.block_m),
@@ -329,12 +377,14 @@ pub const paged = struct {
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const num_seqs = parameters.block_table.dim(0);
 
+        const sink = if (opts.sink) |sink| sink.convert(.f32) else dummy;
+
         const output = kernels.KernelUnifiedAttention2dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
-                .sink_ptr = dummy,
+                .sink_ptr = sink,
                 .block_tables_ptr = parameters.block_table,
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
@@ -386,7 +436,7 @@ pub const paged = struct {
             .use_alibi_slopes = false,
             .use_qq_bias = false,
             .use_softcap = false,
-            .use_sinks = false,
+            .use_sinks = (opts.sink != null),
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .block_q = @intCast(config.attention.block_q),
             .block_m = @intCast(config.attention.block_m),
@@ -424,12 +474,15 @@ pub const paged = struct {
             @intCast(paged_attention_opts.num_kv_heads),
             @intCast(config.attention.num_segments_per_seq),
         };
+
+        const sink = if (opts.sink) |sink| sink.convert(.f32) else dummy;
+
         const attn_output = kernels.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
-                .sink_ptr = dummy,
+                .sink_ptr = sink,
                 .block_tables_ptr = parameters.block_table,
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
@@ -497,8 +550,6 @@ pub const paged = struct {
     /// the SIMD16-tuned kernel (compile-time KV strides, cached loads, same-page fast
     /// path) while reusing the shared segment-reduce kernel. See unified_attention_oneapi.zig.
     pub fn pagedAttention3dOneapi(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
-        _ = opts;
-
         const config = select3dConfig(paged_attention_opts);
 
         const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim));
@@ -518,7 +569,7 @@ pub const paged = struct {
             .use_alibi_slopes = false,
             .use_qq_bias = false,
             .use_softcap = false,
-            .use_sinks = false,
+            .use_sinks = (opts.sink != null),
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
             .block_q = @intCast(config.attention.block_q),
             .block_m = @intCast(config.attention.block_m),
@@ -558,12 +609,15 @@ pub const paged = struct {
         const num_seqs = parameters.block_table.dim(0);
 
         const attn_grid: [3]i32 = .{ @intCast(config.attention.total_q_blocks), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
+
+        const sink = if (opts.sink) |sink| sink.convert(.f32) else dummy;
+
         const attn_output = kernels_oneapi.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
-                .sink_ptr = dummy,
+                .sink_ptr = sink,
                 .block_tables_ptr = parameters.block_table,
                 .seq_lens_ptr = parameters.seq_lens,
                 .alibi_slopes_ptr = dummy,
@@ -622,4 +676,276 @@ pub const paged = struct {
 
         return output.output;
     }
+
+    pub fn pagedSparseMlaKernel(q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, active_query_count: zml.Tensor, paged_opts: PagedSparseMlaOptions) zml.Tensor {
+        const value_rank: i64 = @intCast(paged_opts.value_rank);
+        const rope_rank: i64 = if (paged_opts.value_rank == paged_opts.qk_rank) 0 else @intCast(paged_opts.rope_rank);
+        stdx.debug.assert(std.math.isPowerOfTwo(paged_opts.value_rank), "sparse MLA value rank ({}) must be a power of two", .{paged_opts.value_rank});
+        stdx.debug.assert(rope_rank == 0 or std.math.isPowerOfTwo(@as(usize, @intCast(rope_rank))), "sparse MLA separate RoPE rank ({}) must be a power of two", .{rope_rank});
+        stdx.debug.assert(value_rank + rope_rank == paged_opts.qk_rank, "sparse MLA expects either a full-width value or adjacent value/RoPE regions, got qk={} value={} rope={}", .{ paged_opts.qk_rank, value_rank, rope_rank });
+
+        const out_shape = q.shape().set(.hd, value_rank);
+
+        const q_strides = q.shape().computeElementStrides().constSlice();
+        const out_strides = out_shape.computeElementStrides().constSlice();
+        const kv_strides = kv_cache.shape().computeElementStrides().constSlice();
+
+        const sink_: zml.Tensor = sink orelse .scalar(0, .i8);
+        const use_sink = sink != null;
+        const sm_scale: f32 = paged_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(paged_opts.qk_rank))));
+
+        const config = sparse_mla.launchConfig(paged_opts, @intCast(topk.dim(.topk)), getCuCount());
+
+        const kernel_config: mla_kernels.Config = .{
+            .q_dtype = triton.from(q.dtype()),
+            .kv_dtype = triton.from(kv_cache.dtype()),
+            .sink_dtype = triton.from(sink_.dtype()),
+            .o_dtype = triton.from(q.dtype()),
+            .num_query_heads = @intCast(paged_opts.num_heads),
+            .block_size = @intCast(paged_opts.block_size),
+            .block_m = @intCast(config.block_m),
+            .topk_count = topk.dim(.topk),
+            .rope_rank = rope_rank,
+            .value_rank = value_rank,
+            .rope_offset = value_rank,
+            .tile_size = @intCast(config.tile_size),
+            .num_splits = @intCast(config.num_splits),
+            .use_attn_sink = use_sink,
+            .all_decode = paged_opts.all_decode,
+        };
+        log.debug("pagedSparseMla config: {any}, kernel: {any}", .{ config, kernel_config });
+
+        const kernel_inputs: mla_kernels.Kernel2D.Inputs = .{
+            .query_ptr = q,
+            .kv_cache_ptr = kv_cache,
+            .attn_sink_ptr = sink_,
+            .topk_indices_ptr = topk,
+            .active_query_count_ptr = active_query_count,
+            .scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(sm_scale)),
+            .query_stride_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[0])),
+            .query_stride_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[1])),
+            .output_stride_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(out_strides[0])),
+            .output_stride_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(out_strides[1])),
+            .stride_cache_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(kv_strides[kv_cache.shape().axis(.page)])),
+            .stride_cache_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(kv_strides[kv_cache.shape().axis(.k_chunk)])),
+        };
+
+        if (config.num_splits == 1) {
+            const out = mla_kernels.Kernel2D.call(
+                kernel_inputs,
+                .{ .output = out_shape },
+                .{
+                    .cfg = kernel_config,
+                    .grid = .{ @intCast(config.direct_programs), 1, 1 },
+                    .num_warps = @intCast(config.main_num_warps),
+                    .num_stages = @intCast(config.main_num_stages),
+                },
+            );
+            return out.output.reshape(out_shape);
+        }
+
+        const num_splits: i64 = @intCast(config.num_splits);
+        const kernel_3d_inputs: mla_kernels.Kernel3D.Inputs = .{
+            .query_ptr = kernel_inputs.query_ptr,
+            .kv_cache_ptr = kernel_inputs.kv_cache_ptr,
+            .attn_sink_ptr = kernel_inputs.attn_sink_ptr,
+            .topk_indices_ptr = kernel_inputs.topk_indices_ptr,
+            .active_query_count_ptr = kernel_inputs.active_query_count_ptr,
+            .scale_ptr = kernel_inputs.scale_ptr,
+            .query_stride_0_ptr = kernel_inputs.query_stride_0_ptr,
+            .query_stride_1_ptr = kernel_inputs.query_stride_1_ptr,
+            .output_stride_0_ptr = kernel_inputs.output_stride_0_ptr,
+            .output_stride_1_ptr = kernel_inputs.output_stride_1_ptr,
+            .stride_cache_0_ptr = kernel_inputs.stride_cache_0_ptr,
+            .stride_cache_1_ptr = kernel_inputs.stride_cache_1_ptr,
+        };
+        const partials = mla_kernels.Kernel3D.call(
+            kernel_3d_inputs,
+            .{
+                .partial_output = zml.Shape.init(.{ q.dim(.q), @as(i64, @intCast(paged_opts.num_heads)), num_splits, value_rank }, .f32),
+                .partial_lse = zml.Shape.init(.{ q.dim(.q), @as(i64, @intCast(paged_opts.num_heads)), num_splits }, .f32),
+            },
+            .{
+                .cfg = kernel_config,
+                .grid = .{ @intCast(config.direct_programs), @intCast(config.num_splits), 1 },
+                .num_warps = @intCast(config.main_num_warps),
+                .num_stages = @intCast(config.main_num_stages),
+            },
+        );
+        var reduce_partial_output = partials.partial_output;
+        var reduce_partial_lse = partials.partial_lse;
+        var reduce_num_splits = num_splits;
+        if (num_splits > config.grouped_reduce_threshold) {
+            const grouped_splits: i64 = @divExact(num_splits, @as(i64, @intCast(config.splits_per_group)));
+            const grouped = mla_kernels.Reduce3DPartials.call(
+                .{
+                    .input = partials.partial_output,
+                    .input_lse = partials.partial_lse,
+                    .active_query_count_ptr = active_query_count,
+                },
+                .{
+                    .partial_output = zml.Shape.init(.{ q.dim(.q), @as(i64, @intCast(paged_opts.num_heads)), grouped_splits, value_rank }, .f32),
+                    .partial_lse = zml.Shape.init(.{ q.dim(.q), @as(i64, @intCast(paged_opts.num_heads)), grouped_splits }, .f32),
+                },
+                .{
+                    .cfg = .{
+                        .num_query_heads = @intCast(paged_opts.num_heads),
+                        .value_rank = value_rank,
+                        .num_input_splits = num_splits,
+                        .num_output_splits = grouped_splits,
+                        .all_decode = paged_opts.all_decode,
+                    },
+                    .grid = .{ @intCast(q.dim(.q)), @intCast(paged_opts.num_heads * @as(usize, @intCast(grouped_splits))), 1 },
+                    .num_warps = @intCast(config.grouped_reduce_num_warps),
+                    .num_stages = 1,
+                },
+            );
+            reduce_partial_output = grouped.partial_output;
+            reduce_partial_lse = grouped.partial_lse;
+            reduce_num_splits = grouped_splits;
+        }
+
+        const out = mla_kernels.Reduce3D.call(
+            .{
+                .partial_output_ptr = reduce_partial_output,
+                .partial_lse_ptr = reduce_partial_lse,
+                .attn_sink_ptr = sink_,
+                .active_query_count_ptr = active_query_count,
+                .output_stride_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(out_strides[0])),
+                .output_stride_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(out_strides[1])),
+            },
+            .{ .output = out_shape },
+            .{
+                .cfg = .{
+                    .sink_dtype = triton.from(sink_.dtype()),
+                    .o_dtype = triton.from(q.dtype()),
+                    .num_query_heads = @intCast(paged_opts.num_heads),
+                    .value_rank = value_rank,
+                    .num_splits = reduce_num_splits,
+                    .use_attn_sink = use_sink,
+                    .all_decode = paged_opts.all_decode,
+                },
+                .grid = .{ @intCast(q.dim(.q)), @intCast(paged_opts.num_heads), 1 },
+                .num_warps = @intCast(if (reduce_num_splits >= config.parallel_reduce_min_splits)
+                    config.parallel_reduce_num_warps
+                else
+                    1),
+                .num_stages = 1,
+            },
+        );
+
+        return out.output.reshape(out_shape);
+    }
+
+    pub fn tokenToSequence(query_start_len: zml.Tensor, query_count: i64) zml.Tensor {
+        const sequence_count = query_start_len.dim(.b) - 1;
+        const starts = query_start_len.slice(.b, .{ .end = sequence_count }).rename(.{ .b = .seq });
+        const ends = query_start_len.slice(.b, .{ .start = 1 }).rename(.{ .b = .seq });
+        const query_x_sequence_shape = zml.Shape.init(.{ .q = query_count, .seq = sequence_count }, .i32);
+        const query = zml.Tensor.iota(query_x_sequence_shape, .q).convert(.i32);
+        const in_range = query.cmp(.GE, starts.broad(query_x_sequence_shape)).convert(.i32)
+            .mul(query.cmp(.LT, ends.broad(query_x_sequence_shape)).convert(.i32))
+            .cmp(.NE, zml.Tensor.zeroes(query_x_sequence_shape));
+        const sequence = zml.Tensor.iota(query_x_sequence_shape, .seq).convert(.i32);
+        return zml.Tensor.select(in_range, sequence, zml.Tensor.zeroes(query_x_sequence_shape)).sum(.seq).squeeze(.seq);
+    }
+
+    pub fn topkToPhysical(parameters: anytype, topk: zml.Tensor, tokens_pos: zml.Tensor, block_size: i64) zml.Tensor {
+        const topk_i32 = topk.convert(.i32);
+        const topk_shape = topk_i32.shape();
+
+        stdx.debug.assert(topk_shape.hasTags(.{ .q, .topk }), "paged MLA topk must have .q and .topk axes, got {f}", .{topk_shape});
+        stdx.debug.assert(tokens_pos.shape().hasTags(.{.q}), "paged MLA token positions must have a .q axis, got {f}", .{tokens_pos.shape()});
+
+        const query_to_sequence = tokenToSequence(parameters.query_start_len, topk_i32.dim(.q));
+        const sequence_ends = parameters.query_start_len.slice(.b, .{ .start = 1 }).rename(.{ .b = .seq });
+        const last_query = sequence_ends.gather(.{ .seq = query_to_sequence }, .{}).sub(.scalar(1, .i32));
+        const last_token_pos = tokens_pos
+            .gather(.{ .q = last_query.rename(.{ .q = .lookup }) }, .{})
+            .rename(.{ .lookup = .q })
+            .convert(.i32);
+        const seq_lens = parameters.seq_lens.rename(.{ .b = .seq }).gather(.{ .seq = query_to_sequence }, .{});
+        const first_visible_token = last_token_pos.addConstant(1).sub(seq_lens);
+        const relative_topk = topk_i32.sub(first_visible_token.broad(topk_shape));
+
+        const block_size_scalar = zml.Tensor.scalar(@as(i32, @intCast(block_size)), .i32).broad(topk_shape);
+        const zero = zml.Tensor.zeroes(topk_shape);
+        const valid_nonnegative = relative_topk.cmp(.GE, zero);
+        const valid_in_sequence = relative_topk.cmp(.LT, seq_lens.broad(topk_shape));
+        const valid_topk = valid_nonnegative.logical(.AND, valid_in_sequence);
+
+        const safe_topk = zml.Tensor.select(valid_topk, relative_topk, zero);
+        const logical_block = safe_topk.div(block_size_scalar);
+        const slot = safe_topk.remainder(block_size_scalar);
+
+        const sequence = query_to_sequence.broad(topk_shape);
+        const block_table = parameters.block_table.rename(.{ .b = .seq });
+        const physical_block = block_table.gather(.{ .seq = sequence, .p = logical_block }, .{});
+
+        const physical_topk = physical_block.mul(block_size_scalar).add(slot);
+
+        return zml.Tensor.select(valid_topk, physical_topk, zml.Tensor.scalar(-1, .i32).broad(topk_shape));
+    }
+
+    pub const PagedSparseMlaOptions = sparse_mla.Options;
+
+    pub fn pagedSparseMla(parameters: Parameters, q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: MlaOptions) zml.Tensor {
+        return sparse_mla.pagedAttention(parameters, q, kv_cache, sink, topk, tokens_pos, opts);
+    }
 };
+
+test "sparse MLA emits 2D and 3D Triton kernels" {
+    const platform = zml.testing.env();
+    var compilation = zml.Compiler.init(std.testing.allocator, std.testing.io, platform, .{});
+    defer compilation.deinit();
+    compilation.activate();
+    defer compilation.deactivate();
+
+    const block = @import("mlir").Block.init(&.{}, &.{});
+    const scope = compilation.pushBlock(block);
+    defer scope.pop();
+
+    const q = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .h = 6, .hd = 576 }, .bf16));
+    const kv = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 32, .k_chunk = 1, .hkv = 1, .hd = 576 }, .bf16));
+    const sink = zml.Tensor.zeroes(zml.Shape.init(.{ .h = 6 }, .bf16));
+    const topk = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .topk = 32 }, .i32));
+    const active_query_count = zml.Tensor.scalar(1, .i32);
+    const two_d_opts: paged.PagedSparseMlaOptions = .{
+        .qk_rank = 576,
+        .value_rank = 512,
+        .num_heads = 6,
+        .block_size = 1,
+        .rope_rank = 64,
+        .scale = null,
+        .total_q_blocks = 1,
+        .num_kv_splits = 1,
+        .all_decode = true,
+    };
+    const output_shape = q.shape().set(.hd, 512);
+
+    const two_d = paged.pagedSparseMlaKernel(q, kv, sink, topk, active_query_count, two_d_opts);
+    try std.testing.expect(two_d.shape().eql(output_shape));
+    try std.testing.expect(two_d.value().owner().verify());
+
+    var three_d_opts = two_d_opts;
+    three_d_opts.num_kv_splits = 2;
+    const three_d = paged.pagedSparseMlaKernel(q, kv, sink, topk, active_query_count, three_d_opts);
+    try std.testing.expect(three_d.shape().eql(output_shape));
+    try std.testing.expect(three_d.value().owner().verify());
+
+    const dsv4_q = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .h = 6, .hd = 512 }, .bf16));
+    const dsv4_kv = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 32, .k_chunk = 1, .hkv = 1, .hd = 512 }, .bf16));
+    var dsv4_opts = two_d_opts;
+    dsv4_opts.qk_rank = 512;
+    dsv4_opts.value_rank = 512;
+    const dsv4_output_shape = dsv4_q.shape();
+
+    const dsv4_two_d = paged.pagedSparseMlaKernel(dsv4_q, dsv4_kv, sink, topk, active_query_count, dsv4_opts);
+    try std.testing.expect(dsv4_two_d.shape().eql(dsv4_output_shape));
+    try std.testing.expect(dsv4_two_d.value().owner().verify());
+
+    dsv4_opts.num_kv_splits = 2;
+    const dsv4_three_d = paged.pagedSparseMlaKernel(dsv4_q, dsv4_kv, sink, topk, active_query_count, dsv4_opts);
+    try std.testing.expect(dsv4_three_d.shape().eql(dsv4_output_shape));
+    try std.testing.expect(dsv4_three_d.value().owner().verify());
+}

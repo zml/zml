@@ -17,7 +17,7 @@ py_binary(
     srcs = ["attention_harness.py"],
     data = [
         ":attention.py",
-        "@libpjrt_neuron//:sandbox",
+        "@libzml_neuron//:sandbox",
     ],
     visibility = ["//visibility:public"],
     deps = [

@@ -24,8 +24,9 @@ pub fn fetchRegistry(
     io: std.Io,
     repo: std.Io.Dir,
     model: std.Io.File,
+    model_path: []const u8,
 ) !TensorRegistry {
-    const file_type = try resolveFiletype(io, model);
+    const file_type = resolveFiletype(model_path);
 
     return switch (file_type) {
         .index => blk: {
@@ -284,8 +285,9 @@ pub const TensorRegistry = struct {
         io: std.Io,
         repo: std.Io.Dir,
     ) !TensorRegistry {
-        const entrypoint = try resolveModelEntrypoint(io, repo);
-        return try fetchRegistry(allocator, io, repo, entrypoint);
+        const entrypoint_file, const entrypoint_path = try resolveModelEntrypoint(io, repo);
+        defer entrypoint_file.close(io);
+        return try fetchRegistry(allocator, io, repo, entrypoint_file, entrypoint_path);
     }
 
     pub fn fromPath(
@@ -294,15 +296,15 @@ pub const TensorRegistry = struct {
         path: []const u8,
     ) !TensorRegistry {
         var repo = try resolveModelRepo(io, path);
+        defer repo.close(io);
 
-        if (std.mem.endsWith(u8, path, ".safetensors.index.json") or
-            std.mem.endsWith(u8, path, ".safetensors"))
-        {
-            return try fetchRegistry(allocator, io, repo, try repo.openFile(io, path, .{ .mode = .read_only }));
-        } else {
-            const entrypoint = try resolveModelEntrypoint(io, repo);
-            return try fetchRegistry(allocator, io, repo, entrypoint);
-        }
+        const entrypoint_file, const entrypoint_path = if (std.mem.endsWith(u8, path, ".safetensors.index.json") or std.mem.endsWith(u8, path, ".safetensors"))
+            .{ try repo.openFile(io, path, .{ .mode = .read_only }), path }
+        else
+            try resolveModelEntrypoint(io, repo);
+        defer entrypoint_file.close(io);
+
+        return try fetchRegistry(allocator, io, repo, entrypoint_file, entrypoint_path);
     }
 
     pub fn deinit(self: *TensorRegistry) void {
@@ -548,13 +550,10 @@ fn parseSafetensorsIndexFiles(
     }
 }
 
-pub fn resolveFiletype(io: std.Io, file: std.Io.File) !FileType {
-    var path_buf: [1024]u8 = undefined;
-    const path_len = try file.realPath(io, &path_buf);
-
-    if (std.mem.endsWith(u8, path_buf[0..path_len], ".safetensors.index.json")) {
+pub fn resolveFiletype(path: []const u8) FileType {
+    if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
         return .index;
-    } else if (std.mem.endsWith(u8, path_buf[0..path_len], ".safetensors")) {
+    } else if (std.mem.endsWith(u8, path, ".safetensors")) {
         return .safetensors;
     } else {
         return .unknown;
@@ -595,18 +594,18 @@ pub fn resolveModelRepo(
     return dir;
 }
 
-pub fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionError!std.Io.File {
+pub fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionError!struct { std.Io.File, []const u8 } {
     {
         const index_name = "model.safetensors.index.json";
         if (repo.openFile(io, index_name, .{ .mode = .read_only })) |index_file| {
-            return index_file;
+            return .{ index_file, "model.safetensors.index.json" };
         } else |_| {}
     }
 
     {
         const model_name = "model.safetensors";
         if (repo.openFile(io, model_name, .{ .mode = .read_only })) |model_file| {
-            return model_file;
+            return .{ model_file, "model.safetensors" };
         } else |_| {}
     }
 
@@ -756,7 +755,9 @@ fn stringToDtype(safetensor_type: []const u8) !DataType {
         .{ "F32", .f32 },
         .{ "F16", .f16 },
         .{ "BF16", .bf16 },
+        .{ "F8_E8M0", .f8e8m0 },
         .{ "F8_E4M3", .f8e4m3fn },
+        .{ "F4_E2M1", .f4e2m1 },
         .{ "I64", .i64 },
         .{ "I32", .i32 },
         .{ "I16", .i16 },

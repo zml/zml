@@ -24,8 +24,14 @@ const Tensor = @import("tensor.zig").Tensor;
 const log = std.log.scoped(.@"zml/io");
 
 pub const TensorStore = struct {
+    pub const Binding = struct {
+        tensors: []*safetensors.Tensor,
+        transformed: bool,
+        memory: Memory.Kind = .default,
+    };
+
     registry: *safetensors.TensorRegistry,
-    id_to_sources: std.AutoHashMapUnmanaged(usize, []*safetensors.Tensor),
+    id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
@@ -44,7 +50,7 @@ pub const TensorStore = struct {
         self.arena.deinit();
     }
 
-    fn putSourcesNoClobber(self: *TensorStore, id: usize, sources: []*safetensors.Tensor) std.mem.Allocator.Error!void {
+    fn putSourcesNoClobber(self: *TensorStore, id: Tensor.Id, sources: Binding) std.mem.Allocator.Error!void {
         const gop = try self.id_to_sources.getOrPut(self.allocator, id);
         if (gop.found_existing) {
             stdx.debug.panic("Id {} already has associated sources", .{id});
@@ -59,10 +65,19 @@ pub const TensorStore = struct {
         return tensor_desc_ptr;
     }
 
+    fn dupeSource(self: *TensorStore, key: []const u8) ?*safetensors.Tensor {
+        const entry = self.getPtrFromKey(key) orelse return null;
+
+        const copy = self.arena.allocator().create(safetensors.Tensor) catch @panic("OOM");
+        copy.* = entry.*;
+
+        return copy;
+    }
+
     fn getPtrFromId(self: *const TensorStore, id: usize) ?*safetensors.Tensor {
         const sources = self.id_to_sources.get(id) orelse return null;
-        stdx.debug.assert(sources.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.len });
-        return sources[0];
+        stdx.debug.assert(sources.tensors.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.tensors.len });
+        return sources.tensors[0];
     }
 
     pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
@@ -71,12 +86,12 @@ pub const TensorStore = struct {
 
     pub fn getReaderById(self: *const TensorStore, id: usize, io: std.Io, buffer: []u8) !safetensors.TensorReader {
         const sources = self.id_to_sources.get(id) orelse return error.NotFound;
-        stdx.debug.assert(sources.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.len });
+        stdx.debug.assert(sources.tensors.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.tensors.len });
 
-        return sources[0].reader(io, buffer, .{});
+        return sources.tensors[0].reader(io, buffer, .{});
     }
 
-    pub fn getSourcesById(self: *const TensorStore, id: usize) ?[]*safetensors.Tensor {
+    pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
         return self.id_to_sources.get(id);
     }
 
@@ -135,7 +150,7 @@ pub const TensorStore = struct {
             };
         }
 
-        fn prefix(self: *const View) ?[]const u8 {
+        pub fn prefix(self: *const View) ?[]const u8 {
             return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
         }
 
@@ -147,10 +162,22 @@ pub const TensorStore = struct {
             } else false;
         }
 
+        pub const CreateTensorOpts = struct {
+            memory: Memory.Kind = .default,
+        };
+
         pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
+            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{});
+        }
+
+        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
+            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{ .memory = .host_pinned });
+        }
+
+        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype, opts: CreateTensorOpts) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            const source = self.store.getPtrFromKey(key) orelse return null;
+            const source = self.store.dupeSource(key) orelse return null;
 
             const sources = self.store.arena.allocator().alloc(*safetensors.Tensor, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
             errdefer self.store.arena.allocator().free(sources);
@@ -161,13 +188,19 @@ pub const TensorStore = struct {
             shape = applyPartitioning(shape, partitioning);
 
             const tensor: Tensor = .fromShape(shape);
-            self.store.putSourcesNoClobber(tensor.id, sources) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = opts.memory }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;
         }
 
         pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensor(subkey, tagz, partitioning).?;
+            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{}) orelse
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+        }
+
+        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
+            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{ .memory = .host_pinned }) orelse
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
         fn applyTags(shape_: Shape, tagz: anytype) Shape {
@@ -211,7 +244,7 @@ pub const TensorStore = struct {
             var buffer: [256]u8 = undefined;
             for (sources) |subkey| {
                 const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-                const tensor = self.store.getPtrFromKey(key) orelse return null;
+                const tensor = self.store.dupeSource(key) orelse return null;
                 tensor_list.appendAssumeCapacity(tensor);
             }
 
@@ -219,7 +252,7 @@ pub const TensorStore = struct {
             errdefer arena.free(tensors);
 
             const tensor: Tensor = .fromShape(shape);
-            self.store.putSourcesNoClobber(tensor.id, tensors) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .transformed = true }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;
         }
@@ -275,6 +308,7 @@ pub const Loader = struct {
     pinned_buffer_pools: []mem.DynamicBufferPool,
     group: stdx.Io.LimitedGroup,
     bytes_loaded: std.atomic.Value(usize) = .init(0),
+    delivered: std.AutoHashMapUnmanaged(Tensor.Id, void) = .empty,
 
     pub const Opts = struct {
         pub const default: Opts = .{
@@ -287,7 +321,7 @@ pub const Loader = struct {
         dma_chunk_size: usize,
     };
 
-    pub fn init(allocator: std.mem.Allocator, platform: *const Platform, opts: Opts) !Loader {
+    pub fn init(allocator: std.mem.Allocator, platform: *const Platform, opts: Opts) error{OutOfMemory}!Loader {
         const pool_count = platform.devices.len;
         const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
         errdefer allocator.free(dma_allocators);
@@ -314,7 +348,8 @@ pub const Loader = struct {
         };
     }
 
-    pub fn deinit(self: Loader) void {
+    pub fn deinit(self: *Loader) void {
+        self.delivered.deinit(self.allocator);
         for (self.pinned_buffer_pools, 0..) |*pool, i| pool.deinit(self.dma_allocators[i].allocator());
         self.allocator.free(self.pinned_buffer_pools);
         self.allocator.free(self.dma_allocators);
@@ -328,7 +363,9 @@ pub const Loader = struct {
         progress: ?*std.Progress.Node = null,
     };
 
-    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
+    pub const LoadError = error{TransformedTensorNotDelivered};
+
+    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) LoadError!void {
         const tensor_count = meta.count(Tensor, model);
 
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
@@ -341,57 +378,88 @@ pub const Loader = struct {
             }
         }.call, .{flattened_buffers});
 
-        const Ctx = struct {
-            self: *Loader,
-            io: std.Io,
-            store: *const TensorStore,
-            shardings: []const Sharding,
-            buffers: []*Buffer,
-            opts: LoadOpts,
-        };
-
-        var ctx: Ctx = .{
-            .self = self,
-            .io = io,
-            .store = store,
-            .shardings = shardings,
-            .buffers = flattened_buffers,
-            .opts = opts,
-        };
-
+        const flattened_tensors = arena.allocator().alloc(*const Tensor, tensor_count) catch @panic("Errors can't be handled in `loadInner`");
         meta.forEachVisit(model, *const Tensor, struct {
-            fn call(i: usize, tensor: *const Tensor, ctx_: *Ctx) void {
-                ctx_.self.group.async(ctx_.io, defaultCallback, .{ ctx_.self, ctx_.io, tensor, ctx_.buffers[i], ctx_.store, ctx_.shardings, ctx_.opts });
+            fn call(i: usize, tensor: *const Tensor, flattened_tensors_: []*const Tensor) void {
+                flattened_tensors_[i] = tensor;
             }
-        }.call, .{&ctx});
+        }.call, .{flattened_tensors});
+
+        // Refuse before scheduling anything, so a failure leaves no task in flight.
+        var missing: usize = 0;
+        for (flattened_tensors) |tensor| {
+            const sources = store.getSourcesById(tensor.id) orelse continue;
+            if (!sources.transformed or self.delivered.contains(tensor.id)) {
+                continue;
+            }
+
+            missing += 1;
+            logNotDelivered(arena.allocator(), tensor, sources.tensors);
+        }
+
+        if (missing != 0) {
+            return error.TransformedTensorNotDelivered;
+        }
+
+        for (flattened_tensors, flattened_buffers) |tensor, buffer| {
+            if (store.getSourcesById(tensor.id)) |sources| {
+                if (sources.transformed) continue;
+            }
+
+            self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, shardings, opts });
+        }
+    }
+
+    fn logNotDelivered(arena: std.mem.Allocator, tensor: *const Tensor, sources: []const *safetensors.Tensor) void {
+        const max_names = 8;
+        var names: std.Io.Writer.Allocating = .init(arena);
+        for (sources[0..@min(sources.len, max_names)], 0..) |source, i| {
+            names.writer.print("{s}{s}", .{ if (i != 0) ", " else "", source.name }) catch break;
+        }
+
+        if (sources.len > max_names) {
+            names.writer.print(" and {} more", .{sources.len - max_names}) catch {};
+        }
+
+        log.err("Transformed tensor {} {f} was not delivered by loadExecute before load; sources: {s}", .{ tensor.id, tensor.shape(), names.written() });
+    }
+
+    pub fn loadBuffer(loader: *Loader, io: std.Io, buffer: *Buffer, tensor: Tensor, store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
+        loader.group.async(io, defaultCallback, .{ loader, io, &tensor, buffer, store, shardings, opts });
     }
 
     fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
         const sources = store.getSourcesById(tensor.id) orelse {
-            std.log.warn("Failed to get sources for tensor with id: {}", .{tensor.id});
+            std.log.debug("Failed to get sources for tensor with id: {}", .{tensor.id});
             return;
         };
+        stdx.debug.assert(!sources.transformed and sources.tensors.len == 1, "Tensor {} is transformed or has {} sources; `load` only streams single-source tensors", .{ tensor.id, sources.tensors.len });
 
-        if (sources.len != 1) {
-            log.debug("Skipping fused tensor with {} sources; expected to be loaded via loadExecute", .{sources.len});
-            return;
-        }
-
-        self.loadSingleInner(io, sources[0], tensor.shape(), buffer, shardings, opts) catch |e| {
+        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, shardings, opts) catch |e| {
             log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
             unreachable;
         };
     }
 
     fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: LoadOpts) void {
-        self.loadSingleInner(io, source, shape, buffer, shardings, opts) catch |e| {
+        self.loadSingleInner(io, source, shape, buffer, .device, shardings, opts) catch |e| {
             log.err("Failed to load tensor {s}: {}", .{ source.name, e });
             loaded.* = false;
+            return;
         };
         loaded.* = true;
     }
 
-    fn loadSingleInner(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, shardings: []const Sharding, opts: LoadOpts) !void {
+    fn loadSingleInner(
+        self: *Loader,
+        io: std.Io,
+        source: *safetensors.Tensor,
+        shape: Shape,
+        buffer: *Buffer,
+        memory: Memory.Kind,
+        shardings: []const Sharding,
+        opts: LoadOpts,
+    ) !void {
         var reader = try source.reader(io, &.{}, .{});
         defer reader.deinit();
 
@@ -410,6 +478,7 @@ pub const Loader = struct {
             shape,
             sharding,
             buffer,
+            memory,
         );
         defer writer.deinit(self.allocator);
 
@@ -441,28 +510,31 @@ pub const Loader = struct {
         shardings: []const Sharding,
         exe: *const Exe,
         opts: LoadOpts,
-    ) !void {
-        const sources = store.getSourcesById(tensor.id) orelse return error.NotFound;
+    ) error{ NotFound, OutOfMemory, LoadFailed, Canceled }!void {
+        const sources = (store.getSourcesById(tensor.id) orelse return error.NotFound).tensors;
         const buffers = try arena.alloc(Buffer, sources.len);
         const loaded = try arena.alloc(bool, sources.len);
         @memset(loaded, false);
         defer for (buffers, loaded) |*b, l| if (l) b.deinit();
 
-        var node = if (opts.progress) |progress| b: {
+        var node = if (opts.progress) |progress| p: {
             var writer = std.Io.Writer.Allocating.init(arena);
-            try writer.writer.writeAll("Running executable on ");
-            for (sources, 0..) |source, i| {
-                try writer.writer.print("{s}{s}", .{ if (i != 0) ", " else "", source.name });
+            print: {
+                writer.writer.writeAll("Running executable on ") catch break :print;
+                for (sources, 0..) |source, i| {
+                    writer.writer.print("{s}{s}", .{ if (i != 0) ", " else "", source.name }) catch break :print;
+                }
             }
-
-            break :b progress.start(writer.written(), 1);
+            break :p progress.start(writer.written(), 1);
         } else null;
         defer if (node) |*n| n.end();
 
         for (sources, 0..) |source, i| {
             self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], shardings, .{} });
         }
-        try self.group.await(io);
+        self.group.await(io) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+        };
 
         if (std.mem.findScalar(bool, loaded, false)) |_| {
             return error.LoadFailed;
@@ -472,9 +544,10 @@ pub const Loader = struct {
         var results = try exe.results(arena);
 
         args.set(.{buffers});
-        exe.call(args, &results);
+        exe.callOpts(io, args, &results, .{ .wait = true });
 
         buffer.* = results.get(Buffer);
+        try self.delivered.put(self.allocator, tensor.id, {});
     }
 };
 
@@ -568,10 +641,16 @@ pub const MemoryWriter = union(enum) {
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
+        memory: Memory.Kind,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
-            .rocm, .tpu, .neuron, .cpu, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
+            .cuda, .rocm, .oneapi => .{
+                .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, memory),
+            },
+            .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
+                std.debug.panic("Host pinned memory is not supported on {}", .{platform.target})
+            else
+                .{ .buffered = try .init(allocator, io, platform, shape, sharding, buffer) },
         };
     }
 
@@ -1076,6 +1155,7 @@ pub const DirectMemoryWriter = struct {
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
+        memory: Memory.Kind,
     ) !DirectMemoryWriter {
         const ordered_devices = sharding.devicesInCanonicalOrder();
         var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
@@ -1093,7 +1173,7 @@ pub const DirectMemoryWriter = struct {
 
             const pool = &pools[device.id];
             const shard_dma_allocator = dma_allocators[device.id].allocator();
-            const pjrt_mem = platform.devices[device.id].memory(.default).?;
+            const pjrt_mem = platform.devices[device.id].memory(memory).?;
 
             shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape);
 
@@ -1324,6 +1404,20 @@ pub const DirectMemoryWriter = struct {
     }
 };
 
+fn buildMesh2(
+    allocator: std.mem.Allocator,
+    target: @import("platform.zig").Target,
+    devices: []const @import("platform.zig").Device,
+) !Sharding.PhysicalMesh {
+    if (devices.len < 2) return error.NotEnoughDevices;
+    const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+        .device(devices[0]),
+        .device(devices[1]),
+    });
+
+    return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
+}
+
 fn buildMesh2x2(
     allocator: std.mem.Allocator,
     target: @import("platform.zig").Target,
@@ -1392,6 +1486,7 @@ const DirectMemoryWriterDeviceTest = struct {
         writable_slice_min_len: usize = 128,
         pool_chunks: usize = 4,
         pool_chunk_size: usize = 1 << 20,
+        memory: Memory.Kind = .default,
     };
 
     allocator: std.mem.Allocator,
@@ -1410,6 +1505,7 @@ const DirectMemoryWriterDeviceTest = struct {
             scenario.writable_slice_min_len,
             scenario.pool_chunks,
             scenario.pool_chunk_size,
+            scenario.memory,
         );
     }
 
@@ -1422,6 +1518,7 @@ const DirectMemoryWriterDeviceTest = struct {
         writable_slice_min_len: usize,
         pool_chunks: usize,
         pool_chunk_size: usize,
+        memory: Memory.Kind,
     ) !void {
         const slice = try Slice.alloc(self.allocator, shape);
         defer slice.free(self.allocator);
@@ -1457,6 +1554,7 @@ const DirectMemoryWriterDeviceTest = struct {
             shape,
             sharding,
             &written_buffer,
+            memory,
         );
         defer writer.deinit();
         defer written_buffer.deinit();
@@ -1617,5 +1715,24 @@ test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
             strategy.addFold(.link_x, &.{ .link_x, .link_z });
             break :blk strategy;
         },
+    });
+}
+
+test "MemoryWriter can produce a host pinned buffer" {
+    const case: DirectMemoryWriterDeviceTest = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+    };
+
+    try case.run(.{
+        .name = "host_pinned",
+        .create_options = .{
+            .physical_mesh = .{ .custom = buildMesh2 },
+        },
+        .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32)
+            .withPartitioning(.{ .batch = .replicated, .model = .model }),
+        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
+        .strategy = .parseBindings(.{ .model = .link_x }),
+        .memory = .host_pinned,
     });
 }

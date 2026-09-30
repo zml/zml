@@ -1474,6 +1474,7 @@ pub fn allReduce(
     reducer_block: *mlir.Block,
     replica_groups: *const mlir.Attribute,
     channel_handle: *const mlir.Attribute,
+    location: *const mlir.Location,
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.all_reduce", .{
         .operands = .{ .variadic = &.{inputs} },
@@ -1485,6 +1486,6 @@ pub fn allReduce(
             .named(ctx, "use_global_device_ids", .unit(ctx)),
         },
         .verify = true,
-        .location = .unknown(ctx),
+        .location = location,
     });
 }

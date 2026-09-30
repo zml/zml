@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const attnd = @import("attention/attnd.zig");
+pub const fly = @import("attention/fly_kernels/sparse_mla.zig");
 pub const flashattn = @import("attention/flashattn.zig");
 pub const metal = @import("attention/metal_attention.zig");
 pub const nki = @import("attention/nki/attention.zig");
@@ -25,16 +26,8 @@ pub const Backend = enum {
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
             .cuda => b: {
-                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
-
-                if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
-                    break :b if (std.mem.eql(u8, cc, "9.0"))
-                        .cuda_fa3
-                    else
-                        .cuda_fa2;
-                }
-
-                break :b .vanilla;
+                const cc = zml.platform.cuda.computeCapability(platform) orelse break :b .vanilla;
+                break :b if (cc.eql(.{ .major = 9, .minor = 0 })) .cuda_fa3 else .cuda_fa2;
             },
             .neuron => .nki,
             .metal => .metal_fa,
@@ -49,12 +42,7 @@ pub const Backend = enum {
             .nki => platform.target == .neuron,
             .metal_fa => platform.target == .metal,
             .cuda_fa2 => platform.target == .cuda,
-            .cuda_fa3 => {
-                if (platform.target != .cuda) return false;
-                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
-                const cc = zml.platform.cuda.tryGetComputeCapabilities(platform, first_device) orelse return false;
-                return std.mem.eql(u8, cc, "9.0");
-            },
+            .cuda_fa3 => if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(.{ .major = 9, .minor = 0 }) else false,
         };
     }
 };
@@ -183,7 +171,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             break :b attn_output;
         },
         .attnd => attnd.causalAttention(q, k, v, token_index, metadata.attnd, parameters.attnd),
-        .nki => |params| nki.attention(q, k, v, token_index, params),
+        .nki => nki.attention(q, k, v, token_index, parameters.nki),
         .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
         .metal_fa => metal.attention(q, k, v, token_index, metadata.metal_fa),

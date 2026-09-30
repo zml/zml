@@ -7,4 +7,5 @@ zig_binary(
     data = [],
     main = "main.zig",
     deps = ["//zml"],
+    visibility = ["//visibility:public"],
 )

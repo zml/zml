@@ -48,7 +48,7 @@ copy_to_directory(
             "//platforms/rocm:zmlxrocm",
             "@amdrocm-amdsmi//:libamd_smi",
             "@amdrocm-sysdeps//:system_libs",
-            "@libpjrt_rocm//:amdgpu_ids",
+            "@libzml_rocm//:amdgpu_ids",
         ],
         "@llvm//platforms/config:linux_aarch64": [],
     }),

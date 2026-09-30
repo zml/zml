@@ -1,0 +1,17 @@
+diff --git a/src/io.zig b/src/io.zig
+--- a/src/io.zig
++++ b/src/io.zig
+@@ -1853,7 +1853,12 @@ fn childKillImpl(_: ?*anyopaque, child: *std.process.Child) void {
+ }
+ 
+ fn progressParentFileImpl(_: ?*anyopaque) std.Progress.ParentFileError!Io.File {
+-    @panic("progressParentFile: not supported");
++    var environ: Io.Threaded.Environ = .{ .process_environ = processEnviron() };
++    environ.scan(.failing);
++    var file = try environ.zig_progress_file;
++    // Inherited Windows handles are not associated with zio's IOCP port.
++    if (builtin.os.tag == .windows) flagsWritePollable(&file.flags, false);
++    return file;
+ }
+ 
+ fn nowImpl(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {

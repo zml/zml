@@ -10,7 +10,7 @@ compile_dir="${run_dir}/compile"
 
 mkdir -p "${execution_dir}" "${compile_dir}"
 
-neuron_explorer_bin="$0.runfiles/+neuron_packages+libpjrt_neuron/sandbox/bin/neuron-explorer"
+neuron_explorer_bin="$0.runfiles/+neuron_packages+libzml_neuron/sandbox/bin/neuron-explorer"
 
 xla_flags="--xla_dump_to=${compile_dir} --xla_dump_hlo_as_text --xla_dump_hlo_as_proto --xla_dump_hlo_pass_re=.*"
 

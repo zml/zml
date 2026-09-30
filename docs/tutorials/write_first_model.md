@@ -304,7 +304,7 @@ INFO: Elapsed time: 0.120s, Critical Path: 0.00s
 INFO: 1 process: 1 internal.
 INFO: Build completed successfully, 1 total action
 INFO: Running command line: bazel-bin/examples/simple_layer/simple_layer
-info(pjrt): Loaded library: libpjrt_cpu.dylib
+info(pjrt): Loaded library: libzml_cpu.dylib
 debug(zml/module):
 ******** ZML generated MLIR ********
 module @zml attributes {mhlo.num_partitions = 4 : i32, mhlo.num_replicas = 1 : i32} {

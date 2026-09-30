@@ -102,18 +102,19 @@ fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const
 
     switch (shape.dtype()) {
         inline else => |v| {
-            const ZigType = v.toZigType();
+            const ZigType = v.toPackedZigType();
             switch (comptime v.class()) {
                 .bool => unreachable,
                 .integer => {
-                    for (slice.items(ZigType)) |*e| e.* = random.int(ZigType);
+                    for (slice.items(ZigType)) |*e| e.* = @bitCast(random.int(@Int(.unsigned, @bitSizeOf(ZigType))));
                 },
                 .float => {
                     const value = random.float(f32);
                     for (slice.items(ZigType)) |*e| e.* = switch (ZigType) {
                         f64, f32 => value,
                         f16 => @floatCast(value),
-                        inline else => |T| if (@hasDecl(T, "fromF32")) T.fromF32(value) else unreachable,
+                        zml.floats.Float4E2M1.Packed => .fromF32(value, -value),
+                        inline else => |T| if (@hasDecl(T, "fromF32")) .fromF32(value) else unreachable,
                     };
                 },
                 .complex => unreachable,

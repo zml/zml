@@ -1,0 +1,26 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "cute",
+    hdrs = [
+        "Cute.h",
+        "CuteAttributes.h",
+        "CuteCompilerAttributes.h",
+        "CuteTypes.h",
+    ],
+    includes = ["../.."],
+    deps = ["@llvm-project//mlir:CAPIIR"],
+)
+
+cc_library(
+    name = "cute_nvgpu",
+    hdrs = [
+        "CuteNVGPU.h",
+        "CuteNVGPUAttributes.h",
+        "CuteNVGPUTypes.h",
+    ],
+    includes = ["../.."],
+    deps = ["@llvm-project//mlir:CAPIIR"],
+)

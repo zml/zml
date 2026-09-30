@@ -1,0 +1,48 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+_DEPS = [
+    "//bazel",
+    "@rules_zig//zig/runfiles",
+] + select({
+    "@llvm//platforms/config:linux_x86_64": [
+        "@flashinfer_cutlass_moe_linux_amd64//:c",
+    ],
+    "@llvm//platforms/config:linux_aarch64": [
+        "@flashinfer_cutlass_moe_linux_arm64//:c",
+    ],
+    "//conditions:default": [],
+})
+
+_DATA = select({
+    "@llvm//platforms/config:linux_x86_64": [
+        "@flashinfer_cutlass_moe_linux_amd64//:libraries",
+    ],
+    "@llvm//platforms/config:linux_aarch64": [
+        "@flashinfer_cutlass_moe_linux_arm64//:libraries",
+    ],
+    "//conditions:default": [],
+})
+
+zig_library(
+    name = "flashinfer_cutlass_moe",
+    data = _DATA,
+    import_name = "platforms/cuda/flashinfer_cutlass_moe",
+    main = "flashinfer_cutlass_moe.zig",
+    tags = ["manual"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
+    visibility = ["//visibility:public"],
+    deps = _DEPS,
+)
+
+zig_test(
+    name = "test",
+    data = _DATA,
+    main = "flashinfer_cutlass_moe.zig",
+    tags = ["manual"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
+    deps = _DEPS,
+)

@@ -46,26 +46,6 @@ pub const Parameters = struct {
     }
 };
 
-pub const Metadata = struct {
-    pub const InitOptions = struct {};
-
-    pub fn init(opts: InitOptions) Metadata {
-        _ = opts;
-        return .{};
-    }
-
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
-        _ = self;
-        _ = io;
-        _ = platform;
-        return {};
-    }
-};
-
-pub fn deinitBuffer(bufferized: *zml.Bufferized(Metadata)) void {
-    _ = bufferized;
-}
-
 fn validateOptions(opts: Options) !void {
     if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
     if (opts.w1_scale != null or opts.w2_scale != null) return error.UnsupportedQuantization;
@@ -150,14 +130,14 @@ fn alignSortedRowsByGroup(rows: Tensor, expert_ids_sorted: Tensor, group_sizes: 
     const group_ends = group_sizes.cumulativeSum(.expert);
     const group_starts = Tensor.concatenate(&.{
         Tensor.zeroes(.init(.{ .expert = 1 }, .i32)),
-        group_ends.slice1d(.expert, .{ .end = num_groups - 1 }),
+        group_ends.slice(.expert, .{ .end = num_groups - 1 }),
     }, .expert);
 
     const padded_group_sizes = group_sizes.addConstant(tile_m - 1).divByConst(tile_m).mul(Tensor.scalar(tile_m, .i32));
     const padded_group_ends = padded_group_sizes.cumulativeSum(.expert);
     const padded_group_starts = Tensor.concatenate(&.{
         Tensor.zeroes(.init(.{ .expert = 1 }, .i32)),
-        padded_group_ends.slice1d(.expert, .{ .end = num_groups - 1 }),
+        padded_group_ends.slice(.expert, .{ .end = num_groups - 1 }),
     }, .expert);
 
     const logical_positions = Tensor.arange(.{ .end = rows.dim(.token) }, .i32).withTags(.{.token});
@@ -261,13 +241,13 @@ pub fn callGmmEp(
         },
     ).out;
 
-    return out.slice1d(.out, .{ .end = out_n });
+    return out.slice(.out, .{ .end = out_n });
 }
 
 fn applyActivation(x: Tensor, mode: ActivationMode) Tensor {
     const mid = @divFloor(x.dim(.out), 2);
-    const gate = x.slice1d(.out, .{ .end = mid });
-    const up = x.slice1d(.out, .{ .start = mid });
+    const gate = x.slice(.out, .{ .end = mid });
+    const up = x.slice(.out, .{ .start = mid });
 
     return switch (mode) {
         .silu => gate.silu().mul(up),
@@ -290,10 +270,8 @@ pub fn fusedExpertsImpl(
     w2: Tensor,
     topk_weights: Tensor,
     topk_ids: Tensor,
-    metadata: Metadata,
     opts: Options,
 ) !Tensor {
-    _ = metadata;
     try validateOptions(opts);
 
     const b = hidden_states.dim(.b);
