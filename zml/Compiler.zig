@@ -324,9 +324,10 @@ pub fn manualAxesConflict(self: *const Compiler, sharding: Sharding, logical_axe
 }
 
 pub fn manualAxisConflict(self: *const Compiler, sharding: Sharding, shape: Shape) ?ManualAxisConflict {
-    for (shape._partitioning.constSlice(), 0..) |spec, dimension| {
-        if (spec != .axis) continue;
-        if (self.manualAxesConflict(sharding, &.{spec.axis})) |conflict| {
+    for (0..shape.rank()) |dimension| {
+        const spec = shape.partition(dimension);
+        const mesh_axis = spec.meshAxis() orelse continue;
+        if (self.manualAxesConflict(sharding, &.{sharding.data.logical.axes.get(mesh_axis)})) |conflict| {
             return .{ .dimension = dimension, .logical_axis = conflict.logical_axis, .resolved_axis = conflict.resolved_axis };
         }
     }
@@ -859,8 +860,6 @@ pub fn tensorShardingAttr(
         .gspmd => sharding.data.gspmdShardingAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
             error.WriteFailed => error.OutOfMemory, // We're writing to memory
             error.OutOfMemory => error.OutOfMemory,
-            // TODO(hugomano): clarify what can trigger this and consider moving the check to the Sharding creation
-            error.MissingDeviceInTile => @panic("MissingDeviceInTile"),
         },
     };
 }

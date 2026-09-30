@@ -184,9 +184,8 @@ test "FlashAttention metadata initializes with explicit sharding outside compila
         .name = "metadata_mesh",
         .physical = undefined,
         .logical = .mesh(.{ .model = .high_bandwidth }),
-        .bindings = .init(&.{.init(&.{.link_x})}),
-        .folds = .empty,
-        .folds_consumed = .empty,
+        .bindings = .empty,
+        .view = undefined,
     };
     const sharding: zml.Sharding = .{ .data = &data };
     inline for (.{ Backend.cuda_fa2, Backend.cuda_fa3 }) |backend| {

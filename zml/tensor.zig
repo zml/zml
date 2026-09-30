@@ -181,7 +181,7 @@ pub const Tensor = struct {
             return res;
         };
 
-        const sharding = self._shape._sharding.resolveReplicated(ctx.platform);
+        const sharding = partitioned_shape._sharding.resolveReplicated(ctx.platform);
         const attr = ctx.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
         if (ctx.manualAxisConflict(sharding, partitioned_shape)) |conflict| {
             std.debug.panic(
@@ -233,9 +233,8 @@ pub const Tensor = struct {
             .name = "dp_mp",
             .physical = undefined,
             .logical = .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
-            .bindings = .init(&.{.init(&.{.link_x})}),
-            .folds = .empty,
-            .folds_consumed = .empty,
+            .bindings = .empty,
+            .view = undefined,
         };
         const dp_mp: Sharding = .{ .data = &dp_mp_data };
 
@@ -243,9 +242,8 @@ pub const Tensor = struct {
             .name = "mp_dp",
             .physical = undefined,
             .logical = .mesh(.{ .model = .low_bandwidth, .data = .high_bandwidth }),
-            .bindings = .init(&.{.init(&.{.link_x})}),
-            .folds = .empty,
-            .folds_consumed = .empty,
+            .bindings = .empty,
+            .view = undefined,
         };
         const mp_dp: Sharding = .{ .data = &mp_dp_data };
 

@@ -791,13 +791,8 @@ pub const Shape = struct {
         .name = "shape_test",
         .physical = undefined,
         .logical = .mesh(.{ .batch = .balanced, .feature = .balanced, .colors = .balanced }),
-        .bindings = .init(&.{
-            .init(&.{.link_x}),
-            .init(&.{.link_y}),
-            .init(&.{.link_z}),
-        }),
-        .folds = .empty,
-        .folds_consumed = .empty,
+        .bindings = .empty,
+        .view = undefined,
     } };
 
     pub fn withSharding(self: Shape, new_sharding: Sharding) Shape {
@@ -1018,11 +1013,9 @@ pub const Shape = struct {
 
     pub fn partitioningAxes(self: Shape) TagsArray {
         var partitioning_axes: Shape.TagsArray = .empty;
-        for (self._partitioning.constSlice()) |p| {
-            switch (p) {
-                .axis => |a| partitioning_axes.appendAssumeCapacity(a),
-                else => {},
-            }
+        for (0..self.rank()) |dimension| {
+            const p = self.partition(dimension);
+            if (p.meshAxis()) |axis_| partitioning_axes.appendAssumeCapacity(self._sharding.data.logical.axes.get(axis_));
         }
         return partitioning_axes;
     }

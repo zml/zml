@@ -16,16 +16,16 @@ const Mnist = struct {
     fc1: Layer,
     fc2: Layer,
 
-    pub fn init(store: zml.io.TensorStore.View, sharding: zml.Sharding) Mnist {
+    pub fn init(store: zml.io.TensorStore.View) Mnist {
         return .{
             // Layer 1 is sharded following it's output axis
             .fc1 = .{
-                .weight = store.createTensor("fc1.weight", .{ .d_out, .d }, sharding, .{ .d_out = .model }),
-                .bias = store.createTensor("fc1.bias", .{.d_out}, sharding, .{ .d_out = .model }),
+                .weight = store.createTensor("fc1.weight", .{ .d_out, .d }, .@"DP-MP", .{ .d_out = .model }),
+                .bias = store.createTensor("fc1.bias", .{.d_out}, .@"DP-MP", .{ .d_out = .model }),
             },
             // Layer 2 is sharded following it's input axis (and bias is fully replicated)
             .fc2 = .{
-                .weight = store.createTensor("fc2.weight", .{ .d_out, .d }, sharding, .{ .d = .model }),
+                .weight = store.createTensor("fc2.weight", .{ .d_out, .d }, .@"DP-MP", .{ .d = .model }),
                 .bias = store.createReplicatedTensor("fc2.bias", .{.d_out}),
             },
         };
@@ -108,7 +108,7 @@ pub fn main(init: std.process.Init) !void {
 
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{dp_mp});
     defer store.deinit();
-    const mnist_model: Mnist = .init(store.view(), dp_mp);
+    const mnist_model: Mnist = .init(store.view());
 
     // // Compile model
     const bs: u32 = 4;
@@ -124,6 +124,7 @@ pub fn main(init: std.process.Init) !void {
             .forward,
             .{input},
             .{
+                .shardings = &.{dp_mp},
                 .program_name = "mnist",
                 .xla_dump_to = "/tmp/zml/mnist",
             },

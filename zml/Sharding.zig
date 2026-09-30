@@ -1182,7 +1182,12 @@ pub const LogicalMesh = struct {
     }
 };
 
-pub const AxisList = stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK);
+pub const PhysicalList = stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK);
+
+pub const Partitioning = struct {
+    sharding: Sharding,
+    partition: Shape.PartitionArray,
+};
 
 /// Index into one Data object's resolved mesh, not a physical hardware tag.
 pub const ViewAxisId = enum(u8) { _ };
@@ -1236,14 +1241,21 @@ pub const Data = struct {
     bindings: Bindings,
     view: ResolvedMesh,
 
-    pub fn binding(self: *const Data, tag: Shape.Tag) ?*const Binding {
-        for (self.bindings.constSlice()) |*b| {
-            if (b.logical == tag) return b;
+    pub fn resolveLogicalAxis(self: *const Data, tag: Shape.Tag) ?u8 {
+        for (self.logical.axes.constSlice(), 0..) |logical_axis, i| {
+            if (std.mem.eql(u8, std.mem.span(logical_axis), std.mem.span(tag))) return @intCast(i);
         }
         return null;
     }
 
-    pub fn init(name: []const u8, physical: *const PhysicalMesh, logical: LogicalMesh, strategy: Strategy) !Data {
+    pub fn binding(self: *const Data, tag: Shape.Tag) ?*const Binding {
+        for (self.bindings.constSlice()) |*b| {
+            if (std.mem.eql(u8, std.mem.span(b.logical), std.mem.span(tag))) return b;
+        }
+        return null;
+    }
+
+    pub fn init(name_: []const u8, physical: *const PhysicalMesh, logical: LogicalMesh, strategy: Strategy) !Data {
         const order = physical.axisOrder();
         if (order.len == 0) return error.InvalidPhysicalMesh;
         if (strategy.bindings.len == 0) return error.InvalidStrategy;
@@ -1335,7 +1347,7 @@ pub const Data = struct {
         }
 
         var data: Data = .{
-            .name = name,
+            .name = name_,
             .physical = physical,
             .logical = logical,
             .bindings = .empty,
@@ -1448,8 +1460,8 @@ pub const Data = struct {
             var dim_axes: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
             const spec = shape.partition(ax);
 
-            if (spec == .axis) {
-                if (self.binding(spec.axis)) |binding_| {
+            if (spec.meshAxis()) |mesh_axis| {
+                if (self.binding(self.logical.axes.get(mesh_axis))) |binding_| {
                     for (binding_.axes.constSlice()) |id| {
                         const i = @intFromEnum(id);
                         if (used_mask[i]) continue;
@@ -1499,22 +1511,6 @@ pub const Data = struct {
         for (0.., dimensions) |ax, *d| {
             const spec = shape.partition(ax);
             d.* = switch (spec) {
-                .axis => |logical_tag| d: {
-                    if (data.binding(logical_tag)) |_| {
-                        const dim_phys_indices = mapping.axes_per_dim.get(ax);
-                        if (dim_phys_indices.len == 0) {
-                            break :d .replicated(ctx);
-                        } else {
-                            const axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, dim_phys_indices.len);
-                            for (dim_phys_indices.slice(), 0..) |p_idx, i| {
-                                axes[i] = .named(ctx, mapping.view.axes.get(p_idx).name);
-                            }
-                            break :d .closed(ctx, axes);
-                        }
-                    } else {
-                        break :d .open(ctx, &.{});
-                    }
-                },
                 .replicated => .replicated(ctx),
                 .open, .unknown => if (all_replicated) .replicated(ctx) else .open(ctx, &.{}),
                 else => d: {
@@ -1524,7 +1520,7 @@ pub const Data = struct {
                     } else {
                         const axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, dim_phys_indices.len);
                         for (dim_phys_indices.slice(), 0..) |p_idx, i| {
-                            axes[i] = .named(ctx, @tagName(mapping.view.axes.get(p_idx).tag));
+                            axes[i] = .named(ctx, mapping.view.axes.get(p_idx).name);
                         }
                         break :d .closed(ctx, axes);
                     }
@@ -1622,9 +1618,9 @@ pub const Data = struct {
         return .string(ctx, try out.toOwnedSlice());
     }
 
-    pub fn deviceAssignment(self: *const Data, allocator: std.mem.Allocator) ![]usize {
+    pub fn deviceAssignment(self: *const Data, allocator: std.mem.Allocator) ![]u32 {
         const view = self.resolvedMesh();
-        const count: usize = @intCast(view.total_devices);
+        const count: u32 = @intCast(view.total_devices);
 
         var ids = try allocator.alloc(u32, count);
         @memset(ids, std.math.maxInt(u32));
@@ -1671,12 +1667,6 @@ pub const Data = struct {
                 }
             } else {
                 try writer.writeAll("unbound\n");
-            } else {
-                for (bind.slice(), 0..) |physical, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(@tagName(physical));
-                }
-                try writer.writeAll("\n");
             }
         }
 
@@ -1721,10 +1711,10 @@ pub const Strategy = struct {
         physical: PhysicalList,
     };
 
-    pub const Bindings = stdx.BoundedArray(Binding, MAX_MESH_RANK);
+    pub const Bindings = stdx.BoundedArray(Strategy.Binding, MAX_MESH_RANK);
     pub const Folding = stdx.BoundedArray(Strategy.Fold, MAX_MESH_RANK);
 
-    bindings: Bindings,
+    bindings: Strategy.Bindings,
     folding: Folding,
     splitting: Splits = .empty,
 
@@ -1863,12 +1853,13 @@ pub fn shardedShapeForAxes(sharding: Sharding, shape: Shape, manual_axes: []cons
     var local_shape = shape;
     var used_axes: u8 = 0;
 
-    for (local_shape._dims.slice(), shape._partitioning.constSlice()) |*dim, spec| {
-        if (spec != .axis) continue;
+    for (local_shape._dims.slice(), 0..) |*dim, dimension| {
+        const spec = shape.partition(dimension);
+        const mesh_axis = spec.meshAxis() orelse continue;
 
         var is_manual = false;
         for (manual_axes) |manual_axis| {
-            if (std.mem.eql(u8, std.mem.span(spec.axis), std.mem.span(manual_axis))) {
+            if (std.mem.eql(u8, std.mem.span(sharding.data.logical.axes.get(mesh_axis)), std.mem.span(manual_axis))) {
                 is_manual = true;
                 break;
             }
@@ -1913,7 +1904,8 @@ pub const Placement = struct {
         };
         var used_axes: u8 = 0;
 
-        for (pl.shape._dims.slice(), shape._partitioning.constSlice()) |*dim, spec| {
+        for (pl.shape._dims.slice(), 0..) |*dim, dimension| {
+            const spec = shape.partition(dimension);
             const plan = try axisPlan(sharding.data, spec, &used_axes);
             if (plan.num_devices != 1) {
                 if (@rem(dim.*, plan.num_devices) != 0) return error.IncompatibleSharding;
@@ -2045,8 +2037,8 @@ const AxisPlan = struct {
 };
 
 fn axisPlan(data: *const Data, spec: Shape.PartitionSpec, used_axes: *u8) Error!AxisPlan {
-    if (spec != .axis) return .{};
-    const bound = data.binding(spec.axis) orelse return error.MissingLogicalBinding;
+    const mesh_axis = spec.meshAxis() orelse return .{};
+    const bound = data.binding(data.logical.axes.get(mesh_axis)) orelse return error.MissingLogicalBinding;
     if (used_axes.* & bound.mask == 0) {
         used_axes.* |= bound.mask;
         return .{ .axes = bound.axes, .num_devices = bound.num_partitions };
@@ -2459,12 +2451,12 @@ test "sharding: split_1d physical mesh into logical axes" {
     });
     const data: Data = try .init("split_1d", &physical, logical, strategy);
     const sharding: Sharding = .{ .data = &data };
-    const shape = Shape.init(.{ .data = 4, .model = 8 }, .f32).withPartitioning(.{ .data = .data, .model = .model });
+    const shape = Shape.init(.{ .data = 4, .model = 8 }, .f32).withPartitioning(.{ .data = &data }, .{ .data = .data, .model = .model });
     try std.testing.expectEqual(8, data.numPartitions());
     try std.testing.expectEqual(2, data.numPartitionsForLogicalAxis(.data));
     try std.testing.expectEqual(4, data.numPartitionsForLogicalAxis(.model));
     try std.testing.expectEqualStrings("#sdy.mesh<[\"link_x\"=2, \"link_y\"=4]>", try data.sdyMeshAttr(arena.allocator()));
-    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, try data.deviceAssignment(arena.allocator()));
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, try data.deviceAssignment(arena.allocator()));
 
     const data_axes = Shape.parseTags(.{.data});
     const model_axes = Shape.parseTags(.{.model});
@@ -2473,7 +2465,7 @@ test "sharding: split_1d physical mesh into logical axes" {
     try std.testing.expectEqualSlices(i64, &.{ 4, 2 }, (try sharding.shardedShapeForAxes(shape, model_axes.constSlice())).dims());
     try std.testing.expectEqualSlices(i64, &.{ 2, 2 }, (try sharding.shardedShapeForAxes(shape, all_axes.constSlice())).dims());
 
-    const indivisible_free_axis = Shape.init(.{ .data = 3, .model = 8 }, .f32).withPartitioning(.{ .data = .data, .model = .model });
+    const indivisible_free_axis = Shape.init(.{ .data = 3, .model = 8 }, .f32).withPartitioning(.{ .data = &data }, .{ .data = .data, .model = .model });
     try std.testing.expectError(error.IncompatibleSharding, sharding.shardedShapeForAxes(indivisible_free_axis, data_axes.constSlice()));
     try std.testing.expectEqualSlices(i64, &.{ 3, 2 }, (try sharding.shardedShapeForAxes(indivisible_free_axis, model_axes.constSlice())).dims());
 
@@ -2510,10 +2502,10 @@ test "sharding: split_2d physical mesh into logical axes" {
     try std.testing.expectEqual(2, data.numPartitionsForLogicalAxis(.data));
     try std.testing.expectEqual(2, data.numPartitionsForLogicalAxis(.model));
     try std.testing.expectEqualStrings("#sdy.mesh<[\"link_x\"=2, \"link_z\"=2, \"link_y\"=2]>", try data.sdyMeshAttr(arena.allocator()));
-    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, try data.deviceAssignment(arena.allocator()));
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, try data.deviceAssignment(arena.allocator()));
     try runner.run(.{
         .sharding = data,
-        .shape = Shape.init(.{ .data = 4, .model = 8, .context = 6 }, .f32).withPartitioning(.{ .data = .data, .model = .model, .context = .context }),
+        .shape = Shape.init(.{ .data = 4, .model = 8, .context = 6 }, .f32).withPartitioning(.{ .data = &data }, .{ .data = .data, .model = .model, .context = .context }),
         .expected_sdy = "#sdy.sharding<@split_2d, [{\"link_x\"}, {\"link_z\"}, {\"link_y\"}]>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 2 }, .{ 0, 4 }, .{ 0, 3 } } },
@@ -2539,10 +2531,10 @@ test "sharding: resolved fold then split preserves device coordinates" {
     strategy.addSplit(.link_x, &.{ .{ .tag = .link_x, .size = 2 }, .{ .tag = .link_z, .size = 2 } });
     const data = try Data.init("composed", &physical, logical, strategy);
     try std.testing.expectEqualStrings("#sdy.mesh<[\"link_x\"=2, \"link_z\"=2, \"link_y\"=2], device_ids=[0, 2, 4, 6, 1, 3, 5, 7]>", try data.sdyMeshAttr(arena.allocator()));
-    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, try data.deviceAssignment(arena.allocator()));
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, try data.deviceAssignment(arena.allocator()));
     try runner.run(.{
         .sharding = data,
-        .shape = Shape.init(.{ .data = 4, .model = 8, .context = 6 }, .f32).withPartitioning(.{ .data = .data, .model = .model, .context = .context }),
+        .shape = Shape.init(.{ .data = 4, .model = 8, .context = 6 }, .f32).withPartitioning(.{ .data = &data }, .{ .data = .data, .model = .model, .context = .context }),
         .expected_sdy = "#sdy.sharding<@composed, [{\"link_x\"}, {\"link_z\"}, {\"link_y\"}]>",
         .expected_gspmd = "\"{devices=[2,2,2]0,2,4,6,1,3,5,7}\"",
         .expected_shards = &.{
@@ -2563,14 +2555,14 @@ test "sharding: resolved binding order and partial overlap" {
     defer arena.deinit();
     const runner: ShardingTest = .init(arena.allocator());
     const physical = try runner.physical(.{8}, .point_to_point);
-    const logical: LogicalMesh = .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth });
+    const logical: LogicalMesh = .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth, .other = .balanced });
     var strategy: Strategy = .parseBindings(.{ .data = .link_y, .model = .{ .link_y, .link_x } });
     strategy.addSplit(.link_x, &.{ .{ .tag = .link_x, .size = 2 }, .{ .tag = .link_y, .size = 4 } });
     const data = try Data.init("overlap", &physical, logical, strategy);
     try std.testing.expectEqual(8, data.numPartitionsForLogicalAxis(.model));
     try runner.run(.{
         .sharding = data,
-        .shape = Shape.init(.{ .data = 8, .model = 8 }, .f32).withPartitioning(.{ .data = .data, .model = .model }),
+        .shape = Shape.init(.{ .data = 8, .model = 8 }, .f32).withPartitioning(.{ .data = &data }, .{ .data = .data, .model = .model }),
         .expected_sdy = "#sdy.sharding<@overlap, [{\"link_y\"}, {\"link_x\"}]>",
         .expected_gspmd = "\"{devices=[4,2]0,4,1,5,2,6,3,7}\"",
         .expected_shards = &.{
@@ -2586,12 +2578,12 @@ test "sharding: resolved binding order and partial overlap" {
     });
     try runner.run(.{
         .sharding = data,
-        .shape = Shape.init(.{ .model = 7 }, .f32).withPartitioning(.{ .model = .model }),
+        .shape = Shape.init(.{ .model = 7 }, .f32).withPartitioning(.{ .data = &data }, .{ .model = .model }),
         .expect_error = error.IncompatibleSharding,
     });
     try runner.run(.{
         .sharding = data,
-        .shape = Shape.init(.{ .other = 8 }, .f32).withPartitioning(.{ .other = .other }),
+        .shape = Shape.init(.{ .other = 8 }, .f32).withPartitioning(.{ .data = &data }, .{ .other = .other }),
         .expect_error = error.MissingLogicalBinding,
     });
 }
@@ -2638,8 +2630,8 @@ test "sharding: every overlap subset of a four-axis resolved mesh" {
             }
             for (0..4) |i| strategy.addBinding(.model, tags[if (reverse) 3 - i else i]);
             const data = try Data.init("subsets", &physical, logical, strategy);
-            var shape = Shape.init(.{ .used = 16, .model = 16 }, .f32).withPartitioning(.{ .used = .used, .model = .model });
-            if (used_mask == 0) shape._partitioning.set(0, .replicated);
+            var shape = Shape.init(.{ .used = 16, .model = 16 }, .f32).withPartitioning(.{ .data = &data }, .{ .used = .used, .model = .model });
+            if (used_mask == 0) shape._partitioning = shape._partitioning.set(0, .replicated);
             const pl = try Placement.init(.{ .data = &data }, shape);
             const used_count = @as(u32, 1) << @intCast(@popCount(used_mask));
             for (physical.devices_in_canonical_order, 0..) |device, device_i| {

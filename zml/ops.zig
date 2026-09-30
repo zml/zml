@@ -2516,7 +2516,11 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
     };
 }
 
-/// Runs a per-shard body using one mesh for all input and output partition specs.
+/// Runs a body on shards of an explicitly supplied mesh.
+/// Only `partition_axes` are localized; other axes remain global and may be
+/// partitioned inside the body. Nested computations must use disjoint mesh axes.
+/// Partitioned inputs and outputs must refer to `sharding`; replicated tensors
+/// can come from any mesh.
 pub fn manualComputation(
     sharding: Sharding,
     comptime body_fn: anytype,
@@ -2637,6 +2641,7 @@ fn manualComputationInternal(
         local_input_shapes[i] = sharding.shardedShapeForAxes(shape, partition_axes) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
     }
     for (outputs, 0..) |shape, i| {
+        stdx.debug.assert(shape.isFullyReplicated() or shape._sharding.eql(sharding), "zml.ops.manualComputation expects output {d} to use sharding {s}, got {f}", .{ i, sharding.name(), shape });
         local_output_shapes[i] = sharding.shardedShapeForAxes(shape, partition_axes) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
     }
 
@@ -2952,7 +2957,7 @@ test "manualComputation uses the explicit mesh for every input and output" {
             .input = input,
             .replicated = replicated_input,
             .expected_local_dim = local_shape.dim(.h),
-        }, .{ shape, replicated_shape });
+        }, &.{ shape, replicated_shape }, .{.model});
         for (outputs) |output| try std.testing.expectEqual(selected.data, output.shape()._sharding.data);
         try std.testing.expect(outputs[0].shape().eql(shape));
         try std.testing.expect(outputs[1].shape().eql(replicated_shape));
@@ -3003,7 +3008,7 @@ test "manualComputation tracks nested manual axes on a split physical mesh" {
         });
         defer comp.deinit();
         // This IR-only test uses synthetic devices rather than the runtime mesh.
-        comp.partitioning = try .init(partitioner, &.{ .{ .data = &data }, .{ .data = &alias_data } });
+        comp.shardings = &.{ .{ .data = &data }, .{ .data = &alias_data } };
         comp.activate();
         defer comp.deactivate();
 
@@ -3012,13 +3017,12 @@ test "manualComputation tracks nested manual axes on a split physical mesh" {
         const scope = comp.pushBlock(block);
         defer scope.pop();
 
-        const shape = Shape.init(.{ .b = 32, .d = 64 }, .f32).withPartitioning(.{ .b = .data });
+        const shape = Shape.init(.{ .b = 32, .d = 64 }, .f32).withPartitioning(.{ .data = &data }, .{ .b = .data });
         const input = Tensor.constant(.{ .f32 = 1 }).broad(shape);
         const Body = struct {
-            fn checkConflict(input_local: Tensor, specs: anytype, expected: ?[]const u8) void {
+            fn checkConflict(sharding: Sharding, input_local: Tensor, specs: anytype, expected: ?[]const u8) void {
                 const ctx = Compiler.current();
-                const partitioned_shape = input_local.shape().withPartitioning(specs);
-                const sharding = ctx.partitioning.selectSharding(partitioned_shape) catch unreachable;
+                const partitioned_shape = input_local.shape().withPartitioning(sharding, specs);
                 const conflict = ctx.manualAxisConflict(sharding, partitioned_shape);
                 const requested_axes = partitioned_shape.partitioningAxes();
                 const nesting_conflict = ctx.manualAxesConflict(sharding, requested_axes.constSlice());
@@ -3040,8 +3044,8 @@ test "manualComputation tracks nested manual axes on a split physical mesh" {
                 stdx.debug.assert(ctx.manual_axes.len == 2, "Expected both data and model to be manual", .{});
                 stdx.debug.assert(std.mem.eql(u8, ctx.manual_axes.get(0), "link_x"), "Lost the parent manual axis", .{});
                 stdx.debug.assert(std.mem.eql(u8, ctx.manual_axes.get(1), "link_y"), "Missing the inner manual axis", .{});
-                checkConflict(input_local, .{ .b = .batch }, "link_x");
-                checkConflict(input_local, .{ .d = .feature }, "link_y");
+                checkConflict(ctx.shardings[1], input_local, .{ .b = .batch }, "link_x");
+                checkConflict(ctx.shardings[1], input_local, .{ .d = .feature }, "link_y");
                 // Model replicas retain the full reduction dimension.
                 stdx.debug.assert(input_local.dim(.b) == 16 and input_local.dim(.d) == 64, "Unexpected model-local shape: {f}", .{input_local.shape()});
                 const result = input_local.sum(.d).squeeze(.d);
@@ -3056,33 +3060,33 @@ test "manualComputation tracks nested manual axes on a split physical mesh" {
                 stdx.debug.assert(ctx.manual_axes.len == 1, "Expected only data to be manual", .{});
                 stdx.debug.assert(std.mem.eql(u8, ctx.manual_axes.get(0), "link_x"), "Missing the outer manual axis", .{});
                 stdx.debug.assert(input_local.dim(.b) == 16 and input_local.dim(.d) == 64, "Unexpected data-local shape: {f}", .{input_local.shape()});
-                checkConflict(input_local, .{ .b = .data }, "link_x");
+                checkConflict(ctx.shardings[0], input_local, .{ .b = .data }, "link_x");
                 // Different logical names in a second sharding still resolve to the parent's axis.
-                checkConflict(input_local, .{ .b = .batch }, "link_x");
+                checkConflict(ctx.shardings[1], input_local, .{ .b = .batch }, "link_x");
                 // A logical axis can resolve to several mesh axes; check all of them.
-                checkConflict(input_local, .{ .b = .combined }, "link_x");
-                checkConflict(input_local, .{ .d = .feature }, null);
-                _ = input_local.withPartitioning(.{ .d = .feature });
+                checkConflict(ctx.shardings[1], input_local, .{ .b = .combined }, "link_x");
+                checkConflict(ctx.shardings[1], input_local, .{ .d = .feature }, null);
+                _ = input_local.withPartitioning(ctx.shardings[1], .{ .d = .feature });
                 // A different logical alias of a free resolved axis is valid for nesting.
-                manualComputation(empty, {}, {}, .{.feature});
+                manualComputation(ctx.shardings[1], empty, {}, {}, .{.feature});
                 stdx.debug.assert(ctx.manual_axes.len == 1, "Aliased manual computation did not restore its parent scope", .{});
                 // A free axis is still allowed in withPartitioning.
-                _ = input_local.withPartitioning(.{ .d = .model });
-                const result = manualComputation(model, input_local, output_shape, .{.model});
+                _ = input_local.withPartitioning(ctx.shardings[0], .{ .d = .model });
+                const result = manualComputation(ctx.shardings[0], model, input_local, output_shape, .{.model});
                 stdx.debug.assert(ctx.manual_axes.len == 1 and ctx.in_manual_computation, "Inner manual computation did not restore its parent scope", .{});
-                checkConflict(input_local, .{ .d = .feature }, null);
-                _ = input_local.withPartitioning(.{ .d = .model });
+                checkConflict(ctx.shardings[1], input_local, .{ .d = .feature }, null);
+                _ = input_local.withPartitioning(ctx.shardings[0], .{ .d = .model });
                 return result;
             }
         };
-        const output = manualComputation(Body.dataAxis, input, shape.remove(.d), .{.data});
+        const output = manualComputation(.{ .data = &data }, Body.dataAxis, input, shape.remove(.d), .{.data});
         try zml.testing.expectEqualShapes(shape.remove(.d), output.shape());
         try std.testing.expectEqual(0, comp.manual_axes.len);
         try std.testing.expect(!comp.in_manual_computation);
-        Body.checkConflict(input, .{ .b = .batch, .d = .feature }, null);
-        _ = input.withPartitioning(.{ .b = .batch, .d = .feature });
+        Body.checkConflict(.{ .data = &alias_data }, input, .{ .b = .batch, .d = .feature }, null);
+        _ = input.withPartitioning(@as(Sharding, .{ .data = &alias_data }), .{ .b = .batch, .d = .feature });
         // Both axes are available again outside the manual computation.
-        _ = input.withPartitioning(.{ .b = .data, .d = .model });
+        _ = input.withPartitioning(@as(Sharding, .{ .data = &data }), .{ .b = .data, .d = .model });
     }
 }
 
