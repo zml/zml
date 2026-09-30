@@ -455,12 +455,12 @@ pub fn testLayer(
 
     exe_args.set(.{ layer_weights, args_buffers });
 
-    exe.callAndWait(io, exe_args, &exe_results);
-
     var results = try allocator.alloc(zml.Buffer, output_count);
     defer allocator.free(results);
 
+    exe.callAndWait(io, exe_args, &exe_results);
     exe_results.fill(.{results});
+    defer for (results) |*result| result.deinit();
 
     var failed: bool = false;
     var reader_buffer: [4096]u8 = undefined;
