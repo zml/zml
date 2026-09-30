@@ -4,6 +4,9 @@ const zml = @import("zml");
 
 const common = @import("../common.zig");
 const model = @import("model.zig");
+const whole_forward = @import("whole_forward.zig");
+
+pub const enable_whole_forward = false;
 
 const log = std.log.scoped(.llama);
 const Phase = common.Phase;
@@ -75,10 +78,17 @@ pub const Args = struct {
     attention_metadata_buffers: *const zml.Bufferized(zml.attention.Metadata),
 };
 
+pub const execution = whole_forward.Dispatch(.{
+    .Exe = KernelExe,
+    .Runner = KernelRunner,
+    .compile = compileKernel,
+    .run = run,
+}, CompilationParameters, Args, enable_whole_forward);
+
 pub const CompiledModel = struct {
     loaded_model: *const model.LoadedModel,
-    prefill: KernelExe,
-    decode: KernelExe,
+    prefill: execution.KernelExe,
+    decode: execution.KernelExe,
     params: CompilationParameters,
 
     pub fn init(
@@ -90,9 +100,9 @@ pub const CompiledModel = struct {
         parameters: CompilationParameters,
         progress: *std.Progress.Node,
     ) !CompiledModel {
-        const prefill = try compileKernel(allocator, io, platform, llama_model, parameters, @intCast(parameters.prefill_tokens.dim(.s)), parameters.prefill_attention_parameters, .prefill, progress);
+        const prefill = try execution.compile(allocator, io, platform, llama_model, parameters, @intCast(parameters.prefill_tokens.dim(.s)), parameters.prefill_attention_parameters, .prefill, progress);
         errdefer prefill.deinit();
-        const decode = try compileKernel(allocator, io, platform, llama_model, parameters, @intCast(parameters.decode_tokens.dim(.s)), parameters.decode_attention_parameters, .decode, progress);
+        const decode = try execution.compile(allocator, io, platform, llama_model, parameters, @intCast(parameters.decode_tokens.dim(.s)), parameters.decode_attention_parameters, .decode, progress);
 
         return .{
             .loaded_model = loaded_model,
