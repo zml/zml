@@ -48,6 +48,78 @@ pub fn pinToCore(core_id: usize) void {
     }
 }
 
+/// Restricts every thread of the current process to the CPUs of a NUMA node
+/// that the calling thread may already run on. Threads created afterwards
+/// inherit the affinity of their creator. Returns the number of threads that
+/// were pinned: 0 when the current affinity is already within the node or
+/// excludes all of it.
+pub fn pinProcessToNumaNode(io: std.Io, node: u32) !usize {
+    if (builtin.os.tag != .linux) return error.Unsupported;
+    const linux = std.os.linux;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/sys/devices/system/node/node{d}/cpulist", .{node});
+    var cpulist_buf: [4096]u8 = undefined;
+    const cpulist = try std.Io.Dir.cwd().readFile(io, path, &cpulist_buf);
+
+    var set: linux.cpu_set_t = @splat(0);
+    try parseCpuList(std.mem.trim(u8, cpulist, " \n"), &set);
+
+    // Keep any narrower affinity chosen by the user (taskset, numactl).
+    var current: linux.cpu_set_t = @splat(0);
+    if (linux.errno(linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &current)) != .SUCCESS) {
+        return error.GetAffinityFailed;
+    }
+    var changed = false;
+    var empty = true;
+    for (&set, current) |*word, current_word| {
+        word.* &= current_word;
+        changed = changed or word.* != current_word;
+        empty = empty and word.* == 0;
+    }
+    if (empty or !changed) return 0;
+
+    var tasks = try std.Io.Dir.cwd().openDir(io, "/proc/self/task", .{ .iterate = true });
+    defer tasks.close(io);
+
+    var pinned: usize = 0;
+    var it = tasks.iterate();
+    while (try it.next(io)) |entry| {
+        const tid = std.fmt.parseInt(linux.pid_t, entry.name, 10) catch continue;
+        const rc = linux.syscall3(.sched_setaffinity, @as(usize, @bitCast(@as(isize, tid))), @sizeOf(linux.cpu_set_t), @intFromPtr(&set));
+        // Threads may exit while the list is being walked.
+        switch (linux.errno(rc)) {
+            .SUCCESS => pinned += 1,
+            .SRCH => {},
+            else => return error.SetAffinityFailed,
+        }
+    }
+    return pinned;
+}
+
+/// Parses a Linux cpulist such as "0-71" or "0-3,8,10-11".
+fn parseCpuList(cpulist: []const u8, set: *std.os.linux.cpu_set_t) !void {
+    const bits_per_word = @bitSizeOf(usize);
+    var ranges = std.mem.tokenizeScalar(u8, cpulist, ',');
+    while (ranges.next()) |range| {
+        const dash = std.mem.findScalar(u8, range, '-');
+        const first = try std.fmt.parseInt(usize, range[0 .. dash orelse range.len], 10);
+        const last = if (dash) |d| try std.fmt.parseInt(usize, range[d + 1 ..], 10) else first;
+        if (last < first or last >= set.len * bits_per_word) return error.InvalidCpuList;
+        for (first..last + 1) |cpu| {
+            set[cpu / bits_per_word] |= @as(usize, 1) << @intCast(cpu % bits_per_word);
+        }
+    }
+}
+
+test parseCpuList {
+    var set: std.os.linux.cpu_set_t = @splat(0);
+    try parseCpuList("0-2,64,66-67", &set);
+    try std.testing.expectEqual(@as(usize, 0b111), set[0]);
+    try std.testing.expectEqual(@as(usize, 0b1101), set[1]);
+    try std.testing.expectError(error.InvalidCpuList, parseCpuList("3-1", &set));
+}
+
 pub fn once(comptime f: anytype) once(f) {
     return .{};
 }
