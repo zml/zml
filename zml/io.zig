@@ -361,6 +361,10 @@ pub const Loader = struct {
 
     pub const LoadOpts = struct {
         progress: ?*std.Progress.Node = null,
+        /// The buffers will never be donated to an executable, so executions can
+        /// use them without tracking their usage (e.g. model weights).
+        /// Donating one fails. Ignored by plugins that do not support it.
+        undonatable: bool = false,
     };
 
     pub const LoadError = error{TransformedTensorNotDelivered};
@@ -479,6 +483,7 @@ pub const Loader = struct {
             sharding,
             buffer,
             memory,
+            opts.undonatable,
         );
         defer writer.deinit(self.allocator);
 
@@ -642,10 +647,11 @@ pub const MemoryWriter = union(enum) {
         sharding: Sharding,
         buffer: *Buffer,
         memory: Memory.Kind,
+        undonatable: bool,
     ) !MemoryWriter {
         return switch (platform.target) {
             .cuda, .rocm, .oneapi => .{
-                .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, memory),
+                .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, memory, undonatable),
             },
             .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
                 std.debug.panic("Host pinned memory is not supported on {}", .{platform.target})
@@ -745,7 +751,7 @@ const DirectShardWriter = struct {
     flip_flop: u1 = 0,
     events_contexts: [2]?EventContext = @splat(null),
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape) !DirectShardWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape, undonatable: bool) !DirectShardWriter {
         const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
         const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
             memory.platform.pjrt_api,
@@ -756,6 +762,10 @@ const DirectShardWriter = struct {
         );
         errdefer transfer_manager.deinit(memory.platform.pjrt_api);
 
+        if (undonatable) {
+            // Must precede retrieveBuffer, which creates the buffer.
+            try transfer_manager.addMetadata(memory.platform.pjrt_api, &.{.init(.string, "xla.undonatable", "true")});
+        }
         const pjrt_buffer = try transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0);
         errdefer pjrt_buffer.deinit(memory.platform.pjrt_api);
 
@@ -1158,6 +1168,7 @@ pub const DirectMemoryWriter = struct {
         sharding: Sharding,
         buffer: *Buffer,
         memory: Memory.Kind,
+        undonatable: bool,
     ) !DirectMemoryWriter {
         const ordered_devices = sharding.devicesInCanonicalOrder();
         var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
@@ -1175,7 +1186,7 @@ pub const DirectMemoryWriter = struct {
             const shard_dma_allocator = dma_allocators[device.id].allocator();
             const pjrt_mem = platform.devices[device.id].memory(memory).?;
 
-            shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape);
+            shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape, undonatable);
             initialized += 1;
 
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
@@ -1556,6 +1567,7 @@ const DirectMemoryWriterDeviceTest = struct {
             sharding,
             &written_buffer,
             memory,
+            false,
         );
         defer writer.deinit();
         defer written_buffer.deinit();
