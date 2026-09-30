@@ -742,7 +742,7 @@ pub const CreateOptions = struct {
     io_impl: Platform.IoImpl = .threaded,
 
     pub const Furiosa = struct {
-        pe_count: u8 = 4,
+        pe_count: u8 = 8,
 
         fn writeNamedValues(self: Furiosa, values: *std.ArrayList(pjrt.NamedValue)) void {
             values.appendAssumeCapacity(.init(.int64, "pe_count", self.pe_count));
@@ -1072,7 +1072,7 @@ test "platform defaultMemoryLayout is boring" {
 
 test "Furiosa client options serialize default and explicit topology" {
     var storage: [8]pjrt.NamedValue = undefined;
-    for ([_]CreateOptions{ .{}, .{ .furiosa = .{ .pe_count = 8 } } }, [_]i64{ 4, 8 }) |options, expected| {
+    for ([_]CreateOptions{ .{}, .{ .furiosa = .{ .pe_count = 4 } } }, [_]i64{ 8, 4 }) |options, expected| {
         const values = options.toNamedValues(.furiosa, &storage);
         try std.testing.expectEqual(@as(usize, 1), values.len);
         try std.testing.expectEqualStrings("pe_count", values[0].name());
