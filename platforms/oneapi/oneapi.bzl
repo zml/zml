@@ -1,8 +1,8 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-_PLUGIN_ONEAPI_URL = "https://mirror.zml.ai/plugins/202609301700.135.1.f7a73483aa8a/zml-oneapi-linux-amd64.tar.zst"
-_PLUGIN_ONEAPI_SHA256 = "2437fd3abc23913f1b3d38ea74c3ddd04a73961b56f89165ba4346cfd75eacde"
+_PLUGIN_ONEAPI_URL = "https://mirror.zml.ai/plugins/202610010623.136.1.6d24ee49a07f/zml-oneapi-linux-amd64.tar.zst"
+_PLUGIN_ONEAPI_SHA256 = "9ae4c9c6e26a653f3bcffc4dd40b5d9e492e863095c60d5bc4bced1f222de846"
 
 ONEAPI_VERSION = "2026.1"
 

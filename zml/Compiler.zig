@@ -881,7 +881,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // More efficient for the allgather/broadcast implementation of the collective permute.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_collective_permute_connected_components", true, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_autotune_level", 0, upb_arena);
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLASLT,CUSTOM_CALL,FUSION", upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "", upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
 
                 // Grouped GEMM still needs a oneDNN lowering.
