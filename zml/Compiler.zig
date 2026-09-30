@@ -443,6 +443,7 @@ pub fn compileInternal(
         result.output_info.items(.shape),
         result.input_info.items(.sharding),
         result.output_info.items(.sharding),
+        result.input_info.items(.aliasing_output),
     );
     errdefer exe.deinit();
 

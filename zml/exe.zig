@@ -25,6 +25,10 @@ pub const Exe = struct {
     input_shardings: []const Sharding,
     output_shardings: []const Sharding,
 
+    /// Inputs whose buffers are donated to an output (`reuseBuffer`).
+    /// Their PJRT handles are dead once the execution is enqueued.
+    donated_input_indices: []const usize,
+
     num_devices: usize,
     num_partitions: i32,
 
@@ -40,6 +44,7 @@ pub const Exe = struct {
         output_shapes: []const Shape,
         input_shardings: []const Sharding,
         output_shardings: []const Sharding,
+        input_aliasing: []const ?u32,
     ) !Exe {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
@@ -51,6 +56,16 @@ pub const Exe = struct {
         const input_shardings_copy = try arena.allocator().dupe(Sharding, input_shardings);
         const output_shardings_copy = try arena.allocator().dupe(Sharding, output_shardings);
 
+        var donated_count: usize = 0;
+        for (input_aliasing) |aliasing| donated_count += @intFromBool(aliasing != null);
+        const donated_input_indices = try arena.allocator().alloc(usize, donated_count);
+        var donated_index: usize = 0;
+        for (input_aliasing, 0..) |aliasing, input_index| {
+            if (aliasing == null) continue;
+            donated_input_indices[donated_index] = input_index;
+            donated_index += 1;
+        }
+
         return .{
             .platform = platform,
             .exe = exe,
@@ -58,6 +73,7 @@ pub const Exe = struct {
             .output_shapes = output_shapes_copy,
             .input_shardings = input_shardings_copy,
             .output_shardings = output_shardings_copy,
+            .donated_input_indices = donated_input_indices,
             .num_devices = num_devices,
             .num_partitions = num_partitions,
             .arena = arena,
@@ -327,6 +343,14 @@ pub const Exe = struct {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
 
+        // Donated inputs are deleted by the execution, but their PJRT_Buffer
+        // handles stay allocated until destroyed.
+        if (opts.destroy_donated_inputs) for (self.donated_input_indices) |input_index| {
+            for (arguments.flat_buffers.buffers[0..self.num_devices]) |device_buffers| {
+                device_buffers[input_index].deinit(self.platform.pjrt_api);
+            }
+        };
+
         switch (self.platform.target) {
             .neuron => {
                 for (events_slice.?) |e| {
@@ -355,6 +379,10 @@ pub const Exe = struct {
 
     pub const CallOpts = struct {
         wait: bool = false,
+        /// Destroy the handles of donated inputs once the execution is enqueued.
+        /// For callers that replace every donated input with its output and keep
+        /// no other copy of it, which would otherwise leak one handle per call.
+        destroy_donated_inputs: bool = false,
     };
 
     pub fn callOpts(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
