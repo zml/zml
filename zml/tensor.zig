@@ -165,30 +165,23 @@ pub const Tensor = struct {
         }
 
         const partitioned_shape = self._shape.withPartitioning(sharding_, partition_spec);
-        return self.withPartitioningInner(sharding_, partitioned_shape);
+        return self.withPartitioningInner(partitioned_shape);
     }
 
     /// Force the input tensor to be replicated along the given axes.
     pub fn replicate(self: Tensor, axes_: anytype) Tensor {
-        if (@TypeOf(axes_) != []const u3) {
-            const parsed_axes, _ = self.shape().parseAxes(axes_);
-            return self.replicate(@as([]const u3, parsed_axes.slice()));
-        }
-
-        var replicated = self._shape._partitioning;
-        for (axes_) |ax| replicated = replicated.set(ax, .replicated);
-
-        const partitioned_shape = self._shape.withPartitioning(self._sharding, replicated);
-        return self.withPartitioningInner(self._sharding, partitioned_shape);
+        const partitioned_shape = self._shape.replicate(axes_);
+        return self.withPartitioningInner(partitioned_shape);
     }
 
-    fn withPartitioningInner(self: Tensor, sharding: Sharding, partitioned_shape: Shape) Tensor {
+    fn withPartitioningInner(self: Tensor, partitioned_shape: Shape) Tensor {
         const ctx = Compiler.currentOrNull() orelse {
             var res = self;
             res._shape = partitioned_shape;
             return res;
         };
 
+        const sharding = self._shape._sharding.resolveReplicated(ctx.platform);
         const attr = ctx.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
 
         const op_result = switch (ctx.partitioner) {
@@ -225,30 +218,42 @@ pub const Tensor = struct {
         return _result(partitioned_shape, op_result);
     }
 
-    test "withPartitioning retains the explicitly selected sharding" {
-        const data: Sharding.Data = .{
-            .name = "tensor_partitioning_test",
+    test withPartitioning {
+        // Create two similar shardings,
+        // Then check that tensor.withPartitioning don't confuse the meshes
+        const dp_mp_data: Sharding.Data = .{
+            .name = "dp_mp",
             .physical = undefined,
-            .logical = .mesh(.{ .model = .high_bandwidth }),
+            .logical = .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
             .bindings = .init(&.{.init(&.{.link_x})}),
             .folds = .empty,
             .folds_consumed = .empty,
         };
-        var replacement_data = data;
-        replacement_data.name = "replacement";
-        const sharding: Sharding = .{ .data = &data };
-        const replacement: Sharding = .{ .data = &replacement_data };
-        const input = Tensor.fromShape(Shape.init(.{ .h = 8 }, .f32).withSharding(sharding));
-        const shaped = Tensor.fromShape(Shape.init(.{ .h = 8 }, .f32).withPartitioning(sharding, .{ .h = .model }));
-        try std.testing.expectEqual(sharding.data, shaped.shape()._sharding.data);
-        try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), shaped.shape().partition(.h));
-        try std.testing.expectEqual(sharding.data, shaped.shape().reshape(.{ 2, 4 })._sharding.data);
-        const partitioned = input.withPartitioning(sharding, .{ .h = .model });
-        try std.testing.expectEqual(sharding.data, partitioned._shape._sharding.data);
-        try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), partitioned.shape().partition(.h));
-        const resharded = input.withPartitioning(replacement, .{ .h = .model });
-        try std.testing.expectEqual(replacement.data, resharded._shape._sharding.data);
-        try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), resharded.shape().partition(.h));
+        const dp_mp: Sharding = .{ .data = &dp_mp_data };
+
+        const mp_dp_data: Sharding.Data = .{
+            .name = "mp_dp",
+            .physical = undefined,
+            .logical = .mesh(.{ .model = .low_bandwidth, .data = .high_bandwidth }),
+            .bindings = .init(&.{.init(&.{.link_x})}),
+            .folds = .empty,
+            .folds_consumed = .empty,
+        };
+        const mp_dp: Sharding = .{ .data = &mp_dp_data };
+
+        const x = Tensor.init(.{ .h = 8 }, .f32).withPartitioning(dp_mp, .{ .h = .model });
+        try std.testing.expectEqual(dp_mp.data, x.shape()._sharding.data);
+        try std.testing.expectEqual(Shape.PartitionSpec.sharded(1), x.shape().partition(.h));
+        try std.testing.expectEqual(dp_mp.data, x.shape().reshape(.{ 2, 4 })._sharding.data);
+
+        const x2 = x.withPartitioning(mp_dp, .{ .h = .model });
+        try std.testing.expectEqual(mp_dp.data, x2.shape()._sharding.data);
+        try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), x2.shape().partition(.h));
+        try std.testing.expectEqual(mp_dp.data, x2.shape().reshape(.{ 2, 4 })._sharding.data);
+
+        const x2_replicated = x2.replicate(.{.h});
+        try std.testing.expectEqual(mp_dp.data, x2_replicated.shape()._sharding.data);
+        try std.testing.expectEqual(Shape.PartitionSpec.replicated, x2_replicated.shape().partition(.h));
     }
 
     /// Copy the given tensor to the specified memory.

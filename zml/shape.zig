@@ -815,6 +815,18 @@ pub const Shape = struct {
         return res;
     }
 
+    pub fn replicate(self: Shape, axes_: anytype) Shape {
+        if (@TypeOf(axes_) != []const u3) {
+            const parsed_axes, _ = self.parseAxes(axes_);
+            return self.replicate(@as([]const u3, parsed_axes.slice()));
+        }
+
+        var replicated = self._partitioning;
+        for (axes_) |ax| replicated = replicated.set(ax, .replicated);
+
+        return self.withPartitioning(self._sharding, replicated);
+    }
+
     test withPartitioning {
         var shape = Shape.init(.{ .a = 10, .b = 20, .c = 30 }, .f32).withPartitioning(test_sharding, .{ .c = .feature, .a = .batch });
         try testing.expectEqualSlices(PartitionSpec, &.{ .sharded(0), .unknown, .sharded(1) }, shape._partitioning.toArray()[0..shape.rank()]);
