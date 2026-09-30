@@ -8,6 +8,7 @@ const metal = @import("metal_attention.zig");
 const sparse_mla = @import("sparse_mla.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
+pub const cutile = @import("cutile_attention.zig");
 
 const PagedAttention = @This();
 
@@ -22,6 +23,7 @@ pub const Backend = enum {
     cuda_fa2,
     cuda_fa3,
     triton,
+    cutile,
     mosaic_tpu,
     metal,
     stablehlo,
@@ -42,6 +44,7 @@ pub const Backend = enum {
         return switch (backend) {
             .stablehlo => true,
             .triton => platform.target != .cpu,
+            .cutile => if (zml.platform.cuda.computeCapability(platform)) |cc| cutile.isBlackwell(cc.major, cc.minor) else false,
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
             .cuda_fa2 => platform.target == .cuda,
@@ -54,6 +57,7 @@ pub const Options = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Options,
     cuda_fa3: flashattn.paged_fa3.Options,
     triton: triton.paged.Options,
+    cutile: cutile.Options,
     mosaic_tpu: tpu.mosaic_tpu.Options,
     metal: metal.paged.Options,
     stablehlo: triton.paged.Options,
@@ -141,7 +145,7 @@ pub const Options = union(Backend) {
                     .head_dim = args.head_dim,
                 },
             },
-            inline .triton, .metal, .stablehlo => |t| @unionInit(Options, @tagName(t), .{
+            inline .triton, .cutile, .metal, .stablehlo => |t| @unionInit(Options, @tagName(t), .{
                 .batch_size = args.batch_size,
                 .max_num_pages = args.max_num_pages,
                 .max_seqlen_q = args.max_seqlen_q,
@@ -167,6 +171,7 @@ pub const Parameters = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Parameters,
     cuda_fa3: flashattn.paged_fa3.Parameters,
     triton: triton.paged.Parameters,
+    cutile: cutile.Parameters,
     mosaic_tpu: tpu.mosaic_tpu.Parameters,
     metal: metal.paged.Parameters,
     stablehlo: triton.paged.Parameters,
@@ -227,7 +232,7 @@ pub const KvCache = union(enum) {
 
         const kv: KvCache = switch (self) {
             .split => |split| switch (backend) {
-                .cuda_fa2, .cuda_fa3, .triton, .mosaic_tpu, .metal, .stablehlo => .{
+                .cuda_fa2, .cuda_fa3, .triton, .cutile, .mosaic_tpu, .metal, .stablehlo => .{
                     .split = .{
                         .k = split.k.scatterSlices(
                             .{ .page = page_index, .k_chunk = offset },
@@ -279,6 +284,10 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
     _ = k;
     _ = v;
     return switch (parameters) {
+        .cutile => |params| switch (kv_cache) {
+            .split => |split| cutile.pagedAttention(params, q, split.k, split.v, opts),
+            else => std.debug.panic("cutile attention requires split KV pages", .{}),
+        },
         .cuda_fa2 => |cuda_fa2_parameters| switch (kv_cache) {
             .split => |split| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, q, split.k, split.v, opts),
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
@@ -534,7 +543,7 @@ test pagedAttention {
                     } } };
                 },
                 .triton => triton_parameters_d,
-                inline .metal, .mosaic_tpu, .stablehlo => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
+                inline .cutile, .metal, .mosaic_tpu, .stablehlo => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
                     .block_table = triton_parameters_d.triton.block_table,
                     .seq_lens = triton_parameters_d.triton.seq_lens,
                     .query_start_len = triton_parameters_d.triton.query_start_len,
