@@ -3,7 +3,7 @@ load("@zml//bazel:patchelf.bzl", "patchelf")
 
 patchelf(
     name = "libzml_oneapi_so",
-    src = "libpjrt_oneapi.so",
+    src = "lib/libzml_oneapi.so",
     add_needed = [
         "libzmlxoneapi.so.0",
     ],
