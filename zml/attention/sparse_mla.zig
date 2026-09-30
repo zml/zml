@@ -2,15 +2,21 @@ const std = @import("std");
 const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const triton = @import("triton_attention.zig");
+const cute = @import("cute_kernels/sparse_mla.zig");
 const fly = @import("fly_kernels/sparse_mla.zig");
 const MlaOptions = @import("paged_attention.zig").Mla.Options;
 
 pub const Backend = enum {
     triton,
     fly,
+    /// Blackwell (SM100/SM103) CuTe kernels. Reads selected rows in place from quantized
+    /// caches (`paged_attention.Mla.indexedSparseAttention`); the latent-page path
+    /// falls back to Triton.
+    cute,
 
     pub fn auto(platform: *const zml.Platform, dtype: zml.DataType) Backend {
         return switch (platform.target) {
+            .cuda => if (cute.isAvailable(platform)) .cute else .triton,
             .rocm => switch (zml.platform.rocm.computeCapability(platform) orelse return .triton) {
                 .gfx942 => switch (dtype) {
                     .bf16 => .fly,
@@ -26,10 +32,11 @@ pub const Backend = enum {
         const backend = switch (self) {
             .fly => auto(zml.Compiler.current().platform, q.dtype()),
             .triton => .triton,
+            .cute => .cute,
         };
         switch (backend) {
             .fly => if (fly.pagedAttention(q, kv_cache, sink, topk, active_query_count, opts, triton.getCuCount())) |output| return output,
-            .triton => {},
+            .triton, .cute => {},
         }
         return triton.paged.pagedSparseMlaKernel(q, kv_cache, sink, topk, active_query_count, opts);
     }

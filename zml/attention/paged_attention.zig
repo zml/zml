@@ -5,6 +5,7 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
 const metal = @import("metal_attention.zig");
+const cute = @import("cute_kernels/sparse_mla.zig");
 const sparse_mla = @import("sparse_mla.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
@@ -891,6 +892,31 @@ pub const Mla = struct {
                 opts,
             ),
             else => @panic("NOPE"),
+        };
+    }
+
+    /// Selected rows of one quantized paged cache: the cache values and per-block scales
+    /// (as stored, rows along the last axis) and, per query, the physical rows to attend
+    /// ([.q, .topk] i32, -1 for unused entries; null when the query attends none).
+    pub const IndexedCache = struct {
+        values: zml.Tensor,
+        scales: zml.Tensor,
+        indices: ?zml.Tensor,
+    };
+
+    pub const IndexedOptions = struct {
+        backend: Mla.Backend,
+    };
+
+    /// Sparse MLA over rows read in place from two quantized caches (e.g. a sliding window
+    /// cache and a compressed cache), without gathering them. Returns null when
+    /// `opts.backend` has no kernel for these caches: the caller then gathers the rows and
+    /// uses `pagedSparseAttention`. `active_count` ([1] i32): leading query rows to compute
+    /// (the others are zero).
+    pub fn indexedSparseAttention(q: zml.Tensor, window: IndexedCache, compressed: IndexedCache, sink: zml.Tensor, active_count: zml.Tensor, opts: IndexedOptions) ?zml.Tensor {
+        return switch (opts.backend) {
+            .cute => cute.indexedAttention(q, window, compressed, sink, active_count),
+            .triton, .fly => null,
         };
     }
 };

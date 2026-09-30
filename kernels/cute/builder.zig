@@ -1040,6 +1040,12 @@ pub const Builder = struct {
         return self.emit(cute.inttoptr(self.ctx, self.lift(address).inner, ptr_type, self.loc()));
     }
 
+    /// `cute.ptrtoint`: the integer address of a pointer (`i32` for shared
+    /// memory, `i64` for global memory), for hand-written PTX operands.
+    pub fn ptrToInt(self: *Builder, pointer: anytype, dt: DType) Value {
+        return self.emit(cute.ptrtoint(self.ctx, self.asValue(pointer).inner, dt.toMlir(self.ctx), self.loc()));
+    }
+
     /// Reinterpret a pointer without changing its address. This is the typed
     /// counterpart of Python CuTe's `recast_ptr`; packed MXFP4 buffers use it
     /// to expose their byte storage to a scalar correctness implementation.
