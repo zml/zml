@@ -45,14 +45,13 @@ fn handleConnection(allocator: std.mem.Allocator, io: std.Io, engine: *Engine, s
     var writer = stream.writer(io, &write_buffer);
     var http: std.http.Server = .init(&reader.interface, &writer.interface);
 
-    while (true) {
-        var request = http.receiveHead() catch |err| switch (err) {
-            error.HttpConnectionClosing => return,
-            else => return err,
-        };
-        try handleRequest(allocator, engine, &request);
-        if (!request.head.keep_alive) return;
-    }
+    // One request per connection: connections are served one at a time, so an idle
+    // keep-alive client (e.g. a browser tab) would otherwise block everyone else.
+    var request = http.receiveHead() catch |err| switch (err) {
+        error.HttpConnectionClosing => return,
+        else => return err,
+    };
+    try handleRequest(allocator, engine, &request);
 }
 
 fn handleRequest(allocator: std.mem.Allocator, engine: *Engine, request: *std.http.Server.Request) !void {
@@ -60,7 +59,7 @@ fn handleRequest(allocator: std.mem.Allocator, engine: *Engine, request: *std.ht
     const path = if (std.mem.indexOfScalar(u8, target, '?')) |i| target[0..i] else target;
 
     if (request.head.method == .GET and (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/index.html"))) {
-        return request.respond(demo_html, .{ .extra_headers = &.{
+        return request.respond(demo_html, .{ .keep_alive = false, .extra_headers = &.{
             .{ .name = "content-type", .value = "text/html; charset=utf-8" },
             .{ .name = "cache-control", .value = "no-store" },
         } });
@@ -129,6 +128,7 @@ fn handleDecide(allocator: std.mem.Allocator, engine: *Engine, request: *std.htt
 fn respondJson(request: *std.http.Server.Request, status: std.http.Status, body: []const u8) !void {
     return request.respond(body, .{
         .status = status,
+        .keep_alive = false,
         .extra_headers = &.{
             .{ .name = "content-type", .value = "application/json" },
             .{ .name = "access-control-allow-origin", .value = "*" },
