@@ -240,7 +240,8 @@ pub const TensorStore = struct {
 
             var shape = source.shape;
             if (tags) |user_tags| {
-                stdx.debug.assert(user_tags.len == source.shape.rank(), "tensor {s} from store has shape {f}, but `createTensor` got only {d} tags: {f}", .{ key, source.shape, user_tags.len, stdx.fmt.stringsZ(user_tags) });
+                stdx.debug.assert(user_tags.len == shape.rank(), "tensor {s} from store has shape {f}, but `createTensor` got only {d} tags: {f}", .{ key, source.shape, user_tags.len, stdx.fmt.stringsZ(user_tags) });
+                @memcpy(shape._tags.slice(), user_tags);
             }
             shape._sharding = sharding;
             // partitioning is only null when called from createReplicatedTensor
@@ -441,8 +442,8 @@ pub const Loader = struct {
         log.err("Transformed tensor {} {f} was not delivered by loadExecute before load; sources: {s}", .{ tensor.id, tensor.shape(), names.written() });
     }
 
-    pub fn loadBuffer(loader: *Loader, io: std.Io, buffer: *Buffer, tensor: Tensor, store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
-        loader.group.async(io, defaultCallback, .{ loader, io, &tensor, buffer, store, shardings, opts });
+    pub fn loadBuffer(loader: *Loader, io: std.Io, buffer: *Buffer, tensor: *const Tensor, store: *const TensorStore, opts: LoadOpts) void {
+        loader.group.async(io, defaultCallback, .{ loader, io, tensor, buffer, store, opts });
     }
 
     fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, opts: LoadOpts) void {
@@ -518,7 +519,6 @@ pub const Loader = struct {
         tensor: Tensor,
         buffer: *Buffer,
         store: *const TensorStore,
-        shardings: []const Sharding,
         exe: *const Exe,
         opts: LoadOpts,
     ) error{ NotFound, OutOfMemory, LoadFailed, Canceled }!void {
@@ -541,7 +541,7 @@ pub const Loader = struct {
         defer if (node) |*n| n.end();
 
         for (sources, 0..) |source, i| {
-            self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], shardings, .{} });
+            self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], .{} });
         }
         self.group.await(io) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
