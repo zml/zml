@@ -5,17 +5,19 @@ const triton = @import("triton_attention.zig");
 const cute = @import("cute_kernels/sparse_mla.zig");
 const fly = @import("fly_kernels/sparse_mla.zig");
 const MlaOptions = @import("paged_attention.zig").Mla.Options;
+const SparseAttentionArgs = @import("paged_attention.zig").Mla.SparseAttentionArgs;
 
 pub const Backend = enum {
     triton,
     fly,
     cute,
 
-    pub fn auto(platform: *const zml.Platform, dtype: zml.DataType) Backend {
+    pub fn auto(args: SparseAttentionArgs) Backend {
+        const platform = zml.Compiler.current().platform;
         return switch (platform.target) {
-            .cuda => if (cute.isAvailable(platform)) .cute else .triton,
+            .cuda => if (cute.supports(args)) .cute else .triton,
             .rocm => switch (zml.platform.rocm.computeCapability(platform) orelse return .triton) {
-                .gfx942 => switch (dtype) {
+                .gfx942 => switch (args.q.dtype()) {
                     .bf16 => .fly,
                     else => .triton,
                 },
@@ -26,8 +28,12 @@ pub const Backend = enum {
     }
 
     fn call(self: Backend, q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, active_query_count: zml.Tensor, opts: Options) zml.Tensor {
-        const backend = switch (self) {
-            .fly => auto(zml.Compiler.current().platform, q.dtype()),
+        const backend: Backend = switch (self) {
+            .fly => blk: {
+                const platform = zml.Compiler.current().platform;
+                const gfx942 = platform.target == .rocm and zml.platform.rocm.computeCapability(platform) == .gfx942;
+                break :blk if (gfx942 and q.dtype() == .bf16) .fly else .triton;
+            },
             .triton => .triton,
             .cute => .cute,
         };
