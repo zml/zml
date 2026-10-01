@@ -22,13 +22,17 @@ pub const Error = error{ MissingLogicalBinding, IncompatibleSharding };
 
 pub const MAX_MESH_RANK = 4;
 
+/// This is used to make APIs requiring a sharding more fluents.
+/// The notion of "fully replicated" is platform agnostic, but the Sharding object
+/// itself can't be instantiated in a platform agnostic way because it needs to list all devices.
+/// This lead to some `_handleFakeReplicatedObject` in a few strategic places, but should be kept ZML internal.
 var _replicated: [11]u8 align(@alignOf(Data)) = "_replicated".*;
 
-// special value to make public apis more fluent.
+/// Replicated sharding.
 pub const replicated: Sharding = .{ .data = @ptrCast(&_replicated) };
 
 /// Internal helper to translate the static `zml.Sharding.replicated` into a working Sharding object
-pub fn resolveReplicated(sharding: Sharding, platform: *const Platform) Sharding {
+pub fn _handleFakeReplicatedObject(sharding: Sharding, platform: *const Platform) Sharding {
     return if (sharding.data == replicated.data) platform.replicated_sharding else sharding;
 }
 

@@ -94,6 +94,7 @@ pub const Tensor = struct {
     /// Creates a Tensor from a mlir.Value
     ///
     /// The shape is derived from the type of the mlir.Value.
+    /// Sharding is `unknown`
     pub fn fromMlirValue(val: *const mlir.Value) Tensor {
         const ctx = Compiler.current();
         const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
@@ -101,12 +102,16 @@ pub const Tensor = struct {
 
         stdx.debug.assert(n <= constants.MAX_RANK, "Can't represent MLIR tensor of rank {}, max supported rank is {}.", .{ n, constants.MAX_RANK });
 
-        var sh: Shape = .{ ._dtype = ctx.dtype(ranked_tensor.elementType()) };
+        var sh: Shape = .{
+            ._dtype = ctx.dtype(ranked_tensor.elementType()),
+            ._dims = .empty,
+            ._tags = .{ .buffer = @splat(Shape.TagUnknown), .len = n },
+            ._sharding = .replicated,
+            ._partitioning = .unknown,
+        };
         for (0..n) |i| {
             sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
         }
-        sh._tags.appendNTimes(Shape.TagUnknown, n) catch unreachable;
-
         return .{ ._shape = sh, ._value = val, .id = nextTensorId() };
     }
 
@@ -161,7 +166,7 @@ pub const Tensor = struct {
     pub fn withPartitioning(self: Tensor, sharding_: anytype, partition_spec: anytype) Tensor {
         if (@TypeOf(sharding_) == @EnumLiteral()) {
             const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit zml.Sharding object as input");
-            return self.withPartitioning(compiler.getSharding(sharding_), partition_spec);
+            return self.withPartitioning(compiler.sharding(sharding_), partition_spec);
         }
 
         const partitioned_shape = self._shape.withPartitioning(sharding_, partition_spec);
@@ -181,7 +186,7 @@ pub const Tensor = struct {
             return res;
         };
 
-        const sharding = self._shape._sharding.resolveReplicated(ctx.platform);
+        const sharding = self._shape._sharding._handleFakeReplicatedObject(ctx.platform);
         const attr = ctx.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
 
         const op_result = switch (ctx.partitioner) {
@@ -1578,7 +1583,7 @@ pub const Tensor = struct {
 
         const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
-        var res_shape: Shape = .{ ._dtype = lhs.dtype() };
+        var res_shape: Shape = .scalar(lhs.dtype());
         // Validate batching axes
         var lhs_batching_axes: Axes = .empty;
         var rhs_batching_axes: Axes = .empty;

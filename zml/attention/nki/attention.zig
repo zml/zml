@@ -43,7 +43,7 @@ pub const Parameters = struct {
 
 /// Attention for Neuron. Both prefill and decode lower to NKI custom calls.
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, parameters: Parameters) zml.Tensor {
-    const tp_sharding = zml.Compiler.current().getSharding(.model);
+    const tp_sharding = zml.Compiler.current().sharding(.model);
     const q_sharded = q.withPartitioning(tp_sharding, .{ .q = .replicated, .h = .model, .hd = .replicated });
     const k_sharded = k.withPartitioning(tp_sharding, .{ .k = .replicated, .h = .model, .hd = .replicated });
     const v_sharded = v.withPartitioning(tp_sharding, .{ .k = .replicated, .h = .model, .hd = .replicated });

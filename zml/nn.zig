@@ -141,7 +141,7 @@ pub fn scaledDot(
 
     const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
-    var res_shape: Shape = .{ ._dtype = out_dtype };
+    var res_shape: Shape = .scalar(out_dtype);
     var lhs_batching_axes: Axes = .empty;
     var rhs_batching_axes: Axes = .empty;
     for (dot_axes.batching.constSlice()) |b_axes| {
