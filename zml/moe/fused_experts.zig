@@ -258,33 +258,6 @@ test "SwiGLU uses FP32 math for concatenated and interleaved BF16 inputs" {
     }
 }
 
-// TODO(Corentin): Add better tests
-//test "ReLU squared activation preserves width and applies threshold before squaring" {
-//    const allocator = std.testing.allocator;
-//    const io = std.testing.io;
-//    const platform = zml.testing.env();
-//    const Local = struct {
-//        fn forward(x: Tensor, threshold: ?f32) Tensor {
-//            return applyExpertActivation(x, .relu, threshold, .concatenated);
-//        }
-//    };
-//    const x: Tensor = .init(.{ .token = 1, .out = 5 }, .f32);
-//    const values = [_]f32{ -3, 0, 1, 2, 4 };
-//    var input = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&values));
-//    defer input.deinit();
-//    for ([_]?f32{ null, 2 }) |threshold| {
-//        var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, threshold }, .{});
-//        defer exe.deinit();
-//        try zml.testing.expectEqualShapes(x.shape(), exe.output_shapes[0]);
-//        var output = try exe.eval(allocator, io, .{input});
-//        defer output.deinit();
-//        var actual = try output.toSliceAlloc(allocator, io);
-//        defer actual.free(allocator);
-//        const expected = [_]f32{ 0, 0, 1, 4, if (threshold != null) 4 else 16 };
-//        try std.testing.expectEqualSlices(f32, &expected, actual.constItems(f32));
-//    }
-//}
-
 /// Build the inputs tuple for FusedMoe and invoke it via `K.call(...)`.
 pub const GemmOptions = struct {
     input: Tensor,

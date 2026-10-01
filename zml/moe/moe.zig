@@ -20,13 +20,16 @@ const log = std.log.scoped(.@"zml/moe");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("tests.zig");
 }
 
 /// How a backend expects the expert weights to be stored
 /// The packer writes this layout and forwardMoe reads it
 pub const ExpertsLayout = struct {
-    /// Column order of the fused gate/up projection.
+    /// Whether the two projections occupy contiguous halves or alternate.
     gate_up: ProjectionLayout,
+    /// Projection order within the concatenated halves or interleaved pairs.
+    gate_up_order: enum { gate_up, up_gate } = .gate_up,
     /// Backend specific transformation of the weights and scales.
     packing: Packing,
 
@@ -155,7 +158,10 @@ pub const Backend = enum {
             .stablehlo => .{ .gate_up = .concatenated, .packing = .plain },
             .cute_mxfp4 => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
             .triton_mxfp4 => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else error.UnsupportedQuantization,
-            .flashinfer_cutlass => if (scheme == .nvfp4) .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 } else error.UnsupportedQuantization,
+            .flashinfer_cutlass => if (scheme) |s| switch (s) {
+                .nvfp4 => .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 },
+                else => error.UnsupportedQuantization,
+            } else .{ .gate_up = .concatenated, .gate_up_order = .up_gate, .packing = .plain },
             .mosaic_tpu, .metal => .{ .gate_up = .concatenated, .packing = .plain },
             .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
