@@ -338,6 +338,7 @@ pub fn register(platform: *const zml.Platform) !void {
 }
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
+    if (platform.target != .cuda) return false;
     if (platform.state.cuda.fi_cutlass_moe_runners == null) return false;
     _ = computeCapability(platform) catch return false;
     return true;

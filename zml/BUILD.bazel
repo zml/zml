@@ -104,6 +104,7 @@ zig_library(
         "mem.zig",
         "meta.zig",
         "mlirx.zig",
+        "moe/tests.zig",
         "moe/cute_kernels/moe.zig",
         "moe/cute_kernels/mxfp4.zig",
         "moe/cute_kernels/persistent_mxfp4.zig",
