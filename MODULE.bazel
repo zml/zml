@@ -238,10 +238,46 @@ use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "aws-neur
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
-    name = "sevenzip_macos",
+    name = "sevenzip_darwin_amd64",
     build_file_content = """exports_files(["7zz"])""",
     sha256 = "26aa75bc262bb10bf0805617b95569c3035c2c590a99f7db55c7e9607b2685e0",
     urls = ["https://www.7-zip.org/a/7z2501-mac.tar.xz"],
+)
+
+# Host tools for the portable AEA extraction path.
+http_archive(
+    name = "sevenzip_darwin_arm64",
+    build_file_content = """exports_files(["7zz"])""",
+    sha256 = "26aa75bc262bb10bf0805617b95569c3035c2c590a99f7db55c7e9607b2685e0",
+    urls = ["https://www.7-zip.org/a/7z2501-mac.tar.xz"],
+)
+
+http_archive(
+    name = "sevenzip_linux_amd64",
+    build_file_content = """exports_files(["7zz"])""",
+    sha256 = "4ca3b7c6f2f67866b92622818b58233dc70367be2f36b498eb0bdeaaa44b53f4",
+    urls = ["https://www.7-zip.org/a/7z2501-linux-x64.tar.xz"],
+)
+
+http_archive(
+    name = "ipsw_linux_amd64",
+    build_file_content = """exports_files(["ipsw"])""",
+    sha256 = "923c1caa44d3adaf2b792725c6209e879a13ab68af462ae5adfe1d611e2f3653",
+    urls = ["https://github.com/blacktop/ipsw/releases/download/v3.1.729/ipsw_3.1.729_linux_x86_64.tar.gz"],
+)
+
+http_archive(
+    name = "sevenzip_linux_arm64",
+    build_file_content = """exports_files(["7zz"])""",
+    sha256 = "39c5140f02ce4436599303c59a149f654cb1bbc47cdc105a942120d747ae040d",
+    urls = ["https://www.7-zip.org/a/7z2501-linux-arm64.tar.xz"],
+)
+
+http_archive(
+    name = "ipsw_linux_arm64",
+    build_file_content = """exports_files(["ipsw"])""",
+    sha256 = "fdef33729a0cb1d6be0cbffe677a97fb167e6af07fda3eafd03137ce607e92b4",
+    urls = ["https://github.com/blacktop/ipsw/releases/download/v3.1.729/ipsw_3.1.729_linux_arm64.tar.gz"],
 )
 
 http_aea_archive = use_repo_rule("//bazel:http_aea_archive.bzl", "http_aea_archive")
