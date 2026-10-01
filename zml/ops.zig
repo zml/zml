@@ -21,6 +21,7 @@ const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer;
 const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
 const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
+const log = std.log.scoped(.@"zml/Compiler");
 
 pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@TypeOf(inputs)) {
     const ctx = Compiler.current();
@@ -2582,6 +2583,8 @@ fn manualComputationInternal(
     const BodyOutputShapesT = stdx.meta.FnParam(body_fn, 1);
 
     const ctx = Compiler.current();
+    const replicated_sharding = ctx.sharding(.replicate);
+    // TODO: what does it mean to have `manualComputation(.replicated, ...)` ?
     const sharding = sharding_._handleFakeReplicatedObject(ctx.platform);
     const scope = ctx.currentScope();
 
@@ -2595,12 +2598,16 @@ fn manualComputationInternal(
     const local_input_shapes = try arena.alloc(Shape, input_shapes.len);
     const local_output_shapes = try arena.alloc(Shape, outputs.len);
     for (input_shapes, 0..) |shape, i| {
-        if (shape.isFullyReplicated()) {
+        const input_sharding = shape._sharding._handleFakeReplicatedObject(ctx.platform);
+        if (input_sharding.eql(replicated_sharding) or shape.isFullyReplicated()) {
             local_input_shapes[i] = shape;
             continue;
         }
 
-        stdx.debug.assert(shape._sharding.eql(sharding), "zml.ops.manualComputation expects all input tensors to use the same sharding {s}, got input {d}: {f} with sharding {s}", .{ sharding_.name(), i, shape, shape._sharding.name() });
+        if (!sharding_.eql(input_sharding)) {
+            log.err("zml.ops.manualComputation expects all input tensors to use the same sharding {s}, got input {d}: {f} with sharding {s}", .{ sharding_.name(), i, shape, shape._sharding.name() });
+            @panic("zml.ops.manualComputation expects all input tensors to use the same sharding");
+        }
         local_input_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
     }
     for (outputs, 0..) |shape, i| {
