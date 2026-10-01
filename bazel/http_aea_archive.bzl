@@ -1,4 +1,4 @@
-"""Repository rule for macOS Apple Encrypted Archive."""
+"""Repository rule for downloading and extracting Apple Encrypted Archive assets on macOS and Linux x86_64."""
 
 def _fail_result(step, result):
     if result.return_code != 0:
@@ -14,33 +14,63 @@ def _execute(rctx, step, argv, quiet = True):
     _fail_result(step, result)
     return result
 
-def _require_macos(rctx):
+def _host_tools(rctx):
     os_name = rctx.os.name.lower()
-    if "mac" not in os_name and "darwin" not in os_name:
-        fail("http_aea_archive is macOS-only; current repository OS is %r" % rctx.os.name)
+    if "mac" in os_name or "darwin" in os_name:
+        return (None, rctx.attr._sevenzip_macos)
+    if os_name == "linux" and rctx.os.arch.lower() in ["amd64", "x86_64"]:
+        return (rctx.attr._ipsw_linux_x86_64, rctx.attr._sevenzip_linux_x86_64)
+    fail("http_aea_archive supports macOS and Linux x86_64 repository hosts; got %s/%s" % (rctx.os.name, rctx.os.arch))
 
-def _single_restore_dmg(rctx):
-    restore_dir = rctx.path("AssetData/Restore")
-    if not restore_dir.exists:
-        fail("aa patch did not produce AssetData/Restore")
-
+def _single_restore_dmg(restore_dirs):
     dmgs = []
     entries = []
-    for entry in restore_dir.readdir():
-        entries.append(entry.basename)
-        if not entry.is_dir and entry.basename.endswith(".dmg"):
-            dmgs.append(entry)
+    for restore_dir in restore_dirs:
+        if not restore_dir.exists:
+            continue
+        for entry in restore_dir.readdir():
+            entries.append(str(entry))
+            if not entry.is_dir and entry.basename.endswith(".dmg"):
+                dmgs.append(entry)
 
     if len(dmgs) != 1:
-        fail("expected exactly one restore DMG in AssetData/Restore, got %d; entries: %s" % (
+        fail("expected exactly one DMG under AssetData/Restore, got %d; entries: %s" % (
             len(dmgs),
             ", ".join(sorted(entries)),
         ))
 
     return dmgs[0]
 
+def _linux_restore_dirs(rctx, ipsw, aar):
+    # Create an explicit empty config. It avoids loading the user's ipsw configuration.
+    rctx.file("ipsw-config.yaml", "{}\n")
+    _execute(rctx, "ipsw ota extract", [
+        rctx.path(ipsw),
+        "--config",
+        rctx.path("ipsw-config.yaml"),
+        "ota",
+        "extract",
+        aar,
+        "--key-val",
+        rctx.attr.archive_decryption_key,
+        "--pattern",
+        "AssetData/Restore/.*\\.dmg$",  # pattern to match DMG files under AssetData/Restore
+        "--output",
+        rctx.path("ipsw-output"),
+        "--confirm",
+        "--no-color",
+    ])
+    output = rctx.path("ipsw-output")
+    restore_dirs = []
+    if output.exists:
+        # ipsw prefixes extracted paths with an asset-specific directory.
+        for entry in output.readdir():
+            if entry.is_dir:
+                restore_dirs.append(entry.get_child("AssetData", "Restore"))
+    return restore_dirs
+
 def _http_aea_archive_impl(rctx):
-    _require_macos(rctx)
+    ipsw, sevenzip = _host_tools(rctx)
 
     urls = []
     if rctx.attr.url:
@@ -54,7 +84,7 @@ def _http_aea_archive_impl(rctx):
     if not rctx.attr.archive_decryption_key:
         fail("archive_decryption_key is required")
 
-    aar = rctx.path("asset.aar")
+    aar = rctx.path("asset.aar")  # path to the downloaded Apple Encrypted Archive (AAR) file
     download_kwargs = {
         "canonical_id": rctx.attr.canonical_id,
         "integrity": rctx.attr.integrity,
@@ -71,31 +101,39 @@ def _http_aea_archive_impl(rctx):
 
     rctx.download(**download_kwargs)
 
-    _execute(rctx, "aa patch", [
-        "/usr/bin/aa",
-        "patch",
-        "-i",
-        aar,
-        "-key-value",
-        "base64:%s" % rctx.attr.archive_decryption_key,
-        "-src",
-        "/var/empty",
-        "-dst",
-        rctx.path("."),
-    ])
-    rctx.delete("asset.aar")
-
-    dmg = _single_restore_dmg(rctx)
+    if ipsw:
+        restore_dirs = _linux_restore_dirs(rctx, ipsw, aar)
+    else:
+        _execute(rctx, "aa patch", [
+            "/usr/bin/aa",
+            "patch",
+            "-i",
+            aar,
+            "-key-value",
+            "base64:%s" % rctx.attr.archive_decryption_key,
+            "-src",
+            "/var/empty",
+            "-dst",
+            rctx.path("."),
+        ])
+        restore_dirs = [rctx.path("AssetData/Restore")]
+    dmg = _single_restore_dmg(restore_dirs)
 
     extract_args = [
-        rctx.path(rctx.attr._sevenzip),
+        rctx.path(sevenzip),
         "x",
         "-y",
         dmg,
     ]
     extract_args.extend(rctx.attr.includes)
     _execute(rctx, "7z extract dmg", extract_args)
+
+    # Central cleanup of temporary files and directories after extraction.
+    # If absent, rctx.delete will handle it gracefully.
+    rctx.delete("asset.aar")
     rctx.delete("AssetData")
+    rctx.delete("ipsw-output")
+    rctx.delete("ipsw-config.yaml")
 
     rctx.template("BUILD.bazel", rctx.attr.build_file)
 
@@ -119,10 +157,18 @@ http_aea_archive = repository_rule(
             default = [],
             doc = "Patterns to pass to 7z for selective extraction from the DMG. If empty, extracts everything.",
         ),
-        "_sevenzip": attr.label(
+        "_ipsw_linux_x86_64": attr.label(
+            allow_single_file = True,
+            default = Label("@ipsw_linux_x86_64//:ipsw"),
+        ),
+        "_sevenzip_linux_x86_64": attr.label(
+            allow_single_file = True,
+            default = Label("@sevenzip_linux_x86_64//:7zz"),
+        ),
+        "_sevenzip_macos": attr.label(
             allow_single_file = True,
             default = Label("@sevenzip_macos//:7zz"),
         ),
     },
-    doc = "Downloads and extracts a macOS AEA-wrapped AppleArchive asset",
+    doc = "Downloads and extracts an AEA-wrapped AppleArchive asset on macOS and Linux x86_64.",
 )

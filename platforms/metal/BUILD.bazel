@@ -9,7 +9,6 @@ copy_to_directory(
         "@metal_toolchain//:metal_compile_tools",
     ],
     out = "metal_toolchain",
-    exec_compatible_with = ["@platforms//os:macos"],
     include_external_repositories = ["**"],
     replace_prefixes = {
         "Metal.xctoolchain/usr/metal/32023": ".",
