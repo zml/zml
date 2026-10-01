@@ -1,5 +1,7 @@
 """Repository rule for downloading and extracting Apple Encrypted Archive assets on macOS and Linux AMD64/ARM64."""
 
+load("@bazel_lib//lib:repo_utils.bzl", "repo_utils")
+
 def _fail_result(step, result):
     if result.return_code != 0:
         fail("%s failed with exit code %d\nstdout:\n%s\nstderr:\n%s" % (
@@ -15,14 +17,12 @@ def _execute(rctx, step, argv, quiet = True):
     return result
 
 def _host_tools(rctx):
-    os_name = rctx.os.name.lower()
-    if "mac" in os_name or "darwin" in os_name:
-        return (None, rctx.attr._sevenzip_macos)
-    if os_name == "linux" and rctx.os.arch.lower() in ["amd64", "x86_64"]:
-        return (rctx.attr._ipsw_linux_x86_64, rctx.attr._sevenzip_linux_x86_64)
-    if os_name == "linux" and rctx.os.arch.lower() in ["aarch64", "arm64"]:
-        return (rctx.attr._ipsw_linux_arm64, rctx.attr._sevenzip_linux_arm64)
-    fail("http_aea_archive supports macOS and Linux AMD64/ARM64 repository hosts; got %s/%s" % (rctx.os.name, rctx.os.arch))
+    platform = repo_utils.platform(rctx)
+    if platform not in ["darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64"]:
+        fail("http_aea_archive supports macOS and Linux AMD64/ARM64 repository hosts; got %s/%s" % (rctx.os.name, rctx.os.arch))
+    ipsw = Label("@ipsw_{}//:ipsw".format(platform)) if platform.startswith("linux_") else None
+    sevenzip = Label("@sevenzip_{}//:7zz".format(platform))
+    return (ipsw, sevenzip)
 
 def _single_restore_dmg(restore_dirs):
     dmgs = []
@@ -158,26 +158,6 @@ http_aea_archive = repository_rule(
         "includes": attr.string_list(
             default = [],
             doc = "Patterns to pass to 7z for selective extraction from the DMG. If empty, extracts everything.",
-        ),
-        "_ipsw_linux_x86_64": attr.label(
-            allow_single_file = True,
-            default = Label("@ipsw_linux_x86_64//:ipsw"),
-        ),
-        "_sevenzip_linux_x86_64": attr.label(
-            allow_single_file = True,
-            default = Label("@sevenzip_linux_x86_64//:7zz"),
-        ),
-        "_ipsw_linux_arm64": attr.label(
-            allow_single_file = True,
-            default = Label("@ipsw_linux_arm64//:ipsw"),
-        ),
-        "_sevenzip_linux_arm64": attr.label(
-            allow_single_file = True,
-            default = Label("@sevenzip_linux_arm64//:7zz"),
-        ),
-        "_sevenzip_macos": attr.label(
-            allow_single_file = True,
-            default = Label("@sevenzip_macos//:7zz"),
         ),
     },
     doc = "Downloads and extracts an AEA-wrapped AppleArchive asset on macOS and Linux AMD64/ARM64.",
