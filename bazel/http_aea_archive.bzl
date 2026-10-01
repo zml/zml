@@ -1,4 +1,4 @@
-"""Repository rule for downloading and extracting Apple Encrypted Archive assets on macOS and Linux x86_64."""
+"""Repository rule for downloading and extracting Apple Encrypted Archive assets on macOS and Linux AMD64/ARM64."""
 
 def _fail_result(step, result):
     if result.return_code != 0:
@@ -20,7 +20,9 @@ def _host_tools(rctx):
         return (None, rctx.attr._sevenzip_macos)
     if os_name == "linux" and rctx.os.arch.lower() in ["amd64", "x86_64"]:
         return (rctx.attr._ipsw_linux_x86_64, rctx.attr._sevenzip_linux_x86_64)
-    fail("http_aea_archive supports macOS and Linux x86_64 repository hosts; got %s/%s" % (rctx.os.name, rctx.os.arch))
+    if os_name == "linux" and rctx.os.arch.lower() in ["aarch64", "arm64"]:
+        return (rctx.attr._ipsw_linux_arm64, rctx.attr._sevenzip_linux_arm64)
+    fail("http_aea_archive supports macOS and Linux AMD64/ARM64 repository hosts; got %s/%s" % (rctx.os.name, rctx.os.arch))
 
 def _single_restore_dmg(restore_dirs):
     dmgs = []
@@ -165,10 +167,18 @@ http_aea_archive = repository_rule(
             allow_single_file = True,
             default = Label("@sevenzip_linux_x86_64//:7zz"),
         ),
+        "_ipsw_linux_arm64": attr.label(
+            allow_single_file = True,
+            default = Label("@ipsw_linux_arm64//:ipsw"),
+        ),
+        "_sevenzip_linux_arm64": attr.label(
+            allow_single_file = True,
+            default = Label("@sevenzip_linux_arm64//:7zz"),
+        ),
         "_sevenzip_macos": attr.label(
             allow_single_file = True,
             default = Label("@sevenzip_macos//:7zz"),
         ),
     },
-    doc = "Downloads and extracts an AEA-wrapped AppleArchive asset on macOS and Linux x86_64.",
+    doc = "Downloads and extracts an AEA-wrapped AppleArchive asset on macOS and Linux AMD64/ARM64.",
 )

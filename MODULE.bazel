@@ -244,7 +244,7 @@ http_archive(
     urls = ["https://www.7-zip.org/a/7z2501-mac.tar.xz"],
 )
 
-# Host tools for the portable AEA extraction path (Linux x86_64 only).
+# Host tools for the portable AEA extraction path.
 http_archive(
     name = "sevenzip_linux_x86_64",
     build_file_content = """exports_files(["7zz"])""",
@@ -257,6 +257,20 @@ http_archive(
     build_file_content = """exports_files(["ipsw"])""",
     sha256 = "923c1caa44d3adaf2b792725c6209e879a13ab68af462ae5adfe1d611e2f3653",
     urls = ["https://github.com/blacktop/ipsw/releases/download/v3.1.729/ipsw_3.1.729_linux_x86_64.tar.gz"],
+)
+
+http_archive(
+    name = "sevenzip_linux_arm64",
+    build_file_content = """exports_files(["7zz"])""",
+    sha256 = "39c5140f02ce4436599303c59a149f654cb1bbc47cdc105a942120d747ae040d",
+    urls = ["https://www.7-zip.org/a/7z2501-linux-arm64.tar.xz"],
+)
+
+http_archive(
+    name = "ipsw_linux_arm64",
+    build_file_content = """exports_files(["ipsw"])""",
+    sha256 = "fdef33729a0cb1d6be0cbffe677a97fb167e6af07fda3eafd03137ce607e92b4",
+    urls = ["https://github.com/blacktop/ipsw/releases/download/v3.1.729/ipsw_3.1.729_linux_arm64.tar.gz"],
 )
 
 http_aea_archive = use_repo_rule("//bazel:http_aea_archive.bzl", "http_aea_archive")
