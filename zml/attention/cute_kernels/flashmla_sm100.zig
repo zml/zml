@@ -25,7 +25,6 @@ const zml = @import("../../zml.zig");
 const cute = zml.kernel.cute;
 const B = cute.Builder;
 const V = cute.Value;
-const ptx = @import("ptx.zig");
 
 pub const Cfg = struct {
     queries: i64,
@@ -195,8 +194,8 @@ fn forToken(c0: Ctx, k: V, g0: V, slot0: V, comptime counts: bool) Ctx {
     c.g0 = g0;
     c.slot0 = slot0;
     if (counts) {
-        ptx.mbarWait(b, bar(b, c.s, .idx_ready, c.kb), parity(k));
-        const nc = ptx.ldSharedV2(b, c.ib.add(smem.counts));
+        b.mbarrierWait(bar(b, c.s, .idx_ready, c.kb), parity(k));
+        const nc = b.loadWords(2, c.ib.add(smem.counts), .shared, .{});
         c.nwb = nc[0];
         c.ncb = nc[1];
         const nb = c.nwb.add(c.ncb);
@@ -212,9 +211,9 @@ fn forToken(c0: Ctx, k: V, g0: V, slot0: V, comptime counts: bool) Ctx {
 /// This warp is done with the token's index buffer.
 fn releaseIndices(c: Ctx) void {
     const b = c.b;
-    ptx.syncWarp(b);
+    b.syncWarp();
     var l0 = b.openIf(c.lane.eq(0));
-    ptx.mbarArrive(b, bar(b, c.s, .idx_free, c.kb));
+    b.mbarrierArrive(bar(b, c.s, .idx_free, c.kb), 1);
     l0.yieldThen(.{});
 }
 
@@ -318,17 +317,17 @@ fn globalsOf(b: *B, a: anytype) !Globals {
     b.setFunctionAttribute("cu_attrs", b.parseAttribute("{max_dynamic_shared_size_bytes = #cuda.dev_max_shared_memory_optin, non_portable_cluster_size_allowed = 1 : i32}"));
 
     return .{
-        .q = ptx.globalAddress(b, a.q),
-        .wv = ptx.globalAddress(b, a.wv),
-        .ws = ptx.globalAddress(b, a.ws),
-        .cv = ptx.globalAddress(b, a.cv),
-        .cs = ptx.globalAddress(b, a.cs),
-        .wi = ptx.globalAddress(b, a.wi),
-        .ci = ptx.globalAddress(b, a.ci),
-        .lengths = ptx.globalAddress(b, a.lengths),
-        .sink = ptx.globalAddress(b, a.sink),
-        .active = ptx.globalAddress(b, a.active),
-        .out = ptx.globalAddress(b, a.out),
+        .q = b.ptrToInt(a.q, .i64),
+        .wv = b.ptrToInt(a.wv, .i64),
+        .ws = b.ptrToInt(a.ws, .i64),
+        .cv = b.ptrToInt(a.cv, .i64),
+        .cs = b.ptrToInt(a.cs, .i64),
+        .wi = b.ptrToInt(a.wi, .i64),
+        .ci = b.ptrToInt(a.ci, .i64),
+        .lengths = b.ptrToInt(a.lengths, .i64),
+        .sink = b.ptrToInt(a.sink, .i64),
+        .active = b.ptrToInt(a.active, .i64),
+        .out = b.ptrToInt(a.out, .i64),
     };
 }
 
@@ -342,8 +341,8 @@ fn kernelBody(b: *B, cfg: Cfg, g: Globals) cute.FinishError!void {
     const cta = b.blockIdx().x.shrLogical(log_c);
     const stride: i32 = @intCast(cfg.gridCtas());
     const queries: i32 = @intCast(cfg.queries);
-    const rank = if (cfg.cluster > 1) ptx.clusterCtaRank(b) else b.cst(.i32, 0);
-    const s = ptx.sharedStorage(b, smem.total);
+    const rank = if (cfg.cluster > 1) b.clusterCtaRank() else b.cst(.i32, 0);
+    const s = sharedStorage(b, smem.total);
 
     // Inputs come from the previous kernels of the layer.
     b.waitForDependency();
@@ -371,35 +370,35 @@ fn kernelBody(b: *B, cfg: Cfg, g: Globals) cute.FinishError!void {
     {
         var t0 = b.openIf(tid.eq(0));
         for (0..@intCast(rawSlots(cfg))) |i| {
-            ptx.mbarInit(b, bar(b, s, .raw_full, @as(i32, @intCast(i))), 64);
-            ptx.mbarInit(b, bar(b, s, .raw_empty, @as(i32, @intCast(i))), 128);
+            b.mbarrierInit(bar(b, s, .raw_full, @as(i32, @intCast(i))), 64);
+            b.mbarrierInit(bar(b, s, .raw_empty, @as(i32, @intCast(i))), 128);
         }
         for (0..2) |i| {
-            ptx.mbarInit(b, bar(b, s, .tile_full, @as(i32, @intCast(i))), 128);
-            ptx.mbarInit(b, bar(b, s, .s_full, @as(i32, @intCast(i))), 1);
-            ptx.mbarInit(b, bar(b, s, .p_full, @as(i32, @intCast(i))), 128);
-            ptx.mbarInit(b, bar(b, s, .pv_done, @as(i32, @intCast(i))), 1);
-            ptx.mbarInit(b, bar(b, s, .idx_ready, @as(i32, @intCast(i))), 32);
-            ptx.mbarInit(b, bar(b, s, .idx_free, @as(i32, @intCast(i))), idx_consumers);
-            ptx.mbarInit(b, bar(b, s, .o_free, @as(i32, @intCast(i))), 128);
-            ptx.mbarInit(b, bar(b, s, .q_ready, @as(i32, @intCast(i))), 32);
-            ptx.mbarInit(b, bar(b, s, .q_free, @as(i32, @intCast(i))), 1);
+            b.mbarrierInit(bar(b, s, .tile_full, @as(i32, @intCast(i))), 128);
+            b.mbarrierInit(bar(b, s, .s_full, @as(i32, @intCast(i))), 1);
+            b.mbarrierInit(bar(b, s, .p_full, @as(i32, @intCast(i))), 128);
+            b.mbarrierInit(bar(b, s, .pv_done, @as(i32, @intCast(i))), 1);
+            b.mbarrierInit(bar(b, s, .idx_ready, @as(i32, @intCast(i))), 32);
+            b.mbarrierInit(bar(b, s, .idx_free, @as(i32, @intCast(i))), idx_consumers);
+            b.mbarrierInit(bar(b, s, .o_free, @as(i32, @intCast(i))), 128);
+            b.mbarrierInit(bar(b, s, .q_ready, @as(i32, @intCast(i))), 32);
+            b.mbarrierInit(bar(b, s, .q_free, @as(i32, @intCast(i))), 1);
         }
-        ptx.fenceMbarInit(b);
+        b.fenceMbarrierInit();
         t0.yieldThen(.{});
     }
     {
         var w0 = b.openIf(warp.eq(0));
-        ptx.tmemAlloc(b, s.add(smem.holder), tmem_cols);
-        ptx.tmemRelinquish(b);
+        b.tmemAllocAt(s.add(smem.holder), tmem_cols);
+        b.relinquishTmemAllocPermit(.{});
         w0.yieldThen(.{});
     }
 
-    ptx.tcgenFenceBefore(b);
-    ptx.barSync(b, 0, threads);
-    ptx.tcgenFenceAfter(b);
+    b.tcgen05Fence(.before);
+    b.barrierSync(0, threads);
+    b.tcgen05Fence(.after);
     var c = c0;
-    c.taddr = ptx.ldSharedU32(b, s.add(smem.holder));
+    c.taddr = b.loadWords(1, s.add(smem.holder), .shared, .{})[0];
     {
         var role = b.openIf(warp.lt(4));
         softmaxRole(c);
@@ -426,12 +425,12 @@ fn kernelBody(b: *B, cfg: Cfg, g: Globals) cute.FinishError!void {
         role.yieldThen(.{});
     }
 
-    ptx.tcgenFenceBefore(b);
-    ptx.barSync(b, 0, threads);
+    b.tcgen05Fence(.before);
+    b.barrierSync(0, threads);
     {
         var w0 = b.openIf(warp.eq(0));
-        ptx.tcgenFenceAfter(b);
-        ptx.tmemDealloc(b, c.taddr, tmem_cols);
+        b.tcgen05Fence(.after);
+        b.tmemDeallocAt(c.taddr, tmem_cols);
         w0.yieldThen(.{});
     }
     if (cfg.cluster > 1) {
@@ -457,17 +456,17 @@ const FrontRegs = struct {
 fn frontLoad(c: Ctx, t: V) FrontRegs {
     const b = c.b;
     var r: FrontRegs = undefined;
-    r.active = ptx.ldGlobalU32(b, c.g.active);
-    r.lens = ptx.ldGlobalV2(b, c.g.lengths.add(t.to(.i64).mul(8)));
+    r.active = b.loadWords(1, c.g.active, .global, .{ .invariant = true })[0];
+    r.lens = b.loadWords(2, c.g.lengths.add(t.to(.i64).mul(8)), .global, .{ .invariant = true });
     const wcap: i32 = @intCast(c.cfg.window_capacity);
     const ccap: i32 = @intCast(c.cfg.compressed_capacity);
-    r.w = ptx.ldGlobalV4(b, c.g.wi.add(t.mul(wcap).add(c.lane.mul(@divExact(wcap, 32))).to(.i64).mul(4)));
+    r.w = b.loadWords(4, c.g.wi.add(t.mul(wcap).add(c.lane.mul(@divExact(wcap, 32))).to(.i64).mul(4)), .global, .{ .invariant = true });
     for (&r.c) |*x| x.* = b.cst(.i32, -1);
     if (ccap > 0) {
         const per_lane = @divExact(ccap, 32);
         const src = c.g.ci.add(t.mul(ccap).add(c.lane.mul(per_lane)).to(.i64).mul(4));
         for (0..@intCast(@divExact(per_lane, 4))) |v| {
-            const y = ptx.ldGlobalV4(b, src.add(@as(i64, @intCast(v * 16))));
+            const y = b.loadWords(4, src.add(@as(i64, @intCast(v * 16))), .global, .{ .invariant = true });
             for (0..4) |i| r.c[v * 4 + i] = y[i];
         }
     }
@@ -494,16 +493,16 @@ fn frontStore(c: Ctx, t: V, kb: V, r: FrontRegs) void {
                 const pos = c.lane.mul(per_lane).add(@as(i32, @intCast(i)));
                 const ix = if (f == .fp8) r.w[i] else r.c[i];
                 const ok = pos.lt(length).bitAnd(ix.ge(0)).bitAnd(ix.lt(slots));
-                ptx.stSharedU32(b, ib.add(idxBase(f)).add(pos.mul(4)), b.select(ok, ix, b.cst(.i32, -1)));
+                b.storeWords(1, ib.add(idxBase(f)).add(pos.mul(4)), .shared, .{b.select(ok, ix, b.cst(.i32, -1))});
             }
         }
     }
     {
         var l0 = b.openIf(c.lane.eq(0));
-        ptx.stSharedV2(b, ib.add(smem.counts), .{ wlen.add(BK - 1).shrLogical(6), clen.add(BK - 1).shrLogical(6) });
+        b.storeWords(2, ib.add(smem.counts), .shared, .{ wlen.add(BK - 1).shrLogical(6), clen.add(BK - 1).shrLogical(6) });
         l0.yieldThen(.{});
     }
-    ptx.mbarArrive(b, bar(b, c.s, .idx_ready, kb));
+    b.mbarrierArrive(bar(b, c.s, .idx_ready, kb), 1);
 }
 
 /// Q [16, 512] BF16 of token t -> SW128 K-major shared tile (the B operand of QK).
@@ -511,12 +510,11 @@ fn issueQ(c: Ctx, t: V, kb: V) void {
     const b = c.b;
     const q_row = c.g.q.add(t.to(.i64).mul(H * D * 2));
     const q_smem = c.s.add(b.select(kb.eq(0), b.cst(.i32, smem.q[0]), b.cst(.i32, smem.q[1])));
-    const policy = ptx.evictFirstPolicy(b);
     for (0..32) |it| {
         const chunk = c.lane.add(@as(i32, @intCast(it * 32)));
         const row = chunk.shrLogical(6);
         const col = chunk.bitAnd(63).mul(8);
-        ptx.cpAsync16(b, q_smem.add(ptx.sw128Offset(b, row, col, H)), q_row.add(row.mul(D).add(col).mul(2).to(.i64)), policy);
+        b.cpAsync16(q_smem.add(sw128Offset(b, row, col, H)), q_row.add(row.mul(D).add(col).mul(2).to(.i64)), null);
     }
 }
 
@@ -531,28 +529,28 @@ fn frontRole(c0: Ctx, first: FrontRegs) void {
         var later = b.openIf(k.gt(0));
         {
             var reuse = b.openIf(k.ge(2));
-            ptx.mbarWait(b, bar(b, c.s, .q_free, c.kb), parity(k).bitXor(1));
+            b.mbarrierWait(bar(b, c.s, .q_free, c.kb), parity(k).bitXor(1));
             reuse.yieldThen(.{});
         }
         issueQ(c, c.t, c.kb);
         later.yieldThen(.{});
     }
     // The MMA reads Q through the async proxy.
-    ptx.cpAsyncWaitAll(b);
-    ptx.fenceProxyAsync(b);
-    ptx.mbarArrive(b, bar(b, c.s, .q_ready, c.kb));
+    b.cpAsyncWaitAll();
+    b.fenceProxyAsyncShared();
+    b.mbarrierArrive(bar(b, c.s, .q_ready, c.kb), 1);
     {
         var more = b.openIf(k.add(1).lt(c.ntok));
         const next_t = c.t.add(@as(i32, @intCast(c.cfg.gridCtas())));
         // Warm L2 with the next token's Q (16 KiB: 4 lines per lane).
         const q_next = c.g.q.add(next_t.to(.i64).mul(H * D * 2));
-        for (0..4) |i| ptx.prefetchL2(b, q_next.add(c.lane.add(@as(i32, @intCast(i * 32))).mul(128).to(.i64)));
+        for (0..4) |i| b.prefetchL2EvictLast(q_next.add(c.lane.add(@as(i32, @intCast(i * 32))).mul(128).to(.i64)));
         const r = frontLoad(c, next_t);
         const nkb = k.add(1).bitAnd(1);
         {
             // The buffer's previous token (k - 1) must be released by every consumer.
             var reuse = b.openIf(k.ge(1));
-            ptx.mbarWait(b, bar(b, c.s, .idx_free, nkb), parity(k.add(1)).bitXor(1));
+            b.mbarrierWait(bar(b, c.s, .idx_free, nkb), parity(k.add(1)).bitXor(1));
             reuse.yieldThen(.{});
         }
         frontStore(c, next_t, nkb, r);
@@ -565,17 +563,16 @@ fn frontRole(c0: Ctx, first: FrontRegs) void {
 
 fn loaderRole(c0: Ctx) void {
     const b = c0.b;
-    const policy = ptx.evictFirstPolicy(b);
     var loop = b.openFor(0, c0.ntok, 1, .{b.cst(.i32, 0)});
     const c = forToken(c0, loop.iv, undefined, loop.carried[0], true);
     {
         var blocks = b.openFor(c.b0.minimum(c.nwb), c.b1.minimum(c.nwb), 1, .{});
-        loadBlock(c, .fp8, blocks.iv.sub(c.b0), blocks.iv, policy);
+        loadBlock(c, .fp8, blocks.iv.sub(c.b0), blocks.iv);
         blocks.yield(.{});
     }
     if (c.cfg.compressed_capacity > 0) {
         var blocks = b.openFor(c.b0.maximum(c.nwb), c.b1, 1, .{});
-        loadBlock(c, .fp4, blocks.iv.sub(c.b0), blocks.iv.sub(c.nwb), policy);
+        loadBlock(c, .fp4, blocks.iv.sub(c.b0), blocks.iv.sub(c.nwb));
         blocks.yield(.{});
     }
     releaseIndices(c);
@@ -586,7 +583,7 @@ fn idxBase(comptime f: Format) i32 {
     return if (f == .fp8) 0 else 128 * 4;
 }
 
-fn loadBlock(c: Ctx, comptime f: Format, j: V, local: V, policy: V) void {
+fn loadBlock(c: Ctx, comptime f: Format, j: V, local: V) void {
     const b = c.b;
     const use_a = slotUse(c, j);
     const use_b = use_a.add(1); // second slot of an FP8 block
@@ -595,7 +592,7 @@ fn loadBlock(c: Ctx, comptime f: Format, j: V, local: V, policy: V) void {
     for (0..@as(usize, if (f == .fp8) 2 else 1)) |k| {
         const use = if (k == 0) use_a else use_b;
         var reuse = b.openIf(use.ge(rawSlots(c.cfg)));
-        ptx.mbarWait(b, bar(b, c.s, .raw_empty, use.rem(rawSlots(c.cfg))), slotParity(c, use).bitXor(1));
+        b.mbarrierWait(bar(b, c.s, .raw_empty, use.rem(rawSlots(c.cfg))), slotParity(c, use).bitXor(1));
         reuse.yieldThen(.{});
     }
     const values = if (f == .fp8) c.g.wv else c.g.cv;
@@ -613,20 +610,26 @@ fn loadBlock(c: Ctx, comptime f: Format, j: V, local: V, policy: V) void {
     const chunk_off = chunk16.to(.i64);
     const dst_chunk = c.lane.bitAnd(15).mul(16); // within a 288-byte slot row
     // Two loader warps: warp 5 takes the first half of this lane's rows, warp 6 the second.
-    // Four rows per iteration of a runtime loop (small code).
+    // Four rows per iteration: unrolled for FP4 (4 iterations), a runtime loop for FP8 (small code).
     const half_rows: i32 = comptime if (f == .fp4) 16 else 32;
     const second = c.warp.eq(6).to(.i32).bitAnd(1);
     const first_row = (if (f == .fp4) c.lane.shrLogical(4).mul(32) else b.cst(.i32, 0)).add(second.mul(half_rows));
     const src_base = values.add(chunk_off);
     const dst_base = raw.add(first_row.mul(288)).add(dst_chunk);
     const idx_base = idx.add(first_row.mul(4));
-    {
-        var rows = b.openFor(0, ptx.hiddenConst(b, half_rows), 4, .{});
-        const r = rows.iv;
-        const ixs = ptx.ldSharedBatch(b, 1, 4, idx_base.add(r.mul(4)), .{0});
-        for (0..4) |k| {
-            ptx.cpAsync16Row(b, dst_base.add(r.add(@as(i32, @intCast(k))).mul(288)), src_base, ixs[k], @intCast(f.rowBytes()), b.cst(.i64, 0), policy);
+    const copyRows = struct {
+        fn f_(bb: *B, r: V, dst_base_: V, src_base_: V, idx_base_: V) void {
+            const ixs = ldSharedBatch(bb, 1, 4, idx_base_.add(r.mul(4)), .{0});
+            for (0..4) |k| {
+                cpAsync16Row(bb, dst_base_.add(r.add(@as(i32, @intCast(k))).mul(288)), src_base_, ixs[k], @intCast(f.rowBytes()), bb.cst(.i64, 0));
+            }
         }
+    }.f_;
+    if (f == .fp4) {
+        for (0..half_rows / 4) |i| copyRows(b, b.cst(.i32, @as(i32, @intCast(4 * i))), dst_base, src_base, idx_base);
+    } else {
+        var rows = b.openFor(0, b.opaqueI32(half_rows), 4, .{});
+        copyRows(b, rows.iv, dst_base, src_base, idx_base);
         rows.yield(.{});
     }
     // Scales: 16 (FP8) or 32 (FP4) bytes per row, one 16-byte chunk per lane and step.
@@ -639,17 +642,17 @@ fn loadBlock(c: Ctx, comptime f: Format, j: V, local: V, policy: V) void {
     };
     const scale_row0 = c.lane.shrLogical(std.math.log2_int(u32, @intCast(scale_chunks)));
     const part16 = c.lane.bitAnd(scale_chunks - 1).mul(16);
-    const srow = ptx.ldSharedBatch(b, scale_steps, 1, idx.add(scale_row0.mul(4)), sidx_offsets);
+    const srow = ldSharedBatch(b, scale_steps, 1, idx.add(scale_row0.mul(4)), sidx_offsets);
     const second_warp = c.warp.eq(6);
     for (0..@intCast(scale_steps)) |k| {
         // Warp 5 copies the even scale steps, warp 6 the odd ones.
         var mine = b.openIf(if (k % 2 == 1) second_warp else c.warp.eq(5));
         const row = scale_row0.add(@as(i32, @intCast(k)) * @divExact(32, scale_chunks));
-        ptx.cpAsync16Row(b, sc.add(row.mul(288)).add(part16), scales, srow[k], @intCast(f.scaleBytes()), part16.to(.i64), policy);
+        cpAsync16Row(b, sc.add(row.mul(288)).add(part16), scales, srow[k], @intCast(f.scaleBytes()), part16.to(.i64));
         mine.yieldThen(.{});
     }
-    ptx.cpAsyncMbarArrive(b, bar(b, c.s, .raw_full, slot_a));
-    if (f == .fp8) ptx.cpAsyncMbarArrive(b, bar(b, c.s, .raw_full, slot_b));
+    b.cpAsyncMbarrierArrive(bar(b, c.s, .raw_full, slot_a), true);
+    if (f == .fp8) b.cpAsyncMbarrierArrive(bar(b, c.s, .raw_full, slot_b), true);
 }
 
 // ---- dequant (warps 8-11) ------------------------------------------------------------
@@ -686,11 +689,11 @@ fn dequantBlock(c: Ctx, comptime f: Format, j: V, tid: V) void {
     const par = parity(gj);
     const use_a = slotUse(c, j);
     const use_b = use_a.add(1);
-    ptx.mbarWait(b, bar(b, c.s, .raw_full, use_a.rem(rawSlots(c.cfg))), slotParity(c, use_a));
-    if (f == .fp8) ptx.mbarWait(b, bar(b, c.s, .raw_full, use_b.rem(rawSlots(c.cfg))), slotParity(c, use_b));
+    b.mbarrierWait(bar(b, c.s, .raw_full, use_a.rem(rawSlots(c.cfg))), slotParity(c, use_a));
+    if (f == .fp8) b.mbarrierWait(bar(b, c.s, .raw_full, use_b.rem(rawSlots(c.cfg))), slotParity(c, use_b));
     {
         var reuse = b.openIf(gj.ge(2));
-        ptx.mbarWait(b, bar(b, c.s, .pv_done, buf), par.bitXor(1));
+        b.mbarrierWait(bar(b, c.s, .pv_done, buf), par.bitXor(1));
         reuse.yieldThen(.{});
     }
     const g8 = tid.shrLogical(3);
@@ -714,25 +717,51 @@ fn dequantBlock(c: Ctx, comptime f: Format, j: V, tid: V) void {
             if (ff == .fp8) {
                 // Steps 2p, 2p + 1: bytes [128 (p & 1), + 128) of the first (p < 2) or second slot.
                 const src = bb.select(p.lt(2), raw_, raw_b_).add(in8_.mul(8)).add(p.bitAnd(1).mul(128));
-                const d = ptx.ldSharedBatch(bb, 8, 2, src, .{ 0, 64, 4608, 4672, 9216, 9280, 13824, 13888 });
+                const d = ldSharedBatch(bb, 8, 2, src, .{ 0, 64, 4608, 4672, 9216, 9280, 13824, 13888 });
                 for (0..16) |i| out[i] = d[i];
-                const sw = ptx.ldSharedBatch(bb, 4, 1, sc_.add(p.mul(4)), .{ 0, 4608, 9216, 13824 });
+                const sw = ldSharedBatch(bb, 4, 1, sc_.add(p.mul(4)), .{ 0, 4608, 9216, 13824 });
                 for (0..4) |i| out[16 + i] = sw[i];
             } else {
-                const d = ptx.ldSharedBatch(bb, 8, 1, raw_.add(in8_.mul(4)).add(p.mul(64)), .{ 0, 32, 4608, 4640, 9216, 9248, 13824, 13856 });
+                const d = ldSharedBatch(bb, 8, 1, raw_.add(in8_.mul(4)).add(p.mul(64)), .{ 0, 32, 4608, 4640, 9216, 9248, 13824, 13856 });
                 for (0..8) |i| out[i] = d[i];
-                const sw = ptx.ldSharedBatch(bb, 4, 2, sc_.add(p.mul(8)), .{ 0, 4608, 9216, 13824 });
+                const sw = ldSharedBatch(bb, 4, 2, sc_.add(p.mul(8)), .{ 0, 4608, 9216, 13824 });
                 for (0..8) |i| out[8 + i] = sw[i];
             }
             return out;
         }
     }.f_;
-    var parts = b.openFor(0, ptx.hiddenConst(b, 4), 1, tupleOf(nw, loadPart(c, f, raw, raw_b, sc, in8, b.cst(.i32, 0))));
-    const p = parts.iv;
-    var cur: [nw]V = undefined;
-    for (0..nw) |i| cur[i] = parts.carried[i];
-    // The last iteration re-loads its own part (harmless) to keep the loop uniform.
-    const next = loadPart(c, f, raw, raw_b, sc, in8, p.add(1).minimum(3));
+    const first = loadPart(c, f, raw, raw_b, sc, in8, b.cst(.i32, 0));
+    if (f == .fp4) {
+        // Unrolled: the four parts of an FP4 block are short.
+        var cur = first;
+        for (0..4) |pi| {
+            const p = b.cst(.i32, @as(i32, @intCast(pi)));
+            const next = if (pi < 3) loadPart(c, f, raw, raw_b, sc, in8, p.add(1)) else cur;
+            dequantPart(c, f, cur, dst, in8, p);
+            cur = next;
+        }
+    } else {
+        var parts = b.openFor(0, b.opaqueI32(4), 1, tupleOf(nw, first));
+        const p = parts.iv;
+        var cur: [nw]V = undefined;
+        for (0..nw) |i| cur[i] = parts.carried[i];
+        // The last iteration re-loads its own part (harmless) to keep the loop uniform.
+        const next = loadPart(c, f, raw, raw_b, sc, in8, p.add(1).minimum(3));
+        dequantPart(c, f, cur, dst, in8, p);
+        // Parts 0-1 were the first slot's last reads (part 2's loads read the second slot).
+        var first_done = b.openIf(p.eq(1));
+        b.mbarrierArrive(bar(b, c.s, .raw_empty, use_a.rem(rawSlots(c.cfg))), 1);
+        first_done.yieldThen(.{});
+        parts.yield(tupleOf(nw, next));
+    }
+    b.fenceProxyAsyncShared();
+    b.mbarrierArrive(bar(b, c.s, .tile_full, buf), 1);
+    b.mbarrierArrive(bar(b, c.s, .raw_empty, (if (f == .fp8) use_b else use_a).rem(rawSlots(c.cfg))), 1);
+}
+
+/// Converts part `p` (raw words `cur`, see `dequantBlock`) into the bf16 tile at `dst`.
+fn dequantPart(c: Ctx, comptime f: Format, cur: [if (f == .fp8) 20 else 16]V, dst: V, in8: V, p: V) void {
+    const b = c.b;
     const dst_p = dst.add(p.mul(2 * BK * 128));
     // Invalid rows arrive zero-filled (raw bytes and scales), so they dequantize to 0.
     for (0..4) |r| {
@@ -741,59 +770,49 @@ fn dequantBlock(c: Ctx, comptime f: Format, j: V, tid: V) void {
                 // Scale index 2 * step + (i >= 4) = 4 p + 2 k + (i >> 2): byte 2 k + (i >> 2) of word p.
                 const e = cur[16 + r].shrLogical(in8.shrLogical(2).add(@as(i32, @intCast(2 * k))).mul(8)).bitAnd(0xFF);
                 const scale = e.shl(7).bitOr(e.shl(23));
-                break :blk ptx.fp8x8ToBf16x2x4Scaled(b, cur[r * 4 + k * 2], cur[r * 4 + k * 2 + 1], scale);
+                break :blk fp8x8ToBf16x2x4Scaled(b, cur[r * 4 + k * 2], cur[r * 4 + k * 2 + 1], scale);
             } else blk: {
                 // Scale index 4 * step + i / 2: byte i / 2 of the step's word.
                 const e = cur[8 + r * 2 + k].shrLogical(in8.shrLogical(1).mul(8)).bitAnd(0xFF);
-                const scale = ptx.e4m3x2ToBf16x2(b, e.bitOr(e.shl(8)));
-                break :blk ptx.fp4x8ToBf16x2x4Scaled(b, cur[r * 2 + k], scale);
+                const scale = b.e4m3x2ToBf16x2(e.bitOr(e.shl(8)));
+                break :blk fp4x8ToBf16x2x4Scaled(b, cur[r * 2 + k], scale);
             };
-            ptx.stSharedV4(b, dst_p.add(@as(i32, @intCast(r * 2048 + k * BK * 128))), out);
+            b.storeWords(4, dst_p.add(@as(i32, @intCast(r * 2048 + k * BK * 128))), .shared, out);
         }
     }
-    if (f == .fp8) {
-        // Parts 0-1 were the first slot's last reads (part 2's loads read the second slot).
-        var first_done = b.openIf(p.eq(1));
-        ptx.mbarArrive(b, bar(b, c.s, .raw_empty, use_a.rem(rawSlots(c.cfg))));
-        first_done.yieldThen(.{});
-    }
-    parts.yield(tupleOf(nw, next));
-    ptx.fenceProxyAsync(b);
-    ptx.mbarArrive(b, bar(b, c.s, .tile_full, buf));
-    ptx.mbarArrive(b, bar(b, c.s, .raw_empty, (if (f == .fp8) use_b else use_a).rem(rawSlots(c.cfg))));
 }
 
 // ---- MMA (warp 4) ------------------------------------------------------------------------
 
 fn mmaRole(c0: Ctx) void {
     const b = c0.b;
-    var leader = b.openIf(ptx.electOne(b).ne(0));
+    var leader = b.openIf(b.electSync());
     // Base descriptors; an MMA adds a constant (byte offset >> 4) to the start address field.
-    const q_descs = [2]V{ ptx.smemDescSw128(b, c0.s.add(smem.q[0]), 16, 1024), ptx.smemDescSw128(b, c0.s.add(smem.q[1]), 16, 1024) };
-    const k_desc = [2]V{ ptx.smemDescSw128(b, c0.s.add(smem.tile[0]), 16, 1024), ptx.smemDescSw128(b, c0.s.add(smem.tile[1]), 16, 1024) };
-    const v_desc = [2]V{ ptx.smemDescSw128(b, c0.s.add(smem.tile[0]), 8192, 1024), ptx.smemDescSw128(b, c0.s.add(smem.tile[1]), 8192, 1024) };
-    const p_desc = [2]V{ ptx.smemDescSw128(b, c0.s.add(smem.p[0]), 16, 1024), ptx.smemDescSw128(b, c0.s.add(smem.p[1]), 16, 1024) };
-    const qk_idesc = b.cst(.i32, @as(i32, @bitCast(ptx.instrDescBf16(64, H, .k, .k))));
-    const pv_idesc = b.cst(.i32, @as(i32, @bitCast(ptx.instrDescBf16(128, H, .mn, .k))));
+    const q_descs = [2]V{ smemDescSw128(b, c0.s.add(smem.q[0]), 16, 1024), smemDescSw128(b, c0.s.add(smem.q[1]), 16, 1024) };
+    const k_desc = [2]V{ smemDescSw128(b, c0.s.add(smem.tile[0]), 16, 1024), smemDescSw128(b, c0.s.add(smem.tile[1]), 16, 1024) };
+    const v_desc = [2]V{ smemDescSw128(b, c0.s.add(smem.tile[0]), 8192, 1024), smemDescSw128(b, c0.s.add(smem.tile[1]), 8192, 1024) };
+    const p_desc = [2]V{ smemDescSw128(b, c0.s.add(smem.p[0]), 16, 1024), smemDescSw128(b, c0.s.add(smem.p[1]), 16, 1024) };
+    const qk_idesc = b.cst(.i32, @as(i32, @bitCast(instrDescBf16(64, H, .k, .k))));
+    const pv_idesc = b.cst(.i32, @as(i32, @bitCast(instrDescBf16(128, H, .mn, .k))));
     const i32t = cute.DType.i32.toMlir(b.ctx);
 
     var tokens = b.openFor(0, c0.ntok, 1, .{b.cst(.i32, 0)});
     const c = forToken(c0, tokens.iv, tokens.carried[0], undefined, true);
     // The MMA thread only needs the block count; the elected lane releases for the warp.
-    ptx.mbarArrive(b, bar(b, c.s, .idx_free, c.kb));
-    ptx.mbarWait(b, bar(b, c.s, .q_ready, c.kb), parity(c.k));
+    b.mbarrierArrive(bar(b, c.s, .idx_free, c.kb), 1);
+    b.mbarrierWait(bar(b, c.s, .q_ready, c.kb), parity(c.k));
     const q_desc = b.select(c.kb.eq(0), q_descs[0], q_descs[1]);
     {
         // O^T buffer kb: its previous token's epilogue must have read it.
         var reuse = b.openIf(c.k.ge(2));
-        ptx.mbarWait(b, bar(b, c.s, .o_free, c.kb), parity(c.k).bitXor(1));
+        b.mbarrierWait(bar(b, c.s, .o_free, c.kb), parity(c.k).bitXor(1));
         reuse.yieldThen(.{});
     }
-    ptx.tcgenFenceAfter(b);
+    b.tcgen05Fence(.after);
     {
         // No QK: Q is free right away.
         var none = b.openIf(c.n.eq(0));
-        ptx.tcgenCommit(b, bar(b, c.s, .q_free, c.kb));
+        b.tcgen05Commit(bar(b, c.s, .q_free, c.kb));
         none.yieldThen(.{});
     }
     const o_taddr = c.taddr.add(c.kb.mul(4 * H));
@@ -808,10 +827,10 @@ fn mmaRole(c0: Ctx) void {
     const pv_pending = poll.after_carried[1];
     const gn = c.g0.add(next);
     const nbuf = gn.bitAnd(1);
-    const qk_go = qk_pending.ne(0).bitAnd(ptx.mbarTryWait(b, bar(b, c.s, .tile_full, nbuf), parity(gn)).ne(0));
+    const qk_go = qk_pending.ne(0).bitAnd(b.mbarrierTestParity(bar(b, c.s, .tile_full, nbuf), parity(gn)));
     {
         var go = b.openIf(qk_go);
-        ptx.tcgenFenceAfter(b);
+        b.tcgen05Fence(.after);
         const kd = b.select(nbuf.eq(0), k_desc[0], k_desc[1]);
         const d = c.taddr.add(tmem_s).add(nbuf.mul(qk_parts * H));
         // K step s of part p covers latent dims 128 p + 16 s: consecutive MMAs go to
@@ -823,24 +842,24 @@ fn mmaRole(c0: Ctx) void {
                 const kin: i64 = @intCast(ks % 4);
                 const adesc = kd.add(@divExact(kb * 8192 + kin * 32, 16));
                 const bdesc = q_desc.add(@divExact(kb * 2048 + kin * 32, 16));
-                ptx.mmaSS(b, d.add(@as(i32, @intCast(part * H))), adesc, bdesc, qk_idesc, b.cst(.i32, @intFromBool(step > 0)));
+                b.tcgen05MmaF16(d.add(@as(i32, @intCast(part * H))), adesc, bdesc, qk_idesc, b.cst(.i32, @intFromBool(step > 0)).ne(0));
             }
         }
-        ptx.tcgenCommit(b, bar(b, c.s, .s_full, nbuf));
+        b.tcgen05Commit(bar(b, c.s, .s_full, nbuf));
         {
             // The token's last QK: Q may be replaced once it completes.
             var last = b.openIf(next.eq(c.n.sub(1)));
-            ptx.tcgenCommit(b, bar(b, c.s, .q_free, c.kb));
+            b.tcgen05Commit(bar(b, c.s, .q_free, c.kb));
             last.yieldThen(.{});
         }
         go.yieldThen(.{});
     }
     const gi = c.g0.add(i);
     const buf = gi.bitAnd(1);
-    const pv_go = pv_pending.ne(0).bitAnd(ptx.mbarTryWait(b, bar(b, c.s, .p_full, buf), parity(gi)).ne(0));
+    const pv_go = pv_pending.ne(0).bitAnd(b.mbarrierTestParity(bar(b, c.s, .p_full, buf), parity(gi)));
     {
         var go = b.openIf(pv_go);
-        ptx.tcgenFenceAfter(b);
+        b.tcgen05Fence(.after);
         const vd = b.select(buf.eq(0), v_desc[0], v_desc[1]);
         const pd = b.select(buf.eq(0), p_desc[0], p_desc[1]);
         const first = b.select(i.eq(0), b.cst(.i32, 0), b.cst(.i32, 1));
@@ -849,10 +868,10 @@ fn mmaRole(c0: Ctx) void {
                 const adesc = vd.add(@as(i64, @intCast(@divExact(2 * chunk * 8192 + ks * 2048, 16))));
                 const bdesc = pd.add(@as(i64, @intCast(@divExact(ks * 32, 16))));
                 const acc = if (ks > 0) b.cst(.i32, 1) else first;
-                ptx.mmaSS(b, o_taddr.add(@as(i32, @intCast(chunk * H))), adesc, bdesc, pv_idesc, acc);
+                b.tcgen05MmaF16(o_taddr.add(@as(i32, @intCast(chunk * H))), adesc, bdesc, pv_idesc, acc.ne(0));
             }
         }
-        ptx.tcgenCommit(b, bar(b, c.s, .pv_done, buf));
+        b.tcgen05Commit(bar(b, c.s, .pv_done, buf));
         go.yieldThen(.{});
     }
     poll.yieldAfter(.{ b.select(qk_go, b.cst(.i32, 0), qk_pending), b.select(pv_go, b.cst(.i32, 0), pv_pending) });
@@ -873,7 +892,7 @@ fn softmaxRole(c0: Ctx) void {
     {
         // Prefetch the sink logits for the epilogue.
         var h16 = b.openIf(c0.tid.lt(H));
-        ptx.stSharedF32(b, c0.s.add(smem.sink).add(c0.tid.mul(4)), ptx.val(b, .f32, "ld.global.nc.f32 $0, [$1];", "=f,l", &.{c0.g.sink.add(c0.tid.mul(4).to(.i64))}, true));
+        b.storeWords(1, c0.s.add(smem.sink).add(c0.tid.mul(4)), .shared, .{b.loadWords(1, c0.g.sink.add(c0.tid.mul(4).to(.i64)), .global, .{ .invariant = true })[0].bitCast(.f32).bitCast(.i32)});
         h16.yieldThen(.{});
     }
     var tokens = b.openFor(0, c0.ntok, 1, .{b.cst(.i32, 0)});
@@ -898,10 +917,10 @@ fn softmaxRole(c0: Ctx) void {
     const gj = c.g0.add(j);
     const buf = gj.bitAnd(1);
     const par = parity(gj);
-    ptx.mbarWait(b, bar(b, c.s, .s_full, buf), par);
-    ptx.tcgenFenceAfter(b);
-    const sparts = ptx.tmemLoad32x32b(b, qk_parts * H, lane_tmem.add(tmem_s).add(buf.mul(qk_parts * H)));
-    ptx.tmemWaitLoad(b);
+    b.mbarrierWait(bar(b, c.s, .s_full, buf), par);
+    b.tcgen05Fence(.after);
+    const sparts = b.tmemLoad32x32b(qk_parts * H, lane_tmem.add(tmem_s).add(buf.mul(qk_parts * H)));
+    b.fenceTmemLoad();
     var sv: [H]V = undefined;
     for (0..H) |h| {
         var acc = sparts[h].bitCast(.f32);
@@ -912,7 +931,7 @@ fn softmaxRole(c0: Ctx) void {
     const tb = c.b0.add(j);
     const is_window = tb.lt(c.nwb);
     const cand = b.select(is_window, b.cst(.i32, idxBase(.fp8)).add(tb.mul(BK * 4)), b.cst(.i32, idxBase(.fp4)).add(tb.sub(c.nwb).mul(BK * 4)));
-    const row_ix = ptx.ldSharedU32(b, c.ib.add(cand).add(row.bitAnd(BK - 1).mul(4)));
+    const row_ix = b.loadWords(1, c.ib.add(cand).add(row.bitAnd(BK - 1).mul(4)), .shared, .{})[0];
     const valid = has_row.bitAnd(row_ix.ge(0));
 
     var sc: [H]V = undefined;
@@ -925,17 +944,17 @@ fn softmaxRole(c0: Ctx) void {
     // then skips the block max entirely (m stays, alpha = 1).
     const f32t = cute.DType.f32.toMlir(b.ctx);
     const i32t = cute.DType.i32.toMlir(b.ctx);
-    var upd = b.openIfElse(ptx.barRedOr(b, 1, 128, exceed).ne(0), .{f32t} ** (2 * H) ++ .{i32t});
+    var upd = b.openIfElse(b.barrierReduceOr(1, 128, exceed.ne(0)), .{f32t} ** (2 * H) ++ .{i32t});
     {
         // Block max per head: warp redux, then across the 4 warps through shared memory.
         const red = c.s.add(b.select(buf.eq(0), b.cst(.i32, smem.red[0]), b.cst(.i32, smem.red[1])));
         for (0..H) |h| {
-            const wm = ptx.warpMaxF32(b, sc[h]);
+            const wm = b.warpMaxF32(sc[h]);
             var l0 = b.openIf(c.lane.eq(0));
-            ptx.stSharedF32(b, red.add(c.warp.mul(H * 4)).add(@as(i32, @intCast(h * 4))), wm);
+            b.storeWords(1, red.add(c.warp.mul(H * 4)).add(@as(i32, @intCast(h * 4))), .shared, .{wm.bitCast(.i32)});
             l0.yieldThen(.{});
         }
-        ptx.barSync(b, 1, 128);
+        b.barrierSync(1, 128);
         const bms = blockReduce(c, red, .max);
         var out: [2 * H + 1]V = undefined;
         var changed = b.cst(.i32, 0);
@@ -943,7 +962,7 @@ fn softmaxRole(c0: Ctx) void {
             const bm = bms[h];
             const move = bm.gt(m[h].add(rescale_threshold));
             out[h] = b.select(move, bm, m[h]);
-            out[H + h] = ptx.exp2(b, m[h].sub(out[h]));
+            out[H + h] = b.exp2Approx(m[h].sub(out[h]));
             changed = changed.bitOr(move.to(.i32));
         }
         out[2 * H] = changed;
@@ -969,31 +988,31 @@ fn softmaxRole(c0: Ctx) void {
     const p = c.s.add(b.select(buf.eq(0), b.cst(.i32, smem.p[0]), b.cst(.i32, smem.p[1])));
     var next_l: [H]V = undefined;
     for (0..H) |h| {
-        const pr = b.select(valid, ptx.exp2(b, sc[h].sub(new_m[h])), b.cst(.f32, 0));
+        const pr = b.select(valid, b.exp2Approx(sc[h].sub(new_m[h])), b.cst(.f32, 0));
         next_l[h] = l[h].mul(alpha[h]).add(pr);
         const off = row.shrLogical(3).bitXor(@as(i32, @intCast(h & 7))).shl(4).add(row.bitAnd(7).shl(1));
-        ptx.stSharedBf16If(b, p.add(@as(i32, @intCast(h * 128))).add(off), pr, has_row.to(.i32));
+        stSharedBf16If(b, p.add(@as(i32, @intCast(h * 128))).add(off), pr, has_row);
     }
     // Rescale O^T (TMEM) once the previous PV has landed.
     {
         var rescale = b.openIf(j.gt(0).bitAnd(changed.ne(0)));
         const prev = gj.sub(1);
-        ptx.mbarWait(b, bar(b, c.s, .pv_done, prev.bitAnd(1)), parity(prev));
-        ptx.tcgenFenceAfter(b);
+        b.mbarrierWait(bar(b, c.s, .pv_done, prev.bitAnd(1)), parity(prev));
+        b.tcgen05Fence(.after);
         for (0..4) |chunk| {
             const addr = o_tmem.add(@as(i32, @intCast(chunk * H)));
-            const o = ptx.tmemLoad32x32b(b, H, addr);
-            ptx.tmemWaitLoad(b);
+            const o = b.tmemLoad32x32b(H, addr);
+            b.fenceTmemLoad();
             var scaled: [H]V = undefined;
             for (0..H) |h| scaled[h] = o[h].bitCast(.f32).mul(alpha[h]).bitCast(.i32);
-            ptx.tmemStore32x32b(b, H, addr, scaled);
+            b.tmemStore32x32b(H, addr, scaled);
         }
-        ptx.tmemWaitStore(b);
+        b.fenceTmemStore();
         rescale.yieldThen(.{});
     }
-    ptx.fenceProxyAsync(b);
-    ptx.tcgenFenceBefore(b);
-    ptx.mbarArrive(b, bar(b, c.s, .p_full, buf));
+    b.fenceProxyAsyncShared();
+    b.tcgen05Fence(.before);
+    b.mbarrierArrive(bar(b, c.s, .p_full, buf), 1);
     var carry: [2 * H]V = undefined;
     for (0..H) |h| {
         carry[h] = new_m[h];
@@ -1006,16 +1025,16 @@ fn softmaxRole(c0: Ctx) void {
 }
 
 /// Per head, the reduction over the 4 softmax warps of `buf` [4 warps][16 heads] f32.
-fn blockReduce(c: Ctx, buf: V, comptime op: ptx.ReduceOp) [H]V {
+fn blockReduce(c: Ctx, buf: V, comptime op: ReduceOp) [H]V {
     const b = c.b;
     var r: [H]V = undefined;
     for (0..4) |w| {
         for (0..4) |q4| {
-            const v = ptx.ldSharedV4(b, buf.add(@as(i32, @intCast((w * H + q4 * 4) * 4))));
+            const v = b.loadWords(4, buf.add(@as(i32, @intCast((w * H + q4 * 4) * 4))), .shared, .{});
             for (0..4) |i| {
                 const x = v[i].bitCast(.f32);
                 const h = q4 * 4 + i;
-                r[h] = if (w == 0) x else if (op == .max) r[h].maximum(x) else r[h].add(x);
+                r[h] = if (w == 0) x else if (op == .max) r[h].maxnum(x) else r[h].add(x);
             }
         }
     }
@@ -1031,39 +1050,39 @@ fn epilogue(c: Ctx, o_tmem: V, m: [H]V, l: [H]V) void {
     {
         // Lanes 16-31 hold no key rows (l = 0); lane h (< 16) gets head h's sum.
         for (0..H) |h| {
-            const lsum = ptx.warpSumF32(b, l[h]);
+            const lsum = warpSumF32(b, l[h]);
             var l0 = b.openIf(c.lane.eq(0));
-            ptx.stSharedF32(b, red_sum.add(c.warp.mul(H * 4)).add(@as(i32, @intCast(h * 4))), lsum);
+            b.storeWords(1, red_sum.add(c.warp.mul(H * 4)).add(@as(i32, @intCast(h * 4))), .shared, .{lsum.bitCast(.i32)});
             l0.yieldThen(.{});
         }
     }
-    ptx.barSync(b, 1, 128);
+    b.barrierSync(1, 128);
     const total = blockReduce(c, red_sum, .sum);
     const has_blocks = c.n.gt(0);
     {
         var any = b.openIf(has_blocks);
         const last = c.g0.add(c.n).sub(1);
-        ptx.mbarWait(b, bar(b, c.s, .pv_done, last.bitAnd(1)), parity(last));
+        b.mbarrierWait(bar(b, c.s, .pv_done, last.bitAnd(1)), parity(last));
         any.yieldThen(.{});
     }
-    ptx.tcgenFenceAfter(b);
+    b.tcgen05Fence(.after);
     if (c.cfg.cluster > 1) {
         // Partial result for the cluster merge: (m, l) per head and unnormalized O^T.
         {
             var t0 = b.openIf(c.tid.eq(0));
             for (0..H) |h| {
-                ptx.stSharedF32(b, c.s.add(smem.stats + @as(i32, @intCast(h * 4))), m[h]);
-                ptx.stSharedF32(b, c.s.add(smem.stats + @as(i32, @intCast((H + h) * 4))), total[h]);
+                b.storeWords(1, c.s.add(smem.stats + @as(i32, @intCast(h * 4))), .shared, .{m[h].bitCast(.i32)});
+                b.storeWords(1, c.s.add(smem.stats + @as(i32, @intCast((H + h) * 4))), .shared, .{total[h].bitCast(.i32)});
             }
             t0.yieldThen(.{});
         }
         // Normalized by this CTA's own sum (a convex combination of cache rows: bounded,
         // so it travels as FP16); the owner re-weights with exp2(m - M) * l / L.
         var inv_l: [H]V = undefined;
-        for (0..H) |h| inv_l[h] = b.select(total[h].gt(0).bitAnd(has_blocks), ptx.rcp(b, total[h]), b.cst(.f32, 0));
+        for (0..H) |h| inv_l[h] = b.select(total[h].gt(0).bitAnd(has_blocks), b.rcpApprox(total[h]), b.cst(.f32, 0));
         for (0..4) |chunk| {
-            const o = ptx.tmemLoad32x32b(b, H, o_tmem.add(@as(i32, @intCast(chunk * H))));
-            ptx.tmemWaitLoad(b);
+            const o = b.tmemLoad32x32b(H, o_tmem.add(@as(i32, @intCast(chunk * H))));
+            b.fenceTmemLoad();
             const dim = c.warp.mul(32).add(c.lane).add(@as(i32, @intCast(chunk * 128)));
             const dst = c.s.add(smem.obuf).add(dim.mul(H * 4));
             for (0..4) |q4| {
@@ -1071,17 +1090,17 @@ fn epilogue(c: Ctx, o_tmem: V, m: [H]V, l: [H]V) void {
                 // A rank without key blocks never wrote its O^T (TMEM holds stale data, possibly
                 // NaN/Inf): select, do not multiply by 0.
                 for (0..4) |i| v[i] = b.select(has_blocks, o[q4 * 4 + i].bitCast(.f32).mul(inv_l[q4 * 4 + i]), b.cst(.f32, 0)).bitCast(.i32);
-                ptx.stSharedV4(b, dst.add(@as(i32, @intCast(q4 * 16))), v);
+                b.storeWords(4, dst.add(@as(i32, @intCast(q4 * 16))), .shared, v);
             }
         }
         _ = lane_tmem;
     } else {
         var inv: [H]V = undefined;
         for (0..H) |h| {
-            const sink = ptx.ldSharedF32(b, c.s.add(smem.sink + @as(i32, @intCast(h * 4))));
-            const denom = total[h].add(ptx.exp2(b, sink.mul(@as(f32, log2e)).sub(m[h])));
+            const sink = b.loadWords(1, c.s.add(smem.sink + @as(i32, @intCast(h * 4))), .shared, .{})[0].bitCast(.f32);
+            const denom = total[h].add(b.exp2Approx(sink.mul(@as(f32, log2e)).sub(m[h])));
             // denom underflows only if every logit and the sink are ~2^126 below the running max.
-            inv[h] = b.select(has_blocks.bitAnd(denom.gt(0)), ptx.rcp(b, denom), b.cst(.f32, 0));
+            inv[h] = b.select(has_blocks.bitAnd(denom.gt(0)), b.rcpApprox(denom), b.cst(.f32, 0));
         }
         // The CTA's last token is staged in shared memory (Q is no longer needed) and
         // written with 16-byte stores; earlier tokens store straight to global memory
@@ -1091,8 +1110,8 @@ fn epilogue(c: Ctx, o_tmem: V, m: [H]V, l: [H]V) void {
         {
             var direct = b.openIf(last_token.eq(false));
             var os: [4][H]V = undefined;
-            for (0..4) |chunk| os[chunk] = ptx.tmemLoad32x32b(b, H, o_tmem.add(@as(i32, @intCast(chunk * H))));
-            ptx.tmemWaitLoad(b);
+            for (0..4) |chunk| os[chunk] = b.tmemLoad32x32b(H, o_tmem.add(@as(i32, @intCast(chunk * H))));
+            b.fenceTmemLoad();
             // Lane pairs (d, d + 1) swap half their heads: the even lane stores heads 0-7,
             // the odd lane heads 8-15, each as bf16 pairs of dims (d, d + 1).
             const odd = c.lane.bitAnd(1).ne(0);
@@ -1107,8 +1126,8 @@ fn epilogue(c: Ctx, o_tmem: V, m: [H]V, l: [H]V) void {
                     const keep = b.select(odd, hi, lo);
                     const recv = b.shuffleXor(send, 1).bitCast(.f32);
                     // Even lane: (own dim, partner's dim); odd lane: (partner's dim, own dim).
-                    const pair = ptx.packBf16x2(b, b.select(odd, recv, keep), b.select(odd, keep, recv));
-                    ptx.stGlobalU32(b, base.add(@as(i64, @intCast((i * D + chunk * 128) * 2))), pair);
+                    const pair = b.packHalf2(b.select(odd, recv, keep), b.select(odd, keep, recv), .bf16);
+                    b.storeWords(1, base.add(@as(i64, @intCast((i * D + chunk * 128) * 2))), .global, .{pair});
                 }
             }
             direct.yieldThen(.{});
@@ -1117,29 +1136,29 @@ fn epilogue(c: Ctx, o_tmem: V, m: [H]V, l: [H]V) void {
             var staged = b.openIf(last_token);
             // The staging buffer is Q buffer 0: a token without key blocks never waited for
             // its Q copy (cp.async into that buffer), which must land before it is overwritten.
-            ptx.mbarWait(b, bar(b, c.s, .q_ready, c.kb), parity(c.k));
+            b.mbarrierWait(bar(b, c.s, .q_ready, c.kb), parity(c.k));
             var os: [4][H]V = undefined;
-            for (0..4) |chunk| os[chunk] = ptx.tmemLoad32x32b(b, H, o_tmem.add(@as(i32, @intCast(chunk * H))));
-            ptx.tmemWaitLoad(b);
+            for (0..4) |chunk| os[chunk] = b.tmemLoad32x32b(H, o_tmem.add(@as(i32, @intCast(chunk * H))));
+            b.fenceTmemLoad();
             for (0..4) |chunk| {
                 const o = os[chunk];
                 const dim = c.warp.mul(32).add(c.lane).add(@as(i32, @intCast(chunk * 128)));
                 for (0..H) |h| {
                     const v = b.select(has_blocks, o[h].bitCast(.f32).mul(inv[h]), b.cst(.f32, 0));
-                    ptx.stSharedB16(b, c.s.add(smem.ostage).add(dim.add(@as(i32, @intCast(h * D))).mul(2)), ptx.f32ToBf16Bits(b, v));
+                    b.storeHalf(c.s.add(smem.ostage).add(dim.add(@as(i32, @intCast(h * D))).mul(2)), .shared, b.f32ToBf16Bits(v));
                 }
             }
             staged.yieldThen(.{});
         }
         // O^T buffer kb may take the token after next.
-        ptx.tcgenFenceBefore(b);
-        ptx.mbarArrive(b, bar(b, c.s, .o_free, c.kb));
+        b.tcgen05Fence(.before);
+        b.mbarrierArrive(bar(b, c.s, .o_free, c.kb), 1);
         {
             var staged = b.openIf(last_token);
-            ptx.barSync(b, 1, 128);
+            b.barrierSync(1, 128);
             for (0..8) |it| {
                 const off = c.tid.add(@as(i32, @intCast(it * 128))).mul(16);
-                ptx.stGlobalV4(b, out_row.add(off.to(.i64)), ptx.ldSharedV4(b, c.s.add(smem.ostage).add(off)));
+                b.storeWords(4, out_row.add(off.to(.i64)), .global, b.loadWords(4, c.s.add(smem.ostage).add(off), .shared, .{}));
             }
             staged.yieldThen(.{});
         }
@@ -1158,13 +1177,13 @@ fn clusterMerge(c: Ctx) void {
     const C: i32 = @intCast(c.cfg.cluster);
     const dims = @divExact(D, C);
     // Every rank is done with its tiles (the inbox reuses tile 0).
-    ptx.clusterSync(b);
+    b.clusterSync();
     {
         // (m, l) of head h to every rank's inbox, slot `rank`.
         var heads_ = b.openIf(c.tid.lt(2 * H));
-        const v = ptx.ldSharedF32(b, c.s.add(smem.stats).add(c.tid.mul(4)));
+        const v = b.loadWords(1, c.s.add(smem.stats).add(c.tid.mul(4)), .shared, .{})[0].bitCast(.f32);
         const dst = c.s.add(smem.stats_in).add(c.rank.mul(2 * H * 4)).add(c.tid.mul(4));
-        for (0..@intCast(C)) |p| ptx.stClusterF32(b, ptx.mapaShared(b, dst, b.cst(.i32, @as(i32, @intCast(p)))), v);
+        for (0..@intCast(C)) |p| b.storeWordsPtr(1, b.mapaShared(dst, b.cst(.i32, @as(i32, @intCast(p)))), .{v.bitCast(.i32)});
         heads_.yieldThen(.{});
     }
     {
@@ -1174,15 +1193,15 @@ fn clusterMerge(c: Ctx) void {
         const chunk = loop.iv;
         const d = chunk.shrLogical(2);
         const q4 = chunk.bitAnd(3);
-        const v = ptx.ldSharedV4(b, c.s.add(smem.obuf).add(d.mul(H * 4)).add(q4.mul(16)));
+        const v = b.loadWords(4, c.s.add(smem.obuf).add(d.mul(H * 4)).add(q4.mul(16)), .shared, .{});
         const owner = d.div(dims);
         // Normalized partials travel as FP16.
-        const packed_ = [2]V{ ptx.packF16x2(b, v[0].bitCast(.f32), v[1].bitCast(.f32)), ptx.packF16x2(b, v[2].bitCast(.f32), v[3].bitCast(.f32)) };
+        const packed_ = [2]V{ b.packHalf2(v[0].bitCast(.f32), v[1].bitCast(.f32), .f16), b.packHalf2(v[2].bitCast(.f32), v[3].bitCast(.f32), .f16) };
         const dst = c.s.add(smem.inbox).add(c.rank.mul(dims * H * 2)).add(d.rem(dims).mul(H * 2)).add(q4.mul(8));
-        ptx.stClusterV2(b, ptx.mapaShared(b, dst, owner), packed_);
+        b.storeWordsPtr(2, b.mapaShared(dst, owner), packed_);
         loop.yield(.{});
     }
-    ptx.clusterSync(b);
+    b.clusterSync();
     // Per-head merge weights exp2(m_p - M) / L, with L = sum_p exp2(m_p - M) l_p + exp2(sink - M).
     {
         var heads_ = b.openIf(c.tid.lt(H));
@@ -1192,23 +1211,23 @@ fn clusterMerge(c: Ctx) void {
         var mx = b.cst(.f32, @as(f32, -1e30));
         for (0..@intCast(C)) |p| {
             const slot = c.s.add(smem.stats_in + @as(i32, @intCast(p * 2 * H * 4))).add(h.mul(4));
-            ms[p] = ptx.ldSharedF32(b, slot);
-            ls[p] = ptx.ldSharedF32(b, slot.add(H * 4));
-            mx = mx.maximum(ms[p]);
+            ms[p] = b.loadWords(1, slot, .shared, .{})[0].bitCast(.f32);
+            ls[p] = b.loadWords(1, slot.add(H * 4), .shared, .{})[0].bitCast(.f32);
+            mx = mx.maxnum(ms[p]);
         }
-        const sink = ptx.ldSharedF32(b, c.s.add(smem.sink).add(h.mul(4)));
-        var denom = ptx.exp2(b, sink.mul(@as(f32, log2e)).sub(mx));
+        const sink = b.loadWords(1, c.s.add(smem.sink).add(h.mul(4)), .shared, .{})[0].bitCast(.f32);
+        var denom = b.exp2Approx(sink.mul(@as(f32, log2e)).sub(mx));
         var w: [16]V = undefined;
         for (0..@intCast(C)) |p| {
-            w[p] = ptx.exp2(b, ms[p].sub(mx));
+            w[p] = b.exp2Approx(ms[p].sub(mx));
             denom = denom.add(w[p].mul(ls[p]));
         }
-        const inv = ptx.rcp(b, denom);
+        const inv = b.rcpApprox(denom);
         // Partials are O_p / l_p: weight exp2(m_p - M) * l_p / L.
-        for (0..@intCast(C)) |p| ptx.stSharedF32(b, c.s.add(smem.weights + @as(i32, @intCast(p * H * 4))).add(h.mul(4)), w[p].mul(ls[p]).mul(inv));
+        for (0..@intCast(C)) |p| b.storeWords(1, c.s.add(smem.weights + @as(i32, @intCast(p * H * 4))).add(h.mul(4)), .shared, .{w[p].mul(ls[p]).mul(inv).bitCast(.i32)});
         heads_.yieldThen(.{});
     }
-    ptx.barSync(b, 0, threads);
+    b.barrierSync(0, threads);
     // Output: this rank's dims x 16 heads, 4 heads (one 16-byte load per rank) per item.
     const items = dims * @divExact(H, 4);
     const out_row = c.g.out.add(c.t.to(.i64).mul(H * D * 2));
@@ -1220,28 +1239,117 @@ fn clusterMerge(c: Ctx) void {
         const hq = item.div(dims); // head quad
         var acc = [4]V{ b.cst(.f32, 0), b.cst(.f32, 0), b.cst(.f32, 0), b.cst(.f32, 0) };
         for (0..@intCast(C)) |p| {
-            const o2 = ptx.ldSharedV2(b, c.s.add(smem.inbox + @as(i32, @intCast(p)) * dims * H * 2).add(dl.mul(H * 2)).add(hq.mul(8)));
-            const lo = ptx.unpackF16x2(b, o2[0]);
-            const hi = ptx.unpackF16x2(b, o2[1]);
+            const o2 = b.loadWords(2, c.s.add(smem.inbox + @as(i32, @intCast(p)) * dims * H * 2).add(dl.mul(H * 2)).add(hq.mul(8)), .shared, .{});
+            const lo = b.unpackHalf2(o2[0], .f16);
+            const hi = b.unpackHalf2(o2[1], .f16);
             const o = [4]V{ lo[0], lo[1], hi[0], hi[1] };
-            const wv = ptx.ldSharedV4(b, c.s.add(smem.weights + @as(i32, @intCast(p * H * 4))).add(hq.mul(16)));
+            const wv = b.loadWords(4, c.s.add(smem.weights + @as(i32, @intCast(p * H * 4))).add(hq.mul(16)), .shared, .{});
             for (0..4) |i| acc[i] = acc[i].add(o[i].mul(wv[i].bitCast(.f32)));
         }
         for (0..4) |i| {
             const head = hq.mul(4).add(@as(i32, @intCast(i)));
-            ptx.stSharedB16(b, c.s.add(smem.ostage).add(head.mul(dims).add(dl).mul(2)), ptx.f32ToBf16Bits(b, acc[i]));
+            b.storeHalf(c.s.add(smem.ostage).add(head.mul(dims).add(dl).mul(2)), .shared, b.f32ToBf16Bits(acc[i]));
         }
         loop.yield(.{});
     }
-    ptx.barSync(b, 0, threads);
+    b.barrierSync(0, threads);
     {
         // This rank's slice of every head row: dims / 8 16-byte chunks per head.
         const per_head = @divExact(dims, 8);
         var loop = b.openFor(c.tid, H * per_head, threads, .{});
         const h = loop.iv.div(per_head);
         const k = loop.iv.rem(per_head);
-        const v = ptx.ldSharedV4(b, c.s.add(smem.ostage).add(h.mul(dims).add(k.mul(8)).mul(2)));
-        ptx.stGlobalV4(b, out_row.add(h.mul(D).add(c.rank.mul(dims)).add(k.mul(8)).to(.i64).mul(2)), v);
+        const v = b.loadWords(4, c.s.add(smem.ostage).add(h.mul(dims).add(k.mul(8)).mul(2)), .shared, .{});
+        b.storeWords(4, out_row.add(h.mul(D).add(c.rank.mul(dims)).add(k.mul(8)).to(.i64).mul(2)), .global, v);
         loop.yield(.{});
     }
 }
+
+// ---- helpers ------------------------------------------------------------------------------
+// Addresses are raw integers: shared `i32` (shared window), global `i64`, TMEM `i32`
+// (lane << 16 | column).
+
+/// `bytes` of compiler-visible dynamic shared memory (1024-aligned), as a shared address.
+fn sharedStorage(b: *B, comptime bytes: i64) V {
+    const storage = b.allocSmemStorage(.i8, 1024, b.layoutType(b.layoutSpec(.{bytes}, .{1})), 0, &.{std.fmt.comptimePrint("storage:{d}:0", .{bytes})});
+    const base = b.getIterTyped(storage, b.ptrTy(.i8, .smem, 1024) catch @panic("bad smem ptr")).value();
+    return b.ptrToInt(base, .i32);
+}
+
+/// 16-byte cp.async of `base + row * row_bytes + offset`; when `row < 0` it zero-fills
+/// the destination without reading memory.
+fn cpAsync16Row(b: *B, dst: V, base: V, row: V, comptime row_bytes: u32, offset: V) void {
+    const src = base.add(row.maximum(0).to(.i64).mul(@as(i64, row_bytes))).add(offset);
+    b.cpAsync16(dst, src, row.ge(0));
+}
+
+/// `n` shared loads of `words` 32-bit words each (n * words results), from `base + offsets[i]`.
+fn ldSharedBatch(b: *B, comptime n: usize, comptime words: usize, base: V, comptime offsets: [n]i32) [n * words]V {
+    var out: [n * words]V = undefined;
+    for (0..n) |i| {
+        const w = b.loadWords(words, base.add(offsets[i]), .shared, .{});
+        for (0..words) |k| out[i * words + k] = w[k];
+    }
+    return out;
+}
+
+/// Eight packed FP8 e4m3 (two words) -> four bf16x2, each multiplied by the bf16x2 `scale`.
+fn fp8x8ToBf16x2x4Scaled(b: *B, lo: V, hi: V, scale: V) [4]V {
+    const pairs = [4]V{ lo, lo.shrLogical(16), hi, hi.shrLogical(16) };
+    var out: [4]V = undefined;
+    for (pairs, &out) |pair, *o| o.* = b.mulBf16x2(b.e4m3x2ToBf16x2(pair), scale);
+    return out;
+}
+
+/// Eight packed FP4 e2m1 (one word, even element in the low nibble) -> four bf16x2,
+/// each multiplied by the bf16x2 `scale`.
+fn fp4x8ToBf16x2x4Scaled(b: *B, word: V, scale: V) [4]V {
+    var out = b.e2m1x8ToBf16x2x4(word);
+    for (&out) |*o| o.* = b.mulBf16x2(o.*, scale);
+    return out;
+}
+
+/// 16-bit shared store of the bf16 rounding of `v` (f32) when `pred` (i1).
+fn stSharedBf16If(b: *B, addr: V, v: V, pred: V) void {
+    var only = b.openIf(pred);
+    b.storeHalf(addr, .shared, b.f32ToBf16Bits(v));
+    only.yieldThen(.{});
+}
+
+const Major = enum(u1) { k = 0, mn = 1 };
+
+/// kind::f16 instruction descriptor: BF16 A/B, F32 accumulator.
+fn instrDescBf16(comptime m: u32, comptime n: u32, comptime a_major: Major, comptime b_major: Major) u32 {
+    std.debug.assert((m == 64 or m == 128) and n % 8 == 0 and n >= 8 and n <= 256);
+    return (1 << 4) | // c_format = F32
+        (1 << 7) | // a_format = BF16
+        (1 << 10) | // b_format = BF16
+        (@as(u32, @intFromEnum(a_major)) << 15) |
+        (@as(u32, @intFromEnum(b_major)) << 16) |
+        ((n >> 3) << 17) |
+        ((m >> 4) << 24);
+}
+
+/// SM100 shared-memory matrix descriptor with 128-byte swizzle. `lbo`/`sbo` in bytes.
+fn smemDescSw128(b: *B, addr: V, comptime lbo: u32, comptime sbo: u32) V {
+    const hi: u64 = (@as(u64, sbo >> 4) << 32) | (@as(u64, 1) << 46) | (@as(u64, 2) << 61);
+    const lo: u64 = @as(u64, lbo >> 4) << 16;
+    const start = addr.to(.i64).shrLogical(4).bitAnd(0x3FFF);
+    return start.bitOr(b.cst(.i64, @as(i64, @bitCast(hi | lo))));
+}
+
+/// Byte offset of element (row, col) of a bf16 tile stored as SW128 K-major atoms.
+fn sw128Offset(b: *B, row: V, col: V, comptime rows: i32) V {
+    _ = b;
+    const slab = col.shrLogical(6).mul(rows * 128);
+    const chunk = col.bitAnd(63).shrLogical(3).bitXor(row.bitAnd(7));
+    return slab.add(row.mul(128)).add(chunk.shl(4)).add(col.bitAnd(7).shl(1));
+}
+
+fn warpSumF32(b: *B, v: V) V {
+    var x = v;
+    inline for (.{ 16, 8, 4, 2, 1 }) |o| x = x.add(b.shuffleXor(x, o));
+    return x;
+}
+
+const ReduceOp = enum { max, sum };

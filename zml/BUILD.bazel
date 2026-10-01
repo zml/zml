@@ -82,7 +82,6 @@ zig_library(
         "attention/attnd.zig",
         "attention/flashattn.zig",
         "attention/cute_kernels/flashmla_sm100.zig",
-        "attention/cute_kernels/ptx.zig",
         "attention/cute_kernels/sparse_mla.zig",
         "attention/fly_kernels/sparse_mla.zig",
         "attention/metal_attention.zig",
