@@ -430,7 +430,8 @@ pub const Shape = struct {
 
             const part = self._partitioning.get(i);
             switch (part) {
-                .unknown, .replicated => {},
+                .replicated => {},
+                .unknown => try writer.writeAll("/!"),
                 .open => try writer.writeAll("/?"),
                 else => try writer.print("/ax_{d}", .{part}),
             }
@@ -477,6 +478,7 @@ pub const Shape = struct {
             ._sharding = self._sharding,
             ._partitioning = if (self.isFullyReplicated()) .replicated(_dims.len) else .unknown,
         };
+        std.log.warn("reshape {f}@{s} -> {f}@{s}", .{ self, self._sharding.name(), new_shape, new_shape._sharding.name() });
         new_shape.inferMissingAxis(self.count()) catch |err| {
             std.debug.panic("Can't reshape {any} to {any}: {t}", .{ self.dims(), new_shape.dims(), err });
         };
