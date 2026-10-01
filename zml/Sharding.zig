@@ -26,7 +26,7 @@ pub const MAX_MESH_RANK = 4;
 /// The notion of "fully replicated" is platform agnostic, but the Sharding object
 /// itself can't be instantiated in a platform agnostic way because it needs to list all devices.
 /// This lead to some `_handleFakeReplicatedObject` in a few strategic places, but should be kept ZML internal.
-var _replicated: [11]u8 align(@alignOf(Data)) = "_replicated".*;
+var _replicated: [14]u8 align(@alignOf(Data)) = "__replicated__".*;
 
 /// Replicated sharding.
 pub const replicated: Sharding = .{ .data = @ptrCast(&_replicated) };
@@ -49,10 +49,14 @@ pub fn eql(self: Sharding, other: Sharding) bool {
 }
 
 pub fn name(sharding: Sharding) []const u8 {
+    if (sharding.data == Sharding.replicated.data) return "__replicated__";
     return sharding.data.name;
 }
 
 pub fn format(sharding: Sharding, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (sharding.data == Sharding.replicated.data) {
+        try writer.writeAll("Sharding(.replicated)");
+    }
     return sharding.data.format(writer);
 }
 
