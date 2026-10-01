@@ -9,9 +9,6 @@ const MlaOptions = @import("paged_attention.zig").Mla.Options;
 pub const Backend = enum {
     triton,
     fly,
-    /// Blackwell (SM100/SM103) CuTe kernels. Reads selected rows in place from quantized
-    /// caches (`paged_attention.Mla.indexedSparseAttention`); the latent-page path
-    /// falls back to Triton.
     cute,
 
     pub fn auto(platform: *const zml.Platform, dtype: zml.DataType) Backend {
@@ -140,71 +137,52 @@ pub fn launchConfig(paged_opts: Options, topk_count: usize, cu_count_: usize) Co
     return config;
 }
 
+/// Sparse MLA over a paged latent cache, `topk` holding logical token positions.
 pub fn pagedAttention(parameters: triton.paged.Parameters, q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: MlaOptions) zml.Tensor {
+    const rows = triton.paged.topkToPhysical(parameters, topk, tokens_pos, kv_cache.dim(.k_chunk));
+    const active_count = parameters.query_start_len.slice(.b, .single(parameters.query_start_len.dim(.b) - 1));
+    return attention(q, kv_cache, sink, rows, active_count, !parameters.options_.is_prefill, opts);
+}
+
+/// Sparse MLA of `q` [.q, .h, .hd] over the latent cache `kv_cache` [.page, .k_chunk, .hkv, .hd]
+/// with the Triton (or Fly) kernels: `rows` holds the physical row of each selected key
+/// ([.q, .topk], -1 unused), `active_count` the number of leading active queries.
+pub fn attention(q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, rows: zml.Tensor, active_count: zml.Tensor, all_decode: bool, opts: MlaOptions) zml.Tensor {
     const output_shape = q.shape().set(.hd, opts.value_rank);
     return zml.ops.manualComputation(
         (struct {
             q: zml.Tensor,
             kv_cache: zml.Tensor,
             sink: ?zml.Tensor,
-            topk: zml.Tensor,
-            tokens_pos: zml.Tensor,
-            block_table: zml.Tensor,
-            seq_lens: zml.Tensor,
-            query_start_len: zml.Tensor,
+            rows: zml.Tensor,
+            active_count: zml.Tensor,
+            all_decode: bool,
             opts: MlaOptions,
-            options: triton.paged.Options,
 
             fn body(self: @This(), _: zml.Shape) zml.Tensor {
-                const block_size = self.kv_cache.dim(.k_chunk);
-
-                const parameters_: triton.paged.Parameters = .{
-                    .block_table = self.block_table,
-                    .seq_lens = self.seq_lens,
-                    .query_start_len = self.query_start_len,
-                    .options_ = self.options,
-                };
-
-                const topk_final = triton.paged.topkToPhysical(parameters_, self.topk, self.tokens_pos, block_size);
-                const active_query_count = self.query_start_len
-                    .slice(.b, .{ .start = self.query_start_len.dim(.b) - 1 })
-                    .squeeze(.b);
-                stdx.debug.assert(topk_final.dim(.q) == self.q.dim(.q), "expected topk q dim ({}) to match q dim ({})", .{ topk_final.dim(.q), self.q.dim(.q) });
-
-                const num_heads: usize = @intCast(self.q.dim(.h));
+                stdx.debug.assert(self.rows.dim(.q) == self.q.dim(.q), "expected rows q dim ({}) to match q dim ({})", .{ self.rows.dim(.q), self.q.dim(.q) });
                 const paged_opts: Options = .{
                     .qk_rank = @intCast(self.q.dim(.hd)),
                     .value_rank = @intCast(self.opts.value_rank),
-                    .num_heads = num_heads,
+                    .num_heads = @intCast(self.q.dim(.h)),
                     .block_size = @intCast(self.kv_cache.dim(.k_chunk)),
                     .rope_rank = @intCast(self.opts.rope_rank),
                     .scale = self.opts.scale,
                     .total_q_blocks = @intCast(self.q.dim(.q)),
                     .num_kv_splits = self.opts.num_kv_splits,
-                    .all_decode = !self.options.is_prefill,
+                    .all_decode = self.all_decode,
                 };
-
-                return self.opts.backend.call(
-                    self.q,
-                    self.kv_cache,
-                    self.sink,
-                    topk_final,
-                    active_query_count,
-                    paged_opts,
-                );
+                return self.opts.backend.call(self.q, self.kv_cache, self.sink, self.rows, self.active_count, paged_opts);
             }
         }).body,
         .{
             .q = q,
             .kv_cache = kv_cache,
             .sink = sink,
-            .topk = topk,
-            .tokens_pos = tokens_pos,
-            .block_table = parameters.block_table,
-            .seq_lens = parameters.seq_lens,
-            .query_start_len = parameters.query_start_len,
+            .rows = rows,
+            .active_count = active_count,
+            .all_decode = all_decode,
             .opts = opts,
-            .options = parameters.options_,
         },
         output_shape,
     );

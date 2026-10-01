@@ -867,14 +867,108 @@ pub const Mla = struct {
         return attn_weights_non_sink.dot(selected_values, .kv).convert(q.dtype());
     }
 
-    /// Computes sparse MLA scores over the complete cached key and returns
-    /// `opts.value_rank` output dimensions per head.
-    pub fn pagedSparseAttention(parameters: Parameters, q: zml.Tensor, kv_cache: KvCache, sink: ?zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, opts: Mla.Options) zml.Tensor {
-        const latent_kv = switch (kv_cache) {
-            .latent => |latent_kv| latent_kv,
-            else => std.debug.panic("Sparse Multi-Latent Attention support only latent KV pages, got: {}", .{std.meta.activeTag(kv_cache)}),
-        };
+    /// Rows of a paged sparse MLA cache, as stored
+    pub const CacheStorage = union(enum) {
+        latent: zml.Tensor,
+        quantized: zml.quantization.QuantizedInput,
+    };
 
+    pub const Cache = struct {
+        storage: CacheStorage,
+        /// Page table of this cache (block table, sequence lengths, query offsets)
+        parameters: Parameters,
+        /// The logical token positions to attend, -1 or a
+        /// position outside the sequence selects nothing
+        positions: zml.Tensor,
+        /// Ratio of tokens per row
+        compression_ratio: u32 = 1,
+
+        fn rowsPerPage(self: Cache) i64 {
+            return switch (self.storage) {
+                .latent => |t| t.dim(.k_chunk),
+                .quantized => |input| input.values.dim(.k_chunk),
+            };
+        }
+
+        /// Number of leading active query rows, from the page table
+        pub fn activeCount(self: Cache) zml.Tensor {
+            return switch (self.parameters) {
+                .triton, .stablehlo => |p| p.query_start_len.slice(.b, .single(p.query_start_len.dim(.b) - 1)),
+                else => std.debug.panic("sparse MLA does not support {} parameters", .{std.meta.activeTag(self.parameters)}),
+            };
+        }
+
+        /// Flat physical row (page * rows per page + slot) of each selected position
+        /// -1 for none and for queries past `active_count`
+        pub fn physicalRows(self: Cache, tokens_pos: zml.Tensor, active_count: zml.Tensor) zml.Tensor {
+            const page_tokens = self.rowsPerPage() * self.compression_ratio;
+            const tokens = switch (self.parameters) {
+                .triton, .stablehlo => |parameters| triton.paged.topkToPhysical(parameters, self.positions, tokens_pos, page_tokens),
+                else => std.debug.panic("sparse MLA does not support {} parameters", .{std.meta.activeTag(self.parameters)}),
+            };
+            const active = zml.Tensor.iota(tokens.shape(), .q).cmp(.LT, active_count);
+            const valid = tokens.cmp(.GE, .scalar(0, .i32)).logical(.AND, active);
+            return tokens.divByConst(self.compression_ratio).mask(valid, -1);
+        }
+
+        fn gatherRows(self: Cache, rows: zml.Tensor, dtype: zml.DataType) zml.Tensor {
+            const valid = rows.cmp(.GE, .scalar(0, .i32));
+            const safe = rows.mask(valid, 0);
+            const values = switch (self.storage) {
+                .latent => |t| t.merge(.{ .slot = .{ .page, .k_chunk } }).gather(.{ .slot = safe }, .{}).convert(dtype),
+                .quantized => |input| blk: {
+                    const v = input.values.merge(.{ .slot = .{ .page, .k_chunk } }).gather(.{ .slot = safe }, .{});
+                    const sc = input.scales.merge(.{ .slot = .{ .page, .k_chunk } }).gather(.{ .slot = safe }, .{});
+                    const grouped = v.convert(.f32).splitAxis(.hd, .{ .qb = sc.dim(.hd), .qi = .auto });
+                    var dq = grouped.mul(sc.convert(.f32).rename(.{ .hd = .qb }).broad(grouped.shape())).merge(.{ .hd = .{ .qb, .qi } });
+                    if (input.global_scale) |g| dq = dq.mul(g.convert(.f32).broad(dq.shape()));
+                    break :blk dq.convert(dtype).insertAxes(.hd, .{.hkv});
+                },
+            };
+            return values.mask(valid.insertAxes(.last, .{ .hkv, .hd }).broad(values.shape()), 0);
+        }
+    };
+
+    /// The backend for sparse MLA of `q` over these caches: CuTe when its kernel covers
+    /// them (quantized caches on Blackwell), otherwise the platform's latent-row backend.
+    pub fn autoBackend(q: zml.Tensor, cache: Cache, compressed: ?Cache) Mla.Backend {
+        const backend = Mla.Backend.auto(zml.Compiler.current().platform, q.dtype());
+        if (backend == .cute and !cute.covers(q, cache, compressed)) return .triton;
+        return backend;
+    }
+
+    pub fn pagedSparseAttention(q: zml.Tensor, cache: Cache, compressed: ?Cache, sink: ?zml.Tensor, tokens_pos: zml.Tensor, opts: Mla.Options) zml.Tensor {
+        // Every backend reads physical rows
+        const active_count = cache.activeCount();
+        const rows = cache.physicalRows(tokens_pos, active_count);
+        const compressed_rows = if (compressed) |c| c.physicalRows(tokens_pos, active_count) else null;
+        // Switch there because different inputs for the backends
+        return switch (opts.backend) {
+            .cute => cute.pagedAttention(q, cache, rows, compressed, compressed_rows, sink, active_count, opts),
+            .triton, .fly => latentAttention(q, cache, rows, compressed, compressed_rows, sink, active_count, opts),
+        };
+    }
+
+    fn latentAttention(q: zml.Tensor, cache: Cache, rows: zml.Tensor, compressed: ?Cache, compressed_rows: ?zml.Tensor, sink: ?zml.Tensor, active_count: zml.Tensor, opts: Mla.Options) zml.Tensor {
+        if (compressed == null and cache.storage == .latent) {
+            return latentSparseAttention(cache.parameters, q, cache.storage.latent, sink, rows, active_count, opts);
+        }
+        // These steps are made inside the cute kernel
+        var latent = cache.gatherRows(rows, q.dtype());
+        var valid = rows.cmp(.GE, .scalar(0, .i32));
+        if (compressed) |c| {
+            latent = zml.Tensor.concatenate(&.{ latent, c.gatherRows(compressed_rows.?, q.dtype()) }, .topk);
+            valid = zml.Tensor.concatenate(&.{ valid, compressed_rows.?.cmp(.GE, .scalar(0, .i32)) }, .topk);
+        }
+        // Query i reads its gathered rows i * topk + j.
+        const selected = zml.Tensor.iota(valid.shape().withDtype(.i32), .q).scale(valid.dim(.topk))
+            .add(zml.Tensor.iota(valid.shape().withDtype(.i32), .topk)).mask(valid, -1);
+        const gathered = latent.rename(.{ .q = .page, .topk = .k_chunk });
+        const active = zml.Tensor.iota(.init(.{ .q = q.dim(.q) }, .i32), .q).cmp(.LT, active_count);
+        return latentSparseAttention(cache.parameters, q, gathered, sink, selected, active_count, opts).mask(active, 0);
+    }
+
+    fn latentSparseAttention(parameters: Parameters, q: zml.Tensor, latent_kv: zml.Tensor, sink: ?zml.Tensor, rows: zml.Tensor, active_count: zml.Tensor, opts: Mla.Options) zml.Tensor {
         stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }), "expected q to have tags .q, .h, .hd after flattening, got {f}", .{q.shape()});
         stdx.debug.assert(q.dim(.hd) > opts.rope_rank, "expected q head dim ({}) to include a rope tail of {}", .{ q.dim(.hd), opts.rope_rank });
         stdx.debug.assert(opts.value_rank > 0, "expected MLA value rank to be positive, got {}", .{opts.value_rank});
@@ -883,40 +977,9 @@ pub const Mla = struct {
         stdx.debug.assert(latent_kv.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), latent_kv.dim(.hd) });
 
         return switch (parameters) {
-            .triton => |triton_parameters| sparse_mla.pagedAttention(triton_parameters, q, latent_kv, sink, topk, tokens_pos, opts),
-            .stablehlo => |stablehlo_parameters| stablehlo_pagedSparseAttention(
-                q,
-                latent_kv,
-                sink,
-                triton.paged.topkToPhysical(stablehlo_parameters, topk, tokens_pos, latent_kv.dim(.k_chunk)),
-                opts,
-            ),
+            .triton => |p| sparse_mla.attention(q, latent_kv, sink, rows, active_count, !p.options_.is_prefill, opts),
+            .stablehlo => stablehlo_pagedSparseAttention(q, latent_kv, sink, rows, opts),
             else => @panic("NOPE"),
-        };
-    }
-
-    /// Selected rows of one quantized paged cache: the cache values and per-block scales
-    /// (as stored, rows along the last axis) and, per query, the physical rows to attend
-    /// ([.q, .topk] i32, -1 for unused entries; null when the query attends none).
-    pub const IndexedCache = struct {
-        values: zml.Tensor,
-        scales: zml.Tensor,
-        indices: ?zml.Tensor,
-    };
-
-    pub const IndexedOptions = struct {
-        backend: Mla.Backend,
-    };
-
-    /// Sparse MLA over rows read in place from two quantized caches (e.g. a sliding window
-    /// cache and a compressed cache), without gathering them. Returns null when
-    /// `opts.backend` has no kernel for these caches: the caller then gathers the rows and
-    /// uses `pagedSparseAttention`. `active_count` ([1] i32): leading query rows to compute
-    /// (the others are zero).
-    pub fn indexedSparseAttention(q: zml.Tensor, window: IndexedCache, compressed: IndexedCache, sink: zml.Tensor, active_count: zml.Tensor, opts: IndexedOptions) ?zml.Tensor {
-        return switch (opts.backend) {
-            .cute => cute.indexedAttention(q, window, compressed, sink, active_count),
-            .triton, .fly => null,
         };
     }
 };
@@ -966,7 +1029,7 @@ test "Triton sparse MLA value ranks and padded queries" {
     const query_start_len: [2]i32 = .{ 0, 1 };
 
     const q = zml.Tensor.init(q_shape, .f32);
-    const kv: KvCache = .{ .latent = zml.Tensor.init(kv_shape, .f32) };
+    const kv = zml.Tensor.init(kv_shape, .f32);
     const sink = zml.Tensor.init(sink_shape, .f32);
     const topk = zml.Tensor.init(topk_shape, .i32);
     const tokens_pos = zml.Tensor.init(tokens_pos_shape, .i32);
@@ -979,8 +1042,8 @@ test "Triton sparse MLA value ranks and padded queries" {
     defer zml.Buffer.deinitAll(Parameters, &parameters_d);
     var q_d = try zml.Buffer.fromBytes(std.testing.io, platform, q_shape, .replicated, std.mem.sliceAsBytes(&q_data));
     defer q_d.deinit();
-    var kv_d: zml.Bufferized(KvCache) = .{ .latent = try .fromBytes(std.testing.io, platform, kv_shape, .replicated, std.mem.sliceAsBytes(&kv_data)) };
-    defer zml.Buffer.deinitAll(KvCache, &kv_d);
+    var kv_d = try zml.Buffer.fromBytes(std.testing.io, platform, kv_shape, .replicated, std.mem.sliceAsBytes(&kv_data));
+    defer kv_d.deinit();
     var sink_d = try zml.Buffer.fromBytes(std.testing.io, platform, sink_shape, .replicated, std.mem.sliceAsBytes(&sink_data));
     defer sink_d.deinit();
     var topk_d = try zml.Buffer.fromBytes(std.testing.io, platform, topk_shape, .replicated, std.mem.sliceAsBytes(&topk_data));
@@ -1000,7 +1063,7 @@ test "Triton sparse MLA value ranks and padded queries" {
             std.testing.allocator,
             std.testing.io,
             Mla.pagedSparseAttention,
-            .{ parameters, q, kv, sink, topk, tokens_pos, .{
+            .{ q, .{ .storage = .{ .latent = kv }, .parameters = parameters, .positions = topk }, null, sink, tokens_pos, .{
                 .rope_rank = 64,
                 .value_rank = case.value_rank,
                 .scale = 1,
@@ -1015,7 +1078,7 @@ test "Triton sparse MLA value ranks and padded queries" {
             std.testing.io,
             &exe,
             Mla.pagedSparseAttention,
-            .{ parameters_d, q_d, kv_d, sink_d, topk_d, tokens_pos_d },
+            .{ q_d, .{ .storage = .{ .latent = kv_d }, .parameters = parameters_d, .positions = topk_d }, null, sink_d, tokens_pos_d },
         );
         defer output_d.deinit();
         try std.testing.expect(output_d.shape().eql(q_shape.set(.hd, case.value_rank)));
@@ -1082,7 +1145,7 @@ test "execute stablehlo mla kernel" {
     const query_start_len: [2]i32 = .{ 0, 1 };
 
     const q = zml.Tensor.init(q_shape, .f32);
-    const kv: KvCache = .{ .latent = zml.Tensor.init(kv_shape, .f32) };
+    const kv = zml.Tensor.init(kv_shape, .f32);
     const sink = zml.Tensor.init(sink_shape, .f32);
     const topk = zml.Tensor.init(topk_shape, .i32);
     const tokens_pos = zml.Tensor.init(tokens_pos_shape, .i32);
@@ -1095,8 +1158,8 @@ test "execute stablehlo mla kernel" {
     defer zml.Buffer.deinitAll(Parameters, &parameters_d);
     var q_d = try zml.Buffer.fromBytes(std.testing.io, platform, q_shape, .replicated, std.mem.sliceAsBytes(&q_data));
     defer q_d.deinit();
-    var kv_d: zml.Bufferized(KvCache) = .{ .latent = try .fromBytes(std.testing.io, platform, kv_shape, .replicated, std.mem.sliceAsBytes(&kv_data)) };
-    defer zml.Buffer.deinitAll(KvCache, &kv_d);
+    var kv_d = try zml.Buffer.fromBytes(std.testing.io, platform, kv_shape, .replicated, std.mem.sliceAsBytes(&kv_data));
+    defer kv_d.deinit();
     var sink_d = try zml.Buffer.fromBytes(std.testing.io, platform, sink_shape, .replicated, std.mem.sliceAsBytes(&sink_data));
     defer sink_d.deinit();
     var topk_d = try zml.Buffer.fromBytes(std.testing.io, platform, topk_shape, .replicated, std.mem.sliceAsBytes(&topk_data));
@@ -1108,7 +1171,7 @@ test "execute stablehlo mla kernel" {
         std.testing.allocator,
         std.testing.io,
         Mla.pagedSparseAttention,
-        .{ parameters, q, kv, sink, topk, tokens_pos, .{
+        .{ q, .{ .storage = .{ .latent = kv }, .parameters = parameters, .positions = topk }, null, sink, tokens_pos, .{
             .rope_rank = 64,
             .value_rank = 64,
             .scale = 1,
@@ -1122,7 +1185,7 @@ test "execute stablehlo mla kernel" {
         std.testing.io,
         &exe,
         Mla.pagedSparseAttention,
-        .{ parameters_d, q_d, kv_d, sink_d, topk_d, tokens_pos_d },
+        .{ q_d, .{ .storage = .{ .latent = kv_d }, .parameters = parameters_d, .positions = topk_d }, null, sink_d, tokens_pos_d },
     );
     defer zml.Buffer.deinitAll(zml.Tensor, &output_d);
 

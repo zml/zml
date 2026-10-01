@@ -8,8 +8,9 @@
 //! dequantized on chip (`flashmla_sm100.zig`): nothing is gathered in global
 //! memory and there is no split-KV reduction.
 //!
-//! The caller provides, per query, the physical rows to attend in each cache;
-//! `indexedAttention` runs the kernel once per group of 16 heads.
+//! `pagedAttention` is the backend entry of `paged_attention.Mla.pagedSparseAttention`:
+//! it takes the paged caches with their physical rows already resolved from the page
+//! tables, and runs the kernel once per group of 16 heads.
 const std = @import("std");
 
 const zml = @import("../../zml.zig");
@@ -87,8 +88,8 @@ pub const Layout = struct {
     q: zml.Shape, // [.., heads, 512] bf16
     window_values: zml.Shape, // [.., 512] f8e4m3fn
     window_scales: zml.Shape, // [.., 16] f8e8m0
-    compressed_values: zml.Shape, // [.., 512] f4e2m1
-    compressed_scales: zml.Shape, // [.., 32] f8e4m3fn
+    compressed_values: ?zml.Shape, // [.., 512] f4e2m1, null for window-only layers
+    compressed_scales: ?zml.Shape, // [.., 32] f8e4m3fn
     window_capacity: i64, // window rows per query
     compressed_capacity: i64, // compressed (top-k) rows per query, 0 for window-only layers
 };
@@ -109,10 +110,16 @@ pub fn supports(platform: *const zml.Platform, l: Layout) bool {
         l.q.dtype() == .bf16 and last(l.q) == 512 and heads > 0 and @rem(heads, 16) == 0 and heads <= 64 and
         l.window_values.dtype() == .f8e4m3fn and last(l.window_values) == 512 and
         l.window_scales.dtype() == .f8e8m0 and last(l.window_scales) == 16 and
-        l.compressed_values.dtype() == .f4e2m1 and last(l.compressed_values) == 512 and
-        l.compressed_scales.dtype() == .f8e4m3fn and last(l.compressed_scales) == 32 and
+        (l.compressed_capacity == 0 or compressedFormat(l.compressed_values, l.compressed_scales)) and
         l.window_capacity == 128 and
         @rem(l.compressed_capacity, 128) == 0 and l.compressed_capacity >= 0 and l.compressed_capacity <= 512;
+}
+
+fn compressedFormat(values: ?zml.Shape, scales: ?zml.Shape) bool {
+    const v = values orelse return false;
+    const sc = scales orelse return false;
+    return v.dtype() == .f4e2m1 and v.dim(v.rank() - 1) == 512 and
+        sc.dtype() == .f8e4m3fn and sc.dim(sc.rank() - 1) == 32;
 }
 
 pub fn forward(c: Config, a: Inputs) zml.Tensor {
@@ -148,35 +155,60 @@ pub fn forward(c: Config, a: Inputs) zml.Tensor {
     } }).out;
 }
 
-/// In-place sparse MLA (`paged_attention.Mla.indexedSparseAttention`, backend `.cute`): Q
-/// [.b, .h, .hd], the window cache and the compressed cache (values / scales as stored, and
-/// per-query physical rows [.q, .topk], -1 unused). Null when the kernel does not cover
-/// these inputs (see `supports`). Each stream is scanned up to its last valid entry.
-pub fn indexedAttention(q: Tensor, window: Mla.IndexedCache, compressed: Mla.IndexedCache, sink: Tensor, active_count: Tensor) ?Tensor {
-    const window_indices = window.indices orelse return null;
-    const compressed_capacity = if (compressed.indices) |c| c.dim(.topk) else 0;
-    if (!supports(zml.Compiler.current().platform, .{
+/// Whether the kernel covers sparse MLA of `q` [.q, .h, .hd] over these caches: quantized
+/// caches (no global scale) in the formats and sizes of `supports`, on Blackwell.
+pub fn covers(q: Tensor, cache: Mla.Cache, compressed: ?Mla.Cache) bool {
+    const window = quantized(cache) orelse return false;
+    const compressed_input: ?zml.quantization.QuantizedInput = if (compressed) |c| quantized(c) orelse return false else null;
+    return supports(zml.Compiler.current().platform, .{
         .q = q.shape(),
         .window_values = window.values.shape(),
         .window_scales = window.scales.shape(),
-        .compressed_values = compressed.values.shape(),
-        .compressed_scales = compressed.scales.shape(),
-        .window_capacity = window_indices.dim(.topk),
-        .compressed_capacity = compressed_capacity,
-    })) return null;
+        .compressed_values = if (compressed_input) |c| c.values.shape() else null,
+        .compressed_scales = if (compressed_input) |c| c.scales.shape() else null,
+        .window_capacity = cache.positions.dim(.topk),
+        .compressed_capacity = if (compressed) |c| c.positions.dim(.topk) else 0,
+    });
+}
+
+/// Backend `.cute` of `paged_attention.Mla.pagedSparseAttention`: Q [.q, .h, .hd], a
+/// quantized window cache and optionally a quantized compressed cache, `rows` /
+/// `compressed_rows` the physical rows of their selected positions. Panics on inputs the
+/// kernel does not cover (see `covers`). Each stream is scanned up to its last valid entry.
+pub fn pagedAttention(q: Tensor, cache: Mla.Cache, rows: Tensor, compressed: ?Mla.Cache, compressed_rows: ?Tensor, sink: ?Tensor, active_count: Tensor, opts: Mla.Options) Tensor {
+    if (!covers(q, cache, compressed)) std.debug.panic("CuTe sparse MLA does not cover q {f} over a {s} cache of {} rows per query and {s}: use another backend", .{
+        q.shape(),
+        @tagName(cache.storage),
+        cache.positions.dim(.topk),
+        if (compressed) |c| @tagName(c.storage) else "no compressed cache",
+    });
+    const attention_sink = sink orelse std.debug.panic("CuTe sparse MLA requires an attention sink", .{});
+    if (opts.value_rank != q.dim(.hd)) std.debug.panic("CuTe sparse MLA requires value_rank ({}) == head dim ({})", .{ opts.value_rank, q.dim(.hd) });
+    const window = cache.storage.quantized;
+    const compressed_input: ?zml.quantization.QuantizedInput = if (compressed) |c| c.storage.quantized else null;
+    const head_dim: f64 = @floatFromInt(q.dim(.hd));
     return zml.ops.manualComputation(Shard.run, Shard{
-        .q = q,
+        .q = q.rename(.{ .q = .b }),
         .window_values = window.values,
         .window_scales = window.scales,
-        .window_indices = window_indices,
-        .compressed_values = compressed.values,
-        .compressed_scales = compressed.scales,
-        // Window-only layers: a placeholder, not read (compressed capacity 0).
-        .compressed_indices = compressed.indices orelse window_indices,
-        .compressed_capacity = compressed_capacity,
-        .sink = sink,
+        .window_indices = rows,
+        .compressed_values = if (compressed_input) |c| c.values else null,
+        .compressed_scales = if (compressed_input) |c| c.scales else null,
+        // Window-only: a placeholder, not read (compressed capacity 0).
+        .compressed_indices = compressed_rows orelse rows,
+        .compressed_capacity = if (compressed_rows) |r| r.dim(.topk) else 0,
+        .sink = attention_sink,
         .active_count = active_count,
-    }, q.shape());
+        .scale = if (opts.scale) |scale| scale else 1 / @sqrt(head_dim),
+    }, q.shape().rename(.{ .q = .b })).rename(.{ .b = .q });
+}
+
+/// The quantized storage of `cache` (one row per token, no global scale), or null.
+fn quantized(cache: Mla.Cache) ?zml.quantization.QuantizedInput {
+    if (cache.storage != .quantized) return null;
+    const input = cache.storage.quantized;
+    if (input.global_scale != null) return null;
+    return input;
 }
 
 /// Per-device part: this shard's heads, run in groups of 16 (a TP4 shard has exactly 16).
@@ -185,12 +217,13 @@ const Shard = struct {
     window_values: Tensor,
     window_scales: Tensor,
     window_indices: Tensor,
-    compressed_values: Tensor,
-    compressed_scales: Tensor,
+    compressed_values: ?Tensor, // null for window-only layers
+    compressed_scales: ?Tensor,
     compressed_indices: Tensor,
     compressed_capacity: i64,
     sink: Tensor,
     active_count: Tensor,
+    scale: f64,
 
     fn run(self: Shard, _: zml.Shape) Tensor {
         const q = self.q;
@@ -198,7 +231,10 @@ const Shard = struct {
         const queries = q.dim(.b);
         std.debug.assert(@rem(heads, 16) == 0);
         const window_rows: i64 = @intCast(self.window_values.shape().count() / 512);
-        const compressed_rows: i64 = @intCast(self.compressed_values.shape().count() / 512);
+        const compressed_rows: i64 = if (self.compressed_values) |v| @intCast(v.shape().count() / 512) else 1;
+        // Window-only layers: one zero row as a placeholder (compressed capacity 0, never read).
+        const compressed_values = if (self.compressed_values) |v| v.reshape(.{ compressed_rows, 256, 2 }).bitCast(.u8) else Tensor.zeroes(zml.Shape.init(.{ 1, 256 }, .u8));
+        const compressed_scales = if (self.compressed_scales) |sc| sc.bitCast(.u8).reshape(.{ compressed_rows, 32 }) else Tensor.zeroes(zml.Shape.init(.{ 1, 32 }, .u8));
         const window_capacity = self.window_indices.dim(.topk);
         const window_indices = self.window_indices.convert(.i32);
         const compressed_indices = if (self.compressed_capacity > 0)
@@ -215,6 +251,7 @@ const Shard = struct {
             .compressed_capacity = self.compressed_capacity,
             .window_slots = window_rows,
             .compressed_slots = compressed_rows,
+            .scale = self.scale,
         };
         const q_all = q.reshape(.{ queries, heads, 512 });
         const sink_all = self.sink.convert(.f32).reshape(.{heads});
@@ -226,8 +263,8 @@ const Shard = struct {
                 .q = if (groups == 1) q_all else q_all.slice(1, .{ .start = start, .end = start + 16 }),
                 .window_values = self.window_values.bitCast(.u8).reshape(.{ window_rows, 512 }),
                 .window_scales = self.window_scales.bitCast(.u8).reshape(.{ window_rows, 16 }),
-                .compressed_values = self.compressed_values.reshape(.{ compressed_rows, 256, 2 }).bitCast(.u8),
-                .compressed_scales = self.compressed_scales.bitCast(.u8).reshape(.{ compressed_rows, 32 }),
+                .compressed_values = compressed_values,
+                .compressed_scales = compressed_scales,
                 .window_indices = window_indices.reshape(.{ queries, window_capacity }),
                 .compressed_indices = compressed_indices.reshape(.{ queries, self.compressed_capacity }),
                 .lengths = lengths,
