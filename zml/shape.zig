@@ -16,12 +16,18 @@ test {
 }
 
 /// Represent the shape of a tensor.
+/// Contains also the sharding information,
+/// so it describes exactly how the corresponding tensor/buffer will be layed out
+/// across all devices of the current Platform.
+///
+/// By default all created Shape are replicated, meaning the corresponding tensor / buffer will be copied on each device.
+/// `.withPartitioning` allows to specify how it should be split.
 pub const Shape = struct {
     _dtype: DataType,
-    _dims: DimsArray = .empty,
-    _tags: TagsArray = UnknownTags,
-    _partitioning: PartitionArray = .unknown,
-    _sharding: Sharding = .replicated,
+    _dims: DimsArray,
+    _tags: TagsArray,
+    _partitioning: PartitionArray,
+    _sharding: Sharding,
 
     pub const Tag = [*:0]const u8;
     pub const TagUnknown = "_".ptr;
@@ -33,7 +39,6 @@ pub const Shape = struct {
     pub const DimsArray = stdx.BoundedArray(i64, constants.MAX_RANK);
     pub const TagsArray = stdx.BoundedArray(Tag, constants.MAX_RANK);
     pub const AxesArray = stdx.BoundedArray(u3, constants.MAX_RANK);
-    const UnknownTags: TagsArray = .{ .len = 0, .buffer = @splat(TagUnknown) };
 
     pub fn parseDimensions(v: anytype) struct { DimsArray, TagsArray } {
         const T = @TypeOf(v);
@@ -127,26 +132,41 @@ pub const Shape = struct {
     /// Create a shape from a struct literal, eg:
     /// Shape.init(.{ .h = 1024, .w = 512, .c = 3 });
     /// Shape.init(.{ 1024, 512, 3 });
+    ///
+    /// The created shape is replicated.
     pub fn init(dimz: anytype, dt: DataType) Shape {
-        var res: Shape = .{ ._dtype = dt };
-        res._dims, res._tags = parseDimensions(dimz);
-        res._partitioning = .replicated(res._dims.len);
-
-        return res;
+        const _dims, const _tags = parseDimensions(dimz);
+        return .{
+            ._dtype = dt,
+            ._dims = _dims,
+            ._tags = _tags,
+            ._sharding = .replicated,
+            ._partitioning = .replicated(_dims.len),
+        };
     }
 
     pub fn scalar(dt: DataType) Shape {
-        return .{ ._dtype = dt };
+        return .{
+            ._dtype = dt,
+            ._dims = .empty,
+            ._tags = .{ .len = 0, .buffer = @splat(TagUnknown) },
+            ._sharding = .replicated,
+            ._partitioning = .unknown,
+        };
     }
 
     /// Creates a Shape with dims set to `.{0, 1, 2, ..., rank-1}`.
     pub fn range(rank_: usize, dt: DataType) Shape {
-        var res: Shape = .{ ._dtype = dt };
+        stdx.debug.assert(rank_ <= MAX_RANK, "zml.Shape.range expects a maximum rank of {d}, got {}", .{ MAX_RANK, rank_ });
+        var res: Shape = .{
+            ._dtype = dt,
+            ._dims = .empty,
+            ._tags = .{ .buffer = @splat(TagUnknown), .len = rank_ },
+            ._sharding = .replicated,
+            ._partitioning = .replicated(rank_),
+        };
         for (0..rank_) |i| {
-            res._dims.append(@intCast(i)) catch {
-                stdx.debug.panic("Too many dimensions! Max: {d}, passed: {d}", .{ res._dims.capacity(), rank_ });
-            };
-            res._tags.append(TagUnknown) catch unreachable;
+            res._dims.appendAssumeCapacity(@intCast(i));
         }
         return res;
     }
@@ -445,9 +465,18 @@ pub const Shape = struct {
         return true;
     }
 
+    /// Reshape a given shape but keep the same total number of elements.
+    /// Partitioning information is generally NOT preserved,
+    /// unless input was fully replicated.
     pub fn reshape(self: Shape, new_shape_: anytype) Shape {
-        var new_shape: Shape = .{ ._dtype = self.dtype(), ._sharding = self._sharding };
-        new_shape._dims, new_shape._tags = parseDimensions(new_shape_);
+        const _dims, const _tags = parseDimensions(new_shape_);
+        var new_shape: Shape = .{
+            ._dtype = self._dtype,
+            ._dims = _dims,
+            ._tags = _tags,
+            ._sharding = self._sharding,
+            ._partitioning = if (self.isFullyReplicated()) .replicated(_dims.len) else .unknown,
+        };
         new_shape.inferMissingAxis(self.count()) catch |err| {
             std.debug.panic("Can't reshape {any} to {any}: {t}", .{ self.dims(), new_shape.dims(), err });
         };
@@ -983,7 +1012,7 @@ pub const Shape = struct {
     pub fn isFullyReplicated(self: Shape) bool {
         for (0..self.rank()) |ax| {
             const spec = self._partitioning.get(ax);
-            if (spec != .replicated and spec != .unknown) {
+            if (spec != .replicated) {
                 return false;
             }
         }
@@ -992,9 +1021,6 @@ pub const Shape = struct {
 
     test isFullyReplicated {
         var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(test_sharding, .{ .a = .replicated, .b = .replicated });
-        try testing.expect(shape.isFullyReplicated());
-
-        shape = shape.withPartitioning(test_sharding, .{ .a = .replicated, .b = .unknown });
         try testing.expect(shape.isFullyReplicated());
 
         shape = shape.withPartitioning(test_sharding, .{ .a = .batch, .b = .replicated });
@@ -1577,15 +1603,23 @@ pub const Shape = struct {
         }
 
         pub fn replicated(rank_: usize) PartitionArray {
-            std.debug.assert(rank_ <= MAX_RANK);
-            const full_replicated: Vec = @splat(@intFromEnum(PartitionSpec.replicated));
-            const mask = std.simd.iota(u4, 8) < @as(Vec, @splat(@truncate(rank_)));
-            return @bitCast(@select(u4, mask, full_replicated, @as(Vec, @bitCast(unknown))));
+            return splatPartial(.replicated, rank_);
+        }
+
+        pub fn open(rank_: usize) PartitionArray {
+            return splatPartial(.open, rank_);
         }
 
         pub fn splat(spec: PartitionSpec) PartitionArray {
             const vec: Vec = @splat(@intFromEnum(spec));
             return @bitCast(vec);
+        }
+
+        pub fn splatPartial(spec: PartitionSpec, rank_: usize) PartitionArray {
+            std.debug.assert(rank_ <= MAX_RANK);
+            const splatted: Vec = @splat(@intFromEnum(spec));
+            const mask = std.simd.iota(u4, 8) < @as(Vec, @splat(@truncate(rank_)));
+            return @bitCast(@select(u4, mask, splatted, @as(Vec, @bitCast(unknown))));
         }
 
         pub fn get(array: PartitionArray, ax: usize) PartitionSpec {
@@ -1703,7 +1737,9 @@ pub const Shape = struct {
         // an 8D mesh seems already a lot, the max we know about is 3D.
         replicated = 8,
 
-        unknown = 14,
+        // Special value to replace "undefined". LLVM `undefined` tracking doesn't go to sub-bytes struct,
+        // so it's not a good idea to have `undefined` PartitionSpec inside a PartitionArray
+        unknown = 0xa,
         open = 15,
 
         pub fn sharded(mesh_axis: u3) PartitionSpec {

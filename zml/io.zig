@@ -106,7 +106,7 @@ pub const TensorStore = struct {
         return .{ .store = self };
     }
 
-    pub fn getSharding(store: *const TensorStore, name: @EnumLiteral()) Sharding {
+    pub fn sharding(store: *const TensorStore, name: @EnumLiteral()) Sharding {
         const name_slice = @tagName(name);
         for (store.shardings) |mesh| {
             if (std.mem.eql(u8, name_slice, mesh.data.name)) {
@@ -180,15 +180,15 @@ pub const TensorStore = struct {
         }
 
         /// Creates a zml.Tensor from a specific entry in the store.
-        pub fn createTensor(self: View, subkey: []const u8, tags: anytype, sharding: @EnumLiteral(), partitioning: anytype) Tensor {
-            return self.maybeCreateTensor(subkey, tags, sharding, partitioning) orelse
+        pub fn createTensor(self: View, subkey: []const u8, tags: anytype, sharding_: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateTensor(subkey, tags, sharding_, partitioning) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, sharding: @EnumLiteral(), partitioning: anytype) ?Tensor {
+        pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, sharding_: @EnumLiteral(), partitioning: anytype) ?Tensor {
             const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
             const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
-            const resolved_sharding = self.store.getSharding(sharding);
+            const resolved_sharding = self.store.sharding(sharding_);
 
             const p: Shape.PartitionArray = if (has_tags) p: {
                 // Parse the partitioning. Theoritically we only need tags + spec, but the function is on a full Shape object
@@ -207,13 +207,13 @@ pub const TensorStore = struct {
             return self.maybeCreateTensorInternal(subkey, parsed_tags.constSlice(), resolved_sharding, p);
         }
 
-        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, sharding: @EnumLiteral(), partitioning: anytype) Tensor {
-            return self.maybeCreateHostPinnedTensor(subkey, tags, sharding, partitioning) orelse
+        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, sharding_: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateHostPinnedTensor(subkey, tags, sharding_, partitioning) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, sharding: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
-            const tensor = self.maybeCreateTensor(subkey, tags, sharding, partitioning);
+        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, sharding_: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
+            const tensor = self.maybeCreateTensor(subkey, tags, sharding_, partitioning);
             if (tensor) |t| {
                 const storage = self.store.id_to_sources.getPtr(t.id);
                 storage.?.memory = .host_pinned;
@@ -229,7 +229,7 @@ pub const TensorStore = struct {
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?[]const Shape.Tag, sharding: Sharding, partitioning: ?Shape.PartitionArray) ?Tensor {
+        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?[]const Shape.Tag, sharding_: Sharding, partitioning: ?Shape.PartitionArray) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             const source = self.store.dupeSource(key) orelse return null;
@@ -243,7 +243,7 @@ pub const TensorStore = struct {
                 stdx.debug.assert(user_tags.len == shape.rank(), "tensor {s} from store has shape {f}, but `createTensor` got only {d} tags: {f}", .{ key, source.shape, user_tags.len, stdx.fmt.stringsZ(user_tags) });
                 @memcpy(shape._tags.slice(), user_tags);
             }
-            shape._sharding = sharding;
+            shape._sharding = sharding_;
             // partitioning is only null when called from createReplicatedTensor
             shape._partitioning = partitioning orelse .replicated(source.shape.rank());
 
@@ -488,7 +488,7 @@ pub const Loader = struct {
             self.dma_allocators,
             self.dma_chunk_size,
             shape,
-            shape._sharding.resolveReplicated(self.platform),
+            shape._sharding._handleFakeReplicatedObject(self.platform),
             buffer,
             memory,
         );

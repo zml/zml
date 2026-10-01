@@ -164,9 +164,9 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
     // Ensure replicated sharding is always included as a fallback option.
     var shardings = std.ArrayList(Sharding).initCapacity(arena.allocator(), opts.shardings.len + 1) catch @panic("OOM");
     var needs_replicated: bool = true;
-    for (opts.shardings) |sharding| {
-        if (sharding.data == platform.replicated_sharding.data) needs_replicated = false;
-        shardings.appendAssumeCapacity(sharding.resolveReplicated(platform));
+    for (opts.shardings) |shd| {
+        if (shd.data == platform.replicated_sharding.data) needs_replicated = false;
+        shardings.appendAssumeCapacity(shd._handleFakeReplicatedObject(platform));
     }
     if (needs_replicated) shardings.appendAssumeCapacity(platform.replicated_sharding);
 
@@ -330,13 +330,14 @@ pub fn allocPrint(self: *Compiler, comptime fmt: []const u8, args: anytype) []u8
     return std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch self.abortOOM();
 }
 
-pub fn getSharding(compiler: *const Compiler, name: @EnumLiteral()) Sharding {
+pub fn sharding(compiler: *const Compiler, name: @EnumLiteral()) Sharding {
     const name_slice = @tagName(name);
     for (compiler.shardings) |mesh| {
         if (std.mem.eql(u8, name_slice, mesh.data.name)) {
             return mesh;
         }
     }
+    if (name == .replicated) return compiler.platform.replicated_sharding;
     std.debug.panic(
         \\Found no shardings named {s}.
         \\Try passing more shardings to `zml.compile`.
@@ -352,12 +353,12 @@ pub fn resolveSharding(compiler: *const Compiler, logical_axes: anytype) Shardin
     }
 
     var ok_sharding: ?Sharding = null;
-    for (compiler.shardings) |sharding| {
+    for (compiler.shardings) |shd| {
         var covers_all: bool = true;
         for (logical_axes) |ax| {
             const input_axis = Shape.toTag(ax);
             var covers_this: bool = false;
-            for (sharding.data.logical.axes.slice()) |existing_axis| {
+            for (shd.data.logical.axes.slice()) |existing_axis| {
                 if (std.mem.eql(u8, std.mem.span(existing_axis), std.mem.span(input_axis))) {
                     covers_this = true;
                     break;
@@ -371,9 +372,9 @@ pub fn resolveSharding(compiler: *const Compiler, logical_axes: anytype) Shardin
                     \\Found two shardings covering axes: {any}, expected exacty one.
                     \\- First match: {f}
                     \\- Second match: {f}
-                , .{ logical_axes, first_match, sharding });
+                , .{ logical_axes, first_match, shd });
             }
-            ok_sharding = sharding;
+            ok_sharding = shd;
         }
     }
 
@@ -511,11 +512,11 @@ fn addPartitionerOperations(ctx: *Compiler) !void {
     switch (ctx.partitioner) {
         .gspmd => {},
         .shardy => {
-            for (ctx.shardings) |sharding| {
-                const attr_str = try sharding.data.sdyMeshAttr(allocator);
+            for (ctx.shardings) |shd| {
+                const attr_str = try shd.data.sdyMeshAttr(allocator);
                 defer allocator.free(attr_str);
 
-                const name = sharding.data.name;
+                const name = shd.data.name;
                 const mesh_attr = try mlir.Attribute.parse(mlir_ctx, attr_str);
 
                 const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
@@ -637,7 +638,7 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
                 .shape = og_shape,
-                .sharding = tensor.shape()._sharding.resolveReplicated(ctx.compiler.platform),
+                .sharding = tensor.shape()._sharding._handleFakeReplicatedObject(ctx.compiler.platform),
                 .value = value,
             });
         }
@@ -674,7 +675,7 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
                 // TODO: clarify why this og_shape and not packedShape()
                 .shape = og_shape,
                 // Note: the panic should have been triggered during createBlockArguments or emitMlir
-                .sharding = tensor._shape._sharding.resolveReplicated(ctx.compiler.platform),
+                .sharding = tensor._shape._sharding._handleFakeReplicatedObject(ctx.compiler.platform),
                 .value = value,
             });
         }
@@ -814,11 +815,11 @@ pub fn tensorShardingAttr(
     allocator: std.mem.Allocator,
     mlir_ctx: *mlir.Context,
     shape: Shape,
-    sharding: Sharding,
+    shd: Sharding,
 ) error{OutOfMemory}!*const mlir.Attribute {
     return switch (compiler.partitioner) {
-        .shardy => (try sharding.data.sdyShardingAttrForShape(allocator, mlir_ctx, shape)).asAttr(),
-        .gspmd => sharding.data.gspmdShardingAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
+        .shardy => (try shd.data.sdyShardingAttrForShape(allocator, mlir_ctx, shape)).asAttr(),
+        .gspmd => shd.data.gspmdShardingAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
             error.WriteFailed => error.OutOfMemory, // We're writing to memory
             error.OutOfMemory => error.OutOfMemory,
             // TODO(hugomano): clarify what can trigger this and consider moving the check to the Sharding creation

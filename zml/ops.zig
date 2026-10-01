@@ -2582,7 +2582,7 @@ fn manualComputationInternal(
     const BodyOutputShapesT = stdx.meta.FnParam(body_fn, 1);
 
     const ctx = Compiler.current();
-    const sharding = sharding_.resolveReplicated(ctx.platform);
+    const sharding = sharding_._handleFakeReplicatedObject(ctx.platform);
     const scope = ctx.currentScope();
 
     var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);

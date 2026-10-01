@@ -135,7 +135,7 @@ pub const Buffer = struct {
         var res: Buffer = .{
             ._platform = platform,
             ._shape = shape_,
-            ._sharding = sharding.resolveReplicated(platform),
+            ._sharding = sharding._handleFakeReplicatedObject(platform),
             ._shards = .empty,
         };
         errdefer for (res._shards.slice()) |shard| {
@@ -225,7 +225,7 @@ pub const Buffer = struct {
         var res: Buffer = .{
             ._platform = platform,
             ._shape = shape_,
-            ._sharding = sharding.resolveReplicated(platform),
+            ._sharding = sharding._handleFakeReplicatedObject(platform),
             ._shards = .empty,
         };
         errdefer for (res._shards.slice()) |shard| {
