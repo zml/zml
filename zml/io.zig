@@ -225,7 +225,11 @@ pub const TensorStore = struct {
             const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
             const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
 
-            return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.slice() else null, .replicated, null) orelse
+            // Note: since here we don't have access to the true `platform.replicated_sharding`
+            // we instead use the .replicated singleton, which laters requires the infamous _handleFakeReplicatedObject.
+            // This could be done differently if eg the TensorStore was created with the platform.
+            const replicated: Sharding = .replicated;
+            return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.slice() else null, replicated, null) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
