@@ -1706,6 +1706,105 @@ pub const Tensor = struct {
         try zml.testing.expectClose(std.testing.io, expectation, res, .{});
     }
 
+    /// Returns an element-wise approximation of the error function, computed and returned in FP32.
+    /// Uses the Eigen rational approximation from CHLO's FP32 erf legalization:
+    /// https://github.com/openxla/stablehlo/blob/main/stablehlo/transforms/ChloLegalizeToStablehlo.cpp
+    pub fn erf(input: Tensor) Tensor {
+        const x = input.convert(.f32).clamp(.scalar(-4, .f32), .scalar(4, .f32));
+        const x2 = x.mul(x);
+        // Coefficients run from the highest degree to the constant term.
+        const alpha = [_]f32{
+            -2.72614225801306e-10,
+            2.77068142495902e-08,
+            -2.10102402082508e-06,
+            -5.69250639462346e-05,
+            -7.34990630326855e-04,
+            -2.95459980854025e-03,
+            -1.60960333262415e-02,
+        };
+        const beta = [_]f32{
+            -1.45660718464996e-05,
+            -2.13374055278905e-04,
+            -1.68282697438203e-03,
+            -7.37332916720468e-03,
+            -1.42647390514189e-02,
+        };
+        var numerator = x2.scale(alpha[0]).addConstant(alpha[1]);
+        inline for (alpha[2..]) |coefficient| {
+            numerator = numerator.mul(x2).addConstant(coefficient);
+        }
+        var denominator = x2.scale(beta[0]).addConstant(beta[1]);
+        inline for (beta[2..]) |coefficient| {
+            denominator = denominator.mul(x2).addConstant(coefficient);
+        }
+        return x.mul(numerator).div(denominator).clamp(.scalar(-1, .f32), .scalar(1, .f32));
+    }
+
+    /// Returns an element-wise approximation of the complementary error function in FP32.
+    /// Uses CHLO's Cephes-based approximation to preserve the small positive tail:
+    /// https://github.com/openxla/stablehlo/blob/main/stablehlo/transforms/ChloLegalizeToStablehlo.cpp
+    pub fn erfc(input: Tensor) Tensor {
+        const x = input.convert(.f32);
+        const abs_x = x.abs();
+        const x2 = x.mul(x);
+        const one = Tensor.scalar(1, .f32);
+
+        // For |x| < 1, erf(x) = x T(x^2). Coefficients run from highest degree to constant.
+        const t = [_]f32{
+            7.853861353153693e-5,
+            -8.010193625184903e-4,
+            5.188327685732524e-3,
+            -2.685381193529856e-2,
+            1.128358514861418e-1,
+            -3.761262582423300e-1,
+            1.128379165726710,
+        };
+        var small_poly = x2.scale(t[0]).addConstant(t[1]);
+        inline for (t[2..]) |coefficient| {
+            small_poly = small_poly.mul(x2).addConstant(coefficient);
+        }
+        const small = x.mul(small_poly).negate().addConstant(1);
+
+        // For |x| >= 1, evaluate exp(-x^2) / |x| times P(1/x^2) or R(1/x^2).
+        const p = [_]f32{
+            2.326819970068386e-2,
+            -1.387039388740657e-1,
+            3.687424674597105e-1,
+            -5.824733027278666e-1,
+            6.210004621745983e-1,
+            -4.944515323274145e-1,
+            3.404879937665872e-1,
+            -2.741127028184656e-1,
+            5.638259427386472e-1,
+        };
+        const r = [_]f32{
+            -1.047766399936249e1,
+            1.297719955372516e1,
+            -7.495518717768503,
+            2.921019019210786,
+            -1.015265279202700,
+            4.218463358204948e-1,
+            -2.820767439740514e-1,
+            5.641895067754075e-1,
+        };
+        const reciprocal_x2 = one.div(x2);
+        var middle_poly = reciprocal_x2.scale(p[0]).addConstant(p[1]);
+        inline for (p[2..]) |coefficient| {
+            middle_poly = middle_poly.mul(reciprocal_x2).addConstant(coefficient);
+        }
+        var tail_poly = reciprocal_x2.scale(r[0]).addConstant(r[1]);
+        inline for (r[2..]) |coefficient| {
+            tail_poly = tail_poly.mul(reciprocal_x2).addConstant(coefficient);
+        }
+        const poly = abs_x.cmp(.LT, .scalar(2, .f32)).select(middle_poly, tail_poly);
+        const z = x2.negate();
+        const tail = z.exp().mul(one.div(abs_x)).mul(poly);
+        // Match CHLO's underflow cutoff, then use erfc(-x) = 2 - erfc(x).
+        const positive = z.cmp(.LT, .scalar(-88.72283905206835, .f32)).select(.scalar(0, .f32), tail);
+        const large = x.cmp(.LT, .scalar(0, .f32)).select(positive.negate().addConstant(2), positive);
+        return abs_x.cmp(.LT, one).select(small, large);
+    }
+
     /// Returns a Tensor containing the Gaussian Error Linear Units (GeLU) activation function applied to each element of the input Tensor.
     ///
     /// We use an approximation of the erf function using tanh:

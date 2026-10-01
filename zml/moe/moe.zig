@@ -4,6 +4,7 @@ const platforms = @import("platforms");
 
 const zml = @import("../zml.zig");
 const stdx = zml.stdx;
+pub const stablehlo = @import("stablehlo.zig");
 pub const triton_mxfp4 = @import("triton_mxfp4.zig");
 pub const cute_mxfp4 = @import("cute_mxfp4.zig");
 pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
@@ -73,6 +74,7 @@ pub const Activation = union(ActivationKind) {
 };
 
 pub const Backend = enum {
+    stablehlo,
     cute_mxfp4,
     triton_mxfp4,
     flashinfer_cutlass,
@@ -130,6 +132,7 @@ pub const Backend = enum {
 
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
+            .stablehlo => true,
             .triton_mxfp4 => triton_mxfp4.isAvailable(platform),
             .cute_mxfp4 => cute_mxfp4.isAvailable(platform),
             .flashinfer_cutlass => cutlass_flashinfer.isAvailable(platform),
@@ -149,6 +152,7 @@ pub const Backend = enum {
     /// The layout contract the expert weights must have for a given backend with scheme
     pub fn expertsLayout(backend: Backend, scheme: ?zml.Quantization.Scheme) !ExpertsLayout {
         return switch (backend) {
+            .stablehlo => .{ .gate_up = .concatenated, .packing = .plain },
             .cute_mxfp4 => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
             .triton_mxfp4 => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else error.UnsupportedQuantization,
             .flashinfer_cutlass => if (scheme == .nvfp4) .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 } else error.UnsupportedQuantization,
@@ -159,6 +163,7 @@ pub const Backend = enum {
 
     pub fn register(backend: Backend, platform: *zml.Platform) !void {
         return switch (backend) {
+            .stablehlo => {},
             .cute_mxfp4, .triton_mxfp4 => {},
             .flashinfer_cutlass => cutlass_flashinfer.register(platform),
             .triton, .fly => {},
@@ -186,6 +191,7 @@ pub fn forwardMoe(
     opts: Options,
 ) zml.Tensor {
     return switch (backend) {
+        .stablehlo => stablehlo.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
         .cute_mxfp4 => cute_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
         .triton_mxfp4 => triton_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
         .flashinfer_cutlass => cutlass_flashinfer.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
