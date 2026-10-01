@@ -38,6 +38,7 @@ zls_completion(
         "//bin/zml-smi",
         "//examples/llm",
         "//examples/mnist",
+        "//examples/qwen",
         "//examples/sharding",
         "//examples/io:playground",
         "//stdx",
