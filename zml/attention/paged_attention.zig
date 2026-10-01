@@ -929,11 +929,11 @@ pub const Mla = struct {
         }
     };
 
-    /// The backend for sparse MLA of `q` over these caches: CuTe when its kernel covers
+    /// The backend for sparse MLA of `q` over these caches: CuTe when its kernel supports
     /// them (quantized caches on Blackwell), otherwise the platform's latent-row backend.
     pub fn autoBackend(q: zml.Tensor, cache: Cache, compressed: ?Cache) Mla.Backend {
         const backend = Mla.Backend.auto(zml.Compiler.current().platform, q.dtype());
-        if (backend == .cute and !cute.covers(q, cache, compressed)) return .triton;
+        if (backend == .cute and !cute.supportsInputs(q, cache, compressed)) return .triton;
         return backend;
     }
 
@@ -942,7 +942,8 @@ pub const Mla = struct {
         const active_count = cache.activeCount();
         const rows = cache.physicalRows(tokens_pos, active_count);
         const compressed_rows = if (compressed) |c| c.physicalRows(tokens_pos, active_count) else null;
-        // Switch there because different inputs for the backends
+
+        // Switch there because backends read input rows differently 
         return switch (opts.backend) {
             .cute => cute.pagedAttention(q, cache, rows, compressed, compressed_rows, sink, active_count, opts),
             .triton, .fly => latentAttention(q, cache, rows, compressed, compressed_rows, sink, active_count, opts),
@@ -953,6 +954,7 @@ pub const Mla = struct {
         if (compressed == null and cache.storage == .latent) {
             return latentSparseAttention(cache.parameters, q, cache.storage.latent, sink, rows, active_count, opts);
         }
+
         // These steps are made inside the cute kernel
         var latent = cache.gatherRows(rows, q.dtype());
         var valid = rows.cmp(.GE, .scalar(0, .i32));
@@ -960,6 +962,7 @@ pub const Mla = struct {
             latent = zml.Tensor.concatenate(&.{ latent, c.gatherRows(compressed_rows.?, q.dtype()) }, .topk);
             valid = zml.Tensor.concatenate(&.{ valid, compressed_rows.?.cmp(.GE, .scalar(0, .i32)) }, .topk);
         }
+
         // Query i reads its gathered rows i * topk + j.
         const selected = zml.Tensor.iota(valid.shape().withDtype(.i32), .q).scale(valid.dim(.topk))
             .add(zml.Tensor.iota(valid.shape().withDtype(.i32), .topk)).mask(valid, -1);

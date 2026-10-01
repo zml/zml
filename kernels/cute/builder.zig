@@ -11,7 +11,9 @@ const arith = dialects.arith;
 const cuda = dialects.cuda;
 const func = dialects.func;
 const gpu = dialects.gpu;
+const llvm = dialects.llvm;
 const math = dialects.math;
+const nvvm = dialects.nvvm;
 const vector = dialects.vector;
 
 const dtypes = @import("dtype.zig");
@@ -2225,19 +2227,12 @@ pub const Builder = struct {
     /// Commit the preceding tcgen05 MMA operations to an mbarrier. One elected
     /// lane of the MMA warp issues this after each K-stage.
     pub fn tcgen05Commit(self: *Builder, barrier: Value) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.tcgen05.commit", .{
-            .operands = .{ .flat = &.{self.sharedBarrierPtr(barrier).inner} },
-            .attributes = &.{.named(self.ctx, "group", self.parseAttribute("#nvvm.cta_group<cta_1>"))},
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.tcgen05_commit(self.ctx, self.sharedBarrierPtr(barrier).inner, .cta_1, self.loc()));
     }
 
     /// Wait until asynchronous tensor-memory loads have reached registers.
     pub fn fenceTmemLoad(self: *Builder) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.tcgen05.wait", .{
-            .attributes = &.{.named(self.ctx, "kind", self.parseAttribute("#nvvm.tcgen05_wait<load>"))},
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.tcgen05_wait(self.ctx, .load, self.loc()));
     }
 
     pub const TmemOptions = struct { two_cta: bool = false, exclusive: bool = false };
@@ -2399,10 +2394,7 @@ pub const Builder = struct {
     fn sreg(self: *Builder, comptime reg: []const u8) Index3 {
         var out: [3]Value = undefined;
         inline for (.{ "x", "y", "z" }, 0..) |axis, i| {
-            out[i] = self.emit(mlir.Operation.make(self.ctx, "nvvm.read.ptx.sreg." ++ reg ++ "." ++ axis, .{
-                .results = .{ .flat = &.{.int(self.ctx, .i32)} },
-                .location = self.loc(),
-            }));
+            out[i] = self.emit(nvvm.read_sreg(self.ctx, reg ++ "." ++ axis, self.loc()));
         }
         return .{ .x = out[0], .y = out[1], .z = out[2] };
     }
@@ -2444,10 +2436,7 @@ pub const Builder = struct {
 
     /// `cute.arch.sync_threads()`.
     pub fn syncThreads(self: *Builder) void {
-        _ = mlir.Operation.make(self.ctx, "nvvm.barrier", .{
-            .attributes = &.{.named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ 0, 0, 0 }))},
-            .location = self.loc(),
-        }).appendTo(self.currentBlock());
+        _ = nvvm.barrier(self.ctx, self.loc()).appendTo(self.currentBlock());
     }
 
     /// Synchronize a fixed subset of the CTA on a named hardware barrier.
@@ -2465,14 +2454,7 @@ pub const Builder = struct {
             "bar.sync {d}, {d};",
             .{ id, participants },
         ) catch @panic("namedBarrier OOM");
-        _ = mlir.Operation.make(self.ctx, "llvm.inline_asm", .{
-            .attributes = &.{
-                .named(self.ctx, "asm_string", .string(self.ctx, assembly)),
-                .named(self.ctx, "constraints", .string(self.ctx, "")),
-                .named(self.ctx, "has_side_effects", .unit(self.ctx)),
-            },
-            .location = self.loc(),
-        }).appendTo(self.currentBlock());
+        _ = llvm.inline_asm(self.ctx, assembly, &.{}, null, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
     }
 
     /// Build the CuTe first-class divisor used by CUTLASS's persistent tile
@@ -2504,10 +2486,7 @@ pub const Builder = struct {
     /// Elect one lane from the active warp. Used by TMA issue, tensor-memory
     /// allocation, and tcgen05 commit operations.
     pub fn electSync(self: *Builder) Value {
-        return self.emit(mlir.Operation.make(self.ctx, "nvvm.elect.sync", .{
-            .results = .{ .flat = &.{.int(self.ctx, .i1)} },
-            .location = self.loc(),
-        }));
+        return self.emit(nvvm.elect_sync(self.ctx, self.loc()));
     }
 
     /// `cute.arch.shuffle_sync_bfly`: exchange a scalar with the lane at
@@ -2519,15 +2498,7 @@ pub const Builder = struct {
         const dtype = value.dtype();
         if (dtypeBitwidth(dtype) != 32) @panic("warpMaxNonNegative requires a 32-bit scalar");
         const bits = if (dtype == .i32) value else value.bitCast(.i32);
-        const reduced = self.emit(mlir.Operation.make(self.ctx, "llvm.inline_asm", .{
-            .operands = .{ .flat = &.{bits.inner} },
-            .results = .{ .flat = &.{.int(self.ctx, .i32)} },
-            .attributes = &.{
-                .named(self.ctx, "asm_string", .string(self.ctx, "redux.sync.max.u32 $0, $1, 0xffffffff;")),
-                .named(self.ctx, "constraints", .string(self.ctx, "=r,r")),
-            },
-            .location = self.loc(),
-        }));
+        const reduced = self.emit(llvm.inline_asm(self.ctx, "redux.sync.max.u32 $0, $1, 0xffffffff;", &.{bits.inner}, .int(self.ctx, .i32), .{ .constraints = "=r,r" }, self.loc()));
         return if (dtype == .i32) reduced else reduced.bitCast(dtype);
     }
 
@@ -2535,18 +2506,7 @@ pub const Builder = struct {
         const dtype = value.dtype();
         if (dtypeBitwidth(dtype) != 32) @panic("shuffleXor currently requires a 32-bit scalar");
         const bits = if (dtype == .i32) value else value.bitCast(.i32);
-        const shuffled = self.emit(mlir.Operation.make(self.ctx, "llvm.inline_asm", .{
-            .operands = .{ .flat = &.{
-                bits.inner,
-                self.cst(.i32, offset).inner,
-            } },
-            .results = .{ .flat = &.{.int(self.ctx, .i32)} },
-            .attributes = &.{
-                .named(self.ctx, "asm_string", .string(self.ctx, "shfl.sync.bfly.b32 $0, $1, $2, 31, 0xffffffff;")),
-                .named(self.ctx, "constraints", .string(self.ctx, "=r,r,r")),
-            },
-            .location = self.loc(),
-        }));
+        const shuffled = self.emit(llvm.inline_asm(self.ctx, "shfl.sync.bfly.b32 $0, $1, $2, 31, 0xffffffff;", &.{ bits.inner, self.cst(.i32, offset).inner }, .int(self.ctx, .i32), .{ .constraints = "=r,r,r" }, self.loc()));
         return if (dtype == .i32) shuffled else shuffled.bitCast(dtype);
     }
 
@@ -2556,73 +2516,39 @@ pub const Builder = struct {
         const dtype = value.dtype();
         if (dtypeBitwidth(dtype) != 32) @panic("shuffleIdx currently requires a 32-bit scalar");
         const bits = if (dtype == .i32) value else value.bitCast(.i32);
-        const shuffled = self.emit(mlir.Operation.make(self.ctx, "llvm.inline_asm", .{
-            .operands = .{ .flat = &.{
-                bits.inner,
-                self.liftAs(lane, .i32).inner,
-            } },
-            .results = .{ .flat = &.{.int(self.ctx, .i32)} },
-            .attributes = &.{
-                .named(self.ctx, "asm_string", .string(self.ctx, "shfl.sync.idx.b32 $0, $1, $2, 31, 0xffffffff;")),
-                .named(self.ctx, "constraints", .string(self.ctx, "=r,r,r")),
-            },
-            .location = self.loc(),
-        }));
+        const shuffled = self.emit(llvm.inline_asm(self.ctx, "shfl.sync.idx.b32 $0, $1, $2, 31, 0xffffffff;", &.{ bits.inner, self.liftAs(lane, .i32).inner }, .int(self.ctx, .i32), .{ .constraints = "=r,r,r" }, self.loc()));
         return if (dtype == .i32) shuffled else shuffled.bitCast(dtype);
     }
 
     /// Four FP32 values rounded to FP8 E4M3 (saturating) and packed into one
     /// 32-bit word, `a` in the lowest byte.
     pub fn packFp8x4(self: *Builder, a: Value, b: Value, c: Value, d: Value) Value {
-        return self.emit(mlir.Operation.make(self.ctx, "llvm.inline_asm", .{
-            .operands = .{ .flat = &.{ a.to(.f32).inner, b.to(.f32).inner, c.to(.f32).inner, d.to(.f32).inner } },
-            .results = .{ .flat = &.{.int(self.ctx, .i32)} },
-            .attributes = &.{
-                .named(self.ctx, "asm_string", .string(self.ctx, "{ .reg .b16 lo, hi; cvt.rn.satfinite.e4m3x2.f32 lo, $2, $1; cvt.rn.satfinite.e4m3x2.f32 hi, $4, $3; mov.b32 $0, {lo, hi}; }")),
-                .named(self.ctx, "constraints", .string(self.ctx, "=r,f,f,f,f")),
-            },
-            .location = self.loc(),
-        }));
+        return self.emit(llvm.inline_asm(
+            self.ctx,
+            "{ .reg .b16 lo, hi; cvt.rn.satfinite.e4m3x2.f32 lo, $2, $1; cvt.rn.satfinite.e4m3x2.f32 hi, $4, $3; mov.b32 $0, {lo, hi}; }",
+            &.{ a.to(.f32).inner, b.to(.f32).inner, c.to(.f32).inner, d.to(.f32).inner },
+            .int(self.ctx, .i32),
+            .{ .constraints = "=r,f,f,f,f" },
+            self.loc(),
+        ));
     }
 
     /// One-operand FP32 PTX instruction, e.g. `ex2.approx.ftz.f32`.
     pub fn unaryF32(self: *Builder, comptime instruction: []const u8, value: Value) Value {
-        return self.emit(mlir.Operation.make(self.ctx, "llvm.inline_asm", .{
-            .operands = .{ .flat = &.{value.to(.f32).inner} },
-            .results = .{ .flat = &.{DType.f32.toMlir(self.ctx)} },
-            .attributes = &.{
-                .named(self.ctx, "asm_string", .string(self.ctx, instruction ++ " $0, $1;")),
-                .named(self.ctx, "constraints", .string(self.ctx, "=f,f")),
-            },
-            .location = self.loc(),
-        }));
+        return self.emit(llvm.inline_asm(self.ctx, instruction ++ " $0, $1;", &.{value.to(.f32).inner}, DType.f32.toMlir(self.ctx), .{ .constraints = "=f,f" }, self.loc()));
     }
 
     /// Signal programmatic dependent launches after this grid has consumed
     /// its inputs. The caller must also launch the producer/consumer chain
     /// with PDL enabled.
     pub fn launchDependents(self: *Builder) void {
-        _ = mlir.Operation.make(self.ctx, "llvm.inline_asm", .{
-            .attributes = &.{
-                .named(self.ctx, "asm_string", .string(self.ctx, "griddepcontrol.launch_dependents;")),
-                .named(self.ctx, "constraints", .string(self.ctx, "")),
-                .named(self.ctx, "has_side_effects", .unit(self.ctx)),
-            },
-            .location = self.loc(),
-        }).appendTo(self.currentBlock());
+        _ = llvm.inline_asm(self.ctx, "griddepcontrol.launch_dependents;", &.{}, null, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
     }
 
     /// Wait until the preceding grid has made its programmatic dependency
     /// available. This is the consumer-side half of a PDL launch chain.
     pub fn waitForDependency(self: *Builder) void {
-        _ = mlir.Operation.make(self.ctx, "llvm.inline_asm", .{
-            .attributes = &.{
-                .named(self.ctx, "asm_string", .string(self.ctx, "griddepcontrol.wait;")),
-                .named(self.ctx, "constraints", .string(self.ctx, "")),
-                .named(self.ctx, "has_side_effects", .unit(self.ctx)),
-            },
-            .location = self.loc(),
-        }).appendTo(self.currentBlock());
+        _ = llvm.inline_asm(self.ctx, "griddepcontrol.wait;", &.{}, null, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
     }
 
     /// `cute.arch.alloc_smem(dtype, size_in_elems, alignment)`: a static
@@ -2641,67 +2567,35 @@ pub const Builder = struct {
         if (barrier.isInt()) return self.addressPtr(barrier, .shared);
         return self.emit(mlir.Operation.make(self.ctx, "builtin.unrealized_conversion_cast", .{
             .operands = .{ .flat = &.{barrier.inner} },
-            .results = .{ .flat = &.{self.parseType("!llvm.ptr<3>")} },
+            .results = .{ .flat = &.{llvm.pointerType(self.ctx, .shared)} },
             .location = self.loc(),
         }));
     }
 
     /// Initialize a shared-memory mbarrier expecting `arrivals` per phase.
     pub fn mbarrierInit(self: *Builder, barrier: Value, arrivals: u32) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.mbarrier.init", .{
-            .operands = .{ .flat = &.{ self.sharedBarrierPtr(barrier).inner, self.cst(.i32, arrivals).inner } },
-            .attributes = &.{.named(self.ctx, "layout", self.parseAttribute("#nvvm.mbarrier_layout<v0>"))},
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.mbarrier_init(self.ctx, self.sharedBarrierPtr(barrier).inner, self.cst(.i32, arrivals).inner, self.loc()));
     }
 
     /// Arrive and expect `bytes` of asynchronous transactions (SM90+), as a
     /// TMA producer does before issuing its copies.
     pub fn mbarrierArriveExpectTx(self: *Builder, barrier: Value, bytes: u32) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.mbarrier.arrive.expect_tx", .{
-            .operands = .{ .flat = &.{ self.sharedBarrierPtr(barrier).inner, self.cst(.i32, bytes).inner } },
-            .attributes = &.{
-                .named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ 1, 1, 0, 0 })),
-                .named(self.ctx, "relaxed", .boolean(self.ctx, false)),
-                .named(self.ctx, "scope", self.parseAttribute("#nvvm.mem_scope<cta>")),
-            },
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.mbarrier_arrive_expect_tx(self.ctx, self.sharedBarrierPtr(barrier).inner, self.cst(.i32, bytes).inner, .cta, self.loc()));
     }
 
     pub fn mbarrierArrive(self: *Builder, barrier: Value, count: u32) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.mbarrier.arrive", .{
-            .operands = .{ .flat = &.{ self.sharedBarrierPtr(barrier).inner, self.cst(.i32, count).inner } },
-            .attributes = &.{
-                .named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ 1, 1, 0 })),
-                .named(self.ctx, "relaxed", .boolean(self.ctx, false)),
-                .named(self.ctx, "scope", self.parseAttribute("#nvvm.mem_scope<cta>")),
-            },
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.mbarrier_arrive(self.ctx, self.sharedBarrierPtr(barrier).inner, self.cst(.i32, count).inner, .cta, self.loc()));
     }
 
     /// Test whether phase `phase` has completed, without suspending (SM90+).
     pub fn mbarrierWaitParity(self: *Builder, barrier: Value, phase: Value) Value {
-        return self.emit(mlir.Operation.make(self.ctx, "nvvm.mbarrier.wait.parity", .{
-            .operands = .{ .flat = &.{ self.sharedBarrierPtr(barrier).inner, phase.inner } },
-            .results = .{ .flat = &.{.int(self.ctx, .i1)} },
-            .attributes = &.{
-                .named(self.ctx, "kind", self.parseAttribute("#nvvm.mbar_wait<try>")),
-                .named(self.ctx, "scope", self.parseAttribute("#nvvm.mbar_scope<cta>")),
-            },
-            .location = self.loc(),
-        }));
+        return self.emit(nvvm.mbarrier_wait_parity(self.ctx, self.sharedBarrierPtr(barrier).inner, phase.inner, .@"try", .cta, self.loc()));
     }
 
     /// Wait for phase `phase`, letting the warp sleep for up to
     /// `suspend_time` cycles per attempt (SM90+).
     pub fn mbarrierTryWaitParity(self: *Builder, barrier: Value, phase: Value, suspend_time: u32) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.mbarrier.try_wait.parity", .{
-            .operands = .{ .flat = &.{ self.sharedBarrierPtr(barrier).inner, phase.inner, self.cst(.i32, suspend_time).inner } },
-            .attributes = &.{.named(self.ctx, "useIntrinsic", .boolean(self.ctx, false))},
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.mbarrier_try_wait_parity(self.ctx, self.sharedBarrierPtr(barrier).inner, phase.inner, self.cst(.i32, suspend_time).inner, self.loc()));
     }
 
     /// Wait for a pipeline phase with the two-step sequence of CuTe's
@@ -2718,39 +2612,23 @@ pub const Builder = struct {
 
     /// Make mbarrier initialization visible to the async proxy (SM90+).
     pub fn fenceMbarrierInit(self: *Builder) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.fence.mbarrier.init", .{ .location = self.loc() }));
+        self.emitVoid(nvvm.fence_mbarrier_init(self.ctx, self.loc()));
     }
 
     /// Publish ordinary shared-memory writes to the asynchronous (TMA) proxy (SM90+).
     pub fn fenceProxyAsyncShared(self: *Builder) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.fence.proxy", .{
-            .attributes = &.{
-                .named(self.ctx, "kind", self.parseAttribute("#nvvm.proxy_kind<async.shared>")),
-                .named(self.ctx, "space", self.parseAttribute("#nvvm.shared_space<cta>")),
-            },
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.fence_proxy(self.ctx, .@"async.shared", .cta, self.loc()));
     }
 
     /// Close the current group of bulk asynchronous copies, e.g. TMA stores (SM90+).
     pub fn cpAsyncBulkCommitGroup(self: *Builder) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.cp.async.bulk.commit.group", .{ .location = self.loc() }));
+        self.emitVoid(nvvm.cp_async_bulk_commit_group(self.ctx, self.loc()));
     }
 
     /// Wait until at most `pending` bulk copy groups are in flight; with
     /// `read`, only until their sources have been read (SM90+).
     pub fn cpAsyncBulkWaitGroup(self: *Builder, pending: u32, read: bool) void {
-        var attrs: [2]mlir.NamedAttribute = undefined;
-        var len: usize = 1;
-        attrs[0] = .named(self.ctx, "group", .int(self.ctx, .i32, pending));
-        if (read) {
-            attrs[1] = .named(self.ctx, "read", .unit(self.ctx));
-            len += 1;
-        }
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.cp.async.bulk.wait_group", .{
-            .attributes = attrs[0..len],
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.cp_async_bulk_wait_group(self.ctx, pending, read, self.loc()));
     }
 
     // ==================== raw-address SM90/SM100 primitives ====================
@@ -2759,23 +2637,16 @@ pub const Builder = struct {
     // `i32` TMEM addresses (lane << 16 | column). These helpers emit the NVVM /
     // LLVM operations for them directly (no inline PTX).
 
-    pub const AddressSpace = enum(u32) { global = 1, shared = 3, tensor = 6, shared_cluster = 7 };
-
-    fn ptrType(self: *Builder, comptime space: AddressSpace) *const mlir.Type {
-        return self.parseType(std.fmt.comptimePrint("!llvm.ptr<{d}>", .{@intFromEnum(space)}));
-    }
+    pub const AddressSpace = llvm.AddressSpace;
 
     /// Typed LLVM pointer (`llvm.inttoptr`) for an integer address in `space`.
     pub fn addressPtr(self: *Builder, address: Value, comptime space: AddressSpace) Value {
-        return self.emit(mlir.Operation.make(self.ctx, "llvm.inttoptr", .{
-            .operands = .{ .flat = &.{address.inner} },
-            .results = .{ .flat = &.{self.ptrType(space)} },
-            .location = self.loc(),
-        }));
+        return self.emit(llvm.inttoptr(self.ctx, address.inner, llvm.pointerType(self.ctx, space), self.loc()));
     }
 
     fn wordsType(self: *Builder, comptime n: usize) *const mlir.Type {
-        return if (n == 1) mlir.Type.int(self.ctx, .i32) else self.parseType(std.fmt.comptimePrint("vector<{d}xi32>", .{n}));
+        const word = mlir.Type.int(self.ctx, .i32);
+        return if (n == 1) word else mlir.Type.vector(&.{n}, word);
     }
 
     fn splitWords(self: *Builder, comptime n: usize, v: Value) [n]Value {
@@ -2792,11 +2663,7 @@ pub const Builder = struct {
         if (n == 1) return words[0];
         var inner: [n]*const mlir.Value = undefined;
         for (words, &inner) |w, *x| x.* = w.inner;
-        return self.emit(mlir.Operation.make(self.ctx, "vector.from_elements", .{
-            .operands = .{ .flat = &inner },
-            .results = .{ .flat = &.{self.wordsType(n)} },
-            .location = self.loc(),
-        }));
+        return self.emit(vector.from_elements(self.ctx, &inner, self.wordsType(n), self.loc()));
     }
 
     pub const LoadOptions = struct {
@@ -2806,19 +2673,7 @@ pub const Builder = struct {
 
     /// Load `n` (1, 2 or 4) consecutive 32-bit words from a typed pointer.
     pub fn loadWordsPtr(self: *Builder, comptime n: usize, ptr: Value, opts: LoadOptions) [n]Value {
-        var attrs: [2]mlir.NamedAttribute = undefined;
-        var len: usize = 1;
-        attrs[0] = .named(self.ctx, "alignment", .int(self.ctx, .i64, 4 * n));
-        if (opts.invariant) {
-            attrs[1] = .named(self.ctx, "invariant", .unit(self.ctx));
-            len += 1;
-        }
-        const v = self.emit(mlir.Operation.make(self.ctx, "llvm.load", .{
-            .operands = .{ .flat = &.{ptr.inner} },
-            .results = .{ .flat = &.{self.wordsType(n)} },
-            .attributes = attrs[0..len],
-            .location = self.loc(),
-        }));
+        const v = self.emit(llvm.load(self.ctx, ptr.inner, self.wordsType(n), .{ .alignment = 4 * n, .invariant = opts.invariant }, self.loc()));
         return self.splitWords(n, v);
     }
 
@@ -2829,11 +2684,7 @@ pub const Builder = struct {
 
     /// Store `n` (1, 2 or 4) consecutive 32-bit words through a typed pointer.
     pub fn storeWordsPtr(self: *Builder, comptime n: usize, ptr: Value, words: [n]Value) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "llvm.store", .{
-            .operands = .{ .flat = &.{ self.joinWords(n, words).inner, ptr.inner } },
-            .attributes = &.{.named(self.ctx, "alignment", .int(self.ctx, .i64, 4 * n))},
-            .location = self.loc(),
-        }));
+        self.emitVoid(llvm.store(self.ctx, self.joinWords(n, words).inner, ptr.inner, .{ .alignment = 4 * n }, self.loc()));
     }
 
     /// Store `n` (1, 2 or 4) consecutive 32-bit words at an integer address.
@@ -2843,11 +2694,7 @@ pub const Builder = struct {
 
     /// Store the low 16 bits of an `i32`.
     pub fn storeHalf(self: *Builder, address: Value, comptime space: AddressSpace, word: Value) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "llvm.store", .{
-            .operands = .{ .flat = &.{ word.to(.i16).inner, self.addressPtr(address, space).inner } },
-            .attributes = &.{.named(self.ctx, "alignment", .int(self.ctx, .i64, 2))},
-            .location = self.loc(),
-        }));
+        self.emitVoid(llvm.store(self.ctx, word.to(.i16).inner, self.addressPtr(address, space).inner, .{ .alignment = 2 }, self.loc()));
     }
 
     /// `bar.sync id, threads`: named barrier over `threads` threads.
@@ -2863,23 +2710,12 @@ pub const Builder = struct {
 
     /// `bar.warp.sync 0xffffffff`.
     pub fn syncWarp(self: *Builder) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.bar.warp.sync", .{
-            .operands = .{ .flat = &.{self.cst(.i32, -1).inner} },
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.bar_warp_sync(self.ctx, self.cst(.i32, -1).inner, self.loc()));
     }
 
     /// Non-blocking test of mbarrier phase `parity` (i1).
     pub fn mbarrierTestParity(self: *Builder, barrier: Value, parity: Value) Value {
-        return self.emit(mlir.Operation.make(self.ctx, "nvvm.mbarrier.wait.parity", .{
-            .operands = .{ .flat = &.{ self.sharedBarrierPtr(barrier).inner, parity.inner } },
-            .results = .{ .flat = &.{.int(self.ctx, .i1)} },
-            .attributes = &.{
-                .named(self.ctx, "kind", self.parseAttribute("#nvvm.mbar_wait<test>")),
-                .named(self.ctx, "scope", self.parseAttribute("#nvvm.mbar_scope<cta>")),
-            },
-            .location = self.loc(),
-        }));
+        return self.emit(nvvm.mbarrier_wait_parity(self.ctx, self.sharedBarrierPtr(barrier).inner, parity.inner, .@"test", .cta, self.loc()));
     }
 
     /// Call an LLVM intrinsic by name (e.g. an `llvm.nvvm.*` intrinsic the NVVM dialect of
@@ -2888,16 +2724,7 @@ pub const Builder = struct {
         const alloc = self.arena.allocator();
         const inner = alloc.alloc(*const mlir.Value, operands.len) catch @panic("OOM");
         for (operands, inner) |o, *x| x.* = o.inner;
-        const op = mlir.Operation.make(self.ctx, "llvm.call_intrinsic", .{
-            .operands = .{ .flat = inner },
-            .results = .{ .flat = if (result) |r| &.{r} else &.{} },
-            .attributes = &.{
-                .named(self.ctx, "intrin", .string(self.ctx, name)),
-                .named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ @intCast(operands.len), 0 })),
-                .named(self.ctx, "op_bundle_sizes", .denseArray(self.ctx, .i32, &.{})),
-            },
-            .location = self.loc(),
-        });
+        const op = llvm.call_intrinsic(self.ctx, name, inner, result, self.loc());
         if (result == null) {
             self.emitVoid(op);
             return null;
@@ -2925,11 +2752,8 @@ pub const Builder = struct {
 
     /// Wait until all of this thread's cp.async copies have landed.
     pub fn cpAsyncWaitAll(self: *Builder) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.cp.async.commit.group", .{ .location = self.loc() }));
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.cp.async.wait.group", .{
-            .attributes = &.{.named(self.ctx, "n", .int(self.ctx, .i32, 0))},
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.cp_async_commit_group(self.ctx, self.loc()));
+        self.emitVoid(nvvm.cp_async_wait_group(self.ctx, 0, self.loc()));
     }
 
     /// Prefetch the global line of `address` (i64) into L2 with evict-last priority.
@@ -2939,101 +2763,59 @@ pub const Builder = struct {
 
     /// Warp-wide TMEM allocation of `columns`; the base address is written to `holder` (i32 smem).
     pub fn tmemAllocAt(self: *Builder, holder: Value, columns: u32) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.tcgen05.alloc", .{
-            .operands = .{ .flat = &.{ self.addressPtr(holder, .shared).inner, self.cst(.i32, columns).inner } },
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.tcgen05_alloc(self.ctx, self.addressPtr(holder, .shared).inner, self.cst(.i32, columns).inner, self.loc()));
     }
 
     pub fn tmemDeallocAt(self: *Builder, taddr: Value, columns: u32) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.tcgen05.dealloc", .{
-            .operands = .{ .flat = &.{ self.addressPtr(taddr, .tensor).inner, self.cst(.i32, columns).inner } },
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.tcgen05_dealloc(self.ctx, self.addressPtr(taddr, .tensor).inner, self.cst(.i32, columns).inner, self.loc()));
     }
 
-    pub const Tcgen05Fence = enum { before, after };
+    pub const Tcgen05Fence = nvvm.Tcgen05FenceKind;
 
     /// `tcgen05.fence::{before,after}_thread_sync`.
     pub fn tcgen05Fence(self: *Builder, comptime kind: Tcgen05Fence) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.tcgen05.fence", .{
-            .attributes = &.{.named(self.ctx, "kind", self.parseAttribute("#nvvm.tcgen05_fence<" ++ @tagName(kind) ++ ">"))},
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.tcgen05_fence(self.ctx, kind, self.loc()));
     }
 
     /// `tcgen05.wait::st`.
     pub fn fenceTmemStore(self: *Builder) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.tcgen05.wait", .{
-            .attributes = &.{.named(self.ctx, "kind", self.parseAttribute("#nvvm.tcgen05_wait<store>"))},
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.tcgen05_wait(self.ctx, .store, self.loc()));
     }
 
     /// `tcgen05.mma.cta_group::1.kind::f16`: D (TMEM at `d`) = A . B (+ D when
     /// `accumulate`, i1), with A and B given by shared-memory descriptors (i64) and the
     /// instruction descriptor `idesc` (i32).
     pub fn tcgen05MmaF16(self: *Builder, d: Value, adesc: Value, bdesc: Value, idesc: Value, accumulate: Value) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.tcgen05.mma", .{
-            .operands = .{ .flat = &.{ self.addressPtr(d, .tensor).inner, adesc.inner, bdesc.inner, idesc.inner, accumulate.inner } },
-            .attributes = &.{
-                .named(self.ctx, "kind", self.parseAttribute("#nvvm.tcgen05_mma_kind<f16>")),
-                .named(self.ctx, "ctaGroup", self.parseAttribute("#nvvm.cta_group<cta_1>")),
-                .named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ 1, 1, 1, 1, 1, 0, 0 })),
-            },
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.tcgen05_mma(self.ctx, self.addressPtr(d, .tensor).inner, adesc.inner, bdesc.inner, idesc.inner, accumulate.inner, .f16, .cta_1, self.loc()));
     }
 
     /// `tcgen05.ld.32x32b.x{n}`: thread i of the warp gets TMEM lane (warp base + i),
     /// `n` consecutive 32-bit columns from `taddr`.
     pub fn tmemLoad32x32b(self: *Builder, comptime n: usize, taddr: Value) [n]Value {
-        const v = self.emit(mlir.Operation.make(self.ctx, "nvvm.tcgen05.ld", .{
-            .operands = .{ .flat = &.{self.addressPtr(taddr, .tensor).inner} },
-            .results = .{ .flat = &.{self.wordsType(n)} },
-            .attributes = &.{.named(self.ctx, "shape", self.parseAttribute("#nvvm.tcgen05_ldst_shape<shape_32x32b>"))},
-            .location = self.loc(),
-        }));
+        const v = self.emit(nvvm.tcgen05_ld(self.ctx, self.addressPtr(taddr, .tensor).inner, self.wordsType(n), .shape_32x32b, self.loc()));
         return self.splitWords(n, v);
     }
 
     /// `tcgen05.st.32x32b.x{n}` (see `tmemLoad32x32b`).
     pub fn tmemStore32x32b(self: *Builder, comptime n: usize, taddr: Value, words: [n]Value) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.tcgen05.st", .{
-            .operands = .{ .flat = &.{ self.addressPtr(taddr, .tensor).inner, self.joinWords(n, words).inner } },
-            .attributes = &.{.named(self.ctx, "shape", self.parseAttribute("#nvvm.tcgen05_ldst_shape<shape_32x32b>"))},
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.tcgen05_st(self.ctx, self.addressPtr(taddr, .tensor).inner, self.joinWords(n, words).inner, .shape_32x32b, self.loc()));
     }
 
     /// Rank of this CTA in its cluster.
     pub fn clusterCtaRank(self: *Builder) Value {
-        return self.emit(mlir.Operation.make(self.ctx, "nvvm.read.ptx.sreg.cluster.ctarank", .{
-            .results = .{ .flat = &.{mlir.Type.int(self.ctx, .i32)} },
-            .location = self.loc(),
-        }));
+        return self.emit(nvvm.read_sreg(self.ctx, "cluster.ctarank", self.loc()));
     }
 
     /// The same shared-memory location (i32 address) in CTA `rank` of the cluster, as a
     /// `shared::cluster` pointer.
     pub fn mapaShared(self: *Builder, address: Value, rank: Value) Value {
-        return self.emit(mlir.Operation.make(self.ctx, "nvvm.mapa", .{
-            .operands = .{ .flat = &.{ self.addressPtr(address, .shared).inner, rank.inner } },
-            .results = .{ .flat = &.{self.ptrType(.shared_cluster)} },
-            .location = self.loc(),
-        }));
+        return self.emit(nvvm.mapa(self.ctx, self.addressPtr(address, .shared).inner, rank.inner, llvm.pointerType(self.ctx, .shared_cluster), self.loc()));
     }
 
     /// Full cluster barrier (arrive.release + wait.acquire, aligned).
     pub fn clusterSync(self: *Builder) void {
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.cluster.arrive", .{
-            .attributes = &.{.named(self.ctx, "aligned", .unit(self.ctx))},
-            .location = self.loc(),
-        }));
-        self.emitVoid(mlir.Operation.make(self.ctx, "nvvm.cluster.wait", .{
-            .attributes = &.{.named(self.ctx, "aligned", .unit(self.ctx))},
-            .location = self.loc(),
-        }));
+        self.emitVoid(nvvm.cluster_arrive(self.ctx, true, self.loc()));
+        self.emitVoid(nvvm.cluster_wait(self.ctx, true, self.loc()));
     }
 
     /// Warp-wide maximum of an f32 (`redux.sync.max.f32`, SM100).
@@ -3043,41 +2825,33 @@ pub const Builder = struct {
 
     /// Fast approximate 2^x (`ex2.approx.ftz.f32`).
     pub fn exp2Approx(self: *Builder, value: Value) Value {
-        return self.emit(mlir.Operation.make(self.ctx, "nvvm.ex2", .{
-            .operands = .{ .flat = &.{value.inner} },
-            .results = .{ .flat = &.{mlir.Type.float(self.ctx, .f32)} },
-            .attributes = &.{.named(self.ctx, "ftz", .boolean(self.ctx, true))},
-            .location = self.loc(),
-        }));
+        return self.emit(nvvm.ex2(self.ctx, value.inner, true, self.loc()));
     }
 
     /// Fast approximate 1/x (`rcp.approx.ftz.f32`).
     pub fn rcpApprox(self: *Builder, value: Value) Value {
-        return self.emit(mlir.Operation.make(self.ctx, "nvvm.rcp.approx.ftz.f", .{
-            .operands = .{ .flat = &.{value.inner} },
-            .results = .{ .flat = &.{mlir.Type.float(self.ctx, .f32)} },
-            .location = self.loc(),
-        }));
+        return self.emit(nvvm.rcp_approx_ftz(self.ctx, value.inner, self.loc()));
+    }
+
+    /// `vector<2 x dt>`, e.g. a bf16x2 pair packed in 32 bits.
+    fn pairType(self: *Builder, comptime dt: DType) *const mlir.Type {
+        return mlir.Type.vector(&.{2}, dt.toMlir(self.ctx));
     }
 
     fn bitcastTo(self: *Builder, value: Value, ty: *const mlir.Type) Value {
-        return self.emit(mlir.Operation.make(self.ctx, "llvm.bitcast", .{
-            .operands = .{ .flat = &.{value.inner} },
-            .results = .{ .flat = &.{ty} },
-            .location = self.loc(),
-        }));
+        return self.emit(llvm.bitcast(self.ctx, value.inner, ty, self.loc()));
     }
 
     /// Two FP8 e4m3 (low 16 bits of `pair`, i32) -> bf16x2 packed in an i32.
     pub fn e4m3x2ToBf16x2(self: *Builder, pair: Value) Value {
-        const v = self.callIntrinsic("llvm.nvvm.e4m3x2.to.bf16x2.rn", &.{pair.to(.i16)}, self.parseType("vector<2xbf16>")).?;
+        const v = self.callIntrinsic("llvm.nvvm.e4m3x2.to.bf16x2.rn", &.{pair.to(.i16)}, self.pairType(.bf16)).?;
         return self.bitcastTo(v, mlir.Type.int(self.ctx, .i32));
     }
 
     /// Two FP4 e2m1 (the low byte of `pair`, the even element in the low nibble)
     /// -> bf16x2 packed in an i32.
     pub fn e2m1x2ToBf16x2(self: *Builder, pair: Value) Value {
-        const v = self.callIntrinsic("llvm.nvvm.e2m1x2.to.bf16x2.rn", &.{pair.to(.i16)}, self.parseType("vector<2xbf16>")).?;
+        const v = self.callIntrinsic("llvm.nvvm.e2m1x2.to.bf16x2.rn", &.{pair.to(.i16)}, self.pairType(.bf16)).?;
         return self.bitcastTo(v, mlir.Type.int(self.ctx, .i32));
     }
 
@@ -3085,7 +2859,7 @@ pub const Builder = struct {
     /// in i32s. The pairs are read as the low bytes of the 16-bit halves of `word` and
     /// `word >> 8`, which ptxas maps to operand selectors (one shift per word).
     pub fn e2m1x8ToBf16x2x4(self: *Builder, word: Value) [4]Value {
-        const halves = self.parseType("vector<2xi16>");
+        const halves = self.pairType(.i16);
         const even = self.bitcastTo(word, halves);
         const odd = self.bitcastTo(word.shrLogical(8), halves);
         const pairs = [4]Value{
@@ -3099,28 +2873,20 @@ pub const Builder = struct {
 
     /// bf16x2 * bf16x2 (round to nearest), both packed in i32.
     pub fn mulBf16x2(self: *Builder, a: Value, b: Value) Value {
-        const ty = self.parseType("vector<2xbf16>");
-        const p = self.emit(mlir.Operation.make(self.ctx, "llvm.fmul", .{
-            .operands = .{ .flat = &.{ self.bitcastTo(a, ty).inner, self.bitcastTo(b, ty).inner } },
-            .results = .{ .flat = &.{ty} },
-            .location = self.loc(),
-        }));
+        const ty = self.pairType(.bf16);
+        const p = self.emit(llvm.fmul(self.ctx, self.bitcastTo(a, ty).inner, self.bitcastTo(b, ty).inner, ty, self.loc()));
         return self.bitcastTo(p, mlir.Type.int(self.ctx, .i32));
     }
 
     /// Two f32 -> a packed pair of `dt` (bf16 or f16) in an i32, `lo` in the low half.
     pub fn packHalf2(self: *Builder, lo: Value, hi: Value, comptime dt: DType) Value {
-        const pair = self.emit(mlir.Operation.make(self.ctx, "vector.from_elements", .{
-            .operands = .{ .flat = &.{ lo.to(dt).inner, hi.to(dt).inner } },
-            .results = .{ .flat = &.{self.parseType("vector<2x" ++ @tagName(dt) ++ ">")} },
-            .location = self.loc(),
-        }));
+        const pair = self.emit(vector.from_elements(self.ctx, &.{ lo.to(dt).inner, hi.to(dt).inner }, self.pairType(dt), self.loc()));
         return self.bitcastTo(pair, mlir.Type.int(self.ctx, .i32));
     }
 
     /// A packed pair of `dt` (bf16 or f16) in an i32 -> two f32 (low half first).
     pub fn unpackHalf2(self: *Builder, word: Value, comptime dt: DType) [2]Value {
-        const pair = self.bitcastTo(word, self.parseType("vector<2x" ++ @tagName(dt) ++ ">"));
+        const pair = self.bitcastTo(word, self.pairType(dt));
         return .{ self.vectorExtract(pair, 0, dt).to(.f32), self.vectorExtract(pair, 1, dt).to(.f32) };
     }
 

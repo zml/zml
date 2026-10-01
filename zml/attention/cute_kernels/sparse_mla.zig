@@ -94,7 +94,7 @@ pub const Layout = struct {
     compressed_capacity: i64, // compressed (top-k) rows per query, 0 for window-only layers
 };
 
-/// Whether the kernel covers these inputs on this platform: Blackwell, BF16 Q with
+/// Whether the kernel supports these inputs on this platform: Blackwell, BF16 Q with
 /// a 512-wide latent and a multiple of 16 heads (callers split them into groups of
 /// 16, one `forward` each), and the DeepSeek-V4.1 cache formats (FP8 window rows
 /// with E8M0 scales per 32 values, packed FP4 compressed rows with E4M3 scales per
@@ -155,9 +155,9 @@ pub fn forward(c: Config, a: Inputs) zml.Tensor {
     } }).out;
 }
 
-/// Whether the kernel covers sparse MLA of `q` [.q, .h, .hd] over these caches: quantized
+/// Whether the kernel supports sparse MLA of `q` [.q, .h, .hd] over these caches: quantized
 /// caches (no global scale) in the formats and sizes of `supports`, on Blackwell.
-pub fn covers(q: Tensor, cache: Mla.Cache, compressed: ?Mla.Cache) bool {
+pub fn supportsInputs(q: Tensor, cache: Mla.Cache, compressed: ?Mla.Cache) bool {
     const window = quantized(cache) orelse return false;
     const compressed_input: ?zml.quantization.QuantizedInput = if (compressed) |c| quantized(c) orelse return false else null;
     return supports(zml.Compiler.current().platform, .{
@@ -174,9 +174,9 @@ pub fn covers(q: Tensor, cache: Mla.Cache, compressed: ?Mla.Cache) bool {
 /// Backend `.cute` of `paged_attention.Mla.pagedSparseAttention`: Q [.q, .h, .hd], a
 /// quantized window cache and optionally a quantized compressed cache, `rows` /
 /// `compressed_rows` the physical rows of their selected positions. Panics on inputs the
-/// kernel does not cover (see `covers`). Each stream is scanned up to its last valid entry.
+/// kernel does not support (see `supportsInputs`). Each stream is scanned up to its last valid entry.
 pub fn pagedAttention(q: Tensor, cache: Mla.Cache, rows: Tensor, compressed: ?Mla.Cache, compressed_rows: ?Tensor, sink: ?Tensor, active_count: Tensor, opts: Mla.Options) Tensor {
-    if (!covers(q, cache, compressed)) std.debug.panic("CuTe sparse MLA does not cover q {f} over a {s} cache of {} rows per query and {s}: use another backend", .{
+    if (!supportsInputs(q, cache, compressed)) std.debug.panic("CuTe sparse MLA does not support q {f} over a {s} cache of {} rows per query and {s}: use another backend", .{
         q.shape(),
         @tagName(cache.storage),
         cache.positions.dim(.topk),
