@@ -92,13 +92,18 @@ pub const paged = struct {
         const kc = k_cache.transpose(.{ .page, .k_chunk, .hkv, .hd });
         const vc = v_cache.transpose(.{ .page, .k_chunk, .hkv, .hd });
 
+        const sliding_window: i32 = switch (opts.mask) {
+            .sliding_window => |w| @intCast(w),
+            else => -1,
+        };
+
         const out = zml.ops.customCall(
             "zml$paged_attn",
             .{ qh, kc, vc, parameters.block_table, parameters.seq_lens, parameters.query_start_len },
             qh.shape(),
             .{
-                .is_causal = opts.is_causal,
-                .sliding_window = opts.sliding_window,
+                .is_causal = opts.mask.isCausal(),
+                .sliding_window = sliding_window,
                 .scale = opts.scale,
             },
             .{ .has_side_effect = false },
