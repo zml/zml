@@ -13,6 +13,7 @@ const PlatformDevice = @import("platform.zig").Device;
 const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
+const constants = @import("constants.zig");
 
 const Sharding = @This();
 
@@ -21,20 +22,6 @@ data: *const Data,
 pub const Error = error{ MissingLogicalBinding, IncompatibleSharding };
 
 pub const MAX_MESH_RANK = 4;
-
-/// This is used to make APIs requiring a sharding more fluents.
-/// The notion of "fully replicated" is platform agnostic, but the Sharding object
-/// itself can't be instantiated in a platform agnostic way because it needs to list all devices.
-/// This lead to some `_handleFakeReplicatedObject` in a few strategic places, but should be kept ZML internal.
-var _replicated: [14]u8 align(@alignOf(Data)) = "__replicated__".*;
-
-/// Replicated sharding.
-pub const replicated: Sharding = .{ .data = @ptrCast(&_replicated) };
-
-/// Internal helper to translate the static `zml.Sharding.replicated` into a working Sharding object
-pub fn _handleFakeReplicatedObject(sharding: Sharding, platform: *const Platform) Sharding {
-    return if (sharding.data == replicated.data) platform.replicated_sharding else sharding;
-}
 
 pub fn numPartitionsForLogicalAxis(sharding: Sharding, logical_axis: anytype) i64 {
     return sharding.data.numPartitionsForLogicalAxis(logical_axis);
@@ -49,14 +36,10 @@ pub fn eql(self: Sharding, other: Sharding) bool {
 }
 
 pub fn name(sharding: Sharding) []const u8 {
-    if (sharding.data == Sharding.replicated.data) return "__replicated__";
     return sharding.data.name;
 }
 
 pub fn format(sharding: Sharding, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    if (sharding.data == Sharding.replicated.data) {
-        try writer.writeAll("Sharding(.replicated)");
-    }
     return sharding.data.format(writer);
 }
 
@@ -106,12 +89,11 @@ pub fn shardableDim(sharding: Sharding, dim: i64, logical_axis: anytype, must_di
 pub fn sdyPerValueShardingAttr(
     allocator: std.mem.Allocator,
     ctx: *mlir.Context,
-    shapes: []const Shape,
-    sharding: Sharding,
+    shardings: []const Resolved,
 ) error{OutOfMemory}!*const mlir.Attribute {
-    const sharding_attrs = try allocator.alloc(*const dialects.shardy.TensorShardingAttribute, shapes.len);
-    for (sharding_attrs, shapes) |*attr, shape| {
-        attr.* = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
+    const sharding_attrs = try allocator.alloc(*const dialects.shardy.TensorShardingAttribute, shardings.len);
+    for (sharding_attrs, shardings) |*attr, sharding| {
+        attr.* = try sharding.mesh.sdyShardingAttrForShape(allocator, ctx, sharding.partition);
     }
     return dialects.shardy.TensorShardingPerValueAttribute.init(ctx, sharding_attrs).asAttr();
 }
@@ -1167,7 +1149,7 @@ pub const PhysicalView = struct {
 pub const Data = struct {
     pub const zml_no_meta_visit: void = {};
 
-    name: []const u8,
+    name: [:0]const u8,
     physical: *const PhysicalMesh,
     logical: LogicalMesh,
 
@@ -1190,7 +1172,7 @@ pub const Data = struct {
     }
 
     pub fn init(
-        name_: []const u8,
+        name_: [:0]const u8,
         physical: *const PhysicalMesh,
         logical: LogicalMesh,
         strategy: Strategy,
@@ -1344,15 +1326,14 @@ pub const Data = struct {
     };
 
     /// Common logic to map tensor dimensions to physical mesh indices.
-    fn getDimMapping(self: *const Data, shape: Shape) DimMapping {
+    fn getDimMapping(self: *const Data, partition: Sharding.Resolved.Partitioning) DimMapping {
         const view = self.physicalView();
         var axes_per_dim: stdx.BoundedArray(stdx.BoundedArray(usize, Shape.MAX_RANK), Shape.MAX_RANK) = .empty;
         var used_mask: [Shape.MAX_RANK]bool = @splat(false);
         var globally_used: std.EnumSet(PhysicalAxisTag) = .empty;
 
-        for (0..shape.rank()) |ax| {
+        for (partition.slice(partition.len())) |spec| {
             var dim_axes: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
-            const spec = shape.partition(ax);
 
             if (spec.meshAxis()) |mesh_ax| {
                 const binding_ = self.bindings.get(mesh_ax);
@@ -1386,27 +1367,28 @@ pub const Data = struct {
         data: *const Data,
         parent_allocator: std.mem.Allocator,
         ctx: *mlir.Context,
-        shape: Shape,
+        partitioning: Resolved.Partitioning,
     ) error{OutOfMemory}!*const dialects.shardy.TensorShardingAttribute {
         var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
         defer arena.deinit();
         const allocator = arena.allocator();
         var any_explicit = false;
-        for (0..shape.rank()) |ax| {
-            if (shape.partition(ax) != .unknown) {
+        const rank = partitioning.len();
+        for (partitioning.slice(rank)) |spec| {
+            if (spec != .unknown) {
                 any_explicit = true;
                 break;
             }
         }
         const all_replicated = !any_explicit;
 
-        const mapping = data.getDimMapping(shape);
-        const dimensions = try allocator.alloc(*const dialects.shardy.DimensionShardingAttribute, shape.rank());
+        const mapping = data.getDimMapping(partitioning);
+        const dimensions = try allocator.alloc(*const dialects.shardy.DimensionShardingAttribute, rank);
 
         // Note: here we map from the logical axis to physical. Is this a good idea ?
         // why not stay in logical realm ?
         for (0.., dimensions) |ax, *d| {
-            d.* = switch (shape.partition(ax)) {
+            d.* = switch (partitioning.get(ax)) {
                 .replicated => .replicated(ctx),
                 .open, .unknown => if (all_replicated) .replicated(ctx) else .open(ctx, &.{}),
                 else => d: {
@@ -1432,21 +1414,21 @@ pub const Data = struct {
         return .init(ctx, .{ .mesh = data.name, .dimensions = dimensions, .replicated_axes = replicated_axes });
     }
 
-    pub fn gspmdShardingAttrForShape(self: *const Data, parent_allocator: std.mem.Allocator, ctx: *mlir.Context, shape: Shape) !*const mlir.Attribute {
+    pub fn gspmdShardingAttrForShape(self: *const Data, parent_allocator: std.mem.Allocator, ctx: *mlir.Context, partitioning: Resolved.Partitioning) !*const mlir.Attribute {
         var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
         defer arena.deinit();
         const allocator = arena.allocator();
 
         var has_sharding = false;
-        for (0..shape.rank()) |ax| {
-            if (shape.partition(ax).isSharded()) {
+        for (0..partitioning.len()) |ax| {
+            if (partitioning.get(ax).isSharded()) {
                 has_sharding = true;
                 break;
             }
         }
         if (!has_sharding) return .string(ctx, try allocator.dupe(u8, "{replicated}"));
 
-        const mapping = self.getDimMapping(shape);
+        const mapping = self.getDimMapping(partitioning);
         var tile_shape: stdx.BoundedArray(i64, Shape.MAX_RANK + 1) = .empty;
 
         //  Calculate tile sizes per tensor dimension
@@ -1688,16 +1670,6 @@ pub const Strategy = struct {
     }
 };
 
-/// For a given shape, compute the shape of the slice each shard will receive.
-pub fn shardedShape(sharding: Sharding, shape: Shape) Error!Shape {
-    const pl = try sharding.placement(shape);
-    return pl.shape;
-}
-
-pub fn placement(sharding: Sharding, shape: Shape) Error!Placement {
-    return .init(sharding, shape);
-}
-
 /// Precompute sharding information common to all devices for a given shape.
 pub const Placement = struct {
     pub const Slices = stdx.BoundedArray(Slice1d, Shape.MAX_RANK);
@@ -1706,7 +1678,7 @@ pub const Placement = struct {
         size: i64,
     };
 
-    sharding: Sharding,
+    sharding: Sharding.Resolved,
     // Note this shape is mainly use to indicate the dims of the sharded buffer.
     // We may want to only store that.
     shape: Shape,
@@ -1714,7 +1686,7 @@ pub const Placement = struct {
 
     axis_plans: stdx.BoundedArray(AxisSplit, Shape.MAX_RANK),
 
-    pub fn init(sharding: Sharding, shape: Shape) Error!Placement {
+    pub fn init(sharding: Sharding.Resolved, shape: Shape) Error!Placement {
         var pl: Placement = .{
             .sharding = sharding,
             .shape = shape, // modified below
@@ -1800,7 +1772,7 @@ pub const Placement = struct {
         try writer.writeAll("Axis partitioning summary:\n");
         for (0.., pl.slices(@splat(0)).slice()) |ax, slice| {
             const dim = shape.dim(ax);
-            const spec = shape.partition(ax);
+            const spec = pl.sharding.partition.get(ax);
             const axis_label = shape.debugTag(ax);
 
             const shard_size: i64 = slice.size;
@@ -1818,8 +1790,211 @@ pub const Placement = struct {
 };
 
 pub const Partitioning = struct {
-    sharding: Sharding,
-    partition: Shape.PartitionArray,
+    mesh: Shape.Tag,
+    partition: PartitionArray,
+
+    const replicated_mesh: Shape.Tag = @tagName(.replicated).ptr;
+
+    pub fn replicated(x: Shape) Partitioning {
+        return .{ .mesh = replicated_mesh, .partition = .repeat(.replicated, x.rank()) };
+    }
+
+    pub fn isFullyReplicated(partitioning: Partitioning) bool {
+        if (partitioning.mesh == replicated_mesh) return true;
+        for (partitioning.partition.slice(partitioning.partition.len())) |spec| {
+            if (spec.isReplicated()) {
+                continue;
+            } else {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    pub fn sharding(partitioning: Partitioning, platform: *const Platform) Sharding {
+        return platform.shardings.get(partitioning.mesh) orelse std.debug.panic("unregistered sharding {s}", .{partitioning.mesh});
+    }
+
+    pub const P = parse;
+
+    pub fn parse(tags: Shape.TagsArray, mesh: @EnumLiteral(), partitioning: anytype) Partitioning {
+        return .{
+            .mesh = Shape.toTag(mesh),
+            .partition = parsePartitioning(tags, partitioning),
+        };
+    }
+
+    pub fn parsePartitioning(tags: Shape.TagsArray, partitioning: anytype) PartitionArray {
+        const rank = tags.len();
+        var partition_: PartitionArray = .repeat(.replicated, rank);
+
+        const T = @TypeOf(partitioning);
+        stdx.debug.assertComptime(stdx.meta.isStruct(T), "parsePartitioning expected a struct of enum literals eg {{ .b = .data, .d = .model }}, got: {any}", .{T});
+        inline for (std.meta.fields(T)) |field| {
+            const shape_ax = tags.find(field.name.ptr) orelse {
+                std.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ stdx.fmt.stringsZ(tags.slice(rank)), field.name });
+            };
+
+            const spec: PartitionSpec = .{ .tag = @tagName(@field(partitioning, field.name)) };
+            partition_.set(shape_ax, spec);
+        }
+        return partition_;
+    }
+
+    pub fn resolve(logical: Partitioning, platform: *const Platform) Resolved {
+        const rank = logical.partition.len();
+
+        const shd = platform.shardings.get(logical.mesh) orelse std.debug.panic(
+            \\No shardings registered with {s}.
+            \\Known shardings: {f}
+        , .{ logical.mesh, stdx.fmt.stringsZ(platform.shardings.keys()) });
+
+        var partition: Resolved.Partitioning = .empty;
+        for (logical.partition.slice(rank)) |logical_spec| {
+            partition.append(if (logical_spec.isReplicated())
+                .replicated
+            else if (logical_spec.tag == PartitionSpec.unknown.tag or logical_spec.tag == PartitionSpec.open.tag)
+                // `resolve` is called: during Buffer.from, and at input/output of compilation
+                // for input/output the default is replicated
+                // for Buffer.from, it's feels like a programmer error, let's crash
+                // TODO: consider adding a `mode` to `resolve()` so that we can distinguish between buffer.from and compiler case.
+                std.debug.panic("Can't resolve partitioning because of open/unknown axes: mesh={s}, partition={f}", .{ logical.mesh, stdx.fmt.stringsZ(@ptrCast(logical.partition.slice(rank))) })
+            else spec: {
+                const mesh_logical_axes = shd.data.logical.axes.constSlice();
+                const mesh_logical_axis = std.mem.findScalar(Shape.Tag, mesh_logical_axes, logical_spec.tag) orelse {
+                    std.debug.panic("Invalid partitioning: mesh {s} doesn't have axis {s}: {f}", .{ logical.mesh, logical_spec.tag, shd.data });
+                };
+                break :spec .sharded(@intCast(mesh_logical_axis));
+            });
+        }
+
+        return .{ .mesh = shd.data, .partition = partition };
+    }
+};
+
+pub const PartitionArray = stdx.SentinelArray(PartitionSpec, constants.MAX_RANK, PartitionSpec.unknown);
+
+pub const PartitionSpec = extern struct {
+    tag: [*:0]const u8,
+
+    pub const replicated: PartitionSpec = .{ .tag = "replicated".ptr };
+    pub const open: PartitionSpec = .{ .tag = "open".ptr };
+    pub const unknown: PartitionSpec = .{ .tag = "unknown".ptr };
+
+    pub fn sharded(logical_axis: @EnumLiteral()) PartitionSpec {
+        comptime {
+            switch (logical_axis) {
+                .replicated, .open, .unknown => stdx.debug.compileError("PartitionSpec.sharded(.{0t}) is invalid because .{0t} is a reserved name", .{logical_axis}),
+                else => {},
+            }
+        }
+        return .{ .tag = @tagName(logical_axis).ptr };
+    }
+
+    pub fn isReplicated(spec: PartitionSpec) bool {
+        return spec.tag == replicated.tag;
+    }
+
+    pub fn isSharded(spec: PartitionSpec) bool {
+        if (spec.tag == replicated.tag or spec.tag == open.tag or spec.tag == unknown.tag)
+            return false;
+        return true;
+    }
+
+    pub fn isClosed(spec: PartitionSpec) bool {
+        if (spec.tag == open.tag or spec.tag == unknown.tag)
+            return false;
+        return true;
+    }
+
+    test isClosed {
+        try std.testing.expect(PartitionSpec.sharded(.data).isClosed());
+        try std.testing.expect(!PartitionSpec.open.isClosed());
+
+        try std.testing.expect(PartitionSpec.replicated.isClosed());
+
+        try std.testing.expect(!PartitionSpec.unknown.isClosed());
+    }
+};
+
+/// No logic, just data
+pub const Resolved = struct {
+    mesh: *const Sharding.Data,
+    partition: Resolved.Partitioning,
+
+    pub const Partitioning = stdx.SentinelArray(Spec, 8, .replicated);
+
+    pub fn replicated(platform: *const Platform, shape: Shape) Resolved {
+        return .{
+            .mesh = platform.replicated_sharding.data,
+            .partition = .repeat(.replicated, shape.rank()),
+        };
+    }
+
+    pub fn placement(sharding: Resolved, shape: Shape) !Placement {
+        return .init(sharding, shape);
+    }
+
+    /// For a given shape, compute the shape of the slice each shard will receive.
+    pub fn shardedShape(sharding: Resolved, shape: Shape) Error!Shape {
+        const pl = try sharding.placement(shape);
+        return pl.shape;
+    }
+
+    pub fn devicesInCanonicalOrder(sharding: Resolved) []const Device {
+        return sharding.mesh.physical.devices_in_canonical_order;
+    }
+
+    pub fn format(self: Resolved, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("sharding<mesh={f}, partition={any}>", .{ self.mesh, self.partition.slice(self.partition.len()) });
+    }
+
+    /// Describes how a given Shape axis behaves inside a mesh.
+    /// Is it replicated ? sharded along a specific logical axis ? or open to replication ?
+    pub const Spec = enum(u4) {
+        mesh_axis_0 = 0,
+        mesh_axis_1 = 1,
+        mesh_axis_3 = 3,
+        mesh_axis_4 = 4,
+        mesh_axis_5 = 5,
+        mesh_axis_6 = 6,
+        mesh_axis_2 = 2,
+        mesh_axis_7 = 7,
+        // an 8D mesh seems already a lot, the max we know about is 3D.
+        replicated = 8,
+
+        // Special value to replace "undefined". LLVM `undefined` tracking doesn't go to sub-bytes struct,
+        // so it's not a good idea to have `undefined` PartitionSpec inside a PartitionArray
+        unknown = 0xa,
+        open = 15,
+
+        pub fn sharded(mesh_axis: u3) Spec {
+            return @enumFromInt(mesh_axis);
+        }
+
+        /// Extract the mesh axis along which we are sharded. Null if not sharded.
+        pub fn meshAxis(self: Spec) ?u3 {
+            const ax = @intFromEnum(self);
+            return if (ax < @intFromEnum(Spec.replicated)) @intCast(ax) else null;
+        }
+
+        pub fn isSharded(self: Spec) bool {
+            return @intFromEnum(self) < @intFromEnum(Spec.replicated);
+        }
+
+        pub fn isClosed(self: Spec) bool {
+            return @intFromEnum(self) <= @intFromEnum(Spec.replicated);
+        }
+
+        test isClosed {
+            try std.testing.expect(Spec.mesh_axis_2.isClosed());
+            try std.testing.expect(!Spec.open.isClosed());
+
+            try std.testing.expect(Spec.replicated.isClosed());
+
+            try std.testing.expect(!Spec.unknown.isClosed());
+        }
+    };
 };
 
 const AxisSplit = struct {
@@ -1855,19 +2030,19 @@ const AxisSplit = struct {
 };
 
 fn axisSplit(
-    sharding: Sharding,
+    sharding: Sharding.Resolved,
     shape: Shape,
     used_axes: *std.EnumSet(PhysicalAxisTag),
     axis_index: u8,
 ) !AxisSplit {
     const dim = shape.dim(axis_index);
-    const spec = shape.partition(axis_index);
+    const spec = sharding.partition.get(axis_index);
 
     return if (spec.meshAxis()) |mesh_axis| {
-        const binding = sharding.data.binding(mesh_axis);
+        const binding = sharding.mesh.binding(mesh_axis);
 
         // Calculate the split based on the physical coordinates of the current device.
-        return try calculateSplit(sharding, dim, binding, used_axes);
+        return try calculateSplit(.{ .data = sharding.mesh }, dim, binding, used_axes);
     } else .empty;
 }
 

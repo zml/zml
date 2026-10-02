@@ -15,7 +15,8 @@ pub inline fn assert(check: bool, comptime msg: []const u8, args: anytype) void 
     }
 }
 
-pub fn panic(comptime format: []const u8, args: anytype) noreturn {
+pub inline fn panic(comptime format: []const u8, args: anytype) noreturn {
+    @branchHint(.cold);
     std.debug.panic(format, args);
 }
 

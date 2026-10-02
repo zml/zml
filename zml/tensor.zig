@@ -29,6 +29,7 @@ pub const Tensor = struct {
     id: Tensor.Id,
     auto_broadcast: bool = false,
     _shape: Shape,
+    _partitioning: ?Sharding.Partitioning,
     _value: ?*const mlir.Value = null,
 
     const ResolvedAxis = u3;
@@ -41,8 +42,9 @@ pub const Tensor = struct {
         return @enumFromInt(Tensor.current_id.fetchAdd(1, .seq_cst));
     }
 
+    /// Creates a replicated tensor from the given shape
     pub fn fromShape(shape_: Shape) Tensor {
-        return .{ .id = nextTensorId(), ._shape = shape_ };
+        return .{ .id = nextTensorId(), ._shape = shape_, ._partitioning = .replicated(shape_) };
     }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
@@ -74,11 +76,16 @@ pub const Tensor = struct {
         return self._shape.byteSize();
     }
 
+    /// Returns the partitioning of a Tensor.
+    pub fn partitioning(self: Tensor) Sharding.Partitioning {
+        return self._partitioning orelse @panic("tensor doesn't have any explicit partitioning");
+    }
+
     /// Internal use
     ///
     /// Creates a tensor from a Shape and an mlir.Value.
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
-        const res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
+        const res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId(), ._partitioning = null };
 
         if (builtin.mode == .Debug) {
             // Check that the MLIR value actually have the same shape.
@@ -105,14 +112,12 @@ pub const Tensor = struct {
         var sh: Shape = .{
             ._dtype = ctx.dtype(ranked_tensor.elementType()),
             ._dims = .empty,
-            ._tags = .{ .buffer = @splat(Shape.TagUnknown), .len = n },
-            ._sharding = .replicated,
-            ._partitioning = .unknown,
+            ._tags = .repeat(Shape.TagUnknown, n),
         };
         for (0..n) |i| {
             sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
         }
-        return .{ ._shape = sh, ._value = val, .id = nextTensorId() };
+        return .{ ._shape = sh, ._value = val, .id = nextTensorId(), ._partitioning = null };
     }
 
     /// Returns the dimension of axis 'axis_'.
@@ -158,19 +163,13 @@ pub const Tensor = struct {
     }
 
     /// Specify the sharding of the input tensor.
-    /// * sharding: zml.Sharding, but during compilation the `.sharding_name` syntax can used to get
+    /// * sharding: the name of the sharding to use
     /// a known sharding from the compilation options.
     /// * partition spec: a struct where the field names match the axis of the given sharding
     ///
     /// eg `x.withPartitioning(tp, .{ .h = .model }))` or `x.withPartitioning(.tp, .{ .h = .model }))`
-    pub fn withPartitioning(self: Tensor, sharding_: anytype, partition_spec: anytype) Tensor {
-        if (@TypeOf(sharding_) == @EnumLiteral()) {
-            const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit zml.Sharding object as input");
-            return self.withPartitioning(compiler.sharding(sharding_), partition_spec);
-        }
-
-        const partitioned_shape = self._shape.withPartitioning(sharding_, partition_spec);
-        return self.withPartitioningInner(partitioned_shape);
+    pub fn withPartitioning(self: Tensor, sharding_: @EnumLiteral(), partition_spec: anytype) Tensor {
+        return self.withPartitioningInner(.P(self._shape._tags, sharding_, partition_spec));
     }
 
     /// Force the input tensor to be replicated along the given axes.
@@ -179,15 +178,15 @@ pub const Tensor = struct {
         return self.withPartitioningInner(partitioned_shape);
     }
 
-    fn withPartitioningInner(self: Tensor, partitioned_shape: Shape) Tensor {
+    fn withPartitioningInner(self: Tensor, partitioning_: Sharding.Partitioning) Tensor {
         const ctx = Compiler.currentOrNull() orelse {
             var res = self;
-            res._shape = partitioned_shape;
+            res._partitioning = partitioning_;
             return res;
         };
 
-        const sharding = self._shape._sharding._handleFakeReplicatedObject(ctx.platform);
-        const attr = ctx.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
+        const resolved = partitioning_.resolve(ctx.platform);
+        const attr = ctx.tensorShardingAttr(ctx.allocator, resolved) catch @panic("OOM");
 
         const op_result = switch (ctx.partitioner) {
             .shardy => blk: {
@@ -220,7 +219,7 @@ pub const Tensor = struct {
             },
         };
 
-        return _result(partitioned_shape, op_result);
+        return .{ ._shape = self._shape, ._value = op_result, .id = nextTensorId(), ._partitioning = partitioning_ };
     }
 
     test withPartitioning {

@@ -34,7 +34,6 @@ mlir_ctx: *mlir.Context,
 mlir_pass_manager: *mlir.PassManager,
 module: *mlir.Module,
 platform: *const Platform,
-shardings: []const Sharding,
 partitioner: Sharding.Partitioner,
 
 mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
@@ -132,7 +131,7 @@ pub const Scope = struct {
 };
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: Options) Compiler {
-    var arena = std.heap.ArenaAllocator.init(allocator);
+    const arena = std.heap.ArenaAllocator.init(allocator);
     const mlir_registry = mlirRegistry(io);
     var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
     mlir_ctx.loadAllAvailableDialects();
@@ -162,15 +161,12 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
     }
 
     // Ensure replicated sharding is always included as a fallback option.
-    var shardings = std.ArrayList(Sharding).initCapacity(arena.allocator(), opts.shardings.len + 1) catch @panic("OOM");
-    var needs_replicated: bool = true;
     for (opts.shardings) |shd| {
-        if (shd.data == platform.replicated_sharding.data) needs_replicated = false;
-        shardings.appendAssumeCapacity(shd._handleFakeReplicatedObject(platform));
+        if (platform.shardings.get(shd.data.name) == null) {
+            std.debug.panic("compile received an unregistered sharding: {f}", .{shd});
+        }
     }
-    if (needs_replicated) shardings.appendAssumeCapacity(platform.replicated_sharding);
-
-    validateShardings(shardings.items) catch |err| stdx.debug.panic("Invalid sharding shardings: {t}", .{err});
+    validateShardings(platform.shardings.values()) catch |err| stdx.debug.panic("Invalid sharding shardings: {t}", .{err});
 
     return .{
         .allocator = allocator,
@@ -183,7 +179,6 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
         .module = module,
         .platform = platform,
         .partitioner = opts.partitioner orelse .fromTarget(platform.target),
-        .shardings = shardings.items,
         .location = unknown_location,
         .unknown_location = unknown_location,
     };
@@ -331,18 +326,7 @@ pub fn allocPrint(self: *Compiler, comptime fmt: []const u8, args: anytype) []u8
 }
 
 pub fn sharding(compiler: *const Compiler, name: @EnumLiteral()) Sharding {
-    const name_slice = @tagName(name);
-    for (compiler.shardings) |mesh| {
-        if (std.mem.eql(u8, name_slice, mesh.data.name)) {
-            return mesh;
-        }
-    }
-    if (name == .replicated) return compiler.platform.replicated_sharding;
-    std.debug.panic(
-        \\Found no shardings named {s}.
-        \\Try passing more shardings to `zml.compile`.
-        \\Known shardings: {f}
-    , .{ name_slice, stdx.fmt.slice(compiler.shardings) });
+    return compiler.platform.sharding(name);
 }
 
 pub fn resolveSharding(compiler: *const Compiler, logical_axes: anytype) Sharding {
@@ -459,8 +443,8 @@ pub fn compileInternal(
 
     _ = result.func.appendTo(compiler.module.body());
 
-    const num_partitions = compiler.shardings[0].data.numPartitions();
-    const num_replicas = compiler.shardings[0].data.numReplicas();
+    const num_partitions = compiler.platform.replicated_sharding.data.numPartitions();
+    const num_replicas = compiler.platform.replicated_sharding.data.numReplicas();
     const num_devices = num_partitions * num_replicas;
 
     compiler.module.operation().setAttributeByName(
@@ -495,8 +479,8 @@ pub fn compileInternal(
         // This will get copied into exe
         result.input_info.items(.shape),
         result.output_info.items(.shape),
-        result.input_info.items(.sharding),
-        result.output_info.items(.sharding),
+        result.input_info.items(.partitioning),
+        result.output_info.items(.partitioning),
     );
     errdefer exe.deinit();
 
@@ -512,16 +496,15 @@ fn addPartitionerOperations(ctx: *Compiler) !void {
     switch (ctx.partitioner) {
         .gspmd => {},
         .shardy => {
-            for (ctx.shardings) |shd| {
+            for (ctx.platform.shardings.values()) |shd| {
                 const attr_str = try shd.data.sdyMeshAttr(allocator);
                 defer allocator.free(attr_str);
 
-                const name = shd.data.name;
                 const mesh_attr = try mlir.Attribute.parse(mlir_ctx, attr_str);
 
                 const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
                     .attributes = &.{
-                        .named(mlir_ctx, "sym_name", .string(mlir_ctx, name)),
+                        .named(mlir_ctx, "sym_name", .string(mlir_ctx, shd.name())),
                         .named(mlir_ctx, "mesh", mesh_attr),
                     },
                     .location = .unknown(mlir_ctx),
@@ -543,7 +526,7 @@ const EmitMlirResult = struct {
 pub const TensorInfo = struct {
     id: Tensor.Id,
     shape: Shape,
-    sharding: Sharding,
+    partitioning: Sharding.Resolved,
     value: *const mlir.Value,
 
     // Only used for input tensors, stores which output tensor ends up with their buffer
@@ -553,7 +536,7 @@ pub const TensorInfo = struct {
         var attrs: AttributeList = .empty;
 
         const mlir_ctx = compiler.mlir_ctx;
-        const sharding_attr = try compiler.tensorShardingAttr(arena, mlir_ctx, info.shape, info.sharding);
+        const sharding_attr = try compiler.tensorShardingAttr(arena, info.partitioning);
         const name = switch (compiler.partitioner) {
             .gspmd => "mhlo.sharding",
             .shardy => "sdy.sharding",
@@ -638,7 +621,7 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
                 .shape = og_shape,
-                .sharding = tensor.shape()._sharding._handleFakeReplicatedObject(ctx.compiler.platform),
+                .partitioning = tensor.partitioning().resolve(ctx.compiler.platform),
                 .value = value,
             });
         }
@@ -669,13 +652,16 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
                 value = repack(ctx.compiler, ctx.scope, og_shape, value);
             }
 
+            // Ouptut are replicated unless explicitly marked otherwise
+            const partitioning: Sharding.Partitioning = tensor._partitioning orelse
+                .replicated(tensor._shape);
+
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
                 // const packed_shape = og_shape.packedShape();
                 // TODO: clarify why this og_shape and not packedShape()
                 .shape = og_shape,
-                // Note: the panic should have been triggered during createBlockArguments or emitMlir
-                .sharding = tensor._shape._sharding._handleFakeReplicatedObject(ctx.compiler.platform),
+                .partitioning = partitioning.resolve(ctx.compiler.platform),
                 .value = value,
             });
         }
@@ -813,13 +799,11 @@ fn validateShardings(shardings: []const Sharding) !void {
 pub fn tensorShardingAttr(
     compiler: *const Compiler,
     allocator: std.mem.Allocator,
-    mlir_ctx: *mlir.Context,
-    shape: Shape,
-    shd: Sharding,
+    resolved: Sharding.Resolved,
 ) error{OutOfMemory}!*const mlir.Attribute {
     return switch (compiler.partitioner) {
-        .shardy => (try shd.data.sdyShardingAttrForShape(allocator, mlir_ctx, shape)).asAttr(),
-        .gspmd => shd.data.gspmdShardingAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
+        .shardy => (try resolved.mesh.sdyShardingAttrForShape(allocator, compiler.mlir_ctx, resolved.partition)).asAttr(),
+        .gspmd => resolved.mesh.gspmdShardingAttrForShape(allocator, compiler.mlir_ctx, resolved.partition) catch |err| switch (err) {
             error.WriteFailed => error.OutOfMemory, // We're writing to memory
             error.OutOfMemory => error.OutOfMemory,
             // TODO(hugomano): clarify what can trigger this and consider moving the check to the Sharding creation
@@ -857,7 +841,7 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
     };
 
     const platform = compiler.platform;
-    const main_mesh = compiler.shardings[0];
+    const main_mesh = platform.replicated_sharding;
     const num_partitions = main_mesh.data.numPartitions();
     const num_replicas = main_mesh.data.numReplicas();
 

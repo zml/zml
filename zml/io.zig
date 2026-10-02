@@ -31,29 +31,27 @@ pub const TensorStore = struct {
     };
 
     registry: *safetensors.TensorRegistry,
-    shardings: []const Sharding,
+    platform: *const Platform,
     id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
-    allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
-    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, shardings: []const Sharding) TensorStore {
-        var arena: std.heap.ArenaAllocator = .init(allocator);
+    pub fn fromRegistry(allocator: std.mem.Allocator, platform: *const Platform, registry: *safetensors.TensorRegistry) TensorStore {
         return .{
             .registry = registry,
-            .shardings = arena.allocator().dupe(Sharding, shardings) catch @panic("OOM"),
+            .platform = platform,
             .id_to_sources = .empty,
-            .allocator = allocator,
-            .arena = arena,
+            .arena = .init(allocator),
         };
     }
 
     pub fn deinit(self: *TensorStore) void {
-        self.id_to_sources.deinit(self.allocator);
+        // Only id_to_sources is allowed to use `arena.child_allocator` directly
+        self.id_to_sources.deinit(self.arena.child_allocator);
         self.arena.deinit();
     }
 
     fn putSourcesNoClobber(self: *TensorStore, id: Tensor.Id, sources: Binding) std.mem.Allocator.Error!void {
-        const gop = try self.id_to_sources.getOrPut(self.allocator, id);
+        const gop = try self.id_to_sources.getOrPut(self.arena.child_allocator, id);
         if (gop.found_existing) {
             stdx.debug.panic("Id {} already has associated sources", .{id});
         }
@@ -108,17 +106,11 @@ pub const TensorStore = struct {
 
     pub fn sharding(store: *const TensorStore, name: @EnumLiteral()) Sharding {
         const name_slice = @tagName(name);
-        for (store.shardings) |mesh| {
-            if (std.mem.eql(u8, name_slice, mesh.data.name)) {
-                return mesh;
-            }
-        }
-        if (std.mem.eql(u8, name_slice, "replicated")) return .replicated;
-        std.debug.panic(
-            \\Found no shardings named {s} in TensorStore.
-            \\Try passing more shardings to `zml.TensorStore.fromRegistry`.
-            \\Known shardings: {f}
-        , .{ name_slice, stdx.fmt.slice(store.shardings) });
+        return store.platform.shardings.get(name_slice) orelse
+            std.debug.panic(
+                \\Found no registered shardings named {s} in Platform.
+                \\Known shardings: {f}
+            , .{ name_slice, stdx.fmt.stringsZ(store.platform.shardings.keys()) });
     }
 
     pub const View = struct {
@@ -187,24 +179,15 @@ pub const TensorStore = struct {
 
         pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, sharding_: @EnumLiteral(), partitioning: anytype) ?Tensor {
             const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
-            const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
-            const resolved_sharding = self.store.sharding(sharding_);
+            const parsed_tags: ?Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else .empty;
 
-            const p: Shape.PartitionArray = if (has_tags) p: {
-                // Parse the partitioning. Theoritically we only need tags + spec, but the function is on a full Shape object
-                var tentative_shape: Shape = .{
-                    ._dtype = undefined,
-                    ._dims = .{ .buffer = @splat(64), .len = parsed_tags.len },
-                    ._tags = parsed_tags,
-                    ._sharding = resolved_sharding,
-                    ._partitioning = undefined,
-                };
-                break :p tentative_shape.parsePartitioning(resolved_sharding, partitioning);
-            } else
+            const p: Sharding.PartitionArray = if (comptime has_tags)
+                Sharding.Partitioning.parsePartitioning(parsed_tags.?, partitioning)
+            else
                 // We allowed untagged Tensor, but then the PartitionArray must be created manually.
                 partitioning;
 
-            return self.maybeCreateTensorInternal(subkey, parsed_tags.constSlice(), resolved_sharding, p);
+            return self.maybeCreateTensorInternal(subkey, parsed_tags, .{ .mesh = @tagName(sharding_), .partition = p });
         }
 
         pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, sharding_: @EnumLiteral(), partitioning: anytype) Tensor {
@@ -233,7 +216,7 @@ pub const TensorStore = struct {
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?[]const Shape.Tag, sharding_: Sharding, partitioning: ?Shape.PartitionArray) ?Tensor {
+        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?Shape.TagsArray, partitioning: Sharding.Partitioning) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             const source = self.store.dupeSource(key) orelse return null;
@@ -244,14 +227,13 @@ pub const TensorStore = struct {
 
             var shape = source.shape;
             if (tags) |user_tags| {
-                stdx.debug.assert(user_tags.len == shape.rank(), "tensor {s} from store has shape {f}, but `createTensor` got only {d} tags: {f}", .{ key, source.shape, user_tags.len, stdx.fmt.stringsZ(user_tags) });
-                @memcpy(shape._tags.slice(), user_tags);
+                const user_rank = user_tags.len();
+                stdx.debug.assert(user_tags.len() == shape.rank(), "tensor {s} from store has shape {f}, but `createTensor` got only {d} tags: {f}", .{ key, source.shape, user_rank, stdx.fmt.stringsZ(user_tags.slice(user_rank)) });
+                shape._tags = user_tags;
             }
-            shape._sharding = sharding_;
-            // partitioning is only null when called from createReplicatedTensor
-            shape._partitioning = partitioning orelse .replicated(source.shape.rank());
 
-            const tensor: Tensor = .fromShape(shape);
+            var tensor = Tensor.fromShape(shape);
+            tensor._partitioning = partitioning;
             self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;

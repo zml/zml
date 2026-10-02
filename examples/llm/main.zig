@@ -111,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Defines how the model's tensors are sharded across the available devices.
     const shardings: models.Shardings = try .init(platform);
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &shardings.all());
+    var store: zml.io.TensorStore = .fromRegistry(allocator, platform, &registry);
     defer store.deinit();
 
     const generation: models.GenerationOptions = .{

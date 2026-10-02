@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
 
     // Init model
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{platform.replicated_sharding});
+    var store: zml.io.TensorStore = .fromRegistry(allocator, platform, &registry);
     defer store.deinit();
     const mnist_model: Mnist = .init(store.view());
 
@@ -140,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
     var sample: [28 * 28]u8 align(16) = undefined;
     _ = try dataset.readPositionalAll(io, &sample, 16 + (idx * 28 * 28));
 
-    var input_buffer: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(input.shape(), &sample), .replicated);
+    var input_buffer: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(input.shape(), &sample), .replicated(input.shape()));
     defer input_buffer.deinit();
 
     printDigit(sample);

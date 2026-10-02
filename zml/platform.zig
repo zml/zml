@@ -284,7 +284,15 @@ pub const Platform = struct {
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
     replicated_sharding: zml.Sharding,
-    shardings: std.StringArrayHashMapUnmanaged(zml.Sharding),
+    shardings: std.array_hash_map.Custom(zml.Shape.Tag, zml.Sharding, struct {
+        pub fn hash(_: @This(), comptime_name: zml.Shape.Tag) u32 {
+            return std.array_hash_map.getAutoHashFn(usize, void)({}, @intFromPtr(comptime_name));
+        }
+
+        pub fn eql(_: @This(), a: zml.Shape.Tag, b: zml.Shape.Tag, _: usize) bool {
+            return a == b;
+        }
+    }, false),
     io_impl: IoImpl,
 
     pub const MAX_NUM_DEVICES: u16 = if (Target.tpu.isEnabled()) 64 else 32;
@@ -362,7 +370,7 @@ pub const Platform = struct {
                 .auto => zml.Sharding.PhysicalMesh.auto(arena, target, devices),
                 .custom => |builder| builder(arena, target, devices),
             };
-            platform.replicated_sharding = try platform.registerSharding("replicated", .mesh(.{ .x = .high_bandwidth }));
+            platform.replicated_sharding = try platform.registerSharding(.replicated, .mesh(.{ .x = .high_bandwidth }));
         }
 
         switch (target) {
@@ -626,9 +634,20 @@ pub const Platform = struct {
         return try profiler_.profiler(self.pjrt_api, allocator, io, options);
     }
 
+    pub fn sharding(platform: *const Platform, name: @EnumLiteral()) Sharding {
+        return platform._getSharding(@tagName(name));
+    }
+
+    fn _getSharding(platform: *const Platform, name: [:0]const u8) Sharding {
+        return platform.shardings.get(name.ptr) orelse std.debug.panic(
+            \\No shardings registered with {s}.
+            \\Known shardings: {f}
+        , .{ name, stdx.fmt.stringsZ(platform.shardings.keys()) });
+    }
+
     /// Create a Sharding based on the given logical mesh and the default strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerSharding(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) error{OutOfMemory}!Sharding {
+    pub fn registerSharding(platform: *Platform, name: @EnumLiteral(), logical: Sharding.LogicalMesh) error{OutOfMemory}!Sharding {
         return platform.registerShardingWithStrategy(
             name,
             logical,
@@ -643,21 +662,23 @@ pub const Platform = struct {
 
     /// Create a Sharding based on the given logical mesh and a strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerShardingWithStrategy(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !Sharding {
+    pub fn registerShardingWithStrategy(platform: *Platform, name: @EnumLiteral(), logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !Sharding {
+        return try platform.registerShardingInner(@tagName(name), logical, strategy);
+    }
+
+    fn registerShardingInner(platform: *Platform, name: [:0]const u8, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !Sharding {
         const arena = platform.arena.allocator();
         const entry = try platform.shardings.getOrPut(arena, name);
         if (entry.found_existing) {
             std.debug.panic("Another sharding already exists with this name: {s}", .{name});
         }
 
-        const owned_name = try arena.dupe(u8, name);
         const owned_data = try arena.create(Sharding.Data);
-        owned_data.* = try .init(owned_name, &platform.physical_mesh, logical, strategy);
-        const sharding: Sharding = .{ .data = owned_data };
-        entry.key_ptr.* = owned_name;
-        entry.value_ptr.* = sharding;
+        owned_data.* = try .init(name, &platform.physical_mesh, logical, strategy);
+        const sharding_: Sharding = .{ .data = owned_data };
+        entry.value_ptr.* = sharding_;
 
-        return sharding;
+        return sharding_;
     }
 
     fn memoryFromPjrt(self: *const Platform, pjrt_memory: *const pjrt.Memory) *const Memory {

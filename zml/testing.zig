@@ -27,7 +27,7 @@ pub fn env() *const Platform {
         ) catch @panic("Pjrt not available");
 
         // Register shardings required by flash attention.
-        _ = platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;
+        _ = platform.registerSharding(.model, .mesh(.{ .model = .high_bandwidth })) catch unreachable;
         _platform = platform;
     }
 
