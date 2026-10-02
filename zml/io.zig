@@ -754,8 +754,10 @@ const DirectShardWriter = struct {
                 .memory = memory.pjrt_memory,
             },
         );
+        errdefer transfer_manager.deinit(memory.platform.pjrt_api);
 
-        const pjrt_buffer = transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0) catch unreachable;
+        const pjrt_buffer = try transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0);
+        errdefer pjrt_buffer.deinit(memory.platform.pjrt_api);
 
         const buf = try pool.get(allocator, io);
 
@@ -1169,13 +1171,12 @@ pub const DirectMemoryWriter = struct {
         var pjrt_buffers: Buffer.Shards = .empty;
         const placement = try sharding.placement(shape);
         for (ordered_devices, 0..) |device, i| {
-            defer initialized += 1;
-
             const pool = &pools[device.id];
             const shard_dma_allocator = dma_allocators[device.id].allocator();
             const pjrt_mem = platform.devices[device.id].memory(memory).?;
 
             shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape);
+            initialized += 1;
 
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }
