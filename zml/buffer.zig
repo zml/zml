@@ -465,13 +465,26 @@ pub const HostStagedBuffer = struct {
     /// Heap allocated, so views can borrow it while the buffer moves.
     prepared: *Prepared,
     shards: std.MultiArrayList(Shard),
-    /// Host pointers of the owning shards of a read-only buffer, whose handles
-    /// execution never replaces. Empty for donated outputs, which query them in
-    /// `view`: each query takes and releases a hold on the PJRT buffer.
-    hostPointers: HostPointers,
+    /// Heap allocated and borrowed by views, like `prepared`.
+    hostPointers: *HostPointers,
 
     pub const Coordinates = [Shape.MAX_RANK]usize;
-    const HostPointers = stdx.BoundedArray([*]u8, Platform.MAX_NUM_DEVICES);
+
+    /// Host pointers of the owning shards, read from their PJRT handles once:
+    /// each read takes and releases a hold on the PJRT buffer.
+    const HostPointers = struct {
+        ptrs: stdx.BoundedArray([*]u8, Platform.MAX_NUM_DEVICES) = .empty,
+        /// Execution replaces the handles of donated buffers with its outputs,
+        /// which may not reuse the allocation, so `await` reads them again.
+        handles: stdx.BoundedArray(*pjrt.Buffer, Platform.MAX_NUM_DEVICES) = .empty,
+
+        fn matches(self: *const HostPointers, buffer: *const Buffer, owningBufferIndices: []const usize) bool {
+            for (self.handles.constSlice(), owningBufferIndices) |handle, index| {
+                if (handle != buffer._shards.get(index)) return false;
+            }
+            return true;
+        }
+    };
 
     /// Layout and shard placement prepared once and borrowed by views, which
     /// stay small enough to copy freely.
@@ -579,6 +592,9 @@ pub const HostStagedBuffer = struct {
         const prepared = try allocator.create(Prepared);
         errdefer allocator.destroy(prepared);
         prepared.* = .init(metadata.shape, metadata.placement.shape, metadata.layout, shards.items(.origin));
+        const hostPointers = try allocator.create(HostPointers);
+        errdefer allocator.destroy(hostPointers);
+        hostPointers.* = try queryHostPointers(&buffer, shards.items(.owningBufferIndex));
 
         return .{
             .buffer = buffer,
@@ -586,17 +602,19 @@ pub const HostStagedBuffer = struct {
             .shard_shape = metadata.placement.shape,
             .prepared = prepared,
             .shards = shards,
-            .hostPointers = if (is_device_read_only) try queryHostPointers(&buffer, shards.items(.owningBufferIndex)) else .empty,
+            .hostPointers = hostPointers,
         };
     }
 
     fn queryHostPointers(buffer: *const Buffer, owningBufferIndices: []const usize) !HostPointers {
         const api = buffer._platform.pjrt_api;
-        var ptrs: HostPointers = .empty;
+        var result: HostPointers = .{};
         for (owningBufferIndices) |index| {
-            ptrs.appendAssumeCapacity(@ptrCast(try buffer._shards.get(index).opaqueDeviceMemoryDataPointer(api)));
+            const handle = buffer._shards.get(index);
+            result.ptrs.appendAssumeCapacity(@ptrCast(try handle.opaqueDeviceMemoryDataPointer(api)));
+            result.handles.appendAssumeCapacity(handle);
         }
-        return ptrs;
+        return result;
     }
 
     /// Execution must be done with the buffer.
@@ -604,6 +622,7 @@ pub const HostStagedBuffer = struct {
         deinitBuffer(&self.buffer, &self.shards);
         self.shards.deinit(allocator);
         allocator.destroy(self.prepared);
+        allocator.destroy(self.hostPointers);
     }
 
     fn deinitBuffer(buffer: *Buffer, shards: *const std.MultiArrayList(Shard)) void {
@@ -620,19 +639,23 @@ pub const HostStagedBuffer = struct {
         buffer._shards = .empty;
     }
 
-    /// Wait for execution to finish. Obtain new views before accessing the output.
+    /// Wait for execution to finish, and read the host pointers of handles that
+    /// execution replaced. Obtain new views before accessing the output.
     pub fn await(self: *HostStagedBuffer, io: std.Io) !void {
         try self.buffer.await(io);
+        const owningBufferIndices = self.shards.items(.owningBufferIndex);
+        if (!self.hostPointers.matches(&self.buffer, owningBufferIndices)) {
+            self.hostPointers.* = try queryHostPointers(&self.buffer, owningBufferIndices);
+        }
     }
 
-    /// Snapshots pointers from the current handles. Execution must have completed.
-    /// The view and its borrowed blocks must not be used after the next execution.
+    /// Borrows the buffer's metadata and host pointers. Execution must have
+    /// completed, and `await` must follow any execution that replaced the handles.
+    /// The view and its blocks must not be used after the next execution, nor
+    /// after the buffer is deinitialized.
     pub fn view(self: *const HostStagedBuffer, comptime T: type) View(T) {
-        const ptrs = if (self.hostPointers.len != 0) self.hostPointers else queryHostPointers(&self.buffer, self.shards.items(.owningBufferIndex)) catch |err| {
-            log.err("Failed to retrieve pinned host pointers: {}", .{err});
-            @panic("Pinned host memory must be accessible");
-        };
-        return .init(self.prepared, ptrs.constSlice());
+        stdx.debug.assert(self.hostPointers.matches(&self.buffer, self.shards.items(.owningBufferIndex)), "await the HostStagedBuffer after execution replaces its handles", .{});
+        return .init(self.prepared, self.hostPointers.ptrs.constSlice());
     }
 
     pub fn format(self: HostStagedBuffer, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -657,7 +680,8 @@ pub const HostStagedBuffer = struct {
     pub fn View(comptime T: type) type {
         return struct {
             prepared: *const Prepared,
-            ptrs: stdx.BoundedArray([*]u8, Platform.MAX_NUM_DEVICES),
+            /// One host pointer per origin of `prepared`. Borrowed.
+            ptrs: []const [*]u8,
             start: usize = 0,
             len: usize,
 
@@ -666,18 +690,18 @@ pub const HostStagedBuffer = struct {
             /// A view without elements, which never accesses storage or metadata.
             pub const empty: Self = .{
                 .prepared = undefined,
-                .ptrs = .empty,
+                .ptrs = &.{},
                 .len = 0,
             };
 
             /// A view of raw storage without PJRT buffers, e.g. for tests.
-            /// Copies the pointers, one per origin of `prepared`, and borrows `prepared`.
+            /// Borrows `prepared` and the pointers, one per origin of `prepared`.
             pub fn init(prepared: *const Prepared, ptrs: []const [*]u8) Self {
                 std.debug.assert(@sizeOf(T) == prepared.shard_shape.dtype().sizeOf());
                 std.debug.assert(ptrs.len == prepared.origins.len);
                 return .{
                     .prepared = prepared,
-                    .ptrs = stdx.BoundedArray([*]u8, Platform.MAX_NUM_DEVICES).fromSlice(ptrs) catch unreachable,
+                    .ptrs = ptrs,
                     .len = prepared.shape.count(),
                 };
             }
@@ -911,7 +935,7 @@ pub const HostStagedBuffer = struct {
             }
 
             fn itemsAtByteOffset(self: *const Self, shard: usize, byteOffset: usize, len: usize) []T {
-                const ptr: [*]T = @ptrCast(@alignCast(self.ptrs.constSlice()[shard] + byteOffset));
+                const ptr: [*]T = @ptrCast(@alignCast(self.ptrs[shard] + byteOffset));
                 return ptr[0..len];
             }
 
@@ -1482,7 +1506,7 @@ test "tiled layout offsets follow XLA" {
     try std.testing.expectEqual(31, tiledElementOffset(.init(.{ 4, 8 }, .f32), crossTile, &.{ 3, 7 }));
 }
 
-test "HostStagedBuffer.View snapshots pointers and preserves them through slicing" {
+test "HostStagedBuffer.View borrows its pointers through slicing" {
     const shape = Shape.init(.{4}, .i32);
     const layout: pjrt.MemoryLayout = .{ .strides = .{ .byte_strides = &.{4} } };
     var storage = [_]i32{ 0, 1, 2, 3 };
@@ -1492,11 +1516,13 @@ test "HostStagedBuffer.View snapshots pointers and preserves them through slicin
     const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
     const nested = view.slice(1, null).slice(0, 2);
 
-    // Changing the caller's pointer array cannot redirect an existing view.
+    // Slices read the pointers in place, which lets a buffer refresh them
+    // without copying them into every view.
+    try std.testing.expectEqual(@as([*]const [*]u8, &ptrs), nested.ptrs.ptr);
     ptrs[0] = @ptrCast(&other);
     nested.fill(99);
-    try std.testing.expectEqualSlices(i32, &.{ 0, 99, 99, 3 }, &storage);
-    try std.testing.expectEqualSlices(i32, &.{ 10, 11, 12, 13 }, &other);
+    try std.testing.expectEqualSlices(i32, &.{ 0, 1, 2, 3 }, &storage);
+    try std.testing.expectEqualSlices(i32, &.{ 10, 99, 99, 13 }, &other);
 }
 
 test "HostStagedBuffer.View doesn't borrow source layout metadata" {
@@ -1810,7 +1836,7 @@ test "HostStagedBuffer.View blocks merge shuffled shards and group replicas" {
     var ptrs: [8][*]u8 = undefined;
     var origins: [8]HostStagedBuffer.Coordinates = undefined;
     for (order, &ptrs, &origins) |index, *ptr, *origin| {
-        ptr.* = original.ptrs.get(index);
+        ptr.* = original.ptrs[index];
         origin.* = original.prepared.origins[index];
     }
     const viewPrepared: HostStagedBuffer.Prepared = .init(original.prepared.shape, original.prepared.shard_shape, TestShards.tiled, &origins);
