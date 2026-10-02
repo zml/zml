@@ -10,11 +10,12 @@ pub inline fn internalAssert(check: bool, comptime msg: []const u8, args: anytyp
 
 pub inline fn assert(check: bool, comptime msg: []const u8, args: anytype) void {
     if (!check) {
+        @branchHint(.cold);
         panic(msg, args);
     }
 }
 
-pub inline fn panic(comptime format: []const u8, args: anytype) noreturn {
+pub fn panic(comptime format: []const u8, args: anytype) noreturn {
     std.debug.panic(format, args);
 }
 

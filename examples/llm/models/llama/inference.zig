@@ -32,11 +32,11 @@ pub const CompilationParameters = struct {
                 .k = seqlen,
                 .h = config.num_key_value_heads,
                 .hd = head_dim,
-            }, mdl.model.embed_tokens.weight.dtype())),
+            }, mdl.model.embed_tokens.weight.dtype()), shardings.model),
             .rng = .init(),
             .attention_metadata = switch (backend) {
                 .attnd => .{ .attnd = .init() },
-                else => .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
+                else => .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads)), shardings.model),
             },
             .prefill_attention_parameters = switch (backend) {
                 .attnd => .{ .attnd = .init(.{
@@ -271,7 +271,7 @@ fn compileLayer(
     const hidden: zml.Tensor = .fromShape(zml.Shape.init(
         .{ .s = seqlen, .d = llama_model.config.hidden_size },
         llama_model.model.embed_tokens.weight.dtype(),
-    ).withPartitioning(.{ .d = .replicated }));
+    ).withPartitioning(parameters.shardings.model, .{ .d = .replicated }));
 
     const kv_cache_index: zml.Tensor = .init(.{}, .u32);
 
@@ -316,7 +316,7 @@ fn compileSample(
     const hidden: zml.Tensor = .fromShape(zml.Shape.init(
         .{ .s = seqlen, .d = llama_model.config.hidden_size },
         llama_model.model.embed_tokens.weight.dtype(),
-    ).withPartitioning(.{ .d = .replicated }));
+    ).withPartitioning(parameters.shardings.model, .{ .d = .replicated }));
 
     const tokens: zml.Tensor = .init(.{ .s = seqlen }, .u32);
 
