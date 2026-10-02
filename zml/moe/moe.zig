@@ -16,7 +16,7 @@ const fused_experts = @import("fused_experts.zig");
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
 pub const ProjectionLayout = fused_experts.ProjectionLayout;
 
-const log = std.log.scoped(.moe);
+const log = std.log.scoped(.@"zml/moe");
 
 test {
     std.testing.refAllDecls(@This());

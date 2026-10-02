@@ -1708,7 +1708,7 @@ pub const Tensor = struct {
 
     /// Returns an element-wise approximation of the error function, computed and returned in FP32.
     /// Uses the Eigen rational approximation from CHLO's FP32 erf legalization:
-    /// https://github.com/openxla/stablehlo/blob/main/stablehlo/transforms/ChloLegalizeToStablehlo.cpp
+    /// https://github.com/openxla/stablehlo/blob/95ee4c70146864ed7d0a21dd135ccec37ece1b52/stablehlo/transforms/ChloLegalizeToStablehlo.cpp#L1038
     pub fn erf(input: Tensor) Tensor {
         const x = input.convert(.f32).clamp(.scalar(-4, .f32), .scalar(4, .f32));
         const x2 = x.mul(x);
@@ -1742,7 +1742,7 @@ pub const Tensor = struct {
 
     /// Returns an element-wise approximation of the complementary error function in FP32.
     /// Uses CHLO's Cephes-based approximation to preserve the small positive tail:
-    /// https://github.com/openxla/stablehlo/blob/main/stablehlo/transforms/ChloLegalizeToStablehlo.cpp
+    /// https://github.com/openxla/stablehlo/blob/95ee4c70146864ed7d0a21dd135ccec37ece1b52/stablehlo/transforms/ChloLegalizeToStablehlo.cpp#L1018
     pub fn erfc(input: Tensor) Tensor {
         const x = input.convert(.f32);
         const abs_x = x.abs();

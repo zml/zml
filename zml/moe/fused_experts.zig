@@ -10,7 +10,7 @@ const fly = @import("fly_kernels/moe.zig");
 const triton = @import("triton.zig");
 const callFusedMoe = triton.call;
 
-const log = std.log.scoped(.moe);
+const log = std.log.scoped(.@"zml/moe/fused_experts");
 
 test {
     std.testing.refAllDecls(@This());

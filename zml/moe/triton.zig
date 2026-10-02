@@ -14,7 +14,8 @@ pub const RoutingWeightPlacement = shared.RoutingWeightPlacement;
 pub const FusedExpertsArgs = shared.FusedExpertsArgs;
 const kernels = @import("triton_kernels/triton_kernels.zig");
 
-const log = std.log.scoped(.moe);
+const log = std.log.scoped(.@"zml/moe/triton");
+
 pub fn call(opts: shared.GemmOptions) Tensor {
     // Native FP4 tensors expose logical K; the Triton operand is byte-packed.
     const weight = if (opts.quant_scheme == .mxfp4 and opts.weight.dtype() == .f4e2m1)
