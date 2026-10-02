@@ -1,0 +1,18 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
+zig_binary(
+    name = "laya",
+    srcs = glob(["*.zig"]),
+    data = glob(["testdata/*.json"]),
+    extra_srcs = ["demo.html"],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_test(
+    name = "test",
+    srcs = glob(["*.zig"]),
+    main = "prompt.zig",
+    deps = ["//zml"],
+)
