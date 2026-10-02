@@ -465,8 +465,13 @@ pub const HostStagedBuffer = struct {
     preparedLayout: PreparedLayout,
     preparedShards: PreparedShards,
     shards: std.MultiArrayList(Shard),
+    /// Host pointers of the owning shards of a read-only buffer, whose handles
+    /// execution never replaces. Empty for donated outputs, which query them in
+    /// `view`: each query takes and releases a hold on the PJRT buffer.
+    hostPointers: HostPointers,
 
     pub const Coordinates = [Shape.MAX_RANK]usize;
+    const HostPointers = stdx.BoundedArray([*]u8, Platform.MAX_NUM_DEVICES);
 
     const Shard = struct {
         origin: Coordinates,
@@ -551,7 +556,17 @@ pub const HostStagedBuffer = struct {
             .preparedLayout = .init(metadata.shape, metadata.placement.shape, metadata.layout),
             .preparedShards = .init(shards.items(.origin), metadata.placement.shape.rank()),
             .shards = shards,
+            .hostPointers = if (is_device_read_only) try queryHostPointers(&buffer, shards.items(.owningBufferIndex)) else .empty,
         };
+    }
+
+    fn queryHostPointers(buffer: *const Buffer, owningBufferIndices: []const usize) !HostPointers {
+        const api = buffer._platform.pjrt_api;
+        var ptrs: HostPointers = .empty;
+        for (owningBufferIndices) |index| {
+            ptrs.appendAssumeCapacity(@ptrCast(try buffer._shards.get(index).opaqueDeviceMemoryDataPointer(api)));
+        }
+        return ptrs;
     }
 
     /// Execution must be done with the buffer.
@@ -582,15 +597,10 @@ pub const HostStagedBuffer = struct {
     /// Snapshots pointers from the current handles. Execution must have completed.
     /// The view and its borrowed blocks must not be used after the next execution.
     pub fn view(self: *const HostStagedBuffer, comptime T: type) View(T) {
-        const api = self.buffer._platform.pjrt_api;
-        var ptrs: stdx.BoundedArray([*]u8, Platform.MAX_NUM_DEVICES) = .empty;
-        for (self.shards.items(.owningBufferIndex)) |index| {
-            const ptr = self.buffer._shards.get(index).opaqueDeviceMemoryDataPointer(api) catch |err| {
-                log.err("Failed to retrieve pinned host pointers: {}", .{err});
-                @panic("Pinned host memory must be accessible");
-            };
-            ptrs.appendAssumeCapacity(@ptrCast(ptr));
-        }
+        const ptrs = if (self.hostPointers.len != 0) self.hostPointers else queryHostPointers(&self.buffer, self.shards.items(.owningBufferIndex)) catch |err| {
+            log.err("Failed to retrieve pinned host pointers: {}", .{err});
+            @panic("Pinned host memory must be accessible");
+        };
         return .initPrepared(self.shape, self.shard_shape, self.preparedLayout, self.preparedShards, ptrs.constSlice(), self.shards.items(.origin));
     }
 
