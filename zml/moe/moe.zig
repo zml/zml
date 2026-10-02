@@ -264,8 +264,9 @@ pub fn forwardMoe(
 
                 // TODO(Corentin): Do error checking on nvfp4
                 // Also, maybe pass `zml.nn.Linear` directly
-                if (expert_partition.eql(.init(.experts))) {
+                if (expert_partition.isSharded()) {
                     break :b zml.ops.manualComputation(
+                        gate_up.weight.shape()._sharding,
                         (struct {
                             input: zml.Tensor,
                             topk_ids: zml.Tensor,
@@ -353,6 +354,7 @@ pub fn forwardMoe(
                             .workspace_query_device = runner_options.workspace_query_device,
                         },
                         input.shape(),
+                        .experts,
                     );
                 }
 
@@ -372,8 +374,9 @@ pub fn forwardMoe(
                 );
             }
 
-            if (expert_partition.eql(.init(.experts))) {
+            if (expert_partition.isSharded()) {
                 break :b zml.ops.manualComputation(
+                    gate_up.weight.shape()._sharding,
                     (struct {
                         input: zml.Tensor,
                         topk_ids: zml.Tensor,
@@ -443,6 +446,7 @@ pub fn forwardMoe(
                         .workspace_query_device = runner_options.workspace_query_device,
                     },
                     input.shape(),
+                    .experts,
                 );
             }
 
@@ -471,11 +475,12 @@ pub fn forwardMoe(
             };
             const expert_partition = gate_up.weight.shape().partition(.expert);
 
-            if (!expert_partition.eql(.init(.experts))) {
+            if (!expert_partition.isSharded()) {
                 break :b try fused_experts.fusedExperts(args, backend);
             }
 
             break :b zml.ops.manualComputation(
+                gate_up.weight.shape()._sharding,
                 (struct {
                     args: fused_experts.FusedExpertsArgs,
                     global_num_experts: i64,
@@ -503,14 +508,16 @@ pub fn forwardMoe(
                 }).call,
                 .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert) },
                 input.shape(),
+                .experts,
             );
         },
         .mosaic_tpu => b: {
             const expert_partition = gate_up.weight.shape().partition(.expert);
 
-            if (expert_partition.eql(.init(.experts))) {
+            if (expert_partition.isSharded()) {
                 const global_num_experts = down.weight.dim(.expert);
                 const partial_output = zml.ops.manualComputation(
+                    gate_up.weight.shape()._sharding,
                     (struct {
                         input: zml.Tensor,
                         topk_ids: zml.Tensor,
@@ -569,6 +576,7 @@ pub fn forwardMoe(
                         .bias_down = down.bias,
                     },
                     input.shape(),
+                    .experts,
                 );
                 break :b zml.ops.allReduce(partial_output, zml.Tensor.add);
             }

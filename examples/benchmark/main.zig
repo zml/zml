@@ -5,7 +5,7 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
-    return a.dot(b, .k).withPartitioning(.{ .m = .m, .n = .replicated });
+    return a.dot(b, .k).withPartitioning(.benchmark_mesh, .{ .m = .m, .n = .replicated });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -32,13 +32,10 @@ pub fn main(init: std.process.Init) !void {
 
     const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);
 
-    const a_shape = zml.Shape.init(.{ .m = cli_args.size, .k = cli_args.size }, cli_args.dtype)
-        .withPartitioning(.{ .m = .m, .k = .replicated });
-    const b_shape = zml.Shape.init(.{ .k = cli_args.size, .n = cli_args.size }, cli_args.dtype)
-        .withPartitioning(.{ .k = .replicated, .n = .n });
-
-    const a: zml.Tensor = .fromShape(a_shape);
-    const b: zml.Tensor = .fromShape(b_shape);
+    const a = zml.Tensor.init(.{ .m = cli_args.size, .k = cli_args.size }, cli_args.dtype)
+        .withPartitioning(benchmark_sharding, .{ .m = .m, .k = .replicated });
+    const b = zml.Tensor.init(.{ .k = cli_args.size, .n = cli_args.size }, cli_args.dtype)
+        .withPartitioning(benchmark_sharding, .{ .k = .replicated, .n = .n });
 
     var exe = blk: {
         log.info("⏱️ Compiling benchmark...", .{});

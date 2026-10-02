@@ -40,16 +40,16 @@ pub fn main(init: std.process.Init) !void {
     defer repo.close(io);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    const shardings: common.Shardings = try .init(platform);
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &shardings.all());
     defer store.deinit();
 
     var repo_model = try lfm2.LoadedModel.init(allocator, io, repo, store.view(), .{});
     defer repo_model.deinit(allocator);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    const shardings: common.Shardings = try .init(platform);
 
-    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
+    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
     const backend = args.backend orelse zml.attention.Backend.auto(platform);
@@ -62,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
     );
     progress.end();
 
-    try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, params.attention_metadata, params.attention_parameters);
+    try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, params.attention_metadata, params.attention_parameters, shardings);
 }
 
 pub fn run(
@@ -75,11 +75,12 @@ pub fn run(
     model_buffers: *lfm2.Buffers,
     attention_metadata: zml.attention.Metadata,
     attention_parameters: zml.attention.Parameters,
+    shardings: common.Shardings,
 ) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
-    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &shardings.all());
     defer activation_store.deinit();
 
     var ctx = TestContext{

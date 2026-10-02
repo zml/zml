@@ -50,7 +50,7 @@ pub fn fusedExperts(
         return error.UnsupportedWeightLayout;
     }
 
-    const expert_parallelism = gate_up.weight.shape().partition(.expert).eql(.init(.experts));
+    const expert_parallelism = gate_up.weight.shape().partition(.expert).isSharded();
 
     const context: Context = .{
         .input = input,
@@ -68,7 +68,7 @@ pub fn fusedExperts(
     };
 
     return if (expert_parallelism)
-        zml.ops.manualComputation(Context.body, context, input.shape())
+        zml.ops.manualComputation(gate_up.weight.shape()._sharding, Context.body, context, input.shape(), .experts)
     else
         context.body(input.shape());
 }

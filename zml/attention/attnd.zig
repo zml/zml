@@ -140,8 +140,8 @@ const Context = struct {
 };
 
 pub fn causalAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_offset: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-    const ctx = zml.Compiler.current();
-    const num_partitions = ctx.partitioning.numPartitionsForLogicalAxis(q.shape(), .model) catch unreachable;
+    const tp = zml.Compiler.current().getSharding(.model);
+    const num_partitions = tp.numPartitionsForLogicalAxis(.model);
 
     const actual_k, const actual_v = if (parameters.is_prefill)
         .{ k, v }
@@ -164,6 +164,7 @@ pub fn causalAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_offset
     }, .bytes);
 
     const out = targets.attnd.call(
+        tp,
         .{ .mqkv = packed_input },
         .{
             .attn = q.shape(),
@@ -191,6 +192,7 @@ pub const targets = struct {
     pub const attnd = zml.ops.CustomCall(Input, Output, Attributes, attndCall, .{
         .name = NAME,
         .sharding_aware = true,
+        .manual_axes = &.{"model".ptr},
         .has_side_effect = false,
         .compute_on_host = true,
     });

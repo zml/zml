@@ -155,7 +155,9 @@ pub fn pagedAttention(parameters: triton.paged.Parameters, q: zml.Tensor, kv_cac
 /// ([.q, .topk], -1 unused), `active_count` the number of leading active queries.
 pub fn attention(q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, rows: zml.Tensor, active_count: zml.Tensor, all_decode: bool, opts: MlaOptions) zml.Tensor {
     const output_shape = q.shape().set(.hd, opts.value_rank);
+    const partition_axes = q.shape().partitioningAxes();
     return zml.ops.manualComputation(
+        q.shape()._sharding,
         (struct {
             q: zml.Tensor,
             kv_cache: zml.Tensor,
@@ -191,5 +193,6 @@ pub fn attention(q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, rows: z
             .opts = opts,
         },
         output_shape,
+        partition_axes.constSlice(),
     );
 }

@@ -155,12 +155,12 @@ pub const mosaic_tpu = struct {
             .{ q.dim(.hd), target_head_dim },
         );
         return q.pad(0, .{ .hd = zml.Tensor.Pad{ .high = target_head_dim - q.dim(.hd) } })
-            .withPartitioning(.{ .h = .model });
+            .withPartitioning(.model, .{ .h = .model });
     }
 
     inline fn prepareInputs(parameters: Parameters, q: zml.Tensor, kv_pages: zml.Tensor) PreparedInputs {
-        const kv_pages_partitioned = kv_pages.withPartitioning(.{ .hkv = .model });
-        const q_merged = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
+        const kv_pages_partitioned = kv_pages.withPartitioning(.model, .{ .hkv = .model });
+        const q_merged = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.model, .{ .h = .model });
         const logical_head_dim: usize = @intCast(q_merged.dim(.hd));
         const cache_head_dim: usize = @intCast(kv_pages_partitioned.dim(.hd));
         stdx.debug.assert(
@@ -169,15 +169,15 @@ pub const mosaic_tpu = struct {
             .{ cache_head_dim, logical_head_dim },
         );
         const q_ragged = alignQueryHeadDimForKernel(q_merged, kv_pages_partitioned.dim(.hd));
-        const query_start_len = parameters.query_start_len.withPartitioning(.{ .b = .replicated });
+        const query_start_len = parameters.query_start_len.withPartitioning(.model, .{ .b = .replicated });
 
         return .{
             .q = q_ragged,
             .kv_pages = kv_pages_partitioned,
-            .seq_lens = parameters.seq_lens.withPartitioning(.{ ._0 = .replicated }),
-            .block_table = parameters.block_table.withPartitioning(.{ ._0 = .replicated, ._1 = .replicated }),
+            .seq_lens = parameters.seq_lens.withPartitioning(.model, .{ ._0 = .replicated }),
+            .block_table = parameters.block_table.withPartitioning(.model, .{ ._0 = .replicated, ._1 = .replicated }),
             .query_start_len = query_start_len,
-            .num_seqs = activeSequenceCount(query_start_len).withPartitioning(.{ ._0 = .replicated }),
+            .num_seqs = activeSequenceCount(query_start_len).withPartitioning(.model, .{ ._0 = .replicated }),
         };
     }
 
@@ -223,6 +223,7 @@ pub const mosaic_tpu = struct {
         const prepared = prepareInputs(parameters, q, kv_cache);
 
         const q_out = zml.ops.manualComputation(
+            q.shape()._sharding,
             (struct {
                 q: zml.Tensor,
                 kv_pages: zml.Tensor,
@@ -268,6 +269,7 @@ pub const mosaic_tpu = struct {
                 .parameters = parameters,
             },
             prepared.q.shape(),
+            .model,
         );
 
         const restored = restoreQueryHeads(q, q_out);

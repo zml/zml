@@ -34,11 +34,12 @@ const DemoModel = struct {
 
         var y = x.dot(self.w, .feature);
         y = y.add(self.b.broad(y.shape()));
-        y = y.withPartitioning(.{ .batch = .data, .hidden = .model });
+        y = y.withPartitioning(.dp_mp, .{ .batch = .data, .hidden = .model });
         y.print("dense_out");
 
         const gate = y.scale(0.01).sigmoid();
         return zml.ops.manualComputation(
+            input.shape()._sharding,
             (struct {
                 y: zml.Tensor,
                 gate: zml.Tensor,
@@ -50,6 +51,7 @@ const DemoModel = struct {
             }).body,
             .{ .y = y, .gate = gate },
             y.shape(),
+            .{ .data, .model },
         );
     }
 };
@@ -194,7 +196,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("{f}", .{platform.physical_mesh});
 
     const sharding: zml.Sharding = try platform.registerSharding(
-        "demo_mesh",
+        "dp_mp",
         .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
     );
 
@@ -202,15 +204,15 @@ pub fn main(init: std.process.Init) !void {
     log.info("{f}", .{sharding});
 
     const input_shape = zml.Shape.init(.{ .batch = 16, .feature = 32 }, .f32)
-        .withPartitioning(.{ .batch = .data, .feature = .replicated });
+        .withPartitioning(sharding, .{ .batch = .data, .feature = .replicated });
     const w_shape = zml.Shape.init(.{ .feature = 32, .hidden = 64 }, .f32)
-        .withPartitioning(.{ .feature = .replicated, .hidden = .model });
+        .withPartitioning(sharding, .{ .feature = .replicated, .hidden = .model });
     const b_shape = zml.Shape.init(.{ .hidden = 64 }, .f32)
-        .withPartitioning(.{ .hidden = .model });
+        .withPartitioning(sharding, .{ .hidden = .model });
 
-    const input: zml.Tensor = .fromShape(input_shape);
-    const w: zml.Tensor = .fromShape(w_shape);
-    const b: zml.Tensor = .fromShape(b_shape);
+    const input: zml.Tensor = zml.Tensor.fromShape(input_shape);
+    const w: zml.Tensor = zml.Tensor.fromShape(w_shape);
+    const b: zml.Tensor = zml.Tensor.fromShape(b_shape);
     const model: DemoModel = .init(w, b);
 
     var exe = try platform.compile(

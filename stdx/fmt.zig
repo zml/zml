@@ -5,12 +5,27 @@ pub fn slice(any_slice: anytype) FmtSlice(std.meta.Elem(@TypeOf(any_slice))) {
     return .{ .slice = any_slice };
 }
 
+/// Properly format a slice of []const u8.
+pub fn strings(strs: []const []const u8) FmtStrings {
+    return .{ .strings = strs };
+}
+
+/// Properly format a slice of [*:0]const u8.
+pub fn stringsZ(strs: []const [*:0]const u8) FmtZeroStrings {
+    return .{ .strings = strs };
+}
+
 fn FmtSlice(T: type) type {
     return struct {
         slice: []const T,
 
         pub fn format(f: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            return try formatSliceAny(f.slice, .{}, 1, writer);
+            _ = try writer.writeAll("{");
+            for (0.., f.slice) |i, data| {
+                if (i > 0) try writer.writeAll(", ");
+                try data.format(writer);
+            }
+            _ = try writer.writeAll("}");
         }
 
         pub fn formatNumber(f: @This(), writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
@@ -23,13 +38,33 @@ fn FmtSlice(T: type) type {
                 } else if (@hasDecl(T, "toF32")) {
                     try formatFloatSlice(f.slice, n, 1, writer);
                 } else {
-                    try formatSliceAny(f.slice, n, 1, writer);
+                    try formatSliceAnyNumber(f.slice, n, 1, writer);
                 },
                 else => @compileError("FmtSlice doesn't support type: " ++ @typeName(T)),
             };
         }
     };
 }
+
+pub const FmtStrings = struct {
+    strings: []const []const u8,
+
+    pub fn format(f: FmtStrings, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return try formatSliceCustom(formatStr, f.strings, .{}, 1, writer);
+    }
+
+    pub fn formatNumber(f: FmtStrings, writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
+        return try formatIntSlice(f.strings, n, 1, writer);
+    }
+};
+
+pub const FmtZeroStrings = struct {
+    strings: []const [*:0]const u8,
+
+    pub fn format(f: FmtZeroStrings, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return try formatSliceCustom(formatStrZ, f.strings, .{}, 1, writer);
+    }
+};
 
 pub fn formatFloat(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
     const x = switch (@typeInfo(@TypeOf(value))) {
@@ -77,8 +112,15 @@ pub fn formatBool(value: bool, spec: std.fmt.Number, writer: *std.Io.Writer) !vo
     try writer.alignBufferOptions(if (value) "1" else "0", .{ .alignment = spec.alignment, .fill = spec.fill });
 }
 
-pub fn formatAny(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
-    var buf: [48]u8 = undefined;
+pub fn formatStr(value: []const u8, _: std.fmt.Number, writer: *std.Io.Writer) !void {
+    try writer.writeAll(value);
+}
+
+pub fn formatStrZ(value: [*:0]const u8, _: std.fmt.Number, writer: *std.Io.Writer) !void {
+    try writer.writeAll(std.mem.span(value));
+}
+
+pub fn formatAnyNumber(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
     const T = @TypeOf(value);
     const fmt = switch (@typeInfo(T)) {
         .@"struct", .@"union", .@"enum", .@"opaque" => if (@hasDecl(T, "formatNumber"))
@@ -88,6 +130,7 @@ pub fn formatAny(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !
         else => "{f}",
     };
 
+    var buf: [48]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, .{value}) catch blk: {
         buf[45..].* = "...".*;
         break :blk buf[0..];
@@ -126,8 +169,8 @@ pub fn formatSliceCustom(fmt_func: anytype, values: anytype, spec: std.fmt.Numbe
     _ = try writer.write("}");
 }
 
-pub fn formatSliceAny(values: anytype, spec: std.fmt.Number, stride: i64, writer: *std.Io.Writer) !void {
-    return try formatSliceCustom(formatAny, values, spec, stride, writer);
+pub fn formatSliceAnyNumber(values: anytype, spec: std.fmt.Number, stride: i64, writer: *std.Io.Writer) !void {
+    return try formatSliceCustom(formatAnyNumber, values, spec, stride, writer);
 }
 
 pub fn formatFloatSlice(values: anytype, spec: std.fmt.Number, stride: i64, writer: *std.Io.Writer) !void {
