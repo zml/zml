@@ -686,12 +686,24 @@ pub const HostStagedBuffer = struct {
                 return result;
             }
 
+            // Single elements are addressed directly: slicing and iterating would
+            // copy the view, which embeds the prepared layout (kilobytes).
             pub fn get(self: Self, index: usize) T {
-                return self.readBlock(index).items.get(0)[0];
+                const element = self.locateElement(index);
+                return self.itemsAtByteOffset(self.preparedShards.shardIndices.get(element.group.start), element.byteOffset, 1)[0];
             }
 
             pub fn set(self: Self, index: usize, value: T) void {
-                self.slice(index, 1).fill(value);
+                const element = self.locateElement(index);
+                for (self.preparedShards.shardIndices.constSlice()[element.group.start..][0..element.group.len]) |shard| {
+                    self.itemsAtByteOffset(shard, element.byteOffset, 1)[0] = value;
+                }
+            }
+
+            fn locateElement(self: *const Self, index: usize) struct { group: PreparedShards.Group, byteOffset: usize } {
+                std.debug.assert(index < self.len);
+                const location = self.locate(unflattenIndex(self.shape, self.start + index));
+                return .{ .group = location.group, .byteOffset = self.preparedLayout.byteOffset(location.offset, location.index) };
             }
 
             pub fn fill(self: Self, value: T) void {
@@ -1956,6 +1968,27 @@ test "HostStagedBuffer executions read shared inputs on every device" {
             for (values, 0..) |value, i| try std.testing.expectEqual(@as(i32, @intCast(iteration * 100 + i + 1)), value);
         }
     }
+}
+
+test "HostStagedBuffer.View set and get address single elements in every replica" {
+    var fixture: TestShards = .{};
+    const view = fixture.view(TestShards.tiled);
+    var expected: [24]i32 = undefined;
+    var i: usize = expected.len;
+    while (i > 0) {
+        i -= 1;
+        expected[i] = @intCast(100 + i);
+        view.set(i, expected[i]);
+    }
+    try fixture.expectValues(expected);
+    for (expected, 0..) |value, index| try std.testing.expectEqual(value, view.get(index));
+
+    // Indices of a nested view are relative to its start.
+    const nested = view.slice(7, 10);
+    nested.set(3, -5);
+    expected[10] = -5;
+    try fixture.expectValues(expected);
+    try std.testing.expectEqual(-5, nested.get(3));
 }
 
 test "HostStagedBuffer.View copies across layouts, shards and replicas" {
