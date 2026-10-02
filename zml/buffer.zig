@@ -482,14 +482,20 @@ pub const HostStagedBuffer = struct {
         preparedShards: PreparedShards,
         /// Global coordinates of each shard's first element. Borrowed.
         origins: []const Coordinates,
+        /// Every shard holds the whole array densely, so element `i` sits at
+        /// `i * elementSize` in each of them.
+        contiguous: bool,
 
         pub fn init(shape: Shape, shard_shape: Shape, layout: pjrt.MemoryLayout, origins: []const Coordinates) Prepared {
+            const preparedLayout: PreparedLayout = .init(shape, shard_shape, layout);
+            const preparedShards: PreparedShards = .init(origins, shard_shape.rank());
             return .{
                 .shape = shape,
                 .shard_shape = shard_shape,
-                .preparedLayout = .init(shape, shard_shape, layout),
-                .preparedShards = .init(origins, shard_shape.rank()),
+                .preparedLayout = preparedLayout,
+                .preparedShards = preparedShards,
                 .origins = origins,
+                .contiguous = preparedLayout.addressing == .dense and preparedShards.groups.len == 1 and shard_shape.count() == shape.count(),
             };
         }
     };
@@ -702,6 +708,9 @@ pub const HostStagedBuffer = struct {
 
             fn locateElement(self: *const Self, index: usize) struct { group: PreparedShards.Group, byteOffset: usize } {
                 std.debug.assert(index < self.len);
+                if (self.prepared.contiguous) {
+                    return .{ .group = self.prepared.preparedShards.groups.get(0), .byteOffset = (self.start + index) * @sizeOf(T) };
+                }
                 const location = self.locate(unflattenIndex(self.prepared.shape, self.start + index));
                 return .{ .group = location.group, .byteOffset = self.prepared.preparedLayout.byteOffset(location.offset, location.index) };
             }
@@ -804,13 +813,23 @@ pub const HostStagedBuffer = struct {
                         return .{
                             .view = v,
                             .offset = if (reverse) v.len else 0,
-                            .global = if (v.len == 0) @splat(0) else unflattenIndex(v.prepared.shape, v.start + (if (reverse) v.len - 1 else 0)),
+                            .global = if (v.len == 0 or v.prepared.contiguous) @splat(0) else unflattenIndex(v.prepared.shape, v.start + (if (reverse) v.len - 1 else 0)),
                         };
                     }
 
                     pub fn next(self: *Iterator) ?Block {
                         const v = &self.view;
                         if (if (reverse) self.offset == 0 else self.offset == v.len) return null;
+                        if (v.prepared.contiguous) {
+                            // The whole view is one run in every replica.
+                            var block: Block = .{ .offset = 0 };
+                            const group = v.prepared.preparedShards.groups.get(0);
+                            for (v.prepared.preparedShards.shardIndices.constSlice()[group.start..][0..group.len]) |shard| {
+                                block.items.appendAssumeCapacity(v.itemsAtByteOffset(shard, v.start * @sizeOf(T), v.len));
+                            }
+                            self.offset = if (reverse) 0 else v.len;
+                            return block;
+                        }
                         const location = v.locate(self.global);
                         const bounds = v.blockBounds(location.offset);
                         const len = if (reverse)
@@ -1985,6 +2004,33 @@ test "HostStagedBuffer executions read shared inputs on every device" {
             }
             for (values, 0..) |value, i| try std.testing.expectEqual(@as(i32, @intCast(iteration * 100 + i + 1)), value);
         }
+    }
+}
+
+test "HostStagedBuffer.View indexes replicas of a dense array directly" {
+    const shape = Shape.init(.{ 2, 3 }, .i32);
+    var storage: [2][6]i32 = @splat(@splat(-1));
+    const ptrs = [_][*]u8{ @ptrCast(&storage[0]), @ptrCast(&storage[1]) };
+    const prepared: HostStagedBuffer.Prepared = .init(shape, shape, .{ .strides = .{ .byte_strides = &.{ 12, 4 } } }, &.{ @splat(0), @splat(0) });
+    try std.testing.expect(prepared.contiguous);
+    const view: HostStagedBuffer.View(i32) = .init(&prepared, &ptrs);
+    for (0..6) |i| view.set(i, @intCast(10 + i));
+    view.slice(4, null).set(1, 99);
+    for (storage) |replica| try std.testing.expectEqualSlices(i32, &.{ 10, 11, 12, 13, 14, 99 }, &replica);
+    try std.testing.expectEqual(99, view.get(5));
+    try std.testing.expectEqual(13, view.slice(2, 3).get(1));
+
+    inline for (.{ false, true }) |reverse| {
+        const nested = view.slice(1, 4);
+        var blocks = if (reverse) nested.reverseBlocks() else nested.blocks();
+        const block = blocks.next().?;
+        try std.testing.expectEqual(0, block.offset);
+        try std.testing.expectEqual(2, block.items.len);
+        for (block.items.constSlice(), &storage) |items, *replica| {
+            try std.testing.expectEqualSlices(i32, &.{ 11, 12, 13, 14 }, items);
+            try std.testing.expectEqual(replica[1..].ptr, items.ptr);
+        }
+        try std.testing.expectEqual(null, blocks.next());
     }
 }
 
