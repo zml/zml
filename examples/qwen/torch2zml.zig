@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
             .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dout}, .replicated), null, .d),
             .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dout}, .replicated), null, .d),
             .to_k = .init(attn_view.createTensor("to_k.weight", .{ .dout, .d }, .replicated), null, .d),
-            .to_out = .{.init(attn_view.createTensor("to_out.0.weight", .{ .dout, .d }, .replicated), null, .d)},
+            .to_out = .init(attn_view.createTensor("to_out.0.weight", .{ .dout, .d }, .replicated), null, .d),
             .to_q = .init(attn_view.createTensor("to_q.weight", .{ .dout, .d }, .replicated), null, .d),
             .to_v = .init(attn_view.createTensor("to_v.weight", .{ .dout, .d }, .replicated), null, .d),
         };
@@ -116,7 +116,7 @@ const Attn = struct {
     norm_k: zml.nn.Linear,
     norm_q: zml.nn.Linear,
     to_k: zml.nn.Linear,
-    to_out: [1]zml.nn.Linear,
+    to_out: zml.nn.Linear,
     to_q: zml.nn.Linear,
     to_v: zml.nn.Linear,
 
