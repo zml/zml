@@ -207,11 +207,13 @@ pub const AttentionMask = union(enum) {
     causal,
     /// Causal window size, including the current token.
     sliding_window: u32,
+    /// Attend to keys at specific positions.
+    indices: zml.Tensor,
 
     pub fn isCausal(mask: AttentionMask) bool {
         return switch (mask) {
             .causal, .sliding_window => true,
-            .none => false,
+            .none, .indices => false,
         };
     }
 };
