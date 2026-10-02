@@ -15,7 +15,9 @@ pipe.vae.enable_slicing()
 # Enable CPU offloading on the main pipeline to handle memory shifts
 pipe.enable_model_cpu_offload()
 
-pipe = zml_utils.ActivationCollector(pipe, max_layers=100, stop_after_first_step=True)
+pipe = zml_utils.ActivationCollector(
+    pipe, max_layers=(500 + 800) / 2, stop_after_first_step=True
+)
 output, activations = pipe(
     prompt='A neon shop sign that reads "QWEN IMAGE 2.1", rainy night, reflections on wet pavement',
     width=size,
