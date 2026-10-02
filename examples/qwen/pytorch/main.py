@@ -7,6 +7,20 @@ size = 2048
 model_path = "Qwen/Qwen-Image-2.1"
 
 pipe = QwenImage21Pipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16)
+transformer = (
+    getattr(pipe, pipe.transformer_name)
+    if not hasattr(pipe, "transformer")
+    else pipe.transformer
+)
+if transformer is None:
+    exit(1)
+
+# 1. Print named submodules to map key paths directly to safetensors
+for name, module in transformer.named_children():
+    print(name, "->", type(module))
+
+# 2. Inspect a single block's internals
+print(transformer.transformer_blocks[0])
 
 # Enable VAE tiling and slicing directly on the VAE module
 pipe.vae.enable_tiling()
