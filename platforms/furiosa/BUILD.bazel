@@ -1,23 +1,12 @@
-load("@bazel_lib//lib:copy_file.bzl", "copy_file")
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
-copy_file(
-    name = "gcc",
-    src = "@furiosa_toolchain//:gcc",
-    out = "aarch64-linux-gnu-gcc",
-    is_executable = True,
-    tags = ["manual"],
-)
-
 copy_to_directory(
     name = "sandbox",
     srcs = [
-        ":gcc",
         "@furiosa_runtime//:files",
-        "@furiosa_tcc//:compiler",
-        "@furiosa_toolchain//:files",
+        "@libzml_furiosa//:compiler_sdk",
         "@libzml_furiosa//:lib/libpjrt_c_api_furiosa_plugin.so",
     ],
     out = "sandbox",
@@ -27,10 +16,7 @@ copy_to_directory(
         "libstdc++.so.6": "lib",
         "libgcc_s.so.1": "lib",
         "libunwind.so.1": "lib",
-        "aarch64-linux-gnu-gcc": "toolchain/usr/bin/aarch64-linux-gnu-gcc",
-        "furiosa_tcc-2026.3.0.data/scripts": "libexec",
-        "usr": "toolchain/usr",
-        "lib/x86_64-linux-gnu": "toolchain/lib/x86_64-linux-gnu",
+        "compiler_sdk": "",
     },
     tags = ["manual"],
 )
