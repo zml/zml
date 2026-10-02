@@ -2567,7 +2567,7 @@ pub const Builder = struct {
         if (barrier.isInt()) return self.addressPtr(barrier, .shared);
         return self.emit(mlir.Operation.make(self.ctx, "builtin.unrealized_conversion_cast", .{
             .operands = .{ .flat = &.{barrier.inner} },
-            .results = .{ .flat = &.{llvm.nvptxPointerType(self.ctx, .shared)} },
+            .results = .{ .flat = &.{llvm.pointerType(self.ctx, NVPTXAddressSpace.shared)} },
             .location = self.loc(),
         }));
     }
@@ -2641,7 +2641,7 @@ pub const Builder = struct {
 
     /// Typed LLVM pointer (`llvm.inttoptr`) for an integer address in `space`.
     pub fn addressPtr(self: *Builder, address: Value, comptime space: NVPTXAddressSpace) Value {
-        return self.emit(llvm.inttoptr(self.ctx, address.inner, llvm.nvptxPointerType(self.ctx, space), self.loc()));
+        return self.emit(llvm.inttoptr(self.ctx, address.inner, llvm.pointerType(self.ctx, space), self.loc()));
     }
 
     fn wordsType(self: *Builder, comptime n: usize) *const mlir.Type {
@@ -2809,7 +2809,7 @@ pub const Builder = struct {
     /// The same shared-memory location (i32 address) in CTA `rank` of the cluster, as a
     /// `shared::cluster` pointer.
     pub fn mapaShared(self: *Builder, address: Value, rank: Value) Value {
-        return self.emit(nvvm.mapa(self.ctx, self.addressPtr(address, .shared).inner, rank.inner, llvm.nvptxPointerType(self.ctx, .shared_cluster), self.loc()));
+        return self.emit(nvvm.mapa(self.ctx, self.addressPtr(address, .shared).inner, rank.inner, llvm.pointerType(self.ctx, NVPTXAddressSpace.shared_cluster), self.loc()));
     }
 
     /// Full cluster barrier (arrive.release + wait.acquire, aligned).
