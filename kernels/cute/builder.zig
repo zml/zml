@@ -2567,7 +2567,7 @@ pub const Builder = struct {
         if (barrier.isInt()) return self.addressPtr(barrier, .shared);
         return self.emit(mlir.Operation.make(self.ctx, "builtin.unrealized_conversion_cast", .{
             .operands = .{ .flat = &.{barrier.inner} },
-            .results = .{ .flat = &.{llvm.pointerType(self.ctx, .shared)} },
+            .results = .{ .flat = &.{llvm.nvptxPointerType(self.ctx, .shared)} },
             .location = self.loc(),
         }));
     }
@@ -2637,11 +2637,11 @@ pub const Builder = struct {
     // `i32` TMEM addresses (lane << 16 | column). These helpers emit the NVVM /
     // LLVM operations for them directly (no inline PTX).
 
-    pub const AddressSpace = llvm.AddressSpace;
+    pub const NVPTXAddressSpace = llvm.NVPTXAddressSpace;
 
     /// Typed LLVM pointer (`llvm.inttoptr`) for an integer address in `space`.
-    pub fn addressPtr(self: *Builder, address: Value, comptime space: AddressSpace) Value {
-        return self.emit(llvm.inttoptr(self.ctx, address.inner, llvm.pointerType(self.ctx, space), self.loc()));
+    pub fn addressPtr(self: *Builder, address: Value, comptime space: NVPTXAddressSpace) Value {
+        return self.emit(llvm.inttoptr(self.ctx, address.inner, llvm.nvptxPointerType(self.ctx, space), self.loc()));
     }
 
     fn wordsType(self: *Builder, comptime n: usize) *const mlir.Type {
@@ -2678,7 +2678,7 @@ pub const Builder = struct {
     }
 
     /// Load `n` (1, 2 or 4) consecutive 32-bit words at an integer address.
-    pub fn loadWords(self: *Builder, comptime n: usize, address: Value, comptime space: AddressSpace, opts: LoadOptions) [n]Value {
+    pub fn loadWords(self: *Builder, comptime n: usize, address: Value, comptime space: NVPTXAddressSpace, opts: LoadOptions) [n]Value {
         return self.loadWordsPtr(n, self.addressPtr(address, space), opts);
     }
 
@@ -2688,12 +2688,12 @@ pub const Builder = struct {
     }
 
     /// Store `n` (1, 2 or 4) consecutive 32-bit words at an integer address.
-    pub fn storeWords(self: *Builder, comptime n: usize, address: Value, comptime space: AddressSpace, words: [n]Value) void {
+    pub fn storeWords(self: *Builder, comptime n: usize, address: Value, comptime space: NVPTXAddressSpace, words: [n]Value) void {
         self.storeWordsPtr(n, self.addressPtr(address, space), words);
     }
 
     /// Store the low 16 bits of an `i32`.
-    pub fn storeHalf(self: *Builder, address: Value, comptime space: AddressSpace, word: Value) void {
+    pub fn storeHalf(self: *Builder, address: Value, comptime space: NVPTXAddressSpace, word: Value) void {
         self.emitVoid(llvm.store(self.ctx, word.to(.i16).inner, self.addressPtr(address, space).inner, .{ .alignment = 2 }, self.loc()));
     }
 
@@ -2809,7 +2809,7 @@ pub const Builder = struct {
     /// The same shared-memory location (i32 address) in CTA `rank` of the cluster, as a
     /// `shared::cluster` pointer.
     pub fn mapaShared(self: *Builder, address: Value, rank: Value) Value {
-        return self.emit(nvvm.mapa(self.ctx, self.addressPtr(address, .shared).inner, rank.inner, llvm.pointerType(self.ctx, .shared_cluster), self.loc()));
+        return self.emit(nvvm.mapa(self.ctx, self.addressPtr(address, .shared).inner, rank.inner, llvm.nvptxPointerType(self.ctx, .shared_cluster), self.loc()));
     }
 
     /// Full cluster barrier (arrive.release + wait.acquire, aligned).
