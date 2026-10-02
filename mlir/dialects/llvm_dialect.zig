@@ -7,7 +7,7 @@ const mlir = @import("mlir");
 // =============================================================================
 
 /// Address spaces of `!llvm.ptr<N>` on NVPTX.
-pub const AddressSpace = enum(u32) {
+pub const NVPTXAddressSpace = enum(u32) {
     generic = 0,
     global = 1,
     shared = 3,
@@ -25,7 +25,7 @@ pub const AddressSpace = enum(u32) {
 /// LLVM dialect registered in `ctx`, which may be another MLIR build than the C API's
 /// (e.g. in the CuTe compiler context), and loading the C API's dialect there would
 /// clash with it.
-pub fn pointerType(ctx: *mlir.Context, space: AddressSpace) *const mlir.Type {
+pub fn nvptxPointerType(ctx: *mlir.Context, space: NVPTXAddressSpace) *const mlir.Type {
     var buf: [32]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "!llvm.ptr<{d}>", .{@intFromEnum(space)}) catch unreachable;
     return mlir.Type.parse(ctx, text) catch std.debug.panic("failed to parse LLVM pointer type '{s}'", .{text});
