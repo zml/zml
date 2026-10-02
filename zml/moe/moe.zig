@@ -181,6 +181,7 @@ pub const Options = struct {
     routing_weight_placement: fused_experts.RoutingWeightPlacement,
 };
 
+/// Routing IDs and weights have shape { b, s, topk }; input has shape { b, s, d }.
 pub fn forwardMoe(
     input: zml.Tensor,
     topk_ids: zml.Tensor,

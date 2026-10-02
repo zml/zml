@@ -153,8 +153,8 @@ pub fn fusedExpertsImpl(
     const s = hidden_states.dim(.s);
     const d = hidden_states.dim(.d);
     const num_tokens = b * s;
-    const top_expert = topk_ids.dim(.top_expert);
-    const num_routes = num_tokens * top_expert;
+    const topk = topk_ids.dim(.topk);
+    const num_routes = num_tokens * topk;
 
     const act_dtype: zml.DataType = switch (mode) {
         .none => hidden_states.dtype(),
@@ -162,11 +162,11 @@ pub fn fusedExpertsImpl(
     };
 
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .d = d }).withTags(.{ .token, .d });
-    const x_rows = hidden.insertAxes(.d, .{.top_expert})
-        .broad(zml.Shape.init(.{ .token = num_tokens, .top_expert = top_expert, .d = d }, act_dtype))
-        .merge(.{ .r = .{ .token, .top_expert } });
-    const expert_ids = topk_ids.reshape(.{ .token = num_tokens, .top_expert = top_expert }).withTags(.{ .token, .top_expert })
-        .merge(.{ .r = .{ .token, .top_expert } }).convert(.i32);
+    const x_rows = hidden.insertAxes(.d, .{.topk})
+        .broad(zml.Shape.init(.{ .token = num_tokens, .topk = topk, .d = d }, act_dtype))
+        .merge(.{ .r = .{ .token, .topk } });
+    const expert_ids = topk_ids.reshape(.{ .token = num_tokens, .topk = topk }).withTags(.{ .token, .topk })
+        .merge(.{ .r = .{ .token, .topk } }).convert(.i32);
 
     const gate_up_out = applyGateUpGlobalScale(moeGemm(
         x_rows,
@@ -187,11 +187,11 @@ pub fn fusedExpertsImpl(
         mode,
     ), opts.w2_global_scale, expert_ids);
 
-    const weights = topk_weights.reshape(.{ .token = num_tokens, .top_expert = top_expert }).withTags(.{ .token, .top_expert })
-        .merge(.{ .r = .{ .token, .top_expert } });
+    const weights = topk_weights.reshape(.{ .token = num_tokens, .topk = topk }).withTags(.{ .token, .topk })
+        .merge(.{ .r = .{ .token, .topk } });
     const weighted = down_out.mul(weights.convert(down_out.dtype()).broad(down_out.shape()));
-    const combined = weighted.splitAxis(.r, .{ .token = num_tokens, .top_expert = top_expert })
-        .sum(.top_expert).squeeze(.top_expert);
+    const combined = weighted.splitAxis(.r, .{ .token = num_tokens, .topk = topk })
+        .sum(.topk).squeeze(.topk);
 
     return combined.reshape(.{ .b = b, .s = s, .d = down.dim(.d) });
 }

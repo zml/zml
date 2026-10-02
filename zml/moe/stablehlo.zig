@@ -155,9 +155,9 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
     stdx.debug.assert(gate_up.weight.dim(.expert) == down.weight.dim(.expert), "reference expert counts must match", .{});
     const b = input.dim(.b);
     const s = input.dim(.s);
-    const k = topk_ids.dim(.top_expert);
+    const k = topk_ids.dim(.topk);
     stdx.debug.assert(k > 0 and k <= gate_up.weight.dim(.expert), "reference top-k must fit the expert count", .{});
-    stdx.debug.assert(topk_ids.dim(.b) == b and topk_ids.dim(.s) == s and topk_weights.dim(.b) == b and topk_weights.dim(.s) == s and topk_weights.dim(.top_expert) == k, "reference routing dimensions must match input and ids", .{});
+    stdx.debug.assert(topk_ids.dim(.b) == b and topk_ids.dim(.s) == s and topk_weights.dim(.b) == b and topk_weights.dim(.s) == s and topk_weights.dim(.topk) == k, "reference routing dimensions must match input and ids", .{});
     const ids = topk_ids.reshape(.{ .route = b * s * k });
     const weights = topk_weights.reshape(.{ .route = b * s * k }).convert(.f32);
     const hidden = input.reshape(.{ .token = b * s, .in = input.dim(.d) })
