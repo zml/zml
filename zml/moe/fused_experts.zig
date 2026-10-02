@@ -137,8 +137,8 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs, comptime backend: zml.moe.Backen
     const hidden = hidden_states.reshape(.{ .token = num_tokens, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
     const gate_up = opts.gate_up.weight.withTags(.{ .expert, .out, .in });
     const down = opts.down.weight.withTags(.{ .expert, .out, .mid });
-    const routing_weights = topk_weights.reshape(.{ .token = num_tokens, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
-    const ids = topk_ids.reshape(.{ .token = num_tokens, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
+    const routing_weights = topk_weights.reshape(.{ .token = num_tokens, .in = topk_weights.dim(.topk) }).withTags(.{ .token, .topk });
+    const ids = topk_ids.reshape(.{ .token = num_tokens, .in = topk_ids.dim(.topk) }).withTags(.{ .token, .topk });
 
     stdx.debug.assert(hidden.dtype() == .bf16, "{s} backend expected BF16 hidden states, got {}", .{ backend_name, hidden.dtype() });
     if (gate_up_scheme == .mxfp4) {
@@ -467,8 +467,8 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
                 gate_up.quantization.?.scales = gate_up.quantization.?.scales.bitCast(.f8e8m0);
                 down.quantization.?.scales = down.quantization.?.scales.bitCast(.f8e8m0);
             }
-            const route = Tensor.arange(.{ .end = 2 }, .i32).reshape(.{ .b = 1, .s = 1, .top_expert = 2 })
-                .broad(Shape.init(.{ .b = 1, .s = x.dim(.s), .top_expert = 2 }, .i32));
+            const route = Tensor.arange(.{ .end = 2 }, .i32).reshape(.{ .b = 1, .s = 1, .topk = 2 })
+                .broad(Shape.init(.{ .b = 1, .s = x.dim(.s), .topk = 2 }, .i32));
             return fusedExpertsImpl(.{
                 .hidden_states = x,
                 .gate_up = gate_up,
