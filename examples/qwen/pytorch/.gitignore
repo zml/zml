@@ -1,2 +1,3 @@
 venv
 *.png
+__pycache__
