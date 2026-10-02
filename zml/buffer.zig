@@ -31,7 +31,7 @@ test {
 pub const Buffer = struct {
     _platform: *const Platform,
     _shape: Shape,
-    _sharding: Sharding,
+    _sharding: Sharding.Resolved,
     _shards: Shards,
 
     pub const MAX_NUM_SHARDS: u16 = Platform.MAX_NUM_DEVICES;
@@ -126,7 +126,7 @@ pub const Buffer = struct {
         io: std.Io,
         platform: *const Platform,
         shape_: Shape,
-        sharding: Sharding,
+        partitioning: Sharding.Partitioning,
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
@@ -135,7 +135,7 @@ pub const Buffer = struct {
         var res: Buffer = .{
             ._platform = platform,
             ._shape = shape_,
-            ._sharding = sharding.resolve(platform),
+            ._sharding = partitioning.resolve(platform),
             ._shards = .empty,
         };
         errdefer for (res._shards.slice()) |shard| {
@@ -179,21 +179,21 @@ pub const Buffer = struct {
 
     /// Copies the given Zig bytes to the accelerator memory and
     /// return a Buffer with the given dimensions.
-    pub fn fromBytes(io: std.Io, platform: *const Platform, sh: Shape, sharding: Sharding, data: []const u8) !Buffer {
+    pub fn fromBytes(io: std.Io, platform: *const Platform, sh: Shape, sharding: Sharding.Partitioning, data: []const u8) !Buffer {
         return fromBytesOpts(io, platform, sh, sharding, data, .{});
     }
 
-    pub fn fromBytesOpts(io: std.Io, platform: *const Platform, sh: Shape, sharding: Sharding, data: []const u8, opts: FromOptions) !Buffer {
+    pub fn fromBytesOpts(io: std.Io, platform: *const Platform, sh: Shape, sharding: Sharding.Partitioning, data: []const u8, opts: FromOptions) !Buffer {
         return from(io, platform, sh, sharding, data, opts);
     }
 
     /// Copies the given zml.Slice to the accelerator memory and
     /// return a Buffer.
-    pub fn fromSlice(io: std.Io, platform: *const Platform, slice: Slice, sharding: Sharding) !Buffer {
+    pub fn fromSlice(io: std.Io, platform: *const Platform, slice: Slice, sharding: Sharding.Partitioning) !Buffer {
         return fromSliceOpts(io, platform, slice, sharding, .{});
     }
 
-    pub fn fromSliceOpts(io: std.Io, platform: *const Platform, slice: Slice, sharding: Sharding, opts: FromOptions) !Buffer {
+    pub fn fromSliceOpts(io: std.Io, platform: *const Platform, slice: Slice, sharding: Sharding.Partitioning, opts: FromOptions) !Buffer {
         return from(io, platform, slice.shape, sharding, std.mem.sliceAsBytes(slice.constData()), opts);
     }
 
@@ -217,7 +217,7 @@ pub const Buffer = struct {
         _: std.Io,
         platform: *const Platform,
         shape_: Shape,
-        sharding: Sharding,
+        sharding: Sharding.Partitioning,
         opts: UnitializedOptions,
     ) !Buffer {
         std.log.debug("uninitialized {f}", .{shape_});
@@ -225,7 +225,7 @@ pub const Buffer = struct {
         var res: Buffer = .{
             ._platform = platform,
             ._shape = shape_,
-            ._sharding = sharding.resolve(platform),
+            ._sharding = sharding._handleFakeReplicatedObject(platform),
             ._shards = .empty,
         };
         errdefer for (res._shards.slice()) |shard| {
@@ -257,7 +257,7 @@ pub const Buffer = struct {
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
-    pub fn fromPjrtBuffers(platform: *const Platform, sh: Shape, sharding: Sharding, pjrt_buffers: []const *pjrt.Buffer) Buffer {
+    pub fn fromPjrtBuffers(platform: *const Platform, sh: Shape, sharding: Sharding.Resolved, pjrt_buffers: []const *pjrt.Buffer) Buffer {
         stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
         stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
 
@@ -331,7 +331,7 @@ pub const Buffer = struct {
     /// ie: `num_devices * shard_byte_size`
     /// `shard_byte_size` can be up to `self.shape().byteSize()` when the buffer is fully replicated.
     pub fn byteSize(self: Buffer) usize {
-        const placement = placementOrPanic(self._sharding, self._shape);
+        const placement = placementOrPanic(self._platform, self._sharding, self._shape);
         return placement.shape.byteSize() * self._sharding.devicesInCanonicalOrder().len;
     }
 
@@ -381,12 +381,13 @@ test "device round-trip" {
         .{ 56, 57, 58, 59, 60, 61, 62, 63 },
     };
 
+    const model_sharding: zml.Sharding = platform.shardings.get("model").?;
     const x_h: zml.Slice = .init(.withPartitioning(
         .init(.{ .b = 8, .d = 8 }, .u32),
+        model_sharding,
         .{ .b = .model },
     ), std.mem.asBytes(&x));
     // no free: x_h is stack allocated
-    const model_sharding: zml.Sharding = platform.shardings.get("model").?;
     const x_d: zml.Buffer = try .fromSlice(io, platform, x_h, model_sharding);
     try std.testing.expectEqual(platform.devices.len, x_d.numShards());
 
@@ -409,7 +410,7 @@ test "device round-trip" {
     }
 }
 
-fn placementOrPanic(sharding: Sharding, shape: Shape) Sharding.Placement {
+fn placementOrPanic(sharding: Sharding.Resolved, shape: Shape) Sharding.Placement {
     return sharding.placement(shape) catch |err| {
         @branchHint(.cold);
         switch (err) {

@@ -456,6 +456,7 @@ const Visitor = struct {
     pub const Action = enum {
         callback,
         recurse,
+        exit,
     };
 
     pub fn determineAction(comptime callback: anytype, comptime PtrTypeOfV: type) Action {
@@ -473,6 +474,13 @@ const Visitor = struct {
             return .callback;
         }
 
+        switch (@typeInfo(ptr_info.child)) {
+            .@"struct", .@"union" => {
+                if (@hasDecl(ptr_info.child, "zml_no_meta_visit")) return .exit;
+            },
+            else => {},
+        }
+
         return .recurse;
     }
 };
@@ -487,6 +495,7 @@ pub fn visit(comptime callback: anytype, ctx: FnParam(callback, 0), v: anytype) 
     const can_error = stdx.meta.FnReturnErrorSet(callback) != null;
 
     return switch (action) {
+        .exit => {},
         .callback => callback(ctx, v),
         .recurse => {
             const TargetType, const mutating_cb = switch (@typeInfo(FnParam(callback, 1))) {
@@ -628,8 +637,8 @@ pub fn visitFlatStruct(comptime callback: anytype, ctx: FnParam(callback, 0), v:
     const err_args = .{ChildTypeV};
 
     switch (action) {
+        .exit => {},
         .callback => return callback(ctx, v),
-
         .recurse => {
             if (comptime !Contains(ChildTypeV, TargetType)) return;
 
@@ -929,6 +938,7 @@ pub fn Contains(Haystack: type, T: type) bool {
 
     return switch (@typeInfo(Haystack)) {
         .@"struct" => |info| {
+            if (@hasDecl(Haystack, "zml_no_meta_visit")) return false;
             inline for (info.fields) |field| {
                 if (!field.is_comptime and Contains(field.type, T)) {
                     return true;
@@ -937,6 +947,7 @@ pub fn Contains(Haystack: type, T: type) bool {
             return false;
         },
         .@"union" => |info| {
+            if (@hasDecl(Haystack, "zml_no_meta_visit")) return false;
             inline for (info.fields) |field| {
                 if (Contains(field.type, T))
                     return true;

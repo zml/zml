@@ -31,27 +31,27 @@ pub const TensorStore = struct {
     };
 
     registry: *safetensors.TensorRegistry,
+    platform: *const Platform,
     id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
-    allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
-    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry) TensorStore {
-        const arena: std.heap.ArenaAllocator = .init(allocator);
+    pub fn fromRegistry(allocator: std.mem.Allocator, platform: *const Platform, registry: *safetensors.TensorRegistry) TensorStore {
         return .{
             .registry = registry,
+            .platform = platform,
             .id_to_sources = .empty,
-            .allocator = allocator,
-            .arena = arena,
+            .arena = .init(allocator),
         };
     }
 
     pub fn deinit(self: *TensorStore) void {
-        self.id_to_sources.deinit(self.allocator);
+        // Only id_to_sources is allowed to use `arena.child_allocator` directly
+        self.id_to_sources.deinit(self.arena.child_allocator);
         self.arena.deinit();
     }
 
     fn putSourcesNoClobber(self: *TensorStore, id: Tensor.Id, sources: Binding) std.mem.Allocator.Error!void {
-        const gop = try self.id_to_sources.getOrPut(self.allocator, id);
+        const gop = try self.id_to_sources.getOrPut(self.arena.child_allocator, id);
         if (gop.found_existing) {
             stdx.debug.panic("Id {} already has associated sources", .{id});
         }
@@ -102,6 +102,15 @@ pub const TensorStore = struct {
 
     pub fn view(self: *TensorStore) View {
         return .{ .store = self };
+    }
+
+    pub fn sharding(store: *const TensorStore, name: @EnumLiteral()) Sharding {
+        const name_slice = @tagName(name);
+        return store.platform.shardings.get(name_slice) orelse
+            std.debug.panic(
+                \\Found no registered shardings named {s} in Platform.
+                \\Known shardings: {f}
+            , .{ name_slice, stdx.fmt.stringsZ(store.platform.shardings.keys()) });
     }
 
     pub const View = struct {
@@ -162,19 +171,52 @@ pub const TensorStore = struct {
             } else false;
         }
 
-        pub const CreateTensorOpts = struct {
-            memory: Memory.Kind = .default,
-        };
-
-        pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{});
+        /// Creates a zml.Tensor from a specific entry in the store.
+        pub fn createTensor(self: View, subkey: []const u8, tags: anytype, sharding_: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateTensor(subkey, tags, sharding_, partitioning) orelse
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{ .memory = .host_pinned });
+        pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, sharding_: @EnumLiteral(), partitioning: anytype) ?Tensor {
+            const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
+            const parsed_tags: ?Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else .empty;
+
+            const p: Sharding.PartitionArray = if (comptime has_tags)
+                Sharding.Partitioning.parsePartitioning(parsed_tags.?, partitioning)
+            else
+                // We allowed untagged Tensor, but then the PartitionArray must be created manually.
+                partitioning;
+
+            return self.maybeCreateTensorInternal(subkey, parsed_tags, .{ .mesh = @tagName(sharding_), .partition = p });
         }
 
-        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype, opts: CreateTensorOpts) ?Tensor {
+        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, sharding_: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateHostPinnedTensor(subkey, tags, sharding_, partitioning) orelse
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+        }
+
+        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, sharding_: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
+            const tensor = self.maybeCreateTensor(subkey, tags, sharding_, partitioning);
+            if (tensor) |t| {
+                const storage = self.store.id_to_sources.getPtr(t.id);
+                storage.?.memory = .host_pinned;
+            }
+            return tensor;
+        }
+
+        pub fn createReplicatedTensor(self: View, subkey: []const u8, tags: anytype) Tensor {
+            const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
+            const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
+
+            // Note: since here we don't have access to the true `platform.replicated_sharding`
+            // we instead use the .replicated singleton, which laters requires the infamous _handleFakeReplicatedObject.
+            // This could be done differently if eg the TensorStore was created with the platform.
+            const replicated: Sharding = .replicated;
+            return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.slice() else null, replicated, null) orelse
+                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+        }
+
+        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?Shape.TagsArray, partitioning: Sharding.Partitioning) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             const source = self.store.dupeSource(key) orelse return null;
@@ -184,55 +226,17 @@ pub const TensorStore = struct {
             sources[0] = source;
 
             var shape = source.shape;
-            shape = applyTags(shape, tagz);
-            shape = applyPartitioning(shape, partitioning);
+            if (tags) |user_tags| {
+                const user_rank = user_tags.len();
+                stdx.debug.assert(user_tags.len() == shape.rank(), "tensor {s} from store has shape {f}, but `createTensor` got only {d} tags: {f}", .{ key, source.shape, user_rank, stdx.fmt.stringsZ(user_tags.slice(user_rank)) });
+                shape._tags = user_tags;
+            }
 
-            const tensor: Tensor = .fromShape(shape);
-            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = opts.memory }) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            var tensor = Tensor.fromShape(shape);
+            tensor._partitioning = partitioning;
+            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;
-        }
-
-        pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{}) orelse
-                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
-        }
-
-        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensorInternal(subkey, tagz, partitioning, .{ .memory = .host_pinned }) orelse
-                stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
-        }
-
-        fn applyTags(shape_: Shape, tagz: anytype) Shape {
-            var shape = shape_;
-            if (@TypeOf(tagz) != @TypeOf(null)) {
-                switch (@typeInfo(@TypeOf(tagz))) {
-                    .optional => if (tagz) |t| {
-                        shape = shape.withTags(t);
-                    },
-                    else => shape = shape.withTags(tagz),
-                }
-            }
-            return shape;
-        }
-
-        fn applyPartitioning(shape_: Shape, partitioning: anytype) Shape {
-            var shape = shape_;
-
-            if (@TypeOf(partitioning) == @TypeOf(null)) {
-                @compileError("TensorStore.View.createTensor partitioning cannot be null; pass .replicated or an explicit partitioning");
-            }
-
-            switch (@typeInfo(@TypeOf(partitioning))) {
-                .optional => @compileError("TensorStore.View.createTensor partitioning cannot be optional; pass .replicated or an explicit partitioning"),
-                .enum_literal => switch (partitioning) {
-                    .replicated => shape = shape.withReplicatedPartitioning(),
-                    else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
-                },
-                else => shape = shape.withPartitioning(partitioning),
-            }
-
-            return shape;
         }
 
         pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape) ?Tensor {
@@ -365,7 +369,7 @@ pub const Loader = struct {
 
     pub const LoadError = error{TransformedTensorNotDelivered};
 
-    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) LoadError!void {
+    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, opts: LoadOpts) LoadError!void {
         const tensor_count = meta.count(Tensor, model);
 
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
@@ -406,7 +410,7 @@ pub const Loader = struct {
                 if (sources.transformed) continue;
             }
 
-            self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, shardings, opts });
+            self.group.async(io, defaultCallback, .{ self, io, tensor, buffer, store, opts });
         }
     }
 
@@ -424,25 +428,25 @@ pub const Loader = struct {
         log.err("Transformed tensor {} {f} was not delivered by loadExecute before load; sources: {s}", .{ tensor.id, tensor.shape(), names.written() });
     }
 
-    pub fn loadBuffer(loader: *Loader, io: std.Io, buffer: *Buffer, tensor: Tensor, store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
-        loader.group.async(io, defaultCallback, .{ loader, io, &tensor, buffer, store, shardings, opts });
+    pub fn loadBuffer(loader: *Loader, io: std.Io, buffer: *Buffer, tensor: *const Tensor, store: *const TensorStore, opts: LoadOpts) void {
+        loader.group.async(io, defaultCallback, .{ loader, io, tensor, buffer, store, opts });
     }
 
-    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
+    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, opts: LoadOpts) void {
         const sources = store.getSourcesById(tensor.id) orelse {
             std.log.debug("Failed to get sources for tensor with id: {}", .{tensor.id});
             return;
         };
         stdx.debug.assert(!sources.transformed and sources.tensors.len == 1, "Tensor {} is transformed or has {} sources; `load` only streams single-source tensors", .{ tensor.id, sources.tensors.len });
 
-        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, shardings, opts) catch |e| {
+        self.loadSingleInner(io, sources.tensors[0], tensor.shape(), buffer, sources.memory, opts) catch |e| {
             log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
             unreachable;
         };
     }
 
-    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: LoadOpts) void {
-        self.loadSingleInner(io, source, shape, buffer, .device, shardings, opts) catch |e| {
+    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, opts: LoadOpts) void {
+        self.loadSingleInner(io, source, shape, buffer, .device, opts) catch |e| {
             log.err("Failed to load tensor {s}: {}", .{ source.name, e });
             loaded.* = false;
             return;
@@ -457,16 +461,10 @@ pub const Loader = struct {
         shape: Shape,
         buffer: *Buffer,
         memory: Memory.Kind,
-        shardings: []const Sharding,
         opts: LoadOpts,
     ) !void {
         var reader = try source.reader(io, &.{}, .{});
         defer reader.deinit();
-
-        const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
-            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
-            break :blk self.platform.replicated_sharding;
-        };
 
         var writer = try MemoryWriter.init(
             self.allocator,
@@ -476,7 +474,7 @@ pub const Loader = struct {
             self.dma_allocators,
             self.dma_chunk_size,
             shape,
-            sharding,
+            shape._sharding._handleFakeReplicatedObject(self.platform),
             buffer,
             memory,
         );
@@ -507,7 +505,6 @@ pub const Loader = struct {
         tensor: Tensor,
         buffer: *Buffer,
         store: *const TensorStore,
-        shardings: []const Sharding,
         exe: *const Exe,
         opts: LoadOpts,
     ) error{ NotFound, OutOfMemory, LoadFailed, Canceled }!void {
@@ -530,7 +527,7 @@ pub const Loader = struct {
         defer if (node) |*n| n.end();
 
         for (sources, 0..) |source, i| {
-            self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], shardings, .{} });
+            self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], .{} });
         }
         self.group.await(io) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
@@ -1492,14 +1489,14 @@ const DirectMemoryWriterDeviceTest = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
 
-    fn run(self: DirectMemoryWriterDeviceTest, scenario: Scenario) !void {
+    fn run(self: DirectMemoryWriterDeviceTest, scenario: Scenario, partitioning: anytype) !void {
         var platform = Platform.auto(self.allocator, self.io, scenario.create_options) catch return error.SkipZigTest;
         defer platform.deinit(self.allocator, self.io);
 
         const sharding: Sharding.Data = try .init(scenario.name, &platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
         try self.runDirectMemoryWriter(
             platform,
-            scenario.shape,
+            scenario.shape.withPartitioning(.{ .data = &sharding }, partitioning),
             .{ .data = &sharding },
             scenario.write_mode,
             scenario.writable_slice_min_len,
@@ -1600,11 +1597,10 @@ test "DirectMemoryWriter: replicated with auto topology" {
             .physical_mesh = .auto,
             .cpu = .{ .device_count = 4 },
         },
-        .shape = Shape.init(.{ .rows = 8, .cols = 128 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .replicated }),
+        .shape = Shape.init(.{ .rows = 8, .cols = 128 }, .f32),
         .logical_mesh = .mesh(.{ .x = .high_bandwidth }),
         .strategy = .parseBindings(.{ .x = .link_x }),
-    });
+    }, .{ .rows = .replicated, .cols = .replicated });
 }
 
 test "DirectMemoryWriter: 1D model split with 2x2 physical mesh" {
@@ -1619,11 +1615,10 @@ test "DirectMemoryWriter: 1D model split with 2x2 physical mesh" {
             .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .model }),
+        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = .parseBindings(.{ .model = .link_x }),
-    });
+    }, .{ .rows = .replicated, .cols = .model });
 }
 
 test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
@@ -1638,14 +1633,13 @@ test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
             .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
-        .shape = Shape.init(.{ .batch = 8, .model = 1024 }, .f32)
-            .withPartitioning(.{ .batch = .batch, .model = .model }),
+        .shape = Shape.init(.{ .batch = 8, .model = 1024 }, .f32),
         .logical_mesh = .mesh(.{
             .batch = .low_bandwidth,
             .model = .high_bandwidth,
         }),
         .strategy = .parseBindings(.{ .batch = .link_x, .model = .link_y }),
-    });
+    }, .{ .batch = .batch, .model = .model });
 }
 
 test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
@@ -1660,14 +1654,14 @@ test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
             .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
-        .shape = Shape.init(.{ .model = 4096 }, .f32).withPartitioning(.{ .model = .model }),
+        .shape = Shape.init(.{ .model = 4096 }, .f32),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = blk: {
             var strategy: Sharding.Strategy = .parseBindings(.{ .model = .link_x });
             strategy.addFold(.link_x, &.{ .link_x, .link_y });
             break :blk strategy;
         },
-    });
+    }, .{ .model = .model });
 }
 
 test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
@@ -1682,14 +1676,13 @@ test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
             .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .model }),
+        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = .parseBindings(.{ .model = .link_x }),
         .write_mode = .writable_slice_greedy,
         .writable_slice_min_len = 64,
         .pool_chunk_size = 1024,
-    });
+    }, .{ .rows = .replicated, .cols = .model });
 }
 
 test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
@@ -1704,8 +1697,7 @@ test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
             .physical_mesh = .{ .custom = buildMesh2x2x2 },
             .cpu = .{ .device_count = 8 },
         },
-        .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32)
-            .withPartitioning(.{ .batch = .replicated, .model = .model }),
+        .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32),
         .logical_mesh = .mesh(.{
             .batch = .low_bandwidth,
             .model = .high_bandwidth,
@@ -1715,7 +1707,7 @@ test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
             strategy.addFold(.link_x, &.{ .link_x, .link_z });
             break :blk strategy;
         },
-    });
+    }, .{ .batch = .replicated, .model = .model });
 }
 
 test "MemoryWriter can produce a host pinned buffer" {
@@ -1729,10 +1721,9 @@ test "MemoryWriter can produce a host pinned buffer" {
         .create_options = .{
             .physical_mesh = .{ .custom = buildMesh2 },
         },
-        .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32)
-            .withPartitioning(.{ .batch = .replicated, .model = .model }),
+        .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = .parseBindings(.{ .model = .link_x }),
         .memory = .host_pinned,
-    });
+    }, .{ .batch = .replicated, .model = .model });
 }

@@ -27,7 +27,7 @@ pub fn env() *const Platform {
         ) catch @panic("Pjrt not available");
 
         // Register shardings required by flash attention.
-        _ = platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;
+        _ = platform.registerSharding(.model, .mesh(.{ .model = .high_bandwidth })) catch unreachable;
         _platform = platform;
     }
 
@@ -443,7 +443,7 @@ pub fn testLayer(
             var buffer: [256]u8 = undefined;
             const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
 
-            tensor.* = ctx_.activation_store.createTensor(subkey, null, .replicated);
+            tensor.* = ctx_.activation_store.createReplicatedTensor(subkey, null);
             ctx_.index += 1;
         }
     }.cb, &ctx, &args);

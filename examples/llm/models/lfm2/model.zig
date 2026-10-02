@@ -79,7 +79,6 @@ pub const LoadedModel = struct {
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
-        shardings: common.Shardings,
     ) !Buffers {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
@@ -94,8 +93,7 @@ pub const LoadedModel = struct {
         });
         defer loader.deinit();
 
-        const all_shardings = shardings.all();
-        try loader.load(io, Model, &self.inner, &buffers, store, &all_shardings, .{ .progress = progress });
+        try loader.load(io, Model, &self.inner, &buffers, store, .{ .progress = progress });
         try loader.await(io);
 
         const took = now.untilNow(io, .awake);
@@ -173,7 +171,6 @@ pub const Model = struct {
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
-        shardings: common.Shardings,
     ) !zml.Bufferized(Model) {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
@@ -188,8 +185,7 @@ pub const Model = struct {
         });
         defer loader.deinit();
 
-        const all_shardings = shardings.all();
-        loader.load(io, Model, self, &buffers, store, &all_shardings);
+        loader.load(io, Model, self, &buffers, store);
         try loader.await(io);
 
         const took = now.untilNow(io, .awake);
@@ -278,7 +274,7 @@ pub const TokenEmbedding = struct {
     };
 
     pub fn init(store: zml.io.TensorStore.View) TokenEmbedding {
-        return .{ .weight = store.createTensor("weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }) };
+        return .{ .weight = store.createTensor("weight", .{ .voc, .d }, .model, .{ .voc = .replicated, .d = .model }) };
     }
 
     pub fn forward(input: Input) Output {
@@ -448,16 +444,16 @@ pub const ShortConv = struct {
     pub fn init(config: Config, store: zml.io.TensorStore.View) ShortConv {
         stdx.debug.assert(!config.conv_bias, "conv_bias is not supported.", .{});
         return .{
-            .in_proj = .init(store.withPrefix("in_proj").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
-            .out_proj = .init(store.withPrefix("out_proj").createTensor("weight", .{ .out, .d }, .{ .out = .replicated, .d = .model }), null, .d),
-            .kernel = store.createTensor("conv.weight", .{ .out, .in, .kernel_size }, .replicated),
+            .in_proj = .init(store.withPrefix("in_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
+            .out_proj = .init(store.withPrefix("out_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .replicated, .d = .model }), null, .d),
+            .kernel = store.createReplicatedTensor("conv.weight", .{ .out, .in, .kernel_size }),
             .config = config,
         };
     }
 
     pub fn forward(self: ShortConv, input: zml.Tensor, tokens_position_offset: zml.Tensor, actual_seq_len: zml.Tensor, cache_: ConvCache, cache_index: zml.Tensor, parameters: ConvParameters) struct { zml.Tensor, ConvCache } {
         var cache = cache_;
-        const BCx = self.in_proj.forward(input.withPartitioning(.{ .d = .replicated }));
+        const BCx = self.in_proj.forward(input.withPartitioning(.model, .{ .d = .replicated }));
 
         const B, const C, const x = BCx.chunkExact(.d, 3);
         const Bx = B.mul(x);
@@ -523,10 +519,10 @@ pub const Attention = struct {
         const head_dim = config.hidden_size / config.num_attention_heads;
         const num_key_value_groups = config.num_attention_heads / config.num_key_value_heads;
         return .{
-            .q_proj = .init(store.withPrefix("q_proj").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
-            .k_proj = .init(store.withPrefix("k_proj").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
-            .v_proj = .init(store.withPrefix("v_proj").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
-            .out_proj = .init(store.withPrefix("out_proj").createTensor("weight", .{ .out, .d }, .{ .out = .replicated, .d = .model }), null, .d),
+            .q_proj = .init(store.withPrefix("q_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
+            .k_proj = .init(store.withPrefix("k_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
+            .v_proj = .init(store.withPrefix("v_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
+            .out_proj = .init(store.withPrefix("out_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .replicated, .d = .model }), null, .d),
             .q_layernorm = RmsNorm.init(store.withPrefix("q_layernorm"), config.norm_eps, .hd),
             .k_layernorm = RmsNorm.init(store.withPrefix("k_layernorm"), config.norm_eps, .hd),
             .head_dim = head_dim,
@@ -544,7 +540,7 @@ pub const Attention = struct {
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
-        const x_qkv = x.withPartitioning(.{ .d = .replicated });
+        const x_qkv = x.withPartitioning(.model, .{ .d = .replicated });
 
         var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
         var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
@@ -650,8 +646,8 @@ pub const KvCache = struct {
     k: zml.Tensor,
     v: zml.Tensor,
 
-    pub fn init(kv_shape: zml.Shape) KvCache {
-        const sharded_shape = kv_shape.withPartitioning(.{ .h = .model });
+    pub fn init(kv_shape: zml.Shape, sharding: zml.Sharding) KvCache {
+        const sharded_shape = kv_shape.withPartitioning(sharding, .{ .h = .model });
         return .{ .k = .fromShape(sharded_shape), .v = .fromShape(sharded_shape) };
     }
 
@@ -717,9 +713,9 @@ const Mlp = struct {
 
     pub fn init(store: zml.io.TensorStore.View) Mlp {
         return .{
-            .w1 = .init(store.withPrefix("w1").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
-            .w2 = .init(store.withPrefix("w2").createTensor("weight", .{ .out, .d }, .{ .out = .replicated, .d = .model }), null, .d),
-            .w3 = .init(store.withPrefix("w3").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
+            .w1 = .init(store.withPrefix("w1").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
+            .w2 = .init(store.withPrefix("w2").createTensor("weight", .{ .out, .d }, .model, .{ .out = .replicated, .d = .model }), null, .d),
+            .w3 = .init(store.withPrefix("w3").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
         };
     }
 
@@ -740,7 +736,7 @@ const RmsNorm = struct {
     tag: zml.Shape.Tag,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32, tag: anytype) RmsNorm {
-        return .{ .weight = store.createTensor("weight", .{tag}, .replicated), .eps = eps, .tag = zml.Shape.toTag(tag) };
+        return .{ .weight = store.createReplicatedTensor("weight", .{tag}), .eps = eps, .tag = zml.Shape.toTag(tag) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {

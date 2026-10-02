@@ -59,13 +59,13 @@ pub const Shardings = struct {
                 }
 
                 return .{
-                    .model = try platform.registerShardingWithStrategy("model", .mesh(.{ .model = .high_bandwidth }), strategy_model),
-                    .experts = try platform.registerShardingWithStrategy("experts", .mesh(.{ .experts = .high_bandwidth }), strategy_experts),
+                    .model = try platform.registerShardingWithStrategy(.model, .mesh(.{ .model = .high_bandwidth }), strategy_model),
+                    .experts = try platform.registerShardingWithStrategy(.experts, .mesh(.{ .experts = .high_bandwidth }), strategy_experts),
                 };
             },
             .cuda, .rocm, .oneapi, .neuron, .metal, .cpu => return .{
-                .model = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })),
-                .experts = try platform.registerSharding("experts", .mesh(.{ .experts = .high_bandwidth })),
+                .model = try platform.registerSharding(.model, .mesh(.{ .model = .high_bandwidth })),
+                .experts = try platform.registerSharding(.experts, .mesh(.{ .experts = .high_bandwidth })),
             },
         }
     }

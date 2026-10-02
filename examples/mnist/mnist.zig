@@ -19,8 +19,8 @@ const Mnist = struct {
 
         pub fn init(store: zml.io.TensorStore.View) Layer {
             return .{
-                .weight = store.createTensor("weight", .{ .d_out, .d }, .replicated),
-                .bias = store.createTensor("bias", .{.d_out}, .replicated),
+                .weight = store.createReplicatedTensor("weight", .{ .d_out, .d }),
+                .bias = store.createReplicatedTensor("bias", .{.d_out}),
             };
         }
 
@@ -49,7 +49,7 @@ const Mnist = struct {
         var loader: zml.io.Loader = try .init(allocator, platform, .default);
         errdefer loader.deinit();
 
-        try loader.load(io, Mnist, self, &buffers, store, &.{}, .{});
+        try loader.load(io, Mnist, self, &buffers, store, .{});
         try loader.await(io);
 
         return buffers;
@@ -66,7 +66,10 @@ const Mnist = struct {
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
         var x = input.flatten().convert(.f32).withTags(.{.d});
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
-        for (layers) |layer| {
+        const compiler = zml.Compiler.current();
+        for (0.., layers) |i, layer| {
+            compiler.pushLocationFmt(@src(), "layer[{d}]", .{i});
+            defer compiler.popLocation();
             x = layer.forward(x);
         }
         return x.argMax(0).indices.convert(.u8);
@@ -87,14 +90,14 @@ pub fn main(init: std.process.Init) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
     defer registry.deinit();
 
-    // Init model
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
-    defer store.deinit();
-    const mnist_model: Mnist = .init(store.view());
-
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
+
+    // Init model
+    var store: zml.io.TensorStore = .fromRegistry(allocator, platform, &registry);
+    defer store.deinit();
+    const mnist_model: Mnist = .init(store.view());
 
     // // Compile model
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
@@ -137,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
     var sample: [28 * 28]u8 align(16) = undefined;
     _ = try dataset.readPositionalAll(io, &sample, 16 + (idx * 28 * 28));
 
-    var input_buffer: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(input.shape(), &sample), .replicated);
+    var input_buffer: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(input.shape(), &sample), .replicated(input.shape()));
     defer input_buffer.deinit();
 
     printDigit(sample);

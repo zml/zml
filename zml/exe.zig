@@ -22,8 +22,8 @@ pub const Exe = struct {
     input_shapes: []const Shape,
     output_shapes: []const Shape,
 
-    input_shardings: []const Sharding,
-    output_shardings: []const Sharding,
+    input_shardings: []const Sharding.Resolved,
+    output_shardings: []const Sharding.Resolved,
 
     num_devices: usize,
     num_partitions: i32,
@@ -38,8 +38,8 @@ pub const Exe = struct {
         num_partitions: i32,
         input_shapes: []const Shape,
         output_shapes: []const Shape,
-        input_shardings: []const Sharding,
-        output_shardings: []const Sharding,
+        input_shardings: []const Sharding.Resolved,
+        output_shardings: []const Sharding.Resolved,
     ) !Exe {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
@@ -48,8 +48,8 @@ pub const Exe = struct {
         const output_shapes_copy = try arena.allocator().dupe(Shape, output_shapes);
 
         // Re-home sharding pointers into arena-owned values so exe doesn't depend on caller lifetimes.
-        const input_shardings_copy = try arena.allocator().dupe(Sharding, input_shardings);
-        const output_shardings_copy = try arena.allocator().dupe(Sharding, output_shardings);
+        const input_shardings_copy = try arena.allocator().dupe(Sharding.Resolved, input_shardings);
+        const output_shardings_copy = try arena.allocator().dupe(Sharding.Resolved, output_shardings);
 
         return .{
             .platform = platform,
@@ -112,9 +112,9 @@ pub const Exe = struct {
         flat_buffers: FlatBuffers,
         expected_shapes: []const Shape,
         baked_count: usize = 0,
-        shardings: []const Sharding,
+        shardings: []const Sharding.Resolved,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, num_devices: usize) error{OutOfMemory}!Arguments {
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding.Resolved, num_devices: usize) error{OutOfMemory}!Arguments {
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 
@@ -200,9 +200,9 @@ pub const Exe = struct {
         flat_buffers: FlatBuffers,
 
         expected_shapes: []const Shape,
-        shardings: []const Sharding,
+        shardings: []const Sharding.Resolved,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, platform: *const Platform, num_devices: usize) !Results {
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding.Resolved, platform: *const Platform, num_devices: usize) !Results {
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 

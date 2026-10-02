@@ -14,6 +14,7 @@ pub const meta = @import("meta.zig");
 pub const process = @import("process.zig");
 pub const queue = @import("queue.zig");
 pub const SegmentedList = @import("segmented_list.zig").SegmentedList;
+pub const SentinelArray = @import("sentinel_array.zig").SentinelArray;
 pub const time = @import("time.zig");
 pub const unicode = @import("unicode.zig");
 

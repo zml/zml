@@ -39,7 +39,7 @@ pub fn fusedExperts(
         return error.UnsupportedWeightLayout;
     }
 
-    const expert_parallelism = gate_up.weight.shape().partition(.expert).eql(.init(.experts));
+    const expert_parallelism = gate_up.weight.shape().partition(.expert).isSharded();
     const hidden = down.weight.dim(1);
     const intermediate = down.weight.dim(2) * 2;
     // The CuTe GEMMs are specialized on one set of dimensions
@@ -62,7 +62,7 @@ pub fn fusedExperts(
         .expert_parallel = expert_parallelism,
     };
     return if (expert_parallelism)
-        zml.ops.manualComputation(Context.body, context, input.shape())
+        zml.ops.manualComputation(gate_up.weight.shape()._sharding, Context.body, context, input.shape())
     else
         context.body(input.shape());
 }
