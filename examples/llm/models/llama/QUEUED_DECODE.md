@@ -1,7 +1,7 @@
 # Queued decode diagnostic
 
 `llm --benchmark-decode-queue=N` compares serial token readback with queue
-depths 2 and 8 using the same compiled Llama forward. It requires a prompt,
+depths 2 and a configurable depth (8 by default) using the same compiled Llama forward. It requires a prompt,
 Furiosa3, and the `furiosa_fa` attention backend. Normal generation is unchanged.
 
 The diagnostic resets the complete KV cache to zero and the RNG to seed 0
@@ -12,7 +12,9 @@ the next execution can donate their buffers, and event waits are deferred to
 the end of each bounded batch. Host destinations remain alive through all
 copies, including error cleanup.
 
-Three trials rotate queue depths as 1/2/8, 2/8/1, 8/1/2. After timing, the
+Set `--benchmark-decode-queue-depth=16` to compare depths 1, 2 and 16.
+The configurable depth must be at least 3. Three trials rotate queue depths
+(default: 1/2/8, 2/8/1, 8/1/2), so every depth occupies every position once. After timing, the
 program verifies every generated token on every rank against the first serial
 run, rejects out-of-vocabulary/poison values, and compares the complete K/V
 cache and RNG bytes exactly. This checks queue and donation ordering against
@@ -48,3 +50,11 @@ versus serial). All token/state comparisons passed. This is a modest
 benchmark-only improvement, not the 130 tok/s goal. Exact settings, binary
 hashes, compiler logs, first attempts and all trial rates are retained in
 `xla-private/xla/pjrt/furiosa3/experiments/2026-09-29-queued-decode/`.
+
+On October 2, a single-card/eight-PE release build compared depth 8 and 16 in
+8/16/16/8 process order, 128 steps per trial. Depth 8 measured 65.316 steps/s
+(range 65.224–65.427); depth 16 measured 65.515 (65.343–65.570). The observed
++0.31% has overlapping ranges and is not a demonstrated material improvement.
+All 36 trials passed exact token/KV/RNG checks. Default depth remains 8;
+16 is available with the explicit option above. Commands, hashes and raw
+results are in `xla-private/xla/pjrt/furiosa3/experiments/2026-10-02-single-card-depth16/`.

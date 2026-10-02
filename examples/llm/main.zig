@@ -22,6 +22,7 @@ const Args = struct {
     attnd_ip: ?[]const u8 = null,
     profile: bool = false,
     benchmark_decode_queue: usize = 0,
+    benchmark_decode_queue_depth: usize = 8,
     furiosa_pe_count: ?u8 = null,
 
     pub const help =
@@ -38,6 +39,7 @@ const Args = struct {
         \\   --attnd-ip=<addr>   Register and prefer the `attnd` backend at the provided `IP:PORT`
         \\   --furiosa-pe-count=<4|8> Override Furiosa PE topology
         \\   --benchmark-decode-queue=<n> Llama fixed-length serial/queued diagnostic; seed 0, ignores EOS
+        \\   --benchmark-decode-queue-depth=<n> Compare depths 1, 2 and n (default: 8; minimum: 3)
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\
     ;
@@ -56,6 +58,8 @@ pub fn main(init: std.process.Init) !void {
 
     const args = stdx.flags.parse(init.minimal.args, Args);
     if (args.benchmark_decode_queue > 0 and args.prompt == null) return error.QueueBenchmarkRequiresPrompt;
+
+    if (args.benchmark_decode_queue > 0 and args.benchmark_decode_queue_depth < 3) return error.InvalidQueueBenchmarkDepth;
 
     //
     // Virtual File Systems
@@ -189,7 +193,7 @@ pub fn main(init: std.process.Init) !void {
         const prompt_tokens = try llm_chat.session.tokenizePrompt(allocator, prompt);
         defer allocator.free(prompt_tokens);
         switch (llm_chat.session.inner) {
-            .llama => |*session| try @import("models/llama/queue_benchmark.zig").run(session, prompt_tokens, args.benchmark_decode_queue),
+            .llama => |*session| try @import("models/llama/queue_benchmark.zig").run(session, prompt_tokens, args.benchmark_decode_queue, args.benchmark_decode_queue_depth),
             else => return error.QueueBenchmarkRequiresLlama,
         }
         return;

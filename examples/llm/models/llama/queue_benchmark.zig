@@ -6,7 +6,8 @@ const Session = @import("session.zig").Session;
 
 // Fixed-length autoregressive diagnostic, including token readback. EOS does
 // not terminate the workload. Every run restarts from the same prompt/seed.
-pub fn run(session: *Session, prompt: []const u32, iterations: usize) !void {
+pub fn run(session: *Session, prompt: []const u32, iterations: usize, queued_depth: usize) !void {
+    if (queued_depth < 3) return error.InvalidQueueBenchmarkDepth;
     const warmups = 4;
     if (prompt.len >= session.seqlen) return error.InvalidQueueBenchmarkLength;
     const available: usize = session.seqlen - prompt.len;
@@ -29,7 +30,7 @@ pub fn run(session: *Session, prompt: []const u32, iterations: usize) !void {
     };
     const vocabulary: u32 = @intCast(session.compiled_model.loaded_model.inner.model.embed_tokens.weight.dim(.voc));
     // Rotate order so each depth occupies every position once.
-    const orders = [3][3]usize{ .{ 1, 2, 8 }, .{ 2, 8, 1 }, .{ 8, 1, 2 } };
+    const orders = [3][3]usize{ .{ 1, 2, queued_depth }, .{ 2, queued_depth, 1 }, .{ queued_depth, 1, 2 } };
     for (orders, 0..) |order, trial| {
         for (order) |depth| {
             const replacements = blk: {
