@@ -86,7 +86,7 @@ pub const MBarrierScope = enum {
 /// `#nvvm.proxy_kind<...>`: memory proxy of `fence.proxy`.
 pub const ProxyKind = enum {
     alias,
-    @"async",
+    async,
     @"async.global",
     @"async.shared",
     pub const attribute = EnumAttribute("proxy_kind", ProxyKind).attribute;
