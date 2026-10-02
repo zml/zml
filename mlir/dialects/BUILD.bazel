@@ -9,7 +9,7 @@ zig_library(
         "cuda.zig",
         "func.zig",
         "gpu.zig",
-        "llvm_dialect.zig",
+        "llvm.zig",
         "math.zig",
         "memref.zig",
         "nvvm.zig",
