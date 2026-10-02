@@ -1051,28 +1051,21 @@ fn physicalContiguousBlockSize(shard_shape: Shape, layout: pjrt.MemoryLayout) us
         },
         .tiled => |tiled| {
             if (tiled.tile_dims.len == 0 and isMinorToMajorRowMajor(tiled.minor_to_major, shard_shape.rank())) return shard_shape.count();
-            var dims: [Shape.MAX_RANK]usize = @splat(1);
-            for (shard_shape.dims(), 0..) |dim, axis| dims[axis] = @intCast(dim);
-            var stride: usize = 1;
+            // From the most minor physical dimension, the run grows while each
+            // dimension is the next digit of the innermost axis.
+            const expanded: TiledDims = .init(shard_shape, tiled);
             var run: usize = 1;
-            var cursor: usize = 0;
-            for (0..tiled.tile_dims_sizes.len + 1) |level| {
-                const tile = if (level < tiled.tile_dims_sizes.len)
-                    tileDimsForLayoutTile(shard_shape.rank(), tiled, cursor, tiled.tile_dims_sizes[level])
-                else
-                    dims;
-                for (tiled.minor_to_major) |axis_i64| {
-                    const axis: usize = @intCast(axis_i64);
-                    if (axis == last_axis) {
-                        if (stride != run) return @min(cols, run);
-                        run *= tile[axis];
-                    }
-                    stride *= tile[axis];
-                }
-                if (level < tiled.tile_dims_sizes.len) {
-                    cursor += tiled.tile_dims_sizes[level];
-                    for (0..shard_shape.rank()) |axis| dims[axis] = std.math.divCeil(usize, dims[axis], tile[axis]) catch unreachable;
-                }
+            var i = expanded.dims.len;
+            while (i > 0) {
+                i -= 1;
+                const dim = expanded.dims.get(i);
+                if (dim.size == 1) continue;
+                const axis = dim.axis orelse break;
+                if (axis != last_axis or dim.divisor != run) break;
+                if (dim.modulus == 0) return cols;
+                run *= dim.modulus;
+                // Padding after the digit's last value ends the run.
+                if (dim.size != dim.modulus) break;
             }
             return @min(cols, run);
         },
@@ -1084,17 +1077,40 @@ fn physicalContiguousBlockSize(shard_shape: Shape, layout: pjrt.MemoryLayout) us
 const PreparedLayout = struct {
     const ByteStrides = [Shape.MAX_RANK]usize;
 
-    const TileOp = struct {
+    /// One physical dimension of a tiled layout, as a digit of one coordinate.
+    const Digit = struct {
         byteStride: usize,
-        /// A mask when shift is present; otherwise a general divisor.
-        divisorOrMask: usize,
+        /// A shift when divShift is present; otherwise a general divisor.
+        divisor: usize,
+        /// A mask when isMask is set; otherwise a general modulus.
+        modulus: usize,
         axis: u3,
-        shift: ?std.math.Log2Int(usize),
+        divShift: ?std.math.Log2Int(usize),
+        isMask: bool,
+
+        fn init(axis: u3, dim: TiledDims.Dim, byteStride: usize) Digit {
+            // Unbounded digits keep every bit of the quotient.
+            const modulus = if (dim.modulus == 0) std.math.maxInt(usize) else dim.modulus;
+            const isMask = dim.modulus == 0 or std.math.isPowerOfTwo(modulus);
+            return .{
+                .byteStride = byteStride,
+                .divisor = dim.divisor,
+                .modulus = if (isMask and dim.modulus != 0) modulus - 1 else modulus,
+                .axis = axis,
+                .divShift = if (std.math.isPowerOfTwo(dim.divisor)) @intCast(@ctz(dim.divisor)) else null,
+                .isMask = isMask,
+            };
+        }
+
+        fn value(self: Digit, coordinate: usize) usize {
+            const quotient = if (self.divShift) |shift| coordinate >> shift else coordinate / self.divisor;
+            return if (self.isMask) quotient & self.modulus else quotient % self.modulus;
+        }
     };
 
     const Tiled = struct {
-        byteStrides: ByteStrides = @splat(0),
-        tileOps: stdx.BoundedArray(TileOp, pjrt.DefaultMemoryLayout.MAX_TILE_DIMS) = .empty,
+        /// Unit and padding dimensions always hold index 0 and are left out.
+        digits: stdx.BoundedArray(Digit, Shape.MAX_RANK + pjrt.DefaultMemoryLayout.MAX_TILE_DIMS) = .empty,
     };
 
     const Addressing = union(enum) {
@@ -1136,38 +1152,16 @@ const PreparedLayout = struct {
                 stdx.debug.assert(tiled.minor_to_major.len == shape.rank(), "layout rank {} doesn't match shape rank {}", .{ tiled.minor_to_major.len, shape.rank() });
                 if (tiled.tile_dims.len == 0 and isMinorToMajorRowMajor(tiled.minor_to_major, shape.rank())) return result;
 
+                // The expanded dimensions are laid out row-major.
+                const expanded: TiledDims = .init(shape, tiled);
                 var prepared: Tiled = .{};
-                var dims: [Shape.MAX_RANK]usize = @splat(1);
-                for (shape.dims(), 0..) |dim, axis| dims[axis] = @intCast(dim);
-
                 var byteStride = result.elementSize;
-                var cursor: usize = 0;
-                for (tiled.tile_dims_sizes) |tileRank| {
-                    const tile = tileDimsForLayoutTile(shape.rank(), tiled, cursor, tileRank);
-                    for (tiled.minor_to_major) |axis_| {
-                        const axis: usize = @intCast(axis_);
-                        const dim = tile[axis];
-                        // Unit dimensions contribute nothing and leave coordinates unchanged.
-                        if (dim > 1) {
-                            const powerOfTwo = std.math.isPowerOfTwo(dim);
-                            prepared.tileOps.appendAssumeCapacity(.{
-                                .byteStride = byteStride,
-                                .divisorOrMask = if (powerOfTwo) dim - 1 else dim,
-                                .axis = @intCast(axis),
-                                .shift = if (powerOfTwo) @intCast(@ctz(dim)) else null,
-                            });
-                        }
-                        byteStride *= dim;
-                    }
-                    for (0..shape.rank()) |axis| dims[axis] = std.math.divCeil(usize, dims[axis], tile[axis]) catch unreachable;
-                    cursor += tileRank;
-                }
-
-                stdx.debug.assert(cursor == tiled.tile_dims.len, "layout tile metadata is inconsistent", .{});
-                for (tiled.minor_to_major) |axis_| {
-                    const axis: usize = @intCast(axis_);
-                    prepared.byteStrides[axis] = byteStride;
-                    byteStride *= dims[axis];
+                var i = expanded.dims.len;
+                while (i > 0) {
+                    i -= 1;
+                    const dim = expanded.dims.get(i);
+                    if (dim.size > 1) if (dim.axis) |axis| prepared.digits.appendAssumeCapacity(.init(axis, dim, byteStride));
+                    byteStride *= dim.size;
                 }
 
                 result.addressing = .{ .tiled = prepared };
@@ -1185,21 +1179,82 @@ const PreparedLayout = struct {
                 return offset;
             },
             .tiled => |*tiled| {
-                var index = coordinates;
                 var offset: usize = 0;
-                for (tiled.tileOps.constSlice()) |op| {
-                    if (op.shift) |shift| {
-                        offset += (index[op.axis] & op.divisorOrMask) * op.byteStride;
-                        index[op.axis] >>= shift;
-                    } else {
-                        offset += (index[op.axis] % op.divisorOrMask) * op.byteStride;
-                        index[op.axis] /= op.divisorOrMask;
-                    }
-                }
-                for (index[0..self.rank], tiled.byteStrides[0..self.rank]) |coord, byteStride| offset += coord * byteStride;
+                for (tiled.digits.constSlice()) |digit| offset += digit.value(coordinates[digit.axis]) * digit.byteStride;
                 return offset;
             },
         }
+    }
+};
+
+/// The physical dimensions of a tiled layout, major to minor. XLA lays a tiled array
+/// out row-major over these dimensions; see https://openxla.org/xla/tiled_layout.
+const TiledDims = struct {
+    /// Every dimension holds the digit `(coordinate[axis] / divisor) % modulus`.
+    const Dim = struct {
+        /// Null for padding, which only holds index 0.
+        axis: ?u3,
+        size: usize,
+        divisor: usize = 1,
+        /// Zero for a digit without an upper bound, which holds `coordinate / divisor`.
+        modulus: usize = 0,
+
+        /// The index of the tile along this dimension.
+        fn tileCount(self: Dim, tile: usize) Dim {
+            const size = std.math.divCeil(usize, self.size, tile) catch unreachable;
+            const axis = self.axis orelse return .{ .axis = null, .size = size };
+            if (self.modulus == 0) return .{ .axis = axis, .size = size, .divisor = self.divisor * tile };
+            if (self.modulus % tile == 0) return .{ .axis = axis, .size = size, .divisor = self.divisor * tile, .modulus = self.modulus / tile };
+            // One tile holds every value of the digit.
+            return .{ .axis = null, .size = size };
+        }
+
+        /// The index within the tile along this dimension.
+        fn tileIndex(self: Dim, tile: usize) Dim {
+            const axis = self.axis orelse return .{ .axis = null, .size = tile };
+            stdx.debug.assert(
+                self.modulus == 0 or self.modulus % tile == 0 or tile % self.modulus == 0,
+                "nested tile {} must divide, or be a multiple of, the {} values it tiles",
+                .{ tile, self.modulus },
+            );
+            if (self.modulus != 0 and self.modulus < tile) return .{ .axis = axis, .size = tile, .divisor = self.divisor, .modulus = self.modulus };
+            return .{ .axis = axis, .size = tile, .divisor = self.divisor, .modulus = tile };
+        }
+    };
+
+    dims: stdx.BoundedArray(Dim, Shape.MAX_RANK + 2 * pjrt.DefaultMemoryLayout.MAX_TILE_DIMS) = .empty,
+
+    /// Follows XLA's LayoutUtil::LinearIndexForNestedTiling. The physical dimensions
+    /// start in minor_to_major order. Each tile then splits the most minor ones,
+    /// padded with leading unit dimensions if the tile has more, into tile counts
+    /// followed by indices within the tile. Tile sizes are listed major to minor, so
+    /// a later tile splits the previous tile's indices and possibly its counts.
+    fn init(shape: Shape, layout: pjrt.MemoryLayout.Tiled) TiledDims {
+        const rank = shape.rank();
+        stdx.debug.assert(layout.minor_to_major.len == rank, "layout rank {} doesn't match shape rank {}", .{ layout.minor_to_major.len, rank });
+        var result: TiledDims = .{};
+        var i = rank;
+        while (i > 0) {
+            i -= 1;
+            const axis: u3 = @intCast(layout.minor_to_major[i]);
+            result.dims.appendAssumeCapacity(.{ .axis = axis, .size = @intCast(shape.dim(axis)) });
+        }
+        var cursor: usize = 0;
+        for (layout.tile_dims_sizes) |tileRank| {
+            const tile = layout.tile_dims[cursor..][0..tileRank];
+            cursor += tileRank;
+            while (result.dims.len < tileRank) result.dims.insert(0, .{ .axis = null, .size = 1 }) catch unreachable;
+            const start = result.dims.len - tileRank;
+            for (tile, start..) |size_, d| {
+                // XLA marks dimensions combined with the next one by a negative size.
+                stdx.debug.assert(size_ > 0, "unsupported tile dimension {}", .{size_});
+                const size: usize = @intCast(size_);
+                result.dims.appendAssumeCapacity(result.dims.get(d).tileIndex(size));
+                result.dims.set(d, result.dims.get(d).tileCount(size));
+            }
+        }
+        stdx.debug.assert(cursor == layout.tile_dims.len, "layout tile metadata is inconsistent", .{});
+        return result;
     }
 };
 
@@ -1219,74 +1274,46 @@ fn referenceByteOffset(shape: Shape, layout: pjrt.MemoryLayout, index: []const u
     };
 }
 
-/// Computes the element offset for one logical index in XLA/PJRT tiled layout order.
+/// Computes the element offset for one logical index in XLA/PJRT tiled layout order,
+/// as XLA's LayoutUtil::LinearIndexForNestedTiling does.
 fn tiledElementOffset(shape: Shape, layout: pjrt.MemoryLayout.Tiled, index: []const usize) usize {
     const rank = shape.rank();
     stdx.debug.assert(layout.minor_to_major.len == rank, "layout rank {} doesn't match shape rank {}", .{ layout.minor_to_major.len, rank });
 
-    var current_index: [Shape.MAX_RANK]usize = @splat(0);
-    var current_dims: [Shape.MAX_RANK]usize = @splat(0);
-    for (0..rank) |axis| {
-        current_index[axis] = index[axis];
-        current_dims[axis] = @intCast(shape.dim(axis));
+    // Physical dimensions and indices, major to minor.
+    const Expanded = stdx.BoundedArray(usize, Shape.MAX_RANK + 2 * pjrt.DefaultMemoryLayout.MAX_TILE_DIMS);
+    var dims: Expanded = .empty;
+    var indices: Expanded = .empty;
+    var i = rank;
+    while (i > 0) {
+        i -= 1;
+        const axis: usize = @intCast(layout.minor_to_major[i]);
+        dims.appendAssumeCapacity(@intCast(shape.dim(axis)));
+        indices.appendAssumeCapacity(index[axis]);
     }
 
-    var tile_indices: [pjrt.DefaultMemoryLayout.MAX_NUM_TILES][Shape.MAX_RANK]usize = undefined;
-    var tile_dims: [pjrt.DefaultMemoryLayout.MAX_NUM_TILES][Shape.MAX_RANK]usize = undefined;
-    var tile_count: usize = 0;
     var cursor: usize = 0;
-
-    for (layout.tile_dims_sizes) |tile_dims_size| {
-        const dims_for_tile = tileDimsForLayoutTile(rank, layout, cursor, tile_dims_size);
-        cursor += tile_dims_size;
-
-        for (0..rank) |axis| {
-            const tile_dim = dims_for_tile[axis];
-            tile_indices[tile_count][axis] = current_index[axis] % tile_dim;
-            tile_dims[tile_count][axis] = tile_dim;
-            current_index[axis] /= tile_dim;
-            current_dims[axis] = std.math.divCeil(usize, current_dims[axis], tile_dim) catch unreachable;
+    for (layout.tile_dims_sizes) |tile_rank| {
+        const tile = layout.tile_dims[cursor..][0..tile_rank];
+        cursor += tile_rank;
+        while (dims.len < tile_rank) {
+            dims.insert(0, 1) catch unreachable;
+            indices.insert(0, 0) catch unreachable;
         }
-        tile_count += 1;
+        // Tiled dimensions become tile counts, followed by the indices within the tile.
+        const start = dims.len - tile_rank;
+        for (tile, start..) |tile_dim_, d| {
+            const tile_dim: usize = @intCast(tile_dim_);
+            dims.appendAssumeCapacity(tile_dim);
+            indices.appendAssumeCapacity(indices.get(d) % tile_dim);
+            dims.set(d, std.math.divCeil(usize, dims.get(d), tile_dim) catch unreachable);
+            indices.set(d, indices.get(d) / tile_dim);
+        }
     }
     stdx.debug.assert(cursor == layout.tile_dims.len, "layout tile metadata is inconsistent", .{});
 
-    var offset = linearIndex(current_index[0..rank], current_dims[0..rank], layout.minor_to_major);
-    var tile_index = tile_count;
-    while (tile_index > 0) {
-        tile_index -= 1;
-        offset *= product(tile_dims[tile_index][0..rank]);
-        offset += linearIndex(tile_indices[tile_index][0..rank], tile_dims[tile_index][0..rank], layout.minor_to_major);
-    }
-    return offset;
-}
-
-/// Expands one PJRT tile descriptor into one tile dimension per logical axis.
-fn tileDimsForLayoutTile(rank: usize, layout: pjrt.MemoryLayout.Tiled, cursor: usize, tile_dims_size: usize) [Shape.MAX_RANK]usize {
-    var dims_for_tile: [Shape.MAX_RANK]usize = @splat(1);
-    if (tile_dims_size == rank) {
-        for (0..rank) |axis| {
-            dims_for_tile[axis] = @intCast(layout.tile_dims[cursor + axis]);
-        }
-    } else {
-        stdx.debug.assert(tile_dims_size <= rank, "tile rank {} exceeds shape rank {}", .{ tile_dims_size, rank });
-        for (0..tile_dims_size) |i| {
-            const axis: usize = @intCast(layout.minor_to_major[i]);
-            dims_for_tile[axis] = @intCast(layout.tile_dims[cursor + i]);
-        }
-    }
-    return dims_for_tile;
-}
-
-/// Converts a multi-dimensional index to a flat offset using the provided minor-to-major axis order.
-fn linearIndex(index: []const usize, dims: []const usize, minor_to_major: []const i64) usize {
     var offset: usize = 0;
-    var stride: usize = 1;
-    for (minor_to_major) |axis_i64| {
-        const axis: usize = @intCast(axis_i64);
-        offset += index[axis] * stride;
-        stride *= dims[axis];
-    }
+    for (dims.constSlice(), indices.constSlice()) |dim, coord| offset = offset * dim + coord;
     return offset;
 }
 
@@ -1299,79 +1326,164 @@ fn isMinorToMajorRowMajor(minor_to_major: []const i64, rank: usize) bool {
     return true;
 }
 
-/// Multiplies a short list of dimension sizes.
-fn product(values: []const usize) usize {
-    var res: usize = 1;
-    for (values) |value| res *= value;
-    return res;
-}
-
 test "prepared layout byte offsets match physical layouts" {
     const unitTiles: [pjrt.DefaultMemoryLayout.MAX_TILE_DIMS]i64 = @splat(1);
     const tileRanks: [pjrt.DefaultMemoryLayout.MAX_NUM_TILES]usize = @splat(Shape.MAX_RANK);
-    const Case = struct { shape: Shape, layout: pjrt.MemoryLayout };
+    const Case = struct { shape: Shape, layout: pjrt.MemoryLayout, blockSize: usize };
     const cases = [_]Case{
-        .{ .shape = .init(.{}, .i32), .layout = .{ .strides = .{ .byte_strides = &.{} } } },
-        .{ .shape = .init(.{ 3, 5 }, .i32), .layout = .{ .strides = .{ .byte_strides = &.{ 20, 4 } } } },
-        .{ .shape = .init(.{ 3, 5 }, .f16), .layout = .{ .strides = .{ .byte_strides = &.{ 16, 2 } } } },
-        .{ .shape = .init(.{ 3, 5 }, .i32), .layout = .{ .strides = .{ .byte_strides = &.{ 4, 16 } } } },
+        .{ .shape = .init(.{}, .i32), .layout = .{ .strides = .{ .byte_strides = &.{} } }, .blockSize = 1 },
+        .{ .shape = .init(.{ 3, 5 }, .i32), .layout = .{ .strides = .{ .byte_strides = &.{ 20, 4 } } }, .blockSize = 15 },
+        .{ .shape = .init(.{ 3, 5 }, .f16), .layout = .{ .strides = .{ .byte_strides = &.{ 16, 2 } } }, .blockSize = 5 },
+        .{ .shape = .init(.{ 3, 5 }, .i32), .layout = .{ .strides = .{ .byte_strides = &.{ 4, 16 } } }, .blockSize = 1 },
         .{
             .shape = .init(.{ 3, 5 }, .i32),
             .layout = .{ .tiled = .{ .minor_to_major = &.{ 1, 0 }, .tile_dims = &.{}, .tile_dims_sizes = &.{} } },
+            .blockSize = 15,
         },
         .{
             .shape = .init(.{ 3, 5 }, .i32),
             .layout = .{ .tiled = .{ .minor_to_major = &.{ 0, 1 }, .tile_dims = &.{}, .tile_dims_sizes = &.{} } },
+            .blockSize = 1,
         },
         .{
             .shape = .init(.{ 3, 5 }, .i32),
             .layout = .{ .tiled = .{ .minor_to_major = &.{ 1, 0 }, .tile_dims = &.{ 2, 2 }, .tile_dims_sizes = &.{2} } },
+            .blockSize = 2,
+        },
+        .{
+            .shape = .init(.{ 3, 5 }, .i32),
+            .layout = .{ .tiled = .{ .minor_to_major = &.{ 0, 1 }, .tile_dims = &.{ 2, 2 }, .tile_dims_sizes = &.{2} } },
+            .blockSize = 1,
         },
         .{
             .shape = .init(.{ 3, 5 }, .f16),
             .layout = .{ .tiled = .{ .minor_to_major = &.{ 1, 0 }, .tile_dims = &.{ 2, 2, 2, 1 }, .tile_dims_sizes = &.{ 2, 2 } } },
+            .blockSize = 1,
+        },
+        .{
+            .shape = .init(.{ 4, 8 }, .f16),
+            .layout = .{ .tiled = .{ .minor_to_major = &.{ 1, 0 }, .tile_dims = &.{ 2, 4, 2, 1 }, .tile_dims_sizes = &.{ 2, 2 } } },
+            .blockSize = 1,
+        },
+        // The nested tile is larger than the values it tiles.
+        .{
+            .shape = .init(.{ 3, 5 }, .i32),
+            .layout = .{ .tiled = .{ .minor_to_major = &.{ 1, 0 }, .tile_dims = &.{ 2, 2, 4, 1 }, .tile_dims_sizes = &.{ 2, 2 } } },
+            .blockSize = 1,
+        },
+        // The nested tile also splits the tile counts.
+        .{
+            .shape = .init(.{ 4, 8 }, .i32),
+            .layout = .{ .tiled = .{ .minor_to_major = &.{ 1, 0 }, .tile_dims = &.{ 1, 4, 2, 1, 1 }, .tile_dims_sizes = &.{ 2, 3 } } },
+            .blockSize = 1,
         },
         .{
             .shape = .init(.{ 2, 3, 5 }, .i32),
             .layout = .{ .tiled = .{ .minor_to_major = &.{ 2, 1, 0 }, .tile_dims = &.{ 4, 2 }, .tile_dims_sizes = &.{2} } },
+            .blockSize = 2,
         },
         .{
             .shape = .init(.{ 2, 3, 5 }, .i32),
             .layout = .{ .tiled = .{ .minor_to_major = &.{ 2, 1, 0 }, .tile_dims = &.{ 3, 2 }, .tile_dims_sizes = &.{2} } },
+            .blockSize = 2,
         },
         .{
             .shape = .init(.{ 2, 3, 5 }, .i32),
-            .layout = .{ .tiled = .{ .minor_to_major = &.{ 0, 2, 1 }, .tile_dims = &.{ 2, 4, 2, 3, 1 }, .tile_dims_sizes = &.{ 3, 2 } } },
+            .layout = .{ .tiled = .{ .minor_to_major = &.{ 2, 1, 0 }, .tile_dims = &.{ 3, 2, 3, 1 }, .tile_dims_sizes = &.{ 2, 2 } } },
+            .blockSize = 1,
+        },
+        // The nested tile moves pairs of the innermost axis to the most minor dimension.
+        .{
+            .shape = .init(.{ 2, 3, 5 }, .i32),
+            .layout = .{ .tiled = .{ .minor_to_major = &.{ 0, 2, 1 }, .tile_dims = &.{ 2, 4, 2, 2, 1 }, .tile_dims_sizes = &.{ 3, 2 } } },
+            .blockSize = 2,
+        },
+        // The tile has more dimensions than the shape.
+        .{
+            .shape = .init(.{5}, .i32),
+            .layout = .{ .tiled = .{ .minor_to_major = &.{0}, .tile_dims = &.{ 2, 4 }, .tile_dims_sizes = &.{2} } },
+            .blockSize = 4,
         },
         .{
             .shape = .init(.{ 1, 1, 1, 1, 1, 1, 2, 3 }, .i32),
             .layout = .{ .tiled = .{ .minor_to_major = &.{ 7, 6, 5, 4, 3, 2, 1, 0 }, .tile_dims = &unitTiles, .tile_dims_sizes = &tileRanks } },
+            .blockSize = 3,
         },
     };
     for (cases) |case| {
         const prepared: PreparedLayout = .init(case.shape, case.shape, case.layout);
+        try std.testing.expectEqual(case.blockSize, prepared.blockSize);
         for (0..case.shape.count()) |local| {
             const index = unflattenIndex(case.shape, local);
             const expected = referenceByteOffset(case.shape, case.layout, index[0..case.shape.rank()]);
-            try std.testing.expectEqual(expected, prepared.byteOffset(local, index));
+            const actual = prepared.byteOffset(local, index);
+            try std.testing.expectEqual(expected, actual);
+            // Elements after the first of a block follow the previous one in memory.
+            if ((local % prepared.alignmentSize) % prepared.blockSize != 0) {
+                try std.testing.expectEqual(prepared.byteOffset(local - 1, unflattenIndex(case.shape, local - 1)) + prepared.elementSize, actual);
+            }
         }
     }
 }
 
-test "tiled layout offsets" {
-    const layout: pjrt.MemoryLayout.Tiled = .{
-        .minor_to_major = &.{ 1, 0 },
-        .tile_dims = &.{ 2, 2 },
-        .tile_dims_sizes = &.{2},
-    };
+test "tiled layout offsets follow XLA" {
+    const Tiled = pjrt.MemoryLayout.Tiled;
+    // Figure 1 of https://openxla.org/xla/tiled_layout: F32[3,5]{1,0:T(2,2)}.
+    const tiles: Tiled = .{ .minor_to_major = &.{ 1, 0 }, .tile_dims = &.{ 2, 2 }, .tile_dims_sizes = &.{2} };
+    try std.testing.expectEqual(17, tiledElementOffset(.init(.{ 3, 5 }, .f32), tiles, &.{ 2, 3 }));
     const shape = Shape.init(.{ 3, 4 }, .i32);
+    try std.testing.expectEqual(0, tiledElementOffset(shape, tiles, &.{ 0, 0 }));
+    try std.testing.expectEqual(1, tiledElementOffset(shape, tiles, &.{ 0, 1 }));
+    try std.testing.expectEqual(2, tiledElementOffset(shape, tiles, &.{ 1, 0 }));
+    try std.testing.expectEqual(3, tiledElementOffset(shape, tiles, &.{ 1, 1 }));
+    try std.testing.expectEqual(4, tiledElementOffset(shape, tiles, &.{ 0, 2 }));
+    try std.testing.expectEqual(8, tiledElementOffset(shape, tiles, &.{ 2, 0 }));
 
-    try std.testing.expectEqual(@as(usize, 0), tiledElementOffset(shape, layout, &.{ 0, 0 }));
-    try std.testing.expectEqual(@as(usize, 1), tiledElementOffset(shape, layout, &.{ 0, 1 }));
-    try std.testing.expectEqual(@as(usize, 2), tiledElementOffset(shape, layout, &.{ 1, 0 }));
-    try std.testing.expectEqual(@as(usize, 3), tiledElementOffset(shape, layout, &.{ 1, 1 }));
-    try std.testing.expectEqual(@as(usize, 4), tiledElementOffset(shape, layout, &.{ 0, 2 }));
-    try std.testing.expectEqual(@as(usize, 8), tiledElementOffset(shape, layout, &.{ 2, 0 }));
+    // Figure 2: 4x8 tiled by (2,4)(2,1). The nested tile pairs rows within each
+    // tile, as the (8,128)(2,1) tiling of bf16 on TPU does.
+    const nested: Tiled = .{ .minor_to_major = &.{ 1, 0 }, .tile_dims = &.{ 2, 4, 2, 1 }, .tile_dims_sizes = &.{ 2, 2 } };
+    const figure2 = [4][8]usize{
+        .{ 0, 2, 4, 6, 8, 10, 12, 14 },
+        .{ 1, 3, 5, 7, 9, 11, 13, 15 },
+        .{ 16, 18, 20, 22, 24, 26, 28, 30 },
+        .{ 17, 19, 21, 23, 25, 27, 29, 31 },
+    };
+    for (figure2, 0..) |offsets, row| {
+        for (offsets, 0..) |offset, col| try std.testing.expectEqual(offset, tiledElementOffset(.init(.{ 4, 8 }, .bf16), nested, &.{ row, col }));
+    }
+
+    // A tile lists sizes for the most minor physical dimensions, major to minor.
+    // Like {2,1,0:T(8,128)} on TPU, this tiles rows by 2 and columns by 4:
+    // offset = a*32 + (b/2)*16 + (c/4)*8 + (b%2)*4 + c%4.
+    const rank3: Shape = .init(.{ 2, 3, 5 }, .f32);
+    const partial: Tiled = .{ .minor_to_major = &.{ 2, 1, 0 }, .tile_dims = &.{ 2, 4 }, .tile_dims_sizes = &.{2} };
+    try std.testing.expectEqual(4, tiledElementOffset(rank3, partial, &.{ 0, 1, 0 }));
+    try std.testing.expectEqual(8, tiledElementOffset(rank3, partial, &.{ 0, 0, 4 }));
+    try std.testing.expectEqual(12, tiledElementOffset(rank3, partial, &.{ 0, 1, 4 }));
+    try std.testing.expectEqual(16, tiledElementOffset(rank3, partial, &.{ 0, 2, 0 }));
+    try std.testing.expectEqual(51, tiledElementOffset(rank3, partial, &.{ 1, 2, 3 }));
+
+    // Tiles follow the physical order: offset = (c/2)*8 + (r/2)*4 + (c%2)*2 + r%2.
+    const transposed: Tiled = .{ .minor_to_major = &.{ 0, 1 }, .tile_dims = &.{ 2, 2 }, .tile_dims_sizes = &.{2} };
+    try std.testing.expectEqual(1, tiledElementOffset(.init(.{ 3, 5 }, .f32), transposed, &.{ 1, 0 }));
+    try std.testing.expectEqual(2, tiledElementOffset(.init(.{ 3, 5 }, .f32), transposed, &.{ 0, 1 }));
+    try std.testing.expectEqual(4, tiledElementOffset(.init(.{ 3, 5 }, .f32), transposed, &.{ 2, 0 }));
+    try std.testing.expectEqual(8, tiledElementOffset(.init(.{ 3, 5 }, .f32), transposed, &.{ 0, 2 }));
+    try std.testing.expectEqual(14, tiledElementOffset(.init(.{ 3, 5 }, .f32), transposed, &.{ 2, 3 }));
+
+    // A tile with more dimensions than the shape pads it with leading unit
+    // dimensions: offset = (c/4)*8 + c%4.
+    const wide: Tiled = .{ .minor_to_major = &.{0}, .tile_dims = &.{ 2, 4 }, .tile_dims_sizes = &.{2} };
+    try std.testing.expectEqual(3, tiledElementOffset(.init(.{5}, .f32), wide, &.{3}));
+    try std.testing.expectEqual(8, tiledElementOffset(.init(.{5}, .f32), wide, &.{4}));
+
+    // A later tile can also split the previous tile counts:
+    // offset = r*8 + (c%4)*2 + (c/4)%2.
+    const crossTile: Tiled = .{ .minor_to_major = &.{ 1, 0 }, .tile_dims = &.{ 1, 4, 2, 1, 1 }, .tile_dims_sizes = &.{ 2, 3 } };
+    try std.testing.expectEqual(1, tiledElementOffset(.init(.{ 4, 8 }, .f32), crossTile, &.{ 0, 4 }));
+    try std.testing.expectEqual(2, tiledElementOffset(.init(.{ 4, 8 }, .f32), crossTile, &.{ 0, 1 }));
+    try std.testing.expectEqual(11, tiledElementOffset(.init(.{ 4, 8 }, .f32), crossTile, &.{ 1, 5 }));
+    try std.testing.expectEqual(31, tiledElementOffset(.init(.{ 4, 8 }, .f32), crossTile, &.{ 3, 7 }));
 }
 
 test "HostStagedBuffer.View snapshots pointers and preserves them through slicing" {
@@ -1464,10 +1576,12 @@ test "HostStagedBuffer.View nested tiles" {
     const ptrs = [_][*]u8{@ptrCast(&storage)};
     const viewPrepared: HostStagedBuffer.Prepared = .init(shape, shape, layout, &.{@splat(0)});
     const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
+    // Pairs of rows are interleaved within each tile, so every block is one element.
+    try std.testing.expectEqual(1, view.prepared.preparedLayout.blockSize);
     view.copyFrom(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 });
     try std.testing.expectEqualSlices(i32, &.{
-        1,  2,  6,  7,  11, 12, -1, -1, 3,  4,  8,  9,
-        13, 14, -1, -1, 5,  -1, 10, -1, 15, -1, -1, -1,
+        1,  6,  2,  7,  3,  8,  4,  9,  5,  10, -1, -1,
+        11, -1, 12, -1, 13, -1, 14, -1, 15, -1, -1, -1,
     }, &storage);
 }
 
