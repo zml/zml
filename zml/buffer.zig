@@ -643,7 +643,7 @@ pub const HostStagedBuffer = struct {
                 const values = self.view(dt.toZigType());
                 var blocks = values.blocks();
                 while (blocks.next()) |block| {
-                    for (block.items.get(0)) |value| try writer.print(" {any}", .{value});
+                    for (block.items[0]) |value| try writer.print(" {any}", .{value});
                 }
             },
         }
@@ -718,7 +718,7 @@ pub const HostStagedBuffer = struct {
             pub fn fill(self: Self, value: T) void {
                 var iterator = self.blocks();
                 while (iterator.next()) |block| {
-                    for (block.items.constSlice()) |items| @memset(items, value);
+                    for (block.items) |items| @memset(items, value);
                 }
             }
 
@@ -726,9 +726,9 @@ pub const HostStagedBuffer = struct {
             pub fn fillIota(self: Self, first: T, step: T) void {
                 var iterator = self.blocks();
                 while (iterator.next()) |block| {
-                    const items = block.items.get(0);
+                    const items = block.items[0];
                     for (items, block.offset..) |*value, i| value.* = first + @as(T, @intCast(i)) * step;
-                    for (block.items.constSlice()[1..]) |replica| @memcpy(replica, items);
+                    for (block.items[1..]) |replica| @memcpy(replica, items);
                 }
             }
 
@@ -736,7 +736,7 @@ pub const HostStagedBuffer = struct {
                 std.debug.assert(values.len == self.len);
                 var iterator = self.blocks();
                 while (iterator.next()) |block| {
-                    for (block.items.constSlice()) |items| @memcpy(items, values[block.offset..][0..items.len]);
+                    for (block.items) |items| @memcpy(items, values[block.offset..][0..items.len]);
                 }
             }
 
@@ -744,7 +744,7 @@ pub const HostStagedBuffer = struct {
                 std.debug.assert(values.len == self.len);
                 var iterator = self.blocks();
                 while (iterator.next()) |block| {
-                    const items = block.items.get(0);
+                    const items = block.items[0];
                     @memcpy(values[block.offset..][0..items.len], items);
                 }
             }
@@ -754,21 +754,18 @@ pub const HostStagedBuffer = struct {
                 std.debug.assert(src.len == self.len);
                 var iterator = self.blocks();
                 while (iterator.next()) |block| {
-                    const items = block.items.get(0);
+                    const items = block.items[0];
                     src.slice(block.offset, items.len).copyTo(items);
-                    for (block.items.constSlice()[1..]) |replica| @memcpy(replica, items);
+                    for (block.items[1..]) |replica| @memcpy(replica, items);
                 }
             }
 
-            /// Return all replicas of the consecutive run starting at `index`,
-            /// stopping at a physical boundary or this view's end.
-            /// The block offset is relative to this view.
-            pub fn readBlock(self: Self, index: usize) Block {
+            /// Return the consecutive run starting at `index` in the first replica
+            /// holding it, stopping at a physical boundary or this view's end.
+            pub fn readBlock(self: Self, index: usize) []T {
                 std.debug.assert(index < self.len);
                 var iterator = self.slice(index, null).blocks();
-                var block = iterator.next().?;
-                block.offset += index;
-                return block;
+                return iterator.next().?.items[0];
             }
 
             /// Visit runs of consecutive logical elements in global row-major
@@ -787,12 +784,13 @@ pub const HostStagedBuffer = struct {
             pub const Block = struct {
                 /// Logical position of the first element, relative to this view.
                 offset: usize,
-                /// Equal-length replicas in the supplied shard order. The block
-                /// owns these descriptors; their elements borrow view storage.
-                items: stdx.BoundedArray([]T, Platform.MAX_NUM_DEVICES) = .empty,
+                /// Equal-length replicas in the supplied shard order. The iterator
+                /// owns these descriptors until its next call; their elements
+                /// borrow view storage.
+                items: []const []T,
 
                 pub fn len(self: *const Block) usize {
-                    return self.items.get(0).len;
+                    return self.items[0].len;
                 }
             };
 
@@ -806,6 +804,8 @@ pub const HostStagedBuffer = struct {
                     offset: usize,
                     /// Coordinates of the next block's first (or reverse last) element.
                     global: Coordinates,
+                    /// Replicas of the last block, kept here so blocks stay small.
+                    replicas: stdx.BoundedArray([]T, Platform.MAX_NUM_DEVICES),
 
                     const Iterator = @This();
 
@@ -814,21 +814,22 @@ pub const HostStagedBuffer = struct {
                             .view = v,
                             .offset = if (reverse) v.len else 0,
                             .global = if (v.len == 0 or v.prepared.contiguous) @splat(0) else unflattenIndex(v.prepared.shape, v.start + (if (reverse) v.len - 1 else 0)),
+                            .replicas = .{ .buffer = undefined, .len = 0 },
                         };
                     }
 
                     pub fn next(self: *Iterator) ?Block {
                         const v = &self.view;
                         if (if (reverse) self.offset == 0 else self.offset == v.len) return null;
+                        self.replicas.clear();
                         if (v.prepared.contiguous) {
                             // The whole view is one run in every replica.
-                            var block: Block = .{ .offset = 0 };
                             const group = v.prepared.preparedShards.groups.get(0);
                             for (v.prepared.preparedShards.shardIndices.constSlice()[group.start..][0..group.len]) |shard| {
-                                block.items.appendAssumeCapacity(v.itemsAtByteOffset(shard, v.start * @sizeOf(T), v.len));
+                                self.replicas.appendAssumeCapacity(v.itemsAtByteOffset(shard, v.start * @sizeOf(T), v.len));
                             }
                             self.offset = if (reverse) 0 else v.len;
-                            return block;
+                            return .{ .offset = 0, .items = self.replicas.constSlice() };
                         }
                         const location = v.locate(self.global);
                         const bounds = v.blockBounds(location.offset);
@@ -840,20 +841,15 @@ pub const HostStagedBuffer = struct {
                         // address also gives its start without decoding coordinates again.
                         const byteOffset = v.prepared.preparedLayout.byteOffset(location.offset, location.index) -
                             (if (reverse) (len - 1) * v.prepared.preparedLayout.elementSize else 0);
-                        var block: Block = .{ .offset = self.offset };
                         for (v.prepared.preparedShards.shardIndices.constSlice()[location.group.start..][0..location.group.len]) |shard| {
-                            block.items.appendAssumeCapacity(v.itemsAtByteOffset(shard, byteOffset, len));
+                            self.replicas.appendAssumeCapacity(v.itemsAtByteOffset(shard, byteOffset, len));
                         }
-                        if (reverse) {
-                            self.offset -= len;
-                            block.offset = self.offset;
-                        } else {
-                            self.offset += len;
-                        }
+                        const offset = if (reverse) self.offset - len else self.offset;
+                        self.offset = if (reverse) offset else offset + len;
                         if (if (reverse) self.offset != 0 else self.offset != v.len) {
                             moveIndex(reverse, v.prepared.shape, &self.global, len);
                         }
-                        return block;
+                        return .{ .offset = offset, .items = self.replicas.constSlice() };
                     }
                 };
             }
@@ -1550,7 +1546,7 @@ test "HostStagedBuffer.View blocks skip tile padding" {
     try std.testing.expectEqual(HostStagedBuffer.View(i32).Bounds{ .start = 4, .end = 5 }, view.blockBounds(4));
     var iterator = view.blocks();
     while (iterator.next()) |block| {
-        for (block.items.constSlice()) |items| {
+        for (block.items) |items| {
             for (items, block.offset..) |*value, i| value.* = @intCast(i + 1);
         }
     }
@@ -1649,14 +1645,14 @@ test "HostStagedBuffer.View row-major layouts return one block across rows and r
                 try std.testing.expectEqual(0, block.offset);
                 try std.testing.expectEqual(selected.len, block.len());
                 try std.testing.expectEqual(2, block.items.len);
-                for (block.items.constSlice(), &storage) |items, *replica| {
+                for (block.items, &storage) |items, *replica| {
                     try std.testing.expectEqual(replica[selected.start..].ptr, items.ptr);
                     try std.testing.expectEqual(selected.len, items.len);
                 }
             }
             try std.testing.expectEqual(null, forward.next());
             try std.testing.expectEqual(null, reverse.next());
-            try std.testing.expectEqual(selected.len, selected.readBlock(0).len());
+            try std.testing.expectEqual(selected.len, selected.readBlock(0).len);
         }
     }
 }
@@ -1698,7 +1694,7 @@ test "HostStagedBuffer.View dense shards stop at gaps in global row-major order"
         const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
         try std.testing.expectEqual(case.row_block_size, view.prepared.preparedLayout.blockSize);
         try std.testing.expectEqual(case.row_block_size, view.blockBounds(0).end);
-        try std.testing.expectEqual(@as(usize, 1), view.readBlock(case.row_block_size - 1).len());
+        try std.testing.expectEqual(@as(usize, 1), view.readBlock(case.row_block_size - 1).len);
 
         view.fillIota(0, 1);
         for (storage, case.expected) |data, expected| {
@@ -1775,7 +1771,7 @@ test "HostStagedBuffer.View blocks visit partial global ranges in every shard" {
     while (iterator.next()) |block| {
         try std.testing.expect(block.offset + block.len() <= 18);
         try std.testing.expectEqual(2, block.items.len);
-        for (block.items.constSlice()) |items| {
+        for (block.items) |items| {
             for (items, block.offset + 2..) |*value, global| {
                 visits[global] += 1;
                 value.* = @intCast(global);
@@ -1833,11 +1829,11 @@ test "HostStagedBuffer.View blocks merge shuffled shards and group replicas" {
         const blockStart = offset + 2;
         const region = blockStart / 12 * 2 + blockStart % 6 / 3;
         const physical = physicalOffsets[blockStart / 6 % 2 * 3 + blockStart % 3];
-        for (block.items.constSlice(), replicas[region]) |items, shard| {
+        for (block.items, replicas[region]) |items, shard| {
             try std.testing.expectEqual(fixture.storage[shard][physical..].ptr, items.ptr);
         }
-        try std.testing.expectEqual(block.items.constSlice()[0].ptr, selected.readBlock(offset).items.get(0).ptr);
-        for (block.items.constSlice()) |items| {
+        try std.testing.expectEqual(block.items[0].ptr, selected.readBlock(offset).ptr);
+        for (block.items) |items| {
             for (items, offset + 2..) |*value, global| value.* = @intCast(global);
         }
     }
@@ -1863,7 +1859,7 @@ test "HostStagedBuffer.View blocks group the maximum number of replicas" {
     try std.testing.expectEqual(Platform.MAX_NUM_DEVICES, block.items.len);
     try std.testing.expectEqual(null, iterator.next());
     // The descriptors remain valid after advancing the iterator.
-    for (block.items.constSlice(), &storage) |items, *replica| {
+    for (block.items, &storage) |items, *replica| {
         try std.testing.expectEqual(replica[0..].ptr, items.ptr);
         @memset(items, 42);
         try std.testing.expectEqualSlices(i32, &.{ 42, 42, 42, 42 }, replica);
@@ -1893,11 +1889,11 @@ test "HostStagedBuffer.View visits the maximum number of distinct shuffled regio
         try std.testing.expectEqual(index, block.offset);
         try std.testing.expectEqual(1, block.len());
         try std.testing.expectEqual(1, block.items.len);
-        try std.testing.expectEqual(storage[index..].ptr, block.items.constSlice()[0].ptr);
+        try std.testing.expectEqual(storage[index..].ptr, block.items[0].ptr);
         const reverseBlock = reverse.next().?;
         const reverseIndex = storage.len - index - 1;
         try std.testing.expectEqual(reverseIndex, reverseBlock.offset);
-        try std.testing.expectEqual(storage[reverseIndex..].ptr, reverseBlock.items.constSlice()[0].ptr);
+        try std.testing.expectEqual(storage[reverseIndex..].ptr, reverseBlock.items[0].ptr);
     }
     try std.testing.expectEqual(null, forward.next());
     try std.testing.expectEqual(null, reverse.next());
@@ -1956,13 +1952,15 @@ test "HostStagedBuffer.View reverse blocks mirror forward blocks" {
 }
 
 fn expectReverseBlocksMirrorForward(view: HostStagedBuffer.View(i32)) !void {
-    var expected: [48]HostStagedBuffer.View(i32).Block = undefined;
+    // Blocks borrow their replicas from the iterator, so keep copies.
+    const Expected = struct { offset: usize, items: stdx.BoundedArray([]i32, Platform.MAX_NUM_DEVICES) };
+    var expected: [48]Expected = undefined;
     var len: usize = 0;
     var offset: usize = 0;
     var forward = view.blocks();
     while (forward.next()) |block| : (len += 1) {
         try std.testing.expectEqual(offset, block.offset);
-        expected[len] = block;
+        expected[len] = .{ .offset = block.offset, .items = try .fromSlice(block.items) };
         offset += block.len();
     }
     try std.testing.expectEqual(view.len, offset);
@@ -1971,9 +1969,8 @@ fn expectReverseBlocksMirrorForward(view: HostStagedBuffer.View(i32)) !void {
         len -= 1;
         const block = reverse.next().?;
         try std.testing.expectEqual(expected[len].offset, block.offset);
-        try std.testing.expectEqual(expected[len].len(), block.len());
         try std.testing.expectEqual(expected[len].items.len, block.items.len);
-        for (expected[len].items.constSlice(), block.items.constSlice()) |forwardItems, reverseItems| {
+        for (expected[len].items.constSlice(), block.items) |forwardItems, reverseItems| {
             try std.testing.expectEqual(forwardItems.ptr, reverseItems.ptr);
             try std.testing.expectEqual(forwardItems.len, reverseItems.len);
         }
@@ -2140,7 +2137,7 @@ test "HostStagedBuffer.View indexes replicas of a dense array directly" {
         const block = blocks.next().?;
         try std.testing.expectEqual(0, block.offset);
         try std.testing.expectEqual(2, block.items.len);
-        for (block.items.constSlice(), &storage) |items, *replica| {
+        for (block.items, &storage) |items, *replica| {
             try std.testing.expectEqualSlices(i32, &.{ 11, 12, 13, 14 }, items);
             try std.testing.expectEqual(replica[1..].ptr, items.ptr);
         }
@@ -2185,22 +2182,25 @@ test "HostStagedBuffer.View copies across layouts, shards and replicas" {
     // Blocks expose every replica, respect physical boundaries, and stop at
     // the end of a nested view even when the physical run continues.
     const nested = view.slice(1, null).slice(2, 4);
-    const first = nested.readBlock(0);
+    var nestedBlocks = nested.blocks();
+    const first = nestedBlocks.next().?;
     try std.testing.expectEqual(0, first.offset);
     try std.testing.expectEqual(2, first.items.len);
-    for (first.items.constSlice(), [_]usize{ 1, 5 }) |items, shard| {
+    for (first.items, [_]usize{ 1, 5 }) |items, shard| {
         try std.testing.expectEqualSlices(i32, expected[3..5], items);
         try std.testing.expectEqual(fixture.storage[shard][0..].ptr, items.ptr);
     }
-    const middle = nested.readBlock(2);
+    try std.testing.expectEqual(fixture.storage[1][0..].ptr, nested.readBlock(0).ptr);
+    const middle = nestedBlocks.next().?;
     try std.testing.expectEqual(2, middle.offset);
-    for (middle.items.constSlice()) |items| try std.testing.expectEqualSlices(i32, expected[5..6], items);
-    const last = nested.readBlock(3);
+    for (middle.items) |items| try std.testing.expectEqualSlices(i32, expected[5..6], items);
+    const last = nestedBlocks.next().?;
     try std.testing.expectEqual(3, last.offset);
-    for (last.items.constSlice(), [_]usize{ 0, 4 }) |items, shard| {
+    for (last.items, [_]usize{ 0, 4 }) |items, shard| {
         try std.testing.expectEqualSlices(i32, expected[6..7], items);
         try std.testing.expectEqual(fixture.storage[shard][2..].ptr, items.ptr);
     }
+    try std.testing.expectEqual(null, nestedBlocks.next());
 
     // Copy between differently shaped/tiled ranges, including a nonzero source
     // and destination start, and verify every destination replica physically.
@@ -2251,7 +2251,7 @@ test "HostStagedBuffer await after executable donation permits the next host upd
     var pinned: HostStagedBuffer = try .init(allocator, io, platform, shape, .replicated);
     defer pinned.deinit(allocator);
     try std.testing.expectEqual(pinned.buffer._shards.len, pinned.shards.len);
-    const firstPtr = pinned.view(i32).readBlock(0).items.get(0).ptr;
+    const firstPtr = pinned.view(i32).readBlock(0).ptr;
     pinned.view(i32).fillIota(0, 1);
 
     // Reuse the same runner and output destination as the model execution paths.
@@ -2264,7 +2264,7 @@ test "HostStagedBuffer await after executable donation permits the next host upd
         const view = pinned.view(i32);
         var actual: [15]i32 = undefined;
         view.copyTo(&actual);
-        try std.testing.expectEqual(firstPtr, view.readBlock(0).items.get(0).ptr);
+        try std.testing.expectEqual(firstPtr, view.readBlock(0).ptr);
         for (actual, 0..) |value, i| {
             const expected: i32 = if (iteration == 0 or i < 3 or i >= 12)
                 @intCast(i + iteration + 1)
@@ -2308,11 +2308,11 @@ test "HostStagedBuffer await follows an output that doesn't reuse the pinned all
         // The input isn't donated, so release it once execution replaced it.
         var input = pinned.buffer;
         defer input.deinit();
-        const previous = pinned.view(i32).readBlock(0).items.get(0).ptr;
+        const previous = pinned.view(i32).readBlock(0).ptr;
         runner.runOpts(io, .{input}, .{&pinned.buffer}, .{ .wait = false });
         try pinned.await(io);
         const view = pinned.view(i32);
-        try std.testing.expect(view.readBlock(0).items.get(0).ptr != previous);
+        try std.testing.expect(view.readBlock(0).ptr != previous);
 
         var actual: [15]i32 = undefined;
         view.copyTo(&actual);
