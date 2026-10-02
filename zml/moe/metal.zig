@@ -4,7 +4,7 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const Tensor = zml.Tensor;
 
-const log = std.log.scoped(.moe);
+const log = std.log.scoped(.@"zml/moe/metal");
 
 pub const Options = struct {
     activation: zml.moe.Activation,

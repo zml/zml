@@ -7,7 +7,7 @@ const zml = @import("../zml.zig");
 const Tensor = zml.Tensor;
 pub const gmm_ep = @import("mosaic_tpu_kernels/gmm_ep.zig");
 
-const log = std.log.scoped(.moe_mosaic_tpu);
+const log = std.log.scoped(.@"zml/moe/mosaic_tpu");
 
 var gate_up_transpose: std.atomic.Value(bool) = .init(false);
 var down_transpose: std.atomic.Value(bool) = .init(false);

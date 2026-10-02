@@ -29,8 +29,8 @@ pub const Inputs = struct {
 /// The kernels are tuned for the DeepSeek V4.1 expert geometry, shared by the
 /// main MoE and the D-Spark drafter. Expert count and top-k are parameters.
 pub fn validateShapes(hidden: i64, intermediate: i64) void {
-    stdx.debug.assert(hidden == 5120, "cute_mxfp4 backend expects hidden dimension to be 5120, got {}", .{ hidden });
-    stdx.debug.assert(intermediate == 2304, "cute_mxfp4 backend expects intermediate dimension to be 2304, got {}", .{ intermediate });
+    stdx.debug.assert(hidden == 5120, "cute_mxfp4 backend expects hidden dimension to be 5120, got {}", .{hidden});
+    stdx.debug.assert(intermediate == 2304, "cute_mxfp4 backend expects intermediate dimension to be 2304, got {}", .{intermediate});
 }
 
 /// Route each token/top-k pair to its own one-row group instead of grouping

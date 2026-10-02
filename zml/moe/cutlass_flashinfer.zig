@@ -5,7 +5,7 @@ const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
 const platforms = @import("platforms");
 const zml = @import("../zml.zig");
 
-const log = std.log.scoped(.moe_cutlass_flashinfer);
+const log = std.log.scoped(.@"zml/moe/cutlass_flashinfer");
 
 pub const auto_tactic: i32 = -1;
 
