@@ -462,8 +462,8 @@ pub const HostStagedBuffer = struct {
     buffer: Buffer,
     shape: Shape,
     shard_shape: Shape,
-    preparedLayout: PreparedLayout,
-    preparedShards: PreparedShards,
+    /// Heap allocated, so views can borrow it while the buffer moves.
+    prepared: *Prepared,
     shards: std.MultiArrayList(Shard),
     /// Host pointers of the owning shards of a read-only buffer, whose handles
     /// execution never replaces. Empty for donated outputs, which query them in
@@ -472,6 +472,27 @@ pub const HostStagedBuffer = struct {
 
     pub const Coordinates = [Shape.MAX_RANK]usize;
     const HostPointers = stdx.BoundedArray([*]u8, Platform.MAX_NUM_DEVICES);
+
+    /// Layout and shard placement prepared once and borrowed by views, which
+    /// stay small enough to copy freely.
+    pub const Prepared = struct {
+        shape: Shape,
+        shard_shape: Shape,
+        preparedLayout: PreparedLayout,
+        preparedShards: PreparedShards,
+        /// Global coordinates of each shard's first element. Borrowed.
+        origins: []const Coordinates,
+
+        pub fn init(shape: Shape, shard_shape: Shape, layout: pjrt.MemoryLayout, origins: []const Coordinates) Prepared {
+            return .{
+                .shape = shape,
+                .shard_shape = shard_shape,
+                .preparedLayout = .init(shape, shard_shape, layout),
+                .preparedShards = .init(origins, shard_shape.rank()),
+                .origins = origins,
+            };
+        }
+    };
 
     const Shard = struct {
         origin: Coordinates,
@@ -549,12 +570,15 @@ pub const HostStagedBuffer = struct {
 
         try buffer.await(io);
 
+        const prepared = try allocator.create(Prepared);
+        errdefer allocator.destroy(prepared);
+        prepared.* = .init(metadata.shape, metadata.placement.shape, metadata.layout, shards.items(.origin));
+
         return .{
             .buffer = buffer,
             .shape = metadata.shape,
             .shard_shape = metadata.placement.shape,
-            .preparedLayout = .init(metadata.shape, metadata.placement.shape, metadata.layout),
-            .preparedShards = .init(shards.items(.origin), metadata.placement.shape.rank()),
+            .prepared = prepared,
             .shards = shards,
             .hostPointers = if (is_device_read_only) try queryHostPointers(&buffer, shards.items(.owningBufferIndex)) else .empty,
         };
@@ -573,6 +597,7 @@ pub const HostStagedBuffer = struct {
     pub fn deinit(self: *HostStagedBuffer, allocator: std.mem.Allocator) void {
         deinitBuffer(&self.buffer, &self.shards);
         self.shards.deinit(allocator);
+        allocator.destroy(self.prepared);
     }
 
     fn deinitBuffer(buffer: *Buffer, shards: *const std.MultiArrayList(Shard)) void {
@@ -601,7 +626,7 @@ pub const HostStagedBuffer = struct {
             log.err("Failed to retrieve pinned host pointers: {}", .{err});
             @panic("Pinned host memory must be accessible");
         };
-        return .initPrepared(self.shape, self.shard_shape, self.preparedLayout, self.preparedShards, ptrs.constSlice(), self.shards.items(.origin));
+        return .init(self.prepared, ptrs.constSlice());
     }
 
     pub fn format(self: HostStagedBuffer, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -625,11 +650,7 @@ pub const HostStagedBuffer = struct {
     /// Origins must remain unchanged, since replica groups are prepared at creation.
     pub fn View(comptime T: type) type {
         return struct {
-            shape: Shape,
-            shard_shape: Shape,
-            preparedLayout: PreparedLayout,
-            preparedShards: PreparedShards,
-            origins: []const Coordinates,
+            prepared: *const Prepared,
             ptrs: stdx.BoundedArray([*]u8, Platform.MAX_NUM_DEVICES),
             start: usize = 0,
             len: usize,
@@ -638,40 +659,20 @@ pub const HostStagedBuffer = struct {
 
             /// A view without elements, which never accesses storage or metadata.
             pub const empty: Self = .{
-                .shape = undefined,
-                .shard_shape = undefined,
-                .preparedLayout = undefined,
-                .preparedShards = .empty,
-                .origins = &.{},
+                .prepared = undefined,
                 .ptrs = .empty,
                 .len = 0,
             };
 
-            /// Prepares a layout for raw storage without PJRT buffers.
-            /// Copies the pointers, prepares the layout by value, and borrows origins.
-            /// Origins are global coordinates of each shard's first element.
-            pub fn init(shape: Shape, shard_shape: Shape, layout: pjrt.MemoryLayout, ptrs: []const [*]u8, origins: []const Coordinates) Self {
-                return initPrepared(
-                    shape,
-                    shard_shape,
-                    .init(shape, shard_shape, layout),
-                    .init(origins, shard_shape.rank()),
-                    ptrs,
-                    origins,
-                );
-            }
-
-            fn initPrepared(shape: Shape, shard_shape: Shape, preparedLayout: PreparedLayout, preparedShards: PreparedShards, ptrs: []const [*]u8, origins: []const Coordinates) Self {
-                std.debug.assert(@sizeOf(T) == shard_shape.dtype().sizeOf());
-                std.debug.assert(ptrs.len == origins.len);
+            /// A view of raw storage without PJRT buffers, e.g. for tests.
+            /// Copies the pointers, one per origin of `prepared`, and borrows `prepared`.
+            pub fn init(prepared: *const Prepared, ptrs: []const [*]u8) Self {
+                std.debug.assert(@sizeOf(T) == prepared.shard_shape.dtype().sizeOf());
+                std.debug.assert(ptrs.len == prepared.origins.len);
                 return .{
-                    .shape = shape,
-                    .shard_shape = shard_shape,
-                    .preparedLayout = preparedLayout,
-                    .preparedShards = preparedShards,
-                    .origins = origins,
+                    .prepared = prepared,
                     .ptrs = stdx.BoundedArray([*]u8, Platform.MAX_NUM_DEVICES).fromSlice(ptrs) catch unreachable,
-                    .len = shape.count(),
+                    .len = prepared.shape.count(),
                 };
             }
 
@@ -686,24 +687,23 @@ pub const HostStagedBuffer = struct {
                 return result;
             }
 
-            // Single elements are addressed directly: slicing and iterating would
-            // copy the view, which embeds the prepared layout (kilobytes).
+            // Single elements are addressed directly, without slicing and iterating.
             pub fn get(self: Self, index: usize) T {
                 const element = self.locateElement(index);
-                return self.itemsAtByteOffset(self.preparedShards.shardIndices.get(element.group.start), element.byteOffset, 1)[0];
+                return self.itemsAtByteOffset(self.prepared.preparedShards.shardIndices.get(element.group.start), element.byteOffset, 1)[0];
             }
 
             pub fn set(self: Self, index: usize, value: T) void {
                 const element = self.locateElement(index);
-                for (self.preparedShards.shardIndices.constSlice()[element.group.start..][0..element.group.len]) |shard| {
+                for (self.prepared.preparedShards.shardIndices.constSlice()[element.group.start..][0..element.group.len]) |shard| {
                     self.itemsAtByteOffset(shard, element.byteOffset, 1)[0] = value;
                 }
             }
 
             fn locateElement(self: *const Self, index: usize) struct { group: PreparedShards.Group, byteOffset: usize } {
                 std.debug.assert(index < self.len);
-                const location = self.locate(unflattenIndex(self.shape, self.start + index));
-                return .{ .group = location.group, .byteOffset = self.preparedLayout.byteOffset(location.offset, location.index) };
+                const location = self.locate(unflattenIndex(self.prepared.shape, self.start + index));
+                return .{ .group = location.group, .byteOffset = self.prepared.preparedLayout.byteOffset(location.offset, location.index) };
             }
 
             pub fn fill(self: Self, value: T) void {
@@ -804,7 +804,7 @@ pub const HostStagedBuffer = struct {
                         return .{
                             .view = v,
                             .offset = if (reverse) v.len else 0,
-                            .global = if (v.len == 0) @splat(0) else unflattenIndex(v.shape, v.start + (if (reverse) v.len - 1 else 0)),
+                            .global = if (v.len == 0) @splat(0) else unflattenIndex(v.prepared.shape, v.start + (if (reverse) v.len - 1 else 0)),
                         };
                     }
 
@@ -819,10 +819,10 @@ pub const HostStagedBuffer = struct {
                             @min(bounds.end - location.offset, v.len - self.offset);
                         // A block is physically contiguous, so its last element's
                         // address also gives its start without decoding coordinates again.
-                        const byteOffset = v.preparedLayout.byteOffset(location.offset, location.index) -
-                            (if (reverse) (len - 1) * v.preparedLayout.elementSize else 0);
+                        const byteOffset = v.prepared.preparedLayout.byteOffset(location.offset, location.index) -
+                            (if (reverse) (len - 1) * v.prepared.preparedLayout.elementSize else 0);
                         var block: Block = .{ .offset = self.offset };
-                        for (v.preparedShards.shardIndices.constSlice()[location.group.start..][0..location.group.len]) |shard| {
+                        for (v.prepared.preparedShards.shardIndices.constSlice()[location.group.start..][0..location.group.len]) |shard| {
                             block.items.appendAssumeCapacity(v.itemsAtByteOffset(shard, byteOffset, len));
                         }
                         if (reverse) {
@@ -832,7 +832,7 @@ pub const HostStagedBuffer = struct {
                             self.offset += len;
                         }
                         if (if (reverse) self.offset != 0 else self.offset != v.len) {
-                            moveIndex(reverse, v.shape, &self.global, len);
+                            moveIndex(reverse, v.prepared.shape, &self.global, len);
                         }
                         return block;
                     }
@@ -884,10 +884,10 @@ pub const HostStagedBuffer = struct {
             /// Without tiles, the same dense row-major array has rowBlockSize=10
             /// and alignmentSize=10: one block [0,10) spanning both rows.
             fn blockBounds(self: *const Self, local: usize) Bounds {
-                const blockSize = self.preparedLayout.blockSize;
+                const blockSize = self.prepared.preparedLayout.blockSize;
                 // Runs shorter than a row align within that row. Larger runs
                 // span a whole number of rows, so alignment uses the run itself.
-                const alignment_size = self.preparedLayout.alignmentSize;
+                const alignment_size = self.prepared.preparedLayout.alignmentSize;
                 const alignment_start = local - local % alignment_size;
                 // Round the position relative to alignmentStart down to a run boundary.
                 const start = local - (local - alignment_start) % blockSize;
@@ -904,11 +904,11 @@ pub const HostStagedBuffer = struct {
 
             /// Locate one logical region, retaining coordinates for physical addressing.
             fn locate(self: *const Self, index: Coordinates) Location {
-                for (self.preparedShards.groups.constSlice()) |group| {
-                    const origin = self.origins[group.first];
+                for (self.prepared.preparedShards.groups.constSlice()) |group| {
+                    const origin = self.prepared.origins[group.first];
                     var local: Coordinates = @splat(0);
                     var offset: usize = 0;
-                    for (self.shard_shape.dims(), 0..) |dim_, axis| {
+                    for (self.prepared.shard_shape.dims(), 0..) |dim_, axis| {
                         const dim: usize = @intCast(dim_);
                         if (index[axis] < origin[axis] or index[axis] - origin[axis] >= dim) break;
                         local[axis] = index[axis] - origin[axis];
@@ -1361,7 +1361,8 @@ test "HostStagedBuffer.View snapshots pointers and preserves them through slicin
     var storage = [_]i32{ 0, 1, 2, 3 };
     var other = [_]i32{ 10, 11, 12, 13 };
     var ptrs = [_][*]u8{@ptrCast(&storage)};
-    const view: HostStagedBuffer.View(i32) = .init(shape, shape, layout, &ptrs, &.{@splat(0)});
+    const viewPrepared: HostStagedBuffer.Prepared = .init(shape, shape, layout, &.{@splat(0)});
+    const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
     const nested = view.slice(1, null).slice(0, 2);
 
     // Changing the caller's pointer array cannot redirect an existing view.
@@ -1383,7 +1384,8 @@ test "HostStagedBuffer.View doesn't borrow source layout metadata" {
         else
             .{ .strides = .{ .byte_strides = &byteStrides } };
         var storage: [8]i32 = @splat(-1);
-        const view: HostStagedBuffer.View(i32) = .init(shape, shape, layout, &.{@ptrCast(&storage)}, &.{@splat(0)});
+        const viewPrepared: HostStagedBuffer.Prepared = .init(shape, shape, layout, &.{@splat(0)});
+        const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &.{@ptrCast(&storage)});
 
         // Prepared addressing must survive changes to every source descriptor.
         @memset(&byteStrides, 0);
@@ -1410,8 +1412,9 @@ test "HostStagedBuffer.View blocks skip tile padding" {
     } };
     var storage: [24]i32 = @splat(-1);
     const ptrs = [_][*]u8{@ptrCast(&storage)};
-    const view: HostStagedBuffer.View(i32) = .init(shape, shape, layout, &ptrs, &.{@splat(0)});
-    try std.testing.expectEqual(2, view.preparedLayout.blockSize);
+    const viewPrepared: HostStagedBuffer.Prepared = .init(shape, shape, layout, &.{@splat(0)});
+    const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
+    try std.testing.expectEqual(2, view.prepared.preparedLayout.blockSize);
     try std.testing.expectEqual(HostStagedBuffer.View(i32).Bounds{ .start = 0, .end = 2 }, view.blockBounds(1));
     try std.testing.expectEqual(HostStagedBuffer.View(i32).Bounds{ .start = 4, .end = 5 }, view.blockBounds(4));
     var iterator = view.blocks();
@@ -1440,7 +1443,8 @@ test "HostStagedBuffer.View nested tiles" {
     } };
     var storage: [24]i32 = @splat(-1);
     const ptrs = [_][*]u8{@ptrCast(&storage)};
-    const view: HostStagedBuffer.View(i32) = .init(shape, shape, layout, &ptrs, &.{@splat(0)});
+    const viewPrepared: HostStagedBuffer.Prepared = .init(shape, shape, layout, &.{@splat(0)});
+    const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
     view.copyFrom(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 });
     try std.testing.expectEqualSlices(i32, &.{
         1,  2,  6,  7,  11, 12, -1, -1, 3,  4,  8,  9,
@@ -1486,8 +1490,9 @@ test "HostStagedBuffer.View dense, transposed, strided and partial-rank tiled la
     for (cases) |case| {
         var storage: [8]i32 = @splat(-1);
         const ptrs = [_][*]u8{@ptrCast(&storage)};
-        const view: HostStagedBuffer.View(i32) = .init(shape, shape, case.layout, &ptrs, &.{@splat(0)});
-        try std.testing.expectEqual(case.row_block_size, view.preparedLayout.blockSize);
+        const viewPrepared: HostStagedBuffer.Prepared = .init(shape, shape, case.layout, &.{@splat(0)});
+        const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
+        try std.testing.expectEqual(case.row_block_size, view.prepared.preparedLayout.blockSize);
         view.copyFrom(&.{ 1, 2, 3, 4, 5, 6 });
         try std.testing.expectEqualSlices(i32, case.expected, &storage);
     }
@@ -1502,7 +1507,8 @@ test "HostStagedBuffer.View row-major layouts return one block across rows and r
     for (layouts) |layout| {
         var storage: [2][15]i32 = @splat(@splat(0));
         const ptrs = [_][*]u8{ @ptrCast(&storage[0]), @ptrCast(&storage[1]) };
-        const view: HostStagedBuffer.View(i32) = .init(shape, shape, layout, &ptrs, &.{ @splat(0), @splat(0) });
+        const viewPrepared: HostStagedBuffer.Prepared = .init(shape, shape, layout, &.{ @splat(0), @splat(0) });
+        const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
         for ([_]HostStagedBuffer.View(i32){ view, view.slice(1, null).slice(1, 10) }) |selected| {
             var forward = selected.blocks();
             var reverse = selected.reverseBlocks();
@@ -1555,8 +1561,9 @@ test "HostStagedBuffer.View dense shards stop at gaps in global row-major order"
             ptr.* = @ptrCast(data);
             origin[1] = i * 3;
         }
-        const view: HostStagedBuffer.View(i32) = .init(case.shape, case.shard_shape, .{ .strides = .{ .byte_strides = strides.constSlice() } }, &ptrs, &origins);
-        try std.testing.expectEqual(case.row_block_size, view.preparedLayout.blockSize);
+        const viewPrepared: HostStagedBuffer.Prepared = .init(case.shape, case.shard_shape, .{ .strides = .{ .byte_strides = strides.constSlice() } }, &origins);
+        const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
+        try std.testing.expectEqual(case.row_block_size, view.prepared.preparedLayout.blockSize);
         try std.testing.expectEqual(case.row_block_size, view.blockBounds(0).end);
         try std.testing.expectEqual(@as(usize, 1), view.readBlock(case.row_block_size - 1).len());
 
@@ -1589,6 +1596,7 @@ const TestShards = struct {
     storage: [8][8]i32 = @splat(@splat(-1)),
     ptrs: [8][*]u8 = undefined,
     origins: [8]HostStagedBuffer.Coordinates = @splat(@splat(0)),
+    prepared: HostStagedBuffer.Prepared = undefined,
 
     const shape = Shape.init(.{ 4, 6 }, .i32);
     const shard_shape = Shape.init(.{ 2, 3 }, .i32);
@@ -1598,14 +1606,15 @@ const TestShards = struct {
         .tile_dims_sizes = &.{2},
     } };
 
-    /// The view borrows the storage and origins, which must stay in place.
+    /// The view borrows the storage, origins and prepared layout, which must stay in place.
     fn view(self: *TestShards, layout: pjrt.MemoryLayout) HostStagedBuffer.View(i32) {
         for (&self.ptrs, &self.origins, &self.storage, 0..) |*ptr, *origin, *data, i| {
             ptr.* = @ptrCast(data);
             origin[0] = ((i % 4) / 2) * 2;
             origin[1] = (i % 2) * 3;
         }
-        return .init(shape, shard_shape, layout, &self.ptrs, &self.origins);
+        self.prepared = .init(shape, shard_shape, layout, &self.origins);
+        return .init(&self.prepared, &self.ptrs);
     }
 
     /// With the tiled layout, every copy of each element holds `expected[global]`
@@ -1673,9 +1682,10 @@ test "HostStagedBuffer.View blocks merge shuffled shards and group replicas" {
     var origins: [8]HostStagedBuffer.Coordinates = undefined;
     for (order, &ptrs, &origins) |index, *ptr, *origin| {
         ptr.* = original.ptrs.get(index);
-        origin.* = original.origins[index];
+        origin.* = original.prepared.origins[index];
     }
-    const view: HostStagedBuffer.View(i32) = .init(original.shape, original.shard_shape, TestShards.tiled, &ptrs, &origins);
+    const viewPrepared: HostStagedBuffer.Prepared = .init(original.prepared.shape, original.prepared.shard_shape, TestShards.tiled, &origins);
+    const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
     const selected = view.slice(1, null).slice(1, 18);
     const offsets = [_]usize{ 0, 1, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16 };
     const lengths = [_]usize{ 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2 };
@@ -1711,7 +1721,8 @@ test "HostStagedBuffer.View blocks group the maximum number of replicas" {
     const origins: [Platform.MAX_NUM_DEVICES]HostStagedBuffer.Coordinates = @splat(@splat(0));
     for (&ptrs, &storage) |*ptr, *items| ptr.* = @ptrCast(items);
     const shape: Shape = .init(.{4}, .i32);
-    const view: HostStagedBuffer.View(i32) = .init(shape, shape, .{ .strides = .{ .byte_strides = &.{4} } }, &ptrs, &origins);
+    const viewPrepared: HostStagedBuffer.Prepared = .init(shape, shape, .{ .strides = .{ .byte_strides = &.{4} } }, &origins);
+    const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
     var iterator = view.blocks();
     const block = iterator.next().?;
     try std.testing.expectEqual(0, block.offset);
@@ -1738,7 +1749,8 @@ test "HostStagedBuffer.View visits the maximum number of distinct shuffled regio
     }
     const shape: Shape = .init(.{Platform.MAX_NUM_DEVICES}, .i32);
     const shardShape: Shape = .init(.{1}, .i32);
-    const view: HostStagedBuffer.View(i32) = .init(shape, shardShape, .{ .strides = .{ .byte_strides = &.{4} } }, &ptrs, &origins);
+    const viewPrepared: HostStagedBuffer.Prepared = .init(shape, shardShape, .{ .strides = .{ .byte_strides = &.{4} } }, &origins);
+    const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &ptrs);
     view.fillIota(0, 1);
     var forward = view.blocks();
     var reverse = view.reverseBlocks();
@@ -1766,7 +1778,8 @@ test "HostStagedBuffer.View multidimensional slices preserve coordinates across 
     };
     for (layouts) |layout| {
         var storage: [48]i32 = @splat(-1);
-        const view: HostStagedBuffer.View(i32) = .init(shape, shape, layout, &.{@ptrCast(&storage)}, &.{@splat(0)});
+        const viewPrepared: HostStagedBuffer.Prepared = .init(shape, shape, layout, &.{@splat(0)});
+        const view: HostStagedBuffer.View(i32) = .init(&viewPrepared, &.{@ptrCast(&storage)});
         view.fillIota(0, 1);
         var expected: [48]i32 = @splat(-1);
         for (0..shape.count()) |local| {
@@ -1793,17 +1806,19 @@ test "HostStagedBuffer.View reverse blocks mirror forward blocks" {
     };
     for (layouts) |layout| {
         const view = fixture.view(layout);
-        for (0..view.shape.count() + 1) |start| {
-            for (0..view.shape.count() - start + 1) |len| {
+        for (0..view.prepared.shape.count() + 1) |start| {
+            for (0..view.prepared.shape.count() - start + 1) |len| {
                 try expectReverseBlocksMirrorForward(view.slice(start, len));
             }
         }
     }
     // Dense blocks can span multiple rows, and scalar blocks have no row axis.
-    const dense: HostStagedBuffer.View(i32) = .init(TestShards.shard_shape, TestShards.shard_shape, layouts[1], fixture.ptrs[0..1], fixture.origins[0..1]);
+    const densePrepared: HostStagedBuffer.Prepared = .init(TestShards.shard_shape, TestShards.shard_shape, layouts[1], fixture.origins[0..1]);
+    const dense: HostStagedBuffer.View(i32) = .init(&densePrepared, fixture.ptrs[0..1]);
     try expectReverseBlocksMirrorForward(dense.slice(1, 4));
     const scalar_shape: Shape = .init(.{}, .i32);
-    const scalar: HostStagedBuffer.View(i32) = .init(scalar_shape, scalar_shape, .{ .strides = .{ .byte_strides = &.{} } }, fixture.ptrs[0..1], fixture.origins[0..1]);
+    const scalarPrepared: HostStagedBuffer.Prepared = .init(scalar_shape, scalar_shape, .{ .strides = .{ .byte_strides = &.{} } }, fixture.origins[0..1]);
+    const scalar: HostStagedBuffer.View(i32) = .init(&scalarPrepared, fixture.ptrs[0..1]);
     try expectReverseBlocksMirrorForward(scalar);
 }
 
@@ -1838,7 +1853,8 @@ test "HostStagedBuffer.View scalar, empty ranges and rank-one padding" {
     const scalarPtrs = [_][*]u8{@ptrCast(&scalar)};
     const shape = Shape.scalar(.i32);
     const scalar_layout: pjrt.MemoryLayout = .{ .tiled = .{ .minor_to_major = &.{}, .tile_dims = &.{}, .tile_dims_sizes = &.{} } };
-    const scalarView: HostStagedBuffer.View(i32) = .init(shape, shape, scalar_layout, &scalarPtrs, &.{@splat(0)});
+    const scalarViewPrepared: HostStagedBuffer.Prepared = .init(shape, shape, scalar_layout, &.{@splat(0)});
+    const scalarView: HostStagedBuffer.View(i32) = .init(&scalarViewPrepared, &scalarPtrs);
     scalarView.copyFrom(&.{42});
     try std.testing.expectEqual(42, scalar);
     var past_end = scalarView.slice(1, null).blocks();
@@ -1848,12 +1864,14 @@ test "HostStagedBuffer.View scalar, empty ranges and rank-one padding" {
     const vectorPtrs = [_][*]u8{@ptrCast(&storage)};
     const vector_shape = Shape.init(.{5}, .bool);
     const vector_layout: pjrt.MemoryLayout = .{ .tiled = .{ .minor_to_major = &.{0}, .tile_dims = &.{4}, .tile_dims_sizes = &.{1} } };
-    const vector: HostStagedBuffer.View(bool) = .init(vector_shape, vector_shape, vector_layout, &vectorPtrs, &.{@splat(0)});
+    const vectorPrepared: HostStagedBuffer.Prepared = .init(vector_shape, vector_shape, vector_layout, &.{@splat(0)});
+    const vector: HostStagedBuffer.View(bool) = .init(&vectorPrepared, &vectorPtrs);
     vector.fill(true);
     try std.testing.expectEqualSlices(bool, &.{ true, true, true, true, true, false, false, false }, &storage);
 
     const empty_shape = Shape.init(.{0}, .bool);
-    const emptyView: HostStagedBuffer.View(bool) = .init(empty_shape, empty_shape, vector_layout, &vectorPtrs, &.{@splat(0)});
+    const emptyViewPrepared: HostStagedBuffer.Prepared = .init(empty_shape, empty_shape, vector_layout, &.{@splat(0)});
+    const emptyView: HostStagedBuffer.View(bool) = .init(&emptyViewPrepared, &vectorPtrs);
     var empty_blocks = emptyView.blocks();
     try std.testing.expectEqual(null, empty_blocks.next());
 
@@ -2034,7 +2052,8 @@ test "HostStagedBuffer.View copies across layouts, shards and replicas" {
     } };
     var dst_storage: [2][21]i32 = @splat(@splat(-1));
     const dstPtrs = [_][*]u8{ @ptrCast(&dst_storage[0]), @ptrCast(&dst_storage[1]) };
-    const dst: HostStagedBuffer.View(i32) = .init(dst_shape, dst_shape, dst_layout, &dstPtrs, &.{ @splat(0), @splat(0) });
+    const dstPrepared: HostStagedBuffer.Prepared = .init(dst_shape, dst_shape, dst_layout, &.{ @splat(0), @splat(0) });
+    const dst: HostStagedBuffer.View(i32) = .init(&dstPrepared, &dstPtrs);
     dst.slice(1, 19).copyFromView(view.slice(1, 22).slice(1, 19));
     for (dst_storage) |data| {
         for (0..21) |i| {
