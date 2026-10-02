@@ -1,8 +1,8 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-_PLUGIN_ONEAPI_URL = "https://mirror.zml.ai/plugins/202609301700.135.1.f7a73483aa8a/zml-oneapi-linux-amd64.tar.zst"
-_PLUGIN_ONEAPI_SHA256 = "2437fd3abc23913f1b3d38ea74c3ddd04a73961b56f89165ba4346cfd75eacde"
+_PLUGIN_ONEAPI_URL = "https://mirror.zml.ai/plugins/202610011939.137.1.0d59bb389ee2/zml-oneapi-linux-amd64.tar.zst"
+_PLUGIN_ONEAPI_SHA256 = "9ca5e2c377d938b3d855c46c685d193e90424e44b1c1ea8d0a8e1c924b0d11f1"
 
 ONEAPI_VERSION = "2026.1"
 
@@ -68,11 +68,11 @@ filegroup(
     "libigc2": """
 filegroup(
     name = "libigc_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libigc.so.2.36.3+0"],
+    srcs = ["lib/x86_64-linux-gnu/libigc.so.2.40.13+0"],
 )
 filegroup(
     name = "libiga64_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libiga64.so.2.36.3+0"],
+    srcs = ["lib/x86_64-linux-gnu/libiga64.so.2.40.13+0"],
 )
 filegroup(
     name = "libigc2",
@@ -84,11 +84,11 @@ filegroup(
     "libigdfcl2": """
 filegroup(
     name = "libigdfcl_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libigdfcl.so.2.36.3+0"],
+    srcs = ["lib/x86_64-linux-gnu/libigdfcl.so.2.40.13+0"],
 )
 filegroup(
     name = "libopencl_clang",
-    srcs = ["lib/x86_64-linux-gnu/libopencl-clang.so.16"],
+    srcs = ["lib/x86_64-linux-gnu/libopencl-clang.so.17"],
 )
 filegroup(
     name = "libigdfcl2",

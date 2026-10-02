@@ -13,7 +13,7 @@ sources:
   - channel: noble-updates main
     url: https://snapshot.ubuntu.com/ubuntu/20260715T000000Z
   - channel: noble main
-    url: https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z
+    url: https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260930T000000Z
 
 archs:
   - "amd64"
