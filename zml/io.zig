@@ -551,6 +551,48 @@ pub const Loader = struct {
     }
 };
 
+test "Loader.loadExecute cleans up donated and non-donated inputs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = @import("testing.zig").env();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "inputs", .data = std.mem.asBytes(&[4]i32{ 1, 2, 10, 20 }) });
+    const path = try tmp.dir.realPathFileAlloc(io, "inputs", allocator);
+    defer allocator.free(path);
+
+    const shape: Shape = .init(.{2}, .i32);
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{ .name = "value", .file_uri = path, .shape = shape, .offset = 0 });
+    try registry.registerTensor(.{ .name = "weight", .file_uri = path, .shape = shape, .offset = 2 * @sizeOf(i32) });
+    var store: TensorStore = .fromRegistry(allocator, &registry);
+    defer store.deinit();
+    var loader = try Loader.init(allocator, platform, .{ .parallelism = 2, .dma_chunks = 2, .dma_chunk_size = 4096 });
+    defer loader.deinit();
+
+    inline for (.{ false, true }) |donate| {
+        const Functions = struct {
+            fn forward(value: Tensor, weight: Tensor) Tensor {
+                const sum = value.add(weight);
+                return if (donate) sum.reuseBuffer(value) else sum;
+            }
+        };
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        const tensor = store.view().maybeCreateBinding(&.{ "value", "weight" }, shape) orelse unreachable;
+        const exe = try platform.compileFn(allocator, io, Functions.forward, .{ Tensor.fromShape(shape), Tensor.fromShape(shape) }, .{});
+        defer exe.deinit();
+        try std.testing.expectEqual(@as(usize, @intFromBool(donate)), exe.donated_input_indices.len);
+
+        var output: Buffer = undefined;
+        try loader.loadExecute(arena.allocator(), io, tensor, &output, &store, &.{}, &exe, .{});
+        defer output.deinit();
+        try std.testing.expectEqual([2]i32{ 11, 22 }, try output.getValue([2]i32, io));
+        try std.testing.expect(loader.delivered.contains(tensor.id));
+    }
+}
+
 pub const ProgressWriter = struct {
     inner: *std.Io.Writer,
     progress: *std.Progress.Node,

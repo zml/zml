@@ -251,6 +251,11 @@ the form of a `Slice`. After that, we can print it.
 `callAndWait(io, args, &results)` to wait for execution to finish before returning.
 Here, `toSliceAlloc()` waits for the result before reading it.
 
+Raw calls leave input buffer handles owned by the caller, including inputs donated
+with `reuseBuffer()`. Deinit their original handles after calling. Runners and
+`runOnce` helpers destroy donated input handles automatically; use output
+destinations pointing to those buffers to replace them with the returned outputs.
+
 And that's it! Now, let's have a look at building and actually running this
 example!
 
