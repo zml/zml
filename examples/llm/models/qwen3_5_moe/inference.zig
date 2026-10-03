@@ -156,7 +156,7 @@ pub const KernelRunner = struct {
 
 pub fn run(runner: *KernelRunner, args: RunArgs) void {
     var hidden_buffer: zml.Buffer = undefined;
-    runner.embed.run(args.io, .{
+    runner.embed.run(.{
         .inputs = .{
             .tokens = args.tokens_buffer.*,
         },
@@ -176,7 +176,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                     .v = args.kv_cache_buffers.self_attn.v,
                     .layer_index = index_buffer,
                 };
-                layer.run(args.io, .{
+                layer.run(.{
                     .inputs = .{
                         .hidden = hidden_buffer,
                         .token_index = args.token_index_buffer.*,
@@ -197,7 +197,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                     .recurrent_state = args.kv_cache_buffers.gated_delta_net.recurrent_state,
                     .layer_index = index_buffer,
                 };
-                layer.run(args.io, .{
+                layer.run(.{
                     .inputs = .{
                         .hidden = hidden_buffer,
                         .active_length = args.active_length_buffer.*,
@@ -211,7 +211,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
         }
     }
 
-    runner.sample.run(args.io, .{
+    runner.sample.run(.{
         .inputs = .{
             .hidden = hidden_buffer,
             .rng = args.rng_buffers.*,

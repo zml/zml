@@ -247,6 +247,10 @@ Note that the result of a computation is usually residing in the memory of the
 computation device, so with `.toSliceAlloc()` we bring it back to CPU memory in
 the form of a `Slice`. After that, we can print it.
 
+`call(args, &results)` enqueues execution and returns immediately. Use
+`callAndWait(io, args, &results)` to wait for execution to finish before returning.
+Here, `toSliceAlloc()` waits for the result before reading it.
+
 And that's it! Now, let's have a look at building and actually running this
 example!
 

@@ -3,9 +3,9 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
+const cute = @import("cute_kernels/sparse_mla.zig");
 const flashattn = @import("flashattn.zig");
 const metal = @import("metal_attention.zig");
-const cute = @import("cute_kernels/sparse_mla.zig");
 const sparse_mla = @import("sparse_mla.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
@@ -402,18 +402,21 @@ test pagedAttention {
         .max_seqlen_q = 16 * 2,
     };
     const triton_parameters: Parameters = .init(.fromBackend(triton_options_args));
-    var q = try zml.testing.autoCall(allocator, io, &rng_q, zml.Tensor.Rng.normal, {});
+    var q: zml.Buffer = undefined;
+    try rng_q.runOnceAndWait(allocator, io, {}, .{&q});
     defer q.deinit();
-    var new_k = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    var new_k: zml.Buffer = undefined;
+    try rng_k.runOnceAndWait(allocator, io, {}, .{&new_k});
     defer new_k.deinit();
-    var new_v = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    var new_v: zml.Buffer = undefined;
+    try rng_k.runOnceAndWait(allocator, io, {}, .{&new_v});
     defer new_v.deinit();
 
-    var kv_cache_d: zml.Bufferized(KvCache) = .{ .split = .{
-        .k = try zml.testing.autoCall(allocator, io, &rng_kv_cache, zml.Tensor.Rng.normal, {}),
-        .v = try zml.testing.autoCall(allocator, io, &rng_kv_cache, zml.Tensor.Rng.normal, {}),
-    } };
-    defer zml.Buffer.deinitAll(KvCache, &kv_cache_d);
+    var kv_cache_d: zml.Bufferized(KvCache) = .{ .split = undefined };
+    try rng_kv_cache.runOnceAndWait(allocator, io, .{}, .{&kv_cache_d.split.k});
+    defer kv_cache_d.split.k.deinit();
+    try rng_kv_cache.runOnceAndWait(allocator, io, .{}, .{&kv_cache_d.split.v});
+    defer kv_cache_d.split.v.deinit();
 
     const block_table: [batch_size][max_num_pages]i32 = .{
         // prefilling pages 9-10
@@ -544,7 +547,13 @@ test pagedAttention {
             // cu_fa2 creates new buffers while other reuse triton buffers.
             defer if (backend == .cuda_fa2) zml.Buffer.deinitAll(Parameters, &parameters_d);
 
-            var output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d, .{} });
+            var output_d: zml.Buffer = undefined;
+            try exe.runOnceAndWait(
+                allocator,
+                io,
+                .{ parameters_d, q, new_k, new_v, kv_cache_d, .{} },
+                .{&output_d},
+            );
             defer output_d.deinit();
             results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
         }
@@ -1076,12 +1085,12 @@ test "Triton sparse MLA value ranks and padded queries" {
         );
         defer exe.deinit();
 
-        var output_d = try zml.testing.autoCall(
+        var output_d: zml.Buffer = undefined;
+        try exe.runOnceAndWait(
             std.testing.allocator,
             std.testing.io,
-            &exe,
-            Mla.pagedSparseAttention,
             .{.{ .q = q_d, .kv = .{ .cache = .{ .latent = kv_d }, .parameters = parameters_d, .positions = topk_d }, .compressed = null, .sink = sink_d, .tokens_pos = tokens_pos_d }},
+            .{&output_d},
         );
         defer output_d.deinit();
         try std.testing.expect(output_d.shape().eql(q_shape.set(.hd, case.value_rank)));
@@ -1183,12 +1192,12 @@ test "execute stablehlo mla kernel" {
     );
     defer exe.deinit();
 
-    var output_d = try zml.testing.autoCall(
+    var output_d: zml.Buffer = undefined;
+    try exe.runOnceAndWait(
         std.testing.allocator,
         std.testing.io,
-        &exe,
-        Mla.pagedSparseAttention,
         .{.{ .q = q_d, .kv = .{ .cache = .{ .latent = kv_d }, .parameters = parameters_d, .positions = topk_d }, .compressed = null, .sink = sink_d, .tokens_pos = tokens_pos_d }},
+        .{&output_d},
     );
     defer zml.Buffer.deinitAll(zml.Tensor, &output_d);
 

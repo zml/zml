@@ -156,7 +156,7 @@ pub fn run(
     kv_cache_index_buffer: *zml.Buffer,
 ) void {
     var hidden_buffer: zml.Buffer = undefined;
-    runner.embed.run(args.io, .{
+    runner.embed.run(.{
         .inputs = .{
             .tokens = args.tokens_buf.*,
         },
@@ -165,7 +165,7 @@ pub fn run(
     defer hidden_buffer.deinit();
 
     for (runner.layers) |*layer| {
-        layer.run(args.io, .{
+        layer.run(.{
             .inputs = .{
                 .hidden = hidden_buffer,
                 .tokens_position_offset = args.tokens_pos_buf.*,
@@ -184,7 +184,7 @@ pub fn run(
         });
     }
 
-    runner.sample.run(args.io, .{
+    runner.sample.run(.{
         .inputs = .{
             .hidden = hidden_buffer,
             .tokens = args.tokens_buf.*,
