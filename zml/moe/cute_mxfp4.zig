@@ -1,4 +1,7 @@
 //! Blackwell MXFP4 MoE backend with persistent CuTe GEMMs.
+
+const stdx = @import("stdx");
+
 const zml = @import("../zml.zig");
 const triton_mxfp4 = @import("triton_mxfp4.zig");
 pub const kernels = @import("cute_kernels/moe.zig");
@@ -17,6 +20,13 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
+pub fn validateOptions(opts: zml.moe.Options) void {
+    stdx.debug.assert(opts.activation == .swiglu, "cute_mxfp4 backend only accepts swiglu activation, got {}", .{opts.activation});
+    stdx.debug.assert(opts.activation.swiglu.limit != null, "cute_mxfp4 backend requires swiglu limit to be set", .{});
+    stdx.debug.assert(opts.activation.swiglu.bias == null, "cute_mxfp4 backend requires swiglu bias to be null", .{});
+    stdx.debug.assert(opts.activation.swiglu.scale == null, "cute_mxfp4 backend requires swiglu scale to be null", .{});
+}
+
 pub fn fusedExperts(
     input: zml.Tensor,
     ids: zml.Tensor,
@@ -24,31 +34,30 @@ pub fn fusedExperts(
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     options: zml.moe.Options,
-    parameters: Parameters,
-) !zml.Tensor {
-    if (parameters.activation != .silu) return error.UnsupportedActivation;
-    if (input.dtype() != .bf16) return error.UnsupportedDataType;
-    if (gate_up.bias != null or down.bias != null) return error.UnsupportedBias;
-    const gq = gate_up.quantization orelse return error.UnsupportedQuantization;
-    const dq = down.quantization orelse return error.UnsupportedQuantization;
-    if (gq.scheme != .mxfp4 or dq.scheme != .mxfp4) return error.UnsupportedQuantization;
+) zml.Tensor {
+    validateOptions(options);
+    stdx.debug.assert(input.dtype() == .bf16, "cute_mxfp4 backend only supports bf16 inputs, got {}", .{input.dtype()});
+    stdx.debug.assert(gate_up.bias == null and down.bias == null, "cute_mxfp4 backend expects gate_up bias and down bias to be null", .{});
+
+    const gq = gate_up.quantization orelse @panic("cute_mxfp4 backend requires gate_up quantization to be set");
+    const dq = down.quantization orelse @panic("cute_mxfp4 backend requires down quantization to be set");
+    stdx.debug.assert(gq.scheme == .mxfp4 and dq.scheme == .mxfp4, "cute_mxfp4 expects gate_up and down quantization scheme to be mxfp4, got {} and {}", .{ gq.scheme, dq.scheme });
+
     // Weight storage for mxfp4 in HF is expressed as u8 or i8
-    if ((gate_up.weight.dtype() != .u8 and gate_up.weight.dtype() != .i8) or
-        (down.weight.dtype() != .u8 and down.weight.dtype() != .i8))
-    {
-        return error.UnsupportedWeightLayout;
-    }
+    stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "cute_mxfp4 expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
+    stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "cute_mxfp4 expects down weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
 
     const expert_parallelism = gate_up.weight.shape().partition(.expert).eql(.init(.experts));
     const hidden = down.weight.dim(1);
     const intermediate = down.weight.dim(2) * 2;
+
     // The CuTe GEMMs are specialized on one set of dimensions
-    if (!kernels.isSupported(hidden, intermediate)) return error.UnsupportedShape;
-    const activation_threshold = options.activation_threshold orelse return error.UnsupportedActivation;
+    kernels.validateShapes(hidden, intermediate);
+
     // The SwiGLU clamp is a kernel parameter, but the routing weight is
     // multiplied in the up epilogue, before the down projection: applying it
     // after would have to move into the down epilogue or the reduction.
-    if (options.routing_weight_placement != .before_down) return error.UnsupportedRoutingWeightPlacement;
+    stdx.debug.assert(options.routing_weight_placement == .before_down, "cute_mxfp4 backend only supports routing_weight_placement = .before_down, got {}", .{options.routing_weight_placement});
     const context: Context = .{
         .input = input,
         .ids = ids,
@@ -57,8 +66,8 @@ pub fn fusedExperts(
         .s1 = gq.scales,
         .w2 = down.weight.bitCast(.u8),
         .s2 = dq.scales,
-        .topk = parameters.num_experts_per_tok,
-        .swiglu_limit = activation_threshold,
+        .topk = ids.dim(.topk),
+        .swiglu_limit = options.activation.swiglu.limit.?,
         .expert_parallel = expert_parallelism,
     };
     return if (expert_parallelism)

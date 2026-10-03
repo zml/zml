@@ -116,6 +116,7 @@ zig_library(
         "moe/moe.zig",
         "moe/mosaic_tpu.zig",
         "moe/mosaic_tpu_kernels/gmm_ep.zig",
+        "moe/stablehlo.zig",
         "moe/triton.zig",
         "moe/triton_kernels/mxfp4.zig",
         "moe/triton_kernels/triton_kernels.zig",

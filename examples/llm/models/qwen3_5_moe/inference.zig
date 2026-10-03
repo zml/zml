@@ -10,7 +10,7 @@ const log = std.log.scoped(.qwen3_5_moe);
 pub const CompilationParameters = struct {
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
-    moe_parameters: zml.moe.Parameters,
+    moe_backend: zml.moe.Backend,
     seqlen: u32,
     shardings: common.Shardings,
     xla_dump_to: ?[]const u8,
@@ -20,7 +20,7 @@ pub const CompilationParameters = struct {
         return .{
             .kv_cache = .init(config, 1, seqlen, dtype, .f32, shardings.model),
             .rng = .init(),
-            .moe_parameters = .init(.fromBackend(moe_backend, config.text_config.num_experts_per_tok, zml.moe.ActivationMode.silu)),
+            .moe_backend = moe_backend,
             .seqlen = seqlen,
             .shardings = shardings,
             .xla_dump_to = "/home/ubuntu/xla_dump",
@@ -282,7 +282,7 @@ fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *con
             .layer_index = zml.Tensor.init(.{}, .u32),
         },
         .config = mdl.config,
-        .moe_parameters = parameters.moe_parameters,
+        .moe_backend = parameters.moe_backend,
     }}, parameters, progress, phase, "full-attention layer");
 }
 
@@ -297,7 +297,7 @@ fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *c
             .layer_index = zml.Tensor.init(.{}, .u32),
         },
         .config = mdl.config,
-        .moe_parameters = parameters.moe_parameters,
+        .moe_backend = parameters.moe_backend,
     }}, parameters, progress, phase, "linear-attention layer");
 }
 

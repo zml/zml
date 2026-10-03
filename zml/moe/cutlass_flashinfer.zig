@@ -5,71 +5,40 @@ const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
 const platforms = @import("platforms");
 const zml = @import("../zml.zig");
 
-const log = std.log.scoped(.moe_cutlass_flashinfer);
+const log = std.log.scoped(.@"zml/moe/cutlass_flashinfer");
 
 pub const auto_tactic: i32 = -1;
 
 pub const Options = struct {
     /// Device used at graph-construction time to select the architecture
     /// library and size the XLA-owned scratch buffer.
-    workspace_query_device: i32 = 0,
-    activation: Activation = .swiglu,
-    enable_pdl: bool = false,
-    gemm1_tactic: i32 = auto_tactic,
+    workspace_query_device: i32,
+    activation: zml.moe.Activation,
+    enable_pdl: bool,
+    gemm1_tactic: i32,
     /// GEMM2 uses FlashInfer's absolute tactic index. Query tacticCounts() to
     /// obtain the first valid GEMM2 index.
-    gemm2_tactic: i32 = auto_tactic,
-};
+    gemm2_tactic: i32,
 
-pub const Activation = enum {
-    swiglu,
-    geglu,
-    geglu_tanh,
-    swiglu_step,
-    relu2,
-};
-
-pub const Parameters = struct {
-    num_experts_per_tok: u32,
-    activation: ActivationMode,
-    workspace_query_device: i32 = 0,
-    enable_pdl: bool = false,
-    gemm1_tactic: i32 = auto_tactic,
-    gemm2_tactic: i32 = auto_tactic,
-
-    pub const ActivationMode = enum {
-        silu,
-        relu,
-        gelu,
-    };
-
-    pub const InitOptions = struct {
-        num_experts_per_tok: u32,
-        activation: ActivationMode,
-    };
-
-    pub fn init(opts: InitOptions) Parameters {
+    pub fn fromGlobalOptions(opts: zml.moe.Options) Options {
         return .{
-            .num_experts_per_tok = opts.num_experts_per_tok,
+            .workspace_query_device = 0,
             .activation = opts.activation,
-        };
-    }
-
-    pub fn runnerOptions(self: Parameters) !Options {
-        return .{
-            .workspace_query_device = self.workspace_query_device,
-            .activation = switch (self.activation) {
-                .silu => .swiglu,
-                // Tensor.gelu() is ZML's tanh GELU approximation.
-                .gelu => .geglu_tanh,
-                .relu => .relu2,
-            },
-            .enable_pdl = self.enable_pdl,
-            .gemm1_tactic = self.gemm1_tactic,
-            .gemm2_tactic = self.gemm2_tactic,
+            .enable_pdl = false,
+            .gemm1_tactic = auto_tactic,
+            .gemm2_tactic = auto_tactic,
         };
     }
 };
+
+pub fn validateOptions(opts: zml.moe.Options) void {
+    stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
+    stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
+    stdx.debug.assert(opts.activation == .swiglu, "cute_mxfp4 backend only accepts swiglu activation, got {}", .{opts.activation});
+    stdx.debug.assert(opts.activation.swiglu.limit == null, "Activation thresholds require the Triton MoE backend", .{});
+    stdx.debug.assert(opts.activation.swiglu.bias == null, "flashinfer_cutlass backend requires swiglu bias to be null", .{});
+    stdx.debug.assert(opts.activation.swiglu.scale == null, "flashinfer_cutlass backend requires swiglu scale to be null", .{});
+}
 
 const Input = struct {
     hidden_states: zml.Tensor,
@@ -202,13 +171,15 @@ fn currentRunners() !*Runners {
     return runners orelse error.RunnersNotLoaded;
 }
 
-fn cutlassActivation(activation: Activation) i32 {
+fn cutlassActivation(activation: zml.moe.Activation) i32 {
     return switch (activation) {
+        .gelu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_GELU,
+        .relu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_RELU,
+        .silu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_SILU,
         .swiglu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU,
+        .swiglu_step => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU_STEP,
         .geglu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU,
         .geglu_tanh => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU_TANH,
-        .swiglu_step => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU_STEP,
-        .relu2 => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_RELU2,
     };
 }
 
@@ -405,11 +376,11 @@ pub fn fc1BlockScaleShape(
     num_experts: i64,
     hidden_size: i64,
     intermediate_size: i64,
-    activation: Activation,
+    activation: zml.moe.Activation,
 ) zml.Shape {
     const rows = switch (activation) {
+        .silu, .gelu, .relu => intermediate_size,
         .swiglu, .geglu, .geglu_tanh, .swiglu_step => 2 * intermediate_size,
-        .relu2 => intermediate_size,
     };
     return .init(
         .{ num_experts, roundUp(rows, 128), roundUp(@divExact(hidden_size, 16), 4) },
@@ -474,8 +445,8 @@ fn validateInputs(
     const num_experts = fc1_weights.dim(0);
     const fc1_rows = fc1_weights.dim(1);
     const intermediate_size = switch (options.activation) {
+        .silu, .gelu, .relu => fc1_rows,
         .swiglu, .geglu, .geglu_tanh, .swiglu_step => @divExact(fc1_rows, 2),
-        .relu2 => fc1_rows,
     };
     const top_k = topk_ids.dim(2);
 
@@ -630,8 +601,8 @@ pub fn fusedExpertsBf16(
     const numExperts = fc1_weights.dim(0);
     const fc1Rows = fc1_weights.dim(1);
     const intermediateSize = switch (options.activation) {
+        .silu, .gelu, .relu => fc1Rows,
         .swiglu, .geglu, .geglu_tanh, .swiglu_step => @divExact(fc1Rows, 2),
-        .relu2 => fc1Rows,
     };
     const topK = topk_ids.dim(2);
     if (batch <= 0 or sequence <= 0 or hiddenSize <= 0 or
@@ -703,11 +674,7 @@ pub fn fusedExperts(
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     opts: zml.moe.Options,
-    parameters: Parameters,
 ) zml.Tensor {
-    stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
-    stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
-    stdx.debug.assert(opts.activation_threshold == null, "Activation thresholds require the Triton MoE backend", .{});
     if (comptime !platforms.isEnabled(.cuda)) {
         @panic("FlashInfer CUTLASS MoE is only supported on CUDA platforms");
     }
@@ -716,7 +683,7 @@ pub fn fusedExperts(
         @panic("FlashInfer CUTLASS MoE does not support bias in gate_up or down linear layers");
     }
 
-    const runner_options = try parameters.runnerOptions();
+    const runner_options: Options = .fromGlobalOptions(opts);
     const expert_partition = gate_up.weight.shape().partition(.expert);
 
     const quant_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
@@ -741,7 +708,7 @@ pub fn fusedExperts(
                     down_input_scale: zml.Tensor,
                     down_scales: zml.Tensor,
                     down_global_scale: zml.Tensor,
-                    activation: Activation,
+                    activation: zml.moe.Activation,
                     enable_pdl: bool,
                     gemm1_tactic: i32,
                     gemm2_tactic: i32,
@@ -840,7 +807,7 @@ pub fn fusedExperts(
                 topk_weights: zml.Tensor,
                 weights_gate_up: zml.Tensor,
                 weights_down: zml.Tensor,
-                activation: Activation,
+                activation: zml.moe.Activation,
                 enable_pdl: bool,
                 gemm1_tactic: i32,
                 gemm2_tactic: i32,
