@@ -34,7 +34,7 @@ pub const Backend = enum {
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
             .metal => .metal,
-            .cpu => .stablehlo,
+            .cpu, .furiosa => .stablehlo,
             .neuron => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }
@@ -42,7 +42,7 @@ pub const Backend = enum {
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
             .stablehlo => true,
-            .triton => platform.target != .cpu,
+            .triton => platform.target != .cpu and platform.target != .furiosa,
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
             .cuda_fa2 => platform.target == .cuda,
@@ -310,6 +310,14 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
             else => stablehlo_pagedAttention(params, q, kv_cache, opts),
         },
     };
+}
+
+test "Furiosa selects StableHLO paged attention without Triton" {
+    var platform: zml.Platform = undefined;
+    platform.target = .furiosa;
+    try std.testing.expectEqual(Backend.stablehlo, Backend.auto(&platform));
+    try std.testing.expect(Backend.stablehlo.isAvailable(&platform));
+    try std.testing.expect(!Backend.triton.isAvailable(&platform));
 }
 
 test "Backend.auto selects mosaic_tpu on TPU" {
@@ -587,10 +595,12 @@ fn stablehlo_pagedAttention(
     opts: AttentionOptions,
 ) zml.Tensor {
     const page_size = kv_cache.split.k.dim(.k_chunk);
+    // Keep full query tiles in bounds without clamping packed sequence offsets.
+    const padded_q = q.pad(0, .{ .b = zml.Tensor.Pad{ .high = page_size - 1 } });
 
     const final_state = zml.ops.@"while"(
         AttentionLoop,
-        .{ .q = q, .kv_cache = kv_cache, .parameters = parameters, .opts = opts },
+        .{ .q = padded_q, .kv_cache = kv_cache, .parameters = parameters, .opts = opts },
         .{
             // i32 to match triton conventions
             .slot_id = .scalar(0, .i32),
@@ -600,11 +610,11 @@ fn stablehlo_pagedAttention(
             // Note: we do all partial softmax in f32
             .partial_softmax_prefill = .zeroes(q.shape().setDim(.b, page_size).withDtype(.f32)),
             .partial_softmax_decode = .zeroes(q.shape().setDim(.b, 1).withDtype(.f32)),
-            .out = .zeroes(q.shape()),
+            .out = .zeroes(padded_q.shape()),
         },
     );
 
-    return final_state.out;
+    return final_state.out.slice(q.axis(.b), .{ .end = q.dim(.b) });
 }
 
 const AttentionLoop = struct {
@@ -657,15 +667,16 @@ const AttentionLoop = struct {
                     // seq_lens includes the current queries; subtracting their count gives the context length.
                     const seq_len = while_body.parameters.seq_lens.slice(0, .dynSingle(state.seq_id));
                     const q_offset = seq_len.sub(if_ctx.seq_num_queries).add(state.q_page_idx.scale(page_size));
+                    const valid_slots = if_ctx.seq_num_queries.sub(state.q_page_idx.scale(page_size)).minimum(.scalar(num_slots, .i32));
                     const next_k_offset = state.k_page_idx.addConstant(1).scale(page_size);
 
                     // The current K page is processed in this iteration. Continue if the next page contains
-                    // any key visible to the current query chunk, whose exclusive end is q_offset + num_slots.
-                    const query_has_more_keys: zml.Tensor = .cmp(next_k_offset, .LT, q_offset.addConstant(num_slots));
+                    // any key visible to the valid queries in the current chunk.
+                    const query_has_more_keys: zml.Tensor = .cmp(next_k_offset, .LT, q_offset.add(valid_slots));
                     const sequence_has_more_queries: zml.Tensor = .cmp(state.q_page_idx.addConstant(1).scale(num_slots), .LT, if_ctx.seq_num_queries);
 
                     const partial_softmax = while_body.attentionOnePage(state, q_offset, num_slots, page_size);
-                    return updateState(state, num_slots, query_has_more_keys, sequence_has_more_queries, partial_softmax);
+                    return updateState(state, valid_slots, num_slots, query_has_more_keys, sequence_has_more_queries, partial_softmax);
                 }
 
                 /// Decode version: num_slots == 1, we multiply one query with a page of keys.
@@ -684,7 +695,7 @@ const AttentionLoop = struct {
                     const sequence_has_more_queries: zml.Tensor = .scalar(false, .bool);
 
                     const partial_softmax = while_body.attentionOnePage(state, q_offset, num_slots, page_size);
-                    return updateState(state, num_slots, query_has_more_keys, sequence_has_more_queries, partial_softmax);
+                    return updateState(state, .scalar(1, .i32), num_slots, query_has_more_keys, sequence_has_more_queries, partial_softmax);
                 }
             },
             .{
@@ -705,11 +716,13 @@ const AttentionLoop = struct {
             .{ .b, .p },
             &.{ .dynSingle(state.seq_id), .dynSingle(state.k_page_idx) },
         );
-        const active_k, const active_v = self.kv_cache.getPage(active_k_page_id);
+        const k, const v = self.kv_cache.getPage(active_k_page_id);
+        const valid_k = zml.Tensor.iota(.init(.{ .k_chunk = page_size }, .i32), .k_chunk).add(k_offset).cmp(.LT, self.parameters.seq_lens.slice(0, .dynSingle(state.seq_id)).asScalar());
+        const active_k, const active_v = .{ k.mask(valid_k, 0), v.mask(valid_k, 0) };
 
         const dtype = self.q.dtype();
         const attn_mask: zml.Tensor = attn_mask: {
-            const mask_shape: zml.Shape = .init(.{ .b = q_chunk, .k_chunk = page_size }, dtype);
+            const mask_shape: zml.Shape = .init(.{ .b = q_chunk, .k_chunk = page_size }, .i32);
 
             const q_idx = zml.Tensor.iota(mask_shape, .b).add(q_offset);
             const k_idx = zml.Tensor.iota(mask_shape, .k_chunk).add(k_offset);
@@ -734,7 +747,9 @@ const AttentionLoop = struct {
         return og_softmax.merge(partial);
     }
 
-    pub fn updateState(state: State, num_slots: u32, query_has_more_keys: zml.Tensor, sequence_has_more_queries: zml.Tensor, softmax: PartialSoftmax) State {
+    pub fn updateState(state: State, valid_slots: zml.Tensor, num_slots: u32, query_has_more_keys: zml.Tensor, sequence_has_more_queries: zml.Tensor, softmax: PartialSoftmax) State {
+        const values = softmax.finalize().convert(state.out.dtype());
+        const valid = zml.Tensor.iota(.init(.{ .b = num_slots }, .i32), .b).cmp(.LT, valid_slots);
         return zml.ops.if2(
             query_has_more_keys,
             // If the query has more pages: update partial softmax with attention on current page, delay updating output.
@@ -752,8 +767,8 @@ const AttentionLoop = struct {
                 .k_page_idx = .scalar(0, .i32),
                 .partial_softmax_prefill = if (num_slots == 1) state.partial_softmax_prefill else .reset(softmax),
                 .partial_softmax_decode = if (num_slots == 1) .reset(softmax) else state.partial_softmax_decode,
-                .out = state.out.dynamicUpdateSlice(.{ .b = state.slot_id }, softmax.finalize().convert(state.out.dtype())),
-                .slot_id = state.slot_id.addConstant(num_slots),
+                .out = state.out.dynamicUpdateSlice(.{ .b = state.slot_id }, values.mask(valid, 0)),
+                .slot_id = state.slot_id.add(valid_slots),
                 // If the sequence has more query chunks: increment q_page_idx, otherwise start over at 0.
                 .q_page_idx = .select(sequence_has_more_queries, state.q_page_idx.addConstant(1), .scalar(0, .i32)),
                 // If the sequence has more query chunks: keep seq_id, otherwise increment seq_id.

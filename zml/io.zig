@@ -647,10 +647,13 @@ pub const MemoryWriter = union(enum) {
             .cuda, .rocm, .oneapi => .{
                 .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, memory),
             },
+            .furiosa => .{
+                .buffered = try .init(allocator, io, platform, shape, sharding, buffer, memory),
+            },
             .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
                 std.debug.panic("Host pinned memory is not supported on {}", .{platform.target})
             else
-                .{ .buffered = try .init(allocator, io, platform, shape, sharding, buffer) },
+                .{ .buffered = try .init(allocator, io, platform, shape, sharding, buffer, memory) },
         };
     }
 
@@ -682,15 +685,17 @@ pub const BufferedMemoryWriter = struct {
     shape: Shape,
     sharding: Sharding,
     buffer: *Buffer,
+    memory: Memory.Kind,
     interface: std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, sharding: Sharding, buffer: *Buffer) !BufferedMemoryWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, sharding: Sharding, buffer: *Buffer, memory: Memory.Kind) !BufferedMemoryWriter {
         return .{
             .io = io,
             .platform = platform,
             .shape = shape,
             .sharding = sharding,
             .buffer = buffer,
+            .memory = memory,
             .interface = .{
                 .buffer = try allocator.alloc(u8, shape.byteSize()),
                 .vtable = &.{
@@ -717,7 +722,7 @@ pub const BufferedMemoryWriter = struct {
             self.shape,
             self.sharding,
             @ptrCast(self.interface.buffer),
-            .{ .wait = true },
+            .{ .wait = true, .memory = self.memory },
         ) catch return std.Io.Writer.Error.WriteFailed;
     }
 };
@@ -1735,4 +1740,36 @@ test "MemoryWriter can produce a host pinned buffer" {
         .strategy = .parseBindings(.{ .model = .link_x }),
         .memory = .host_pinned,
     });
+}
+
+test "BufferedMemoryWriter preserves pinned host placement on one device" {
+    const platform = @import("testing.zig").env();
+    if (platform.devices[0].memory(.host_pinned) == null) return error.SkipZigTest;
+    const shape = Shape.init(.{32}, .f32);
+    const values: [32]f32 = @splat(3.25);
+    var buffer: Buffer = undefined;
+    var writer: BufferedMemoryWriter = try .init(
+        std.testing.allocator,
+        std.testing.io,
+        platform,
+        shape,
+        platform.replicated_sharding,
+        &buffer,
+        .host_pinned,
+    );
+    defer writer.deinit(std.testing.allocator);
+    try writer.interface.writeAll(std.mem.sliceAsBytes(&values));
+    try writer.interface.flush();
+    defer buffer.deinit();
+    // CPU aliases host memory kinds to device memory. Compare against the
+    // requested memory's PJRT kind; Furiosa still requires pinned_host here.
+    const expected_kind = platform.devices[0].memory(.host_pinned).?.pjrt_memory.kind(platform.pjrt_api);
+    if (platform.target == .furiosa) try std.testing.expectEqual(pjrt.Memory.Kind.host_pinned, expected_kind);
+    for (buffer._shards.constSlice()) |shard| {
+        const memory = shard.memory(platform.pjrt_api);
+        try std.testing.expectEqual(expected_kind, memory.kind(platform.pjrt_api));
+    }
+    var result = try buffer.toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer result.free(std.testing.allocator);
+    try std.testing.expectEqualSlices(f32, &values, result.items(f32));
 }

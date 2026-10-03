@@ -10,8 +10,8 @@ pub const Session = struct {
     io: std.Io,
     platform: *const zml.Platform,
     compiled_model: *inference.CompiledModel,
-    prefill: inference.KernelRunner,
-    decode: inference.KernelRunner,
+    prefill: inference.execution.KernelRunner,
+    decode: inference.execution.KernelRunner,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
     token_index_buffers: []zml.Buffer,
     kv_cache_index_buffers: []zml.Buffer,
@@ -62,9 +62,9 @@ pub const Session = struct {
             initialized_kv_cache_index_buffers = i + 1;
         }
 
-        var prefill = try inference.KernelRunner.init(allocator, &compiled_model.prefill, model_buffers);
+        var prefill = try inference.execution.KernelRunner.init(allocator, &compiled_model.prefill, model_buffers);
         errdefer prefill.deinit(allocator);
-        const decode = try inference.KernelRunner.init(allocator, &compiled_model.decode, model_buffers);
+        const decode = try inference.execution.KernelRunner.init(allocator, &compiled_model.decode, model_buffers);
 
         return .{
             .allocator = allocator,
@@ -166,7 +166,7 @@ pub const Session = struct {
         };
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
-        inference.run(&self.prefill, .{
+        inference.execution.run(&self.prefill, .{
             .io = self.io,
             .tokens_buf = &prefill_tokens_buffer,
             .token_index_buf = &self.token_index_buffers[0],
@@ -210,7 +210,7 @@ pub const Session = struct {
             try all_tokens.append(self.allocator, last_token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
-            inference.run(&self.decode, .{
+            inference.execution.run(&self.decode, .{
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
                 .token_index_buf = &self.token_index_buffers[all_tokens.items.len],
