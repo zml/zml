@@ -200,9 +200,24 @@ pub const Parameters = union(Backend) {
     }
 };
 
+pub const AttentionMask = union(enum) {
+    /// Attend to every valid key in the sequence.
+    none,
+    /// Attend to keys at or before the query position.
+    causal,
+    /// Causal window size, including the current token.
+    sliding_window: u32,
+
+    pub fn isCausal(mask: AttentionMask) bool {
+        return switch (mask) {
+            .causal, .sliding_window => true,
+            .none => false,
+        };
+    }
+};
+
 pub const AttentionOptions = struct {
-    is_causal: bool = true,
-    sliding_window: i32 = -1,
+    mask: AttentionMask = .causal,
     scale: ?f32 = null,
     sink: ?zml.Tensor = null,
 };
@@ -458,17 +473,17 @@ test pagedAttention {
     }{
         .{
             .name = "unbounded",
-            .attention_options = .{ .is_causal = true },
+            .attention_options = .{ .mask = .causal },
             .backends = all_backends,
         },
         .{
             .name = "non_causal",
-            .attention_options = .{ .is_causal = false },
+            .attention_options = .{ .mask = .none },
             .backends = &option_sensitive_backends,
         },
         .{
             .name = "sliding_window",
-            .attention_options = .{ .is_causal = true, .sliding_window = page_size },
+            .attention_options = .{ .mask = .{ .sliding_window = page_size } },
             .backends = &option_sensitive_backends,
         },
     };

@@ -7,6 +7,7 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const ffi = zml.pjrt.ffi;
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
+const AttentionMask = @import("paged_attention.zig").AttentionMask;
 
 const log = std.log.scoped(.@"zml/attention/flashattn");
 
@@ -900,7 +901,8 @@ pub const paged_fa2 = struct {
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
         const ctx = zml.Compiler.current();
-        const window_size_left = windowSizeLeft(opts.sliding_window);
+
+        const window_size_left = windowSizeLeft(opts.mask);
 
         const num_head_groups = q.dim(.hg);
         const num_kv_heads = q.dim(.hkv);
@@ -911,7 +913,7 @@ pub const paged_fa2 = struct {
 
         const o = switch (parameters) {
             .decode => |decode_parameters| b: {
-                const seqlenq_ngroups_swapped = num_heads > num_kv_heads and @mod(head_dim, 8) == 0 and opts.sliding_window < 0;
+                const seqlenq_ngroups_swapped = num_heads > num_kv_heads and @mod(head_dim, 8) == 0 and opts.mask != .sliding_window;
 
                 const block_table = decode_parameters.block_table.withPartitioning(.{ .b = .replicated });
                 const cu_seqlens_q = decode_parameters.cu_seqlens_q.withPartitioning(.{ .b = .replicated });
@@ -977,7 +979,7 @@ pub const paged_fa2 = struct {
                             out_accum,
                         },
                         .metadata = .{
-                            .is_causal = opts.is_causal,
+                            .is_causal = opts.mask.isCausal(),
                             .max_seqlen_k = decode_parameters.options.max_seqlen_k,
                             .num_heads = num_heads_per_shard,
                             .window_size_left = window_size_left,
@@ -999,7 +1001,7 @@ pub const paged_fa2 = struct {
                 break :b o;
             },
             .mixed => |mixed_parameters| b: {
-                const seqlenq_ngroups_swapped = num_heads > num_kv_heads and @mod(head_dim, 8) == 0 and opts.sliding_window < 0;
+                const seqlenq_ngroups_swapped = num_heads > num_kv_heads and @mod(head_dim, 8) == 0 and opts.mask != .sliding_window;
 
                 const block_table_prefill = mixed_parameters.block_table_prefill.withPartitioning(.{ .b = .replicated });
                 const cu_seqlens_q_prefill = mixed_parameters.cu_seqlens_q_prefill.withPartitioning(.{ .b = .replicated });
@@ -1063,7 +1065,7 @@ pub const paged_fa2 = struct {
                             out_accum_prefill,
                         },
                         .metadata = .{
-                            .is_causal = opts.is_causal,
+                            .is_causal = opts.mask.isCausal(),
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
                             .max_seqlen_q = mixed_parameters.options.max_seqlen_q,
                             .num_heads = num_heads_per_shard,
@@ -1138,7 +1140,7 @@ pub const paged_fa2 = struct {
                             out_accum_decode,
                         },
                         .metadata = .{
-                            .is_causal = opts.is_causal,
+                            .is_causal = opts.mask.isCausal(),
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
                             .num_heads = num_heads_per_shard,
                             .window_size_left = window_size_left,
@@ -1552,7 +1554,7 @@ pub const paged_fa3 = struct {
         stdx.debug.assert(q.shape().hasTags(.{ .b, .hg, .hkv, .hd }), "Expected q to have tags .b, .h, .hd", .{});
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
-        const window_size_left = windowSizeLeft(opts.sliding_window);
+        const window_size_left = windowSizeLeft(opts.mask);
 
         const num_head_groups = q.dim(.hg);
         const num_kv_heads = q.dim(.hkv);
@@ -1616,7 +1618,7 @@ pub const paged_fa3 = struct {
                             scheduler_metadata,
                         },
                         .metadata = .{
-                            .is_causal = opts.is_causal,
+                            .is_causal = opts.mask.isCausal(),
                             .max_seqlen_k = decode_parameters.options.max_seqlen_k,
                             .window_size_left = window_size_left,
                         },
@@ -1693,7 +1695,7 @@ pub const paged_fa3 = struct {
                             scheduler_metadata_prefill,
                         },
                         .metadata = .{
-                            .is_causal = opts.is_causal,
+                            .is_causal = opts.mask.isCausal(),
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
                             .max_seqlen_q = mixed_parameters.options.max_seqlen_q,
                             .window_size_left = window_size_left,
@@ -1758,7 +1760,7 @@ pub const paged_fa3 = struct {
                             scheduler_metadata_decode,
                         },
                         .metadata = .{
-                            .is_causal = opts.is_causal,
+                            .is_causal = opts.mask.isCausal(),
                             .max_seqlen_k = mixed_parameters.options.max_seqlen_k,
                             .window_size_left = window_size_left,
                         },
@@ -1777,12 +1779,16 @@ pub const paged_fa3 = struct {
     }
 };
 
-fn windowSizeLeft(sliding_window: i32) i32 {
-    return if (sliding_window > 0) sliding_window - 1 else sliding_window;
+fn windowSizeLeft(mask: AttentionMask) i32 {
+    return switch (mask) {
+        .sliding_window => |w| @as(i32, @intCast(w)) - 1,
+        else => -1,
+    };
 }
 
 test "FlashAttention sliding window uses an inclusive offset" {
-    try std.testing.expectEqual(@as(i32, 2047), windowSizeLeft(2048));
-    try std.testing.expectEqual(@as(i32, 0), windowSizeLeft(1));
-    try std.testing.expectEqual(@as(i32, -1), windowSizeLeft(-1));
+    try std.testing.expectEqual(@as(i32, 2047), windowSizeLeft(.{ .sliding_window = 2048 }));
+    try std.testing.expectEqual(@as(i32, 0), windowSizeLeft(.{ .sliding_window = 1 }));
+    try std.testing.expectEqual(@as(i32, -1), windowSizeLeft(.causal));
+    try std.testing.expectEqual(@as(i32, -1), windowSizeLeft(.none));
 }
