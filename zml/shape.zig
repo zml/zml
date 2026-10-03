@@ -548,6 +548,10 @@ pub const Shape = struct {
 
     /// Broadcasts a Tensor to the given shape, extending dimensions if needed.
     pub fn canBroadcastTo(self: Shape, other: Shape) bool {
+        if (self.isFullyTagged() and other.isFullyTagged()) {
+            return self.canBroadcastToTagged(other);
+        }
+
         // Already the right shape
         if (std.mem.eql(i64, self.dims(), other.dims())) return true;
 
@@ -567,6 +571,33 @@ pub const Shape = struct {
             if (d != 1 and d != other.dim(other_ax)) return false;
         }
         return true;
+    }
+
+    test "canBroadcastTo matches tagged axes by name and preserves untagged broadcasting" {
+        // The source's .a axis maps to the target's .a axis after reordering.
+        try testing.expect(Shape.init(.{ .a = 1, .b = 4 }, .f32).canBroadcastTo(Shape.init(.{ .b = 4, .a = 3 }, .f32)));
+
+        // Untagged shapes retain positional broadcasting.
+        try testing.expect(Shape.init(.{ 1, 16 }, .f32).canBroadcastTo(Shape.init(.{ 8, 16 }, .f32)));
+        try testing.expect(!Shape.init(.{ 8, 1 }, .f32).canBroadcastTo(Shape.init(.{ 16, 4 }, .f32)));
+    }
+
+    fn canBroadcastToTagged(self: Shape, other: Shape) bool {
+        for (self.dims(), self.tags()) |d, t| {
+            const other_ax = other.hasTag(t) orelse return false;
+            if (d != 1 and d != other.dim(other_ax)) return false;
+        }
+        return true;
+    }
+
+    test "canBroadcastTo rejects fully tagged positional mismatch" {
+        const batch_len = 8;
+        const singleton_len = 1;
+        const hidden_len = 16;
+        const source = Shape.init(.{ .a = batch_len, .l = singleton_len, .k = hidden_len }, .f32);
+        const target = Shape.init(.{ .a = batch_len, .k = hidden_len, .v = hidden_len }, .f32);
+
+        try testing.expect(!source.canBroadcastTo(target));
     }
 
     pub fn reshape(self: Shape, new_shape_: anytype) Shape {
