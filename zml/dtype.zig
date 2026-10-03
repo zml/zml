@@ -342,6 +342,15 @@ pub const DataType = enum(u8) {
             try std.testing.expectEqual(C128.init(1, 2), Value.init(.c128, C64.init(1, 2)).c128);
         }
 
+        test as {
+            // Every float dtype must be convertible to a native float via `as`,
+            // including the narrow formats added alongside f8e4m3/f8e8m0.
+            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f4e2m1, 1).as(f32));
+            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f8e3m4, 1).as(f32));
+            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f8e4m3, 1).as(f32));
+            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f8e8m0, 1).as(f32));
+        }
+
         pub fn dtype(self: Value) DataType {
             return std.meta.activeTag(self);
         }
@@ -358,7 +367,7 @@ pub const DataType = enum(u8) {
                 .bool => return self.bool,
                 .float => switch (self) {
                     inline .f16, .f32, .f64 => |v| return @floatCast(v),
-                    inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz, .bf16 => |v| return @floatCast(v.toF32()),
+                    inline .f4e2m1, .f8e3m4, .f8e4m3, .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz, .f8e8m0, .bf16 => |v| return @floatCast(v.toF32()),
                     else => {},
                 },
                 .int => switch (self) {
