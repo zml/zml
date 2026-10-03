@@ -264,6 +264,106 @@ fn applyActivation(x: Tensor, mode: ActivationMode) Tensor {
     };
 }
 
+pub fn fusedExperts(
+    input: zml.Tensor,
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
+    gate_up: zml.nn.Linear,
+    down: zml.nn.Linear,
+    opts: zml.moe.Options,
+    parameters: Parameters,
+) zml.Tensor {
+    stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
+    stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
+    stdx.debug.assert(opts.activation_threshold == null, "Activation thresholds require the Triton MoE backend", .{});
+
+    const gate_up_scales: ?zml.Tensor = if (gate_up.quantization) |q| q.scales else null;
+    const down_scales: ?zml.Tensor = if (down.quantization) |q| q.scales else null;
+
+    const expert_partition = gate_up.weight.shape().partition(.expert);
+
+    if (expert_partition.eql(.init(.experts))) {
+        const global_num_experts = down.weight.dim(.expert);
+        const partial_output = zml.ops.manualComputation(
+            (struct {
+                input: zml.Tensor,
+                topk_ids: zml.Tensor,
+                topk_weights: zml.Tensor,
+                weights_gate_up: zml.Tensor,
+                weights_down: zml.Tensor,
+                activation: ActivationMode,
+                global_num_experts: i64,
+                gate_up_scales: ?zml.Tensor,
+                bias_gate_up: ?zml.Tensor,
+                down_scales: ?zml.Tensor,
+                bias_down: ?zml.Tensor,
+
+                fn body(self: @This(), _: zml.Shape) zml.Tensor {
+                    const local_num_experts = self.weights_gate_up.dim(.expert);
+                    const partition_id = zml.ops.partitionId().convert(.i32);
+                    const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                    const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
+
+                    const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
+                        .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
+                    const expert_map = local_expert_mask.select(
+                        global_expert_ids.sub(expert_start),
+                        zml.Tensor.scalar(-1, .i32),
+                    );
+                    const local_output = fusedExpertsImpl(
+                        self.input,
+                        self.weights_gate_up,
+                        self.weights_down,
+                        self.topk_weights,
+                        self.topk_ids,
+                        .{
+                            .activation = self.activation,
+                            .global_num_experts = self.global_num_experts,
+                            .expert_map = expert_map,
+                            .w1_scale = self.gate_up_scales,
+                            .w2_scale = self.down_scales,
+                            .w1_bias = self.bias_gate_up,
+                            .w2_bias = self.bias_down,
+                        },
+                    );
+                    return local_output.reshape(self.input.shape().dims()).withTags(.{ .b, .s, .d });
+                }
+            }).body,
+            .{
+                .input = input,
+                .topk_ids = topk_ids,
+                .topk_weights = topk_weights,
+                .weights_gate_up = gate_up.weight,
+                .weights_down = down.weight,
+                .activation = parameters.activation,
+                .global_num_experts = global_num_experts,
+                .gate_up_scales = gate_up_scales,
+                .bias_gate_up = gate_up.bias,
+                .down_scales = down_scales,
+                .bias_down = down.bias,
+            },
+            input.shape(),
+        );
+        return zml.ops.allReduce(partial_output, zml.Tensor.add);
+    }
+
+    return fusedExpertsImpl(
+        input,
+        gate_up.weight,
+        down.weight,
+        topk_weights,
+        topk_ids,
+        .{
+            .activation = parameters.activation,
+            .global_num_experts = gate_up.weight.dim(.expert),
+            .w1_scale = gate_up_scales,
+            .w2_scale = down_scales,
+            .w1_bias = gate_up.bias,
+            .w2_bias = down.bias,
+        },
+    );
+}
+
 pub fn fusedExpertsImpl(
     hidden_states: Tensor,
     w1: Tensor,
@@ -271,21 +371,22 @@ pub fn fusedExpertsImpl(
     topk_weights: Tensor,
     topk_ids: Tensor,
     opts: Options,
-) !Tensor {
-    try validateOptions(opts);
+) Tensor {
+    validateOptions(opts) catch |e| stdx.debug.panic("Invalid options for fusedExpertsImpl: {}", .{e});
 
     const b = hidden_states.dim(.b);
     const s = hidden_states.dim(.s);
     const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
-    const gate_up = try canonicalizeGateUp(w1, hidden.dim(.in));
-    const down = try canonicalizeDown(w2, hidden.dim(.in), gate_up.dim(.out));
+    // TODO(Corentin): Better error message
+    const gate_up = canonicalizeGateUp(w1, hidden.dim(.in)) catch |e| stdx.debug.panic("Invalid gate_up weights for fusedExpertsImpl: {}", .{e});
+    const down = canonicalizeDown(w2, hidden.dim(.in), gate_up.dim(.out)) catch |e| stdx.debug.panic("Invalid down weights for fusedExpertsImpl: {}", .{e});
     const weights = topk_weights.reshape(.{ .token = b * s, .topk = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
     const ids = topk_ids.reshape(.{ .token = b * s, .topk = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
     const num_experts = if (opts.global_num_experts != -1) opts.global_num_experts else gate_up.dim(.expert);
     if (opts.expert_map) |expert_map| {
-        if (expert_map.dtype() != .i32) return error.UnsupportedType;
-        if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) return error.InvalidShape;
+        if (expert_map.dtype() != .i32) stdx.debug.panic("expert_map must be of dtype i32, got {}", .{expert_map.dtype()});
+        if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) stdx.debug.panic("expert_map must be a 1D tensor of length num_experts, got shape {}", .{expert_map.shape()});
     }
 
     const flat_ids_global = ids.transpose(.{ .topk, .token }).flatten().withTags(.{.route});
