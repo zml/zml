@@ -353,6 +353,89 @@ pub const fa2 = struct {
         else
             o.rename(.{ .tot = .q });
     }
+
+    pub const DenseOpts = struct {
+        is_causal: bool = false,
+        softmax_scale: ?f32 = null,
+    };
+
+    pub fn dense(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, opts: DenseOpts) zml.Tensor {
+        stdx.debug.assert(q_.shape().hasTags(.{ .q, .h, .hd }), "cu_fa2 dense expects q tags .q .h .hd, got {f}", .{q_});
+        stdx.debug.assert(k_.shape().hasTags(.{ .k, .h, .hd }), "cu_fa2 dense expects k tags .k .h .hd, got {f}", .{k_});
+        stdx.debug.assert(v_.shape().hasTags(.{ .k, .h, .hd }), "cu_fa2 dense expects v tags .k .h .hd, got {f}", .{v_});
+        stdx.debug.assert(q_.dim(.q) > 0 and k_.dim(.k) > 0, "cu_fa2 dense expects positive seq lens, got q={f} k={f}", .{ q_, k_ });
+        stdx.debug.assert(v_.dim(.k) == k_.dim(.k), "cu_fa2 dense expects v.k == k.k, got k={f} v={f}", .{ k_, v_ });
+        stdx.debug.assert(q_.dim(.h) == k_.dim(.h) and k_.dim(.h) == v_.dim(.h), "cu_fa2 dense does not support GQA, got q={f} k={f} v={f}", .{ q_, k_, v_ });
+        stdx.debug.assert(q_.dim(.hd) == k_.dim(.hd) and q_.dim(.hd) == v_.dim(.hd), "cu_fa2 dense expects matching head dim, got q={f} k={f} v={f}", .{ q_, k_, v_ });
+        const head_dim = q_.dim(.hd);
+        stdx.debug.assert(head_dim >= 32 and head_dim <= 128 and @rem(head_dim, 32) == 0, "cu_fa2 dense head dim must be 32..=128 and a multiple of 32, got {d}", .{head_dim});
+        stdx.debug.assert(q_.dtype() == k_.dtype() and q_.dtype() == v_.dtype(), "cu_fa2 dense expects matching dtypes, got q={f} k={f} v={f}", .{ q_, k_, v_ });
+        stdx.debug.assert(q_.dtype() == .f16 or q_.dtype() == .bf16, "cu_fa2 dense expects f16 or bf16, got {t}", .{q_.dtype()});
+
+        const q_has_b = q_.shape().hasTag(.b) != null;
+        stdx.debug.assert((k_.shape().hasTag(.b) != null) == q_has_b and (v_.shape().hasTag(.b) != null) == q_has_b, "cu_fa2 dense expects q/k/v to share a .b axis, got q={f} k={f} v={f}", .{ q_, k_, v_ });
+        if (q_has_b) {
+            stdx.debug.assert(q_.dim(.b) == k_.dim(.b) and q_.dim(.b) == v_.dim(.b), "cu_fa2 dense expects matching batch, got q={f} k={f} v={f}", .{ q_, k_, v_ });
+        }
+
+        const ctx = zml.Compiler.current();
+        var bs: i64 = 1;
+        var q = q_;
+        var k = k_;
+        var v = v_;
+        if (q_has_b) {
+            bs = q_.dim(.b);
+            q = q_.merge(.{ .tot = .{ .b, .q } });
+            k = k_.merge(.{ .tot = .{ .b, .k } });
+            v = v_.merge(.{ .tot = .{ .b, .k } });
+        } else {
+            q = q_.rename(.{ .q = .tot });
+            k = k_.rename(.{ .k = .tot });
+            v = v_.rename(.{ .k = .tot });
+        }
+        const max_seqlen_q: i32 = @intCast(q_.dim(.q));
+        const max_seqlen_k: i32 = @intCast(k_.dim(.k));
+        const num_heads: i32 = @intCast(q_.dim(.h));
+        const scratch = Metadata.init(.{ .seqlen = q.dim(.tot), .num_heads = q_.dim(.h) });
+        const softmax_lse = zml.Tensor.uninitialized(scratch.softmax_lse.shape());
+        const softmax_lse_accum = zml.Tensor.uninitialized(scratch.softmax_lse_accum.shape());
+        const out_accum = zml.Tensor.uninitialized(scratch.out_accum.shape());
+        const cu_seqlens_q: zml.Tensor = .arange(.{ .end = max_seqlen_q * (bs + 1), .step = max_seqlen_q }, .i32);
+        const cu_seqlens_k: zml.Tensor = .arange(.{ .end = max_seqlen_k * (bs + 1), .step = max_seqlen_k }, .i32);
+        const seqused_k = zml.Tensor.scalar(max_seqlen_k, .i32).broad(.init(.{ .b = bs }, .i32));
+        const q_sharded = q.withPartitioning(.{ .h = .model });
+        const model_partitions: i32 = @intCast(ctx.partitioning.numPartitionsForLogicalAxis(q_sharded.shape(), .model) catch
+            std.debug.panic("cu_fa2 attention backend requires a .model sharding", .{}));
+        const scale = opts.softmax_scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
+        const output = fa2_mha_varlen_fwd.call(
+            .{
+                .q = q_sharded,
+                .k = k.withPartitioning(.{ .h = .model }),
+                .v = v.withPartitioning(.{ .h = .model }),
+                .cu_seqlens_q = cu_seqlens_q,
+                .cu_seqlens_k = cu_seqlens_k,
+                .seqused_k = seqused_k,
+                .softmax_lse = softmax_lse.withPartitioning(.{ .h = .model }),
+                .softmax_lse_accum = softmax_lse_accum.withPartitioning(.{ .h = .model }),
+                .out_accum = out_accum.withPartitioning(.{ .h = .model }),
+            },
+            .{ .o = q_sharded.shape() },
+            .{
+                .softmax_scale = scale,
+                .is_causal = opts.is_causal,
+                .window_size_left = -1,
+                .window_size_right = -1,
+                .max_seqlen_q = max_seqlen_q,
+                .max_seqlen_k = max_seqlen_k,
+                .num_heads = @divExact(num_heads, model_partitions),
+            },
+        );
+        const o = output.o;
+        return if (q_has_b)
+            o.splitAxis(.tot, .{ .b = bs, .q = q_.dim(.q) })
+        else
+            o.rename(.{ .tot = .q });
+    }
 };
 
 pub const fa3 = struct {
