@@ -116,13 +116,18 @@ pub fn main(init: std.process.Init) !void {
 
     var api_group: std.Io.Group = .init;
 
+    const local_device_count = collector.device_infos.items.len;
+    var host_summaries: std.ArrayList(smi_info.host_info.HostSummary) = .empty;
+    if (args.remotes == null or local_device_count > 0) {
+        try host_summaries.append(arena, .{ .host = &host_info, .device_count = local_device_count });
+    }
     if (args.remotes) |hosts| {
-        try api.addRemotes(&collector, hosts);
+        try host_summaries.appendSlice(arena, try api.addRemotes(&collector, hosts));
     }
 
     var state = try data.SystemState.init(.{
         .devices = collector.device_infos.items,
-        .host = &host_info,
+        .hosts = host_summaries.items,
         .targets = targets,
         .tui_refresh_rate = args.tui_refresh_rate,
         .process_lists = collector.process_lists.items,
@@ -138,7 +143,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (args.api) {
-        try api_group.concurrent(io, api.Server.run, .{ gpa, io, args.api_port, collector.device_infos.items, collector.process_lists.items, &enricher });
+        try api_group.concurrent(io, api.Server.run, .{ gpa, io, args.api_port, collector.device_infos.items, collector.process_lists.items, &enricher, &host_info });
     }
 
     if (args.prometheus_listen != null or args.api) {
@@ -160,7 +165,8 @@ pub fn main(init: std.process.Init) !void {
         var json_buf: [4096]u8 = undefined;
         var json_writer = std.Io.File.stdout().writer(io, &json_buf);
 
-        try json.write(&json_writer.interface, collector.device_infos.items, procs.items);
+        const output_host = if (host_summaries.items.len == 1) host_summaries.items[0].host else null;
+        try json.write(&json_writer.interface, collector.device_infos.items, procs.items, output_host);
         try json_writer.flush();
     } else if (args.top) {
         try tui.run(gpa, io, &state);

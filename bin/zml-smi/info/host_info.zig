@@ -14,3 +14,8 @@ pub const HostData = struct {
     load_15: ?f32 = null,
     uptime_seconds: ?u64 = null,
 };
+
+pub const HostSummary = struct {
+    host: *HostInfo,
+    device_count: usize,
+};

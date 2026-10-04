@@ -83,7 +83,7 @@ pub const HistoryBuffers = struct {
 
 pub const SystemState = struct {
     devices: []*DeviceInfo,
-    host: *HostInfo,
+    hosts: []const hi.HostSummary,
     history: HistoryBuffers = .{},
     targets: Targets,
     process_lists: []*ProcessDoubleBuffer,
@@ -95,7 +95,7 @@ pub const SystemState = struct {
 
     pub const Config = struct {
         devices: []*DeviceInfo,
-        host: *HostInfo,
+        hosts: []const hi.HostSummary,
         targets: Targets,
         tui_refresh_rate: u16,
         process_lists: []*ProcessDoubleBuffer,
@@ -108,7 +108,7 @@ pub const SystemState = struct {
     pub fn init(cfg: Config) !SystemState {
         return .{
             .devices = cfg.devices,
-            .host = cfg.host,
+            .hosts = cfg.hosts,
             .history = try HistoryBuffers.init(cfg.arena, cfg.devices.len),
             .targets = cfg.targets,
             .tui_refresh_rate = cfg.tui_refresh_rate,

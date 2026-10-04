@@ -1,13 +1,13 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "api",
-    import_name = "zml-smi/api",
-    main = "api.zig",
     srcs = [
         "client.zig",
         "server.zig",
     ],
+    import_name = "zml-smi/api",
+    main = "api.zig",
     visibility = ["//visibility:public"],
     deps = [
         "//bin/zml-smi/collector",
@@ -18,4 +18,9 @@ zig_library(
         "@platforms//os:macos": ["//bin/zml-smi/platforms/macos"],
         "//conditions:default": ["//bin/zml-smi/platforms/linux"],
     }),
+)
+
+zig_test(
+    name = "test",
+    deps = [":api"],
 )

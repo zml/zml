@@ -1,6 +1,7 @@
 const std = @import("std");
 const smi_info = @import("zml-smi/info");
 const DeviceInfo = smi_info.device_info.DeviceInfo;
+const hi = smi_info.host_info;
 const pi = smi_info.process_info;
 const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const Collector = @import("zml-smi/collector").Collector;
@@ -14,16 +15,20 @@ fn setRemote(device: *DeviceInfo) void {
     }
 }
 
-pub fn addRemotes(collector: *Collector, hosts: []const u8) !void {
+pub fn addRemotes(collector: *Collector, hosts: []const u8) ![]const hi.HostSummary {
+    var summaries: std.ArrayList(hi.HostSummary) = .empty;
     var it = std.mem.splitScalar(u8, hosts, ',');
     while (it.next()) |host| {
-        addHost(collector, host) catch |err| {
+        const summary = addHost(collector, host) catch |err| {
             std.log.err("{s}: {s}", .{ host, @errorName(err) });
+            continue;
         };
+        try summaries.append(collector.arena, summary);
     }
+    return summaries.toOwnedSlice(collector.arena);
 }
 
-fn addHost(collector: *Collector, host: []const u8) !void {
+fn addHost(collector: *Collector, host: []const u8) !hi.HostSummary {
     const body = try httpGet(collector.gpa, collector.io, host);
     defer collector.gpa.free(body);
 
@@ -43,9 +48,9 @@ fn addHost(collector: *Collector, host: []const u8) !void {
         try devices.append(collector.arena, info);
     }
 
-    if (devices.items.len == 0) {
-        return;
-    }
+    const host_info = try collector.arena.create(hi.HostInfo);
+    const initial_host = try parseHost(collector.arena, root, host);
+    host_info.* = .{ .values = .{ initial_host, initial_host } };
 
     const processes = try collector.createProcessList();
     const str_arenas: [2]*std.heap.ArenaAllocator = .{ try collector.createPollArena(), try collector.createPollArena() };
@@ -63,10 +68,11 @@ fn addHost(collector: *Collector, host: []const u8) !void {
 
     const url = try collector.arena.dupe(u8, host);
     const poll_arena = try collector.createPollArena();
-    try collector.spawnPoll(pollOnce, .{ poll_arena, collector.gpa, collector.io, url, devices.items, processes, dev_offset, str_arenas });
+    try collector.spawnPoll(pollOnce, .{ poll_arena, collector.gpa, collector.io, url, devices.items, processes, dev_offset, str_arenas, host_info });
+    return .{ .host = host_info, .device_count = devices.items.len };
 }
 
-fn pollOnce(poll_arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, host: []const u8, devices: []const *DeviceInfo, processes: *ProcessDoubleBuffer, dev_offset: u16, str_arenas: [2]*std.heap.ArenaAllocator) void {
+fn pollOnce(poll_arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, host: []const u8, devices: []const *DeviceInfo, processes: *ProcessDoubleBuffer, dev_offset: u16, str_arenas: [2]*std.heap.ArenaAllocator, host_info: *hi.HostInfo) void {
     _ = poll_arena.reset(.retain_capacity);
 
     const body = httpGet(gpa, io, host) catch return;
@@ -98,6 +104,8 @@ fn pollOnce(poll_arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: st
     const back_idx: usize = 1 - processes.current.load(.acquire);
     _ = str_arenas[back_idx].reset(.retain_capacity);
     const alloc = str_arenas[back_idx].allocator();
+    host_info.back().* = parseHost(alloc, root, host) catch .{};
+    host_info.swap();
     const back = processes.back();
     back.clearRetainingCapacity();
     for (json_processes) |item| {
@@ -135,4 +143,36 @@ fn httpGet(allocator: std.mem.Allocator, io: std.Io, host: []const u8) ![]const 
     }
 
     return try aw.toOwnedSlice();
+}
+
+fn parseHost(allocator: std.mem.Allocator, root: std.json.ObjectMap, url: []const u8) !hi.HostData {
+    if (root.get("host")) |value| {
+        if (value != .null) return std.json.parseFromValueLeaky(hi.HostData, allocator, value, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+    }
+    return .{ .hostname = try allocator.dupe(u8, url) };
+}
+
+test "remote host survives response cleanup" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const host: hi.HostData = .{ .hostname = "remote-node", .kernel = "remote-kernel", .cpu_name = "remote-cpu", .cpu_cores = 96, .mem_total_kib = 1024, .mem_available_kib = 512, .uptime_seconds = 1234, .load_1 = 2.5 };
+    const host_info: hi.HostInfo = .{ .values = .{ host, host } };
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try @import("zml-smi/json").write(&writer.writer, &.{}, &.{}, &host_info);
+    const remote = blk: {
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.written(), .{});
+        defer parsed.deinit();
+        break :blk try parseHost(arena.allocator(), parsed.value.object, "http://remote");
+    };
+    try std.testing.expectEqualDeep(host, remote);
+}
+
+test "legacy server host data stays unknown" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{\"devices\":[],\"processes\":[]}", .{});
+    defer parsed.deinit();
+    const remote = try parseHost(arena.allocator(), parsed.value.object, "http://legacy");
+    try std.testing.expectEqualDeep(hi.HostData{ .hostname = "http://legacy" }, remote);
 }

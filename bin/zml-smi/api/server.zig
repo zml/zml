@@ -16,10 +16,11 @@ pub const Server = struct {
     devices: []const *DeviceInfo,
     process_lists: []const *const ProcessDoubleBuffer,
     enricher: *ProcessEnricher,
+    host: *const smi_info.host_info.HostInfo,
     tcp: std.Io.net.Server,
     connection_group: std.Io.Group = .init,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, port: u16, devices: []const *DeviceInfo, process_lists: []const *const ProcessDoubleBuffer, enricher: *ProcessEnricher) !Server {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, port: u16, devices: []const *DeviceInfo, process_lists: []const *const ProcessDoubleBuffer, enricher: *ProcessEnricher, host: *const smi_info.host_info.HostInfo) !Server {
         const address: std.Io.net.IpAddress = .{ .ip4 = .{
             .bytes = .{ 0, 0, 0, 0 },
             .port = port,
@@ -33,12 +34,13 @@ pub const Server = struct {
             .devices = devices,
             .process_lists = process_lists,
             .enricher = enricher,
+            .host = host,
             .tcp = tcp,
         };
     }
 
-    pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, devices: []const *DeviceInfo, process_lists: []const *const ProcessDoubleBuffer, enricher: *ProcessEnricher) void {
-        var self = init(allocator, io, port, devices, process_lists, enricher) catch |err| {
+    pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, devices: []const *DeviceInfo, process_lists: []const *const ProcessDoubleBuffer, enricher: *ProcessEnricher, host: *const smi_info.host_info.HostInfo) void {
+        var self = init(allocator, io, port, devices, process_lists, enricher, host) catch |err| {
             std.log.err("api server failed to start: {s}", .{@errorName(err)});
             return;
         };
@@ -98,7 +100,7 @@ pub const Server = struct {
                 },
             });
 
-            try json.write(&body_writer.writer, self.devices, procs.items);
+            try json.write(&body_writer.writer, self.devices, procs.items, self.host);
             try body_writer.end();
         }
     }
