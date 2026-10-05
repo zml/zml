@@ -1,4 +1,5 @@
 const std = @import("std");
+const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 pub const kernels = @import("triton_kernels/mxfp4.zig");
@@ -9,22 +10,12 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major == 10;
 }
 
-pub const Parameters = struct {
-    pub const InitOptions = struct {
-        num_experts_per_tok: u32,
-        activation: zml.moe.ActivationMode,
-    };
-
-    num_experts_per_tok: u32,
-    activation: zml.moe.ActivationMode,
-
-    pub fn init(opts: InitOptions) Parameters {
-        return .{
-            .num_experts_per_tok = opts.num_experts_per_tok,
-            .activation = opts.activation,
-        };
-    }
-};
+pub fn validateOptions(opts: zml.moe.Options) void {
+    stdx.debug.assert(opts.activation == .swiglu, "cute_mxfp4 backend only accepts swiglu activation, got {}", .{opts.activation});
+    stdx.debug.assert(opts.activation.swiglu.limit != null, "cute_mxfp4 backend requires swiglu limit to be set", .{});
+    stdx.debug.assert(opts.activation.swiglu.bias == null, "cute_mxfp4 backend requires swiglu bias to be null", .{});
+    stdx.debug.assert(opts.activation.swiglu.scale == null, "cute_mxfp4 backend requires swiglu scale to be null", .{});
+}
 
 /// Row-major MXFP4 E2M1 weights and linear E8M0 block32 scales.
 /// BF16 activations are quantized on the GPU to FP8 with per-32 E8M0 scales.
@@ -35,20 +26,18 @@ pub fn fusedExperts(
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
     options: zml.moe.Options,
-    parameters: Parameters,
-) !zml.Tensor {
-    if (parameters.activation != .silu) return error.UnsupportedActivation;
-    if (input.dtype() != .bf16) return error.UnsupportedDataType;
-    if (gate_up.bias != null or down.bias != null) return error.UnsupportedBias;
-    const gq = gate_up.quantization orelse return error.UnsupportedQuantization;
-    const dq = down.quantization orelse return error.UnsupportedQuantization;
-    if (gq.scheme != .mxfp4 or dq.scheme != .mxfp4) return error.UnsupportedQuantization;
+) zml.Tensor {
+    validateOptions(options);
+    stdx.debug.assert(input.dtype() == .bf16, "triton_mxfp4 backend only supports bf16 inputs, got {}", .{input.dtype()});
+    stdx.debug.assert(gate_up.bias == null and down.bias == null, "triton_mxfp4 backend expects gate_up bias and down bias to be null", .{});
+
+    const gq = gate_up.quantization orelse @panic("triton_mxfp4 backend requires gate_up quantization to be set");
+    const dq = down.quantization orelse @panic("triton_mxfp4 backend requires down quantization to be set");
+    stdx.debug.assert(gq.scheme == .mxfp4 and dq.scheme == .mxfp4, "triton_mxfp4 expects gate_up and down quantization scheme to be mxfp4, got {} and {}", .{ gq.scheme, dq.scheme });
+
     // Weight storage for mxfp4 in HF is expressed as u8 or i8
-    if ((gate_up.weight.dtype() != .u8 and gate_up.weight.dtype() != .i8) or
-        (down.weight.dtype() != .u8 and down.weight.dtype() != .i8))
-    {
-        return error.UnsupportedWeightLayout;
-    }
+    stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "triton_mxfp4 expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
+    stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "triton_mxfp4 expects down weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
 
     const expert_parallelism = gate_up.weight.shape().partition(.expert).eql(.init(.experts));
 
@@ -61,8 +50,8 @@ pub fn fusedExperts(
         .w2 = down.weight.bitCast(.u8),
         .s2 = dq.scales,
         .global_experts = gate_up.weight.dim(.expert),
-        .topk = parameters.num_experts_per_tok,
-        .limit = options.activation_threshold orelse 0,
+        .topk = ids.dim(.topk),
+        .limit = options.activation.swiglu.limit.?,
         .routing_weight_placement = options.routing_weight_placement,
         .expert_parallel = expert_parallelism,
     };

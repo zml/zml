@@ -13,7 +13,7 @@ const Builder = tri.Builder;
 const Value = tri.Value;
 const DType = tri.DType;
 
-const log = std.log.scoped(.moe_triton);
+const log = std.log.scoped(.@"zml/moe/triton_kernels");
 
 /// Floor to a multiple of 16 — matches the Python `(v // 16) * 16` guards
 /// that keep dynamic strides aligned for tt.load/store.

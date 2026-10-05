@@ -4,6 +4,7 @@
 //! and the top-k reduction. Routing weights are applied before the down
 //! projection, with the reference model's BF16 rounding.
 const std = @import("std");
+const stdx = @import("stdx");
 
 const zml = @import("../../zml.zig");
 const triton_mxfp4 = @import("../triton_mxfp4.zig");
@@ -27,8 +28,9 @@ pub const Inputs = struct {
 
 /// The kernels are tuned for the DeepSeek V4.1 expert geometry, shared by the
 /// main MoE and the D-Spark drafter. Expert count and top-k are parameters.
-pub fn isSupported(hidden: i64, intermediate: i64) bool {
-    return hidden == 5120 and intermediate == 2304;
+pub fn validateShapes(hidden: i64, intermediate: i64) void {
+    stdx.debug.assert(hidden == 5120, "cute_mxfp4 backend expects hidden dimension to be 5120, got {}", .{hidden});
+    stdx.debug.assert(intermediate == 2304, "cute_mxfp4 backend expects intermediate dimension to be 2304, got {}", .{intermediate});
 }
 
 /// Route each token/top-k pair to its own one-row group instead of grouping
@@ -113,7 +115,6 @@ pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: 
 /// `forward` with an explicit GEMM tile N, for tuning. `null` selects it from
 /// the batch size.
 pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs, tile_n: ?i64) zml.Tensor {
-    if (!isSupported(hidden, intermediate)) @panic("unsupported SM100 CuTe MoE shape");
     const n = tile_n orelse tileN(tokens, experts, topk);
     const direct = isDirect(tokens);
     const routing = route(tokens, hidden, intermediate, experts, topk, n, direct, a.ids);
