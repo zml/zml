@@ -410,10 +410,10 @@ pub fn testLayer(
     platform: *const zml.Platform,
     layer: anytype,
     comptime func: std.meta.DeclEnum(@TypeOf(layer)),
-    activation_store: zml.io.TensorStore.View,
+    activation_store: *zml.io.TensorStore,
     name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    shardings: []const *const zml.Sharding,
+    shardings: []const zml.Sharding,
     opts: CompareOpts,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -429,14 +429,16 @@ pub fn testLayer(
         index: usize = 0,
     };
 
+    const activation_store_view = activation_store.view();
+
     const input_name = try std.fmt.allocPrint(arena.allocator(), "{s}.in", .{name});
     const input_count = zml.meta.count(zml.Tensor, &args);
-    const expected_input_count = countWithPrefix(activation_store, input_name);
+    const expected_input_count = countWithPrefix(activation_store_view, input_name);
     if (input_count != expected_input_count) {
         log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ expected_input_count, input_count });
     }
 
-    const store_input = activation_store.withPrefix(input_name);
+    const store_input = activation_store_view.withPrefix(input_name);
     var ctx = LocalContext{ .activation_store = store_input };
     try zml.meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *zml.Tensor) !void {
@@ -453,7 +455,7 @@ pub fn testLayer(
 
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});
     const output_count = exe.output_shapes.len;
-    const store_output = activation_store.withPrefix(output_name);
+    const store_output = activation_store_view.withPrefix(output_name);
     const expected_output_count = countWithPrefix(store_output, output_name);
     if (output_count != expected_output_count) {
         log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ expected_output_count, output_count });
@@ -465,12 +467,14 @@ pub fn testLayer(
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, activation_store.store, .auto);
-    defer zml.meta.visit(struct {
-        fn cb(_: void, b: *zml.Buffer) void {
-            b.deinit();
-        }
-    }.cb, {}, &args_buffers);
+    var args_buffers = try zml.mem.bufferize(allocator, @TypeOf(args), &args);
+    // errdefer unloadBuffers(&args_buffers);
+
+    var loader: zml.io.Loader = try .init(allocator, platform, .default);
+    errdefer loader.deinit();
+
+    try loader.load(io, ArgsT, &args, &args_buffers, activation_store, &.{}, .{});
+    try loader.await(io);
 
     exe_args.set(.{ layer_weights, args_buffers });
 

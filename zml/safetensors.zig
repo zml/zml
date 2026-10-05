@@ -751,6 +751,7 @@ const Metadata = union(enum) {
 
 fn stringToDtype(safetensor_type: []const u8) !DataType {
     const map = std.StaticStringMap(DataType).initComptime(.{
+        .{ "C64", .c64 },
         .{ "F64", .f64 },
         .{ "F32", .f32 },
         .{ "F16", .f16 },
