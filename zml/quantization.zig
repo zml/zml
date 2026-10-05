@@ -3,6 +3,8 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
+const zml = @import("zml.zig");
+
 const DataType = @import("dtype.zig").DataType;
 const platform_mod = @import("platform.zig");
 const Platform = platform_mod.Platform;
@@ -109,10 +111,19 @@ pub const QuantizedInput = struct {
     values: Tensor,
     scales: Tensor,
     global_scale: ?Tensor,
+
+    pub fn reuseBuffer(self: QuantizedInput, other: QuantizedInput) QuantizedInput {
+        return .{
+            .values = self.values.reuseBuffer(other.values),
+            .scales = self.scales.reuseBuffer(other.scales),
+            .global_scale = if (self.global_scale != null and other.global_scale != null) self.global_scale.?.reuseBuffer(other.global_scale.?) else self.global_scale,
+        };
+    }
 };
 
 pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag, platform: *const Platform) ?QuantizedInput {
     const global_scale: ?Tensor = if (quantization.input_scale) |scale| scale.asMultiplier() else null;
+
     return switch (quantization.scheme) {
         .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input.convert(.bf16), global_scale, axis) else null,
         .fp8_block32, .fp8_block128 => blk: {
@@ -125,6 +136,7 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
                 } else return null,
                 else => return null,
             };
+
             break :blk switch (quantization.scheme) {
                 .fp8_block32 => quantizeBlockFp8(input, axis, 32, dtype, .f8e8m0),
                 .fp8_block128 => quantizeBlockFp8(input.convert(.bf16), axis, 128, dtype, .f32),
@@ -133,6 +145,45 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
         },
         .mxfp8, .mxfp4, .fp8_per_channel, .fp8_per_tensor => null,
     };
+}
+
+pub fn quantizeMxfp4(x: Tensor, axis: anytype) QuantizedInput {
+    stdx.debug.assert(@mod(x.dim(axis), mx_block_size) == 0, "MXFP4 activation width must be divisible by {}, got {f}", .{ mx_block_size, x.shape() });
+
+    const grouped = x.convert(.f32).splitAxis(axis, .{ .mx_ks = -1, .mx_block = mx_block_size });
+    const raw_scale = grouped.abs().max(.mx_block).maximum(.scalar(6 * 0x1p-126, .f32)).scale(1.0 / 6.0);
+    const scales = ceilPowerOfTwo(raw_scale);
+
+    return .{
+        .values = grouped.div(scales.broad(grouped.shape()))
+            .clamp(.scalar(-6, .f32), .scalar(6, .f32))
+            .convert(.f4e2m1)
+            .reshape(x.shape().withDtype(.f4e2m1)),
+        .scales = scales.reshape(x.shape().setDim(axis, @divExact(x.dim(axis), mx_block_size)).withDtype(.f32)).convert(.f8e8m0),
+        .global_scale = null,
+    };
+}
+
+pub fn quantizeMxfp8(x: Tensor, axis: anytype) QuantizedInput {
+    const platform = zml.Compiler.current().platform;
+
+    const dtype: ?DataType = switch (platform.target) {
+        .cuda, .cpu, .tpu => .f8e4m3fn,
+        .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
+            .cdna4, .rdna4 => .f8e4m3fn,
+            .cdna3 => .f8e4m3fnuz,
+            .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => null,
+        } else null,
+        else => null,
+    };
+
+    if (dtype == null) std.debug.panic("MXFP8 is not supported on {}", .{platform.target});
+    return quantizeBlockFp8(x, axis, mx_block_size, dtype.?, .f8e8m0);
+}
+
+fn ceilPowerOfTwo(raw_scale: Tensor) Tensor {
+    const bits = raw_scale.bitCast(.u32);
+    return bits.addConstant(0x7fffff).logical(.AND, .scalar(0xff800000, .u32)).bitCast(.f32);
 }
 
 /// Quantize activation blocks, preserving the input's axes.
@@ -155,10 +206,7 @@ pub fn quantizeBlockFp8(x: Tensor, axis: anytype, block_size: i64, dtype: DataTy
             .max(.fp8_block),
         .f8e8m0 => blk: {
             const raw_scale = grouped.abs().maximum(.scalar(1e-4, .f32)).scale(1.0 / fp8_max).max(.fp8_block);
-            // Round a positive F32 scale up to a power of two. Adding all
-            // mantissa bits carries into the exponent iff the mantissa is nonzero.
-            const bits = raw_scale.bitCast(.u32);
-            break :blk bits.addConstant(0x7fffff).logical(.AND, .scalar(0xff800000, .u32)).bitCast(.f32);
+            break :blk ceilPowerOfTwo(raw_scale);
         },
         else => stdx.debug.panic("expected F32 or E8M0 scale dtype, got {s}", .{@tagName(scale_dtype)}),
     };
@@ -363,7 +411,6 @@ test "Quantization.Scheme.classify" {
 }
 
 test "block FP8 quantization preserves axes and reconstructs constant blocks in FN and FNUZ" {
-    const zml = @import("zml.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = zml.testing.env();
@@ -409,7 +456,6 @@ test "block FP8 quantization preserves axes and reconstructs constant blocks in 
 }
 
 test "block FP8 E8M0 scales preserve power-of-two boundaries and nonminor axes" {
-    const zml = @import("zml.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = zml.testing.env();
