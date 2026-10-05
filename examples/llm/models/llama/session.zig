@@ -14,7 +14,6 @@ pub const Session = struct {
     decode: inference.KernelRunner,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
     token_index_buffers: []zml.Buffer,
-    kv_cache_index_buffers: []zml.Buffer,
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
     tokenizer: zml.tokenizer.Tokenizer,
     config: *const model.Config,
@@ -53,15 +52,6 @@ pub const Session = struct {
         var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-        const kv_cache_index_buffers = try allocator.alloc(zml.Buffer, model_buffers.model.layers.len);
-        errdefer allocator.free(kv_cache_index_buffers);
-        var initialized_kv_cache_index_buffers: usize = 0;
-        errdefer for (kv_cache_index_buffers[0..initialized_kv_cache_index_buffers]) |*buffer| buffer.deinit();
-        for (kv_cache_index_buffers, 0..) |*buffer, i| {
-            buffer.* = try .scalar(io, platform, i, .u32);
-            initialized_kv_cache_index_buffers = i + 1;
-        }
-
         var prefill = try inference.KernelRunner.init(allocator, &compiled_model.prefill, model_buffers);
         errdefer prefill.deinit(allocator);
         const decode = try inference.KernelRunner.init(allocator, &compiled_model.decode, model_buffers);
@@ -75,7 +65,6 @@ pub const Session = struct {
             .decode = decode,
             .kv_cache_buffers = kv_cache_buffers,
             .token_index_buffers = token_index_buffers,
-            .kv_cache_index_buffers = kv_cache_index_buffers,
             .rng_buffers = rng_buffers,
             .tokenizer = tokenizer,
             .config = &compiled_model.loaded_model.parsed_config.value,
@@ -92,8 +81,6 @@ pub const Session = struct {
             token_index_buffer.deinit();
         }
         self.allocator.free(self.token_index_buffers);
-        for (self.kv_cache_index_buffers) |*buffer| buffer.deinit();
-        self.allocator.free(self.kv_cache_index_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
     }
 
@@ -173,7 +160,7 @@ pub const Session = struct {
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
             .attention_metadata_buffers = &attention_metadata_buffers,
-        }, self.kv_cache_index_buffers);
+        });
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
 
         self.last_generated_token = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
@@ -217,7 +204,7 @@ pub const Session = struct {
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
                 .attention_metadata_buffers = &attention_metadata_buffers,
-            }, self.kv_cache_index_buffers);
+            });
             last_token_id = try current_token_buffer.getValue(u32, self.io);
         }
 
