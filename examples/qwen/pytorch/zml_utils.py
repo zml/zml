@@ -21,6 +21,7 @@ import torch
 
 log = logging.getLogger(__name__)
 
+
 class ActivationCollector:
     """Wrap a given torch.nn.Module and collect all its intermediary activations.
 
@@ -43,11 +44,13 @@ class ActivationCollector:
         self,
         model,
         *,
+        skip: int = 0,
         max_layers: int = -1,
         stop_after_first_step: bool = False,
         blacklist_regexes: list[str] = [r".*\.(\d\d+)\.", r".*\.[1-9]\."],
     ):
         self.model = model
+        self.skip = skip
         self.max_layers = max_layers
         self.stop_after_first_step = stop_after_first_step
         self.blacklist_regexes = blacklist_regexes
@@ -92,8 +95,8 @@ class ActivationCollector:
             for idx, out in enumerate(outputs):
                 tensors[f"{name}.out.{idx}"] = out
 
-        for k, v in tensors.items():
-            print(k, "->", v.shape)
+        for i, (k, v) in enumerate(tensors.items()):
+            print(f"{i + self.skip}:", k, "->", v.shape)
 
         return res, tensors
 
@@ -101,7 +104,9 @@ class ActivationCollector:
         name, prev_out, prev_in = self.outs.get(id(module), (None, None, None))
 
         if self.stop_after_first_step and prev_out is not None:
-            print(f"stopping collection cause {name} was already recorded or stop_after_first_step was set to `True`")
+            print(
+                f"stopping collection cause {name} was already recorded or stop_after_first_step was set to `True`"
+            )
             raise ActivationCollector.CollectionOver()
 
         if prev_out is None:
@@ -119,7 +124,8 @@ class ActivationCollector:
         kwargs = inspect.stack()[1].frame.f_locals["kwargs"]
         extra_inputs = [i.detach().cpu() for i in _flatten(kwargs)]
 
-        self.outs[id(module)] = (name, outs, inputs + extra_inputs)
+        if self.skip < self.count < self.max_layers:
+            self.outs[id(module)] = (name, outs, inputs + extra_inputs)
         if 0 < self.max_layers < self.count:
             print(f"stopping collection cause we got {self.count} activations already")
             raise ActivationCollector.CollectionOver()
