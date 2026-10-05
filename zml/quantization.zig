@@ -167,7 +167,7 @@ pub fn quantizeMxfp4(x: Tensor, axis: anytype) QuantizedInput {
 pub fn quantizeMxfp8(x: Tensor, axis: anytype) QuantizedInput {
     const platform = zml.Compiler.current().platform;
 
-    const dtype: DataType = switch (platform.target) {
+    const dtype: ?DataType = switch (platform.target) {
         .cuda => .f8e4m3fn,
         .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
             .cdna4, .rdna4 => .f8e4m3fn,
@@ -176,7 +176,9 @@ pub fn quantizeMxfp8(x: Tensor, axis: anytype) QuantizedInput {
         } else return null,
         else => return null,
     };
-    return quantizeBlockFp8(x, axis, mx_block_size, dtype, .f8e8m0);
+
+    if (dtype == null) std.debug.panic("Nvfp4 not supported on {}", .{platform.target});
+    return quantizeBlockFp8(x, axis, mx_block_size, dtype.?, .f8e8m0);
 }
 
 fn ceilPowerOfTwo(raw_scale: Tensor) Tensor {
