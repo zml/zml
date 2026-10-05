@@ -93,6 +93,15 @@ bool Mapping(Attribute a) {
 }
 
 bool Tensor(Type t) { return isa<LogicalType, MappedType>(t); }
+bool ScalarI32(Type t) {
+  auto l = dyn_cast<LogicalType>(t);
+  return l && l.getAxes().empty() && l.getElementType().isInteger(32);
+}
+bool LoopIndex(Value v) {
+  auto arg = dyn_cast<BlockArgument>(v);
+  return arg && arg.getArgNumber() == 0 &&
+         isa_and_nonnull<GraphForOp>(arg.getOwner()->getParentOp());
+}
 
 LogicalResult Keys(Error error, DictionaryAttr d,
                    llvm::ArrayRef<llvm::StringRef> keys) {
@@ -241,7 +250,7 @@ LogicalResult VeOpcodeAttr::verify(Error e, llvm::StringRef v) {
 }
 
 LogicalResult ReduceModeAttr::verify(Error e, llvm::StringRef v) {
-  return Enum(e, v, {"Addi", "Addf", "Maxi", "Maxf", "Mini", "Minf"});
+  return Enum(e, v, {"Addi", "Addf", "Maxi", "Maxf", "Mini", "Minf", "Cumsum"});
 }
 
 LogicalResult PredicateAttr::verify(Error e, llvm::StringRef v) {
@@ -377,6 +386,19 @@ LogicalResult VerifyGraph(Operation* op, DictionaryAttr options) {
   } else if (n == "vector") {
     min = max = 0;
     fields = {"values", "repeat_to"};
+  } else if (n == "index_read") {
+    min = max = 2;
+  } else if (n == "index_write") {
+    min = max = 3;
+  } else if (n == "scratchpad") {
+    min = max = 0;
+  } else if (n == "full") {
+    min = max = 0;
+    fields = {"value"};
+  } else if (n == "sym_expr") {
+    min = 0;
+    max = -1;
+    fields = {"expr"};
   }
   if (op->getNumOperands() < min || (max >= 0 && op->getNumOperands() > max) ||
       op->getNumResults() != results)
@@ -396,6 +418,8 @@ LogicalResult VerifyGraph(Operation* op, DictionaryAttr options) {
       ok = Axis(v);
     else if (k == "axes")
       ok = Axes(v);
+    else if (k == "value")
+      ok = Number(v);
     else if (k == "values") {
       auto a = dyn_cast<ArrayAttr>(v);
       ok = a && !a.empty() && llvm::all_of(a, Number);
@@ -406,7 +430,8 @@ LogicalResult VerifyGraph(Operation* op, DictionaryAttr options) {
     if (!ok) return e() << "invalid field " << k;
   }
   for (auto k : fields) {
-    bool required = llvm::is_contained({"axis", "offset", "end", "values"}, k);
+    bool required =
+        llvm::is_contained({"axis", "offset", "end", "values", "expr", "value"}, k);
     if (required && !options.get(k))
       return e() << "missing required field " << k;
   }
@@ -416,6 +441,39 @@ LogicalResult VerifyGraph(Operation* op, DictionaryAttr options) {
   if (n == "as_dram" && (!isa<LogicalType>(op->getOperand(0).getType()) ||
                          !isa<MappedType>(op->getResult(0).getType())))
     return e() << "as_dram requires logical -> mapped";
+  if (n == "index_read" || n == "index_write") {
+    if (!LoopIndex(op->getOperand(1)))
+      return e() << "requires the index of an enclosing loop";
+    auto table = dyn_cast<LogicalType>(op->getOperand(0).getType());
+    auto slice = dyn_cast<LogicalType>(
+        (n == "index_read" ? op->getResult(0) : op->getOperand(2)).getType());
+    if (!table || !slice || table.getAxes().empty() ||
+        table.getElementType() != slice.getElementType() ||
+        table.getAxes().getValue().drop_front() != slice.getAxes().getValue())
+      return e() << "slice must be the table without its outermost axis";
+    if (n == "index_write" &&
+        (op->getResult(0).getType() != table || !op->getOperand(0).hasOneUse()))
+      return e() << "writes in place: the table must have no other use";
+  }
+  if ((n == "reduce_max_i32" || n == "sym_expr") &&
+      !ScalarI32(op->getResult(0).getType()))
+    return e() << "requires a scalar i32 result";
+  if (n == "sym_expr") {
+    for (Value v : op->getOperands())
+      if (!ScalarI32(v.getType()))
+        return e() << "requires scalar i32 operands";
+    llvm::SmallVector<Attribute> pending{options.get("expr")};
+    while (!pending.empty()) {
+      auto x = dyn_cast<ExprAttr>(pending.pop_back_val());
+      if (!x) continue;
+      if (x.getKind() == "arg") {
+        if (cast<IntegerAttr>(x.getArgs()[0]).getInt() >= op->getNumOperands())
+          return e() << "expression operand out of range";
+        continue;
+      }
+      pending.append(x.getArgs().begin(), x.getArgs().end());
+    }
+  }
   return success();
 }
 }  // namespace
@@ -555,6 +613,19 @@ LogicalResult VeReduceOp::verify() {
   if (failed(InKernel(*this)) ||
       failed(CheckAxes([&] { return emitOpError(); }, getAxes())))
     return failure();
+  // An integer cumulative sum runs along its axes and keeps them.
+  if (getMode().getValue() == "Cumsum") {
+    if (getAxes().empty() ||
+        getInput().getType().getAxes() != getOutput().getType().getAxes() ||
+        !llvm::all_of(getAxes(),
+                      [&](Attribute a) {
+                        return llvm::is_contained(
+                            getInput().getType().getAxes(), a);
+                      }) ||
+        !getInput().getType().getElementType().isInteger(32))
+      return emitOpError("cumsum keeps the axes of an i32 value");
+    return success();
+  }
   llvm::SmallVector<Attribute> remaining;
   for (Attribute a : getInput().getType().getAxes())
     if (!llvm::is_contained(getAxes(), a)) remaining.push_back(a);
@@ -652,6 +723,58 @@ LogicalResult GraphAsLogicalOp::verify() {
 
 LogicalResult GraphAsDramOp::verify() {
   return VerifyGraph(*this, getOptions());
+}
+
+LogicalResult GraphIndexReadOp::verify() {
+  return VerifyGraph(*this, getOptions());
+}
+
+LogicalResult GraphIndexWriteOp::verify() {
+  return VerifyGraph(*this, getOptions());
+}
+
+LogicalResult GraphScratchpadOp::verify() {
+  return VerifyGraph(*this, getOptions());
+}
+
+LogicalResult GraphFullOp::verify() {
+  return VerifyGraph(*this, getOptions());
+}
+
+LogicalResult GraphReduceMaxI32Op::verify() {
+  return VerifyGraph(*this, getOptions());
+}
+
+LogicalResult GraphSymExprOp::verify() {
+  return VerifyGraph(*this, getOptions());
+}
+
+LogicalResult GraphForOp::verify() {
+  if (!getLimit() == !getBound())
+    return emitOpError("requires exactly one of a limit tensor or a bound");
+  if (getLimit() && !ScalarI32(getLimit().getType()))
+    return emitOpError("limit must be a scalar i32 tensor");
+  if (auto bound = getBoundAttr()) {
+    auto n = dyn_cast<IntegerAttr>(bound);
+    if (!Axis(bound) && !(n && Number(n) && n.getInt() > 0))
+      return emitOpError("bound must be a positive integer or an axis");
+  }
+  Block& body = getBody().front();
+  if (body.getNumArguments() != getInits().size() + 1 ||
+      !ScalarI32(body.getArgument(0).getType()))
+    return emitOpError("requires a scalar i32 index and one accumulator each");
+  auto yield = dyn_cast<GraphYieldOp>(body.getTerminator());
+  if (!yield) return emitOpError("requires a tcl.graph.yield terminator");
+  if (getOutputs().size() != getInits().size() ||
+      yield.getValues().size() != getInits().size())
+    return emitOpError("requires one result and one yield per accumulator");
+  for (auto [i, init] : llvm::enumerate(getInits())) {
+    Type t = init.getType();
+    if (!Tensor(t) || body.getArgument(i + 1).getType() != t ||
+        getOutputs()[i].getType() != t || yield.getValues()[i].getType() != t)
+      return emitOpError("accumulator ") << i << " changes type";
+  }
+  return success();
 }
 
 }  // namespace xla::furiosa::tcl

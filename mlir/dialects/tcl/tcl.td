@@ -139,6 +139,38 @@ def Tcl_GraphAsLogicalOp : Tcl_GraphOp<"as_logical">;
 
 def Tcl_GraphAsDramOp : Tcl_GraphOp<"as_dram">;
 
+// Loop-level graph constructs. `x[i]` reads and `acc[i] = v` writes the slice
+// of the outermost axis at the loop index; `sym_expr` evaluates an integer
+// expression (`#tcl.expr<arg, ...>` names its operands) on the device.
+def Tcl_GraphIndexReadOp : Tcl_GraphOp<"index_read">;
+
+def Tcl_GraphIndexWriteOp : Tcl_GraphOp<"index_write">;
+
+def Tcl_GraphScratchpadOp : Tcl_GraphOp<"scratchpad">;
+
+def Tcl_GraphFullOp : Tcl_GraphOp<"full">;
+
+def Tcl_GraphReduceMaxI32Op : Tcl_GraphOp<"reduce_max_i32">;
+
+def Tcl_GraphSymExprOp : Tcl_GraphOp<"sym_expr">;
+
+// `outputs = for i in 0..limit (acc = init, ...): body; yield ...;`. The limit
+// is a static bound (integer or axis) or a scalar i32 tensor computed in the
+// function. The block arguments are the loop index, then the accumulators.
+def Tcl_GraphForOp : Tcl_Op<"graph.for",
+    [AttrSizedOperandSegments, RecursiveMemoryEffects, SingleBlock]> {
+  let arguments = (ins Optional<AnyType>:$limit, Variadic<AnyType>:$inits,
+                       OptionalAttr<AnyAttr>:$bound);
+  let results = (outs Variadic<AnyType>:$outputs);
+  let regions = (region SizedRegion<1>:$body);
+  let hasVerifier = 1;
+}
+
+def Tcl_GraphYieldOp : Tcl_Op<"graph.yield",
+    [Pure, Terminator, HasParent<"GraphForOp">]> {
+  let arguments = (ins Variadic<AnyType>:$values);
+}
+
 def Tcl_KernelOp : Tcl_Op<"kernel", [MemoryEffects<[MemRead]>, SingleBlock]> {
   let arguments = (ins Variadic<AnyType>:$inputs, Tcl_Tactic:$tactic,
                        OptionalAttr<Tcl_Context>:$context);

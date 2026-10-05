@@ -83,6 +83,9 @@ def softmax_kernel(B: Axis = 2, D: Axis = 1024, S: Axis = 16, v0: [B, S, D]/bf16
 | `commit.typecast(v, tcl.bf16)` / `commit.permute` | `op.commit(v, .{ .dtype = .bf16, .axes = ... })`   |
 | `tcl.reshape`, `transmute`, `concat`, `slice`  | `b.reshape`, `b.transmute`, `b.concat`, `b.slice`     |
 | `tcl.gather`, `scatter`, `arange`, `vector`, `all_gather` | `b.gather`, `b.scatter`, `b.arange`, `b.vector`, `b.allGather` |
+| `for i in tcl.range(0, n):` (carried `acc`)    | `var loop = b.openFor(n, .{acc})` ... `try loop.yield(.{new_acc})`, then `loop.results` |
+| `x[i]`, `out[i] = v`, `tcl.scratchpad()`       | `b.indexRead(x, loop.iv)`, `b.indexWrite(out, loop.iv, v)`, `b.scratchpad` |
+| `core.reduce_max_i32(t)`, `core.eval_expr(...)` | `b.reduceMaxI32(t)`, `b.symExpr(.div, n, 64)`        |
 | `return out`                                   | `b.ret(&.{out})`                                      |
 
 * **Axes are static.** `b.axis(name, size)` declares `name: Axis = size`,
@@ -115,6 +118,46 @@ def softmax_kernel(B: Axis = 2, D: Axis = 1024, S: Axis = 16, v0: [B, S, D]/bf16
 * **Constant outputs.** `furiosa-tcc` 2026.3 fails ("No producer") on a
   function returning two input-independent tensors, such as `arange` and
   `vector`.
+* **Loops** run on the device. `x[i]` and `acc[i] = v` address the outermost
+  axis, and the body must index something with `i`: that bounds the trip
+  count. A dynamic trip count must be computed in the kernel (`reduceMaxI32`,
+  `symExpr`); one read straight from an argument adds a CPU node the plugin
+  rejects.
+
+## Good practices on RNGD
+
+The TCL CPU interpreter (`furiosa.torch.TclModule`) accepts several programs
+that compute garbage on the hardware: check kernels on RNGD.
+
+* **One VE stream per tensor operation.** Each instruction takes the previous
+  result and one side operand (a read or a constant). A select whose branches
+  are both constants must test the operation's first read.
+* **Outer broadcasts** (`[B, H, V] * [B, H, K]` to `[B, H, V, K]`, tactic
+  `EinsumByVe`) need a shared leading axis, and the read with more axes first.
+* **Contraction epilogues** read their extra tensors before the contraction
+  and combine the contraction result first: `contract(q, k).addf(bias)`.
+* **Conversions.** `typecast_to` converts floats only; `toFp(n)` of an i32
+  yields `x / 2^31` whatever `n`.
+* **Update caches in place.** `scatter(rows, idx, axis, .{ .init = cache })`
+  on a kernel argument shares its buffer with the result (a whole-cache copy
+  otherwise), so return it as an aliased output.
+* **Few axes, few operations.** tcc's tactic search grows with the number and
+  extents of axes, and more than linearly with the number of operations in a
+  function: merge axes before contractions (`[N, H, G*Q, C]`, not
+  `[N, H, G, Q, P, C]`) and set `.lowering_mode = "Heuristic"` above a few
+  tokens.
+* **Prefer one-shot graphs to hand-written online softmax.** Furiosa's
+  production attention gathers the context, contracts, masks with a select,
+  runs the softmax as one `ReduceByVe` and contracts again; gathers take
+  `valid_length` to skip padding, and padding indices are spread
+  (`idx | (pos % n)`) rather than all pointing at one row.
+* **Furiosa's kernels** in the SDK (`furiosa/kernels/`) are the reference for
+  layouts, tile sizes and compiler configs: `common/attention.py` (attention
+  and decode/prefill configs), `common/topk.py` and
+  `common/blockwise_moe_index.py` (routing on the device),
+  `qwen3_moe/optimized/` (blockwise MoE for prefill, activation-stationary MoE
+  for decode), `exaone_moe/k_exaone_w4fa16kv16/flash_attention.py` (chunked
+  softmax over a dynamic trip count).
 
 ## The custom call
 
