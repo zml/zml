@@ -3,6 +3,8 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
+const zml = @import("zml.zig");
+
 const DataType = @import("dtype.zig").DataType;
 const platform_mod = @import("platform.zig");
 const Platform = platform_mod.Platform;
@@ -162,7 +164,9 @@ pub fn quantizeMxfp4(x: Tensor, axis: anytype) QuantizedInput {
     };
 }
 
-pub fn quantizeMxfp8(x: Tensor, axis: anytype, platform: *const Platform) QuantizedInput {
+pub fn quantizeMxfp8(x: Tensor, axis: anytype) QuantizedInput {
+    const platform = zml.Compiler.current().platform;
+
     const dtype: DataType = switch (platform.target) {
         .cuda => .f8e4m3fn,
         .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
@@ -405,7 +409,6 @@ test "Quantization.Scheme.classify" {
 }
 
 test "block FP8 quantization preserves axes and reconstructs constant blocks in FN and FNUZ" {
-    const zml = @import("zml.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = zml.testing.env();
@@ -448,7 +451,6 @@ test "block FP8 quantization preserves axes and reconstructs constant blocks in 
 }
 
 test "block FP8 E8M0 scales preserve power-of-two boundaries and nonminor axes" {
-    const zml = @import("zml.zig");
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = zml.testing.env();
