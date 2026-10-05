@@ -52,6 +52,8 @@ pub const ReduceMode = enum {
     maxf,
     mini,
     minf,
+    /// A running i32 sum that keeps its axes.
+    cumsum,
 
     pub fn name(self: ReduceMode) []const u8 {
         return switch (self) {
@@ -61,6 +63,7 @@ pub const ReduceMode = enum {
             .maxf => "Maxf",
             .mini => "Mini",
             .minf => "Minf",
+            .cumsum => "Cumsum",
         };
     }
 };
@@ -237,7 +240,7 @@ pub fn write(ctx: *mlir.Context, input: *const mlir.Value, location: *const mlir
     });
 }
 
-pub const GraphOp = enum { gather, all_gather, scatter, reshape, transmute, concat, slice, arange, vector, as_logical, as_dram };
+pub const GraphOp = enum { gather, all_gather, scatter, reshape, transmute, concat, slice, arange, vector, as_logical, as_dram, index_read, index_write, scratchpad, full, reduce_max_i32, sym_expr };
 
 /// `tcl.graph.<op>`: a graph-level TCL operation whose fields go in `options`.
 pub fn graph(ctx: *mlir.Context, comptime op: GraphOp, inputs: []const *const mlir.Value, output: *const mlir.Type, options: []const mlir.NamedAttribute, context_: ?*const mlir.Attribute, location: *const mlir.Location) *mlir.Operation {
@@ -248,6 +251,31 @@ pub fn graph(ctx: *mlir.Context, comptime op: GraphOp, inputs: []const *const ml
         .operands = .{ .flat = inputs },
         .results = .{ .flat = &.{output} },
         .attributes = attrs[0 .. @as(usize, 1) + @intFromBool(context_ != null)],
+        .verify = false,
+        .location = location,
+    });
+}
+
+/// `tcl.graph.for`: runs `body` up to `limit` (a scalar i32 tensor) or `bound`
+/// (an integer or axis attribute) times. The body's arguments are the index,
+/// then one accumulator per `inits`; it ends with `tcl.graph.yield`.
+pub fn loop(ctx: *mlir.Context, limit: ?*const mlir.Value, bound: ?*const mlir.Attribute, inits: []const *const mlir.Value, result_types: []const *const mlir.Type, body: *mlir.Block, location: *const mlir.Location) *mlir.Operation {
+    const limits: []const *const mlir.Value = if (limit) |l| &.{l} else &.{};
+    var attrs: [1]mlir.NamedAttribute = undefined;
+    if (bound) |b| attrs[0] = .named(ctx, "bound", b);
+    return mlir.Operation.make(ctx, "tcl.graph.for", .{
+        .operands = .{ .variadic = &.{ limits, inits } },
+        .results = .{ .flat = result_types },
+        .attributes = attrs[0..@intFromBool(bound != null)],
+        .blocks = &.{body},
+        .verify = false,
+        .location = location,
+    });
+}
+
+pub fn yield(ctx: *mlir.Context, values: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "tcl.graph.yield", .{
+        .operands = .{ .flat = values },
         .verify = false,
         .location = location,
     });
