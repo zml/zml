@@ -799,10 +799,18 @@ pub const tcl = struct {
             }
 
             fn check(t: tcl_builder.Tensor, s: Shape, field: []const u8) void {
-                var same = from(s.dtype()) == t.dtype and s.rank() == t.axes.len;
-                if (same) for (t.axes, 0..) |a, i| {
-                    same = same and a.size == s.dim(i);
-                };
+                var same = from(s.dtype()) == t.dtype;
+                if (t.shards > 1) {
+                    // A partition holds one chip's share of a chip-split DRAM tensor.
+                    var n: i64 = 1;
+                    for (t.axes) |a| n *= a.size;
+                    same = same and n == @as(i64, @intCast(s.count())) * t.shards;
+                } else {
+                    same = same and s.rank() == t.axes.len;
+                    if (same) for (t.axes, 0..) |a, i| {
+                        same = same and a.size == s.dim(i);
+                    };
+                }
 
                 if (!same) std.debug.panic("zml.kernel.tcl.Kernel({s}): {s} is {f}, the TCL function has {s} over {d} axes", .{ name, field, s, @tagName(t.dtype), t.axes.len });
             }
@@ -1288,4 +1296,57 @@ test "cuda_tile kernel emits a module XLA can parse" {
     try std.testing.expect(std.mem.indexOf(u8, ir, "entry @add_one(") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "load_view_tko") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "store_view_tko") != null);
+}
+
+/// exp over a tensor split across two chips in one launch, returning the
+/// split result and its all_gather.
+const TclSplitExp = struct {
+    const Cfg = struct {};
+    const K = tcl.Kernel(Cfg, .{ .name = "split_exp", .inputs = &.{"x"}, .outputs = &.{ "y", "all" }, .run = run });
+    fn run(b: *tcl.Builder, _: Cfg) tcl.FinishError!void {
+        const C = b.axis("C", 2);
+        const A = b.axis("A", 1024);
+        const t = try b.declareArgs(.{ .x = .{ .dtype = .f32, .axes = &.{ C, A }, .dram = tcl.Dram{ .chip = &.{.{ .axis = C }} } } });
+        const op = b.tensorOperation(.{ .context = .{ .layout = .{ .chip = .{ .axis = C } } } });
+        const local = try op.commit(op.fetch(t.x, .{}).exp(), .{});
+        const all = try b.allGather(local, C, .{});
+        b.ret(&.{ try b.asDram(local, .{ .chip = &.{.{ .axis = C }} }), try b.asDram(all, .{}) });
+    }
+    // manualComputation keeps the returned slice.
+    var outs: [2]Tensor = undefined;
+    fn body(ctx: struct { x: Tensor }, shapes: []const Shape) []const Tensor {
+        const r = K.call(.{ .x = ctx.x }, .{ .y = shapes[0], .all = shapes[1] }, .{ .cfg = .{} });
+        outs = .{ r.y, r.all };
+        return &outs;
+    }
+};
+
+// Needs XLA_FURIOSA_VISIBLE_DEVICES=0,1.
+test "tcl multi-chip kernels run on two furiosa chips" {
+    const zml = @import("zml.zig");
+    const allocator = std.testing.allocator;
+    const platform = zml.testing.env();
+    if (platform.target != .furiosa or platform.devices.len != 2) return error.SkipZigTest;
+    const model = platform.shardings.get("model").?;
+    const x_shape = Shape.init(.{ .c = 2, .a = 1024 }, .f32).withPartitioning(.{ .c = .model });
+    const Mod = struct {
+        pub fn forward(x: Tensor) [2]Tensor {
+            const r = zml.ops.manualComputation(TclSplitExp.body, .{ .x = x }, .{ x.shape(), Shape.init(.{ .c = 2, .a = 1024 }, .f32) });
+            return .{ r[0], r[1] };
+        }
+    };
+    const x: Tensor = .fromShape(x_shape);
+    var exe = try zml.module.compile(allocator, std.testing.io, Mod.forward, .{x}, platform, .{ .shardings = &.{model} });
+    defer exe.deinit();
+    var hx: [2 * 1024]f32 = undefined;
+    for (&hx, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 13)) * 0.125 - 0.5;
+    var bx: zml.Buffer = try .fromBytes(std.testing.io, platform, x_shape, model, std.mem.sliceAsBytes(&hx));
+    defer bx.deinit();
+    var res = try zml.testing.autoCall(allocator, std.testing.io, &exe, Mod.forward, .{bx});
+    defer for (&res) |*r| r.deinit();
+    for (res) |r| {
+        var host = try r.toSliceAlloc(allocator, std.testing.io);
+        defer host.free(allocator);
+        for (host.items(f32), 0..) |v, i| try std.testing.expectApproxEqRel(@exp(hx[i]), v, 1e-4);
+    }
 }

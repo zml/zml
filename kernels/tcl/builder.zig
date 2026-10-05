@@ -62,12 +62,26 @@ pub const Expr = union(enum) {
 };
 
 /// `dram(chip | inner)/T`: a tensor in an explicit DRAM mapping, Python's
-/// `tcl.Dram[T, chip, inner, tcl.original[...]]`. `inner` defaults to the
-/// tensor's axes.
+/// `tcl.Dram[T, chip, inner, tcl.original[...]]`. `chip` is `.broadcast`
+/// (a copy per chip) or the axes split across chips; `inner` defaults to the
+/// tensor's other axes.
 pub const Dram = struct {
     chip: []const Expr = &.{.broadcast},
     inner: ?[]const Expr = null,
     original: []const Axis = &.{},
+
+    fn shards(self: Dram) i64 {
+        var n: i64 = 1;
+        for (self.chip) |e| if (e == .axis) {
+            n *= e.axis.size;
+        };
+        return n;
+    }
+
+    fn isChipAxis(self: Dram, a: Axis) bool {
+        for (self.chip) |e| if (e == .axis and std.mem.eql(u8, e.axis.name, a.name)) return true;
+        return false;
+    }
 };
 
 /// `@ context(operator = {...}, heuristic_hint = {...})`, Python's
@@ -162,6 +176,9 @@ pub const Tensor = struct {
     inner: *const mlir.Value,
     dtype: DType,
     axes: []const Axis,
+    /// Chips a DRAM tensor is split across: each SPMD partition holds
+    /// 1/shards of it.
+    shards: i64 = 1,
 };
 
 /// A value inside a tensor operation (`%N` in TCL): the result of a read,
@@ -644,8 +661,8 @@ pub const Builder = struct {
     }
 
     /// One field per argument: `.{ .x = .{ .dtype = .bf16, .axes = &.{ M, K } } }`.
-    /// With `.dram = .{...}` the argument is DRAM-mapped and the field is
-    /// its `as_logical` view.
+    /// With `.dram = Dram{...}` (or `.{}`) the argument is DRAM-mapped and the
+    /// field is its `as_logical` view.
     pub fn declareArgs(self: *Builder, spec: anytype) FinishError!ArgsOf(@TypeOf(spec)) {
         std.debug.assert(self.entry == null);
         const fields = @typeInfo(@TypeOf(spec)).@"struct".fields;
@@ -656,9 +673,10 @@ pub const Builder = struct {
         inline for (fields, 0..) |f, i| {
             const s = @field(spec, f.name);
             const axes = self.dupeAxes(s.axes);
-            types[i] = if (@hasField(@TypeOf(s), "dram")) self.mappedType(s.dtype, axes, toDram(s.dram)) else self.logicalType(s.dtype, axes);
+            const dram: ?Dram = if (@hasField(@TypeOf(s), "dram")) toDram(s.dram) else null;
+            types[i] = if (dram) |d| self.mappedType(s.dtype, axes, d) else self.logicalType(s.dtype, axes);
             locs[i] = self.loc();
-            args[i] = .{ .inner = undefined, .dtype = s.dtype, .axes = axes };
+            args[i] = .{ .inner = undefined, .dtype = s.dtype, .axes = axes, .shards = if (dram) |d| d.shards() else 1 };
         }
         const entry = mlir.Block.init(&types, &locs);
         // In place from the start: the kernel verifier walks to its inputs'
@@ -809,7 +827,7 @@ pub const Builder = struct {
     /// `as_dram(t)`: `t` in the DRAM mapping `dram`, to return it as such.
     pub fn asDram(self: *Builder, t: Tensor, dram: Dram) FinishError!Tensor {
         const out = try self.graphOp(.as_dram, &.{t.inner}, self.mappedType(t.dtype, t.axes, dram), &.{}, null);
-        return .{ .inner = out, .dtype = t.dtype, .axes = t.axes };
+        return .{ .inner = out, .dtype = t.dtype, .axes = t.axes, .shards = dram.shards() };
     }
 
     /// Any `tcl.graph.*` operation; `options` are its TCL keyword fields.
@@ -972,7 +990,11 @@ pub const Builder = struct {
 
     fn mappedType(self: *Builder, dtype: DType, axes: []const Axis, dram: Dram) *const mlir.Type {
         for (axes) |a| _ = self.axis(a.name, a.size);
-        const inner = if (dram.inner) |e| self.exprAttrs(e) else self.axisAttrs(axes);
+        const inner = if (dram.inner) |e| self.exprAttrs(e) else blk: {
+            var rest: std.ArrayList(Axis) = .empty;
+            for (axes) |a| if (!dram.isChipAxis(a)) rest.append(self.arena.allocator(), a) catch @panic("OOM");
+            break :blk self.axisAttrs(rest.items);
+        };
         const mapping = tcl.dramMapping(self.ctx, self.exprAttrs(dram.chip), inner, self.axisAttrs(dram.original)) catch
             std.debug.panic("tcl: {s}: invalid DRAM mapping", .{self.name});
         return tcl.mappedType(self.ctx, dtype.toMlir(self.ctx), mapping) catch unreachable;
@@ -1153,4 +1175,27 @@ test "composite axes, DRAM, fixed point, context, config and graph ops" {
     try expectContains(ir, "operator = {Chip = #tcl.expr<\"broadcast\", []>, Split = [#tcl.symbol<\"M\">]}");
     inline for (.{ "gather", "scatter", "arange", "vector", "transmute", "reshape", "as_dram" }) |g|
         try expectContains(ir, "\"tcl.graph." ++ g ++ "\"");
+}
+
+test "multi-chip kernel over chip-split DRAM tensors" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = try Builder.open(std.testing.allocator, ctx, "split_exp");
+    defer b.deinit();
+
+    const C = b.axis("C", 2);
+    const A = b.axis("A", 1024);
+    const t = try b.declareArgs(.{ .x = .{ .dtype = .f32, .axes = &.{ C, A }, .dram = Dram{ .chip = &.{.{ .axis = C }} } } });
+    try std.testing.expectEqual(2, t.x.shards);
+
+    const op = b.tensorOperation(.{ .context = .{ .layout = .{ .chip = .{ .axis = C } } } });
+    const local = try op.commit(op.fetch(t.x, .{}).exp(), .{});
+    const all = try b.allGather(local, C, .{});
+    b.ret(&.{ try b.asDram(local, .{ .chip = &.{.{ .axis = C }} }), try b.asDram(all, .{}) });
+
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "%arg0: !tcl.mapped<f32, <[#tcl.symbol<\"C\">], [#tcl.symbol<\"A\">], []>>");
+    try expectContains(ir, "operator = {Chip = #tcl.symbol<\"C\">}");
+    try expectContains(ir, "\"tcl.graph.all_gather\"");
 }
