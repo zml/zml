@@ -29,7 +29,8 @@ pub fn main(init: std.process.Init) !void {
     var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry);
     defer model_store.deinit();
 
-    const TRANSFORMER_BLOCK_COUNT: usize = 32;
+    // const TRANSFORMER_BLOCK_COUNT: usize = 32;
+    const TRANSFORMER_BLOCK_COUNT: usize = 1;
 
     const transformer_blocks: []TransformerBlock =
         try allocator.alloc(TransformerBlock, TRANSFORMER_BLOCK_COUNT);
@@ -51,9 +52,9 @@ pub fn main(init: std.process.Init) !void {
 
         const img_mlp_view = tb_layer_view.withPrefix("img_mlp");
         const img_mlp: Mlp = .{
-            .gate_layer = .init(img_mlp_view.createTensor("gate_layer.weight", .{ .dout, .d }, .replicated), null, .dout),
-            .out = .init(img_mlp_view.createTensor("out.weight", .{ .d, .dout }, .replicated), null, .d),
             .proj = .init(img_mlp_view.createTensor("proj.weight", .{ .dout, .d }, .replicated), null, .dout),
+            .out = .init(img_mlp_view.createTensor("out.weight", .{ .d, .dout }, .replicated), null, .d),
+            .gate_layer = .init(img_mlp_view.createTensor("gate_layer.weight", .{ .dout, .d }, .replicated), null, .dout),
         };
 
         transformer_blocks[i] = .{ .attn = attn, .img_mlp = img_mlp };
@@ -77,6 +78,28 @@ pub fn main(init: std.process.Init) !void {
     defer for (0..TRANSFORMER_BLOCK_COUNT) |i| {
         TransformerBlock.unloadBuffers(&transformer_blocks_buffer[i]);
     };
+
+    var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry);
+    defer activations_store.deinit();
+
+    std.debug.print("\n\nStarting testing\n\n", .{});
+    std.debug.print("{f}\n", .{transformer_blocks[0].img_mlp.gate_layer.weight._shape});
+    std.debug.print("{f}\n", .{transformer_blocks[0].img_mlp.out.weight._shape});
+    std.debug.print("{f}\n", .{transformer_blocks[0].img_mlp.proj.weight._shape});
+    std.debug.print("\n", .{});
+
+    try zml.testing.testLayer(
+        allocator,
+        io,
+        platform,
+        transformer_blocks[0].img_mlp,
+        .forward,
+        &activations_store,
+        "transformer.transformer_blocks.6.img_mlp",
+        transformer_blocks_buffer[0].img_mlp,
+        &.{},
+        .{},
+    );
 }
 
 // pos_embed -> <class 'diffusers.models.transformers.transformer_qwenimage21.QwenImage21Rope'>
@@ -145,9 +168,9 @@ const TransformerBlock = struct {
 };
 
 const Mlp = struct {
-    gate_layer: zml.nn.Linear,
-    out: zml.nn.Linear,
     proj: zml.nn.Linear,
+    out: zml.nn.Linear,
+    gate_layer: zml.nn.Linear,
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
         zml.nn.Linear.unloadBuffers(&self.gate_layer);
@@ -156,8 +179,14 @@ const Mlp = struct {
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        _ = self; // autofix
-        return x;
+        std.debug.print("{f}\n\n", .{x.shape()});
+        const forward_gate = self.gate_layer.forward(x, .bf16);
+        _ = forward_gate; // autofix
+
+        const left = self.gate_layer.forward(x, .bf16).silu().withTags(.{ .dout, .d });
+        const right = self.proj.forward(x, .bf16);
+        const dot = left.dot(right, .d);
+        return self.out.forward(dot, .bf16);
     }
 };
 
