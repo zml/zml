@@ -12,8 +12,8 @@ ZigOption = provider(
         "value": "The configured build setting or explicit value.",
         "type": "The Zig integer type, or None for other flag types.",
         "allowed_values": "Allowed values for string flags; an empty list allows any string. None for other flag types.",
-        "enum_name": "Optional exported enum type name for a constrained string flag.",
-        "nullable": "Whether an unconstrained string emits null for an empty value.",
+        "enum_name": "Exported enum type name for a constrained string flag; empty keeps the option as a string.",
+        "nullable": "Whether a string or enum emits null for an empty value.",
     },
 )
 
@@ -41,8 +41,6 @@ def _zig_option_impl(ctx):
         fail("type is only supported for integer options")
     if ctx.attr.nullable and not types.is_string(value):
         fail("nullable is only supported for string options")
-    if ctx.attr.nullable and allowed_values:
-        fail("nullable strings cannot have enum values")
     if ctx.attr.enum_name and not allowed_values:
         fail("enum_name requires a string flag with nonempty values")
     return [ZigOption(
@@ -81,15 +79,17 @@ def _zig_options_impl(ctx):
         elif types.is_int(value):
             zig_type = option.type
             literal = str(value)
-        elif option.allowed_values:
-            zig_type = "enum { " + ", ".join(["@" + _zig_string(v) for v in option.allowed_values]) + " }"
-            if option.enum_name:
-                if option.enum_name in names:
-                    fail("Duplicate Zig declaration: {}".format(option.enum_name))
-                names[option.enum_name] = True
-                lines.append("pub const @{} = {};".format(_zig_string(option.enum_name), zig_type))
-                zig_type = "@" + _zig_string(option.enum_name)
-            literal = ".@" + _zig_string(value)
+        elif option.enum_name:
+            enum_values = [v for v in option.allowed_values if not option.nullable or v != ""]
+            zig_type = "enum { " + ", ".join(["@" + _zig_string(v) for v in enum_values]) + " }"
+            if option.enum_name in names:
+                fail("Duplicate Zig declaration: {}".format(option.enum_name))
+            names[option.enum_name] = True
+            lines.append("pub const @{} = {};".format(_zig_string(option.enum_name), zig_type))
+            zig_type = "@" + _zig_string(option.enum_name)
+            if option.nullable:
+                zig_type = "?" + zig_type
+            literal = "null" if option.nullable and not value else ".@" + _zig_string(value)
         else:
             zig_type = "?[]const u8" if option.nullable else "[]const u8"
             literal = "null" if option.nullable and not value else _zig_string(value)
@@ -142,8 +142,8 @@ _zig_option = rule(
         "int": attr.int(),
         "value_source": attr.string(mandatory = True, values = ["flag", "bool", "string", "int"]),
         "type": attr.string(doc = "Zig integer type; defaults to usize. Only valid for integer options."),
-        "nullable": attr.bool(doc = "Emit an optional string; an empty value becomes null. Cannot be combined with values."),
-        "enum_name": attr.string(doc = "Optional exported Zig enum type name; requires nonempty values."),
+        "nullable": attr.bool(doc = "Emit an optional string or enum; an empty value becomes null. String flags with values must include an empty string to allow null; it is excluded from the enum."),
+        "enum_name": attr.string(doc = "Emit a named Zig enum instead of a string; requires nonempty values. Defaults to emitting a string."),
     },
     doc = "Expose a build setting or explicit value as a Zig option, named after the flag or this target respectively.",
 )
