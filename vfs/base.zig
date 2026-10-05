@@ -93,12 +93,12 @@ pub const VFSBase = struct {
             .processSetCurrentDir = processSetCurrentDir,
             .processSetCurrentPath = processSetCurrentPath,
             .processReplace = processReplace,
-            .processReplacePath = processReplacePath,
             .processSpawn = processSpawn,
-            .processSpawnPath = processSpawnPath,
             .childWait = childWait,
             .childKill = childKill,
             .progressParentFile = progressParentFile,
+            .inheritParentDir = inheritParentDir,
+            .inheritParentFile = inheritParentFile,
             .now = now,
             .clockResolution = clockResolution,
             .sleep = sleep,
@@ -538,19 +538,9 @@ pub const VFSBase = struct {
         return self.inner.vtable.processReplace(self.inner.userdata, options);
     }
 
-    pub fn processReplacePath(userdata: ?*anyopaque, dir: std.Io.Dir, options: std.process.ReplaceOptions) std.process.ReplaceError {
-        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        return self.inner.vtable.processReplacePath(self.inner.userdata, dir, options);
-    }
-
     pub fn processSpawn(userdata: ?*anyopaque, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.processSpawn(self.inner.userdata, options);
-    }
-
-    pub fn processSpawnPath(userdata: ?*anyopaque, dir: std.Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
-        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        return self.inner.vtable.processSpawnPath(self.inner.userdata, dir, options);
     }
 
     pub fn childWait(userdata: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
@@ -566,6 +556,16 @@ pub const VFSBase = struct {
     pub fn progressParentFile(userdata: ?*anyopaque) std.Progress.ParentFileError!std.Io.File {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.progressParentFile(self.inner.userdata);
+    }
+
+    pub fn inheritParentDir(userdata: ?*anyopaque, handle: std.Io.Dir.Handle) std.Io.InheritParentHandleError!std.Io.Dir {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.inheritParentDir(self.inner.userdata, handle);
+    }
+
+    pub fn inheritParentFile(userdata: ?*anyopaque, handle: std.Io.File.Handle, flags: std.Io.File.Flags) std.Io.InheritParentHandleError!std.Io.File {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.inheritParentFile(self.inner.userdata, handle, flags);
     }
 
     pub fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
