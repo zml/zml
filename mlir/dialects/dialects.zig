@@ -5,6 +5,7 @@ pub const cute = @import("mlir/dialects/cute_ir");
 pub const fly = @import("mlir/dialects/fly");
 pub const mosaic_tpu = @import("mlir/dialects/mosaic_tpu");
 pub const stablehlo = @import("mlir/dialects/stablehlo");
+pub const tcl = @import("mlir/dialects/tcl");
 pub const ttir = @import("mlir/dialects/ttir");
 
 pub const affine = @import("affine.zig");
