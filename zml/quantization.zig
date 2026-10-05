@@ -177,9 +177,7 @@ pub fn quantizeMxfp8(x: Tensor, axis: anytype, platform: *const Platform) Quanti
 
 fn ceilPowerOfTwo(raw_scale: Tensor) Tensor {
     const bits = raw_scale.bitCast(.u32);
-    const exponent = bits.shiftRightLogical(.scalar(23, .u32));
-    const fractional = bits.logical(.AND, .scalar(0x7fffff, .u32)).cmp(.NE, .scalar(0, .u32)).convert(.u32);
-    return exponent.add(fractional).shiftLeft(.scalar(23, .u32)).bitCast(.f32);
+    return bits.addConstant(0x7fffff).logical(.AND, .scalar(0xff800000, .u32)).bitCast(.f32);
 }
 
 /// Quantize activation blocks, preserving the input's axes.
