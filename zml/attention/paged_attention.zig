@@ -603,6 +603,11 @@ fn stablehlo_pagedAttention(
     kv_cache: KvCache,
     opts: AttentionOptions,
 ) zml.Tensor {
+    switch (opts.mask) {
+        .sliding_window, .indices => @panic("Sliding window or sparse attention mask are not supported on StableHLO"),
+        else => {},
+    }
+
     const page_size = kv_cache.split.k.dim(.k_chunk);
 
     const final_state = zml.ops.@"while"(
