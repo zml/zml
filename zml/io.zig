@@ -31,16 +31,16 @@ pub const TensorStore = struct {
     };
 
     registry: *safetensors.TensorRegistry,
-    meshes: []const Sharding.Mesh,
+    meshes: []const *const Sharding.Mesh,
     id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
-    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, meshes: []const Sharding.Mesh) TensorStore {
+    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, meshes: []const *const Sharding.Mesh) TensorStore {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
             .registry = registry,
-            .meshes = arena.allocator().dupe(Sharding.Mesh, meshes) catch @panic("OOM"),
+            .meshes = arena.allocator().dupe(*const Sharding.Mesh, meshes) catch @panic("OOM"),
             .id_to_sources = .empty,
             .allocator = allocator,
             .arena = arena,
@@ -106,14 +106,13 @@ pub const TensorStore = struct {
         return .{ .store = self };
     }
 
-    pub fn mesh(store: *const TensorStore, name: @EnumLiteral()) Sharding.Mesh {
+    pub fn mesh(store: *const TensorStore, name: @EnumLiteral()) *const Sharding.Mesh {
         const name_slice = @tagName(name);
         for (store.meshes) |m| {
             if (std.mem.eql(u8, name_slice, m.name)) {
                 return m;
             }
         }
-        if (std.mem.eql(u8, name_slice, "replicated")) return .replicated;
         std.debug.panic(
             \\Found no meshes named {s} in TensorStore.
             \\Try passing more meshes to `zml.TensorStore.fromRegistry`.
@@ -188,23 +187,15 @@ pub const TensorStore = struct {
         pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, meshe_: @EnumLiteral(), partitioning: anytype) ?Tensor {
             const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
             const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
-            const resolved_meshe = self.store.meshe(meshe_);
-
-            const p: Shape.PartitionArray = if (has_tags) p: {
-                // Parse the partitioning. Theoritically we only need tags + spec, but the function is on a full Shape object
-                var tentative_shape: Shape = .{
-                    ._dtype = undefined,
-                    ._dims = .{ .buffer = @splat(64), .len = parsed_tags.len },
-                    ._tags = parsed_tags,
-                    ._meshe = resolved_meshe,
-                    ._partitioning = undefined,
-                };
-                break :p tentative_shape.parsePartitioning(resolved_meshe, partitioning);
-            } else
-                // We allowed untagged Tensor, but then the PartitionArray must be created manually.
+            if (meshe_ == .replicated) {
+                return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .replicated);
+            }
+            const resolved_mesh = self.store.mesh(meshe_);
+            const partition: Sharding.Partitioning = if (has_tags)
+                .parse(parsed_tags.constSlice(), resolved_mesh, partitioning)
+            else
                 partitioning;
-
-            return self.maybeCreateTensorInternal(subkey, parsed_tags.constSlice(), resolved_meshe, p);
+            return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .{ .mesh = resolved_mesh, .partition = partition });
         }
 
         pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, meshe_: @EnumLiteral(), partitioning: anytype) Tensor {
@@ -244,6 +235,7 @@ pub const TensorStore = struct {
                 @memcpy(shape._tags.slice(), user_tags);
             }
             shape._sharding = sharding;
+            if (sharding.mesh) |mesh_| shape = shape.withPartitioning(mesh_, sharding.partition);
 
             const tensor: Tensor = .fromShape(shape);
             self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
@@ -486,7 +478,6 @@ pub const Loader = struct {
             self.dma_allocators,
             self.dma_chunk_size,
             shape,
-            shape._meshe._handleFakeReplicatedObject(self.platform),
             buffer,
             memory,
         );
@@ -733,8 +724,7 @@ pub const BufferedMemoryWriter = struct {
     buffer: *Buffer,
     interface: std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, sharding: Sharding, buffer: *Buffer) !BufferedMemoryWriter {
-        _ = sharding; // autofix
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer) !BufferedMemoryWriter {
         return .{
             .io = io,
             .platform = platform,
@@ -764,7 +754,6 @@ pub const BufferedMemoryWriter = struct {
             self.io,
             self.platform,
             self.shape,
-            self.meshe,
             @ptrCast(self.interface.buffer),
             .{ .wait = true },
         ) catch return std.Io.Writer.Error.WriteFailed;
@@ -990,8 +979,8 @@ const DispatchSpans = struct {
     mirror_writers: []usize,
 
     fn init(allocator: std.mem.Allocator, shape: Shape) !DispatchSpans {
-        const placement = try shape.placement();
-        const ordered_devices = placement.devices;
+        const placement = try Sharding.Placement.init(shape);
+        const ordered_devices = placement.mesh().?.devicesInCanonicalOrder();
 
         var placement_span_count: usize = 0;
         for (ordered_devices) |device| {
@@ -1207,9 +1196,11 @@ pub const DirectMemoryWriter = struct {
         buffer: *Buffer,
         memory: Memory.Kind,
     ) !DirectMemoryWriter {
-        const placement: Sharding.Placement = .init(shape._sharding, shape, platform);
-        const mesh = placement.mesh();
-        const ordered_devices = placement.mesh.devicesInCanonicalOrder();
+        var placed_shape = shape;
+        if (placed_shape._sharding.mesh == null) placed_shape._sharding.mesh = platform.replicated_mesh;
+        const placement = try Sharding.Placement.init(placed_shape);
+        const mesh = placement.mesh().?;
+        const ordered_devices = mesh.devicesInCanonicalOrder();
         var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
         errdefer allocator.free(shard_writers);
 
@@ -1230,9 +1221,9 @@ pub const DirectMemoryWriter = struct {
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }
 
-        buffer.* = .fromPjrtBuffers(platform, shape, placement.mesh, pjrt_buffers.constSlice());
+        buffer.* = .fromPjrtBuffers(platform, shape, pjrt_buffers.constSlice());
 
-        const dispatch_spans: DispatchSpans = try .init(allocator, shape, mesh);
+        const dispatch_spans: DispatchSpans = try .init(allocator, placed_shape);
         errdefer dispatch_spans.deinit(allocator);
 
         const first_span = dispatch_spans.spans[0];

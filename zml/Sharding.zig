@@ -22,7 +22,39 @@ partition: Partitioning,
 pub const replicated: Sharding = .{ .mesh = null, .partition = .replicated(Shape.MAX_RANK) };
 
 pub fn get(sharding: Sharding, ax: usize) PartitionSpec {
-    return if (sharding.mesh == null) return .replicated else sharding.partition.get(ax);
+    return if (sharding.mesh == null) .replicated else sharding.partition.get(ax);
+}
+
+pub fn set(self: Sharding, ax: usize, spec: PartitionSpec) Sharding {
+    var res = self;
+    res.partition = res.partition.set(ax, spec);
+    return res;
+}
+
+pub fn insert(self: Sharding, ax: usize, spec: PartitionSpec) Sharding {
+    var res = self;
+    res.partition = res.partition.insert(ax, spec);
+    return res;
+}
+
+pub fn orderedRemove(self: Sharding, ax: usize) Sharding {
+    var res = self;
+    res.partition = res.partition.orderedRemove(ax);
+    return res;
+}
+
+pub fn toArray(self: Sharding) [Shape.MAX_RANK]PartitionSpec {
+    var result: [Shape.MAX_RANK]PartitionSpec = undefined;
+    for (&result, 0..) |*spec, ax| spec.* = self.get(ax);
+    return result;
+}
+
+pub fn isFullyReplicated(self: Sharding) bool {
+    if (self.mesh == null) return true;
+    for (self.partition.toArray()) |spec| {
+        if (spec != .replicated and spec != .not_set) return false;
+    }
+    return true;
 }
 
 pub const MAX_MESH_RANK = 4;
@@ -74,26 +106,6 @@ pub const PartitionSpec = enum(u4) {
     }
 };
 
-pub fn numPartitionsForLogicalAxis(mesh: Mesh, logical_axis: anytype) i64 {
-    return mesh.mesh.numPartitionsForLogicalAxis(logical_axis);
-}
-
-pub fn eql(self: Mesh, other: Mesh) bool {
-    return self.data == other.data;
-}
-
-pub fn name(mesh: Mesh) []const u8 {
-    if (mesh.mesh == Mesh.replicated.data) return "__replicated__";
-    return mesh.mesh.name;
-}
-
-pub fn format(mesh: Mesh, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    if (mesh.mesh == Mesh.replicated.data) {
-        try writer.writeAll("Mesh(.replicated)");
-    }
-    return mesh.mesh.format(writer);
-}
-
 pub const Partitioner = union(enum) {
     shardy,
     gspmd,
@@ -120,34 +132,17 @@ pub const DimMeshe = union(enum) {
     replicated,
 };
 
-pub fn shardableDim(mesh: Mesh, dim: i64, logical_axis: anytype, must_divide: i64) DimMeshe {
-    const partitions = mesh.numPartitionsForLogicalAxis(logical_axis);
-
-    if (@mod(dim, partitions) == 0) {
-        return if (@mod(must_divide, dim) == 0) .{ .sharded = .{ .dim = dim, .factor = 1 } } else .replicated;
-    }
-
-    const gcd: i64 = @intCast(std.math.gcd(@as(u64, @intCast(dim)), @as(u64, @intCast(partitions))));
-    const repeat_factor: u32 = @intCast(@divExact(partitions, gcd));
-    const materialized_dim = std.math.mul(i64, dim, @as(i64, repeat_factor)) catch return .replicated;
-    if (@mod(must_divide, materialized_dim) == 0) {
-        return .{ .sharded = .{ .dim = materialized_dim, .factor = repeat_factor } };
-    } else {
-        return .replicated;
-    }
-}
-
-pub fn sdyPerValueMesheAttr(
+pub fn sdyPerValueShardingAttr(
     allocator: std.mem.Allocator,
     ctx: *mlir.Context,
     shapes: []const Shape,
-    mesh: Mesh,
+    mesh: *const Mesh,
 ) error{OutOfMemory}!*const mlir.Attribute {
-    const meshe_attrs = try allocator.alloc(*const dialects.shardy.TensorMesheAttribute, shapes.len);
+    const meshe_attrs = try allocator.alloc(*const dialects.shardy.TensorShardingAttribute, shapes.len);
     for (meshe_attrs, shapes) |*attr, shape| {
-        attr.* = try mesh.mesh.sdyShardingAttrForShape(allocator, ctx, shape);
+        attr.* = try mesh.sdyShardingAttrForShape(allocator, ctx, shape);
     }
-    return dialects.shardy.TensorMeshePerValueAttribute.init(ctx, meshe_attrs).asAttr();
+    return dialects.shardy.TensorShardingPerValueAttribute.init(ctx, meshe_attrs).asAttr();
 }
 
 pub fn sdyManualAxesAttr(
@@ -155,7 +150,7 @@ pub fn sdyManualAxesAttr(
     ctx: *mlir.Context,
     in_shapes: []const Shape,
     out_shapes: []const Shape,
-    mesh: Mesh,
+    mesh: *const Mesh,
 ) error{OutOfMemory}!*const mlir.Attribute {
     var axis_names = std.ArrayList([]const u8).empty;
     defer axis_names.deinit(allocator);
@@ -170,7 +165,7 @@ pub fn sdyManualAxesAttr(
     };
 
     for (in_shapes) |shape| {
-        const attr = try mesh.mesh.sdyShardingAttrForShape(allocator, ctx, shape);
+        const attr = try mesh.sdyShardingAttrForShape(allocator, ctx, shape);
         for (0..attr.numReplicatedAxes()) |i| {
             Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
         }
@@ -182,7 +177,7 @@ pub fn sdyManualAxesAttr(
         }
     }
     for (out_shapes) |shape| {
-        const attr = try mesh.mesh.sdyShardingAttrForShape(allocator, ctx, shape);
+        const attr = try mesh.sdyShardingAttrForShape(allocator, ctx, shape);
         for (0..attr.numReplicatedAxes()) |i| {
             Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
         }
@@ -354,7 +349,7 @@ pub const Partitioning = packed struct {
     }
 
     pub fn parse(tags: []const [*:0]const u8, mesh: *const Mesh, partitioning: anytype) Partitioning {
-        var partition_: Partitioning = .not_set;
+        var partition_: Partitioning = .replicated(tags.len);
 
         const T = @TypeOf(partitioning);
         stdx.debug.assertComptime(stdx.meta.isStruct(T), "parsePartitioning expected a struct of enum literals eg {{ .b = .data, .d = .model }}, got: {any}", .{T});
@@ -367,11 +362,11 @@ pub const Partitioning = packed struct {
             const value = @field(partitioning, field.name);
             const spec: PartitionSpec = if (@TypeOf(value) == PartitionSpec) value else switch (value) {
                 .replicated => .replicated,
-                .not_set => std.debug.panic("value not_set not allowed"),
+                .not_set => std.debug.panic("value not_set not allowed", .{}),
                 .open => .open,
                 else => spec: {
                     const mesh_tag = Shape.toTag(value);
-                    const mesh_ax = mesh.data.resolveLogicalAxis(mesh_tag) orelse {
+                    const mesh_ax = mesh.resolveLogicalAxis(mesh_tag) orelse {
                         stdx.debug.panic("{f} has no logical axis '{s}'", .{ mesh, mesh_tag });
                     };
                     break :spec .sharded(@intCast(mesh_ax));
@@ -1393,8 +1388,25 @@ pub const Mesh = struct {
     folds: Folds,
     folds_consumed: std.EnumSet(PhysicalAxisTag),
 
+    pub fn shardableDim(mesh: *const Mesh, dim: i64, logical_axis: anytype, must_divide: i64) DimMeshe {
+        const partitions = mesh.numPartitionsForLogicalAxis(logical_axis);
+
+        if (@mod(dim, partitions) == 0) {
+            return if (@mod(must_divide, dim) == 0) .{ .sharded = .{ .dim = dim, .factor = 1 } } else .replicated;
+        }
+
+        const gcd: i64 = @intCast(std.math.gcd(@as(u64, @intCast(dim)), @as(u64, @intCast(partitions))));
+        const repeat_factor: u32 = @intCast(@divExact(partitions, gcd));
+        const materialized_dim = std.math.mul(i64, dim, @as(i64, repeat_factor)) catch return .replicated;
+        if (@mod(must_divide, materialized_dim) == 0) {
+            return .{ .sharded = .{ .dim = materialized_dim, .factor = repeat_factor } };
+        } else {
+            return .replicated;
+        }
+    }
+
     pub fn binding(self: *const Mesh, mesh_axis: usize) []const PhysicalAxisTag {
-        return self.bindings.get(mesh_axis).slice();
+        return self.bindings.constSlice()[mesh_axis].constSlice();
     }
 
     pub fn resolveLogicalAxis(self: *const Mesh, tag: Shape.Tag) ?u8 {
@@ -1610,15 +1622,6 @@ pub const Mesh = struct {
         var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
         defer arena.deinit();
         const allocator = arena.allocator();
-        var any_explicit = false;
-        for (0..shape.rank()) |ax| {
-            if (shape.partition(ax) != .not_set) {
-                any_explicit = true;
-                break;
-            }
-        }
-        const all_replicated = !any_explicit;
-
         const mapping = data.getDimMapping(shape);
         const dimensions = try allocator.alloc(*const dialects.shardy.DimensionShardingAttribute, shape.rank());
 
@@ -1628,7 +1631,7 @@ pub const Mesh = struct {
             d.* = switch (shape.partition(ax)) {
                 .not_set => @panic("undefined"),
                 .replicated => .replicated(ctx),
-                .open => if (all_replicated) .replicated(ctx) else .open(ctx, &.{}),
+                .open => .open(ctx, &.{}),
                 else => d: {
                     const dim_phys_indices = mapping.axes_per_dim.get(ax);
                     if (dim_phys_indices.len == 0) {
@@ -1747,7 +1750,6 @@ pub const Mesh = struct {
         const depth = physical.axis_traversal.depth(tag) orelse return;
         plan.add(@intCast(info.size), depth);
     }
-
 
     pub fn format(self: Mesh, writer: *std.Io.Writer) !void {
         try writer.print("Mesh(name={s})\n", .{self.name});
@@ -1919,9 +1921,11 @@ pub const Strategy = struct {
 
 /// For a given shape, compute the shape of the slice each shard will receive.
 pub fn shardedShape(shape: Shape) error{IncompatibleSharding}!Shape {
-    if (shape._sharding.mesh) |m| {
-        const pl: Placement = try .init(shape, m);
-        return pl.shape;
+    if (shape._sharding.mesh != null) {
+        const pl: Placement = try .init(shape);
+        var local_shape = pl.shape;
+        local_shape._sharding = .replicated;
+        return local_shape;
     } else {
         // fully replicated
         return shape;
@@ -1970,6 +1974,10 @@ pub const Placement = struct {
 
     pub fn slices(pl: *const Placement, device: Device.Coords) Slices {
         var res: Slices = .{ .buffer = undefined, .len = pl.shape.rank() };
+        if (pl.mesh() == null) {
+            for (res.slice(), pl.shape.dims()) |*slice, dim| slice.* = .{ .start = 0, .size = dim };
+            return res;
+        }
         for (res.slice(), pl.shape.dims(), pl.axis_plans.slice()) |*r, size, plan| {
             const start = plan.linearIndex(device) * size;
             r.* = .{
@@ -2012,7 +2020,7 @@ pub const Placement = struct {
 
     pub fn format(pl: Placement, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const ordered_devices = if (pl.mesh()) |m| m.devicesInCanonicalOrder() else {
-            return try writer.print("Placement(shape={f}, replicated)\n", .{ pl.shape });
+            return try writer.print("Placement(shape={f}, replicated)\n", .{pl.shape});
         };
 
         try pl.formatPlacementSummary(pl.shape, ordered_devices.len, writer);
@@ -2278,7 +2286,7 @@ test "mesh: unknown partitioning implies replication" {
         .mesh = &mesh,
         // No partitioning on shape
         .shape = Shape.init(.{ .batch = 8 }, .f32),
-        .expected_sdy = "#sdy.mesh<@folded_mesh, [{}], replicated={\"link_x\", \"link_y\"}>",
+        .expected_sdy = "#sdy.sharding<@folded_mesh, [{}], replicated={\"link_x\", \"link_y\"}>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{.{ 0, 8 }} },
             .{ .device_id = 1, .slices = &.{.{ 0, 8 }} },
@@ -2307,7 +2315,7 @@ test "mesh: suggest strategy realization" {
         .mesh = &mesh,
         .shape = Shape.init(.{ .batch = 4, .model = 4 }, .f32)
             .withPartitioning(&mesh, .{ .batch = .batch, .model = .model }),
-        .expected_sdy = "#sdy.mesh<@suggested_mesh, [{\"link_z\"}, {\"link_x\"}], replicated={\"link_y\"}>",
+        .expected_sdy = "#sdy.sharding<@suggested_mesh, [{\"link_z\"}, {\"link_x\"}], replicated={\"link_y\"}>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 2 }, .{ 0, 2 } } }, // x0, y0, z0
             .{ .device_id = 1, .slices = &.{ .{ 2, 2 }, .{ 0, 2 } } }, // x0, y0, z1 (batch split)
@@ -2340,7 +2348,7 @@ test "mesh: suggest folds logical axes with same intent" {
         .mesh = &mesh,
         .shape = Shape.init(.{ .model = 4, .experts = 4 }, .f32)
             .withPartitioning(&mesh, .{ .model = .model, .experts = .experts }),
-        .expected_sdy = "#sdy.mesh<@fold_mesh, [{\"link_x\"}, {}]>",
+        .expected_sdy = "#sdy.sharding<@fold_mesh, [{\"link_x\"}, {}]>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 1 }, .{ 0, 4 } } },
             .{ .device_id = 1, .slices = &.{ .{ 1, 1 }, .{ 0, 4 } } },
@@ -2364,7 +2372,7 @@ test "mesh: multiple physical axes on one logical dimension (folding)" {
         try runner.run(.{
             .mesh = &mesh,
             .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(&mesh, .{ .model = .model }),
-            .expected_sdy = "#sdy.mesh<@folded_mesh, [{\"link_x\", \"link_y\"}]>",
+            .expected_sdy = "#sdy.sharding<@folded_mesh, [{\"link_x\", \"link_y\"}]>",
             .expected_shards = &.{
                 .{ .device_id = 0, .slices = &.{.{ 0, 4 }} },
                 .{ .device_id = 1, .slices = &.{.{ 4, 4 }} },
@@ -2382,7 +2390,7 @@ test "mesh: multiple physical axes on one logical dimension (folding)" {
         try runner.run(.{
             .mesh = &mesh,
             .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(&mesh, .{ .model = .model }),
-            .expected_sdy = "#sdy.mesh<@folded_mesh, [{\"link_y\", \"link_x\"}]>",
+            .expected_sdy = "#sdy.sharding<@folded_mesh, [{\"link_y\", \"link_x\"}]>",
             .expected_shards = &.{
                 .{ .device_id = 0, .slices = &.{.{ 0, 4 }} },
                 .{ .device_id = 1, .slices = &.{.{ 8, 4 }} },
@@ -2408,7 +2416,7 @@ test "mesh: explicit strategy folding" {
     try runner.run(.{
         .mesh = &mesh,
         .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(&mesh, .{ .model = .model }),
-        .expected_sdy = "#sdy.mesh<@strategy_fold, [{\"link_x\"}], replicated={\"link_y\"}>",
+        .expected_sdy = "#sdy.sharding<@strategy_fold, [{\"link_x\"}], replicated={\"link_y\"}>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{.{ 0, 4 }} },
             .{ .device_id = 1, .slices = &.{.{ 4, 4 }} },
@@ -2436,7 +2444,7 @@ test "mesh: open and replicated dimension mix" {
     try runner.run(.{
         .mesh = &mesh,
         .shape = Shape.init(.{ .batch = 8, .model = 8 }, .f32).withPartitioning(&mesh, .{ .batch = .open, .model = .replicated }),
-        .expected_sdy = "#sdy.mesh<@mix_mesh, [{?}, {}], replicated={\"link_x\", \"link_y\"}>",
+        .expected_sdy = "#sdy.sharding<@mix_mesh, [{?}, {}], replicated={\"link_x\", \"link_y\"}>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 8 }, .{ 0, 8 } } },
             .{ .device_id = 1, .slices = &.{ .{ 0, 8 }, .{ 0, 8 } } },
@@ -2466,7 +2474,7 @@ test "mesh: full 3D cluster mesh" {
         // Note: .context and .model are swapped compared to .link_x and .link_z
         .shape = Shape.init(.{ .batch = 4, .context = 4, .model = 4 }, .f32)
             .withPartitioning(&mesh, .{ .batch = .batch, .model = .model, .context = .context }),
-        .expected_sdy = "#sdy.mesh<@\"3d_mesh\", [{\"link_x\"}, {\"link_z\"}, {\"link_y\"}]>",
+        .expected_sdy = "#sdy.sharding<@\"3d_mesh\", [{\"link_x\"}, {\"link_z\"}, {\"link_y\"}]>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 2 }, .{ 0, 2 }, .{ 0, 2 } } },
             .{ .device_id = 1, .slices = &.{ .{ 0, 2 }, .{ 2, 2 }, .{ 0, 2 } } },
@@ -2498,4 +2506,19 @@ test "mesh: num partitions for logical axis" {
 
     try std.testing.expectEqual(4, mesh.numPartitionsForLogicalAxis(.model));
     try std.testing.expectEqual(1, mesh.numPartitionsForLogicalAxis(.batch));
+}
+
+test "localized shapes do not retain global sharding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+    const physical = try runner.physical(.{2}, .{ .mesh = .torus });
+    const mesh_ = try Mesh.init("local", &physical, .mesh(.{ .batch = .balanced }), .parseBindings(.{ .batch = .link_x }));
+    try std.testing.expectEqual(mesh_.bindings.constSlice()[0].constSlice().ptr, mesh_.binding(0).ptr);
+    const global = Shape.init(.{ .batch = 8 }, .f32).withPartitioning(&mesh_, .{ .batch = .batch });
+    const local = try shardedShape(global);
+    try std.testing.expectEqual(4, local.dim(.batch));
+    try std.testing.expectEqual(null, local._sharding.mesh);
+    try std.testing.expectEqual(8, global.dim(.batch));
+    try std.testing.expectEqual(&mesh_, global._sharding.mesh);
 }

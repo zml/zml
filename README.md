@@ -168,7 +168,7 @@ const Mnist = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
-        meshes: []const zml.Meshe,
+        meshes: []const *const zml.Mesh,
     ) !zml.Bufferized(Mnist) {
         return zml.io.load(Mnist, self, allocator, io, platform, store, .{
             .meshes = meshes,

@@ -951,7 +951,6 @@ pub const paged_fa2 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    q.shape()._meshe,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {
@@ -1037,7 +1036,6 @@ pub const paged_fa2 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    q.shape()._meshe,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {
@@ -1114,7 +1112,6 @@ pub const paged_fa2 = struct {
 
                 const output_shape_decode = q_decode.shape();
                 var o_decode = zml.ops.manualComputation(
-                    q.shape()._meshe,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {
@@ -1595,7 +1592,6 @@ pub const paged_fa3 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    q.shape()._meshe,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {
@@ -1672,7 +1668,6 @@ pub const paged_fa3 = struct {
 
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
-                    q.shape()._meshe,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {
@@ -1739,7 +1734,6 @@ pub const paged_fa3 = struct {
 
                 const decode_output_shape = q_decode.shape();
                 var o_decode = zml.ops.manualComputation(
-                    q.shape()._meshe,
                     (struct {
                         inputs: struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor },
                         metadata: struct {

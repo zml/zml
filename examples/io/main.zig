@@ -165,11 +165,11 @@ pub fn main(init: std.process.Init) !void {
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();
 
-            const tensor_parallel: zml.Meshe = try platform.registerMeshe(
+            const tensor_parallel: *const zml.Mesh = try platform.registerMesh(
                 "tp",
                 .mesh(.{ .model = .high_bandwidth }),
             );
-            const tp_partitioning: zml.Shape.PartitionArray = .init(&.{.sharded(@intCast(tensor_parallel.data.resolveLogicalAxis("model").?))});
+            const tp_partitioning: zml.Sharding.Partitioning = .init(&.{.sharded(@intCast(tensor_parallel.resolveLogicalAxis("model").?))});
 
             var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{tensor_parallel});
             defer store.deinit();

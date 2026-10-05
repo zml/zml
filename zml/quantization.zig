@@ -436,7 +436,7 @@ test "block FP8 quantization preserves axes and reconstructs constant blocks in 
                 else => -magnitude,
             });
         }
-        var buffer = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&host));
+        var buffer = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&host));
         defer buffer.deinit();
         var output: zml.Bufferized(Local.Outputs) = undefined;
         var runner = try exe.runner(allocator);

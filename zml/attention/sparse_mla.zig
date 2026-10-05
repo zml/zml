@@ -156,7 +156,6 @@ pub fn pagedAttention(parameters: triton.paged.Parameters, q: zml.Tensor, kv_cac
 pub fn attention(q: zml.Tensor, kv_cache: zml.Tensor, sink: ?zml.Tensor, rows: zml.Tensor, active_count: zml.Tensor, all_decode: bool, opts: MlaOptions) zml.Tensor {
     const output_shape = q.shape().set(.hd, opts.value_rank);
     return zml.ops.manualComputation(
-        q.shape()._meshe,
         (struct {
             q: zml.Tensor,
             kv_cache: zml.Tensor,

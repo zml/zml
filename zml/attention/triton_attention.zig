@@ -274,7 +274,6 @@ pub const paged = struct {
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         const output = zml.ops.manualComputation(
-            q.shape()._meshe,
             (struct {
                 q: zml.Tensor,
                 k_cache: zml.Tensor,

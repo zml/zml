@@ -296,7 +296,8 @@ pub const Platform = struct {
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
-    meshes: std.StringArrayHashMapUnmanaged(zml.Mesh),
+    meshes: std.StringArrayHashMapUnmanaged(*const zml.Mesh),
+    replicated_mesh: *const zml.Mesh,
     io_impl: IoImpl,
 
     pub const MAX_NUM_DEVICES: u16 = if (Target.tpu.isEnabled()) 64 else 32;
@@ -337,6 +338,7 @@ pub const Platform = struct {
                 .pjrt_client = pjrt_client,
                 .state = State.init(target),
                 .meshes = .empty,
+                .replicated_mesh = undefined,
                 // set below
                 .devices = undefined,
                 .memories = undefined,
@@ -639,7 +641,7 @@ pub const Platform = struct {
 
     /// Create a Mesh based on the given logical mesh and the default strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerMesh(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) error{OutOfMemory}!Sharding.Mesh {
+    pub fn registerMesh(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) error{OutOfMemory}!*const Sharding.Mesh {
         return platform.registerMeshWithStrategy(
             name,
             logical,
@@ -654,7 +656,7 @@ pub const Platform = struct {
 
     /// Create a Mesh based on the given logical mesh and a strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerMeshWithStrategy(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !Sharding.Mesh {
+    pub fn registerMeshWithStrategy(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !*const Sharding.Mesh {
         const arena = platform.arena.allocator();
         const entry = try platform.meshes.getOrPut(arena, name);
         if (entry.found_existing) {

@@ -34,7 +34,7 @@ mlir_ctx: *mlir.Context,
 mlir_pass_manager: *mlir.PassManager,
 module: *mlir.Module,
 platform: *const Platform,
-meshes: []const Sharding.Mesh,
+meshes: []const *const Sharding.Mesh,
 partitioner: Sharding.Partitioner,
 
 mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
@@ -161,7 +161,12 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
         }
     }
 
-    const meshes = arena.allocator().dupe(*const Sharding.Mesh, opts.meshes) catch @panic("OOM");
+    var mesh_list: std.ArrayList(*const Sharding.Mesh) = .empty;
+    mesh_list.appendSlice(arena.allocator(), opts.meshes) catch @panic("OOM");
+    if (std.mem.indexOfScalar(*const Sharding.Mesh, mesh_list.items, platform.replicated_mesh) == null) {
+        mesh_list.append(arena.allocator(), platform.replicated_mesh) catch @panic("OOM");
+    }
+    const meshes = mesh_list.items;
     validateMeshes(meshes) catch |err| stdx.debug.panic("Incompatible meshes: {t}", .{err});
 
     return .{
@@ -323,14 +328,14 @@ pub fn allocPrint(self: *Compiler, comptime fmt: []const u8, args: anytype) []u8
 }
 
 /// Lookup a mesh by it's name
-pub fn mesh(compiler: *const Compiler, name: @EnumLiteral()) Sharding.Mesh {
+pub fn mesh(compiler: *const Compiler, name: @EnumLiteral()) *const Sharding.Mesh {
     const name_slice = @tagName(name);
     for (compiler.meshes) |m| {
         if (std.mem.eql(u8, name_slice, m.name)) {
             return m;
         }
     }
-    if (name == .replicated) return compiler.platform.replicated_meshe;
+    if (name == .replicated) return compiler.platform.replicated_mesh;
     std.debug.panic(
         \\Found no meshes named {s}.
         \\Try passing more meshes to `zml.compile`.
@@ -339,14 +344,14 @@ pub fn mesh(compiler: *const Compiler, name: @EnumLiteral()) Sharding.Mesh {
 }
 
 /// Find a mesh that covers all the given axes
-pub fn resolveMesh(compiler: *const Compiler, logical_axes: anytype) Sharding.Mesh {
+pub fn resolveMesh(compiler: *const Compiler, logical_axes: anytype) *const Sharding.Mesh {
     if (@TypeOf(logical_axes) != []const Shape.Tag) {
         const comp_tags = comptime Shape.parseTags(logical_axes);
         const parsed_tags: []const Shape.Tag = comptime comp_tags.constSlice();
         return compiler.resolveMesh(parsed_tags);
     }
 
-    var ok_meshe: ?Sharding.Mesh = null;
+    var ok_meshe: ?*const Sharding.Mesh = null;
     for (compiler.meshes) |shd| {
         var covers_all: bool = true;
         for (logical_axes) |ax| {
@@ -489,8 +494,6 @@ pub fn compileInternal(
         // This will get copied into exe
         result.input_info.items(.shape),
         result.output_info.items(.shape),
-        result.input_info.items(.meshe),
-        result.output_info.items(.meshe),
         result.input_info.items(.aliasing_output),
     );
     errdefer exe.deinit();
@@ -538,7 +541,6 @@ const EmitMlirResult = struct {
 pub const TensorInfo = struct {
     id: Tensor.Id,
     shape: Shape,
-    meshe: Sharding.Mesh,
     value: *const mlir.Value,
 
     // Only used for input tensors, stores which output tensor ends up with their buffer
@@ -548,10 +550,10 @@ pub const TensorInfo = struct {
         var attrs: AttributeList = .empty;
 
         const mlir_ctx = compiler.mlir_ctx;
-        const meshe_attr = try compiler.tensorMesheAttr(arena, mlir_ctx, info.shape, info.meshe);
+        const meshe_attr = try compiler.tensorShardingAttr(arena, mlir_ctx, info.shape);
         const name = switch (compiler.partitioner) {
-            .gspmd => "mhlo.meshe",
-            .shardy => "sdy.meshe",
+            .gspmd => "mhlo.sharding",
+            .shardy => "sdy.sharding",
         };
         attrs.appendAssumeCapacity(.named(mlir_ctx, name, meshe_attr));
 
@@ -633,7 +635,6 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
                 .shape = og_shape,
-                .meshe = tensor.shape()._meshe._handleFakeReplicatedObject(ctx.compiler.platform),
                 .value = value,
             });
         }
@@ -669,8 +670,6 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
                 // const packed_shape = og_shape.packedShape();
                 // TODO: clarify why this og_shape and not packedShape()
                 .shape = og_shape,
-                // Note: the panic should have been triggered during createBlockArguments or emitMlir
-                .meshe = tensor._shape._meshe._handleFakeReplicatedObject(ctx.compiler.platform),
                 .value = value,
             });
         }
@@ -811,9 +810,10 @@ pub fn tensorShardingAttr(
     mlir_ctx: *mlir.Context,
     shape: Shape,
 ) error{OutOfMemory}!*const mlir.Attribute {
+    const mesh_ = shape._sharding.mesh orelse compiler.platform.replicated_mesh;
     return switch (compiler.partitioner) {
-        .shardy => (try shape._sharding.sdyMesheAttrForShape(allocator, mlir_ctx, shape)).asAttr(),
-        .gspmd => shape._sharding.gspmdMesheAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
+        .shardy => (try mesh_.sdyShardingAttrForShape(allocator, mlir_ctx, shape)).asAttr(),
+        .gspmd => mesh_.gspmdShardingAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
             error.WriteFailed => error.OutOfMemory, // We're writing to memory
             error.OutOfMemory => error.OutOfMemory,
             // TODO(hugomano): clarify what can trigger this and consider moving the check to the Sharding.Mesh creation

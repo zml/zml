@@ -31,12 +31,11 @@ pub const Session = struct {
         compiled_model: *inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
-        const meshes = compiled_model.params.meshes;
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, meshes.model);
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
-        var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed);
+        var rng_buffers = try zml.Tensor.Rng.init().initBuffer(io, platform, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
         const layer_types = compiled_model.loaded_model.inner.config.text_config.layer_types;
@@ -122,7 +121,7 @@ pub const Session = struct {
         @memset(tokens_slice.items(u32), 0);
         @memcpy(tokens_slice.items(u32)[0..all_tokens.len], all_tokens);
 
-        var tokens_buffer = try zml.Buffer.fromSlice(self.io, self.platform, tokens_slice, .replicated);
+        var tokens_buffer = try zml.Buffer.fromSlice(self.io, self.platform, tokens_slice);
         defer tokens_buffer.deinit();
         var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32);
         defer token_index_buffer.deinit();
@@ -149,7 +148,7 @@ pub const Session = struct {
         const out_tokens_buffer = try self.allocator.alloc(u8, 1024);
         defer self.allocator.free(out_tokens_buffer);
 
-        var current_token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.generated_token_slice, .replicated);
+        var current_token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.generated_token_slice);
         defer current_token_buffer.deinit();
         var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.items.len)), .u32);
         defer token_index_buffer.deinit();

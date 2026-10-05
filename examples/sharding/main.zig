@@ -37,7 +37,7 @@ const DemoModel = struct {
         y = y.withPartitioning(.dp_mp, .{ .batch = .data, .hidden = .model });
         y.print("dense_out");
 
-        const gate = y.scale(0.01).sigmoid();
+        const gate = y.scale(0.01).sigmoid().withPartitioning(.dp_mp, .{ .batch = .data, .hidden = .model });
         return zml.ops.manualComputation(
             (struct {
                 y: zml.Tensor,
@@ -192,12 +192,12 @@ pub fn main(init: std.process.Init) !void {
     }
     log.info("{f}", .{platform.physical_mesh});
 
-    const meshe: zml.Meshe = try platform.registerMeshe(
+    const meshe: *const zml.Mesh = try platform.registerMesh(
         "dp_mp",
         .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
     );
 
-    log.info("{f}", .{meshe.data.logical});
+    log.info("{f}", .{meshe.logical});
     log.info("{f}", .{meshe});
 
     const input_shape = zml.Shape.init(.{ .batch = 16, .feature = 32 }, .f32)
@@ -225,11 +225,11 @@ pub fn main(init: std.process.Init) !void {
     );
     defer exe.deinit();
 
-    var w_buf = try createSequenceBuffer(allocator, io, platform, w_shape, meshe, 0.0);
+    var w_buf = try createSequenceBuffer(allocator, io, platform, w_shape, 0.0);
     defer w_buf.deinit();
-    var b_buf = try createSequenceBuffer(allocator, io, platform, b_shape, meshe, 100.0);
+    var b_buf = try createSequenceBuffer(allocator, io, platform, b_shape, 100.0);
     defer b_buf.deinit();
-    var input_buf = try createSequenceBuffer(allocator, io, platform, input_shape, meshe, 1000.0);
+    var input_buf = try createSequenceBuffer(allocator, io, platform, input_shape, 1000.0);
     defer input_buf.deinit();
 
     log.info("input placement: {f}", .{input_buf});

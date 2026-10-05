@@ -30,9 +30,9 @@ pub const Session = struct {
         model_buffers: *model.Buffers,
     ) !Session {
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
-        var cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform, compiled_model.params.meshes.model);
+        var cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform);
         errdefer model.Cache.unloadBuffers(&cache_buffers);
-        var rng_buf = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed);
+        var rng_buf = try zml.Tensor.Rng.init().initBuffer(io, platform, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buf);
         const generated_token_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{ .batch = 1, .seq = 1 }, .u32));
         errdefer generated_token_slice.free(allocator);
@@ -120,21 +120,21 @@ pub const Session = struct {
         @memset(tokens, self.config.pad_token_id);
         @memcpy(tokens[0..all_tokens.len], all_tokens);
 
-        var tokens_buf: zml.Buffer = try .fromSlice(self.io, self.platform, tokens_slice, .replicated);
+        var tokens_buf: zml.Buffer = try .fromSlice(self.io, self.platform, tokens_slice);
         defer tokens_buf.deinit();
 
         const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
-        var tokens_pos_buf: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, .replicated);
+        var tokens_pos_buf: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice);
         defer tokens_pos_buf.deinit();
 
         const actual_seq_len_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(all_tokens.len)}));
-        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice, .replicated);
+        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice);
         defer actual_seq_len_buf.deinit();
 
         const params = self.compiled_model.params;
         var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
             .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
-            else => try params.attention_metadata.initBuffer(self.io, self.platform, params.meshes.model),
+            else => try params.attention_metadata.initBuffer(self.io, self.platform),
         };
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
@@ -161,18 +161,18 @@ pub const Session = struct {
         var decoder = try self.tokenizer.decoder();
         defer decoder.deinit();
 
-        var current_token_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, self.generated_token_slice, .replicated);
+        var current_token_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, self.generated_token_slice);
         defer current_token_buffer.deinit();
 
         const actual_seq_len_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
-        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice, .replicated);
+        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice);
         defer actual_seq_len_buf.deinit();
 
         const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
         defer self.allocator.free(out_tokens_buffer);
 
         const params = self.compiled_model.params;
-        var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform, params.meshes.model);
+        var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform);
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         generation: while (true) {
@@ -194,7 +194,7 @@ pub const Session = struct {
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
             const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(all_tokens.items.len)}));
-            var token_pos_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, .replicated);
+            var token_pos_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice);
             defer token_pos_buffer.deinit();
 
             var conv_cache_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, 0, .u32);

@@ -339,7 +339,7 @@ test "Backend.auto selects mosaic_tpu on TPU" {
         .devices = &.{},
         .memories = &.{},
         .physical_mesh = undefined,
-        .replicated_meshe = undefined,
+        .replicated_mesh = undefined,
         .meshes = .empty,
         .io_impl = .threaded,
     };
@@ -357,7 +357,7 @@ test "Backend.auto selects triton on oneAPI" {
         .devices = &.{},
         .memories = &.{},
         .physical_mesh = undefined,
-        .replicated_meshe = undefined,
+        .replicated_mesh = undefined,
         .meshes = .empty,
         .io_impl = .threaded,
     };
@@ -397,7 +397,7 @@ test pagedAttention {
         },
     };
 
-    const meshes: []const zml.Meshe = &.{ platform.replicated_meshe, platform.meshes.get("model").? };
+    const meshes: []const *const zml.Mesh = &.{ platform.replicated_mesh, platform.meshes.get("model").? };
     const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{} }, .{ .meshes = meshes });
     defer rng_q.deinit();
     const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{} }, .{ .meshes = meshes });

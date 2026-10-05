@@ -14,9 +14,8 @@ pub const Metadata = struct {
         return .{ .num_tokens = .fromShape(.scalar(.u32)) };
     }
 
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, meshe: zml.Meshe) !zml.Bufferized(Metadata) {
+    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
         _ = self;
-        _ = meshe;
         return .{ .num_tokens = try zml.Buffer.scalar(io, platform, 0, .u32) };
     }
 

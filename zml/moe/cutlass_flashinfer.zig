@@ -548,7 +548,6 @@ pub fn fusedExpertsNvfp4(
     ) catch |e| stdx.debug.panic("Failed to get workspace requirements: {}", .{e});
 
     const result = routedNvfp4Call.call(
-        hidden_states.shape()._meshe,
         .{
             .hidden_states = hidden_states,
             .fc1_weights = fc1_weights,
@@ -652,7 +651,6 @@ pub fn fusedExpertsBf16(
     ) catch |e| stdx.debug.panic("Failed to get workspace requirements: {}", .{e});
 
     const result = routedBf16Call.call(
-        hidden_states.shape()._meshe,
         .{
             .hidden_states = hidden_states,
             .fc1_weights = fc1_weights,

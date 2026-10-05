@@ -300,7 +300,7 @@ fn compileSample(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.
     }});
 }
 
-fn hiddenTensor(mdl: model.Model, seqlen: usize, meshe: zml.Meshe) zml.Tensor {
+fn hiddenTensor(mdl: model.Model, seqlen: usize, meshe: *const zml.Mesh) zml.Tensor {
     return .fromShape(zml.Shape.init(
         .{ .b = 1, .s = seqlen, .d = mdl.config.text_config.hidden_size },
         mdl.text_model.embed_tokens.weight.dtype(),

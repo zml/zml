@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    const benchmark_meshe: zml.Meshe = try platform.registerMeshe("benchmark_mesh", .mesh(
+    const benchmark_meshe: *const zml.Mesh = try platform.registerMesh("benchmark_mesh", .mesh(
         .{ .m = .low_bandwidth, .n = .high_bandwidth },
     ));
 
@@ -48,9 +48,9 @@ pub fn main(init: std.process.Init) !void {
     var rng = std.Random.DefaultPrng.init(0);
     const random = rng.random();
 
-    var a_buffer = try createRandomBuffer(allocator, io, platform, a.shape(), benchmark_meshe, random);
+    var a_buffer = try createRandomBuffer(allocator, io, platform, a.shape(), random);
     defer a_buffer.deinit();
-    var b_buffer = try createRandomBuffer(allocator, io, platform, b.shape(), benchmark_meshe, random);
+    var b_buffer = try createRandomBuffer(allocator, io, platform, b.shape(), random);
     defer b_buffer.deinit();
 
     var exe_args = try exe.args(allocator);
@@ -93,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
-fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, meshe: zml.Meshe, random: std.Random) !zml.Buffer {
+fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, random: std.Random) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
     defer slice.free(allocator);
 
@@ -119,5 +119,5 @@ fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const
         },
     }
 
-    return .fromSlice(io, platform, slice, meshe);
+    return .fromSlice(io, platform, slice);
 }

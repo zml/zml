@@ -295,7 +295,7 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
     defer k.deinit();
     var v = try rng_k.eval(allocator, io, {});
     defer v.deinit();
-    var token_index = try zml.Buffer.fromBytes(io, platform, token_index_shape, .replicated, @ptrCast(token_index_h));
+    var token_index = try zml.Buffer.fromBytes(io, platform, token_index_shape, @ptrCast(token_index_h));
     defer token_index.deinit();
 
     const meshes = platform.meshes.values();
@@ -331,7 +331,7 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
         );
         defer exe.deinit();
 
-        var metadata_d = try metadata.initBuffer(io, platform, platform.meshes.get("model").?);
+        var metadata_d = try metadata.initBuffer(io, platform);
         defer Metadata.deinitBuffer(&metadata_d);
 
         var output_d = try exe.eval(allocator, io, .{ q, k, v, token_index, metadata_d });

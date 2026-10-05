@@ -615,7 +615,7 @@ pub const KvCache = struct {
 
     pub const Buffer = zml.Bufferized(KvCache);
 
-    pub fn init(kv_shape: zml.Shape, meshe: zml.Meshe) KvCache {
+    pub fn init(kv_shape: zml.Shape, meshe: *const zml.Mesh) KvCache {
         const sharded_shape = kv_shape.withPartitioning(meshe, .{ .h = .model });
 
         return .{
@@ -624,10 +624,10 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, meshe: zml.Meshe) !Buffer {
+    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform) !Buffer {
         return .{
-            .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), meshe, .{}),
-            .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), meshe, .{}),
+            .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), .{}),
+            .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), .{}),
         };
     }
 

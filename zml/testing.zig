@@ -27,7 +27,7 @@ pub fn env() *const Platform {
         ) catch @panic("Pjrt not available");
 
         // Register meshes required by flash attention.
-        _ = platform.registerMeshe("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;
+        _ = platform.registerMesh("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;
         _platform = platform;
     }
 
@@ -394,7 +394,7 @@ pub fn testLayer(
     activation_store: zml.io.TensorStore.View,
     name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    meshes: []const *const zml.Meshe,
+    meshes: []const *const *const zml.Mesh,
     opts: CompareOpts,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);

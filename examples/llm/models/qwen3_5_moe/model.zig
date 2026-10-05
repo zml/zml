@@ -47,7 +47,7 @@ pub const RopeParameters = struct {
     rope_theta: f32,
 };
 
-fn partitionProjectedKv(kv: zml.Tensor, kv_head_meshe: zml.Mesh.DimMeshe) zml.Tensor {
+fn partitionProjectedKv(kv: zml.Tensor, kv_head_meshe: zml.Sharding.DimMeshe) zml.Tensor {
     return switch (kv_head_meshe) {
         .sharded => |heads| blk: {
             const sharded_kv = if (heads.factor != 1) kv.stutter1d(kv.axis(.h), heads.factor) else kv;
@@ -57,7 +57,7 @@ fn partitionProjectedKv(kv: zml.Tensor, kv_head_meshe: zml.Mesh.DimMeshe) zml.Te
     };
 }
 
-fn partitionCachedKv(tensor: zml.Tensor, kv_head_meshe: zml.Mesh.DimMeshe) zml.Tensor {
+fn partitionCachedKv(tensor: zml.Tensor, kv_head_meshe: zml.Sharding.DimMeshe) zml.Tensor {
     var kv = tensor.rename(.{ .s = .k });
     return switch (kv_head_meshe) {
         .sharded => |heads| blk: {
@@ -194,7 +194,7 @@ pub const Model = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
-        meshes: []const zml.Meshe,
+        meshes: []const *const zml.Mesh,
         progress: *std.Progress.Node,
     ) !zml.Bufferized(Model) {
         progress.increaseEstimatedTotalItems(store.view().count());
@@ -603,7 +603,7 @@ pub const SelfAttn = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache.SelfAttnCache,
     ) struct { zml.Tensor, KvCache.SelfAttnCache } {
-        const tp = zml.Compiler.current().meshe(.model);
+        const tp = zml.Compiler.current().mesh(.model);
         const x_qkv = x.withPartitioning(tp, .{ .d = .replicated });
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
@@ -640,7 +640,7 @@ pub const SelfAttn = struct {
             k,
             v,
             token_index,
-            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads), x.shape()._meshe),
+            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads), tp),
             zml.attention.Parameters.init(.fromBackend(.vanilla)),
         ).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
@@ -1138,7 +1138,7 @@ pub const KvCache = struct {
         v: zml.Tensor,
         layer_index: zml.Tensor,
 
-        pub fn init(config: Config, batch_dim: i64, max_seq_len: i64, dtype: zml.DataType, model_meshe: zml.Meshe) SelfAttnCache {
+        pub fn init(config: Config, batch_dim: i64, max_seq_len: i64, dtype: zml.DataType, model_meshe: *const zml.Mesh) SelfAttnCache {
             const num_self_attn_layers = countLayers(config.text_config.layer_types, .full_attention);
             const kv_shape = zml.Shape.init(.{
                 .b = batch_dim,
@@ -1159,10 +1159,10 @@ pub const KvCache = struct {
             };
         }
 
-        pub fn initBuffer(self: SelfAttnCache, io: std.Io, platform: *const zml.Platform, meshe: zml.Meshe) !zml.Bufferized(SelfAttnCache) {
+        pub fn initBuffer(self: SelfAttnCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(SelfAttnCache) {
             return .{
-                .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), meshe, .{}),
-                .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), meshe, .{}),
+                .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}),
+                .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}),
                 .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
             };
         }
@@ -1235,7 +1235,7 @@ pub const KvCache = struct {
         recurrent_state: zml.Tensor,
         layer_index: zml.Tensor,
 
-        pub fn init(config: Config, batch_dim: i64, conv_dtype: zml.DataType, recurrent_dtype: zml.DataType, model_meshe: zml.Meshe) GatedDeltaNetCache {
+        pub fn init(config: Config, batch_dim: i64, conv_dtype: zml.DataType, recurrent_dtype: zml.DataType, model_meshe: *const zml.Mesh) GatedDeltaNetCache {
             const num_linear_attn_layers = countLayers(config.text_config.layer_types, .linear_attention);
             const conv_dim = 2 * config.text_config.linear_num_key_heads * config.text_config.linear_key_head_dim + config.text_config.linear_num_value_heads * config.text_config.linear_value_head_dim;
             const conv_state_shape = zml.Shape.init(.{
@@ -1260,10 +1260,10 @@ pub const KvCache = struct {
             };
         }
 
-        pub fn initBuffer(self: GatedDeltaNetCache, io: std.Io, platform: *const zml.Platform, meshe: zml.Meshe) !zml.Bufferized(GatedDeltaNetCache) {
+        pub fn initBuffer(self: GatedDeltaNetCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(GatedDeltaNetCache) {
             return .{
-                .conv_state = try zml.Buffer.uninitialized(io, platform, self.conv_state.shape(), meshe, .{}),
-                .recurrent_state = try zml.Buffer.uninitialized(io, platform, self.recurrent_state.shape(), meshe, .{}),
+                .conv_state = try zml.Buffer.uninitialized(io, platform, self.conv_state.shape(), .{}),
+                .recurrent_state = try zml.Buffer.uninitialized(io, platform, self.recurrent_state.shape(), .{}),
                 .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
             };
         }
@@ -1331,7 +1331,7 @@ pub const KvCache = struct {
         max_seq_len: i64,
         cache_dtype: zml.DataType,
         recurrent_dtype: zml.DataType,
-        model_meshe: zml.Meshe,
+        model_meshe: *const zml.Mesh,
     ) KvCache {
         return .{
             .layer_types = config.text_config.layer_types,
@@ -1340,10 +1340,10 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform, meshe: zml.Meshe) !zml.Bufferized(KvCache) {
+    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
         return .{
-            .self_attn = try self.self_attn.initBuffer(io, platform, meshe),
-            .gated_delta_net = try self.gated_delta_net.initBuffer(io, platform, meshe),
+            .self_attn = try self.self_attn.initBuffer(io, platform),
+            .gated_delta_net = try self.gated_delta_net.initBuffer(io, platform),
         };
     }
 

@@ -197,7 +197,7 @@ pub const Buffer = struct {
     /// Creates a Buffer with a single element.
     pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
-        return fromBytes(io, platform, .scalar(dtype_), .replicated, x.asBytes());
+        return fromBytes(io, platform, .scalar(dtype_), x.asBytes());
     }
 
     pub fn await(self: Buffer, io: std.Io) !void {
@@ -229,7 +229,7 @@ pub const Buffer = struct {
 
         stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
         const element_type = pjrtx.bufferTypeFromDtype(sh.dtype());
-        const placement = placementOrPanic(res._meshe, sh);
+        const placement = placementOrPanic(platform, sh);
         const shard_dims: []const i64 = placement.shape.dims();
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
@@ -277,8 +277,8 @@ pub const Buffer = struct {
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
 
-        const placement = placementOrPanic(self._shape);
-        for (self._meshe.devicesInCanonicalOrder(), 0..) |device, shard_index| {
+        const placement = placementOrPanic(self._platform, self._shape);
+        for (self._platform.physical_mesh.devices_in_canonical_order, 0..) |device, shard_index| {
             // TODO: handle replicated information, we shouldn't iterate over all the devices unless needed
             const sub_slice = placement.shardSlice(device.coords, slice);
             if (!sub_slice.isContiguous()) return error.NonContiguousShardRead;
@@ -300,12 +300,12 @@ pub const Buffer = struct {
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
 
-        const placement = placementOrPanic(self._shape);
+        const placement = placementOrPanic(self._platform, self._shape);
 
         var shard_slice = try Slice.alloc(allocator, placement.shape);
         defer shard_slice.free(allocator);
 
-        for (self._mesh.devicesInCanonicalOrder(), 0..) |device, shard_index| {
+        for (self._platform.physical_mesh.devices_in_canonical_order, 0..) |device, shard_index| {
             const sub_slice = placement.shardSlice(device.coords, slice);
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, shard_slice.data());
             if (maybe_event) |event| {
@@ -325,7 +325,7 @@ pub const Buffer = struct {
     /// ie: `num_devices * shard_byte_size`
     /// `shard_byte_size` can be up to `self.shape().byteSize()` when the buffer is fully replicated.
     pub fn byteSize(self: Buffer) usize {
-        const placement = placementOrPanic(self._shape);
+        const placement = placementOrPanic(self._platform, self._shape);
         return placement.shape.byteSize() * self._shards.len;
     }
 
@@ -375,14 +375,14 @@ test "device round-trip" {
         .{ 56, 57, 58, 59, 60, 61, 62, 63 },
     };
 
-    const mp: zml.Sharding.Mesh = platform.meshes.get("model").?;
+    const mp: *const zml.Mesh = platform.meshes.get("model").?;
     const x_h: zml.Slice = .init(.withPartitioning(
         .init(.{ .b = 8, .d = 8 }, .u32),
         mp,
         .{ .b = .model },
     ), std.mem.asBytes(&x));
     // no free: x_h is stack allocated
-    const x_d: zml.Buffer = try .fromSlice(io, platform, x_h, mp);
+    const x_d: zml.Buffer = try .fromSlice(io, platform, x_h);
     try std.testing.expectEqual(platform.devices.len, x_d.numShards());
 
     {
@@ -404,31 +404,11 @@ test "device round-trip" {
     }
 }
 
-fn placementOrPanic(platform: Platform, shape: Shape) Sharding.Placement {
+fn placementOrPanic(platform: *const Platform, shape: Shape) Sharding.Placement {
     var sh = shape;
     if (sh._sharding.mesh == null) sh._sharding.mesh = platform.replicated_mesh;
     return Sharding.Placement.init(sh) catch |err| {
         @branchHint(.cold);
-        switch (err) {
-            error.MissingLogicalBinding => {
-                log.err(
-                    \\Failed to shard Buffer of shape {f}, with mesh:
-                    \\{f}
-                    \\
-                    \\The Buffer is probably inheriting a partitionned shape from a Tensor,
-                    \\So Buffer creation must pass a Meshe, that maps the logical mesh of the Tensor to the physical mesh.
-                , .{ shape, shape._sharding.mesh.? });
-                @panic("Buffer shape and mesh should be consistent");
-            },
-            error.IncompatibleMeshe => {
-                log.err(
-                    \\Failed to shard Buffer of shape {f}, with mesh:
-                    \\{f}
-                    \\
-                    \\The Buffer dimension isn't properly divisible by the number of devices along the sharded axis.
-                , .{ shape, shape._sharding.mesh.? });
-                @panic("Buffer shape should be divisible by the number of devices along the sharded axis.");
-            },
-        }
+        std.debug.panic("Buffer shape {f} is incompatible with its mesh: {t}", .{ shape, err });
     };
 }

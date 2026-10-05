@@ -61,7 +61,7 @@ fn run(
     activations_path: []const u8,
     mdl: model.Model,
     model_buffers: *model.Buffers,
-    meshes: []const zml.Meshe,
+    meshes: []const *const zml.Mesh,
 ) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
@@ -93,19 +93,19 @@ fn testLayer(
     name: []const u8,
     layer: anytype,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    meshes: []const zml.Meshe,
+    meshes: []const *const zml.Mesh,
     opts: zml.testing.CompareOpts,
 ) !void {
     const in_key = try std.fmt.allocPrint(allocator, "{s}.in", .{name});
     defer allocator.free(in_key);
     const in_shape = activation_store.getShape(in_key) orelse return error.NotFound;
-    var in_buffer = try loadBufferFromStore(allocator, io, platform, activation_store, in_key, .replicated);
+    var in_buffer = try loadBufferFromStore(allocator, io, platform, activation_store, in_key);
     defer in_buffer.deinit();
     const in_tensor = zml.Tensor.fromShape(in_shape);
 
     const out_key = try std.fmt.allocPrint(allocator, "{s}.out", .{name});
     defer allocator.free(out_key);
-    var out_buffer_expected = try loadBufferFromStore(allocator, io, platform, activation_store, out_key, .replicated);
+    var out_buffer_expected = try loadBufferFromStore(allocator, io, platform, activation_store, out_key);
     defer out_buffer_expected.deinit();
 
     // `zml.nn.Linear.forward` takes an explicit output dtype; every other layer here
@@ -133,7 +133,7 @@ fn testLayer(
     try zml.testing.expectClose(io, out_result, out_buffer_expected, opts);
 }
 
-fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: zml.io.TensorStore.View, key: []const u8, meshe: zml.Meshe) !zml.Buffer {
+fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: zml.io.TensorStore.View, key: []const u8) !zml.Buffer {
     const shape = store.getShape(key) orelse return error.NotFound;
 
     const host_bytes = try allocator.alloc(u8, shape.byteSize());
@@ -145,5 +145,5 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *cons
 
     _ = try reader.interface.readSliceAll(host_bytes);
 
-    return zml.Buffer.fromBytes(io, platform, shape, meshe, host_bytes);
+    return zml.Buffer.fromBytes(io, platform, shape, host_bytes);
 }
