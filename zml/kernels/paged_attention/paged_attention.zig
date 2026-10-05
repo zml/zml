@@ -7,6 +7,7 @@ const cute = @import("cute/cute.zig");
 const metal = @import("metal/metal.zig");
 const tpu = @import("mosaic_tpu/mosaic_tpu.zig");
 const triton = @import("triton/triton.zig");
+const tcl = @import("tcl/tcl.zig");
 const stablehlo = @import("stablehlo/stablehlo.zig");
 
 const PagedAttention = @This();
@@ -24,6 +25,7 @@ pub const Backend = enum {
     mosaic_tpu,
     metal,
     stablehlo,
+    tcl,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -32,7 +34,8 @@ pub const Backend = enum {
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
             .metal => .metal,
-            .cpu, .furiosa => .stablehlo,
+            .cpu => .stablehlo,
+            .furiosa => .tcl,
             .neuron => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }
@@ -41,6 +44,7 @@ pub const Backend = enum {
         return switch (backend) {
             .cute => cute.isAvailable(platform),
             .stablehlo => true,
+            .tcl => platform.target == .furiosa,
             .triton => platform.target != .cpu,
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
@@ -54,6 +58,7 @@ pub const Options = union(Backend) {
     mosaic_tpu: tpu.mosaic_tpu.Options,
     metal: metal.Options,
     stablehlo: triton.paged.Options,
+    tcl: tcl.paged.Options,
 
     const Args = struct {
         backend: Backend,
@@ -84,7 +89,7 @@ pub const Options = union(Backend) {
                     .head_dim = args.head_dim,
                 },
             },
-            inline .cute, .triton, .metal, .stablehlo => |t| @unionInit(Options, @tagName(t), .{
+            inline .cute, .triton, .metal, .stablehlo, .tcl => |t| @unionInit(Options, @tagName(t), .{
                 .batch_size = args.batch_size,
                 .max_num_pages = args.max_num_pages,
                 .max_seqlen_q = args.max_seqlen_q,
@@ -112,6 +117,7 @@ pub const Parameters = union(Backend) {
     mosaic_tpu: tpu.mosaic_tpu.Parameters,
     metal: metal.Parameters,
     stablehlo: triton.paged.Parameters,
+    tcl: tcl.paged.Parameters,
 
     pub fn init(options_: Options) Parameters {
         return switch (options_) {
@@ -196,7 +202,7 @@ pub const KvCache = union(enum) {
 
         const kv: KvCache = switch (self) {
             .split => |split| switch (backend) {
-                .cute, .triton, .mosaic_tpu, .metal, .stablehlo => .{
+                .cute, .triton, .mosaic_tpu, .metal, .stablehlo, .tcl => .{
                     .split = .{
                         .k = split.k.scatterSlices(
                             .{ .page = page_index, .k_chunk = offset },
@@ -258,6 +264,10 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
         .stablehlo => |params| stablehlo.pagedAttention(params, q, kv_cache, opts),
+        .tcl => |params| switch (kv_cache) {
+            .split => |split| tcl.paged.pagedAttention(params, q, split.k, split.v, opts),
+            .dense => std.debug.panic("TCL paged attention takes separate K and V pages", .{}),
+        },
     };
 }
 
