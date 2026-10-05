@@ -10,6 +10,7 @@ pub const cute_mxfp4 = @import("cute_mxfp4.zig");
 pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
 pub const metal = @import("metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
+pub const tcl = @import("tcl.zig");
 pub const triton = @import("triton.zig");
 pub const fly = @import("fly_kernels/moe.zig");
 const fused_experts = @import("fused_experts.zig");
@@ -82,6 +83,7 @@ pub const Backend = enum {
     fly,
     mosaic_tpu,
     metal,
+    tcl,
 
     pub fn auto(platform: *const zml.Platform, scheme: ?zml.Quantization.Scheme, dtype: zml.DataType) !Backend {
         // Keep the dtype as an argument because non scheme-specific backends may depend on it later
@@ -119,6 +121,7 @@ pub const Backend = enum {
                 };
             },
             .tpu => if (scheme == null) .mosaic_tpu else error.UnsupportedQuantization,
+            .furiosa => if (scheme == null) .tcl else error.UnsupportedQuantization,
             .metal => b: {
                 const s = scheme orelse break :b .metal;
                 break :b switch (s) {
@@ -146,6 +149,7 @@ pub const Backend = enum {
             },
             .mosaic_tpu => platform.target == .tpu,
             .metal => platform.target == .metal,
+            .tcl => platform.target == .furiosa,
         };
     }
 
@@ -156,7 +160,7 @@ pub const Backend = enum {
             .cute_mxfp4 => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
             .triton_mxfp4 => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else error.UnsupportedQuantization,
             .flashinfer_cutlass => if (scheme == .nvfp4) .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 } else error.UnsupportedQuantization,
-            .mosaic_tpu, .metal => .{ .gate_up = .concatenated, .packing = .plain },
+            .mosaic_tpu, .metal, .tcl => .{ .gate_up = .concatenated, .packing = .plain },
             .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
     }
@@ -169,6 +173,7 @@ pub const Backend = enum {
             .triton, .fly => {},
             .mosaic_tpu => {},
             .metal => {},
+            .tcl => {},
         };
     }
 };
@@ -177,7 +182,7 @@ pub const Options = struct {
     activation: Activation,
     /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
     quantize_input: bool,
-    /// Where routing weights are applied; FlashInfer, Mosaic and Metal require after_down.
+    /// Where routing weights are applied; FlashInfer, Mosaic, Metal and TCL require after_down.
     routing_weight_placement: fused_experts.RoutingWeightPlacement,
 };
 
@@ -199,6 +204,7 @@ pub fn forwardMoe(
         inline .triton, .fly => |b| fused_experts.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, b),
         .mosaic_tpu => mosaic_tpu.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
         .metal => metal.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
+        .tcl => tcl.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
     };
 }
 
