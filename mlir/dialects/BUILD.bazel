@@ -29,6 +29,7 @@ zig_library(
         "//mlir/dialects/fly",
         "//mlir/dialects/mosaic_tpu",
         "//mlir/dialects/stablehlo",
+        "//mlir/dialects/tcl",
         "//mlir/dialects/ttir",
         "//stdx",
         "@shardy//shardy/integrations/c:sdy_capi",
