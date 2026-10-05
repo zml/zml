@@ -176,7 +176,7 @@ pub fn fusedExpertsImpl(
         zml.Shape.init(.{ .r = num_routes, .out = gate_up.dim(.dout) }, act_dtype),
         mode,
     ), opts.w1_global_scale, expert_ids);
-    const activated = zml.moe.applyActivation(gate_up_out, opts.activation, .concatenated);
+    const activated = zml.moe.applyActivation(gate_up_out, opts.activation, .concatenated).convert(act_dtype);
 
     const down_out = applyDownGlobalScale(moeGemm(
         activated,
