@@ -158,6 +158,7 @@ zig_library(
         "//kernels/cute:cute_builder",
         "//kernels/fly:fly_builder",
         "//kernels/mosaic_tpu:mosaic_tpu_builder",
+        "//kernels/tcl:tcl_builder",
         "//kernels/triton:triton_builder",
         "//mlir",
         "//mlir/dialects",

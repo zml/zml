@@ -1,0 +1,20 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "tcl_builder",
+    srcs = ["dtype.zig"],
+    import_name = "kernels/tcl/builder",
+    main = "builder.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//mlir/dialects",
+        "//mlir/dialects/tcl",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":tcl_builder"],
+)

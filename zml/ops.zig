@@ -1360,6 +1360,32 @@ pub fn cudaTile(inputs: anytype, outputs: anytype, opts: CudaTileOps) [outputs.l
     return outputs_;
 }
 
+pub const TclOps = struct {
+    ir: []const u8,
+};
+
+/// A TCL function the Furiosa plugin compiles as its own native unit.
+pub fn tcl(inputs: anytype, outputs: anytype, opts: TclOps) [outputs.len]Tensor {
+    const compiler = Compiler.current();
+    const mlir_ctx = compiler.mlir_ctx;
+
+    var values: [inputs.len]*const mlir.Value = undefined;
+    inline for (0..inputs.len) |i| values[i] = inputs[i].value();
+
+    var res_types: [outputs.len]*const mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| res_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output);
+
+    const op = dialects.stablehlo.custom_call(mlir_ctx, &values, &res_types, .{
+        .call_target_name = "furiosa.tcl",
+        .backend_config = .{ .original = opts.ir },
+        .has_side_effect = false,
+    }, compiler.location).appendTo(compiler.currentScope().block);
+
+    var outputs_: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| outputs_[i] = Tensor._result(output, op.result(i));
+    return outputs_;
+}
+
 pub const CuteOps = struct {
     /// The kernel symbol.
     name: []const u8,
