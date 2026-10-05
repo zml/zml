@@ -356,7 +356,8 @@ pub const Tensor = struct {
     /// but this API allows to reuse buffer between input and output arguments
     /// of a given function.
     /// Note this is visible from the outside. The caller of a function with donations
-    /// is not allowed to reuse the donated input buffer after the call.
+    /// cannot use the donated input's contents after execution. Runners destroy its
+    /// handle automatically; raw `Exe.call` leaves it for the caller to deinit.
     /// For `reuseBuffer` to be effective, it needs to propagate all the way through the output.
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
         const compilation_context = Compiler.current();
@@ -406,25 +407,27 @@ pub const Tensor = struct {
             y_memory[dev] = y_d.opaqueDevicePtr(dev);
         }
 
-        var y2_d: zml.Buffer = undefined;
-        var z2_d: zml.Buffer = undefined;
         var runner = try exe.runner(std.testing.allocator);
         defer runner.deinit(std.testing.allocator);
-        runner.run(io, .{ x_d, y_d, z_d }, .{ &y2_d, &z2_d }, .{ .wait = true });
-        defer y2_d.deinit();
-        defer z2_d.deinit();
 
-        var output_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
-        for (0..y2_d.numShards()) |dev| {
-            output_memory[dev] = y2_d.opaqueDevicePtr(dev);
-        }
+        for ([_]bool{ false, true }) |wait| {
+            var z2_d: zml.Buffer = undefined;
+            runner.run(io, .{ x_d, y_d, z_d }, .{ &y_d, &z2_d }, .{ .wait = wait });
+            defer z2_d.deinit();
+            try y_d.await(io);
 
-        // Check that y_d and y2_d point to the same addresses on the devices.
-        try std.testing.expectEqualSlices(*anyopaque, y_memory[0..y_d.numShards()], output_memory[0..y2_d.numShards()]);
+            var output_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
+            for (0..y_d.numShards()) |dev| {
+                output_memory[dev] = y_d.opaqueDevicePtr(dev);
+            }
 
-        // Check that z_d and z2_d DO NOT POINT to the same addresses
-        for (0..z2_d.numShards()) |dev| {
-            try std.testing.expect(z2_d.opaqueDevicePtr(dev) != z_d.opaqueDevicePtr(dev));
+            // Check that the replacement y_d reuses the donated device memory.
+            try std.testing.expectEqualSlices(*anyopaque, y_memory[0..y_d.numShards()], output_memory[0..y_d.numShards()]);
+
+            // Check that z_d and z2_d DO NOT POINT to the same addresses
+            for (0..z2_d.numShards()) |dev| {
+                try std.testing.expect(z2_d.opaqueDevicePtr(dev) != z_d.opaqueDevicePtr(dev));
+            }
         }
     }
 
@@ -834,19 +837,17 @@ pub const Tensor = struct {
             var rng_buffer = try Rng.initBuffer(std.testing.io, platform, .replicated, 1234);
             defer rng_buffer._state.deinit();
 
-            var rand: zml.Bufferized(Rng) = undefined;
             var stats: zml.Bufferized(Stats) = undefined;
             var runner = try exe.runner(std.testing.allocator);
             defer runner.deinit(std.testing.allocator);
-            runner.run(std.testing.io, .{rng_buffer}, .{ &rand, &stats }, .{ .wait = true });
-            defer rand._state.deinit();
+            runner.run(std.testing.io, .{rng_buffer}, .{ &rng_buffer, &stats }, .{ .wait = true });
             defer stats.mean.deinit();
             defer stats.variance.deinit();
             defer stats.min.deinit();
             defer stats.max.deinit();
 
             // Check the Rng state has been modified.
-            try std.testing.expect(try rand._state.getValue(u128, std.testing.io) != 1234);
+            try std.testing.expect(try rng_buffer._state.getValue(u128, std.testing.io) != 1234);
 
             // Check the mean and variance are close to theoritical values.
             const mean_ = try stats.mean.getValue(f32, std.testing.io);
@@ -948,18 +949,16 @@ pub const Tensor = struct {
             var tgt_dist_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), .replicated, @ptrCast(&tgt_dist_data));
             defer tgt_dist_buffer.deinit();
 
-            var rand: zml.Bufferized(Rng) = undefined;
             var stats: zml.Bufferized(Stats) = undefined;
             var runner = try exe.runner(std.testing.allocator);
             defer runner.deinit(std.testing.allocator);
-            runner.run(std.testing.io, .{ rng_buffer, tgt_dist_buffer }, .{ &rand, &stats }, .{ .wait = true });
-            defer rand._state.deinit();
+            runner.run(std.testing.io, .{ rng_buffer, tgt_dist_buffer }, .{ &rng_buffer, &stats }, .{ .wait = true });
             defer stats.mean.deinit();
             defer stats.variance.deinit();
             defer stats.actual_dist.deinit();
 
             // Check the Rng state has been modified.
-            try std.testing.expect(try rand._state.getValue(i128, std.testing.io) != 1234);
+            try std.testing.expect(try rng_buffer._state.getValue(i128, std.testing.io) != 1234);
 
             // Check the mean and variance are close to theoritical values.
             const mean_ = try stats.mean.getValue(f32, std.testing.io);
