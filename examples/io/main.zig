@@ -155,9 +155,9 @@ pub fn main(init: std.process.Init) !void {
             try stdout_writer.interface.flush();
         },
         .load => {
-            const MesheType = enum { replicated, sharded };
+            const MeshType = enum { replicated, sharded };
 
-            const meshe_type: MesheType = std.meta.stringToEnum(MesheType, it.next() orelse "sharded") orelse return error.InvalidMesheKind;
+            const mesh_type: MeshType = std.meta.stringToEnum(MeshType, it.next() orelse "sharded") orelse return error.InvalidMesheKind;
 
             const platform: *zml.Platform = try .auto(allocator, io, .{});
             defer platform.deinit(allocator, io);
@@ -186,7 +186,7 @@ pub fn main(init: std.process.Init) !void {
             var registry_it = registry.iterator();
             var load_count: usize = 0;
             while (registry_it.next()) |entry| : (load_count += 1) {
-                tensors[load_count] = switch (meshe_type) {
+                tensors[load_count] = switch (mesh_type) {
                     .replicated => store.view().createReplicatedTensor(entry.key_ptr.*, null),
                     .sharded => if (entry.value_ptr.shape.rank() > 0)
                         store.view().createTensor(entry.key_ptr.*, null, .tp, tp_partitioning)

@@ -90,7 +90,7 @@ pub fn run(
         .activations_store = &activation_store,
         .attention_metadata = attention_metadata,
         .attention_parameters = attention_parameters,
-        .meshe = platform.replicated_mesh,
+        .mesh = platform.replicated_mesh,
     };
 
     try ctx.testLayer("embed_tokens", .{ .batch, .seq }, mdl.embed_tokens, model_buffers.embed_tokens, .{});
@@ -135,7 +135,7 @@ const TestContext = struct {
     activations_store: *zml.io.TensorStore,
     attention_metadata: zml.attention.Metadata,
     attention_parameters: zml.attention.Parameters,
-    meshe: *const zml.Mesh,
+    mesh: *const zml.Mesh,
 
     fn testLayerPrint(self: *TestContext, comptime name_fmt: []const u8, name_args: anytype, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
         const name = try std.fmt.allocPrint(self.allocator, name_fmt, name_args);
@@ -158,9 +158,9 @@ const TestContext = struct {
         defer out_buffer_expected.deinit();
 
         const exe = if (comptime @TypeOf(layer) == model.TokenEmbedding)
-            try self.platform.compileFn(self.allocator, self.io, model.TokenEmbedding.forward, .{.{ .embedding = layer, .tokens = in_tensor }}, .{ .meshes = &.{self.meshe} })
+            try self.platform.compileFn(self.allocator, self.io, model.TokenEmbedding.forward, .{.{ .embedding = layer, .tokens = in_tensor }}, .{ .meshes = &.{self.mesh} })
         else
-            try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .meshes = &.{self.meshe} });
+            try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .meshes = &.{self.mesh} });
         defer exe.deinit();
 
         var args = try exe.args(self.allocator);
@@ -211,7 +211,7 @@ const TestContext = struct {
         const actual_seq_len: u32 = @intCast(in_tensor.dim(.seq));
         const cache_index_tensor: zml.Tensor = .init(.{}, .u32);
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, actual_seq_len_tensor, model.ConvCache{ .state = cache_tensor }, cache_index_tensor, model.ConvParameters{ .is_prefill = false } }, .{ .meshes = &.{self.meshe} });
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, actual_seq_len_tensor, model.ConvCache{ .state = cache_tensor }, cache_index_tensor, model.ConvParameters{ .is_prefill = false } }, .{ .meshes = &.{self.mesh} });
         defer exe.deinit();
 
         const conv_cache: zml.Bufferized(model.ConvCache) = .{ .state = cache_buffer };
@@ -273,7 +273,7 @@ const TestContext = struct {
 
         const cache_index_tensor: zml.Tensor = .init(.{}, .u32);
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, model.KvCache{ .k = key_cache_tensor, .v = value_cache_tensor }, cache_index_tensor, self.attention_metadata, self.attention_parameters }, .{ .meshes = &.{self.meshe} });
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, model.KvCache{ .k = key_cache_tensor, .v = value_cache_tensor }, cache_index_tensor, self.attention_metadata, self.attention_parameters }, .{ .meshes = &.{self.mesh} });
         defer exe.deinit();
 
         const kv_cache: zml.Bufferized(model.KvCache) = .{ .k = key_cache_buffer, .v = value_cache_buffer };

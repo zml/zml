@@ -206,17 +206,17 @@ pub fn main(init: std.process.Init) !void {
     const mlp: Mlp = .{
         .up_proj = .init(
             mlp_view.createReplicatedTensor("up_proj.weight", .{ .dout, .d }),
-            mlp_view.maybecreateReplicatedTensor("up_proj.bias", .{.dout}),
+            mlp_view.maybeCreateReplicatedTensor("up_proj.bias", .{.dout}),
             .d,
         ),
         .gate_proj = .init(
             mlp_view.createReplicatedTensor("gate_proj.weight", .{ .dout, .d }),
-            mlp_view.maybecreateReplicatedTensor("gate_proj.bias", .{.dout}),
+            mlp_view.maybeCreateReplicatedTensor("gate_proj.bias", .{.dout}),
             .d,
         ),
         .down_proj = .init(
             mlp_view.createReplicatedTensor("down_proj.weight", .{ .d, .dout }),
-            mlp_view.maybecreateReplicatedTensor("down_proj.bias", .{.d}),
+            mlp_view.maybeCreateReplicatedTensor("down_proj.bias", .{.d}),
             .dout,
         ),
     };

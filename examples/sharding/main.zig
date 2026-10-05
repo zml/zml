@@ -2,7 +2,7 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const log = std.log.scoped(.meshe);
+const log = std.log.scoped(.mesh);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -192,20 +192,20 @@ pub fn main(init: std.process.Init) !void {
     }
     log.info("{f}", .{platform.physical_mesh});
 
-    const meshe: *const zml.Mesh = try platform.registerMesh(
+    const mesh: *const zml.Mesh = try platform.registerMesh(
         "dp_mp",
         .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
     );
 
-    log.info("{f}", .{meshe.logical});
-    log.info("{f}", .{meshe});
+    log.info("{f}", .{mesh.logical});
+    log.info("{f}", .{mesh});
 
     const input_shape = zml.Shape.init(.{ .batch = 16, .feature = 32 }, .f32)
-        .withPartitioning(meshe, .{ .batch = .data, .feature = .replicated });
+        .withPartitioning(mesh, .{ .batch = .data, .feature = .replicated });
     const w_shape = zml.Shape.init(.{ .feature = 32, .hidden = 64 }, .f32)
-        .withPartitioning(meshe, .{ .feature = .replicated, .hidden = .model });
+        .withPartitioning(mesh, .{ .feature = .replicated, .hidden = .model });
     const b_shape = zml.Shape.init(.{ .hidden = 64 }, .f32)
-        .withPartitioning(meshe, .{ .hidden = .model });
+        .withPartitioning(mesh, .{ .hidden = .model });
 
     const input: zml.Tensor = zml.Tensor.fromShape(input_shape);
     const w: zml.Tensor = zml.Tensor.fromShape(w_shape);
@@ -220,7 +220,7 @@ pub fn main(init: std.process.Init) !void {
         .{input},
         .{
             .partitioner = args.partitioner,
-            .meshes = &.{meshe},
+            .meshes = &.{mesh},
         },
     );
     defer exe.deinit();

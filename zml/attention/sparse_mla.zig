@@ -103,7 +103,7 @@ pub fn launchConfig(paged_opts: Options, topk_count: usize, cu_count_: usize) Co
     }
     // Full 256-query prefill chunks already expose enough query parallelism.
     // Retain BLOCK_M=16 and the generic split model, but process wider sparse
-    // tiles. The predicate uses the post-meshe flattened query shape.
+    // tiles. The predicate uses the post-mesh flattened query shape.
     if (is_sm103 and
         !paged_opts.all_decode and
         paged_opts.total_q_blocks >= 256 and

@@ -179,18 +179,18 @@ pub const TensorStore = struct {
         }
 
         /// Creates a zml.Tensor from a specific entry in the store.
-        pub fn createTensor(self: View, subkey: []const u8, tags: anytype, meshe_: @EnumLiteral(), partitioning: anytype) Tensor {
-            return self.maybeCreateTensor(subkey, tags, meshe_, partitioning) orelse
+        pub fn createTensor(self: View, subkey: []const u8, tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateTensor(subkey, tags, mesh_, partitioning) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, meshe_: @EnumLiteral(), partitioning: anytype) ?Tensor {
+        pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
             const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
             const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
-            if (meshe_ == .replicated) {
+            if (mesh_ == .replicated) {
                 return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .replicated);
             }
-            const resolved_mesh = self.store.mesh(meshe_);
+            const resolved_mesh = self.store.mesh(mesh_);
             const partition: Sharding.Partitioning = if (has_tags)
                 .parse(parsed_tags.constSlice(), resolved_mesh, partitioning)
             else
@@ -198,13 +198,13 @@ pub const TensorStore = struct {
             return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .{ .mesh = resolved_mesh, .partition = partition });
         }
 
-        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, meshe_: @EnumLiteral(), partitioning: anytype) Tensor {
-            return self.maybeCreateHostPinnedTensor(subkey, tags, meshe_, partitioning) orelse
+        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateHostPinnedTensor(subkey, tags, mesh_, partitioning) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, meshe_: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
-            const tensor = self.maybeCreateTensor(subkey, tags, meshe_, partitioning);
+        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
+            const tensor = self.maybeCreateTensor(subkey, tags, mesh_, partitioning);
             if (tensor) |t| {
                 const storage = self.store.id_to_sources.getPtr(t.id);
                 storage.?.memory = .host_pinned;
@@ -1683,7 +1683,7 @@ test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
     }, .{ .batch = .batch, .model = .model });
 }
 
-test "DirectMemoryWriter: folded model meshe with 2x2 physical mesh" {
+test "DirectMemoryWriter: folded model mesh with 2x2 physical mesh" {
     const case: DirectMemoryWriterDeviceTest = .{
         .allocator = std.testing.allocator,
         .io = std.testing.io,

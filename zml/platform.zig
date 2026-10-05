@@ -648,7 +648,7 @@ pub const Platform = struct {
             .suggest(logical, &platform.physical_mesh),
         ) catch |err| switch (err) {
             error.InvalidPhysicalMesh, error.InvalidStrategy, error.InvalidPhysicalAxis => {
-                std.debug.panic("ZML failed to create a valid meshe for logical mesh: {f}\nand physical_mesh: {f}\nPlease report this bug.", .{ logical, platform.physical_mesh });
+                std.debug.panic("ZML failed to create a valid mesh for logical mesh: {f}\nand physical_mesh: {f}\nPlease report this bug.", .{ logical, platform.physical_mesh });
             },
             error.OutOfMemory => |e| return e,
         };
@@ -660,7 +660,7 @@ pub const Platform = struct {
         const arena = platform.arena.allocator();
         const entry = try platform.meshes.getOrPut(arena, name);
         if (entry.found_existing) {
-            std.debug.panic("Another meshe already exists with this name: {s}", .{name});
+            std.debug.panic("Another mesh already exists with this name: {s}", .{name});
         }
 
         const owned_name = try arena.dupe(u8, name);

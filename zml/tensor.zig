@@ -103,7 +103,7 @@ pub const Tensor = struct {
     /// Creates a Tensor from a mlir.Value
     ///
     /// The shape is derived from the type of the mlir.Value.
-    /// Meshe is `unknown`
+    /// mesh is `unknown`
     pub fn fromMlirValue(val: *const mlir.Value) Tensor {
         const ctx = Compiler.current();
         const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
@@ -165,19 +165,19 @@ pub const Tensor = struct {
         return res;
     }
 
-    /// Specify the meshe of the input tensor.
-    /// * meshe: *const zml.Mesh, but during compilation the `.meshe_name` syntax can used to get
-    /// a known meshe from the compilation options.
-    /// * partition spec: a struct where the field names match the axis of the given meshe
+    /// Specify the mesh of the input tensor.
+    /// * mesh: *const zml.Mesh, but during compilation the `.meshe_name` syntax can used to get
+    /// a known mesh from the compilation options.
+    /// * partition spec: a struct where the field names match the axis of the given mesh
     ///
     /// eg `x.withPartitioning(tp, .{ .h = .model }))` or `x.withPartitioning(.tp, .{ .h = .model }))`
-    pub fn withPartitioning(self: Tensor, meshe_: anytype, partition_spec: anytype) Tensor {
-        if (@TypeOf(meshe_) == @EnumLiteral()) {
+    pub fn withPartitioning(self: Tensor, mesh_: anytype, partition_spec: anytype) Tensor {
+        if (@TypeOf(mesh_) == @EnumLiteral()) {
             const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit *const zml.Mesh object as input");
-            return self.withPartitioning(compiler.mesh(meshe_), partition_spec);
+            return self.withPartitioning(compiler.mesh(mesh_), partition_spec);
         }
 
-        const partitioned_shape = self._shape.withPartitioning(meshe_, partition_spec);
+        const partitioned_shape = self._shape.withPartitioning(mesh_, partition_spec);
         return self.withPartitioningInner(partitioned_shape);
     }
 

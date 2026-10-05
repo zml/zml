@@ -334,11 +334,11 @@ fn compileExe(
     }, args);
 }
 
-fn hiddenTensor(mdl: model.Model, seqlen: usize, meshe: *const zml.Mesh) zml.Tensor {
+fn hiddenTensor(mdl: model.Model, seqlen: usize, mesh: *const zml.Mesh) zml.Tensor {
     return .fromShape(zml.Shape.init(
         .{ .b = 1, .s = seqlen, .d = mdl.config.text_config.hidden_size },
         mdl.text_model.embed_tokens.weight.dtype(),
-    ).withPartitioning(meshe, .{ .b = .replicated, .s = .replicated, .d = .replicated }));
+    ).withPartitioning(mesh, .{ .b = .replicated, .s = .replicated, .d = .replicated }));
 }
 
 fn findFirstLayerIndex(layer_types: []const model.LayerType, target: model.LayerType) ?usize {

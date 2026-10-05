@@ -26,22 +26,22 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    const benchmark_meshe: *const zml.Mesh = try platform.registerMesh("benchmark_mesh", .mesh(
+    const mesh: *const zml.Mesh = try platform.registerMesh("mesh", .mesh(
         .{ .m = .low_bandwidth, .n = .high_bandwidth },
     ));
 
     const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);
 
     const a = zml.Tensor.init(.{ .m = cli_args.size, .k = cli_args.size }, cli_args.dtype)
-        .withPartitioning(benchmark_meshe, .{ .m = .m, .k = .replicated });
+        .withPartitioning(mesh, .{ .m = .m, .k = .replicated });
     const b = zml.Tensor.init(.{ .k = cli_args.size, .n = cli_args.size }, cli_args.dtype)
-        .withPartitioning(benchmark_meshe, .{ .k = .replicated, .n = .n });
+        .withPartitioning(mesh, .{ .k = .replicated, .n = .n });
 
     var exe = blk: {
         log.info("⏱️ Compiling benchmark...", .{});
         const now: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Compiled benchmark [{f}]", .{now.untilNow(io, .awake)});
-        break :blk try platform.compileFn(allocator, io, benchmark, .{ a, b }, .{ .meshes = &.{benchmark_meshe} });
+        break :blk try platform.compileFn(allocator, io, benchmark, .{ a, b }, .{ .meshes = &.{mesh} });
     };
     defer exe.deinit();
 

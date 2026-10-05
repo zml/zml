@@ -707,14 +707,14 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
         }
     }
 
-    // Input meshe/memory/aliasing attributes
+    // Input mesh/memory/aliasing attributes
     const input_attributes = try arena.alloc(*const mlir.Attribute, input_info.len);
     for (0.., input_attributes) |i, *input_attrs| {
         const attrs_list = try input_info.get(i).attributes(arena, compiler, fn_scope);
         input_attrs.* = .dict(mlir_ctx, attrs_list.constSlice());
     }
 
-    // Output meshe/memory attributes
+    // Output mesh/memory attributes
     const output_attributes = try arena.alloc(*const mlir.Attribute, output_info.len);
     for (0.., output_attributes) |i, *output_attrs| {
         const attrs_list = try output_info.get(i).attributes(arena, compiler, fn_scope);
@@ -790,7 +790,7 @@ fn repack(compiler: *Compiler, scope: *Scope, og_shape: Shape, value: *const mli
 }
 
 fn validateMeshes(meshes: []const *const Sharding.Mesh) !void {
-    stdx.debug.assert(meshes.len >= 1, "Waiting at leat 1 meshe strategy to be implemented", .{});
+    stdx.debug.assert(meshes.len >= 1, "Waiting at leat 1 mesh strategy to be implemented", .{});
 
     const first = meshes[0];
     const partitions = first.numPartitions();

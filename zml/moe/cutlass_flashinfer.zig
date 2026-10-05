@@ -252,7 +252,7 @@ fn ffiCallNvfp4(
 
 const routedNvfp4Call = zml.ops.CustomCall(Input, Output, Attributes, ffiCallNvfp4, .{
     .name = "flashinfer_cutlass_nvfp4_routed_moe",
-    // Expert meshe is owned by forwardMoe outer manual computation.
+    // Expert mesh is owned by forwardMoe outer manual computation.
     .meshe_aware = false,
     .has_side_effect = false,
 });

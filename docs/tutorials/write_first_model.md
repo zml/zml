@@ -175,7 +175,7 @@ var executable = try platform.compile(allocator, io, layer, .forward, .{input}, 
 defer executable.deinit();
 ```
 
-You might wonder what this `meshe` variable is for ? ZML supports meshe tensors across multiple devices,
+You might wonder what this `sharding` variable is for ? ZML supports sharding tensors across multiple devices,
 and the `compile()` function needs to know how the tensors are sharded in order to compile the module correctly.
 For this simple example, we just replicate the tensors across all devices for simplicity.
 
@@ -318,7 +318,7 @@ debug(zml/module):
 ******** ZML generated MLIR ********
 module @zml attributes {mhlo.num_partitions = 4 : i32, mhlo.num_replicas = 1 : i32} {
   sdy.mesh @replicated = <["bus"=4]>
-  func.func public @main(%arg0: tensor<3xf16> {sdy.meshe = #sdy.meshe<@replicated, [{}], replicated={"bus"}>}, %arg1: tensor<3xf16> {sdy.meshe = #sdy.meshe<@replicated, [{}], replicated={"bus"}>}, %arg2: tensor<3xf16> {sdy.meshe = #sdy.meshe<@replicated, [{}], replicated={"bus"}>}) -> (tensor<3xf16> {sdy.meshe = #sdy.meshe<@replicated, [{}], replicated={"bus"}>}) {
+  func.func public @main(%arg0: tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}, %arg1: tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}, %arg2: tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}) -> (tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}) {
     %0 = stablehlo.multiply %arg1, %arg2 : tensor<3xf16>
     %1 = stablehlo.add %0, %arg0 : tensor<3xf16>
     return %1 : tensor<3xf16>
