@@ -13,7 +13,6 @@ pub const Session = struct {
     prefill: inference.KernelRunner,
     decode: inference.KernelRunner,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
-    token_index_buffers: []zml.Buffer,
     kv_cache_index_buffers: []zml.Buffer,
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
     tokenizer: zml.tokenizer.Tokenizer,
@@ -33,19 +32,6 @@ pub const Session = struct {
         const shardings = &compiled_model.params.shardings;
         var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, shardings.model);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
-
-        const token_index_buffers = try allocator.alloc(zml.Buffer, compiled_model.params.seqlen);
-        errdefer allocator.free(token_index_buffers);
-        var initialized_token_index_buffers: usize = 0;
-        errdefer {
-            for (token_index_buffers[0..initialized_token_index_buffers]) |*token_index_buffer| {
-                token_index_buffer.deinit();
-            }
-        }
-        for (token_index_buffers, 0..) |*token_index_buffer, i| {
-            token_index_buffer.* = try zml.Buffer.scalar(io, platform, i, .u32);
-            initialized_token_index_buffers = i + 1;
-        }
 
         const conversation_id: u64 = @bitCast(std.Io.Clock.now(.real, io).toMicroseconds());
 
@@ -74,7 +60,6 @@ pub const Session = struct {
             .prefill = prefill,
             .decode = decode,
             .kv_cache_buffers = kv_cache_buffers,
-            .token_index_buffers = token_index_buffers,
             .kv_cache_index_buffers = kv_cache_index_buffers,
             .rng_buffers = rng_buffers,
             .tokenizer = tokenizer,
@@ -88,10 +73,6 @@ pub const Session = struct {
         self.prefill.deinit(self.allocator);
         self.decode.deinit(self.allocator);
         model.KvCache.deinitBuffer(&self.kv_cache_buffers);
-        for (self.token_index_buffers) |*token_index_buffer| {
-            token_index_buffer.deinit();
-        }
-        self.allocator.free(self.token_index_buffers);
         for (self.kv_cache_index_buffers) |*buffer| buffer.deinit();
         self.allocator.free(self.kv_cache_index_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
@@ -154,6 +135,9 @@ pub const Session = struct {
         var prefill_tokens_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, prefill_tokens_slice, .replicated);
         defer prefill_tokens_buffer.deinit();
 
+        var token_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, 0, .u32);
+        defer token_index_buffer.deinit();
+
         const params = self.compiled_model.params;
         var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
             .attnd => .{ .attnd = .{
@@ -169,7 +153,7 @@ pub const Session = struct {
         inference.run(&self.prefill, .{
             .io = self.io,
             .tokens_buf = &prefill_tokens_buffer,
-            .token_index_buf = &self.token_index_buffers[0],
+            .token_index_buf = &token_index_buffer,
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
             .attention_metadata_buffers = &attention_metadata_buffers,
@@ -210,10 +194,13 @@ pub const Session = struct {
             try all_tokens.append(self.allocator, last_token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
+            var token_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.items.len, .u32);
+            defer token_index_buffer.deinit();
+
             inference.run(&self.decode, .{
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
-                .token_index_buf = &self.token_index_buffers[all_tokens.items.len],
+                .token_index_buf = &token_index_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
                 .attention_metadata_buffers = &attention_metadata_buffers,
