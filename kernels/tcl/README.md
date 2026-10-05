@@ -92,8 +92,14 @@ def softmax_kernel(B: Axis = 2, D: Axis = 1024, S: Axis = 16, v0: [B, S, D]/bf16
   checks.
 * **DRAM tensors.** A `.dram` argument comes back as its `as_logical` view;
   `b.asDram(t, .{...})` returns a result in a DRAM mapping.
-* **Context is multi-chip.** `furiosa-tcc` only lowers `@ context(...)` for
-  `renegade-8pe-Nchip` targets, and the plugin compiles units for one chip.
+* **Multi-chip kernels.** A kernel that places data or work on chips (a
+  chip-split DRAM tensor, a `.context`, `allGather`) is compiled by the plugin
+  for all the chips of its SPMD program (2 or 4), and runs as one launch
+  across the partitions; other kernels stay per chip. Its arguments and
+  results are DRAM tensors: `Dram{ .chip = &.{.{ .axis = C }} }` splits axis
+  `C`, sized to the chip count, across chips (each partition holds its share),
+  the default `.broadcast` keeps a copy per chip. Call it inside
+  `zml.ops.manualComputation` so it sees each partition's shards.
 * **Convolutions** pad and slide the input in its read: a slide replaces its
   axis by `window_axis, frame_axis`, then `contract` with the filter. On its
   own (without a slide) the padding is dropped.
