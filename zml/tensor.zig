@@ -294,7 +294,7 @@ pub const Tensor = struct {
         const x_h_ptr: [*]f32 = @ptrCast(@alignCast(x_h.opaqueDevicePtr(0)));
         try std.testing.expectEqualSlices(f32, &inputs, x_h_ptr[0..8]);
 
-        var x_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcpyH2D, .{x_h});
+        var x_d = try exe.eval(std.testing.allocator, io, .{x_h});
         defer x_d.deinit();
 
         if (platform.target == .furiosa) {
