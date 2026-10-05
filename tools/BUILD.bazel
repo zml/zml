@@ -16,10 +16,11 @@ sh_binary(
 
 sh_binary(
     name = "rocprofv3",
+    srcs = ["rocprofv3.sh"],
     data = [
         "@amdrocm-profiler-base//:rocprofv3_tool",
         "@libzml_rocm//:sandbox",
     ],
-    srcs = ["rocprofv3.sh"],
+    target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//visibility:public"],
 )
