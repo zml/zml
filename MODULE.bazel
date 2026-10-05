@@ -329,13 +329,6 @@ use_repo(llvm, "llvm-project")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.install(
-    name = "apt_furiosa",
-    lock = "//platforms/furiosa:packages.lock.json",
-    manifest = "//platforms/furiosa:packages.yaml",
-)
-use_repo(apt, "apt_furiosa")
-
-apt.install(
     name = "apt_cpu",
     lock = "//platforms/cpu:packages.lock.json",
     manifest = "//platforms/cpu:packages.yaml",
