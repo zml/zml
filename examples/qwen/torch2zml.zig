@@ -42,19 +42,19 @@ pub fn main(init: std.process.Init) !void {
 
         const attn_view = tb_layer_view.withPrefix("attn");
         const attn: Attn = .{
-            .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dout}, .replicated), null, .d),
-            .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dout}, .replicated), null, .d),
-            .to_k = .init(attn_view.createTensor("to_k.weight", .{ .dout, .d }, .replicated), null, .d),
-            .to_out = .init(attn_view.createTensor("to_out.0.weight", .{ .dout, .d }, .replicated), null, .d),
-            .to_q = .init(attn_view.createTensor("to_q.weight", .{ .dout, .d }, .replicated), null, .d),
-            .to_v = .init(attn_view.createTensor("to_v.weight", .{ .dout, .d }, .replicated), null, .d),
+            .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dup}, .replicated), null, .d),
+            .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dup}, .replicated), null, .d),
+            .to_k = .init(attn_view.createTensor("to_k.weight", .{ .dup, .d }, .replicated), null, .d),
+            .to_out = .init(attn_view.createTensor("to_out.0.weight", .{ .dup, .d }, .replicated), null, .d),
+            .to_q = .init(attn_view.createTensor("to_q.weight", .{ .dup, .d }, .replicated), null, .d),
+            .to_v = .init(attn_view.createTensor("to_v.weight", .{ .dup, .d }, .replicated), null, .d),
         };
 
         const img_mlp_view = tb_layer_view.withPrefix("img_mlp");
         const img_mlp: Mlp = .{
-            .proj = .init(img_mlp_view.createTensor("proj.weight", .{ .dout, .d }, .replicated), null, .dout),
-            .out = .init(img_mlp_view.createTensor("out.weight", .{ .d, .dout }, .replicated), null, .d),
-            .gate_layer = .init(img_mlp_view.createTensor("gate_layer.weight", .{ .dout, .d }, .replicated), null, .dout),
+            .proj = .init(img_mlp_view.createTensor("proj.weight", .{ .dup, .d }, .replicated), null, .d),
+            .out = .init(img_mlp_view.createTensor("out.weight", .{ .dout, .d }, .replicated), null, .d),
+            .gate_layer = .init(img_mlp_view.createTensor("gate_layer.weight", .{ .dup, .d }, .replicated), null, .d),
         };
 
         transformer_blocks[i] = .{ .attn = attn, .img_mlp = img_mlp };
@@ -83,20 +83,16 @@ pub fn main(init: std.process.Init) !void {
     defer activations_store.deinit();
 
     std.debug.print("\n\nStarting testing\n\n", .{});
-    std.debug.print("{f}\n", .{transformer_blocks[0].img_mlp.gate_layer.weight._shape});
-    std.debug.print("{f}\n", .{transformer_blocks[0].img_mlp.out.weight._shape});
-    std.debug.print("{f}\n", .{transformer_blocks[0].img_mlp.proj.weight._shape});
-    std.debug.print("\n", .{});
 
     try zml.testing.testLayer(
         allocator,
         io,
         platform,
-        transformer_blocks[0].img_mlp,
+        Wrapper{ .mlp = transformer_blocks[0].img_mlp },
         .forward,
         &activations_store,
-        "transformer.transformer_blocks.6.img_mlp",
-        transformer_blocks_buffer[0].img_mlp,
+        "transformer.transformer_blocks.0.img_mlp",
+        .{ .mlp = transformer_blocks_buffer[0].img_mlp },
         &.{},
         .{},
     );
@@ -132,6 +128,16 @@ pub fn main(init: std.process.Init) !void {
 //     (activation_fn): SiLU()
 //   )
 // )
+
+const Wrapper = struct {
+    mlp: Mlp,
+
+    pub fn forward(self: Wrapper, x: zml.Tensor) zml.Tensor {
+        const tagged = x.withTags(.{ .single, .wh, .d });
+        const squeezed = tagged.squeeze(.single);
+        return self.mlp.forward(squeezed);
+    }
+};
 
 const TransformerBlock = struct {
     img_mlp: Mlp,
@@ -179,13 +185,10 @@ const Mlp = struct {
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        std.debug.print("{f}\n\n", .{x.shape()});
-        const forward_gate = self.gate_layer.forward(x, .bf16);
-        _ = forward_gate; // autofix
-
-        const left = self.gate_layer.forward(x, .bf16).silu().withTags(.{ .dout, .d });
+        // It seems like I need to tag again after the silu(?)
+        const left = self.gate_layer.forward(x, .bf16).silu().withTags(.{ .d, .dup });
         const right = self.proj.forward(x, .bf16);
-        const dot = left.dot(right, .d);
+        const dot = left.mul(right).withTags(.{ .dup, .d });
         return self.out.forward(dot, .bf16);
     }
 };
