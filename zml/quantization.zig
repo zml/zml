@@ -172,9 +172,9 @@ pub fn quantizeMxfp8(x: Tensor, axis: anytype) QuantizedInput {
         .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
             .cdna4, .rdna4 => .f8e4m3fn,
             .cdna3 => .f8e4m3fnuz,
-            .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => return null,
-        } else return null,
-        else => return null,
+            .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => null,
+        } else null,
+        else => null,
     };
 
     if (dtype == null) std.debug.panic("Nvfp4 not supported on {}", .{platform.target});
