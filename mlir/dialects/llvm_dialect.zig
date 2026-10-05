@@ -27,7 +27,7 @@ pub const NVPTXAddressSpace = enum(u32) {
 /// clash with it.
 pub fn pointerType(ctx: *mlir.Context, space: anytype) *const mlir.Type {
     var buf: [32]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "!llvm.ptr<{d}>", .{@intFromEnum(space)}) catch unreachable;
+    const text = std.fmt.bufPrint(&buf, "!llvm.ptr<{d}>", .{@backingInt(space)}) catch unreachable;
     return mlir.Type.parse(ctx, text) catch std.debug.panic("failed to parse LLVM pointer type '{s}'", .{text});
 }
 
