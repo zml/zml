@@ -7,6 +7,7 @@ const cuda_tile_builder = @import("kernels/cuda_tile/builder");
 const cute_builder = @import("kernels/cute/builder");
 const fly_builder = @import("kernels/fly/builder");
 const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
+const tcl_builder = @import("kernels/tcl/builder");
 const tpu_dialect = @import("mlir/dialects/mosaic_tpu");
 const triton_builder = @import("kernels/triton/builder");
 
@@ -706,6 +707,135 @@ pub const cute = struct {
     }
 };
 
+pub const tcl = struct {
+    pub const Builder = tcl_builder.Builder;
+    pub const TensorOperation = tcl_builder.TensorOperation;
+    pub const Value = tcl_builder.Value;
+    pub const Axis = tcl_builder.Axis;
+    pub const Expr = tcl_builder.Expr;
+    pub const Dram = tcl_builder.Dram;
+    pub const Context = tcl_builder.Context;
+    pub const DType = tcl_builder.DType;
+    pub const VeOp = tcl_builder.VeOp;
+    pub const ReduceMode = tcl_builder.ReduceMode;
+    pub const Predicate = tcl_builder.Predicate;
+    pub const Tactic = tcl_builder.Tactic;
+    pub const FinishError = tcl_builder.FinishError;
+
+    pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
+        return makeKernelContext(&tcl_builder.dialects_needed);
+    }
+
+    pub fn from(dt: DataType) DType {
+        return switch (dt) {
+            .bool => .bool,
+            .i4 => .i4,
+            .i8 => .i8,
+            .i16 => .i16,
+            .i32 => .i32,
+            .i64 => .i64,
+            .u8 => .u8,
+            .u16 => .u16,
+            .u32 => .u32,
+            .u64 => .u64,
+            .f16 => .f16,
+            .bf16 => .bf16,
+            .f32 => .f32,
+            .f64 => .f64,
+            .f4e2m1 => .f4_e2,
+            .f8e4m3fn => .f8_e4,
+            .f8e5m2 => .f8_e5,
+            else => std.debug.panic("zml.kernel.tcl.from: dtype {s} has no TCL equivalent", .{@tagName(dt)}),
+        };
+    }
+
+    fn Spec(comptime Config: type) type {
+        return struct {
+            name: [:0]const u8,
+            inputs: []const [:0]const u8,
+            outputs: []const [:0]const u8,
+            run: *const fn (*Builder, Config) FinishError!void,
+        };
+    }
+
+    /// A TCL function compiled by the Furiosa plugin as one native unit:
+    /// `declareArgs` declares the inputs in order, `ret` the outputs.
+    pub fn Kernel(
+        comptime ConfigT: type,
+        comptime spec: Spec(ConfigT),
+    ) type {
+        return struct {
+            pub const name: [:0]const u8 = spec.name;
+            pub const Config = ConfigT;
+            pub const Inputs = StructOf(spec.inputs, Tensor);
+            pub const Outputs = StructOf(spec.outputs, Shape);
+            pub const Results = StructOf(spec.outputs, Tensor);
+
+            pub const CallOpts = struct {
+                cfg: ConfigT,
+            };
+
+            pub fn emit(allocator: std.mem.Allocator, cfg: ConfigT) ![:0]const u8 {
+                return build(allocator, cfg, null, null);
+            }
+
+            fn build(allocator: std.mem.Allocator, cfg: ConfigT, inputs: ?[]const Shape, outputs: ?[]const Shape) ![:0]const u8 {
+                const ctx = try newContext();
+                defer ctx.deinit();
+
+                var b = try Builder.open(allocator, ctx, name);
+                defer b.deinit();
+                try spec.run(&b, cfg);
+
+                const results = b.results orelse std.debug.panic("zml.kernel.tcl.Kernel({s}): run did not call ret", .{name});
+                if (b.args.len != spec.inputs.len or results.len != spec.outputs.len) {
+                    std.debug.panic("zml.kernel.tcl.Kernel({s}): {d} arguments and {d} results for {d} inputs and {d} outputs", .{ name, b.args.len, results.len, spec.inputs.len, spec.outputs.len });
+                }
+
+                if (inputs) |shapes| for (b.args, shapes, spec.inputs) |t, s, n| check(t, s, n);
+                if (outputs) |shapes| for (results, shapes, spec.outputs) |t, s, n| check(t, s, n);
+
+                return b.finish();
+            }
+
+            fn check(t: tcl_builder.Tensor, s: Shape, field: []const u8) void {
+                var same = from(s.dtype()) == t.dtype and s.rank() == t.axes.len;
+                if (same) for (t.axes, 0..) |a, i| {
+                    same = same and a.size == s.dim(i);
+                };
+
+                if (!same) std.debug.panic("zml.kernel.tcl.Kernel({s}): {s} is {f}, the TCL function has {s} over {d} axes", .{ name, field, s, @tagName(t.dtype), t.axes.len });
+            }
+
+            pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
+                const cur = Compiler.current();
+
+                var inputs_arr: [spec.inputs.len]Tensor = undefined;
+                var input_shapes: [spec.inputs.len]Shape = undefined;
+                inline for (spec.inputs, 0..) |fname, i| {
+                    inputs_arr[i] = @field(inputs, fname);
+                    input_shapes[i] = inputs_arr[i].shape();
+                }
+
+                var outputs_arr: [spec.outputs.len]Shape = undefined;
+                inline for (spec.outputs, 0..) |fname, i| outputs_arr[i] = @field(outputs, fname);
+
+                const ir = build(cur.allocator, opts.cfg, &input_shapes, &outputs_arr) catch |err|
+                    std.debug.panic("zml.kernel.tcl.Kernel({s}).call: emit failed: {}", .{ name, err });
+                defer cur.allocator.free(ir);
+
+                const tensor_results = ops.tcl(inputs_arr, outputs_arr, .{ .ir = ir });
+                var results: Results = undefined;
+                inline for (spec.outputs, 0..) |fname, i| {
+                    @field(results, fname) = tensor_results[i];
+                }
+
+                return results;
+            }
+        };
+    }
+};
+
 pub const fly = struct {
     /// Threads per wavefront: 64 on CDNA, 32 on RDNA.
     pub fn waveSize(p: *const platform_.Platform) i32 {
@@ -1040,6 +1170,71 @@ test "fly kernels run on rocm" {
             };
         },
     };
+}
+
+/// `furiosa.tcl.examples.softmax` over f32.
+const TclSoftmax = struct {
+    const Cfg = struct { b: i64, s: i64, d: i64 };
+    const K = tcl.Kernel(Cfg, .{
+        .name = "softmax_kernel",
+        .inputs = &.{"x"},
+        .outputs = &.{"y"},
+        .run = run,
+    });
+
+    fn run(b: *tcl.Builder, cfg: Cfg) tcl.FinishError!void {
+        const B = b.axis("B", cfg.b);
+        const S = b.axis("S", cfg.s);
+        const D = b.axis("D", cfg.d);
+        const t = try b.declareArgs(.{ .x = .{ .dtype = .f32, .axes = &.{ B, S, D } } });
+
+        const op = b.tensorOperation(.{});
+        const x = op.fetch(t.x, .{});
+        const e = x.subf(x.reduce(&.{D}, .maxf)).exp();
+        b.ret(&.{try op.commit(e.divf(e.reduce(&.{D}, .addf)), .{})});
+    }
+};
+
+test "tcl kernels run on furiosa" {
+    const zml = @import("zml.zig");
+    const allocator = std.testing.allocator;
+    const cfg: TclSoftmax.Cfg = .{ .b = 2, .s = 16, .d = 256 };
+
+    const ir = try TclSoftmax.K.emit(allocator, cfg);
+    defer allocator.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "func.func @softmax_kernel(") != null);
+
+    const platform = zml.testing.env();
+    if (platform.target != .furiosa) return error.SkipZigTest;
+
+    const Mod = struct {
+        pub fn forward(x: Tensor) Tensor {
+            return TclSoftmax.K.call(.{ .x = x }, .{ .y = x.shape() }, .{ .cfg = cfg }).y;
+        }
+    };
+    const x: Tensor = .init(.{ cfg.b, cfg.s, cfg.d }, .f32);
+    var exe = try zml.module.compile(allocator, std.testing.io, Mod.forward, .{x}, platform, .{});
+    defer exe.deinit();
+
+    var input: [cfg.b * cfg.s * cfg.d]f32 = undefined;
+    for (&input, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 37)) * 0.25 - 4;
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&input));
+    defer x_buffer.deinit();
+    var result = try zml.testing.autoCall(allocator, std.testing.io, &exe, Mod.forward, .{x_buffer});
+    defer result.deinit();
+    var host = try result.toSliceAlloc(allocator, std.testing.io);
+    defer host.free(allocator);
+
+    const out = host.items(f32);
+    var row: usize = 0;
+    while (row < cfg.b * cfg.s) : (row += 1) {
+        const in = input[row * cfg.d ..][0..cfg.d];
+        var max: f32 = in[0];
+        for (in) |v| max = @max(max, v);
+        var sum: f32 = 0;
+        for (in) |v| sum += @exp(v - max);
+        for (in, out[row * cfg.d ..][0..cfg.d]) |v, y| try std.testing.expectApproxEqAbs(@exp(v - max) / sum, y, 1e-4);
+    }
 }
 
 test "cute kernel emits the module the CuTe compiler takes" {

@@ -1,0 +1,81 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+# The native subset of the Furiosa XLA plugin's `tcl` dialect
+# (xla/pjrt/furiosa/ir): what ZML emits and the plugin's custom call parses.
+td_library(
+    name = "td_files",
+    srcs = ["tcl.td"],
+    deps = [
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "inc_gen",
+    tbl_outs = {
+        "tcl_dialect.h.inc": ["-gen-dialect-decls"],
+        "tcl_dialect.cc.inc": ["-gen-dialect-defs"],
+        "tcl_attrs.h.inc": ["-gen-attrdef-decls"],
+        "tcl_attrs.cc.inc": ["-gen-attrdef-defs"],
+        "tcl_types.h.inc": ["-gen-typedef-decls"],
+        "tcl_types.cc.inc": ["-gen-typedef-defs"],
+        "tcl_ops.h.inc": ["-gen-op-decls"],
+        "tcl_ops.cc.inc": ["-gen-op-defs"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "tcl.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "dialect",
+    srcs = ["tcl.cc"],
+    hdrs = [
+        "tcl.h",
+        "ve_instructions.inc",
+    ],
+    tags = ["manual"],
+    deps = [
+        ":inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:BytecodeOpInterface",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:SideEffectInterfaces",
+    ],
+)
+
+cc_library(
+    name = "tcl_capi",
+    srcs = ["tcl_capi.cc"],
+    hdrs = ["tcl_capi.h"],
+    strip_include_prefix = ".",
+    tags = ["manual"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":dialect",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+    alwayslink = True,
+)
+
+zig_library(
+    name = "tcl",
+    import_name = "mlir/dialects/tcl",
+    main = "tcl.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tcl_capi",
+        "//mlir",
+        "//mlir:c",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":tcl"],
+)
