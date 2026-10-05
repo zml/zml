@@ -42,35 +42,35 @@ pub const Phase = enum {
     }
 };
 
-pub const Shardings = struct {
-    model: zml.Sharding,
-    experts: zml.Sharding,
+pub const Meshes = struct {
+    model: zml.Meshe,
+    experts: zml.Meshe,
 
-    pub fn init(platform: *zml.Platform) !Shardings {
+    pub fn init(platform: *zml.Platform) !Meshes {
         switch (platform.target) {
             .tpu => {
                 const has_link_y = platform.physical_mesh.hasAxis(.link_y);
 
-                var strategy_experts: zml.Sharding.Strategy = .parseBindings(.{ .experts = .link_x });
-                var strategy_model: zml.Sharding.Strategy = .parseBindings(.{ .model = .link_x });
+                var strategy_experts: zml.Mesh.Strategy = .parseBindings(.{ .experts = .link_x });
+                var strategy_model: zml.Mesh.Strategy = .parseBindings(.{ .model = .link_x });
                 if (has_link_y) {
                     strategy_experts.addFold(.link_x, &.{ .link_x, .link_y });
                     strategy_model.addFold(.link_x, &.{ .link_x, .link_y });
                 }
 
                 return .{
-                    .model = try platform.registerShardingWithStrategy("model", .mesh(.{ .model = .high_bandwidth }), strategy_model),
-                    .experts = try platform.registerShardingWithStrategy("experts", .mesh(.{ .experts = .high_bandwidth }), strategy_experts),
+                    .model = try platform.registerMesheWithStrategy("model", .mesh(.{ .model = .high_bandwidth }), strategy_model),
+                    .experts = try platform.registerMesheWithStrategy("experts", .mesh(.{ .experts = .high_bandwidth }), strategy_experts),
                 };
             },
             .cuda, .rocm, .oneapi, .neuron, .metal, .cpu => return .{
-                .model = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })),
-                .experts = try platform.registerSharding("experts", .mesh(.{ .experts = .high_bandwidth })),
+                .model = try platform.registerMeshe("model", .mesh(.{ .model = .high_bandwidth })),
+                .experts = try platform.registerMeshe("experts", .mesh(.{ .experts = .high_bandwidth })),
             },
         }
     }
 
-    pub fn all(self: Shardings) [2]zml.Sharding {
+    pub fn all(self: Meshes) [2]zml.Meshe {
         return .{ self.model, self.experts };
     }
 };

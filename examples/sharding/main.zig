@@ -2,7 +2,7 @@ const std = @import("std");
 
 const zml = @import("zml");
 
-const log = std.log.scoped(.sharding);
+const log = std.log.scoped(.meshe);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -39,7 +39,6 @@ const DemoModel = struct {
 
         const gate = y.scale(0.01).sigmoid();
         return zml.ops.manualComputation(
-            input.shape()._sharding,
             (struct {
                 y: zml.Tensor,
                 gate: zml.Tensor,
@@ -143,7 +142,6 @@ fn createSequenceBuffer(
     io: std.Io,
     platform: *const zml.Platform,
     shape: zml.Shape,
-    sharding: zml.Sharding,
     start: f32,
 ) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
@@ -153,7 +151,7 @@ fn createSequenceBuffer(
         e.* = start + @as(f32, @floatFromInt(i));
     }
 
-    return zml.Buffer.fromSlice(io, platform, slice, sharding);
+    return zml.Buffer.fromSlice(io, platform, slice);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -194,20 +192,20 @@ pub fn main(init: std.process.Init) !void {
     }
     log.info("{f}", .{platform.physical_mesh});
 
-    const sharding: zml.Sharding = try platform.registerSharding(
+    const meshe: zml.Meshe = try platform.registerMeshe(
         "dp_mp",
         .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
     );
 
-    log.info("{f}", .{sharding.data.logical});
-    log.info("{f}", .{sharding});
+    log.info("{f}", .{meshe.data.logical});
+    log.info("{f}", .{meshe});
 
     const input_shape = zml.Shape.init(.{ .batch = 16, .feature = 32 }, .f32)
-        .withPartitioning(sharding, .{ .batch = .data, .feature = .replicated });
+        .withPartitioning(meshe, .{ .batch = .data, .feature = .replicated });
     const w_shape = zml.Shape.init(.{ .feature = 32, .hidden = 64 }, .f32)
-        .withPartitioning(sharding, .{ .feature = .replicated, .hidden = .model });
+        .withPartitioning(meshe, .{ .feature = .replicated, .hidden = .model });
     const b_shape = zml.Shape.init(.{ .hidden = 64 }, .f32)
-        .withPartitioning(sharding, .{ .hidden = .model });
+        .withPartitioning(meshe, .{ .hidden = .model });
 
     const input: zml.Tensor = zml.Tensor.fromShape(input_shape);
     const w: zml.Tensor = zml.Tensor.fromShape(w_shape);
@@ -222,16 +220,16 @@ pub fn main(init: std.process.Init) !void {
         .{input},
         .{
             .partitioner = args.partitioner,
-            .shardings = &.{sharding},
+            .meshes = &.{meshe},
         },
     );
     defer exe.deinit();
 
-    var w_buf = try createSequenceBuffer(allocator, io, platform, w_shape, sharding, 0.0);
+    var w_buf = try createSequenceBuffer(allocator, io, platform, w_shape, meshe, 0.0);
     defer w_buf.deinit();
-    var b_buf = try createSequenceBuffer(allocator, io, platform, b_shape, sharding, 100.0);
+    var b_buf = try createSequenceBuffer(allocator, io, platform, b_shape, meshe, 100.0);
     defer b_buf.deinit();
-    var input_buf = try createSequenceBuffer(allocator, io, platform, input_shape, sharding, 1000.0);
+    var input_buf = try createSequenceBuffer(allocator, io, platform, input_shape, meshe, 1000.0);
     defer input_buf.deinit();
 
     log.info("input placement: {f}", .{input_buf});

@@ -112,11 +112,11 @@ pub const LoadedModel = struct {
         io: std.Io,
         platform: *const zml.Platform,
         backend: zml.attention.Backend,
-        shardings: common.Shardings,
+        meshes: common.Meshes,
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, meshes);
 
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
@@ -615,8 +615,8 @@ pub const KvCache = struct {
 
     pub const Buffer = zml.Bufferized(KvCache);
 
-    pub fn init(kv_shape: zml.Shape, sharding: zml.Sharding) KvCache {
-        const sharded_shape = kv_shape.withPartitioning(sharding, .{ .h = .model });
+    pub fn init(kv_shape: zml.Shape, meshe: zml.Meshe) KvCache {
+        const sharded_shape = kv_shape.withPartitioning(meshe, .{ .h = .model });
 
         return .{
             .k = .fromShape(sharded_shape),
@@ -624,10 +624,10 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
+    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, meshe: zml.Meshe) !Buffer {
         return .{
-            .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
-            .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),
+            .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), meshe, .{}),
+            .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), meshe, .{}),
         };
     }
 

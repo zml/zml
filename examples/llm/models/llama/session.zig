@@ -29,8 +29,8 @@ pub const Session = struct {
         compiled_model: *inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
-        const shardings = &compiled_model.params.shardings;
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, shardings.model);
+        const meshes = &compiled_model.params.meshes;
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, meshes.model);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         const token_index_buffers = try allocator.alloc(zml.Buffer, compiled_model.params.seqlen);
@@ -149,7 +149,7 @@ pub const Session = struct {
                 .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32),
             } },
             .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
-            .vanilla, .cuda_fa2, .cuda_fa3, .nki => try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model),
+            .vanilla, .cuda_fa2, .cuda_fa3, .nki => try params.attention_metadata.initBuffer(self.io, self.platform, params.meshes.model),
         };
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
@@ -184,7 +184,7 @@ pub const Session = struct {
                 .layer_id = try .scalar(self.io, self.platform, 0, .u16),
                 .num_tokens = try .scalar(self.io, self.platform, 1, .u32),
             } },
-            .vanilla, .cuda_fa2, .cuda_fa3, .nki, .metal_fa => try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model),
+            .vanilla, .cuda_fa2, .cuda_fa3, .nki, .metal_fa => try params.attention_metadata.initBuffer(self.io, self.platform, params.meshes.model),
         };
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 

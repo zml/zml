@@ -34,7 +34,7 @@ mlir_ctx: *mlir.Context,
 mlir_pass_manager: *mlir.PassManager,
 module: *mlir.Module,
 platform: *const Platform,
-shardings: []const Sharding,
+meshes: []const Sharding.Mesh,
 partitioner: Sharding.Partitioner,
 
 mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
@@ -74,7 +74,7 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
 pub const Options = struct {
     /// Incremented once after successful compilation.
     progress: std.Progress.Node = .none,
-    shardings: []const Sharding = &.{},
+    meshes: []const *const Sharding.Mesh = &.{},
     // If null, will be initialized from the target
     partitioner: ?Sharding.Partitioner = null,
     // Debugging options
@@ -161,16 +161,8 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
         }
     }
 
-    // Ensure replicated sharding is always included as a fallback option.
-    var shardings = std.ArrayList(Sharding).initCapacity(arena.allocator(), opts.shardings.len + 1) catch @panic("OOM");
-    var needs_replicated: bool = true;
-    for (opts.shardings) |shd| {
-        if (shd.data == platform.replicated_sharding.data) needs_replicated = false;
-        shardings.appendAssumeCapacity(shd._handleFakeReplicatedObject(platform));
-    }
-    if (needs_replicated) shardings.appendAssumeCapacity(platform.replicated_sharding);
-
-    validateShardings(shardings.items) catch |err| stdx.debug.panic("Invalid sharding shardings: {t}", .{err});
+    const meshes = arena.allocator().dupe(*const Sharding.Mesh, opts.meshes) catch @panic("OOM");
+    validateMeshes(meshes) catch |err| stdx.debug.panic("Incompatible meshes: {t}", .{err});
 
     return .{
         .allocator = allocator,
@@ -183,7 +175,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
         .module = module,
         .platform = platform,
         .partitioner = opts.partitioner orelse .fromTarget(platform.target),
-        .shardings = shardings.items,
+        .meshes = meshes,
         .location = unknown_location,
         .unknown_location = unknown_location,
     };
@@ -278,7 +270,7 @@ test pushLocation {
         .module = undefined,
         .platform = undefined,
         .partitioner = undefined,
-        .shardings = undefined,
+        .meshes = undefined,
         .location = unknown_location,
         .unknown_location = unknown_location,
     };
@@ -330,35 +322,37 @@ pub fn allocPrint(self: *Compiler, comptime fmt: []const u8, args: anytype) []u8
     return std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch self.abortOOM();
 }
 
-pub fn sharding(compiler: *const Compiler, name: @EnumLiteral()) Sharding {
+/// Lookup a mesh by it's name
+pub fn mesh(compiler: *const Compiler, name: @EnumLiteral()) Sharding.Mesh {
     const name_slice = @tagName(name);
-    for (compiler.shardings) |mesh| {
-        if (std.mem.eql(u8, name_slice, mesh.data.name)) {
-            return mesh;
+    for (compiler.meshes) |m| {
+        if (std.mem.eql(u8, name_slice, m.name)) {
+            return m;
         }
     }
-    if (name == .replicated) return compiler.platform.replicated_sharding;
+    if (name == .replicated) return compiler.platform.replicated_meshe;
     std.debug.panic(
-        \\Found no shardings named {s}.
-        \\Try passing more shardings to `zml.compile`.
-        \\Known shardings: {f}
-    , .{ name_slice, stdx.fmt.slice(compiler.shardings) });
+        \\Found no meshes named {s}.
+        \\Try passing more meshes to `zml.compile`.
+        \\Known meshes: {f}
+    , .{ name_slice, stdx.fmt.slice(compiler.meshes) });
 }
 
-pub fn resolveSharding(compiler: *const Compiler, logical_axes: anytype) Sharding {
+/// Find a mesh that covers all the given axes
+pub fn resolveMesh(compiler: *const Compiler, logical_axes: anytype) Sharding.Mesh {
     if (@TypeOf(logical_axes) != []const Shape.Tag) {
         const comp_tags = comptime Shape.parseTags(logical_axes);
         const parsed_tags: []const Shape.Tag = comptime comp_tags.constSlice();
-        return compiler.resolveSharding(parsed_tags);
+        return compiler.resolveMesh(parsed_tags);
     }
 
-    var ok_sharding: ?Sharding = null;
-    for (compiler.shardings) |shd| {
+    var ok_meshe: ?Sharding.Mesh = null;
+    for (compiler.meshes) |shd| {
         var covers_all: bool = true;
         for (logical_axes) |ax| {
             const input_axis = Shape.toTag(ax);
             var covers_this: bool = false;
-            for (shd.data.logical.axes.slice()) |existing_axis| {
+            for (shd.logical.axes.slice()) |existing_axis| {
                 if (std.mem.eql(u8, std.mem.span(existing_axis), std.mem.span(input_axis))) {
                     covers_this = true;
                     break;
@@ -367,22 +361,22 @@ pub fn resolveSharding(compiler: *const Compiler, logical_axes: anytype) Shardin
             covers_all = covers_all and covers_this;
         }
         if (covers_all) {
-            if (ok_sharding) |first_match| {
+            if (ok_meshe) |first_match| {
                 std.debug.panic(
-                    \\Found two shardings covering axes: {any}, expected exacty one.
+                    \\Found two meshes covering axes: {any}, expected exacty one.
                     \\- First match: {f}
                     \\- Second match: {f}
                 , .{ logical_axes, first_match, shd });
             }
-            ok_sharding = shd;
+            ok_meshe = shd;
         }
     }
 
-    return ok_sharding orelse std.debug.panic(
-        \\Found no shardings covering axes: {any}, expected exacty one.
-        \\Try passing more shardings to `zml.compile`.
-        \\Known shardings: {f}
-    , .{ logical_axes, stdx.fmt.slice(compiler.shardings) });
+    return ok_meshe orelse std.debug.panic(
+        \\Found no meshes covering axes: {any}, expected exacty one.
+        \\Try passing more meshes to `zml.compile`.
+        \\Known meshes: {f}
+    , .{ logical_axes, stdx.fmt.slice(compiler.meshes) });
 }
 
 pub fn Typed(comptime func: anytype) type {
@@ -459,8 +453,8 @@ pub fn compileInternal(
 
     _ = result.func.appendTo(compiler.module.body());
 
-    const num_partitions = compiler.shardings[0].data.numPartitions();
-    const num_replicas = compiler.shardings[0].data.numReplicas();
+    const num_partitions = compiler.meshes[0].numPartitions();
+    const num_replicas = compiler.meshes[0].numReplicas();
     const num_devices = num_partitions * num_replicas;
 
     compiler.module.operation().setAttributeByName(
@@ -495,8 +489,8 @@ pub fn compileInternal(
         // This will get copied into exe
         result.input_info.items(.shape),
         result.output_info.items(.shape),
-        result.input_info.items(.sharding),
-        result.output_info.items(.sharding),
+        result.input_info.items(.meshe),
+        result.output_info.items(.meshe),
         result.input_info.items(.aliasing_output),
     );
     errdefer exe.deinit();
@@ -513,11 +507,11 @@ fn addPartitionerOperations(ctx: *Compiler) !void {
     switch (ctx.partitioner) {
         .gspmd => {},
         .shardy => {
-            for (ctx.shardings) |shd| {
-                const attr_str = try shd.data.sdyMeshAttr(allocator);
+            for (ctx.meshes) |shd| {
+                const attr_str = try shd.sdyMeshAttr(allocator);
                 defer allocator.free(attr_str);
 
-                const name = shd.data.name;
+                const name = shd.name;
                 const mesh_attr = try mlir.Attribute.parse(mlir_ctx, attr_str);
 
                 const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
@@ -544,7 +538,7 @@ const EmitMlirResult = struct {
 pub const TensorInfo = struct {
     id: Tensor.Id,
     shape: Shape,
-    sharding: Sharding,
+    meshe: Sharding.Mesh,
     value: *const mlir.Value,
 
     // Only used for input tensors, stores which output tensor ends up with their buffer
@@ -554,12 +548,12 @@ pub const TensorInfo = struct {
         var attrs: AttributeList = .empty;
 
         const mlir_ctx = compiler.mlir_ctx;
-        const sharding_attr = try compiler.tensorShardingAttr(arena, mlir_ctx, info.shape, info.sharding);
+        const meshe_attr = try compiler.tensorMesheAttr(arena, mlir_ctx, info.shape, info.meshe);
         const name = switch (compiler.partitioner) {
-            .gspmd => "mhlo.sharding",
-            .shardy => "sdy.sharding",
+            .gspmd => "mhlo.meshe",
+            .shardy => "sdy.meshe",
         };
-        attrs.appendAssumeCapacity(.named(mlir_ctx, name, sharding_attr));
+        attrs.appendAssumeCapacity(.named(mlir_ctx, name, meshe_attr));
 
         const memory = scope.id_to_memory.get(info.id) orelse .device;
         if (memory != .device) {
@@ -639,7 +633,7 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
                 .shape = og_shape,
-                .sharding = tensor.shape()._sharding._handleFakeReplicatedObject(ctx.compiler.platform),
+                .meshe = tensor.shape()._meshe._handleFakeReplicatedObject(ctx.compiler.platform),
                 .value = value,
             });
         }
@@ -676,7 +670,7 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
                 // TODO: clarify why this og_shape and not packedShape()
                 .shape = og_shape,
                 // Note: the panic should have been triggered during createBlockArguments or emitMlir
-                .sharding = tensor._shape._sharding._handleFakeReplicatedObject(ctx.compiler.platform),
+                .meshe = tensor._shape._meshe._handleFakeReplicatedObject(ctx.compiler.platform),
                 .value = value,
             });
         }
@@ -714,14 +708,14 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
         }
     }
 
-    // Input sharding/memory/aliasing attributes
+    // Input meshe/memory/aliasing attributes
     const input_attributes = try arena.alloc(*const mlir.Attribute, input_info.len);
     for (0.., input_attributes) |i, *input_attrs| {
         const attrs_list = try input_info.get(i).attributes(arena, compiler, fn_scope);
         input_attrs.* = .dict(mlir_ctx, attrs_list.constSlice());
     }
 
-    // Output sharding/memory attributes
+    // Output meshe/memory attributes
     const output_attributes = try arena.alloc(*const mlir.Attribute, output_info.len);
     for (0.., output_attributes) |i, *output_attrs| {
         const attrs_list = try output_info.get(i).attributes(arena, compiler, fn_scope);
@@ -796,17 +790,17 @@ fn repack(compiler: *Compiler, scope: *Scope, og_shape: Shape, value: *const mli
     return bit_cast_op.result(0);
 }
 
-fn validateShardings(shardings: []const Sharding) !void {
-    stdx.debug.assert(shardings.len >= 1, "Waiting at leat 1 sharding strategy to be implemented", .{});
+fn validateMeshes(meshes: []const *const Sharding.Mesh) !void {
+    stdx.debug.assert(meshes.len >= 1, "Waiting at leat 1 meshe strategy to be implemented", .{});
 
-    const first = shardings[0];
-    const partitions = first.data.numPartitions();
-    const replicas = first.data.numReplicas();
+    const first = meshes[0];
+    const partitions = first.numPartitions();
+    const replicas = first.numReplicas();
 
-    for (shardings[1..]) |s| {
-        if (s.data.numPartitions() != partitions or s.data.numReplicas() != replicas) {
+    for (meshes[1..]) |s| {
+        if (s.numPartitions() != partitions or s.numReplicas() != replicas) {
             // todo: deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
-            return error.InconsistentShardingCardinality;
+            return error.InconsistentMesheCardinality;
         }
     }
 }
@@ -816,14 +810,13 @@ pub fn tensorShardingAttr(
     allocator: std.mem.Allocator,
     mlir_ctx: *mlir.Context,
     shape: Shape,
-    shd: Sharding,
 ) error{OutOfMemory}!*const mlir.Attribute {
     return switch (compiler.partitioner) {
-        .shardy => (try shd.data.sdyShardingAttrForShape(allocator, mlir_ctx, shape)).asAttr(),
-        .gspmd => shd.data.gspmdShardingAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
+        .shardy => (try shape._sharding.sdyMesheAttrForShape(allocator, mlir_ctx, shape)).asAttr(),
+        .gspmd => shape._sharding.gspmdMesheAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
             error.WriteFailed => error.OutOfMemory, // We're writing to memory
             error.OutOfMemory => error.OutOfMemory,
-            // TODO(hugomano): clarify what can trigger this and consider moving the check to the Sharding creation
+            // TODO(hugomano): clarify what can trigger this and consider moving the check to the Sharding.Mesh creation
             error.MissingDeviceInTile => @panic("MissingDeviceInTile"),
         },
     };
@@ -858,11 +851,11 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
     };
 
     const platform = compiler.platform;
-    const main_mesh = compiler.shardings[0];
-    const num_partitions = main_mesh.data.numPartitions();
-    const num_replicas = main_mesh.data.numReplicas();
+    const main_mesh = compiler.meshes[0];
+    const num_partitions = main_mesh.numPartitions();
+    const num_replicas = main_mesh.numReplicas();
 
-    const device_assignment = try main_mesh.data.deviceAssignment(compiler.allocator);
+    const device_assignment = try main_mesh.deviceAssignment(compiler.allocator);
     defer compiler.allocator.free(device_assignment);
 
     var arena = std.heap.ArenaAllocator.init(compiler.allocator);

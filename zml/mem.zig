@@ -333,7 +333,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
             // I'm not sure I like that. I'd rather set all fields but _shards than leaving most of the m undefined.
             ._shape = model._shape,
             ._shards = .empty,
-            ._sharding = undefined,
+            ._meshe = undefined,
             ._platform = undefined,
         };
         return;

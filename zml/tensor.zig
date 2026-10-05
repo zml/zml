@@ -94,7 +94,7 @@ pub const Tensor = struct {
     /// Creates a Tensor from a mlir.Value
     ///
     /// The shape is derived from the type of the mlir.Value.
-    /// Sharding is `unknown`
+    /// Meshe is `unknown`
     pub fn fromMlirValue(val: *const mlir.Value) Tensor {
         const ctx = Compiler.current();
         const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
@@ -106,7 +106,7 @@ pub const Tensor = struct {
             ._dtype = ctx.dtype(ranked_tensor.elementType()),
             ._dims = .empty,
             ._tags = .{ .buffer = @splat(Shape.TagUnknown), .len = n },
-            ._sharding = .replicated,
+            ._meshe = .replicated,
             ._partitioning = .unknown,
         };
         for (0..n) |i| {
@@ -157,19 +157,19 @@ pub const Tensor = struct {
         return res;
     }
 
-    /// Specify the sharding of the input tensor.
-    /// * sharding: zml.Sharding, but during compilation the `.sharding_name` syntax can used to get
-    /// a known sharding from the compilation options.
-    /// * partition spec: a struct where the field names match the axis of the given sharding
+    /// Specify the meshe of the input tensor.
+    /// * meshe: zml.Meshe, but during compilation the `.meshe_name` syntax can used to get
+    /// a known meshe from the compilation options.
+    /// * partition spec: a struct where the field names match the axis of the given meshe
     ///
     /// eg `x.withPartitioning(tp, .{ .h = .model }))` or `x.withPartitioning(.tp, .{ .h = .model }))`
-    pub fn withPartitioning(self: Tensor, sharding_: anytype, partition_spec: anytype) Tensor {
-        if (@TypeOf(sharding_) == @EnumLiteral()) {
-            const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit zml.Sharding object as input");
-            return self.withPartitioning(compiler.sharding(sharding_), partition_spec);
+    pub fn withPartitioning(self: Tensor, meshe_: anytype, partition_spec: anytype) Tensor {
+        if (@TypeOf(meshe_) == @EnumLiteral()) {
+            const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit zml.Meshe object as input");
+            return self.withPartitioning(compiler.meshe(meshe_), partition_spec);
         }
 
-        const partitioned_shape = self._shape.withPartitioning(sharding_, partition_spec);
+        const partitioned_shape = self._shape.withPartitioning(meshe_, partition_spec);
         return self.withPartitioningInner(partitioned_shape);
     }
 
@@ -186,16 +186,16 @@ pub const Tensor = struct {
             return res;
         };
 
-        const sharding = self._shape._sharding._handleFakeReplicatedObject(ctx.platform);
-        const attr = ctx.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
+        const meshe = self._shape._meshe._handleFakeReplicatedObject(ctx.platform);
+        const attr = ctx.tensorMesheAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, meshe) catch @panic("OOM");
 
         const op_result = switch (ctx.partitioner) {
             .shardy => blk: {
-                const op = mlir.Operation.make(ctx.mlir_ctx, "sdy.sharding_constraint", .{
+                const op = mlir.Operation.make(ctx.mlir_ctx, "sdy.meshe_constraint", .{
                     .operands = .{ .flat = &.{self.value()} },
                     .results = .{ .flat = &.{self.value().type_()} },
                     .attributes = &.{
-                        .named(ctx.mlir_ctx, "sharding", attr),
+                        .named(ctx.mlir_ctx, "meshe", attr),
                     },
                     .location = ctx.location,
                 }).appendTo(currentBlock());
@@ -207,11 +207,11 @@ pub const Tensor = struct {
                     &.{self.value()},
                     &.{self.value().type_()},
                     .{
-                        .call_target_name = "Sharding",
+                        .call_target_name = "Meshe",
                         .has_side_effect = false,
                         .backend_config = .{ .original = "" },
                         .additional_attributes = &.{
-                            .named(ctx.mlir_ctx, "mhlo.sharding", attr),
+                            .named(ctx.mlir_ctx, "mhlo.meshe", attr),
                         },
                     },
                     ctx.location,
@@ -224,9 +224,9 @@ pub const Tensor = struct {
     }
 
     test withPartitioning {
-        // Create two similar shardings,
+        // Create two similar meshes,
         // Then check that tensor.withPartitioning don't confuse the meshes
-        const dp_mp_data: Sharding.Data = .{
+        const dp_mp: Sharding.Mesh = .{
             .name = "dp_mp",
             .physical = undefined,
             .logical = .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
@@ -234,9 +234,8 @@ pub const Tensor = struct {
             .folds = .empty,
             .folds_consumed = .empty,
         };
-        const dp_mp: Sharding = .{ .data = &dp_mp_data };
 
-        const mp_dp_data: Sharding.Data = .{
+        const mp_dp: Sharding.Mesh = .{
             .name = "mp_dp",
             .physical = undefined,
             .logical = .mesh(.{ .model = .low_bandwidth, .data = .high_bandwidth }),
@@ -244,21 +243,20 @@ pub const Tensor = struct {
             .folds = .empty,
             .folds_consumed = .empty,
         };
-        const mp_dp: Sharding = .{ .data = &mp_dp_data };
 
         const x = Tensor.init(.{ .h = 8 }, .f32).withPartitioning(dp_mp, .{ .h = .model });
-        try std.testing.expectEqual(dp_mp.data, x.shape()._sharding.data);
-        try std.testing.expectEqual(Shape.PartitionSpec.sharded(1), x.shape().partition(.h));
-        try std.testing.expectEqual(dp_mp.data, x.shape().reshape(.{ 2, 4 })._sharding.data);
+        try std.testing.expectEqual(&dp_mp, x.shape()._sharding.mesh);
+        try std.testing.expectEqual(Shape.PartitioningSpec.sharded(1), x.shape().partition(.h));
+        try std.testing.expectEqual(&dp_mp, x.shape().reshape(.{ 2, 4 })._sharding.mesh);
 
         const x2 = x.withPartitioning(mp_dp, .{ .h = .model });
-        try std.testing.expectEqual(mp_dp.data, x2.shape()._sharding.data);
-        try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), x2.shape().partition(.h));
-        try std.testing.expectEqual(mp_dp.data, x2.shape().reshape(.{ 2, 4 })._sharding.data);
+        try std.testing.expectEqual(&mp_dp, x2.shape()._sharding.mesh);
+        try std.testing.expectEqual(Shape.PartitioningSpec.sharded(0), x2.shape().partition(.h));
+        try std.testing.expectEqual(&mp_dp, x2.shape().reshape(.{ 2, 4 })._sharding.mesh);
 
         const x2_replicated = x2.replicate(.{.h});
-        try std.testing.expectEqual(mp_dp.data, x2_replicated.shape()._sharding.data);
-        try std.testing.expectEqual(Shape.PartitionSpec.replicated, x2_replicated.shape().partition(.h));
+        try std.testing.expectEqual(&mp_dp, x2_replicated.shape()._sharding.mesh);
+        try std.testing.expectEqual(Shape.PartitioningSpec.replicated, x2_replicated.shape().partition(.h));
     }
 
     /// Copy the given tensor to the specified memory.
@@ -786,9 +784,9 @@ pub const Tensor = struct {
             return .{ ._state = .init(.{2}, .u64) };
         }
 
-        pub fn initBuffer(io: std.Io, platform: *const Platform, sharding: Sharding, seed: u128) !Buffer {
+        pub fn initBuffer(rng: Rng, io: std.Io, platform: *const Platform, seed: u128) !Buffer {
             return .{
-                ._state = try .fromBytes(io, platform, Shape.init(.{2}, .u64), sharding, std.mem.asBytes(&seed)),
+                ._state = try .fromBytes(io, platform, rng._state._shape, std.mem.asBytes(&seed)),
             };
         }
 
@@ -4768,7 +4766,7 @@ pub const Tensor = struct {
         defer ctx.arena.allocator().free(full_name);
         switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
-                ops.manualComputation(input._shape._sharding, (struct {
+                ops.manualComputation(input._shape._meshe, (struct {
                     input: Tensor,
                     name: []const u8,
 

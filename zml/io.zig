@@ -31,16 +31,16 @@ pub const TensorStore = struct {
     };
 
     registry: *safetensors.TensorRegistry,
-    shardings: []const Sharding,
+    meshes: []const Sharding.Mesh,
     id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
-    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, shardings: []const Sharding) TensorStore {
+    pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, meshes: []const Sharding.Mesh) TensorStore {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
             .registry = registry,
-            .shardings = arena.allocator().dupe(Sharding, shardings) catch @panic("OOM"),
+            .meshes = arena.allocator().dupe(Sharding.Mesh, meshes) catch @panic("OOM"),
             .id_to_sources = .empty,
             .allocator = allocator,
             .arena = arena,
@@ -106,19 +106,19 @@ pub const TensorStore = struct {
         return .{ .store = self };
     }
 
-    pub fn sharding(store: *const TensorStore, name: @EnumLiteral()) Sharding {
+    pub fn mesh(store: *const TensorStore, name: @EnumLiteral()) Sharding.Mesh {
         const name_slice = @tagName(name);
-        for (store.shardings) |mesh| {
-            if (std.mem.eql(u8, name_slice, mesh.data.name)) {
-                return mesh;
+        for (store.meshes) |m| {
+            if (std.mem.eql(u8, name_slice, m.name)) {
+                return m;
             }
         }
         if (std.mem.eql(u8, name_slice, "replicated")) return .replicated;
         std.debug.panic(
-            \\Found no shardings named {s} in TensorStore.
-            \\Try passing more shardings to `zml.TensorStore.fromRegistry`.
-            \\Known shardings: {f}
-        , .{ name_slice, stdx.fmt.slice(store.shardings) });
+            \\Found no meshes named {s} in TensorStore.
+            \\Try passing more meshes to `zml.TensorStore.fromRegistry`.
+            \\Known meshes: {f}
+        , .{ name_slice, stdx.fmt.slice(store.meshes) });
     }
 
     pub const View = struct {
@@ -180,15 +180,15 @@ pub const TensorStore = struct {
         }
 
         /// Creates a zml.Tensor from a specific entry in the store.
-        pub fn createTensor(self: View, subkey: []const u8, tags: anytype, sharding_: @EnumLiteral(), partitioning: anytype) Tensor {
-            return self.maybeCreateTensor(subkey, tags, sharding_, partitioning) orelse
+        pub fn createTensor(self: View, subkey: []const u8, tags: anytype, meshe_: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateTensor(subkey, tags, meshe_, partitioning) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, sharding_: @EnumLiteral(), partitioning: anytype) ?Tensor {
+        pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, meshe_: @EnumLiteral(), partitioning: anytype) ?Tensor {
             const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
             const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
-            const resolved_sharding = self.store.sharding(sharding_);
+            const resolved_meshe = self.store.meshe(meshe_);
 
             const p: Shape.PartitionArray = if (has_tags) p: {
                 // Parse the partitioning. Theoritically we only need tags + spec, but the function is on a full Shape object
@@ -196,24 +196,24 @@ pub const TensorStore = struct {
                     ._dtype = undefined,
                     ._dims = .{ .buffer = @splat(64), .len = parsed_tags.len },
                     ._tags = parsed_tags,
-                    ._sharding = resolved_sharding,
+                    ._meshe = resolved_meshe,
                     ._partitioning = undefined,
                 };
-                break :p tentative_shape.parsePartitioning(resolved_sharding, partitioning);
+                break :p tentative_shape.parsePartitioning(resolved_meshe, partitioning);
             } else
                 // We allowed untagged Tensor, but then the PartitionArray must be created manually.
                 partitioning;
 
-            return self.maybeCreateTensorInternal(subkey, parsed_tags.constSlice(), resolved_sharding, p);
+            return self.maybeCreateTensorInternal(subkey, parsed_tags.constSlice(), resolved_meshe, p);
         }
 
-        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, sharding_: @EnumLiteral(), partitioning: anytype) Tensor {
-            return self.maybeCreateHostPinnedTensor(subkey, tags, sharding_, partitioning) orelse
+        pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, meshe_: @EnumLiteral(), partitioning: anytype) Tensor {
+            return self.maybeCreateHostPinnedTensor(subkey, tags, meshe_, partitioning) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, sharding_: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
-            const tensor = self.maybeCreateTensor(subkey, tags, sharding_, partitioning);
+        pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, meshe_: @EnumLiteral(), comptime partitioning: anytype) ?Tensor {
+            const tensor = self.maybeCreateTensor(subkey, tags, meshe_, partitioning);
             if (tensor) |t| {
                 const storage = self.store.id_to_sources.getPtr(t.id);
                 storage.?.memory = .host_pinned;
@@ -225,15 +225,11 @@ pub const TensorStore = struct {
             const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
             const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
 
-            // Note: since here we don't have access to the true `platform.replicated_sharding`
-            // we instead use the .replicated singleton, which laters requires the infamous _handleFakeReplicatedObject.
-            // This could be done differently if eg the TensorStore was created with the platform.
-            const replicated: Sharding = .replicated;
-            return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.slice() else null, replicated, null) orelse
+            return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.slice() else null, .replicated) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
         }
 
-        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?[]const Shape.Tag, sharding_: Sharding, partitioning: ?Shape.PartitionArray) ?Tensor {
+        fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?[]const Shape.Tag, sharding: Sharding) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             const source = self.store.dupeSource(key) orelse return null;
@@ -247,9 +243,7 @@ pub const TensorStore = struct {
                 stdx.debug.assert(user_tags.len == shape.rank(), "tensor {s} from store has shape {f}, but `createTensor` got only {d} tags: {f}", .{ key, source.shape, user_tags.len, stdx.fmt.stringsZ(user_tags) });
                 @memcpy(shape._tags.slice(), user_tags);
             }
-            shape._sharding = sharding_;
-            // partitioning is only null when called from createReplicatedTensor
-            shape._partitioning = partitioning orelse .replicated(source.shape.rank());
+            shape._sharding = sharding;
 
             const tensor: Tensor = .fromShape(shape);
             self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
@@ -492,7 +486,7 @@ pub const Loader = struct {
             self.dma_allocators,
             self.dma_chunk_size,
             shape,
-            shape._sharding._handleFakeReplicatedObject(self.platform),
+            shape._meshe._handleFakeReplicatedObject(self.platform),
             buffer,
             memory,
         );
@@ -696,18 +690,17 @@ pub const MemoryWriter = union(enum) {
         dma_allocators: []const mem.DmaAllocator,
         dma_chunk_size: usize,
         shape: Shape,
-        sharding: Sharding,
         buffer: *Buffer,
         memory: Memory.Kind,
     ) !MemoryWriter {
         return switch (platform.target) {
             .cuda, .rocm, .oneapi => .{
-                .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, memory),
+                .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, buffer, memory),
             },
             .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
                 std.debug.panic("Host pinned memory is not supported on {}", .{platform.target})
             else
-                .{ .buffered = try .init(allocator, io, platform, shape, sharding, buffer) },
+                .{ .buffered = try .init(allocator, io, platform, shape, buffer) },
         };
     }
 
@@ -737,16 +730,15 @@ pub const BufferedMemoryWriter = struct {
     io: std.Io,
     platform: *const Platform,
     shape: Shape,
-    sharding: Sharding,
     buffer: *Buffer,
     interface: std.Io.Writer,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, sharding: Sharding, buffer: *Buffer) !BufferedMemoryWriter {
+        _ = sharding; // autofix
         return .{
             .io = io,
             .platform = platform,
             .shape = shape,
-            .sharding = sharding,
             .buffer = buffer,
             .interface = .{
                 .buffer = try allocator.alloc(u8, shape.byteSize()),
@@ -772,7 +764,7 @@ pub const BufferedMemoryWriter = struct {
             self.io,
             self.platform,
             self.shape,
-            self.sharding,
+            self.meshe,
             @ptrCast(self.interface.buffer),
             .{ .wait = true },
         ) catch return std.Io.Writer.Error.WriteFailed;
@@ -997,9 +989,9 @@ const DispatchSpans = struct {
     spans: []DispatchSpan,
     mirror_writers: []usize,
 
-    fn init(allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !DispatchSpans {
-        const placement = try sharding.placement(shape);
-        const ordered_devices = sharding.devicesInCanonicalOrder();
+    fn init(allocator: std.mem.Allocator, shape: Shape) !DispatchSpans {
+        const placement = try shape.placement();
+        const ordered_devices = placement.devices;
 
         var placement_span_count: usize = 0;
         for (ordered_devices) |device| {
@@ -1212,11 +1204,12 @@ pub const DirectMemoryWriter = struct {
         dma_allocators: []const mem.DmaAllocator,
         dma_chunk_size: usize,
         shape: Shape,
-        sharding: Sharding,
         buffer: *Buffer,
         memory: Memory.Kind,
     ) !DirectMemoryWriter {
-        const ordered_devices = sharding.devicesInCanonicalOrder();
+        const placement: Sharding.Placement = .init(shape._sharding, shape, platform);
+        const mesh = placement.mesh();
+        const ordered_devices = placement.mesh.devicesInCanonicalOrder();
         var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
         errdefer allocator.free(shard_writers);
 
@@ -1226,7 +1219,6 @@ pub const DirectMemoryWriter = struct {
         };
 
         var pjrt_buffers: Buffer.Shards = .empty;
-        const placement = try sharding.placement(shape);
         for (ordered_devices, 0..) |device, i| {
             const pool = &pools[device.id];
             const shard_dma_allocator = dma_allocators[device.id].allocator();
@@ -1238,9 +1230,9 @@ pub const DirectMemoryWriter = struct {
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }
 
-        buffer.* = .fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
+        buffer.* = .fromPjrtBuffers(platform, shape, placement.mesh, pjrt_buffers.constSlice());
 
-        const dispatch_spans: DispatchSpans = try .init(allocator, shape, sharding);
+        const dispatch_spans: DispatchSpans = try .init(allocator, shape, mesh);
         errdefer dispatch_spans.deinit(allocator);
 
         const first_span = dispatch_spans.spans[0];
@@ -1554,11 +1546,10 @@ const DirectMemoryWriterDeviceTest = struct {
         var platform = Platform.auto(self.allocator, self.io, scenario.create_options) catch return error.SkipZigTest;
         defer platform.deinit(self.allocator, self.io);
 
-        const sharding: Sharding.Data = try .init(scenario.name, &platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
+        const mesh: Sharding.Mesh = try .init(scenario.name, &platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
         try self.runDirectMemoryWriter(
             platform,
-            scenario.shape.withPartitioning(.{ .data = &sharding }, partitioning),
-            .{ .data = &sharding },
+            scenario.shape.withPartitioning(&mesh, partitioning),
             scenario.write_mode,
             scenario.writable_slice_min_len,
             scenario.pool_chunks,
@@ -1571,7 +1562,6 @@ const DirectMemoryWriterDeviceTest = struct {
         self: DirectMemoryWriterDeviceTest,
         platform: *const Platform,
         shape: Shape,
-        sharding: Sharding,
         write_mode: WriteMode,
         writable_slice_min_len: usize,
         pool_chunks: usize,
@@ -1610,7 +1600,6 @@ const DirectMemoryWriterDeviceTest = struct {
             dma_allocators,
             pool_chunk_size,
             shape,
-            sharding,
             &written_buffer,
             memory,
         );
@@ -1703,7 +1692,7 @@ test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
     }, .{ .batch = .batch, .model = .model });
 }
 
-test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
+test "DirectMemoryWriter: folded model meshe with 2x2 physical mesh" {
     const case: DirectMemoryWriterDeviceTest = .{
         .allocator = std.testing.allocator,
         .io = std.testing.io,

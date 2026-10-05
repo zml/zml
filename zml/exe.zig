@@ -23,8 +23,6 @@ pub const Exe = struct {
     input_shapes: []const Shape,
     output_shapes: []const Shape,
 
-    input_shardings: []const Sharding,
-    output_shardings: []const Sharding,
 
     /// Inputs whose buffers are donated to an output (`reuseBuffer`).
     /// Runners destroy their PJRT handles after the raw call returns.
@@ -43,8 +41,6 @@ pub const Exe = struct {
         num_partitions: i32,
         input_shapes: []const Shape,
         output_shapes: []const Shape,
-        input_shardings: []const Sharding,
-        output_shardings: []const Sharding,
         input_aliasing: []const ?u32,
     ) !Exe {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -53,9 +49,6 @@ pub const Exe = struct {
         const input_shapes_copy = try arena.allocator().dupe(Shape, input_shapes);
         const output_shapes_copy = try arena.allocator().dupe(Shape, output_shapes);
 
-        // Re-home sharding pointers into arena-owned values so exe doesn't depend on caller lifetimes.
-        const input_shardings_copy = try arena.allocator().dupe(Sharding, input_shardings);
-        const output_shardings_copy = try arena.allocator().dupe(Sharding, output_shardings);
 
         var donated_count: usize = 0;
         for (input_aliasing) |aliasing| donated_count += @intFromBool(aliasing != null);
@@ -74,8 +67,6 @@ pub const Exe = struct {
             .exe = exe,
             .input_shapes = input_shapes_copy,
             .output_shapes = output_shapes_copy,
-            .input_shardings = input_shardings_copy,
-            .output_shardings = output_shardings_copy,
             .donated_input_indices = donated_input_indices,
             .num_devices = num_devices,
             .num_partitions = num_partitions,
@@ -90,11 +81,11 @@ pub const Exe = struct {
     }
 
     pub fn args(self: *const Exe, allocator: std.mem.Allocator) !Arguments {
-        return Arguments.init(allocator, self.input_shapes, self.input_shardings, self.num_devices);
+        return Arguments.init(allocator, self.input_shapes, self.num_devices);
     }
 
     pub fn results(self: *const Exe, allocator: std.mem.Allocator) !Results {
-        return Results.init(allocator, self.output_shapes, self.output_shardings, self.platform, self.num_devices);
+        return Results.init(allocator, self.output_shapes, self.platform, self.num_devices);
     }
 
     pub const FlatBuffers = struct {
@@ -131,9 +122,8 @@ pub const Exe = struct {
         flat_buffers: FlatBuffers,
         expected_shapes: []const Shape,
         baked_count: usize = 0,
-        shardings: []const Sharding,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, num_devices: usize) error{OutOfMemory}!Arguments {
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, num_devices: usize) error{OutOfMemory}!Arguments {
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 
@@ -143,7 +133,6 @@ pub const Exe = struct {
             return .{
                 .flat_buffers = flat_buffers,
                 .expected_shapes = expected_shapes,
-                .shardings = shardings,
             };
         }
 
@@ -219,9 +208,8 @@ pub const Exe = struct {
         flat_buffers: FlatBuffers,
 
         expected_shapes: []const Shape,
-        shardings: []const Sharding,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, platform: *const Platform, num_devices: usize) !Results {
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, platform: *const Platform, num_devices: usize) !Results {
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 
@@ -232,7 +220,6 @@ pub const Exe = struct {
                 .platform = platform,
                 .flat_buffers = flat_buffers,
                 .expected_shapes = expected_shapes,
-                .shardings = shardings,
             };
         }
 
@@ -254,7 +241,7 @@ pub const Exe = struct {
                     for (0..context_.self.flat_buffers.num_devices) |device_index| {
                         shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
                     }
-                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], context_.self.shardings[context_.current_index], shards.constSlice());
+                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], shards.constSlice());
                     context_.current_index += 1;
                 }
             }.cb, &context, &result);
@@ -274,7 +261,7 @@ pub const Exe = struct {
                     for (0..ctx.results.flat_buffers.num_devices) |device_index| {
                         shards.appendAssumeCapacity(ctx.results.flat_buffers.buffers[device_index][ctx.current_index]);
                     }
-                    buffer.* = Buffer.fromPjrtBuffers(ctx.results.platform, ctx.results.expected_shapes[ctx.current_index], ctx.results.shardings[ctx.current_index], shards.constSlice());
+                    buffer.* = Buffer.fromPjrtBuffers(ctx.results.platform, ctx.results.expected_shapes[ctx.current_index], shards.constSlice());
                     ctx.current_index += 1;
                 }
             }.cb, &context, &v);

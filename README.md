@@ -168,10 +168,10 @@ const Mnist = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
-        shardings: []const zml.Sharding,
+        meshes: []const zml.Meshe,
     ) !zml.Bufferized(Mnist) {
         return zml.io.load(Mnist, self, allocator, io, platform, store, .{
-            .shardings = shardings,
+            .meshes = meshes,
             .parallelism = 1,
             .dma_chunks = 1,
             .dma_chunk_size = 16 * 1024 * 1024,

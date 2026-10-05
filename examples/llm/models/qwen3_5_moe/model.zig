@@ -47,8 +47,8 @@ pub const RopeParameters = struct {
     rope_theta: f32,
 };
 
-fn partitionProjectedKv(kv: zml.Tensor, kv_head_sharding: zml.Sharding.DimSharding) zml.Tensor {
-    return switch (kv_head_sharding) {
+fn partitionProjectedKv(kv: zml.Tensor, kv_head_meshe: zml.Mesh.DimMeshe) zml.Tensor {
+    return switch (kv_head_meshe) {
         .sharded => |heads| blk: {
             const sharded_kv = if (heads.factor != 1) kv.stutter1d(kv.axis(.h), heads.factor) else kv;
             break :blk sharded_kv.withPartitioning(.model, .{ .s = .replicated, .h = .model, .hd = .replicated });
@@ -57,9 +57,9 @@ fn partitionProjectedKv(kv: zml.Tensor, kv_head_sharding: zml.Sharding.DimShardi
     };
 }
 
-fn partitionCachedKv(tensor: zml.Tensor, kv_head_sharding: zml.Sharding.DimSharding) zml.Tensor {
+fn partitionCachedKv(tensor: zml.Tensor, kv_head_meshe: zml.Mesh.DimMeshe) zml.Tensor {
     var kv = tensor.rename(.{ .s = .k });
-    return switch (kv_head_sharding) {
+    return switch (kv_head_meshe) {
         .sharded => |heads| blk: {
             if (heads.factor != 1) {
                 kv = kv.stutter1d(kv.axis(.h), heads.factor);
@@ -143,7 +143,7 @@ pub const LoadedModel = struct {
         io: std.Io,
         platform: *const zml.Platform,
         backend: zml.attention.Backend,
-        shardings: common.Shardings,
+        meshes: common.Meshes,
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
@@ -151,7 +151,7 @@ pub const LoadedModel = struct {
         const moe_gate_up = self.inner.text_model.layers[0].moe.gate_up_proj;
         log.info("Moe dtype : {}", .{moe_gate_up.weight.dtype()});
         const moe_backend = try zml.moe.Backend.auto(platform, moe_gate_up.quantizationScheme(), moe_gate_up.weight.dtype());
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), moe_backend, shardings);
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), moe_backend, meshes);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
@@ -194,7 +194,7 @@ pub const Model = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
-        shardings: []const zml.Sharding,
+        meshes: []const zml.Meshe,
         progress: *std.Progress.Node,
     ) !zml.Bufferized(Model) {
         progress.increaseEstimatedTotalItems(store.view().count());
@@ -210,7 +210,7 @@ pub const Model = struct {
         });
         defer loader.deinit();
 
-        loader.load(io, Model, self, &buffers, store, shardings);
+        loader.load(io, Model, self, &buffers, store, meshes);
         try loader.await(io);
 
         const took = now.untilNow(io, .awake);
@@ -603,16 +603,16 @@ pub const SelfAttn = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache.SelfAttnCache,
     ) struct { zml.Tensor, KvCache.SelfAttnCache } {
-        const tp = zml.Compiler.current().sharding(.model);
+        const tp = zml.Compiler.current().meshe(.model);
         const x_qkv = x.withPartitioning(tp, .{ .d = .replicated });
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
-        const kv_head_sharding = tp.shardableDim(k.dim(.h), .model, q.dim(.h));
+        const kv_head_meshe = tp.shardableDim(k.dim(.h), .model, q.dim(.h));
 
         q = q.withPartitioning(tp, .{ .s = .replicated, .h = .model, .hd = .replicated });
         gate = gate.withPartitioning(tp, .{ .s = .replicated, .d_out_proj = .model });
-        k = partitionProjectedKv(k, kv_head_sharding);
-        v = partitionProjectedKv(v, kv_head_sharding);
+        k = partitionProjectedKv(k, kv_head_meshe);
+        v = partitionProjectedKv(v, kv_head_meshe);
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
 
@@ -625,22 +625,22 @@ pub const SelfAttn = struct {
         q = self.rotary_embed.applyRope(q, cos, sin);
         k = self.rotary_embed.applyRope(k, cos, sin);
         q = q.withPartitioning(tp, .{ .s = .replicated, .h = .model, .hd = .replicated });
-        k = partitionProjectedKv(k, kv_head_sharding);
-        v = partitionProjectedKv(v, kv_head_sharding);
+        k = partitionProjectedKv(k, kv_head_meshe);
+        v = partitionProjectedKv(v, kv_head_meshe);
 
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
         q = q.rename(.{ .s = .q }).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated });
-        k = partitionCachedKv(k, kv_head_sharding);
-        v = partitionCachedKv(v, kv_head_sharding);
+        k = partitionCachedKv(k, kv_head_meshe);
+        v = partitionCachedKv(v, kv_head_meshe);
 
         const attn_output = zml.attention.attention(
             q,
             k,
             v,
             token_index,
-            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads), x.shape()._sharding),
+            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads), x.shape()._meshe),
             zml.attention.Parameters.init(.fromBackend(.vanilla)),
         ).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
@@ -1138,7 +1138,7 @@ pub const KvCache = struct {
         v: zml.Tensor,
         layer_index: zml.Tensor,
 
-        pub fn init(config: Config, batch_dim: i64, max_seq_len: i64, dtype: zml.DataType, model_sharding: zml.Sharding) SelfAttnCache {
+        pub fn init(config: Config, batch_dim: i64, max_seq_len: i64, dtype: zml.DataType, model_meshe: zml.Meshe) SelfAttnCache {
             const num_self_attn_layers = countLayers(config.text_config.layer_types, .full_attention);
             const kv_shape = zml.Shape.init(.{
                 .b = batch_dim,
@@ -1147,10 +1147,10 @@ pub const KvCache = struct {
                 .h = config.text_config.num_key_value_heads,
                 .hd = config.text_config.head_dim,
             }, dtype);
-            const kv_head_sharding = model_sharding.shardableDim(kv_shape.dim(.h), .model, config.text_config.num_attention_heads);
-            const sharded_kv_shape = switch (kv_head_sharding) {
-                .sharded => |heads| kv_shape.setDim(.h, heads.dim).withPartitioning(model_sharding, .{ .h = .model }),
-                .replicated => kv_shape.withPartitioning(model_sharding, .{ .h = .replicated }),
+            const kv_head_meshe = model_meshe.shardableDim(kv_shape.dim(.h), .model, config.text_config.num_attention_heads);
+            const sharded_kv_shape = switch (kv_head_meshe) {
+                .sharded => |heads| kv_shape.setDim(.h, heads.dim).withPartitioning(model_meshe, .{ .h = .model }),
+                .replicated => kv_shape.withPartitioning(model_meshe, .{ .h = .replicated }),
             };
             return .{
                 .k = zml.Tensor.fromShape(sharded_kv_shape),
@@ -1159,10 +1159,10 @@ pub const KvCache = struct {
             };
         }
 
-        pub fn initBuffer(self: SelfAttnCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(SelfAttnCache) {
+        pub fn initBuffer(self: SelfAttnCache, io: std.Io, platform: *const zml.Platform, meshe: zml.Meshe) !zml.Bufferized(SelfAttnCache) {
             return .{
-                .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), sharding, .{}),
-                .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), sharding, .{}),
+                .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), meshe, .{}),
+                .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), meshe, .{}),
                 .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
             };
         }
@@ -1235,7 +1235,7 @@ pub const KvCache = struct {
         recurrent_state: zml.Tensor,
         layer_index: zml.Tensor,
 
-        pub fn init(config: Config, batch_dim: i64, conv_dtype: zml.DataType, recurrent_dtype: zml.DataType, model_sharding: zml.Sharding) GatedDeltaNetCache {
+        pub fn init(config: Config, batch_dim: i64, conv_dtype: zml.DataType, recurrent_dtype: zml.DataType, model_meshe: zml.Meshe) GatedDeltaNetCache {
             const num_linear_attn_layers = countLayers(config.text_config.layer_types, .linear_attention);
             const conv_dim = 2 * config.text_config.linear_num_key_heads * config.text_config.linear_key_head_dim + config.text_config.linear_num_value_heads * config.text_config.linear_value_head_dim;
             const conv_state_shape = zml.Shape.init(.{
@@ -1251,8 +1251,8 @@ pub const KvCache = struct {
                 .khd = config.text_config.linear_key_head_dim,
                 .vhd = config.text_config.linear_value_head_dim,
             }, recurrent_dtype);
-            const sharded_conv_state_shape = conv_state_shape.withPartitioning(model_sharding, .{ .mix = .model });
-            const sharded_recurrent_state_shape = recurrent_state_shape.withPartitioning(model_sharding, .{ .vh = .model });
+            const sharded_conv_state_shape = conv_state_shape.withPartitioning(model_meshe, .{ .mix = .model });
+            const sharded_recurrent_state_shape = recurrent_state_shape.withPartitioning(model_meshe, .{ .vh = .model });
             return .{
                 .conv_state = zml.Tensor.fromShape(sharded_conv_state_shape),
                 .recurrent_state = zml.Tensor.fromShape(sharded_recurrent_state_shape),
@@ -1260,10 +1260,10 @@ pub const KvCache = struct {
             };
         }
 
-        pub fn initBuffer(self: GatedDeltaNetCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(GatedDeltaNetCache) {
+        pub fn initBuffer(self: GatedDeltaNetCache, io: std.Io, platform: *const zml.Platform, meshe: zml.Meshe) !zml.Bufferized(GatedDeltaNetCache) {
             return .{
-                .conv_state = try zml.Buffer.uninitialized(io, platform, self.conv_state.shape(), sharding, .{}),
-                .recurrent_state = try zml.Buffer.uninitialized(io, platform, self.recurrent_state.shape(), sharding, .{}),
+                .conv_state = try zml.Buffer.uninitialized(io, platform, self.conv_state.shape(), meshe, .{}),
+                .recurrent_state = try zml.Buffer.uninitialized(io, platform, self.recurrent_state.shape(), meshe, .{}),
                 .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
             };
         }
@@ -1331,19 +1331,19 @@ pub const KvCache = struct {
         max_seq_len: i64,
         cache_dtype: zml.DataType,
         recurrent_dtype: zml.DataType,
-        model_sharding: zml.Sharding,
+        model_meshe: zml.Meshe,
     ) KvCache {
         return .{
             .layer_types = config.text_config.layer_types,
-            .self_attn = SelfAttnCache.init(config, batch_dim, max_seq_len, cache_dtype, model_sharding),
-            .gated_delta_net = GatedDeltaNetCache.init(config, batch_dim, cache_dtype, recurrent_dtype, model_sharding),
+            .self_attn = SelfAttnCache.init(config, batch_dim, max_seq_len, cache_dtype, model_meshe),
+            .gated_delta_net = GatedDeltaNetCache.init(config, batch_dim, cache_dtype, recurrent_dtype, model_meshe),
         };
     }
 
-    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(KvCache) {
+    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform, meshe: zml.Meshe) !zml.Bufferized(KvCache) {
         return .{
-            .self_attn = try self.self_attn.initBuffer(io, platform, sharding),
-            .gated_delta_net = try self.gated_delta_net.initBuffer(io, platform, sharding),
+            .self_attn = try self.self_attn.initBuffer(io, platform, meshe),
+            .gated_delta_net = try self.gated_delta_net.initBuffer(io, platform, meshe),
         };
     }
 

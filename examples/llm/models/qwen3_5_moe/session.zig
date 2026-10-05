@@ -31,8 +31,8 @@ pub const Session = struct {
         compiled_model: *inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
-        const shardings = compiled_model.params.shardings;
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, shardings.model);
+        const meshes = compiled_model.params.meshes;
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, meshes.model);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());

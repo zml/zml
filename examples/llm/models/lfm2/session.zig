@@ -30,7 +30,7 @@ pub const Session = struct {
         model_buffers: *model.Buffers,
     ) !Session {
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
-        var cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform, compiled_model.params.shardings.model);
+        var cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform, compiled_model.params.meshes.model);
         errdefer model.Cache.unloadBuffers(&cache_buffers);
         var rng_buf = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buf);
@@ -134,7 +134,7 @@ pub const Session = struct {
         const params = self.compiled_model.params;
         var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
             .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
-            else => try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model),
+            else => try params.attention_metadata.initBuffer(self.io, self.platform, params.meshes.model),
         };
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
@@ -172,7 +172,7 @@ pub const Session = struct {
         defer self.allocator.free(out_tokens_buffer);
 
         const params = self.compiled_model.params;
-        var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model);
+        var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform, params.meshes.model);
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         generation: while (true) {

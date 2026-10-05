@@ -252,8 +252,8 @@ fn ffiCallNvfp4(
 
 const routedNvfp4Call = zml.ops.CustomCall(Input, Output, Attributes, ffiCallNvfp4, .{
     .name = "flashinfer_cutlass_nvfp4_routed_moe",
-    // Expert sharding is owned by forwardMoe outer manual computation.
-    .sharding_aware = false,
+    // Expert meshe is owned by forwardMoe outer manual computation.
+    .meshe_aware = false,
     .has_side_effect = false,
 });
 
@@ -299,7 +299,7 @@ fn ffiCallBf16(
 
 const routedBf16Call = zml.ops.CustomCall(Bf16Input, Output, Attributes, ffiCallBf16, .{
     .name = "flashinfer_cutlass_bf16_routed_moe",
-    .sharding_aware = false,
+    .meshe_aware = false,
     .has_side_effect = false,
 });
 
@@ -548,7 +548,7 @@ pub fn fusedExpertsNvfp4(
     ) catch |e| stdx.debug.panic("Failed to get workspace requirements: {}", .{e});
 
     const result = routedNvfp4Call.call(
-        hidden_states.shape()._sharding,
+        hidden_states.shape()._meshe,
         .{
             .hidden_states = hidden_states,
             .fc1_weights = fc1_weights,
@@ -652,7 +652,7 @@ pub fn fusedExpertsBf16(
     ) catch |e| stdx.debug.panic("Failed to get workspace requirements: {}", .{e});
 
     const result = routedBf16Call.call(
-        hidden_states.shape()._sharding,
+        hidden_states.shape()._meshe,
         .{
             .hidden_states = hidden_states,
             .fc1_weights = fc1_weights,

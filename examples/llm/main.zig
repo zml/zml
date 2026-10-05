@@ -110,8 +110,8 @@ pub fn main(init: std.process.Init) !void {
     defer registry.deinit();
 
     // Defines how the model's tensors are sharded across the available devices.
-    const shardings: models.Shardings = try .init(platform);
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &shardings.all());
+    const meshes: models.Meshes = try .init(platform);
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &meshes.all());
     defer store.deinit();
 
     const generation: models.GenerationOptions = .{
@@ -134,7 +134,7 @@ pub fn main(init: std.process.Init) !void {
 
     var compiled_model = try allocator.create(models.CompiledModel);
     defer allocator.destroy(compiled_model);
-    compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
+    compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, meshes, args.seqlen, &progress);
     defer compiled_model.deinit();
 
     // Load buffers after the model compilation to be sure to give enough room to the autotune.

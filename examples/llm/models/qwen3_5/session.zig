@@ -31,7 +31,7 @@ pub const Session = struct {
         compiled_model: *inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, compiled_model.params.shardings.model);
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, compiled_model.params.meshes.model);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
@@ -111,9 +111,9 @@ pub const Session = struct {
         @memset(prefill_tokens_slice.items(u32), 0);
         @memcpy(prefill_tokens_slice.items(u32)[0..all_tokens.len], all_tokens);
 
-        const replicated_sharding: zml.Sharding = .replicated;
+        const replicated_meshe: zml.Meshe = .replicated;
 
-        var prefill_tokens_buffer = try zml.Buffer.fromSlice(self.io, self.platform, prefill_tokens_slice, replicated_sharding);
+        var prefill_tokens_buffer = try zml.Buffer.fromSlice(self.io, self.platform, prefill_tokens_slice, replicated_meshe);
         defer prefill_tokens_buffer.deinit();
 
         var prefill_token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32);
@@ -141,9 +141,9 @@ pub const Session = struct {
 
         const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
         defer self.allocator.free(out_tokens_buffer);
-        const replicated_sharding: zml.Sharding = .replicated;
+        const replicated_meshe: zml.Meshe = .replicated;
 
-        var current_token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.generated_token_slice, replicated_sharding);
+        var current_token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.generated_token_slice, replicated_meshe);
         defer current_token_buffer.deinit();
 
         var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.items.len)), .u32);
