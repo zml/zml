@@ -46,7 +46,7 @@ pub fn fusedExperts(
     };
     const expert_partition = gate_up.weight.shape().partition(.expert);
 
-    if (!expert_partition.eql(.init(.experts))) {
+    if (!expert_partition.isSharded()) {
         return fusedExpertsImpl(args, backend);
     }
 

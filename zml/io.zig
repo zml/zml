@@ -566,7 +566,7 @@ test "Loader.loadExecute cleans up donated and non-donated inputs" {
     defer registry.deinit();
     try registry.registerTensor(.{ .name = "value", .file_uri = path, .shape = shape, .offset = 0 });
     try registry.registerTensor(.{ .name = "weight", .file_uri = path, .shape = shape, .offset = 2 * @sizeOf(i32) });
-    var store: TensorStore = .fromRegistry(allocator, &registry);
+    var store: TensorStore = .fromRegistry(allocator, &registry, &.{platform.replicated_mesh});
     defer store.deinit();
     var loader = try Loader.init(allocator, platform, .{ .parallelism = 2, .dma_chunks = 2, .dma_chunk_size = 4096 });
     defer loader.deinit();
@@ -586,7 +586,7 @@ test "Loader.loadExecute cleans up donated and non-donated inputs" {
         try std.testing.expectEqual(@as(usize, @intFromBool(donate)), exe.donated_input_indices.len);
 
         var output: Buffer = undefined;
-        try loader.loadExecute(arena.allocator(), io, tensor, &output, &store, &.{}, &exe, .{});
+        try loader.loadExecute(arena.allocator(), io, tensor, &output, &store, &exe, .{});
         defer output.deinit();
         try std.testing.expectEqual([2]i32{ 11, 22 }, try output.getValue([2]i32, io));
         try std.testing.expect(loader.delivered.contains(tensor.id));

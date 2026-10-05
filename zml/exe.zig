@@ -23,7 +23,6 @@ pub const Exe = struct {
     input_shapes: []const Shape,
     output_shapes: []const Shape,
 
-
     /// Inputs whose buffers are donated to an output (`reuseBuffer`).
     /// Runners destroy their PJRT handles after the raw call returns.
     donated_input_indices: []const usize,
@@ -48,7 +47,6 @@ pub const Exe = struct {
 
         const input_shapes_copy = try arena.allocator().dupe(Shape, input_shapes);
         const output_shapes_copy = try arena.allocator().dupe(Shape, output_shapes);
-
 
         var donated_count: usize = 0;
         for (input_aliasing) |aliasing| donated_count += @intFromBool(aliasing != null);
@@ -626,7 +624,7 @@ test "Exe raw calls leave donated input handle cleanup to the caller" {
     defer exe.deinit();
     try std.testing.expectEqualSlices(usize, &.{0}, exe.donated_input_indices);
 
-    var weight_buffer = try Buffer.fromBytes(io, platform, weight.shape(), .replicated, std.mem.asBytes(&[2]i32{ 10, 20 }));
+    var weight_buffer = try Buffer.fromBytes(io, platform, weight.shape(), std.mem.asBytes(&[2]i32{ 10, 20 }));
     defer weight_buffer.deinit();
     var args = try exe.args(allocator);
     defer args.deinit(allocator);
@@ -634,7 +632,7 @@ test "Exe raw calls leave donated input handle cleanup to the caller" {
     defer results.deinit(allocator);
 
     for ([_]bool{ false, true }) |wait| {
-        var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), .replicated, std.mem.asBytes(&[2]i32{ 1, 2 }));
+        var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), std.mem.asBytes(&[2]i32{ 1, 2 }));
         defer value_buffer.deinit();
         args.set(.{ value_buffer, weight_buffer });
         exe.call(io, args, &results, .{ .wait = wait });
@@ -666,9 +664,9 @@ test "FnExe runner replaces donated buffers with and without waiting" {
     const exe = try Model.compile(allocator, io, platform, .{}, .{.{ .weight = weight, .value = value }});
     defer exe.deinit();
 
-    var weight_buffer = try Buffer.fromBytes(io, platform, weight.shape(), .replicated, std.mem.asBytes(&[2]i32{ 10, 20 }));
+    var weight_buffer = try Buffer.fromBytes(io, platform, weight.shape(), std.mem.asBytes(&[2]i32{ 10, 20 }));
     defer weight_buffer.deinit();
-    var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), .replicated, std.mem.asBytes(&[2]i32{ 1, 2 }));
+    var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), std.mem.asBytes(&[2]i32{ 1, 2 }));
     defer value_buffer.deinit();
     var runner = try Model.Runner(.{.weight}).init(&exe, allocator, .{ .weight = weight_buffer });
     defer runner.deinit(allocator);
@@ -701,7 +699,7 @@ test "FnExe runner replaces unchanged donated buffers" {
     defer exe.deinit();
     try std.testing.expectEqualSlices(usize, &.{0}, exe.raw.donated_input_indices);
 
-    var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), .replicated, std.mem.asBytes(&[2]i32{ 1, 2 }));
+    var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), std.mem.asBytes(&[2]i32{ 1, 2 }));
     defer value_buffer.deinit();
     var runner = try exe.runner(allocator);
     defer runner.deinit(allocator);

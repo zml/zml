@@ -694,7 +694,7 @@ pub fn fusedExperts(
 
         // TODO(Corentin): Do error checking on nvfp4
         // Also, maybe pass `zml.nn.Linear` directly
-        if (expert_partition.eql(.init(.experts))) {
+        if (expert_partition.isSharded()) {
             return zml.ops.manualComputation(
                 (struct {
                     input: zml.Tensor,
@@ -799,7 +799,7 @@ pub fn fusedExperts(
         );
     }
 
-    if (expert_partition.eql(.init(.experts))) {
+    if (expert_partition.isSharded()) {
         return zml.ops.manualComputation(
             (struct {
                 input: zml.Tensor,

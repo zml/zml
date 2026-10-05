@@ -238,7 +238,7 @@ pub fn fusedExperts(
 
     const expert_partition = gate_up.weight.shape().partition(.expert);
 
-    if (expert_partition.eql(.init(.experts))) {
+    if (expert_partition.isSharded()) {
         const global_num_experts = down.weight.dim(.expert);
         const partial_output = zml.ops.manualComputation(
             (struct {
