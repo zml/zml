@@ -97,8 +97,8 @@ pub const Value = struct {
 
     pub fn isFloat(self: Value) bool {
         const t = self.type_();
-        inline for (std.meta.fields(mlir.FloatTypes)) |f| {
-            if (t.isA(mlir.FloatType(@field(mlir.FloatTypes, f.name))) != null) return true;
+        inline for (@typeInfo(mlir.FloatTypes).@"enum".field_names) |f| {
+            if (t.isA(mlir.FloatType(@field(mlir.FloatTypes, f))) != null) return true;
         }
         return false;
     }
@@ -671,14 +671,14 @@ pub const Builder = struct {
     /// yields a `Tensor`, `.{ .p = .{ .ptr = .f32 } }` a pointer `Value`.
     pub fn declareArgs(self: *Builder, spec: anytype) FinishError!ArgsOf(@TypeOf(spec)) {
         const Spec = @TypeOf(spec);
-        const fields = @typeInfo(Spec).@"struct".fields;
+        const fields = @typeInfo(Spec).@"struct".field_names;
 
         const arg_specs = try self.arena.allocator().alloc(ArgSpec, fields.len);
         inline for (fields, 0..) |f, i| {
-            const raw = @field(spec, f.name);
-            const variant = @typeInfo(@TypeOf(raw)).@"struct".fields[0].name;
+            const raw = @field(spec, f);
+            const variant = @typeInfo(@TypeOf(raw)).@"struct".field_names[0];
             const inner = @field(raw, variant);
-            arg_specs[i] = .{ .name = f.name, .kind = switch (@field(std.meta.Tag(ArgSpec.Kind), variant)) {
+            arg_specs[i] = .{ .name = f, .kind = switch (@field(std.meta.Tag(ArgSpec.Kind), variant)) {
                 .ptr => .{ .ptr = inner },
                 .tensor => .{ .tensor = .{
                     .dtype = inner.dtype,
@@ -700,7 +700,7 @@ pub const Builder = struct {
 
         var named: ArgsOf(Spec) = undefined;
         inline for (fields, 0..) |f, i| {
-            @field(named, f.name) = switch (@FieldType(ArgsOf(Spec), f.name)) {
+            @field(named, f) = switch (@FieldType(ArgsOf(Spec), f)) {
                 Tensor => self.tensors[i].?,
                 else => self.arg(i),
             };
@@ -709,12 +709,12 @@ pub const Builder = struct {
     }
 
     fn ArgsOf(comptime Spec: type) type {
-        const in = @typeInfo(Spec).@"struct".fields;
+        const in = @typeInfo(Spec).@"struct".field_names;
         comptime var names: [in.len][]const u8 = undefined;
         comptime var types: [in.len]type = undefined;
         inline for (in, 0..) |f, i| {
-            names[i] = f.name;
-            types[i] = if (@hasField(f.type, "tensor")) Tensor else Value;
+            names[i] = f;
+            types[i] = if (@hasField(@FieldType(Spec, f), "tensor")) Tensor else Value;
         }
         return @Struct(.auto, null, &names, &types, &@splat(.{}));
     }
@@ -1025,7 +1025,7 @@ pub const Builder = struct {
             rest = payload[end + 1 ..];
         }
         try output.writer.writeAll(rest);
-        return try self.allocator.dupeZ(u8, output.written());
+        return try self.allocator.dupeSentinel(u8, output.written(), 0);
     }
 
     // ==================== types ====================
@@ -1134,9 +1134,9 @@ pub const Builder = struct {
             .comptime_int, .int => writer.print("{d}", .{value}) catch @panic("OOM"),
             .@"struct" => |info| {
                 writer.writeByte('(') catch @panic("OOM");
-                inline for (info.fields, 0..) |field, i| {
+                inline for (info.field_names, 0..) |field, i| {
                     if (i != 0) writer.writeByte(',') catch @panic("OOM");
-                    self.writeAlgebra(writer, @field(value, field.name));
+                    self.writeAlgebra(writer, @field(value, field));
                 }
                 writer.writeByte(')') catch @panic("OOM");
             },
@@ -1157,10 +1157,10 @@ pub const Builder = struct {
     pub fn basis(self: *Builder, numerator: i64, denominator: i64, modes: anytype) ScaledBasis {
         _ = self;
         if (denominator <= 0) @panic("CuTe scaled-basis denominator must be positive");
-        const fields = @typeInfo(@TypeOf(modes)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(modes)).@"struct".field_names;
         if (fields.len == 0 or fields.len > MAX_RANK) @panic("CuTe scaled basis needs 1..MAX_RANK modes");
         var result: ScaledBasis = .{ .numerator = numerator, .denominator = denominator, .mode_count = fields.len };
-        inline for (fields, 0..) |field, i| result.modes[i] = @intCast(@field(modes, field.name));
+        inline for (fields, 0..) |field, i| result.modes[i] = @intCast(@field(modes, field));
         return result;
     }
 
@@ -1349,13 +1349,13 @@ pub const Builder = struct {
         switch (@typeInfo(T)) {
             .comptime_int, .int => writer.print("{d}", .{coord}) catch @panic("OOM"),
             .@"struct" => |info| {
-                if (info.fields.len == 0) @compileError("makeCoord: empty tuple");
-                if (info.fields.len > 1) writer.writeByte('(') catch @panic("OOM");
-                inline for (info.fields, 0..) |field, i| {
+                if (info.field_names.len == 0) @compileError("makeCoord: empty tuple");
+                if (info.field_names.len > 1) writer.writeByte('(') catch @panic("OOM");
+                inline for (info.field_names, 0..) |field, i| {
                     if (i != 0) writer.writeByte(',') catch @panic("OOM");
-                    self.writeCoord(writer, dyn, @field(coord, field.name));
+                    self.writeCoord(writer, dyn, @field(coord, field));
                 }
-                if (info.fields.len > 1) writer.writeByte(')') catch @panic("OOM");
+                if (info.field_names.len > 1) writer.writeByte(')') catch @panic("OOM");
             },
             else => @compileError("makeCoord: unsupported coordinate leaf " ++ @typeName(T)),
         }
@@ -3010,8 +3010,8 @@ pub const Builder = struct {
     pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
         const N = comptime tupleArity(@TypeOf(result_types), "openIfElse: result_types");
         var types: [N]*const mlir.Type = undefined;
-        inline for (@typeInfo(@TypeOf(result_types)).@"struct".fields, 0..) |f, i| {
-            types[i] = @field(result_types, f.name);
+        inline for (@typeInfo(@TypeOf(result_types)).@"struct".field_names, 0..) |f, i| {
+            types[i] = @field(result_types, f);
         }
         const then_block = mlir.Block.init(&.{}, &.{});
         const else_block = mlir.Block.init(&.{}, &.{});
@@ -3031,8 +3031,8 @@ pub const Builder = struct {
         block_types[0] = lb.type_();
         block_locs[0] = self.loc();
         var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (@typeInfo(@TypeOf(inits)).@"struct".fields, 0..) |f, i| {
-            const v = self.lift(@field(inits, f.name));
+        inline for (@typeInfo(@TypeOf(inits)).@"struct".field_names, 0..) |f, i| {
+            const v = self.lift(@field(inits, f));
             block_types[i + 1] = v.type_();
             block_locs[i + 1] = self.loc();
             inits_inner[i] = v.inner;
@@ -3071,8 +3071,8 @@ pub const Builder = struct {
         var init_types: [N]*const mlir.Type = undefined;
         var init_locs: [N]*const mlir.Location = undefined;
         var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (@typeInfo(@TypeOf(inits)).@"struct".fields, 0..) |f, i| {
-            const v = self.lift(@field(inits, f.name));
+        inline for (@typeInfo(@TypeOf(inits)).@"struct".field_names, 0..) |f, i| {
+            const v = self.lift(@field(inits, f));
             init_types[i] = v.type_();
             init_locs[i] = self.loc();
             inits_inner[i] = v.inner;
@@ -3080,8 +3080,8 @@ pub const Builder = struct {
 
         var result_types: [M]*const mlir.Type = undefined;
         var result_locs: [M]*const mlir.Location = undefined;
-        inline for (@typeInfo(@TypeOf(after_types)).@"struct".fields, 0..) |f, i| {
-            result_types[i] = @field(after_types, f.name);
+        inline for (@typeInfo(@TypeOf(after_types)).@"struct".field_names, 0..) |f, i| {
+            result_types[i] = @field(after_types, f);
             result_locs[i] = self.loc();
         }
 

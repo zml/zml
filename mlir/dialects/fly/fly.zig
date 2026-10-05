@@ -252,7 +252,7 @@ test {
     inline for (.{ types, attributes, rocdl }) |module| {
         std.testing.refAllDecls(module);
         inline for (comptime std.meta.declarations(module)) |decl| {
-            const value = @field(module, decl.name);
+            const value = @field(module, decl);
             if (@TypeOf(value) == type and @typeInfo(value) == .@"opaque") std.testing.refAllDecls(value);
         }
     }

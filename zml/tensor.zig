@@ -38,7 +38,7 @@ pub const Tensor = struct {
     }
 
     fn nextTensorId() Id {
-        return @enumFromInt(Tensor.current_id.fetchAdd(1, .seq_cst));
+        return @fromBackingInt(@intCast(Tensor.current_id.fetchAdd(1, .seq_cst)));
     }
 
     pub fn fromShape(shape_: Shape) Tensor {

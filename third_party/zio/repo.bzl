@@ -9,6 +9,7 @@ def repo():
         patches = [
             Label("//third_party/zio:progress-parent-file.patch"),
             Label("//third_party/zio:runtime-page-size.patch"),
+            Label("//third_party/zio:zig-0.17.patch"),
         ],
         patch_args = ["-p1"],
     )

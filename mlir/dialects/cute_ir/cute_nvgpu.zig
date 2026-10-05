@@ -564,7 +564,7 @@ pub const CopyAtomG2RType = opaque {
         invariant: bool = false,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomG2RTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @intFromEnum(args.memOrder), @intFromEnum(args.memScope), @intFromEnum(args.l2PrefetchSize), @intFromEnum(args.l1CacheEvictPriority), @intFromEnum(args.loadCacheMode), @intFromEnum(args.sharedSpace), args.invariant);
+        const result = c.mlirCuteNVGPUCopyAtomG2RTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @backingInt(args.memOrder), @backingInt(args.memScope), @backingInt(args.l2PrefetchSize), @backingInt(args.l1CacheEvictPriority), @backingInt(args.loadCacheMode), @backingInt(args.sharedSpace), args.invariant);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -574,22 +574,22 @@ pub const CopyAtomG2RType = opaque {
         return c.mlirCuteNVGPUCopyAtomG2RTypeGetCopyBits(self.ptr());
     }
     pub fn getMemOrder(self: *const Self) MemOrderKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomG2RTypeGetMemOrder(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomG2RTypeGetMemOrder(self.ptr())));
     }
     pub fn getMemScope(self: *const Self) MemScopeKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomG2RTypeGetMemScope(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomG2RTypeGetMemScope(self.ptr())));
     }
     pub fn getL2PrefetchSize(self: *const Self) L2PrefetchSize {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomG2RTypeGetL2PrefetchSize(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomG2RTypeGetL2PrefetchSize(self.ptr())));
     }
     pub fn getL1CacheEvictPriority(self: *const Self) CacheEvictionPriority {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomG2RTypeGetL1CacheEvictPriority(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomG2RTypeGetL1CacheEvictPriority(self.ptr())));
     }
     pub fn getLoadCacheMode(self: *const Self) LoadCacheMode {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomG2RTypeGetLoadCacheMode(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomG2RTypeGetLoadCacheMode(self.ptr())));
     }
     pub fn getSharedSpace(self: *const Self) SharedSpace {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomG2RTypeGetSharedSpace(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomG2RTypeGetSharedSpace(self.ptr())));
     }
     pub fn getInvariant(self: *const Self) bool {
         return c.mlirCuteNVGPUCopyAtomG2RTypeGetInvariant(self.ptr());
@@ -705,7 +705,7 @@ pub const CopyAtomLdsmType = opaque {
         transpose: bool = false,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomLdsmTypeGet(ctx.ptr(), args.valType.ptr(), args.mode.ptr(), @intFromEnum(args.szPattern), args.numMatrices, args.transpose);
+        const result = c.mlirCuteNVGPUCopyAtomLdsmTypeGet(ctx.ptr(), args.valType.ptr(), args.mode.ptr(), @backingInt(args.szPattern), args.numMatrices, args.transpose);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -715,7 +715,7 @@ pub const CopyAtomLdsmType = opaque {
         return @ptrCast(c.mlirCuteNVGPUCopyAtomLdsmTypeGetMode(self.ptr()).ptr.?);
     }
     pub fn getSzPattern(self: *const Self) LdsmSzPattern {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomLdsmTypeGetSzPattern(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomLdsmTypeGetSzPattern(self.ptr())));
     }
     pub fn getNumMatrices(self: *const Self) c_int {
         return c.mlirCuteNVGPUCopyAtomLdsmTypeGetNumMatrices(self.ptr());
@@ -748,11 +748,11 @@ pub const CopyAtomNonExec2DGather4TmaLoadType = opaque {
         tmaFormat: ?TmaDataFormat = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomNonExec2DGather4TmaLoadTypeGet(ctx.ptr(), @intFromEnum(args.kind), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @intFromEnum(v) else -1);
+        const result = c.mlirCuteNVGPUCopyAtomNonExec2DGather4TmaLoadTypeGet(ctx.ptr(), @backingInt(args.kind), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @backingInt(v) else -1);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getKind(self: *const Self) GatherScatterTmaLoad {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomNonExec2DGather4TmaLoadTypeGetKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomNonExec2DGather4TmaLoadTypeGetKind(self.ptr())));
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUCopyAtomNonExec2DGather4TmaLoadTypeGetValType(self.ptr()).ptr.?);
@@ -765,7 +765,7 @@ pub const CopyAtomNonExec2DGather4TmaLoadType = opaque {
     }
     pub fn getTmaFormat(self: *const Self) ?TmaDataFormat {
         const value = c.mlirCuteNVGPUCopyAtomNonExec2DGather4TmaLoadTypeGetTmaFormat(self.ptr());
-        return if (value < 0) null else @enumFromInt(value);
+        return if (value < 0) null else @fromBackingInt(@intCast(value));
     }
 };
 
@@ -791,7 +791,7 @@ pub const CopyAtomNonExec2DScatter4TmaStoreType = opaque {
         tmaFormat: ?TmaDataFormat = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomNonExec2DScatter4TmaStoreTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @intFromEnum(v) else -1);
+        const result = c.mlirCuteNVGPUCopyAtomNonExec2DScatter4TmaStoreTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @backingInt(v) else -1);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -805,7 +805,7 @@ pub const CopyAtomNonExec2DScatter4TmaStoreType = opaque {
     }
     pub fn getTmaFormat(self: *const Self) ?TmaDataFormat {
         const value = c.mlirCuteNVGPUCopyAtomNonExec2DScatter4TmaStoreTypeGetTmaFormat(self.ptr());
-        return if (value < 0) null else @enumFromInt(value);
+        return if (value < 0) null else @fromBackingInt(@intCast(value));
     }
 };
 
@@ -832,11 +832,11 @@ pub const CopyAtomNonExecIm2ColTmaLoadType = opaque {
         tmaFormat: ?TmaDataFormat = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomNonExecIm2ColTmaLoadTypeGet(ctx.ptr(), @intFromEnum(args.kind), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @intFromEnum(v) else -1);
+        const result = c.mlirCuteNVGPUCopyAtomNonExecIm2ColTmaLoadTypeGet(ctx.ptr(), @backingInt(args.kind), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @backingInt(v) else -1);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getKind(self: *const Self) Im2ColTmaLoad {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomNonExecIm2ColTmaLoadTypeGetKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomNonExecIm2ColTmaLoadTypeGetKind(self.ptr())));
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUCopyAtomNonExecIm2ColTmaLoadTypeGetValType(self.ptr()).ptr.?);
@@ -849,7 +849,7 @@ pub const CopyAtomNonExecIm2ColTmaLoadType = opaque {
     }
     pub fn getTmaFormat(self: *const Self) ?TmaDataFormat {
         const value = c.mlirCuteNVGPUCopyAtomNonExecIm2ColTmaLoadTypeGetTmaFormat(self.ptr());
-        return if (value < 0) null else @enumFromInt(value);
+        return if (value < 0) null else @fromBackingInt(@intCast(value));
     }
 };
 
@@ -875,7 +875,7 @@ pub const CopyAtomNonExecIm2ColTmaStoreType = opaque {
         tmaFormat: ?TmaDataFormat = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomNonExecIm2ColTmaStoreTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @intFromEnum(v) else -1);
+        const result = c.mlirCuteNVGPUCopyAtomNonExecIm2ColTmaStoreTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @backingInt(v) else -1);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -889,7 +889,7 @@ pub const CopyAtomNonExecIm2ColTmaStoreType = opaque {
     }
     pub fn getTmaFormat(self: *const Self) ?TmaDataFormat {
         const value = c.mlirCuteNVGPUCopyAtomNonExecIm2ColTmaStoreTypeGetTmaFormat(self.ptr());
-        return if (value < 0) null else @enumFromInt(value);
+        return if (value < 0) null else @fromBackingInt(@intCast(value));
     }
 };
 
@@ -916,11 +916,11 @@ pub const CopyAtomNonExecTiledTmaLoadType = opaque {
         tmaFormat: ?TmaDataFormat = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomNonExecTiledTmaLoadTypeGet(ctx.ptr(), @intFromEnum(args.kind), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @intFromEnum(v) else -1);
+        const result = c.mlirCuteNVGPUCopyAtomNonExecTiledTmaLoadTypeGet(ctx.ptr(), @backingInt(args.kind), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @backingInt(v) else -1);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getKind(self: *const Self) TiledTmaLoad {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomNonExecTiledTmaLoadTypeGetKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomNonExecTiledTmaLoadTypeGetKind(self.ptr())));
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUCopyAtomNonExecTiledTmaLoadTypeGetValType(self.ptr()).ptr.?);
@@ -933,7 +933,7 @@ pub const CopyAtomNonExecTiledTmaLoadType = opaque {
     }
     pub fn getTmaFormat(self: *const Self) ?TmaDataFormat {
         const value = c.mlirCuteNVGPUCopyAtomNonExecTiledTmaLoadTypeGetTmaFormat(self.ptr());
-        return if (value < 0) null else @enumFromInt(value);
+        return if (value < 0) null else @fromBackingInt(@intCast(value));
     }
 };
 
@@ -960,11 +960,11 @@ pub const CopyAtomNonExecTiledTmaReduceType = opaque {
         tmaFormat: ?TmaDataFormat = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomNonExecTiledTmaReduceTypeGet(ctx.ptr(), @intFromEnum(args.kind), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @intFromEnum(v) else -1);
+        const result = c.mlirCuteNVGPUCopyAtomNonExecTiledTmaReduceTypeGet(ctx.ptr(), @backingInt(args.kind), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @backingInt(v) else -1);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getKind(self: *const Self) ReductionKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomNonExecTiledTmaReduceTypeGetKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomNonExecTiledTmaReduceTypeGetKind(self.ptr())));
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUCopyAtomNonExecTiledTmaReduceTypeGetValType(self.ptr()).ptr.?);
@@ -977,7 +977,7 @@ pub const CopyAtomNonExecTiledTmaReduceType = opaque {
     }
     pub fn getTmaFormat(self: *const Self) ?TmaDataFormat {
         const value = c.mlirCuteNVGPUCopyAtomNonExecTiledTmaReduceTypeGetTmaFormat(self.ptr());
-        return if (value < 0) null else @enumFromInt(value);
+        return if (value < 0) null else @fromBackingInt(@intCast(value));
     }
 };
 
@@ -1003,7 +1003,7 @@ pub const CopyAtomNonExecTiledTmaStoreType = opaque {
         tmaFormat: ?TmaDataFormat = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomNonExecTiledTmaStoreTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @intFromEnum(v) else -1);
+        const result = c.mlirCuteNVGPUCopyAtomNonExecTiledTmaStoreTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, args.tmaGbasis.ptr(), if (args.tmaFormat) |v| @backingInt(v) else -1);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1017,7 +1017,7 @@ pub const CopyAtomNonExecTiledTmaStoreType = opaque {
     }
     pub fn getTmaFormat(self: *const Self) ?TmaDataFormat {
         const value = c.mlirCuteNVGPUCopyAtomNonExecTiledTmaStoreTypeGetTmaFormat(self.ptr());
-        return if (value < 0) null else @enumFromInt(value);
+        return if (value < 0) null else @fromBackingInt(@intCast(value));
     }
 };
 
@@ -1046,7 +1046,7 @@ pub const CopyAtomR2GType = opaque {
         sharedSpace: SharedSpace = .CTA,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomR2GTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @intFromEnum(args.memOrder), @intFromEnum(args.memScope), @intFromEnum(args.l1CacheEvictPriority), @intFromEnum(args.storeCacheMode), @intFromEnum(args.sharedSpace));
+        const result = c.mlirCuteNVGPUCopyAtomR2GTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @backingInt(args.memOrder), @backingInt(args.memScope), @backingInt(args.l1CacheEvictPriority), @backingInt(args.storeCacheMode), @backingInt(args.sharedSpace));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1056,19 +1056,19 @@ pub const CopyAtomR2GType = opaque {
         return c.mlirCuteNVGPUCopyAtomR2GTypeGetCopyBits(self.ptr());
     }
     pub fn getMemOrder(self: *const Self) MemOrderKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomR2GTypeGetMemOrder(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomR2GTypeGetMemOrder(self.ptr())));
     }
     pub fn getMemScope(self: *const Self) MemScopeKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomR2GTypeGetMemScope(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomR2GTypeGetMemScope(self.ptr())));
     }
     pub fn getL1CacheEvictPriority(self: *const Self) CacheEvictionPriority {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomR2GTypeGetL1CacheEvictPriority(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomR2GTypeGetL1CacheEvictPriority(self.ptr())));
     }
     pub fn getStoreCacheMode(self: *const Self) StoreCacheMode {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomR2GTypeGetStoreCacheMode(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomR2GTypeGetStoreCacheMode(self.ptr())));
     }
     pub fn getSharedSpace(self: *const Self) SharedSpace {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomR2GTypeGetSharedSpace(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomR2GTypeGetSharedSpace(self.ptr())));
     }
 };
 
@@ -1095,7 +1095,7 @@ pub const CopyAtomR2SType = opaque {
         sharedSpace: SharedSpace = .CTA,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomR2STypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @intFromEnum(args.memOrder), @intFromEnum(args.memScope), @intFromEnum(args.sharedSpace));
+        const result = c.mlirCuteNVGPUCopyAtomR2STypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @backingInt(args.memOrder), @backingInt(args.memScope), @backingInt(args.sharedSpace));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1105,13 +1105,13 @@ pub const CopyAtomR2SType = opaque {
         return c.mlirCuteNVGPUCopyAtomR2STypeGetCopyBits(self.ptr());
     }
     pub fn getMemOrder(self: *const Self) MemOrderKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomR2STypeGetMemOrder(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomR2STypeGetMemOrder(self.ptr())));
     }
     pub fn getMemScope(self: *const Self) MemScopeKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomR2STypeGetMemScope(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomR2STypeGetMemScope(self.ptr())));
     }
     pub fn getSharedSpace(self: *const Self) SharedSpace {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomR2STypeGetSharedSpace(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomR2STypeGetSharedSpace(self.ptr())));
     }
 };
 
@@ -1138,7 +1138,7 @@ pub const CopyAtomS2RType = opaque {
         sharedSpace: SharedSpace = .CTA,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomS2RTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @intFromEnum(args.memOrder), @intFromEnum(args.memScope), @intFromEnum(args.sharedSpace));
+        const result = c.mlirCuteNVGPUCopyAtomS2RTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @backingInt(args.memOrder), @backingInt(args.memScope), @backingInt(args.sharedSpace));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1148,13 +1148,13 @@ pub const CopyAtomS2RType = opaque {
         return c.mlirCuteNVGPUCopyAtomS2RTypeGetCopyBits(self.ptr());
     }
     pub fn getMemOrder(self: *const Self) MemOrderKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomS2RTypeGetMemOrder(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomS2RTypeGetMemOrder(self.ptr())));
     }
     pub fn getMemScope(self: *const Self) MemScopeKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomS2RTypeGetMemScope(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomS2RTypeGetMemScope(self.ptr())));
     }
     pub fn getSharedSpace(self: *const Self) SharedSpace {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomS2RTypeGetSharedSpace(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomS2RTypeGetSharedSpace(self.ptr())));
     }
 };
 
@@ -1179,14 +1179,14 @@ pub const CopyAtomSIMTAsyncCopyType = opaque {
         copyBits: c_int,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomSIMTAsyncCopyTypeGet(ctx.ptr(), args.valType.ptr(), @intFromEnum(args.cache), args.copyBits);
+        const result = c.mlirCuteNVGPUCopyAtomSIMTAsyncCopyTypeGet(ctx.ptr(), args.valType.ptr(), @backingInt(args.cache), args.copyBits);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUCopyAtomSIMTAsyncCopyTypeGetValType(self.ptr()).ptr.?);
     }
     pub fn getCache(self: *const Self) LoadCacheMode {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSIMTAsyncCopyTypeGetCache(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTAsyncCopyTypeGetCache(self.ptr())));
     }
     pub fn getCopyBits(self: *const Self) c_int {
         return c.mlirCuteNVGPUCopyAtomSIMTAsyncCopyTypeGetCopyBits(self.ptr());
@@ -1217,7 +1217,7 @@ pub const CopyAtomSIMTMultimemLdReduceType = opaque {
         memScope: MemScopeKind = .SYS,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomSIMTMultimemLdReduceTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @intFromEnum(args.reduction), if (args.ldReduceAccPrecision) |v| v.ptr() else c.MlirAttribute{ .ptr = null }, @intFromEnum(args.memOrder), @intFromEnum(args.memScope));
+        const result = c.mlirCuteNVGPUCopyAtomSIMTMultimemLdReduceTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @backingInt(args.reduction), if (args.ldReduceAccPrecision) |v| v.ptr() else c.MlirAttribute{ .ptr = null }, @backingInt(args.memOrder), @backingInt(args.memScope));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1227,16 +1227,16 @@ pub const CopyAtomSIMTMultimemLdReduceType = opaque {
         return c.mlirCuteNVGPUCopyAtomSIMTMultimemLdReduceTypeGetCopyBits(self.ptr());
     }
     pub fn getReduction(self: *const Self) ReductionKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSIMTMultimemLdReduceTypeGetReduction(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTMultimemLdReduceTypeGetReduction(self.ptr())));
     }
     pub fn getLdReduceAccPrecision(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVGPUCopyAtomSIMTMultimemLdReduceTypeGetLdReduceAccPrecision(self.ptr()).ptr);
     }
     pub fn getMemOrder(self: *const Self) MemOrderKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSIMTMultimemLdReduceTypeGetMemOrder(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTMultimemLdReduceTypeGetMemOrder(self.ptr())));
     }
     pub fn getMemScope(self: *const Self) MemScopeKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSIMTMultimemLdReduceTypeGetMemScope(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTMultimemLdReduceTypeGetMemScope(self.ptr())));
     }
 };
 
@@ -1263,7 +1263,7 @@ pub const CopyAtomSIMTMultimemRedType = opaque {
         memScope: MemScopeKind = .SYS,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomSIMTMultimemRedTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @intFromEnum(args.reduction), @intFromEnum(args.memOrder), @intFromEnum(args.memScope));
+        const result = c.mlirCuteNVGPUCopyAtomSIMTMultimemRedTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @backingInt(args.reduction), @backingInt(args.memOrder), @backingInt(args.memScope));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1273,13 +1273,13 @@ pub const CopyAtomSIMTMultimemRedType = opaque {
         return c.mlirCuteNVGPUCopyAtomSIMTMultimemRedTypeGetCopyBits(self.ptr());
     }
     pub fn getReduction(self: *const Self) ReductionKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSIMTMultimemRedTypeGetReduction(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTMultimemRedTypeGetReduction(self.ptr())));
     }
     pub fn getMemOrder(self: *const Self) MemOrderKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSIMTMultimemRedTypeGetMemOrder(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTMultimemRedTypeGetMemOrder(self.ptr())));
     }
     pub fn getMemScope(self: *const Self) MemScopeKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSIMTMultimemRedTypeGetMemScope(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTMultimemRedTypeGetMemScope(self.ptr())));
     }
 };
 
@@ -1305,7 +1305,7 @@ pub const CopyAtomSIMTMultimemStType = opaque {
         memScope: MemScopeKind = .SYS,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomSIMTMultimemStTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @intFromEnum(args.memOrder), @intFromEnum(args.memScope));
+        const result = c.mlirCuteNVGPUCopyAtomSIMTMultimemStTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @backingInt(args.memOrder), @backingInt(args.memScope));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1315,10 +1315,10 @@ pub const CopyAtomSIMTMultimemStType = opaque {
         return c.mlirCuteNVGPUCopyAtomSIMTMultimemStTypeGetCopyBits(self.ptr());
     }
     pub fn getMemOrder(self: *const Self) MemOrderKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSIMTMultimemStTypeGetMemOrder(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTMultimemStTypeGetMemOrder(self.ptr())));
     }
     pub fn getMemScope(self: *const Self) MemScopeKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSIMTMultimemStTypeGetMemScope(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTMultimemStTypeGetMemScope(self.ptr())));
     }
 };
 
@@ -1344,7 +1344,7 @@ pub const CopyAtomSIMTSyncCopyType = opaque {
         dstSpace: cute.AddressSpace = .generic,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomSIMTSyncCopyTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @intFromEnum(args.srcSpace), @intFromEnum(args.dstSpace));
+        const result = c.mlirCuteNVGPUCopyAtomSIMTSyncCopyTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @backingInt(args.srcSpace), @backingInt(args.dstSpace));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1354,10 +1354,10 @@ pub const CopyAtomSIMTSyncCopyType = opaque {
         return c.mlirCuteNVGPUCopyAtomSIMTSyncCopyTypeGetCopyBits(self.ptr());
     }
     pub fn getSrcSpace(self: *const Self) cute.AddressSpace {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSIMTSyncCopyTypeGetSrcSpace(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTSyncCopyTypeGetSrcSpace(self.ptr())));
     }
     pub fn getDstSpace(self: *const Self) cute.AddressSpace {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSIMTSyncCopyTypeGetDstSpace(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTSyncCopyTypeGetDstSpace(self.ptr())));
     }
 };
 
@@ -1384,7 +1384,7 @@ pub const CopyAtomSM100CopyS2TType = opaque {
         broadcast: CopyS2TBroadcast = .none,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomSM100CopyS2TTypeGet(ctx.ptr(), args.valType.ptr(), args.numDp, args.numBit, args.numCta, @intFromEnum(args.broadcast));
+        const result = c.mlirCuteNVGPUCopyAtomSM100CopyS2TTypeGet(ctx.ptr(), args.valType.ptr(), args.numDp, args.numBit, args.numCta, @backingInt(args.broadcast));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1400,7 +1400,7 @@ pub const CopyAtomSM100CopyS2TType = opaque {
         return c.mlirCuteNVGPUCopyAtomSM100CopyS2TTypeGetNumCta(self.ptr());
     }
     pub fn getBroadcast(self: *const Self) CopyS2TBroadcast {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSM100CopyS2TTypeGetBroadcast(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSM100CopyS2TTypeGetBroadcast(self.ptr())));
     }
 };
 
@@ -1428,7 +1428,7 @@ pub const CopyAtomSM100S2TCopyV2Type = opaque {
         broadcast: CopyS2TBroadcast = .none,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomSM100S2TCopyV2TypeGet(ctx.ptr(), args.valType.ptr(), args.numDp, args.numBit, args.numCta, @intFromEnum(args.smemMajor), @intFromEnum(args.broadcast));
+        const result = c.mlirCuteNVGPUCopyAtomSM100S2TCopyV2TypeGet(ctx.ptr(), args.valType.ptr(), args.numDp, args.numBit, args.numCta, @backingInt(args.smemMajor), @backingInt(args.broadcast));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1444,10 +1444,10 @@ pub const CopyAtomSM100S2TCopyV2Type = opaque {
         return c.mlirCuteNVGPUCopyAtomSM100S2TCopyV2TypeGetNumCta(self.ptr());
     }
     pub fn getSmemMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSM100S2TCopyV2TypeGetSmemMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSM100S2TCopyV2TypeGetSmemMajor(self.ptr())));
     }
     pub fn getBroadcast(self: *const Self) CopyS2TBroadcast {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSM100S2TCopyV2TypeGetBroadcast(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSM100S2TCopyV2TypeGetBroadcast(self.ptr())));
     }
 };
 
@@ -1562,7 +1562,7 @@ pub const CopyAtomSM107TmemLoadSPCompressType = opaque {
         nan: bool = false,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGet(ctx.ptr(), args.valType.ptr(), args.numDp, args.numBit, args.numRep, @intFromEnum(args.redOp), args.red, args.nan);
+        const result = c.mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGet(ctx.ptr(), args.valType.ptr(), args.numDp, args.numBit, args.numRep, @backingInt(args.redOp), args.red, args.nan);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1578,7 +1578,7 @@ pub const CopyAtomSM107TmemLoadSPCompressType = opaque {
         return c.mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetNumRep(self.ptr());
     }
     pub fn getRedOp(self: *const Self) TmemLoadRedOp {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetRedOp(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetRedOp(self.ptr())));
     }
     pub fn getRed(self: *const Self) bool {
         return c.mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetRed(self.ptr());
@@ -1613,7 +1613,7 @@ pub const CopyAtomSM10xTmemLoadRedType = opaque {
         halfSplitOff: ?*const mlir.Attribute = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGet(ctx.ptr(), args.valType.ptr(), args.numDp, args.numBit, args.numRep, @intFromEnum(args.redOp), args.nan, if (args.halfSplitOff) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
+        const result = c.mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGet(ctx.ptr(), args.valType.ptr(), args.numDp, args.numBit, args.numRep, @backingInt(args.redOp), args.nan, if (args.halfSplitOff) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1629,7 +1629,7 @@ pub const CopyAtomSM10xTmemLoadRedType = opaque {
         return c.mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetNumRep(self.ptr());
     }
     pub fn getRedOp(self: *const Self) TmemLoadRedOp {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetRedOp(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetRedOp(self.ptr())));
     }
     pub fn getNan(self: *const Self) bool {
         return c.mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetNan(self.ptr());
@@ -1706,7 +1706,7 @@ pub const CopyAtomTmaLoadType = opaque {
         noFullyOobTile: bool = false,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomTmaLoadTypeGet(ctx.ptr(), args.valType.ptr(), args.sparsity, args.copyBits, @intFromEnum(args.mode), args.numCta, args.gStride.ptr(), args.mcast, if (args.tmaGbasis) |v| v.ptr() else c.MlirType{ .ptr = null }, args.override, args.noFullyOobTile);
+        const result = c.mlirCuteNVGPUCopyAtomTmaLoadTypeGet(ctx.ptr(), args.valType.ptr(), args.sparsity, args.copyBits, @backingInt(args.mode), args.numCta, args.gStride.ptr(), args.mcast, if (args.tmaGbasis) |v| v.ptr() else c.MlirType{ .ptr = null }, args.override, args.noFullyOobTile);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1719,7 +1719,7 @@ pub const CopyAtomTmaLoadType = opaque {
         return c.mlirCuteNVGPUCopyAtomTmaLoadTypeGetCopyBits(self.ptr());
     }
     pub fn getMode(self: *const Self) TmaLoadMode {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomTmaLoadTypeGetMode(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomTmaLoadTypeGetMode(self.ptr())));
     }
     pub fn getNumCta(self: *const Self) c_int {
         return c.mlirCuteNVGPUCopyAtomTmaLoadTypeGetNumCta(self.ptr());
@@ -1765,7 +1765,7 @@ pub const CopyAtomTmaReduceType = opaque {
         tmaGbasis: ?*const mlir.Type = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomTmaReduceTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @intFromEnum(args.mode), @intFromEnum(args.kind), args.gStride.ptr(), if (args.tmaGbasis) |v| v.ptr() else c.MlirType{ .ptr = null });
+        const result = c.mlirCuteNVGPUCopyAtomTmaReduceTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @backingInt(args.mode), @backingInt(args.kind), args.gStride.ptr(), if (args.tmaGbasis) |v| v.ptr() else c.MlirType{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1775,10 +1775,10 @@ pub const CopyAtomTmaReduceType = opaque {
         return c.mlirCuteNVGPUCopyAtomTmaReduceTypeGetCopyBits(self.ptr());
     }
     pub fn getMode(self: *const Self) TmaStoreMode {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomTmaReduceTypeGetMode(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomTmaReduceTypeGetMode(self.ptr())));
     }
     pub fn getKind(self: *const Self) ReductionKind {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomTmaReduceTypeGetKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomTmaReduceTypeGetKind(self.ptr())));
     }
     pub fn getGStride(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUCopyAtomTmaReduceTypeGetGStride(self.ptr()).ptr.?);
@@ -1814,7 +1814,7 @@ pub const CopyAtomTmaStoreType = opaque {
         noFullyOobTile: bool = false,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyAtomTmaStoreTypeGet(ctx.ptr(), args.valType.ptr(), args.sparsity, args.copyBits, @intFromEnum(args.mode), args.gStride.ptr(), if (args.tmaGbasis) |v| v.ptr() else c.MlirType{ .ptr = null }, args.override, args.noFullyOobTile);
+        const result = c.mlirCuteNVGPUCopyAtomTmaStoreTypeGet(ctx.ptr(), args.valType.ptr(), args.sparsity, args.copyBits, @backingInt(args.mode), args.gStride.ptr(), if (args.tmaGbasis) |v| v.ptr() else c.MlirType{ .ptr = null }, args.override, args.noFullyOobTile);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValType(self: *const Self) *const mlir.Type {
@@ -1827,7 +1827,7 @@ pub const CopyAtomTmaStoreType = opaque {
         return c.mlirCuteNVGPUCopyAtomTmaStoreTypeGetCopyBits(self.ptr());
     }
     pub fn getMode(self: *const Self) TmaStoreMode {
-        return @enumFromInt(c.mlirCuteNVGPUCopyAtomTmaStoreTypeGetMode(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomTmaStoreTypeGetMode(self.ptr())));
     }
     pub fn getGStride(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUCopyAtomTmaStoreTypeGetGStride(self.ptr()).ptr.?);
@@ -1874,7 +1874,7 @@ pub const MmaAtomSM100UMMABlockScaledSparseType = opaque {
         intOverflow: ?*const mlir.Attribute = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @intFromEnum(args.aMajor), @intFromEnum(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.sfType.ptr(), @intFromEnum(args.sparseMetadataFormat), @intFromEnum(args.aFragKind), args.vecSize, @intFromEnum(args.archPromote), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
+        const result = c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @backingInt(args.aMajor), @backingInt(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.sfType.ptr(), @backingInt(args.sparseMetadataFormat), @backingInt(args.aFragKind), args.vecSize, @backingInt(args.archPromote), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getShapeMnk(self: *const Self) *const mlir.Attribute {
@@ -1884,10 +1884,10 @@ pub const MmaAtomSM100UMMABlockScaledSparseType = opaque {
         return c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetNumCta(self.ptr());
     }
     pub fn getAMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetAMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetAMajor(self.ptr())));
     }
     pub fn getBMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetBMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetAType(self.ptr()).ptr.?);
@@ -1902,16 +1902,16 @@ pub const MmaAtomSM100UMMABlockScaledSparseType = opaque {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetSfType(self.ptr()).ptr.?);
     }
     pub fn getSparseMetadataFormat(self: *const Self) SparseMetadataFormat {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetSparseMetadataFormat(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetSparseMetadataFormat(self.ptr())));
     }
     pub fn getAFragKind(self: *const Self) MmaFragKind {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetAFragKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetAFragKind(self.ptr())));
     }
     pub fn getVecSize(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetVecSize(self.ptr());
     }
     pub fn getArchPromote(self: *const Self) Arch {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetArchPromote(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetArchPromote(self.ptr())));
     }
     pub fn getIntOverflow(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetIntOverflow(self.ptr()).ptr);
@@ -1948,7 +1948,7 @@ pub const MmaAtomSM100UMMABlockScaledType = opaque {
         intOverflow: ?*const mlir.Attribute = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @intFromEnum(args.aMajor), @intFromEnum(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.sfType.ptr(), @intFromEnum(args.aFragKind), args.vecSize, @intFromEnum(args.archPromote), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
+        const result = c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @backingInt(args.aMajor), @backingInt(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.sfType.ptr(), @backingInt(args.aFragKind), args.vecSize, @backingInt(args.archPromote), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getShapeMnk(self: *const Self) *const mlir.Attribute {
@@ -1958,10 +1958,10 @@ pub const MmaAtomSM100UMMABlockScaledType = opaque {
         return c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetNumCta(self.ptr());
     }
     pub fn getAMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetAMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetAMajor(self.ptr())));
     }
     pub fn getBMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetBMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetAType(self.ptr()).ptr.?);
@@ -1976,13 +1976,13 @@ pub const MmaAtomSM100UMMABlockScaledType = opaque {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetSfType(self.ptr()).ptr.?);
     }
     pub fn getAFragKind(self: *const Self) MmaFragKind {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetAFragKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetAFragKind(self.ptr())));
     }
     pub fn getVecSize(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetVecSize(self.ptr());
     }
     pub fn getArchPromote(self: *const Self) Arch {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetArchPromote(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetArchPromote(self.ptr())));
     }
     pub fn getIntOverflow(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetIntOverflow(self.ptr()).ptr);
@@ -2019,7 +2019,7 @@ pub const MmaAtomSM100UMMASparseType = opaque {
         intOverflow: ?*const mlir.Attribute = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @intFromEnum(args.aMajor), @intFromEnum(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.eType.ptr(), @intFromEnum(args.sparseMetadataFormat), @intFromEnum(args.aFragKind), args.cScaleExp, if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
+        const result = c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @backingInt(args.aMajor), @backingInt(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.eType.ptr(), @backingInt(args.sparseMetadataFormat), @backingInt(args.aFragKind), args.cScaleExp, if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getShapeMnk(self: *const Self) *const mlir.Attribute {
@@ -2029,10 +2029,10 @@ pub const MmaAtomSM100UMMASparseType = opaque {
         return c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetNumCta(self.ptr());
     }
     pub fn getAMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetAMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetAMajor(self.ptr())));
     }
     pub fn getBMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetBMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetAType(self.ptr()).ptr.?);
@@ -2047,10 +2047,10 @@ pub const MmaAtomSM100UMMASparseType = opaque {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetEType(self.ptr()).ptr.?);
     }
     pub fn getSparseMetadataFormat(self: *const Self) SparseMetadataFormat {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetSparseMetadataFormat(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetSparseMetadataFormat(self.ptr())));
     }
     pub fn getAFragKind(self: *const Self) MmaFragKind {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetAFragKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetAFragKind(self.ptr())));
     }
     pub fn getCScaleExp(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetCScaleExp(self.ptr());
@@ -2088,7 +2088,7 @@ pub const MmaAtomSM100UMMAType = opaque {
         intOverflow: ?*const mlir.Attribute = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaAtomSM100UMMATypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @intFromEnum(args.aMajor), @intFromEnum(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), @intFromEnum(args.aFragKind), args.cScaleExp, if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
+        const result = c.mlirCuteNVGPUMmaAtomSM100UMMATypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @backingInt(args.aMajor), @backingInt(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), @backingInt(args.aFragKind), args.cScaleExp, if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getShapeMnk(self: *const Self) *const mlir.Attribute {
@@ -2098,10 +2098,10 @@ pub const MmaAtomSM100UMMAType = opaque {
         return c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetNumCta(self.ptr());
     }
     pub fn getAMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetAMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetAMajor(self.ptr())));
     }
     pub fn getBMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetBMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetAType(self.ptr()).ptr.?);
@@ -2113,7 +2113,7 @@ pub const MmaAtomSM100UMMAType = opaque {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetCType(self.ptr()).ptr.?);
     }
     pub fn getAFragKind(self: *const Self) MmaFragKind {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetAFragKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetAFragKind(self.ptr())));
     }
     pub fn getCScaleExp(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetCScaleExp(self.ptr());
@@ -2155,7 +2155,7 @@ pub const MmaAtomSM107UMMABlockScaledSparseType = opaque {
         intOverflow: ?*const mlir.Attribute = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @intFromEnum(args.aMajor), @intFromEnum(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.sfType.ptr(), @intFromEnum(args.sparseMetadataFormat), @intFromEnum(args.aFragKind), args.vecSize, @intFromEnum(args.aCollectorOp), @intFromEnum(args.bCollectorOp), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
+        const result = c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @backingInt(args.aMajor), @backingInt(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.sfType.ptr(), @backingInt(args.sparseMetadataFormat), @backingInt(args.aFragKind), args.vecSize, @backingInt(args.aCollectorOp), @backingInt(args.bCollectorOp), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getShapeMnk(self: *const Self) *const mlir.Attribute {
@@ -2165,10 +2165,10 @@ pub const MmaAtomSM107UMMABlockScaledSparseType = opaque {
         return c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetNumCta(self.ptr());
     }
     pub fn getAMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetAMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetAMajor(self.ptr())));
     }
     pub fn getBMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetBMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetAType(self.ptr()).ptr.?);
@@ -2183,19 +2183,19 @@ pub const MmaAtomSM107UMMABlockScaledSparseType = opaque {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetSfType(self.ptr()).ptr.?);
     }
     pub fn getSparseMetadataFormat(self: *const Self) SparseMetadataFormat {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetSparseMetadataFormat(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetSparseMetadataFormat(self.ptr())));
     }
     pub fn getAFragKind(self: *const Self) MmaFragKind {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetAFragKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetAFragKind(self.ptr())));
     }
     pub fn getVecSize(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetVecSize(self.ptr());
     }
     pub fn getACollectorOp(self: *const Self) MmaCollectorOp {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetACollectorOp(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetACollectorOp(self.ptr())));
     }
     pub fn getBCollectorOp(self: *const Self) MmaCollectorOp {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetBCollectorOp(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetBCollectorOp(self.ptr())));
     }
     pub fn getIntOverflow(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetIntOverflow(self.ptr()).ptr);
@@ -2233,7 +2233,7 @@ pub const MmaAtomSM107UMMABlockScaledType = opaque {
         intOverflow: ?*const mlir.Attribute = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @intFromEnum(args.aMajor), @intFromEnum(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.sfType.ptr(), @intFromEnum(args.aFragKind), args.vecSize, @intFromEnum(args.aCollectorOp), @intFromEnum(args.bCollectorOp), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
+        const result = c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @backingInt(args.aMajor), @backingInt(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.sfType.ptr(), @backingInt(args.aFragKind), args.vecSize, @backingInt(args.aCollectorOp), @backingInt(args.bCollectorOp), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getShapeMnk(self: *const Self) *const mlir.Attribute {
@@ -2243,10 +2243,10 @@ pub const MmaAtomSM107UMMABlockScaledType = opaque {
         return c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetNumCta(self.ptr());
     }
     pub fn getAMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetAMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetAMajor(self.ptr())));
     }
     pub fn getBMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetBMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetAType(self.ptr()).ptr.?);
@@ -2261,16 +2261,16 @@ pub const MmaAtomSM107UMMABlockScaledType = opaque {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetSfType(self.ptr()).ptr.?);
     }
     pub fn getAFragKind(self: *const Self) MmaFragKind {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetAFragKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetAFragKind(self.ptr())));
     }
     pub fn getVecSize(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetVecSize(self.ptr());
     }
     pub fn getACollectorOp(self: *const Self) MmaCollectorOp {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetACollectorOp(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetACollectorOp(self.ptr())));
     }
     pub fn getBCollectorOp(self: *const Self) MmaCollectorOp {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetBCollectorOp(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetBCollectorOp(self.ptr())));
     }
     pub fn getIntOverflow(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetIntOverflow(self.ptr()).ptr);
@@ -2309,7 +2309,7 @@ pub const MmaAtomSM107UMMASparseType = opaque {
         intOverflow: ?*const mlir.Attribute = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @intFromEnum(args.aMajor), @intFromEnum(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.eType.ptr(), @intFromEnum(args.sparseMetadataFormat), @intFromEnum(args.aFragKind), args.cScaleExp, @intFromEnum(args.aCollectorOp), @intFromEnum(args.bCollectorOp), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
+        const result = c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @backingInt(args.aMajor), @backingInt(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), args.eType.ptr(), @backingInt(args.sparseMetadataFormat), @backingInt(args.aFragKind), args.cScaleExp, @backingInt(args.aCollectorOp), @backingInt(args.bCollectorOp), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getShapeMnk(self: *const Self) *const mlir.Attribute {
@@ -2319,10 +2319,10 @@ pub const MmaAtomSM107UMMASparseType = opaque {
         return c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetNumCta(self.ptr());
     }
     pub fn getAMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetAMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetAMajor(self.ptr())));
     }
     pub fn getBMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetBMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetAType(self.ptr()).ptr.?);
@@ -2337,19 +2337,19 @@ pub const MmaAtomSM107UMMASparseType = opaque {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetEType(self.ptr()).ptr.?);
     }
     pub fn getSparseMetadataFormat(self: *const Self) SparseMetadataFormat {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetSparseMetadataFormat(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetSparseMetadataFormat(self.ptr())));
     }
     pub fn getAFragKind(self: *const Self) MmaFragKind {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetAFragKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetAFragKind(self.ptr())));
     }
     pub fn getCScaleExp(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetCScaleExp(self.ptr());
     }
     pub fn getACollectorOp(self: *const Self) MmaCollectorOp {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetACollectorOp(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetACollectorOp(self.ptr())));
     }
     pub fn getBCollectorOp(self: *const Self) MmaCollectorOp {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetBCollectorOp(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetBCollectorOp(self.ptr())));
     }
     pub fn getIntOverflow(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetIntOverflow(self.ptr()).ptr);
@@ -2386,7 +2386,7 @@ pub const MmaAtomSM107UMMAType = opaque {
         intOverflow: ?*const mlir.Attribute = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaAtomSM107UMMATypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @intFromEnum(args.aMajor), @intFromEnum(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), @intFromEnum(args.aFragKind), args.cScaleExp, @intFromEnum(args.aCollectorOp), @intFromEnum(args.bCollectorOp), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
+        const result = c.mlirCuteNVGPUMmaAtomSM107UMMATypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.numCta, @backingInt(args.aMajor), @backingInt(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), @backingInt(args.aFragKind), args.cScaleExp, @backingInt(args.aCollectorOp), @backingInt(args.bCollectorOp), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getShapeMnk(self: *const Self) *const mlir.Attribute {
@@ -2396,10 +2396,10 @@ pub const MmaAtomSM107UMMAType = opaque {
         return c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetNumCta(self.ptr());
     }
     pub fn getAMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetAMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetAMajor(self.ptr())));
     }
     pub fn getBMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetBMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetAType(self.ptr()).ptr.?);
@@ -2411,16 +2411,16 @@ pub const MmaAtomSM107UMMAType = opaque {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetCType(self.ptr()).ptr.?);
     }
     pub fn getAFragKind(self: *const Self) MmaFragKind {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetAFragKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetAFragKind(self.ptr())));
     }
     pub fn getCScaleExp(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetCScaleExp(self.ptr());
     }
     pub fn getACollectorOp(self: *const Self) MmaCollectorOp {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetACollectorOp(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetACollectorOp(self.ptr())));
     }
     pub fn getBCollectorOp(self: *const Self) MmaCollectorOp {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetBCollectorOp(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetBCollectorOp(self.ptr())));
     }
     pub fn getIntOverflow(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetIntOverflow(self.ptr()).ptr);
@@ -2502,7 +2502,7 @@ pub const MmaAtomSM80SparseType = opaque {
         intOverflow: ?*const mlir.Attribute = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaAtomSM80SparseTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), @intFromEnum(args.sparseMetadataFormat), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
+        const result = c.mlirCuteNVGPUMmaAtomSM80SparseTypeGet(ctx.ptr(), args.shapeMnk.ptr(), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), @backingInt(args.sparseMetadataFormat), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getShapeMnk(self: *const Self) *const mlir.Attribute {
@@ -2518,7 +2518,7 @@ pub const MmaAtomSM80SparseType = opaque {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM80SparseTypeGetCType(self.ptr()).ptr.?);
     }
     pub fn getSparseMetadataFormat(self: *const Self) SparseMetadataFormat {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM80SparseTypeGetSparseMetadataFormat(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM80SparseTypeGetSparseMetadataFormat(self.ptr())));
     }
     pub fn getIntOverflow(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM80SparseTypeGetIntOverflow(self.ptr()).ptr);
@@ -2639,17 +2639,17 @@ pub const MmaAtomSM90Type = opaque {
         bNeg: bool = false,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaAtomSM90TypeGet(ctx.ptr(), args.shapeMnk.ptr(), @intFromEnum(args.aMajor), @intFromEnum(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), @intFromEnum(args.aFragKind), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null }, args.aNeg, args.bNeg);
+        const result = c.mlirCuteNVGPUMmaAtomSM90TypeGet(ctx.ptr(), args.shapeMnk.ptr(), @backingInt(args.aMajor), @backingInt(args.bMajor), args.aType.ptr(), args.bType.ptr(), args.cType.ptr(), @backingInt(args.aFragKind), if (args.intOverflow) |v| v.ptr() else c.MlirAttribute{ .ptr = null }, args.aNeg, args.bNeg);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getShapeMnk(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM90TypeGetShapeMnk(self.ptr()).ptr.?);
     }
     pub fn getAMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM90TypeGetAMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM90TypeGetAMajor(self.ptr())));
     }
     pub fn getBMajor(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM90TypeGetBMajor(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM90TypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM90TypeGetAType(self.ptr()).ptr.?);
@@ -2661,7 +2661,7 @@ pub const MmaAtomSM90Type = opaque {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM90TypeGetCType(self.ptr()).ptr.?);
     }
     pub fn getAFragKind(self: *const Self) MmaFragKind {
-        return @enumFromInt(c.mlirCuteNVGPUMmaAtomSM90TypeGetAFragKind(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM90TypeGetAFragKind(self.ptr())));
     }
     pub fn getIntOverflow(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM90TypeGetIntOverflow(self.ptr()).ptr);
@@ -2932,11 +2932,11 @@ pub const AtomCopyFieldBulkCopyG2SAttr = opaque {
         value: AtomCopyFieldBulkCopyG2S,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldBulkCopyG2SAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldBulkCopyG2SAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldBulkCopyG2S {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldBulkCopyG2SAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldBulkCopyG2SAttrGetValue(self.ptr())));
     }
 };
 
@@ -2959,11 +2959,11 @@ pub const AtomCopyFieldBulkCopyS2GAttr = opaque {
         value: AtomCopyFieldBulkCopyS2G,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldBulkCopyS2GAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldBulkCopyS2GAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldBulkCopyS2G {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldBulkCopyS2GAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldBulkCopyS2GAttrGetValue(self.ptr())));
     }
 };
 
@@ -2986,11 +2986,11 @@ pub const AtomCopyFieldBulkCopyS2SAttr = opaque {
         value: AtomCopyFieldBulkCopyS2S,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldBulkCopyS2SAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldBulkCopyS2SAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldBulkCopyS2S {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldBulkCopyS2SAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldBulkCopyS2SAttrGetValue(self.ptr())));
     }
 };
 
@@ -3013,11 +3013,11 @@ pub const AtomCopyFieldDsmemStoreAttr = opaque {
         value: AtomCopyFieldDsmemStore,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldDsmemStoreAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldDsmemStoreAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldDsmemStore {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldDsmemStoreAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldDsmemStoreAttrGetValue(self.ptr())));
     }
 };
 
@@ -3040,11 +3040,11 @@ pub const AtomCopyFieldLoadGlobalAttr = opaque {
         value: AtomCopyFieldLoadGlobal,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldLoadGlobalAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldLoadGlobalAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldLoadGlobal {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldLoadGlobalAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldLoadGlobalAttrGetValue(self.ptr())));
     }
 };
 
@@ -3067,11 +3067,11 @@ pub const AtomCopyFieldNonExec2DGather4TmaLoadAttr = opaque {
         value: AtomCopyFieldNonExec2DGather4TmaLoad,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldNonExec2DGather4TmaLoadAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldNonExec2DGather4TmaLoadAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldNonExec2DGather4TmaLoad {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldNonExec2DGather4TmaLoadAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldNonExec2DGather4TmaLoadAttrGetValue(self.ptr())));
     }
 };
 
@@ -3094,11 +3094,11 @@ pub const AtomCopyFieldNonExec2DScatter4TmaStoreAttr = opaque {
         value: AtomCopyFieldNonExec2DScatter4TmaStore,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldNonExec2DScatter4TmaStoreAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldNonExec2DScatter4TmaStoreAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldNonExec2DScatter4TmaStore {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldNonExec2DScatter4TmaStoreAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldNonExec2DScatter4TmaStoreAttrGetValue(self.ptr())));
     }
 };
 
@@ -3121,11 +3121,11 @@ pub const AtomCopyFieldNonExecIm2ColTmaLoadAttr = opaque {
         value: AtomCopyFieldNonExecIm2ColTmaLoad,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldNonExecIm2ColTmaLoadAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldNonExecIm2ColTmaLoadAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldNonExecIm2ColTmaLoad {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldNonExecIm2ColTmaLoadAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldNonExecIm2ColTmaLoadAttrGetValue(self.ptr())));
     }
 };
 
@@ -3148,11 +3148,11 @@ pub const AtomCopyFieldNonExecIm2ColTmaStoreAttr = opaque {
         value: AtomCopyFieldNonExecIm2ColTmaStore,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldNonExecIm2ColTmaStoreAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldNonExecIm2ColTmaStoreAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldNonExecIm2ColTmaStore {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldNonExecIm2ColTmaStoreAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldNonExecIm2ColTmaStoreAttrGetValue(self.ptr())));
     }
 };
 
@@ -3175,11 +3175,11 @@ pub const AtomCopyFieldNonExecTiledTmaLoadAttr = opaque {
         value: AtomCopyFieldNonExecTiledTmaLoad,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaLoadAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaLoadAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldNonExecTiledTmaLoad {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaLoadAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaLoadAttrGetValue(self.ptr())));
     }
 };
 
@@ -3202,11 +3202,11 @@ pub const AtomCopyFieldNonExecTiledTmaReduceAttr = opaque {
         value: AtomCopyFieldNonExecTiledTmaReduce,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaReduceAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaReduceAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldNonExecTiledTmaReduce {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaReduceAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaReduceAttrGetValue(self.ptr())));
     }
 };
 
@@ -3229,11 +3229,11 @@ pub const AtomCopyFieldNonExecTiledTmaStoreAttr = opaque {
         value: AtomCopyFieldNonExecTiledTmaStore,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaStoreAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaStoreAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldNonExecTiledTmaStore {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaStoreAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldNonExecTiledTmaStoreAttrGetValue(self.ptr())));
     }
 };
 
@@ -3256,11 +3256,11 @@ pub const AtomCopyFieldStoreGlobalAttr = opaque {
         value: AtomCopyFieldStoreGlobal,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldStoreGlobalAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldStoreGlobalAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldStoreGlobal {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldStoreGlobalAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldStoreGlobalAttrGetValue(self.ptr())));
     }
 };
 
@@ -3283,11 +3283,11 @@ pub const AtomCopyFieldTmaLoadAttr = opaque {
         value: AtomCopyFieldTmaLoad,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldTmaLoadAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldTmaLoadAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldTmaLoad {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldTmaLoadAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldTmaLoadAttrGetValue(self.ptr())));
     }
 };
 
@@ -3310,11 +3310,11 @@ pub const AtomCopyFieldTmaReduceAttr = opaque {
         value: AtomCopyFieldTmaReduce,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldTmaReduceAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldTmaReduceAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldTmaReduce {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldTmaReduceAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldTmaReduceAttrGetValue(self.ptr())));
     }
 };
 
@@ -3337,11 +3337,11 @@ pub const AtomCopyFieldTmaStoreAttr = opaque {
         value: AtomCopyFieldTmaStore,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomCopyFieldTmaStoreAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomCopyFieldTmaStoreAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomCopyFieldTmaStore {
-        return @enumFromInt(c.mlirCuteNVGPUAtomCopyFieldTmaStoreAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomCopyFieldTmaStoreAttrGetValue(self.ptr())));
     }
 };
 
@@ -3364,11 +3364,11 @@ pub const AtomMmaFieldSM100Attr = opaque {
         value: AtomMmaFieldSM100,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomMmaFieldSM100AttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomMmaFieldSM100AttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomMmaFieldSM100 {
-        return @enumFromInt(c.mlirCuteNVGPUAtomMmaFieldSM100AttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomMmaFieldSM100AttrGetValue(self.ptr())));
     }
 };
 
@@ -3391,11 +3391,11 @@ pub const AtomMmaFieldSM100BlockScaledAttr = opaque {
         value: AtomMmaFieldSM100BlockScaled,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomMmaFieldSM100BlockScaledAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomMmaFieldSM100BlockScaledAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomMmaFieldSM100BlockScaled {
-        return @enumFromInt(c.mlirCuteNVGPUAtomMmaFieldSM100BlockScaledAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomMmaFieldSM100BlockScaledAttrGetValue(self.ptr())));
     }
 };
 
@@ -3418,11 +3418,11 @@ pub const AtomMmaFieldSM100BlockScaledSparseAttr = opaque {
         value: AtomMmaFieldSM100BlockScaledSparse,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomMmaFieldSM100BlockScaledSparseAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomMmaFieldSM100BlockScaledSparseAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomMmaFieldSM100BlockScaledSparse {
-        return @enumFromInt(c.mlirCuteNVGPUAtomMmaFieldSM100BlockScaledSparseAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomMmaFieldSM100BlockScaledSparseAttrGetValue(self.ptr())));
     }
 };
 
@@ -3445,11 +3445,11 @@ pub const AtomMmaFieldSM100SparseAttr = opaque {
         value: AtomMmaFieldSM100Sparse,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomMmaFieldSM100SparseAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomMmaFieldSM100SparseAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomMmaFieldSM100Sparse {
-        return @enumFromInt(c.mlirCuteNVGPUAtomMmaFieldSM100SparseAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomMmaFieldSM100SparseAttrGetValue(self.ptr())));
     }
 };
 
@@ -3472,11 +3472,11 @@ pub const AtomMmaFieldSM120BlockScaledAttr = opaque {
         value: AtomMmaFieldSM120BlockScaled,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomMmaFieldSM120BlockScaledAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomMmaFieldSM120BlockScaledAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomMmaFieldSM120BlockScaled {
-        return @enumFromInt(c.mlirCuteNVGPUAtomMmaFieldSM120BlockScaledAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomMmaFieldSM120BlockScaledAttrGetValue(self.ptr())));
     }
 };
 
@@ -3499,11 +3499,11 @@ pub const AtomMmaFieldSM80SparseAttr = opaque {
         value: AtomMmaFieldSM80Sparse,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomMmaFieldSM80SparseAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomMmaFieldSM80SparseAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomMmaFieldSM80Sparse {
-        return @enumFromInt(c.mlirCuteNVGPUAtomMmaFieldSM80SparseAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomMmaFieldSM80SparseAttrGetValue(self.ptr())));
     }
 };
 
@@ -3526,11 +3526,11 @@ pub const AtomMmaFieldSM90Attr = opaque {
         value: AtomMmaFieldSM90,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUAtomMmaFieldSM90AttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUAtomMmaFieldSM90AttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) AtomMmaFieldSM90 {
-        return @enumFromInt(c.mlirCuteNVGPUAtomMmaFieldSM90AttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUAtomMmaFieldSM90AttrGetValue(self.ptr())));
     }
 };
 
@@ -3553,11 +3553,11 @@ pub const BinaryOpAttr = opaque {
         value: BinaryOp,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUBinaryOpAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUBinaryOpAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) BinaryOp {
-        return @enumFromInt(c.mlirCuteNVGPUBinaryOpAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUBinaryOpAttrGetValue(self.ptr())));
     }
 };
 
@@ -3580,11 +3580,11 @@ pub const CopyS2TBroadcastAttr = opaque {
         value: CopyS2TBroadcast,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUCopyS2TBroadcastAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUCopyS2TBroadcastAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) CopyS2TBroadcast {
-        return @enumFromInt(c.mlirCuteNVGPUCopyS2TBroadcastAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyS2TBroadcastAttrGetValue(self.ptr())));
     }
 };
 
@@ -3607,11 +3607,11 @@ pub const GatherScatterTmaLoadAttr = opaque {
         value: GatherScatterTmaLoad,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUGatherScatterTmaLoadAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUGatherScatterTmaLoadAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) GatherScatterTmaLoad {
-        return @enumFromInt(c.mlirCuteNVGPUGatherScatterTmaLoadAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUGatherScatterTmaLoadAttrGetValue(self.ptr())));
     }
 };
 
@@ -3634,11 +3634,11 @@ pub const Im2ColTmaLoadAttr = opaque {
         value: Im2ColTmaLoad,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUIm2ColTmaLoadAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUIm2ColTmaLoadAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) Im2ColTmaLoad {
-        return @enumFromInt(c.mlirCuteNVGPUIm2ColTmaLoadAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUIm2ColTmaLoadAttrGetValue(self.ptr())));
     }
 };
 
@@ -3661,11 +3661,11 @@ pub const LdReduceAccPrecisionKindAttr = opaque {
         value: LdReduceAccPrecisionKind,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPULdReduceAccPrecisionKindAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPULdReduceAccPrecisionKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) LdReduceAccPrecisionKind {
-        return @enumFromInt(c.mlirCuteNVGPULdReduceAccPrecisionKindAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPULdReduceAccPrecisionKindAttrGetValue(self.ptr())));
     }
 };
 
@@ -3688,11 +3688,11 @@ pub const LdsmSzPatternAttr = opaque {
         value: LdsmSzPattern,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPULdsmSzPatternAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPULdsmSzPatternAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) LdsmSzPattern {
-        return @enumFromInt(c.mlirCuteNVGPULdsmSzPatternAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPULdsmSzPatternAttrGetValue(self.ptr())));
     }
 };
 
@@ -3715,11 +3715,11 @@ pub const LoadCacheModeAttr = opaque {
         value: LoadCacheMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPULoadCacheModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPULoadCacheModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) LoadCacheMode {
-        return @enumFromInt(c.mlirCuteNVGPULoadCacheModeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPULoadCacheModeAttrGetValue(self.ptr())));
     }
 };
 
@@ -3742,11 +3742,11 @@ pub const MMAIntOverflowAttr = opaque {
         value: MMAIntOverflow,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMMAIntOverflowAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUMMAIntOverflowAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) MMAIntOverflow {
-        return @enumFromInt(c.mlirCuteNVGPUMMAIntOverflowAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMMAIntOverflowAttrGetValue(self.ptr())));
     }
 };
 
@@ -3769,11 +3769,11 @@ pub const MajorModeAttr = opaque {
         value: cute.MajorMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMajorModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUMajorModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUMajorModeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMajorModeAttrGetValue(self.ptr())));
     }
 };
 
@@ -3796,11 +3796,11 @@ pub const MmaCollectorOpAttr = opaque {
         value: MmaCollectorOp,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaCollectorOpAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUMmaCollectorOpAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) MmaCollectorOp {
-        return @enumFromInt(c.mlirCuteNVGPUMmaCollectorOpAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaCollectorOpAttrGetValue(self.ptr())));
     }
 };
 
@@ -3823,11 +3823,11 @@ pub const MmaFragKindAttr = opaque {
         value: MmaFragKind,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUMmaFragKindAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUMmaFragKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) MmaFragKind {
-        return @enumFromInt(c.mlirCuteNVGPUMmaFragKindAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaFragKindAttrGetValue(self.ptr())));
     }
 };
 
@@ -3873,11 +3873,11 @@ pub const ReductionKindAttr = opaque {
         value: ReductionKind,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUReductionKindAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUReductionKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) ReductionKind {
-        return @enumFromInt(c.mlirCuteNVGPUReductionKindAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUReductionKindAttrGetValue(self.ptr())));
     }
 };
 
@@ -3902,14 +3902,14 @@ pub const RmemFrgAttr = opaque {
         deriveElemType: bool = false,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPURmemFrgAttrGet(ctx.ptr(), args.valueType.ptr(), @intFromEnum(args.operand), args.deriveElemType);
+        const result = c.mlirCuteNVGPURmemFrgAttrGet(ctx.ptr(), args.valueType.ptr(), @backingInt(args.operand), args.deriveElemType);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValueType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPURmemFrgAttrGetValueType(self.ptr()).ptr.?);
     }
     pub fn getOperand(self: *const Self) cute.MmaOperand {
-        return @enumFromInt(c.mlirCuteNVGPURmemFrgAttrGetOperand(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPURmemFrgAttrGetOperand(self.ptr())));
     }
     pub fn getDeriveElemType(self: *const Self) bool {
         return c.mlirCuteNVGPURmemFrgAttrGetDeriveElemType(self.ptr());
@@ -3935,11 +3935,11 @@ pub const SM100CircularSmemFrgAttr = opaque {
         majorMode: cute.MajorMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUSM100CircularSmemFrgAttrGet(ctx.ptr(), @intFromEnum(args.majorMode));
+        const result = c.mlirCuteNVGPUSM100CircularSmemFrgAttrGet(ctx.ptr(), @backingInt(args.majorMode));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getMajorMode(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUSM100CircularSmemFrgAttrGetMajorMode(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUSM100CircularSmemFrgAttrGetMajorMode(self.ptr())));
     }
 };
 
@@ -3962,11 +3962,11 @@ pub const SM100SmemFrgAttr = opaque {
         majorMode: cute.MajorMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUSM100SmemFrgAttrGet(ctx.ptr(), @intFromEnum(args.majorMode));
+        const result = c.mlirCuteNVGPUSM100SmemFrgAttrGet(ctx.ptr(), @backingInt(args.majorMode));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getMajorMode(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUSM100SmemFrgAttrGetMajorMode(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUSM100SmemFrgAttrGetMajorMode(self.ptr())));
     }
 };
 
@@ -4023,7 +4023,7 @@ pub const SM100TmemFrgAttr = opaque {
         tmemAllocMode: TmemAllocMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUSM100TmemFrgAttrGet(ctx.ptr(), args.dataType.ptr(), args.storageType.ptr(), args.ctaGroup, @intFromEnum(args.tmemAllocMode));
+        const result = c.mlirCuteNVGPUSM100TmemFrgAttrGet(ctx.ptr(), args.dataType.ptr(), args.storageType.ptr(), args.ctaGroup, @backingInt(args.tmemAllocMode));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getDataType(self: *const Self) *const mlir.Type {
@@ -4036,7 +4036,7 @@ pub const SM100TmemFrgAttr = opaque {
         return c.mlirCuteNVGPUSM100TmemFrgAttrGetCtaGroup(self.ptr());
     }
     pub fn getTmemAllocMode(self: *const Self) TmemAllocMode {
-        return @enumFromInt(c.mlirCuteNVGPUSM100TmemFrgAttrGetTmemAllocMode(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUSM100TmemFrgAttrGetTmemAllocMode(self.ptr())));
     }
 };
 
@@ -4063,7 +4063,7 @@ pub const SM100TmemSfFrgAttr = opaque {
         tmemAllocMode: TmemAllocMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUSM100TmemSfFrgAttrGet(ctx.ptr(), args.sfType.ptr(), args.sfVecSize, args.ctaGroup, args.isSfa, @intFromEnum(args.tmemAllocMode));
+        const result = c.mlirCuteNVGPUSM100TmemSfFrgAttrGet(ctx.ptr(), args.sfType.ptr(), args.sfVecSize, args.ctaGroup, args.isSfa, @backingInt(args.tmemAllocMode));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getSfType(self: *const Self) *const mlir.Type {
@@ -4079,7 +4079,7 @@ pub const SM100TmemSfFrgAttr = opaque {
         return c.mlirCuteNVGPUSM100TmemSfFrgAttrGetIsSfa(self.ptr());
     }
     pub fn getTmemAllocMode(self: *const Self) TmemAllocMode {
-        return @enumFromInt(c.mlirCuteNVGPUSM100TmemSfFrgAttrGetTmemAllocMode(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUSM100TmemSfFrgAttrGetTmemAllocMode(self.ptr())));
     }
 };
 
@@ -4102,11 +4102,11 @@ pub const SM107SmemFrgAttr = opaque {
         majorMode: cute.MajorMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUSM107SmemFrgAttrGet(ctx.ptr(), @intFromEnum(args.majorMode));
+        const result = c.mlirCuteNVGPUSM107SmemFrgAttrGet(ctx.ptr(), @backingInt(args.majorMode));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getMajorMode(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUSM107SmemFrgAttrGetMajorMode(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUSM107SmemFrgAttrGetMajorMode(self.ptr())));
     }
 };
 
@@ -4129,11 +4129,11 @@ pub const SM90SmemFrgAttr = opaque {
         majorMode: cute.MajorMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUSM90SmemFrgAttrGet(ctx.ptr(), @intFromEnum(args.majorMode));
+        const result = c.mlirCuteNVGPUSM90SmemFrgAttrGet(ctx.ptr(), @backingInt(args.majorMode));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getMajorMode(self: *const Self) cute.MajorMode {
-        return @enumFromInt(c.mlirCuteNVGPUSM90SmemFrgAttrGetMajorMode(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUSM90SmemFrgAttrGetMajorMode(self.ptr())));
     }
 };
 
@@ -4156,11 +4156,11 @@ pub const TiledTmaLoadAttr = opaque {
         value: TiledTmaLoad,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUTiledTmaLoadAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUTiledTmaLoadAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) TiledTmaLoad {
-        return @enumFromInt(c.mlirCuteNVGPUTiledTmaLoadAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUTiledTmaLoadAttrGetValue(self.ptr())));
     }
 };
 
@@ -4183,11 +4183,11 @@ pub const TmaDataFormatAttr = opaque {
         value: TmaDataFormat,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUTmaDataFormatAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUTmaDataFormatAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) TmaDataFormat {
-        return @enumFromInt(c.mlirCuteNVGPUTmaDataFormatAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUTmaDataFormatAttrGetValue(self.ptr())));
     }
 };
 
@@ -4210,11 +4210,11 @@ pub const TmaLoadModeAttr = opaque {
         value: TmaLoadMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUTmaLoadModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUTmaLoadModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) TmaLoadMode {
-        return @enumFromInt(c.mlirCuteNVGPUTmaLoadModeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUTmaLoadModeAttrGetValue(self.ptr())));
     }
 };
 
@@ -4237,11 +4237,11 @@ pub const TmaStoreModeAttr = opaque {
         value: TmaStoreMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUTmaStoreModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUTmaStoreModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) TmaStoreMode {
-        return @enumFromInt(c.mlirCuteNVGPUTmaStoreModeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUTmaStoreModeAttrGetValue(self.ptr())));
     }
 };
 
@@ -4264,11 +4264,11 @@ pub const TmemAllocModeAttr = opaque {
         value: TmemAllocMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUTmemAllocModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUTmemAllocModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) TmemAllocMode {
-        return @enumFromInt(c.mlirCuteNVGPUTmemAllocModeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUTmemAllocModeAttrGetValue(self.ptr())));
     }
 };
 
@@ -4291,11 +4291,11 @@ pub const TmemLoadRedOpAttr = opaque {
         value: TmemLoadRedOp,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteNVGPUTmemLoadRedOpAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteNVGPUTmemLoadRedOpAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) TmemLoadRedOp {
-        return @enumFromInt(c.mlirCuteNVGPUTmemLoadRedOpAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteNVGPUTmemLoadRedOpAttrGetValue(self.ptr())));
     }
 };
 

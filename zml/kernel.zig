@@ -832,7 +832,7 @@ pub const fly = struct {
 
             /// `zeroed_args` index of an output.
             pub fn zeroedOutput(comptime f: std.meta.FieldEnum(Outputs)) i32 {
-                return @intCast(spec.inputs.len + @intFromEnum(f));
+                return @intCast(spec.inputs.len + @backingInt(f));
             }
 
             /// `shapes` is inputs, then outputs.
