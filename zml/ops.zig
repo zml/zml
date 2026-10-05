@@ -2614,7 +2614,6 @@ fn manualComputationInternal(
         .shardy => {
             const in_sharding_attrs = try arena.alloc(*const dialects.shardy.TensorShardingAttribute, input_shapes.len);
 
-            const out_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, outputs, sharding);
             const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, input_shapes, outputs, sharding);
 
             const manual_block = mlir.Block.init(&.{}, &.{});
@@ -2622,8 +2621,11 @@ fn manualComputationInternal(
 
             const local_input_tensors = try arena.alloc(Tensor, input_shapes.len);
             for (input_shapes, 0..) |input_shape, i| {
-                const input_sharding = input_tensors.partitioning[i] orelse .replicated(input_shape);
-                const input_resolved_sharding = input_sharding.resolve(ctx.platform);
+                const input_sharding = input_tensors[i]._partitioning orelse .replicated(input_shape);
+                var input_resolved_sharding = input_sharding.resolve(ctx.platform);
+                if (input_sharding.isFullyReplicated()) {
+                    input_resolved_sharding.mesh = sharding;
+                }
                 const local_input_shape = input_resolved_sharding.shardedShape(input_shape);
                 const input_type = mlirx.Type.rankedTensor(ctx.mlir_ctx, local_input_shape);
                 const argument_i = manual_block.addArgument(input_type, ctx.unknown_location);
@@ -2644,9 +2646,15 @@ fn manualComputationInternal(
             stdx.debug.assert(local_outputs.len == outputs.len, "manualComputation body returned {} values, expected {}", .{ local_outputs.len, outputs.len });
 
             const local_output_values = try arena.alloc(*const mlir.Value, outputs.len);
-            for (0..outputs.len) |i| {
-                stdx.debug.assert(local_outputs[i].shape().eql(local_output_shapes[i]), "manualComputation body returned shape {f}, expected {f}", .{ local_outputs[i].shape(), local_output_shapes[i] });
-                local_output_values[i] = local_outputs[i].value();
+            const out_sharding_attrs = try arena.alloc(*const dialects.shardy.TensorShardingAttribute, outputs.len);
+            for (0..outputs.len, local_outputs) |i, o| {
+                // TODO improve logic, handle invalid output mesh
+                const o_sharding = o._partitioning orelse .replicated(o);
+                var o_resolved_sharding = o_sharding.resolve(ctx.platform);
+                if (o_sharding.isFullyReplicated()) {
+                    o_resolved_sharding.mesh = sharding;
+                }
+                out_sharding_attrs[i] = try o_resolved_sharding.mesh.sdyShardingAttrForShape(arena, ctx, o_resolved_sharding.partition);
             }
 
             _ = mlir.Operation.make(ctx.mlir_ctx, "sdy.return", .{
@@ -2666,7 +2674,7 @@ fn manualComputationInternal(
                 .blocks = &.{manual_block},
                 .attributes = &.{
                     .named(ctx.mlir_ctx, "in_shardings", dialects.shardy.TensorShardingPerValueAttribute.init(ctx.mlir_ctx, in_sharding_attrs).asAttr()),
-                    .named(ctx.mlir_ctx, "out_shardings", out_shardings_attr),
+                    .named(ctx.mlir_ctx, "out_shardings", dialects.shardy.TensorShardingPerValueAttribute.init(ctx.mlir_ctx, out_sharding_attrs).asAttr()),
                     .named(ctx.mlir_ctx, "manual_axes", manual_axes_attr),
                 },
                 .verify = true,

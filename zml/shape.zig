@@ -119,8 +119,8 @@ pub const Shape = struct {
         const T = @TypeOf(v);
         stdx.debug.assertComptime(stdx.meta.isTupleOf(T, @EnumLiteral()), "Wrong type, got {}. Expected .{{ .a, .b }}", .{T});
         var tags_: TagsArray = .empty;
-        inline for (v) |field| {
-            tags_.append(toTag(field));
+        inline for (0.., v) |i, field| {
+            tags_.items[i] = toTag(field);
         }
         return tags_;
     }

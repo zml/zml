@@ -50,14 +50,21 @@ pub fn SentinelArray(T: type, capacity_: u8, sentinel_: T) type {
 
         pub fn find(array: Array, needle: T) ?u8 {
             @setRuntimeSafety(false);
-            const needle_int = std.mem.bytesToValue(SmuggleT, std.mem.asBytes(&needle));
-            const i = std.mem.findScalar(SmuggleT, @ptrCast(array.items[0..]), needle_int) orelse return null;
-            return @truncate(i);
+            for (0..capacity) |i| {
+                if (@typeInfo(T) == .@"struct" and @hasDecl(T, "eql")) {
+                    if (needle.eql(array.items[i])) {
+                        return @truncate(i);
+                    }
+                } else if (array.items[i] == needle) {
+                    return @truncate(i);
+                }
+            }
+            return null;
         }
 
         pub fn append(array: *Array, value: T) void {
             const l = array.len();
-            if (l < capacity) @panic("SentinelArray is full");
+            if (l == capacity) @panic("SentinelArray is full");
             array.items[l] = value;
         }
 

@@ -273,7 +273,6 @@ test pushLocation {
         .module = undefined,
         .platform = undefined,
         .partitioner = undefined,
-        .shardings = undefined,
         .location = unknown_location,
         .unknown_location = unknown_location,
     };
@@ -332,12 +331,12 @@ pub fn sharding(compiler: *const Compiler, name: @EnumLiteral()) Sharding {
 pub fn resolveSharding(compiler: *const Compiler, logical_axes: anytype) Sharding {
     if (@TypeOf(logical_axes) != []const Shape.Tag) {
         const comp_tags = comptime Shape.parseTags(logical_axes);
-        const parsed_tags: []const Shape.Tag = comptime comp_tags.constSlice();
+        const parsed_tags: []const Shape.Tag = comptime comp_tags.slice(comp_tags.len());
         return compiler.resolveSharding(parsed_tags);
     }
 
     var ok_sharding: ?Sharding = null;
-    for (compiler.shardings) |shd| {
+    for (compiler.platform.shardings.values()) |shd| {
         var covers_all: bool = true;
         for (logical_axes) |ax| {
             const input_axis = Shape.toTag(ax);
@@ -366,7 +365,7 @@ pub fn resolveSharding(compiler: *const Compiler, logical_axes: anytype) Shardin
         \\Found no shardings covering axes: {any}, expected exacty one.
         \\Try passing more shardings to `zml.compile`.
         \\Known shardings: {f}
-    , .{ logical_axes, stdx.fmt.slice(compiler.shardings) });
+    , .{ logical_axes, stdx.fmt.slice(compiler.platform.shardings.values()) });
 }
 
 pub fn Typed(comptime func: anytype) type {

@@ -1915,6 +1915,10 @@ pub const PartitionSpec = extern struct {
 
         try std.testing.expect(!PartitionSpec.unknown.isClosed());
     }
+
+    pub fn eql(x: PartitionSpec, y: PartitionSpec) bool {
+        return x.tag == y.tag;
+    }
 };
 
 /// No logic, just data
