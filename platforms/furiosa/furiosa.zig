@@ -29,7 +29,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         return error.FileNotFound;
     };
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const runfile = try stdx.Io.Dir.path.bufJoin(&lib_path_buf, &.{ sandbox, "lib", "libpjrt_c_api_furiosa_plugin.so" });
+    const runfile = try stdx.Io.Dir.path.bufJoin(&lib_path_buf, &.{ sandbox, "lib", "libzml_furiosa.so" });
     // Tests can expose individual runfiles as symlinks. Keep SDK discovery
     // relative to the actual assembled bundle containing the plugin.
     const resolved = try std.Io.Dir.cwd().realPathFileAlloc(io, runfile, allocator);

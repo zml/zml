@@ -6,12 +6,10 @@ copy_to_directory(
     name = "sandbox",
     srcs = glob(
         [
+            "bin/**",
+            "include/**",
             "lib/**",
-            "libexec/**",
         ],
-        allow_empty = False,
-    ) + glob(
-        ["toolchain/**"],
         allow_empty = False,
     ),
     add_directory_to_runfiles = True,
