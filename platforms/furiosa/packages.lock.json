@@ -2,7 +2,18 @@
 	"packages": [
 		{
 			"arch": "amd64",
-			"dependencies": [],
+			"dependencies": [
+				{
+					"key": "libgcc-s1_14.2.0-4ubuntu2_24.04.1_amd64",
+					"name": "libgcc-s1",
+					"version": "14.2.0-4ubuntu2~24.04.1"
+				},
+				{
+					"key": "gcc-14-base_14.2.0-4ubuntu2_24.04.1_amd64",
+					"name": "gcc-14-base",
+					"version": "14.2.0-4ubuntu2~24.04.1"
+				}
+			],
 			"key": "libc6_2.39-0ubuntu8.7_amd64",
 			"name": "libc6",
 			"sha256": "955644e8bc2930a9bf8eea5e4c2237c8a118c1e2ac2845b993b6f7f35eefd293",
@@ -13,7 +24,18 @@
 		},
 		{
 			"arch": "amd64",
-			"dependencies": [],
+			"dependencies": [
+				{
+					"key": "libc6_2.39-0ubuntu8.7_amd64",
+					"name": "libc6",
+					"version": "2.39-0ubuntu8.7"
+				},
+				{
+					"key": "gcc-14-base_14.2.0-4ubuntu2_24.04.1_amd64",
+					"name": "gcc-14-base",
+					"version": "14.2.0-4ubuntu2~24.04.1"
+				}
+			],
 			"key": "libgcc-s1_14.2.0-4ubuntu2_24.04.1_amd64",
 			"name": "libgcc-s1",
 			"sha256": "aa7fadbe33b78bcf99885318040601c550c208929565b179891d9a3cc2aa68cd",
@@ -86,6 +108,50 @@
 				"https://apt.llvm.org/bookworm/pool/main/l/llvm-toolchain-23/llvm-libunwind1_23.1.2~++20260920033443+85ac56026243-1~exp1~20260920033605.79_amd64.deb"
 			],
 			"version": "1:23.1.2~++20260920033443+85ac56026243-1~exp1~20260920033605.79"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "linux-libc-dev-arm64-cross_6.8.0-25.25cross1_amd64",
+					"name": "linux-libc-dev-arm64-cross",
+					"version": "6.8.0-25.25cross1"
+				},
+				{
+					"key": "libc6-arm64-cross_2.39-0ubuntu8cross1_amd64",
+					"name": "libc6-arm64-cross",
+					"version": "2.39-0ubuntu8cross1"
+				}
+			],
+			"key": "libc6-dev-arm64-cross_2.39-0ubuntu8cross1_amd64",
+			"name": "libc6-dev-arm64-cross",
+			"sha256": "04c6956de42669a53e620ad04a32475ea0bd4325808c227bf5ba52498f0d3f90",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/c/cross-toolchain-base/libc6-dev-arm64-cross_2.39-0ubuntu8cross1_all.deb"
+			],
+			"version": "2.39-0ubuntu8cross1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "linux-libc-dev-arm64-cross_6.8.0-25.25cross1_amd64",
+			"name": "linux-libc-dev-arm64-cross",
+			"sha256": "6a5a00b8ba8de66862e05493def87a5cbbb23b949601e45a5e3cbde56505cb6b",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/c/cross-toolchain-base/linux-libc-dev-arm64-cross_6.8.0-25.25cross1_all.deb"
+			],
+			"version": "6.8.0-25.25cross1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libc6-arm64-cross_2.39-0ubuntu8cross1_amd64",
+			"name": "libc6-arm64-cross",
+			"sha256": "76547cb8a4d7f057e23dcade45a17fc0f3d5c2fa0d3ff125bca56f7c4ecd7a07",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/c/cross-toolchain-base/libc6-arm64-cross_2.39-0ubuntu8cross1_all.deb"
+			],
+			"version": "2.39-0ubuntu8cross1"
 		}
 	],
 	"version": 1

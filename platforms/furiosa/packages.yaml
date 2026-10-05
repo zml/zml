@@ -16,8 +16,8 @@ archs:
   - amd64
 
 packages:
-  - gcc-aarch64-linux-gnu
-  - binutils-aarch64-linux-gnu
+  - libc6
+  - libgcc-s1
   - libstdc++6
   - llvm-libunwind1
   - libc6-dev-arm64-cross

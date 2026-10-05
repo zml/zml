@@ -1,31 +1,7 @@
-load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
-copy_to_directory(
-    name = "sandbox",
-    srcs = [
-        "@furiosa_runtime//:files",
-        "@libzml_furiosa//:compiler_sdk",
-        "@libzml_furiosa//:lib/libpjrt_c_api_furiosa_plugin.so",
-    ],
-    out = "sandbox",
-    add_directory_to_runfiles = True,
-    include_external_repositories = ["**"],
-    replace_prefixes = {
-        "libstdc++.so.6": "lib",
-        "libgcc_s.so.1": "lib",
-        "libunwind.so.1": "lib",
-        "compiler_sdk": "",
-    },
-    tags = ["manual"],
-)
-
-cc_library(
-    name = "libzml_furiosa",
-    data = [":sandbox"],
-    tags = ["manual"],
-)
+exports_files(["libzml_furiosa.BUILD.bazel"])
 
 zig_library(
     name = "furiosa",
@@ -39,7 +15,7 @@ zig_library(
         "//platforms:options",
         "//stdx",
     ] + select({
-        "//platforms:furiosa.enabled": [":libzml_furiosa"],
+        "//platforms:furiosa.enabled": ["@libzml_furiosa"],
         "//conditions:default": [],
     }),
 )

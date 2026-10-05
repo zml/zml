@@ -24,7 +24,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
 
     const r = try bazel.runfiles(bazel_builtin.current_repository);
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox = try r.rlocation("zml/platforms/furiosa/sandbox", &path_buf) orelse {
+    const sandbox = try r.rlocation("libzml_furiosa/sandbox", &path_buf) orelse {
         log.err("Missing Furiosa sandbox runfile", .{});
         return error.FileNotFound;
     };

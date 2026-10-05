@@ -1,54 +1,91 @@
-"""Pinned host runtime libraries and a locally built PJRT plugin/SDK."""
+"""Pinned libraries and target headers for the Furiosa compiler sandbox."""
 
+load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
-load("//bazel:simple_repository.bzl", "simple_repository")
 
 _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
 """
 
-# The compiler SDK is supplied with the plugin. Only its host plugin runtime
-# libraries are assembled here.
+# The compiler binaries come from ZML's hermetic LLVM toolchain. TCC and the
+# plugin come from the XLA archive; their host libraries are pinned here.
+
 _DEB_PACKAGES = {
-    "libgcc-s1": 'filegroup(name = "files", srcs = ["usr/lib/x86_64-linux-gnu/libgcc_s.so.1"])',
-    "libstdc++6": 'filegroup(name = "files", srcs = ["usr/lib/x86_64-linux-gnu/libstdc++.so.6"])',
-    "llvm-libunwind1": 'filegroup(name = "runtime", srcs = ["usr/lib/x86_64-linux-gnu/libunwind.so.1"])',
-}
+    "libc6": """
+exports_files([
+    "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "usr/lib/x86_64-linux-gnu/libc.so.6",
+    "usr/lib/x86_64-linux-gnu/libdl.so.2",
+    "usr/lib/x86_64-linux-gnu/libm.so.6",
+    "usr/lib/x86_64-linux-gnu/libpthread.so.0",
+])
 
-_RUNTIME_BUILD_FILE = """
-load("@zml//bazel:patchelf.bzl", "patchelf")
-
-package(default_visibility = ["//visibility:public"])
-
-patchelf(
-    name = "libstdc++.so.6",
-    src = "@furiosa_deb_libstdcpp6//:files",
-    set_rpath = "$ORIGIN",
-)
-patchelf(
-    name = "libgcc_s.so.1",
-    src = "@furiosa_deb_libgcc_s1//:files",
-    set_rpath = "$ORIGIN",
-)
-patchelf(
-    name = "libunwind.so.1",
-    src = "@furiosa_deb_llvm_libunwind1//:runtime",
-    set_rpath = "$ORIGIN",
-)
 filegroup(
     name = "files",
     srcs = [
-        ":libstdc++.so.6",
-        ":libgcc_s.so.1",
-        ":libunwind.so.1",
+        "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "usr/lib/x86_64-linux-gnu/libc.so.6",
+        "usr/lib/x86_64-linux-gnu/libdl.so.2",
+        "usr/lib/x86_64-linux-gnu/libm.so.6",
+        "usr/lib/x86_64-linux-gnu/libpthread.so.0",
     ],
 )
-"""
+""",
+    "libc6-dev-arm64-cross": """
+# Transitive headers used by TCC's pe.h/tuc.h with the interceptor's C11 flags.
+filegroup(
+    name = "headers",
+    srcs = [
+        "usr/aarch64-linux-gnu/include/assert.h",
+        "usr/aarch64-linux-gnu/include/bits/libc-header-start.h",
+        "usr/aarch64-linux-gnu/include/bits/long-double.h",
+        "usr/aarch64-linux-gnu/include/bits/stdint-intn.h",
+        "usr/aarch64-linux-gnu/include/bits/stdint-least.h",
+        "usr/aarch64-linux-gnu/include/bits/stdint-uintn.h",
+        "usr/aarch64-linux-gnu/include/bits/time64.h",
+        "usr/aarch64-linux-gnu/include/bits/timesize.h",
+        "usr/aarch64-linux-gnu/include/bits/types.h",
+        "usr/aarch64-linux-gnu/include/bits/typesizes.h",
+        "usr/aarch64-linux-gnu/include/bits/wchar.h",
+        "usr/aarch64-linux-gnu/include/bits/wordsize.h",
+        "usr/aarch64-linux-gnu/include/features-time64.h",
+        "usr/aarch64-linux-gnu/include/features.h",
+        "usr/aarch64-linux-gnu/include/gnu/stubs-lp64.h",
+        "usr/aarch64-linux-gnu/include/gnu/stubs.h",
+        "usr/aarch64-linux-gnu/include/stdc-predef.h",
+        "usr/aarch64-linux-gnu/include/stdint.h",
+        "usr/aarch64-linux-gnu/include/string.h",
+        "usr/aarch64-linux-gnu/include/sys/cdefs.h",
+    ],
+)
+""",
+    "libgcc-s1": """
+filegroup(
+    name = "files",
+    srcs = ["usr/lib/x86_64-linux-gnu/libgcc_s.so.1"],
+)
+""",
+    "libstdc++6": """
+filegroup(
+    name = "files",
+    srcs = ["usr/lib/x86_64-linux-gnu/libstdc++.so.6"],
+)
+""",
+    "llvm-libunwind1": """
+filegroup(
+    name = "runtime",
+    srcs = ["usr/lib/x86_64-linux-gnu/libunwind.so.1"],
+)
+""",
+}
 
-_ROOT_MODULE_DIRECT_DEPS = [
-    "libzml_furiosa",
-    "furiosa_runtime",
-]
+_REPO_NAMES = {
+    "libc6": "libc6",
+    "libc6-dev-arm64-cross": "libc6-dev-arm64-cross",
+    "libgcc-s1": "libgcc-s1",
+    "libstdc++6": "libstdcpp6",
+    "llvm-libunwind1": "llvm-libunwind1",
+}
 
 def _read_packages(mctx, labels):
     ret = {}
@@ -58,55 +95,30 @@ def _read_packages(mctx, labels):
             ret.setdefault(pkg["name"], {})[pkg["arch"]] = pkg
     return ret
 
-def _placeholder_impl(rctx):
-    rctx.file("BUILD.bazel", """
-load(":missing.bzl", "missing_plugin")
-
-package(default_visibility = ["//visibility:public"])
-
-missing_plugin(name = "libzml_furiosa")
-alias(name = "compiler_sdk", actual = ":libzml_furiosa")
-alias(
-    name = "lib/libpjrt_c_api_furiosa_plugin.so",
-    actual = ":libzml_furiosa",
-)
-""")
-    rctx.file("missing.bzl", """
-def _impl(ctx):
-    fail("Furiosa requires a matching staged PJRT plugin and compiler_sdk: use --override_repository=libzml_furiosa=/path/to/xla-override")
-
-missing_plugin = rule(implementation = _impl)
-""")
-
-_placeholder = repository_rule(
-    implementation = _placeholder_impl,
-)
-
 def _furiosa_impl(mctx):
     loaded_packages = _read_packages(mctx, [
         "@zml//platforms/furiosa:packages.lock.json",
     ])
 
-    _placeholder(name = "libzml_furiosa")
+    http_archive(
+        name = "libzml_furiosa",
+        build_file = "libzml_furiosa.BUILD.bazel",
+        url = "https://mirror.zml.ai/plugins/202610021553.141.1.aa72501708f2/zml-furiosa-linux-amd64.tar.zst",
+        sha256 = "f8909dc9c06709b50bf89679231dd8a959e9117027c184b41367fe2ab133f4da",
+    )
 
     for pkg_name, build_file_content in _DEB_PACKAGES.items():
         pkg = loaded_packages[pkg_name]["amd64"]
-        repo = "furiosa_deb_" + pkg_name.replace("+", "p").replace("-", "_")
         http_deb_archive(
-            name = repo,
+            name = _REPO_NAMES[pkg_name],
             urls = pkg["urls"],
             sha256 = pkg["sha256"],
             build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
         )
 
-    simple_repository(
-        name = "furiosa_runtime",
-        build_file_content = _RUNTIME_BUILD_FILE,
-    )
-
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = _ROOT_MODULE_DIRECT_DEPS,
+        root_module_direct_deps = ["libzml_furiosa"],
         root_module_direct_dev_deps = [],
     )
 
