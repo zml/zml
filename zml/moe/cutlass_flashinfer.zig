@@ -253,7 +253,7 @@ fn ffiCallNvfp4(
 const routedNvfp4Call = zml.ops.CustomCall(Input, Output, Attributes, ffiCallNvfp4, .{
     .name = "flashinfer_cutlass_nvfp4_routed_moe",
     // Expert mesh is owned by forwardMoe outer manual computation.
-    .meshe_aware = false,
+    .sharding_aware = false,
     .has_side_effect = false,
 });
 
@@ -299,7 +299,7 @@ fn ffiCallBf16(
 
 const routedBf16Call = zml.ops.CustomCall(Bf16Input, Output, Attributes, ffiCallBf16, .{
     .name = "flashinfer_cutlass_bf16_routed_moe",
-    .meshe_aware = false,
+    .sharding_aware = false,
     .has_side_effect = false,
 });
 
