@@ -64,43 +64,13 @@ pub const Linear = struct {
     fn forwardScaled(self: Linear, lhs: Tensor, lhs_scale: ?Tensor, input_global_scale: ?Tensor, output_dtype: DataType) Tensor {
         const q = self.quantization.?;
         const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
-        const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
+        const weight = if (quantization.isPackedFp4(q.scheme, self.weight.dtype())) quantization.unpackFp4(self.weight, self.tag, self.tag) else self.weight;
         const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
         const acc = scaledDot(lhs, weight, lhs_scale, scales, output_dtype, self.tag, .{ .rhs_scale_swizzled = q.swizzled_scales });
         const y = applyGlobalScale(acc, input_global_scale, weight_global_scale).convert(output_dtype);
         return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
     }
 };
-
-pub fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {
-    return (scheme == .nvfp4 or scheme == .mxfp4) and (weight_dtype == .u8 or weight_dtype == .i8);
-}
-
-/// Unpacks two f4e2m1 values per byte along `packed_tag` and names the expanded
-/// axis `k_tag`. Group-size agnostic: NVFP4 (16) and MXFP4 (32) share this packing.
-pub fn unpackFp4(w: Tensor, packed_tag: anytype, contracting_tag: anytype) Tensor {
-    stdx.debug.assert(w.dtype() == .u8 or w.dtype() == .i8, "unpackFp4 expects packed 8-bit weights, got {}", .{w.dtype()});
-    const source_tag = Shape.toTag(packed_tag);
-    const result_tag = Shape.toTag(contracting_tag);
-    return w.bitCast(.f4e2m1) // bitcast inserts a tag (it respects shlo), but maybe we should simplify it
-        .merge(.{ .kb = .{ source_tag, .bitcast } })
-        .renameTag(.kb, result_tag);
-}
-
-test "unpackFp4 expands the requested axis" {
-    const platform = zml.testing.env();
-    const packed_weight: Tensor = .init(.{ .out = 2, .stored = 4 }, .u8);
-    const Local = struct {
-        fn call(w: Tensor) Tensor {
-            return unpackFp4(w, .stored, .contracted);
-        }
-    };
-
-    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.call, .{packed_weight}, .{});
-    defer exe.deinit();
-
-    try zml.testing.expectEqualShapes(.init(.{ .out = 2, .contracted = 8 }, .f4e2m1), exe.output_shapes[0]);
-}
 
 /// Scaled matrix multiply (`xla.scaled_dot`): `acc = (lhs * lhs_scale) @ (rhs * rhs_scale)`.
 ///
