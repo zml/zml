@@ -68,14 +68,14 @@ pub fn main(init: std.process.Init) !void {
 
     // Ignore first run
     {
-        exe.call(exe_args, &exe_results);
+        exe.call(io, exe_args, &exe_results, .{});
         var result = exe_results.get(zml.Buffer);
         defer result.deinit();
     }
 
     // call our executable module
     const run_start: std.Io.Timestamp = .now(io, .awake);
-    exe.call(exe_args, &exe_results);
+    exe.call(io, exe_args, &exe_results, .{});
     var result = exe_results.get(zml.Buffer);
     _ = try result.await(io);
     defer result.deinit();

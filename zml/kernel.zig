@@ -1,12 +1,12 @@
 const std = @import("std");
 
-const stdx = @import("stdx");
-const dialects = @import("mlir/dialects");
-const mlir = @import("mlir");
 const cuda_tile_builder = @import("kernels/cuda_tile/builder");
 const cute_builder = @import("kernels/cute/builder");
+const dialects = @import("mlir/dialects");
 const fly_builder = @import("kernels/fly/builder");
+const mlir = @import("mlir");
 const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
+const stdx = @import("stdx");
 const tpu_dialect = @import("mlir/dialects/mosaic_tpu");
 const triton_builder = @import("kernels/triton/builder");
 
@@ -959,7 +959,7 @@ test "fly kernels run on rocm" {
             defer ba.deinit();
             var bb: zml.Buffer = try .fromBytes(std.testing.io, p, tb.shape(), .replicated, std.mem.sliceAsBytes(hb));
             defer bb.deinit();
-            var out = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ ba, bb });
+            var out = try exe.eval(std.testing.allocator, std.testing.io, .{ ba, bb });
             defer out.deinit();
             return out.toSliceAlloc(std.testing.allocator, std.testing.io);
         }

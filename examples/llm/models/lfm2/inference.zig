@@ -161,7 +161,7 @@ pub fn run(
             .tokens = args.tokens_buf.*,
         },
         .outputs = .{ .hidden = &hidden_buffer },
-    });
+    }, .{});
     defer hidden_buffer.deinit();
 
     for (runner.layers) |*layer| {
@@ -181,7 +181,7 @@ pub fn run(
                 .conv_cache_index = conv_cache_index_buffer,
                 .kv_cache_index = kv_cache_index_buffer,
             },
-        });
+        }, .{});
     }
 
     runner.sample.run(args.io, .{
@@ -194,7 +194,7 @@ pub fn run(
             .tokens = args.tokens_buf,
             .rng = args.rng_buf,
         },
-    });
+    }, .{});
 }
 
 fn compileKernel(

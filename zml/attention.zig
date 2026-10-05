@@ -2,8 +2,8 @@ const std = @import("std");
 
 pub const attnd = @import("attention/attnd.zig");
 pub const cute = @import("attention/cute_kernels/sparse_mla.zig");
-pub const fly = @import("attention/fly_kernels/sparse_mla.zig");
 pub const flashattn = @import("attention/flashattn.zig");
+pub const fly = @import("attention/fly_kernels/sparse_mla.zig");
 pub const metal = @import("attention/metal_attention.zig");
 pub const nki = @import("attention/nki/attention.zig");
 pub const paged_attention = @import("attention/paged_attention.zig");
@@ -264,10 +264,14 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
     const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{ .mean = 0, .stddev = 1 } }, .{});
     defer rng_k.deinit();
 
-    const q = try zml.testing.autoCall(allocator, io, &rng_q, zml.Tensor.Rng.normal, {});
-    const k = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
-    const v = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
-    const token_index = try zml.Buffer.fromBytes(io, platform, token_index_shape, .replicated, @ptrCast(token_index_h));
+    var q = try rng_q.eval(allocator, io, {});
+    defer q.deinit();
+    var k = try rng_k.eval(allocator, io, {});
+    defer k.deinit();
+    var v = try rng_k.eval(allocator, io, {});
+    defer v.deinit();
+    var token_index = try zml.Buffer.fromBytes(io, platform, token_index_shape, .replicated, @ptrCast(token_index_h));
+    defer token_index.deinit();
 
     const shardings = platform.shardings.values();
     const vanilla_exe = try platform.compileFn(allocator, io, attention, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, .vanilla, .vanilla }, .{
@@ -276,7 +280,8 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
     });
     defer vanilla_exe.deinit();
 
-    const vanilla_d = try zml.testing.autoCall(allocator, io, &vanilla_exe, attention, .{ q, k, v, token_index, .vanilla });
+    var vanilla_d = try vanilla_exe.eval(allocator, io, .{ q, k, v, token_index, .vanilla });
+    defer vanilla_d.deinit();
     try vanilla_d.await(io);
     const vanilla_h: zml.Slice = try vanilla_d.toSliceAlloc(allocator, io);
     defer vanilla_h.free(allocator);
@@ -304,7 +309,7 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
         var metadata_d = try metadata.initBuffer(io, platform, platform.shardings.get("model").?);
         defer Metadata.deinitBuffer(&metadata_d);
 
-        var output_d = try zml.testing.autoCall(allocator, io, &exe, attention, .{ q, k, v, token_index, metadata_d });
+        var output_d = try exe.eval(allocator, io, .{ q, k, v, token_index, metadata_d });
         defer output_d.deinit();
         try output_d.await(io);
         const output_h = try output_d.toSliceAlloc(allocator, io);

@@ -169,7 +169,7 @@ const TestContext = struct {
         var res = try exe.results(self.allocator);
         defer res.deinit(self.allocator);
 
-        exe.call(args, &res);
+        exe.call(self.io, args, &res, .{});
 
         var out_result = res.get(zml.Buffer);
         defer out_result.deinit();
@@ -229,7 +229,7 @@ const TestContext = struct {
 
         var res = try exe.results(self.allocator);
         defer res.deinit(self.allocator);
-        exe.call(args, &res);
+        exe.call(self.io, args, &res, .{});
 
         var out_result = res.get(zml.Buffer);
         defer out_result.deinit();
@@ -291,7 +291,7 @@ const TestContext = struct {
 
         var res = try exe.results(self.allocator);
         defer res.deinit(self.allocator);
-        exe.call(args, &res);
+        exe.call(self.io, args, &res, .{});
 
         var out_result, var updated_kv = res.get(struct { zml.Buffer, zml.Bufferized(model.KvCache) });
         defer out_result.deinit();

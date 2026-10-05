@@ -194,7 +194,7 @@ pub fn run(runner: *KernelRunner, args: Args) void {
             .kv_cache = args.kv_cache_buffers,
             .rng = args.rng_buffers,
         },
-    });
+    }, .{});
 }
 
 fn compileKernel(

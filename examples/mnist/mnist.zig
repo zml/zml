@@ -143,7 +143,7 @@ pub fn main(init: std.process.Init) !void {
     printDigit(sample);
 
     args.set(.{ mnist_buffers, input_buffer });
-    exe.call(args, &results);
+    exe.call(io, args, &results, .{});
     var result: zml.Buffer = results.get(zml.Buffer);
     defer result.deinit();
 

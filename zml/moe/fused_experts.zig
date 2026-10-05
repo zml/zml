@@ -214,7 +214,7 @@ test "SwiGLU uses FP32 math for concatenated and interleaved BF16 inputs" {
             var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, layout, threshold }, .{});
             defer exe.deinit();
             try zml.testing.expectEqualShapes(Shape.init(.{ .token = 1, .out = 3 }, .f32), exe.output_shapes[0]);
-            var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{input});
+            var output = try exe.eval(allocator, io, .{input});
             defer output.deinit();
             var actual = try output.toSliceAlloc(allocator, io);
             defer actual.free(allocator);
@@ -244,7 +244,7 @@ test "ReLU squared activation preserves width and applies threshold before squar
         var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, threshold }, .{});
         defer exe.deinit();
         try zml.testing.expectEqualShapes(x.shape(), exe.output_shapes[0]);
-        var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{input});
+        var output = try exe.eval(allocator, io, .{input});
         defer output.deinit();
         var actual = try output.toSliceAlloc(allocator, io);
         defer actual.free(allocator);
@@ -383,7 +383,10 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
                     buffers[i] = try zml.Buffer.fromSlice(io, platform, slice, .replicated);
                     initialized += 1;
                 }
-                var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{ buffers[0], buffers[1], buffers[2], buffers[3], buffers[4], buffers[5] });
+                var output: zml.Bufferized(Local.Outputs) = undefined;
+                var runner = try exe.runner(allocator);
+                defer runner.deinit(allocator);
+                runner.run(io, .{ buffers[0], buffers[1], buffers[2], buffers[3], buffers[4], buffers[5] }, .{&output}, .{ .wait = true });
                 defer zml.Buffer.deinitAll(Local.Outputs, &output);
                 zml.testing.expectClose(io, output.expected, output.actual, .{ .absolute_tolerance = 0.03125, .relative_tolerance = 0.01 }) catch |err| {
                     log.warn("FP8 routed GEMM failed for scheme={s}, quantize_input={}, tokens={}", .{ @tagName(scheme), quantize_input, tokens });
@@ -461,7 +464,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
             for ([_]RoutingWeightPlacement{ .before_down, .after_down }) |placement| {
                 var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, layout, placement, storage_dtype }, .{});
                 defer exe.deinit();
-                var output = try zml.testing.autoCall(allocator, io, &exe, Local.forward, .{input});
+                var output = try exe.eval(allocator, io, .{input});
                 defer output.deinit();
                 var actual = try output.toSliceAlloc(allocator, io);
                 defer actual.free(allocator);
