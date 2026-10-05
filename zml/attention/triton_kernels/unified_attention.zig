@@ -49,7 +49,7 @@ pub const KernelUnifiedAttention2dPtr = struct {
         fp8_max: f32 = FP8_E4M3_MAX,
         all_decode: bool = false,
         is_causal: bool = true,
-        sparse_count: i64 = 0,
+        indices_count: i64 = 0,
     };
 
     pub const Kernel = tri.Kernel(Config, .{
@@ -183,7 +183,7 @@ pub const KernelUnifiedAttention3dPtr = struct {
         num_segments_per_seq: i64,
         all_decode: bool = false,
         is_causal: bool = true,
-        sparse_count: i64 = 0,
+        indices_count: i64 = 0,
     };
 
     pub const Kernel = tri.Kernel(Config, .{
@@ -297,7 +297,7 @@ pub const ReduceSegmentsPtr = struct {
         block_q: i64,
         num_segments_per_seq: i64,
 
-        sparse_count: i64 = 0,
+        indices_count: i64 = 0,
         use_fp8: bool,
         fp8_min: f32 = FP8_E4M3_MIN,
         fp8_max: f32 = FP8_E4M3_MAX,
@@ -497,7 +497,7 @@ fn kernelUnifiedAttention2d(
     // query_pos = q_block_local_idx * BLOCK_Q + offs_m // NUM_QUERIES_PER_KV
     const q_local_bq = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q)));
     // Sparse tiles contain one query token and its GQA heads, with padded head lanes.
-    const query_pos = if (config.sparse_count > 0)
+    const query_pos = if (config.indices_count > 0)
         q_local_bq.splatTo(&.{BLOCK_M})
     else
         q_local_bq.add(offs_m.div(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
@@ -515,7 +515,7 @@ fn kernelUnifiedAttention2d(
     else
         k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
     const query_mask_0 = query_pos.lt(cur_batch_query_len);
-    const query_mask_1 = if (config.sparse_count > 0)
+    const query_mask_1 = if (config.indices_count > 0)
         offs_m.lt(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
     else
         query_offset_1.lt(@as(i32, @intCast(NUM_QUERY_HEADS)));
@@ -569,7 +569,7 @@ fn kernelUnifiedAttention2d(
     // represented in this block. In non-causal mode, scan the whole sequence
     // so draft rows can attend to all rows written for the same sequence.
     const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
-    const max_seq_prefix_len = if (config.sparse_count > 0) k.liftAs(config.sparse_count, .i32) else if (config.is_causal) b: {
+    const max_seq_prefix_len = if (config.indices_count > 0) k.liftAs(config.indices_count, .i32) else if (config.is_causal) b: {
         const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
         break :b max_prefix_raw.minimum(seq_len);
     } else seq_len;
@@ -609,11 +609,11 @@ fn kernelUnifiedAttention2d(
 
         const selection_offset = j.mul(@as(i32, @intCast(TILE_SIZE))).add(offs_t);
         const selection_mask = selection_offset.lt(max_seq_prefix_len);
-        const seq_offset = if (config.sparse_count > 0) k.loadOpts(
-            indices_ptr.addPtr(cur_batch_in_all_start_index.add(q_local_bq).to(.i64).mul(config.sparse_count)).addPtr(selection_offset),
+        const seq_offset = if (config.indices_count > 0) k.loadOpts(
+            indices_ptr.addPtr(cur_batch_in_all_start_index.add(q_local_bq).to(.i64).mul(config.indices_count)).addPtr(selection_offset),
             .{ .mask = selection_mask, .other = k.full(&.{TILE_SIZE}, -1, .i32) },
         ) else selection_offset;
-        var tile_mask = if (config.sparse_count > 0)
+        var tile_mask = if (config.indices_count > 0)
             selection_mask.bitAnd(seq_offset.ge(0)).bitAnd(seq_offset.lt(seq_len))
         else
             selection_mask;
@@ -716,7 +716,7 @@ fn kernelUnifiedAttention2d(
         const new_L = L.mul(alpha).add(l_j);
         // An empty sparse tile must not establish a maximum of zero: later
         // selected keys can have very negative scores and still carry all mass.
-        const new_M = if (config.sparse_count > 0)
+        const new_M = if (config.indices_count > 0)
             k.where(new_L.gt(0.0), m_j, k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32))
         else
             m_j;
@@ -819,7 +819,7 @@ fn kernelUnifiedAttention3d(
     k.returnIf(q_out_of_range, .{});
 
     const seq_len = k.load(seq_lens_ptr.addPtr(seq_idx));
-    const attention_len = if (config.sparse_count > 0) k.liftAs(config.sparse_count, .i32) else seq_len;
+    const attention_len = if (config.indices_count > 0) k.liftAs(config.indices_count, .i32) else seq_len;
     const tiles_per_segment = cdivFn(attention_len, @as(i32, @intCast(NUM_SEGMENTS_PER_SEQ * TILE_SIZE)));
 
     const segm_lo = segm_idx.mul(tiles_per_segment).mul(@as(i32, @intCast(TILE_SIZE)));
@@ -832,7 +832,7 @@ fn kernelUnifiedAttention3d(
 
     const q_local_bq = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q)));
     // Sparse tiles contain one query token and its GQA heads, with padded head lanes.
-    const query_pos = if (config.sparse_count > 0)
+    const query_pos = if (config.indices_count > 0)
         q_local_bq.splatTo(&.{BLOCK_M})
     else
         q_local_bq.add(offs_m.div(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
@@ -853,7 +853,7 @@ fn kernelUnifiedAttention3d(
     else
         k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
     const query_mask_0 = query_pos.lt(cur_batch_query_len);
-    const query_mask_1 = if (config.sparse_count > 0)
+    const query_mask_1 = if (config.indices_count > 0)
         offs_m.lt(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
     else
         query_offset_1.lt(@as(i32, @intCast(NUM_QUERY_HEADS)));
@@ -909,7 +909,7 @@ fn kernelUnifiedAttention3d(
         qq_bias_ptr.splatTo(&.{BLOCK_M});
 
     const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
-    const max_seq_prefix_len = if (config.sparse_count > 0) k.liftAs(config.sparse_count, .i32) else if (config.is_causal) b: {
+    const max_seq_prefix_len = if (config.indices_count > 0) k.liftAs(config.indices_count, .i32) else if (config.is_causal) b: {
         const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
         break :b max_prefix_raw.minimum(seq_len);
     } else seq_len;
@@ -930,11 +930,11 @@ fn kernelUnifiedAttention3d(
 
         const selection_offset = j.mul(@as(i32, @intCast(TILE_SIZE))).add(offs_t);
         const selection_mask = selection_offset.lt(max_seq_prefix_len);
-        const seq_offset = if (config.sparse_count > 0) k.loadOpts(
-            indices_ptr.addPtr(cur_batch_in_all_start_index.add(q_local_bq).to(.i64).mul(config.sparse_count)).addPtr(selection_offset),
+        const seq_offset = if (config.indices_count > 0) k.loadOpts(
+            indices_ptr.addPtr(cur_batch_in_all_start_index.add(q_local_bq).to(.i64).mul(config.indices_count)).addPtr(selection_offset),
             .{ .mask = selection_mask, .other = k.full(&.{TILE_SIZE}, -1, .i32) },
         ) else selection_offset;
-        var tile_mask = if (config.sparse_count > 0)
+        var tile_mask = if (config.indices_count > 0)
             selection_mask.bitAnd(seq_offset.ge(0)).bitAnd(seq_offset.lt(seq_len))
         else
             selection_mask;
@@ -1038,7 +1038,7 @@ fn kernelUnifiedAttention3d(
         const P_cast = P.to(config.q_dtype);
         const new_acc = k.dot(P_cast, V, acc_scaled);
 
-        const new_M = if (config.sparse_count > 0)
+        const new_M = if (config.indices_count > 0)
             k.where(new_L.gt(0.0), m_j, k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32))
         else
             m_j;
@@ -1108,7 +1108,7 @@ fn reduceSegments(
 
     const query_token_idx = k.programId(.x);
     const query_head_idx = k.programId(.y);
-    if (config.sparse_count > 0) {
+    if (config.indices_count > 0) {
         const active_queries = k.load(query_start_len_ptr.addPtr(num_seqs));
         k.returnIf(query_token_idx.ge(active_queries), .{});
     }
@@ -1116,7 +1116,7 @@ fn reduceSegments(
     const seq_idx = findSeqIdx(k, query_start_len_ptr, query_token_idx, num_seqs, BLOCK_Q, false);
 
     const seq_len = k.load(seq_lens_ptr.addPtr(seq_idx));
-    const attention_len = if (config.sparse_count > 0) k.liftAs(config.sparse_count, .i32) else seq_len;
+    const attention_len = if (config.indices_count > 0) k.liftAs(config.indices_count, .i32) else seq_len;
     const tiles_per_segment = cdivFn(attention_len, @as(i32, @intCast(NUM_SEGMENTS_PER_SEQ * TILE_SIZE)));
     const act_num_segments = cdivFn(attention_len, tiles_per_segment.mul(@as(i32, @intCast(TILE_SIZE))));
 
@@ -1141,7 +1141,7 @@ fn reduceSegments(
         .other = k.full(&.{NUM_SEGMENTS_PER_SEQ}, -std.math.inf(f32), .f32),
     });
     const max_value = k.max(segm_max);
-    const overall_max = if (config.sparse_count > 0)
+    const overall_max = if (config.indices_count > 0)
         k.where(max_value.gt(-std.math.inf(f32)), max_value, k.liftAs(0.0, .f32))
     else
         max_value;

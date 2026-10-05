@@ -62,15 +62,26 @@ fn isCudaComputeCapability(expected: zml.platform.cuda.ComputeCapability) bool {
 /// Triton codegen bug is not diagnosed; this only keeps us out of it.
 const max_query_tile_elements: usize = 16 * 1024;
 
-fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
-    if (options.sparse_count > 0) return .{
+fn select2dSparseConfig(options: paged.PagedAttentionOptions) Config2D {
+    const tile_size: usize = switch (options.indices_count) {
+        0...16 => 16,
+        17...32 => 32,
+        else => if (options.head_dim > 128) 32 else 64,
+    };
+
+    return .{
         .block_m = @max(16, std.math.ceilPowerOfTwoAssert(usize, options.numQueriesPerKv())),
         .block_q = 1,
-        .tile_size = 32,
+        .tile_size = tile_size,
         .num_warps = 4,
         .num_stages = 1,
         .total_q_blocks = options.num_tokens + options.batch_size,
     };
+}
+
+fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
+    if (options.indices_count > 0) return select2dSparseConfig(options);
+
     const max_num_stages_2d: usize = if (options.head_dim <= 128) 4 else 2;
 
     // Until we test on other platforms, gate the fix to GB300
@@ -137,7 +148,7 @@ fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     var reduce_num_warps: usize = 2;
     // Intel decode needs more warps to spread the work and avoid register spill.
     const attn_warps: usize = if (options.all_decode and isOneapiTarget()) 8 else 2;
-    const tile_size = if (options.sparse_count > 0) 32 else options.block_size;
+    const tile_size = if (options.indices_count > 0) 32 else options.block_size;
 
     //const MAX_SEGMENTS: usize = @min(128, std.math.divCeil(usize, max_seqlen_k, tile_size));
     var num_segments = std.math.divCeil(usize, options.target_num_prgms, options.num_2d_prgms) catch unreachable;
@@ -249,7 +260,8 @@ pub const paged = struct {
         num_2d_prgms: usize,
         max_seqlen_q: usize,
         scale: ?f32,
-        sparse_count: usize,
+        /// Number of indices for sparse attention
+        indices_count: usize,
 
         pub fn numQueriesPerKv(self: PagedAttentionOptions) usize {
             return self.num_heads / self.num_kv_heads;
@@ -323,7 +335,7 @@ pub const paged = struct {
                         .num_2d_prgms = num_2d_prgms,
                         .max_seqlen_q = self.options.max_seqlen_q,
                         .scale = self.opts.scale,
-                        .sparse_count = switch (self.opts.mask) {
+                        .indices_count = switch (self.opts.mask) {
                             .indices => |indices| @intCast(indices.dim(.topk)),
                             else => 0,
                         },
@@ -383,7 +395,7 @@ pub const paged = struct {
             .use_fp8 = false,
             .all_decode = paged_attention_opts.all_decode,
             .is_causal = opts.mask.isCausal(),
-            .sparse_count = @intCast(paged_attention_opts.sparse_count),
+            .indices_count = @intCast(paged_attention_opts.indices_count),
         };
         log.debug("pagedAttention2d config: {any}", .{kernel_config});
 
@@ -468,7 +480,7 @@ pub const paged = struct {
             .num_segments_per_seq = @intCast(config.attention.num_segments_per_seq),
             .all_decode = paged_attention_opts.all_decode,
             .is_causal = opts.mask.isCausal(),
-            .sparse_count = @intCast(paged_attention_opts.sparse_count),
+            .indices_count = @intCast(paged_attention_opts.indices_count),
         };
         log.debug("pagedAttention3d attention config: {any}", .{attn_kernel_config});
 
@@ -480,7 +492,7 @@ pub const paged = struct {
             .head_size_padded = head_size_padded,
             .block_q = @intCast(config.reduce.block_q),
             .num_segments_per_seq = @intCast(config.reduce.num_segments_per_seq),
-            .sparse_count = @intCast(paged_attention_opts.sparse_count),
+            .indices_count = @intCast(paged_attention_opts.indices_count),
             .use_fp8 = false,
         };
         log.debug("pagedAttention3d reduce config: {any}", .{reduce_kernel_config});
