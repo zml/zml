@@ -288,6 +288,11 @@ pub const paged = struct {
                     const target_num_prgms: usize = cu_count * 4;
                     const num_2d_prgms: usize = total_q_blocks * num_kv_heads;
 
+                    const sliding_window: usize = switch (self.opts.mask) {
+                        .sliding_window => |w| @intCast(w),
+                        else => 0,
+                    };
+
                     const paged_attention_opts: PagedAttentionOptions = .{
                         .cu_count = getCuCount(),
                         .all_decode = !self.options.is_prefill,
@@ -299,7 +304,7 @@ pub const paged = struct {
                         .block_size = @intCast(self.k_cache.dim(.k_chunk)),
                         .num_blocks = @intCast(self.k_cache.dim(.page)),
                         .max_num_block_per_seq = @intCast(parameters_.block_table.dim(.p)),
-                        .sliding_window = if (self.opts.sliding_window < 0) 0 else @intCast(self.opts.sliding_window),
+                        .sliding_window = sliding_window,
                         .block_m = block_m,
                         .block_q = block_q,
                         .total_q_blocks = total_q_blocks,
@@ -362,7 +367,7 @@ pub const paged = struct {
             .block_m = @intCast(config.block_m),
             .use_fp8 = false,
             .all_decode = paged_attention_opts.all_decode,
-            .is_causal = opts.is_causal,
+            .is_causal = opts.mask.isCausal(),
         };
         log.debug("pagedAttention2d config: {any}", .{kernel_config});
 
@@ -442,7 +447,7 @@ pub const paged = struct {
             .block_m = @intCast(config.attention.block_m),
             .num_segments_per_seq = @intCast(config.attention.num_segments_per_seq),
             .all_decode = paged_attention_opts.all_decode,
-            .is_causal = opts.is_causal,
+            .is_causal = opts.mask.isCausal(),
         };
         log.debug("pagedAttention3d attention config: {any}", .{attn_kernel_config});
 
