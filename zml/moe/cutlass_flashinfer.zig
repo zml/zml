@@ -112,7 +112,7 @@ pub const Runners = struct {
         if (device < 0 or device >= max_num_devices) return error.UnsupportedDevice;
 
         const index: usize = @intCast(device);
-        const variant_index: usize = @intFromEnum(variant);
+        const variant_index: usize = @backingInt(variant);
         if (self.runners[variant_index][index]) |runner| return runner;
 
         const api = try fi_cutlass_moe.apiForDevice(device);

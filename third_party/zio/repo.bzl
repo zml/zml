@@ -6,4 +6,6 @@ def repo():
         remote = "https://github.com/lalinsky/zio",
         commit = "281d969fdefe04f2e8b28d1f45fac0011f881c73",  # v0.19.0
         build_file = Label("//third_party/zio:zio.bazel"),
+        patches = [Label("//third_party/zio:zig-0.17.patch")],
+        patch_args = ["-p1"],
     )

@@ -643,12 +643,12 @@ pub const Builder = struct {
         const info = @typeInfo(T);
         if (info != .@"struct" or !info.@"struct".is_tuple)
             @compileError("Builder.yield expects a tuple literal like `.{ v1, v2 }`");
-        const n = info.@"struct".fields.len;
+        const n = info.@"struct".field_names.len;
         const out = self.arena.allocator().alloc(Value, n) catch @panic("Builder.yield OOM");
-        inline for (info.@"struct".fields, 0..) |f, i| {
-            if (f.type != Value)
-                @compileError("Builder.yield: every tuple element must be a Value; got " ++ @typeName(f.type));
-            out[i] = @field(values, f.name);
+        inline for (info.@"struct".field_names, 0..) |f, i| {
+            if (@FieldType(T, f) != Value)
+                @compileError("Builder.yield: every tuple element must be a Value; got " ++ @typeName(@FieldType(T, f)));
+            out[i] = @field(values, f);
         }
         return out;
     }
@@ -1633,7 +1633,7 @@ pub const Builder = struct {
         inits: anytype,
     ) ForScope(tupleArity(@TypeOf(inits), "openFor: inits")) {
         const N = comptime tupleArity(@TypeOf(inits), "openFor: inits");
-        const fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
 
         // Literals take the type of the first bound that is a Value; all
         // three must agree (`AllTypesMatch` on the op).
@@ -1651,8 +1651,8 @@ pub const Builder = struct {
         block_locs[0] = self.loc();
         var inits_inner: [N]*const mlir.Value = undefined;
         inline for (fields, 0..) |f, i| {
-            const raw = @field(inits, f.name);
-            const v: Value = if (f.type == Value) raw else self.lift(raw);
+            const raw = @field(inits, f);
+            const v: Value = if (@FieldType(@TypeOf(inits), f) == Value) raw else self.lift(raw);
             block_types[i + 1] = v.type_();
             block_locs[i + 1] = self.loc();
             inits_inner[i] = v.inner;
@@ -1692,13 +1692,13 @@ pub const Builder = struct {
         result_types: anytype,
     ) IfScope(tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
         const N = comptime tupleArity(@TypeOf(result_types), "openIfElse: result_types");
-        const fields = @typeInfo(@TypeOf(result_types)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(result_types)).@"struct".field_names;
 
         var types: [N]*const mlir.Type = undefined;
         inline for (fields, 0..) |f, i| {
-            if (f.type != *const mlir.Type)
+            if (@FieldType(@TypeOf(result_types), f) != *const mlir.Type)
                 @compileError("openIfElse: every result_type must be *const mlir.Type (use b.scalarTy/tileTy)");
-            types[i] = @field(result_types, f.name);
+            types[i] = @field(result_types, f);
         }
 
         const then_block = mlir.Block.init(&.{}, &.{});
@@ -1718,14 +1718,14 @@ pub const Builder = struct {
     /// inside an `if`, and close the body with `scope.yield`.
     pub fn openLoop(self: *Builder, inits: anytype) LoopScope(tupleArity(@TypeOf(inits), "openLoop: inits")) {
         const N = comptime tupleArity(@TypeOf(inits), "openLoop: inits");
-        const fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
 
         var block_types: [N]*const mlir.Type = undefined;
         var block_locs: [N]*const mlir.Location = undefined;
         var inits_inner: [N]*const mlir.Value = undefined;
         inline for (fields, 0..) |f, i| {
-            const raw = @field(inits, f.name);
-            const v: Value = if (f.type == Value) raw else self.lift(raw);
+            const raw = @field(inits, f);
+            const v: Value = if (@FieldType(@TypeOf(inits), f) == Value) raw else self.lift(raw);
             block_types[i] = v.type_();
             block_locs[i] = self.loc();
             inits_inner[i] = v.inner;

@@ -155,7 +155,7 @@ pub fn deviceType(dev: *c.ndl_device_t) DeviceType {
 }
 
 fn resolveFromElf(handle: *anyopaque, io: std.Io, comptime known_sym: [:0]const u8) !PrivateFns {
-    const field_names = std.meta.fieldNames(PrivateFns);
+    const field_names = comptime std.meta.fieldNames(PrivateFns);
 
     const sym_addr = std.c.dlsym(handle, known_sym) orelse
         return error.SymbolNotFound;

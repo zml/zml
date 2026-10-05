@@ -104,7 +104,7 @@ zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
     # Ensure Zig actions are run locally only
     extra_exec_compatible_with = ["//platforms:local_execution"],
-    zig_version = "0.17.0-dev.1936+5a625d5f3",
+    zig_version = "0.17.0",
 )
 zig.mirrors(urls = [
     "https://pkg.machengine.org/zig",
@@ -142,7 +142,7 @@ register_execution_platforms("//platforms:local_execution_platform")
 zls = use_extension("@rules_zig//zig/zls:extensions.bzl", "zls")
 zls.index(file = "@rules_zig//zig/zls/private:versions.json")
 zls.toolchain(
-    zig_version = "0.17.0-dev.1936+5a625d5f3",
+    zig_version = "0.17.0",
     zls_version = "0.16.0",
 )
 use_repo(zls, "zls_toolchains")

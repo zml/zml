@@ -1,0 +1,378 @@
+diff --git a/src/Image/Managed.zig b/src/Image/Managed.zig
+--- a/src/Image/Managed.zig
++++ b/src/Image/Managed.zig
+@@ -18,7 +18,7 @@
+ // This layout must match the one in Image
+ width: usize = 0,
+ height: usize = 0,
+-pixels: color.PixelStorage = .{ .invalid = void{} },
++pixels: color.PixelStorage = .{ .invalid = {} },
+ animation: Animation = .{},
+ io: std.Io = undefined,
+ allocator: std.mem.Allocator = undefined, // Allocator needs to be last in order to be able to ptrCast to Image
+diff --git a/src/Image.zig b/src/Image.zig
+--- a/src/Image.zig
++++ b/src/Image.zig
+@@ -9,7 +9,7 @@
+ 
+ width: usize = 0,
+ height: usize = 0,
+-pixels: color.PixelStorage = .{ .invalid = void{} },
++pixels: color.PixelStorage = .{ .invalid = {} },
+ animation: Animation = .{},
+ 
+ const Image = @This();
+@@ -124,15 +124,15 @@
+     const all_formats_delcs = std.meta.declarations(SupportedFormats);
+     var result: []const FormatInteraceFnType = &[0]FormatInteraceFnType{};
+     for (all_formats_delcs) |decl| {
+-        const decl_value = @field(SupportedFormats, decl.name);
++        const decl_value = @field(SupportedFormats, decl);
+         const entry_type = @TypeOf(decl_value);
+         if (entry_type == type) {
+             const entry_type_info = @typeInfo(decl_value);
+             if (entry_type_info == .@"struct") {
+-                for (entry_type_info.@"struct".decls) |struct_entry| {
+-                    if (std.mem.eql(u8, struct_entry.name, "formatInterface")) {
++                for (entry_type_info.@"struct".decl_names) |struct_entry| {
++                    if (std.mem.eql(u8, struct_entry, "formatInterface")) {
+                         result = result ++ [_]FormatInteraceFnType{
+-                            @field(decl_value, struct_entry.name),
++                            @field(decl_value, struct_entry),
+                         };
+                         break;
+                     }
+diff --git a/src/PixelFormatConverter.zig b/src/PixelFormatConverter.zig
+--- a/src/PixelFormatConverter.zig
++++ b/src/PixelFormatConverter.zig
+@@ -752,14 +752,7 @@
+ }
+ 
+ fn getFieldNameFromPixelFormat(comptime source_format: PixelFormat) []const u8 {
+-    const enum_fields = std.meta.fields(PixelFormat);
+-    inline for (enum_fields) |field| {
+-        if (field.value == @intFromEnum(source_format)) {
+-            return field.name;
+-        }
+-    }
+-
+-    return "";
++    return @tagName(source_format);
+ }
+ 
+ // ========================
+@@ -782,19 +775,19 @@
+ }
+ 
+ fn grayscaleToGrayscale(comptime T: type, gray: anytype) T {
+-    const scaleValue = color.ScaleValue(std.meta.fieldInfo(T, .value).type);
++    const scaleValue = color.ScaleValue(@FieldType(T, "value"));
+     return .{ .value = scaleValue(gray.value) };
+ }
+ 
+ fn grayscaleAlphaToGrayscale(comptime T: type, gray: anytype) T {
+     const toF32 = color.ScaleValue(f32);
+-    const scaleValue = color.ScaleValue(std.meta.fieldInfo(T, .value).type);
++    const scaleValue = color.ScaleValue(@FieldType(T, "value"));
+     return .{ .value = scaleValue(toF32(gray.value) * toF32(gray.alpha)) };
+ }
+ 
+ fn grayscaleAlphaToGrayscaleAlpha(comptime T: type, gray: anytype) T {
+-    const scaleValue = color.ScaleValue(std.meta.fieldInfo(T, .value).type);
+-    const scaleAlpha = color.ScaleValue(std.meta.fieldInfo(T, .alpha).type);
++    const scaleValue = color.ScaleValue(@FieldType(T, "value"));
++    const scaleAlpha = color.ScaleValue(@FieldType(T, "alpha"));
+     return .{
+         .value = scaleValue(gray.value),
+         .alpha = scaleAlpha(gray.alpha),
+@@ -1101,7 +1094,7 @@
+             var destination_pixels = @field(destination, getFieldNameFromPixelFormat(destination_format));
+             const DestinationType = @TypeOf(destination_pixels[0]);
+ 
+-            const scaleValue = color.ScaleValue(std.meta.fieldInfo(DestinationType, .value).type);
++            const scaleValue = color.ScaleValue(@FieldType(DestinationType, "value"));
+ 
+             for (0..source_rgb.len) |index| {
+                 const source_float4 = source_rgb[index].to.float4();
+@@ -1125,8 +1118,8 @@
+             var destination_pixels = @field(destination, getFieldNameFromPixelFormat(destination_format));
+             const DestinationType = @TypeOf(destination_pixels[0]);
+ 
+-            const scaleValue = color.ScaleValue(std.meta.fieldInfo(DestinationType, .value).type);
+-            const scaleAlpha = color.ScaleValue(std.meta.fieldInfo(DestinationType, .alpha).type);
++            const scaleValue = color.ScaleValue(@FieldType(DestinationType, "value"));
++            const scaleAlpha = color.ScaleValue(@FieldType(DestinationType, "alpha"));
+ 
+             for (0..source_rgb.len) |index| {
+                 const source_float4 = source_rgb[index].to.float4();
+@@ -1482,7 +1475,7 @@
+     var destination_pixels = @field(destination, getFieldNameFromPixelFormat(destination_format));
+     const DestinationType = @TypeOf(destination_pixels[0]);
+ 
+-    const scaleValue = color.ScaleValue(std.meta.fieldInfo(DestinationType, .value).type);
++    const scaleValue = color.ScaleValue(@FieldType(DestinationType, "value"));
+ 
+     for (0..source_pixels.len) |index| {
+         const source_float4 = source_pixels[index].to.float4();
+@@ -1503,8 +1496,8 @@
+     var destination_pixels = @field(destination, getFieldNameFromPixelFormat(destination_format));
+     const DestinationType = @TypeOf(destination_pixels[0]);
+ 
+-    const scaleValue = color.ScaleValue(std.meta.fieldInfo(DestinationType, .value).type);
+-    const scaleAlpha = color.ScaleValue(std.meta.fieldInfo(DestinationType, .alpha).type);
++    const scaleValue = color.ScaleValue(@FieldType(DestinationType, "value"));
++    const scaleAlpha = color.ScaleValue(@FieldType(DestinationType, "alpha"));
+ 
+     for (0..source_pixels.len) |index| {
+         const source_float4 = source_pixels[index].to.float4();
+diff --git a/src/color.zig b/src/color.zig
+--- a/src/color.zig
++++ b/src/color.zig
+@@ -829,7 +829,7 @@
+         return switch (format) {
+             .invalid => {
+                 return .{
+-                    .invalid = void{},
++                    .invalid = {},
+                 };
+             },
+             .indexed1 => {
+diff --git a/src/compressions/deflate/Lookup.zig b/src/compressions/deflate/Lookup.zig
+--- a/src/compressions/deflate/Lookup.zig
++++ b/src/compressions/deflate/Lookup.zig
+@@ -13,9 +13,9 @@
+ const chain_len = 2 * consts.history.len;
+ 
+ // Maps hash => first position
+-head: [consts.lookup.len]u16 = [_]u16{0} ** consts.lookup.len,
++head: [consts.lookup.len]u16 = @splat(0),
+ // Maps position => previous positions for the same hash value
+-chain: [chain_len]u16 = [_]u16{0} ** (chain_len),
++chain: [chain_len]u16 = @splat(0),
+ 
+ // Calculates hash of the 4 bytes from data.
+ // Inserts `pos` position of that hash in the lookup tables.
+diff --git a/src/compressions/deflate/huffman_encoder.zig b/src/compressions/deflate/huffman_encoder.zig
+--- a/src/compressions/deflate/huffman_encoder.zig
++++ b/src/compressions/deflate/huffman_encoder.zig
+@@ -338,7 +338,7 @@
+ }
+ 
+ pub fn huffmanDistanceEncoder() DistanceEncoder {
+-    var distance_freq = [1]u16{0} ** consts.distance_code_count;
++    var distance_freq = @as([consts.distance_code_count]u16, @splat(0));
+     distance_freq[0] = 1;
+     // huff_distance is a static distance encoder used for huffman only encoding.
+     // It can be reused since we will not be encoding distance values.
+diff --git a/src/formats/jpeg/writer.zig b/src/formats/jpeg/writer.zig
+--- a/src/formats/jpeg/writer.zig
++++ b/src/formats/jpeg/writer.zig
+@@ -20,7 +20,7 @@
+     luminance,
+     chrominance,
+ };
+-const quant_index_size = @typeInfo(QuantIndex).@"enum".fields.len;
++const quant_index_size = @typeInfo(QuantIndex).@"enum".field_names.len;
+ 
+ const n_huff_index = 4;
+ const HuffmanIndex = enum(usize) {
+@@ -156,7 +156,7 @@
+ 
+ // Initialize Huffman LUT from Huffman specification
+ fn initHuffmanLUT(spec: HuffmanSpec) [256]u32 {
+-    var lut: [256]u32 = [_]u32{0} ** 256;
++    var lut: [256]u32 = @splat(0);
+ 
+     var code: u32 = 0;
+     var value_index: usize = 0;
+diff --git a/src/formats/pam.zig b/src/formats/pam.zig
+--- a/src/formats/pam.zig
++++ b/src/formats/pam.zig
+@@ -382,7 +382,7 @@
+ 
+         if (src_maxval == dst_maxval) return val;
+ 
+-        const W = std.meta.Int(.unsigned, @bitSizeOf(T) * 2);
++        const W = @Int(.unsigned, @bitSizeOf(T) * 2);
+         return @intCast(@min(std.math.maxInt(T), @as(W, dst_maxval) * @as(W, val) / @as(W, src_maxval)));
+     }
+ 
+diff --git a/src/formats/tga.zig b/src/formats/tga.zig
+--- a/src/formats/tga.zig
++++ b/src/formats/tga.zig
+@@ -374,7 +374,7 @@
+         const VectorType = @Vector(VectorLength, IntType);
+         const BytesPerPixels = (@typeInfo(IntType).int.bits + 7) / 8;
+         const IndexStep = VectorLength * BytesPerPixels;
+-        const MaskType = std.meta.Int(.unsigned, VectorLength);
++        const MaskType = @Int(.unsigned, VectorLength);
+ 
+         comptime {
+             if (!std.math.isPowerOfTwo(@typeInfo(IntType).int.bits)) {
+@@ -466,7 +466,7 @@
+                 if (std.mem.eql(u8, std.mem.asBytes(&rle_value), std.mem.asBytes(&value))) {
+                     self.length += 1;
+                 } else {
+-                    try RunLengthEncoderCommon.flush(IntType, writer, @as(IntType, @bitCast(rle_value)), self.length);
++                    try RunLengthEncoderCommon.flush(IntType, writer, std.mem.readInt(IntType, std.mem.asBytes(&rle_value), .little), self.length);
+ 
+                     self.length = 1;
+                     self.rle_value = value;
+@@ -480,7 +480,7 @@
+             }
+ 
+             if (self.rle_value) |rle_value| {
+-                try RunLengthEncoderCommon.flush(IntType, writer, @as(IntType, @bitCast(rle_value)), self.length);
++                try RunLengthEncoderCommon.flush(IntType, writer, std.mem.readInt(IntType, std.mem.asBytes(&rle_value), .little), self.length);
+             }
+         }
+     };
+@@ -1197,7 +1197,7 @@
+         if (self.header.image_type.run_length) {
+             // The TGA spec recommend that the RLE compression should be done on scanline per scanline basis
+             inline for (1..(4 + 1)) |bpp| {
+-                const IntType = std.meta.Int(.unsigned, bpp * 8);
++                const IntType = @Int(.unsigned, bpp * 8);
+ 
+                 if (bytes_per_pixel == bpp) {
+                     if (comptime std.math.isPowerOfTwo(bpp)) {
+diff --git a/src/io.zig b/src/io.zig
+--- a/src/io.zig
++++ b/src/io.zig
+@@ -193,7 +193,7 @@
+         }
+ 
+         fn initBits(comptime T: type, out: anytype, num: u16) Bits(T) {
+-            const UT = std.meta.Int(.unsigned, @bitSizeOf(T));
++            const UT = @Int(.unsigned, @bitSizeOf(T));
+             return .{
+                 @bitCast(@as(UT, @intCast(out))),
+                 num,
+@@ -222,7 +222,7 @@
+         ///  containing them in the least significant end, and the number of bits successfully
+         ///  read. Reaching the end of the stream is not an error.
+         pub fn readBitsTuple(self: *@This(), comptime T: type, num: u16) !Bits(T) {
+-            const UT = std.meta.Int(.unsigned, @bitSizeOf(T));
++            const UT = @Int(.unsigned, @bitSizeOf(T));
+             const U = if (@bitSizeOf(T) < 8) u8 else UT; //it is a pain to work with <u8
+ 
+             //dump any bits in our buffer first
+@@ -412,7 +412,7 @@
+         ///  are enough to fill a byte.
+         pub fn writeBits(self: *@This(), value: anytype, num: u16) !void {
+             const T = @TypeOf(value);
+-            const UT = std.meta.Int(.unsigned, @bitSizeOf(T));
++            const UT = @Int(.unsigned, @bitSizeOf(T));
+             const U = if (@bitSizeOf(T) < 8) u8 else UT; //<u8 is a pain to work with
+ 
+             var in: U = @as(UT, @bitCast(value));
+@@ -495,8 +495,8 @@
+ }
+ 
+ test "BitWriter: api coverage" {
+-    var mem_be = [_]u8{0} ** 2;
+-    var mem_le = [_]u8{0} ** 2;
++    var mem_be = @as([2]u8, @splat(0));
++    var mem_le = @as([2]u8, @splat(0));
+ 
+     var mem_out_be = std.Io.Writer.fixed(mem_be[0..]);
+     var bit_stream_be: BitWriter(.big) = .{
+diff --git a/src/utils.zig b/src/utils.zig
+--- a/src/utils.zig
++++ b/src/utils.zig
+@@ -55,14 +55,14 @@
+ // Only keeping this for PNG load header that can load invalid enum values so std.mem.byteSwapAllFields() is not valid
+ fn checkEnumFields(data: anytype) StructReadError!void {
+     const T = @typeInfo(@TypeOf(data)).pointer.child;
+-    inline for (std.meta.fields(T)) |entry| {
+-        switch (@typeInfo(entry.type)) {
++    inline for (@typeInfo(T).@"struct".field_names) |entry| {
++        switch (@typeInfo(@FieldType(T, entry))) {
+             .@"enum" => {
+-                const value = @intFromEnum(@field(data, entry.name));
+-                _ = std.enums.fromInt(entry.type, value) orelse return StructReadError.InvalidData;
++                const value = @intFromEnum(@field(data, entry));
++                _ = std.enums.fromInt(@FieldType(T, entry), value) orelse return StructReadError.InvalidData;
+             },
+             .@"struct" => {
+-                try checkEnumFields(&@field(data, entry.name));
++                try checkEnumFields(&@field(data, entry));
+             },
+             else => {},
+         }
+@@ -85,24 +85,24 @@
+ 
+ // TODO: Remove ?
+ pub fn writeStructForeign(writer: anytype, value: anytype) StructWriteError!void {
+-    const T = @typeInfo(@TypeOf(value));
+-    inline for (std.meta.fields(T)) |field| {
+-        switch (@typeInfo(field.type)) {
++    const T = @TypeOf(value);
++    inline for (@typeInfo(T).@"struct".field_names) |field| {
++        switch (@typeInfo(@FieldType(T, field))) {
+             .int => {
+-                try writer.writeIntForeign(field.type, @field(value, field.name));
++                try writer.writeIntForeign(@FieldType(T, field), @field(value, field));
+             },
+             .@"struct" => {
+-                try writeStructForeign(writer, @field(value, field.name));
++                try writeStructForeign(writer, @field(value, field));
+             },
+             .@"enum" => {
+-                const enum_value = @intFromEnum(@field(value, field.name));
+-                try writer.writeIntForeign(field.type, enum_value);
++                const enum_value = @intFromEnum(@field(value, field));
++                try writer.writeIntForeign(@FieldType(T, field), enum_value);
+             },
+             .bool => {
+-                try writer.writeByte(@intFromBool(@field(value, field.name)));
++                try writer.writeByte(@intFromBool(@field(value, field)));
+             },
+             else => {
+-                @compileError("Add support for type " ++ @typeName(T) ++ "." ++ @typeName(field.type) ++ " in writeStructForeign()");
++                @compileError("Add support for type " ++ @typeName(T) ++ "." ++ @typeName(@FieldType(T, field)) ++ " in writeStructForeign()");
+             },
+         }
+     }
+@@ -111,32 +111,32 @@
+ // Extend std.mem.byteSwapAllFields to support enums with invalid data
+ fn swapFieldBytes(data: anytype) StructReadError!void {
+     const T = @typeInfo(@TypeOf(data)).pointer.child;
+-    inline for (std.meta.fields(T)) |entry| {
+-        switch (@typeInfo(entry.type)) {
++    inline for (@typeInfo(T).@"struct".field_names) |entry| {
++        switch (@typeInfo(@FieldType(T, entry))) {
+             .int => |int| {
+                 if (int.bits > 8) {
+-                    @field(data, entry.name) = @byteSwap(@field(data, entry.name));
++                    @field(data, entry) = @byteSwap(@field(data, entry));
+                 }
+             },
+             .@"struct" => {
+-                try swapFieldBytes(&@field(data, entry.name));
++                try swapFieldBytes(&@field(data, entry));
+             },
+             .@"enum" => {
+-                const value = @intFromEnum(@field(data, entry.name));
++                const value = @intFromEnum(@field(data, entry));
+                 if (@bitSizeOf(@TypeOf(value)) > 8) {
+-                    @field(data, entry.name) = std.enums.fromInt(entry.type, @byteSwap(value)) orelse return StructReadError.InvalidData;
++                    @field(data, entry) = std.enums.fromInt(@FieldType(T, entry), @byteSwap(value)) orelse return StructReadError.InvalidData;
+                 } else {
+-                    _ = std.enums.fromInt(entry.type, value) orelse return StructReadError.InvalidData;
++                    _ = std.enums.fromInt(@FieldType(T, entry), value) orelse return StructReadError.InvalidData;
+                 }
+             },
+             .array => |array| {
+                 if (array.child != u8) {
+-                    @compileError("Add support for type " ++ @typeName(T) ++ "." ++ @typeName(entry.type) ++ " in swapFieldBytes");
++                    @compileError("Add support for type " ++ @typeName(T) ++ "." ++ @typeName(@FieldType(T, entry)) ++ " in swapFieldBytes");
+                 }
+             },
+             .bool => {},
+             else => {
+-                @compileError("Add support for type " ++ @typeName(T) ++ "." ++ @typeName(entry.type) ++ " in swapFieldBytes");
++                @compileError("Add support for type " ++ @typeName(T) ++ "." ++ @typeName(@FieldType(T, entry)) ++ " in swapFieldBytes");
+             },
+         }
+     }

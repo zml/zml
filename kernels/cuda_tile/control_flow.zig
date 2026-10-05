@@ -13,13 +13,13 @@ fn collect(comptime ValueT: type, comptime N: usize, values: anytype, comptime w
     const info = @typeInfo(@TypeOf(values));
     if (info != .@"struct" or !info.@"struct".is_tuple)
         @compileError(what ++ " expects a tuple literal");
-    if (info.@"struct".fields.len != N)
+    if (info.@"struct".field_names.len != N)
         @compileError(what ++ ": arity must match the scope's declared arity");
     var buf: [N]*const mlir.Value = undefined;
-    inline for (info.@"struct".fields, 0..) |f, i| {
-        if (f.type != ValueT)
+    inline for (info.@"struct".field_names, 0..) |f, i| {
+        if (@FieldType(@TypeOf(values), f) != ValueT)
             @compileError(what ++ ": every tuple element must be a Value");
-        buf[i] = @field(values, f.name).inner;
+        buf[i] = @field(values, f).inner;
     }
     return buf;
 }

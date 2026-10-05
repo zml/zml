@@ -1632,7 +1632,7 @@ pub const NamedValue = extern struct {
         };
     }
 
-    pub fn init(comptime kind_: Kind, name_: []const u8, value_: std.meta.fieldInfo(Value, kind_).type) NamedValue {
+    pub fn init(comptime kind_: Kind, name_: []const u8, value_: @FieldType(Value, @tagName(kind_))) NamedValue {
         return .{
             .inner = .{
                 .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
