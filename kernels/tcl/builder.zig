@@ -199,6 +199,10 @@ pub const Value = struct {
         return self.op.reduce(self, axes, mode);
     }
 
+    pub fn cumsum(self: Value, axes: []const Axis) Value {
+        return self.op.cumsum(self, axes);
+    }
+
     pub fn addf(self: Value, rhs: anytype) Value {
         return self.binary(.addf, rhs);
     }
@@ -437,6 +441,7 @@ pub const TensorOperation = struct {
 
     /// `ve.exec(<mode> t[axes] x)`: removes `axes`.
     pub fn reduce(self: *TensorOperation, x: anytype, axes: []const Axis, mode: ReduceMode) Value {
+        if (mode == .cumsum) return self.cumsum(x, axes);
         const v = self.lift(x, .f32);
         var kept: std.ArrayList(Axis) = .empty;
         for (v.axes) |a| {
@@ -446,6 +451,16 @@ pub const TensorOperation = struct {
         self.has_reduce = true;
         const op = tcl.ve_reduce(self.b.ctx, v.inner, mode, self.b.axisAttrs(axes), self.b.logicalType(v.dtype, kept.items), self.b.loc());
         return self.emit(op, v.dtype, kept.items, false);
+    }
+
+    /// `cumsum t[axes] x`, like `operation.cumsum`: the running sum of an i32
+    /// value along `axes`, flattened in that order.
+    pub fn cumsum(self: *TensorOperation, x: anytype, axes: []const Axis) Value {
+        const v = self.lift(x, .i32);
+        self.has_ve = true;
+        self.has_reduce = true;
+        const op = tcl.ve_reduce(self.b.ctx, v.inner, .cumsum, self.b.axisAttrs(axes), self.b.logicalType(v.dtype, v.axes), self.b.loc());
+        return self.emit(op, v.dtype, v.axes, false);
     }
 
     /// `ve.exec(if cond <pred> threshold { yes } else { no })`, like
@@ -586,6 +601,8 @@ pub const Builder = struct {
     entry: ?*mlir.Block = null,
     args: []const Tensor = &.{},
     results: ?[]const Tensor = null,
+    /// Blocks being built inside the entry block (loop bodies), innermost last.
+    block_stack: std.ArrayList(*mlir.Block) = .empty,
 
     pub fn open(allocator: std.mem.Allocator, ctx: *mlir.Context, name: []const u8) !Builder {
         _ = tcl.symbol(ctx, name) catch std.debug.panic("tcl: `{s}` is not a TCL function name", .{name});
@@ -662,13 +679,13 @@ pub const Builder = struct {
     /// field is its `as_logical` view.
     pub fn declareArgs(self: *Builder, spec: anytype) FinishError!ArgsOf(@TypeOf(spec)) {
         std.debug.assert(self.entry == null);
-        const fields = @typeInfo(@TypeOf(spec)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(spec)).@"struct".field_names;
         const scratch = self.arena.allocator();
         var types: [fields.len]*const mlir.Type = undefined;
         var locs: [fields.len]*const mlir.Location = undefined;
         const args = try scratch.alloc(Tensor, fields.len);
         inline for (fields, 0..) |f, i| {
-            const s = @field(spec, f.name);
+            const s = @field(spec, f);
             const axes = self.dupeAxes(s.axes);
             const dram: ?Dram = if (@hasField(@TypeOf(s), "dram")) toDram(s.dram) else null;
             types[i] = if (dram) |d| self.mappedType(s.dtype, axes, d) else self.logicalType(s.dtype, axes);
@@ -685,9 +702,9 @@ pub const Builder = struct {
         var named: ArgsOf(@TypeOf(spec)) = undefined;
         inline for (fields, 0..) |f, i| {
             args[i].inner = entry.argument(i);
-            if (@hasField(@TypeOf(@field(spec, f.name)), "dram"))
+            if (@hasField(@TypeOf(@field(spec, f)), "dram"))
                 args[i].inner = try self.graphOp(.as_logical, &.{entry.argument(i)}, self.logicalType(args[i].dtype, args[i].axes), &.{}, null);
-            @field(named, f.name) = args[i];
+            @field(named, f) = args[i];
         }
         self.args = args;
         return named;
@@ -704,9 +721,9 @@ pub const Builder = struct {
     }
 
     fn ArgsOf(comptime Spec: type) type {
-        const in = @typeInfo(Spec).@"struct".fields;
+        const in = @typeInfo(Spec).@"struct".field_names;
         comptime var names: [in.len][]const u8 = undefined;
-        inline for (in, 0..) |f, i| names[i] = f.name;
+        inline for (in, 0..) |f, i| names[i] = f;
         return @Struct(.auto, null, &names, &@splat(Tensor), &@splat(.{}));
     }
 
@@ -842,6 +859,113 @@ pub const Builder = struct {
         return g.result(0);
     }
 
+    /// `for iv in 0..limit (acc = init, ...):`, closed by `yield`.
+    pub fn ForScope(comptime N: usize) type {
+        return struct {
+            b: *Builder,
+            op: *mlir.Operation,
+            body: *mlir.Block,
+            /// The loop index, a scalar i32 tensor for `indexRead`,
+            /// `indexWrite` and `symExpr`.
+            iv: Tensor,
+            carried: [N]Tensor,
+            results: [N]Tensor = undefined,
+
+            const Self = @This();
+
+            /// `yield values;` closes the loop and sets `results`.
+            pub fn yield(self: *Self, values: [N]Tensor) FinishError!void {
+                const b = self.b;
+                var inner: [N]*const mlir.Value = undefined;
+                for (&inner, values) |*v, t| v.* = t.inner;
+                _ = tcl.yield(b.ctx, &inner, b.loc()).appendTo(self.body);
+                b.popBlock();
+                if (!self.op.verify()) {
+                    std.log.err("tcl: {s}: invalid loop:\n{f}", .{ b.name, self.op.fmt(.{ .print_generic_op_form = true }) });
+                    return error.InvalidMlir;
+                }
+                for (&self.results, self.carried, 0..) |*r, c, i| r.* = .{ .inner = self.op.result(i), .dtype = c.dtype, .axes = c.axes, .shards = c.shards };
+            }
+        };
+    }
+
+    /// Opens a device loop from 0 to `limit`: an `Axis`, an integer, or a
+    /// scalar i32 `Tensor` computed in the function (`reduceMaxI32`,
+    /// `symExpr`). The body must index a tensor with `iv`, which bounds the
+    /// trip count. `inits` is a tuple of the accumulators' initial tensors.
+    pub fn openFor(self: *Builder, limit: anytype, inits: anytype) ForScope(@typeInfo(@TypeOf(inits)).@"struct".field_names.len) {
+        const N = @typeInfo(@TypeOf(inits)).@"struct".field_names.len;
+        var types: [N + 1]*const mlir.Type = undefined;
+        var locs: [N + 1]*const mlir.Location = @splat(self.loc());
+        var values: [N]*const mlir.Value = undefined;
+        var carried: [N]Tensor = undefined;
+        types[0] = self.logicalType(.i32, &.{});
+        inline for (0..N) |i| {
+            carried[i] = inits[i];
+            values[i] = inits[i].inner;
+            types[i + 1] = inits[i].inner.type_();
+        }
+        const body = mlir.Block.init(&types, &locs);
+        const tensor_limit: ?*const mlir.Value, const bound: ?*const mlir.Attribute = switch (@TypeOf(limit)) {
+            Tensor => .{ limit.inner, null },
+            Axis => .{ null, self.axisAttr(limit) },
+            else => .{ null, .int(self.ctx, .i64, limit) },
+        };
+        // Attached before its body is built: the index operations' verifiers
+        // look for their loop.
+        const op = tcl.loop(self.ctx, tensor_limit, bound, &values, types[1..], body, self.loc());
+        _ = op.appendTo(self.currentBlock());
+        self.pushBlock(body);
+        for (&carried, 0..) |*c, i| c.inner = body.argument(i + 1);
+        return .{ .b = self, .op = op, .body = body, .iv = .{ .inner = body.argument(0), .dtype = .i32, .axes = &.{} }, .carried = carried };
+    }
+
+    /// `t[i]`: the slice of `t`'s outermost axis at loop index `i`.
+    pub fn indexRead(self: *Builder, t: Tensor, i: Tensor) FinishError!Tensor {
+        return self.graph(.index_read, &.{ t, i }, t.dtype, t.axes[1..], &.{}, null);
+    }
+
+    /// `acc[i] = v`, in place: `acc` must have no other use; use the result.
+    pub fn indexWrite(self: *Builder, acc: Tensor, i: Tensor, v: Tensor) FinishError!Tensor {
+        return self.graph(.index_write, &.{ acc, i, v }, acc.dtype, acc.axes, &.{}, null);
+    }
+
+    /// `scratchpad()`: an uninitialized tensor, typically a loop's output that
+    /// `indexWrite` fills.
+    pub fn scratchpad(self: *Builder, dtype: DType, to: []const Axis) FinishError!Tensor {
+        return self.graph(.scratchpad, &.{}, dtype, to, &.{}, null);
+    }
+
+    /// `full(value)`: a constant tensor, like `tcl.full`.
+    pub fn full(self: *Builder, value: f64, dtype: DType, to: []const Axis) FinishError!Tensor {
+        const v: *const mlir.Attribute = if (dtype.isFloat()) .float(self.ctx, .f64, value) else .int(self.ctx, .i64, @as(i64, @intFromFloat(value)));
+        return self.graph(.full, &.{}, dtype, to, &.{.named(self.ctx, "value", v)}, null);
+    }
+
+    /// `reduce_max_i32(t)`: the maximum of an i32 tensor, as a scalar.
+    pub fn reduceMaxI32(self: *Builder, t: Tensor) FinishError!Tensor {
+        return self.graph(.reduce_max_i32, &.{t}, .i32, &.{}, &.{}, null);
+    }
+
+    /// `sym_expr(lhs <kind> rhs)`: scalar i32 arithmetic on the device, over
+    /// scalar tensors (a loop index, `reduceMaxI32`) and integers.
+    pub fn symExpr(self: *Builder, kind: Expr.Kind, lhs: anytype, rhs: anytype) FinishError!Tensor {
+        var inputs: [2]Tensor = undefined;
+        var n: usize = 0;
+        const l = self.symOperand(lhs, &inputs, &n);
+        const r = self.symOperand(rhs, &inputs, &n);
+        const e = tcl.expr(self.ctx, @tagName(kind), &.{ l, r }) catch
+            std.debug.panic("tcl: {s}: invalid {s} expression", .{ self.name, @tagName(kind) });
+        return self.graph(.sym_expr, inputs[0..n], .i32, &.{}, &.{.named(self.ctx, "expr", e)}, null);
+    }
+
+    fn symOperand(self: *Builder, x: anytype, inputs: *[2]Tensor, n: *usize) *const mlir.Attribute {
+        if (@TypeOf(x) != Tensor) return .int(self.ctx, .i64, x);
+        inputs[n.*] = x;
+        n.* += 1;
+        return tcl.expr(self.ctx, "arg", &.{.int(self.ctx, .i64, @as(i64, @intCast(n.* - 1)))}) catch unreachable;
+    }
+
     /// `return results...`.
     pub fn ret(self: *Builder, results: []const Tensor) void {
         self.results = self.arena.allocator().dupe(Tensor, results) catch @panic("OOM");
@@ -878,11 +1002,11 @@ pub const Builder = struct {
         var printed: std.Io.Writer.Allocating = .init(self.allocator);
         defer printed.deinit();
         try printed.writer.print("{f}", .{self.module.operation()});
-        return try self.allocator.dupeZ(u8, printed.written());
+        return try self.allocator.dupeSentinel(u8, printed.written(), 0);
     }
 
     fn append(self: *Builder, op: *mlir.Operation) FinishError!void {
-        _ = op.appendTo(self.entryBlock());
+        _ = op.appendTo(self.currentBlock());
         if (!op.verify()) {
             std.log.err("tcl: {s}: invalid operation:\n{f}", .{ self.name, op.fmt(.{ .print_generic_op_form = true }) });
             return error.InvalidMlir;
@@ -891,6 +1015,18 @@ pub const Builder = struct {
 
     fn entryBlock(self: *const Builder) *mlir.Block {
         return self.entry orelse std.debug.panic("tcl: {s}: declareArgs first", .{self.name});
+    }
+
+    pub fn pushBlock(self: *Builder, block: *mlir.Block) void {
+        self.block_stack.append(self.arena.allocator(), block) catch @panic("OOM");
+    }
+
+    pub fn popBlock(self: *Builder) void {
+        _ = self.block_stack.pop();
+    }
+
+    pub fn currentBlock(self: *const Builder) *mlir.Block {
+        return self.block_stack.getLastOrNull() orelse self.entryBlock();
     }
 
     pub fn axisAttr(self: *const Builder, a: Axis) *const mlir.Attribute {
@@ -958,9 +1094,9 @@ pub const Builder = struct {
     }
 
     fn jsonFields(self: *Builder, config: anytype) []const mlir.NamedAttribute {
-        const fields = @typeInfo(@TypeOf(config)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(config)).@"struct".field_names;
         const out = self.arena.allocator().alloc(mlir.NamedAttribute, fields.len) catch @panic("OOM");
-        inline for (fields, 0..) |f, i| out[i] = .named(self.ctx, f.name, self.json(@field(config, f.name)));
+        inline for (fields, 0..) |f, i| out[i] = .named(self.ctx, f, self.json(@field(config, f)));
         return out;
     }
 
@@ -972,8 +1108,8 @@ pub const Builder = struct {
             .comptime_float, .float => .float(self.ctx, .f64, v),
             .enum_literal, .@"enum" => .string(self.ctx, @tagName(v)),
             .@"struct" => |info| if (info.is_tuple) blk: {
-                var items: [info.fields.len]*const mlir.Attribute = undefined;
-                inline for (info.fields, 0..) |f, i| items[i] = self.json(@field(v, f.name));
+                var items: [info.field_names.len]*const mlir.Attribute = undefined;
+                inline for (info.field_names, 0..) |f, i| items[i] = self.json(@field(v, f));
                 break :blk .array(self.ctx, &items);
             } else .dict(self.ctx, self.jsonFields(v)),
             .pointer => if (std.meta.Elem(T) == u8) .string(self.ctx, v) else blk: {
@@ -1172,6 +1308,36 @@ test "composite axes, DRAM, fixed point, context, config and graph ops" {
     try expectContains(ir, "operator = {Chip = #tcl.expr<\"broadcast\", []>, Split = [#tcl.symbol<\"M\">]}");
     inline for (.{ "gather", "scatter", "arange", "vector", "transmute", "reshape", "as_dram" }) |g|
         try expectContains(ir, "\"tcl.graph." ++ g ++ "\"");
+}
+
+test "loop over a device-computed trip count with index reads and writes" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = try Builder.open(std.testing.allocator, ctx, "prefix");
+    defer b.deinit();
+
+    const T = b.axis("T", 8);
+    const D = b.axis("D", 64);
+    const B = b.axis("B", 4);
+    const t = try b.declareArgs(.{
+        .x = .{ .dtype = .f32, .axes = &.{ T, D } },
+        .s = .{ .dtype = .f32, .axes = &.{D} },
+        .lens = .{ .dtype = .i32, .axes = &.{B} },
+    });
+    // Running sums of the rows up to the longest length.
+    const n = try b.symExpr(.add, try b.reduceMaxI32(t.lens), 0);
+    var loop = b.openFor(n, .{ t.s, try b.scratchpad(.f32, &.{ T, D }) });
+    const op = b.tensorOperation(.{});
+    const sum = try op.commit(op.fetch(try b.indexRead(t.x, loop.iv), .{}).addf(op.fetch(loop.carried[0], .{})), .{});
+    try loop.yield(.{ sum, try b.indexWrite(loop.carried[1], loop.iv, sum) });
+    b.ret(&loop.results);
+
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "\"tcl.graph.for\"");
+    try expectContains(ir, "operandSegmentSizes = array<i32: 1, 2>");
+    try expectContains(ir, "\"tcl.graph.index_write\"");
+    try expectContains(ir, "#tcl.expr<\"add\", [#tcl.expr<\"arg\", [0]>, 0]>");
 }
 
 test "multi-chip kernel over chip-split DRAM tensors" {
