@@ -2,6 +2,12 @@ load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@tar.bzl//tar:tar.bzl", "tar")
 load("@zml//bazel:patchelf.bzl", "patchelf")
+load("@zml//platforms/furiosa:furiosa.bzl", "aarch64_headers")
+
+aarch64_headers(
+    name = "headers",
+    srcs = ["@llvm//runtimes/glibc:glibc_headers_include_search_directory"],
+)
 
 patchelf(
     name = "plugin",
@@ -23,7 +29,7 @@ patchelf(
 
 patchelf(
     name = "libstdc++.so.6",
-    src = "@libstdcpp6//:files",
+    src = "@llvm//runtimes/libstdcxx:libstdcxx.shared",
     set_rpath = "$ORIGIN",
 )
 
@@ -35,20 +41,20 @@ patchelf(
 
 patchelf(
     name = "libunwind.so.1",
-    src = "@llvm-libunwind1//:runtime",
+    src = "@llvm//runtimes/libunwind:libunwind.shared",
     set_rpath = "$ORIGIN",
 )
 
 copy_to_directory(
     name = "sandbox",
     srcs = [
+        ":headers",
         ":intercept",
         ":libgcc_s.so.1",
         ":libstdc++.so.6",
         ":libunwind.so.1",
         ":plugin",
         ":tcc",
-        "@libc6-dev-arm64-cross//:headers",
         "@libc6//:files",
         "@llvm//:builtin_resource_dir",
         "@llvm//tools:clang",
@@ -65,7 +71,7 @@ copy_to_directory(
         "libgcc_s.so.1": "lib",
         "libunwind.so.1": "lib",
         "usr/lib/x86_64-linux-gnu": "lib",
-        "usr/aarch64-linux-gnu/include": "toolchain/usr/aarch64-linux-gnu/include",
+        "include": "toolchain/usr/aarch64-linux-gnu/include",
         "bin": "toolchain/usr/bin",
         "lib/clang/*": "toolchain/lib/clang",
     },

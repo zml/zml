@@ -9,15 +9,9 @@ sources:
   - channel: noble-security main universe
     url: https://snapshot.ubuntu.com/ubuntu/20260715T000000Z
 
-  - channel: llvm-toolchain-bookworm-23 main
-    url: https://apt.llvm.org/bookworm
-
 archs:
   - amd64
 
 packages:
   - libc6
   - libgcc-s1
-  - libstdc++6
-  - llvm-libunwind1
-  - libc6-dev-arm64-cross
