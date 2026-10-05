@@ -207,11 +207,13 @@ pub const AttentionMask = union(enum) {
     causal,
     /// Causal window size, including the current token.
     sliding_window: u32,
+    /// Attend to keys at specific positions.
+    indices: zml.Tensor,
 
     pub fn isCausal(mask: AttentionMask) bool {
         return switch (mask) {
             .causal, .sliding_window => true,
-            .none => false,
+            .none, .indices => false,
         };
     }
 };
@@ -601,6 +603,11 @@ fn stablehlo_pagedAttention(
     kv_cache: KvCache,
     opts: AttentionOptions,
 ) zml.Tensor {
+    switch (opts.mask) {
+        .sliding_window, .indices => @panic("Sliding window or sparse attention mask are not supported on StableHLO"),
+        else => {},
+    }
+
     const page_size = kv_cache.split.k.dim(.k_chunk);
 
     const final_state = zml.ops.@"while"(

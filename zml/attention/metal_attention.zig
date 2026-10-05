@@ -86,6 +86,8 @@ pub const paged = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        if (opts.mask == .indices) @panic("Sparse Attention is not implemented on Metal");
+
         const num_kv_heads = q.dim(.hkv);
 
         const qh = q.merge(.{ .h = .{ .hkv, .hg } }).transpose(.{ .b, .h, .hd });

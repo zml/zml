@@ -225,6 +225,8 @@ pub const mosaic_tpu = struct {
     }
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, kv_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        if (opts.mask == .indices) @panic("Sparse Attention is not supported on TPU");
+
         const prepared = prepareInputs(parameters, q, kv_cache);
 
         const q_out = zml.ops.manualComputation(
