@@ -1694,9 +1694,7 @@ pub const Mesh = struct {
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
 
-        // Emit explicit device assignment list to avoid XLA requiring
-        // a sharding attribute on the custom-call instruction.
-        const ids = try self.deviceAssignment(allocator);
+        const ids = try self.gspmdTileAssignment(allocator, shape);
         defer allocator.free(ids);
 
         try out.writer.writeAll("{devices=[");
@@ -1721,6 +1719,30 @@ pub const Mesh = struct {
         try out.writer.writeAll("}");
 
         return .string(ctx, try out.toOwnedSlice());
+    }
+
+    fn gspmdTileAssignment(self: *const Mesh, allocator: std.mem.Allocator, shape: Shape) ![]u32 {
+        const placement = try Placement.init(shape);
+        const devices = self.devicesInCanonicalOrder();
+        var tile_count: usize = 1;
+        for (placement.axis_plans.constSlice()) |plan| tile_count *= @intCast(plan.num_devices);
+        const replicas_per_tile = @divExact(devices.len, tile_count);
+        const replica_indices = try allocator.alloc(usize, tile_count);
+        defer allocator.free(replica_indices);
+        @memset(replica_indices, 0);
+        const ids = try allocator.alloc(u32, devices.len);
+
+        for (devices, 0..) |device, partition_index| {
+            var tile_index: usize = 0;
+            for (placement.axis_plans.constSlice()) |plan| {
+                tile_index = tile_index * @as(usize, @intCast(plan.num_devices)) + @as(usize, @intCast(plan.linearIndex(device.coords)));
+            }
+            // HLO shardings refer to logical partitions; executable device assignment
+            // separately maps those partitions to physical PJRT device IDs.
+            ids[tile_index * replicas_per_tile + replica_indices[tile_index]] = @intCast(partition_index);
+            replica_indices[tile_index] += 1;
+        }
+        return ids;
     }
 
     pub fn deviceAssignment(self: *const Mesh, allocator: std.mem.Allocator) ![]u32 {
@@ -2521,4 +2543,16 @@ test "localized shapes do not retain global sharding" {
     try std.testing.expectEqual(null, local._sharding.mesh);
     try std.testing.expectEqual(8, global.dim(.batch));
     try std.testing.expectEqual(&mesh_, global._sharding.mesh);
+}
+
+test "GSPMD tiles use tensor axis order and logical partition indices" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+    const physical = try runner.physical(.{ 2, 2, 2 }, .{ .mesh = .torus });
+    for (physical.devices_in_canonical_order, 0..) |*device, i| device.id = @intCast(7 - i);
+    const mesh_ = try Mesh.init("tiles", &physical, .mesh(.{ .batch = .balanced, .model = .balanced }), .parseBindings(.{ .batch = .link_z, .model = .link_x }));
+    const shape = Shape.init(.{ .batch = 8, .model = 8 }, .f32).withPartitioning(&mesh_, .{ .batch = .batch, .model = .model });
+    const ids = try mesh_.gspmdTileAssignment(arena.allocator(), shape);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2, 4, 6, 1, 3, 5, 7 }, ids);
 }

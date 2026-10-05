@@ -816,8 +816,7 @@ pub fn tensorShardingAttr(
         .gspmd => mesh_.gspmdShardingAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
             error.WriteFailed => error.OutOfMemory, // We're writing to memory
             error.OutOfMemory => error.OutOfMemory,
-            // TODO(hugomano): clarify what can trigger this and consider moving the check to the Sharding.Mesh creation
-            error.MissingDeviceInTile => @panic("MissingDeviceInTile"),
+            error.IncompatibleSharding => @panic("Shape dimensions must be divisible by their mesh partitions"),
         },
     };
 }
