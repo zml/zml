@@ -40,16 +40,16 @@ pub fn main(init: std.process.Init) !void {
     defer repo.close(io);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    const shardings: common.Shardings = try .init(platform);
+    var store: zml.io.TensorStore = .fromRegistry(allocator, platform, &registry);
     defer store.deinit();
 
     var repo_model = try lfm2.LoadedModel.init(allocator, io, repo, store.view(), .{});
     defer repo_model.deinit(allocator);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    const shardings: common.Shardings = try .init(platform);
 
-    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
+    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
     const backend = args.backend orelse zml.attention.Backend.auto(platform);
@@ -79,7 +79,7 @@ pub fn run(
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
-    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, platform, &registry);
     defer activation_store.deinit();
 
     var ctx = TestContext{
@@ -89,7 +89,6 @@ pub fn run(
         .activations_store = &activation_store,
         .attention_metadata = attention_metadata,
         .attention_parameters = attention_parameters,
-        .sharding = platform.replicated_sharding,
     };
 
     try ctx.testLayer("embed_tokens", .{ .batch, .seq }, mdl.embed_tokens, model_buffers.embed_tokens, .{});
@@ -134,7 +133,6 @@ const TestContext = struct {
     activations_store: *zml.io.TensorStore,
     attention_metadata: zml.attention.Metadata,
     attention_parameters: zml.attention.Parameters,
-    sharding: zml.Sharding,
 
     fn testLayerPrint(self: *TestContext, comptime name_fmt: []const u8, name_args: anytype, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
         const name = try std.fmt.allocPrint(self.allocator, name_fmt, name_args);
@@ -147,19 +145,19 @@ const TestContext = struct {
 
         const in_key = try std.fmt.allocPrint(self.allocator, "{s}.in", .{name});
         defer self.allocator.free(in_key);
-        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key, self.sharding);
+        var in_buffer = try self.loadBufferFromStore(in_key);
         defer in_buffer.deinit();
         const in_tensor = zml.Tensor.fromShape(in_buffer.shape()).withTags(tagz);
 
         const out_key = try std.fmt.allocPrint(self.allocator, "{s}.out", .{name});
         defer self.allocator.free(out_key);
-        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
+        var out_buffer_expected = try self.loadBufferFromStore(out_key);
         defer out_buffer_expected.deinit();
 
         const exe = if (comptime @TypeOf(layer) == model.TokenEmbedding)
-            try self.platform.compileFn(self.allocator, self.io, model.TokenEmbedding.forward, .{.{ .embedding = layer, .tokens = in_tensor }}, .{ .shardings = &.{self.sharding} })
+            try self.platform.compileFn(self.allocator, self.io, model.TokenEmbedding.forward, .{.{ .embedding = layer, .tokens = in_tensor }}, .{})
         else
-            try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .shardings = &.{self.sharding} });
+            try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{});
         defer exe.deinit();
 
         var args = try exe.args(self.allocator);
@@ -300,19 +298,19 @@ const TestContext = struct {
         try zml.testing.expectClose(self.io, out_result, out_buffer_expected, opts);
         std.log.info("Layer {s} passed!", .{name});
     }
+
+    fn loadBufferFromStore(self: *const TestContext, key: []const u8) !zml.Buffer {
+        const shape = self.activations_store.view().getShape(key) orelse return error.NotFound;
+
+        const host_bytes = try self.allocator.alloc(u8, shape.byteSize());
+        defer self.allocator.free(host_bytes);
+
+        var io_buffer: [8 * 1024]u8 = undefined;
+        var reader = try self.activations_store.view().getReader(key, self.io, &io_buffer);
+        defer reader.deinit();
+
+        _ = try reader.interface.readSliceAll(host_bytes);
+
+        return zml.Buffer.fromBytes(self.io, self.platform, shape, .replicated(shape), host_bytes);
+    }
 };
-
-fn loadBufferFromStore(allocator: std.mem.Allocator, io: anytype, platform: *zml.Platform, store: *zml.io.TensorStore, key: []const u8, sharding: zml.Sharding) !zml.Buffer {
-    const shape = store.view().getShape(key) orelse return error.NotFound;
-
-    const host_bytes = try allocator.alloc(u8, shape.byteSize());
-    defer allocator.free(host_bytes);
-
-    var io_buffer: [8 * 1024]u8 = undefined;
-    var reader = try store.view().getReader(key, io, &io_buffer);
-    defer reader.deinit();
-
-    _ = try reader.interface.readSliceAll(host_bytes);
-
-    return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
-}

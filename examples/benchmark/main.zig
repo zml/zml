@@ -5,7 +5,7 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
-    return a.dot(b, .k).withPartitioning(.{ .m = .m, .n = .replicated });
+    return a.dot(b, .k).withPartitioning(.benchmark_mesh, .{ .m = .m, .n = .replicated });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -26,34 +26,31 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    const benchmark_sharding: zml.Sharding = try platform.registerSharding("benchmark_mesh", .mesh(
+    _ = try platform.registerSharding(.my_mesh, .mesh(
         .{ .m = .low_bandwidth, .n = .high_bandwidth },
     ));
 
     const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);
 
-    const a_shape = zml.Shape.init(.{ .m = cli_args.size, .k = cli_args.size }, cli_args.dtype)
-        .withPartitioning(.{ .m = .m, .k = .replicated });
-    const b_shape = zml.Shape.init(.{ .k = cli_args.size, .n = cli_args.size }, cli_args.dtype)
-        .withPartitioning(.{ .k = .replicated, .n = .n });
-
-    const a: zml.Tensor = .fromShape(a_shape);
-    const b: zml.Tensor = .fromShape(b_shape);
+    const a = zml.Tensor.init(.{ .m = cli_args.size, .k = cli_args.size }, cli_args.dtype)
+        .withPartitioning(.my_mesh, .{ .m = .m, .k = .replicated });
+    const b = zml.Tensor.init(.{ .k = cli_args.size, .n = cli_args.size }, cli_args.dtype)
+        .withPartitioning(.my_mesh, .{ .k = .replicated, .n = .n });
 
     var exe = blk: {
         log.info("⏱️ Compiling benchmark...", .{});
         const now: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Compiled benchmark [{f}]", .{now.untilNow(io, .awake)});
-        break :blk try platform.compileFn(allocator, io, benchmark, .{ a, b }, .{ .shardings = &.{benchmark_sharding} });
+        break :blk try platform.compileFn(allocator, io, benchmark, .{ a, b }, .{});
     };
     defer exe.deinit();
 
     var rng = std.Random.DefaultPrng.init(0);
     const random = rng.random();
 
-    var a_buffer = try createRandomBuffer(allocator, io, platform, a.shape(), benchmark_sharding, random);
+    var a_buffer = try createRandomBuffer(allocator, io, platform, a.shape(), a.partitioning(), random);
     defer a_buffer.deinit();
-    var b_buffer = try createRandomBuffer(allocator, io, platform, b.shape(), benchmark_sharding, random);
+    var b_buffer = try createRandomBuffer(allocator, io, platform, b.shape(), b.partitioning(), random);
     defer b_buffer.deinit();
 
     var exe_args = try exe.args(allocator);
@@ -96,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
-fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: zml.Sharding, random: std.Random) !zml.Buffer {
+fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: zml.Sharding.Partitioning, random: std.Random) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
     defer slice.free(allocator);
 

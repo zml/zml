@@ -274,7 +274,7 @@ fn compileEmbed(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
 fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardSelfAttn) {
     return compileExe(allocator, io, platform, model.TransformerLayer.forwardSelfAttn, .{.{
         .layer = mdl.text_model.layers[layer_index],
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.shardings.model),
         .token_index = zml.Tensor.init(.{}, .u32),
         .cache = .{
             .k = parameters.kv_cache.self_attn.k,
@@ -289,7 +289,7 @@ fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *con
 fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardLinearAttn) {
     return compileExe(allocator, io, platform, model.TransformerLayer.forwardLinearAttn, .{.{
         .layer = mdl.text_model.layers[layer_index],
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.shardings.model),
         .active_length = zml.Tensor.init(.{}, .u32),
         .cache = .{
             .conv_state = parameters.kv_cache.gated_delta_net.conv_state,
@@ -304,7 +304,7 @@ fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *c
 fn compileSample(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.Sampler.sampleTokens) {
     return compileExe(allocator, io, platform, model.Sampler.sampleTokens, .{.{
         .sampler = mdl.text_model.sampler(),
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.shardings.model),
         .rng = parameters.rng,
         .token_index = zml.Tensor.init(.{}, .u32),
     }}, parameters, progress, phase, "sampling");
@@ -334,11 +334,11 @@ fn compileExe(
     }, args);
 }
 
-fn hiddenTensor(mdl: model.Model, seqlen: usize) zml.Tensor {
+fn hiddenTensor(mdl: model.Model, seqlen: usize, sharding: zml.Sharding) zml.Tensor {
     return .fromShape(zml.Shape.init(
         .{ .b = 1, .s = seqlen, .d = mdl.config.text_config.hidden_size },
         mdl.text_model.embed_tokens.weight.dtype(),
-    ).withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .replicated }));
+    ).withPartitioning(sharding, .{ .b = .replicated, .s = .replicated, .d = .replicated }));
 }
 
 fn findFirstLayerIndex(layer_types: []const model.LayerType, target: model.LayerType) ?usize {

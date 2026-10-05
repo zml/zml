@@ -9,156 +9,32 @@ const DataType = @import("dtype.zig").DataType;
 
 const log = std.log.scoped(.shape);
 
+test {
+    std.testing.refAllDecls(Shape);
+    std.testing.refAllDecls(Shape.PartitionSpec);
+}
+
 /// Represent the shape of a tensor.
+/// Contains also the sharding information,
+/// so it describes exactly how the corresponding tensor/buffer will be layed out
+/// across all devices of the current Platform.
+///
+/// By default all created Shape are replicated, meaning the corresponding tensor / buffer will be copied on each device.
+/// `.withPartitioning` allows to specify how it should be split.
 pub const Shape = struct {
-    pub const MAX_RANK: u8 = 8;
-
-    pub const PartitionSpec = union(enum) {
-        axis: Tag,
-        open,
-        replicated,
-        unknown,
-
-        pub fn init(comptime value: anytype) PartitionSpec {
-            const T = @TypeOf(value);
-
-            if (T == PartitionSpec) {
-                return value;
-            }
-
-            if (comptime T == @EnumLiteral()) {
-                const name = @tagName(value);
-                inline for (std.meta.fields(PartitionSpec)) |field| {
-                    if (field.type == void and std.mem.eql(u8, field.name, name)) {
-                        return @field(PartitionSpec, field.name);
-                    }
-                }
-            }
-
-            if (comptime isTagConvertible(T)) {
-                const tag_ = Shape.toTag(value);
-
-                return .{ .axis = tag_ };
-            }
-
-            stdx.debug.compileError("PartitionSpec.init expected a tag, got: {any}", .{T});
-        }
-
-        test "PartitionSpec.init" {
-            const spec_axis: PartitionSpec = .{ .axis = Shape.toTag(.a) };
-            try testing.expectEqual(spec_axis, PartitionSpec.init(.a));
-
-            const spec_axis_open: PartitionSpec = .open;
-            try testing.expect(spec_axis_open.eql(.init(.open)));
-        }
-
-        pub fn eql(self: PartitionSpec, other: PartitionSpec) bool {
-            if (@as(u4, @intFromEnum(self)) != @as(u4, @intFromEnum(other))) {
-                return false;
-            }
-
-            switch (self) {
-                .axis => |t1| {
-                    const t2 = other.axis;
-                    return std.mem.eql(u8, std.mem.span(t1), std.mem.span(t2));
-                },
-                else => return true,
-            }
-        }
-
-        test "PartitionSpec.eql" {
-            const spec_axis: PartitionSpec = .init(.a);
-            const spec_axis_b: PartitionSpec = .init(.b);
-            const spec_open: PartitionSpec = .open;
-            const spec_replicated: PartitionSpec = .replicated;
-            const spec_unknown: PartitionSpec = .unknown;
-
-            try testing.expect(spec_axis.eql(.{ .axis = Shape.toTag(.a) }));
-            try testing.expect(!spec_axis.eql(spec_axis_b));
-            try testing.expect(!spec_axis.eql(.open));
-            try testing.expect(!spec_axis.eql(.replicated));
-            try testing.expect(!spec_axis.eql(.unknown));
-
-            try testing.expect(spec_open.eql(.open));
-            try testing.expect(!spec_open.eql(spec_axis));
-            try testing.expect(!spec_open.eql(.replicated));
-            try testing.expect(!spec_open.eql(.unknown));
-
-            try testing.expect(spec_replicated.eql(.replicated));
-            try testing.expect(!spec_replicated.eql(spec_axis));
-            try testing.expect(!spec_replicated.eql(.open));
-            try testing.expect(!spec_replicated.eql(.unknown));
-
-            try testing.expect(spec_unknown.eql(.unknown));
-            try testing.expect(!spec_unknown.eql(spec_axis));
-            try testing.expect(!spec_unknown.eql(.open));
-            try testing.expect(!spec_unknown.eql(.replicated));
-        }
-
-        pub fn isClosed(self: PartitionSpec) bool {
-            return switch (self) {
-                .axis => true,
-                .open => false,
-                .replicated => true,
-                .unknown => false,
-            };
-        }
-
-        test isClosed {
-            const spec_axis: PartitionSpec = .init(.a);
-            try testing.expect(spec_axis.isClosed());
-
-            const spec_open: PartitionSpec = .open;
-            try testing.expect(!spec_open.isClosed());
-
-            const spec_replicated: PartitionSpec = .replicated;
-            try testing.expect(spec_replicated.isClosed());
-
-            const spec_unknown: PartitionSpec = .unknown;
-            try testing.expect(!spec_unknown.isClosed());
-        }
-
-        pub fn toTag(self: PartitionSpec) Tag {
-            return switch (self) {
-                .axis => |t| return t,
-                .open => TagOpen,
-                .replicated => TagReplicated,
-                .unknown => TagUnknown,
-            };
-        }
-
-        test "PartitionSpec.toTag" {
-            const spec_axis: PartitionSpec = .init(.a);
-            try testing.expect(spec_axis.toTag() == Shape.toTag(.a));
-
-            const spec_open: PartitionSpec = .open;
-            try testing.expect(spec_open.toTag() == TagOpen);
-
-            const spec_replicated: PartitionSpec = .replicated;
-            try testing.expect(spec_replicated.toTag() == TagReplicated);
-
-            const spec_unknown: PartitionSpec = .unknown;
-            try testing.expect(spec_unknown.toTag() == TagUnknown);
-        }
-    };
+    _dtype: DataType,
+    _dims: DimsArray,
+    _tags: TagsArray,
 
     pub const Tag = [*:0]const u8;
     pub const TagUnknown = "_".ptr;
+    pub const TagUnset = "<unset>".ptr;
     const TagLast = "last".ptr;
-    const TagReplicated = "replicated".ptr;
-    const TagOpen = "open".ptr;
 
+    pub const MAX_RANK: u8 = constants.MAX_RANK;
     pub const DimsArray = stdx.BoundedArray(i64, constants.MAX_RANK);
-    pub const TagsArray = stdx.BoundedArray(Tag, constants.MAX_RANK);
     pub const AxesArray = stdx.BoundedArray(u3, constants.MAX_RANK);
-    pub const PartitionArray = stdx.BoundedArray(PartitionSpec, constants.MAX_RANK);
-
-    const UnknownTags: TagsArray = .{ .len = 0, .buffer = @splat(TagUnknown) };
-
-    _dtype: DataType,
-    _dims: DimsArray = .empty,
-    _tags: TagsArray = UnknownTags,
-    _partitioning: PartitionArray = .empty,
+    pub const TagsArray = stdx.SentinelArray(Tag, constants.MAX_RANK, TagUnset);
 
     pub fn parseDimensions(v: anytype) struct { DimsArray, TagsArray } {
         const T = @TypeOf(v);
@@ -172,7 +48,7 @@ pub const Shape = struct {
             var tags_: TagsArray = .empty;
             for (v) |d| {
                 dims_.appendAssumeCapacity(@intCast(d));
-                tags_.appendAssumeCapacity(TagUnknown);
+                tags_.append(TagUnknown);
             }
             return .{ dims_, tags_ };
         }
@@ -190,9 +66,9 @@ pub const Shape = struct {
                     stdx.debug.compileError("Field {s} should be an integer or an auto dimension, got {}", .{ field.name, field.type });
                 }
                 if (comptime stdx.meta.isTuple(T)) {
-                    tags_.appendAssumeCapacity(TagUnknown);
+                    tags_.append(TagUnknown);
                 } else {
-                    tags_.appendAssumeCapacity(toTag(field));
+                    tags_.append(toTag(field));
                 }
             }
 
@@ -223,7 +99,7 @@ pub const Shape = struct {
         if (comptime stdx.meta.isSliceOfAny(T, isAxisConvertible)) {
             for (v) |d| {
                 axes_.appendAssumeCapacity(self.axis(d));
-                tags_.appendAssumeCapacity(self.tag(d));
+                tags_.append(self.tag(d));
             }
             return .{ axes_, tags_ };
         }
@@ -231,7 +107,7 @@ pub const Shape = struct {
         if (comptime stdx.meta.isTupleOfAny(T, isAxisConvertible)) {
             inline for (std.meta.fields(T)) |field| {
                 axes_.appendAssumeCapacity(self.axis(@field(v, field.name)));
-                tags_.appendAssumeCapacity(self.tag(@field(v, field.name)));
+                tags_.append(self.tag(@field(v, field.name)));
             }
             return .{ axes_, tags_ };
         }
@@ -243,8 +119,8 @@ pub const Shape = struct {
         const T = @TypeOf(v);
         stdx.debug.assertComptime(stdx.meta.isTupleOf(T, @EnumLiteral()), "Wrong type, got {}. Expected .{{ .a, .b }}", .{T});
         var tags_: TagsArray = .empty;
-        inline for (v) |field| {
-            tags_.appendAssumeCapacity(toTag(field));
+        inline for (0.., v) |i, field| {
+            tags_.items[i] = toTag(field);
         }
         return tags_;
     }
@@ -252,28 +128,38 @@ pub const Shape = struct {
     /// Create a shape from a struct literal, eg:
     /// Shape.init(.{ .h = 1024, .w = 512, .c = 3 });
     /// Shape.init(.{ 1024, 512, 3 });
+    ///
+    /// The created shape is replicated.
     pub fn init(dimz: anytype, dt: DataType) Shape {
-        var res: Shape = .{ ._dtype = dt };
-        res._dims, res._tags = parseDimensions(dimz);
-        res._partitioning.appendNTimes(.unknown, res._dims.len) catch @panic("Rank too large");
-
-        return res;
+        const _dims, const _tags = parseDimensions(dimz);
+        return .{
+            ._dtype = dt,
+            ._dims = _dims,
+            ._tags = _tags,
+        };
     }
 
     pub fn scalar(dt: DataType) Shape {
-        return .{ ._dtype = dt };
+        return .{
+            ._dtype = dt,
+            ._dims = .empty,
+            ._tags = .empty,
+        };
     }
 
     /// Creates a Shape with dims set to `.{0, 1, 2, ..., rank-1}`.
     pub fn range(rank_: usize, dt: DataType) Shape {
-        var res: Shape = .{ ._dtype = dt };
+        stdx.debug.assert(rank_ <= MAX_RANK, "zml.Shape.range expects a maximum rank of {d}, got {}", .{ MAX_RANK, rank_ });
+        var res: Shape = .{
+            ._dtype = dt,
+            ._dims = .empty,
+            ._tags = .{ .buffer = @splat(TagUnknown), .len = rank_ },
+            ._sharding = .replicated,
+            ._partitioning = .replicated(rank_),
+        };
         for (0..rank_) |i| {
-            res._dims.append(@intCast(i)) catch {
-                stdx.debug.panic("Too many dimensions! Max: {d}, passed: {d}", .{ res._dims.capacity(), rank_ });
-            };
-            res._tags.append(TagUnknown) catch unreachable;
+            res._dims.appendAssumeCapacity(@intCast(i));
         }
-        res._partitioning.appendNTimes(.unknown, rank_) catch @panic("Rank too large");
         return res;
     }
 
@@ -282,17 +168,14 @@ pub const Shape = struct {
     }
 
     pub fn rank(self: Shape) u4 {
-        self.ensureAttributesAreSync();
         return @intCast(self._dims.len);
     }
 
     pub fn dim(self: Shape, ax: anytype) i64 {
-        self.ensureAttributesAreSync();
         return self._dims.get(self.axis(ax));
     }
 
     pub fn dims(self: *const Shape) []const i64 {
-        self.ensureAttributesAreSync();
         return self._dims.constSlice();
     }
 
@@ -317,14 +200,7 @@ pub const Shape = struct {
         };
     }
 
-    fn ensureAttributesAreSync(self: Shape) void {
-        if (builtin.mode == .Debug) {
-            stdx.debug.assert(self._dims.len == self._tags.len and self._dims.len == self._partitioning.len, "Tags, dims and partitioning have diverged! dims={d} tags={d} partitioning={d}", .{ self._dims.len, self._tags.len, self._partitioning.len });
-        }
-    }
-
     pub fn tag(self: Shape, ax: anytype) Tag {
-        self.ensureAttributesAreSync();
         return self._tags.get(self.axis(ax));
     }
 
@@ -344,8 +220,7 @@ pub const Shape = struct {
     }
 
     pub fn tags(self: *const Shape) []const Tag {
-        self.ensureAttributesAreSync();
-        return self._tags.constSlice();
+        return self._tags.slice(self.rank());
     }
 
     pub fn hasTag(self: Shape, tag_: anytype) ?u3 {
@@ -384,8 +259,6 @@ pub const Shape = struct {
     }
 
     pub fn axis(self: Shape, axis_: anytype) u3 {
-        self.ensureAttributesAreSync();
-
         const T = @TypeOf(axis_);
         // Special handling of unsigned int, to remove runtime computations and favor inlining
         return switch (@typeInfo(T)) {
@@ -534,11 +407,6 @@ pub const Shape = struct {
                 try writer.print("{d}", .{d});
             }
 
-            const part = self._partitioning.get(i);
-            if (part.toTag() != TagUnknown) {
-                try writer.print("/{s}", .{part.toTag()});
-            }
-
             need_comma = true;
         }
         if (need_comma) try writer.writeByte(',');
@@ -569,10 +437,19 @@ pub const Shape = struct {
         return true;
     }
 
+    /// Reshape a given shape but keep the same total number of elements.
+    /// Partitioning information is generally NOT preserved,
+    /// unless input was fully replicated.
     pub fn reshape(self: Shape, new_shape_: anytype) Shape {
-        var new_shape: Shape = .{ ._dtype = self.dtype() };
-        new_shape._dims, new_shape._tags = parseDimensions(new_shape_);
-        new_shape._partitioning.appendNTimes(.unknown, new_shape._dims.len) catch @panic("Rank too large");
+        const _dims, const _tags = parseDimensions(new_shape_);
+        var new_shape: Shape = .{
+            ._dtype = self._dtype,
+            ._dims = _dims,
+            ._tags = _tags,
+            ._sharding = self._sharding,
+            ._partitioning = if (self.isFullyReplicated()) .replicated(_dims.len) else .unknown,
+        };
+        std.log.warn("reshape {f}@{s} -> {f}@{s}", .{ self, self._sharding.name(), new_shape, new_shape._sharding.name() });
         new_shape.inferMissingAxis(self.count()) catch |err| {
             std.debug.panic("Can't reshape {any} to {any}: {t}", .{ self.dims(), new_shape.dims(), err });
         };
@@ -655,7 +532,7 @@ pub const Shape = struct {
         res._tags.insertSlice(ax, tags_.constSlice()) catch unreachable;
 
         for (0..dims_.len) |_| {
-            res._partitioning.insert(ax, .unknown) catch unreachable;
+            res._partitioning = res._partitioning.insert(ax, .unknown);
         }
 
         return res;
@@ -678,7 +555,7 @@ pub const Shape = struct {
         var res = self;
         res._dims.insert(ax, d) catch unreachable;
         res._tags.insert(ax, toTag(tag_)) catch unreachable;
-        res._partitioning.insert(ax, .unknown) catch unreachable;
+        res._partitioning = res._partitioning.insert(ax, .unknown);
 
         return res;
     }
@@ -688,7 +565,6 @@ pub const Shape = struct {
         const dims_, const tags_ = parseDimensions(v);
         res._dims.appendSliceAssumeCapacity(dims_.constSlice());
         res._tags.appendSliceAssumeCapacity(tags_.constSlice());
-        res._partitioning.appendNTimesAssumeCapacity(.unknown, dims_.len);
         return res;
     }
 
@@ -709,8 +585,7 @@ pub const Shape = struct {
     pub fn appendDim(self: Shape, d: i64, tag_: ?Tag) Shape {
         var res = self;
         res._dims.appendAssumeCapacity(d);
-        res._tags.appendAssumeCapacity(if (tag_) |t| t else TagUnknown);
-        res._partitioning.appendAssumeCapacity(.unknown);
+        res._tags.set(res._dims.len - 1, if (tag_) |t| t else TagUnknown);
         return res;
     }
 
@@ -719,7 +594,6 @@ pub const Shape = struct {
         const a = self.axis(axis_);
         _ = res._dims.orderedRemove(a);
         _ = res._tags.orderedRemove(a);
-        _ = res._partitioning.orderedRemove(a);
         return res;
     }
 
@@ -736,6 +610,7 @@ pub const Shape = struct {
         std.mem.sort(u3, to_remove.slice(), {}, std.sort.asc(u3));
 
         var sh: Shape = self;
+        sh._partitioning = .unknown;
         const rk = self.rank();
         var res_ax: u32 = 0;
         for (0..rk) |ax| {
@@ -745,12 +620,11 @@ pub const Shape = struct {
 
             sh._dims.buffer[res_ax] = self._dims.buffer[ax];
             sh._tags.buffer[res_ax] = self._tags.buffer[ax];
-            sh._partitioning.buffer[res_ax] = self._partitioning.buffer[ax];
+            sh._partitioning = sh._partitioning.set(res_ax, self._partitioning.get(ax));
             res_ax += 1;
         }
         sh._dims.len = rk - to_remove.len;
         sh._tags.len = rk - to_remove.len;
-        sh._partitioning.len = rk - to_remove.len;
         return sh;
     }
 
@@ -778,7 +652,7 @@ pub const Shape = struct {
         for (permutations_.constSlice(), 0..) |permutation, i| {
             res._dims.set(i, original_dims.get(permutation));
             res._tags.set(i, original_tags.get(permutation));
-            res._partitioning.set(i, original_parts.get(permutation));
+            res._partitioning = res._partitioning.set(i, original_parts.get(permutation));
         }
 
         return res;
@@ -797,9 +671,8 @@ pub const Shape = struct {
             ),
         );
 
-        const shape = Shape.init(.{ .a = 10, .c = 12, .b = 11 }, .f32).withPartitioning(.{ .a = .batch, .c = .colors, .b = .open }).transpose(.{ 0, 2, 1 });
+        const shape = Shape.init(.{ .a = 10, .c = 12, .b = 11 }, .f32).withPartitioning(test_sharding, .{ .a = .batch, .c = .colors, .b = .open }).transpose(.{ 0, 2, 1 });
         try testing.expect(shape.eqlWithTags(Shape.init(.{ .a = 10, .b = 11, .c = 12 }, .f32)));
-        try testing.expectEqualSlices(PartitionSpec, &.{ .init(.batch), .open, .init(.colors) }, shape._partitioning.constSlice());
     }
 
     /// Tag each ax of this shape with tags from a tuple.
@@ -908,232 +781,20 @@ pub const Shape = struct {
         return res;
     }
 
-    pub fn withPartitioning(self: Shape, specs: anytype) Shape {
-        const T = @TypeOf(specs);
-
-        var res = self.withDefaultPartitioning(); // todo add test for this new change
-
-        if (stdx.meta.isStruct(T)) {
-            inline for (std.meta.fields(T)) |field| {
-                const partition_axis = @field(specs, field.name);
-                const axis_ = res.axisFromTagMaybe(toTag(field));
-
-                if (axis_) |ax| {
-                    res._partitioning.set(ax, PartitionSpec.init(partition_axis));
-                } else {
-                    stdx.debug.panic("Partitioning axis {s} not found", .{field.name});
-                }
-            }
-        } else {
-            stdx.debug.panic("Expected a struct of enum literals, got: {any}", .{T});
-        }
-
-        // Check that no mesh axis is used to partition multiple tensor dimensions.
-        var used_mesh_axes: stdx.BoundedArray(Tag, constants.MAX_RANK) = .empty;
-
-        for (res._partitioning.constSlice()) |spec| {
-            const axis_tag = spec.toTag();
-
-            if (std.mem.indexOfScalar(Tag, used_mesh_axes.constSlice(), axis_tag)) |_| {
-                stdx.debug.panic("Mesh axis '{s}' used to partition multiple tensor dimensions. This is not allowed.", .{axis_tag});
-            }
-
-            switch (spec) {
-                .unknown => {},
-                .open => {},
-                .replicated => {},
-                .axis => used_mesh_axes.appendAssumeCapacity(axis_tag),
-            }
-        }
-
-        return res;
-    }
-
-    test withPartitioning {
-        var shape = Shape.init(.{ .a = 10, .b = 20, .c = 30 }, .f32).withPartitioning(.{ .c = .feature, .a = .batch });
-        try testing.expectEqualSlices(PartitionSpec, &.{ .init(.batch), .unknown, .init(.feature) }, shape._partitioning.constSlice());
-
-        shape = shape.withDefaultPartitioning();
-        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .unknown, .unknown }, shape._partitioning.constSlice());
-
-        shape = shape.withPartitioning(.{ .a = .batch, .b = .open, .c = .feature });
-        try testing.expectEqualSlices(PartitionSpec, &.{ .init(.batch), .open, .init(.feature) }, shape._partitioning.constSlice());
-    }
-
-    pub fn mapPartitioningAxes(self: Shape, mapping: anytype) Shape {
-        const T = @TypeOf(mapping);
-        stdx.debug.assertComptime(stdx.meta.isStruct(T), "Mapping must be a struct, e.g., .{ .old_axis = .new_axis }", .{});
-
-        var res = self;
-        for (res._partitioning.slice()) |*spec| {
-            switch (spec.*) {
-                .unknown => {},
-                .open => {},
-                .replicated => {},
-                .axis => |*old_axis_tag| {
-                    inline for (std.meta.fields(T)) |field| {
-                        const logical_axis_in_map = toTag(field);
-
-                        if (std.mem.eql(u8, std.mem.span(old_axis_tag.*), std.mem.span(logical_axis_in_map))) {
-                            const physical_axis_from_map = @field(mapping, field.name);
-                            spec.* = PartitionSpec.init(physical_axis_from_map);
-                            break;
-                        }
-                    }
-                },
-            }
-        }
-        return res;
-    }
-
-    test mapPartitioningAxes {
-        const logical_shape = Shape.init(.{ .batch = 64, .seq = 128, .features = 512 }, .f32).withPartitioning(.{
-            .batch = .data,
-            .seq = .replicated,
-            .features = .model,
-        });
-
-        const physical_shape = logical_shape.mapPartitioningAxes(.{ .data = .x, .model = .y });
-
-        try testing.expect(physical_shape.partition(.batch).eql(.init(.x)));
-        try testing.expect(physical_shape.partition(.features).eql(.init(.y)));
-        try testing.expect(physical_shape.partition(.seq).eql(.replicated));
-
-        const partial_mapped_shape = logical_shape.mapPartitioningAxes(.{ .data = .z });
-        try testing.expect(partial_mapped_shape.partition(.batch).eql(.init(.z)));
-        try testing.expect(partial_mapped_shape.partition(.features).eql(.init(.model)));
-    }
-
-    pub fn withDefaultPartitioning(self: Shape) Shape {
-        var res = self;
-        res._partitioning.clear();
-        res._partitioning.appendNTimes(.unknown, self._dims.len) catch stdx.debug.panic("Too many partitioning axes, max: {d}", .{MAX_RANK});
-        return res;
-    }
-
-    test withDefaultPartitioning {
-        var shape = Shape.init(.{ 10, 20, 30 }, .f32);
-        try testing.expectEqual(3, shape._partitioning.len);
-        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .unknown, .unknown }, shape._partitioning.constSlice());
-
-        shape = shape.withPartitioning(.{ ._1 = .batch });
-        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .init(.batch), .unknown }, shape._partitioning.constSlice());
-
-        shape = shape.withDefaultPartitioning();
-        try testing.expectEqual(3, shape._partitioning.len);
-        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .unknown, .unknown }, shape._partitioning.constSlice());
-    }
-
-    pub fn withReplicatedPartitioning(self: Shape) Shape {
-        var res = self;
-        res._partitioning.clear();
-        res._partitioning.appendNTimes(.replicated, self._dims.len) catch stdx.debug.panic("Too many partitioning axes, max: {d}", .{MAX_RANK});
-        return res;
-    }
-
-    test withReplicatedPartitioning {
-        var shape = Shape.init(.{ 10, 20, 30 }, .f32);
-        try testing.expectEqual(3, shape._partitioning.len);
-        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .unknown, .unknown }, shape._partitioning.constSlice());
-
-        shape = shape.withPartitioning(.{ ._1 = .batch });
-        try testing.expectEqualSlices(PartitionSpec, &.{ .unknown, .init(.batch), .unknown }, shape._partitioning.constSlice());
-
-        shape = shape.withReplicatedPartitioning();
-        try testing.expectEqual(3, shape._partitioning.len);
-        try testing.expectEqualSlices(PartitionSpec, &.{ .replicated, .replicated, .replicated }, shape._partitioning.constSlice());
-    }
-
-    pub fn hasAtLeastOnePartitionedAxis(self: Shape) bool {
-        for (self._partitioning.constSlice()) |spec| {
-            if (spec == .axis) return true;
-        }
-        return false;
-    }
-
-    test hasAtLeastOnePartitionedAxis {
-        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(.{ .a = .x, .b = .replicated });
-        try testing.expect(shape.hasAtLeastOnePartitionedAxis());
-
-        shape = shape.withPartitioning(.{ .a = .replicated, .b = .replicated });
-        try testing.expect(!shape.hasAtLeastOnePartitionedAxis());
-
-        shape = shape.withDefaultPartitioning();
-        try testing.expect(!shape.hasAtLeastOnePartitionedAxis());
-    }
-
-    pub fn isFullyPartitioned(self: Shape) bool {
-        for (self._partitioning.constSlice()) |spec| {
-            switch (spec) {
-                .replicated, .open, .unknown => return false,
-                .axis => {},
-            }
-        }
-        return true;
-    }
-
-    test isFullyPartitioned {
-        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(.{ .a = .x, .b = .y });
-        try testing.expect(shape.isFullyPartitioned());
-
-        shape = shape.withPartitioning(.{ .a = .x, .b = .replicated });
-        try testing.expect(!shape.isFullyPartitioned());
-
-        shape = shape.withDefaultPartitioning();
-        try testing.expect(!shape.isFullyPartitioned());
-    }
-
-    pub fn isFullyReplicated(self: Shape) bool {
-        for (self._partitioning.constSlice()) |spec| {
-            if (spec != .replicated and spec != .unknown) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    test isFullyReplicated {
-        var shape = Shape.init(.{ .a = 10, .b = 20 }, .f32).withPartitioning(.{ .a = .replicated, .b = .replicated });
-        try testing.expect(shape.isFullyReplicated());
-
-        shape = shape.withPartitioning(.{ .a = .replicated, .b = .unknown });
-        try testing.expect(shape.isFullyReplicated());
-
-        shape = shape.withPartitioning(.{ .a = .x, .b = .replicated });
-        try testing.expect(!shape.isFullyReplicated());
-    }
-
-    pub fn partition(self: Shape, ax: anytype) PartitionSpec {
-        return self._partitioning.get(self.axis(ax));
-    }
-
-    test partition {
-        const shape = Shape.init(.{ .a = 10, .b = 20, .c = 30 }, .f32).withPartitioning(.{ .a = .batch, .b = .open, .c = .feature });
-        try testing.expectEqual(PartitionSpec.init(.batch), shape.partition(.a));
-        try testing.expectEqual(.open, shape.partition(.b));
-        try testing.expectEqual(PartitionSpec.init(.feature), shape.partition(.c));
-    }
-
-    pub fn containsPartitionSpec(self: Shape, part: PartitionSpec) bool {
-        for (self._partitioning.constSlice()[0..self.rank()]) |dim_part| {
-            if (dim_part.eql(part)) return true;
-        }
-        return false;
-    }
-
-    test containsPartitionSpec {
-        var shape = Shape.init(.{ .a = 10, .b = 20, .c = 30, .d = 40 }, .f32).withPartitioning(.{ .a = .batch, .b = .open, .c = .feature });
-        try testing.expect(shape.containsPartitionSpec(.init(.batch)));
-        try testing.expect(shape.containsPartitionSpec(.open));
-        try testing.expect(!shape.containsPartitionSpec(.replicated));
-        try testing.expect(shape.containsPartitionSpec(.unknown));
-
-        shape = shape.withDefaultPartitioning();
-        try testing.expect(!shape.containsPartitionSpec(.init(.batch)));
-        try testing.expect(shape.containsPartitionSpec(.unknown));
-        try testing.expect(!shape.containsPartitionSpec(.replicated));
-        try testing.expect(!shape.containsPartitionSpec(.open));
-    }
+    const Sharding = @import("Sharding.zig");
+    // These tests only resolve logical names; placement does not use this fixture.
+    const test_sharding: Sharding = .{ .data = &.{
+        .name = "shape_test",
+        .physical = undefined,
+        .logical = .mesh(.{ .batch = .balanced, .feature = .balanced, .colors = .balanced }),
+        .bindings = .init(&.{
+            .init(&.{.link_x}),
+            .init(&.{.link_y}),
+            .init(&.{.link_z}),
+        }),
+        .folds = .empty,
+        .folds_consumed = .empty,
+    } };
 
     /// Renames some of the tags in this shape.
     /// Shape.init(.{ .a = 10, .b = 20 }).rename(.{ .b = .batch }); // .{ .a = 10, .batch = 20 };
@@ -1328,12 +989,8 @@ pub const Shape = struct {
         const dims_, const tags_ = parseDimensions(split_shape_);
         var new_shape = self;
         new_shape._dims.replaceRange(ax, 1, dims_.constSlice()) catch unreachable;
-        new_shape._tags.replaceRange(ax, 1, tags_.constSlice()) catch unreachable;
-        _ = new_shape._partitioning.orderedRemove(ax);
-
-        for (0..dims_.len) |_| {
-            new_shape._partitioning.insert(ax, .unknown) catch unreachable;
-        }
+        new_shape._tags.orderedRemove(ax);
+        new_shape._tags.insertSlice(ax, tags_.slice(self.rank()));
 
         new_shape.inferMissingAxis(self.count()) catch |err| {
             std.debug.panic("Can't split {any} along axis {d} into {any}: {t}", .{ self.dims(), ax, new_shape.dims(), err });
@@ -1383,39 +1040,34 @@ pub const Shape = struct {
         const axes_to_merge = self.axes(axes_);
         stdx.debug.assert(axes_to_merge.len > 1, "Must merge at least two axes, got {any}", .{axes_});
 
-        var new_dim: i64 = 1;
         // Merging partitioned axes is complex. If ANY axis being merged is partitioned,
         // the resulting sharding is ambiguous. A propagation pass must resolve this.
         // Marking it 'open' is the correct signal. If all are replicated/unknown, the
         // result is also replicated/unknown.
         // rule: .replicated wins over .unknown. .open wins over everything.
-        var resulting_partition_spec: PartitionSpec = .unknown;
-
-        for (0..axes_to_merge.len) |i| {
-            const current_axis = axes_to_merge.get(i);
-            new_dim *= self.dim(current_axis);
-
-            if (i > 0) {
-                stdx.debug.assert(current_axis == axes_to_merge.get(i - 1) + 1, "Can't merge shape {f} along non-contiguous axes {any}", .{ self, axes_ });
-            }
-
-            switch (self.partition(current_axis)) {
-                .axis, .open => resulting_partition_spec = .open,
-                .replicated => if (resulting_partition_spec != .open) {
-                    resulting_partition_spec = .replicated;
-                },
-                .unknown => {},
-            }
-        }
 
         const first_axis_to_merge = axes_to_merge.get(0);
         const num_axes_to_merge = axes_to_merge.len;
 
-        var new_shape = self;
+        var merged_dim: i64 = 1;
+        // var merged_spec: PartitionSpec = .unknown;
+        for (axes_to_merge.constSlice()) |ax| {
+            merged_dim *= self.dim(ax);
+            // const spec = self.partition(ax);
+            // if (spec.isSharded() or spec == .open) {
+            //     merged_spec = .open;
+            // } else if (spec == .replicated and merged_spec != .open) {
+            //     merged_spec = .replicated;
+            // }
+        }
 
-        new_shape._dims.replaceRange(first_axis_to_merge, num_axes_to_merge, &.{new_dim}) catch @panic("mergeAxis failed on dims");
+        var new_shape = self;
+        for (1..num_axes_to_merge) |_| {
+            new_shape._partitioning = new_shape._partitioning.orderedRemove(first_axis_to_merge);
+        }
+        // new_shape._partitioning = new_shape._partitioning.set(first_axis_to_merge, merged_spec);
+        new_shape._dims.replaceRange(first_axis_to_merge, num_axes_to_merge, &.{merged_dim}) catch @panic("mergeAxis failed on dims");
         new_shape._tags.replaceRange(first_axis_to_merge, num_axes_to_merge, &.{toTag(axis_)}) catch @panic("mergeAxis failed on tags");
-        new_shape._partitioning.replaceRange(first_axis_to_merge, num_axes_to_merge, &.{resulting_partition_spec}) catch @panic("mergeAxis failed on partitioning");
 
         return new_shape;
     }
@@ -1446,28 +1098,6 @@ pub const Shape = struct {
                 Shape.init(.{ .a1 = 5, .a2 = 2, .b = 3 }, .f32).mergeAxis(.a, @as([]const usize, &.{ 0, 1 })),
             ),
         );
-    }
-
-    test "mergeAxis partitioning" {
-        // Merging a partitioned axis with a replicated one -> open
-        const shape1 = Shape.init(.{ .a = 5, .b = 2, .c = 3 }, .f32)
-            .withPartitioning(.{ .a = .replicated, .b = .x, .c = .replicated });
-        const merged1 = shape1.mergeAxis(.ab, .{ .a, .b });
-        try testing.expect(merged1.partition(.ab).eql(.open));
-        try testing.expect(merged1.dim(.ab) == 10);
-        try testing.expect(merged1.rank() == 2);
-
-        // Merging two replicated axes -> replicated
-        const shape2 = Shape.init(.{ .a = 5, .b = 2, .c = 3 }, .f32)
-            .withPartitioning(.{ .a = .replicated, .b = .replicated, .c = .y });
-        const merged2 = shape2.mergeAxis(.ab, .{ .a, .b });
-        try testing.expect(merged2.partition(.ab).eql(.replicated));
-        try testing.expect(merged2.partition(.c).eql(.init(.y)));
-
-        // Merging two unknown axes -> unknown
-        const shape3 = Shape.init(.{ .a = 5, .b = 2, .c = 3 }, .f32); // default is .unknown
-        const merged3 = shape3.mergeAxis(.ab, .{ .a, .b });
-        try testing.expect(merged3.partition(.ab).eql(.unknown));
     }
 
     pub fn mergeAxes(self: Shape, axes_: anytype) Shape {

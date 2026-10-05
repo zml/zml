@@ -29,6 +29,7 @@ pub const Tensor = struct {
     id: Tensor.Id,
     auto_broadcast: bool = false,
     _shape: Shape,
+    _partitioning: ?Sharding.Partitioning,
     _value: ?*const mlir.Value = null,
 
     const ResolvedAxis = u3;
@@ -41,8 +42,9 @@ pub const Tensor = struct {
         return @enumFromInt(Tensor.current_id.fetchAdd(1, .seq_cst));
     }
 
+    /// Creates a replicated tensor from the given shape
     pub fn fromShape(shape_: Shape) Tensor {
-        return .{ .id = nextTensorId(), ._shape = shape_ };
+        return .{ .id = nextTensorId(), ._shape = shape_, ._partitioning = .replicated(shape_) };
     }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
@@ -74,11 +76,16 @@ pub const Tensor = struct {
         return self._shape.byteSize();
     }
 
+    /// Returns the partitioning of a Tensor.
+    pub fn partitioning(self: Tensor) Sharding.Partitioning {
+        return self._partitioning orelse @panic("tensor doesn't have any explicit partitioning");
+    }
+
     /// Internal use
     ///
     /// Creates a tensor from a Shape and an mlir.Value.
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
-        const res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
+        const res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId(), ._partitioning = null };
 
         if (builtin.mode == .Debug) {
             // Check that the MLIR value actually have the same shape.
@@ -94,6 +101,7 @@ pub const Tensor = struct {
     /// Creates a Tensor from a mlir.Value
     ///
     /// The shape is derived from the type of the mlir.Value.
+    /// Sharding is `unknown`
     pub fn fromMlirValue(val: *const mlir.Value) Tensor {
         const ctx = Compiler.current();
         const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
@@ -101,14 +109,15 @@ pub const Tensor = struct {
 
         stdx.debug.assert(n <= constants.MAX_RANK, "Can't represent MLIR tensor of rank {}, max supported rank is {}.", .{ n, constants.MAX_RANK });
 
-        var sh: Shape = .{ ._dtype = ctx.dtype(ranked_tensor.elementType()) };
+        var sh: Shape = .{
+            ._dtype = ctx.dtype(ranked_tensor.elementType()),
+            ._dims = .empty,
+            ._tags = .repeat(Shape.TagUnknown, n),
+        };
         for (0..n) |i| {
             sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
         }
-        sh._tags.appendNTimes(Shape.TagUnknown, n) catch unreachable;
-        sh._partitioning.appendNTimes(.unknown, n) catch unreachable;
-
-        return .{ ._shape = sh, ._value = val, .id = nextTensorId() };
+        return .{ ._shape = sh, ._value = val, .id = nextTensorId(), ._partitioning = null };
     }
 
     /// Returns the dimension of axis 'axis_'.
@@ -153,24 +162,33 @@ pub const Tensor = struct {
         return res;
     }
 
-    pub fn withPartitioning(self: Tensor, axes_: anytype) Tensor {
-        const partitioned_shape = self._shape.withPartitioning(axes_);
+    /// Specify the sharding of the input tensor.
+    /// * sharding: the name of the sharding to use
+    /// a known sharding from the compilation options.
+    /// * partition spec: a struct where the field names match the axis of the given sharding
+    ///
+    /// eg `x.withPartitioning(tp, .{ .h = .model }))` or `x.withPartitioning(.tp, .{ .h = .model }))`
+    pub fn withPartitioning(self: Tensor, sharding_: @EnumLiteral(), partition_spec: anytype) Tensor {
+        return self.withPartitioningInner(.P(self._shape._tags, sharding_, partition_spec));
+    }
 
+    /// Force the input tensor to be replicated along the given axes.
+    pub fn replicate(self: Tensor, axes_: anytype) Tensor {
+        const partitioned_shape = self._shape.replicate(axes_);
+        return self.withPartitioningInner(partitioned_shape);
+    }
+
+    fn withPartitioningInner(self: Tensor, partitioning_: Sharding.Partitioning) Tensor {
         const ctx = Compiler.currentOrNull() orelse {
             var res = self;
-            res._shape = partitioned_shape;
+            res._partitioning = partitioning_;
             return res;
         };
 
-        const sharding = ctx.partitioning.selectSharding(partitioned_shape) catch |err| switch (err) {
-            error.NoSuitableSharding => std.debug.panic(
-                "{f}.withPartitioning({f}) failed to resolve because it's using unknown sharding. Pass more shardings to `zml.compile`. Known shardings: {f}",
-                .{ self, partitioned_shape, stdx.fmt.slice(ctx.partitioning.shardings) },
-            ),
-        };
-        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
+        const resolved = partitioning_.resolve(ctx.platform);
+        const attr = ctx.tensorShardingAttr(ctx.allocator, resolved) catch @panic("OOM");
 
-        const op_result = switch (ctx.partitioning.partitioner) {
+        const op_result = switch (ctx.partitioner) {
             .shardy => blk: {
                 const op = mlir.Operation.make(ctx.mlir_ctx, "sdy.sharding_constraint", .{
                     .operands = .{ .flat = &.{self.value()} },
@@ -201,7 +219,45 @@ pub const Tensor = struct {
             },
         };
 
-        return _result(partitioned_shape, op_result);
+        return .{ ._shape = self._shape, ._value = op_result, .id = nextTensorId(), ._partitioning = partitioning_ };
+    }
+
+    test withPartitioning {
+        // Create two similar shardings,
+        // Then check that tensor.withPartitioning don't confuse the meshes
+        const dp_mp_data: Sharding.Data = .{
+            .name = "dp_mp",
+            .physical = undefined,
+            .logical = .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
+            .bindings = .init(&.{.init(&.{.link_x})}),
+            .folds = .empty,
+            .folds_consumed = .empty,
+        };
+        const dp_mp: Sharding = .{ .data = &dp_mp_data };
+
+        const mp_dp_data: Sharding.Data = .{
+            .name = "mp_dp",
+            .physical = undefined,
+            .logical = .mesh(.{ .model = .low_bandwidth, .data = .high_bandwidth }),
+            .bindings = .init(&.{.init(&.{.link_x})}),
+            .folds = .empty,
+            .folds_consumed = .empty,
+        };
+        const mp_dp: Sharding = .{ .data = &mp_dp_data };
+
+        const x = Tensor.init(.{ .h = 8 }, .f32).withPartitioning(dp_mp, .{ .h = .model });
+        try std.testing.expectEqual(dp_mp.data, x.shape()._sharding.data);
+        try std.testing.expectEqual(Shape.PartitionSpec.sharded(1), x.shape().partition(.h));
+        try std.testing.expectEqual(dp_mp.data, x.shape().reshape(.{ 2, 4 })._sharding.data);
+
+        const x2 = x.withPartitioning(mp_dp, .{ .h = .model });
+        try std.testing.expectEqual(mp_dp.data, x2.shape()._sharding.data);
+        try std.testing.expectEqual(Shape.PartitionSpec.sharded(0), x2.shape().partition(.h));
+        try std.testing.expectEqual(mp_dp.data, x2.shape().reshape(.{ 2, 4 })._sharding.data);
+
+        const x2_replicated = x2.replicate(.{.h});
+        try std.testing.expectEqual(mp_dp.data, x2_replicated.shape()._sharding.data);
+        try std.testing.expectEqual(Shape.PartitionSpec.replicated, x2_replicated.shape().partition(.h));
     }
 
     /// Copy the given tensor to the specified memory.
@@ -1509,7 +1565,7 @@ pub const Tensor = struct {
 
         const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
-        var res_shape: Shape = .{ ._dtype = lhs.dtype() };
+        var res_shape: Shape = .scalar(lhs.dtype());
         // Validate batching axes
         var lhs_batching_axes: Axes = .empty;
         var rhs_batching_axes: Axes = .empty;
@@ -4194,8 +4250,8 @@ pub const Tensor = struct {
         var res_shape = self._shape;
         res_shape._dims.replaceRange(a, 1, &.{ d, d }) catch unreachable;
         res_shape._tags.replaceRange(a, 1, &.{ @tagName(new_tags[0]), @tagName(new_tags[1]) }) catch unreachable;
-        // TODO(Corentin): Not sure about that
-        res_shape._partitioning.replaceRange(a, 1, &.{ p, p }) catch unreachable;
+
+        res_shape._partitioning = res_shape._partitioning.insert(a, p);
 
         const values = self.insertAxes(a + 1, .{new_tags[1]}).broad(res_shape);
         const zeros = Tensor.constant(self.dtype().zero()).broad(res_shape);
@@ -4591,7 +4647,7 @@ pub const Tensor = struct {
         defer ctx.arena.allocator().free(full_name);
         switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
-                ops.manualComputation((struct {
+                ops.manualComputation(input._shape._sharding, (struct {
                     input: Tensor,
                     name: []const u8,
 

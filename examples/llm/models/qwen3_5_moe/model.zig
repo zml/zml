@@ -51,9 +51,9 @@ fn partitionProjectedKv(kv: zml.Tensor, kv_head_sharding: zml.Sharding.DimShardi
     return switch (kv_head_sharding) {
         .sharded => |heads| blk: {
             const sharded_kv = if (heads.factor != 1) kv.stutter1d(kv.axis(.h), heads.factor) else kv;
-            break :blk sharded_kv.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+            break :blk sharded_kv.withPartitioning(.model, .{ .s = .replicated, .h = .model, .hd = .replicated });
         },
-        .replicated => kv.withPartitioning(.{ .s = .replicated, .h = .replicated, .hd = .replicated }),
+        .replicated => kv.withPartitioning(.model, .{ .s = .replicated, .h = .replicated, .hd = .replicated }),
     };
 }
 
@@ -64,9 +64,9 @@ fn partitionCachedKv(tensor: zml.Tensor, kv_head_sharding: zml.Sharding.DimShard
             if (heads.factor != 1) {
                 kv = kv.stutter1d(kv.axis(.h), heads.factor);
             }
-            break :blk kv.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+            break :blk kv.withPartitioning(.model, .{ .k = .replicated, .h = .model, .hd = .replicated });
         },
-        .replicated => kv.withPartitioning(.{ .k = .replicated, .h = .replicated, .hd = .replicated }),
+        .replicated => kv.withPartitioning(.model, .{ .k = .replicated, .h = .replicated, .hd = .replicated }),
     };
 }
 
@@ -107,7 +107,6 @@ pub const LoadedModel = struct {
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
-        shardings: common.Shardings,
     ) !Buffers {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
@@ -122,8 +121,7 @@ pub const LoadedModel = struct {
         });
         defer loader.deinit();
 
-        const all_shardings = shardings.all();
-        try loader.load(io, Model, &self.inner, &buffers, store, &all_shardings, .{ .progress = progress });
+        try loader.load(io, Model, &self.inner, &buffers, store, .{ .progress = progress });
         try loader.await(io);
 
         const took = now.untilNow(io, .awake);
@@ -314,10 +312,10 @@ pub const TextModel = struct {
         }
 
         return .{
-            .embed_tokens = .{ .weight = store.createTensor("embed_tokens.weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }) },
+            .embed_tokens = .{ .weight = store.createTensor("embed_tokens.weight", .{ .voc, .d }, .model, .{ .voc = .replicated, .d = .model }) },
             .layers = layers,
             .norm = RmsNorm.init(store.withPrefix("norm"), config.text_config.rms_norm_eps),
-            .lm_head = .init(store.root().withPrefix(lm_head_prefix).createTensor("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }), null, .d),
+            .lm_head = .init(store.root().withPrefix(lm_head_prefix).createTensor("weight", .{ .dout, .d }, .model, .{ .dout = .model, .d = .replicated }), null, .d),
             .gen_options = gen_options,
         };
     }
@@ -447,7 +445,7 @@ pub const TransformerLayer = struct {
         const self = input.layer;
         const x0 = input.hidden;
         _ = input.config;
-        const x0_replicated = x0.withPartitioning(.{ .d = .replicated });
+        const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
         const normalized_x0 = self.input_layernorm.forward(x0_replicated);
 
         const self_attn = switch (self.attn) {
@@ -456,13 +454,13 @@ pub const TransformerLayer = struct {
         };
         const attention_output, const updated_kv_cache = self_attn.forward(normalized_x0, input.token_index, input.cache);
 
-        const x1 = attention_output.add(x0_replicated).withPartitioning(.{ .d = .replicated });
+        const x1 = attention_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated });
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
         const moe_output = self.moe.forward(normalized_hidden, input.moe_parameters);
 
         return .{
-            .hidden = moe_output.add(x1).withPartitioning(.{ .d = .replicated }).reuseBuffer(x0),
+            .hidden = moe_output.add(x1).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
             .cache = updated_kv_cache,
         };
     }
@@ -471,7 +469,7 @@ pub const TransformerLayer = struct {
         const self = input.layer;
         const x0 = input.hidden;
         _ = input.config;
-        const x0_replicated = x0.withPartitioning(.{ .d = .replicated });
+        const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
         const normalized_x0 = self.input_layernorm.forward(x0_replicated);
 
         const linear_attn = switch (self.attn) {
@@ -480,13 +478,13 @@ pub const TransformerLayer = struct {
         };
         const attention_output, const updated_kv_cache = linear_attn.forward(normalized_x0, input.cache, input.active_length);
 
-        const x1 = attention_output.add(x0_replicated).withPartitioning(.{ .d = .replicated });
+        const x1 = attention_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated });
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
         const moe_output = self.moe.forward(normalized_hidden, input.moe_parameters);
 
         return .{
-            .hidden = moe_output.add(x1).withPartitioning(.{ .d = .replicated }).reuseBuffer(x0),
+            .hidden = moe_output.add(x1).withPartitioning(.model, .{ .d = .replicated }).reuseBuffer(x0),
             .cache = updated_kv_cache,
         };
     }
@@ -501,7 +499,7 @@ pub const TransformerLayer = struct {
         moe_parameters: zml.moe.Parameters,
     ) struct { zml.Tensor, KvCache } {
         _ = config;
-        const x0_replicated = x0.withPartitioning(.{ .d = .replicated });
+        const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
         const normalized_x0 = self.input_layernorm.forward(x0_replicated);
 
         var attention_output: zml.Tensor = undefined;
@@ -519,12 +517,12 @@ pub const TransformerLayer = struct {
             },
         }
 
-        const x1 = attention_output.add(x0_replicated).withPartitioning(.{ .d = .replicated });
+        const x1 = attention_output.add(x0_replicated).withPartitioning(.model, .{ .d = .replicated });
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
         const moe_output = self.moe.forward(normalized_hidden, moe_parameters);
 
-        return .{ moe_output.add(x1).withPartitioning(.{ .d = .replicated }), updated_kv_cache };
+        return .{ moe_output.add(x1).withPartitioning(.model, .{ .d = .replicated }), updated_kv_cache };
     }
 };
 
@@ -550,8 +548,8 @@ pub const SelfAttn = struct {
 
     fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
         return .init(
-            store.createTensor("weight", .{ .dout, .d }, partitions),
-            store.maybeCreateTensor("bias", .{.dout}, bias_partitions),
+            store.createTensor("weight", .{ .dout, .d }, .model, partitions),
+            store.maybeCreateTensor("bias", .{.dout}, .model, bias_partitions),
             .d,
         );
     }
@@ -605,17 +603,14 @@ pub const SelfAttn = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache.SelfAttnCache,
     ) struct { zml.Tensor, KvCache.SelfAttnCache } {
-        const x_qkv = x.withPartitioning(.{ .d = .replicated });
+        const tp = zml.Compiler.current().sharding(.model);
+        const x_qkv = x.withPartitioning(tp, .{ .d = .replicated });
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
-        const kv_head_sharding = zml.Compiler.current().partitioning.shardableDim(
-            k.shape().withPartitioning(.{ .h = .model }),
-            .h,
-            q.dim(.h),
-        ) catch unreachable;
+        const kv_head_sharding = tp.shardableDim(k.dim(.h), .model, q.dim(.h));
 
-        q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        gate = gate.withPartitioning(.{ .s = .replicated, .d_out_proj = .model });
+        q = q.withPartitioning(tp, .{ .s = .replicated, .h = .model, .hd = .replicated });
+        gate = gate.withPartitioning(tp, .{ .s = .replicated, .d_out_proj = .model });
         k = partitionProjectedKv(k, kv_head_sharding);
         v = partitionProjectedKv(v, kv_head_sharding);
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
@@ -629,14 +624,14 @@ pub const SelfAttn = struct {
         const cos, const sin = self.rotary_embed.getCosAndSin(position_ids, dtype);
         q = self.rotary_embed.applyRope(q, cos, sin);
         k = self.rotary_embed.applyRope(k, cos, sin);
-        q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+        q = q.withPartitioning(tp, .{ .s = .replicated, .h = .model, .hd = .replicated });
         k = partitionProjectedKv(k, kv_head_sharding);
         v = partitionProjectedKv(v, kv_head_sharding);
 
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
-        q = q.rename(.{ .s = .q }).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
+        q = q.rename(.{ .s = .q }).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated });
         k = partitionCachedKv(k, kv_head_sharding);
         v = partitionCachedKv(v, kv_head_sharding);
 
@@ -645,12 +640,12 @@ pub const SelfAttn = struct {
             k,
             v,
             token_index,
-            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads)),
+            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads), x.shape()._sharding),
             zml.attention.Parameters.init(.fromBackend(.vanilla)),
-        ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
+        ).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());
-        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d }), gated_output.dtype()).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d }), gated_output.dtype()).rename(.{ .dout = .d }).withPartitioning(tp, .{ .d = .replicated });
 
         return .{ projected_output, new_kv_cache };
     }
@@ -667,20 +662,20 @@ pub const Mlp = struct {
     pub fn init(store: zml.io.TensorStore.View) Mlp {
         return .{
             .up_proj = .init(
-                store.withPrefix("up_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
-                store.withPrefix("up_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }),
+                store.withPrefix("up_proj").createTensor("weight", .{ .dout, .d }, .model, .{ .dout = .model, .d = .replicated }),
+                store.withPrefix("up_proj").maybeCreateTensor("bias", .{.dout}, .model, .{ .dout = .model }),
                 .d,
             ),
             .up_proj_scale = null,
             .gate_proj = .init(
-                store.withPrefix("gate_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
-                store.withPrefix("gate_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }),
+                store.withPrefix("gate_proj").createTensor("weight", .{ .dout, .d }, .model, .{ .dout = .model, .d = .replicated }),
+                store.withPrefix("gate_proj").maybeCreateTensor("bias", .{.dout}, .model, .{ .dout = .model }),
                 .d,
             ),
             .gate_proj_scale = null,
             .down_proj = .init(
-                store.withPrefix("down_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .model }),
-                store.withPrefix("down_proj").maybeCreateTensor("bias", .{.d}, .{ .d = .replicated }),
+                store.withPrefix("down_proj").createTensor("weight", .{ .dout, .d }, .model, .{ .dout = .replicated, .d = .model }),
+                store.withPrefix("down_proj").maybeCreateTensor("bias", .{.d}, .model, .{ .d = .replicated }),
                 .d,
             ),
             .down_proj_scale = null,
@@ -708,8 +703,8 @@ const Router = struct {
     pub fn init(store: zml.io.TensorStore.View, num_experts_per_tok: u32) Router {
         return .{
             .router = .init(
-                store.createTensor("weight", .{ .expert, .d }, .{ .expert = .replicated, .d = .replicated }),
-                store.maybeCreateTensor("bias", .{.expert}, .{ .expert = .replicated }),
+                store.createTensor("weight", .{ .expert, .d }, .replicated, .{ .expert = .replicated, .d = .replicated }),
+                store.maybeCreateTensor("bias", .{.expert}, .replicated, .{ .expert = .replicated }),
                 .d,
             ),
             .num_experts_per_tok = num_experts_per_tok,
@@ -742,19 +737,21 @@ pub const Moe = struct {
         const gate_up_proj_tensor = experts_store.createTensor(
             "gate_up_proj",
             .{ .expert, .dout, .d },
+            .experts,
             .{ .expert = .experts, .dout = .replicated, .d = .replicated },
         );
         const down_proj_tensor = experts_store.createTensor(
             "down_proj",
             .{ .expert, .d, .dout },
+            .experts,
             .{ .expert = .experts, .d = .replicated, .dout = .replicated },
         );
 
         return .{
             .shared_expert = Mlp.init(store.withPrefix("shared_expert")),
             .shared_expert_gate = .init(
-                store.withPrefix("shared_expert_gate").createTensor("weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }),
-                store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.dout}, .{ .dout = .replicated }),
+                store.withPrefix("shared_expert_gate").createTensor("weight", .{ .dout, .d }, .replicated, .{ .dout = .replicated, .d = .replicated }),
+                store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.dout}, .replicated, .{ .dout = .replicated }),
                 .d,
             ),
             .gate_up_proj = .init(gate_up_proj_tensor, null, .d),
@@ -785,7 +782,7 @@ pub const Moe = struct {
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
         const shared_gate = self.shared_expert_gate.forward(x, x.dtype()).sigmoid().broad(x.shape());
-        const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate).withPartitioning(.{
+        const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate).withPartitioning(.model, .{
             .b = .replicated,
             .s = .replicated,
             .d = .replicated,
@@ -895,7 +892,7 @@ pub const GatedDeltaNet = struct {
     conv_kernel_size: i64,
 
     fn initProj(store: zml.io.TensorStore.View, partitions: anytype) zml.nn.Linear {
-        return .init(store.createTensor("weight", .{ .dout, .d }, partitions), null, .d);
+        return .init(store.createTensor("weight", .{ .dout, .d }, .model, partitions), null, .d);
     }
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) GatedDeltaNet {
@@ -910,9 +907,9 @@ pub const GatedDeltaNet = struct {
             .in_proj_a = initProj(store.withPrefix("in_proj_a"), .{ .dout = .model, .d = .replicated }),
             .out_proj = initProj(store.withPrefix("out_proj"), .{ .dout = .replicated, .d = .model }),
             .out_proj_scale = null,
-            .conv1d_weight = store.withPrefix("conv1d").createTensor("weight", .{ .out, .in, .kernel_size }, .{ .out = .model, .in = .replicated, .kernel_size = .replicated }),
-            .dt_bias = store.createTensor("dt_bias", .{.vh}, .{ .vh = .model }),
-            .aLog = store.createTensor("A_log", .{.vh}, .{ .vh = .model }),
+            .conv1d_weight = store.withPrefix("conv1d").createTensor("weight", .{ .out, .in, .kernel_size }, .model, .{ .out = .model, .in = .replicated, .kernel_size = .replicated }),
+            .dt_bias = store.createTensor("dt_bias", .{.vh}, .model, .{ .vh = .model }),
+            .aLog = store.createTensor("A_log", .{.vh}, .model, .{ .vh = .model }),
             .norm = RmsNormGated.init(store.withPrefix("norm"), config.text_config.rms_norm_eps),
             .num_k_heads = config.text_config.linear_num_key_heads,
             .num_v_heads = config.text_config.linear_num_value_heads,
@@ -996,9 +993,9 @@ pub const GatedDeltaNet = struct {
         const conv_dim = 2 * key_dim + value_dim;
         const left_pad = self.conv_kernel_size - 1;
 
-        const x_in = x.withPartitioning(.{ .d = .replicated });
+        const x_in = x.withPartitioning(.model, .{ .d = .replicated });
         const projected_qkv = self.in_proj_qkv.forward(x_in, x_in.dtype())
-            .rename(.{ .dout = .mix }).withPartitioning(.{ .s = .replicated, .mix = .model });
+            .rename(.{ .dout = .mix }).withPartitioning(.model, .{ .s = .replicated, .mix = .model });
         const use_cached_state = x.dim(.s) == 1 and left_pad > 0;
         const conv_input = if (use_cached_state)
             zml.Tensor.concatenate(&.{ cache.convState(), projected_qkv }, .s)
@@ -1028,26 +1025,26 @@ pub const GatedDeltaNet = struct {
         if (use_cached_state) {
             mixed_qkv = mixed_qkv.slice(.s, .{ .start = mixed_qkv.dim(.s) - 1, .end = mixed_qkv.dim(.s) });
         }
-        mixed_qkv = mixed_qkv.withPartitioning(.{ .s = .replicated, .mix = .model });
+        mixed_qkv = mixed_qkv.withPartitioning(.model, .{ .s = .replicated, .mix = .model });
 
         const z = self.in_proj_z.forward(x_in, x_in.dtype())
             .splitAxis(.dout, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim })
-            .withPartitioning(.{ .s = .replicated, .vh = .model, .vhd = .replicated });
-        const b = self.in_proj_b.forward(x_in, x_in.dtype()).rename(.{ .dout = .vh }).withPartitioning(.{ .s = .replicated, .vh = .model });
-        const a = self.in_proj_a.forward(x_in, x_in.dtype()).rename(.{ .dout = .vh }).withPartitioning(.{ .s = .replicated, .vh = .model });
+            .withPartitioning(.model, .{ .s = .replicated, .vh = .model, .vhd = .replicated });
+        const b = self.in_proj_b.forward(x_in, x_in.dtype()).rename(.{ .dout = .vh }).withPartitioning(.model, .{ .s = .replicated, .vh = .model });
+        const a = self.in_proj_a.forward(x_in, x_in.dtype()).rename(.{ .dout = .vh }).withPartitioning(.model, .{ .s = .replicated, .vh = .model });
 
         const query = mixed_qkv
             .slice(.mix, .{ .start = 0, .end = key_dim })
             .splitAxis(.mix, .{ .kh = self.num_k_heads, .khd = self.head_k_dim })
-            .withPartitioning(.{ .s = .replicated, .kh = .model, .khd = .replicated });
+            .withPartitioning(.model, .{ .s = .replicated, .kh = .model, .khd = .replicated });
         const key = mixed_qkv
             .slice(.mix, .{ .start = key_dim, .end = 2 * key_dim })
             .splitAxis(.mix, .{ .kh = self.num_k_heads, .khd = self.head_k_dim })
-            .withPartitioning(.{ .s = .replicated, .kh = .model, .khd = .replicated });
+            .withPartitioning(.model, .{ .s = .replicated, .kh = .model, .khd = .replicated });
         const value = mixed_qkv
             .slice(.mix, .{ .start = 2 * key_dim, .end = 2 * key_dim + value_dim })
             .splitAxis(.mix, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim })
-            .withPartitioning(.{ .s = .replicated, .vh = .model, .vhd = .replicated });
+            .withPartitioning(.model, .{ .s = .replicated, .vh = .model, .vhd = .replicated });
 
         const beta = b.sigmoid();
         const aLog_type = self.aLog.dtype();
@@ -1072,10 +1069,10 @@ pub const GatedDeltaNet = struct {
                 z.rename(.{ .vhd = .d }),
             )
             .rename(.{ .d = .vhd })
-            .withPartitioning(.{ .s = .replicated, .vh = .model, .vhd = .replicated });
+            .withPartitioning(.model, .{ .s = .replicated, .vh = .model, .vhd = .replicated });
 
         const output = self.out_proj.forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } }), core_attn_out_normed.dtype())
-            .rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+            .rename(.{ .dout = .d }).withPartitioning(.model, .{ .d = .replicated });
         const updated_cache = cache.update(
             if (use_cached_state) buildUpdatedConvState(conv_input, left_pad) else buildUpdatedConvStateFromPrefix(projected_qkv, left_pad, active_length),
             last_recurrent_state,
@@ -1089,7 +1086,7 @@ pub const RmsNorm = struct {
     eps: f32 = 1e-6,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
-        return .{ .weight = store.createTensor("weight", .{.d}, .{ .d = .replicated }), .eps = eps };
+        return .{ .weight = store.createTensor("weight", .{.d}, .model, .{ .d = .replicated }), .eps = eps };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
@@ -1110,7 +1107,7 @@ pub const RmsNormGated = struct {
     eps: f32 = 1e-6,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNormGated {
-        return .{ .weight = store.createTensor("weight", .{.d}, .{ .d = .replicated }), .eps = eps };
+        return .{ .weight = store.createTensor("weight", .{.d}, .model, .{ .d = .replicated }), .eps = eps };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNormGated)) void {
@@ -1151,12 +1148,12 @@ pub const KvCache = struct {
             }, dtype);
             const kv_head_sharding = model_sharding.shardableDim(kv_shape.dim(.h), .model, config.text_config.num_attention_heads);
             const sharded_kv_shape = switch (kv_head_sharding) {
-                .sharded => |heads| kv_shape.setDim(.h, heads.dim).withPartitioning(.{ .h = .model }),
-                .replicated => kv_shape.withPartitioning(.{ .h = .replicated }),
+                .sharded => |heads| kv_shape.setDim(.h, heads.dim).withPartitioning(model_sharding, .{ .h = .model }),
+                .replicated => kv_shape.withPartitioning(model_sharding, .{ .h = .replicated }),
             };
             return .{
-                .k = .fromShape(sharded_kv_shape),
-                .v = .fromShape(sharded_kv_shape),
+                .k = zml.Tensor.fromShape(sharded_kv_shape),
+                .v = zml.Tensor.fromShape(sharded_kv_shape),
                 .layer_index = .init(.{}, .u32),
             };
         }
@@ -1237,7 +1234,7 @@ pub const KvCache = struct {
         recurrent_state: zml.Tensor,
         layer_index: zml.Tensor,
 
-        pub fn init(config: Config, batch_dim: i64, conv_dtype: zml.DataType, recurrent_dtype: zml.DataType) GatedDeltaNetCache {
+        pub fn init(config: Config, batch_dim: i64, conv_dtype: zml.DataType, recurrent_dtype: zml.DataType, model_sharding: zml.Sharding) GatedDeltaNetCache {
             const num_linear_attn_layers = countLayers(config.text_config.layer_types, .linear_attention);
             const conv_dim = 2 * config.text_config.linear_num_key_heads * config.text_config.linear_key_head_dim + config.text_config.linear_num_value_heads * config.text_config.linear_value_head_dim;
             const conv_state_shape = zml.Shape.init(.{
@@ -1253,11 +1250,11 @@ pub const KvCache = struct {
                 .khd = config.text_config.linear_key_head_dim,
                 .vhd = config.text_config.linear_value_head_dim,
             }, recurrent_dtype);
-            const sharded_conv_state_shape = conv_state_shape.withPartitioning(.{ .mix = .model });
-            const sharded_recurrent_state_shape = recurrent_state_shape.withPartitioning(.{ .vh = .model });
+            const sharded_conv_state_shape = conv_state_shape.withPartitioning(model_sharding, .{ .mix = .model });
+            const sharded_recurrent_state_shape = recurrent_state_shape.withPartitioning(model_sharding, .{ .vh = .model });
             return .{
-                .conv_state = .fromShape(sharded_conv_state_shape),
-                .recurrent_state = .fromShape(sharded_recurrent_state_shape),
+                .conv_state = zml.Tensor.fromShape(sharded_conv_state_shape),
+                .recurrent_state = zml.Tensor.fromShape(sharded_recurrent_state_shape),
                 .layer_index = .init(.{}, .u32),
             };
         }
@@ -1338,7 +1335,7 @@ pub const KvCache = struct {
         return .{
             .layer_types = config.text_config.layer_types,
             .self_attn = SelfAttnCache.init(config, batch_dim, max_seq_len, cache_dtype, model_sharding),
-            .gated_delta_net = GatedDeltaNetCache.init(config, batch_dim, cache_dtype, recurrent_dtype),
+            .gated_delta_net = GatedDeltaNetCache.init(config, batch_dim, cache_dtype, recurrent_dtype, model_sharding),
         };
     }
 
