@@ -4,10 +4,9 @@ def repo():
     git_repository(
         name = "zigimg",
         remote = "https://github.com/zigimg/zigimg.git",
-        commit = "7b98e82621fe302a9edc147df1191f4d1b7ff7a5",
+        # Match libvaxis build.zig.zon.
+        commit = "d695acd97c02e57bb151e8f659d1280f5cd6ca70",
         build_file = Label("//third_party/zigimg:zigimg.bazel"),
-        patches = [
-            Label("//third_party/zigimg:zig-0.17.patch"),
-        ],
+        patches = ["//third_party/zigimg:zig-0.17.patch"],
         patch_args = ["-p1"],
     )

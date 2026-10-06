@@ -14,11 +14,12 @@ fn silentResize(vx: *vaxis.Vaxis, allocator: std.mem.Allocator, winsize: vaxis.W
     vx.screen_last = try vaxis.AllocatingScreen.init(allocator, winsize.cols, winsize.rows);
 }
 
-pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !void {
-    var tty = try vaxis.Tty.init(io);
+pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, state: *data.SystemState) !void {
+    var tty_buffer: [4096]u8 = undefined;
+    var tty = try vaxis.Tty.init(io, &tty_buffer);
     defer tty.deinit();
 
-    var vx = try vaxis.init(allocator, .{});
+    var vx = try vaxis.init(io, allocator, env_map, .{});
     defer {
         // Reset terminal modes without clearing screen content.
         vx.resetModes(tty.writer()) catch {};
@@ -27,12 +28,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
         vx.deinit(allocator, &discarding.writer);
     }
 
-    const ws = try vaxis.Tty.getWinsize(tty.fd);
+    const ws = try tty.getWinsize();
     try silentResize(&vx, allocator, ws);
 
     {
         const EventLoop = vaxis.Loop(vxfw.Event);
-        var loop: EventLoop = .{ .tty = &tty, .vaxis = &vx, .io = io, .queue = .{ .io = io } };
+        var loop: EventLoop = .init(io, &tty, &vx);
         try loop.start();
         defer loop.stop();
 
@@ -41,7 +42,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
         const writer = tty.writer();
         try writer.writeAll("\x1b7"); // DECSC: save cursor
         try writer.flush();
-        try vx.queryTerminal(writer, io, 1 * std.time.ns_per_s);
+        try vx.queryTerminal(writer, .fromSeconds(1));
         try writer.writeAll("\x1b8"); // DECRC: restore cursor
         try writer.flush();
     }
