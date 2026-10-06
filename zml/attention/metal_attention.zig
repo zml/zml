@@ -93,10 +93,7 @@ pub const paged = struct {
         const kc = k_cache.transpose(.{ .page, .k_chunk, .hkv, .hd });
         const vc = v_cache.transpose(.{ .page, .k_chunk, .hkv, .hd });
 
-        const sliding_window: i32 = switch (opts.mask) {
-            .sliding_window => |w| @intCast(w),
-            else => -1,
-        };
+        const sliding_window: i32 = if (opts.mask.slidingWindow()) |window| @intCast(window) else -1;
 
         const out = zml.ops.customCall(
             "zml$paged_attn",

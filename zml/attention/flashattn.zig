@@ -914,7 +914,7 @@ pub const paged_fa2 = struct {
 
         const o = switch (parameters) {
             .decode => |decode_parameters| b: {
-                const seqlenq_ngroups_swapped = num_heads > num_kv_heads and @mod(head_dim, 8) == 0 and opts.mask != .sliding_window;
+                const seqlenq_ngroups_swapped = num_heads > num_kv_heads and @mod(head_dim, 8) == 0 and opts.mask.slidingWindow() == null;
 
                 const block_table = decode_parameters.block_table.withPartitioning(.model, .{ .b = .replicated });
                 const cu_seqlens_q = decode_parameters.cu_seqlens_q.withPartitioning(.model, .{ .b = .replicated });
@@ -1002,7 +1002,7 @@ pub const paged_fa2 = struct {
                 break :b o;
             },
             .mixed => |mixed_parameters| b: {
-                const seqlenq_ngroups_swapped = num_heads > num_kv_heads and @mod(head_dim, 8) == 0 and opts.mask != .sliding_window;
+                const seqlenq_ngroups_swapped = num_heads > num_kv_heads and @mod(head_dim, 8) == 0 and opts.mask.slidingWindow() == null;
 
                 const block_table_prefill = mixed_parameters.block_table_prefill.withPartitioning(.model, .{ .b = .replicated });
                 const cu_seqlens_q_prefill = mixed_parameters.cu_seqlens_q_prefill.withPartitioning(.model, .{ .b = .replicated });
@@ -1781,15 +1781,12 @@ pub const paged_fa3 = struct {
 };
 
 fn windowSizeLeft(mask: AttentionMask) i32 {
-    return switch (mask) {
-        .sliding_window => |w| @as(i32, @intCast(w)) - 1,
-        else => -1,
-    };
+    return if (mask.slidingWindow()) |window| @as(i32, @intCast(window)) - 1 else -1;
 }
 
 test "FlashAttention sliding window uses an inclusive offset" {
-    try std.testing.expectEqual(@as(i32, 2047), windowSizeLeft(.{ .sliding_window = 2048 }));
-    try std.testing.expectEqual(@as(i32, 0), windowSizeLeft(.{ .sliding_window = 1 }));
-    try std.testing.expectEqual(@as(i32, -1), windowSizeLeft(.causal));
+    try std.testing.expectEqual(@as(i32, 2047), windowSizeLeft(.{ .standard = .{ .sliding_window = 2048 } }));
+    try std.testing.expectEqual(@as(i32, 0), windowSizeLeft(.{ .standard = .{ .sliding_window = 1 } }));
+    try std.testing.expectEqual(@as(i32, -1), windowSizeLeft(.{ .standard = .{} }));
     try std.testing.expectEqual(@as(i32, -1), windowSizeLeft(.none));
 }

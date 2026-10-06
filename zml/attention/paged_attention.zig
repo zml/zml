@@ -201,25 +201,36 @@ pub const Parameters = union(Backend) {
 };
 
 pub const AttentionMask = union(enum) {
-    /// Attend to every valid key in the sequence.
-    none,
-    /// Attend to keys at or before the query position.
-    causal,
-    /// Causal window size, including the current token.
-    sliding_window: u32,
+    standard: struct {
+        /// Restrict attention to keys at or before the query position.
+        causal: bool = true,
+        /// Optional left window size, including the current token.
+        /// Non-causal attention also includes every later valid key.
+        sliding_window: ?u32 = null,
+    },
     /// Attend to keys at specific positions.
     indices: zml.Tensor,
 
+    /// Attend to every valid key in the sequence.
+    pub const none: AttentionMask = .{ .standard = .{ .causal = false } };
+
     pub fn isCausal(mask: AttentionMask) bool {
         return switch (mask) {
-            .causal, .sliding_window => true,
-            .none, .indices => false,
+            .standard => |options| options.causal,
+            .indices => false,
+        };
+    }
+
+    pub fn slidingWindow(mask: AttentionMask) ?u32 {
+        return switch (mask) {
+            .standard => |options| options.sliding_window,
+            .indices => null,
         };
     }
 };
 
 pub const AttentionOptions = struct {
-    mask: AttentionMask = .causal,
+    mask: AttentionMask = .{ .standard = .{} },
     scale: ?f32 = null,
     sink: ?zml.Tensor = null,
 };
@@ -476,17 +487,17 @@ test pagedAttention {
     }{
         .{
             .name = "unbounded",
-            .attention_options = .{ .mask = .causal },
+            .attention_options = .{ .mask = .{ .standard = .{} } },
             .backends = all_backends,
         },
         .{
             .name = "non_causal",
-            .attention_options = .{ .mask = .none },
+            .attention_options = .{ .mask = .{ .standard = .{ .causal = false } } },
             .backends = &option_sensitive_backends,
         },
         .{
             .name = "sliding_window",
-            .attention_options = .{ .mask = .{ .sliding_window = page_size } },
+            .attention_options = .{ .mask = .{ .standard = .{ .sliding_window = page_size } } },
             .backends = &option_sensitive_backends,
         },
     };
@@ -605,8 +616,8 @@ fn stablehlo_pagedAttention(
     opts: AttentionOptions,
 ) zml.Tensor {
     switch (opts.mask) {
-        .sliding_window, .indices => @panic("Sliding window or sparse attention mask are not supported on StableHLO"),
-        else => {},
+        .standard => |options| if (options.sliding_window != null) @panic("Sliding window attention mask is not supported on StableHLO"),
+        .indices => @panic("Sparse attention mask is not supported on StableHLO"),
     }
 
     const page_size = kv_cache.split.k.dim(.k_chunk);

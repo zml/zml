@@ -100,6 +100,7 @@ pub const KernelUnifiedAttention3dPtr = struct {
         use_softcap: bool,
         use_sinks: bool,
         sliding_window: i64,
+        is_causal: bool = true,
 
         stride_k_cache_0: i64 = 0,
         stride_k_cache_1: i64 = 0,
@@ -357,7 +358,7 @@ fn kernelUnifiedAttention3d(
 
     const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
     const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
-    const max_seq_prefix_len = max_prefix_raw.minimum(seq_len);
+    const max_seq_prefix_len = if (config.is_causal) max_prefix_raw.minimum(seq_len) else seq_len;
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
     const segm_tile_lo = segm_idx.mul(tiles_per_segment);
@@ -437,8 +438,10 @@ fn kernelUnifiedAttention3d(
         // seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
         const ql_2d_i32 = query_pos.expandDims(1);
         const so_2d = seq_offset.expandDims(0);
-        const rhs = context_len.add(ql_2d_i32).add(1);
-        const seq_mask = so_2d.lt(rhs);
+        const seq_mask = if (config.is_causal) b: {
+            const rhs = context_len.add(ql_2d_i32).add(1);
+            break :b so_2d.lt(rhs);
+        } else k.broadcastTo(tile_mask.expandDims(0), &.{ BLOCK_M, TILE_SIZE });
 
         const acc_zero = k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32);
         const qk = k.dot(Q, K, acc_zero);
