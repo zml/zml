@@ -1831,8 +1831,11 @@ pub fn scatter(
         compiler.location,
     ).appendTo(compiler.currentScope().block);
 
+    // A scatter updates its operand: keep the operand's sharding, so that a
+    // manualComputation taking the result, like attention reading the KV cache
+    // it just wrote, does not see open axes and replicate it.
     inline for (0..result.len) |i| {
-        result[i] = Tensor._result(inputs[i].shape(), op.result(i));
+        result[i] = Tensor._resultPropagateSharding(inputs[i].shape(), op.result(i));
     }
 
     return result;
