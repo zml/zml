@@ -223,7 +223,6 @@ pub const Tensor = struct {
             },
         };
 
-        std.log.warn("{f}.withPartitioning({f}) -> {f}", .{ self, partitioned_shape, attr });
         return _resultPropagateSharding(partitioned_shape, op_result);
     }
 
