@@ -561,6 +561,9 @@ pub const Tensor = struct {
             currentLoc(),
         ).appendTo(currentBlock());
 
+        // Same-width casts keep every axis, and so the sharding: a manualComputation
+        // taking reinterpreted weights, like MoE experts, must not replicate them.
+        if (src_bit_size == tgt_bit_size) return _resultPropagateSharding(res_shape, op.result(0));
         return _result(res_shape, op.result(0));
     }
 
