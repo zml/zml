@@ -3,6 +3,7 @@ const stdx = @import("stdx");
 const log = std.log;
 
 const zml = @import("zml");
+const block = @import("./blocks.zig");
 
 const CliArgs = struct {
     pub const help =
@@ -32,8 +33,8 @@ pub fn main(init: std.process.Init) !void {
     // const TRANSFORMER_BLOCK_COUNT: usize = 32;
     const TRANSFORMER_BLOCK_COUNT: usize = 1;
 
-    const transformer_blocks: []TransformerBlock =
-        try allocator.alloc(TransformerBlock, TRANSFORMER_BLOCK_COUNT);
+    const transformer_blocks: []block.TransformerBlock =
+        try allocator.alloc(block.TransformerBlock, TRANSFORMER_BLOCK_COUNT);
     defer allocator.free(transformer_blocks);
 
     const transformer_blocks_view = model_store.view().withPrefix("transformer_blocks");
@@ -41,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
         const tb_layer_view = transformer_blocks_view.withLayer(i);
 
         const attn_view = tb_layer_view.withPrefix("attn");
-        const attn: Attn = .{
+        const attn: block.Attn = .{
             .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dup}, .replicated), null, .d),
             .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dup}, .replicated), null, .d),
             .to_k = .init(attn_view.createTensor("to_k.weight", .{ .dup, .d }, .replicated), null, .d),
@@ -51,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
         };
 
         const img_mlp_view = tb_layer_view.withPrefix("img_mlp");
-        const img_mlp: Mlp = .{
+        const img_mlp: block.Mlp = .{
             .proj = .init(img_mlp_view.createTensor("proj.weight", .{ .dup, .d }, .replicated), null, .d),
             .out = .init(img_mlp_view.createTensor("out.weight", .{ .dout, .d }, .replicated), null, .d),
             .gate_layer = .init(img_mlp_view.createTensor("gate_layer.weight", .{ .dup, .d }, .replicated), null, .d),
@@ -66,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Load buffers
     const transformer_blocks_buffer =
-        try allocator.alloc(zml.Bufferized(TransformerBlock), TRANSFORMER_BLOCK_COUNT);
+        try allocator.alloc(zml.Bufferized(block.TransformerBlock), TRANSFORMER_BLOCK_COUNT);
     defer allocator.free(transformer_blocks_buffer);
 
     for (0..TRANSFORMER_BLOCK_COUNT) |i| {
@@ -76,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
         transformer_blocks_buffer[i] = try transformer_blocks[i].load(init.arena.allocator(), io, platform, &model_store);
     }
     defer for (0..TRANSFORMER_BLOCK_COUNT) |i| {
-        TransformerBlock.unloadBuffers(&transformer_blocks_buffer[i]);
+        block.TransformerBlock.unloadBuffers(&transformer_blocks_buffer[i]);
     };
 
     var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry);
@@ -130,87 +131,10 @@ pub fn main(init: std.process.Init) !void {
 // )
 
 const Wrapper = struct {
-    mlp: Mlp,
+    mlp: block.Mlp,
 
     pub fn forward(self: Wrapper, x: zml.Tensor) zml.Tensor {
         const tagged = x.withTags(.{ .bs, .dout, .d });
         return self.mlp.forward(tagged);
-    }
-};
-
-const TransformerBlock = struct {
-    img_mlp: Mlp,
-    attn: Attn,
-
-    pub fn load(
-        self: *const TransformerBlock,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *const zml.io.TensorStore,
-    ) !zml.Bufferized(TransformerBlock) {
-        var buffers = try zml.mem.bufferize(allocator, TransformerBlock, self);
-        errdefer unloadBuffers(&buffers);
-
-        var loader: zml.io.Loader = try .init(allocator, platform, .default);
-        errdefer loader.deinit();
-
-        try loader.load(io, TransformerBlock, self, &buffers, store, &.{}, .{});
-        try loader.await(io);
-
-        return buffers;
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(TransformerBlock)) void {
-        Mlp.unloadBuffers(&self.img_mlp);
-        Attn.unloadBuffers(&self.attn);
-    }
-
-    pub fn forward(self: TransformerBlock, x: zml.Tensor) zml.Tensor {
-        const y = self.attn.forward(x);
-        return self.img_mlp.forward(y);
-    }
-};
-
-const Mlp = struct {
-    gate_layer: zml.nn.Linear,
-    out: zml.nn.Linear,
-    proj: zml.nn.Linear,
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
-        zml.nn.Linear.unloadBuffers(&self.gate_layer);
-        zml.nn.Linear.unloadBuffers(&self.gate_layer);
-        zml.nn.Linear.unloadBuffers(&self.gate_layer);
-    }
-
-    pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        // It seems like I need to tag again after the silu(?)
-        const left = self.gate_layer.forward(x, x.dtype()).silu().withTags(.{ .bs, .d, .dup });
-        const right = self.proj.forward(x, x.dtype());
-        const dot = left.mul(right).withTags(.{ .bs, .dup, .d });
-        return self.out.forward(dot, x.dtype());
-    }
-};
-
-const Attn = struct {
-    norm_k: zml.nn.Linear,
-    norm_q: zml.nn.Linear,
-    to_k: zml.nn.Linear,
-    to_out: zml.nn.Linear,
-    to_q: zml.nn.Linear,
-    to_v: zml.nn.Linear,
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Attn)) void {
-        zml.nn.Linear.unloadBuffers(&self.norm_k);
-        zml.nn.Linear.unloadBuffers(&self.norm_q);
-        zml.nn.Linear.unloadBuffers(&self.to_k);
-        zml.nn.Linear.unloadBuffers(&self.to_out);
-        zml.nn.Linear.unloadBuffers(&self.to_q);
-        zml.nn.Linear.unloadBuffers(&self.to_v);
-    }
-
-    pub fn forward(self: Attn, x: zml.Tensor) zml.Tensor {
-        _ = self; // autofix
-        return x;
     }
 };
