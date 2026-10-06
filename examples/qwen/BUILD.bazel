@@ -10,6 +10,10 @@ zig_binary(
 
 zig_binary(
     name = "torch2zml",
+    srcs = [
+        "blocks.zig",
+        "torch2zml.zig",
+    ],
     main = "torch2zml.zig",
     deps = [
         "@zml//stdx",
