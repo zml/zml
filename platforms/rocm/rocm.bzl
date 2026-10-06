@@ -12,7 +12,7 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 _ROCM_VERSION = "10.1"
 _ROCM_STRIP_PREFIX = "./opt/rocm/core-" + _ROCM_VERSION
 _PLUGIN_ROCM_URL = "file:///home/hugo/archive.tar.zst"
-_PLUGIN_ROCM_SHA256 = "c2cb17021113e3e07dbf6fca41c61f6dd1a1aa04c6f5b8c19bd80031da79e7df"
+_PLUGIN_ROCM_SHA256 = "c72efedb3dc1416641d557e304b6cc078954ae5c087d24c56fb530c1906ba193"
 
 def _rocm_package_name(name):
     return name + _ROCM_VERSION
