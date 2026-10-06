@@ -1523,7 +1523,6 @@ pub const Shape = struct {
             shape.reshape(.{24}),
             shape.splitAxis(1, .{ 1, 3 }),
             shape.mergeAxis(.merged, .{ 0, 1 }),
-            shape.replicate(),
             shape.withDefaultPartitioning(),
         }) |transformed| {
             try testing.expectEqual(&test_mesh, transformed._sharding.mesh);

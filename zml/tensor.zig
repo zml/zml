@@ -77,8 +77,8 @@ pub const Tensor = struct {
     /// Internal use
     ///
     /// Creates a tensor from a Shape and an mlir.Value.
-    /// Note: sharding is information is discarded !
-    /// See _resultPropagateSharding instead
+    /// Note: sharding information is discarded, the output tensor is considered open for replication.
+    /// Use _resultPropagateSharding when the shape sharding should be propagated.
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
         var res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
         res._shape._sharding.partition = .open(sh.rank());
@@ -426,6 +426,8 @@ pub const Tensor = struct {
     /// cannot use the donated input's contents after execution. Runners destroy its
     /// handle automatically; raw `Exe.call` leaves it for the caller to deinit.
     /// For `reuseBuffer` to be effective, it needs to propagate all the way through the output.
+    ///
+    /// The sharding of the origin tensor is propagated to this one.
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
         const compilation_context = Compiler.current();
         const scope = compilation_context.currentScope();
@@ -436,8 +438,30 @@ pub const Tensor = struct {
                 .explicit => og_donation,
             };
             scope.id_to_donation.put(scope.arena.allocator(), self.id, donation) catch @panic("OOM");
+
+            // The origin is mapped to a physical buffer either because it's an input or through `reuseBuffer`
+            // We can now look at its sharding.
+            if (origin._shape.isFullyReplicated()) {
+                stdx.debug.assert(self.byteSize() ==  origin.byteSize(), ".reuseBuffer expects two tensors with same byteSize, got {f} ({B}) and {f} ({B})", .{self, self.byteSize(), origin, origin.byteSize()});
+            } else {
+                // Origin is sharded, we can't just use the global byte size, we actually need the same byte size per shard.
+                // We are stricter here and require the same shape.
+                stdx.debug.assert(self._shape.eql(origin._shape), ".reuseBuffer expects two sharded tensors with same shape, got {f} and {f}", .{self, origin });
+
+                // Normally self sharding is unspecified and we can just propagate origin sharding,
+                // but if the user called `.withPartitioning` explicitly it would be weird to override it silently, hence the check.
+                stdx.debug.assert(self._shape._sharding.mesh == null or self._shape._sharding.eql(origin._shape._sharding), ".reuseBuffer expects two tensors on the same mesh, got {f} and {f}", .{self, origin});
+            }
+
+            var res = self;
+            res._shape._sharding = origin._shape._sharding;
+            return res;
+        } else {
+            // Origin tensor doesn't has any physical buffer associated so we can move on.
+            // This is allowed to allow a function like KVCache.update to call `reuseBuffer`,
+            // even though the caller may have constructed the inputs internally.
+            return self;
         }
-        return self;
     }
 
     test reuseBuffer {

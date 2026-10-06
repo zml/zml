@@ -57,6 +57,10 @@ pub fn isFullyReplicated(self: Sharding) bool {
     return true;
 }
 
+pub fn eql(self: Sharding, other: Sharding) bool {
+    return self.mesh == other.mesh and self.partition == other.partition;
+}
+
 pub const MAX_MESH_RANK = 4;
 
 /// Describes how a given Shape axis behaves inside a mesh.
