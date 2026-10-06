@@ -1,15 +1,11 @@
-load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary", "zig_library")
+load("@zml//bazel:zig_options.bzl", "zig_option", "zig_options")
 
-write_file(
-    name = "build_options_zig",
-    out = "build_options.zig",
-    content = ["pub const debug_allocations: bool = false;"],
-)
+zig_option(name = "debug_allocations", bool = False)
 
-zig_library(
+zig_options(
     name = "build_options",
-    main = ":build_options_zig",
+    settings = [":debug_allocations"],
 )
 
 zig_library(
