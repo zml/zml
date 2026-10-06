@@ -171,23 +171,19 @@ pub const Tensor = struct {
     /// * partition spec: a struct where the field names match the axis of the given mesh
     ///
     /// eg `x.withPartitioning(tp, .{ .h = .model }))` or `x.withPartitioning(.tp, .{ .h = .model }))`
-    pub fn withPartitioning(self: Tensor, mesh_: anytype, partition_spec: anytype) Tensor {
+    pub fn withPartitioning(self: Tensor, mesh_: anytype, partitioning: anytype) Tensor {
         if (@TypeOf(mesh_) == @EnumLiteral()) {
             const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit *const zml.Mesh object as input");
-            return self.withPartitioning(compiler.mesh(mesh_), partition_spec);
+            return self.withPartitioning(compiler.mesh(mesh_), partitioning);
         }
 
-        const partitioned_shape = self._shape.withPartitioning(mesh_, partition_spec);
-        return self.withPartitioningInner(partitioned_shape);
-    }
+        if (@TypeOf(partitioning) != Sharding.Partitioning) {
+            const parsed = Sharding.Partitioning.parse(self._shape.tags(), mesh_, .open, partitioning);
+            return self.withPartitioning(mesh_, parsed);
+        }
 
-    /// Force the input tensor to be replicated along the given axes.
-    pub fn replicate(self: Tensor, axes_: anytype) Tensor {
-        const partitioned_shape = self._shape.replicate(axes_);
-        return self.withPartitioningInner(partitioned_shape);
-    }
+        const partitioned_shape = self._shape.withPartitioning(mesh_, partitioning);
 
-    fn withPartitioningInner(self: Tensor, partitioned_shape: Shape) Tensor {
         const ctx = Compiler.currentOrNull() orelse {
             var res = self;
             res._shape = partitioned_shape;
@@ -227,7 +223,16 @@ pub const Tensor = struct {
             },
         };
 
+        std.log.warn("{f}.withPartitioning({f}) -> {f}", .{ self, partitioned_shape, attr });
         return _resultPropagateSharding(partitioned_shape, op_result);
+    }
+
+    /// Force the input tensor to be fully replicated.
+    /// This can be detrimental for performance.
+    pub fn replicate(self: Tensor) Tensor {
+        const compiler = Compiler.current();
+        const partitioning: Sharding.Partitioning = .repeat(.replicated, self.rank());
+        return self.withPartitioning(compiler.platform.replicated_mesh, partitioning);
     }
 
     test withPartitioning {
@@ -261,7 +266,7 @@ pub const Tensor = struct {
         try std.testing.expectEqual(Sharding.PartitionSpec.sharded(0), x2.shape().partition(.h));
         try std.testing.expectEqual(&mp_dp, x2.shape().reshape(.{ 2, 4 })._sharding.mesh);
 
-        const x2_replicated = x2.replicate(.{.h});
+        const x2_replicated = x2.replicate();
         try std.testing.expectEqual(&mp_dp, x2_replicated.shape()._sharding.mesh);
         try std.testing.expectEqual(Sharding.PartitionSpec.replicated, x2_replicated.shape().partition(.h));
     }

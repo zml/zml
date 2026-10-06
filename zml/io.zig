@@ -191,8 +191,9 @@ pub const TensorStore = struct {
                 return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .replicated);
             }
             const resolved_mesh = self.store.mesh(mesh_);
+            // Unspecified tensor axes are treated as replicated
             const partition: Sharding.Partitioning = if (has_tags)
-                .parse(parsed_tags.constSlice(), resolved_mesh, partitioning)
+                .parse(parsed_tags.constSlice(), resolved_mesh, .replicated, partitioning)
             else
                 partitioning;
             return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .{ .mesh = resolved_mesh, .partition = partition });

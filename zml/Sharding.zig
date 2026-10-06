@@ -52,7 +52,7 @@ pub fn toArray(self: Sharding) [Shape.MAX_RANK]PartitionSpec {
 pub fn isFullyReplicated(self: Sharding) bool {
     if (self.mesh == null) return true;
     for (self.partition.toArray()) |spec| {
-        if (spec != .replicated and spec != .not_set) return false;
+        if (spec != .replicated and spec != .out_of_bound) return false;
     }
     return true;
 }
@@ -73,9 +73,8 @@ pub const PartitionSpec = enum(u4) {
     // an 8D mesh seems already a lot, the max we know about is 3D.
     replicated = 8,
 
-    // Special value to replace "undefined". LLVM `undefined` tracking doesn't go to sub-bytes struct,
-    // so it's not a good idea to have `undefined` PartitionSpec inside a Partitioning
-    not_set = 0xa,
+    // Partitioning don't encode the rank of corresponding tensor, so this is used to mark invalid positions.
+    out_of_bound = 0xa,
     open = 15,
 
     pub fn sharded(mesh_axis: u3) PartitionSpec {
@@ -102,7 +101,7 @@ pub const PartitionSpec = enum(u4) {
 
         try std.testing.expect(PartitionSpec.replicated.isClosed());
 
-        try std.testing.expect(!PartitionSpec.not_set.isClosed());
+        try std.testing.expect(!PartitionSpec.out_of_bound.isClosed());
     }
 };
 
@@ -207,13 +206,13 @@ pub const Partitioning = packed struct {
     _6: PartitionSpec,
     _7: PartitionSpec,
 
-    pub const not_set: Partitioning = splat(.not_set);
+    pub const out_of_bound: Partitioning = splat(.out_of_bound);
 
     const MAX_RANK = Shape.MAX_RANK;
     const Vec = @Vector(MAX_RANK, u4);
 
     pub fn init(specs: []const PartitionSpec) Partitioning {
-        var res: Partitioning = not_set;
+        var res: Partitioning = out_of_bound;
         for (0.., specs) |i, spec| {
             res = res.set(i, spec);
         }
@@ -221,11 +220,11 @@ pub const Partitioning = packed struct {
     }
 
     pub fn replicated(rank_: usize) Partitioning {
-        return splatPartial(.replicated, rank_);
+        return repeat(.replicated, rank_);
     }
 
     pub fn open(rank_: usize) Partitioning {
-        return splatPartial(.open, rank_);
+        return repeat(.open, rank_);
     }
 
     pub fn splat(spec: PartitionSpec) Partitioning {
@@ -233,11 +232,11 @@ pub const Partitioning = packed struct {
         return @bitCast(vec);
     }
 
-    pub fn splatPartial(spec: PartitionSpec, rank_: usize) Partitioning {
+    pub fn repeat(spec: PartitionSpec, rank_: usize) Partitioning {
         std.debug.assert(rank_ <= MAX_RANK);
         const splatted: Vec = @splat(@intFromEnum(spec));
         const mask = std.simd.iota(u4, 8) < @as(Vec, @splat(@truncate(rank_)));
-        return @bitCast(@select(u4, mask, splatted, @as(Vec, @bitCast(not_set))));
+        return @bitCast(@select(u4, mask, splatted, @as(Vec, @bitCast(out_of_bound))));
     }
 
     pub fn get(p: Partitioning, ax: usize) PartitionSpec {
@@ -258,7 +257,7 @@ pub const Partitioning = packed struct {
     pub fn rank(p: Partitioning) u8 {
         for (0..MAX_RANK) |i_usize| {
             const i: u8 = @truncate(i_usize);
-            if (p.get(i) == .not_set) return i;
+            if (p.get(i) == .out_of_bound) return i;
         }
         return MAX_RANK;
     }
@@ -278,7 +277,7 @@ pub const Partitioning = packed struct {
         const pack: u32 = @bitCast(p);
         const shift: u5 = @intCast(4 * ax);
         const lower_mask = (@as(u32, 1) << shift) - 1;
-        return @bitCast((pack & lower_mask) | ((pack >> 4) & ~lower_mask) | (@as(u32, @intFromEnum(PartitionSpec.not_set)) << 28));
+        return @bitCast((pack & lower_mask) | ((pack >> 4) & ~lower_mask) | (@as(u32, @intFromEnum(PartitionSpec.out_of_bound)) << 28));
     }
 
     pub fn toArray(p: Partitioning) [MAX_RANK]PartitionSpec {
@@ -311,22 +310,22 @@ pub const Partitioning = packed struct {
             const filled = Partitioning.splat(spec);
             for (0..MAX_RANK) |ax| {
                 try std.testing.expectEqual(spec, filled.get(ax));
-                const updated = Partitioning.not_set.set(ax, spec);
+                const updated = Partitioning.out_of_bound.set(ax, spec);
                 for (0..MAX_RANK) |i| {
-                    try std.testing.expectEqual(if (i == ax) spec else .not_set, updated.get(i));
+                    try std.testing.expectEqual(if (i == ax) spec else .out_of_bound, updated.get(i));
                 }
             }
         }
         for (0..MAX_RANK + 1) |rank_| {
             const parts = Partitioning.replicated(rank_);
             for (0..MAX_RANK) |ax| {
-                try std.testing.expectEqual(if (ax < rank_) PartitionSpec.replicated else .not_set, parts.get(ax));
+                try std.testing.expectEqual(if (ax < rank_) PartitionSpec.replicated else .out_of_bound, parts.get(ax));
             }
         }
     }
 
     test "insertion and removal at every slot" {
-        var parts: Partitioning = .not_set;
+        var parts: Partitioning = .out_of_bound;
         for (0..MAX_RANK) |ax| parts = parts.set(ax, @enumFromInt(ax));
         const original = parts.toArray();
         for (0..MAX_RANK) |ax| {
@@ -337,19 +336,24 @@ pub const Partitioning = packed struct {
 
             var removed = original;
             std.mem.copyForwards(PartitionSpec, removed[ax .. MAX_RANK - 1], original[ax + 1 ..]);
-            removed[MAX_RANK - 1] = .not_set;
+            removed[MAX_RANK - 1] = .out_of_bound;
             try std.testing.expectEqualSlices(PartitionSpec, &removed, &parts.orderedRemove(ax).toArray());
             try std.testing.expectEqual(parts, parts.orderedRemove(ax).insert(ax, parts.get(ax)));
         }
-        try std.testing.expectEqual(Partitioning.not_set, Partitioning.not_set.orderedRemove(0));
-        const comptime_parts = comptime Partitioning.not_set.insert(7, .open).orderedRemove(0).set(0, .replicated);
+        try std.testing.expectEqual(Partitioning.out_of_bound, Partitioning.out_of_bound.orderedRemove(0));
+        const comptime_parts = comptime Partitioning.out_of_bound.insert(7, .open).orderedRemove(0).set(0, .replicated);
         try std.testing.expectEqual(PartitionSpec.replicated, comptime_parts.get(0));
         try std.testing.expectEqual(PartitionSpec.open, comptime_parts.get(6));
-        try std.testing.expectEqual(PartitionSpec.not_set, comptime_parts.get(7));
+        try std.testing.expectEqual(PartitionSpec.out_of_bound, comptime_parts.get(7));
     }
 
-    pub fn parse(tags: []const [*:0]const u8, mesh: *const Mesh, partitioning: anytype) Partitioning {
-        var partition_: Partitioning = .replicated(tags.len);
+    /// Parse a struct literal into a partitioning object.
+    /// The struct passed to partitioning must only have fields names present in `tags`.
+    /// The ordering of tags matter, the return struct will map names to axis as specified by `tags`.
+    /// The default value is important.
+    /// In Tensor code unspecified axis will be inferred as `.open` while in shape code, it's `.replicated`.
+    pub fn parse(tags: []const [*:0]const u8, mesh: *const Mesh, default_value: PartitionSpec, partitioning: anytype) Partitioning {
+        var partition_: Partitioning = .repeat(default_value, tags.len);
 
         const T = @TypeOf(partitioning);
         stdx.debug.assertComptime(stdx.meta.isStruct(T), "parsePartitioning expected a struct of enum literals eg {{ .b = .data, .d = .model }}, got: {any}", .{T});
@@ -362,7 +366,7 @@ pub const Partitioning = packed struct {
             const value = @field(partitioning, field.name);
             const spec: PartitionSpec = if (@TypeOf(value) == PartitionSpec) value else switch (value) {
                 .replicated => .replicated,
-                .not_set => std.debug.panic("value not_set not allowed", .{}),
+                .out_of_bound => std.debug.panic("value out_of_bound not allowed", .{}),
                 .open => .open,
                 else => spec: {
                     const mesh_tag = Shape.toTag(value);
@@ -1629,7 +1633,7 @@ pub const Mesh = struct {
         // why not stay in logical realm ?
         for (0.., dimensions) |ax, *d| {
             d.* = switch (shape.partition(ax)) {
-                .not_set => @panic("undefined"),
+                .out_of_bound => @panic("undefined"),
                 .replicated => .replicated(ctx),
                 .open => .open(ctx, &.{}),
                 else => d: {
