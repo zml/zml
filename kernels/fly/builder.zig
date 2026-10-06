@@ -529,19 +529,17 @@ pub const Value = struct {
         return self.shuffle(.xor, offset, width);
     }
 
-    pub const ShuffleMode = enum { xor, up, down, idx };
+    pub const ShuffleMode = gpu.ShuffleMode;
 
     pub fn shuffle(self: Value, mode: ShuffleMode, offset: anytype, width: i32) Value {
         const k = self.kern();
         const off: Value = if (@TypeOf(offset) == Value) offset else k.constant(.i32, offset);
         const wid = k.constant(.i32, width);
-        const mode_attr = switch (mode) {
-            inline else => |m| fly.parseAttr(k.ctx, "#gpu<shuffle_mode<" ++ @tagName(m) ++ ">>"),
-        };
+        const mode_attr = gpu.ShuffleModeAttr.get(k.ctx, .{ .value = mode }) catch unreachable;
         const op = fly.make(k.ctx, "gpu.shuffle", .{
             .operands = .{ .flat = &.{ self.inner, off.inner, wid.inner } },
             .results = .{ .flat = &.{ self.type_(), .int(k.ctx, .i1) } },
-            .attributes = &.{.named(k.ctx, "mode", mode_attr)},
+            .attributes = &.{.named(k.ctx, "mode", mode_attr.attribute())},
             .location = k.loc(),
         });
         return k.emit(op);
@@ -1038,7 +1036,8 @@ pub const Builder = struct {
 
     pub fn emitFast(self: *Builder, op: *mlir.Operation) Value {
         if (self.fast_math and op.numResults() > 0 and (Value{ .inner = op.result(0), .kernel = self }).isFloatElem()) {
-            op.setAttributeByName("fastmath", fly.parseAttr(self.ctx, "#arith.fastmath<fast>"));
+            const fast = arith.FastMathAttr.get(self.ctx, .{ .value = .fast }) catch unreachable;
+            op.setAttributeByName("fastmath", fast.attribute());
         }
         return self.emit(op);
     }
@@ -1878,6 +1877,34 @@ test "scalar conversions and constants" {
     if (std.mem.indexOf(u8, ir, "arith.sitofp") != null or std.mem.indexOf(u8, ir, "arith.extsi") != null) {
         std.debug.print("i1 was sign-extended:\n{s}\n", .{ir});
         return error.TestUnexpectedResult;
+    }
+}
+
+test "shuffles and fast math carry their attributes" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "shuffle");
+    defer b.deinit();
+    _ = try b.declareArgs(.{
+        .x = .{ .tensor = .{ .dtype = .f32, .dims = &.{16} } },
+    });
+
+    b.setFastMath(true);
+    const x = b.constant(.f32, 1.0);
+    _ = x.shuffleXor(1, 64).add(x.shuffle(.idx, 3, 64));
+
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+    for ([_][]const u8{
+        "gpu.shuffle xor",
+        "gpu.shuffle idx",
+        "arith.addf %shuffleResult, %shuffleResult_1 fastmath<fast>",
+    }) |needle| {
+        if (std.mem.indexOf(u8, ir, needle) == null) {
+            std.debug.print("missing `{s}` in:\n{s}\n", .{ needle, ir });
+            return error.TestUnexpectedResult;
+        }
     }
 }
 

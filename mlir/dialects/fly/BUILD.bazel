@@ -13,7 +13,6 @@ cc_library(
         "@flydsl//:FlyROCDLDialect",
         "@flydsl//:TiledOpTraits",
         "@llvm-project//mlir:CAPIIR",
-        "@llvm-project//mlir:GPUDialect",
         "@llvm-project//mlir:UBDialect",
     ],
     alwayslink = True,
@@ -21,7 +20,6 @@ cc_library(
 
 zig_library(
     name = "fly",
-    tags = ["manual"],
     srcs = [
         "attributes.zig",
         "rocdl.zig",
@@ -29,11 +27,13 @@ zig_library(
     ],
     import_name = "mlir/dialects/fly",
     main = "fly.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         ":fly_capi",
         "//mlir",
         "//mlir:c",
+        "//mlir/dialects:capi",
         "//stdx",
     ],
 )

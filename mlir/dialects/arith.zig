@@ -43,6 +43,52 @@ pub const CmpFPredicate = enum(i64) {
 };
 
 // =============================================================================
+// Flag attributes
+// =============================================================================
+
+/// `mlir::arith::FastMathFlags`, one bit per flag.
+pub const FastMathFlags = packed struct(u32) {
+    reassoc: bool = false,
+    nnan: bool = false,
+    ninf: bool = false,
+    nsz: bool = false,
+    arcp: bool = false,
+    contract: bool = false,
+    afn: bool = false,
+    _padding: u25 = 0,
+
+    pub const none: FastMathFlags = .{};
+    pub const fast: FastMathFlags = .{ .reassoc = true, .nnan = true, .ninf = true, .nsz = true, .arcp = true, .contract = true, .afn = true };
+};
+
+/// `#arith.fastmath<...>`.
+pub const FastMathAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsAArithFastMath;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "fastmath";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: FastMathFlags,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirArithFastMathAttrGet(ctx.ptr(), @bitCast(args.value));
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) FastMathFlags {
+        return @bitCast(c.mlirArithFastMathAttrGetValue(self.ptr()));
+    }
+};
+
+// =============================================================================
 // Constants
 // =============================================================================
 
@@ -404,4 +450,31 @@ pub fn select(
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+fn expectPrints(expected: []const u8, value: anytype) !void {
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print("{f}", .{value});
+    try std.testing.expectEqualStrings(expected, w.buffered());
+}
+
+test "arith fastmath attribute is built through the C API" {
+    const ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+
+    const cases = [_]struct { FastMathFlags, []const u8 }{
+        .{ .none, "#arith.fastmath<none>" },
+        .{ .fast, "#arith.fastmath<fast>" },
+        .{ .{ .reassoc = true }, "#arith.fastmath<reassoc>" },
+        .{ .{ .nnan = true, .ninf = true, .afn = true }, "#arith.fastmath<nnan,ninf,afn>" },
+        .{ .{ .nsz = true, .arcp = true, .contract = true }, "#arith.fastmath<nsz,arcp,contract>" },
+    };
+    for (cases) |case| {
+        const attr = try FastMathAttr.get(ctx, .{ .value = case[0] });
+        try std.testing.expectEqual(case[0], attr.getValue());
+        try std.testing.expect(attr.attribute().isA(FastMathAttr) != null);
+        try expectPrints(case[1], attr);
+    }
+    try std.testing.expectError(error.InvalidMlir, FastMathAttr.get(ctx, .{ .value = .{ ._padding = 1 } }));
 }

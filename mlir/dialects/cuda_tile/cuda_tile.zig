@@ -1,6 +1,6 @@
 //! Zig bindings for NVIDIA's `cuda_tile` MLIR dialect (CUDA Tile IR): one
-//! function per op in `Ops.td` order. Types and enums go through the dialect's
-//! C API; what it has no getter for is parsed from text.
+//! function per op in `Ops.td` order. Types and attributes go through the
+//! dialect's C API, completed by `cuda_tile_capi.h` where it has no getter.
 
 const std = @import("std");
 
@@ -245,7 +245,55 @@ pub const StridedViewType = opaque {
 };
 
 /// `!cuda_tile.gather_scatter_view<tile=(...), padding_value=..., tensor_view<...>, sparse_dim=N>`
-/// (13.3). The C API has no getter for it, so it is parsed from text.
+/// (13.3): gathers or scatters along `sparseDim`, one tile per index.
+pub const GatherScatterViewType = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirType);
+    pub const isAFn = c.mlirTypeIsACudaTileGatherScatterView;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirTypeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "gather_scatter_view";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.type_().format(writer);
+    }
+    pub fn type_(self: *const Self) *const mlir.Type {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        tileShape: []const i32,
+        tensorView: *const TensorViewType,
+        sparseDim: u32,
+        paddingValue: ?PaddingValue = null,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirCudaTileGatherScatterViewTypeGet(
+            ctx.ptr(),
+            @intCast(args.tileShape.len),
+            args.tileShape.ptr,
+            args.tensorView.ptr(),
+            args.sparseDim,
+            if (args.paddingValue) |p| p.attribute(ctx).ptr() else null_attr,
+        );
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getTileShape(self: *const Self) *const mlir.DenseArrayAttribute(.i32) {
+        return @ptrCast(attrFromC(c.mlirCudaTileGatherScatterViewTypeGetTileShape(self.ptr())));
+    }
+    pub fn getTensorView(self: *const Self) *const TensorViewType {
+        return @ptrCast(typeFromC(c.mlirCudaTileGatherScatterViewTypeGetTensorView(self.ptr())));
+    }
+    pub fn getSparseDim(self: *const Self) u32 {
+        return c.mlirCudaTileGatherScatterViewTypeGetSparseDim(self.ptr());
+    }
+    pub fn getPaddingValue(self: *const Self) ?PaddingValue {
+        const attr = c.mlirCudaTileGatherScatterViewTypeGetPaddingValue(self.ptr());
+        if (attr.ptr == null) return null;
+        const name = c.mlirCudaTilePaddingValueAttrGetValue(attr);
+        return std.meta.stringToEnum(PaddingValue, name.data[0..name.length]).?;
+    }
+};
+
 pub fn gatherScatterViewType(
     ctx: *mlir.Context,
     tile_shape: []const i64,
@@ -253,31 +301,28 @@ pub fn gatherScatterViewType(
     sparse_dim: u32,
     padding: ?PaddingValue,
 ) *const mlir.Type {
-    var buf: [1024]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    w.writeAll("!cuda_tile.gather_scatter_view<tile=(") catch unreachable;
-    for (tile_shape, 0..) |d, i| {
-        if (i > 0) w.writeAll("x") catch unreachable;
-        w.print("{d}", .{d}) catch unreachable;
-    }
-    w.writeAll("), ") catch unreachable;
-    if (padding) |p| w.print("padding_value={s}, ", .{@tagName(p)}) catch unreachable;
-    w.print("{f}, sparse_dim={d}>", .{ tensor_view, sparse_dim }) catch unreachable;
-    const text = w.buffered();
-    return mlir.Type.parse(ctx, text) catch std.debug.panic("cuda_tile: cannot parse '{s}'", .{text});
+    var shape: stdx.BoundedArray(i32, mlir.ShapedType.MAX_RANK) = .empty;
+    for (tile_shape) |d| shape.appendAssumeCapacity(@intCast(d));
+    const view = GatherScatterViewType.get(ctx, .{
+        .tileShape = shape.constSlice(),
+        .tensorView = tensor_view.isA(TensorViewType) orelse std.debug.panic("cuda_tile: {f} is not a tensor_view", .{tensor_view}),
+        .sparseDim = sparse_dim,
+        .paddingValue = padding,
+    }) catch std.debug.panic("cuda_tile: invalid gather_scatter_view over {f}", .{tensor_view});
+    return view.type_();
 }
 
 /// The `tile<...>` type a load through `view` yields, for any view kind —
 /// through the dialect's `TileView` type interface (`cuda_tile_capi.cc`), so
 /// the gather/scatter view, which has no getters in NVIDIA's C API, works too.
 pub fn tileTypeOfView(view: *const mlir.Type) *const mlir.Type {
-    if (!c.zmlCudaTileTypeIsATileView(view.ptr())) std.debug.panic("cuda_tile: {f} is not a tiled view", .{view});
-    return typeFromC(c.zmlCudaTileTileViewGetViewTileType(view.ptr()));
+    if (!c.mlirTypeIsACudaTileTileView(view.ptr())) std.debug.panic("cuda_tile: {f} is not a tiled view", .{view});
+    return typeFromC(c.mlirCudaTileTileViewTypeGetViewTileType(view.ptr()));
 }
 
 pub fn indexRankOfView(view: *const mlir.Type) usize {
-    if (!c.zmlCudaTileTypeIsATileView(view.ptr())) std.debug.panic("cuda_tile: {f} is not a tiled view", .{view});
-    return @intCast(c.zmlCudaTileTileViewGetViewIndexRank(view.ptr()));
+    if (!c.mlirTypeIsACudaTileTileView(view.ptr())) std.debug.panic("cuda_tile: {f} is not a tiled view", .{view});
+    return @intCast(c.mlirCudaTileTileViewTypeGetViewIndexRank(view.ptr()));
 }
 
 // Enum attributes: built through the C getter from the tag name, so a typo is
@@ -403,8 +448,7 @@ pub const SymbolVisibility = enum {
     }
 };
 
-// optimization_hints: per-architecture dictionaries, built from text so
-// several architectures can be listed.
+// optimization_hints: one dictionary of hints per architecture.
 
 pub const Arch = enum { default, sm_80, sm_86, sm_87, sm_88, sm_89, sm_90, sm_100, sm_103, sm_110, sm_120, sm_121 };
 
@@ -431,78 +475,185 @@ pub const PtrLoadStoreHint = struct {
     latency: ?i32 = null,
 };
 
-fn writeHintFields(w: *std.Io.Writer, hint: anytype) !void {
-    var first = true;
-    inline for (@typeInfo(@TypeOf(hint)).@"struct".fields) |f| {
+/// `#cuda_tile.optimization_hints<sm_120 = {num_cta_in_cga = 2}, ...>`: a
+/// dictionary from architecture name to a dictionary of hints.
+pub const OptimizationHintsAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirCudaTileAttributeIsAOptimizationHintsAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "optimization_hints";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: *const mlir.DictionaryAttribute,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirCudaTileOptimizationHintsAttrGet(ctx.ptr(), args.value.ptr());
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) *const mlir.DictionaryAttribute {
+        return @ptrCast(attrFromC(c.mlirCudaTileOptimizationHintsAttrGetValue(self.ptr())));
+    }
+};
+
+/// The hint dictionary of one architecture: the non-null fields of `hint`
+/// but `arch`, integers as `i64` like the textual form.
+fn hintDictionary(ctx: *mlir.Context, hint: anytype) *const mlir.Attribute {
+    const fields = @typeInfo(@TypeOf(hint)).@"struct".fields;
+    var entries: stdx.BoundedArray(mlir.NamedAttribute, fields.len) = .empty;
+    inline for (fields) |f| {
         if (comptime std.mem.eql(u8, f.name, "arch")) continue;
         if (@field(hint, f.name)) |v| {
-            if (!first) try w.writeAll(", ");
-            first = false;
-            switch (@TypeOf(v)) {
-                bool => try w.print("{s} = {}", .{ f.name, v }),
-                else => try w.print("{s} = {d}", .{ f.name, v }),
-            }
+            const value: *const mlir.Attribute = switch (@TypeOf(v)) {
+                bool => .boolean(ctx, v),
+                else => .int(ctx, .i64, v),
+            };
+            entries.appendAssumeCapacity(.named(ctx, f.name, value));
         }
     }
+    return .dict(ctx, entries.constSlice());
 }
 
-/// `#cuda_tile.optimization_hints<sm_120 = {num_cta_in_cga = 2}, ...>` from a
-/// slice of `EntryHint` or `LoadStoreHint`.
+/// `#cuda_tile.optimization_hints` from a slice of `EntryHint`,
+/// `LoadStoreHint` or `PtrLoadStoreHint`.
 pub fn optimizationHints(ctx: *mlir.Context, hints: anytype) *const mlir.Attribute {
-    var buf: [2048]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    w.writeAll("#cuda_tile.optimization_hints<") catch unreachable;
-    for (hints, 0..) |h, i| {
-        if (i > 0) w.writeAll(", ") catch unreachable;
-        w.print("{s} = {{", .{@tagName(h.arch)}) catch unreachable;
-        writeHintFields(&w, h) catch unreachable;
-        w.writeAll("}") catch unreachable;
+    var entries: stdx.BoundedArray(mlir.NamedAttribute, @typeInfo(Arch).@"enum".fields.len) = .empty;
+    for (hints) |h| entries.appendAssumeCapacity(.named(ctx, @tagName(h.arch), hintDictionary(ctx, h)));
+    const value: *const mlir.DictionaryAttribute = @ptrCast(mlir.Attribute.dict(ctx, entries.constSlice()));
+    const attr = OptimizationHintsAttr.get(ctx, .{ .value = value }) catch
+        std.debug.panic("cuda_tile: invalid optimization_hints {f}", .{value});
+    return attr.attribute();
+}
+
+// assume predicates.
+
+/// `#cuda_tile.div_by<divisor>`, or `<divisor, every E along A>` for a
+/// per-group claim; `every` and `along` are both set or both null.
+pub const DivByAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsACudaTileDivBy;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "div_by";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
     }
-    w.writeAll(">") catch unreachable;
-    const text = w.buffered();
-    return mlir.Attribute.parse(ctx, text) catch std.debug.panic("cuda_tile: cannot parse '{s}'", .{text});
-}
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        divisor: u64,
+        every: ?i64 = null,
+        along: ?i64 = null,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirCudaTileDivByAttrGet(
+            ctx.ptr(),
+            args.divisor,
+            args.every != null,
+            args.every orelse 0,
+            args.along != null,
+            args.along orelse 0,
+        );
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getDivisor(self: *const Self) u64 {
+        return c.mlirCudaTileDivByAttrGetDivisor(self.ptr());
+    }
+    pub fn getEvery(self: *const Self) ?i64 {
+        return if (c.mlirCudaTileDivByAttrHasEvery(self.ptr())) c.mlirCudaTileDivByAttrGetEvery(self.ptr()) else null;
+    }
+    pub fn getAlong(self: *const Self) ?i64 {
+        return if (c.mlirCudaTileDivByAttrHasAlong(self.ptr())) c.mlirCudaTileDivByAttrGetAlong(self.ptr()) else null;
+    }
+};
 
-// assume predicates: no C getters; parsed from their documented spellings.
-
-fn parseAttr(ctx: *mlir.Context, comptime fmt: []const u8, args: anytype) *const mlir.Attribute {
-    var buf: [256]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, fmt, args) catch unreachable;
-    return mlir.Attribute.parse(ctx, text) catch std.debug.panic("cuda_tile: cannot parse '{s}'", .{text});
-}
-
-/// `#cuda_tile.div_by<N>`, or `<N, every E along A>` for a per-group claim.
+/// `along` defaults to 0 when only `every` is given.
 pub fn divBy(ctx: *mlir.Context, divisor: u64, every: ?i64, along: ?i64) *const mlir.Attribute {
-    if (every) |e| {
-        return parseAttr(ctx, "#cuda_tile.div_by<{d}, every {d} along {d}>", .{ divisor, e, along orelse 0 });
-    }
-    return parseAttr(ctx, "#cuda_tile.div_by<{d}>", .{divisor});
+    const attr = DivByAttr.get(ctx, .{
+        .divisor = divisor,
+        .every = every,
+        .along = if (every != null) along orelse 0 else null,
+    }) catch unreachable;
+    return attr.attribute();
 }
+
+/// `#cuda_tile.same_elements<[...]>`: per dimension, the size of the groups
+/// of equal elements.
+pub const SameElementsAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsACudaTileSameElements;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "same_elements";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        values: []const i64,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirCudaTileSameElementsAttrGet(ctx.ptr(), @intCast(args.values.len), args.values.ptr);
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValues(self: *const Self) *const mlir.DenseArrayAttribute(.i64) {
+        return @ptrCast(attrFromC(c.mlirCudaTileSameElementsAttrGetValues(self.ptr())));
+    }
+};
 
 pub fn sameElements(ctx: *mlir.Context, values: []const i64) *const mlir.Attribute {
-    var buf: [256]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    w.writeAll("#cuda_tile.same_elements<[") catch unreachable;
-    for (values, 0..) |v, i| {
-        if (i > 0) w.writeAll(", ") catch unreachable;
-        w.print("{d}", .{v}) catch unreachable;
-    }
-    w.writeAll("]>") catch unreachable;
-    const text = w.buffered();
-    return mlir.Attribute.parse(ctx, text) catch std.debug.panic("cuda_tile: cannot parse '{s}'", .{text});
+    const attr = SameElementsAttr.get(ctx, .{ .values = values }) catch unreachable;
+    return attr.attribute();
 }
 
 /// `#cuda_tile.bounded<lb, ub>`, either side `?` when null.
+pub const BoundedAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsACudaTileBounded;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "bounded";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        lb: ?i64 = null,
+        ub: ?i64 = null,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirCudaTileBoundedAttrGet(ctx.ptr(), args.lb != null, args.lb orelse 0, args.ub != null, args.ub orelse 0);
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getLb(self: *const Self) ?i64 {
+        return if (c.mlirCudaTileBoundedAttrHasLb(self.ptr())) c.mlirCudaTileBoundedAttrGetLb(self.ptr()) else null;
+    }
+    pub fn getUb(self: *const Self) ?i64 {
+        return if (c.mlirCudaTileBoundedAttrHasUb(self.ptr())) c.mlirCudaTileBoundedAttrGetUb(self.ptr()) else null;
+    }
+};
+
 pub fn bounded(ctx: *mlir.Context, lb: ?i64, ub: ?i64) *const mlir.Attribute {
-    var buf: [128]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    w.writeAll("#cuda_tile.bounded<") catch unreachable;
-    if (lb) |v| w.print("{d}", .{v}) catch unreachable else w.writeAll("?") catch unreachable;
-    w.writeAll(", ") catch unreachable;
-    if (ub) |v| w.print("{d}", .{v}) catch unreachable else w.writeAll("?") catch unreachable;
-    w.writeAll(">") catch unreachable;
-    const text = w.buffered();
-    return mlir.Attribute.parse(ctx, text) catch std.debug.panic("cuda_tile: cannot parse '{s}'", .{text});
+    const attr = BoundedAttr.get(ctx, .{ .lb = lb, .ub = ub }) catch unreachable;
+    return attr.attribute();
 }
 
 // Constant values: DenseElementsAttr over a tile type, which is a ShapedType.
@@ -1534,6 +1685,33 @@ test "dialect registers and types round-trip" {
     try std.testing.expectEqual(@as(usize, 1), indexRankOfView(pv));
 
     try std.testing.expect(tokenType(ctx).eql(try mlir.Type.parse(ctx, "!cuda_tile.token")));
+
+    const gather_tv = tensorViewType(ctx, f32_ty, &.{ 64, 32 }, &.{ 32, 1 });
+    const gsv = gatherScatterViewType(ctx, &.{ 8, 16 }, gather_tv, 0, .zero);
+    try std.testing.expect(gsv.eql(try mlir.Type.parse(ctx, "!cuda_tile.gather_scatter_view<tile=(8x16), padding_value = zero, tensor_view<64x32xf32, strides=[32,1]>, sparse_dim=0>")));
+    const typed_gsv = gsv.isA(GatherScatterViewType).?;
+    const gsv_tile = typed_gsv.getTileShape();
+    var gsv_shape: [2]i32 = undefined;
+    try std.testing.expectEqual(gsv_shape.len, gsv_tile.numElements());
+    for (&gsv_shape, 0..) |*d, i| d.* = gsv_tile.element(i);
+    const rebuilt_gsv = try GatherScatterViewType.get(ctx, .{
+        .tileShape = &gsv_shape,
+        .tensorView = typed_gsv.getTensorView(),
+        .sparseDim = typed_gsv.getSparseDim(),
+        .paddingValue = typed_gsv.getPaddingValue(),
+    });
+    try std.testing.expect(rebuilt_gsv.eql(typed_gsv));
+    try std.testing.expect(tileTypeOfView(gsv).eql(tileType(ctx, &.{ 8, 16 }, f32_ty)));
+    try std.testing.expect((try GatherScatterViewType.get(ctx, .{
+        .tileShape = &.{ 8, 16 },
+        .tensorView = gather_tv.isA(TensorViewType).?,
+        .sparseDim = 1,
+    })).getPaddingValue() == null);
+    try std.testing.expectError(error.InvalidMlir, GatherScatterViewType.get(ctx, .{
+        .tileShape = &.{8},
+        .tensorView = gather_tv.isA(TensorViewType).?,
+        .sparseDim = 0,
+    }));
 }
 
 test "enum and hint attributes" {
@@ -1550,10 +1728,40 @@ test "enum and hint attributes" {
         .{ .arch = .sm_120, .num_cta_in_cga = 2, .occupancy = 2 },
     });
     try std.testing.expect(hints.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.optimization_hints<sm_100 = {num_cta_in_cga = 2}, sm_120 = {num_cta_in_cga = 2, occupancy = 2}>")));
+    const typed_hints = hints.isA(OptimizationHintsAttr).?;
+    try std.testing.expect((try OptimizationHintsAttr.get(ctx, .{ .value = typed_hints.getValue() })).eql(typed_hints));
+    const ls_hints = optimizationHints(ctx, &[_]LoadStoreHint{.{ .arch = .sm_100, .allow_tma = false, .latency = 3 }});
+    try std.testing.expect(ls_hints.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.optimization_hints<sm_100 = {allow_tma = false, latency = 3}>")));
+    const not_a_dict: *const mlir.DictionaryAttribute = @ptrCast(mlir.Attribute.dict(ctx, &.{.named(ctx, "sm_100", .int(ctx, .i64, 1))}));
+    try std.testing.expectError(error.InvalidMlir, OptimizationHintsAttr.get(ctx, .{ .value = not_a_dict }));
 
-    _ = divBy(ctx, 16, null, null);
-    _ = sameElements(ctx, &.{ 2, 4 });
-    _ = bounded(ctx, 0, null);
+    const div = divBy(ctx, 16, null, null);
+    try std.testing.expect(div.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.div_by<16>")));
+    const div_every = divBy(ctx, 4, 4, 1);
+    try std.testing.expect(div_every.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.div_by<4, every 4 along 1>")));
+    try std.testing.expect(divBy(ctx, 32, 4, null).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.div_by<32, every 4 along 0>")));
+    const typed_div = div_every.isA(DivByAttr).?;
+    try std.testing.expect((try DivByAttr.get(ctx, .{
+        .divisor = typed_div.getDivisor(),
+        .every = typed_div.getEvery(),
+        .along = typed_div.getAlong(),
+    })).eql(typed_div));
+    try std.testing.expect(div.isA(DivByAttr).?.getEvery() == null);
+    try std.testing.expectError(error.InvalidMlir, DivByAttr.get(ctx, .{ .divisor = 4, .every = 4 }));
+
+    const same = sameElements(ctx, &.{ 2, 4 });
+    try std.testing.expect(same.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.same_elements<[2, 4]>")));
+    const same_values = same.isA(SameElementsAttr).?.getValues();
+    try std.testing.expectEqual(@as(usize, 2), same_values.numElements());
+    try std.testing.expectEqual(@as(i64, 4), same_values.element(1));
+
+    const lower = bounded(ctx, 0, null);
+    try std.testing.expect(lower.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<0, ?>")));
+    try std.testing.expect(bounded(ctx, null, 7).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<?, 7>")));
+    try std.testing.expect(bounded(ctx, -3, 7).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<-3, 7>")));
+    const typed_lower = lower.isA(BoundedAttr).?;
+    try std.testing.expectEqual(@as(?i64, 0), typed_lower.getLb());
+    try std.testing.expect(typed_lower.getUb() == null);
 }
 
 test "entry round-trip through print and parse" {

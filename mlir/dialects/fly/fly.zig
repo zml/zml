@@ -88,15 +88,6 @@ pub fn effect(ctx: *mlir.Context, comptime mnemonic: []const u8, operands: []con
     });
 }
 
-/// Panics with the text on failure.
-pub fn parseType(ctx: *mlir.Context, text: []const u8) *const mlir.Type {
-    return mlir.Type.parse(ctx, text) catch std.debug.panic("fly: cannot parse type `{s}`", .{text});
-}
-
-pub fn parseAttr(ctx: *mlir.Context, text: []const u8) *const mlir.Attribute {
-    return mlir.Attribute.parse(ctx, text) catch std.debug.panic("fly: cannot parse attribute `{s}`", .{text});
-}
-
 pub const TypeKind = enum {
     memref,
     coord_tensor,
@@ -375,12 +366,11 @@ test "types and attributes are built through the C API" {
     }));
 }
 
-test "fly enum and gpu attributes" {
+test "fly enum attributes" {
     const ctx = try testContext();
     defer ctx.deinit();
     _ = try attributes.mmaOperandAttr(ctx, .a);
     _ = try attributes.gemmTraversalOrderAttr(ctx, .kmn);
-    _ = parseAttr(ctx, "#gpu<dim<x>>");
 }
 
 test "inferred fly ops compute layout algebra" {
@@ -392,8 +382,8 @@ test "inferred fly ops compute layout algebra" {
     const block = module.body();
 
     // raked_product((8,16):(16,1), (1,4):(1,1)) — the vectorAdd TV layout.
-    const thr = static(ctx, parseType(ctx, "!fly.layout<(8,16):(16,1)>"), loc).appendTo(block);
-    const val = static(ctx, parseType(ctx, "!fly.layout<(1,4):(1,1)>"), loc).appendTo(block);
+    const thr = static(ctx, try mlir.Type.parse(ctx, "!fly.layout<(8,16):(16,1)>"), loc).appendTo(block);
+    const val = static(ctx, try mlir.Type.parse(ctx, "!fly.layout<(1,4):(1,1)>"), loc).appendTo(block);
     const mn = inferred(ctx, "raked_product", &.{ thr.result(0), val.result(0) }, .empty, loc).appendTo(block);
     const shape = inferred(ctx, "get_shape", &.{mn.result(0)}, .empty, loc).appendTo(block);
     const tiler = inferred(ctx, "int_tuple_product_each", &.{shape.result(0)}, .empty, loc).appendTo(block);
@@ -407,7 +397,7 @@ test "atom traits" {
     defer ctx.deinit();
 
     // MFMA 16x16x4 f32 tiled over a (2,2,1) atom layout.
-    const tm = expect(parseType(ctx, "!fly.tiled_mma<!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>, <(2,2,1):(1,2,0)>>"), .tiled_mma);
+    const tm = expect(try mlir.Type.parse(ctx, "!fly.tiled_mma<!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>, <(2,2,1):(1,2,0)>>"), .tiled_mma);
     try expectPrints("!fly.int_tuple<(32,32,4)>", tm.getTileSizeMNK());
     _ = tm.getTiledThrValLayoutA();
     _ = tm.getThrLayoutVMNK();
@@ -434,7 +424,7 @@ test "atom traits" {
     })).type_() });
     try expectPrints("!fly.layout<32:1>", wmma.getThrLayout());
 
-    const ca = expect(parseType(ctx, "!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 32>"), .copy_atom);
+    const ca = expect(try mlir.Type.parse(ctx, "!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 32>"), .copy_atom);
     _ = ca.getThrValLayoutSrc();
 }
 
@@ -451,7 +441,7 @@ test "type kinds" {
         .{ "!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>", TypeKind.mma_atom },
     };
     inline for (cases) |case| {
-        try std.testing.expectEqual(case[1], typeKind(parseType(ctx, case[0])));
+        try std.testing.expectEqual(case[1], typeKind(try mlir.Type.parse(ctx, case[0])));
     }
     try std.testing.expectEqual(TypeKind.other, typeKind(.float(ctx, .f32)));
 }
@@ -459,7 +449,7 @@ test "type kinds" {
 test "structural readers" {
     const ctx = try testContext();
     defer ctx.deinit();
-    const it = expect(parseType(ctx, "!fly.int_tuple<((2,4),?)>"), .int_tuple);
+    const it = expect(try mlir.Type.parse(ctx, "!fly.int_tuple<((2,4),?)>"), .int_tuple);
     try std.testing.expectEqual(@as(usize, 2), it.getNumElements());
     try std.testing.expect(!it.isLeaf());
     try std.testing.expect(!it.isStatic());
@@ -468,7 +458,7 @@ test "structural readers" {
     try std.testing.expectEqual(types.IntTupleType.Leaf{ .static = 4 }, inner.getElement(1).getLeaf());
     try std.testing.expectEqual(types.IntTupleType.Leaf.dynamic, it.getElement(1).getLeaf());
 
-    const m = parseType(ctx, "!fly.memref<bf16, shared, S<3,3,3> o 0 o (64,32):(32,1), align<16>>");
+    const m = try mlir.Type.parse(ctx, "!fly.memref<bf16, shared, S<3,3,3> o 0 o (64,32):(32,1), align<16>>");
     try expectPrints("!fly.int_tuple<(64,32)>", layoutLikeShape(m));
     try expectPrints("bf16", elemType(m));
 }
