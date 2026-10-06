@@ -1,0 +1,18 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "dialect",
+    srcs = [
+        "CudaDialect.cpp",
+        "CudaInference.cpp",
+    ],
+    deps = [
+        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/Cuda/IR:headers",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:LLVMDialect",
+    ],
+)

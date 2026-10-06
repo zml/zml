@@ -1064,7 +1064,8 @@ test "cute kernel emits the module the CuTe compiler takes" {
 
     const ir = try AddOne.emit(std.testing.allocator, .{ .n = 1000 }, .{ 128, 1, 1 });
     defer std.testing.allocator.free(ir);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "module {\n  func.func @add_one(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "\"func.func\"() <{function_type = (") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "sym_name = \"add_one\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "nvvm.reqntid = array<i32: 128, 1, 1>") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "cute.memref.load") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "gpu.module") == null);

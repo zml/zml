@@ -9,8 +9,9 @@ ops to a block stack, a `Value` with fluent scalar arithmetic, and a
 `zml.kernel.cute.Kernel` wrapper that turns a `run` function into a
 `stablehlo.custom_call` XLA compiles in process with `libcute_compiler.so`.
 
-The dialect binding lives in `mlir/dialects/cute_ir` (`cute` and
-`cute_nvgpu`, types through the dialect's C API).
+The dialect binding lives in `mlir/dialects/cute_ir` (`cute`, `cute_nvgpu`,
+and NVIDIA's `nvvm` and `cuda`, types and attributes through the dialects'
+C API).
 
 ## A kernel
 
@@ -94,11 +95,16 @@ const c = NaiveElementwiseAdd.call(.{ .gA = a, .gB = b }, .{ .gC = a.shape() }, 
 * **Scalars are `i32` and `f32` by default**, like `Int32`/`Float32`;
   `cst(dtype, v)` picks another type and `coerce` lifts literals to the other
   operand's type.
-* **`nvvm` is not linked into ZML.** Thread indices and barriers are emitted
-  as unregistered ops in generic form; the compiler has the dialect.
-* **The module is just the kernel.** `finish` prints `module { func.func
-  @name(...) {...} }`; the CuTe compiler makes every public function a kernel
-  entry, so there is no `gpu.module` or host launch function to write.
+* **`nvvm` and `cuda` are the compiler's.** The context registers NVIDIA's
+  `nvvm` and `cuda` dialects (`cute.nvvm`, `cute.cuda`, carried in
+  `mlir/dialects/cute_ir`) and upstream's `llvm`, so every operation is
+  verified as it is built; nothing is left unregistered.
+* **The module is just the kernel.** `finish` prints a module holding only
+  `func.func @name(...)`; the CuTe compiler makes every public function a
+  kernel entry, so there is no `gpu.module` or host launch function to write.
+* **Generic form.** `finish` and `finishProgram` print the generic operation
+  form: NVIDIA's compiler parses with its own MLIR revision, whose custom
+  assembly differs from ours (`llvm.load`/`llvm.store` alignment, for one).
 * **Explicit result types:** Zig covers local tiling, TMA partitioning, tiled
   copies, tensor-memory fragments, and SM100 block-scaled MMA. CuTe derives
   their layouts in the compiler, so callers spell out the resulting CuTe type

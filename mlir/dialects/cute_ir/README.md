@@ -11,6 +11,13 @@ allowed, the compiler's attributes, types and enums beyond the release
 `CuteNVGPU*.td` files), and every operation of the compiler's registry in
 `CuteOps.td` and `CuteNVGPUOps.td`.
 
+It also carries NVIDIA's `nvvm` and `cuda` dialects as the same compiler
+registers them (`include/cute_ir/Dialect/{NVVM,Cuda}`): every operation,
+attribute, type and enum, rebuilt from the release's bindings and the live
+compiler, since no `.td` ships for them and the compiler's `nvvm` is not
+upstream's. The CuTe builder registers them, with the upstream `llvm`
+dialect, so its kernels are built without parsing any of their text.
+
 Updating to a new DSL release means refreshing the compiler entry-point
 offsets and regenerating the `.td` files from the release's Python bindings
 and compiler. The C API (except the algebra attributes, `CuteAttributes.*`)
@@ -22,9 +29,12 @@ from those `.td` files and follow them.
 Depend on `//mlir/dialects/cute_ir` and import `mlir/dialects/cute_ir`, or use
 `@import("mlir/dialects").cute` through the dialect aggregator.
 
-`cute.registerDialects(registry)` registers both `cute` and `cute_nvgpu`.
-Cute builders, types, and attributes live directly in `cute`; CuteNVGPU builders
-and types live in `cute.nvgpu`.
+`cute.registerDialects(registry)` registers `cute`, `cute_nvgpu`, and NVIDIA's
+`nvvm` and `cuda` (handles `cute_nvvm` and `cuda`: this `nvvm` and upstream's
+cannot share a registry). Cute builders, types, and attributes live directly in
+`cute`; CuteNVGPU builders and types live in `cute.nvgpu`, NVVM's in
+`cute.nvvm` and CUDA's in `cute.cuda`. `mlir/dialects/nvvm.zig` and
+`mlir/dialects/cuda.zig` are convenience builders over the last two.
 
 ```zig
 const cute = @import("mlir/dialects/cute_ir");
@@ -66,15 +76,24 @@ through `Operation.make`'s `.variadic` API, which writes the segment-size
 attributes. Builders verify the created operations; to defer verification, use
 `mlir.Operation.make` directly with `.verify = false`.
 
-The C API is also available independently of Zig from `lib/CAPI:cute` and
-`lib/CAPI:cute_nvgpu`, via `cute_ir-c/Dialect/Cute.h` and `CuteNVGPU.h`;
-constructors return a null handle for invalid parameters.
+Builders of operations with regions (`cuda.kernel`) and of terminators
+(`cuda.return`) do not verify on creation, since their blocks are completed
+afterwards; the module is verified instead.
+
+The C API is also available independently of Zig from `lib/CAPI:cute`,
+`lib/CAPI:cute_nvgpu`, `lib/CAPI:nvvm` and `lib/CAPI:cuda`, via
+`cute_ir-c/Dialect/Cute.h`, `CuteNVGPU.h`, `NVVM.h` (names prefixed
+`CuteNVVM`) and `Cuda.h`; constructors return a null handle for invalid
+parameters.
 
 ```sh
 bazel test //mlir/dialects/cute_ir:test
 ```
 
-These tests only check the bindings: every bound operation is registered and
-every type and attribute rebuilds from its getters. The dialect itself is
+These tests only check the bindings: every bound operation is registered,
+every type and attribute rebuilds from its getters, and a sample of the nvvm
+and cuda attributes and types print the compiler's own text byte for byte
+(`#cuda<device_attributes{…}>` and `#cuda<func_attributes{…}>` print with a
+space the compiler omits; it parses both). The dialect itself is
 tested where it is maintained. The dialects here do not implement the
 compiler's semantic verification or lowering.

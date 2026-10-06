@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const c = @import("c");
 const mlir = @import("mlir");
 
 // =============================================================================
@@ -19,16 +20,10 @@ pub const NVPTXAddressSpace = enum(u32) {
     shared_cluster = 7,
 };
 
-/// `!llvm.ptr<space>`, an opaque pointer.
-///
-/// Parsed rather than built with `mlirLLVMPointerTypeGet`: the type must come from the
-/// LLVM dialect registered in `ctx`, which may be another MLIR build than the C API's
-/// (e.g. in the CuTe compiler context), and loading the C API's dialect there would
-/// clash with it.
+/// `!llvm.ptr<space>`, an opaque pointer. Loads the LLVM dialect into `ctx`.
 pub fn pointerType(ctx: *mlir.Context, space: anytype) *const mlir.Type {
-    var buf: [32]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "!llvm.ptr<{d}>", .{@intFromEnum(space)}) catch unreachable;
-    return mlir.Type.parse(ctx, text) catch std.debug.panic("failed to parse LLVM pointer type '{s}'", .{text});
+    _ = c.mlirContextGetOrLoadDialect(ctx.ptr(), mlir.stringRef("llvm"));
+    return @ptrCast(c.mlirLLVMPointerTypeGet(ctx.ptr(), @intCast(@intFromEnum(space))).ptr);
 }
 
 // =============================================================================

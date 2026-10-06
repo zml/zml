@@ -10,8 +10,8 @@ Paths below are relative to this directory (the one holding this file).
 
 ## Goal
 
-Every dialect this directory carries (`cute`, `cute_nvgpu`, and `cuda` when
-`include/cute_ir/Dialect/Cuda` exists) must describe the DSL compiler's
+Every dialect this directory carries (`cute`, `cute_nvgpu`, and NVIDIA's
+`nvvm` and `cuda`, see below) must describe the DSL compiler's
 registry as completely and as precisely as the release allows: every
 operation, type, attribute and enum the compiler registers, with every fact
 that can be established about each of them. Nothing is opaque unless it cannot
@@ -36,14 +36,18 @@ without it, and so that anything built here is accepted by it unchanged.
   the parsers, printers and verifiers of every cute type, fixed wherever the
   release's parsing diverges from the compiler's. `CuteInference.{h,cpp}` holds
   result type inference; the other dialect `.cpp` files and the `BUILD.bazel`
-  files complete them. Edit them as the new definitions require.
+  files complete them. Edit them as the new definitions require. For `nvvm`
+  and `cuda` these are `NVVMDialect.{h,cpp}` (with the `#nvvm.target`
+  verifier) and `CudaDialect.{h,cpp}` under `include/` and `lib/Dialect/`.
 - **Generated: what you produce.** Every `.td` file under `include/` that is not
   a dialect declaration: the operations (`CuteOps.td`, `CuteNVGPUOps.td`,
-  `CudaOps.td`), the compiler's types, attributes and enums beyond the release
-  (`CuteTypesCompiler.td`, `CuteAttrsCompiler.td`, `CuteEnums.td`,
-  `CuteNVGPUTypes.td`, `CuteNVGPUAttrs.td`, `CuteNVGPUEnums.td`, `CudaTypes.td`,
-  `CudaAttrs.td`, `CudaEnums.td`), and any new `.td` you need to split them
-  sensibly. The dialect declarations (`*Dialect.td`) change only as far as the
+  `NVVMOps.td`, `CudaOps.td`), the compiler's types, attributes and enums
+  beyond the release (`CuteTypesCompiler.td`, `CuteAttrsCompiler.td`,
+  `CuteEnums.td`, `CuteNVGPUTypes.td`, `CuteNVGPUAttrs.td`, `CuteNVGPUEnums.td`,
+  `NVVMAttrs.td`, `NVVMEnums.td`, `CudaTypes.td`, `CudaAttrs.td`,
+  `CudaEnums.td`), the inference of `nvvm` and `cuda` operations whose results
+  are not one buildable type (`NVVMInference.cpp`, `CudaInference.cpp`), and
+  any new `.td` you need to split them sensibly. The dialect declarations (`*Dialect.td`) change only as far as the
   generated files need.
 - **Language bindings, if present.** When the tree carries bindings derived
   from these definitions (a C API under `lib/CAPI`, builder files next to this
@@ -55,11 +59,97 @@ without it, and so that anything built here is accepted by it unchanged.
 
 Consumers outside this directory use the dialect classes and must keep
 compiling: search the repository for the dialect namespaces
-(`cutlass_compiler::cute`, `cute_nvgpu`, `cuda`) and for the headers under
-`include/cute_ir`. When a definition changes shape, update those users in the
+(`cutlass_compiler::cute`, `cute_nvgpu`, `nvvm`, `cuda`), for the Zig modules
+(`cute.nvgpu`, `cute.nvvm`, `cute.cuda`, and the convenience layers over them
+in `mlir/dialects/nvvm.zig` and `mlir/dialects/cuda.zig`) and for the headers
+under `include/cute_ir`. When a definition changes shape, update those users in the
 same change. Tighter operand constraints also break consumers that built IR
 with loose types, and so does an operation that stops inferring its results:
 fix the consumer, not the constraint.
+
+## NVIDIA's `nvvm` and `cuda` dialects
+
+The kernels the CuTe builder emits (`kernels/cute`) use two more dialects of
+the compiler: `nvvm` (special registers, mbarriers, tcgen05, ...) and `cuda`
+(kernels, launch configurations, host runtime calls). Both are carried here
+and must be regenerated with every release, like `cute` and `cute_nvgpu`.
+
+- **Neither is upstream's.** The compiler is built on NVIDIA's own LLVM
+  revision (the `.so` names it: `LLVM version 23.0.0git (<hash>)`, a hash
+  upstream does not have), and its `nvvm` differs from upstream NVVM: it has
+  operations, operands and enums upstream lacks (`nvvm.mbarrier.wait.parity`,
+  `#nvvm.mbar_wait`) and lacks some upstream has. `cuda` exists only in the
+  compiler. No `.td` ships with the release for either: rebuild both from the
+  bindings and the live compiler, as for the cute dialects. Upstream's NVVM
+  `.td` is neither a source nor a substitute.
+- **Where they live.** `include/cute_ir/Dialect/{NVVM,Cuda}/IR` (declarations
+  and generated `.td`), `lib/Dialect/{NVVM,Cuda}/IR` (dialect and inference
+  `.cpp`), `include/cute_ir-c/Dialect/{NVVM,Cuda}*.h` and
+  `lib/CAPI/{NVVM,Cuda}*.cpp` (C API), and `nvvm.zig`, `cuda.zig` (Zig,
+  `cute.nvvm` and `cute.cuda`).
+- **Names.** The C++ namespaces are `mlir::cutlass_compiler::nvvm` and
+  `mlir::cutlass_compiler::cuda`. The dialects are named `nvvm` and `cuda` as
+  in the compiler, so a registry holds this `nvvm` or upstream's, never both;
+  upstream's NVVM C++ is linked into the tree and must stay unregistered where
+  this one is. The C dialect handles are `cute_nvvm` and `cuda`, and the C API
+  of `nvvm` is prefixed `CuteNVVM` (`mlirAttributeIsACuteNVVM<Name>`,
+  `mlirCuteNVVM<Name>AttrGet`) so that neither collides with upstream's
+  `mlirGetDialectHandle__nvvm__` or a future upstream NVVM C API; `cuda`'s is
+  prefixed `Cuda`.
+- **`llvm` is upstream's.** NVVM operands are `!llvm.ptr<N>` and LLVM
+  structs, and the builder emits `llvm.*` operations. The CuTe context
+  registers the upstream LLVM dialect, bound by `mlir/dialects/llvm_dialect.zig`
+  (its builders, and `mlirLLVMPointerTypeGet` for `!llvm.ptr<N>`); the nvvm
+  and cuda constraints name `::mlir::LLVM` types. NVIDIA's `llvm` is not
+  vendored: its types print and parse the same, and the compiler reads the
+  `llvm.*` operations upstream prints (custom and generic forms, with the
+  properties upstream fills in) into the same module. This holds only while
+  the compatibility check below passes; when it stops holding, vendor NVIDIA's
+  `llvm` the same way (its bindings are `_llvm_ops_gen.py` and
+  `_llvm_enum_gen.py`) rather than patching around it.
+
+Sources specific to them, besides those in the table below:
+
+- `_nvvm_ops_gen.py`, `_cuda_ops_gen.py`: the operations. Operand kinds come
+  from how `__init__` appends them (and `_ODS_OPERAND_SEGMENTS`), result names
+  and kinds from the result properties, inference from whether `__init__`
+  builds a `results` list or passes its `results=` argument through.
+- `_nvvm_enum_gen.py`, `_cuda_enum_gen.py`: the enums. A builder registered
+  under the enum's own name builds the plain `I32EnumAttr` (it follows its
+  enum class in the file); one registered as `nvvm.<Name>Attr` builds the
+  dialect attribute and gives its mnemonic and form: `#nvvm.<mnemonic><case>`
+  or `#nvvm<mnemonic case>`. Some enums only have the latter. Parsing an
+  invalid case names the C++ enum (`expected ::mlir::NVVM::<Enum> to be one
+  of: ...`) or its summary, which maps each attribute to its enum.
+- `cutlass._mlir._mlir_libs._cutlass_ir._mlirDialectsCuda`: the typed cuda
+  type and attribute classes and their `get()` parameters. The other cuda
+  types and attributes, and the three non-enum nvvm attributes (`shape`,
+  `ld_st_matrix_shape`, `target`), are found by trying the `.so`'s
+  identifiers as mnemonics (`!cuda.<word>`, `#nvvm.<word>`); `nvvm` has no
+  types.
+- Attribute constraints the bindings name but no builder covers
+  (`nvvm.FPArithRoundingMode`, the `nvvm.Multimem*` orders, anonymous
+  `TypeAttr` constraints) are recovered by probing values: the verifier's
+  `failed to satisfy constraint: ...` names the rule, and the values it lets
+  through give the predicate.
+- The compiler aborts on some malformed probes (`nvvm.mma.sync`,
+  `nvvm.mma.sp.sync`): run those checks one process each.
+- Results the compiler infers but that are not one buildable type get an
+  inference rule only where varying the operand types shows the result is one
+  operand's type; elsewhere inference fails and the types written stand
+  (`<Dialect>_InferredOp`, as in cute). Vary the attributes too: a rule must
+  hold for every attribute value (`nvvm.mul` with `mode = wide` doubles the
+  width, `nvvm.shfl.sync` with `return_value_and_is_valid` returns a struct),
+  or inference must fail.
+
+The bindings follow the cute ones: the C API and the Zig enums, typed
+attribute and type wrappers and operation builders are generated from
+`llvm-tblgen --dump-json` of the generated `.td` files, then formatted with
+`zig fmt`. Builders of operations with regions, and of terminators, do not
+verify on creation (their blocks are filled, or their block is completed,
+afterwards). `mlir/dialects/nvvm.zig` and `mlir/dialects/cuda.zig` are the
+hand-written convenience layer the builder calls; they fix the attributes the
+kernels do not choose and must keep building no text.
 
 ## Sources
 
@@ -222,7 +312,19 @@ A change is done when all of these hold:
 4. **The repository's tests pass**, including the dialect's own tests and the
    tests of every consumer found above (kernel emitters, host tools, language
    bindings), built with the tree's usual Bazel configuration.
-5. **Both copies agree.** When the same dialect is carried by more than one
+5. **NVIDIA's compiler reads what the kernels emit.** Dump the IR of every
+   kernel the repository's tests emit through `kernels/cute`: the builder's
+   own tests, the MXFP4 emission tests under `zml/moe/cute_kernels`, and the
+   FlashMLA program (`zml/attention/cute_kernels/flashmla_sm100.zig`, whose
+   `Program.emit` needs a temporary test with a few configurations, single-CTA,
+   clustered and persistent). Dump both with the previous definitions and with
+   the new ones. In the release's venv, `import cutlass`, then parse and
+   verify each module with `cutlass._mlir.ir.Module.parse`, and compare the
+   generic print (`get_asm(print_generic_op_form=True)`) of each module before
+   and after: it must be identical, and a module the compiler rejected before
+   must be rejected the same way after. This is also what keeps upstream
+   `llvm` acceptable (see above).
+6. **Both copies agree.** When the same dialect is carried by more than one
    repository, the shared files are identical in each, and only
    repository-specific files (`BUILD.bazel`, bindings) differ.
 

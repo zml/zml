@@ -2,17 +2,25 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "cute_ir",
-    srcs = ["cute_nvgpu.zig"],
+    srcs = [
+        "cuda.zig",
+        "cute_nvgpu.zig",
+        "nvvm.zig",
+    ],
     import_name = "mlir/dialects/cute_ir",
     main = "cute_ir.zig",
     visibility = ["//visibility:public"],
     deps = [
         "//mlir",
         "//mlir:c",
+        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cuda",
         "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cute",
         "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cute_nvgpu",
+        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:nvvm",
+        "//mlir/dialects/cute_ir/lib/CAPI:cuda",
         "//mlir/dialects/cute_ir/lib/CAPI:cute",
         "//mlir/dialects/cute_ir/lib/CAPI:cute_nvgpu",
+        "//mlir/dialects/cute_ir/lib/CAPI:nvvm",
         "//stdx",
     ],
 )
