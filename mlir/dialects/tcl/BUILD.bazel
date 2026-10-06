@@ -3,10 +3,11 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 # The native subset of the Furiosa XLA plugin's `tcl` dialect
-# (xla/pjrt/furiosa/ir): what ZML emits and the plugin's custom call parses.
+# (xla/backends/furiosa/codegen/tcl/ir): what ZML emits and the plugin's custom
+# call parses. Files mirror the plugin's one for one.
 td_library(
-    name = "td_files",
-    srcs = ["tcl.td"],
+    name = "tcl_td_files",
+    srcs = glob(["*.td"]),
     deps = [
         "@llvm-project//mlir:OpBaseTdFiles",
         "@llvm-project//mlir:SideEffectInterfacesTdFiles",
@@ -14,32 +15,82 @@ td_library(
 )
 
 gentbl_cc_library(
-    name = "inc_gen",
+    name = "tcl_dialect_inc_gen",
     tbl_outs = {
         "tcl_dialect.h.inc": ["-gen-dialect-decls"],
         "tcl_dialect.cc.inc": ["-gen-dialect-defs"],
-        "tcl_attrs.h.inc": ["-gen-attrdef-decls"],
-        "tcl_attrs.cc.inc": ["-gen-attrdef-defs"],
-        "tcl_types.h.inc": ["-gen-typedef-decls"],
-        "tcl_types.cc.inc": ["-gen-typedef-defs"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "tcl_dialect.td",
+    deps = [":tcl_td_files"],
+)
+
+gentbl_cc_library(
+    name = "tcl_attrs_inc_gen",
+    tbl_outs = {
+        "tcl_attrs.h.inc": [
+            "-gen-attrdef-decls",
+            "-attrdefs-dialect=tcl",
+        ],
+        "tcl_attrs.cc.inc": [
+            "-gen-attrdef-defs",
+            "-attrdefs-dialect=tcl",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "tcl_attrs.td",
+    deps = [":tcl_td_files"],
+)
+
+gentbl_cc_library(
+    name = "tcl_types_inc_gen",
+    tbl_outs = {
+        "tcl_types.h.inc": [
+            "-gen-typedef-decls",
+            "-typedefs-dialect=tcl",
+        ],
+        "tcl_types.cc.inc": [
+            "-gen-typedef-defs",
+            "-typedefs-dialect=tcl",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "tcl_types.td",
+    deps = [":tcl_td_files"],
+)
+
+gentbl_cc_library(
+    name = "tcl_ops_inc_gen",
+    tbl_outs = {
         "tcl_ops.h.inc": ["-gen-op-decls"],
         "tcl_ops.cc.inc": ["-gen-op-defs"],
     },
     tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "tcl.td",
-    deps = [":td_files"],
+    td_file = "tcl_ops.td",
+    deps = [":tcl_td_files"],
 )
 
 cc_library(
     name = "dialect",
-    srcs = ["tcl.cc"],
+    srcs = [
+        "tcl_attrs.cc",
+        "tcl_dialect.cc",
+        "tcl_ops.cc",
+        "tcl_types.cc",
+    ],
     hdrs = [
-        "tcl.h",
-        "ve_instructions.inc",
+        "tcl_attrs.h",
+        "tcl_dialect.h",
+        "tcl_ops.h",
+        "tcl_types.h",
     ],
     tags = ["manual"],
+    textual_hdrs = ["ve_instructions.inc"],
     deps = [
-        ":inc_gen",
+        ":tcl_attrs_inc_gen",
+        ":tcl_dialect_inc_gen",
+        ":tcl_ops_inc_gen",
+        ":tcl_types_inc_gen",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:BytecodeOpInterface",
         "@llvm-project//mlir:IR",

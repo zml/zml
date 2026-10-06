@@ -1,3 +1,4 @@
+// SDK 2026.3 VE opcode vocabulary; conversion widths 0..31 are parametric.
 VE("exp", "exp", 1)
 VE("neg_exp", "neg_exp", 1)
 VE("sqrt", "sqrt", 1)
