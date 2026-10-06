@@ -21,6 +21,56 @@ const Case = struct {
     width: i64 = 128,
     intermediate: i64 = 128,
     experts: i64 = 8,
+
+    fn run(c: Case, io: std.Io, allocator: std.mem.Allocator, platform: *const zml.Platform) !void {
+        std.debug.assert(c.backend.isAvailable(platform));
+
+        const exe = try c.compile(allocator, io, platform);
+        defer exe.deinit();
+
+        try c.check(allocator, io, platform, &exe);
+    }
+
+    pub fn compile(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Exe {
+        std.debug.assert(c.backend.isAvailable(platform));
+        const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
+        return platform.compileFn(allocator, io, forward, .{ x, c }, .{});
+    }
+
+    pub fn check(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, exe: *const zml.Exe) !void {
+        const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
+
+        var host = try zml.Slice.alloc(allocator, x.shape());
+        defer host.free(allocator);
+        switch (c.activation_dtype) {
+            inline .bf16, .f16, .f32 => |dtype| {
+                for (host.items(dtype.toZigType()), 0..) |*value, i| {
+                    const f = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13 + i / 128) % 23)) - 11)) / 32;
+                    value.* = if (dtype == .bf16) .fromF32(f) else @floatCast(f);
+                }
+            },
+            else => unreachable,
+        }
+
+        var input = try zml.Buffer.fromSlice(io, platform, host, .replicated);
+        defer input.deinit();
+
+        var runner = try exe.runner(allocator);
+        defer runner.deinit(allocator);
+        var output: zml.Bufferized(Outputs) = undefined;
+        runner.run(io, .{input}, .{&output}, .{ .wait = true });
+        defer zml.Buffer.deinitAll(Outputs, &output);
+
+        // BF16 intermediate rounding and different GEMM reduction orders. Every
+        // element must pass; near-zero values use the absolute bound.
+        try zml.testing.expectClose(io, output.expected, output.actual, .{
+            // The NVFP4 matrix observed a maximum absolute error of 0.07519531.
+            // Allow a small margin; this is an empirical comparison budget.
+            .absolute_tolerance = if (c.scheme == .nvfp4) 0.078125 else 0.015625,
+            .relative_tolerance = 0.02,
+            .minimum_close_fraction = 1,
+        });
+    }
 };
 
 /// Generate a reproducible Tensor with a simple pattern.
@@ -222,95 +272,6 @@ fn forward(input: Tensor, c: Case) Outputs {
     return .{ .actual = actual.reshape(input.shape()), .expected = expected };
 }
 
-//TODO(Corentin): use compileCase and checkCase. Can also remove run entirely.
-fn run(c: Case) !void {
-    const platform = zml.testing.env();
-
-    std.debug.assert(c.backend.isAvailable(platform));
-
-    // TODO(Corentin): Baaahhh caca
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-
-    const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
-
-    var exe = try platform.compileFn(allocator, io, forward, .{ x, c }, .{});
-    defer exe.deinit();
-
-    var host = try zml.Slice.alloc(allocator, x.shape());
-    defer host.free(allocator);
-    switch (c.activation_dtype) {
-        inline .bf16, .f16, .f32 => |dtype| {
-            for (host.items(dtype.toZigType()), 0..) |*value, i| {
-                const f = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13 + i / 128) % 23)) - 11)) / 32;
-                value.* = if (dtype == .bf16) .fromF32(f) else @floatCast(f);
-            }
-        },
-        else => unreachable,
-    }
-
-    var input = try zml.Buffer.fromSlice(io, platform, host, .replicated);
-    defer input.deinit();
-
-    var runner = try exe.runner(allocator);
-    defer runner.deinit(allocator);
-    var output: zml.Bufferized(Outputs) = undefined;
-    runner.run(io, .{input}, .{&output}, .{ .wait = true });
-    defer zml.Buffer.deinitAll(Outputs, &output);
-
-    // BF16 intermediate rounding and different GEMM reduction orders. Every
-    // element must pass; near-zero values use the absolute bound.
-    try zml.testing.expectClose(io, output.expected, output.actual, .{
-        // The NVFP4 matrix observed a maximum absolute error of 0.07519531.
-        // Allow a small margin; this is an empirical comparison budget.
-        .absolute_tolerance = if (c.scheme == .nvfp4) 0.078125 else 0.015625,
-        .relative_tolerance = 0.02,
-        .minimum_close_fraction = 1,
-    });
-}
-
-// TODO(Corentin): maybe move in Case ?
-pub fn compileCase(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, c: Case) !zml.Exe {
-    std.debug.assert(c.backend.isAvailable(platform));
-    const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
-    return platform.compileFn(allocator, io, forward, .{ x, c }, .{});
-}
-
-pub fn checkCase(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, c: Case, exe: *const zml.Exe) !void {
-    const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
-
-    var host = try zml.Slice.alloc(allocator, x.shape());
-    defer host.free(allocator);
-    switch (c.activation_dtype) {
-        inline .bf16, .f16, .f32 => |dtype| {
-            for (host.items(dtype.toZigType()), 0..) |*value, i| {
-                const f = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13 + i / 128) % 23)) - 11)) / 32;
-                value.* = if (dtype == .bf16) .fromF32(f) else @floatCast(f);
-            }
-        },
-        else => unreachable,
-    }
-
-    var input = try zml.Buffer.fromSlice(io, platform, host, .replicated);
-    defer input.deinit();
-
-    var runner = try exe.runner(allocator);
-    defer runner.deinit(allocator);
-    var output: zml.Bufferized(Outputs) = undefined;
-    runner.run(io, .{input}, .{&output}, .{ .wait = true });
-    defer zml.Buffer.deinitAll(Outputs, &output);
-
-    // BF16 intermediate rounding and different GEMM reduction orders. Every
-    // element must pass; near-zero values use the absolute bound.
-    try zml.testing.expectClose(io, output.expected, output.actual, .{
-        // The NVFP4 matrix observed a maximum absolute error of 0.07519531.
-        // Allow a small margin; this is an empirical comparison budget.
-        .absolute_tolerance = if (c.scheme == .nvfp4) 0.078125 else 0.015625,
-        .relative_tolerance = 0.02,
-        .minimum_close_fraction = 1,
-    });
-}
-
 const gated_activations = [_]zml.moe.Activation{
     .{ .swiglu = .{} },
     .{ .swiglu = .{ .limit = 0.25 } },
@@ -400,57 +361,32 @@ const Matrix = struct {
     }
 };
 
-// TODO(Corentin): use Matrix helper instead of the loops
-
 /// Execute the complete Cartesian product declared by the backend test.
 /// Only unavailable hardware is skipped; returned errors are collected with
 /// their full configuration, and fail the backend test after all cases run.
-fn runMatrix(backend: zml.moe.Backend, matrix: Matrix) !void {
-    const platform = zml.testing.env();
+fn runMatrix(io: std.Io, allocator: std.mem.Allocator, platform: *const zml.Platform, backend: zml.moe.Backend, matrix: Matrix) !void {
     if (!backend.isAvailable(platform)) return error.SkipZigTest;
     var passed: usize = 0;
     var failed: usize = 0;
     var skipped: usize = 0;
-    for (matrix.formats) |format| {
-        std.debug.print("MoE {s}: format {any}\n", .{ @tagName(backend), format });
-        for (matrix.activations) |activation| {
-            for (matrix.quantize_inputs) |quantize_input| {
-                for (matrix.placements) |placement| {
-                    for (matrix.biases) |bias| {
-                        for (matrix.shapes) |shape| {
-                            if (backend == .flashinfer_cutlass and format.scheme == .nvfp4 and
-                                !zml.moe.cutlass_flashinfer.isNvfp4Supported(platform))
-                            {
-                                skipped += 1;
-                                continue;
-                            }
-                            const c: Case = .{
-                                .backend = backend,
-                                .activation = activation,
-                                .scheme = format.scheme,
-                                .activation_dtype = format.activation_dtype,
-                                .quantize_input = quantize_input,
-                                .placement = placement,
-                                .bias = bias,
-                                .batch = shape.batch,
-                                .tokens = shape.tokens,
-                                .topk = shape.topk,
-                                .width = shape.width,
-                                .intermediate = shape.intermediate,
-                                .experts = shape.experts,
-                            };
-                            run(c) catch |err| {
-                                std.debug.print("MoE case failed: {any}\nError: {}\n", .{ c, err });
-                                failed += 1;
-                                continue;
-                            };
-                            passed += 1;
-                        }
-                    }
-                }
-            }
+
+    for (0..matrix.count()) |case_index| {
+        const case = matrix.caseAt(backend, case_index);
+
+        if (backend == .flashinfer_cutlass and case.scheme == .nvfp4 and
+            !zml.moe.cutlass_flashinfer.isNvfp4Supported(platform))
+        {
+            skipped += 1;
+            continue;
         }
+        case.run(io, allocator, platform) catch |err| {
+            std.debug.print("MoE case failed: {any}\nError: {}\n", .{ case, err });
+            failed += 1;
+            continue;
+        };
+        passed += 1;
     }
+
     std.debug.print("MoE {s}: {} passed, {} failed, {} hardware-skipped cases\n", .{ @tagName(backend), passed, failed, skipped });
     if (failed != 0) return error.MoeComplianceFailed;
     if (passed == 0) return error.SkipZigTest;
@@ -511,7 +447,7 @@ const Pipeline = struct {
                 error.Closed => {},
                 error.Canceled => error.Canceled,
             };
-            var exe = compileCase(allocator, io, self.platform, job.case) catch |err| {
+            var exe = job.case.compile(allocator, io, self.platform) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
                 results[job.index] = .{ .case = job.case, .outcome = .{ .compilation_failed = err } };
                 continue;
@@ -535,7 +471,7 @@ const Pipeline = struct {
             };
             defer compiled.exe.deinit();
             const job = compiled.job;
-            checkCase(allocator, io, self.platform, job.case, &compiled.exe) catch |err| {
+            job.case.check(allocator, io, self.platform, &compiled.exe) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
                 results[job.index] = .{ .case = job.case, .outcome = .{ .check_failed = err } };
                 continue;
@@ -603,7 +539,9 @@ const Pipeline = struct {
 };
 
 test "Triton compatibility matrix" {
-    const pipeline: Pipeline = .{ .platform = zml.testing.env() };
+    const platform = zml.testing.env();
+
+    const pipeline: Pipeline = .{ .platform = platform };
 
     try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
         .formats = &.{
@@ -624,16 +562,20 @@ test "Triton compatibility matrix" {
 }
 
 test "FlashInfer compatibility matrix" {
+    const platform = zml.testing.env();
+
     // Only default SwiGLU, no linear bias, and routing after the down projection.
-    try runMatrix(.flashinfer_cutlass, .{
+    try runMatrix(std.testing.io, std.testing.allocator, platform, .flashinfer_cutlass, .{
         .formats = &.{ .{}, .{ .scheme = .nvfp4 } },
         .activations = &.{.{ .swiglu = .{} }},
     });
 }
 
 test "specialized Triton MXFP4 compatibility matrix" {
+    const platform = zml.testing.env();
+
     // The kernel always quantizes inputs to MXFP8, independently of the option.
-    try runMatrix(.triton_mxfp4, .{
+    try runMatrix(std.testing.io, std.testing.allocator, platform, .triton_mxfp4, .{
         .formats = &.{.{ .scheme = .mxfp4 }},
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
@@ -642,7 +584,9 @@ test "specialized Triton MXFP4 compatibility matrix" {
 }
 
 test "specialized CuTe MXFP4 compatibility matrix" {
-    try runMatrix(.cute_mxfp4, .{
+    const platform = zml.testing.env();
+
+    try runMatrix(std.testing.io, std.testing.allocator, platform, .cute_mxfp4, .{
         .formats = &.{.{ .scheme = .mxfp4 }},
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
@@ -652,8 +596,10 @@ test "specialized CuTe MXFP4 compatibility matrix" {
 }
 
 test "Fly compatibility matrix" {
+    const platform = zml.testing.env();
+
     // These constraints keep execution on Fly rather than its Triton fallback.
-    try runMatrix(.fly, .{
+    try runMatrix(std.testing.io, std.testing.allocator, platform, .fly, .{
         .formats = &.{.{ .scheme = .mxfp4 }},
         .activations = &gated_activations,
         .quantize_inputs = &.{ false, true },
@@ -663,8 +609,10 @@ test "Fly compatibility matrix" {
 }
 
 test "Metal compatibility matrix" {
+    const platform = zml.testing.env();
+
     // Quantized Metal kernels require BF16 activations and do not support bias.
-    try runMatrix(.metal, .{
+    try runMatrix(std.testing.io, std.testing.allocator, platform, .metal, .{
         .formats = &.{
             .{},
             .{ .activation_dtype = .f16 },
@@ -681,9 +629,11 @@ test "Metal compatibility matrix" {
 }
 
 test "Mosaic TPU compatibility matrix" {
+    const platform = zml.testing.env();
+
     // canonicalizeDown currently requires a gated projection; quantized weights
     // are not supported by gmmDType. Plain activations need a backend fix first.
-    try runMatrix(.mosaic_tpu, .{
+    try runMatrix(std.testing.io, std.testing.allocator, platform, .mosaic_tpu, .{
         .formats = &.{ .{}, .{ .activation_dtype = .f16 }, .{ .activation_dtype = .f32 } },
         .activations = &gated_activations,
         .biases = &.{ false, true },
