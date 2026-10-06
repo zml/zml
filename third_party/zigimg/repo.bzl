@@ -9,4 +9,5 @@ def repo():
         patches = [
             Label("//third_party/zigimg:zig-0.17.patch"),
         ],
+        patch_args = ["-p1"],
     )
