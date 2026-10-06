@@ -222,11 +222,13 @@ fn forward(input: Tensor, c: Case) Outputs {
     return .{ .actual = actual.reshape(input.shape()), .expected = expected };
 }
 
+//TODO(Corentin): use compileCase and checkCase. Can also remove run entirely.
 fn run(c: Case) !void {
     const platform = zml.testing.env();
 
     std.debug.assert(c.backend.isAvailable(platform));
 
+    // TODO(Corentin): Baaahhh caca
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
@@ -234,6 +236,48 @@ fn run(c: Case) !void {
 
     var exe = try platform.compileFn(allocator, io, forward, .{ x, c }, .{});
     defer exe.deinit();
+
+    var host = try zml.Slice.alloc(allocator, x.shape());
+    defer host.free(allocator);
+    switch (c.activation_dtype) {
+        inline .bf16, .f16, .f32 => |dtype| {
+            for (host.items(dtype.toZigType()), 0..) |*value, i| {
+                const f = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13 + i / 128) % 23)) - 11)) / 32;
+                value.* = if (dtype == .bf16) .fromF32(f) else @floatCast(f);
+            }
+        },
+        else => unreachable,
+    }
+
+    var input = try zml.Buffer.fromSlice(io, platform, host, .replicated);
+    defer input.deinit();
+
+    var runner = try exe.runner(allocator);
+    defer runner.deinit(allocator);
+    var output: zml.Bufferized(Outputs) = undefined;
+    runner.run(io, .{input}, .{&output}, .{ .wait = true });
+    defer zml.Buffer.deinitAll(Outputs, &output);
+
+    // BF16 intermediate rounding and different GEMM reduction orders. Every
+    // element must pass; near-zero values use the absolute bound.
+    try zml.testing.expectClose(io, output.expected, output.actual, .{
+        // The NVFP4 matrix observed a maximum absolute error of 0.07519531.
+        // Allow a small margin; this is an empirical comparison budget.
+        .absolute_tolerance = if (c.scheme == .nvfp4) 0.078125 else 0.015625,
+        .relative_tolerance = 0.02,
+        .minimum_close_fraction = 1,
+    });
+}
+
+// TODO(Corentin): maybe move in Case ?
+pub fn compileCase(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, c: Case) !zml.Exe {
+    std.debug.assert(c.backend.isAvailable(platform));
+    const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
+    return platform.compileFn(allocator, io, forward, .{ x, c }, .{});
+}
+
+pub fn checkCase(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, c: Case, exe: *const zml.Exe) !void {
+    const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
 
     var host = try zml.Slice.alloc(allocator, x.shape());
     defer host.free(allocator);
@@ -317,7 +361,46 @@ const Matrix = struct {
     placements: []const Placement = &.{.after_down},
     biases: []const bool = &.{false},
     shapes: []const FixtureShape = &fixture_shapes,
+
+    pub fn count(self: Matrix) usize {
+        return self.formats.len * self.activations.len * self.quantize_inputs.len *
+            self.placements.len * self.biases.len * self.shapes.len;
+    }
+
+    /// Shapes vary fastest, matching the nested loops in the backend tests.
+    pub fn caseAt(self: Matrix, backend: zml.moe.Backend, index: usize) Case {
+        std.debug.assert(index < self.count());
+        var remaining = index;
+        const shape = self.shapes[remaining % self.shapes.len];
+        remaining /= self.shapes.len;
+        const bias = self.biases[remaining % self.biases.len];
+        remaining /= self.biases.len;
+        const placement = self.placements[remaining % self.placements.len];
+        remaining /= self.placements.len;
+        const quantize_input = self.quantize_inputs[remaining % self.quantize_inputs.len];
+        remaining /= self.quantize_inputs.len;
+        const activation = self.activations[remaining % self.activations.len];
+        remaining /= self.activations.len;
+        const format = self.formats[remaining];
+        return .{
+            .backend = backend,
+            .activation = activation,
+            .scheme = format.scheme,
+            .activation_dtype = format.activation_dtype,
+            .quantize_input = quantize_input,
+            .placement = placement,
+            .bias = bias,
+            .batch = shape.batch,
+            .tokens = shape.tokens,
+            .topk = shape.topk,
+            .width = shape.width,
+            .intermediate = shape.intermediate,
+            .experts = shape.experts,
+        };
+    }
 };
+
+// TODO(Corentin): use Matrix helper instead of the loops
 
 /// Execute the complete Cartesian product declared by the backend test.
 /// Only unavailable hardware is skipped; returned errors are collected with
@@ -373,8 +456,156 @@ fn runMatrix(backend: zml.moe.Backend, matrix: Matrix) !void {
     if (passed == 0) return error.SkipZigTest;
 }
 
+const Options = struct {
+    producers: usize = 16,
+    consumers: usize = 1,
+    case_queue_capacity: usize = 16,
+    executable_queue_capacity: usize = 16,
+};
+
+const CaseJob = struct {
+    index: usize,
+    case: Case,
+};
+
+const ExecutableJob = struct {
+    job: CaseJob,
+    exe: zml.Exe,
+};
+
+const Result = struct {
+    case: Case,
+    outcome: union(enum) {
+        passed,
+        skipped,
+        compilation_failed: anyerror,
+        check_failed: anyerror,
+    },
+};
+
+const Pipeline = struct {
+    platform: *const zml.Platform,
+
+    fn enumerate(self: *const Pipeline, io: std.Io, backend: zml.moe.Backend, matrix: Matrix, case_queue: *std.Io.Queue(CaseJob), results: []?Result) std.Io.Cancelable!void {
+        defer case_queue.close(io);
+        const available = backend.isAvailable(self.platform);
+
+        var index: usize = 0;
+        for (0..matrix.count()) |local_index| {
+            const c = matrix.caseAt(backend, local_index);
+            if (available) {
+                case_queue.putOne(io, .{ .index = index, .case = c }) catch |err| return switch (err) {
+                    error.Closed => {},
+                    error.Canceled => error.Canceled,
+                };
+            } else {
+                results[index] = .{ .case = c, .outcome = .skipped };
+            }
+            index += 1;
+        }
+    }
+
+    fn produce(self: *const Pipeline, io: std.Io, allocator: std.mem.Allocator, case_queue: *std.Io.Queue(CaseJob), executable_queue: *std.Io.Queue(ExecutableJob), results: []?Result) std.Io.Cancelable!void {
+        while (true) {
+            const job = case_queue.getOne(io) catch |err| return switch (err) {
+                error.Closed => {},
+                error.Canceled => error.Canceled,
+            };
+            var exe = compileCase(allocator, io, self.platform, job.case) catch |err| {
+                if (err == error.Canceled) return error.Canceled;
+                results[job.index] = .{ .case = job.case, .outcome = .{ .compilation_failed = err } };
+                continue;
+            };
+            // Ownership transfers only on a successful enqueue.
+            executable_queue.putOne(io, .{ .job = job, .exe = exe }) catch |err| {
+                exe.deinit();
+                return switch (err) {
+                    error.Closed => {},
+                    error.Canceled => error.Canceled,
+                };
+            };
+        }
+    }
+
+    fn consume(self: *const Pipeline, io: std.Io, allocator: std.mem.Allocator, executable_queue: *std.Io.Queue(ExecutableJob), results: []?Result) std.Io.Cancelable!void {
+        while (true) {
+            var compiled = executable_queue.getOne(io) catch |err| return switch (err) {
+                error.Closed => {},
+                error.Canceled => error.Canceled,
+            };
+            defer compiled.exe.deinit();
+            const job = compiled.job;
+            checkCase(allocator, io, self.platform, job.case, &compiled.exe) catch |err| {
+                if (err == error.Canceled) return error.Canceled;
+                results[job.index] = .{ .case = job.case, .outcome = .{ .check_failed = err } };
+                continue;
+            };
+            results[job.index] = .{ .case = job.case, .outcome = .passed };
+        }
+    }
+
+    fn run(self: *const Pipeline, io: std.Io, allocator: std.mem.Allocator, backend: zml.moe.Backend, matrix: Matrix, options: Options) !void {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+
+        const cases_buffer = try arena.allocator().alloc(CaseJob, options.case_queue_capacity);
+        const executables_buffer = try arena.allocator().alloc(ExecutableJob, options.executable_queue_capacity);
+        const results = try arena.allocator().alloc(?Result, matrix.count());
+        @memset(results, null);
+
+        var case_queue: std.Io.Queue(CaseJob) = .init(cases_buffer);
+        var executable_queue: std.Io.Queue(ExecutableJob) = .init(executables_buffer);
+
+        var enumerator: std.Io.Group = .init;
+        var producers: std.Io.Group = .init;
+        var consumers: std.Io.Group = .init;
+        defer {
+            case_queue.close(io);
+            executable_queue.close(io);
+            enumerator.cancel(io);
+            producers.cancel(io);
+            consumers.cancel(io);
+            // On partial startup or cancellation, queued executables still own resources.
+            while (executable_queue.getOneUncancelable(io)) |compiled| {
+                compiled.exe.deinit();
+            } else |_| {}
+        }
+
+        for (0..options.consumers) |_| try consumers.concurrent(io, consume, .{ self, io, allocator, &executable_queue, results });
+        for (0..options.producers) |_| try producers.concurrent(io, produce, .{ self, io, allocator, &case_queue, &executable_queue, results });
+        try enumerator.concurrent(io, enumerate, .{ self, io, backend, matrix, &case_queue, results });
+
+        try enumerator.await(io);
+        try producers.await(io);
+        // Closed queues drain before getOne returns error.Closed.
+        executable_queue.close(io);
+        try consumers.await(io);
+
+        try report(results);
+    }
+
+    fn report(results: []const ?Result) !void {
+        var failed: usize = 0;
+        for (results, 0..) |result, index| {
+            const r = result orelse return error.MissingCaseResult;
+            switch (r.outcome) {
+                .passed, .skipped => {},
+                inline .compilation_failed, .check_failed => |err, stage| {
+                    failed += 1;
+                    std.debug.print("MoE case {}/{} {s}: {any}\nError: {}\n", .{
+                        index + 1, results.len, @tagName(stage), r.case, err,
+                    });
+                },
+            }
+        }
+        if (failed != 0) return error.MoeComplianceFailed;
+    }
+};
+
 test "Triton compatibility matrix" {
-    try runMatrix(.triton, .{
+    const pipeline: Pipeline = .{ .platform = zml.testing.env() };
+
+    try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
         .formats = &.{
             .{},
             .{ .scheme = .mxfp4 },
@@ -389,7 +620,7 @@ test "Triton compatibility matrix" {
         .quantize_inputs = &.{ false, true },
         .placements = &.{ .before_down, .after_down },
         .biases = &.{ false, true },
-    });
+    }, .{});
 }
 
 test "FlashInfer compatibility matrix" {
