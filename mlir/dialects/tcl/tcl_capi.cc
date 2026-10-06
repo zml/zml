@@ -5,7 +5,7 @@
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 #include "mlir/CAPI/Support.h"
-#include "mlir/dialects/tcl/tcl.h"
+#include "mlir/dialects/tcl/tcl_ops.h"
 
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Tcl, tcl, xla::furiosa::tcl::TclDialect)
 
@@ -111,10 +111,6 @@ MlirType mlirTclMappedTypeGet(MlirContext ctx, MlirType element,
   auto m = as<DramMappingAttr>(mapping);
   if (!m || mlirTypeIsNull(element)) return {nullptr};
   return wrap(checked<MappedType>(ctx, unwrap(element), m));
-}
-
-bool mlirTypeIsATclMapped(MlirType type) {
-  return mlir::isa_and_nonnull<MappedType>(unwrap(type));
 }
 
 }  // extern "C"
