@@ -2578,10 +2578,13 @@ fn manualComputationLocalizeInputs(allocator: std.mem.Allocator, inputs: anytype
     return local_inputs;
 }
 
+/// The mesh of the sharded inputs and outputs. Shapes without a sharded axis
+/// are replicated or open on any mesh, so their own mesh does not matter.
 fn manualComputationMesh(inputs: []const Shape, outputs: []const Shape, fallback: *const Sharding.Mesh) error{IncompatibleMeshes}!*const Sharding.Mesh {
     var mesh: ?*const Sharding.Mesh = null;
     for ([_][]const Shape{ inputs, outputs }) |shapes| {
         for (shapes) |shape| {
+            if (!hasShardedAxis(shape)) continue;
             if (shape._sharding.mesh) |shape_mesh| {
                 if (mesh) |m| {
                     if (m != shape_mesh) return error.IncompatibleMeshes;
@@ -2590,6 +2593,13 @@ fn manualComputationMesh(inputs: []const Shape, outputs: []const Shape, fallback
         }
     }
     return mesh orelse fallback;
+}
+
+fn hasShardedAxis(shape: Shape) bool {
+    for (0..shape.rank()) |ax| {
+        if (shape.partition(ax).isSharded()) return true;
+    }
+    return false;
 }
 
 test "manualComputation infers one mesh from inputs and outputs" {
@@ -2617,6 +2627,12 @@ test "manualComputation infers one mesh from inputs and outputs" {
     try std.testing.expectEqual(&first, try manualComputationMesh(&.{}, &.{sharded}, &fallback));
     try std.testing.expectError(error.IncompatibleMeshes, manualComputationMesh(&.{ sharded, other }, &.{}, &fallback));
     try std.testing.expectError(error.IncompatibleMeshes, manualComputationMesh(&.{sharded}, &.{other}, &fallback));
+
+    // Replicated shapes of another mesh, like activations next to experts, do not conflict.
+    var replicated_other = replicated;
+    replicated_other._sharding = .{ .mesh = &second, .partition = .init(&.{.replicated}) };
+    try std.testing.expectEqual(&first, try manualComputationMesh(&.{ replicated_other, sharded }, &.{replicated_other}, &fallback));
+    try std.testing.expectEqual(&fallback, try manualComputationMesh(&.{replicated_other}, &.{}, &fallback));
 }
 
 fn manualComputationInternal(
