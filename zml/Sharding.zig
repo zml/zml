@@ -19,6 +19,7 @@ const Sharding = @This();
 mesh: ?*const Mesh,
 partition: Partitioning,
 
+pub const MAX_MESH_RANK = 4;
 pub const replicated: Sharding = .{ .mesh = null, .partition = .replicated(Shape.MAX_RANK) };
 
 pub fn get(sharding: Sharding, ax: usize) PartitionSpec {
@@ -71,8 +72,8 @@ pub fn isCompatible(self: Sharding, other: Sharding) bool {
 }
 
 test isCompatible {
-    const tp: Mesh = undefined;
-    const dp: Mesh = undefined;
+    const tp: Mesh = .initTest(.tp, .{.model});
+    const dp: Mesh = .initTest(.dp, .{ .data, .model });
 
     const sharded: Sharding = .{ .mesh = &tp, .partition = .init(&.{ .mesh_axis_0, .replicated }) };
     const cases = [_]struct { lhs: Sharding, rhs: Sharding, compatible: bool }{
@@ -89,12 +90,31 @@ test isCompatible {
         .{ .lhs = sharded, .rhs = sharded.set(2, .open), .compatible = false },
     };
     for (cases) |case| {
+        errdefer std.log.err("{f}.isCompatible({f}) expected to be {}, got {}", .{ case.lhs, case.rhs, case.compatible, !case.compatible });
+
         try std.testing.expectEqual(case.compatible, case.lhs.isCompatible(case.rhs));
         try std.testing.expectEqual(case.compatible, case.rhs.isCompatible(case.lhs));
     }
 }
 
-pub const MAX_MESH_RANK = 4;
+pub fn format(self: Sharding, writer: *std.Io.Writer) !void {
+    const mesh = self.mesh orelse return writer.writeAll("{replicated}");
+    const specs = self.partition.toArray();
+    var rank = specs.len;
+    while (rank > 0 and specs[rank - 1] == .out_of_bound) rank -= 1;
+
+    try writer.writeByte('{');
+    for (specs[0..rank], 0..) |spec, i| {
+        if (i > 0) try writer.writeByte(',');
+        switch (spec) {
+            .replicated => try writer.writeAll("replicated"),
+            .open => try writer.writeByte('?'),
+            .out_of_bound => try writer.writeByte('!'),
+            else => try writer.print("{s}", .{mesh.logical.axes.get(spec.meshAxis().?)}),
+        }
+    }
+    try writer.print("}}@{s}", .{mesh.name});
+}
 
 /// Describes how a given Shape axis behaves inside a mesh.
 /// Is it replicated ? sharded along a specific logical axis ? or open to replication ?
@@ -1501,6 +1521,22 @@ pub const Mesh = struct {
             .bindings = bindings,
             .folds = folds,
             .folds_consumed = folds_consumed,
+        };
+    }
+
+    pub fn initTest(name_: @EnumLiteral(), tagz: anytype) Mesh {
+        if (!builtin.is_test) @compileError("Cannot use zml.Sharding.Mesh.initTest outside of a test block");
+        const axes_tags = Shape.parseTags(tagz);
+        return .{
+            .name = @tagName(name_),
+            .logical = .{
+                .axes = .init(axes_tags.slice()),
+                .intents = .{ .buffer = @splat(.high_bandwidth), .len = axes_tags.len },
+            },
+            .physical = undefined,
+            .bindings = .empty,
+            .folds = .empty,
+            .folds_consumed = .empty,
         };
     }
 

@@ -266,7 +266,7 @@ pub const Tensor = struct {
         try std.testing.expectEqual(Sharding.PartitionSpec.sharded(0), x2.shape().partition(.h));
         try std.testing.expectEqual(&mp_dp, x2.shape().reshape(.{ 2, 4 })._sharding.mesh);
 
-        const x2_replicated = x2.replicate();
+        const x2_replicated = x.withPartitioning(&mp_dp, .{ .h = .replicated });
         try std.testing.expectEqual(&mp_dp, x2_replicated.shape()._sharding.mesh);
         try std.testing.expectEqual(Sharding.PartitionSpec.replicated, x2_replicated.shape().partition(.h));
     }
@@ -442,11 +442,11 @@ pub const Tensor = struct {
             // The origin is mapped to a physical buffer either because it's an input or through `reuseBuffer`
             // We can now look at its sharding.
             if (origin._shape.isFullyReplicated()) {
-                stdx.debug.assert(self.byteSize() ==  origin.byteSize(), ".reuseBuffer expects two tensors with same byteSize, got {f} ({B}) and {f} ({B})", .{self, self.byteSize(), origin, origin.byteSize()});
+                stdx.debug.assert(self.byteSize() == origin.byteSize(), ".reuseBuffer expects two tensors with same byteSize, got {f} ({B}) and {f} ({B})", .{ self, self.byteSize(), origin, origin.byteSize() });
             } else {
                 // Origin is sharded, we can't just use the global byte size, we actually need the same byte size per shard.
                 // We are stricter here and require the same shape.
-                stdx.debug.assert(self._shape.eql(origin._shape), ".reuseBuffer expects two sharded tensors with same shape, got {f} and {f}", .{self, origin });
+                stdx.debug.assert(self._shape.eql(origin._shape), ".reuseBuffer expects two sharded tensors with same shape, got {f} and {f}", .{ self, origin });
 
                 // Normally self sharding is unspecified and we can just propagate origin sharding,
                 // but if the user called `.withPartitioning` explicitly it would be weird to override it silently, hence the check.
