@@ -52,7 +52,7 @@ pub fn return_(ctx: *mlir.Context, values: []const *const mlir.Value, location: 
 
 fn dimAttr(ctx: *mlir.Context, dim: Dim) *const mlir.Attribute {
     return switch (dim) {
-        inline else => |d| mlir.Attribute.parse(ctx, "#gpu<dim " ++ @tagName(d) ++ ">") catch unreachable,
+        inline else => |d| mlir.Attribute.parse(ctx, "#gpu<dim<" ++ @tagName(d) ++ ">>") catch unreachable,
     };
 }
 

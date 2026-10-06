@@ -1,6 +1,6 @@
 # ZML Mosaic TPU DSL — Author's Guide
 
-A Zig builder for Mosaic TPU IR (the `tpu` dialect shipped by JAX) that tries
+A Zig builder for Mosaic TPU IR (the `tpu` dialect in XLA) that tries
 to read like `pallas.tpu` Python while staying in pure Zig. Used by
 `examples/mosaic_gdn` and by anything else that wants to emit a TPU kernel
 op-for-op against what `pallas_call` produces.
@@ -9,8 +9,8 @@ The DSL talks to the `tpu` dialect through `mlir.Operation.make(ctx, "tpu.<op>",
 A Mosaic kernel is a pure IR generator: it builds its MLIR in a throwaway
 context, canonicalizes it, serializes it to a string, and hands that to a
 `stablehlo.custom_call` targeting `tpu_custom_call` — it never touches ZML's
-compilation context (which carries only `func`/`stablehlo`/`sdy`). Until the
-JAX repo is wired into `MODULE.bazel`, the whole stack is `manual`-tagged in Bazel.
+compilation context (which carries only `func`/`stablehlo`/`sdy`). The dialect and
+its C API come from the pinned XLA repository.
 
 Two layers define the surface:
 
@@ -479,7 +479,7 @@ Use these for SMEM args (e.g. `cu_seqlens`) where Pallas emits scalar
 | `b.concatenate(sources, dimension)`                 | `tpu.concatenate`.                                       |
 | `b.transpose(src, permutation)`                     | `tpu.transpose`.                                         |
 | `b.broadcastInSublanes(src, lane)`                  | `tpu.broadcast_in_sublanes`.                             |
-| `b.rotate(src, .{ .amount, .dimension, .stride, .stride_dimension })` | `tpu.rotate`.                          |
+| `b.rotate(src, .{ .amount, .dimension, .stride, .stride_dimension })` | `tpu.dynamic_rotate` with a constant i32 amount.                          |
 | `b.vectorExtract(src, position)`                    | `vector.extract` — scalar / lower-rank slice.            |
 | `b.iota(shape, dtype, dimensions)`                  | `tpu.iota` over a chosen dim.                            |
 | `b.arange(n, dtype)`                                | Pallas-style 1-D iota: `<1xN>` `tpu.iota` + `vector.shape_cast` to `<N>`. Mirrors `_iota_lowering_rule`. |
@@ -536,7 +536,7 @@ through `vector.broadcast`) or `b.full / b.splat` for comptime constants.
 |-----------------------------------------------------|----------------------------------------------------------|
 | `b.allReduce(input, kind, dim)`                     | `tpu.all_reduce` — keeps `dim` as size 1.                |
 | `b.reduceIndex(input, kind, axis)`                  | `tpu.reduce_index` — drop axis, replace with `index`.    |
-| `b.scan(input, kind, mask)`                         | `tpu.scan`.                                              |
+| `b.scan(input, kind, mask)`                         | `tpu.scan` along the last dimension; optional rank-one mask. |
 | `b.sort(keys, values, mask, .{ .descending })`      | `tpu.sort` — returns `[3]Value` (sorted_keys, indices, sorted_values). |
 
 ---
@@ -619,9 +619,9 @@ For multi-core / async DMA orchestration:
 | `b.semBarrier()`                                                             | `tpu.sem_barrier`.     |
 | `b.semRead(sem)`                                                             | `tpu.sem_read`.        |
 | `b.semWait(sem, amount)`                                                     | `tpu.sem_wait`.        |
-| `b.semSignal(sem, amount)` / `b.semSignalOpts(sem, amount, .{ .device_id, .core_id })` | `tpu.sem_signal`. |
+| `b.semSignal(sem, amount)` / `b.semSignalOpts(sem, amount, .{ .device_id, .core_id, .subcore_id })` | `tpu.sem_signal`. |
 | `b.barrier(barrier_id)`                                                      | `tpu.barrier`.         |
-| `b.enqueueDma(src, dst, target_sem, .{ .source_semaphore, .device_id, .core_id, .priority, .strict_ordering })` | `tpu.enqueue_dma`. |
+| `b.enqueueDma(src, dst, target_sem, .{ .source_semaphore, .device_id, .core_id, .subcore_id, .priority, .strict_ordering })` | `tpu.enqueue_dma`. |
 | `b.waitDma2(sem, src, dst, .{ .device_id, .core_id, .strict_ordering })`     | `tpu.wait_dma2`.       |
 | `b.deviceId()`                                                               | `tpu.device_id`.       |
 | `b.delay(cycles)`                                                            | `tpu.delay`.           |
@@ -830,3 +830,7 @@ is the manual form.
    always means an operand-type mismatch or a missing block terminator —
    `scf.yield` operand count must match the loop's result types, and
    `func.return` arity must match the declared result types.
+
+The removed low-level `tpu.relayout` helper has no replacement: upstream deleted
+the unused operation and its vector-layout attribute. `Builder.rotate` retains
+its static-amount API and emits `tpu.dynamic_rotate` with an i32 constant.

@@ -216,7 +216,9 @@ pub const GemmOpts = struct {
 };
 
 pub fn gemm(ctx: *mlir.Context, atom: *const mlir.Value, d: *const mlir.Value, a: *const mlir.Value, b: *const mlir.Value, cc: *const mlir.Value, opts: GemmOpts, location: *const mlir.Location) *mlir.Operation {
-    var at: Attrs = .empty;
+    var at = attrs(&.{.named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &.{
+        1, 1, 1, 1, 1, @intFromBool(opts.traversal_layout != null),
+    }))});
     if (opts.traversal_order) |o| {
         const attr = attributes.gemmTraversalOrderAttr(ctx, o) catch @panic("fly.gemm: invalid traversal order");
         at.appendAssumeCapacity(.named(ctx, "traversalOrder", attr));
@@ -378,7 +380,7 @@ test "fly enum and gpu attributes" {
     defer ctx.deinit();
     _ = try attributes.mmaOperandAttr(ctx, .a);
     _ = try attributes.gemmTraversalOrderAttr(ctx, .kmn);
-    _ = parseAttr(ctx, "#gpu<dim x>");
+    _ = parseAttr(ctx, "#gpu<dim<x>>");
 }
 
 test "inferred fly ops compute layout algebra" {

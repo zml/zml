@@ -3,7 +3,7 @@
 //! Args are memrefs (`!memref<S x dtype, mem_space>`) plus optional scalars,
 //! iteration-index, and semaphore args. The dialect must be registered into
 //! the MLIR context — see `mlir/dialects/mosaic_tpu`. The entire Mosaic stack is
-//! `manual`-tagged in Bazel until the JAX repo is wired into `MODULE.bazel`.
+//! backed by the Mosaic dialect in the pinned XLA repository.
 
 const std = @import("std");
 
@@ -380,6 +380,7 @@ pub const VectorStoreOpts = struct {
 pub const MatmulOpts = struct {
     transpose_lhs: bool = false,
     transpose_rhs: bool = false,
+    transpose_lhs_hint: bool = false,
     precision: ?ContractPrecision = null,
     /// Optional `#tpu.dot_dimension_numbers<...>` attribute. When omitted the
     /// canonicalizer derives one. Build with `mlir.Attribute.parse`.
@@ -398,12 +399,14 @@ pub const SortOpts = struct {
 pub const SemSignalOpts = struct {
     device_id: ?Value = null,
     core_id: ?Value = null,
+    subcore_id: ?Value = null,
 };
 
 pub const EnqueueDmaOpts = struct {
     source_semaphore: ?Value = null,
     device_id: ?Value = null,
     core_id: ?Value = null,
+    subcore_id: ?Value = null,
     priority: i32 = 0,
     strict_ordering: bool = false,
 };
@@ -1594,6 +1597,7 @@ pub const Builder = struct {
             .{
                 .transpose_lhs = opts.transpose_lhs,
                 .transpose_rhs = opts.transpose_rhs,
+                .transpose_lhs_hint = opts.transpose_lhs_hint,
                 .precision = opts.precision,
                 .dimension_numbers = opts.dimension_numbers,
             },
@@ -1763,8 +1767,8 @@ pub const Builder = struct {
     }
 
     pub fn rotate(self: *Builder, value: Value, opts: RotateOpts) Value {
-        return self.emit(tpu.rotate(self.ctx, value.inner, .{
-            .amount = opts.amount,
+        const amount = self.lift(@as(i32, opts.amount));
+        return self.emit(tpu.dynamic_rotate(self.ctx, value.inner, amount.inner, .{
             .dimension = opts.dimension,
             .stride = opts.stride,
             .stride_dimension = opts.stride_dimension,
@@ -1794,7 +1798,8 @@ pub const Builder = struct {
         return self.emit(tpu.reduce_index(self.ctx, input.inner, axis, kind, ty, self.loc()));
     }
 
-    /// `tpu.scan(input, kind, mask?)` — same shape as input.
+    /// Scan the last dimension; a mask must be rank one with that dimension
+    /// as its length. The result has the same shape as the input.
     pub fn scan(self: *Builder, input: Value, kind: ReductionKind, mask: ?Value) Value {
         const m_inner: ?*const mlir.Value = if (mask) |m| m.inner else null;
         return self.emit(tpu.scan(self.ctx, input.inner, kind, m_inner, input.type_(), self.loc()));
@@ -1945,9 +1950,11 @@ pub const Builder = struct {
         const a = if (@TypeOf(amount) == Value) amount else self.lift(amount);
         const dev: ?*const mlir.Value = if (opts.device_id) |d| d.inner else null;
         const core: ?*const mlir.Value = if (opts.core_id) |c_| c_.inner else null;
+        const subcore: ?*const mlir.Value = if (opts.subcore_id) |sc| sc.inner else null;
         _ = tpu.sem_signal(self.ctx, semaphore.inner, a.inner, .{
             .device_id = dev,
             .core_id = core,
+            .subcore_id = subcore,
         }, self.loc()).appendTo(self.currentBlock());
     }
 
@@ -1959,10 +1966,12 @@ pub const Builder = struct {
         const src_sem: ?*const mlir.Value = if (opts.source_semaphore) |s| s.inner else null;
         const dev: ?*const mlir.Value = if (opts.device_id) |d| d.inner else null;
         const core: ?*const mlir.Value = if (opts.core_id) |c_| c_.inner else null;
+        const subcore: ?*const mlir.Value = if (opts.subcore_id) |sc| sc.inner else null;
         _ = tpu.enqueue_dma(self.ctx, source.inner, target.inner, target_semaphore.inner, .{
             .source_semaphore = src_sem,
             .device_id = dev,
             .core_id = core,
+            .subcore_id = subcore,
             .priority = opts.priority,
             .strict_ordering = opts.strict_ordering,
         }, self.loc()).appendTo(self.currentBlock());
@@ -2329,4 +2338,23 @@ pub fn WhileScope(comptime N: usize, comptime M: usize) type {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "static rotate uses the current dynamic rotate operation" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    inline for (dialects_needed) |dialect| registry.registerDialect(dialect);
+    mlir.registerFuncExtensions(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    var b = try Builder.init(std.testing.allocator, ctx, "rotate", &.{}, &.{});
+    defer b.deinit();
+    const input = b.zeros(&.{ 8, 128 }, .f32);
+    const rotated = b.rotate(input, .{ .amount = 3, .dimension = 1 });
+    try std.testing.expectEqualStrings("tpu.dynamic_rotate", rotated.inner.owner().name());
+    const amount: Value = .{ .inner = rotated.inner.owner().operand(1), .kernel = &b };
+    try std.testing.expectEqual(@as(?i64, 3), amount.asConstantInt());
+    const ir = try b.finish(&.{});
+    defer std.testing.allocator.free(ir);
 }

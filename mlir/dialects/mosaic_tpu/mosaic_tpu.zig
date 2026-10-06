@@ -4,10 +4,10 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-/// Latest Mosaic-serde format version. Pallas's `tpu_custom_call.py:CustomCallBackendConfig.to_json`
-/// surfaces this through `serialization_format`. Bumped in lockstep with
-/// `jaxlib/mosaic/dialect/tpu/transforms/serde.h:kVersion`.
-pub const SERDE_VERSION: i32 = 11;
+/// Mosaic IR version stored as `stable_mosaic.version`, matching
+/// `xla/mosaic/dialect/tpu/transforms/serde.h:kVersion`. This is distinct from
+/// the custom-call JSON `serialization_format`, which remains 1.
+pub const SERDE_VERSION: i32 = 18;
 
 /// Register the `mosaic-serde` pass so `PassManager.parse` can pick it up by
 /// name. Idempotent — safe to call repeatedly. Required before running the
@@ -65,6 +65,15 @@ pub const ReductionKind = enum {
     sum,
     max,
     min,
+    maxf,
+    minf,
+    maxsi,
+    minsi,
+    maxui,
+    minui,
+    arg_max,
+    arg_min,
+    find_first_set,
     @"and",
     @"or",
     xor,
@@ -74,6 +83,18 @@ pub const ReductionKind = enum {
         const text = std.fmt.bufPrint(&buf, "#tpu.reduction_kind<{s}>", .{@tagName(self)}) catch unreachable;
         return mlir.Attribute.parse(ctx, text) catch
             std.debug.panic("failed to parse tpu.reduction_kind '{s}'", .{text});
+    }
+
+    fn forInput(self: ReductionKind, input: *const mlir.Value, unsigned_integer: bool) ReductionKind {
+        if (self != .max and self != .min) return self;
+        const element_type = input.type_().isA(mlir.ShapedType).?.elementType();
+        if (element_type.isFloat()) return if (self == .max) .maxf else .minf;
+        // Match Mosaic's serde upgrade: scans used unsigned integer extrema,
+        // while all-reduce used signed integer extrema.
+        return if (unsigned_integer)
+            (if (self == .max) .maxui else .minui)
+        else
+            (if (self == .max) .maxsi else .minsi);
     }
 };
 
@@ -220,7 +241,7 @@ pub fn all_reduce(
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
             .named(ctx, "dim", .int(ctx, .i64, dim)),
-            .named(ctx, "kind", kind.attribute(ctx)),
+            .named(ctx, "kind", kind.forInput(input, false).attribute(ctx)),
         },
         .location = location,
     });
@@ -245,6 +266,7 @@ pub fn reduce_index(
     });
 }
 
+/// Scan the last dimension; an optional rank-one mask spans that dimension.
 pub fn scan(
     ctx: *mlir.Context,
     input: *const mlir.Value,
@@ -261,7 +283,8 @@ pub fn scan(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "kind", kind.attribute(ctx)),
+            .named(ctx, "kind", kind.forInput(input, true).attribute(ctx)),
+            .named(ctx, "dimension", .int(ctx, .i64, @as(i64, @intCast(input.type_().isA(mlir.ShapedType).?.rank())) - 1)),
         },
         .location = location,
     });
@@ -486,6 +509,7 @@ pub const MatmulOpts = struct {
     /// Deprecated when `dimension_numbers` is provided.
     transpose_lhs: bool = false,
     transpose_rhs: bool = false,
+    transpose_lhs_hint: bool = false,
     /// Optional precision; pass null to omit.
     precision: ?ContractPrecision = null,
     /// Optional `#tpu.dot_dimension_numbers<...>` attribute. When omitted the
@@ -502,10 +526,11 @@ pub fn matmul(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 4) = .empty;
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 5) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
         .named(ctx, "transpose_lhs", .boolean(ctx, opts.transpose_lhs)),
         .named(ctx, "transpose_rhs", .boolean(ctx, opts.transpose_rhs)),
+        .named(ctx, "transpose_lhs_hint", .boolean(ctx, opts.transpose_lhs_hint)),
     });
     if (opts.precision) |p| {
         attrs.appendAssumeCapacity(.named(ctx, "precision", p.attribute(ctx)));
@@ -588,7 +613,6 @@ pub const truncf = castOp("tpu.truncf").call;
 pub const bitcast = castOp("tpu.bitcast").call;
 pub const bitcast_vreg = castOp("tpu.bitcast_vreg").call;
 pub const mask_cast = castOp("tpu.mask_cast").call;
-pub const relayout = castOp("tpu.relayout").call;
 
 // =============================================================================
 // Shape — reshape / repeat / concatenate / transpose / broadcast_in_sublanes
@@ -677,29 +701,28 @@ pub fn broadcast_in_sublanes(
     });
 }
 
-pub const RotateOpts = struct {
-    amount: i32,
+pub const DynamicRotateOpts = struct {
     dimension: i32,
     stride: ?i32 = null,
     stride_dimension: ?i32 = null,
 };
 
-pub fn rotate(
+pub fn dynamic_rotate(
     ctx: *mlir.Context,
     value: *const mlir.Value,
-    opts: RotateOpts,
+    amount: *const mlir.Value,
+    opts: DynamicRotateOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 4) = .empty;
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 3) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
-        .named(ctx, "amount", .int(ctx, .i32, opts.amount)),
-        .named(ctx, "dimension", .int(ctx, .i32, opts.dimension)),
+        .named(ctx, "dimension", .int(ctx, .si32, opts.dimension)),
     });
-    if (opts.stride) |s| attrs.appendAssumeCapacity(.named(ctx, "stride", .int(ctx, .i32, s)));
-    if (opts.stride_dimension) |sd| attrs.appendAssumeCapacity(.named(ctx, "stride_dimension", .int(ctx, .i32, sd)));
+    if (opts.stride) |s| attrs.appendAssumeCapacity(.named(ctx, "stride", .int(ctx, .si32, s)));
+    if (opts.stride_dimension) |sd| attrs.appendAssumeCapacity(.named(ctx, "stride_dimension", .int(ctx, .si32, sd)));
 
-    return mlir.Operation.make(ctx, "tpu.rotate", .{
-        .operands = .{ .flat = &.{value} },
+    return mlir.Operation.make(ctx, "tpu.dynamic_rotate", .{
+        .operands = .{ .flat = &.{ value, amount } },
         .results = .{ .flat = &.{value.type_()} },
         .attributes = attrs.constSlice(),
         .location = location,
@@ -788,6 +811,7 @@ pub fn reinterpret_cast(
     return mlir.Operation.make(ctx, "tpu.reinterpret_cast", .{
         .operands = .{ .flat = &.{mem_ref} },
         .results = .{ .flat = &.{result_type} },
+        .attributes = &.{.named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &.{ 1, 0, 0, 0 }))},
         .location = location,
     });
 }
@@ -895,6 +919,7 @@ pub fn sem_wait(
 pub const SemSignalOpts = struct {
     device_id: ?*const mlir.Value = null,
     core_id: ?*const mlir.Value = null,
+    subcore_id: ?*const mlir.Value = null,
 };
 
 pub fn sem_signal(
@@ -904,7 +929,7 @@ pub fn sem_signal(
     opts: SemSignalOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var operands_buf: stdx.BoundedArray(*const mlir.Value, 4) = .empty;
+    var operands_buf: stdx.BoundedArray(*const mlir.Value, 5) = .empty;
     operands_buf.appendSliceAssumeCapacity(&.{ semaphore, amount });
     const dev_len: i32 = if (opts.device_id) |d| blk: {
         operands_buf.appendAssumeCapacity(d);
@@ -915,7 +940,12 @@ pub fn sem_signal(
         break :blk 1;
     } else 0;
 
-    const seg_sizes = [4]i32{ 1, 1, dev_len, core_len };
+    const subcore_len: i32 = if (opts.subcore_id) |subcore| blk: {
+        operands_buf.appendAssumeCapacity(subcore);
+        break :blk 1;
+    } else 0;
+
+    const seg_sizes = [5]i32{ 1, 1, dev_len, core_len, subcore_len };
     return mlir.Operation.make(ctx, "tpu.sem_signal", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
@@ -940,6 +970,7 @@ pub const EnqueueDmaOpts = struct {
     source_semaphore: ?*const mlir.Value = null,
     device_id: ?*const mlir.Value = null,
     core_id: ?*const mlir.Value = null,
+    subcore_id: ?*const mlir.Value = null,
     priority: i32 = 0,
     strict_ordering: bool = false,
 };
@@ -952,7 +983,7 @@ pub fn enqueue_dma(
     opts: EnqueueDmaOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var operands_buf: stdx.BoundedArray(*const mlir.Value, 6) = .empty;
+    var operands_buf: stdx.BoundedArray(*const mlir.Value, 7) = .empty;
     operands_buf.appendAssumeCapacity(source);
     const src_sem_len: i32 = if (opts.source_semaphore) |s| blk: {
         operands_buf.appendAssumeCapacity(s);
@@ -969,8 +1000,13 @@ pub fn enqueue_dma(
         break :blk 1;
     } else 0;
 
-    // Source / source_semaphore? / target / target_semaphore / device_id? / core_id?
-    const seg_sizes = [6]i32{ 1, src_sem_len, 1, 1, dev_len, core_len };
+    // Source / source_semaphore? / target / target_semaphore / device_id? / core_id? / subcore_id?
+    const subcore_len: i32 = if (opts.subcore_id) |subcore| blk: {
+        operands_buf.appendAssumeCapacity(subcore);
+        break :blk 1;
+    } else 0;
+
+    const seg_sizes = [7]i32{ 1, src_sem_len, 1, 1, dev_len, core_len, subcore_len };
     return mlir.Operation.make(ctx, "tpu.enqueue_dma", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
@@ -1175,4 +1211,109 @@ fn denseBoolArrayAttribute(ctx: *mlir.Context, values: []const bool) *const mlir
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+fn testContext() !*mlir.Context {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    registry.registerDialect("tpu");
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    ctx.loadAllAvailableDialects();
+    return ctx;
+}
+
+fn expectSegments(op: *const mlir.Operation, expected: []const i32) !void {
+    const segments = op.attributeByName("operandSegmentSizes").?.isA(mlir.DenseArrayAttribute(.i32)).?;
+    try std.testing.expectEqual(expected.len, segments.numElements());
+    for (expected, 0..) |size, i| try std.testing.expectEqual(size, segments.element(i));
+}
+
+test "DMA and semaphore wrappers satisfy current operand groups" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    const loc = mlir.Location.unknown(ctx);
+    const args = mlir.Block.init(&.{}, &.{});
+    defer args.deinit();
+    const source = args.addArgument(try mlir.Type.parse(ctx, "memref<8x128xbf16, #tpu.memory_space<hbm>>"), loc);
+    const target = args.addArgument(try mlir.Type.parse(ctx, "memref<8x128xbf16, #tpu.memory_space<vmem>>"), loc);
+    const dma_sem = args.addArgument(try mlir.Type.parse(ctx, "memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>"), loc);
+    const sem = args.addArgument(try mlir.Type.parse(ctx, "memref<!tpu.semaphore, #tpu.memory_space<semaphore_mem>>"), loc);
+    const amount = args.addArgument(.int(ctx, .i32), loc);
+
+    const dma = enqueue_dma(ctx, source, target, dma_sem, .{}, loc);
+    defer dma.deinit();
+    try expectSegments(dma, &.{ 1, 0, 1, 1, 0, 0, 0 });
+    try std.testing.expect(dma.verify());
+    const signal = sem_signal(ctx, sem, amount, .{}, loc);
+    defer signal.deinit();
+    try expectSegments(signal, &.{ 1, 1, 0, 0, 0 });
+    try std.testing.expect(signal.verify());
+
+    const sc_sem = args.addArgument(try mlir.Type.parse(ctx, "memref<!tpu.semaphore, #tpu.memory_space<semaphore_mem, sc_vector_subcore>>"), loc);
+    const sc_dma_sem = args.addArgument(try mlir.Type.parse(ctx, "memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem, sc_vector_subcore>>"), loc);
+    const core = args.addArgument(.int(ctx, .i32), loc);
+    const subcore = args.addArgument(.int(ctx, .i32), loc);
+    const remote_signal = sem_signal(ctx, sc_sem, amount, .{ .core_id = core, .subcore_id = subcore }, loc);
+    defer remote_signal.deinit();
+    try expectSegments(remote_signal, &.{ 1, 1, 0, 1, 1 });
+    try std.testing.expect(remote_signal.operand(3).eql(subcore));
+    const remote_dma = enqueue_dma(ctx, source, target, sc_dma_sem, .{
+        .source_semaphore = dma_sem,
+        .core_id = core,
+        .subcore_id = subcore,
+    }, loc);
+    defer remote_dma.deinit();
+    try expectSegments(remote_dma, &.{ 1, 1, 1, 1, 0, 1, 1 });
+    try std.testing.expect(remote_dma.operand(5).eql(subcore));
+}
+
+test "matmul and reinterpret cast satisfy current required properties" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    const loc = mlir.Location.unknown(ctx);
+    const args = mlir.Block.init(&.{}, &.{});
+    defer args.deinit();
+    const vector_type = mlir.Type.vector(&.{ 8, 8 }, .float(ctx, .f32));
+    const lhs = args.addArgument(vector_type, loc);
+    const rhs = args.addArgument(vector_type, loc);
+    const acc = args.addArgument(vector_type, loc);
+    const product = matmul(ctx, lhs, rhs, acc, .{}, vector_type, loc);
+    defer product.deinit();
+    try std.testing.expect(product.verify());
+    try std.testing.expect(!product.attributeByName("transpose_lhs_hint").?.isA(mlir.BoolAttribute).?.value());
+
+    const ref_type = try mlir.Type.parse(ctx, "memref<8x8xf32, #tpu.memory_space<vmem>>");
+    const ref = args.addArgument(ref_type, loc);
+    const cast = reinterpret_cast(ctx, ref, ref_type, loc);
+    defer cast.deinit();
+    try expectSegments(cast, &.{ 1, 0, 0, 0 });
+    try std.testing.expect(cast.verify());
+}
+
+test "legacy reduction extrema and scan axis preserve their semantics" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    const loc = mlir.Location.unknown(ctx);
+    const args = mlir.Block.init(&.{}, &.{});
+    defer args.deinit();
+    const float_type = mlir.Type.vector(&.{ 2, 8 }, .float(ctx, .f32));
+    const int_type = mlir.Type.vector(&.{ 2, 8 }, .int(ctx, .i32));
+    const floats = args.addArgument(float_type, loc);
+    const integers = args.addArgument(int_type, loc);
+    const mask = args.addArgument(mlir.Type.vector(&.{8}, .int(ctx, .i1)), loc);
+    const float_min = all_reduce(ctx, floats, 1, .min, float_type, loc);
+    defer float_min.deinit();
+    const int_max = all_reduce(ctx, integers, 1, .max, int_type, loc);
+    defer int_max.deinit();
+    try std.testing.expect(float_min.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<minf>")));
+    try std.testing.expect(int_max.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<maxsi>")));
+
+    const int_scan = scan(ctx, integers, .max, mask, int_type, loc);
+    defer int_scan.deinit();
+    try std.testing.expect(int_scan.verify());
+    try std.testing.expect(int_scan.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<maxui>")));
+    try std.testing.expectEqual(@as(i64, 1), int_scan.attributeByName("dimension").?.isA(mlir.IntegerAttribute).?.value(i64));
+    const float_scan = scan(ctx, floats, .min, null, float_type, loc);
+    defer float_scan.deinit();
+    try std.testing.expect(float_scan.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<minf>")));
 }

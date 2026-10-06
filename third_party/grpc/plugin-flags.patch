@@ -1,0 +1,19 @@
+# Match XLA's cc_grpc_library extension for services_namespace.
+--- a/bazel/cc_grpc_library.bzl
++++ b/bazel/cc_grpc_library.bzl
+@@ -29,6 +29,7 @@
+         allow_deprecated = False,
+         use_external = False,  # @unused
+         grpc_only = False,
++        plugin_flags = [],
+         **kwargs):
+     """Generates C++ grpc classes for services defined in a proto file.
+ 
+@@ -110,6 +111,7 @@
+             well_known_protos = well_known_protos,
+             generate_mocks = generate_mocks,
+             allow_deprecated = allow_deprecated,
++            flags = plugin_flags,
+             **kwargs
+         )
+ 

@@ -647,7 +647,7 @@ pub fn minf(ctx: *mlir.Context, lhs: *const mlir.Value, rhs: *const mlir.Value, 
 }
 
 pub fn pow(ctx: *mlir.Context, source: *const mlir.Value, exponent: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-    return binary(ctx, "pow", source, exponent, .empty, location);
+    return binary(ctx, "fpowf", source, exponent, .empty, location);
 }
 
 pub fn atan2(ctx: *mlir.Context, x: *const mlir.Value, y: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
@@ -1278,6 +1278,9 @@ pub fn load_view_tko(ctx: *mlir.Context, view: *const mlir.Value, index: []const
     segs.add(index);
     segs.add(tok.slice());
     var attrs = memAttrs(ctx, opts);
+    // Preserve bounds checks unless the caller has proved a coordinate in bounds.
+    const inbounds = [_]i32{0} ** mlir.ShapedType.MAX_RANK;
+    attrs.appendAssumeCapacity(.named(ctx, "inbounds", .denseArray(ctx, .bool, inbounds[0..index.len])));
     attrs.appendAssumeCapacity(segs.attr(ctx));
     return mlir.Operation.make(ctx, opName("load_view_tko"), .{
         .operands = .{ .flat = segs.values.constSlice() },
@@ -1296,6 +1299,8 @@ pub fn store_view_tko(ctx: *mlir.Context, tile: *const mlir.Value, view: *const 
     segs.add(index);
     segs.add(tok.slice());
     var attrs = memAttrs(ctx, opts);
+    const inbounds = [_]i32{0} ** mlir.ShapedType.MAX_RANK;
+    attrs.appendAssumeCapacity(.named(ctx, "inbounds", .denseArray(ctx, .bool, inbounds[0..index.len])));
     attrs.appendAssumeCapacity(segs.attr(ctx));
     return mlir.Operation.make(ctx, opName("store_view_tko"), .{
         .operands = .{ .flat = segs.values.constSlice() },
@@ -1637,6 +1642,7 @@ test "views, control flow and mma verify" {
     const body = mlir.Block.init(&.{ i32_tile, acc_ty }, &.{ loc, loc });
     const at = load_view_tko(ctx, va.result(0), &.{ bid.result(0), body.argument(0) }, .{}, loc).appendTo(body);
     const bt = load_view_tko(ctx, vb.result(0), &.{ body.argument(0), bid.result(1) }, .{}, loc).appendTo(body);
+    try std.testing.expect(at.attributeByName("inbounds").?.eql(.denseArray(ctx, .bool, &.{ 0, 0 })));
     const acc = mmaf(ctx, at.result(0), bt.result(0), body.argument(1), false, loc).appendTo(body);
     _ = continue_(ctx, &.{acc.result(0)}, loc).appendTo(body);
     const loop_op = for_(ctx, zero.result(0), one.result(0), one.result(0), &.{acc0.result(0)}, body, false, loc).appendTo(block);
@@ -1649,7 +1655,8 @@ test "views, control flow and mma verify" {
     _ = yield(ctx, &.{acc0.result(0)}, loc).appendTo(else_block);
     const if_op = if_(ctx, cond.result(0), &.{acc_ty}, then_block, else_block, loc).appendTo(block);
 
-    _ = store_view_tko(ctx, if_op.result(0), vc.result(0), &.{ bid.result(0), bid.result(1) }, .{}, loc).appendTo(block);
+    const store = store_view_tko(ctx, if_op.result(0), vc.result(0), &.{ bid.result(0), bid.result(1) }, .{}, loc).appendTo(block);
+    try std.testing.expect(store.attributeByName("inbounds").?.eql(.denseArray(ctx, .bool, &.{ 0, 0 })));
     _ = return_(ctx, &.{}, loc).appendTo(block);
 
     const ct_body = mlir.Block.init(&.{}, &.{});
