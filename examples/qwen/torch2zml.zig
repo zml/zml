@@ -133,9 +133,8 @@ const Wrapper = struct {
     mlp: Mlp,
 
     pub fn forward(self: Wrapper, x: zml.Tensor) zml.Tensor {
-        const tagged = x.withTags(.{ .single, .wh, .d });
-        const squeezed = tagged.squeeze(.single);
-        return self.mlp.forward(squeezed);
+        const tagged = x.withTags(.{ .bs, .dout, .d });
+        return self.mlp.forward(tagged);
     }
 };
 
@@ -174,9 +173,9 @@ const TransformerBlock = struct {
 };
 
 const Mlp = struct {
-    proj: zml.nn.Linear,
-    out: zml.nn.Linear,
     gate_layer: zml.nn.Linear,
+    out: zml.nn.Linear,
+    proj: zml.nn.Linear,
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
         zml.nn.Linear.unloadBuffers(&self.gate_layer);
@@ -186,10 +185,10 @@ const Mlp = struct {
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         // It seems like I need to tag again after the silu(?)
-        const left = self.gate_layer.forward(x, .bf16).silu().withTags(.{ .d, .dup });
-        const right = self.proj.forward(x, .bf16);
-        const dot = left.mul(right).withTags(.{ .dup, .d });
-        return self.out.forward(dot, .bf16);
+        const left = self.gate_layer.forward(x, x.dtype()).silu().withTags(.{ .bs, .d, .dup });
+        const right = self.proj.forward(x, x.dtype());
+        const dot = left.mul(right).withTags(.{ .bs, .dup, .d });
+        return self.out.forward(dot, x.dtype());
     }
 };
 
