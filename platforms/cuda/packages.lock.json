@@ -19,13 +19,13 @@
 					"version": "12.2.0-14+deb12u1"
 				}
 			],
-			"key": "llvm-libunwind1_1-23.1.2_-p--p-20260920033443-p-85ac56026243-1_exp1_20260920033605.79_amd64",
-			"name": "llvm-libunwind1",
-			"sha256": "aa690e56d52dc2798491167a06a879cb047b4f294cc953bd4c9f7267b0b0cecd",
+			"key": "libunwind-19_1-19.1.4-1_deb12u1_amd64",
+			"name": "libunwind-19",
+			"sha256": "4c6d39c735e17a4ecc5bb2393b2962dd2ae4e261578460a62bc8fd2f89b806c3",
 			"urls": [
-				"https://apt.llvm.org/bookworm/pool/main/l/llvm-toolchain-23/llvm-libunwind1_23.1.2~++20260920033443+85ac56026243-1~exp1~20260920033605.79_amd64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/l/llvm-toolchain-19/libunwind-19_19.1.4-1~deb12u1_amd64.deb"
 			],
-			"version": "1:23.1.2~++20260920033443+85ac56026243-1~exp1~20260920033605.79"
+			"version": "1:19.1.4-1~deb12u1"
 		},
 		{
 			"arch": "amd64",
@@ -106,13 +106,13 @@
 					"version": "12.2.0-14+deb12u1"
 				}
 			],
-			"key": "llvm-libunwind1_1-23.1.2_-p--p-20260920033443-p-85ac56026243-1_exp1_20260920033605.79_arm64",
-			"name": "llvm-libunwind1",
-			"sha256": "a34362f952c5c815e715ab9b9b9c4776f6690683cb2037f04cf71322f1822e3b",
+			"key": "libunwind-19_1-19.1.4-1_deb12u1_arm64",
+			"name": "libunwind-19",
+			"sha256": "a9514ef8590d0d21d6afb2e694ee60229823465151abcbbe0560b75a4518a03c",
 			"urls": [
-				"https://apt.llvm.org/bookworm/pool/main/l/llvm-toolchain-23/llvm-libunwind1_23.1.2~++20260920033443+85ac56026243-1~exp1~20260920033605.79_arm64.deb"
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/l/llvm-toolchain-19/libunwind-19_19.1.4-1~deb12u1_arm64.deb"
 			],
-			"version": "1:23.1.2~++20260920033443+85ac56026243-1~exp1~20260920033605.79"
+			"version": "1:19.1.4-1~deb12u1"
 		},
 		{
 			"arch": "arm64",

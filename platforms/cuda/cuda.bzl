@@ -202,7 +202,7 @@ NVSHMEM_PACKAGES = {
 }
 
 _UBUNTU_PACKAGES = {
-    "llvm-libunwind1": [
+    "libunwind-19": [
         """filegroup(
             name = "libunwind",
             srcs = select({
