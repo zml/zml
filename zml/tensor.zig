@@ -450,7 +450,7 @@ pub const Tensor = struct {
 
                 // Normally self sharding is unspecified and we can just propagate origin sharding,
                 // but if the user called `.withPartitioning` explicitly it would be weird to override it silently, hence the check.
-                stdx.debug.assert(self._shape._sharding.mesh == null or self._shape._sharding.eql(origin._shape._sharding), ".reuseBuffer expects two tensors on the same mesh, got {f} and {f}", .{self, origin});
+                stdx.debug.assert(self._shape._sharding.isCompatible(origin._shape._sharding), ".reuseBuffer expects compatible shardings, got {f} and {f}", .{ self, origin });
             }
 
             var res = self;

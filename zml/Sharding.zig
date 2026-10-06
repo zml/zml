@@ -57,8 +57,41 @@ pub fn isFullyReplicated(self: Sharding) bool {
     return true;
 }
 
-pub fn eql(self: Sharding, other: Sharding) bool {
-    return self.mesh == other.mesh and self.partition == other.partition;
+/// An unspecified mesh is compatible with any sharding. On the same mesh,
+/// open axes accept any in-bounds partition, while closed axes must match.
+pub fn isCompatible(self: Sharding, other: Sharding) bool {
+    if (self.mesh == null or other.mesh == null) return true;
+    if (self.mesh != other.mesh) return false;
+    for (self.partition.toArray(), other.partition.toArray()) |lhs, rhs| {
+        if (lhs == rhs) continue;
+        if (lhs == .out_of_bound or rhs == .out_of_bound) return false;
+        if (lhs != .open and rhs != .open) return false;
+    }
+    return true;
+}
+
+test isCompatible {
+    const tp: Mesh = undefined;
+    const dp: Mesh = undefined;
+
+    const sharded: Sharding = .{ .mesh = &tp, .partition = .init(&.{ .mesh_axis_0, .replicated }) };
+    const cases = [_]struct { lhs: Sharding, rhs: Sharding, compatible: bool }{
+        .{ .lhs = .replicated, .rhs = .replicated, .compatible = true },
+        .{ .lhs = .replicated, .rhs = sharded, .compatible = true },
+        .{ .lhs = sharded, .rhs = sharded, .compatible = true },
+        .{ .lhs = sharded, .rhs = .{ .mesh = &tp, .partition = .open(2) }, .compatible = true },
+        .{ .lhs = sharded.set(1, .open), .rhs = sharded.set(0, .open), .compatible = true },
+        .{ .lhs = sharded, .rhs = sharded.set(0, .mesh_axis_1), .compatible = false },
+        .{ .lhs = sharded, .rhs = sharded.set(0, .replicated), .compatible = false },
+        .{ .lhs = sharded, .rhs = .{ .mesh = &dp, .partition = sharded.partition }, .compatible = false },
+        .{ .lhs = sharded, .rhs = .{ .mesh = &dp, .partition = .open(2) }, .compatible = false },
+        .{ .lhs = sharded, .rhs = sharded.set(1, .out_of_bound), .compatible = false },
+        .{ .lhs = sharded, .rhs = sharded.set(2, .open), .compatible = false },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.compatible, case.lhs.isCompatible(case.rhs));
+        try std.testing.expectEqual(case.compatible, case.rhs.isCompatible(case.lhs));
+    }
 }
 
 pub const MAX_MESH_RANK = 4;
