@@ -431,8 +431,9 @@ pub const Float8E8M0 = packed struct(u8) {
     exponent: u8,
     sign: u0 = 0,
 
-    pub const max: Float8E8M0 = .{ .exponent = std.math.maxInt(u8) };
+    pub const max: Float8E8M0 = .{ .exponent = std.math.maxInt(u8) - 1 };
     pub const min: Float8E8M0 = .{ .exponent = 0 };
+    pub const nan: Float8E8M0 = .{ .exponent = std.math.maxInt(u8) };
     pub const min_scale: f32 = @bitCast(Float32{ .sign = 0, .exponent = 0, .mantissa = 0b1 << 22 });
 
     /// Lossy conversion from f32, similar to @floatCast
@@ -450,6 +451,10 @@ pub const Float8E8M0 = packed struct(u8) {
             .mantissa = 0,
         };
         return @bitCast(vf32);
+    }
+
+    pub fn isNan(x: Float8E8M0) bool {
+        return x.exponent == nan.exponent;
     }
 
     const Helpers = FloatHelpers(@This());
@@ -473,6 +478,7 @@ pub const Float4E2M1 = packed struct(u4) {
 
     pub const max: Float4E2M1 = .{ .sign = 0, .exponent = std.math.maxInt(u2), .mantissa = std.math.maxInt(u1) };
     pub const min: Float4E2M1 = neg(max);
+    pub const nan: Float4E2M1 = .{ .sign = 0, .exponent = std.math.maxInt(u2), .mantissa = 1 };
     const Helpers = FloatHelpers(@This());
     pub const zero = Helpers.zero;
     pub const neg = Helpers.neg;
@@ -484,6 +490,10 @@ pub const Float4E2M1 = packed struct(u4) {
     pub fn toF32(x: Float4E2M1) f32 {
         // faster implementation
         return values[@as(u4, @bitCast(x))];
+    }
+
+    pub fn isNan(_: Float4E2M1) bool {
+        return false;
     }
 
     test toF32 {
@@ -534,6 +544,14 @@ pub fn floatCast(T: type, x: anytype) T {
             else => .fromF32(x.toF32()),
         },
     };
+}
+
+pub fn isNan(x: anytype) bool {
+    const Float = @TypeOf(x);
+    switch (Float) {
+        f64, f32, f16 => return std.math.isNan(x),
+        else => return x.isNan(),
+    }
 }
 
 pub fn isInf(x: anytype) bool {
