@@ -785,7 +785,7 @@ pub const Moe = struct {
             },
         );
 
-        const shared_gate = self.shared_expert_gate.forward(x, x.dtype()).sigmoid().broad(x.shape());
+        const shared_gate = self.shared_expert_gate.forward(x, x.dtype()).sigmoid().rename(.{ .dout = .d }).broad(x.shape());
         const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate).withPartitioning(.{
             .b = .replicated,
             .s = .replicated,
