@@ -339,8 +339,8 @@ test "Backend.auto selects mosaic_tpu on TPU" {
         .devices = &.{},
         .memories = &.{},
         .physical_mesh = undefined,
-        .replicated_sharding = undefined,
-        .shardings = .empty,
+        .replicated_mesh = undefined,
+        .meshes = .empty,
         .io_impl = .threaded,
     };
 
@@ -357,8 +357,8 @@ test "Backend.auto selects triton on oneAPI" {
         .devices = &.{},
         .memories = &.{},
         .physical_mesh = undefined,
-        .replicated_sharding = undefined,
-        .shardings = .empty,
+        .replicated_mesh = undefined,
+        .meshes = .empty,
         .io_impl = .threaded,
     };
 
@@ -383,25 +383,26 @@ test pagedAttention {
     const batch_size = active_batch_size + 1;
     const query_token_count = prefill_token_count + num_decode;
     const dt: zml.DataType = .bf16;
+    const model_meshe = platform.meshes.get("model").?;
     const partition = .{ .hkv = .model };
     const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache } = .{
-        .q = .withPartitioning(.init(.{ .b = query_token_count, .hkv = 4, .hg = 4, .hd = 32 }, dt), partition),
-        .k = .withPartitioning(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt), partition),
-        .v = .withPartitioning(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt), partition),
+        .q = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hg = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
+        .k = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
+        .v = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
         .kv_cache = .{
             .split = .{
-                .k = .withPartitioning(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt), partition),
-                .v = .withPartitioning(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt), partition),
+                .k = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
+                .v = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
             },
         },
     };
 
-    const shardings: []const zml.Sharding = &.{ platform.replicated_sharding, platform.shardings.get("model").? };
-    const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{} }, .{ .shardings = shardings });
+    const meshes: []const *const zml.Mesh = &.{ platform.replicated_mesh, platform.meshes.get("model").? };
+    const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{} }, .{ .meshes = meshes });
     defer rng_q.deinit();
-    const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{} }, .{ .shardings = shardings });
+    const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{} }, .{ .meshes = meshes });
     defer rng_k.deinit();
-    const rng_kv_cache = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.kv_cache.split.k.shape(), .{} }, .{ .shardings = shardings });
+    const rng_kv_cache = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.kv_cache.split.k.shape(), .{} }, .{ .meshes = meshes });
     defer rng_kv_cache.deinit();
 
     const triton_options_args: Options.Args = .{
@@ -458,9 +459,9 @@ test pagedAttention {
 
     const query_start_len: [batch_size + 1]i32 = .{ 0, 32, 33, 34, 35, 36, 37, 38, 38 };
     var triton_parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
-        .block_table = try .fromBytes(io, platform, triton_parameters.triton.block_table.shape(), .replicated, @ptrCast(&block_table)),
-        .seq_lens = try .fromBytes(io, platform, triton_parameters.triton.seq_lens.shape(), .replicated, @ptrCast(&seq_lens)),
-        .query_start_len = try .fromBytes(io, platform, triton_parameters.triton.query_start_len.shape(), .replicated, @ptrCast(&query_start_len)),
+        .block_table = try .fromBytes(io, platform, triton_parameters.triton.block_table.shape(), @ptrCast(&block_table)),
+        .seq_lens = try .fromBytes(io, platform, triton_parameters.triton.seq_lens.shape(), @ptrCast(&seq_lens)),
+        .query_start_len = try .fromBytes(io, platform, triton_parameters.triton.query_start_len.shape(), @ptrCast(&query_start_len)),
     } };
     defer zml.Buffer.deinitAll(Parameters, &triton_parameters_d);
 
@@ -514,7 +515,7 @@ test pagedAttention {
                 io,
                 pagedAttention,
                 .{ parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, test_case.attention_options },
-                .{ .program_name = try std.fmt.allocPrint(arena, "paged_attention_{s}_{t}", .{ test_case.name, backend }), .shardings = shardings },
+                .{ .program_name = try std.fmt.allocPrint(arena, "paged_attention_{s}_{t}", .{ test_case.name, backend }), .meshes = meshes },
             );
             defer exe.deinit();
 
@@ -540,13 +541,13 @@ test pagedAttention {
                     @memcpy(&seqused_k_decode, seq_lens[num_prefill .. num_prefill + num_decode]);
 
                     break :cuda_fa2 .{ .cuda_fa2 = .{ .mixed = .{
-                        .block_table_prefill = try .fromBytes(io, platform, params.mixed.block_table_prefill.shape(), .replicated, @ptrCast(&block_table_prefill)),
-                        .cu_seqlens_q_prefill = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_prefill.shape(), .replicated, @ptrCast(&cu_seqlens_q_prefill)),
-                        .seqused_k_prefill = try .fromBytes(io, platform, params.mixed.seqused_k_prefill.shape(), .replicated, @ptrCast(&seqused_k_prefill)),
+                        .block_table_prefill = try .fromBytes(io, platform, params.mixed.block_table_prefill.shape(), @ptrCast(&block_table_prefill)),
+                        .cu_seqlens_q_prefill = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_prefill.shape(), @ptrCast(&cu_seqlens_q_prefill)),
+                        .seqused_k_prefill = try .fromBytes(io, platform, params.mixed.seqused_k_prefill.shape(), @ptrCast(&seqused_k_prefill)),
 
-                        .block_table_decode = try .fromBytes(io, platform, params.mixed.block_table_decode.shape(), .replicated, @ptrCast(&block_table_decode)),
-                        .cu_seqlens_q_decode = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_decode.shape(), .replicated, @ptrCast(&cu_seqlens_q_decode)),
-                        .seqused_k_decode = try .fromBytes(io, platform, params.mixed.seqused_k_decode.shape(), .replicated, @ptrCast(&seqused_k_decode)),
+                        .block_table_decode = try .fromBytes(io, platform, params.mixed.block_table_decode.shape(), @ptrCast(&block_table_decode)),
+                        .cu_seqlens_q_decode = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_decode.shape(), @ptrCast(&cu_seqlens_q_decode)),
+                        .seqused_k_decode = try .fromBytes(io, platform, params.mixed.seqused_k_decode.shape(), @ptrCast(&seqused_k_decode)),
 
                         .metadata = .{ .decode_offset = try .scalar(io, platform, prefill_token_count, .i32) },
                     } } };
@@ -1060,20 +1061,20 @@ test "Triton sparse MLA value ranks and padded queries" {
     const tokens_pos = zml.Tensor.init(tokens_pos_shape, .i32);
 
     var parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
-        .block_table = try .fromBytes(std.testing.io, platform, parameters.triton.block_table.shape(), .replicated, std.mem.sliceAsBytes(&block_table)),
-        .seq_lens = try .fromBytes(std.testing.io, platform, parameters.triton.seq_lens.shape(), .replicated, std.mem.sliceAsBytes(&seq_lens)),
-        .query_start_len = try .fromBytes(std.testing.io, platform, parameters.triton.query_start_len.shape(), .replicated, std.mem.sliceAsBytes(&query_start_len)),
+        .block_table = try .fromBytes(std.testing.io, platform, parameters.triton.block_table.shape(), std.mem.sliceAsBytes(&block_table)),
+        .seq_lens = try .fromBytes(std.testing.io, platform, parameters.triton.seq_lens.shape(), std.mem.sliceAsBytes(&seq_lens)),
+        .query_start_len = try .fromBytes(std.testing.io, platform, parameters.triton.query_start_len.shape(), std.mem.sliceAsBytes(&query_start_len)),
     } };
     defer zml.Buffer.deinitAll(Parameters, &parameters_d);
-    var q_d = try zml.Buffer.fromBytes(std.testing.io, platform, q_shape, .replicated, std.mem.sliceAsBytes(&q_data));
+    var q_d = try zml.Buffer.fromBytes(std.testing.io, platform, q_shape, std.mem.sliceAsBytes(&q_data));
     defer q_d.deinit();
-    var kv_d = try zml.Buffer.fromBytes(std.testing.io, platform, kv_shape, .replicated, std.mem.sliceAsBytes(&kv_data));
+    var kv_d = try zml.Buffer.fromBytes(std.testing.io, platform, kv_shape, std.mem.sliceAsBytes(&kv_data));
     defer kv_d.deinit();
-    var sink_d = try zml.Buffer.fromBytes(std.testing.io, platform, sink_shape, .replicated, std.mem.sliceAsBytes(&sink_data));
+    var sink_d = try zml.Buffer.fromBytes(std.testing.io, platform, sink_shape, std.mem.sliceAsBytes(&sink_data));
     defer sink_d.deinit();
-    var topk_d = try zml.Buffer.fromBytes(std.testing.io, platform, topk_shape, .replicated, std.mem.sliceAsBytes(&topk_data));
+    var topk_d = try zml.Buffer.fromBytes(std.testing.io, platform, topk_shape, std.mem.sliceAsBytes(&topk_data));
     defer topk_d.deinit();
-    var tokens_pos_d = try zml.Buffer.fromBytes(std.testing.io, platform, tokens_pos_shape, .replicated, std.mem.sliceAsBytes(&tokens_pos_data));
+    var tokens_pos_d = try zml.Buffer.fromBytes(std.testing.io, platform, tokens_pos_shape, std.mem.sliceAsBytes(&tokens_pos_data));
     defer tokens_pos_d.deinit();
 
     const TestCase = struct {
@@ -1174,20 +1175,20 @@ test "execute stablehlo mla kernel" {
     const tokens_pos = zml.Tensor.init(tokens_pos_shape, .i32);
 
     var parameters_d: zml.Bufferized(Parameters) = .{ .stablehlo = .{
-        .block_table = try .fromBytes(std.testing.io, platform, parameters.stablehlo.block_table.shape(), .replicated, std.mem.sliceAsBytes(&block_table)),
-        .seq_lens = try .fromBytes(std.testing.io, platform, parameters.stablehlo.seq_lens.shape(), .replicated, std.mem.sliceAsBytes(&seq_lens)),
-        .query_start_len = try .fromBytes(std.testing.io, platform, parameters.stablehlo.query_start_len.shape(), .replicated, std.mem.sliceAsBytes(&query_start_len)),
+        .block_table = try .fromBytes(std.testing.io, platform, parameters.stablehlo.block_table.shape(), std.mem.sliceAsBytes(&block_table)),
+        .seq_lens = try .fromBytes(std.testing.io, platform, parameters.stablehlo.seq_lens.shape(), std.mem.sliceAsBytes(&seq_lens)),
+        .query_start_len = try .fromBytes(std.testing.io, platform, parameters.stablehlo.query_start_len.shape(), std.mem.sliceAsBytes(&query_start_len)),
     } };
     defer zml.Buffer.deinitAll(Parameters, &parameters_d);
-    var q_d = try zml.Buffer.fromBytes(std.testing.io, platform, q_shape, .replicated, std.mem.sliceAsBytes(&q_data));
+    var q_d = try zml.Buffer.fromBytes(std.testing.io, platform, q_shape, std.mem.sliceAsBytes(&q_data));
     defer q_d.deinit();
-    var kv_d = try zml.Buffer.fromBytes(std.testing.io, platform, kv_shape, .replicated, std.mem.sliceAsBytes(&kv_data));
+    var kv_d = try zml.Buffer.fromBytes(std.testing.io, platform, kv_shape, std.mem.sliceAsBytes(&kv_data));
     defer kv_d.deinit();
-    var sink_d = try zml.Buffer.fromBytes(std.testing.io, platform, sink_shape, .replicated, std.mem.sliceAsBytes(&sink_data));
+    var sink_d = try zml.Buffer.fromBytes(std.testing.io, platform, sink_shape, std.mem.sliceAsBytes(&sink_data));
     defer sink_d.deinit();
-    var topk_d = try zml.Buffer.fromBytes(std.testing.io, platform, topk_shape, .replicated, std.mem.sliceAsBytes(&topk_data));
+    var topk_d = try zml.Buffer.fromBytes(std.testing.io, platform, topk_shape, std.mem.sliceAsBytes(&topk_data));
     defer topk_d.deinit();
-    var tokens_pos_d = try zml.Buffer.fromBytes(std.testing.io, platform, tokens_pos_shape, .replicated, std.mem.sliceAsBytes(&tokens_pos_data));
+    var tokens_pos_d = try zml.Buffer.fromBytes(std.testing.io, platform, tokens_pos_shape, std.mem.sliceAsBytes(&tokens_pos_data));
     defer tokens_pos_d.deinit();
 
     const exe = try platform.compileFn(

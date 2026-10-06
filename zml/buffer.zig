@@ -31,7 +31,6 @@ test {
 pub const Buffer = struct {
     _platform: *const Platform,
     _shape: Shape,
-    _sharding: Sharding,
     _shards: Shards,
 
     pub const MAX_NUM_SHARDS: u16 = Platform.MAX_NUM_DEVICES;
@@ -115,10 +114,10 @@ pub const Buffer = struct {
     }
 
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
-        const placement = self._sharding.placement(self._shape) catch {
-            return try writer.print("sharding error {} vs {}", .{ self._sharding, self._shape });
+        const pl = Sharding.Placement.init(self._shape) catch |err| {
+            return try writer.print("Buffer({f}) with invalid sharding {} ({})", .{ self._shape, self._shape._sharding, err });
         };
-        try writer.print("{f}", .{placement});
+        try writer.print("{f}", .{pl});
     }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
@@ -126,7 +125,6 @@ pub const Buffer = struct {
         io: std.Io,
         platform: *const Platform,
         shape_: Shape,
-        sharding: Sharding,
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
@@ -135,7 +133,6 @@ pub const Buffer = struct {
         var res: Buffer = .{
             ._platform = platform,
             ._shape = shape_,
-            ._sharding = sharding.resolve(platform),
             ._shards = .empty,
         };
         errdefer for (res._shards.slice()) |shard| {
@@ -146,7 +143,7 @@ pub const Buffer = struct {
         const slice = Slice.init(sh, data_);
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
 
-        const placement = placementOrPanic(res._sharding, sh);
+        const placement = placementOrPanic(platform, sh);
         const shard_dims: []const i64 = placement.shape.dims();
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
@@ -179,28 +176,28 @@ pub const Buffer = struct {
 
     /// Copies the given Zig bytes to the accelerator memory and
     /// return a Buffer with the given dimensions.
-    pub fn fromBytes(io: std.Io, platform: *const Platform, sh: Shape, sharding: Sharding, data: []const u8) !Buffer {
-        return fromBytesOpts(io, platform, sh, sharding, data, .{});
+    pub fn fromBytes(io: std.Io, platform: *const Platform, sh: Shape, data: []const u8) !Buffer {
+        return fromBytesOpts(io, platform, sh, data, .{});
     }
 
-    pub fn fromBytesOpts(io: std.Io, platform: *const Platform, sh: Shape, sharding: Sharding, data: []const u8, opts: FromOptions) !Buffer {
-        return from(io, platform, sh, sharding, data, opts);
+    pub fn fromBytesOpts(io: std.Io, platform: *const Platform, sh: Shape, data: []const u8, opts: FromOptions) !Buffer {
+        return from(io, platform, sh, data, opts);
     }
 
     /// Copies the given zml.Slice to the accelerator memory and
     /// return a Buffer.
-    pub fn fromSlice(io: std.Io, platform: *const Platform, slice: Slice, sharding: Sharding) !Buffer {
-        return fromSliceOpts(io, platform, slice, sharding, .{});
+    pub fn fromSlice(io: std.Io, platform: *const Platform, slice: Slice) !Buffer {
+        return fromSliceOpts(io, platform, slice, .{});
     }
 
-    pub fn fromSliceOpts(io: std.Io, platform: *const Platform, slice: Slice, sharding: Sharding, opts: FromOptions) !Buffer {
-        return from(io, platform, slice.shape, sharding, std.mem.sliceAsBytes(slice.constData()), opts);
+    pub fn fromSliceOpts(io: std.Io, platform: *const Platform, slice: Slice, opts: FromOptions) !Buffer {
+        return from(io, platform, slice.shape, std.mem.sliceAsBytes(slice.constData()), opts);
     }
 
     /// Creates a Buffer with a single element.
     pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
-        return fromBytes(io, platform, .scalar(dtype_), .replicated, x.asBytes());
+        return fromBytes(io, platform, .scalar(dtype_), x.asBytes());
     }
 
     pub fn await(self: Buffer, io: std.Io) !void {
@@ -217,7 +214,6 @@ pub const Buffer = struct {
         _: std.Io,
         platform: *const Platform,
         shape_: Shape,
-        sharding: Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
         std.log.debug("uninitialized {f}", .{shape_});
@@ -225,7 +221,6 @@ pub const Buffer = struct {
         var res: Buffer = .{
             ._platform = platform,
             ._shape = shape_,
-            ._sharding = sharding.resolve(platform),
             ._shards = .empty,
         };
         errdefer for (res._shards.slice()) |shard| {
@@ -234,7 +229,7 @@ pub const Buffer = struct {
 
         stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
         const element_type = pjrtx.bufferTypeFromDtype(sh.dtype());
-        const placement = placementOrPanic(res._sharding, sh);
+        const placement = placementOrPanic(platform, sh);
         const shard_dims: []const i64 = placement.shape.dims();
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
@@ -257,14 +252,13 @@ pub const Buffer = struct {
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
-    pub fn fromPjrtBuffers(platform: *const Platform, sh: Shape, sharding: Sharding, pjrt_buffers: []const *pjrt.Buffer) Buffer {
+    pub fn fromPjrtBuffers(platform: *const Platform, sh: Shape, pjrt_buffers: []const *pjrt.Buffer) Buffer {
         stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
         stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
 
         return .{
             ._platform = platform,
             ._shape = sh,
-            ._sharding = sharding,
             ._shards = Shards.fromSlice(pjrt_buffers) catch unreachable,
         };
     }
@@ -283,8 +277,8 @@ pub const Buffer = struct {
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
 
-        const placement = placementOrPanic(self._sharding, self._shape);
-        for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
+        const placement = placementOrPanic(self._platform, self._shape);
+        for (self._platform.physical_mesh.devices_in_canonical_order, 0..) |device, shard_index| {
             // TODO: handle replicated information, we shouldn't iterate over all the devices unless needed
             const sub_slice = placement.shardSlice(device.coords, slice);
             if (!sub_slice.isContiguous()) return error.NonContiguousShardRead;
@@ -306,12 +300,12 @@ pub const Buffer = struct {
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
 
-        const placement = placementOrPanic(self._sharding, self._shape);
+        const placement = placementOrPanic(self._platform, self._shape);
 
         var shard_slice = try Slice.alloc(allocator, placement.shape);
         defer shard_slice.free(allocator);
 
-        for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
+        for (self._platform.physical_mesh.devices_in_canonical_order, 0..) |device, shard_index| {
             const sub_slice = placement.shardSlice(device.coords, slice);
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, shard_slice.data());
             if (maybe_event) |event| {
@@ -331,8 +325,8 @@ pub const Buffer = struct {
     /// ie: `num_devices * shard_byte_size`
     /// `shard_byte_size` can be up to `self.shape().byteSize()` when the buffer is fully replicated.
     pub fn byteSize(self: Buffer) usize {
-        const placement = placementOrPanic(self._sharding, self._shape);
-        return placement.shape.byteSize() * self._sharding.devicesInCanonicalOrder().len;
+        const placement = placementOrPanic(self._platform, self._shape);
+        return placement.shape.byteSize() * self._shards.len;
     }
 
     pub fn opaqueDevicePtr(self: Buffer, device_id: usize) *anyopaque {
@@ -360,7 +354,7 @@ pub const Buffer = struct {
             view_shard_list.appendAssumeCapacity(view_shard);
         }
 
-        return fromPjrtBuffers(platform, self._shape, self._sharding, view_shard_list.items);
+        return fromPjrtBuffers(platform, self._shape, view_shard_list.items);
     }
 };
 
@@ -381,13 +375,14 @@ test "device round-trip" {
         .{ 56, 57, 58, 59, 60, 61, 62, 63 },
     };
 
+    const mp: *const zml.Mesh = platform.meshes.get("model").?;
     const x_h: zml.Slice = .init(.withPartitioning(
         .init(.{ .b = 8, .d = 8 }, .u32),
+        mp,
         .{ .b = .model },
     ), std.mem.asBytes(&x));
     // no free: x_h is stack allocated
-    const model_sharding: zml.Sharding = platform.shardings.get("model").?;
-    const x_d: zml.Buffer = try .fromSlice(io, platform, x_h, model_sharding);
+    const x_d: zml.Buffer = try .fromSlice(io, platform, x_h);
     try std.testing.expectEqual(platform.devices.len, x_d.numShards());
 
     {
@@ -409,29 +404,11 @@ test "device round-trip" {
     }
 }
 
-fn placementOrPanic(sharding: Sharding, shape: Shape) Sharding.Placement {
-    return sharding.placement(shape) catch |err| {
+fn placementOrPanic(platform: *const Platform, shape: Shape) Sharding.Placement {
+    var sh = shape;
+    if (sh._sharding.mesh == null) sh._sharding.mesh = platform.replicated_mesh;
+    return Sharding.Placement.init(sh) catch |err| {
         @branchHint(.cold);
-        switch (err) {
-            error.MissingLogicalBinding => {
-                log.err(
-                    \\Failed to shard Buffer of shape {f}, with sharding:
-                    \\{f}
-                    \\
-                    \\The Buffer is probably inheriting a partitionned shape from a Tensor,
-                    \\So Buffer creation must pass a Sharding, that maps the logical sharding of the Tensor to the physical mesh.
-                , .{ shape, sharding });
-                @panic("Buffer shape and sharding should be consistent");
-            },
-            error.IncompatibleSharding => {
-                log.err(
-                    \\Failed to shard Buffer of shape {f}, with sharding:
-                    \\{f}
-                    \\
-                    \\The Buffer dimension isn't properly divisible by the number of devices along the sharded axis.
-                , .{ shape, sharding });
-                @panic("Buffer shape should be divisible by the number of devices along the sharded axis.");
-            },
-        }
+        std.debug.panic("Buffer shape {f} is incompatible with its mesh: {t}", .{ shape, err });
     };
 }

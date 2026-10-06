@@ -145,8 +145,8 @@ const Mnist = struct {
 
         pub fn init(store: zml.io.TensorStore.View) Layer {
             return .{
-                .weight = store.createTensor("weight", .{ .d_out, .d }, null),
-                .bias = store.createTensor("bias", .{.d_out}, null),
+                .weight = store.createReplicatedTensor("weight", .{ .d_out, .d }),
+                .bias = store.createReplicatedTensor("bias", .{.d_out}),
             };
         }
 
@@ -168,10 +168,10 @@ const Mnist = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
-        shardings: []const zml.Sharding,
+        meshes: []const *const zml.Mesh,
     ) !zml.Bufferized(Mnist) {
         return zml.io.load(Mnist, self, allocator, io, platform, store, .{
-            .shardings = shardings,
+            .meshes = meshes,
             .parallelism = 1,
             .dma_chunks = 1,
             .dma_chunk_size = 16 * 1024 * 1024,

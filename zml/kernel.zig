@@ -955,9 +955,9 @@ test "fly kernels run on rocm" {
         fn f(comptime forward: anytype, p: *const zml.Platform, ta: Tensor, ha: anytype, tb: Tensor, hb: anytype) !zml.Slice {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ ta, tb }, p, .{});
             defer exe.deinit();
-            var ba: zml.Buffer = try .fromBytes(std.testing.io, p, ta.shape(), .replicated, std.mem.sliceAsBytes(ha));
+            var ba: zml.Buffer = try .fromBytes(std.testing.io, p, ta.shape(), std.mem.sliceAsBytes(ha));
             defer ba.deinit();
-            var bb: zml.Buffer = try .fromBytes(std.testing.io, p, tb.shape(), .replicated, std.mem.sliceAsBytes(hb));
+            var bb: zml.Buffer = try .fromBytes(std.testing.io, p, tb.shape(), std.mem.sliceAsBytes(hb));
             defer bb.deinit();
             var out = try exe.eval(std.testing.allocator, std.testing.io, .{ ba, bb });
             defer out.deinit();

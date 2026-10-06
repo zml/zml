@@ -43,13 +43,14 @@ pub const Parameters = struct {
 
 /// Attention for Neuron. Both prefill and decode lower to NKI custom calls.
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, parameters: Parameters) zml.Tensor {
-    const q_sharded = q.withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
-    const k_sharded = k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-    const v_sharded = v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+    const tp_mesh = zml.Compiler.current().mesh(.model);
+    const q_sharded = q.withPartitioning(tp_mesh, .{ .q = .replicated, .h = .model, .hd = .replicated });
+    const k_sharded = k.withPartitioning(tp_mesh, .{ .k = .replicated, .h = .model, .hd = .replicated });
+    const v_sharded = v.withPartitioning(tp_mesh, .{ .k = .replicated, .h = .model, .hd = .replicated });
 
     if (q.dim(.q) == 1) {
         const token_index_2d = token_index.broad(zml.Shape.init(.{ .row = 1, .col = 1 }, token_index.dtype()))
-            .withPartitioning(.{ .row = .replicated, .col = .replicated });
+            .withPartitioning(tp_mesh, .{ .row = .replicated, .col = .replicated });
 
         return zml.ops.manualComputation(
             (struct {

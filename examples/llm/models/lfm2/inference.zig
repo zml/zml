@@ -17,9 +17,9 @@ pub const CompilationParameters = struct {
     attention_metadata: zml.attention.Metadata,
     attention_parameters: zml.attention.Parameters,
     seqlen: u32,
-    shardings: common.Shardings,
+    meshes: common.Meshes,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, shardings: common.Shardings) CompilationParameters {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, meshes: common.Meshes) CompilationParameters {
         stdx.debug.assert(seqlen >= config.conv_L_cache, "seqlen ({}) must be at least conv_L_cache ({})", .{ seqlen, config.conv_L_cache });
         const cache: model.Cache = .{
             .kv = .init(.init(.{
@@ -28,7 +28,7 @@ pub const CompilationParameters = struct {
                 .k = seqlen,
                 .h = config.num_key_value_heads,
                 .hd = config.hidden_size / config.num_attention_heads,
-            }, mdl.embed_tokens.weight.dtype())),
+            }, mdl.embed_tokens.weight.dtype()), meshes.model),
             .conv = .init(.init(.{
                 .layer = mdl.num_conv_layers,
                 .batch = 1,
@@ -42,10 +42,10 @@ pub const CompilationParameters = struct {
             .batch_dim = 1,
             .rng = .init(),
             .cache = cache,
-            .attention_metadata = .init(.fromBackend(backend, seqlen, config.num_attention_heads)),
+            .attention_metadata = .init(.fromBackend(backend, seqlen, config.num_attention_heads), meshes.model),
             .attention_parameters = .init(.fromBackend(backend)),
             .seqlen = seqlen,
-            .shardings = shardings,
+            .meshes = meshes,
         };
     }
 };
@@ -235,7 +235,7 @@ fn compileEmbed(
     defer phase.logCompileDone(log, "embed_tokens", io, from);
 
     return zml.FnExe(model.TokenEmbedding.forward).compile(allocator, io, platform, .{
-        .shardings = &opts.shardings.all(),
+        .meshes = &opts.meshes.all(),
         .program_name = phase.programName("lfm2", "embed_tokens"),
     }, .{.{
         .embedding = embed_tokens,
@@ -273,7 +273,7 @@ fn compileLayer(
     } else unreachable;
 
     return zml.FnExe(model.DecoderLayer.forward).compile(allocator, io, platform, .{
-        .shardings = &opts.shardings.all(),
+        .meshes = &opts.meshes.all(),
         .program_name = phase.programName("lfm2", if (kind == .conv) "conv_layer" else "attn_layer"),
     }, .{.{
         .layer = layer,
@@ -306,7 +306,7 @@ fn compileSample(
     defer phase.logCompileDone(log, "lm_head", io, from);
 
     return zml.FnExe(model.LmHead.forward).compile(allocator, io, platform, .{
-        .shardings = &opts.shardings.all(),
+        .meshes = &opts.meshes.all(),
         .program_name = phase.programName("lfm2", "lm_head"),
     }, .{.{
         .lm_head = mdl.lm_head,

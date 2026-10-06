@@ -46,7 +46,7 @@ pub fn fusedExperts(
     };
     const expert_partition = gate_up.weight.shape().partition(.expert);
 
-    if (!expert_partition.eql(.init(.experts))) {
+    if (!expert_partition.isSharded()) {
         return fusedExpertsImpl(args, backend);
     }
 
@@ -238,7 +238,7 @@ test "SwiGLU uses FP32 math for concatenated and interleaved BF16 inputs" {
             values[if (layout == .concatenated) i else 2 * i] = .fromF32(gate);
             values[if (layout == .concatenated) i + 3 else 2 * i + 1] = .fromF32(up);
         }
-        var input = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&values));
+        var input = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&values));
         defer input.deinit();
         for ([_]?f32{ null, 2 }) |threshold| {
             const activation: zml.moe.Activation = .{ .swiglu = .{ .limit = threshold } };
@@ -270,7 +270,7 @@ test "SwiGLU uses FP32 math for concatenated and interleaved BF16 inputs" {
 //    };
 //    const x: Tensor = .init(.{ .token = 1, .out = 5 }, .f32);
 //    const values = [_]f32{ -3, 0, 1, 2, 4 };
-//    var input = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&values));
+//    var input = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&values));
 //    defer input.deinit();
 //    for ([_]?f32{ null, 2 }) |threshold| {
 //        var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, threshold }, .{});
@@ -412,7 +412,7 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
                                 @as(f32, @floatFromInt(@as(i32, @intCast((j * 7 + j / 256) % 13)) - 6)) / 4),
                         }
                     }
-                    buffers[i] = try zml.Buffer.fromSlice(io, platform, slice, .replicated);
+                    buffers[i] = try zml.Buffer.fromSlice(io, platform, slice);
                     initialized += 1;
                 }
                 var output: zml.Bufferized(Local.Outputs) = undefined;
@@ -491,7 +491,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
         const host = try zml.Slice.alloc(allocator, x.shape());
         defer host.free(allocator);
         @memset(host.items(zml.floats.BFloat16), .fromF32(1.0 / 128.0));
-        var input = try zml.Buffer.fromSlice(io, platform, host, .replicated);
+        var input = try zml.Buffer.fromSlice(io, platform, host);
         defer input.deinit();
         for ([_]ProjectionLayout{ .concatenated, .interleaved }) |layout| {
             for ([_]RoutingWeightPlacement{ .before_down, .after_down }) |placement| {

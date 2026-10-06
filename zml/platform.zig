@@ -296,8 +296,8 @@ pub const Platform = struct {
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
-    replicated_sharding: zml.Sharding,
-    shardings: std.StringArrayHashMapUnmanaged(zml.Sharding),
+    meshes: std.StringArrayHashMapUnmanaged(*const zml.Mesh),
+    replicated_mesh: *const zml.Mesh,
     io_impl: IoImpl,
 
     pub const MAX_NUM_DEVICES: u16 = if (Target.tpu.isEnabled()) 64 else 32;
@@ -337,12 +337,12 @@ pub const Platform = struct {
                 .pjrt_api = api,
                 .pjrt_client = pjrt_client,
                 .state = State.init(target),
-                .shardings = .empty,
+                .meshes = .empty,
+                .replicated_mesh = undefined,
                 // set below
                 .devices = undefined,
                 .memories = undefined,
                 .physical_mesh = undefined,
-                .replicated_sharding = undefined,
                 .io_impl = options.io_impl,
             };
             break :platform platform;
@@ -350,7 +350,7 @@ pub const Platform = struct {
 
         const arena = platform.arena.allocator();
         errdefer platform.arena.deinit();
-        try platform.shardings.ensureTotalCapacity(arena, 8);
+        try platform.meshes.ensureTotalCapacity(arena, 8);
 
         {
             const devices = try arena.alloc(Device, pjrt_devices.len);
@@ -375,7 +375,7 @@ pub const Platform = struct {
                 .auto => zml.Sharding.PhysicalMesh.auto(arena, target, devices),
                 .custom => |builder| builder(arena, target, devices),
             };
-            platform.replicated_sharding = try platform.registerSharding("replicated", .mesh(.{ .x = .high_bandwidth }));
+            platform.replicated_mesh = try platform.registerMesh("replicated", .mesh(.{ .all = .high_bandwidth }));
         }
 
         switch (target) {
@@ -639,38 +639,37 @@ pub const Platform = struct {
         return try profiler_.profiler(self.pjrt_api, allocator, io, options);
     }
 
-    /// Create a Sharding based on the given logical mesh and the default strategy.
+    /// Create a Mesh based on the given logical mesh and the default strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerSharding(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) error{OutOfMemory}!Sharding {
-        return platform.registerShardingWithStrategy(
+    pub fn registerMesh(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) error{OutOfMemory}!*const Sharding.Mesh {
+        return platform.registerMeshWithStrategy(
             name,
             logical,
             .suggest(logical, &platform.physical_mesh),
         ) catch |err| switch (err) {
             error.InvalidPhysicalMesh, error.InvalidStrategy, error.InvalidPhysicalAxis => {
-                std.debug.panic("ZML failed to create a valid sharding for logical mesh: {f}\nand physical_mesh: {f}\nPlease report this bug.", .{ logical, platform.physical_mesh });
+                std.debug.panic("ZML failed to create a valid mesh for logical mesh: {f}\nand physical_mesh: {f}\nPlease report this bug.", .{ logical, platform.physical_mesh });
             },
             error.OutOfMemory => |e| return e,
         };
     }
 
-    /// Create a Sharding based on the given logical mesh and a strategy.
+    /// Create a Mesh based on the given logical mesh and a strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerShardingWithStrategy(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !Sharding {
+    pub fn registerMeshWithStrategy(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !*const Sharding.Mesh {
         const arena = platform.arena.allocator();
-        const entry = try platform.shardings.getOrPut(arena, name);
+        const entry = try platform.meshes.getOrPut(arena, name);
         if (entry.found_existing) {
-            std.debug.panic("Another sharding already exists with this name: {s}", .{name});
+            std.debug.panic("Another mesh already exists with this name: {s}", .{name});
         }
 
         const owned_name = try arena.dupe(u8, name);
-        const owned_data = try arena.create(Sharding.Data);
-        owned_data.* = try .init(owned_name, &platform.physical_mesh, logical, strategy);
-        const sharding: Sharding = .{ .data = owned_data };
+        const owned_mesh = try arena.create(Sharding.Mesh);
+        owned_mesh.* = try .init(owned_name, &platform.physical_mesh, logical, strategy);
         entry.key_ptr.* = owned_name;
-        entry.value_ptr.* = sharding;
+        entry.value_ptr.* = owned_mesh;
 
-        return sharding;
+        return owned_mesh;
     }
 
     fn memoryFromPjrt(self: *const Platform, pjrt_memory: *const pjrt.Memory) *const Memory {

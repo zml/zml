@@ -141,7 +141,7 @@ pub fn scaledDot(
 
     const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
-    var res_shape: Shape = .{ ._dtype = out_dtype };
+    var res_shape: Shape = .scalar(out_dtype);
     var lhs_batching_axes: Axes = .empty;
     var rhs_batching_axes: Axes = .empty;
     for (dot_axes.batching.constSlice()) |b_axes| {
@@ -290,7 +290,7 @@ test "block128 scaled dot layouts" {
                             slice.items(zml.floats.BFloat16)[j] = .fromF32(value);
                         }
                     }
-                    buffers[i] = try zml.Buffer.fromSlice(io, platform, slice, .replicated);
+                    buffers[i] = try zml.Buffer.fromSlice(io, platform, slice);
                     initialized += 1;
                 }
                 var output: zml.Bufferized(Local.Outputs) = undefined;
@@ -443,7 +443,7 @@ test normalizeL2 {
     var exe = try platform.compileFn(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, .{});
     defer exe.deinit();
 
-    var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }));
+    var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }));
     defer input_buffer.deinit();
 
     var res = try exe.eval(std.testing.allocator, std.testing.io, .{input_buffer});
@@ -1041,7 +1041,7 @@ test rope {
     defer exe_sequential.deinit();
 
     const x_values: [5][4]f32 = @splat(.{ 1.0, 0.1, -1.0, -0.5 });
-    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_values));
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&x_values));
     defer x_buffer.deinit();
 
     var res1 = try exe_interleaved.eval(std.testing.allocator, std.testing.io, .{x_buffer});
@@ -1075,7 +1075,7 @@ test "rope: Proportional" {
     defer exe.deinit();
 
     const x_h: [5][16]f32 = @splat([_]f32{ 0.754, -0.146, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 });
-    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, @ptrCast(&x_h));
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), @ptrCast(&x_h));
     defer x_buffer.deinit();
 
     const expected_h: [5][16]f32 = .{
@@ -1127,7 +1127,7 @@ test "rope: Yarn with partial_rotary_factor" {
     defer exe.deinit();
 
     const x_h: [5][16]f32 = @splat([_]f32{ 0.754, -0.146, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 });
-    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, @ptrCast(&x_h));
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), @ptrCast(&x_h));
     defer x_buffer.deinit();
 
     const expected_h: [5][16]f32 = .{
@@ -1223,7 +1223,6 @@ test nearest {
             std.testing.io,
             platform,
             input_3d_basic.shape(),
-            .replicated,
             std.mem.sliceAsBytes(&[1][1][2]i32{.{.{ 1, 2 }}}),
         );
         defer input_3d_basic_buffer.deinit();
@@ -1248,7 +1247,7 @@ test nearest {
         );
         defer exe.deinit();
 
-        var input_3d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_3d_advanced.shape(), .replicated, std.mem.sliceAsBytes(&[2][3][4]i32{
+        var input_3d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_3d_advanced.shape(), std.mem.sliceAsBytes(&[2][3][4]i32{
             .{ .{ 1, 2, 3, 4 }, .{ 5, 6, 7, 8 }, .{ 9, 10, 11, 12 } },
             .{ .{ 13, 14, 15, 16 }, .{ 17, 18, 19, 20 }, .{ 21, 22, 23, 24 } },
         }));
@@ -1285,7 +1284,7 @@ test nearest {
         );
         defer exe.deinit();
 
-        var input_4d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_basic.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
+        var input_4d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_basic.shape(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
         defer input_4d_basic_buffer.deinit();
 
         var result = try exe.eval(std.testing.allocator, std.testing.io, .{input_4d_basic_buffer});
@@ -1314,7 +1313,7 @@ test nearest {
         );
         defer exe.deinit();
 
-        var input_4d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_advanced.shape(), .replicated, std.mem.sliceAsBytes(&[2][2][2][2]i32{ .{
+        var input_4d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_advanced.shape(), std.mem.sliceAsBytes(&[2][2][2][2]i32{ .{
             .{ .{ 1, 2 }, .{ 3, 4 } },
             .{ .{ 5, 6 }, .{ 7, 8 } },
         }, .{
@@ -1371,7 +1370,7 @@ test nearest {
         );
         defer exe.deinit();
 
-        var input_5d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_5d.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
+        var input_5d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_5d.shape(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
         defer input_5d_buffer.deinit();
 
         var result = try exe.eval(std.testing.allocator, std.testing.io, .{input_5d_buffer});
@@ -1821,7 +1820,6 @@ test "gated delta net" {
         std.testing.io,
         platform,
         queries.shape(),
-        .replicated,
         std.mem.sliceAsBytes(&[2][2][2]f32{
             .{ .{ 1.0, 0.0 }, .{ 0.0, 1.0 } },
             .{ .{ 1.0, 1.0 }, .{ 1.0, -1.0 } },
@@ -1832,7 +1830,6 @@ test "gated delta net" {
         std.testing.io,
         platform,
         keys.shape(),
-        .replicated,
         std.mem.sliceAsBytes(&[2][2][2]f32{
             .{ .{ 1.0, 2.0 }, .{ 0.0, 1.0 } },
             .{ .{ 2.0, 1.0 }, .{ 1.0, 0.0 } },
@@ -1843,7 +1840,6 @@ test "gated delta net" {
         std.testing.io,
         platform,
         values.shape(),
-        .replicated,
         std.mem.sliceAsBytes(&[2][2][2]f32{
             .{ .{ 3.0, 1.0 }, .{ 2.0, 4.0 } },
             .{ .{ 1.0, 5.0 }, .{ 3.0, 0.0 } },
@@ -1854,7 +1850,6 @@ test "gated delta net" {
         std.testing.io,
         platform,
         alphas.shape(),
-        .replicated,
         std.mem.sliceAsBytes(&[2][2]f32{
             .{ 0.5, 0.25 },
             .{ 0.8, 0.6 },
@@ -1865,7 +1860,6 @@ test "gated delta net" {
         std.testing.io,
         platform,
         betas.shape(),
-        .replicated,
         std.mem.sliceAsBytes(&[2][2]f32{
             .{ 1.0, 0.5 },
             .{ 0.75, 1.0 },
@@ -1876,7 +1870,6 @@ test "gated delta net" {
         std.testing.io,
         platform,
         initial_s.shape(),
-        .replicated,
         std.mem.sliceAsBytes(&[2][2][2]f32{
             .{ .{ 1.0, 0.0 }, .{ 0.0, 1.0 } },
             .{ .{ 2.0, 1.0 }, .{ 1.0, 0.0 } },
@@ -2004,7 +1997,7 @@ test sampleTokens {
     var exe = try platform.compileFn(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, .{});
     defer exe.deinit();
 
-    var rng_buffer = try zml.Tensor.Rng.initBuffer(std.testing.io, platform, .replicated, 0xdeadbeef);
+    var rng_buffer = try rng.initBuffer(std.testing.io, platform, 0xdeadbeef);
     defer rng_buffer._state.deinit();
 
     const inf = std.math.inf(f32);
@@ -2016,7 +2009,7 @@ test sampleTokens {
     }) |logits_expected| {
         const logits, const expected: i32 = logits_expected;
 
-        var activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), .replicated, std.mem.sliceAsBytes(&logits));
+        var activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), std.mem.sliceAsBytes(&logits));
         defer activations_buffer.deinit();
 
         var sampled: zml.Buffer = undefined;
@@ -2149,7 +2142,7 @@ test sampleTokensDynamic {
     var exe = try platform.compileFn(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, .{});
     defer exe.deinit();
 
-    var logits_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits.shape(), .replicated, std.mem.sliceAsBytes(&logits_data));
+    var logits_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits.shape(), std.mem.sliceAsBytes(&logits_data));
     defer logits_buffer.deinit();
 
     const Args = struct { DynamicSamplingStrategy.Opts, [4]f32 };
@@ -2193,7 +2186,7 @@ test sampleTokensDynamic {
         const boost = bf16.inf;
         const nerf = bf16.minus_inf;
 
-        var logits_bf16_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits_bf16.shape(), .replicated, std.mem.sliceAsBytes(&[4]bf16{ boost, boost, bf16.fromF32(2), nerf }));
+        var logits_bf16_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits_bf16.shape(), std.mem.sliceAsBytes(&[4]bf16{ boost, boost, bf16.fromF32(2), nerf }));
         defer logits_bf16_buffer.deinit();
         var dynamic_sampling_strategy_bf16_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 });
         defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_bf16_buffers);

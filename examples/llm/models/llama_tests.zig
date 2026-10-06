@@ -38,20 +38,20 @@ pub fn main(init: std.process.Init) !void {
     defer repo.close(io);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    const meshes: common.Meshes = try .init(platform);
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &meshes.all());
     defer store.deinit();
 
     var repo_model = try llama.LoadedModel.init(allocator, io, repo, store.view(), .{});
     defer repo_model.deinit(allocator);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    const shardings: common.Shardings = try .init(platform);
 
-    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
+    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
     progress.end();
 
-    try run(allocator, io, platform, args.activations, repo_model.inner, &model_buffers, platform.replicated_sharding);
+    try run(allocator, io, platform, args.activations, repo_model.inner, &model_buffers, &meshes.all());
 }
 
 fn run(
@@ -61,28 +61,28 @@ fn run(
     activations_path: []const u8,
     mdl: model.Model,
     model_buffers: *model.Buffers,
-    sharding: zml.Sharding,
+    meshes: []const *const zml.Mesh,
 ) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
-    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry, meshes);
     defer activation_store.deinit();
 
-    try testLayer(allocator, io, platform, activation_store.view(), "embed_tokens", mdl.model.embed_tokens, model_buffers.model.embed_tokens, sharding, .{ .absolute_tolerance = 1e-3 });
+    try testLayer(allocator, io, platform, activation_store.view(), "embed_tokens", mdl.model.embed_tokens, model_buffers.model.embed_tokens, meshes, .{ .absolute_tolerance = 1e-3 });
 
     if (mdl.model.layers.len == 0) return;
 
     const layer = mdl.model.layers[0];
     const layer_buffers = model_buffers.model.layers[0];
 
-    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.self_attn.v_proj", layer.self_attn.v_proj, layer_buffers.self_attn.v_proj, sharding, .{ .absolute_tolerance = 1e-2 });
-    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.self_attn.q_proj", layer.self_attn.q_proj, layer_buffers.self_attn.q_proj, sharding, .{ .absolute_tolerance = 2e-2 });
-    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.self_attn.k_proj", layer.self_attn.k_proj, layer_buffers.self_attn.k_proj, sharding, .{ .absolute_tolerance = 2e-2 });
-    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.self_attn.o_proj", layer.self_attn.o_proj, layer_buffers.self_attn.o_proj, sharding, .{ .absolute_tolerance = 2e-2 });
-    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.mlp", layer.mlp, layer_buffers.mlp, sharding, .{ .absolute_tolerance = 1e-2 });
-    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.input_layernorm", layer.input_layernorm, layer_buffers.input_layernorm, sharding, .{ .absolute_tolerance = 1e-2 });
-    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.post_attention_layernorm", layer.post_attention_layernorm, layer_buffers.post_attention_layernorm, sharding, .{ .absolute_tolerance = 1e-2 });
+    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.self_attn.v_proj", layer.self_attn.v_proj, layer_buffers.self_attn.v_proj, meshes, .{ .absolute_tolerance = 1e-2 });
+    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.self_attn.q_proj", layer.self_attn.q_proj, layer_buffers.self_attn.q_proj, meshes, .{ .absolute_tolerance = 2e-2 });
+    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.self_attn.k_proj", layer.self_attn.k_proj, layer_buffers.self_attn.k_proj, meshes, .{ .absolute_tolerance = 2e-2 });
+    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.self_attn.o_proj", layer.self_attn.o_proj, layer_buffers.self_attn.o_proj, meshes, .{ .absolute_tolerance = 2e-2 });
+    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.mlp", layer.mlp, layer_buffers.mlp, meshes, .{ .absolute_tolerance = 1e-2 });
+    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.input_layernorm", layer.input_layernorm, layer_buffers.input_layernorm, meshes, .{ .absolute_tolerance = 1e-2 });
+    try testLayer(allocator, io, platform, activation_store.view(), "layers.0.post_attention_layernorm", layer.post_attention_layernorm, layer_buffers.post_attention_layernorm, meshes, .{ .absolute_tolerance = 1e-2 });
 }
 
 fn testLayer(
@@ -93,19 +93,19 @@ fn testLayer(
     name: []const u8,
     layer: anytype,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    sharding: zml.Sharding,
+    meshes: []const *const zml.Mesh,
     opts: zml.testing.CompareOpts,
 ) !void {
     const in_key = try std.fmt.allocPrint(allocator, "{s}.in", .{name});
     defer allocator.free(in_key);
     const in_shape = activation_store.getShape(in_key) orelse return error.NotFound;
-    var in_buffer = try loadBufferFromStore(allocator, io, platform, activation_store, in_key, sharding);
+    var in_buffer = try loadBufferFromStore(allocator, io, platform, activation_store, in_key);
     defer in_buffer.deinit();
     const in_tensor = zml.Tensor.fromShape(in_shape);
 
     const out_key = try std.fmt.allocPrint(allocator, "{s}.out", .{name});
     defer allocator.free(out_key);
-    var out_buffer_expected = try loadBufferFromStore(allocator, io, platform, activation_store, out_key, sharding);
+    var out_buffer_expected = try loadBufferFromStore(allocator, io, platform, activation_store, out_key);
     defer out_buffer_expected.deinit();
 
     // `zml.nn.Linear.forward` takes an explicit output dtype; every other layer here
@@ -116,7 +116,7 @@ fn testLayer(
             return if (Layer == zml.nn.Linear) l.forward(x, x.dtype()) else Layer.forward(l, x);
         }
     };
-    const exe = try platform.compileFn(allocator, io, Call.forward, .{ layer, in_tensor }, .{ .shardings = &.{sharding} });
+    const exe = try platform.compileFn(allocator, io, Call.forward, .{ layer, in_tensor }, .{ .meshes = meshes });
     defer exe.deinit();
 
     var args = try exe.args(allocator);
@@ -133,7 +133,7 @@ fn testLayer(
     try zml.testing.expectClose(io, out_result, out_buffer_expected, opts);
 }
 
-fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: zml.io.TensorStore.View, key: []const u8, sharding: zml.Sharding) !zml.Buffer {
+fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: zml.io.TensorStore.View, key: []const u8) !zml.Buffer {
     const shape = store.getShape(key) orelse return error.NotFound;
 
     const host_bytes = try allocator.alloc(u8, shape.byteSize());
@@ -145,5 +145,5 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *cons
 
     _ = try reader.interface.readSliceAll(host_bytes);
 
-    return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
+    return zml.Buffer.fromBytes(io, platform, shape, host_bytes);
 }

@@ -26,8 +26,8 @@ pub fn env() *const Platform {
             },
         ) catch @panic("Pjrt not available");
 
-        // Register shardings required by flash attention.
-        _ = platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;
+        // Register meshes required by flash attention.
+        _ = platform.registerMesh("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;
         _platform = platform;
     }
 
@@ -394,7 +394,7 @@ pub fn testLayer(
     activation_store: zml.io.TensorStore.View,
     name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    shardings: []const *const zml.Sharding,
+    meshes: []const *const zml.Mesh,
     opts: CompareOpts,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -424,12 +424,12 @@ pub fn testLayer(
             var buffer: [256]u8 = undefined;
             const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
 
-            tensor.* = ctx_.activation_store.createTensor(subkey, null, .replicated);
+            tensor.* = ctx_.activation_store.createReplicatedTensor(subkey, null);
             ctx_.index += 1;
         }
     }.cb, &ctx, &args);
 
-    const exe = try platform.compile(allocator, io, layer, func, args, .{ .shardings = if (shardings.len != 0) shardings else &.{} });
+    const exe = try platform.compile(allocator, io, layer, func, args, .{ .meshes = if (meshes.len != 0) meshes else &.{} });
     defer exe.deinit();
 
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});

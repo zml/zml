@@ -252,7 +252,7 @@ fn ffiCallNvfp4(
 
 const routedNvfp4Call = zml.ops.CustomCall(Input, Output, Attributes, ffiCallNvfp4, .{
     .name = "flashinfer_cutlass_nvfp4_routed_moe",
-    // Expert sharding is owned by forwardMoe outer manual computation.
+    // Expert mesh is owned by forwardMoe outer manual computation.
     .sharding_aware = false,
     .has_side_effect = false,
 });
@@ -694,7 +694,7 @@ pub fn fusedExperts(
 
         // TODO(Corentin): Do error checking on nvfp4
         // Also, maybe pass `zml.nn.Linear` directly
-        if (expert_partition.eql(.init(.experts))) {
+        if (expert_partition.isSharded()) {
             return zml.ops.manualComputation(
                 (struct {
                     input: zml.Tensor,
@@ -799,7 +799,7 @@ pub fn fusedExperts(
         );
     }
 
-    if (expert_partition.eql(.init(.experts))) {
+    if (expert_partition.isSharded()) {
         return zml.ops.manualComputation(
             (struct {
                 input: zml.Tensor,

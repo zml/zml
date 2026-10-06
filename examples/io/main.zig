@@ -155,9 +155,9 @@ pub fn main(init: std.process.Init) !void {
             try stdout_writer.interface.flush();
         },
         .load => {
-            const ShardingType = enum { replicated, sharded };
+            const MeshType = enum { replicated, sharded };
 
-            const sharding_type: ShardingType = std.meta.stringToEnum(ShardingType, it.next() orelse "sharded") orelse return error.InvalidShardingKind;
+            const mesh_type: MeshType = std.meta.stringToEnum(MeshType, it.next() orelse "sharded") orelse return error.InvalidMesheKind;
 
             const platform: *zml.Platform = try .auto(allocator, io, .{});
             defer platform.deinit(allocator, io);
@@ -165,7 +165,13 @@ pub fn main(init: std.process.Init) !void {
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();
 
-            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+            const tensor_parallel: *const zml.Mesh = try platform.registerMesh(
+                "tp",
+                .mesh(.{ .model = .high_bandwidth }),
+            );
+            const tp_partitioning: zml.Sharding.Partitioning = .init(&.{.sharded(@intCast(tensor_parallel.resolveLogicalAxis("model").?))});
+
+            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{tensor_parallel});
             defer store.deinit();
 
             const AllTensorsModel = struct {
@@ -180,21 +186,16 @@ pub fn main(init: std.process.Init) !void {
             var registry_it = registry.iterator();
             var load_count: usize = 0;
             while (registry_it.next()) |entry| : (load_count += 1) {
-                tensors[load_count] = switch (sharding_type) {
-                    .replicated => store.view().createTensor(entry.key_ptr.*, null, .replicated),
+                tensors[load_count] = switch (mesh_type) {
+                    .replicated => store.view().createReplicatedTensor(entry.key_ptr.*, null),
                     .sharded => if (entry.value_ptr.shape.rank() > 0)
-                        store.view().createTensor(entry.key_ptr.*, null, .{ ._0 = .model })
+                        store.view().createTensor(entry.key_ptr.*, null, .tp, tp_partitioning)
                     else
-                        store.view().createTensor(entry.key_ptr.*, null, .replicated),
+                        store.view().createReplicatedTensor(entry.key_ptr.*, null),
                 };
             }
 
             const model: AllTensorsModel = .{ .tensors = tensors };
-
-            const sharded_sharding: zml.Sharding = try platform.registerSharding(
-                "playground_model",
-                .mesh(.{ .model = .high_bandwidth }),
-            );
 
             var progress = std.Progress.start(io, .{ .root_name = "zml.examples.load" });
             progress.increaseEstimatedTotalItems(load_count);
@@ -215,7 +216,7 @@ pub fn main(init: std.process.Init) !void {
             });
             defer loader.deinit();
 
-            try loader.load(io, AllTensorsModel, &model, &buffers, &store, &.{sharded_sharding}, .{ .progress = &progress });
+            try loader.load(io, AllTensorsModel, &model, &buffers, &store, .{ .progress = &progress });
             try loader.await(io);
 
             const took = now.untilNow(io, .awake);

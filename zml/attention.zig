@@ -116,22 +116,22 @@ pub const Metadata = union(Backend) {
         }
     };
 
-    pub fn init(opts: InitOptions) Metadata {
+    pub fn init(opts: InitOptions, mesh: *const zml.Sharding.Mesh) Metadata {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
             .attnd => @panic("Must be initialized manually"),
             .nki => .{ .nki = {} },
-            .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
-            .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o) },
+            .cuda_fa2 => |o| .{ .cuda_fa2 = .init(o, mesh) },
+            .cuda_fa3 => |o| .{ .cuda_fa3 = .init(o, mesh) },
             .metal_fa => .{ .metal_fa = .init() },
         };
     }
 
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(Metadata) {
+    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
         return switch (self) {
             .vanilla => .{ .vanilla = {} },
             .nki => .{ .nki = {} },
-            inline else => |v, tag| @unionInit(zml.Bufferized(Metadata), @tagName(tag), try v.initBuffer(io, platform, sharding)),
+            inline else => |v, tag| @unionInit(zml.Bufferized(Metadata), @tagName(tag), try v.initBuffer(io, platform)),
         };
     }
 
@@ -177,6 +177,31 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
         .metal_fa => metal.attention(q, k, v, token_index, metadata.metal_fa),
     };
+}
+
+test "FlashAttention metadata initializes with explicit sharding outside compilation" {
+    try std.testing.expect(zml.Compiler.currentOrNull() == null);
+    const mesh: zml.Sharding.Mesh = .{
+        .name = "metadata_mesh",
+        .physical = undefined,
+        .logical = .mesh(.{ .model = .high_bandwidth }),
+        .bindings = .init(&.{.init(&.{.link_x})}),
+        .folds = .empty,
+        .folds_consumed = .empty,
+    };
+    inline for (.{ Backend.cuda_fa2, Backend.cuda_fa3 }) |backend| {
+        const metadata: Metadata = .init(.fromBackend(backend, 16, 8), &mesh);
+        const cuda_metadata = @field(metadata, @tagName(backend));
+        inline for (std.meta.fields(@TypeOf(cuda_metadata))) |field| {
+            const shape = @field(cuda_metadata, field.name).shape();
+            try std.testing.expectEqual(&mesh, shape._sharding.mesh);
+            if (shape.hasTag(.h)) |axis| {
+                try std.testing.expectEqual(zml.Sharding.PartitionSpec.sharded(0), shape.partition(axis));
+            } else {
+                try std.testing.expectEqual(zml.Sharding.PartitionSpec.replicated, shape.partition(.meta));
+            }
+        }
+    }
 }
 
 test "attention: q=1,qh=64,kh=8" {
@@ -270,13 +295,13 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
     defer k.deinit();
     var v = try rng_k.eval(allocator, io, {});
     defer v.deinit();
-    var token_index = try zml.Buffer.fromBytes(io, platform, token_index_shape, .replicated, @ptrCast(token_index_h));
+    var token_index = try zml.Buffer.fromBytes(io, platform, token_index_shape, @ptrCast(token_index_h));
     defer token_index.deinit();
 
-    const shardings = platform.shardings.values();
+    const meshes = platform.meshes.values();
     const vanilla_exe = try platform.compileFn(allocator, io, attention, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, .vanilla, .vanilla }, .{
         .program_name = "attention_vanilla",
-        .shardings = shardings,
+        .meshes = meshes,
     });
     defer vanilla_exe.deinit();
 
@@ -292,7 +317,7 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
             else => if (!backend.isAvailable(platform)) continue,
         }
 
-        const metadata: Metadata = .init(.fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)));
+        const metadata: Metadata = .init(.fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)), platform.meshes.get("model").?);
         const parameters: Parameters = .init(.fromBackend(backend));
         const exe = try platform.compileFn(
             allocator,
@@ -301,12 +326,12 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
             .{ tensors.q, tensors.k, tensors.v, tensors.token_index, metadata, parameters },
             .{
                 .program_name = try std.fmt.allocPrint(arena, "attention_{t}", .{backend}),
-                .shardings = shardings,
+                .meshes = meshes,
             },
         );
         defer exe.deinit();
 
-        var metadata_d = try metadata.initBuffer(io, platform, platform.shardings.get("model").?);
+        var metadata_d = try metadata.initBuffer(io, platform);
         defer Metadata.deinitBuffer(&metadata_d);
 
         var output_d = try exe.eval(allocator, io, .{ q, k, v, token_index, metadata_d });

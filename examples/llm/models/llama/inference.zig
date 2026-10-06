@@ -18,9 +18,9 @@ pub const CompilationParameters = struct {
     prefill_attention_parameters: zml.attention.Parameters,
     decode_attention_parameters: zml.attention.Parameters,
     seqlen: usize,
-    shardings: common.Shardings,
+    meshes: common.Meshes,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, shardings: common.Shardings) CompilationParameters {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, meshes: common.Meshes) CompilationParameters {
         const head_dim = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads);
 
         return .{
@@ -32,11 +32,11 @@ pub const CompilationParameters = struct {
                 .k = seqlen,
                 .h = config.num_key_value_heads,
                 .hd = head_dim,
-            }, mdl.model.embed_tokens.weight.dtype())),
+            }, mdl.model.embed_tokens.weight.dtype()), meshes.model),
             .rng = .init(),
             .attention_metadata = switch (backend) {
                 .attnd => .{ .attnd = .init() },
-                else => .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
+                else => .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads)), meshes.model),
             },
             .prefill_attention_parameters = switch (backend) {
                 .attnd => .{ .attnd = .init(.{
@@ -59,7 +59,7 @@ pub const CompilationParameters = struct {
                 else => .init(.fromBackend(backend)),
             },
             .seqlen = seqlen,
-            .shardings = shardings,
+            .meshes = meshes,
         };
     }
 };
@@ -211,7 +211,7 @@ fn compileKernel(
     defer phase.logCompileDone(log, "forward", io, from);
 
     return KernelExe.compile(allocator, io, platform, .{
-        .shardings = &parameters.shardings.all(),
+        .meshes = &parameters.meshes.all(),
         .program_name = phase.programName("llama", "forward"),
     }, .{.{
         .weights = llama_model,

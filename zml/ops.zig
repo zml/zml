@@ -21,6 +21,7 @@ const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer;
 const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
 const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
+const log = std.log.scoped(.@"zml/Compiler");
 
 pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@TypeOf(inputs)) {
     const ctx = Compiler.current();
@@ -66,7 +67,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
     };
 
-    const num_devices = ctx.partitioning.numPartitions();
+    const num_devices = ctx.meshes[0].numPartitions();
     if (num_devices <= 1) return inputs;
 
     const reducer_block = b: {
@@ -635,9 +636,9 @@ test @"while" {
     );
     defer exe.deinit();
 
-    var i_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_i.shape(), .replicated, std.mem.sliceAsBytes(&[1]i64{1}));
+    var i_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_i.shape(), std.mem.sliceAsBytes(&[1]i64{1}));
     defer i_buffer.deinit();
-    var sum_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_sum.shape(), .replicated, std.mem.sliceAsBytes(&[1]i64{0}));
+    var sum_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_sum.shape(), std.mem.sliceAsBytes(&[1]i64{0}));
     defer sum_buffer.deinit();
 
     var results: zml.Bufferized(While.State) = undefined;
@@ -865,10 +866,10 @@ fn fromMlirOperationWithTags(op: *const mlir.Operation, base: anytype) @TypeOf(b
         fn cb(inner_ctx: *LocalContext, tensor: *Tensor) void {
             var new = Tensor.fromMlirValue(inner_ctx.op.result(inner_ctx.index));
             stdx.debug.internalAssert(new.rank() == tensor.rank(), "expected operand result to have rank {} but got {f}", .{ tensor.rank(), new });
-            // copy tags and sharding info over
+            // copy tags and mesh info over
             // some ops can change dims eg reduceWindow, so we trust mlir here.
             new._shape._tags = tensor._shape._tags;
-            new._shape._partitioning = tensor._shape._partitioning;
+            new._shape._sharding = tensor._shape._sharding;
             tensor.* = new;
             inner_ctx.index += 1;
         }
@@ -1055,7 +1056,7 @@ test "fly custom call, both entry ABIs" {
         fn f(comptime forward: anytype, p: *const zml.Platform, t: Tensor, h: []const f32) !zml.Slice {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{t}, p, .{});
             defer exe.deinit();
-            var buf: zml.Buffer = try .fromBytes(std.testing.io, p, t.shape(), .replicated, std.mem.sliceAsBytes(h));
+            var buf: zml.Buffer = try .fromBytes(std.testing.io, p, t.shape(), std.mem.sliceAsBytes(h));
             defer buf.deinit();
             var out = try exe.eval(std.testing.allocator, std.testing.io, .{buf});
             defer out.deinit();
@@ -1274,9 +1275,9 @@ test "triton" {
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform, .{});
     defer exe.deinit();
 
-    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&[1]f32{1}));
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[1]f32{1}));
     defer a_buffer.deinit();
-    var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), .replicated, std.mem.sliceAsBytes(&[1]f32{3}));
+    var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), std.mem.sliceAsBytes(&[1]f32{3}));
     defer b_buffer.deinit();
 
     var results: [2]zml.Buffer = undefined;
@@ -1497,7 +1498,7 @@ test "cute" {
 
     var input: [128]f32 = undefined;
     for (&input, 0..) |*v, i| v.* = @floatFromInt(i);
-    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&input));
     defer a_buffer.deinit();
 
     var result = try exe.eval(std.testing.allocator, std.testing.io, .{a_buffer});
@@ -1556,7 +1557,7 @@ test "cuda_tile" {
 
     var input: [128]f32 = undefined;
     for (&input, 0..) |*v, i| v.* = @floatFromInt(i);
-    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&input));
     defer a_buffer.deinit();
 
     var result = try exe.eval(std.testing.allocator, std.testing.io, .{a_buffer});
@@ -1623,7 +1624,7 @@ test "cuda_tile grid" {
     defer exe.deinit();
 
     const input = [_]f32{0} ** n;
-    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&input));
     defer a_buffer.deinit();
 
     var result = try exe.eval(std.testing.allocator, std.testing.io, .{a_buffer});
@@ -1683,7 +1684,7 @@ test "cuda_tile zeroed_outputs" {
 
     var input: [128]f32 = undefined;
     for (&input, 0..) |*v, i| v.* = @floatFromInt(i);
-    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&input));
     defer a_buffer.deinit();
 
     var result = try exe.eval(std.testing.allocator, std.testing.io, .{a_buffer});
@@ -2109,7 +2110,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
     if (indices_shape.count() == 1 and idx_axes.len == 1) {
         return self
             .slice(idx_axes[0], .dyn(indices_per_axis.get(0).asScalar(), 1))
-            // Keep downstream resharding after the slice. SPMD engines like Neuron otherwise
+            // Keep downstream remeshe after the slice. SPMD engines like Neuron otherwise
             // may hoist an all-gather before the slice and materialize the full tensor.
             .optimizationBarrier()
             .reshape(res_shape);
@@ -2522,6 +2523,7 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
     };
 }
 
+/// Runs a per-shard body using one mesh for all input and output partition specs.
 pub fn manualComputation(
     comptime body_fn: anytype,
     inputs: stdx.meta.FnParam(body_fn, 0),
@@ -2576,6 +2578,47 @@ fn manualComputationLocalizeInputs(allocator: std.mem.Allocator, inputs: anytype
     return local_inputs;
 }
 
+fn manualComputationMesh(inputs: []const Shape, outputs: []const Shape, fallback: *const Sharding.Mesh) error{IncompatibleMeshes}!*const Sharding.Mesh {
+    var mesh: ?*const Sharding.Mesh = null;
+    for ([_][]const Shape{ inputs, outputs }) |shapes| {
+        for (shapes) |shape| {
+            if (shape._sharding.mesh) |shape_mesh| {
+                if (mesh) |m| {
+                    if (m != shape_mesh) return error.IncompatibleMeshes;
+                } else mesh = shape_mesh;
+            }
+        }
+    }
+    return mesh orelse fallback;
+}
+
+test "manualComputation infers one mesh from inputs and outputs" {
+    const fallback: Sharding.Mesh = .{
+        .name = "fallback",
+        .physical = undefined,
+        .logical = .mesh(.{ .batch = .balanced }),
+        .bindings = .empty,
+        .folds = .empty,
+        .folds_consumed = .empty,
+    };
+    var first = fallback;
+    first.name = "first";
+    var second = fallback;
+    second.name = "second";
+    const replicated: Shape = .init(.{8}, .f32);
+    var sharded = replicated;
+    sharded._sharding = .{ .mesh = &first, .partition = .init(&.{.mesh_axis_0}) };
+    var other = sharded;
+    other._sharding.mesh = &second;
+
+    try std.testing.expectEqual(&fallback, try manualComputationMesh(&.{replicated}, &.{replicated}, &fallback));
+    try std.testing.expectEqual(&first, try manualComputationMesh(&.{ replicated, sharded, sharded }, &.{sharded}, &fallback));
+    try std.testing.expectEqual(&first, try manualComputationMesh(&.{replicated}, &.{sharded}, &fallback));
+    try std.testing.expectEqual(&first, try manualComputationMesh(&.{}, &.{sharded}, &fallback));
+    try std.testing.expectError(error.IncompatibleMeshes, manualComputationMesh(&.{ sharded, other }, &.{}, &fallback));
+    try std.testing.expectError(error.IncompatibleMeshes, manualComputationMesh(&.{sharded}, &.{other}, &fallback));
+}
+
 fn manualComputationInternal(
     inputs: anytype,
     outputs: []const Shape,
@@ -2596,35 +2639,21 @@ fn manualComputationInternal(
 
     const local_input_shapes = try arena.alloc(Shape, input_shapes.len);
     const local_output_shapes = try arena.alloc(Shape, outputs.len);
-    const input_shardings = try arena.alloc(Sharding, input_shapes.len);
-    const output_shardings = try arena.alloc(Sharding, outputs.len);
+    const manual_mesh = manualComputationMesh(input_shapes, outputs, ctx.platform.replicated_mesh) catch
+        @panic("manualComputation expects all inputs and outputs to use the same mesh");
 
     for (input_shapes, 0..) |shape, i| {
-        const sharding = ctx.partitioning.selectSharding(shape) catch |err| switch (err) {
-            error.NoSuitableSharding => std.debug.panic(
-                "failed to shard manualComputation input {f}({d}) because it's using unknown sharding. Pass more shardings to `.compile`. Known shardings: {f}",
-                .{ shape, i, stdx.fmt.slice(ctx.partitioning.shardings) },
-            ),
-        };
-        input_shardings[i] = sharding;
-        local_input_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
+        local_input_shapes[i] = Sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, manual_mesh });
     }
     for (outputs, 0..) |shape, i| {
-        const sharding = ctx.partitioning.selectSharding(shape) catch |err| switch (err) {
-            error.NoSuitableSharding => std.debug.panic(
-                "failed to shard manualComputation output {f}({d}) because it's using unknown sharding. Pass more shardings to `.compile`. Known shardings: {f}",
-                .{ shape, i, stdx.fmt.slice(ctx.partitioning.shardings) },
-            ),
-        };
-        output_shardings[i] = sharding;
-        local_output_shapes[i] = sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, sharding });
+        local_output_shapes[i] = Sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, manual_mesh });
     }
 
-    return switch (ctx.partitioning.partitioner) {
+    return switch (ctx.partitioner) {
         .shardy => {
-            const in_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, input_shapes, input_shardings);
-            const out_shardings_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, outputs, output_shardings);
-            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, input_shapes, input_shardings, outputs, output_shardings);
+            const in_meshes_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, input_shapes, manual_mesh);
+            const out_meshes_attr = try Sharding.sdyPerValueShardingAttr(arena, ctx.mlir_ctx, outputs, manual_mesh);
+            const manual_axes_attr = try Sharding.sdyManualAxesAttr(arena, ctx.mlir_ctx, input_shapes, outputs, manual_mesh);
 
             const block_types = try arena.alloc(*const mlir.Type, input_shapes.len);
             for (local_input_shapes, 0..) |input_shape, i| {
@@ -2675,8 +2704,8 @@ fn manualComputationInternal(
                 .results = .{ .flat = global_result_types },
                 .blocks = &.{manual_block},
                 .attributes = &.{
-                    .named(ctx.mlir_ctx, "in_shardings", in_shardings_attr),
-                    .named(ctx.mlir_ctx, "out_shardings", out_shardings_attr),
+                    .named(ctx.mlir_ctx, "in_shardings", in_meshes_attr),
+                    .named(ctx.mlir_ctx, "out_shardings", out_meshes_attr),
                     .named(ctx.mlir_ctx, "manual_axes", manual_axes_attr),
                 },
                 .verify = true,
@@ -2686,7 +2715,7 @@ fn manualComputationInternal(
             // Use the compiler allocator to return memory to the parent
             const sharded_outputs = ctx.alloc(Tensor, outputs.len);
             for (outputs, 0..) |output, i| {
-                sharded_outputs[i] = Tensor._result(output, op.result(i));
+                sharded_outputs[i] = Tensor._resultPropagateSharding(output, op.result(i));
             }
             return sharded_outputs;
         },
@@ -2732,8 +2761,8 @@ fn manualComputationInternal(
 
             const global_values = try arena.alloc(*const mlir.Value, outputs.len);
             const global_types = try arena.alloc(*const mlir.Type, outputs.len);
-            for (outputs, output_shardings, 0..) |output_shape, output_sharding, i| {
-                const gspmd_attr = try ctx.partitioning.tensorShardingAttr(arena, ctx.mlir_ctx, output_shape, output_sharding);
+            for (outputs, 0..) |output_shape, i| {
+                const gspmd_attr = try ctx.tensorShardingAttr(arena, ctx.mlir_ctx, output_shape);
 
                 global_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, output_shape);
                 const shard_to_full = dialects.stablehlo.custom_call(
@@ -2762,7 +2791,7 @@ fn manualComputationInternal(
 
             const sharded_outputs = ctx.alloc(Tensor, outputs.len);
             for (outputs, 0..) |output_shape, i| {
-                sharded_outputs[i] = Tensor._result(output_shape, barrier.result(i));
+                sharded_outputs[i] = Tensor._resultPropagateSharding(output_shape, barrier.result(i));
             }
             return sharded_outputs;
         },
@@ -3153,7 +3182,7 @@ pub fn typedCustomCall(
             }
             break :b &input_tensors;
         },
-        // Extra case to support []const Tensor from shardingAwareTypedCustomCall
+        // Extra case to support []const Tensor from mesheAwareTypedCustomCall
         .pointer => |pointer_info| b: {
             if (pointer_info.size != .slice) @compileError("Expected input slice");
             break :b input;
@@ -3169,7 +3198,7 @@ pub fn typedCustomCall(
             }
             break :b &output_shapes;
         },
-        // Extra case to support []const Shape from shardingAwareTypedCustomCall
+        // Extra case to support []const Shape from mesheAwareTypedCustomCall
         .pointer => |pointer_info| b: {
             if (pointer_info.size != .slice) @compileError("Expected input slice");
             break :b output;
@@ -3234,7 +3263,7 @@ pub fn typedCustomCall(
         ctx.location,
     ).appendTo(ctx.currentScope().block);
 
-    if (ctx.manual_computation_depth > 0 and ctx.partitioning.partitioner == .gspmd) {
+    if (ctx.manual_computation_depth > 0 and ctx.partitioner == .gspmd) {
         op.setAttributeByName("mhlo.sharding", .string(ctx.mlir_ctx, "{manual}"));
     }
 
@@ -3246,7 +3275,7 @@ pub fn typedCustomCall(
             }
             return out;
         },
-        // Extra case to support []const Shape from shardingAwareTypedCustomCall
+        // Extra case to support []const Shape from mesheAwareTypedCustomCall
         .pointer => |pointer_info| {
             if (pointer_info.size != .slice) @compileError("Expected input slice");
             var out: []Tensor = allocator.alloc(Tensor, output_shapes.len) catch unreachable;
@@ -3307,7 +3336,7 @@ test customCall {
     const scope = comp.pushBlock(block);
     defer scope.pop();
 
-    const shape = zml.Shape.init(.{128}, .bf16).withPartitioning(.{ ._0 = .x });
+    const shape = zml.Shape.init(.{128}, .bf16).withPartitioning(platform.meshes.get("model").?, .{ ._0 = .model });
     const input = Tensor.constant(zml.DataType.bf16.constant(0)).broad(shape);
     const output = customCall("my_custom_call", .{input}, .{zml.Shape.init(.{128}, .bf16)}, .{}, .{
         .has_side_effect = false,

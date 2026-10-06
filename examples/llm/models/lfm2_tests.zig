@@ -40,16 +40,16 @@ pub fn main(init: std.process.Init) !void {
     defer repo.close(io);
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    const meshes: common.Meshes = try .init(platform);
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &meshes.all());
     defer store.deinit();
 
     var repo_model = try lfm2.LoadedModel.init(allocator, io, repo, store.view(), .{});
     defer repo_model.deinit(allocator);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    const shardings: common.Shardings = try .init(platform);
 
-    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
+    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
     const backend = args.backend orelse zml.attention.Backend.auto(platform);
@@ -58,11 +58,11 @@ pub fn main(init: std.process.Init) !void {
         repo_model.parsed_config.value,
         repo_model.parsed_config.value.max_position_embeddings,
         backend,
-        shardings,
+        meshes,
     );
     progress.end();
 
-    try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, params.attention_metadata, params.attention_parameters);
+    try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, params.attention_metadata, params.attention_parameters, meshes);
 }
 
 pub fn run(
@@ -75,11 +75,12 @@ pub fn run(
     model_buffers: *lfm2.Buffers,
     attention_metadata: zml.attention.Metadata,
     attention_parameters: zml.attention.Parameters,
+    meshes: common.Meshes,
 ) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
-    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &meshes.all());
     defer activation_store.deinit();
 
     var ctx = TestContext{
@@ -89,7 +90,7 @@ pub fn run(
         .activations_store = &activation_store,
         .attention_metadata = attention_metadata,
         .attention_parameters = attention_parameters,
-        .sharding = platform.replicated_sharding,
+        .mesh = platform.replicated_mesh,
     };
 
     try ctx.testLayer("embed_tokens", .{ .batch, .seq }, mdl.embed_tokens, model_buffers.embed_tokens, .{});
@@ -134,7 +135,7 @@ const TestContext = struct {
     activations_store: *zml.io.TensorStore,
     attention_metadata: zml.attention.Metadata,
     attention_parameters: zml.attention.Parameters,
-    sharding: zml.Sharding,
+    mesh: *const zml.Mesh,
 
     fn testLayerPrint(self: *TestContext, comptime name_fmt: []const u8, name_args: anytype, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
         const name = try std.fmt.allocPrint(self.allocator, name_fmt, name_args);
@@ -147,19 +148,19 @@ const TestContext = struct {
 
         const in_key = try std.fmt.allocPrint(self.allocator, "{s}.in", .{name});
         defer self.allocator.free(in_key);
-        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key, self.sharding);
+        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key);
         defer in_buffer.deinit();
         const in_tensor = zml.Tensor.fromShape(in_buffer.shape()).withTags(tagz);
 
         const out_key = try std.fmt.allocPrint(self.allocator, "{s}.out", .{name});
         defer self.allocator.free(out_key);
-        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
+        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key);
         defer out_buffer_expected.deinit();
 
         const exe = if (comptime @TypeOf(layer) == model.TokenEmbedding)
-            try self.platform.compileFn(self.allocator, self.io, model.TokenEmbedding.forward, .{.{ .embedding = layer, .tokens = in_tensor }}, .{ .shardings = &.{self.sharding} })
+            try self.platform.compileFn(self.allocator, self.io, model.TokenEmbedding.forward, .{.{ .embedding = layer, .tokens = in_tensor }}, .{ .meshes = &.{self.mesh} })
         else
-            try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .shardings = &.{self.sharding} });
+            try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .meshes = &.{self.mesh} });
         defer exe.deinit();
 
         var args = try exe.args(self.allocator);
@@ -185,42 +186,42 @@ const TestContext = struct {
 
         const in_key = try std.fmt.allocPrint(self.allocator, "{s}.in", .{name});
         defer self.allocator.free(in_key);
-        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key, self.sharding);
+        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key);
         defer in_buffer.deinit();
         const in_tensor = zml.Tensor.fromShape(in_buffer.shape()).withTags(.{ .batch, .seq, .d });
 
         const cache_key = try std.fmt.allocPrint(self.allocator, "{s}.cache", .{name});
         defer self.allocator.free(cache_key);
-        var cache_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, cache_key, self.sharding);
+        var cache_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, cache_key);
         defer cache_buffer.deinit();
         const cache_tensor = zml.Tensor.fromShape(cache_buffer.shape()).withTags(.{ .layer, .batch, .seq, .d });
 
         const cache_pos_key = try std.fmt.allocPrint(self.allocator, "{s}.cache_position", .{name});
         defer self.allocator.free(cache_pos_key);
-        var cache_pos_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, cache_pos_key, self.sharding);
+        var cache_pos_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, cache_pos_key);
         defer cache_pos_buffer.deinit();
         const cache_pos_tensor = zml.Tensor.fromShape(cache_pos_buffer.shape()).withTags(.{.batch});
 
         const out_key = try std.fmt.allocPrint(self.allocator, "{s}.out", .{name});
         defer self.allocator.free(out_key);
-        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
+        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key);
         defer out_buffer_expected.deinit();
 
         const actual_seq_len_tensor: zml.Tensor = .init(.{}, .u32);
         const actual_seq_len: u32 = @intCast(in_tensor.dim(.seq));
         const cache_index_tensor: zml.Tensor = .init(.{}, .u32);
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, actual_seq_len_tensor, model.ConvCache{ .state = cache_tensor }, cache_index_tensor, model.ConvParameters{ .is_prefill = false } }, .{ .shardings = &.{self.sharding} });
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, actual_seq_len_tensor, model.ConvCache{ .state = cache_tensor }, cache_index_tensor, model.ConvParameters{ .is_prefill = false } }, .{ .meshes = &.{self.mesh} });
         defer exe.deinit();
 
         const conv_cache: zml.Bufferized(model.ConvCache) = .{ .state = cache_buffer };
 
         const actual_seq_len_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{actual_seq_len}));
-        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice, self.sharding);
+        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice);
         defer actual_seq_len_buf.deinit();
 
         const cache_index_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(cache_ix)}));
-        var cache_index_buf: zml.Buffer = try .fromSlice(self.io, self.platform, cache_index_slice, self.sharding);
+        var cache_index_buf: zml.Buffer = try .fromSlice(self.io, self.platform, cache_index_slice);
         defer cache_index_buf.deinit();
 
         var runner = try exe.runner(self.allocator);
@@ -243,41 +244,41 @@ const TestContext = struct {
 
         const in_key = try std.fmt.allocPrint(self.allocator, "{s}.in", .{name});
         defer self.allocator.free(in_key);
-        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key, self.sharding);
+        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key);
         defer in_buffer.deinit();
         const in_tensor = zml.Tensor.fromShape(in_buffer.shape()).withTags(.{ .batch, .seq, .d });
 
         const key_cache_key = try std.fmt.allocPrint(self.allocator, "{s}.cache.key", .{name});
         defer self.allocator.free(key_cache_key);
-        var key_cache_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, key_cache_key, self.sharding);
+        var key_cache_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, key_cache_key);
         defer key_cache_buffer.deinit();
         const key_cache_tensor = zml.Tensor.fromShape(key_cache_buffer.shape()).withTags(.{ .layer, .batch, .h, .k, .hd });
 
         const value_cache_key = try std.fmt.allocPrint(self.allocator, "{s}.cache.value", .{name});
         defer self.allocator.free(value_cache_key);
-        var value_cache_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, value_cache_key, self.sharding);
+        var value_cache_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, value_cache_key);
         defer value_cache_buffer.deinit();
         const value_cache_tensor = zml.Tensor.fromShape(value_cache_buffer.shape()).withTags(.{ .layer, .batch, .h, .k, .hd });
 
         const cache_pos_key = try std.fmt.allocPrint(self.allocator, "{s}.cache_position", .{name});
         defer self.allocator.free(cache_pos_key);
-        var cache_pos_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, cache_pos_key, self.sharding);
+        var cache_pos_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, cache_pos_key);
         defer cache_pos_buffer.deinit();
         const cache_pos_tensor = zml.Tensor.fromShape(cache_pos_buffer.shape()).withTags(.{.batch});
 
         const out_key = try std.fmt.allocPrint(self.allocator, "{s}.out", .{name});
         defer self.allocator.free(out_key);
-        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
+        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key);
         defer out_buffer_expected.deinit();
 
         const cache_index_tensor: zml.Tensor = .init(.{}, .u32);
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, model.KvCache{ .k = key_cache_tensor, .v = value_cache_tensor }, cache_index_tensor, self.attention_metadata, self.attention_parameters }, .{ .shardings = &.{self.sharding} });
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, cache_pos_tensor, model.KvCache{ .k = key_cache_tensor, .v = value_cache_tensor }, cache_index_tensor, self.attention_metadata, self.attention_parameters }, .{ .meshes = &.{self.mesh} });
         defer exe.deinit();
 
         const kv_cache: zml.Bufferized(model.KvCache) = .{ .k = key_cache_buffer, .v = value_cache_buffer };
 
-        var attention_metadata_buffers = try self.attention_metadata.initBuffer(self.io, self.platform, self.sharding);
+        var attention_metadata_buffers = try self.attention_metadata.initBuffer(self.io, self.platform);
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         var cache_index_buf: zml.Buffer = try .scalar(self.io, self.platform, cache_ix, .u32);
@@ -297,7 +298,7 @@ const TestContext = struct {
     }
 };
 
-fn loadBufferFromStore(allocator: std.mem.Allocator, io: anytype, platform: *zml.Platform, store: *zml.io.TensorStore, key: []const u8, sharding: zml.Sharding) !zml.Buffer {
+fn loadBufferFromStore(allocator: std.mem.Allocator, io: anytype, platform: *zml.Platform, store: *zml.io.TensorStore, key: []const u8) !zml.Buffer {
     const shape = store.view().getShape(key) orelse return error.NotFound;
 
     const host_bytes = try allocator.alloc(u8, shape.byteSize());
@@ -309,5 +310,5 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: anytype, platform: *zml
 
     _ = try reader.interface.readSliceAll(host_bytes);
 
-    return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
+    return zml.Buffer.fromBytes(io, platform, shape, host_bytes);
 }

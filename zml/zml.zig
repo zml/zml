@@ -45,6 +45,7 @@ pub const tracer = @import("profiling/tracer.zig");
 pub const safetensors = @import("safetensors.zig");
 pub const shape = @import("shape.zig");
 pub const Shape = shape.Shape;
+pub const Mesh = Sharding.Mesh;
 pub const Sharding = @import("Sharding.zig");
 pub const slice = @import("slice.zig");
 pub const Slice = slice.Slice;
