@@ -135,21 +135,21 @@ pub const PartitionSpec = enum(u4) {
     open = 15,
 
     pub fn sharded(mesh_axis: u3) PartitionSpec {
-        return @enumFromInt(mesh_axis);
+        return @fromBackingInt(@intCast(mesh_axis));
     }
 
     /// Extract the mesh axis along which we are sharded. Null if not sharded.
     pub fn meshAxis(self: PartitionSpec) ?u3 {
-        const ax = @intFromEnum(self);
-        return if (ax < @intFromEnum(PartitionSpec.replicated)) @intCast(ax) else null;
+        const ax = @backingInt(self);
+        return if (ax < @backingInt(PartitionSpec.replicated)) @intCast(ax) else null;
     }
 
     pub fn isSharded(self: PartitionSpec) bool {
-        return @intFromEnum(self) < @intFromEnum(PartitionSpec.replicated);
+        return @backingInt(self) < @backingInt(PartitionSpec.replicated);
     }
 
     pub fn isClosed(self: PartitionSpec) bool {
-        return @intFromEnum(self) <= @intFromEnum(PartitionSpec.replicated);
+        return @backingInt(self) <= @backingInt(PartitionSpec.replicated);
     }
 
     test isClosed {
@@ -285,13 +285,13 @@ pub const Partitioning = packed struct {
     }
 
     pub fn splat(spec: PartitionSpec) Partitioning {
-        const vec: Vec = @splat(@intFromEnum(spec));
+        const vec: Vec = @splat(@backingInt(spec));
         return @bitCast(vec);
     }
 
     pub fn repeat(spec: PartitionSpec, rank_: usize) Partitioning {
         std.debug.assert(rank_ <= MAX_RANK);
-        const splatted: Vec = @splat(@intFromEnum(spec));
+        const splatted: Vec = @splat(@backingInt(spec));
         const mask = std.simd.iota(u4, 8) < @as(Vec, @splat(@truncate(rank_)));
         return @bitCast(@select(u4, mask, splatted, @as(Vec, @bitCast(out_of_bound))));
     }
@@ -300,7 +300,7 @@ pub const Partitioning = packed struct {
         std.debug.assert(ax < MAX_RANK);
         const pack: u32 = @bitCast(p);
         const shift: u5 = @intCast(4 * ax);
-        return @enumFromInt(@as(u4, @truncate(pack >> shift)));
+        return @fromBackingInt(@truncate(pack >> shift));
     }
 
     pub fn set(p: Partitioning, ax: usize, spec: PartitionSpec) Partitioning {
@@ -308,7 +308,7 @@ pub const Partitioning = packed struct {
         const pack: u32 = @bitCast(p);
         const shift: u5 = @intCast(4 * ax);
         const mask = @as(u32, 0xf) << shift;
-        return @bitCast((pack & ~mask) | (@as(u32, @intFromEnum(spec)) << shift));
+        return @bitCast((pack & ~mask) | (@as(u32, @backingInt(spec)) << shift));
     }
 
     pub fn rank(p: Partitioning) u8 {
@@ -325,7 +325,7 @@ pub const Partitioning = packed struct {
         const pack: u32 = @bitCast(p);
         const shift: u5 = @intCast(4 * ax);
         const lower_mask = (@as(u32, 1) << shift) - 1;
-        return @bitCast((pack & lower_mask) | ((pack & ~lower_mask) << 4) | (@as(u32, @intFromEnum(spec)) << shift));
+        return @bitCast((pack & lower_mask) | ((pack & ~lower_mask) << 4) | (@as(u32, @backingInt(spec)) << shift));
     }
 
     /// Removes a spec, shifting subsequent slots left and filling the last with unknown.
@@ -334,7 +334,7 @@ pub const Partitioning = packed struct {
         const pack: u32 = @bitCast(p);
         const shift: u5 = @intCast(4 * ax);
         const lower_mask = (@as(u32, 1) << shift) - 1;
-        return @bitCast((pack & lower_mask) | ((pack >> 4) & ~lower_mask) | (@as(u32, @intFromEnum(PartitionSpec.out_of_bound)) << 28));
+        return @bitCast((pack & lower_mask) | ((pack >> 4) & ~lower_mask) | (@as(u32, @backingInt(PartitionSpec.out_of_bound)) << 28));
     }
 
     pub fn toArray(p: Partitioning) [MAX_RANK]PartitionSpec {
@@ -344,7 +344,7 @@ pub const Partitioning = packed struct {
     }
 
     pub fn hasUniqueAxes(p: Partitioning) bool {
-        var used_mesh_axes: std.StaticBitSet(MAX_RANK) = .initEmpty();
+        var used_mesh_axes: std.StaticBitSet(MAX_RANK) = .empty;
         for (0..MAX_RANK) |shape_ax| {
             const spec = p.get(shape_ax);
             if (spec.meshAxis()) |mesh_axis| {
@@ -383,7 +383,7 @@ pub const Partitioning = packed struct {
 
     test "insertion and removal at every slot" {
         var parts: Partitioning = .out_of_bound;
-        for (0..MAX_RANK) |ax| parts = parts.set(ax, @enumFromInt(ax));
+        for (0..MAX_RANK) |ax| parts = parts.set(ax, @fromBackingInt(@intCast(ax)));
         const original = parts.toArray();
         for (0..MAX_RANK) |ax| {
             var inserted = original;
@@ -414,13 +414,13 @@ pub const Partitioning = packed struct {
 
         const T = @TypeOf(partitioning);
         stdx.debug.assertComptime(stdx.meta.isStruct(T), "parsePartitioning expected a struct of enum literals eg {{ .b = .data, .d = .model }}, got: {any}", .{T});
-        inline for (std.meta.fields(T)) |field| {
-            const shape_tag = Shape.toTag(field);
+        inline for (comptime std.meta.fieldNames(T)) |field_name| {
+            const shape_tag = Shape.toTag(field_name);
             const shape_ax = Shape.axisFromTagMaybe(tags, shape_tag) orelse {
-                std.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ stdx.fmt.stringsZ(tags), field.name });
+                std.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ stdx.fmt.stringsZ(tags), field_name });
             };
 
-            const value = @field(partitioning, field.name);
+            const value = @field(partitioning, field_name);
             const spec: PartitionSpec = if (@TypeOf(value) == PartitionSpec) value else switch (value) {
                 .replicated => .replicated,
                 .out_of_bound => std.debug.panic("value out_of_bound not allowed", .{}),
