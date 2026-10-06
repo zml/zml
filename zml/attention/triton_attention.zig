@@ -311,10 +311,7 @@ pub const paged = struct {
                     const target_num_prgms: usize = cu_count * 4;
                     const num_2d_prgms: usize = total_q_blocks * num_kv_heads;
 
-                    const sliding_window: usize = switch (self.opts.mask) {
-                        .sliding_window => |w| @intCast(w),
-                        else => 0,
-                    };
+                    const sliding_window: usize = self.opts.mask.slidingWindow() orelse 0;
 
                     const paged_attention_opts: PagedAttentionOptions = .{
                         .cu_count = getCuCount(),
@@ -614,6 +611,7 @@ pub const paged = struct {
             .use_softcap = false,
             .use_sinks = (opts.sink != null),
             .sliding_window = @intCast(paged_attention_opts.sliding_window),
+            .is_causal = opts.mask.isCausal(),
             .block_q = @intCast(config.attention.block_q),
             .block_m = @intCast(config.attention.block_m),
             .num_segments_per_seq = @intCast(config.attention.num_segments_per_seq),
