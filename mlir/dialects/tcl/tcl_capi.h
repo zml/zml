@@ -47,7 +47,6 @@ MLIR_CAPI_EXPORTED MlirAttribute mlirTclLogicalTypeGetAxes(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirTclMappedTypeGet(MlirContext ctx,
                                                  MlirType element,
                                                  MlirAttribute mapping);
-MLIR_CAPI_EXPORTED bool mlirTypeIsATclMapped(MlirType type);
 
 #ifdef __cplusplus
 }
