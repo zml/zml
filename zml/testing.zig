@@ -104,8 +104,8 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, opts: CompareOpt
                 => |rt| {
                     const R = rt.toZigType();
                     const report: CompareOpts.Report = try .compareSlices(true, allocator, L, R, left, right, opts);
+                    try w.print("{f}\n", .{report});
                     if (!report.ok(opts)) {
-                        try w.print("{f}\n", .{report});
                         return error.TestUnexpectedResult;
                     }
                     return;
@@ -147,10 +147,10 @@ pub const CompareOpts = struct {
 
         close_fraction: f32,
 
-        p50_absolute_error: f32,
-        p90_absolute_error: f32,
-        p99_absolute_error: f32,
-        p999_absolute_error: f32,
+        // p50_absolute_error: f32,
+        // p90_absolute_error: f32,
+        // p99_absolute_error: f32,
+        // p999_absolute_error: f32,
 
         pub fn ok(report: Report, opts: CompareOpts) bool {
             return !report.nan_or_inf and report.close_fraction >= opts.minimum_close_fraction;
@@ -199,20 +199,20 @@ pub const CompareOpts = struct {
                 \\    mean_absolute_error: {d}
                 \\    rmse: {d}
                 \\    close_fraction: {d}
-                \\    p50_absolute_error: {d}
-                \\    p90_absolute_error: {d}
-                \\    p99_absolute_error: {d}
-                \\    p999_absolute_error: {d}
+                // \\    p50_absolute_error: {d}
+                // \\    p90_absolute_error: {d}
+                // \\    p99_absolute_error: {d}
+                // \\    p999_absolute_error: {d}
             , .{
                 self.nan_or_inf,
                 self.max_absolute_error,
                 self.mean_absolute_error,
                 self.rmse,
                 self.close_fraction,
-                self.p50_absolute_error,
-                self.p90_absolute_error,
-                self.p99_absolute_error,
-                self.p999_absolute_error,
+                // self.p50_absolute_error,
+                // self.p90_absolute_error,
+                // self.p99_absolute_error,
+                // self.p999_absolute_error,
             });
         }
     };
@@ -263,6 +263,11 @@ pub const CompareOpts = struct {
             for (left, right, 0..) |l, r, i| {
                 const l_f32 = zml.floats.floatCast(f32, l);
                 const r_f32 = zml.floats.floatCast(f32, r);
+                if (zml.floats.isNan(l) and zml.floats.isNan(r)) {
+                    self.count_close += 1;
+                    continue;
+                }
+
                 if (!std.math.isFinite(l_f32) or !std.math.isFinite(r_f32)) {
                     self.nan_or_inf = true;
                     continue;
@@ -307,26 +312,30 @@ pub const CompareOpts = struct {
                     .mean_absolute_error = std.math.nan(f32),
                     .rmse = std.math.nan(f32),
                     .close_fraction = std.math.nan(f32),
-                    .p50_absolute_error = 0,
-                    .p90_absolute_error = 0,
-                    .p99_absolute_error = 0,
-                    .p999_absolute_error = 0,
+                    // .p50_absolute_error = 0,
+                    // .p90_absolute_error = 0,
+                    // .p99_absolute_error = 0,
+                    // .p999_absolute_error = 0,
                 };
             }
 
-            std.sort.heap(f32, self.absolute_errors, {}, std.sort.asc(f32));
-            std.sort.heap(f32, self.relative_errors, {}, std.sort.asc(f32));
+            // std.debug.print("Starting sort\n", .{});
+            // std.sort.heap(f32, self.absolute_errors, {}, std.sort.asc(f32));
+            // std.debug.print("Midpoint\n", .{});
+            // std.sort.heap(f32, self.relative_errors, {}, std.sort.asc(f32));
+            // std.debug.print("Ending sort\n", .{});
 
-            const q = struct {
-                fn q(values: []const f32, frac: f32) f32 {
-                    if (values.len == 0) return 0;
-                    const idx: usize = @intFromFloat(std.math.round(@as(f32, @floatFromInt(values.len - 1)) * frac));
-                    return values[idx];
-                }
-            }.q;
+            // const q = struct {
+            //     fn q(values: []const f32, frac: f32) f32 {
+            //         if (values.len == 0) return 0;
+            //         const idx: usize = @intFromFloat(std.math.round(@as(f32, @floatFromInt(values.len - 1)) * frac));
+            //         return values[idx];
+            //     }
+            // }.q;
 
             const mean_absolute_error = stdx.math.divFloat(f64, self.sum_absolute_error, self.processed_count);
             const rmse = std.math.sqrt(stdx.math.divFloat(f64, self.sum_squared_error, self.processed_count));
+            std.debug.print("self.count_close: {} - self.processed_count: {}\n", .{ self.count_close, self.processed_count });
             const close_fraction = stdx.math.divFloat(f64, self.count_close, self.processed_count);
 
             return .{
@@ -335,10 +344,10 @@ pub const CompareOpts = struct {
                 .mean_absolute_error = @floatCast(mean_absolute_error),
                 .rmse = @floatCast(rmse),
                 .close_fraction = @floatCast(close_fraction),
-                .p50_absolute_error = q(self.absolute_errors, 0.5),
-                .p90_absolute_error = q(self.absolute_errors, 0.9),
-                .p99_absolute_error = q(self.absolute_errors, 0.99),
-                .p999_absolute_error = q(self.absolute_errors, 0.999),
+                // .p50_absolute_error = q(self.absolute_errors, 0.5),
+                // .p90_absolute_error = q(self.absolute_errors, 0.9),
+                // .p99_absolute_error = q(self.absolute_errors, 0.99),
+                // .p999_absolute_error = q(self.absolute_errors, 0.999),
             };
         }
     };
@@ -493,7 +502,9 @@ pub fn testLayer(
 
     exe_args.set(.{ layer_weights, args_buffers });
 
+    std.debug.print("\n\nStart exec\n\n", .{});
     exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+    std.debug.print("\n\nEnd exec\n\n", .{});
 
     var results = try allocator.alloc(zml.Buffer, output_count);
     defer allocator.free(results);
