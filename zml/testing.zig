@@ -384,10 +384,25 @@ pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Ex
 fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
     var count: usize = 0;
     var it = store.store.registry.iterator();
-    while (it.next()) |entry| {
-        if (std.mem.startsWith(u8, entry.key_ptr.*, prefix)) {
-            count += 1;
+
+    counter: while (it.next()) |entry| {
+        if (!std.mem.startsWith(u8, entry.key_ptr.*, prefix)) {
+            continue;
         }
+
+        if (entry.key_ptr.*[prefix.len] != '.') {
+            continue;
+        }
+
+        // Take into account the `.` after the prefix and then it should only be a numeric string
+        for (prefix.len + 1..entry.key_ptr.len) |i| {
+            const c = entry.key_ptr.*[i];
+            if (c < '0' or c > '9') {
+                continue :counter;
+            }
+        }
+
+        count += 1;
     }
 
     return count;
