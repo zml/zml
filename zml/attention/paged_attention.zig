@@ -210,20 +210,21 @@ pub const AttentionMask = union(enum) {
     },
     /// Attend to keys at specific positions.
     indices: zml.Tensor,
+
     /// Attend to every valid key in the sequence.
-    none,
+    pub const none: AttentionMask = .{ .standard = .{ .causal = false } };
 
     pub fn isCausal(mask: AttentionMask) bool {
         return switch (mask) {
             .standard => |options| options.causal,
-            .none, .indices => false,
+            .indices => false,
         };
     }
 
     pub fn slidingWindow(mask: AttentionMask) ?u32 {
         return switch (mask) {
             .standard => |options| options.sliding_window,
-            .none, .indices => null,
+            .indices => null,
         };
     }
 };
@@ -616,7 +617,6 @@ fn stablehlo_pagedAttention(
     switch (opts.mask) {
         .standard => |options| if (options.sliding_window != null) @panic("Sliding window attention mask is not supported on StableHLO"),
         .indices => @panic("Sparse attention mask is not supported on StableHLO"),
-        .none => {},
     }
 
     const page_size = kv_cache.split.k.dim(.k_chunk);
