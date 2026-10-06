@@ -21,5 +21,6 @@ zig_library(
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_stream_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_triton_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_undonatable_buffers_extension_hdrs",
     ],
 )

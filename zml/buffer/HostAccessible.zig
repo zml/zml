@@ -243,6 +243,9 @@ pub fn init(
         else => false,
     };
     const api = platform.pjrt_api;
+    // Executions only read undonatable buffers: let them skip holds and usage
+    // events. Converted before any view or external reference is taken.
+    const undonatable_buffers = if (donation == .undonatable) api.undonatableBuffers() else null;
 
     var buffer, const metadata = emptyShell(platform, shape_);
     const devices = platform.physical_mesh.devices_in_canonical_order;
@@ -266,7 +269,7 @@ pub fn init(
                 try existing.handle.increaseExternalReferenceCount(api);
                 allocations.entries.items(.shared)[entry] = true;
             }
-            buffer._shards.appendAssumeCapacity(try platform.pjrt_client.createViewOfDeviceBuffer(api, .{
+            const view_handle = try platform.pjrt_client.createViewOfDeviceBuffer(api, .{
                 .device_buffer_ptr = try existing.handle.opaqueDeviceMemoryDataPointer(api),
                 .dims = metadata.placement.shape.dims(),
                 .element_type = metadata.ty,
@@ -276,7 +279,9 @@ pub fn init(
                 // associates the view with the current device rather than
                 // the device that originally allocated the memory.
                 .memory = memory,
-            }));
+            });
+            buffer._shards.appendAssumeCapacity(view_handle);
+            if (undonatable_buffers) |ext| try ext.makeUndonatable(api, view_handle);
         } else {
             const handle = try platform.pjrt_client.createUninitializedBuffer(api, .{
                 .dims = metadata.placement.shape.dims(),
@@ -285,6 +290,7 @@ pub fn init(
                 .dst = .{ .memory = memory },
             });
             buffer._shards.appendAssumeCapacity(handle);
+            if (undonatable_buffers) |ext| try ext.makeUndonatable(api, handle);
             // The pointer is read once the creation completes, after `await` below.
             allocations.add(metadata.placement.shape, .{
                 .origin = origin,

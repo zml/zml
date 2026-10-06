@@ -7,6 +7,7 @@ def repo():
         commit = "41370d1124c74d7b93a207136a636d8c631cbed9",
         patches = [
             "//third_party/xla:cuda-root-path-local-defines.patch",
+            "//third_party/xla:pjrt-undonatable-buffers-extension.patch",
         ],
         patch_args = ["-p1"],
     )

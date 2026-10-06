@@ -99,6 +99,35 @@ pub const Buffer = struct {
         }.deinit, {}, buffers);
     }
 
+    /// Lets executions read this buffer without taking a hold or recording a
+    /// usage event on it, which they otherwise do for every argument. Executions
+    /// can no longer donate it, and do not keep it alive: deinit it only once
+    /// they no longer need it. Returns false, leaving the buffer unchanged, when
+    /// the plugin does not support undonatable buffers.
+    ///
+    /// The buffer must not have device views, external references or a
+    /// concurrent user; convert weights right after loading them.
+    pub fn makeUndonatable(self: *Buffer) pjrt.ApiError!bool {
+        const api = self._platform.pjrt_api;
+        const ext = api.undonatableBuffers() orelse return false;
+        for (self._shards.constSlice()) |shard| {
+            try ext.makeUndonatable(api, shard);
+        }
+        return true;
+    }
+
+    /// Calls `makeUndonatable` on every `zml.Buffer` that `buffers` points to,
+    /// in arbitrary structs, and returns how many were converted.
+    pub fn makeUndonatableAll(buffers: anytype) pjrt.ApiError!usize {
+        var converted: usize = 0;
+        try meta.visit(struct {
+            fn convert(count: *usize, x: *Buffer) pjrt.ApiError!void {
+                if (try x.makeUndonatable()) count.* += 1;
+            }
+        }.convert, &converted, buffers);
+        return converted;
+    }
+
     /// Given an arbitrary struct `deinit` all `zml.Buffer` containing.
     /// If the struct contains slices of `zml.Buffer` the memory of the slices will NOT be freed,
     /// This only impacts device memory.

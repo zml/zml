@@ -198,6 +198,7 @@ pub const Api = struct {
             raw_buffer = c.PJRT_Extension_Type_RawBuffer,
             phase_compile = c.PJRT_Extension_Type_PhaseCompile,
             unknown = c.PJRT_Extension_Type_Unknown,
+            undonatable_buffers = c.PJRT_Extension_Type_UndonatableBuffers,
         };
 
         pub const Extension = union(Type) {
@@ -211,6 +212,7 @@ pub const Api = struct {
             raw_buffer: *const c.PJRT_RawBuffer_Extension,
             phase_compile: *const c.PJRT_PhaseCompile_Extension,
             unknown: *const c.PJRT_Extension_Base,
+            undonatable_buffers: *const c.PJRT_UndonatableBuffers_Extension,
         };
 
         pub const Iterator = struct {
@@ -283,6 +285,13 @@ pub const Api = struct {
             return .{ .inner = ext.ffi };
         }
         return null;
+    }
+
+    /// Returns null when the plugin cannot make buffers undonatable.
+    pub fn undonatableBuffers(api: *const Api) ?UndonatableBuffers {
+        const ext = (api.extension(.undonatable_buffers) orelse return null).undonatable_buffers;
+        if (ext.base.struct_size < meta.structSize(c.PJRT_UndonatableBuffers_Extension)) return null;
+        return .{ .inner = ext };
     }
 
     pub fn profiler(self: *const Api, options_pb: []const u8) ApiError!?Profiler {
@@ -1754,6 +1763,29 @@ pub const Ffi = extern struct {
             log.err("addUserData error: {s}", .{pjrt_error.getMessage(api)});
             return pjrt_error.getCode(api).toApiError();
         }
+    }
+};
+
+/// Undonatable buffers are inputs that executions never donate, such as weights.
+/// Executions read them without taking a hold or recording a usage event.
+pub const UndonatableBuffers = struct {
+    inner: *const c.PJRT_UndonatableBuffers_Extension,
+
+    /// Converts `buffer` in place; its handle stays valid. It must not be used
+    /// concurrently, have external references, or be passed as a donated input.
+    pub fn makeUndonatable(self: UndonatableBuffers, api: *const Api, buffer: *Buffer) ApiError!void {
+        var args: meta.Struct(c.PJRT_Buffer_MakeUndonatable_Args) = .{ .buffer = @ptrCast(buffer) };
+        if (self.inner.make_undonatable.?(@ptrCast(&args))) |pjrt_c_error| {
+            return interpretPjrtError(api, @ptrCast(pjrt_c_error), "PJRT_Buffer_MakeUndonatable");
+        }
+    }
+
+    pub fn isUndonatable(self: UndonatableBuffers, api: *const Api, buffer: *const Buffer) ApiError!bool {
+        var args: meta.Struct(c.PJRT_Buffer_IsUndonatable_Args) = .{ .buffer = @ptrCast(@constCast(buffer)) };
+        if (self.inner.is_undonatable.?(@ptrCast(&args))) |pjrt_c_error| {
+            return interpretPjrtError(api, @ptrCast(pjrt_c_error), "PJRT_Buffer_IsUndonatable");
+        }
+        return args.is_undonatable;
     }
 };
 

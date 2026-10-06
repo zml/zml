@@ -1,0 +1,114 @@
+diff --git a/xla/pjrt/c/BUILD b/xla/pjrt/c/BUILD
+index 3f370f4f79..aa851752c2 100644
+--- a/xla/pjrt/c/BUILD
++++ b/xla/pjrt/c/BUILD
+@@ -300,6 +300,13 @@ cc_library(
+     ],
+ )
+ 
++cc_library(
++    name = "pjrt_c_api_undonatable_buffers_extension_hdrs",
++    hdrs = ["pjrt_c_api_undonatable_buffers_extension.h"],
++    visibility = ["//visibility:public"],
++    deps = [":pjrt_c_api_hdrs"],
++)
++
+ cc_library(
+     name = "pjrt_c_api_profiler_extension_hdrs",
+     hdrs = ["pjrt_c_api_profiler_extension.h"],
+diff --git a/xla/pjrt/c/pjrt_c_api.h b/xla/pjrt/c/pjrt_c_api.h
+index 1c75a88b5e..076aaafaaf 100644
+--- a/xla/pjrt/c/pjrt_c_api.h
++++ b/xla/pjrt/c/pjrt_c_api.h
+@@ -53,6 +53,9 @@ extern "C" {
+ // ------------------------------- Extensions ----------------------------------
+ 
+ typedef enum {
++  // ZML fork extension. The value spells "zml" so that it cannot collide with
++  // types appended upstream.
++  PJRT_Extension_Type_UndonatableBuffers = 0x7A6D6C00,
+   PJRT_Extension_Type_Gpu_Custom_Call = 0,
+   PJRT_Extension_Type_Profiler,
+   PJRT_Extension_Type_Custom_Partitioner,
+diff --git a/xla/pjrt/c/pjrt_c_api_undonatable_buffers_extension.h b/xla/pjrt/c/pjrt_c_api_undonatable_buffers_extension.h
+new file mode 100644
+index 0000000000..4108bc2e93
+--- /dev/null
++++ b/xla/pjrt/c/pjrt_c_api_undonatable_buffers_extension.h
+@@ -0,0 +1,76 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef XLA_PJRT_C_PJRT_C_API_UNDONATABLE_BUFFERS_EXTENSION_H_
++#define XLA_PJRT_C_PJRT_C_API_UNDONATABLE_BUFFERS_EXTENSION_H_
++
++#include <stdbool.h>
++#include <stddef.h>
++
++#include "xla/pjrt/c/pjrt_c_api.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// Undonatable buffers are inputs that executions never donate, such as
++// weights. Executions read them without taking a hold or recording a usage
++// event, which removes most of the per-argument cost of an execution.
++//
++// Executions do not extend their lifetime: destroy an undonatable buffer only
++// once the executions reading it no longer need it, as stream-ordered
++// deallocation does on the compute stream. Passing one as a donated input
++// fails.
++
++#define PJRT_API_UNDONATABLE_BUFFERS_EXTENSION_VERSION 1
++
++struct PJRT_Buffer_MakeUndonatable_Args {
++  size_t struct_size;
++  PJRT_Extension_Base* extension_start;
++  PJRT_Buffer* buffer;
++};
++PJRT_DEFINE_STRUCT_TRAITS(PJRT_Buffer_MakeUndonatable_Args, buffer);
++
++// Converts `buffer` in place: the handle stays valid and aliases the same
++// device memory. The buffer must not be used concurrently, as for
++// PJRT_Buffer_Destroy. Converting an undonatable buffer does nothing. Fails,
++// leaving the buffer unchanged, if it is deleted or donated, has external
++// references, or its client does not support undonatable buffers.
++typedef PJRT_Error* PJRT_Buffer_MakeUndonatable(
++    PJRT_Buffer_MakeUndonatable_Args* args);
++
++struct PJRT_Buffer_IsUndonatable_Args {
++  size_t struct_size;
++  PJRT_Extension_Base* extension_start;
++  PJRT_Buffer* buffer;
++  bool is_undonatable;  // out
++};
++PJRT_DEFINE_STRUCT_TRAITS(PJRT_Buffer_IsUndonatable_Args, is_undonatable);
++
++typedef PJRT_Error* PJRT_Buffer_IsUndonatable(
++    PJRT_Buffer_IsUndonatable_Args* args);
++
++typedef struct PJRT_UndonatableBuffers_Extension {
++  PJRT_Extension_Base base;
++  PJRT_Buffer_MakeUndonatable* make_undonatable;
++  PJRT_Buffer_IsUndonatable* is_undonatable;
++} PJRT_UndonatableBuffers_Extension;
++PJRT_DEFINE_STRUCT_TRAITS(PJRT_UndonatableBuffers_Extension, is_undonatable);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // XLA_PJRT_C_PJRT_C_API_UNDONATABLE_BUFFERS_EXTENSION_H_
