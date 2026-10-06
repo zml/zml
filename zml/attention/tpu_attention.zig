@@ -200,10 +200,7 @@ pub const mosaic_tpu = struct {
         const num_queries_per_block = @max(@as(i64, 1), @min(q_token_count, max_num_seqs));
         const logical_head_dim: f64 = @floatFromInt(parameters.opts.head_dim);
 
-        const sliding_window: ?i64 = switch (opts.mask) {
-            .sliding_window => |w| @intCast(w),
-            else => null,
-        };
+        const sliding_window: ?i64 = if (opts.mask.slidingWindow()) |window| @intCast(window) else null;
 
         return .{
             .num_q_tokens = q_token_count,
@@ -319,11 +316,11 @@ test "mosaic_tpu cfg uses kernel head dim and logical scale" {
         0.000001,
     );
 
-    const non_causal_cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{ .mask = .none });
+    const non_causal_cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{ .mask = .{ .standard = .{ .causal = false } } });
     try std.testing.expect(!non_causal_cfg.is_causal);
     try std.testing.expectEqual(@as(?i64, null), non_causal_cfg.sliding_window);
 
-    const window_cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{ .mask = .{ .sliding_window = 16 } });
+    const window_cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{ .mask = .{ .standard = .{ .sliding_window = 16 } } });
     try std.testing.expect(window_cfg.is_causal);
     try std.testing.expectEqual(@as(?i64, 16), window_cfg.sliding_window);
 }
