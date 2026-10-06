@@ -43,8 +43,8 @@ pub fn main(init: std.process.Init) !void {
 
         const attn_view = tb_layer_view.withPrefix("attn");
         const attn: block.Attn = .{
-            .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dup}, .replicated), null, .d),
-            .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dup}, .replicated), null, .d),
+            .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dim}, .replicated), null, .d),
+            .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dim}, .replicated), null, .d),
             .to_k = .init(attn_view.createTensor("to_k.weight", .{ .dup, .d }, .replicated), null, .d),
             .to_out = .init(attn_view.createTensor("to_out.0.weight", .{ .dup, .d }, .replicated), null, .d),
             .to_q = .init(attn_view.createTensor("to_q.weight", .{ .dup, .d }, .replicated), null, .d),
@@ -89,11 +89,11 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         io,
         platform,
-        Wrapper{ .mlp = transformer_blocks[0].img_mlp },
+        Wrapper{ .attn = transformer_blocks[0].attn.norm_k },
         .forward,
         &activations_store,
-        "transformer.transformer_blocks.0.img_mlp",
-        .{ .mlp = transformer_blocks_buffer[0].img_mlp },
+        "transformer.transformer_blocks.0.attn.norm_k",
+        .{ .attn = transformer_blocks_buffer[0].attn.norm_k },
         &.{},
         .{},
     );
@@ -131,10 +131,11 @@ pub fn main(init: std.process.Init) !void {
 // )
 
 const Wrapper = struct {
-    mlp: block.Mlp,
+    attn: block.RMSNorm,
 
     pub fn forward(self: Wrapper, x: zml.Tensor) zml.Tensor {
-        const tagged = x.withTags(.{ .bs, .dout, .d });
-        return self.mlp.forward(tagged);
+        // .d is .seqlen it seems
+        const tagged = x.withTags(.{ .bs, .d, .num, .dim });
+        return self.attn.forward(tagged);
     }
 };

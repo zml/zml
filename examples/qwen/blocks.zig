@@ -59,24 +59,52 @@ pub const Mlp = struct {
 };
 
 pub const Attn = struct {
-    norm_k: zml.nn.Linear,
-    norm_q: zml.nn.Linear,
+    norm_k: RMSNorm,
+    norm_q: RMSNorm,
     to_k: zml.nn.Linear,
     to_out: zml.nn.Linear,
     to_q: zml.nn.Linear,
     to_v: zml.nn.Linear,
 
     pub fn unloadBuffers(self: *zml.Bufferized(Attn)) void {
-        zml.nn.Linear.unloadBuffers(&self.norm_k);
-        zml.nn.Linear.unloadBuffers(&self.norm_q);
+        RMSNorm.unloadBuffers(&self.norm_k);
+        RMSNorm.unloadBuffers(&self.norm_q);
         zml.nn.Linear.unloadBuffers(&self.to_k);
         zml.nn.Linear.unloadBuffers(&self.to_out);
         zml.nn.Linear.unloadBuffers(&self.to_q);
         zml.nn.Linear.unloadBuffers(&self.to_v);
     }
 
+    // Implemented following QwenImage21AttnProcessor (which is the default Processor)
+    // and following the prefill part (not decode)
     pub fn forward(self: Attn, x: zml.Tensor) zml.Tensor {
         _ = self; // autofix
         return x;
+    }
+};
+
+// From diffusers/models/normalization.py, with is_torch_npu_available() == False
+pub const RMSNorm = struct {
+    // Removed the optional
+    weight: zml.Tensor,
+    /// Defaults to 1e-6
+    eps: f32,
+    tag: zml.Shape.Tag,
+
+    pub fn init(weight: zml.Tensor, eps: ?f32, tag: anytype) RMSNorm {
+        return .{
+            .weight = weight,
+            .eps = eps orelse 1e-6,
+            .tag = zml.Shape.toTag(tag),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(RMSNorm)) void {
+        self.weight.deinit();
+    }
+
+    pub fn forward(self: RMSNorm, x: zml.Tensor) zml.Tensor {
+        var normalized = zml.nn.rmsNorm(x, self.tag, self.eps);
+        return normalized.mul(self.weight.broad(normalized.shape()));
     }
 };
