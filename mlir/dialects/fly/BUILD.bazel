@@ -22,7 +22,9 @@ zig_library(
     name = "fly",
     srcs = [
         "attributes.zig",
+        "ops.zig",
         "rocdl.zig",
+        "rocdl_ops.zig",
         "types.zig",
     ],
     import_name = "mlir/dialects/fly",

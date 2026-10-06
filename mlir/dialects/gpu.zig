@@ -143,6 +143,18 @@ pub fn grid_dim(ctx: *mlir.Context, dim: Dim, location: *const mlir.Location) *m
     return idOp(ctx, "gpu.grid_dim", dim, location);
 }
 
+/// `gpu.shuffle`: `value` from lane `offset` (per `mode`) within `width` lanes,
+/// and whether that lane was valid (i1).
+pub fn shuffle(ctx: *mlir.Context, value: *const mlir.Value, offset: *const mlir.Value, width: *const mlir.Value, mode: ShuffleMode, location: *const mlir.Location) *mlir.Operation {
+    const mode_attr = ShuffleModeAttr.get(ctx, .{ .value = mode }) catch unreachable;
+    return mlir.Operation.make(ctx, "gpu.shuffle", .{
+        .operands = .{ .flat = &.{ value, offset, width } },
+        .results = .{ .flat = &.{ value.type_(), .int(ctx, .i1) } },
+        .attributes = &.{.named(ctx, "mode", mode_attr.attribute())},
+        .location = location,
+    });
+}
+
 pub fn barrier(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "gpu.barrier", .{ .location = location });
 }
