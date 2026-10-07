@@ -147,12 +147,12 @@ pub const Slice = struct {
     }
 
     pub fn items(slice: Slice, comptime T: type) []T {
-        stdx.debug.assertComptime(T == bool or @bitSizeOf(T) >= 8, "zml.Slice stores packed sub-bytes type so you need to pass a packed type here like @Vector({}, {}). Got: {}", .{ @divFloor(8, @bitSizeOf(T)), T, T });
+        stdx.debug.assertComptime(T == bool or @bitSizeOf(T) >= 8, "zml.Slice stores packed sub-bytes type so you need to pass a packed struct here like stdx.Packed({0}). Got: {0}", .{T});
         return @ptrCast(@alignCast(slice.data()));
     }
 
     pub fn constItems(slice: Slice, comptime T: type) []const T {
-        stdx.debug.assertComptime(T == bool or @bitSizeOf(T) >= 8, "zml.Slice stores packed sub-bytes type so you need to pass a packed type here like @Vector({}, {}). Got: {}", .{ @divFloor(8, @bitSizeOf(T)), T, T });
+        stdx.debug.assertComptime(T == bool or @bitSizeOf(T) >= 8, "zml.Slice stores packed sub-bytes type so you need to pass a packed struct here like zml.Float4E2M1.Packed. Got: {}", .{T});
         return @ptrCast(@alignCast(slice.constData()));
     }
 
@@ -288,6 +288,10 @@ pub const Slice = struct {
                     // rank-1 path can read raw items without requiring contiguity.
                     const raw_values: []const T = @ptrCast(@alignCast(slice.bytes[slice.offset_bytes..]));
                     const values = raw_values[0..needed_len];
+
+                    if (comptime dt.bitSizeOf() < 8) {
+                        return try stdx.fmt.formatSliceAny(values, options, stride, writer);
+                    }
 
                     switch (comptime dt.class()) {
                         .float => try stdx.fmt.formatFloatSlice(values, options, stride, writer),

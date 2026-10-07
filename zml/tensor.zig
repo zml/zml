@@ -468,7 +468,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
         const io = std.testing.io;
 
-        const inputs: [6]@Vector(2, i4) = .{ .{ -3.0, -2 }, .{ -1, 1 }, .{ 2, 3 }, .{ 1, 2 }, .{ 3, 4 }, .{ 5, -5 } };
+        const inputs: [6]stdx.Packed(i4) = .{ .pack(-3.0, -2), .pack(-1, 1), .pack(2, 3), .pack(1, 2), .pack(3, 4), .pack(5, -5) };
         const x_t = Tensor.init(.{ 6, 2 }, .i4);
         const y_t = Tensor.init(.{ 6, 2 }, .i4);
         const z_t = Tensor.init(.{ 6, 2 }, .i4);
@@ -483,7 +483,6 @@ pub const Tensor = struct {
         const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcopy, .{ x_t, y_t, z_t }, platform, .{});
         defer exe.deinit();
 
-        std.log.warn("fromBytes: x_t={f}, data={d} bytes from {s}", .{ x_t, @sizeOf(@TypeOf(inputs)), @typeName(@TypeOf(inputs)) });
         var x_d = try zml.Buffer.fromBytes(io, platform, x_t.shape(), @ptrCast(&inputs));
         defer x_d.deinit();
 
@@ -1433,8 +1432,8 @@ pub const Tensor = struct {
     test "convert u2 -> u8" {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
-        const x_u2: [2]@Vector(4, u2) = .{ .{ 0, 1, 2, 3 }, .{ 3, 2, 1, 0 } };
-        std.debug.assert(@sizeOf(@TypeOf(x_u2)) == 2);
+        const x_u2: [2]stdx.Packed(u2) = .{ .pack(0, 1, 2, 3), .pack(3, 2, 1, 0) };
+        comptime std.debug.assert(@sizeOf(@TypeOf(x_u2)) == 2);
         const x_u8: [8]u8 = .{ 0, 1, 2, 3, 3, 2, 1, 0 };
 
         const x_u2_t: Tensor = .init(.{8}, .u2);

@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const stdx = @import("stdx");
+
 const floats = @import("floats.zig");
 
 const C64 = std.math.Complex(f32);
@@ -139,7 +141,7 @@ pub const DataType = enum(u8) {
     pub fn toPackedZigType(comptime dtype: DataType) type {
         return switch (dtype) {
             .bool => bool,
-            .i2, .i4, .u2, .u4 => |dt| @Vector(8 / dt.bitSizeOf(), @FieldType(Value, @tagName(dtype))),
+            .i2, .i4, .u2, .u4 => |dt| stdx.Packed(@FieldType(Value, @tagName(dt))),
             .f4e2m1 => floats.Float4E2M1.Packed,
             inline .c64, .c128 => |dt| @FieldType(Value, @tagName(dt)),
             else => {

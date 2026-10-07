@@ -517,7 +517,7 @@ pub const Float4E2M1 = packed struct(u4) {
 
         pub fn formatNumber(xy: Packed, w: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
             try xy.x.formatNumber(w, n);
-            w.writeByte(',');
+            try w.writeByte(',');
             try xy.y.formatNumber(w, n);
         }
     };

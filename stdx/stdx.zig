@@ -86,3 +86,60 @@ pub fn Once(comptime f: anytype) type {
         }
     };
 }
+
+/// Packed storage of sub-byte values
+///
+/// Note: before Zig 0.17, @Vector(u2, 4) was always one byte and could be used as a storage type,
+/// But that's not true anymore.
+pub fn Packed(T: type) type {
+    return switch (@bitSizeOf(T)) {
+        2 => packed struct(u8) {
+            x: T,
+            y: T,
+            z: T,
+            w: T,
+
+            const P = @This();
+            pub fn pack(x: T, y: T, z: T, w: T) P {
+                return .{ .x = x, .y = y, .z = z, .w = w };
+            }
+
+            pub fn unpack(p: P) [4]T {
+                return .{ p.x, p.y, p.z, p.w };
+            }
+
+            pub fn formatNumber(p: P, w: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
+                try formatPackedNumber(T, &p.unpack(), w, n);
+            }
+        },
+        4 => packed struct(u8) {
+            x: T,
+            y: T,
+
+            const P = @This();
+            pub fn pack(x: T, y: T) P {
+                return .{ .x = x, .y = y };
+            }
+
+            pub fn unpack(p: P) [2]T {
+                return .{ p.x, p.y };
+            }
+
+            pub fn formatNumber(p: P, w: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
+                try formatPackedNumber(T, &p.unpack(), w, n);
+            }
+        },
+        else => debug.compileError("stdx.Packed expects a bitsize of 2 or 4, got type {} with bitsize {d}", .{ T, @bitSizeOf(T) }),
+    };
+}
+
+fn formatPackedNumber(T: type, values: []const T, w: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
+    for (0.., values) |i, val| {
+        if (i > 0) try w.writeByte(',');
+        switch (@typeInfo(T)) {
+            .@"struct" => try val.formatNumber(w, n),
+            .int => try fmt.formatInt(val, n, w),
+            else => try w.print("{}", .{val}),
+        }
+    }
+}
