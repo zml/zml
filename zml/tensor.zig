@@ -77,11 +77,11 @@ pub const Tensor = struct {
     /// Internal use
     ///
     /// Creates a tensor from a Shape and an mlir.Value.
-    /// Note: sharding information is discarded, the output tensor is considered open for replication.
+    /// Sharding is left to compiler propagation; this is not a replicated layout.
     /// Use _resultPropagateSharding when the shape sharding should be propagated.
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
         var res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
-        res._shape._sharding.partition = .open(sh.rank());
+        res._shape._sharding = .open(sh.rank());
 
         if (builtin.mode == .Debug) {
             // Check that the MLIR value actually have the same shape.
@@ -115,7 +115,7 @@ pub const Tensor = struct {
             ._dtype = ctx.dtype(ranked_tensor.elementType()),
             ._dims = .empty,
             ._tags = .{ .buffer = @splat(Shape.TagUnknown), .len = n },
-            ._sharding = .replicated,
+            ._sharding = .open(n),
         };
         for (0..n) |i| {
             sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
@@ -561,6 +561,7 @@ pub const Tensor = struct {
             currentLoc(),
         ).appendTo(currentBlock());
 
+        if (src_bit_size == tgt_bit_size) return _resultPropagateSharding(res_shape, op.result(0));
         return _result(res_shape, op.result(0));
     }
 
@@ -1361,7 +1362,7 @@ pub const Tensor = struct {
 
         const res_type = mlirx.Type.rankedTensor(mlirCtx(), self.shape().withDtype(to));
         const op = dialects.stablehlo.convert(mlirCtx(), self.value(), res_type, currentLoc()).appendTo(currentBlock());
-        return _result(self._shape.withDtype(to), op.result(0));
+        return _resultPropagateSharding(self._shape.withDtype(to), op.result(0));
     }
 
     test "convert f32 -> f4e2m1" {
@@ -2708,7 +2709,7 @@ pub const Tensor = struct {
             mlirx.Type.rankedTensor(mlirCtx(), res_shape),
             currentLoc(),
         ).appendTo(currentBlock());
-        return _result(res_shape, op.result(0));
+        return _resultPropagateSharding(res_shape, op.result(0));
     }
 
     pub const LinspaceArgs = struct {
@@ -2783,7 +2784,8 @@ pub const Tensor = struct {
     }
 
     pub fn zeroes(sh: Shape) Tensor {
-        return Tensor.constant(sh.dtype().zero()).broad(sh);
+        const result = Tensor.constant(sh.dtype().zero()).broad(sh);
+        return _resultPropagateSharding(sh, result.value());
     }
 
     pub fn uninitialized(sh: Shape) Tensor {
@@ -2798,7 +2800,7 @@ pub const Tensor = struct {
             .appendTo(currentBlock());
         const tensor = dialects.stablehlo.unpin(ctx.mlir_ctx, buffer.result(0), ctx.location)
             .appendTo(currentBlock());
-        return _result(sh, tensor.result(0));
+        return _resultPropagateSharding(sh, tensor.result(0));
     }
 
     /// Embeds a buffer with concrete values into an Mlir program.
@@ -2806,7 +2808,7 @@ pub const Tensor = struct {
         const elem_type = mlirx.Type.fromDType(mlirCtx(), sh.dtype());
         //const elem_type = mlirx.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {f}", .{val.shape()});
         const constant_op = dialects.stablehlo.constant(mlirCtx(), sh.dims(), elem_type, bytes_, currentLoc()).appendTo(currentBlock());
-        return _result(sh, constant_op.result(0));
+        return _resultPropagateSharding(sh, constant_op.result(0));
     }
 
     /// Returns a Tensor containing the result of the outer product between the input Tensors.
@@ -4215,7 +4217,7 @@ pub const Tensor = struct {
             offset_values[0..self.rank()],
             currentLoc(),
         ).appendTo(currentBlock());
-        return _result(self._shape, op.result(0));
+        return _resultPropagateSharding(self._shape, op.result(0));
     }
 
     test dynamicUpdateSlice {

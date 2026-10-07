@@ -41,10 +41,11 @@ pub fn fusedExperts(
 
     const expert_parallelism = gate_up.weight.shape().partition(.expert).isSharded();
 
+    const boundary: zml.ops.ManualComputation = .{ .mesh = gate_up.weight.shape()._sharding.mesh orelse zml.Compiler.current().platform.replicated_mesh };
     const context: Context = .{
-        .input = input,
-        .ids = ids,
-        .weights = weights,
+        .input = boundary.input(input, .{}),
+        .ids = boundary.input(ids, .{}),
+        .weights = boundary.input(weights, .{}),
         .w1 = gate_up.weight.bitCast(.u8),
         .s1 = gq.scales,
         .w2 = down.weight.bitCast(.u8),
@@ -57,7 +58,7 @@ pub fn fusedExperts(
     };
 
     return if (expert_parallelism)
-        zml.ops.manualComputation(Context.body, context, input.shape())
+        boundary.call(Context.body, context, boundary.output(input.shape(), .{}))
     else
         context.body(input.shape());
 }

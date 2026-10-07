@@ -58,10 +58,11 @@ pub fn fusedExperts(
     // multiplied in the up epilogue, before the down projection: applying it
     // after would have to move into the down epilogue or the reduction.
     stdx.debug.assert(options.routing_weight_placement == .before_down, "cute_mxfp4 backend only supports routing_weight_placement = .before_down, got {}", .{options.routing_weight_placement});
+    const boundary: zml.ops.ManualComputation = .{ .mesh = gate_up.weight.shape()._sharding.mesh orelse zml.Compiler.current().platform.replicated_mesh };
     const context: Context = .{
-        .input = input,
-        .ids = ids,
-        .weights = weights,
+        .input = boundary.input(input, .{}),
+        .ids = boundary.input(ids, .{}),
+        .weights = boundary.input(weights, .{}),
         .w1 = gate_up.weight,
         .s1 = gq.scales,
         .w2 = down.weight,
@@ -71,7 +72,7 @@ pub fn fusedExperts(
         .expert_parallel = expert_parallelism,
     };
     return if (expert_parallelism)
-        zml.ops.manualComputation(Context.body, context, input.shape())
+        boundary.call(Context.body, context, boundary.output(input.shape(), .{}))
     else
         context.body(input.shape());
 }

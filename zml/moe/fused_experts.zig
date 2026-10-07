@@ -33,12 +33,13 @@ pub fn fusedExperts(
     else
         .{ .gate_up = .concatenated, .packing = .plain };
 
+    const boundary: zml.ops.ManualComputation = .{ .mesh = gate_up.weight.shape()._sharding.mesh orelse zml.Compiler.current().platform.replicated_mesh };
     const args: FusedExpertsArgs = .{
-        .hidden_states = input,
+        .hidden_states = boundary.input(input, .{}),
         .gate_up = gate_up,
         .down = down,
-        .topk_weights = topk_weights,
-        .topk_ids = topk_ids,
+        .topk_weights = boundary.input(topk_weights, .{}),
+        .topk_ids = boundary.input(topk_ids, .{}),
         .activation = opts.activation,
         .quantize_input = opts.quantize_input,
         .gate_up_layout = layout.gate_up,
@@ -50,7 +51,7 @@ pub fn fusedExperts(
         return fusedExpertsImpl(args, backend);
     }
 
-    return zml.ops.manualComputation(
+    return boundary.call(
         (struct {
             args: FusedExpertsArgs,
             global_num_experts: i64,
@@ -77,7 +78,7 @@ pub fn fusedExperts(
             }
         }).call,
         .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert) },
-        input.shape(),
+        boundary.output(input.shape(), .{}),
     );
 }
 

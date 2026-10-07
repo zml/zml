@@ -22,8 +22,12 @@ partition: Partitioning,
 pub const MAX_MESH_RANK = 4;
 pub const replicated: Sharding = .{ .mesh = null, .partition = .replicated(Shape.MAX_RANK) };
 
+pub fn open(rank: usize) Sharding {
+    return .{ .mesh = null, .partition = .open(rank) };
+}
+
 pub fn get(sharding: Sharding, ax: usize) PartitionSpec {
-    return if (sharding.mesh == null) .replicated else sharding.partition.get(ax);
+    return sharding.partition.get(ax);
 }
 
 pub fn set(self: Sharding, ax: usize, spec: PartitionSpec) Sharding {
@@ -51,11 +55,51 @@ pub fn toArray(self: Sharding) [Shape.MAX_RANK]PartitionSpec {
 }
 
 pub fn isFullyReplicated(self: Sharding) bool {
-    if (self.mesh == null) return true;
     for (self.partition.toArray()) |spec| {
         if (spec != .replicated and spec != .out_of_bound) return false;
     }
     return true;
+}
+
+/// Resolve unspecified dimensions at a buffer or fully manual computation boundary.
+/// Graph constraints must keep their open dimensions until such a boundary.
+pub fn closed(self: Sharding, rank: usize) Sharding {
+    var result = self;
+    for (0..rank) |ax| {
+        if (result.get(ax) == .open) result.partition = result.partition.set(ax, .replicated);
+    }
+    for (rank..Shape.MAX_RANK) |ax| result.partition = result.partition.set(ax, .out_of_bound);
+    return result;
+}
+
+/// Translate mesh-relative indices without changing which slice each device owns.
+/// Meshes over different physical topologies require an explicit resharding contract.
+pub fn onMesh(self: Sharding, mesh: *const Mesh, rank: usize) error{IncompatibleMeshes}!Sharding {
+    var result = self;
+    result.mesh = mesh;
+    const source = self.mesh orelse return result;
+    if (source == mesh) return result;
+    if (source.physical != mesh.physical) return error.IncompatibleMeshes;
+
+    for (0..rank) |ax| {
+        const source_axis = self.get(ax).meshAxis() orelse continue;
+        var source_used: std.EnumSet(PhysicalAxisTag) = .empty;
+        // The total device count is divisible by every axis's partition count.
+        const source_split = calculateSplit(source, source.numDevices(), source.binding(source_axis), &source_used) catch unreachable;
+        if (source_split.num_devices == 1) {
+            result.partition = result.partition.set(ax, .replicated);
+            continue;
+        }
+        for (0..mesh.logical.axes.len) |target_axis| {
+            var target_used: std.EnumSet(PhysicalAxisTag) = .empty;
+            const target_split = calculateSplit(mesh, mesh.numDevices(), mesh.binding(target_axis), &target_used) catch unreachable;
+            if (std.meta.eql(source_split, target_split)) {
+                result.partition = result.partition.set(ax, .sharded(@intCast(target_axis)));
+                break;
+            }
+        } else return error.IncompatibleMeshes;
+    }
+    return result;
 }
 
 /// An unspecified mesh is compatible with any sharding. On the same mesh,
@@ -97,8 +141,39 @@ test isCompatible {
     }
 }
 
+test "sharding boundaries distinguish open dimensions and remap logical axes" {
+    const unspecified: Sharding = .open(2);
+    try std.testing.expect(!unspecified.isFullyReplicated());
+    try std.testing.expectEqual(PartitionSpec.open, unspecified.get(0));
+    try std.testing.expect(unspecified.closed(2).isFullyReplicated());
+
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+    const physical = try runner.physical(.{ .x = 2, .y = 2 }, .{ .mesh = .torus });
+    const source: Mesh = try .init("source", &physical, .mesh(.{ .data = .balanced, .model = .balanced }), .parseBindings(.{ .data = .link_x, .model = .link_y }));
+    const target: Mesh = try .init("target", &physical, .mesh(.{ .experts = .balanced, .batch = .balanced }), .parseBindings(.{ .experts = .link_y, .batch = .link_x }));
+    const original = Shape.init(.{ .b = 8, .h = 8 }, .f32).withPartitioning(&source, .{ .b = .data, .h = .model });
+    var mapped = original;
+    mapped._sharding = try original._sharding.onMesh(&target, original.rank());
+    try std.testing.expectEqual(PartitionSpec.mesh_axis_1, mapped.partition(.b));
+    try std.testing.expectEqual(PartitionSpec.mesh_axis_0, mapped.partition(.h));
+    const original_placement: Placement = try .init(original);
+    const mapped_placement: Placement = try .init(mapped);
+    for (physical.devices_in_canonical_order) |device| {
+        try std.testing.expectEqualDeep(original_placement.slices(device.coords), mapped_placement.slices(device.coords));
+    }
+
+    const incompatible: Mesh = try .init("incompatible", &physical, .mesh(.{ .model = .balanced }), .parseBindings(.{ .model = .link_x }));
+    try std.testing.expectError(error.IncompatibleMeshes, original._sharding.onMesh(&incompatible, original.rank()));
+    const other_physical = try runner.physical(.{ .x = 4 }, .{ .mesh = .torus });
+    const other: Mesh = try .init("other", &other_physical, .mesh(.{ .model = .balanced }), .parseBindings(.{ .model = .link_x }));
+    try std.testing.expectError(error.IncompatibleMeshes, original._sharding.onMesh(&other, original.rank()));
+    try std.testing.expect((try original.withReplicatedPartitioning()._sharding.onMesh(&target, original.rank())).isFullyReplicated());
+}
+
 pub fn format(self: Sharding, writer: *std.Io.Writer) !void {
-    const mesh = self.mesh orelse return writer.writeAll("{replicated}");
+    const mesh = self.mesh orelse return writer.writeAll(if (self.isFullyReplicated()) "{replicated}" else "{open}");
     const specs = self.partition.toArray();
     var rank = specs.len;
     while (rank > 0 and specs[rank - 1] == .out_of_bound) rank -= 1;
@@ -204,50 +279,14 @@ pub fn sdyPerValueShardingAttr(
 pub fn sdyManualAxesAttr(
     allocator: std.mem.Allocator,
     ctx: *mlir.Context,
-    in_shapes: []const Shape,
-    out_shapes: []const Shape,
     mesh: *const Mesh,
 ) error{OutOfMemory}!*const mlir.Attribute {
-    var axis_names = std.ArrayList([]const u8).empty;
-    defer axis_names.deinit(allocator);
-
-    const Collect = struct {
-        fn appendUnique(list: *std.ArrayList([]const u8), allocator_: std.mem.Allocator, axis_name: []const u8) void {
-            for (list.items) |existing| {
-                if (std.mem.eql(u8, existing, axis_name)) return;
-            }
-            list.append(allocator_, axis_name) catch unreachable;
-        }
-    };
-
-    for (in_shapes) |shape| {
-        const attr = try mesh.sdyShardingAttrForShape(allocator, ctx, shape);
-        for (0..attr.numReplicatedAxes()) |i| {
-            Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
-        }
-        for (0..attr.numDimensions()) |i| {
-            const dim = attr.dimension(i);
-            for (0..dim.numAxes()) |j| {
-                Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
-            }
-        }
-    }
-    for (out_shapes) |shape| {
-        const attr = try mesh.sdyShardingAttrForShape(allocator, ctx, shape);
-        for (0..attr.numReplicatedAxes()) |i| {
-            Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
-        }
-        for (0..attr.numDimensions()) |i| {
-            const dim = attr.dimension(i);
-            for (0..dim.numAxes()) |j| {
-                Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
-            }
-        }
-    }
-
-    const axes = try allocator.alloc(*const mlir.StringAttribute, axis_names.items.len);
-    for (axis_names.items, 0..) |axis_name, i| {
-        axes[i] = mlir.StringAttribute.init(ctx, axis_name);
+    // Fully local bodies are manual on every mesh axis. Shardy requires these
+    // in mesh declaration order, not tensor dimension order.
+    const view = mesh.physicalView();
+    const axes = try allocator.alloc(*const mlir.StringAttribute, view.axes.len);
+    for (view.axes.constSlice(), axes) |axis, *attr| {
+        attr.* = mlir.StringAttribute.init(ctx, @tagName(axis.tag));
     }
 
     return dialects.shardy.ManualAxesAttribute.init(ctx, axes).asAttr();
@@ -1724,8 +1763,11 @@ pub const Mesh = struct {
             };
         }
 
-        const replicated_axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, mapping.replicated_axes.len);
-        for (replicated_axes, mapping.replicated_axes.slice()) |*r, p_idx| {
+        // Unused axes remain available to propagation when a dimension is open.
+        var has_open = false;
+        for (0..shape.rank()) |ax| has_open = has_open or shape.partition(ax) == .open;
+        const replicated_axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, if (has_open) 0 else mapping.replicated_axes.len);
+        for (replicated_axes, mapping.replicated_axes.slice()[0..replicated_axes.len]) |*r, p_idx| {
             r.* = .named(ctx, @tagName(mapping.view.axes.get(p_idx).tag));
         }
 
@@ -2543,7 +2585,7 @@ test "mesh: open and replicated dimension mix" {
     try runner.run(.{
         .mesh = &mesh,
         .shape = Shape.init(.{ .batch = 8, .model = 8 }, .f32).withPartitioning(&mesh, .{ .batch = .open, .model = .replicated }),
-        .expected_sdy = "#sdy.sharding<@mix_mesh, [{?}, {}], replicated={\"link_x\", \"link_y\"}>",
+        .expected_sdy = "#sdy.sharding<@mix_mesh, [{?}, {}]>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 8 }, .{ 0, 8 } } },
             .{ .device_id = 1, .slices = &.{ .{ 0, 8 }, .{ 0, 8 } } },

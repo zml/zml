@@ -641,7 +641,11 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
 
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
-                .shape = og_shape,
+                .shape = blk: {
+                    var shape = og_shape;
+                    shape._sharding = shape._sharding.closed(shape.rank());
+                    break :blk shape;
+                },
                 .value = value,
             });
         }
@@ -676,7 +680,11 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
                 .id = tensor.id,
                 // const packed_shape = og_shape.packedShape();
                 // TODO: clarify why this og_shape and not packedShape()
-                .shape = og_shape,
+                .shape = blk: {
+                    var shape = og_shape;
+                    shape._sharding = shape._sharding.closed(shape.rank());
+                    break :blk shape;
+                },
                 .value = value,
             });
         }
