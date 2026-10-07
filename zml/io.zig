@@ -199,6 +199,23 @@ pub const TensorStore = struct {
             return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .{ .mesh = resolved_mesh, .partition = partition });
         }
 
+        /// The checkpoint tensor `subkey` with its axis `axis` split into `split` (a view of its row-major data: the loader
+        /// slices the view per device), e.g. a fused [expert, 2 F, d] as [expert, 2, F, d] to shard F across devices with
+        /// each device's gate and up rows paired.
+        pub fn createTensorSplitAxis(self: View, subkey: []const u8, tags: anytype, axis: anytype, split: anytype, mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
+            var buffer: [256]u8 = undefined;
+            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+            const source = self.store.dupeSource(key) orelse stdx.debug.panic("Checkpoint has no tensor named {s}", .{key});
+            const sources = self.store.arena.allocator().alloc(*safetensors.Tensor, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            sources[0] = source;
+            const resolved_mesh = self.store.mesh(mesh_);
+            var shape = source.shape.withTags(tags).splitAxis(axis, split);
+            shape = shape.withPartitioning(resolved_mesh, Sharding.Partitioning.parse(shape.tags(), resolved_mesh, .replicated, partitioning));
+            const tensor: Tensor = .fromShape(shape);
+            self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            return tensor;
+        }
+
         pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
             return self.maybeCreateHostPinnedTensor(subkey, tags, mesh_, partitioning) orelse
                 stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
@@ -530,8 +547,10 @@ pub const Loader = struct {
         } else null;
         defer if (node) |*n| n.end();
 
+        // Each source as the executable takes it (its sharding: a device's part only).
         for (sources, 0..) |source, i| {
-            self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], .{} });
+            const shape = if (i < exe.input_shapes.len and exe.input_shapes[i].eqlDims(source.shape)) exe.input_shapes[i] else source.shape;
+            self.group.async(io, loadSingle, .{ self, io, source, shape, &buffers[i], &loaded[i], .{} });
         }
         self.group.await(io) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
