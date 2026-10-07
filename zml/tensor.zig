@@ -38,7 +38,7 @@ pub const Tensor = struct {
     }
 
     fn nextTensorId() Id {
-        return @fromBackingInt(@intCast(Tensor.current_id.fetchAdd(1, .seq_cst)));
+        return @enumFromInt(Tensor.current_id.fetchAdd(1, .seq_cst));
     }
 
     pub fn fromShape(shape_: Shape) Tensor {
@@ -83,7 +83,7 @@ pub const Tensor = struct {
         var res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
         res._shape._sharding.partition = .open(sh.rank());
 
-        if (builtin.mode == .debug) {
+        if (builtin.mode == .Debug) {
             // Check that the MLIR value actually have the same shape.
             const other = fromMlirValue(val);
             const eql_dtype = sh.dtype() == other.dtype();
@@ -468,7 +468,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
         const io = std.testing.io;
 
-        const inputs: [6]stdx.Packed(i4) = .{ .pack(-3.0, -2), .pack(-1, 1), .pack(2, 3), .pack(1, 2), .pack(3, 4), .pack(5, -5) };
+        const inputs: [6]@Vector(2, i4) = .{ .{ -3.0, -2 }, .{ -1, 1 }, .{ 2, 3 }, .{ 1, 2 }, .{ 3, 4 }, .{ 5, -5 } };
         const x_t = Tensor.init(.{ 6, 2 }, .i4);
         const y_t = Tensor.init(.{ 6, 2 }, .i4);
         const z_t = Tensor.init(.{ 6, 2 }, .i4);
@@ -1432,8 +1432,8 @@ pub const Tensor = struct {
     test "convert u2 -> u8" {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
-        const x_u2: [2]stdx.Packed(u2) = .{ .pack(0, 1, 2, 3), .pack(3, 2, 1, 0) };
-        comptime std.debug.assert(@sizeOf(@TypeOf(x_u2)) == 2);
+        const x_u2: [2]@Vector(4, u2) = .{ .{ 0, 1, 2, 3 }, .{ 3, 2, 1, 0 } };
+        std.debug.assert(@sizeOf(@TypeOf(x_u2)) == 2);
         const x_u8: [8]u8 = .{ 0, 1, 2, 3, 3, 2, 1, 0 };
 
         const x_u2_t: Tensor = .init(.{8}, .u2);
@@ -3809,8 +3809,8 @@ pub const Tensor = struct {
         const has_name: ?[:0]const u8, const a = switch (@typeInfo(@TypeOf(named_axis_))) {
             .int, .comptime_int => .{ null, self.axis(@as(i64, @intCast(named_axis_))) },
             .@"struct" => |info| blk: {
-                stdx.debug.assertComptime(info.field_names.len == 1, err_msg, .{});
-                break :blk .{ info.field_names[0], self.axis(@field(named_axis_, info.field_names[0])) };
+                stdx.debug.assertComptime(info.fields.len == 1, err_msg, .{});
+                break :blk .{ info.fields[0].name, self.axis(@field(named_axis_, info.fields[0].name)) };
             },
             else => stdx.debug.compileError(err_msg, .{}),
         };

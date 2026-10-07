@@ -151,9 +151,8 @@ const Model = struct {
     }
 };
 
-pub fn run(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, state: *data.SystemState) !void {
-    var tty_buffer: [4096]u8 = undefined;
-    var app = try vxfw.App.init(io, allocator, env_map, &tty_buffer);
+pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !void {
+    var app = try vxfw.App.init(allocator, io);
     defer app.deinit();
 
     var model: Model = .{

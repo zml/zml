@@ -22,8 +22,8 @@ pub const Platform = enum {
     metal,
 
     pub fn selectFirstAcceleratorEnabled() error{Unavailable}!Platform {
-        inline for (@typeInfo(Platform).@"enum".field_names) |field| {
-            const target: Platform = @field(Platform, field);
+        inline for (@typeInfo(Platform).@"enum".fields) |field| {
+            const target: Platform = @enumFromInt(field.value);
             if (comptime (target != .cpu and target.isEnabled())) return target;
         }
 

@@ -58,19 +58,19 @@ pub const Shape = struct {
         if (comptime stdx.meta.isStruct(T)) {
             var dims_: DimsArray = .empty;
             var tags_: TagsArray = .empty;
-            inline for (comptime std.meta.fieldNames(T), comptime std.meta.fieldTypes(T)) |field_name, Field| {
-                const fv = @field(v, field_name);
-                if (comptime stdx.meta.isInteger(Field)) {
+            inline for (std.meta.fields(T)) |field| {
+                const fv = @field(v, field.name);
+                if (comptime stdx.meta.isInteger(field.type)) {
                     dims_.appendAssumeCapacity(@intCast(fv));
                 } else if (@TypeOf(fv) == @EnumLiteral() and comptime isAutoDim(fv)) {
                     dims_.appendAssumeCapacity(-1);
                 } else {
-                    stdx.debug.compileError("Field {s} should be an integer or an auto dimension, got {}", .{ field_name, Field });
+                    stdx.debug.compileError("Field {s} should be an integer or an auto dimension, got {}", .{ field.name, field.type });
                 }
                 if (comptime stdx.meta.isTuple(T)) {
                     tags_.appendAssumeCapacity(TagUnknown);
                 } else {
-                    tags_.appendAssumeCapacity(toTag(field_name));
+                    tags_.appendAssumeCapacity(toTag(field));
                 }
             }
 
@@ -107,9 +107,9 @@ pub const Shape = struct {
         }
 
         if (comptime stdx.meta.isTupleOfAny(T, isAxisConvertible)) {
-            inline for (comptime std.meta.fieldNames(T)) |field_name| {
-                axes_.appendAssumeCapacity(self.axis(@field(v, field_name)));
-                tags_.appendAssumeCapacity(self.tag(@field(v, field_name)));
+            inline for (std.meta.fields(T)) |field| {
+                axes_.appendAssumeCapacity(self.axis(@field(v, field.name)));
+                tags_.appendAssumeCapacity(self.tag(@field(v, field.name)));
             }
             return .{ axes_, tags_ };
         }
@@ -191,7 +191,7 @@ pub const Shape = struct {
 
     fn isTagConvertible(comptime T: type) bool {
         return switch (T) {
-            @EnumLiteral(), [:0]const u8, Tag => true,
+            @EnumLiteral(), std.builtin.Type.StructField, Tag => true,
             else => false,
         };
     }
@@ -200,14 +200,14 @@ pub const Shape = struct {
         const T = @TypeOf(v);
         return switch (T) {
             @EnumLiteral() => @tagName(v).ptr,
-            [:0]const u8 => v.ptr,
+            std.builtin.Type.StructField => v.name.ptr,
             Tag => v,
-            else => stdx.debug.compileError("Shape tag should be an @EnumLiteral(), a Shape.Tag or a field name, got {}", .{T}),
+            else => stdx.debug.compileError("Shape tag should be an @EnumLiteral(), a Shape.Tag or a StructField, got {}", .{T}),
         };
     }
 
     fn ensureAttributesAreSync(self: Shape) void {
-        if (builtin.mode == .debug) {
+        if (builtin.mode == .Debug) {
             stdx.debug.assert(self._dims.len == self._tags.len, "Tags, dims and partitioning have diverged! dims={d} tags={d}", .{ self._dims.len, self._tags.len });
         }
     }
@@ -312,8 +312,8 @@ pub const Shape = struct {
         }
 
         if (comptime stdx.meta.isStruct(T)) {
-            inline for (comptime std.meta.fieldNames(T)) |field_name| {
-                res.appendAssumeCapacity(self.axis(@field(axes_, field_name)));
+            inline for (std.meta.fields(T)) |field| {
+                res.appendAssumeCapacity(self.axis(@field(axes_, field.name)));
             }
             return res;
         }
@@ -861,11 +861,11 @@ pub const Shape = struct {
         var res = self;
         for (0..self.rank()) |ax| {
             const mesh_axis = self.partition(ax).meshAxis() orelse continue;
-            inline for (comptime std.meta.fieldNames(T)) |field_name| {
-                const old_axis = mesh.resolveLogicalAxis(toTag(field_name)) orelse
-                    stdx.debug.panic("Mesh '{s}' has no logical axis '{s}'", .{ mesh.name, field_name });
+            inline for (std.meta.fields(T)) |field| {
+                const old_axis = mesh.resolveLogicalAxis(toTag(field)) orelse
+                    stdx.debug.panic("Mesh '{s}' has no logical axis '{s}'", .{ mesh.name, field.name });
                 if (mesh_axis == old_axis) {
-                    const new_tag = toTag(@field(mapping, field_name));
+                    const new_tag = toTag(@field(mapping, field.name));
                     const new_axis = mesh.resolveLogicalAxis(new_tag) orelse
                         stdx.debug.panic("Mesh '{s}' has no logical axis '{s}'", .{ mesh.name, new_tag });
                     res._sharding = res._sharding.set(ax, .sharded(@intCast(new_axis)));
@@ -1015,10 +1015,10 @@ pub const Shape = struct {
         const T = @TypeOf(renames);
         stdx.debug.assertComptime(stdx.meta.isStructOfAny(T, isAxisConvertible), "Must pass a struct of enum literals. Passed: {any}", .{T});
         var res = self;
-        inline for (comptime std.meta.fieldNames(T)) |field_name| {
-            const new_field = @field(renames, field_name);
+        inline for (std.meta.fields(T)) |field| {
+            const new_field = @field(renames, field.name);
             stdx.debug.assert(self.hasTag(new_field) == null, "{f}.rename({any}) failed because of duplicated axis {any}", .{ self, renames, new_field });
-            res._tags.set(self.axis(field_name), toTag(new_field));
+            res._tags.set(self.axis(field), toTag(new_field));
         }
         return res;
     }
@@ -1232,8 +1232,8 @@ pub const Shape = struct {
         stdx.debug.assertComptime(stdx.meta.isStruct(T), "Must pass struct of enum literals like .{ .a = .{ .a1, .a2 } }. Passed: {any}", .{T});
 
         var res = self;
-        inline for (comptime std.meta.fieldNames(T)) |field_name| {
-            res = res.splitAxis(field_name, @field(axes_, field_name));
+        inline for (std.meta.fields(T)) |field| {
+            res = res.splitAxis(field, @field(axes_, field.name));
         }
         return res;
     }
@@ -1344,9 +1344,9 @@ pub const Shape = struct {
         stdx.debug.assertComptime(stdx.meta.isStruct(T), "Must pass struct of enum literals like .{ .a = .{ .a1, .a2 } }. Passed: {any}", .{T});
 
         var res = self;
-        inline for (comptime std.meta.fieldNames(T), comptime std.meta.fieldTypes(T)) |field_name, Field| {
-            stdx.debug.assertComptime(stdx.meta.isTupleOfAny(Field, isAxisConvertible) or stdx.meta.isSliceOfAny(Field, isAxisConvertible), "Must pass struct of axes. Passed: {any}", .{Field});
-            res = res.mergeAxis(field_name, @field(axes_, field_name));
+        inline for (std.meta.fields(T)) |field| {
+            stdx.debug.assertComptime(stdx.meta.isTupleOfAny(field.type, isAxisConvertible) or stdx.meta.isSliceOfAny(field.type, isAxisConvertible), "Must pass struct of axes. Passed: {any}", .{field.type});
+            res = res.mergeAxis(field, @field(axes_, field.name));
         }
         return res;
     }
@@ -1398,14 +1398,14 @@ pub const Shape = struct {
         }
 
         if (comptime stdx.meta.isStruct(V)) {
-            const field_names = comptime std.meta.fieldNames(V);
-            stdx.debug.assertComptime(field_names.len <= constants.MAX_RANK, "Too many fields in struct {} ({d}). Max supported is {d}.", .{ V, field_names.len, constants.MAX_RANK });
-            inline for (field_names) |field_name| {
-                const fv = @field(v, field_name);
+            const fields = std.meta.fields(V);
+            stdx.debug.assertComptime(fields.len <= constants.MAX_RANK, "Too many fields in struct {} ({d}). Max supported is {d}.", .{ V, fields.len, constants.MAX_RANK });
+            inline for (fields) |field| {
+                const fv = @field(v, field.name);
                 vals_.appendAssumeCapacity(fv);
 
                 if (!comptime stdx.meta.isTuple(V)) {
-                    tags_.appendAssumeCapacity(toTag(field_name));
+                    tags_.appendAssumeCapacity(toTag(field));
                 }
             }
             return .{ vals_, tags_ };
@@ -1435,11 +1435,11 @@ pub const Shape = struct {
 
         if (comptime stdx.meta.isStruct(V)) {
             for (0..self.rank()) |_| res.appendAssumeCapacity(default);
-            const field_names = comptime std.meta.fieldNames(V);
-            stdx.debug.assertComptime(field_names.len <= constants.MAX_RANK, "expects up to {} options struct literal, got {}", .{ V, constants.MAX_RANK, field_names.len });
-            inline for (field_names) |field_name| {
-                const a = self.axis(field_name);
-                res.buffer[a] = @field(options, field_name);
+            const fields = std.meta.fields(V);
+            stdx.debug.assertComptime(fields.len <= constants.MAX_RANK, "expects up to {} options struct literal, got {}", .{ V, constants.MAX_RANK, fields.len });
+            inline for (fields) |field| {
+                const a = self.axis(field);
+                res.buffer[a] = @field(options, field.name);
             }
             return res;
         }

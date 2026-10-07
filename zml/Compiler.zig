@@ -164,7 +164,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
     var mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type) = .initUndefined();
     {
         for (0.., &mlir_known_types.values) |i, *mlir_type| {
-            mlir_type.* = mlirx.Type.fromDType(mlir_ctx, @fromBackingInt(@intCast(i)));
+            mlir_type.* = mlirx.Type.fromDType(mlir_ctx, @enumFromInt(i));
         }
     }
 
@@ -316,7 +316,7 @@ pub fn mlirType(self: *const Compiler, dt: DataType) *const mlir.Type {
 pub fn dtype(self: *const Compiler, mlir_type: *const mlir.Type) DataType {
     @setRuntimeSafety(false);
     for (0.., &self.mlir_known_types.values) |i, known_type| {
-        if (known_type == mlir_type) return @fromBackingInt(@intCast(i));
+        if (known_type == mlir_type) return @enumFromInt(i);
     }
     std.debug.panic("Can't convert unknown mlir type to dtype: {f}", .{mlir_type});
 }
