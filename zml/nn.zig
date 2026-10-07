@@ -11,6 +11,7 @@ const ops = @import("ops.zig");
 const quantization = @import("quantization.zig");
 pub const Quantization = quantization.Quantization;
 const Shape = @import("shape.zig").Shape;
+const Sharding = @import("Sharding.zig");
 const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
 const zml = @import("zml.zig");
@@ -142,6 +143,8 @@ pub fn scaledDot(
     const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
     var res_shape: Shape = .scalar(out_dtype);
+    // The result axes' partitioning, their operand axes' (dot_general's, by Shardy's rule).
+    var res_specs: stdx.BoundedArray(Sharding.PartitionSpec, constants.MAX_RANK) = .empty;
     var lhs_batching_axes: Axes = .empty;
     var rhs_batching_axes: Axes = .empty;
     for (dot_axes.batching.constSlice()) |b_axes| {
@@ -150,6 +153,7 @@ pub fn scaledDot(
         var t = lhs._shape.tag(l);
         if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
         res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
+        res_specs.appendAssumeCapacity(lhs._shape.partition(l));
         lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
         rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
     }
@@ -171,6 +175,7 @@ pub fn scaledDot(
             continue;
         }
         res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l));
+        res_specs.appendAssumeCapacity(lhs._shape.partition(l));
     }
     for (0..rhs.rank()) |r| {
         if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
@@ -180,6 +185,7 @@ pub fn scaledDot(
             continue;
         }
         res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
+        res_specs.appendAssumeCapacity(rhs._shape.partition(r));
     }
 
     const lhs_scale_operand = lhs_scale orelse blk: {
@@ -209,9 +215,19 @@ pub fn scaledDot(
     if (opts.rhs_scale_swizzled) {
         stdx.debug.assert(rhs.rank() == 2 and rhs_scale.rank() == 2 and rhs_contracting_axes.get(0) == 1, "scaledDot: a swizzled rhs scale needs a [n, k] rhs, got {f}", .{rhs});
     }
-    return ops.composite("xla.scaled_dot", &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand }, &.{res_shape}, scaledDotReference, res_shape, .{
+    const res = ops.composite("xla.scaled_dot", &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand }, &.{res_shape}, scaledDotReference, res_shape, .{
         .composite_attributes = if (opts.rhs_scale_swizzled) &attributes else attributes[0..1],
     })[0];
+    // Shardy has no rule for the composite: a sharded operand axis is passed on to the result explicitly.
+    for (res_specs.slice()) |*spec| {
+        if (spec.meshAxis() == null) spec.* = .open;
+    }
+    for (res_specs.constSlice()) |spec| {
+        if (spec.meshAxis() == null) continue;
+        const mesh = lhs._shape._sharding.mesh orelse rhs._shape._sharding.mesh orelse break;
+        return res.withPartitioning(mesh, Sharding.Partitioning.init(res_specs.constSlice()));
+    }
+    return res;
 }
 
 pub const ScaledDotOpts = struct {
