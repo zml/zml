@@ -2641,9 +2641,11 @@ fn manualComputationInternal(
     const local_output_shapes = try arena.alloc(Shape, outputs.len);
     const manual_mesh = manualComputationMesh(input_shapes, outputs, ctx.platform.replicated_mesh) catch
         @panic("manualComputation expects all inputs and outputs to use the same mesh");
+    log.debug("manualComputation({s}) will use mesh {s}", .{ @typeName(@TypeOf(body_fn)), manual_mesh.name });
 
     for (input_shapes, 0..) |shape, i| {
         local_input_shapes[i] = Sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, manual_mesh });
+        log.debug("\t- {f} -> {f}", .{ shape, local_input_shapes[i] });
     }
     for (outputs, 0..) |shape, i| {
         local_output_shapes[i] = Sharding.shardedShape(shape) catch std.debug.panic("can't shard {f} for {f}", .{ shape, manual_mesh });
