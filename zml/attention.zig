@@ -192,8 +192,8 @@ test "FlashAttention metadata initializes with explicit sharding outside compila
     inline for (.{ Backend.cuda_fa2, Backend.cuda_fa3 }) |backend| {
         const metadata: Metadata = .init(.fromBackend(backend, 16, 8), &mesh);
         const cuda_metadata = @field(metadata, @tagName(backend));
-        inline for (comptime std.meta.fieldNames(@TypeOf(cuda_metadata))) |field_name| {
-            const shape = @field(cuda_metadata, field_name).shape();
+        inline for (std.meta.fields(@TypeOf(cuda_metadata))) |field| {
+            const shape = @field(cuda_metadata, field.name).shape();
             try std.testing.expectEqual(&mesh, shape._sharding.mesh);
             if (shape.hasTag(.h)) |axis| {
                 try std.testing.expectEqual(zml.Sharding.PartitionSpec.sharded(0), shape.partition(axis));

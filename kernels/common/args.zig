@@ -1,4 +1,6 @@
 pub fn NamedArgs(comptime Spec: type, comptime ValueT: type) type {
-    const field_names = @typeInfo(Spec).@"struct".field_names;
-    return @Struct(.auto, null, field_names, &@splat(ValueT), &@splat(.{}));
+    const in = @typeInfo(Spec).@"struct".fields;
+    comptime var names: [in.len][]const u8 = undefined;
+    for (in, 0..) |f, i| names[i] = f.name;
+    return @Struct(.auto, null, &names, &@splat(ValueT), &@splat(.{}));
 }

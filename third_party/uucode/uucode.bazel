@@ -8,7 +8,6 @@ zig_library(
     main = "src/config.zig",
     srcs = [
         "src/components.zig",
-        "src/ucd_inputs.zig",
         "src/fields.zig",
         "src/multi_slice.zig",
         "src/quirks.zig",
@@ -52,7 +51,6 @@ zig_library(
     main = "src/config.zig",
     srcs = [
         "src/components.zig",
-        "src/ucd_inputs.zig",
         "src/fields.zig",
         "src/multi_slice.zig",
         "src/quirks.zig",

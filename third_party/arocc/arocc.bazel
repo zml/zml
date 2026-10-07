@@ -81,9 +81,18 @@ zig_options(
 )
 
 zig_library(
+    name = "zig",
+    srcs = glob(["deps/zig/**/*.zig"]),
+    main = "deps/zig/lib.zig",
+)
+
+zig_library(
     name = "backend",
     main = "src/backend.zig",
-    deps = [":build_options"],
+    deps = [
+        ":build_options",
+        ":zig",
+    ],
 )
 
 zig_library(
@@ -118,6 +127,7 @@ zig_binary(
         ":assembly_backend",
         ":build_options",
     ],
+    zigopts = ["-fm"],
 )
 
 zig_binary(

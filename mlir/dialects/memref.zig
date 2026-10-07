@@ -216,7 +216,7 @@ pub fn atomic_rmw(
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{value.type_()} },
         .attributes = &.{
-            .named(ctx, "kind", .int(ctx, .i64, @backingInt(kind))),
+            .named(ctx, "kind", .int(ctx, .i64, @intFromEnum(kind))),
         },
         .location = location,
     });

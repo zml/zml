@@ -135,21 +135,21 @@ pub const PartitionSpec = enum(u4) {
     open = 15,
 
     pub fn sharded(mesh_axis: u3) PartitionSpec {
-        return @fromBackingInt(@intCast(mesh_axis));
+        return @enumFromInt(mesh_axis);
     }
 
     /// Extract the mesh axis along which we are sharded. Null if not sharded.
     pub fn meshAxis(self: PartitionSpec) ?u3 {
-        const ax = @backingInt(self);
-        return if (ax < @backingInt(PartitionSpec.replicated)) @intCast(ax) else null;
+        const ax = @intFromEnum(self);
+        return if (ax < @intFromEnum(PartitionSpec.replicated)) @intCast(ax) else null;
     }
 
     pub fn isSharded(self: PartitionSpec) bool {
-        return @backingInt(self) < @backingInt(PartitionSpec.replicated);
+        return @intFromEnum(self) < @intFromEnum(PartitionSpec.replicated);
     }
 
     pub fn isClosed(self: PartitionSpec) bool {
-        return @backingInt(self) <= @backingInt(PartitionSpec.replicated);
+        return @intFromEnum(self) <= @intFromEnum(PartitionSpec.replicated);
     }
 
     test isClosed {
@@ -285,13 +285,13 @@ pub const Partitioning = packed struct {
     }
 
     pub fn splat(spec: PartitionSpec) Partitioning {
-        const vec: Vec = @splat(@backingInt(spec));
+        const vec: Vec = @splat(@intFromEnum(spec));
         return @bitCast(vec);
     }
 
     pub fn repeat(spec: PartitionSpec, rank_: usize) Partitioning {
         std.debug.assert(rank_ <= MAX_RANK);
-        const splatted: Vec = @splat(@backingInt(spec));
+        const splatted: Vec = @splat(@intFromEnum(spec));
         const mask = std.simd.iota(u4, 8) < @as(Vec, @splat(@truncate(rank_)));
         return @bitCast(@select(u4, mask, splatted, @as(Vec, @bitCast(out_of_bound))));
     }
@@ -300,7 +300,7 @@ pub const Partitioning = packed struct {
         std.debug.assert(ax < MAX_RANK);
         const pack: u32 = @bitCast(p);
         const shift: u5 = @intCast(4 * ax);
-        return @fromBackingInt(@truncate(pack >> shift));
+        return @enumFromInt(@as(u4, @truncate(pack >> shift)));
     }
 
     pub fn set(p: Partitioning, ax: usize, spec: PartitionSpec) Partitioning {
@@ -308,7 +308,7 @@ pub const Partitioning = packed struct {
         const pack: u32 = @bitCast(p);
         const shift: u5 = @intCast(4 * ax);
         const mask = @as(u32, 0xf) << shift;
-        return @bitCast((pack & ~mask) | (@as(u32, @backingInt(spec)) << shift));
+        return @bitCast((pack & ~mask) | (@as(u32, @intFromEnum(spec)) << shift));
     }
 
     pub fn rank(p: Partitioning) u8 {
@@ -325,7 +325,7 @@ pub const Partitioning = packed struct {
         const pack: u32 = @bitCast(p);
         const shift: u5 = @intCast(4 * ax);
         const lower_mask = (@as(u32, 1) << shift) - 1;
-        return @bitCast((pack & lower_mask) | ((pack & ~lower_mask) << 4) | (@as(u32, @backingInt(spec)) << shift));
+        return @bitCast((pack & lower_mask) | ((pack & ~lower_mask) << 4) | (@as(u32, @intFromEnum(spec)) << shift));
     }
 
     /// Removes a spec, shifting subsequent slots left and filling the last with unknown.
@@ -334,7 +334,7 @@ pub const Partitioning = packed struct {
         const pack: u32 = @bitCast(p);
         const shift: u5 = @intCast(4 * ax);
         const lower_mask = (@as(u32, 1) << shift) - 1;
-        return @bitCast((pack & lower_mask) | ((pack >> 4) & ~lower_mask) | (@as(u32, @backingInt(PartitionSpec.out_of_bound)) << 28));
+        return @bitCast((pack & lower_mask) | ((pack >> 4) & ~lower_mask) | (@as(u32, @intFromEnum(PartitionSpec.out_of_bound)) << 28));
     }
 
     pub fn toArray(p: Partitioning) [MAX_RANK]PartitionSpec {
@@ -344,7 +344,7 @@ pub const Partitioning = packed struct {
     }
 
     pub fn hasUniqueAxes(p: Partitioning) bool {
-        var used_mesh_axes: std.StaticBitSet(MAX_RANK) = .empty;
+        var used_mesh_axes: std.StaticBitSet(MAX_RANK) = .initEmpty();
         for (0..MAX_RANK) |shape_ax| {
             const spec = p.get(shape_ax);
             if (spec.meshAxis()) |mesh_axis| {
@@ -383,7 +383,7 @@ pub const Partitioning = packed struct {
 
     test "insertion and removal at every slot" {
         var parts: Partitioning = .out_of_bound;
-        for (0..MAX_RANK) |ax| parts = parts.set(ax, @fromBackingInt(@intCast(ax)));
+        for (0..MAX_RANK) |ax| parts = parts.set(ax, @enumFromInt(ax));
         const original = parts.toArray();
         for (0..MAX_RANK) |ax| {
             var inserted = original;
@@ -414,13 +414,13 @@ pub const Partitioning = packed struct {
 
         const T = @TypeOf(partitioning);
         stdx.debug.assertComptime(stdx.meta.isStruct(T), "parsePartitioning expected a struct of enum literals eg {{ .b = .data, .d = .model }}, got: {any}", .{T});
-        inline for (comptime std.meta.fieldNames(T)) |field_name| {
-            const shape_tag = Shape.toTag(field_name);
+        inline for (std.meta.fields(T)) |field| {
+            const shape_tag = Shape.toTag(field);
             const shape_ax = Shape.axisFromTagMaybe(tags, shape_tag) orelse {
-                std.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ stdx.fmt.stringsZ(tags), field_name });
+                std.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ stdx.fmt.stringsZ(tags), field.name });
             };
 
-            const value = @field(partitioning, field_name);
+            const value = @field(partitioning, field.name);
             const spec: PartitionSpec = if (@TypeOf(value) == PartitionSpec) value else switch (value) {
                 .replicated => .replicated,
                 .out_of_bound => std.debug.panic("value out_of_bound not allowed", .{}),
@@ -603,11 +603,11 @@ pub const PhysicalMesh = struct {
 
             try writer.writeAll("], depth_by_tag={");
 
-            const field_names = comptime std.meta.fieldNames(PhysicalAxisTag);
-            inline for (field_names, 0..) |field_name, i| {
+            const fields = std.meta.fields(PhysicalAxisTag);
+            inline for (fields, 0..) |field, i| {
                 if (i > 0) try writer.writeAll(", ");
-                const tag = @field(PhysicalAxisTag, field_name);
-                try writer.writeAll(field_name);
+                const tag = @field(PhysicalAxisTag, field.name);
+                try writer.writeAll(field.name);
                 try writer.writeAll("=");
                 if (self.depth_by_tag.get(tag)) |d| {
                     try writer.print("{d}", .{d});
@@ -1349,9 +1349,9 @@ pub const LogicalMesh = struct {
         var axes: Axes = .empty;
         var intents: Intents = .empty;
 
-        inline for (comptime std.meta.fieldNames(T)) |field_name| {
-            const value = @field(axes_, field_name);
-            axes.appendAssumeCapacity(Shape.toTag(field_name));
+        inline for (std.meta.fields(T)) |field| {
+            const value = @field(axes_, field.name);
+            axes.appendAssumeCapacity(Shape.toTag(field));
             intents.appendAssumeCapacity(intentFromValue(value));
         }
 
@@ -1922,15 +1922,15 @@ pub const Strategy = struct {
     pub fn parseBindings(bindings: anytype) Strategy {
         const err_msg = "Strategy.parseBindings excepts fields to be PhysicalAxisTag or tuple of PhysicalAxisTag, got {}";
         var res: Strategy = .{ .bindings = .empty, .folding = .empty };
-        const info = @typeInfo(@TypeOf(bindings)).@"struct";
-        if (info.field_names.len == 0) @compileError("Strategy.parseBindings requires at least one binding");
-        inline for (info.field_names, info.field_types) |field_name, Field| {
-            switch (@typeInfo(Field)) {
-                .enum_literal, .@"enum" => res.addBinding(field_name, @field(bindings, field_name)),
+        const fields = @typeInfo(@TypeOf(bindings)).@"struct".fields;
+        if (fields.len == 0) @compileError("Strategy.parseBindings requires at least one binding");
+        inline for (fields) |field_info| {
+            switch (@typeInfo(field_info.type)) {
+                .enum_literal, .@"enum" => res.addBinding(field_info, @field(bindings, field_info.name)),
                 .@"struct" => |struct_info| {
                     stdx.debug.assertComptime(struct_info.is_tuple, err_msg, .{@TypeOf(bindings)});
-                    inline for (@field(bindings, field_name)) |axis_tag| {
-                        res.addBinding(field_name, axis_tag);
+                    inline for (@field(bindings, field_info.name)) |axis_tag| {
+                        res.addBinding(field_info, axis_tag);
                     }
                 },
                 else => stdx.debug.compileError(err_msg, .{@TypeOf(bindings)}),
@@ -2042,13 +2042,13 @@ pub const Placement = struct {
     // Note this shape is mainly use to indicate the dims of the sharded buffer.
     // We may want to only store that.
     shape: Shape,
-    global_shape: if (builtin.mode == .debug) Shape else void,
+    global_shape: if (builtin.mode == .Debug) Shape else void,
     axis_plans: stdx.BoundedArray(AxisSplit, Shape.MAX_RANK),
 
     pub fn init(shape: Shape) error{IncompatibleSharding}!Placement {
         var pl: Placement = .{
             .shape = shape, // modified below
-            .global_shape = if (builtin.mode == .debug) shape else {},
+            .global_shape = if (builtin.mode == .Debug) shape else {},
             .axis_plans = .empty, // set below
         };
         // mesh == null => replicated => no axis plan
@@ -2088,7 +2088,7 @@ pub const Placement = struct {
     }
 
     pub fn shardPtr(pl: *const Placement, device: Device.Coords, slice: Slice) [*]const u8 {
-        if (builtin.mode == .debug) {
+        if (builtin.mode == .Debug) {
             // there is a bug in caller code that used a placement for a different shape
             std.debug.assert(pl.global_shape.eql(slice.shape));
         }
@@ -2276,10 +2276,10 @@ const ShardingTest = struct {
     /// Creates a 1D-3D PhysicalMesh from simple dimensions.
     pub fn physical(self: ShardingTest, dims: anytype, geometry: AxisGeometry) !PhysicalMesh {
         const info = @typeInfo(@TypeOf(dims)).@"struct";
-        const N = info.field_names.len;
+        const N = info.fields.len;
         var sizes: [N]usize = undefined;
-        inline for (info.field_names, sizes[0..]) |field_name, *s| {
-            s.* = @intCast(@field(dims, field_name));
+        inline for (info.fields, sizes[0..]) |field, *s| {
+            s.* = @intCast(@field(dims, field.name));
         }
 
         const tags: [3]PhysicalAxisTag = .{ .link_x, .link_y, .link_z };

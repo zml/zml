@@ -163,9 +163,9 @@ pub fn main(init: std.process.Init) !void {
         try json.write(&json_writer.interface, collector.device_infos.items, procs.items);
         try json_writer.flush();
     } else if (args.top) {
-        try tui.run(gpa, io, init.environ_map, &state);
+        try tui.run(gpa, io, &state);
     } else {
-        try static_print.run(arena, io, init.environ_map, &state);
+        try static_print.run(arena, io, &state);
     }
 }
 

@@ -19,7 +19,7 @@ pub fn load(
     key: []const u8,
     data: []const u8,
 ) void {
-    const image = vx.loadImage(allocator, writer, .{ .mem = data }) catch return;
+    const image = vx.loadImage(allocator, undefined, writer, .{ .mem = data }) catch return;
     self.map.put(allocator, key, image) catch return;
 }
 
