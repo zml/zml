@@ -86,43 +86,50 @@ pub const Exe = struct {
         return Results.init(allocator, self.output_shapes, self.platform, self.num_devices);
     }
 
-    pub const FlatBuffers = struct {
-        buffers: []const [*]*pjrt.Buffer,
-        raw_buffers: []const *pjrt.Buffer,
+    /// Per-device lists of PJRT buffer handles, of type `Element`.
+    pub fn FlatBuffers(comptime Element: type) type {
+        return struct {
+            buffers: []const [*]Element,
+            raw_buffers: []const Element,
 
-        num_devices: usize,
+            num_devices: usize,
 
-        pub fn init(allocator: std.mem.Allocator, count: usize, num_devices: usize) !FlatBuffers {
-            const raw_buffers = try allocator.alloc(*pjrt.Buffer, num_devices * count);
-            errdefer allocator.free(raw_buffers);
+            const Self = @This();
 
-            const buffers = try allocator.alloc([*]*pjrt.Buffer, num_devices);
-            errdefer allocator.free(buffers);
+            pub fn init(allocator: std.mem.Allocator, count: usize, num_devices: usize) !Self {
+                const raw_buffers = try allocator.alloc(Element, num_devices * count);
+                errdefer allocator.free(raw_buffers);
 
-            for (0..num_devices) |i| {
-                buffers[i] = raw_buffers[i * count ..].ptr;
+                const buffers = try allocator.alloc([*]Element, num_devices);
+                errdefer allocator.free(buffers);
+
+                for (0..num_devices) |i| {
+                    buffers[i] = raw_buffers[i * count ..].ptr;
+                }
+
+                return .{
+                    .buffers = buffers,
+                    .raw_buffers = raw_buffers,
+                    .num_devices = num_devices,
+                };
             }
 
-            return .{
-                .buffers = buffers,
-                .raw_buffers = raw_buffers,
-                .num_devices = num_devices,
-            };
-        }
-
-        pub fn deinit(self: *const FlatBuffers, allocator: std.mem.Allocator) void {
-            allocator.free(self.buffers);
-            allocator.free(self.raw_buffers);
-        }
-    };
+            pub fn deinit(self: *const Self, allocator: std.mem.Allocator) void {
+                allocator.free(self.buffers);
+                allocator.free(self.raw_buffers);
+            }
+        };
+    }
 
     pub const Arguments = struct {
-        flat_buffers: FlatBuffers,
+        /// Null at baked arguments bound to the executable.
+        flat_buffers: FlatBuffers(?*pjrt.Buffer),
         expected_shapes: []const Shape,
         baked_count: usize = 0,
+        bound_arguments: ?*pjrt.BoundArguments = null,
 
         pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, num_devices: usize) error{OutOfMemory}!Arguments {
-            const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
+            const flat_buffers = try FlatBuffers(?*pjrt.Buffer).init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 
             const expected_shapes = try allocator.dupe(Shape, shapes);
@@ -199,16 +206,46 @@ pub const Exe = struct {
 
             self.baked_count = context.current_index;
         }
+
+        /// Binds the baked arguments to `exe` when the plugin supports it, so that
+        /// executions skip their per-argument work. Baked arguments must not be
+        /// donated and must outlive the binding, which `unbind` destroys.
+        pub fn bindBaked(self: *Arguments, allocator: std.mem.Allocator, exe: *const Exe) !void {
+            stdx.debug.assert(self.bound_arguments == null, "Baked arguments are already bound", .{});
+            if (self.baked_count == 0) return;
+            const extension = exe.platform.pjrt_api.boundArguments() orelse return;
+            for (exe.donated_input_indices) |input_index| {
+                if (input_index < self.baked_count) return;
+            }
+
+            const parameter_indices = try allocator.alloc(i64, self.baked_count);
+            defer allocator.free(parameter_indices);
+            for (parameter_indices, 0..) |*parameter_index, i| parameter_index.* = @intCast(i);
+
+            // Baked slots hold buffers.
+            const argument_lists: []const [*]const *const pjrt.Buffer = @ptrCast(self.flat_buffers.buffers);
+            self.bound_arguments = try extension.create(exe.platform.pjrt_api, exe.exe, parameter_indices, argument_lists);
+            for (self.flat_buffers.buffers) |device_buffers| {
+                @memset(device_buffers[0..self.baked_count], null);
+            }
+        }
+
+        /// Destroys the binding of `bindBaked`. Bake again before running.
+        pub fn unbind(self: *Arguments, exe: *const Exe) void {
+            const bound_arguments = self.bound_arguments orelse return;
+            exe.platform.pjrt_api.boundArguments().?.destroy(exe.platform.pjrt_api, bound_arguments);
+            self.bound_arguments = null;
+        }
     };
 
     pub const Results = struct {
         platform: *const Platform,
-        flat_buffers: FlatBuffers,
+        flat_buffers: FlatBuffers(*pjrt.Buffer),
 
         expected_shapes: []const Shape,
 
         pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, platform: *const Platform, num_devices: usize) !Results {
-            const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
+            const flat_buffers = try FlatBuffers(*pjrt.Buffer).init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 
             const expected_shapes = try allocator.dupe(Shape, shapes);
@@ -326,7 +363,7 @@ pub const Exe = struct {
         // Arguments retain the old handles even when outputs replace the caller's buffers.
         for (self.donated_input_indices) |input_index| {
             for (arguments.flat_buffers.buffers[0..self.num_devices]) |device_buffers| {
-                device_buffers[input_index].deinit(self.platform.pjrt_api);
+                device_buffers[input_index].?.deinit(self.platform.pjrt_api);
             }
         }
     }
@@ -358,6 +395,7 @@ pub const Exe = struct {
             // TODO: Set this flag for undonatable buffers.
             .non_donatable_input_indices = &.{},
             .context = self.context,
+            .bound_arguments = arguments.bound_arguments,
         }) catch |err| {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
@@ -448,16 +486,20 @@ pub fn FnExe(comptime function_: anytype) type {
                 pub const BakedInput = structFieldRange(Input, 0, count);
                 pub const NonBakedInput = structFieldRange(Input, count, @typeInfo(Input).@"struct".fields.len);
 
+                /// Baked inputs are bound to the executable when the plugin supports it:
+                /// they must not be donated and must outlive the runner.
                 pub fn init(exe: *const Self, allocator: std.mem.Allocator, baked: BakedInput) !RunnerSelf {
                     var arguments = try exe.raw.args(allocator);
                     errdefer arguments.deinit(allocator);
                     var results = try exe.raw.results(allocator);
                     errdefer results.deinit(allocator);
                     arguments.bake(baked);
+                    try arguments.bindBaked(allocator, &exe.raw);
                     return .{ .exe = &exe.raw, .args = arguments, .results = results };
                 }
 
                 pub fn deinit(self: *RunnerSelf, allocator: std.mem.Allocator) void {
+                    self.args.unbind(self.exe);
                     self.results.deinit(allocator);
                     self.args.deinit(allocator);
                 }
@@ -682,6 +724,60 @@ test "FnExe runner replaces donated buffers with and without waiting" {
         .outputs = .{ .value = &value_buffer },
     }, .{ .wait = true });
     try std.testing.expectEqual([2]i32{ 21, 42 }, try value_buffer.getValue([2]i32, io));
+}
+
+test "FnExe runner binds baked inputs that are not donated" {
+    const platform = @import("testing.zig").env();
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const Functions = struct {
+        fn forward(inputs: struct { weight: Tensor, bias: Tensor, value: Tensor }) struct { value: Tensor } {
+            return .{ .value = inputs.value.add(inputs.weight).add(inputs.bias).reuseBuffer(inputs.value) };
+        }
+        fn forwardDonatingBias(inputs: struct { bias: Tensor, value: Tensor }) struct { bias: Tensor } {
+            return .{ .bias = inputs.bias.add(inputs.value).reuseBuffer(inputs.bias) };
+        }
+    };
+    const supported = platform.pjrt_api.boundArguments() != null;
+    const shape: Shape = .init(.{2}, .i32);
+
+    const Model = FnExe(Functions.forward);
+    const exe = try Model.compile(allocator, io, platform, .{}, .{.{ .weight = Tensor.fromShape(shape), .bias = Tensor.fromShape(shape), .value = Tensor.fromShape(shape) }});
+    defer exe.deinit();
+
+    var weight_buffer = try Buffer.fromBytes(io, platform, shape, std.mem.asBytes(&[2]i32{ 10, 20 }));
+    defer weight_buffer.deinit();
+    var bias_buffer = try Buffer.fromBytes(io, platform, shape, std.mem.asBytes(&[2]i32{ 100, 200 }));
+    defer bias_buffer.deinit();
+    var value_buffer = try Buffer.fromBytes(io, platform, shape, std.mem.asBytes(&[2]i32{ 1, 2 }));
+    defer value_buffer.deinit();
+    {
+        var runner = try Model.Runner(.{ .weight, .bias }).init(&exe, allocator, .{ .weight = weight_buffer, .bias = bias_buffer });
+        defer runner.deinit(allocator);
+        try std.testing.expectEqual(supported, runner.args.bound_arguments != null);
+
+        for ([_]bool{ false, true }) |wait| {
+            runner.run(io, .{
+                .inputs = .{ .value = value_buffer },
+                .outputs = .{ .value = &value_buffer },
+            }, .{ .wait = wait });
+        }
+        try std.testing.expectEqual([2]i32{ 221, 442 }, try value_buffer.getValue([2]i32, io));
+    }
+    try std.testing.expectEqual([2]i32{ 10, 20 }, try weight_buffer.getValue([2]i32, io));
+
+    // Donated baked inputs cannot be bound.
+    const DonatingModel = FnExe(Functions.forwardDonatingBias);
+    const donating_exe = try DonatingModel.compile(allocator, io, platform, .{}, .{.{ .bias = Tensor.fromShape(shape), .value = Tensor.fromShape(shape) }});
+    defer donating_exe.deinit();
+    var runner = try DonatingModel.Runner(.{.bias}).init(&donating_exe, allocator, .{ .bias = bias_buffer });
+    defer runner.deinit(allocator);
+    try std.testing.expectEqual(null, runner.args.bound_arguments);
+    runner.run(io, .{
+        .inputs = .{ .value = value_buffer },
+        .outputs = .{ .bias = &bias_buffer },
+    }, .{ .wait = true });
+    try std.testing.expectEqual([2]i32{ 321, 642 }, try bias_buffer.getValue([2]i32, io));
 }
 
 test "FnExe runner replaces unchanged donated buffers" {

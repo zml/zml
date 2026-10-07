@@ -197,6 +197,7 @@ pub const Api = struct {
             raw_buffer = c.PJRT_Extension_Type_RawBuffer,
             phase_compile = c.PJRT_Extension_Type_PhaseCompile,
             unknown = c.PJRT_Extension_Type_Unknown,
+            bound_arguments = c.PJRT_Extension_Type_BoundArguments,
         };
 
         pub const Extension = union(Type) {
@@ -209,6 +210,7 @@ pub const Api = struct {
             raw_buffer: *const c.PJRT_RawBuffer_Extension,
             phase_compile: *const c.PJRT_PhaseCompile_Extension,
             unknown: *const c.PJRT_Extension_Base,
+            bound_arguments: *const c.PJRT_BoundArguments_Extension,
         };
 
         pub const Iterator = struct {
@@ -281,6 +283,13 @@ pub const Api = struct {
             return .{ .inner = ext.ffi };
         }
         return null;
+    }
+
+    /// Returns null when the plugin cannot bind arguments.
+    pub fn boundArguments(api: *const Api) ?BoundArgumentsExtension {
+        const ext = (api.extension(.bound_arguments) orelse return null).bound_arguments;
+        if (ext.base.struct_size < meta.structSize(c.PJRT_BoundArguments_Extension)) return null;
+        return .{ .inner = ext };
     }
 
     pub fn profiler(self: *const Api, options_pb: []const u8) ApiError!?Profiler {
@@ -989,15 +998,26 @@ pub const LoadedExecutable = opaque {
 
     pub const ExecuteArgs = struct {
         num_args: usize,
-        arguments: []const [*]const *const Buffer,
+        /// Null at parameters bound by `bound_arguments`.
+        arguments: []const [*]const ?*const Buffer,
         results: []const [*]*Buffer,
         events: ?[]?*Event,
         non_donatable_input_indices: []const i64 = &.{},
         context: ?*ExecuteContext,
+        bound_arguments: ?*const BoundArguments = null,
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ApiError!void {
+        var bound_arguments: c.PJRT_ExecuteOptions_BoundArguments = .{
+            .base = .{
+                .struct_size = meta.structSize(c.PJRT_ExecuteOptions_BoundArguments),
+                .type = c.PJRT_Extension_Type_BoundArguments,
+                .next = null,
+            },
+            .bound_arguments = @ptrCast(@constCast(args.bound_arguments)),
+        };
         var options: meta.Struct(c.PJRT_ExecuteOptions) = .{
+            .extension_start = if (args.bound_arguments != null) &bound_arguments.base else null,
             .non_donatable_input_indices = @ptrCast(args.non_donatable_input_indices),
             .num_non_donatable_input_indices = args.non_donatable_input_indices.len,
             .context = @ptrCast(args.context),
@@ -1751,6 +1771,48 @@ pub const Ffi = extern struct {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
             log.err("addUserData error: {s}", .{pjrt_error.getMessage(api)});
             return pjrt_error.getCode(api).toApiError();
+        }
+    }
+};
+
+/// Buffers bound to parameters of a loaded executable once, for many executions,
+/// such as weights. Executions skip the per-argument work of bound parameters.
+pub const BoundArguments = opaque {};
+
+pub const BoundArgumentsExtension = struct {
+    inner: *const c.PJRT_BoundArguments_Extension,
+
+    /// Binds `argument_lists[i][j]` to parameter `parameter_indices[j]` on the
+    /// i-th addressable device of `executable`; `parameter_indices` is sorted and
+    /// unique. Waits until the buffers are defined. Bound parameters must not be
+    /// donated, bound buffers cannot be donated while bound, and they must
+    /// outlive the binding.
+    pub fn create(
+        self: BoundArgumentsExtension,
+        api: *const Api,
+        executable: *const LoadedExecutable,
+        parameter_indices: []const i64,
+        argument_lists: []const [*]const *const Buffer,
+    ) ApiError!*BoundArguments {
+        var args: meta.Struct(c.PJRT_BoundArguments_Create_Args) = .{
+            .executable = @ptrCast(@constCast(executable)),
+            .parameter_indices = parameter_indices.ptr,
+            .num_parameters = parameter_indices.len,
+            .argument_lists = @ptrCast(argument_lists.ptr),
+            .num_devices = argument_lists.len,
+        };
+        if (self.inner.create.?(@ptrCast(&args))) |pjrt_c_error| {
+            return interpretPjrtError(api, @ptrCast(pjrt_c_error), "PJRT_BoundArguments_Create");
+        }
+        return @ptrCast(args.bound_arguments.?);
+    }
+
+    /// Executions using the binding keep it alive until they complete.
+    pub fn destroy(self: BoundArgumentsExtension, api: *const Api, bound_arguments: *BoundArguments) void {
+        var args: meta.Struct(c.PJRT_BoundArguments_Destroy_Args) = .{ .bound_arguments = @ptrCast(bound_arguments) };
+        if (self.inner.destroy.?(@ptrCast(&args))) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            pjrt_error.deinit(api);
         }
     }
 };

@@ -1,0 +1,130 @@
+diff --git a/xla/pjrt/c/BUILD b/xla/pjrt/c/BUILD
+index 3f370f4f79..92cd815f6d 100644
+--- a/xla/pjrt/c/BUILD
++++ b/xla/pjrt/c/BUILD
+@@ -300,6 +300,13 @@ cc_library(
+     ],
+ )
+ 
++cc_library(
++    name = "pjrt_c_api_bound_arguments_extension_hdrs",
++    hdrs = ["pjrt_c_api_bound_arguments_extension.h"],
++    visibility = ["//visibility:public"],
++    deps = [":pjrt_c_api_hdrs"],
++)
++
+ cc_library(
+     name = "pjrt_c_api_profiler_extension_hdrs",
+     hdrs = ["pjrt_c_api_profiler_extension.h"],
+diff --git a/xla/pjrt/c/pjrt_c_api.h b/xla/pjrt/c/pjrt_c_api.h
+index 1c75a88b5e..c79e64ee2e 100644
+--- a/xla/pjrt/c/pjrt_c_api.h
++++ b/xla/pjrt/c/pjrt_c_api.h
+@@ -53,6 +53,9 @@ extern "C" {
+ // ------------------------------- Extensions ----------------------------------
+ 
+ typedef enum {
++  // ZML fork extension. The value spells "zml" so that it cannot collide with
++  // types appended upstream.
++  PJRT_Extension_Type_BoundArguments = 0x7A6D6C01,
+   PJRT_Extension_Type_Gpu_Custom_Call = 0,
+   PJRT_Extension_Type_Profiler,
+   PJRT_Extension_Type_Custom_Partitioner,
+diff --git a/xla/pjrt/c/pjrt_c_api_bound_arguments_extension.h b/xla/pjrt/c/pjrt_c_api_bound_arguments_extension.h
+new file mode 100644
+index 0000000000..452aa34e85
+--- /dev/null
++++ b/xla/pjrt/c/pjrt_c_api_bound_arguments_extension.h
+@@ -0,0 +1,92 @@
++/* Copyright 2026 The OpenXLA Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++==============================================================================*/
++
++#ifndef XLA_PJRT_C_PJRT_C_API_BOUND_ARGUMENTS_EXTENSION_H_
++#define XLA_PJRT_C_PJRT_C_API_BOUND_ARGUMENTS_EXTENSION_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "xla/pjrt/c/pjrt_c_api.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// Bound arguments are buffers bound to parameters of a loaded executable once,
++// for many executions, such as weights. Executions skip the per-argument work
++// of bound parameters: holds, usage events, checks and address lookups.
++//
++// Bound parameters must not be donated by the executable, and bound buffers
++// cannot be donated while bound. Deleting a bound buffer keeps its memory
++// alive until the binding is destroyed, but bound buffers must outlive the
++// binding. Executions keep the binding alive until they complete.
++
++#define PJRT_API_BOUND_ARGUMENTS_EXTENSION_VERSION 1
++
++typedef struct PJRT_BoundArguments PJRT_BoundArguments;
++
++struct PJRT_BoundArguments_Create_Args {
++  size_t struct_size;
++  PJRT_Extension_Base* extension_start;
++  PJRT_LoadedExecutable* executable;
++  // Sorted and unique parameter indices to bind.
++  const int64_t* parameter_indices;
++  size_t num_parameters;
++  // `argument_lists[i][j]` is the buffer of parameter `parameter_indices[j]`
++  // on the i-th device returned by PJRT_Executable_AddressableDevices.
++  PJRT_Buffer* const* const* argument_lists;
++  size_t num_devices;
++  PJRT_BoundArguments* bound_arguments;  // out
++};
++PJRT_DEFINE_STRUCT_TRAITS(PJRT_BoundArguments_Create_Args, bound_arguments);
++
++// Waits until the buffers are defined and binds them. Fails if a buffer is not
++// on its device, does not match its parameter, or may be donated.
++typedef PJRT_Error* PJRT_BoundArguments_Create(
++    PJRT_BoundArguments_Create_Args* args);
++
++struct PJRT_BoundArguments_Destroy_Args {
++  size_t struct_size;
++  PJRT_Extension_Base* extension_start;
++  PJRT_BoundArguments* bound_arguments;
++};
++PJRT_DEFINE_STRUCT_TRAITS(PJRT_BoundArguments_Destroy_Args, bound_arguments);
++
++// Releases the binding once the executions using it complete.
++typedef PJRT_Error* PJRT_BoundArguments_Destroy(
++    PJRT_BoundArguments_Destroy_Args* args);
++
++// Chain into `PJRT_ExecuteOptions.extension_start`, with type
++// PJRT_Extension_Type_BoundArguments, to execute with bound arguments.
++// Argument lists hold NULL, or the bound buffer, at bound parameters.
++typedef struct PJRT_ExecuteOptions_BoundArguments {
++  PJRT_Extension_Base base;
++  PJRT_BoundArguments* bound_arguments;
++} PJRT_ExecuteOptions_BoundArguments;
++PJRT_DEFINE_STRUCT_TRAITS(PJRT_ExecuteOptions_BoundArguments, bound_arguments);
++
++typedef struct PJRT_BoundArguments_Extension {
++  PJRT_Extension_Base base;
++  PJRT_BoundArguments_Create* create;
++  PJRT_BoundArguments_Destroy* destroy;
++} PJRT_BoundArguments_Extension;
++PJRT_DEFINE_STRUCT_TRAITS(PJRT_BoundArguments_Extension, destroy);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // XLA_PJRT_C_PJRT_C_API_BOUND_ARGUMENTS_EXTENSION_H_

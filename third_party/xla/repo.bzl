@@ -7,6 +7,7 @@ def repo():
         commit = "f3dee9ae87745e151837b2ff1b0485928f8e5a5d",
         patches = [
             "//third_party/xla:cuda-root-path-local-defines.patch",
+            "//third_party/xla:pjrt-bound-arguments-extension.patch",
         ],
         patch_args = ["-p1"],
     )
