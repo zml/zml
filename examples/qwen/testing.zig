@@ -437,7 +437,7 @@ pub fn testLayer(
     layer: anytype,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
 ) !void {
-    const shardings: []const zml.Sharding = &.{};
+    const shardings: []const zml.Sharding = platform.shardings.values();
     const opts: CompareOpts = .{};
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -494,7 +494,7 @@ pub fn testLayer(
     // errdefer unloadBuffers(&args_buffers);
 
     var loader: zml.io.Loader = try .init(allocator, platform, .default);
-    errdefer loader.deinit();
+    defer loader.deinit();
 
     try loader.load(io, ArgsT, &args, &args_buffers, activation_store, &.{}, .{});
     try loader.await(io);

@@ -12,6 +12,7 @@ zig_binary(
     name = "torch2zml",
     srcs = [
         "blocks.zig",
+        "compiler.zig",
         "testing.zig",
         "torch2zml.zig",
     ],
