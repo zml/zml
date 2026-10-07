@@ -311,7 +311,7 @@ pub const Platform = struct {
         const api = try loadOrGetApi(allocator, io, target);
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
-        const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
+        const pjrt_client = try target.createClient(api, options.toNamedValues(target, &named_values_buf));
         const pjrt_devices = pjrt_client.addressableDevices(api);
         try validateDeviceCount(target, pjrt_devices.len);
         if (pjrt_devices.len > MAX_NUM_DEVICES) {

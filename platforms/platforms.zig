@@ -42,6 +42,13 @@ pub const Platform = enum {
             inline else => |tag| @field(platforms, @tagName(tag)).load(allocator, io),
         };
     }
+
+    pub fn createClient(target: Platform, api: *const pjrt.Api, create_options: []const pjrt.NamedValue) pjrt.ClientInitError!*pjrt.Client {
+        return switch (target) {
+            .oneapi => oneapi.createClient(api, create_options),
+            else => pjrt.Client.init(api, create_options),
+        };
+    }
 };
 
 pub const load = Platform.load;
