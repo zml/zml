@@ -250,6 +250,19 @@ gentbl_cc_library(
     deps = [":td_files"],
 )
 
+gentbl_cc_library(
+    name = "fly_rocdl_passes_inc_gen",
+    tbl_outs = {
+        "include/flydsl/Dialect/FlyROCDL/Transforms/Passes.h.inc": [
+            "--gen-pass-decls",
+            "--name=FlyROCDL",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/flydsl/Dialect/FlyROCDL/Transforms/Passes.td",
+    deps = [":td_files"],
+)
+
 cc_library(
     name = "FlyDialect",
     srcs = [
@@ -327,6 +340,9 @@ cc_library(
         "lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp",
         "lib/Dialect/FlyROCDL/CDNA4/CopyAtom.cpp",
         "lib/Dialect/FlyROCDL/CDNA4/MmaAtom.cpp",
+        "lib/Dialect/FlyROCDL/CDNA5/CopyAtom.cpp",
+        "lib/Dialect/FlyROCDL/CDNA5/TdmAtomBuilder.cpp",
+        "lib/Dialect/FlyROCDL/CDNA5/TdmGeometry.cpp",
         "lib/Dialect/FlyROCDL/Dialect.cpp",
         "lib/Dialect/FlyROCDL/GFX11/MmaAtom.cpp",
         "lib/Dialect/FlyROCDL/GFX120X/MmaAtom.cpp",
@@ -334,6 +350,8 @@ cc_library(
         "lib/Dialect/FlyROCDL/GFX1250/MmaAtom.cpp",
         "lib/Dialect/FlyROCDL/GFX1250/MmaAtomScale.cpp",
         "lib/Dialect/FlyROCDL/Ops.cpp",
+        "lib/Dialect/FlyROCDL/Transforms/ClusterAttr.cpp",
+        "lib/Dialect/FlyROCDL/Transforms/ExpandOps.cpp",
     ],
     hdrs = glob([
         "include/flydsl/Dialect/FlyROCDL/**/*.h",
@@ -346,10 +364,12 @@ cc_library(
         ":fly_rocdl_attrs_inc_gen",
         ":fly_rocdl_dialect_inc_gen",
         ":fly_rocdl_ops_inc_gen",
+        ":fly_rocdl_passes_inc_gen",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:ROCDLDialect",
         "@llvm-project//mlir:SCFDialect",
         "@llvm-project//mlir:VectorDialect",
@@ -358,7 +378,10 @@ cc_library(
 
 cc_library(
     name = "FlyToROCDL",
-    srcs = ["lib/Conversion/FlyToROCDL/FlyToROCDL.cpp"],
+    srcs = [
+        "lib/Conversion/FlyToROCDL/FastMathOps.cpp",
+        "lib/Conversion/FlyToROCDL/FlyToROCDL.cpp",
+    ],
     hdrs = glob(["include/flydsl/Conversion/**/*.h"]),
     includes = ["include"],
     deps = [
@@ -368,13 +391,17 @@ cc_library(
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:ArithUtils",
+        "@llvm-project//mlir:ControlFlowTransforms",
         "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:FuncTransforms",
         "@llvm-project//mlir:GPUDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:MathDialect",
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:ROCDLDialect",
         "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:SCFTransforms",
         "@llvm-project//mlir:Transforms",
         "@llvm-project//mlir:VectorDialect",
     ],

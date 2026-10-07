@@ -536,7 +536,7 @@ pub const Value = struct {
         const off: Value = if (@TypeOf(offset) == Value) offset else k.constant(.i32, offset);
         const wid = k.constant(.i32, width);
         const mode_attr = switch (mode) {
-            inline else => |m| fly.parseAttr(k.ctx, "#gpu<shuffle_mode " ++ @tagName(m) ++ ">"),
+            inline else => |m| fly.parseAttr(k.ctx, "#gpu<shuffle_mode<" ++ @tagName(m) ++ ">>"),
         };
         const op = fly.make(k.ctx, "gpu.shuffle", .{
             .operands = .{ .flat = &.{ self.inner, off.inner, wid.inner } },
@@ -1063,7 +1063,9 @@ pub const Builder = struct {
     /// A matrix atom with SSA operands; unlike `gemm`, this needs no register
     /// allocas and can carry its accumulator through control flow.
     pub fn mmaAtomCall(self: *Builder, atom: Value, a: Value, b: Value, c: Value) Value {
-        return self.emit(fly.typed(self.ctx, "mma_atom_call_ssa", &.{ atom.inner, a.inner, b.inner, c.inner }, &.{c.type_()}, .empty, self.loc()));
+        return self.emit(fly.typed(self.ctx, "mma_atom_call_ssa", &.{ atom.inner, a.inner, b.inner, c.inner }, &.{c.type_()}, fly.attrs(&.{
+            .named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ 1, 0, 1, 1, 1 })),
+        }), self.loc()));
     }
 
     /// AMD byte permutation. ROCDL has no corresponding operation at our pin.
@@ -1892,4 +1894,61 @@ test "static queries read inferred types" {
     const tiled = a.x.flatDivide(tile(.{ 16, 8 }));
     try std.testing.expectEqual(@as(i64, 64 * 32), tiled.sizeStatic());
     try std.testing.expectEqual(@as(usize, 4), tiled.shapeStatic().rank());
+}
+
+test "atomic addition builds, verifies and re-parses" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "atomic_add");
+    defer b.deinit();
+    _ = try b.declareArgs(.{});
+    const counter = b.sharedArray(.i32, 1, 4);
+    _ = b.ptrAtomicAdd(counter.emitIter(), b.constant(.i32, 1), .workgroup);
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+
+    // LLVM's current custom assembly stores alignment in the property dictionary.
+    for ([_][]const u8{
+        "llvm.atomicrmw add",
+        "syncscope(\"workgroup\") monotonic <alignment = 4>",
+        ": !llvm.ptr<3>, i32",
+    }) |needle| {
+        if (std.mem.indexOf(u8, ir, needle) == null) {
+            std.debug.print("IR missing `{s}`:\n{s}\n", .{ needle, ir });
+            return error.TestUnexpectedResult;
+        }
+    }
+    const reparsed = try mlir.Module.parse(ctx, ir);
+    defer reparsed.deinit();
+    try std.testing.expect(reparsed.operation().verify());
+}
+
+test "SSA matrix atom builds, verifies and re-parses" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "mma_atom_ssa");
+    defer b.deinit();
+    _ = try b.declareArgs(.{});
+    const atom_type = try fly.rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
+        .m = 16,
+        .n = 16,
+        .k = 16,
+        .elemTyA = .float(ctx, .bf16),
+        .elemTyB = .float(ctx, .bf16),
+        .elemTyAcc = .float(ctx, .f32),
+    });
+    const atom = b.mmaAtom(atom_type.type_());
+    const lhs = b.constant(.bf16, 0).splat(4);
+    const rhs = b.constant(.bf16, 0).splat(4);
+    const acc = b.constant(.f32, 0).splat(4);
+    const result = b.mmaAtomCall(atom, lhs, rhs, acc);
+    try std.testing.expect(result.type_().eql(acc.type_()));
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+
+    const reparsed = try mlir.Module.parse(ctx, ir);
+    defer reparsed.deinit();
+    try std.testing.expect(reparsed.operation().verify());
 }

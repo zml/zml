@@ -27,7 +27,7 @@ pub const ApiVersion = extern struct {
     minor_version: i32,
 };
 
-pub const ExtensionType = enum(c.XLA_FFI_Extension_Type) {
+pub const ExtensionType = enum(c.XLA_FFI_InternalExtension_Type) {
     metadata = c.XLA_FFI_Extension_Metadata,
 };
 
@@ -152,17 +152,17 @@ pub const ExecutionStage = enum(c.XLA_FFI_ExecutionStage) {
 };
 
 pub const ExecutionContext = opaque {
-    pub const inner = TransmuteMixin(ExecutionContext, c.XLA_FFI_ExecutionContext).to;
+    pub const inner = TransmuteMixin(ExecutionContext, c.XLA_FFI_InvokeContext).to;
 
     pub fn getContext(self: *const ExecutionContext, type_id: TypeId, api: *const Api) pjrt.ApiError!*anyopaque {
-        var ret: c.XLA_FFI_ExecutionContext_Get_Args = .{
-            .struct_size = pjrt.pjrtStructSize(c.XLA_FFI_ExecutionContext_Get_Args),
+        var ret: c.XLA_FFI_InvokeContext_Get_Args = .{
+            .struct_size = pjrt.meta.structSize(c.XLA_FFI_InvokeContext_Get_Args),
             .extension_start = api.inner().extension_start,
             .ctx = @ptrCast(@constCast(self)),
             .type_id = @constCast(&type_id),
-            .data = undefined, // set by XLA_FFI_ExecutionContext_Get.
+            .data = undefined, // set by XLA_FFI_InvokeContext_Get.
         };
-        const maybe_err = api.inner().XLA_FFI_ExecutionContext_Get.?(&ret);
+        const maybe_err = api.inner().XLA_FFI_InvokeContext_Get.?(&ret);
 
         if (maybe_err) |ffi_error| {
             const err = Error.fromInner(ffi_error);
@@ -257,7 +257,7 @@ pub const DataType = enum(c.XLA_FFI_DataType) {
 
 pub const Buffer = extern struct {
     struct_size: usize,
-    extension_start: ?*c.XLA_FFI_Extension_Base,
+    extension_start: ?*c.XLA_FFI_InternalExtension,
     dtype: DataType,
     data: [*]u8,
     rank: u64,
@@ -274,7 +274,7 @@ pub const Buffer = extern struct {
 
 pub const Args = extern struct {
     struct_size: usize,
-    extension_start: ?*const c.XLA_FFI_Extension_Base,
+    extension_start: ?*const c.XLA_FFI_InternalExtension,
     len: u64,
     types: [*]const Type,
     ptr: [*]*const Buffer,
@@ -290,7 +290,7 @@ pub const Args = extern struct {
 
 pub const Rets = extern struct {
     struct_size: usize,
-    extension_start: ?*const c.XLA_FFI_Extension_Base,
+    extension_start: ?*const c.XLA_FFI_InternalExtension,
     len: u64,
     types: [*]const Type,
     ptr: [*]*const Buffer,
@@ -461,10 +461,10 @@ pub const Error = opaque {
     }
 
     pub fn getMessage(err: *Error, api: *const Api) [:0]const u8 {
-        var ret: pjrt.meta.Struct(c.XLA_FFI_Error_GetMessage_Args) = .{
+        var ret: pjrt.meta.Struct(c.XLA_FFI_Error_GetDetails_Args) = .{
             .@"error" = err.inner(),
         };
-        api.inner().XLA_FFI_Error_GetMessage.?(@ptrCast(&ret));
+        api.inner().XLA_FFI_Error_GetDetails.?(@ptrCast(&ret));
         return std.mem.span(ret.message);
     }
 };

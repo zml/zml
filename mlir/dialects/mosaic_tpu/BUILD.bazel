@@ -9,7 +9,7 @@ zig_library(
         "//mlir",
         "//mlir:c",
         "//stdx",
-        "@mosaic_tpu//:tpu_dialect_capi",
+        "@xla//xla/mosaic:tpu_dialect_capi",
     ],
 )
 

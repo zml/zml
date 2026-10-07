@@ -17,7 +17,8 @@ using mlir::isa;
 extern "C" {
 
 MlirType mlirTritonPointerTypeGet(MlirType pointee, int32_t address_space) {
-  return wrap(mlir::triton::PointerType::get(unwrap(pointee), address_space));
+  return wrap(mlir::triton::PointerType::get(
+      unwrap(pointee), static_cast<mlir::triton::PtrAddrSpace>(address_space)));
 }
 
 MlirType mlirTritonPointerTypeGetPointee(MlirType ptr) {
@@ -25,7 +26,8 @@ MlirType mlirTritonPointerTypeGetPointee(MlirType ptr) {
 }
 
 int32_t mlirTritonPointerTypeGetAddressSpace(MlirType ptr) {
-  return cast<mlir::triton::PointerType>(unwrap(ptr)).getAddressSpace();
+  return static_cast<int32_t>(
+      cast<mlir::triton::PointerType>(unwrap(ptr)).getAddressSpace());
 }
 
 bool mlirTritonTypeIsAPointer(MlirType t) {

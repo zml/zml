@@ -945,6 +945,8 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_nccl_user_buffers", true, upb_arena);
                 // Enable for both Blackwell+ and Ampere+
                 // try setXlaOverrideFlag(overrides_map, "xla_gpu_cudnn_gemm_fusion_level", 2, upb_arena);
+                // Need to adapt XLA to support that (for other platforms too)
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_enable_tiling_propagation", false, upb_arena);
             },
             .rocm => {
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
@@ -959,9 +961,11 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 // Enable user buffers to assign color 1 and receive the reclaim exemption:
                 // https://github.com/openxla/xla/pull/46029
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_nccl_user_buffers", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_enable_tiling_propagation", false, upb_arena);
             },
             .metal => {
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_metal_fast_math", false, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_enable_tiling_propagation", false, upb_arena);
             },
             .oneapi => {
                 // More efficient for the allgather/broadcast implementation of the collective permute.
@@ -972,6 +976,7 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
 
                 // Grouped GEMM still needs a oneDNN lowering.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_ragged_dot_grouped_gemm", false, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_enable_tiling_propagation", false, upb_arena);
             },
             else => {},
         }
