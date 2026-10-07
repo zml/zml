@@ -24,13 +24,13 @@
 					"version": "12.3.0-1ubuntu1~22.04"
 				}
 			],
-			"key": "llvm-libunwind1_1-23.1.2_-p--p-20260916113350-p-ba019b7aafce-1_exp1_20260916233400.76_amd64",
+			"key": "llvm-libunwind1_1-22.1.8_-p--p-20260613092327-p-e80beda6e255-1_exp1_20260613092437.81_amd64",
 			"name": "llvm-libunwind1",
-			"sha256": "72f83f34f22e01e1219c9600f9e8562505afc1eabfb5b0cfae5f4603d0694720",
+			"sha256": "0da2b5596faee4e53456b7bdf51458e7bd5ec06852af93f2538e74c122032df2",
 			"urls": [
-				"https://apt.llvm.org/jammy/pool/main/l/llvm-toolchain-23/llvm-libunwind1_23.1.2~++20260916113350+ba019b7aafce-1~exp1~20260916233400.76_amd64.deb"
+				"https://apt.llvm.org/jammy/pool/main/l/llvm-toolchain-22/llvm-libunwind1_22.1.8~++20260613092327+e80beda6e255-1~exp1~20260613092437.81_amd64.deb"
 			],
-			"version": "1:23.1.2~++20260916113350+ba019b7aafce-1~exp1~20260916233400.76"
+			"version": "1:22.1.8~++20260613092327+e80beda6e255-1~exp1~20260613092437.81"
 		},
 		{
 			"arch": "amd64",
