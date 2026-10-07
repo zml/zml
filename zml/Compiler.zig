@@ -77,6 +77,13 @@ pub const Options = struct {
     meshes: []const *const Sharding.Mesh = &.{},
     // If null, will be initialized from the target
     partitioner: ?Sharding.Partitioner = null,
+    /// HACK: Extra bytes added to the device memory size reported to XLA.
+    /// Some buffers (e.g. engram tables) live in host-pinned memory but are declared to XLA as
+    /// device memory, because XLA only supports a few GPU operations reading host-pinned memory.
+    /// XLA then counts them against device memory, leaves no budget for temporary buffers and
+    /// rematerializes aggressively. Callers set this to the per-device size of such buffers to
+    /// compensate. Remove once XLA properly supports host-pinned inputs.
+    extra_device_memory_bytes: u64 = 0,
     // Debugging options
     program_name: []const u8 = "zml",
     xla_dump_to: ?[]const u8 = null,
@@ -886,7 +893,8 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 device_memory_size = @min(device_memory_size orelse bytes_limit, bytes_limit);
             }
             if (device_memory_size) |bytes_limit| {
-                c.xla_ExecutableBuildOptionsProto_set_device_memory_size(exec_build_options, @intCast(bytes_limit));
+                // HACK: See `Options.extra_device_memory_bytes`.
+                c.xla_ExecutableBuildOptionsProto_set_device_memory_size(exec_build_options, @intCast(bytes_limit + opts.extra_device_memory_bytes));
             }
 
             c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
