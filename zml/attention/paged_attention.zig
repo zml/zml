@@ -6,6 +6,7 @@ const zml = @import("../zml.zig");
 const cute = @import("cute_kernels/sparse_mla.zig");
 const flashattn = @import("flashattn.zig");
 const metal = @import("metal_attention.zig");
+const qaic = @import("qaic_attention.zig");
 const sparse_mla = @import("sparse_mla.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
@@ -26,6 +27,8 @@ pub const Backend = enum {
     mosaic_tpu,
     metal,
     stablehlo,
+    /// The qaic graph plugin's attention over its own KV pool (qaic_attention.zig).
+    qaic,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -34,7 +37,8 @@ pub const Backend = enum {
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
             .metal => .metal,
-            .cpu, .qaic => .stablehlo,
+            .cpu => .stablehlo,
+            .qaic => .qaic,
             .neuron => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }
@@ -43,6 +47,7 @@ pub const Backend = enum {
         return switch (backend) {
             .stablehlo => true,
             .triton => platform.target != .cpu and platform.target != .qaic,
+            .qaic => platform.target == .qaic,
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
             .cuda_fa2 => platform.target == .cuda,
@@ -58,6 +63,7 @@ pub const Options = union(Backend) {
     mosaic_tpu: tpu.mosaic_tpu.Options,
     metal: metal.paged.Options,
     stablehlo: triton.paged.Options,
+    qaic: triton.paged.Options,
 
     const Args = struct {
         backend: Backend,
@@ -142,7 +148,7 @@ pub const Options = union(Backend) {
                     .head_dim = args.head_dim,
                 },
             },
-            inline .triton, .metal, .stablehlo => |t| @unionInit(Options, @tagName(t), .{
+            inline .triton, .metal, .stablehlo, .qaic => |t| @unionInit(Options, @tagName(t), .{
                 .batch_size = args.batch_size,
                 .max_num_pages = args.max_num_pages,
                 .max_seqlen_q = args.max_seqlen_q,
@@ -171,6 +177,7 @@ pub const Parameters = union(Backend) {
     mosaic_tpu: tpu.mosaic_tpu.Parameters,
     metal: metal.paged.Parameters,
     stablehlo: triton.paged.Parameters,
+    qaic: triton.paged.Parameters,
 
     pub fn init(options_: Options) Parameters {
         return switch (options_) {
@@ -256,6 +263,7 @@ pub const KvCache = union(enum) {
 
         const kv: KvCache = switch (self) {
             .split => |split| switch (backend) {
+                .qaic => self, // (qaic_attention.zig writes the rows)
                 .cuda_fa2, .cuda_fa3, .triton, .mosaic_tpu, .metal, .stablehlo => .{
                     .split = .{
                         .k = split.k.scatterSlices(
@@ -305,8 +313,6 @@ pub const KvCache = union(enum) {
 };
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
-    _ = k;
-    _ = v;
     return switch (parameters) {
         .cuda_fa2 => |cuda_fa2_parameters| switch (kv_cache) {
             .split => |split| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, q, split.k, split.v, opts),
@@ -336,6 +342,11 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
         .stablehlo => |params| switch (kv_cache) {
             .latent => std.debug.panic("latent KV pages are only supported with Multi-Latent Attention", .{}),
             else => stablehlo_pagedAttention(params, q, kv_cache, opts),
+        },
+        .qaic => |params| switch (kv_cache) {
+            .split => |split| qaic.pagedAttention(params, q, k, v, split.k, opts),
+            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+            .latent => std.debug.panic("latent KV pages are only supported with Multi-Latent Attention", .{}),
         },
     };
 }
@@ -564,7 +575,7 @@ test pagedAttention {
                     } } };
                 },
                 .triton => triton_parameters_d,
-                inline .metal, .mosaic_tpu, .stablehlo => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
+                inline .metal, .mosaic_tpu, .stablehlo, .qaic => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
                     .block_table = triton_parameters_d.triton.block_table,
                     .seq_lens = triton_parameters_d.triton.seq_lens,
                     .query_start_len = triton_parameters_d.triton.query_start_len,
@@ -929,7 +940,7 @@ pub const Mla = struct {
         /// Number of leading active query rows, from the page table
         pub fn activeCount(self: CacheSelection) zml.Tensor {
             return switch (self.parameters) {
-                .triton, .stablehlo => |p| p.query_start_len.slice(.b, .single(p.query_start_len.dim(.b) - 1)),
+                .triton, .stablehlo, .qaic => |p| p.query_start_len.slice(.b, .single(p.query_start_len.dim(.b) - 1)),
                 else => std.debug.panic("sparse MLA does not support {} parameters", .{std.meta.activeTag(self.parameters)}),
             };
         }
@@ -939,7 +950,7 @@ pub const Mla = struct {
         pub fn physicalRows(self: CacheSelection, tokens_pos: zml.Tensor, active_count: zml.Tensor) zml.Tensor {
             const page_tokens = self.cache.rowsPerPage() * self.compression_ratio;
             const tokens = switch (self.parameters) {
-                .triton, .stablehlo => |parameters| triton.paged.topkToPhysical(parameters, self.positions, tokens_pos, page_tokens),
+                .triton, .stablehlo, .qaic => |parameters| triton.paged.topkToPhysical(parameters, self.positions, tokens_pos, page_tokens),
                 else => std.debug.panic("sparse MLA does not support {} parameters", .{std.meta.activeTag(self.parameters)}),
             };
             const active = zml.Tensor.iota(tokens.shape(), .q).cmp(.LT, active_count);
@@ -981,7 +992,7 @@ pub const Mla = struct {
                 valid = zml.Tensor.concatenate(&.{ valid, compressed_rows.cmp(.GE, .scalar(0, .i32)) }, .topk);
             }
             // StableHLO: each query's attention over its gathered rows as they are.
-            if (args.kv.parameters == .stablehlo) {
+            if (args.kv.parameters == .stablehlo or args.kv.parameters == .qaic) {
                 return stablehloRowsAttention(args.q, latent.squeeze(.hkv).rename(.{ .topk = .kv }), valid, args.sink, opts).mask(active, 0);
             }
             // Query i reads its gathered rows i * topk + j.
@@ -1020,7 +1031,7 @@ pub const Mla = struct {
 
         return switch (parameters) {
             .triton => |p| sparse_mla.attention(q, latent_kv, sink, rows, active_count, !p.options_.is_prefill, opts),
-            .stablehlo => stablehlo_pagedSparseAttention(q, latent_kv, sink, rows, opts),
+            .stablehlo, .qaic => stablehlo_pagedSparseAttention(q, latent_kv, sink, rows, opts),
             else => @panic("NOPE"),
         };
     }
