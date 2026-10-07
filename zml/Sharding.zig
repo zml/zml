@@ -168,7 +168,7 @@ pub const Partitioner = union(enum) {
 
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal => .shardy,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal, .qaic => .shardy,
         };
     }
 };
@@ -895,6 +895,8 @@ pub const PhysicalMesh = struct {
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
             .cuda, .rocm => &.{.link},
             .cpu, .metal => &.{.bus},
+            // qaic: SoCs of a card (`link`) first, then the cards of a root complex (`link_x`); `bus` (root complexes) last.
+            .qaic => &.{ .link, .link_x, .bus },
             .oneapi => &.{ .link, .bus },
         };
     }
@@ -1101,6 +1103,7 @@ pub const PhysicalMesh = struct {
             .tpu => tpu(allocator, platform_devices),
             .neuron => return neuron(allocator, platform_devices),
             .oneapi, .metal => cpu(allocator, platform_devices),
+            .qaic => qaic(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 
@@ -1130,6 +1133,72 @@ pub const PhysicalMesh = struct {
                 .children = nodes,
             },
         };
+    }
+
+    /// Qualcomm Cloud AI 100 Ultra (qaic graph plugin): PCIe root complex -> card -> SoC, from the devices' `root_complex`
+    /// and `card` attributes. Device-side P2P between SoCs only works within a root complex (`bus`, isolated); the SoCs of
+    /// a card share its PCIe switch (`link`), the cards of a root complex the host's switch (`link_x`). Levels of one
+    /// element are dropped; a selection whose cards or root complexes hold different numbers of devices, or devices without
+    /// the attributes, get the flat bus.
+    pub fn qaic(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
+        const Place = struct { device: PlatformDevice, root: i64, card: i64 };
+        const places = try allocator.alloc(Place, platform_devices.len);
+        defer allocator.free(places);
+        for (platform_devices, places) |d, *p| {
+            const api = d.platform.pjrt_api;
+            const root = d.pjrt_desc.attribute(api, "root_complex");
+            const card = d.pjrt_desc.attribute(api, "card");
+            if (root == null or card == null or root.? != .int64 or card.? != .int64 or card.?.int64 < 0) {
+                return cpu(allocator, platform_devices);
+            }
+            p.* = .{ .device = d, .root = root.?.int64, .card = card.?.int64 };
+        }
+        const Order = struct {
+            fn lessThan(_: void, a: Place, b: Place) bool {
+                if (a.root != b.root) return a.root < b.root;
+                if (a.card != b.card) return a.card < b.card;
+                return a.device.id() < b.device.id();
+            }
+        };
+        std.mem.sort(Place, places, {}, Order.lessThan);
+
+        // Group sizes: devices per card, cards per root complex, root complexes; all must be uniform.
+        var n_roots: usize = 0;
+        var cards_per_root: usize = 0;
+        var socs_per_card: usize = 0;
+        var i: usize = 0;
+        while (i < places.len) {
+            var cards: usize = 0;
+            const root = places[i].root;
+            while (i < places.len and places[i].root == root) {
+                var socs: usize = 0;
+                const card = places[i].card;
+                while (i < places.len and places[i].root == root and places[i].card == card) : (i += 1) socs += 1;
+                if (socs_per_card == 0) socs_per_card = socs;
+                if (socs != socs_per_card) return cpu(allocator, platform_devices);
+                cards += 1;
+            }
+            if (cards_per_root == 0) cards_per_root = cards;
+            if (cards != cards_per_root) return cpu(allocator, platform_devices);
+            n_roots += 1;
+        }
+
+        const Level = struct { tag: PhysicalAxisTag, geometry: AxisGeometry, size: usize };
+        var levels: stdx.BoundedArray(Level, 3) = .empty;
+        if (n_roots > 1) levels.appendAssumeCapacity(.{ .tag = .bus, .geometry = .isolated, .size = n_roots });
+        if (cards_per_root > 1) levels.appendAssumeCapacity(.{ .tag = .link_x, .geometry = .tree, .size = cards_per_root });
+        if (socs_per_card > 1 or levels.len == 0) levels.appendAssumeCapacity(.{ .tag = .link, .geometry = .point_to_point, .size = socs_per_card });
+
+        const Build = struct {
+            fn node(alloc: std.mem.Allocator, lv: []const Level, ps: []const Place) !PhysicalNode {
+                if (lv.len == 0) return .device(ps[0].device);
+                const children = try alloc.alloc(PhysicalNode, lv[0].size);
+                const per = ps.len / lv[0].size;
+                for (children, 0..) |*c, k| c.* = try node(alloc, lv[1..], ps[k * per .. (k + 1) * per]);
+                return .{ .branch = .{ .tag = lv[0].tag, .geometry = lv[0].geometry, .children = children } };
+            }
+        };
+        return Build.node(allocator, levels.slice(), places);
     }
 
     pub fn gpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {

@@ -98,6 +98,7 @@ Append one or more platform flags when compiling or running:
 - Intel OneAPI: `--@zml//platforms:oneapi=true`
 - Google TPU: `--@zml//platforms:tpu=true`
 - AWS Trainium / Inferentia 2: `--@zml//platforms:neuron=true`
+- Qualcomm Cloud AI 100: `--@zml//platforms:qaic=true` (plus `--repo_env=ZML_QAIC_PLUGIN_DIR=<dir>`: the plugin is not published yet)
 - Disable CPU compilation: `--@zml//platforms:cpu=false`
 
 Example on CUDA:

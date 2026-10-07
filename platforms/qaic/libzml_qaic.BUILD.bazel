@@ -1,0 +1,26 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@zml//bazel:patchelf.bzl", "patchelf")
+
+# The plugin is the only file (it loads the Platform SDK's runtime, libQAic.so, from the host at run time).
+patchelf(
+    name = "libzml_qaic_so",
+    src = "lib/libzml_qaic.so",
+    set_rpath = "$ORIGIN",
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [":libzml_qaic_so"],
+    add_directory_to_runfiles = False,
+    include_external_repositories = ["**"],
+    replace_prefixes = {
+        "libzml_qaic_so": "lib",
+    },
+)
+
+cc_library(
+    name = "libzml_qaic",
+    data = [":sandbox"],
+    visibility = ["@zml//platforms/qaic:__subpackages__"],
+)

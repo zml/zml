@@ -1,0 +1,20 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "qaic",
+    import_name = "platforms/qaic",
+    main = "qaic.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//pjrt",
+        "//platforms:options",
+        "//stdx",
+    ] + select({
+        "//platforms:qaic.enabled": [
+            "@libzml_qaic",
+        ],
+        "//conditions:default": [],
+    }),
+)

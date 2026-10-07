@@ -7,6 +7,7 @@ const neuron = @import("platforms/neuron");
 const oneapi = @import("platforms/oneapi");
 const pjrt = @import("pjrt");
 const platforms_options = @import("platforms/options");
+const qaic = @import("platforms/qaic");
 const rocm = @import("platforms/rocm");
 const tpu = @import("platforms/tpu");
 
@@ -20,6 +21,7 @@ pub const Platform = enum {
     neuron,
     oneapi,
     metal,
+    qaic,
 
     pub fn selectFirstAcceleratorEnabled() error{Unavailable}!Platform {
         inline for (@typeInfo(Platform).@"enum".fields) |field| {

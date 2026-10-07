@@ -39,7 +39,7 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         return error.MissingDevices;
     }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .qaic => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
                 return error.InvalidDeviceCount;
@@ -97,7 +97,7 @@ pub const Memory = struct {
                 };
                 return zml_kind == kind_;
             },
-            .cpu, .neuron, .metal => return true,
+            .cpu, .neuron, .metal, .qaic => return true,
         }
     }
 
@@ -224,7 +224,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .qaic => device.id(),
     };
 }
 
@@ -255,6 +255,7 @@ pub const State = union(Target) {
     neuron: void,
     oneapi: void,
     metal: void,
+    qaic: void,
 
     pub const CudaState = struct {
         fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
@@ -276,6 +277,7 @@ pub const State = union(Target) {
             .neuron => .{ .neuron = {} },
             .oneapi => .{ .oneapi = {} },
             .metal => .{ .metal = {} },
+            .qaic => .{ .qaic = {} },
         };
     }
 
@@ -421,6 +423,7 @@ pub const Platform = struct {
             .cuda,
             .oneapi,
             .metal,
+            .qaic,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -698,7 +701,7 @@ pub const Platform = struct {
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal => .{
+            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal, .qaic => .{
                 // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
@@ -734,6 +737,7 @@ pub const CreateOptions = struct {
     neuron: struct {} = .{},
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    qaic: struct {} = .{},
     io_impl: Platform.IoImpl = .threaded,
 
     pub const Cpu = struct {

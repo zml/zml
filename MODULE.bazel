@@ -297,6 +297,9 @@ http_aea_archive(
 metal = use_extension("//platforms/metal:metal.bzl", "metal_packages")
 use_repo(metal, "libzml_metal")
 
+qaic = use_extension("//platforms/qaic:qaic.bzl", "qaic_packages")
+use_repo(qaic, "libzml_qaic")
+
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
 use_repo(
     non_module_deps,

@@ -274,7 +274,7 @@ pub const Tensor = struct {
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal => return self,
+            .cpu, .neuron, .metal, .qaic => return self,
             .cuda, .rocm, .tpu, .oneapi => {},
         }
 
@@ -340,7 +340,7 @@ pub const Tensor = struct {
     pub fn toMemoryAll(flat_tensors: anytype, kind: Memory.Kind) @TypeOf(flat_tensors) {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal => return flat_tensors,
+            .cpu, .neuron, .metal, .qaic => return flat_tensors,
             .cuda, .rocm, .tpu, .oneapi => {},
         }
 
@@ -358,7 +358,7 @@ pub const Tensor = struct {
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal => return self,
+            .cpu, .neuron, .metal, .qaic => return self,
             .cuda, .rocm, .tpu, .oneapi => {},
         }
 
@@ -377,7 +377,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             // Only one memory kind on those platform
-            .cpu, .neuron, .metal => return,
+            .cpu, .neuron, .metal, .qaic => return,
             .cuda, .rocm, .tpu, .oneapi => {},
         }
 
@@ -3854,7 +3854,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .qaic => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice(a, .{ .end = k });
@@ -4811,7 +4811,7 @@ pub const Tensor = struct {
                     }
                 }).body, .{ .input = input, .name = full_name }, {});
             },
-            .oneapi, .neuron => {},
+            .oneapi, .neuron, .qaic => {},
         }
     }
 

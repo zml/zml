@@ -34,7 +34,7 @@ pub const Backend = enum {
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
             .metal => .metal,
-            .cpu => .stablehlo,
+            .cpu, .qaic => .stablehlo,
             .neuron => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }
@@ -42,7 +42,7 @@ pub const Backend = enum {
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
             .stablehlo => true,
-            .triton => platform.target != .cpu,
+            .triton => platform.target != .cpu and platform.target != .qaic,
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
             .cuda_fa2 => platform.target == .cuda,
