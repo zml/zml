@@ -38,6 +38,8 @@ meshes: []const *const Sharding.Mesh,
 partitioner: Sharding.Partitioner,
 
 mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
+/// Options.uniform_graph.
+uniform_graph: bool = false,
 
 scopes: stdx.BoundedArray(Scope, 16) = .empty,
 manual_computation_depth: usize = 0,
@@ -79,6 +81,12 @@ pub const Options = struct {
     partitioner: ?Sharding.Partitioner = null,
     // Debugging options
     program_name: []const u8 = "zml",
+    /// Build the same graph whatever the sizes: no op elided because a size makes it trivial (equal-shape broadcasts,
+    /// one-index gathers as slices) and no MLIR canonicalization or CSE, which fold such ops and merge values that happen
+    /// to have the same shape. Programs compiled at different sizes then differ only in sizes and constants (e.g. to
+    /// become specializations of one program for a graph compiler). null: on for qaic (its buckets are such
+    /// specializations).
+    uniform_graph: ?bool = null,
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
@@ -141,10 +149,11 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
     const module = mlir.Module.init(unknown_location);
     module.operation().setAttributeByName("sym_name", .string(mlir_ctx, opts.program_name));
 
+    const uniform_graph = opts.uniform_graph orelse (platform.target == .qaic);
     const pass_manager = mlir.PassManager.init(mlir_ctx);
     {
         var opm = pass_manager.asOpPassManager();
-        const passes: []const []const u8 = &.{
+        const passes: []const []const u8 = if (uniform_graph) &.{} else &.{
             "canonicalize",
             "cse",
             "canonicalize",
@@ -177,6 +186,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
         .mlir_ctx = mlir_ctx,
         .mlir_pass_manager = pass_manager,
         .mlir_known_types = mlir_known_types,
+        .uniform_graph = uniform_graph,
         .module = module,
         .platform = platform,
         .partitioner = opts.partitioner orelse .fromTarget(platform.target),

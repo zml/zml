@@ -2835,7 +2835,7 @@ pub const Tensor = struct {
         }
 
         const res_shape = output_shape.withDtype(self.dtype());
-        if (std.mem.eql(i64, self.dims(), output_shape.dims())) {
+        if (std.mem.eql(i64, self.dims(), output_shape.dims()) and !Compiler.current().uniform_graph) {
             // No broadcast needed. We don't emit a new stablehlo value
             // but we propagate output_shape tags.
             return _result(res_shape, self.value());
@@ -2875,7 +2875,7 @@ pub const Tensor = struct {
         stdx.debug.assert(self._shape.canBroadcastTo(other), "Can't broadcast {f} to {f}", .{ self, other });
 
         // Already the right shape
-        if (std.mem.eql(i64, self.dims(), other.dims())) return self;
+        if (std.mem.eql(i64, self.dims(), other.dims()) and !Compiler.current().uniform_graph) return self;
 
         if (ops.LoweringCompatibility.preserveIntegerScalarBroadcast(self, other)) |rewritten| return rewritten;
 

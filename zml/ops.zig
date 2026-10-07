@@ -2107,7 +2107,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
     // This is not a gather, but a dynamicSlice.
     // Sometimes the backend recognize this pattern, but not always.
     // So let us handle that.
-    if (indices_shape.count() == 1 and idx_axes.len == 1) {
+    if (indices_shape.count() == 1 and idx_axes.len == 1 and !Compiler.current().uniform_graph) {
         return self
             .slice(idx_axes[0], .dyn(indices_per_axis.get(0).asScalar(), 1))
             // Keep downstream remeshe after the slice. SPMD engines like Neuron otherwise
