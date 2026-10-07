@@ -386,14 +386,18 @@ pub fn elu(x: Tensor, alpha: f32) Tensor {
 
 /// Layer Normalization
 pub const LayerNorm = struct {
-    weight: Tensor,
+    // Weight seems to be only needed when torch.nn.LayerNorm has elementwise_affine is True
+    // meaning weight should be optional
+    weight: ?Tensor = null,
     bias: ?Tensor = null,
     eps: f32 = 1e-5,
 
     pub fn forward(self: LayerNorm, x: Tensor) Tensor {
         const normed = normalizeVariance(x, self.eps);
+        var out = normed;
+
         const ax = x.axis(-1);
-        var out = normed.mul(self.weight.broadcast(x.shape(), &.{ax}));
+        if (self.weight) |weight| out = normed.mul(weight.broadcast(x.shape(), &.{ax}));
         if (self.bias) |bias| out = out.add(bias.broadcast(x.shape(), &.{ax}));
 
         return out;
