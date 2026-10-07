@@ -32,10 +32,10 @@ index 1c75a88b5e..c79e64ee2e 100644
    PJRT_Extension_Type_Custom_Partitioner,
 diff --git a/xla/pjrt/c/pjrt_c_api_bound_arguments_extension.h b/xla/pjrt/c/pjrt_c_api_bound_arguments_extension.h
 new file mode 100644
-index 0000000000..452aa34e85
+index 0000000000..f3a1250188
 --- /dev/null
 +++ b/xla/pjrt/c/pjrt_c_api_bound_arguments_extension.h
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,93 @@
 +/* Copyright 2026 The OpenXLA Authors.
 +
 +Licensed under the Apache License, Version 2.0 (the "License");
@@ -68,9 +68,10 @@ index 0000000000..452aa34e85
 +// of bound parameters: holds, usage events, checks and address lookups.
 +//
 +// Bound parameters must not be donated by the executable, and bound buffers
-+// cannot be donated while bound. Deleting a bound buffer keeps its memory
-+// alive until the binding is destroyed, but bound buffers must outlive the
-+// binding. Executions keep the binding alive until they complete.
++// cannot be donated while bound. Bound buffers must outlive the binding, which
++// keeps their memory alive even if they are deleted. Executions keep the
++// memory of bound buffers alive until they complete, so the binding and the
++// buffers can be destroyed while they run.
 +
 +#define PJRT_API_BOUND_ARGUMENTS_EXTENSION_VERSION 1
 +
@@ -103,7 +104,7 @@ index 0000000000..452aa34e85
 +};
 +PJRT_DEFINE_STRUCT_TRAITS(PJRT_BoundArguments_Destroy_Args, bound_arguments);
 +
-+// Releases the binding once the executions using it complete.
++// Releases the bound buffers, which can then be donated or destroyed.
 +typedef PJRT_Error* PJRT_BoundArguments_Destroy(
 +    PJRT_BoundArguments_Destroy_Args* args);
 +

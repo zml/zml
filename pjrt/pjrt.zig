@@ -1786,7 +1786,7 @@ pub const BoundArgumentsExtension = struct {
     /// i-th addressable device of `executable`; `parameter_indices` is sorted and
     /// unique. Waits until the buffers are defined. Bound parameters must not be
     /// donated, bound buffers cannot be donated while bound, and they must
-    /// outlive the binding.
+    /// outlive the binding, but not the executions using it.
     pub fn create(
         self: BoundArgumentsExtension,
         api: *const Api,
@@ -1807,7 +1807,7 @@ pub const BoundArgumentsExtension = struct {
         return @ptrCast(args.bound_arguments.?);
     }
 
-    /// Executions using the binding keep it alive until they complete.
+    /// Releases the bound buffers. Executions in flight keep their memory alive.
     pub fn destroy(self: BoundArgumentsExtension, api: *const Api, bound_arguments: *BoundArguments) void {
         var args: meta.Struct(c.PJRT_BoundArguments_Destroy_Args) = .{ .bound_arguments = @ptrCast(bound_arguments) };
         if (self.inner.destroy.?(@ptrCast(&args))) |pjrt_c_error| {
