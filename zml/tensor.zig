@@ -483,6 +483,7 @@ pub const Tensor = struct {
         const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcopy, .{ x_t, y_t, z_t }, platform, .{});
         defer exe.deinit();
 
+        std.log.warn("fromBytes: x_t={f}, data={d} bytes from {s}", .{ x_t, @sizeOf(@TypeOf(inputs)), @typeName(@TypeOf(inputs)) });
         var x_d = try zml.Buffer.fromBytes(io, platform, x_t.shape(), @ptrCast(&inputs));
         defer x_d.deinit();
 
