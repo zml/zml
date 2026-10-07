@@ -58,7 +58,12 @@ pub fn main(init: std.process.Init) !void {
             .gate_layer = .init(img_mlp_view.createTensor("gate_layer.weight", .{ .dup, .d }, .replicated), null, .d),
         };
 
-        transformer_blocks[i] = .{ .attn = attn, .img_mlp = img_mlp };
+        transformer_blocks[i] = .{
+            .img_norm1 = .{ .eps = 1e-6 },
+            .img_norm2 = .{ .eps = 1e-6 },
+            .attn = attn,
+            .img_mlp = img_mlp,
+        };
     }
 
     // Auto-select platform
@@ -89,11 +94,11 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         io,
         platform,
-        Wrapper{ .attn = transformer_blocks[0].attn.norm_k },
+        Wrapper{ .tblock = transformer_blocks[0] },
         .forward,
         &activations_store,
-        "transformer.transformer_blocks.0.attn.norm_k",
-        .{ .attn = transformer_blocks_buffer[0].attn.norm_k },
+        "transformer.transformer_blocks.0.img_norm1",
+        .{ .tblock = transformer_blocks_buffer[0] },
         &.{},
         .{},
     );
@@ -131,11 +136,11 @@ pub fn main(init: std.process.Init) !void {
 // )
 
 const Wrapper = struct {
-    attn: block.RMSNorm,
+    tblock: block.TransformerBlock,
 
     pub fn forward(self: Wrapper, x: zml.Tensor) zml.Tensor {
         // .d is .seqlen it seems
-        const tagged = x.withTags(.{ .bs, .d, .num, .dim });
-        return self.attn.forward(tagged);
+        const tagged = x.withTags(.{ .bs, .dout, .d });
+        return self.tblock.img_norm1.forward(tagged);
     }
 };

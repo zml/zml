@@ -5,6 +5,8 @@ const log = std.log;
 const zml = @import("zml");
 
 pub const TransformerBlock = struct {
+    img_norm1: zml.nn.LayerNorm,
+    img_norm2: zml.nn.LayerNorm,
     img_mlp: Mlp,
     attn: Attn,
 
@@ -103,6 +105,7 @@ pub const RMSNorm = struct {
         self.weight.deinit();
     }
 
+    // The basic nn.LayerNorm
     pub fn forward(self: RMSNorm, x: zml.Tensor) zml.Tensor {
         var normalized = zml.nn.rmsNorm(x, self.tag, self.eps);
         return normalized.mul(self.weight.broad(normalized.shape()));
