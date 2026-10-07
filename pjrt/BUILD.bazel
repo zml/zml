@@ -8,6 +8,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "@xla//xla/ffi/api:c_api",
+        "@xla//xla/pjrt/c:pjrt_c_api_bound_arguments_extension_hdrs",
         # TODO: fix non conformance to C standard
         # "@xla//xla/pjrt/c:pjrt_c_api_callback_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_custom_partitioner_extension_hdrs",
