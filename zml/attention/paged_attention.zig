@@ -878,14 +878,15 @@ pub const Mla = struct {
         });
         const valid_topk = topk.cmp(.GE, zml.Tensor.zeroes(topk.shape()));
         const safe_topk = zml.Tensor.select(valid_topk, topk, zml.Tensor.zeroes(topk.shape()));
-        const mask = valid_topk.insertAxes(.topk, .{.h});
-        const selected_kv = kv_flat.gather(.{ .kv = safe_topk.rename(.{ .q = .b }) }, .{}).rename(.{ .b = .q, .topk = .kv }).convert(.f32);
+        const selected_kv = kv_flat.gather(.{ .kv = safe_topk.rename(.{ .q = .b }) }, .{}).rename(.{ .b = .q, .topk = .kv });
+        return stablehloRowsAttention(q, selected_kv, valid_topk, sink, opts);
+    }
 
-        const dims = zml.nn.collectDims(.{ .h, .q, .kv, .hd }, &.{ q, kv_flat }, .strict) catch {
-            stdx.debug.panic("Inputs have incompatible shapes (q: {f}, kv: {f}).", .{ q, kv_flat });
-        };
-
-        const sqrt_head_dim = opts.scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
+    /// Each query's attention over its own rows: q [q, h, hd], rows [q, kv, hd], valid [q, topk] (which rows count).
+    fn stablehloRowsAttention(q: zml.Tensor, rows: zml.Tensor, valid: zml.Tensor, sink: ?zml.Tensor, opts: Mla.Options) zml.Tensor {
+        const selected_kv = rows.convert(.f32);
+        const mask = valid.insertAxes(.topk, .{.h});
+        const sqrt_head_dim = opts.scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q.dim(.hd))));
         const q_32 = q.convert(.f32);
         var scores = q_32.dot(selected_kv, .hd).scale(sqrt_head_dim);
         scores = zml.Tensor.select(mask.broad(scores.shape()), scores, zml.Tensor.constant(scores.dtype().minValue()));
@@ -896,7 +897,7 @@ pub const Mla = struct {
         const scores_sink = zml.Tensor.concatenate(&.{ scores, sink_.convert(scores.dtype()) }, .kv);
 
         const attn_weights = scores_sink.softmax(.kv);
-        const attn_weights_non_sink = attn_weights.slice(-1, .{ .end = topk.dim(.topk) });
+        const attn_weights_non_sink = attn_weights.slice(-1, .{ .end = valid.dim(.topk) });
         const selected_values = selected_kv.slice(.hd, .{ .end = opts.value_rank });
         return attn_weights_non_sink.dot(selected_values, .kv).convert(q.dtype());
     }
@@ -967,6 +968,7 @@ pub const Mla = struct {
     fn latentAttention(args: SparseAttentionArgs, opts: Mla.Options) zml.Tensor {
         const active_count = args.kv.activeCount();
         const rows = args.kv.physicalRows(args.tokens_pos, active_count);
+        const active = zml.Tensor.iota(.init(.{ .q = args.q.dim(.q) }, .i32), .q).cmp(.LT, active_count);
         const kv, const selected = if (args.compressed == null and args.kv.cache == .latent)
             .{ args.kv.cache.latent, rows }
         else blk: {
@@ -978,12 +980,15 @@ pub const Mla = struct {
                 latent = zml.Tensor.concatenate(&.{ latent, gatherRows(c.cache, compressed_rows, args.q.dtype()) }, .topk);
                 valid = zml.Tensor.concatenate(&.{ valid, compressed_rows.cmp(.GE, .scalar(0, .i32)) }, .topk);
             }
+            // StableHLO: each query's attention over its gathered rows as they are.
+            if (args.kv.parameters == .stablehlo) {
+                return stablehloRowsAttention(args.q, latent.squeeze(.hkv).rename(.{ .topk = .kv }), valid, args.sink, opts).mask(active, 0);
+            }
             // Query i reads its gathered rows i * topk + j.
             const block_rows = zml.Tensor.iota(valid.shape().withDtype(.i32), .q).scale(valid.dim(.topk))
                 .add(zml.Tensor.iota(valid.shape().withDtype(.i32), .topk)).mask(valid, -1);
             break :blk .{ latent.rename(.{ .q = .page, .topk = .k_chunk }), block_rows };
         };
-        const active = zml.Tensor.iota(.init(.{ .q = args.q.dim(.q) }, .i32), .q).cmp(.LT, active_count);
         return latentSparseAttention(args.kv.parameters, args.q, kv, args.sink, selected, active_count, opts).mask(active, 0);
     }
 
