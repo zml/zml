@@ -10,6 +10,7 @@ pub const cute_mxfp4 = @import("cute_mxfp4.zig");
 pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
 pub const metal = @import("metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
+pub const qaic = @import("qaic.zig");
 pub const triton = @import("triton.zig");
 pub const fly = @import("fly_kernels/moe.zig");
 const fused_experts = @import("fused_experts.zig");
@@ -29,6 +30,8 @@ pub const ExpertsLayout = struct {
     gate_up: ProjectionLayout,
     /// Backend specific transformation of the weights and scales.
     packing: Packing,
+    /// How the experts are sharded on the `experts` mesh.
+    sharding: Sharding = .expert,
 
     pub const Packing = enum {
         /// Experts stacked as stored in the checkpoint.
@@ -37,6 +40,14 @@ pub const ExpertsLayout = struct {
         swizzled_scales,
         /// Weights, block scales and global scales in the FlashInfer CUTLASS NVFP4 layout.
         flashinfer_nvfp4,
+    };
+
+    pub const Sharding = enum {
+        /// Whole experts per device (expert parallel).
+        expert,
+        /// Every expert on every device, split on its intermediate axis: gate_up's output (interleaved: a device's slice
+        /// pairs its gate and up rows) and down's input. Balanced whatever the routing.
+        intermediate,
     };
 };
 
@@ -82,6 +93,8 @@ pub const Backend = enum {
     fly,
     mosaic_tpu,
     metal,
+    /// The qaic graph plugin's sparse MoE custom call (qaic.zig).
+    qaic,
 
     pub fn auto(platform: *const zml.Platform, scheme: ?zml.Quantization.Scheme, dtype: zml.DataType) !Backend {
         // Keep the dtype as an argument because non scheme-specific backends may depend on it later
@@ -126,6 +139,7 @@ pub const Backend = enum {
                     .mxfp4 => error.UnsupportedQuantization,
                 };
             },
+            .qaic => if (scheme == null or scheme == .mxfp4) .qaic else error.UnsupportedQuantization,
             else => error.UnimplementedMoEBackend,
         };
     }
@@ -146,6 +160,7 @@ pub const Backend = enum {
             },
             .mosaic_tpu => platform.target == .tpu,
             .metal => platform.target == .metal,
+            .qaic => platform.target == .qaic,
         };
     }
 
@@ -158,6 +173,7 @@ pub const Backend = enum {
             .flashinfer_cutlass => if (scheme == .nvfp4) .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 } else error.UnsupportedQuantization,
             .mosaic_tpu, .metal => .{ .gate_up = .concatenated, .packing = .plain },
             .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
+            .qaic => if (scheme == null or scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain, .sharding = .intermediate } else error.UnsupportedQuantization,
         };
     }
 
@@ -169,6 +185,7 @@ pub const Backend = enum {
             .triton, .fly => {},
             .mosaic_tpu => {},
             .metal => {},
+            .qaic => {},
         };
     }
 };
@@ -199,6 +216,7 @@ pub fn forwardMoe(
         inline .triton, .fly => |b| fused_experts.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, b),
         .mosaic_tpu => mosaic_tpu.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
         .metal => metal.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
+        .qaic => qaic.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
     };
 }
 
