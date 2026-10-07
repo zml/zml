@@ -947,10 +947,9 @@ test "sparse MLA emits 2D and 3D Triton kernels" {
     defer scope.pop();
 
     const q = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .h = 6, .hd = 576 }, .bf16));
-    // GB300 uses 32 entries per tile; the test requests two splits.
-    const kv = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 64, .k_chunk = 1, .hkv = 1, .hd = 576 }, .bf16));
+    const kv = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 32, .k_chunk = 1, .hkv = 1, .hd = 576 }, .bf16));
     const sink = zml.Tensor.zeroes(zml.Shape.init(.{ .h = 6 }, .bf16));
-    const topk = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .topk = 64 }, .i32));
+    const topk = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .topk = 32 }, .i32));
     const active_query_count = zml.Tensor.scalar(1, .i32);
     const two_d_opts: paged.PagedSparseMlaOptions = .{
         .qk_rank = 576,
@@ -976,7 +975,7 @@ test "sparse MLA emits 2D and 3D Triton kernels" {
     try std.testing.expect(three_d.value().owner().verify());
 
     const dsv4_q = zml.Tensor.zeroes(zml.Shape.init(.{ .q = 1, .h = 6, .hd = 512 }, .bf16));
-    const dsv4_kv = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 64, .k_chunk = 1, .hkv = 1, .hd = 512 }, .bf16));
+    const dsv4_kv = zml.Tensor.zeroes(zml.Shape.init(.{ .page = 32, .k_chunk = 1, .hkv = 1, .hd = 512 }, .bf16));
     var dsv4_opts = two_d_opts;
     dsv4_opts.qk_rank = 512;
     dsv4_opts.value_rank = 512;
