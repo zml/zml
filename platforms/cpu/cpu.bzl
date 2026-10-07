@@ -15,7 +15,7 @@ _BUILD_LINUX = "\n".join([
     ),
     packages.filegroup(
         name = "libzml_cpu",
-        srcs = [":libzml_cpu_so", "@libunwind-19//:libunwind"],
+        srcs = [":libzml_cpu_so", "@llvm-libunwind1//:libunwind"],
         visibility = ["@zml//platforms/cpu:__subpackages__"],
     ),
 ])
@@ -28,9 +28,9 @@ _BUILD_DARWIN = packages.filegroup(
 
 def _cpu_plugin_impl(mctx):
     loaded_packages = packages.read(mctx, ["@zml//platforms/cpu:packages.lock.json"])
-    pkg = loaded_packages["libunwind-19"]["amd64"]
+    pkg = loaded_packages["llvm-libunwind1"]["amd64"]
     http_deb_archive(
-        name = "libunwind-19",
+        name = "llvm-libunwind1",
         urls = pkg["urls"],
         sha256 = pkg["sha256"],
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + packages.filegroup(
