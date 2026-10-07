@@ -5,6 +5,7 @@ const log = std.log;
 const zml = @import("zml");
 const block = @import("./blocks.zig");
 const testing = @import("./testing.zig");
+const CompileArgs = @import("./compiler.zig").CompileArgs;
 
 const CliArgs = struct {
     pub const help =
@@ -44,6 +45,8 @@ pub fn main(init: std.process.Init) !void {
 
         const attn_view = tb_layer_view.withPrefix("attn");
         const attn: block.Attn = .{
+            .seq_len = 16415,
+            .num_attention_heads = 128,
             .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dim}, .replicated), null, .d),
             .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dim}, .replicated), null, .d),
             .to_k = .init(attn_view.createTensor("to_k.weight", .{ .dup, .d }, .replicated), null, .d),
@@ -91,23 +94,42 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("\n\nStarting testing\n\n", .{});
 
+    const model_sharding = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth }));
+    const backend = zml.attention.Backend.auto(platform);
+    const attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, transformer_blocks[0].attn.seq_len, transformer_blocks[0].attn.num_attention_heads));
+    const attention_parameters: zml.attention.Parameters = .init(.fromBackend(backend));
+
+    const compile_args: CompileArgs = .{
+        .attention_metadata = attention_metadata,
+        .attention_parameters = attention_parameters,
+    };
+    const compile_args_buffers: zml.Bufferized(CompileArgs) = .{
+        .attention_metadata = try attention_metadata.initBuffer(io, platform, model_sharding),
+    };
+
     try testing.testLayer(
         allocator,
         io,
         platform,
         "transformer.transformer_blocks.0.attn",
         &activations_store,
-        Wrapper{ .tblock = transformer_blocks[0].attn },
-        .{ .tblock = transformer_blocks_buffer[0].attn },
+        Wrapper{ .tblock = transformer_blocks[0].attn, .args = compile_args },
+        .{ .tblock = transformer_blocks_buffer[0].attn, .args = compile_args_buffers },
     );
 }
 
 const Wrapper = struct {
-    tblock: block.TransformerBlock,
+    tblock: block.Attn,
+    args: CompileArgs,
 
-    pub fn forward(self: Wrapper, x: zml.Tensor) zml.Tensor {
-        // .d is .seqlen it seems
-        const tagged = x.withTags(.{ .bs, .dout, .d });
-        return self.tblock.img_norm1.forward(tagged);
+    pub fn forward(
+        self: Wrapper,
+        x: zml.Tensor,
+        // mod: zml.Tensor,
+        rotary: zml.Tensor,
+        // token_mask: zml.Tensor,
+    ) zml.Tensor {
+        const tagged = x.withTags(.{ .bs, .seq_len, .d });
+        return self.tblock.forward(tagged, rotary.withTags(.{ .seq_len, .d }), self.args);
     }
 };

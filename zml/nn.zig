@@ -457,6 +457,10 @@ test normalizeL2 {
 pub const RopeOpts = struct {
     layout: Layout = .real_im_pass,
     scaling: Scaling = .{ .default = .{} },
+    // The model can give the positions or the precomputed inv_freq_pos, pass either one of them
+    // but not both ^^
+    pos_idx: ?Tensor = null,
+    inv_freq_pos: ?Tensor = null,
 
     /// There are 3 layouts corresponding to how to split `x` in real/imag/passthrough parts.
     /// The hard part is that HF models don't specify the layout they use.
@@ -605,26 +609,33 @@ pub const RopeOpts = struct {
 /// - x: .{ .s, .hd } where .s is the sequence length and .hd the head dimension
 /// - pos_idx: optional tensor which indicates which positions are needed.
 ///   When not set `rope` return all positions from 0 to x.dim(.s) which is the max seq len.
-pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
+pub fn rope(x: Tensor, opts: RopeOpts) Tensor {
     const head_dim = x.dim(.hd);
     stdx.debug.assert(@mod(head_dim, 2) == 0, "rope expects a even head dim (.hd), got {f}", .{x});
-
-    const idx = if (pos_idx) |idx| blk: {
-        stdx.debug.assert(x.shape().hasTags(.{.hd}), "rope expects x argument to have .hd axes got: rope(x={f}, idx={f})", .{ x, idx });
-        break :blk idx;
-    } else blk: {
-        stdx.debug.assert(x.shape().hasTags(.{ .s, .hd }), "rope expects x argument to have both .s and .hd axes got: rope(x={f})", .{x});
-        break :blk Tensor.arange(.{ .end = x.dim(.s) }, .f32).withTags(.{.s});
-    };
+    stdx.debug.assert(opts.pos_idx == null or opts.inv_freq_pos == null, "rope expects either no position buffer, a pos_idx orbuffer or a precomputed inv_freq_pos", .{});
 
     const rotary_dim: u32 = opts.scaling.partialRotaryDim(head_dim);
     stdx.debug.assert(rotary_dim > 0 and @mod(rotary_dim, 2) == 0, "partial rope expects a even head dim (.hd), got {d}", .{rotary_dim});
 
     const x_real, const x_imag, const x_pass = zml.nn.splitRealImgPass(x, opts.layout, rotary_dim);
-    const inv_freq = invFreq(head_dim, opts).withTags(.{.hd});
 
     // compute sin and cos in f32 before downcasting to x type.
-    const inv_freq_pos = zml.Tensor.outer(idx.convert(.f32), inv_freq);
+    var inv_freq_pos: zml.Tensor = undefined;
+    if (opts.inv_freq_pos) |inv_pos| {
+        inv_freq_pos = inv_pos.convert(.f32);
+    } else {
+        const idx = if (opts.pos_idx) |idx| blk: {
+            stdx.debug.assert(x.shape().hasTags(.{.hd}), "rope expects x argument to have .hd axes got: rope(x={f}, idx={f})", .{ x, idx });
+            break :blk idx;
+        } else blk: {
+            stdx.debug.assert(x.shape().hasTags(.{ .s, .hd }), "rope expects x argument to have both .s and .hd axes got: rope(x={f})", .{x});
+            break :blk Tensor.arange(.{ .end = x.dim(.s) }, .f32).withTags(.{.s});
+        };
+
+        const inv_freq = invFreq(head_dim, opts).withTags(.{.hd});
+        inv_freq_pos = zml.Tensor.outer(idx.convert(.f32), inv_freq);
+    }
+
     const scaling = opts.scaling.attentionScaling();
     const cos = inv_freq_pos.cos().scale(scaling).convert(x.dtype()).broad(x_real.shape());
     const sin = inv_freq_pos.sin().scale(scaling).convert(x.dtype()).broad(x_real.shape());
