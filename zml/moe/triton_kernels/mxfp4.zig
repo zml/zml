@@ -64,8 +64,8 @@ pub fn validateInputs(c: Config, a: Inputs) !void {
         .w2 = zml.Shape.init(.{ c.experts, c.hidden, @divTrunc(c.intermediate, 2) }, .u8),
         .s2 = zml.Shape.init(.{ c.experts, c.hidden, a.s2.dim(2) }, .f8e8m0),
     };
-    inline for (std.meta.fields(Inputs)) |field| {
-        if (!@field(a, field.name).shape().eql(@field(shapes, field.name))) return error.InvalidInputShape;
+    inline for (comptime std.meta.fieldNames(Inputs)) |field| {
+        if (!@field(a, field).shape().eql(@field(shapes, field))) return error.InvalidInputShape;
     }
 }
 

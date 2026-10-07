@@ -474,7 +474,7 @@ test "block FP8 E8M0 scales preserve power-of-two boundaries and nonminor axes" 
         try zml.testing.expectEqualShapes(x.shape().setDim(.k, 8).withDtype(.f32), exe.output_shapes[1]);
         const fp8_max: f32 = if (dtype == .f8e4m3fn) 448.0 else 224.0;
         var host: [2 * 256 * 3]f32 = undefined;
-        var maxima = [_]f32{0} ** (2 * 8 * 3);
+        var maxima: [2 * 8 * 3]f32 = @splat(0);
         for (&host, 0..) |*value, i| {
             const block = (i / 3) % 256 / 32;
             const scale_index = (i / (256 * 3)) * 24 + block * 3 + i % 3;

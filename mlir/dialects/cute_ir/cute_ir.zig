@@ -634,14 +634,14 @@ pub const PtrType = opaque {
         bitlayout: ?*const mlir.Attribute = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCutePtrTypeGet(ctx.ptr(), if (args.valueType) |v| v.ptr() else c.MlirType{ .ptr = null }, @intFromEnum(args.addressSpace), args.alignment, if (args.swizzle) |v| v.ptr() else c.MlirAttribute{ .ptr = null }, if (args.bitlayout) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
+        const result = c.mlirCutePtrTypeGet(ctx.ptr(), if (args.valueType) |v| v.ptr() else c.MlirType{ .ptr = null }, @backingInt(args.addressSpace), args.alignment, if (args.swizzle) |v| v.ptr() else c.MlirAttribute{ .ptr = null }, if (args.bitlayout) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValueType(self: *const Self) ?*const mlir.Type {
         return @ptrCast(c.mlirCutePtrTypeGetValueType(self.ptr()).ptr);
     }
     pub fn getAddressSpace(self: *const Self) AddressSpace {
-        return @enumFromInt(c.mlirCutePtrTypeGetAddressSpace(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCutePtrTypeGetAddressSpace(self.ptr())));
     }
     pub fn getAlignment(self: *const Self) u64 {
         return c.mlirCutePtrTypeGetAlignment(self.ptr());
@@ -1218,11 +1218,11 @@ pub const ReductionOpAttr = opaque {
         value: ReductionOp,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCuteReductionOpAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirCuteReductionOpAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) ReductionOp {
-        return @enumFromInt(c.mlirCuteReductionOpAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCuteReductionOpAttrGetValue(self.ptr())));
     }
 };
 
@@ -2850,11 +2850,11 @@ test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(nvgpu);
     inline for (comptime std.meta.declarations(@This())) |decl| {
-        const T = @field(@This(), decl.name);
+        const T = @field(@This(), decl);
         if (@TypeOf(T) == type) std.testing.refAllDecls(T);
     }
     inline for (comptime std.meta.declarations(nvgpu)) |decl| {
-        const T = @field(nvgpu, decl.name);
+        const T = @field(nvgpu, decl);
         if (@TypeOf(T) == type) std.testing.refAllDecls(T);
     }
 }
@@ -2976,13 +2976,14 @@ test "generated types and attributes rebuild from their getters" {
     // Every case of every enum attribute.
     inline for (.{ cute, nvgpu }) |namespace| {
         inline for (comptime std.meta.declarations(namespace)) |decl| {
-            const T = @field(namespace, decl.name);
+            const T = @field(namespace, decl);
             if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque" and @hasDecl(T, "InitArgs")) {
-                const fields = @typeInfo(T.InitArgs).@"struct".fields;
-                if (fields.len == 1 and comptime std.mem.eql(u8, fields[0].name, "value")) {
-                    inline for (@typeInfo(fields[0].type).@"enum".fields) |case| {
-                        const attr = try T.get(ctx, .{ .value = @enumFromInt(case.value) });
-                        try std.testing.expectEqual(case.value, @intFromEnum(attr.getValue()));
+                const fields = @typeInfo(T.InitArgs).@"struct".field_names;
+                if (fields.len == 1 and comptime std.mem.eql(u8, fields[0], "value")) {
+                    inline for (@typeInfo(@FieldType(T.InitArgs, fields[0])).@"enum".field_names) |case| {
+                        const case_value = @field(@FieldType(T.InitArgs, fields[0]), case);
+                        const attr = try T.get(ctx, .{ .value = case_value });
+                        try std.testing.expectEqual(@backingInt(case_value), @backingInt(attr.getValue()));
                         try std.testing.expect((try rebuild(T, ctx, attr)).eql(attr));
                     }
                 }
@@ -2995,14 +2996,14 @@ test "generated types and attributes rebuild from their getters" {
 fn rebuild(comptime T: type, ctx: *mlir.Context, value: *const T) !*const T {
     var args: T.InitArgs = undefined;
     var elements: [8]*const mlir.Type = undefined;
-    inline for (@typeInfo(T.InitArgs).@"struct".fields) |field| {
-        const name = [_]u8{comptime std.ascii.toUpper(field.name[0])} ++ field.name[1..];
-        if (field.type == []const *const mlir.Type) {
+    inline for (@typeInfo(T.InitArgs).@"struct".field_names) |field| {
+        const name = [_]u8{comptime std.ascii.toUpper(field[0])} ++ field[1..];
+        if (@FieldType(T.InitArgs, field) == []const *const mlir.Type) {
             const count = @field(T, "getNum" ++ name)(value);
             for (elements[0..count], 0..) |*element, i| element.* = @field(T, "get" ++ name[0 .. name.len - 1])(value, i);
-            @field(args, field.name) = elements[0..count];
+            @field(args, field) = elements[0..count];
         } else {
-            @field(args, field.name) = @field(T, "get" ++ name)(value);
+            @field(args, field) = @field(T, "get" ++ name)(value);
         }
     }
     return T.get(ctx, args);

@@ -577,8 +577,8 @@ pub const Normalizer = struct {
                 ),
             },
             .Strip => |direction| b: {
-                const strip_left = @intFromEnum(direction) & 0b10 != 0;
-                const strip_right = @intFromEnum(direction) & 0b01 != 0;
+                const strip_left = @backingInt(direction) & 0b10 != 0;
+                const strip_right = @backingInt(direction) & 0b01 != 0;
                 break :b c.iree_tokenizer_normalizer_strip_allocate(strip_left, strip_right, iree_allocator, &norm);
             },
         };
@@ -785,10 +785,10 @@ test "normalizer sequence preserves composition across tiles" {
     const allocator = std.testing.allocator;
     var normalizer = try Normalizer.init(allocator, &.{ .NFC, .Lowercase });
     defer normalizer.deinit();
-    const input = "a" ** 63 ++ "e\u{301}b";
+    const input = @as([63]u8, @splat('a')) ++ "e\u{301}b";
     const output = try normalizer.normalize(allocator, input);
     defer allocator.free(output);
-    try std.testing.expectEqualSlices(u8, "a" ** 63 ++ "éb", output);
+    try std.testing.expectEqualSlices(u8, @as([63]u8, @splat('a')) ++ "éb", output);
 }
 
 test "normalizer sequence allocation failure retains child ownership" {

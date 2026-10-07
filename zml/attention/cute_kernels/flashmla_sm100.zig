@@ -120,7 +120,7 @@ const Bar = enum(i32) {
 const idx_consumers = 11;
 
 fn bar(b: *B, base: V, comptime which: Bar, buf: anytype) V {
-    return base.add(smem.bars + 8 * @intFromEnum(which)).add(b.lift(buf).mul(8));
+    return base.add(smem.bars + 8 * @backingInt(which)).add(b.lift(buf).mul(8));
 }
 
 // TMEM columns: O^T of token parity ob in 64 * ob (4 chunks of 128 dims x 16
@@ -252,8 +252,8 @@ fn parity(j: V) V {
     return j.shrLogical(1).bitAnd(1);
 }
 
-fn tupleOf(comptime n: usize, arr: [n]V) std.meta.Tuple(&([_]type{V} ** n)) {
-    var t: std.meta.Tuple(&([_]type{V} ** n)) = undefined;
+fn tupleOf(comptime n: usize, arr: [n]V) @Tuple(&@as([n]type, @splat(V))) {
+    var t: @Tuple(&@as([n]type, @splat(V))) = undefined;
     inline for (0..n) |i| t[i] = arr[i];
     return t;
 }
@@ -944,7 +944,10 @@ fn softmaxRole(c0: Ctx) void {
     // then skips the block max entirely (m stays, alpha = 1).
     const f32t = cute.DType.f32.toMlir(b.ctx);
     const i32t = cute.DType.i32.toMlir(b.ctx);
-    var upd = b.openIfElse(b.barrierReduceOr(1, 128, exceed.ne(0)), .{f32t} ** (2 * H) ++ .{i32t});
+    var update_types: @Tuple(&@as([2 * H + 1]type, @splat(@TypeOf(f32t)))) = undefined;
+    inline for (0..2 * H) |h| update_types[h] = f32t;
+    update_types[2 * H] = i32t;
+    var upd = b.openIfElse(b.barrierReduceOr(1, 128, exceed.ne(0)), update_types);
     {
         // Block max per head: warp redux, then across the 4 warps through shared memory.
         const red = c.s.add(b.select(buf.eq(0), b.cst(.i32, smem.red[0]), b.cst(.i32, smem.red[1])));
@@ -1324,8 +1327,8 @@ fn instrDescBf16(comptime m: u32, comptime n: u32, comptime a_major: Major, comp
     return (1 << 4) | // c_format = F32
         (1 << 7) | // a_format = BF16
         (1 << 10) | // b_format = BF16
-        (@as(u32, @intFromEnum(a_major)) << 15) |
-        (@as(u32, @intFromEnum(b_major)) << 16) |
+        (@as(u32, @backingInt(a_major)) << 15) |
+        (@as(u32, @backingInt(b_major)) << 16) |
         ((n >> 3) << 17) |
         ((m >> 4) << 24);
 }

@@ -736,22 +736,22 @@ pub const Builder = struct {
     /// `.{ .tensor = .{ .dtype = ..., .dims = &.{ ... } } }`.
     pub fn declareArgs(self: *Builder, spec: anytype) !dsl.NamedArgs(@TypeOf(spec), Value) {
         const Spec = @TypeOf(spec);
-        const fields = @typeInfo(Spec).@"struct".fields;
+        const fields = @typeInfo(Spec).@"struct".field_names;
         var specs: [fields.len]ArgSpec = undefined;
         inline for (fields, 0..) |f, i| {
-            const raw = @field(spec, f.name);
-            const variant = @typeInfo(@TypeOf(raw)).@"struct".fields[0].name;
+            const raw = @field(spec, f);
+            const variant = @typeInfo(@TypeOf(raw)).@"struct".field_names[0];
             const inner = @field(raw, variant);
             specs[i] = if (comptime std.mem.eql(u8, variant, "ptr"))
-                .{ .name = f.name, .dtype = inner }
+                .{ .name = f, .dtype = inner }
             else if (comptime std.mem.eql(u8, variant, "tensor"))
-                .{ .name = f.name, .dtype = inner.dtype, .dims = inner.dims, .space = if (@hasField(@TypeOf(inner), "space")) inner.space else .global }
+                .{ .name = f, .dtype = inner.dtype, .dims = inner.dims, .space = if (@hasField(@TypeOf(inner), "space")) inner.space else .global }
             else
-                @compileError("fly.declareArgs: argument `" ++ f.name ++ "` must be `.{ .ptr = dtype }` or `.{ .tensor = .{ .dtype, .dims } }`");
+                @compileError("fly.declareArgs: argument `" ++ f ++ "` must be `.{ .ptr = dtype }` or `.{ .tensor = .{ .dtype, .dims } }`");
         }
         try self.declareArgsLow(&specs);
         var named: dsl.NamedArgs(Spec, Value) = undefined;
-        inline for (fields, 0..) |f, i| @field(named, f.name) = self.arg(i);
+        inline for (fields, 0..) |f, i| @field(named, f) = self.arg(i);
         return named;
     }
 
@@ -969,8 +969,8 @@ pub const Builder = struct {
             .comptime_int, .int => return .static(@intCast(v)),
             .@"struct" => |s| {
                 if (!s.is_tuple) @compileError("fly.intTuple: expected an integer, null, Value, IntTuple or tuple, got " ++ @typeName(T));
-                const elems = self.alloc(IntTuple, s.fields.len);
-                inline for (s.fields, 0..) |f, i| elems[i] = self.intTupleSpec(operands, @field(v, f.name));
+                const elems = self.alloc(IntTuple, s.field_names.len);
+                inline for (s.field_names, 0..) |f, i| elems[i] = self.intTupleSpec(operands, @field(v, f));
                 return .{ .tup = elems };
             },
             else => @compileError("fly.intTuple: expected an integer, null, Value, IntTuple or tuple, got " ++ @typeName(T)),
@@ -1367,7 +1367,7 @@ pub const Builder = struct {
         inits: anytype,
     ) ForScope(tupleArity(@TypeOf(inits), "openFor: inits")) {
         const N = comptime tupleArity(@TypeOf(inits), "openFor: inits");
-        const fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
 
         const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.constIndex(lower);
         const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constLike(upper, lb_v);
@@ -1379,8 +1379,8 @@ pub const Builder = struct {
         block_locs[0] = self.loc();
         var inits_inner: [N]*const mlir.Value = undefined;
         inline for (fields, 0..) |f, i| {
-            if (f.type != Value) @compileError("openFor: every init must be a Value");
-            const v: Value = @field(inits, f.name);
+            if (@TypeOf(@field(inits, f)) != Value) @compileError("openFor: every init must be a Value");
+            const v: Value = @field(inits, f);
             block_types[i + 1] = v.type_();
             block_locs[i + 1] = self.loc();
             inits_inner[i] = v.inner;
@@ -1423,11 +1423,11 @@ pub const Builder = struct {
 
     pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
         const N = comptime tupleArity(@TypeOf(result_types), "openIfElse: result_types");
-        const fields = @typeInfo(@TypeOf(result_types)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(result_types)).@"struct".field_names;
         var types: [N]*const mlir.Type = undefined;
         inline for (fields, 0..) |f, i| {
-            if (f.type != *const mlir.Type) @compileError("openIfElse: every result_type must be *const mlir.Type");
-            types[i] = @field(result_types, f.name);
+            if (@TypeOf(@field(result_types, f)) != *const mlir.Type) @compileError("openIfElse: every result_type must be *const mlir.Type");
+            types[i] = @field(result_types, f);
         }
         const then_block = mlir.Block.init(&.{}, &.{});
         const else_block = mlir.Block.init(&.{}, &.{});
@@ -1445,16 +1445,16 @@ pub const Builder = struct {
     ) {
         const N = comptime tupleArity(@TypeOf(inits), "openWhile: inits");
         const M = comptime tupleArity(@TypeOf(after_types), "openWhile: after_types");
-        const init_fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
-        const type_fields = @typeInfo(@TypeOf(after_types)).@"struct".fields;
+        const init_fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
+        const type_fields = @typeInfo(@TypeOf(after_types)).@"struct".field_names;
 
         var before_types: [N]*const mlir.Type = undefined;
         var before_locs: [N]*const mlir.Location = undefined;
         var inits_inner: [N]*const mlir.Value = undefined;
         inline for (init_fields, 0..) |f, i| {
-            if (f.type != Value)
+            if (@TypeOf(@field(inits, f)) != Value)
                 @compileError("openWhile: every init must be a Value");
-            const v: Value = @field(inits, f.name);
+            const v: Value = @field(inits, f);
             before_types[i] = v.type_();
             before_locs[i] = self.loc();
             inits_inner[i] = v.inner;
@@ -1464,9 +1464,9 @@ pub const Builder = struct {
         var after_tys: [M]*const mlir.Type = undefined;
         var after_locs: [M]*const mlir.Location = undefined;
         inline for (type_fields, 0..) |f, i| {
-            if (f.type != *const mlir.Type)
+            if (@TypeOf(@field(after_types, f)) != *const mlir.Type)
                 @compileError("openWhile: every after_type must be *const mlir.Type");
-            after_tys[i] = @field(after_types, f.name);
+            after_tys[i] = @field(after_types, f);
             after_locs[i] = self.loc();
         }
         const after_block = mlir.Block.init(&after_tys, &after_locs);
@@ -1500,7 +1500,7 @@ pub const Builder = struct {
         var al: std.Io.Writer.Allocating = .init(self.allocator);
         defer al.deinit();
         try al.writer.print("{f}", .{self.module.operation().fmt(.{ .debug_info = false })});
-        return try self.allocator.dupeZ(u8, al.written());
+        return try self.allocator.dupeSentinel(u8, al.written(), 0);
     }
 };
 
@@ -1784,8 +1784,7 @@ test "tiledMma builds, verifies and re-parses" {
 test "MmaFlavor.atomThreads matches the dialect" {
     const ctx = try testContext();
     defer ctx.deinit();
-    inline for (std.meta.fields(MmaFlavor)) |field| {
-        const flavor: MmaFlavor = @enumFromInt(field.value);
+    inline for (comptime std.enums.values(MmaFlavor)) |flavor| {
         const atom = try fly.types.MmaAtomType.get(ctx, .{ .mmaOp = flavor.atomType(ctx) });
         // `mma_atom.thr_layout` is the wavefront an atom occupies; the launch
         // geometry is derived from it, so a wrong table silently corrupts C.

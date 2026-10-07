@@ -49,7 +49,8 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 
 # repo_name = None prevents rules_swift from eagerly auto-registering toolchains.
 bazel_dep(name = "rules_swift", version = "3.6.1", repo_name = None)
-bazel_dep(name = "rules_zig", version = "0.15.1")
+bazel_dep(name = "rules_zig", version = "0.17.0")
+
 bazel_dep(name = "tar.bzl", version = "0.10.4")
 bazel_dep(name = "llvm", version = "0.8.24")
 bazel_dep(name = "zlib-ng", version = "2.3.3", repo_name = "llvm_zlib")
@@ -95,7 +96,7 @@ zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
     # Ensure Zig actions are run locally only
     extra_exec_compatible_with = ["//platforms:local_execution"],
-    zig_version = "0.16.0",
+    zig_version = "0.17.0",
 )
 zig.mirrors(urls = [
     "https://pkg.machengine.org/zig",
@@ -133,7 +134,7 @@ register_execution_platforms("//platforms:local_execution_platform")
 zls = use_extension("@rules_zig//zig/zls:extensions.bzl", "zls")
 zls.index(file = "@rules_zig//zig/zls/private:versions.json")
 zls.toolchain(
-    zig_version = "0.16.0",
+    zig_version = "0.17.0",
     zls_version = "0.16.0",
 )
 use_repo(zls, "zls_toolchains")

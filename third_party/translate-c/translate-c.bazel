@@ -1,4 +1,12 @@
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary", "zig_library")
+load("@zml//bazel:zig_options.bzl", "zig_option", "zig_options")
+
+zig_option(name = "debug_allocations", bool = False)
+
+zig_options(
+    name = "build_options",
+    settings = [":debug_allocations"],
+)
 
 zig_library(
     name = "c_builtins",
@@ -19,6 +27,7 @@ zig_binary(
     main = "src/main.zig",
     linkopts = ["-lc"],
     deps = [
+        ":build_options",
         ":c_builtins",
         ":helpers",
         "@arocc//:aro",

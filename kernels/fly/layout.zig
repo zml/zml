@@ -189,8 +189,8 @@ fn itImpl(comptime v: anytype) IntTuple {
         .comptime_int, .int => return IntTuple.static(v),
         .@"struct" => |s| {
             if (!s.is_tuple) @compileError("fly.it: expected an integer, null, IntTuple or tuple, got " ++ @typeName(T));
-            var elems: [s.fields.len]IntTuple = undefined;
-            for (s.fields, 0..) |f, i| elems[i] = itImpl(@field(v, f.name));
+            var elems: [s.field_names.len]IntTuple = undefined;
+            for (s.field_names, 0..) |f, i| elems[i] = itImpl(@field(v, f));
             const frozen = elems;
             return .{ .tup = &frozen };
         },
@@ -413,8 +413,8 @@ fn tileImpl(comptime v: anytype) Tile {
         .comptime_int, .int => return .{ .leaf = .{ .s = v } },
         .@"struct" => |s| {
             if (!s.is_tuple) @compileError("fly.tile: expected an integer, null, Layout, Tile or tuple, got " ++ @typeName(T));
-            var elems: [s.fields.len]Tile = undefined;
-            for (s.fields, 0..) |f, i| elems[i] = tileImpl(@field(v, f.name));
+            var elems: [s.field_names.len]Tile = undefined;
+            for (s.field_names, 0..) |f, i| elems[i] = tileImpl(@field(v, f));
             const frozen = elems;
             return .{ .modes = &frozen };
         },
