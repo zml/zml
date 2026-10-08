@@ -71,6 +71,7 @@ class ActivationCollector:
         try:
             res = self.model(*args, **kwargs)
         except ActivationCollector.CollectionOver:
+            print("Could not retrieve result")
             res = None
         finally:
             hook.remove()
@@ -95,8 +96,8 @@ class ActivationCollector:
             for idx, out in enumerate(outputs):
                 tensors[f"{name}.out.{idx}"] = out
 
-        for i, (k, v) in enumerate(tensors.items()):
-            print(f"{i + self.skip}:", k, "->", v.shape)
+        # for i, (k, v) in enumerate(tensors.items()):
+        #     print(f"{i + self.skip}:", k, "->", v.shape)
 
         return res, tensors
 
@@ -126,9 +127,9 @@ class ActivationCollector:
 
         if self.skip < self.count < self.max_layers:
             self.outs[id(module)] = (name, outs, inputs + extra_inputs)
-        if 0 < self.max_layers < self.count:
-            print(f"stopping collection cause we got {self.count} activations already")
-            raise ActivationCollector.CollectionOver()
+        # if 0 < self.max_layers < self.count:
+        #     print(f"stopping collection cause we got {self.count} activations already")
+        #     raise ActivationCollector.CollectionOver()
 
 
 def save_with_confirmation(filename: str, tensors: dict):
