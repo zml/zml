@@ -22,15 +22,6 @@ const Case = struct {
     intermediate: i64 = 128,
     experts: i64 = 8,
 
-    fn run(c: Case, io: std.Io, allocator: std.mem.Allocator, platform: *const zml.Platform) !void {
-        std.debug.assert(c.backend.isAvailable(platform));
-
-        const exe = try c.compile(allocator, io, platform);
-        defer exe.deinit();
-
-        try c.check(allocator, io, platform, &exe);
-    }
-
     pub fn compile(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Exe {
         std.debug.assert(c.backend.isAvailable(platform));
         const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
@@ -361,37 +352,6 @@ const Matrix = struct {
     }
 };
 
-/// Execute the complete Cartesian product declared by the backend test.
-/// Only unavailable hardware is skipped; returned errors are collected with
-/// their full configuration, and fail the backend test after all cases run.
-fn runMatrix(io: std.Io, allocator: std.mem.Allocator, platform: *const zml.Platform, backend: zml.moe.Backend, matrix: Matrix) !void {
-    if (!backend.isAvailable(platform)) return error.SkipZigTest;
-    var passed: usize = 0;
-    var failed: usize = 0;
-    var skipped: usize = 0;
-
-    for (0..matrix.count()) |case_index| {
-        const case = matrix.caseAt(backend, case_index);
-
-        if (backend == .flashinfer_cutlass and case.scheme == .nvfp4 and
-            !zml.moe.cutlass_flashinfer.isNvfp4Supported(platform))
-        {
-            skipped += 1;
-            continue;
-        }
-        case.run(io, allocator, platform) catch |err| {
-            std.debug.print("MoE case failed: {any}\nError: {}\n", .{ case, err });
-            failed += 1;
-            continue;
-        };
-        passed += 1;
-    }
-
-    std.debug.print("MoE {s}: {} passed, {} failed, {} hardware-skipped cases\n", .{ @tagName(backend), passed, failed, skipped });
-    if (failed != 0) return error.MoeComplianceFailed;
-    if (passed == 0) return error.SkipZigTest;
-}
-
 const Options = struct {
     producers: usize = 16,
     consumers: usize = 1,
@@ -422,7 +382,7 @@ const Result = struct {
 const Pipeline = struct {
     platform: *const zml.Platform,
 
-    fn enumerate(self: *const Pipeline, io: std.Io, backend: zml.moe.Backend, matrix: Matrix, case_queue: *std.Io.Queue(CaseJob), results: []?Result) std.Io.Cancelable!void {
+    fn generateCases(self: *const Pipeline, io: std.Io, backend: zml.moe.Backend, matrix: Matrix, case_queue: *std.Io.Queue(CaseJob), results: []?Result) std.Io.Cancelable!void {
         defer case_queue.close(io);
         const available = backend.isAvailable(self.platform);
 
@@ -441,7 +401,7 @@ const Pipeline = struct {
         }
     }
 
-    fn produce(self: *const Pipeline, io: std.Io, allocator: std.mem.Allocator, case_queue: *std.Io.Queue(CaseJob), executable_queue: *std.Io.Queue(ExecutableJob), results: []?Result) std.Io.Cancelable!void {
+    fn compileExecutablesWorker(self: *const Pipeline, io: std.Io, allocator: std.mem.Allocator, case_queue: *std.Io.Queue(CaseJob), executable_queue: *std.Io.Queue(ExecutableJob), results: []?Result) std.Io.Cancelable!void {
         while (true) {
             const job = case_queue.getOne(io) catch |err| return switch (err) {
                 error.Closed => {},
@@ -463,7 +423,7 @@ const Pipeline = struct {
         }
     }
 
-    fn consume(self: *const Pipeline, io: std.Io, allocator: std.mem.Allocator, executable_queue: *std.Io.Queue(ExecutableJob), results: []?Result) std.Io.Cancelable!void {
+    fn runTestCaseWorker(self: *const Pipeline, io: std.Io, allocator: std.mem.Allocator, executable_queue: *std.Io.Queue(ExecutableJob), results: []?Result) std.Io.Cancelable!void {
         while (true) {
             var compiled = executable_queue.getOne(io) catch |err| return switch (err) {
                 error.Closed => {},
@@ -507,9 +467,9 @@ const Pipeline = struct {
             } else |_| {}
         }
 
-        for (0..options.consumers) |_| try consumers.concurrent(io, consume, .{ self, io, allocator, &executable_queue, results });
-        for (0..options.producers) |_| try producers.concurrent(io, produce, .{ self, io, allocator, &case_queue, &executable_queue, results });
-        try enumerator.concurrent(io, enumerate, .{ self, io, backend, matrix, &case_queue, results });
+        for (0..options.consumers) |_| try consumers.concurrent(io, runTestCaseWorker, .{ self, io, allocator, &executable_queue, results });
+        for (0..options.producers) |_| try producers.concurrent(io, compileExecutablesWorker, .{ self, io, allocator, &case_queue, &executable_queue, results });
+        try enumerator.concurrent(io, generateCases, .{ self, io, backend, matrix, &case_queue, results });
 
         try enumerator.await(io);
         try producers.await(io);
@@ -564,55 +524,65 @@ test "Triton compatibility matrix" {
 test "FlashInfer compatibility matrix" {
     const platform = zml.testing.env();
 
+    const pipeline: Pipeline = .{ .platform = platform };
+
     // Only default SwiGLU, no linear bias, and routing after the down projection.
-    try runMatrix(std.testing.io, std.testing.allocator, platform, .flashinfer_cutlass, .{
+    try pipeline.run(std.testing.io, std.testing.allocator, .flashinfer_cutlass, .{
         .formats = &.{ .{}, .{ .scheme = .nvfp4 } },
         .activations = &.{.{ .swiglu = .{} }},
-    });
+    }, .{});
 }
 
 test "specialized Triton MXFP4 compatibility matrix" {
     const platform = zml.testing.env();
 
+    const pipeline: Pipeline = .{ .platform = platform };
+
     // The kernel always quantizes inputs to MXFP8, independently of the option.
-    try runMatrix(std.testing.io, std.testing.allocator, platform, .triton_mxfp4, .{
+    try pipeline.run(std.testing.io, std.testing.allocator, .triton_mxfp4, .{
         .formats = &.{.{ .scheme = .mxfp4 }},
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
         .placements = &.{ .before_down, .after_down },
-    });
+    }, .{});
 }
 
 test "specialized CuTe MXFP4 compatibility matrix" {
     const platform = zml.testing.env();
 
-    try runMatrix(std.testing.io, std.testing.allocator, platform, .cute_mxfp4, .{
+    const pipeline: Pipeline = .{ .platform = platform };
+
+    try pipeline.run(std.testing.io, std.testing.allocator, .cute_mxfp4, .{
         .formats = &.{.{ .scheme = .mxfp4 }},
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
         .placements = &.{.before_down},
         .shapes = &specialized_shapes,
-    });
+    }, .{});
 }
 
 test "Fly compatibility matrix" {
     const platform = zml.testing.env();
 
+    const pipeline: Pipeline = .{ .platform = platform };
+
     // These constraints keep execution on Fly rather than its Triton fallback.
-    try runMatrix(std.testing.io, std.testing.allocator, platform, .fly, .{
+    try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
         .formats = &.{.{ .scheme = .mxfp4 }},
         .activations = &gated_activations,
         .quantize_inputs = &.{ false, true },
         .placements = &.{.before_down},
         .shapes = &specialized_shapes,
-    });
+    }, .{});
 }
 
 test "Metal compatibility matrix" {
     const platform = zml.testing.env();
 
+    const pipeline: Pipeline = .{ .platform = platform };
+
     // Quantized Metal kernels require BF16 activations and do not support bias.
-    try runMatrix(std.testing.io, std.testing.allocator, platform, .metal, .{
+    try pipeline.run(std.testing.io, std.testing.allocator, .metal, .{
         .formats = &.{
             .{},
             .{ .activation_dtype = .f16 },
@@ -625,17 +595,19 @@ test "Metal compatibility matrix" {
             .{ .scheme = .fp8_block32 },
         },
         .activations = &all_activations,
-    });
+    }, .{});
 }
 
 test "Mosaic TPU compatibility matrix" {
     const platform = zml.testing.env();
 
+    const pipeline: Pipeline = .{ .platform = platform };
+
     // canonicalizeDown currently requires a gated projection; quantized weights
     // are not supported by gmmDType. Plain activations need a backend fix first.
-    try runMatrix(std.testing.io, std.testing.allocator, platform, .mosaic_tpu, .{
+    try pipeline.run(std.testing.io, std.testing.allocator, .mosaic_tpu, .{
         .formats = &.{ .{}, .{ .activation_dtype = .f16 }, .{ .activation_dtype = .f32 } },
         .activations = &gated_activations,
         .biases = &.{ false, true },
-    });
+    }, .{});
 }
