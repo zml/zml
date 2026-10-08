@@ -18,6 +18,7 @@ zig_library(
         "pages/detail/tpu_detail.zig",
         "pages/overview.zig",
         "print.zig",
+        "selection.zig",
         "theme.zig",
         "top.zig",
         "widgets/braille_chart.zig",

@@ -7,15 +7,16 @@ const utils = @import("../lib/utils.zig");
 const ui = @import("../lib/ui.zig");
 const image_cache = @import("../image_cache.zig");
 const MetricCard = @import("metric_card.zig");
+const Selection = @import("../selection.zig").Selection;
 
 const DeviceCard = @This();
 
 device_id: u16 = 0,
-highlighted: bool = false,
 
 state: *const data.SystemState = undefined,
 use_braille: bool = false,
 viewing_device: *?u16 = undefined,
+selection: *Selection = undefined,
 
 pub fn handleEvent(self: *DeviceCard, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
     switch (event) {
@@ -24,15 +25,17 @@ pub fn handleEvent(self: *DeviceCard, ctx: *vxfw.EventContext, event: vxfw.Event
                 self.viewing_device.* = self.device_id;
                 return ctx.consumeAndRedraw();
             }
+            // Any mouse movement over the card claims the selection (mouse wins).
+            if (self.selection.setDevice(self.device_id)) ctx.redraw = true;
         },
         .mouse_enter => {
-            self.highlighted = true;
+            _ = self.selection.setDevice(self.device_id);
             try ctx.setMouseShape(.pointer);
             return ctx.consumeAndRedraw();
         },
         .mouse_leave => {
-            self.highlighted = false;
             try ctx.setMouseShape(.default);
+            if (self.selection.deviceEq(self.device_id)) self.selection.clear();
             ctx.redraw = true;
         },
         else => {},
@@ -119,7 +122,7 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         }),
         .title_right = if (self.state.devices[i].isRemote()) "remote" else null,
         .cell_size = ctx.cell_size,
-        .highlighted = self.highlighted,
+        .highlighted = self.selection.deviceEq(self.device_id),
     };
 
     const util_hist = try self.state.history.util[i].sliceLast(ctx.arena, data.history_len);
