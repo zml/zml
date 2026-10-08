@@ -383,7 +383,7 @@ pub const MatmulOpts = struct {
     transpose_lhs_hint: bool = false,
     precision: ?ContractPrecision = null,
     /// Optional `#tpu.dot_dimension_numbers<...>` attribute. When omitted the
-    /// canonicalizer derives one. Build with `mlir.Attribute.parse`.
+    /// canonicalizer derives one. Build with `tpu.dotDimensionNumbers`.
     dimension_numbers: ?*const mlir.Attribute = null,
 };
 

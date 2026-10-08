@@ -1,0 +1,117 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+td_library(
+    name = "td_files",
+    srcs = glob(["*.td"]),
+    includes = ["/mlir/dialects/cute_ir/include"],
+    deps = [
+        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "dialect_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            [
+                "-gen-dialect-decls",
+                "-dialect=nvvm",
+            ],
+            "NVVMDialect.h.inc",
+        ),
+        (
+            [
+                "-gen-dialect-defs",
+                "-dialect=nvvm",
+            ],
+            "NVVMDialect.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "NVVMDialect.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "enums_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            ["-gen-enum-decls"],
+            "NVVMEnums.h.inc",
+        ),
+        (
+            ["-gen-enum-defs"],
+            "NVVMEnums.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "NVVMEnums.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "attrs_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            [
+                "-gen-attrdef-decls",
+                "-attrdefs-dialect=nvvm",
+            ],
+            "NVVMAttrs.h.inc",
+        ),
+        (
+            [
+                "-gen-attrdef-defs",
+                "-attrdefs-dialect=nvvm",
+            ],
+            "NVVMAttrs.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "NVVMAttrs.td",
+    deps = [":td_files"],
+)
+
+# Every nvvm operation of the compiler's registry.
+gentbl_cc_library(
+    name = "ops_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            ["-gen-op-decls"],
+            "NVVMOps.h.inc",
+        ),
+        (
+            ["-gen-op-defs"],
+            "NVVMOps.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "NVVMOps.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "headers",
+    hdrs = ["NVVMDialect.h"],
+    includes = ["../../../.."],
+    deps = [
+        ":attrs_inc_gen",
+        ":dialect_inc_gen",
+        ":enums_inc_gen",
+        ":ops_inc_gen",
+        "@llvm-project//mlir:BytecodeOpInterface",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:SideEffectInterfaces",
+    ],
+)

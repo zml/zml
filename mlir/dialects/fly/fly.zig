@@ -5,6 +5,7 @@ const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 pub const attributes = @import("attributes.zig");
+pub const ops = @import("ops.zig");
 pub const rocdl = @import("rocdl.zig");
 pub const types = @import("types.zig");
 
@@ -20,19 +21,6 @@ pub fn insertDialects(registry: *mlir.DialectRegistry) void {
     inline for (dialects_needed) |d| {
         mlir.DialectHandle.fromString(d).insertDialect(registry);
     }
-}
-
-pub fn opName(comptime mnemonic: []const u8) []const u8 {
-    return "fly." ++ mnemonic;
-}
-
-/// By value, so a helper's temporary outlives the slice `Operation.make` gets.
-pub const Attrs = stdx.BoundedArray(mlir.NamedAttribute, 8);
-
-pub fn attrs(list: []const mlir.NamedAttribute) Attrs {
-    var out: Attrs = .empty;
-    out.appendSliceAssumeCapacity(list);
-    return out;
 }
 
 /// `Operation.make` that names the op and its operand types on failure: a
@@ -57,44 +45,6 @@ pub fn make(ctx: *mlir.Context, name: []const u8, args: mlir.Operation.MakeArgs)
         };
         std.debug.panic("{s}: cannot create operation ({}){s}", .{ name, err, w.buffered() });
     };
-}
-
-/// Result type inferred by FlyDSL.
-pub fn inferred(ctx: *mlir.Context, comptime mnemonic: []const u8, operands: []const *const mlir.Value, attributes_: Attrs, location: *const mlir.Location) *mlir.Operation {
-    return make(ctx, opName(mnemonic), .{
-        .operands = .{ .flat = operands },
-        .result_type_inference = true,
-        .attributes = attributes_.constSlice(),
-        .location = location,
-    });
-}
-
-/// Explicit result types.
-pub fn typed(ctx: *mlir.Context, comptime mnemonic: []const u8, operands: []const *const mlir.Value, results: []const *const mlir.Type, attributes_: Attrs, location: *const mlir.Location) *mlir.Operation {
-    return make(ctx, opName(mnemonic), .{
-        .operands = .{ .flat = operands },
-        .results = .{ .flat = results },
-        .attributes = attributes_.constSlice(),
-        .location = location,
-    });
-}
-
-/// No results.
-pub fn effect(ctx: *mlir.Context, comptime mnemonic: []const u8, operands: []const *const mlir.Value, attributes_: Attrs, location: *const mlir.Location) *mlir.Operation {
-    return make(ctx, opName(mnemonic), .{
-        .operands = .{ .flat = operands },
-        .attributes = attributes_.constSlice(),
-        .location = location,
-    });
-}
-
-/// Panics with the text on failure.
-pub fn parseType(ctx: *mlir.Context, text: []const u8) *const mlir.Type {
-    return mlir.Type.parse(ctx, text) catch std.debug.panic("fly: cannot parse type `{s}`", .{text});
-}
-
-pub fn parseAttr(ctx: *mlir.Context, text: []const u8) *const mlir.Attribute {
-    return mlir.Attribute.parse(ctx, text) catch std.debug.panic("fly: cannot parse attribute `{s}`", .{text});
 }
 
 pub const TypeKind = enum {
@@ -177,81 +127,9 @@ pub fn ptrWithElem(ctx: *mlir.Context, ptr: *const mlir.Type, elem: *const mlir.
     });
 }
 
-/// A value whose whole content lives in its type.
-pub fn static(ctx: *mlir.Context, ty: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
-    return typed(ctx, "static", &.{}, &.{ty}, .empty, location);
-}
-
-/// `ty` names the tuple with a `?` per dynamic operand, in order.
-pub fn makeIntTuple(ctx: *mlir.Context, dynamic: []const *const mlir.Value, ty: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
-    return typed(ctx, "make_int_tuple", dynamic, &.{ty}, .empty, location);
-}
-
-pub fn makeCopyAtom(ctx: *mlir.Context, ty: *const mlir.Type, val_bits: i32, location: *const mlir.Location) *mlir.Operation {
-    return typed(ctx, "make_copy_atom", &.{}, &.{ty}, attrs(&.{.named(ctx, "valBits", .int(ctx, .i32, val_bits))}), location);
-}
-
-pub fn makeMmaAtom(ctx: *mlir.Context, ty: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
-    return typed(ctx, "make_mma_atom", &.{}, &.{ty}, .empty, location);
-}
-
-pub fn makeFragmentLike(ctx: *mlir.Context, src: *const mlir.Value, dtype: ?*const mlir.Type, location: *const mlir.Location) *mlir.Operation {
-    var a: Attrs = .empty;
-    if (dtype) |t| a.appendAssumeCapacity(.named(ctx, "dtype", .typeAttr(t)));
-    return inferred(ctx, "make_fragment_like", &.{src}, a, location);
-}
-
-pub const CopyOpts = struct {
-    pred: ?*const mlir.Value = null,
-};
-
-pub fn copy(ctx: *mlir.Context, atom: *const mlir.Value, src: *const mlir.Value, dst: *const mlir.Value, opts: CopyOpts, location: *const mlir.Location) *mlir.Operation {
-    if (opts.pred) |p| return effect(ctx, "copy", &.{ atom, src, dst, p }, .empty, location);
-    return effect(ctx, "copy", &.{ atom, src, dst }, .empty, location);
-}
-
-pub const GemmOpts = struct {
-    traversal_order: ?GemmTraversalOrder = null,
-    traversal_layout: ?*const mlir.Value = null,
-};
-
-pub fn gemm(ctx: *mlir.Context, atom: *const mlir.Value, d: *const mlir.Value, a: *const mlir.Value, b: *const mlir.Value, cc: *const mlir.Value, opts: GemmOpts, location: *const mlir.Location) *mlir.Operation {
-    var at = attrs(&.{.named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &.{
-        1, 1, 1, 1, 1, @intFromBool(opts.traversal_layout != null),
-    }))});
-    if (opts.traversal_order) |o| {
-        const attr = attributes.gemmTraversalOrderAttr(ctx, o) catch @panic("fly.gemm: invalid traversal order");
-        at.appendAssumeCapacity(.named(ctx, "traversalOrder", attr));
-    }
-    if (opts.traversal_layout) |l| return effect(ctx, "gemm", &.{ atom, d, a, b, cc, l }, at, location);
-    return effect(ctx, "gemm", &.{ atom, d, a, b, cc }, at, location);
-}
-
-pub fn get(ctx: *mlir.Context, input: *const mlir.Value, mode: []const i32, location: *const mlir.Location) *mlir.Operation {
-    return inferred(ctx, "get", &.{input}, attrs(&.{.named(ctx, "mode", .denseArray(ctx, .i32, mode))}), location);
-}
-
-pub fn select(ctx: *mlir.Context, input: *const mlir.Value, indices: []const i32, location: *const mlir.Location) *mlir.Operation {
-    return inferred(ctx, "select", &.{input}, attrs(&.{.named(ctx, "indices", .denseArray(ctx, .i32, indices))}), location);
-}
-
-pub fn takeOrGroup(ctx: *mlir.Context, comptime mnemonic: []const u8, input: *const mlir.Value, begin: i32, end: i32, location: *const mlir.Location) *mlir.Operation {
-    return inferred(ctx, mnemonic, &.{input}, attrs(&.{
-        .named(ctx, "begin", .int(ctx, .i32, begin)),
-        .named(ctx, "end", .int(ctx, .i32, end)),
-    }), location);
-}
-
-/// Explicit pointer type; `fly.make_ptr` infers nothing.
-pub fn makePtr(ctx: *mlir.Context, operands: []const *const mlir.Value, ty: *const mlir.Type, dict_attrs: ?*const mlir.Attribute, location: *const mlir.Location) *mlir.Operation {
-    var a: Attrs = .empty;
-    if (dict_attrs) |d| a.appendAssumeCapacity(.named(ctx, "dictAttrs", d));
-    return typed(ctx, "make_ptr", operands, &.{ty}, a, location);
-}
-
 test {
     std.testing.refAllDecls(@This());
-    inline for (.{ types, attributes, rocdl }) |module| {
+    inline for (.{ types, attributes, ops, rocdl, rocdl.ops }) |module| {
         std.testing.refAllDecls(module);
         inline for (comptime std.meta.declarations(module)) |decl| {
             const value = @field(module, decl.name);
@@ -287,6 +165,18 @@ test "fly dialects register" {
     try std.testing.expect(ctx.isRegisteredOperation("gpu.func"));
     try std.testing.expect(ctx.isRegisteredOperation("rocdl.sched.barrier"));
     try std.testing.expect(ctx.isRegisteredOperation("ub.poison"));
+}
+
+test "every generated operation builder names a registered operation" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    for (ops.names ++ rocdl.ops.names) |name| {
+        if (!ctx.isRegisteredOperation(name)) {
+            std.debug.print("`{s}` is not registered\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "fly types parse and print round-trip" {
@@ -375,12 +265,11 @@ test "types and attributes are built through the C API" {
     }));
 }
 
-test "fly enum and gpu attributes" {
+test "fly enum attributes" {
     const ctx = try testContext();
     defer ctx.deinit();
     _ = try attributes.mmaOperandAttr(ctx, .a);
     _ = try attributes.gemmTraversalOrderAttr(ctx, .kmn);
-    _ = parseAttr(ctx, "#gpu<dim<x>>");
 }
 
 test "inferred fly ops compute layout algebra" {
@@ -392,11 +281,11 @@ test "inferred fly ops compute layout algebra" {
     const block = module.body();
 
     // raked_product((8,16):(16,1), (1,4):(1,1)) — the vectorAdd TV layout.
-    const thr = static(ctx, parseType(ctx, "!fly.layout<(8,16):(16,1)>"), loc).appendTo(block);
-    const val = static(ctx, parseType(ctx, "!fly.layout<(1,4):(1,1)>"), loc).appendTo(block);
-    const mn = inferred(ctx, "raked_product", &.{ thr.result(0), val.result(0) }, .empty, loc).appendTo(block);
-    const shape = inferred(ctx, "get_shape", &.{mn.result(0)}, .empty, loc).appendTo(block);
-    const tiler = inferred(ctx, "int_tuple_product_each", &.{shape.result(0)}, .empty, loc).appendTo(block);
+    const thr = ops.static(ctx, try mlir.Type.parse(ctx, "!fly.layout<(8,16):(16,1)>"), loc).appendTo(block);
+    const val = ops.static(ctx, try mlir.Type.parse(ctx, "!fly.layout<(1,4):(1,1)>"), loc).appendTo(block);
+    const mn = ops.raked_product(ctx, thr.result(0), val.result(0), loc).appendTo(block);
+    const shape = ops.get_shape(ctx, mn.result(0), loc).appendTo(block);
+    const tiler = ops.int_tuple_product_each(ctx, shape.result(0), loc).appendTo(block);
 
     try expectPrints("!fly.int_tuple<(8,64)>", tiler.result(0).type_());
     try std.testing.expect(module.operation().verify());
@@ -407,7 +296,7 @@ test "atom traits" {
     defer ctx.deinit();
 
     // MFMA 16x16x4 f32 tiled over a (2,2,1) atom layout.
-    const tm = expect(parseType(ctx, "!fly.tiled_mma<!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>, <(2,2,1):(1,2,0)>>"), .tiled_mma);
+    const tm = expect(try mlir.Type.parse(ctx, "!fly.tiled_mma<!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>, <(2,2,1):(1,2,0)>>"), .tiled_mma);
     try expectPrints("!fly.int_tuple<(32,32,4)>", tm.getTileSizeMNK());
     _ = tm.getTiledThrValLayoutA();
     _ = tm.getThrLayoutVMNK();
@@ -434,7 +323,7 @@ test "atom traits" {
     })).type_() });
     try expectPrints("!fly.layout<32:1>", wmma.getThrLayout());
 
-    const ca = expect(parseType(ctx, "!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 32>"), .copy_atom);
+    const ca = expect(try mlir.Type.parse(ctx, "!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 32>"), .copy_atom);
     _ = ca.getThrValLayoutSrc();
 }
 
@@ -451,7 +340,7 @@ test "type kinds" {
         .{ "!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>", TypeKind.mma_atom },
     };
     inline for (cases) |case| {
-        try std.testing.expectEqual(case[1], typeKind(parseType(ctx, case[0])));
+        try std.testing.expectEqual(case[1], typeKind(try mlir.Type.parse(ctx, case[0])));
     }
     try std.testing.expectEqual(TypeKind.other, typeKind(.float(ctx, .f32)));
 }
@@ -459,7 +348,7 @@ test "type kinds" {
 test "structural readers" {
     const ctx = try testContext();
     defer ctx.deinit();
-    const it = expect(parseType(ctx, "!fly.int_tuple<((2,4),?)>"), .int_tuple);
+    const it = expect(try mlir.Type.parse(ctx, "!fly.int_tuple<((2,4),?)>"), .int_tuple);
     try std.testing.expectEqual(@as(usize, 2), it.getNumElements());
     try std.testing.expect(!it.isLeaf());
     try std.testing.expect(!it.isStatic());
@@ -468,7 +357,7 @@ test "structural readers" {
     try std.testing.expectEqual(types.IntTupleType.Leaf{ .static = 4 }, inner.getElement(1).getLeaf());
     try std.testing.expectEqual(types.IntTupleType.Leaf.dynamic, it.getElement(1).getLeaf());
 
-    const m = parseType(ctx, "!fly.memref<bf16, shared, S<3,3,3> o 0 o (64,32):(32,1), align<16>>");
+    const m = try mlir.Type.parse(ctx, "!fly.memref<bf16, shared, S<3,3,3> o 0 o (64,32):(32,1), align<16>>");
     try expectPrints("!fly.int_tuple<(64,32)>", layoutLikeShape(m));
     try expectPrints("bf16", elemType(m));
 }

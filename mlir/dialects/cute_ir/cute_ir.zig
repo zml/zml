@@ -7,6 +7,9 @@ const cute = @This();
 
 pub const dialect_namespace = "cute";
 pub const nvgpu = @import("cute_nvgpu.zig");
+/// NVIDIA's `nvvm` and `cuda` dialects, as the DSL compiler registers them.
+pub const nvvm = @import("nvvm.zig");
+pub const cuda = @import("cuda.zig");
 
 pub const AttributeKind = enum { int_tuple, coord, shape, stride, layout, tile, composed_layout, swizzle };
 
@@ -24,10 +27,14 @@ pub const CuteType = opaque {
     }
 };
 
-/// Registers both dialects in the existing MLIR registry.
+/// Registers `cute`, `cute_nvgpu`, and NVIDIA's `nvvm` and `cuda` in the
+/// existing MLIR registry. The `nvvm` here is the compiler's, not upstream's:
+/// a registry cannot hold both.
 pub fn registerDialects(registry: *mlir.DialectRegistry) void {
     mlir.DialectHandle.fromString(dialect_namespace).insertDialect(registry);
     mlir.DialectHandle.fromString(nvgpu.dialect_namespace).insertDialect(registry);
+    mlir.DialectHandle.fromString(nvvm.dialect_handle).insertDialect(registry);
+    mlir.DialectHandle.fromString(cuda.dialect_handle).insertDialect(registry);
 }
 
 pub const AlgebraKind = AttributeKind;
@@ -2847,8 +2854,17 @@ fn testContext() !*mlir.Context {
 }
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(nvgpu);
+    std.testing.refAllDecls(nvvm);
+    std.testing.refAllDecls(cuda);
+    inline for (.{ nvvm, cuda }) |namespace| {
+        inline for (comptime std.meta.declarations(namespace)) |decl| {
+            const T = @field(namespace, decl.name);
+            if (@TypeOf(T) == type) std.testing.refAllDecls(T);
+        }
+    }
     inline for (comptime std.meta.declarations(@This())) |decl| {
         const T = @field(@This(), decl.name);
         if (@TypeOf(T) == type) std.testing.refAllDecls(T);
@@ -2864,6 +2880,8 @@ test "every bound operation is registered" {
     defer ctx.deinit();
     for (cute.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     for (nvgpu.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (nvvm.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (cuda.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }
 
@@ -2990,6 +3008,82 @@ test "generated types and attributes rebuild from their getters" {
         }
     }
     try std.testing.expect((try nvgpu.SmemDescType.get(ctx, .{})).type_().isA(nvgpu.NVGPUType) != null);
+}
+
+test "nvvm and cuda types and attributes print as the compiler does" {
+    @setEvalBranchQuota(100_000);
+    const ctx = try testContext();
+    defer ctx.deinit();
+    // The compiler's printed forms, which these must print byte for byte.
+    inline for (.{
+        .{ nvvm.MMAShapeAttr, "#nvvm.shape<m = 16, n = 8, k = 16>" },
+        .{ nvvm.LdStMatrixShapeAttr, "#nvvm.ld_st_matrix_shape<m = 8, n = 8>" },
+        .{ nvvm.TargetAttr, "#nvvm.target" },
+        .{ nvvm.TargetAttr, "#nvvm.target<verifyTarget = true>" },
+        .{ nvvm.TargetAttr, "#nvvm.target<O = 3, triple = \"t\", chip = \"sm_90\", features = \"f\", flags = {x}, link = [\"a\"]>" },
+        .{ cuda.AssumeKernelAttr, "#cuda.assume_kernel_attr<true>" },
+        .{ cuda.ComputeTargetAttr, "#cuda.compute_target<sass, portable, [sm_90, sm_100]>" },
+        .{ cuda.DevMaxSharedMemoryOptinAttr, "#cuda.dev_max_shared_memory_optin" },
+        .{ cuda.ExecutableAttr, "#cuda.executable<elf>" },
+        .{ cuda.LaunchConfigType, "!cuda.launch_cfg<max_attrs = 3>" },
+        .{ cuda.StreamType, "!cuda.stream" },
+        .{ cuda.ResultType, "!cuda.result" },
+        .{ cuda.IntType, "!cuda.int" },
+        .{ cuda.RuntimeDim3Type, "!cuda.runtime.dim_3" },
+        .{ cuda.RuntimeLaunchAttributeValueSyncPolicyType, "!cuda.runtime.launch_attribute_value.sync_policy" },
+        .{ cuda.RuntimeLaunchAttributeValueClusterSchedulingPolicyPreferenceType, "!cuda.runtime.launch_attribute_value.cluster_scheduling_policy_preference" },
+        .{ cuda.RuntimeLaunchAttributeValueNvlinkUtilCentricSchedulingType, "!cuda.runtime.launch_attribute_value.nvlink_util_centric_scheduling" },
+        .{ cuda.RuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowedType, "!cuda.runtime.launch_attribute_value.programmatic_stream_serialization_allowed" },
+    }) |example| {
+        const T = example[0];
+        const is_type = @hasDecl(T, "type_");
+        const parsed = if (is_type) try mlir.Type.parse(ctx, example[1]) else try mlir.Attribute.parse(ctx, example[1]);
+        const value = parsed.isA(T) orelse return error.TestUnexpectedResult;
+        try std.testing.expect((try rebuildEnums(T, ctx, value)).eql(value));
+        var buf: [512]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        try w.print("{f}", .{value});
+        try std.testing.expectEqualStrings(example[1], w.buffered());
+    }
+    // The compiler prints these without the space before the dictionary; it
+    // parses both.
+    inline for (.{
+        .{ cuda.DeviceAttributesAttr, "#cuda<device_attributes{}>" },
+        .{ cuda.FuncAttributesAttr, "#cuda<func_attributes{}>" },
+    }) |example| {
+        const parsed = try mlir.Attribute.parse(ctx, example[1]);
+        const value = parsed.isA(example[0]) orelse return error.TestUnexpectedResult;
+        try std.testing.expect((try rebuildEnums(example[0], ctx, value)).eql(value));
+    }
+}
+
+test "nvvm target rejects what the compiler rejects" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    try std.testing.expectError(error.InvalidMlir, nvvm.TargetAttr.get(ctx, .{ .O = 4 }));
+    try std.testing.expectError(error.InvalidMlir, nvvm.TargetAttr.get(ctx, .{ .chip = "" }));
+    const not_strings = try mlir.Attribute.parse(ctx, "[\"a\", 2]");
+    try std.testing.expectError(error.InvalidMlir, nvvm.TargetAttr.get(ctx, .{ .link = not_strings }));
+}
+
+/// `rebuild` for parameters that are slices of enums.
+fn rebuildEnums(comptime T: type, ctx: *mlir.Context, value: *const T) !*const T {
+    var args: T.InitArgs = undefined;
+    var buffers: [4][16]u32 = undefined;
+    inline for (@typeInfo(T.InitArgs).@"struct".fields, 0..) |field, i| {
+        const name = [_]u8{comptime std.ascii.toUpper(field.name[0])} ++ field.name[1..];
+        const info = @typeInfo(field.type);
+        if (info == .pointer and info.pointer.size == .slice and @typeInfo(info.pointer.child) == .@"enum") {
+            const E = info.pointer.child;
+            const count = @field(T, "getNum" ++ name)(value);
+            const elements: []E = @ptrCast(buffers[i][0..count]);
+            for (elements, 0..) |*element, pos| element.* = @field(T, "get" ++ name[0 .. name.len - 1])(value, pos);
+            @field(args, field.name) = elements;
+        } else {
+            @field(args, field.name) = @field(T, "get" ++ name)(value);
+        }
+    }
+    return T.get(ctx, args);
 }
 
 fn rebuild(comptime T: type, ctx: *mlir.Context, value: *const T) !*const T {

@@ -21,16 +21,62 @@ pub fn registerMosaicSerdePass() void {
 // Types — !tpu.semaphore, !tpu.dma_semaphore, !tpu.float8_exmy<...>
 // =============================================================================
 
+/// `!tpu.semaphore`.
+pub const SemaphoreType = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirType);
+    pub const isAFn = c.mlirTypeIsATpuSemaphore;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirTypeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "semaphore";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.type_().format(writer);
+    }
+    pub fn type_(self: *const Self) *const mlir.Type {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {};
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        _ = args;
+        const result = c.mlirTpuSemaphoreTypeGet(ctx.ptr());
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+};
+
 /// `!tpu.semaphore` element type.
 pub fn semaphoreType(ctx: *mlir.Context) *const mlir.Type {
-    return mlir.Type.parse(ctx, "!tpu.semaphore") catch
-        @panic("failed to parse !tpu.semaphore — is the tpu dialect registered?");
+    const ty = SemaphoreType.get(ctx, .{}) catch unreachable;
+    return ty.type_();
 }
+
+/// `!tpu.dma_semaphore`.
+pub const DMASemaphoreType = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirType);
+    pub const isAFn = c.mlirTypeIsATpuDMASemaphore;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirTypeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "dma_semaphore";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.type_().format(writer);
+    }
+    pub fn type_(self: *const Self) *const mlir.Type {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {};
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        _ = args;
+        const result = c.mlirTpuDMASemaphoreTypeGet(ctx.ptr());
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+};
 
 /// Build `!tpu.dma_semaphore`.
 pub fn dmaSemaphoreType(ctx: *mlir.Context) *const mlir.Type {
-    return mlir.Type.parse(ctx, "!tpu.dma_semaphore") catch
-        @panic("failed to parse !tpu.dma_semaphore — is the tpu dialect registered?");
+    const ty = DMASemaphoreType.get(ctx, .{}) catch unreachable;
+    return ty.type_();
 }
 
 /// `!tpu.float8_exmy<UnderlyingType>` — Mosaic Float8 type.
@@ -57,32 +103,27 @@ pub fn float8ExmyType(ctx: *mlir.Context, underlying: *const mlir.Type) *const m
 }
 
 // =============================================================================
-// Enum / dialect-attribute helpers — parsed from their textual form.
+// Attributes
 // =============================================================================
 
 /// Reduction kind for `tpu.all_reduce`, `tpu.reduce_index`, `tpu.scan`.
-pub const ReductionKind = enum {
-    sum,
-    max,
-    min,
-    maxf,
-    minf,
-    maxsi,
-    minsi,
-    maxui,
-    minui,
-    arg_max,
-    arg_min,
-    find_first_set,
-    @"and",
-    @"or",
-    xor,
+pub const ReductionKind = enum(u32) {
+    sum = 0,
+    max = 1,
+    min = 2,
+    arg_max = 3,
+    arg_min = 4,
+    find_first_set = 5,
+    maxf = 6,
+    minf = 7,
+    maxsi = 8,
+    minsi = 9,
+    maxui = 10,
+    minui = 11,
 
     pub fn attribute(self: ReductionKind, ctx: *mlir.Context) *const mlir.Attribute {
-        var buf: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "#tpu.reduction_kind<{s}>", .{@tagName(self)}) catch unreachable;
-        return mlir.Attribute.parse(ctx, text) catch
-            std.debug.panic("failed to parse tpu.reduction_kind '{s}'", .{text});
+        const attr = ReductionKindAttr.get(ctx, .{ .value = self }) catch unreachable;
+        return attr.attribute();
     }
 
     fn forInput(self: ReductionKind, input: *const mlir.Value, unsigned_integer: bool) ReductionKind {
@@ -98,105 +139,355 @@ pub const ReductionKind = enum {
     }
 };
 
-/// `tpu.contract_precision` — matmul precision setting.
-pub const ContractPrecision = enum {
-    bf16,
-    fp32,
+/// `#tpu.reduction_kind<...>`.
+pub const ReductionKindAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsATpuReductionKind;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "reduction_kind";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: ReductionKind,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirTpuReductionKindAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) ReductionKind {
+        return @enumFromInt(c.mlirTpuReductionKindAttrGetValue(self.ptr()));
+    }
+};
+
+/// Matmul precision setting of `tpu.matmul`.
+pub const ContractPrecision = enum(u32) {
+    bf16 = 0,
+    fp32 = 1,
+    bf16x3 = 2,
 
     pub fn attribute(self: ContractPrecision, ctx: *mlir.Context) *const mlir.Attribute {
-        const text = switch (self) {
-            .bf16 => "#tpu.contract_precision<bf16>",
-            .fp32 => "#tpu.contract_precision<fp32>",
-        };
-        return mlir.Attribute.parse(ctx, text) catch @panic("contract_precision parse");
+        const attr = ContractPrecisionAttr.get(ctx, .{ .value = self }) catch unreachable;
+        return attr.attribute();
     }
 };
 
-/// `tpu.rounding_mode` — used by tpu.fptosi / tpu.fptoui / etc.
-pub const RoundingMode = enum {
-    to_nearest_even,
-    to_nearest_away,
-    upward,
-    downward,
-    toward_zero,
+/// `#tpu.contract_precision<...>`.
+pub const ContractPrecisionAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsATpuContractPrecision;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "contract_precision";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: ContractPrecision,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirTpuContractPrecisionAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) ContractPrecision {
+        return @enumFromInt(c.mlirTpuContractPrecisionAttrGetValue(self.ptr()));
+    }
+};
+
+/// Rounding mode of `tpu.fptosi` / `tpu.fptoui` / etc.
+pub const RoundingMode = enum(u32) {
+    towards_zero = 0,
+    to_nearest_even = 1,
 
     pub fn attribute(self: RoundingMode, ctx: *mlir.Context) *const mlir.Attribute {
-        var buf: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "#tpu.rounding_mode<{s}>", .{@tagName(self)}) catch unreachable;
-        return mlir.Attribute.parse(ctx, text) catch
-            std.debug.panic("failed to parse tpu.rounding_mode '{s}'", .{text});
+        const attr = RoundingModeAttr.get(ctx, .{ .value = self }) catch unreachable;
+        return attr.attribute();
     }
 };
 
-/// `#tpu.memory_space<...>` — passed as the `memory_space` of a memref's type.
-pub const MemorySpace = enum {
-    vmem,
-    smem,
-    cmem,
-    hbm,
-    semaphore_mem,
-    vmem_shared,
-    any,
-
-    pub fn attribute(self: MemorySpace, ctx: *mlir.Context) *const mlir.Attribute {
-        var buf: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "#tpu.memory_space<{s}>", .{@tagName(self)}) catch unreachable;
-        return mlir.Attribute.parse(ctx, text) catch
-            std.debug.panic("failed to parse tpu.memory_space '{s}'", .{text});
+/// `#tpu.rounding_mode<...>`.
+pub const RoundingModeAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsATpuRoundingMode;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "rounding_mode";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: RoundingMode,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirTpuRoundingModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) RoundingMode {
+        return @enumFromInt(c.mlirTpuRoundingModeAttrGetValue(self.ptr()));
     }
 };
 
-/// `#tpu.core_type<...>` — used by remote DMAs / sem_signal target hints.
-pub const CoreType = enum {
-    tc,
-    sc_scalar_subcore,
-    sc_vector_subcore,
+/// Target core of a kernel, remote DMAs and `tpu.sem_signal`.
+pub const CoreType = enum(u32) {
+    tc = 0,
+    sc_scalar_subcore = 1,
+    sc_vector_subcore = 2,
 
     pub fn attribute(self: CoreType, ctx: *mlir.Context) *const mlir.Attribute {
-        var buf: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "#tpu.core_type<{s}>", .{@tagName(self)}) catch unreachable;
-        return mlir.Attribute.parse(ctx, text) catch
-            std.debug.panic("failed to parse tpu.core_type '{s}'", .{text});
+        const attr = CoreTypeAttr.get(ctx, .{ .value = self }) catch unreachable;
+        return attr.attribute();
     }
 };
 
-/// `#tpu.dimension_semantics<...>` — grid dimension semantics annotation.
-pub const DimensionSemantics = enum {
-    parallel,
-    arbitrary,
-    sequential,
+/// `#tpu.core_type<...>`.
+pub const CoreTypeAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsATpuCoreType;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "core_type";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: CoreType,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirTpuCoreTypeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) CoreType {
+        return @enumFromInt(c.mlirTpuCoreTypeAttrGetValue(self.ptr()));
+    }
+};
+
+/// Grid dimension semantics annotation.
+pub const DimensionSemantics = enum(u32) {
+    parallel = 0,
+    arbitrary = 1,
+    core_parallel = 2,
+    subcore_parallel = 3,
 
     pub fn attribute(self: DimensionSemantics, ctx: *mlir.Context) *const mlir.Attribute {
-        var buf: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "#tpu.dimension_semantics<{s}>", .{@tagName(self)}) catch unreachable;
-        return mlir.Attribute.parse(ctx, text) catch
-            std.debug.panic("failed to parse tpu.dimension_semantics '{s}'", .{text});
+        const attr = DimensionSemanticsAttr.get(ctx, .{ .value = self }) catch unreachable;
+        return attr.attribute();
     }
 };
 
-/// `#tpu.pipeline_mode<...>` — double-buffering mode in `window_params`.
-pub const PipelineMode = enum {
-    synchronous,
-    double_buffered,
+/// `#tpu.dimension_semantics<...>`.
+pub const DimensionSemanticsAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsATpuDimensionSemantics;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "dimension_semantics";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: DimensionSemantics,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirTpuDimensionSemanticsAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) DimensionSemantics {
+        return @enumFromInt(c.mlirTpuDimensionSemanticsAttrGetValue(self.ptr()));
+    }
+};
+
+/// Buffering mode of a `window_params` entry.
+pub const PipelineMode = enum(u32) {
+    synchronous = 1,
+    double_buffered = 2,
 
     pub fn attribute(self: PipelineMode, ctx: *mlir.Context) *const mlir.Attribute {
-        var buf: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "#tpu.pipeline_mode<{s}>", .{@tagName(self)}) catch unreachable;
-        return mlir.Attribute.parse(ctx, text) catch
-            std.debug.panic("failed to parse tpu.pipeline_mode '{s}'", .{text});
+        const attr = PipelineModeAttr.get(ctx, .{ .value = self }) catch unreachable;
+        return attr.attribute();
     }
 };
 
-/// `#tpu.revisit_mode<...>` — controls block revisit for multi-pass outputs.
-pub const RevisitMode = enum {
-    immediate,
-    any,
+/// `#tpu.pipeline_mode<...>`.
+pub const PipelineModeAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsATpuPipelineMode;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "pipeline_mode";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: PipelineMode,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirTpuPipelineModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) PipelineMode {
+        return @enumFromInt(c.mlirTpuPipelineModeAttrGetValue(self.ptr()));
+    }
+};
+
+/// Block revisit mode of a `window_params` entry.
+pub const RevisitMode = enum(u32) {
+    immediate = 0,
+    any = 1,
 
     pub fn attribute(self: RevisitMode, ctx: *mlir.Context) *const mlir.Attribute {
-        var buf: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "#tpu.revisit_mode<{s}>", .{@tagName(self)}) catch unreachable;
-        return mlir.Attribute.parse(ctx, text) catch
-            std.debug.panic("failed to parse tpu.revisit_mode '{s}'", .{text});
+        const attr = RevisitModeAttr.get(ctx, .{ .value = self }) catch unreachable;
+        return attr.attribute();
+    }
+};
+
+/// `#tpu.revisit_mode<...>`.
+pub const RevisitModeAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsATpuRevisitMode;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "revisit_mode";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: RevisitMode,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirTpuRevisitModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) RevisitMode {
+        return @enumFromInt(c.mlirTpuRevisitModeAttrGetValue(self.ptr()));
+    }
+};
+
+/// Memory space of a memref, `#tpu.memory_space<...>`.
+pub const MemorySpace = enum(u32) {
+    any = 0xffff_ffff,
+    vmem = 0,
+    smem = 1,
+    hbm = 2,
+    cmem = 3,
+    semaphore_mem = 4,
+    vmem_shared = 5,
+    host = 6,
+
+    pub fn attribute(self: MemorySpace, ctx: *mlir.Context) *const mlir.Attribute {
+        const attr = MemorySpaceAttr.get(ctx, .{ .value = self }) catch unreachable;
+        return attr.attribute();
+    }
+};
+
+/// `#tpu.memory_space<value[, core_type]>` — passed as the `memory_space` of a memref's type.
+pub const MemorySpaceAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsATpuMemorySpace;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "memory_space";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: MemorySpace,
+        coreType: ?CoreType = null,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const core_type: i64 = if (args.coreType) |ct| @intFromEnum(ct) else -1;
+        const result = c.mlirTpuMemorySpaceAttrGet(ctx.ptr(), @intFromEnum(args.value), core_type);
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) MemorySpace {
+        return @enumFromInt(c.mlirTpuMemorySpaceAttrGetValue(self.ptr()));
+    }
+    pub fn getCoreType(self: *const Self) ?CoreType {
+        const core_type = c.mlirTpuMemorySpaceAttrGetCoreType(self.ptr());
+        return if (core_type < 0) null else @enumFromInt(core_type);
+    }
+};
+
+/// `#tpu.element_window<[pad_low], [pad_high]>` — per-arg window padding.
+pub const ElementWindowAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsATpuElementWindow;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "element_window";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        padLow: []const i64,
+        padHigh: []const i64,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirTpuElementWindowAttrGet(
+            ctx.ptr(),
+            @intCast(args.padLow.len),
+            args.padLow.ptr,
+            @intCast(args.padHigh.len),
+            args.padHigh.ptr,
+        );
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getNumPadLow(self: *const Self) usize {
+        return @intCast(c.mlirTpuElementWindowAttrGetNumPadLow(self.ptr()));
+    }
+    pub fn getPadLow(self: *const Self, pos: usize) i64 {
+        return c.mlirTpuElementWindowAttrGetPadLow(self.ptr(), @intCast(pos));
+    }
+    pub fn getNumPadHigh(self: *const Self) usize {
+        return @intCast(c.mlirTpuElementWindowAttrGetNumPadHigh(self.ptr()));
+    }
+    pub fn getPadHigh(self: *const Self, pos: usize) i64 {
+        return c.mlirTpuElementWindowAttrGetPadHigh(self.ptr(), @intCast(pos));
     }
 };
 
@@ -206,23 +497,99 @@ pub fn elementWindowAttribute(
     pad_low: []const i64,
     pad_high: []const i64,
 ) *const mlir.Attribute {
-    var buf: [256]u8 = undefined;
-    var len: usize = 0;
-    len += (std.fmt.bufPrint(buf[len..], "#tpu.element_window<[", .{}) catch unreachable).len;
-    for (pad_low, 0..) |p, i| {
-        const sep = if (i == 0) "" else ", ";
-        len += (std.fmt.bufPrint(buf[len..], "{s}{d}", .{ sep, p }) catch unreachable).len;
-    }
-    len += (std.fmt.bufPrint(buf[len..], "], [", .{}) catch unreachable).len;
-    for (pad_high, 0..) |p, i| {
-        const sep = if (i == 0) "" else ", ";
-        len += (std.fmt.bufPrint(buf[len..], "{s}{d}", .{ sep, p }) catch unreachable).len;
-    }
-    len += (std.fmt.bufPrint(buf[len..], "]>", .{}) catch unreachable).len;
-    const text = buf[0..len];
-    return mlir.Attribute.parse(ctx, text) catch
-        std.debug.panic("failed to parse tpu.element_window '{s}'", .{text});
+    const attr = ElementWindowAttr.get(ctx, .{ .padLow = pad_low, .padHigh = pad_high }) catch unreachable;
+    return attr.attribute();
 }
+
+/// `#tpu.dot_dimension_numbers<...>` — the dimension mapping of `tpu.matmul`.
+pub const DotDimensionNumbersAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsATpuDotDimensionNumbers;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "dot_dimension_numbers";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        lhsContractingDims: []const i64,
+        rhsContractingDims: []const i64,
+        lhsNonContractingDims: []const i64,
+        /// Empty when rhs is a 1-D vector.
+        rhsNonContractingDims: []const i64 = &.{},
+        /// Flattened (operand, dim) pairs: operand 0 is lhs, 1 is rhs.
+        outputDimOrder: []const i64,
+        lhsBatchDims: []const i64 = &.{},
+        rhsBatchDims: []const i64 = &.{},
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirTpuDotDimensionNumbersAttrGet(
+            ctx.ptr(),
+            @intCast(args.lhsContractingDims.len),
+            args.lhsContractingDims.ptr,
+            @intCast(args.rhsContractingDims.len),
+            args.rhsContractingDims.ptr,
+            @intCast(args.lhsNonContractingDims.len),
+            args.lhsNonContractingDims.ptr,
+            @intCast(args.rhsNonContractingDims.len),
+            args.rhsNonContractingDims.ptr,
+            @intCast(args.outputDimOrder.len),
+            args.outputDimOrder.ptr,
+            @intCast(args.lhsBatchDims.len),
+            args.lhsBatchDims.ptr,
+            @intCast(args.rhsBatchDims.len),
+            args.rhsBatchDims.ptr,
+        );
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getNumLhsContractingDims(self: *const Self) usize {
+        return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumLhsContractingDims(self.ptr()));
+    }
+    pub fn getLhsContractingDims(self: *const Self, pos: usize) i64 {
+        return c.mlirTpuDotDimensionNumbersAttrGetLhsContractingDims(self.ptr(), @intCast(pos));
+    }
+    pub fn getNumRhsContractingDims(self: *const Self) usize {
+        return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumRhsContractingDims(self.ptr()));
+    }
+    pub fn getRhsContractingDims(self: *const Self, pos: usize) i64 {
+        return c.mlirTpuDotDimensionNumbersAttrGetRhsContractingDims(self.ptr(), @intCast(pos));
+    }
+    pub fn getNumLhsNonContractingDims(self: *const Self) usize {
+        return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumLhsNonContractingDims(self.ptr()));
+    }
+    pub fn getLhsNonContractingDims(self: *const Self, pos: usize) i64 {
+        return c.mlirTpuDotDimensionNumbersAttrGetLhsNonContractingDims(self.ptr(), @intCast(pos));
+    }
+    pub fn getNumRhsNonContractingDims(self: *const Self) usize {
+        return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumRhsNonContractingDims(self.ptr()));
+    }
+    pub fn getRhsNonContractingDims(self: *const Self, pos: usize) i64 {
+        return c.mlirTpuDotDimensionNumbersAttrGetRhsNonContractingDims(self.ptr(), @intCast(pos));
+    }
+    pub fn getNumOutputDimOrder(self: *const Self) usize {
+        return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumOutputDimOrder(self.ptr()));
+    }
+    pub fn getOutputDimOrder(self: *const Self, pos: usize) i64 {
+        return c.mlirTpuDotDimensionNumbersAttrGetOutputDimOrder(self.ptr(), @intCast(pos));
+    }
+    pub fn getNumLhsBatchDims(self: *const Self) usize {
+        return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumLhsBatchDims(self.ptr()));
+    }
+    pub fn getLhsBatchDims(self: *const Self, pos: usize) i64 {
+        return c.mlirTpuDotDimensionNumbersAttrGetLhsBatchDims(self.ptr(), @intCast(pos));
+    }
+    pub fn getNumRhsBatchDims(self: *const Self) usize {
+        return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumRhsBatchDims(self.ptr()));
+    }
+    pub fn getRhsBatchDims(self: *const Self, pos: usize) i64 {
+        return c.mlirTpuDotDimensionNumbersAttrGetRhsBatchDims(self.ptr(), @intCast(pos));
+    }
+};
 
 // =============================================================================
 // Reductions / scan / sort
@@ -513,7 +880,8 @@ pub const MatmulOpts = struct {
     /// Optional precision; pass null to omit.
     precision: ?ContractPrecision = null,
     /// Optional `#tpu.dot_dimension_numbers<...>` attribute. When omitted the
-    /// canonicalizer derives one. Build with `mlir.Attribute.parse`.
+    /// canonicalizer derives one. Build with `DotDimensionNumbersAttr` or
+    /// `dotDimensionNumbers`.
     dimension_numbers: ?*const mlir.Attribute = null,
 };
 
@@ -1135,29 +1503,16 @@ pub fn dotDimensionNumbers(
     lhs_batch: []const i64,
     rhs_batch: []const i64,
 ) *const mlir.Attribute {
-    var buf: [512]u8 = undefined;
-    var len: usize = 0;
-    len += (std.fmt.bufPrint(buf[len..], "#tpu.dot_dimension_numbers<", .{}) catch unreachable).len;
-    inline for (.{
-        lhs_contracting,
-        rhs_contracting,
-        lhs_non_contracting,
-        rhs_non_contracting,
-        output_dim_order,
-        lhs_batch,
-        rhs_batch,
-    }, 0..) |arr, i| {
-        if (i != 0) len += (std.fmt.bufPrint(buf[len..], ", ", .{}) catch unreachable).len;
-        len += (std.fmt.bufPrint(buf[len..], "[", .{}) catch unreachable).len;
-        for (arr, 0..) |v, j| {
-            const sep = if (j == 0) "" else ", ";
-            len += (std.fmt.bufPrint(buf[len..], "{s}{d}", .{ sep, v }) catch unreachable).len;
-        }
-        len += (std.fmt.bufPrint(buf[len..], "]", .{}) catch unreachable).len;
-    }
-    len += (std.fmt.bufPrint(buf[len..], ">", .{}) catch unreachable).len;
-    return mlir.Attribute.parse(ctx, buf[0..len]) catch
-        std.debug.panic("failed to parse tpu.dot_dimension_numbers '{s}'", .{buf[0..len]});
+    const attr = DotDimensionNumbersAttr.get(ctx, .{
+        .lhsContractingDims = lhs_contracting,
+        .rhsContractingDims = rhs_contracting,
+        .lhsNonContractingDims = lhs_non_contracting,
+        .rhsNonContractingDims = rhs_non_contracting,
+        .outputDimOrder = output_dim_order,
+        .lhsBatchDims = lhs_batch,
+        .rhsBatchDims = rhs_batch,
+    }) catch unreachable;
+    return attr.attribute();
 }
 
 // =============================================================================
@@ -1316,4 +1671,90 @@ test "legacy reduction extrema and scan axis preserve their semantics" {
     const float_scan = scan(ctx, floats, .min, null, float_type, loc);
     defer float_scan.deinit();
     try std.testing.expect(float_scan.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<minf>")));
+}
+
+fn expectPrints(expected: []const u8, value: anytype) !void {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print("{f}", .{value});
+    try std.testing.expectEqualStrings(expected, w.buffered());
+}
+
+fn expectEnumAttr(comptime Attr: type, ctx: *mlir.Context) !void {
+    const Enum = @FieldType(Attr.InitArgs, "value");
+    inline for (std.meta.fields(Enum)) |field| {
+        const value: Enum = @enumFromInt(field.value);
+        const attr = try Attr.get(ctx, .{ .value = value });
+        try std.testing.expectEqual(value, attr.getValue());
+        try std.testing.expect(attr.attribute().isA(Attr) != null);
+        try std.testing.expect(value.attribute(ctx).eql(attr.attribute()));
+        try expectPrints("#tpu." ++ Attr.mnemonic ++ "<" ++ field.name ++ ">", attr);
+    }
+}
+
+test "tpu types are built through the C API" {
+    const ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+
+    const semaphore = try SemaphoreType.get(ctx, .{});
+    try std.testing.expect(semaphoreType(ctx).isA(SemaphoreType) != null);
+    try std.testing.expect(semaphoreType(ctx).isA(DMASemaphoreType) == null);
+    try expectPrints("!tpu.semaphore", semaphore);
+
+    const dma_semaphore = try DMASemaphoreType.get(ctx, .{});
+    try std.testing.expect(dmaSemaphoreType(ctx).isA(DMASemaphoreType) != null);
+    try expectPrints("!tpu.dma_semaphore", dma_semaphore);
+}
+
+test "tpu enum attributes are built through the C API" {
+    const ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+
+    try expectEnumAttr(ReductionKindAttr, ctx);
+    try expectEnumAttr(ContractPrecisionAttr, ctx);
+    try expectEnumAttr(RoundingModeAttr, ctx);
+    try expectEnumAttr(CoreTypeAttr, ctx);
+    try expectEnumAttr(DimensionSemanticsAttr, ctx);
+    try expectEnumAttr(PipelineModeAttr, ctx);
+    try expectEnumAttr(RevisitModeAttr, ctx);
+    try expectEnumAttr(MemorySpaceAttr, ctx);
+
+    const smem_tc = try MemorySpaceAttr.get(ctx, .{ .value = .smem, .coreType = .sc_scalar_subcore });
+    try std.testing.expectEqual(MemorySpace.smem, smem_tc.getValue());
+    try std.testing.expectEqual(CoreType.sc_scalar_subcore, smem_tc.getCoreType().?);
+    try expectPrints("#tpu.memory_space<smem, sc_scalar_subcore>", smem_tc);
+    try std.testing.expectEqual(null, (try MemorySpaceAttr.get(ctx, .{ .value = .hbm })).getCoreType());
+    // The dialect verifier's pairing rules: no core type on hbm, no scalar subcore on vmem.
+    try std.testing.expectError(error.InvalidMlir, MemorySpaceAttr.get(ctx, .{ .value = .hbm, .coreType = .tc }));
+    try std.testing.expectError(error.InvalidMlir, MemorySpaceAttr.get(ctx, .{ .value = .vmem, .coreType = .sc_scalar_subcore }));
+}
+
+test "tpu array attributes are built through the C API" {
+    const ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+
+    const window = try ElementWindowAttr.get(ctx, .{ .padLow = &.{ 0, 2 }, .padHigh = &.{ 1, 3 } });
+    try std.testing.expectEqual(2, window.getNumPadLow());
+    try std.testing.expectEqual(2, window.getPadLow(1));
+    try std.testing.expectEqual(2, window.getNumPadHigh());
+    try std.testing.expectEqual(3, window.getPadHigh(1));
+    try expectPrints("#tpu.element_window<[0, 2], [1, 3]>", window);
+    try std.testing.expect(elementWindowAttribute(ctx, &.{ 0, 2 }, &.{ 1, 3 }).eql(window.attribute()));
+
+    const dims = dotDimensionNumbers(ctx, &.{1}, &.{0}, &.{0}, &.{1}, &.{ 0, 0, 1, 1 }, &.{}, &.{});
+    try expectPrints("#tpu.dot_dimension_numbers<[1], [0], [0], [1], [0, 0, 1, 1], [], []>", dims);
+
+    const batched = try DotDimensionNumbersAttr.get(ctx, .{
+        .lhsContractingDims = &.{2},
+        .rhsContractingDims = &.{1},
+        .lhsNonContractingDims = &.{1},
+        .outputDimOrder = &.{ 0, 0, 0, 1 },
+        .lhsBatchDims = &.{0},
+        .rhsBatchDims = &.{0},
+    });
+    try std.testing.expectEqual(0, batched.getNumRhsNonContractingDims());
+    try std.testing.expectEqual(4, batched.getNumOutputDimOrder());
+    try std.testing.expectEqual(1, batched.getOutputDimOrder(3));
+    try std.testing.expectEqual(0, batched.getRhsBatchDims(0));
+    try expectPrints("#tpu.dot_dimension_numbers<[2], [1], [1], [], [0, 0, 0, 1], [0], [0]>", batched);
 }

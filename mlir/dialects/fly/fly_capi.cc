@@ -5,14 +5,12 @@
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
-#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Fly, fly, mlir::fly::FlyDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl,
                                       mlir::fly_rocdl::FlyROCDLDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(UB, ub, mlir::ub::UBDialect)
-MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(GPU, gpu, mlir::gpu::GPUDialect)
 
 using mlir::cast;
 using mlir::isa;

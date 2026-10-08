@@ -1,4 +1,21 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+# The types and attributes Mosaic's C API does not expose.
+cc_library(
+    name = "mosaic_tpu_capi",
+    srcs = ["mosaic_tpu_capi.cc"],
+    hdrs = ["mosaic_tpu_capi.h"],
+    strip_include_prefix = ".",
+    tags = ["manual"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:CAPIIR",
+        "@xla//xla/mosaic:tpu_dialect",
+    ],
+    alwayslink = True,
+)
 
 zig_library(
     name = "mosaic_tpu",
@@ -6,6 +23,7 @@ zig_library(
     main = "mosaic_tpu.zig",
     visibility = ["//visibility:public"],
     deps = [
+        ":mosaic_tpu_capi",
         "//mlir",
         "//mlir:c",
         "//stdx",

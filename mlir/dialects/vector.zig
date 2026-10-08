@@ -5,45 +5,93 @@ const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 // =============================================================================
-// Enum attributes — parsed from their textual `#vector.<kind><...>` form.
+// Enum attributes
 // =============================================================================
 
-/// Matches `mlir::vector::CombiningKind` (I32EnumAttr in VectorAttributes.td).
-pub const CombiningKind = enum {
-    add,
-    mul,
-    minui,
-    minsi,
-    minnumf,
-    maxui,
-    maxsi,
-    maxnumf,
-    @"and",
-    @"or",
-    xor,
-    minimumf,
-    maximumf,
+/// Kind of combining function for contractions and reductions.
+pub const CombiningKind = enum(u32) {
+    add = 0,
+    mul = 1,
+    minui = 2,
+    minsi = 3,
+    minnumf = 4,
+    maxui = 5,
+    maxsi = 6,
+    maxnumf = 7,
+    @"and" = 8,
+    @"or" = 9,
+    xor = 10,
+    minimumf = 11,
+    maximumf = 12,
+    minimumnumf = 13,
+    maximumnumf = 14,
 
     pub fn attribute(self: CombiningKind, ctx: *mlir.Context) *const mlir.Attribute {
-        var buf: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "#vector.kind<{s}>", .{@tagName(self)}) catch unreachable;
-        return mlir.Attribute.parse(ctx, text) catch
-            std.debug.panic("failed to parse CombiningKind '{s}'", .{text});
+        return (CombiningKindAttr.get(ctx, .{ .value = self }) catch unreachable).attribute();
     }
 };
 
-/// Matches `mlir::vector::IteratorType` — used by `vector.contract`.
-pub const IteratorType = enum {
-    parallel,
-    reduction,
+/// Iterator type of a `vector.contract` dimension.
+pub const IteratorType = enum(u32) {
+    parallel = 0,
+    reduction = 1,
 
     pub fn attribute(self: IteratorType, ctx: *mlir.Context) *const mlir.Attribute {
-        const text = switch (self) {
-            .parallel => "#vector.iterator_type<parallel>",
-            .reduction => "#vector.iterator_type<reduction>",
-        };
-        return mlir.Attribute.parse(ctx, text) catch
-            std.debug.panic("failed to parse IteratorType", .{});
+        return (IteratorTypeAttr.get(ctx, .{ .value = self }) catch unreachable).attribute();
+    }
+};
+
+/// `#vector.kind<...>`.
+pub const CombiningKindAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsAVectorCombiningKind;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "kind";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: CombiningKind,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirVectorCombiningKindAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) CombiningKind {
+        return @enumFromInt(c.mlirVectorCombiningKindAttrGetValue(self.ptr()));
+    }
+};
+
+/// `#vector.iterator_type<...>`.
+pub const IteratorTypeAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsAVectorIteratorType;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const isA = M.isA;
+    pub const mnemonic = "iterator_type";
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: IteratorType,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirVectorIteratorTypeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn getValue(self: *const Self) IteratorType {
+        return @enumFromInt(c.mlirVectorIteratorTypeAttrGetValue(self.ptr()));
     }
 };
 
@@ -773,4 +821,30 @@ pub fn create_mask(
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+fn expectPrints(expected: []const u8, value: anytype) !void {
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print("{f}", .{value});
+    try std.testing.expectEqualStrings(expected, w.buffered());
+}
+
+test "vector enum attributes are built through the C API" {
+    const ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+
+    inline for (std.meta.fields(CombiningKind)) |field| {
+        const value: CombiningKind = @enumFromInt(field.value);
+        const attr = try CombiningKindAttr.get(ctx, .{ .value = value });
+        try std.testing.expectEqual(value, attr.getValue());
+        try std.testing.expect(value.attribute(ctx).isA(CombiningKindAttr) != null);
+        try expectPrints("#vector.kind<" ++ field.name ++ ">", attr);
+    }
+    inline for (std.meta.fields(IteratorType)) |field| {
+        const value: IteratorType = @enumFromInt(field.value);
+        const attr = try IteratorTypeAttr.get(ctx, .{ .value = value });
+        try std.testing.expectEqual(value, attr.getValue());
+        try expectPrints("#vector.iterator_type<" ++ field.name ++ ">", attr);
+    }
 }

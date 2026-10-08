@@ -200,7 +200,8 @@ Pallas's `len(grid_mapping.block_mappings)`), and re-emits the
 The default `memory_space` for a `.ref` is `.vmem`. Override with `.smem`,
 `.cmem`, `.hbm`, `.semaphore_mem`, `.vmem_shared`, or `.any` per the
 `MemorySpace` enum. Iteration semantics (`.parallel`, `.arbitrary`,
-`.sequential`) attach `tpu.dimension_semantics` to the iter arg.
+`.core_parallel`, `.subcore_parallel`) attach `tpu.dimension_semantics` to
+the iter arg.
 
 **Runtime payloads:** the variant tags are fixed per kernel, but shape /
 dtype / memory_space values can be runtime — typical for kernels

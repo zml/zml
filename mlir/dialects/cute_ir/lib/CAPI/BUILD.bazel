@@ -32,3 +32,32 @@ cc_library(
     ],
     alwayslink = True,
 )
+
+cc_library(
+    name = "cuda",
+    srcs = [
+        "Cuda.cpp",
+        "CudaAttributes.cpp",
+        "CudaTypes.cpp",
+    ],
+    deps = [
+        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cuda",
+        "//mlir/dialects/cute_ir/lib/Dialect/Cuda/IR:dialect",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+    alwayslink = True,
+)
+
+cc_library(
+    name = "nvvm",
+    srcs = [
+        "NVVM.cpp",
+        "NVVMAttributes.cpp",
+    ],
+    deps = [
+        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:nvvm",
+        "//mlir/dialects/cute_ir/lib/Dialect/NVVM/IR:dialect",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+    alwayslink = True,
+)

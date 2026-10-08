@@ -30,9 +30,10 @@ test {
     std.testing.refAllDecls(Atom);
 }
 
-/// `nvvm` is not linked into ZML: its ops are emitted unregistered, in
-/// generic form; the CuTe compiler has the dialect.
-pub const dialects_needed = [_][]const u8{ "func", "gpu", "cute", "cute_nvgpu", "arith", "scf", "math", "cf", "vector" };
+/// `nvvm` and `cuda` are NVIDIA's (`cute.nvvm`, `cute.cuda`, handles `cute_nvvm`
+/// and `cuda`); `llvm` is upstream's, whose types and operations NVIDIA's
+/// compiler reads as its own.
+pub const dialects_needed = [_][]const u8{ "func", "gpu", "cute", "cute_nvgpu", cute.nvvm.dialect_handle, cute.cuda.dialect_handle, "llvm", "arith", "scf", "math", "cf", "vector" };
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -626,8 +627,6 @@ pub const Builder = struct {
     tensors: []?Tensor = &.{},
 
     pub fn open(allocator: std.mem.Allocator, ctx: *mlir.Context, name: []const u8) !Builder {
-        // `nvvm.*` is built unregistered.
-        ctx.setAllowUnregisteredDialects(true);
         const module: *mlir.Module = .init(.unknown(ctx));
         errdefer module.deinit();
         return .{
@@ -923,9 +922,6 @@ pub const Builder = struct {
     };
 
     /// Build the mutable CUDA launch configuration used by `cuda.launch_ex`.
-    /// The segment attribute is written explicitly because the CUDA dialect is
-    /// supplied by the runtime CuTe compiler and is intentionally unregistered
-    /// in ZML's lightweight construction context.
     pub fn makeLaunchConfig(self: *Builder, opts: LaunchOptions) LaunchConfig {
         const config = self.emit(cuda.launch_cfg_create(self.ctx, .{
             .max_attrs = 17,
@@ -953,7 +949,7 @@ pub const Builder = struct {
             .config = config.inner,
             .inputs = values,
             .callee = self.parseAttribute(symbol),
-            .assume_kernel_attr = self.targetAttribute("#cuda.assume_kernel_attr<true>"),
+            .assume_kernel_attr = cuda.assumeKernelAttr(self.ctx, true),
             .location = self.loc(),
         }));
     }
@@ -991,41 +987,18 @@ pub const Builder = struct {
     pub fn finishProgram(self: *Builder) FinishError![:0]const u8 {
         std.debug.assert(self.entry_block == null and self.func_op == null);
         if (!self.module.operation().verify()) return error.InvalidMlir;
-        return self.renderModule(true);
+        return self.renderModule();
     }
 
-    const target_attr_marker = "__zml_cute_target_attr__";
-
-    fn renderModule(self: *Builder, generic: bool) FinishError![:0]const u8 {
+    fn renderModule(self: *Builder) FinishError![:0]const u8 {
         var printed: std.Io.Writer.Allocating = .init(self.allocator);
         defer printed.deinit();
-        // Generic form is stable across the lightweight construction dialect
-        // and NVIDIA's runtime compiler dialect. In particular, the two
-        // versions currently use different custom assembly printers for
-        // `cute.make_composed_layout`.
-        if (generic) {
-            try printed.writer.print("{f}", .{self.module.operation().fmt(.{ .print_generic_op_form = true })});
-        } else {
-            try printed.writer.print("{f}", .{self.module.operation()});
-        }
-
-        // A target attribute is initially a quoted StringAttr so the local
-        // verifier can carry it through an AnyAttr field. Replace the whole
-        // quoted string with its CuTe assembly before handing the module to
-        // the real compiler, which owns the attribute parser.
-        var output: std.Io.Writer.Allocating = .init(self.allocator);
-        defer output.deinit();
-        var rest = printed.written();
-        while (std.mem.indexOf(u8, rest, target_attr_marker)) |marker| {
-            if (marker == 0 or rest[marker - 1] != '"') return error.InvalidMlir;
-            try output.writer.writeAll(rest[0 .. marker - 1]);
-            const payload = rest[marker + target_attr_marker.len ..];
-            const end = std.mem.indexOfScalar(u8, payload, '"') orelse return error.InvalidMlir;
-            try output.writer.writeAll(payload[0..end]);
-            rest = payload[end + 1 ..];
-        }
-        try output.writer.writeAll(rest);
-        return try self.allocator.dupeZ(u8, output.written());
+        // Always the generic form: NVIDIA's compiler parses the module with its
+        // own MLIR revision, whose custom assembly differs from ours (e.g.
+        // `cute.make_composed_layout`, or `llvm.load`/`llvm.store` printing
+        // their alignment as a `<alignment = N>` property).
+        try printed.writer.print("{f}", .{self.module.operation().fmt(.{ .print_generic_op_form = true })});
+        return try self.allocator.dupeZ(u8, printed.written());
     }
 
     // ==================== types ====================
@@ -1079,16 +1052,6 @@ pub const Builder = struct {
     /// Parse a target-specific MLIR attribute.
     pub fn parseAttribute(self: *Builder, text: []const u8) *const mlir.Attribute {
         return mlir.Attribute.parse(self.ctx, text) catch std.debug.panic("invalid MLIR attribute: {s}", .{text});
-    }
-
-    /// Preserve an attribute owned by the runtime CuTe compiler when the
-    /// lightweight ZML MLIR context has no parser hook for that attribute.
-    /// It is represented as a verifier-safe string while constructing the
-    /// module and restored to target assembly by `finish`/`finishProgram`.
-    pub fn targetAttribute(self: *Builder, text: []const u8) *const mlir.Attribute {
-        if (std.mem.indexOfScalar(u8, text, '"') != null) @panic("targetAttribute cannot contain a quote");
-        const encoded = std.fmt.allocPrint(self.arena.allocator(), "__zml_cute_target_attr__{s}", .{text}) catch @panic("OOM");
-        return .string(self.ctx, encoded);
     }
 
     fn algebra(self: *Builder, dims: []const i64) []const u8 {
@@ -3115,7 +3078,7 @@ pub const Builder = struct {
         func_op.setAttributeByName("nvvm.reqntid", .denseArray(self.ctx, .i32, &block));
         if (!self.module.operation().verify()) return error.InvalidMlir;
 
-        return self.renderModule(false);
+        return self.renderModule();
     }
 };
 
@@ -3160,15 +3123,15 @@ test "naive elementwise add matches the Python notebook kernel" {
     // The module round-trips through the local dialects.
     const ir = try b.finish(.{ 128, 1, 1 });
     defer std.testing.allocator.free(ir);
-    try expectContains(ir, "module {\n  func.func @naive_elementwise_add_kernel(%arg0: !cute.ptr<f16, gmem, align<16>>, %arg1: !cute.ptr<f16, gmem, align<16>>, %arg2: !cute.ptr<f16, gmem, align<16>>)");
-    try expectContains(ir, "attributes {cute.kernel, gpu.kernel, nvvm.reqntid = array<i32: 128, 1, 1>}");
+    try expectContains(ir, "\"func.func\"() <{function_type = (!cute.ptr<f16, gmem, align<16>>, !cute.ptr<f16, gmem, align<16>>, !cute.ptr<f16, gmem, align<16>>) -> (), sym_name = \"naive_elementwise_add_kernel\"}>");
+    try expectContains(ir, "}) {cute.kernel, gpu.kernel, nvvm.reqntid = array<i32: 128, 1, 1>} : () -> ()");
     try expectContains(ir, "\"nvvm.read.ptx.sreg.tid.x\"() : () -> i32");
     try expectContains(ir, "!cute.layout<\"(16,8):(8,1)\">");
     try expectContains(ir, "!cute.coord<\"(?,?)\">");
     try expectContains(ir, "cute.memref.load");
     try expectContains(ir, "cute.memref.store");
     try expectContains(ir, "arith.addf");
-    try expectContains(ir, "    return\n  }\n}\n");
+    try expectContains(ir, "\"func.return\"() : () -> ()\n  })");
     try std.testing.expect(std.mem.indexOf(u8, ir, "gpu.module") == null);
     const parsed = try mlir.Module.parse(ctx, ir);
     defer parsed.deinit();
@@ -3206,7 +3169,7 @@ test "guard, shared memory, sync, layouts, for loop" {
     defer std.testing.allocator.free(kernel);
     try expectContains(kernel, "cute_nvgpu.arch.alloc_smem");
     try expectContains(kernel, "!cute.ptr<f32, smem, align<16>>");
-    try expectContains(kernel, "\"nvvm.barrier\"() {operandSegmentSizes = array<i32: 0, 0, 0>} : () -> ()");
+    try expectContains(kernel, "\"nvvm.barrier\"() <{operandSegmentSizes = array<i32: 0, 0, 0>}> : () -> ()");
     try expectContains(kernel, "bar.sync 2, 128;");
     try expectContains(kernel, "griddepcontrol.launch_dependents;");
     try expectContains(kernel, "griddepcontrol.wait;");
@@ -3273,7 +3236,7 @@ test "casts, select, if-else, integer widening" {
     const kernel = try b.finish(.{ 1, 1, 1 });
     defer std.testing.allocator.free(kernel);
     try expectContains(kernel, "arith.extsi");
-    try expectContains(kernel, "arith.constant 3000000000 : i64");
+    try expectContains(kernel, "\"arith.constant\"() <{value = 3000000000 : i64}> : () -> i64");
     try expectContains(kernel, "arith.sitofp");
     try expectContains(kernel, "arith.truncf");
     try expectContains(kernel, "arith.extf");
@@ -3283,7 +3246,8 @@ test "casts, select, if-else, integer widening" {
     try expectContains(kernel, "arith.extui");
     try expectContains(kernel, "arith.select");
     try expectContains(kernel, "shfl.sync.bfly.b32");
-    try expectContains(kernel, "} else {");
+    try expectContains(kernel, "\"scf.if\"");
+    try expectContains(kernel, "}, {");
     const parsed = try mlir.Module.parse(ctx, kernel);
     defer parsed.deinit();
     try std.testing.expect(parsed.operation().verify());
