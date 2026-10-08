@@ -575,6 +575,8 @@ pub const RopeOpts = struct {
 /// - pos_idx: optional tensor which indicates which positions are needed.
 ///   When not set `rope` return all positions from 0 to x.dim(.s) which is the max seq len.
 pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
+    if (!x.shape.hasTag(.hd)) std.debug.panic("TODO", .{});
+
     const head_dim = x.dim(.hd);
     stdx.debug.assert(@mod(head_dim, 2) == 0, "rope expects a even head dim (.hd), got {f}", .{x});
 
@@ -627,6 +629,8 @@ const Pass = union(RopeOpts.Layout) {
 };
 
 pub fn splitRealImgPass(x: Tensor, layout: RopeOpts.Layout, rotary_dim: u32) struct { Tensor, Tensor, ?Pass } {
+    if (!x.shape.hasTag(.hd)) std.debug.panic("TODO", .{});
+
     const ax = x.axis(.hd);
     const hd = x.dim(ax);
     if (rotary_dim == hd) {
@@ -659,8 +663,11 @@ pub fn splitRealImgPass(x: Tensor, layout: RopeOpts.Layout, rotary_dim: u32) str
 }
 
 pub fn mergeRealImg(x_real: Tensor, x_imag: Tensor, layout: RopeOpts.Layout) Tensor {
+    if (!x_real.shape().hasTag(.hd)) std.debug.panic("Expected x_real argument to have tag .hd but got {f} instead", .{x_real.shape()});
+    if (!x_imag.shape().hasTag(.hd)) std.debug.panic("Expected x_imag argument to have tag .hd but got {f} instead", .{x_imag.shape()});
+
     return switch (layout) {
-        .real_im_pass, .real_pass_im_pass => .concatenate(&.{ x_real, x_imag }, -1),
+        .real_im_pass, .real_pass_im_pass => .concatenate(&.{ x_real, x_imag }, .hd),
         .interleaved => Tensor.stack(&.{ x_real, x_imag }, .last, .interleaved_real_img)
             .merge(.{ .hd = .{ .hd, .interleaved_real_img } }),
     };
@@ -668,6 +675,10 @@ pub fn mergeRealImg(x_real: Tensor, x_imag: Tensor, layout: RopeOpts.Layout) Ten
 
 pub fn mergeRealImgPass(x_real: Tensor, x_imag: Tensor, x_pass: ?Pass, layout: RopeOpts.Layout) Tensor {
     if (x_pass == null) return mergeRealImg(x_real, x_imag, layout);
+
+    if (!x_real.shape().hasTag(.hd)) std.debug.panic("Expected x_real argument to have tag .hd but got {f} instead", .{x_real.shape()});
+    if (!x_imag.shape().hasTag(.hd)) std.debug.panic("Expected x_imag argument to have tag .hd but got {f} instead", .{x_imag.shape()});
+    if (x_pass != null and !x_pass.?.shape().hasTag(.hd)) std.debug.panic("Expected x_pass argument to have tag .hd but got {f} instead", .{x_pass.?.shape()});
 
     return switch (x_pass.?) {
         .real_im_pass => |pass| .concatenate(&.{ x_real, x_imag, pass }, .hd),
@@ -1423,6 +1434,7 @@ test resizeBilinear {
 }
 
 pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Tensor {
+    // TODO: HERE
     const ax = image.axis(axis);
     const res_shape = image.shape().set(ax, new_len);
 
