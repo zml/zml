@@ -9,6 +9,7 @@ const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
 const compat_probe = @import("compat_probe.zig");
+pub const NcclPreload = @import("nccl.zig").Preload;
 
 const nvidiaLibsPath = "/cuda/";
 
@@ -24,6 +25,18 @@ fn findCudaSandbox(
         else => return null,
     };
     return try r.rlocation(candidate, buffer);
+}
+
+/// Call after creating the PJRT client, which selects the CUDA driver and owns
+/// the primary contexts used by inference.
+pub fn preloadNccl(io: std.Io, devices: []const i32) !NcclPreload {
+    if (comptime !isEnabled() or builtin.os.tag != .linux) return error.Unavailable;
+    const r = try bazel.runfiles(bazel_builtin.current_repository);
+    var sandbox_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const sandbox = try findCudaSandbox(r, &sandbox_buf) orelse return error.FileNotFound;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try stdx.Io.Dir.path.bufJoinZ(&path_buf, &.{ sandbox, "lib", "libnccl.so.2" });
+    return try NcclPreload.init(io, path, devices);
 }
 
 pub fn isEnabled() bool {

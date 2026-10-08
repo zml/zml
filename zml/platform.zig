@@ -257,6 +257,7 @@ pub const State = union(Target) {
     metal: void,
 
     pub const CudaState = struct {
+        nccl_preload: ?@import("platforms").cuda.NcclPreload = null,
         fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
 
         fn deinit(self: *CudaState) void {
@@ -552,7 +553,27 @@ pub const Platform = struct {
         }
         self.physical_mesh.deinit(self.arena.allocator());
         self.pjrt_client.deinit(self.pjrt_api);
+        // Keep NCCL and its driver alive until PJRT has released its resources.
+        if (comptime Target.cuda.isEnabled()) {
+            if (self.state == .cuda) {
+                if (self.state.cuda.nccl_preload) |*preload| preload.deinit();
+            }
+        }
         self.arena.deinit();
+    }
+
+    /// Loads NCCL kernels into the inference contexts without running a model.
+    /// Call during startup, before accepting requests. This does not prepare
+    /// XLA's inference communicator cliques.
+    pub fn preloadNccl(self: *Platform, io: std.Io) !void {
+        if (comptime !Target.cuda.isEnabled()) return error.Unavailable;
+        if (self.target != .cuda) return error.Unavailable;
+        if (self.devices.len > MAX_NUM_DEVICES) return error.InvalidDeviceCount;
+        const state = &self.state.cuda;
+        if (state.nccl_preload != null) return;
+        var devices: [MAX_NUM_DEVICES]i32 = undefined;
+        for (self.devices, 0..) |device, i| devices[i] = @intCast(device.localHardwareId());
+        state.nccl_preload = try @import("platforms").cuda.preloadNccl(io, devices[0..self.devices.len]);
     }
 
     pub fn compile(

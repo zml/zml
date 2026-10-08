@@ -1,5 +1,5 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library", "zig_test")
 
 zig_binary(
     name = "compat_probe",
@@ -46,7 +46,10 @@ cc_library(
 
 zig_library(
     name = "cuda",
-    srcs = ["compat_probe.zig"],
+    srcs = [
+        "compat_probe.zig",
+        "nccl.zig",
+    ],
     import_name = "platforms/cuda",
     main = "cuda.zig",
     tags = ["manual"],
@@ -63,4 +66,22 @@ zig_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+zig_test(
+    name = "nccl_preload_gpu_test",
+    main = "nccl_preload_gpu_test.zig",
+    tags = [
+        "manual",
+        "no_ci",
+    ],
+    zigopts = [
+        "--test-filter",
+        "NCCL preload",
+    ],
+    deps = [
+        ":cuda",
+        ":libzml_cuda",
+        "//zml",
+    ],
 )

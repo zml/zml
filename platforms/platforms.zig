@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const cpu = @import("platforms/cpu");
-const cuda = @import("platforms/cuda");
+pub const cuda = @import("platforms/cuda");
 const metal = @import("platforms/metal");
 const neuron = @import("platforms/neuron");
 const oneapi = @import("platforms/oneapi");
