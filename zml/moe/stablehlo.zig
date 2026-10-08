@@ -205,7 +205,7 @@ test "MoE compliance: FP4 midpoint rounding" {
     const x: Tensor = .init(.{values.len}, .f32);
     var exe = try platform.compileFn(allocator, io, Local.call, .{x}, .{});
     defer exe.deinit();
-    var input = try zml.Buffer.fromBytes(io, platform, x.shape(), .replicated, std.mem.asBytes(&values));
+    var input = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&values));
     defer input.deinit();
     var output = try exe.eval(allocator, io, .{input});
     defer output.deinit();

@@ -52,7 +52,7 @@ const Case = struct {
             else => unreachable,
         }
 
-        var input = try zml.Buffer.fromSlice(io, platform, host, .replicated);
+        var input = try zml.Buffer.fromSlice(io, platform, host);
         defer input.deinit();
 
         var runner = try exe.runner(allocator);
