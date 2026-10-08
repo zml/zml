@@ -29,3 +29,7 @@ Tests are generally inline Zig `test "..." {}` blocks near the code they cover. 
 ## Commit & Pull Request Guidelines
 
 Recent history uses scoped, imperative commit subjects such as `zml/tensor: add Tensor.onMemory()` or `workspace: use latest version of upstreamable rules_zig`. Keep subjects concise and mention the affected area first. Pull requests should include a short description, relevant linked issue, platform impact if any, and the exact `bazel build` or `bazel test` commands run. Include screenshots only for docs or UI-visible changes.
+
+## Quirks
+
+If during build, you encounter an `AccessDenied` error, the solution is not to use the `--repo_env` bazel argument to override the zig cache. The solution is to run `sudo chmod -R 777`on `/tmp/zig-cache` and `/var/tmp/zig-cache`. This is due to the fact that all users share the same zig cache directory, and bazel runs as a different user than the one who created the cache.
