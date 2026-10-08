@@ -161,7 +161,9 @@ test "sharding boundaries distinguish open dimensions and remap logical axes" {
     const original_placement: Placement = try .init(original);
     const mapped_placement: Placement = try .init(mapped);
     for (physical.devices_in_canonical_order) |device| {
-        try std.testing.expectEqualDeep(original_placement.slices(device.coords), mapped_placement.slices(device.coords));
+        const original_slices = original_placement.slices(device.coords);
+        const mapped_slices = mapped_placement.slices(device.coords);
+        try std.testing.expectEqualSlices(Placement.Slice1d, original_slices.constSlice(), mapped_slices.constSlice());
     }
 
     const incompatible: Mesh = try .init("incompatible", &physical, .mesh(.{ .model = .balanced }), .parseBindings(.{ .model = .link_x }));
