@@ -4,6 +4,7 @@ const log = std.log;
 
 const zml = @import("zml");
 const block = @import("./blocks.zig");
+const testing = @import("./testing.zig");
 
 const CliArgs = struct {
     pub const help =
@@ -90,17 +91,14 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("\n\nStarting testing\n\n", .{});
 
-    try zml.testing.testLayer(
+    try testing.testLayer(
         allocator,
         io,
         platform,
-        Wrapper{ .tblock = transformer_blocks[0] },
-        .forward,
+        "transformer.transformer_blocks.0.attn",
         &activations_store,
-        "transformer.transformer_blocks.0.img_norm1",
-        .{ .tblock = transformer_blocks_buffer[0] },
-        &.{},
-        .{},
+        Wrapper{ .tblock = transformer_blocks[0].attn },
+        .{ .tblock = transformer_blocks_buffer[0].attn },
     );
 }
 
