@@ -52,7 +52,7 @@ fn drawNarrowBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16
     const info_lines: InfoLines = .{ .state = self.state };
 
     const children = [2]vxfw.Widget{
-        try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&logo)), .{ .width = content_w, .height = Logo.logo_height }),
+        try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&logo)), .{ .width = content_w, .height = logo.height() }),
         ui.widget(&info_lines),
     };
     const layout: ColumnLayout = .{ .children = &children, .gap = 1 };
@@ -65,7 +65,7 @@ fn drawWideBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16) 
 
     const logo_box_w = Logo.logo_width + 6; // +4 centering + 2 absorbed page margin
     const info_max_w = @min(content_w -| logo_box_w, max_info_width);
-    const banner_h = @max(Logo.logo_height, InfoLines.entry_count);
+    const banner_h = @max(logo.height(), InfoLines.entry_count);
 
     const flex_items = [2]vxfw.FlexItem{
         .{ .widget = try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&logo)), .{ .width = logo_box_w, .height = banner_h }), .flex = 0 },

@@ -1,14 +1,20 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+cc_library(
+    name = "svg_renderer",
+    srcs = ["lib/svg.cpp"],
+    deps = ["@lunasvg"],
+)
 
 zig_library(
     name = "tui",
-    import_name = "zml-smi/tui",
-    main = "tui.zig",
     srcs = [
         "data.zig",
         "image_cache.zig",
         "lib/compose.zig",
         "lib/image.zig",
+        "lib/svg.zig",
         "lib/ui.zig",
         "lib/utils.zig",
         "pages/detail.zig",
@@ -35,13 +41,16 @@ zig_library(
     extra_srcs = [
         "assets/amd.png",
         "assets/intel.png",
-        "assets/logo.png",
         "assets/neuron.png",
         "assets/nvidia.png",
         "assets/tpu.png",
+        "assets/zml-logo-glow.svg",
     ],
+    import_name = "zml-smi/tui",
+    main = "tui.zig",
     visibility = ["//visibility:public"],
     deps = [
+        ":svg_renderer",
         "//bazel/stamp:zig",
         "//bin/zml-smi/info",
         "//bin/zml-smi/utils:double_buffer",

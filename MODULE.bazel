@@ -313,6 +313,7 @@ use_repo(
     "iree",
     "libvaxis",
     "linenoise",
+    "lunasvg",
     "mnist",
     "mosaic_tpu",
     "org_swig_swig",
