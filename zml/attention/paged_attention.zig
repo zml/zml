@@ -609,6 +609,269 @@ test pagedAttention {
     }
 }
 
+// BEGIN GENERATED PAGED ATTENTION REFERENCE
+// Reference outputs generated offline by a Python script using PyTorch 2.8.0:
+// torch.nn.functional.scaled_dot_product_attention (CPU math backend, float64 -> float32).
+// https://docs.pytorch.org/docs/2.8/generated/torch.nn.functional.scaled_dot_product_attention.html
+// PyTorch uses valid dense K/V rows; the fixture packs them into shuffled pages.
+// Explicit causal mask includes cached prefixes; scale=1, dropout_p=0.
+// Expected arrays contain active rows; the fixture checks zeroes in unused output rows.
+const PagedAttentionTestData = struct {
+    const q: [9][2]f32 = .{
+        .{ 0.125, -0.25 },
+        .{ 0.25, -0.5 },
+        .{ 0.375, -0.75 },
+        .{ 0.5, -0.25 },
+        .{ 0.625, -0.5 },
+        .{ 0.75, -0.75 },
+        .{ 0.875, -0.25 },
+        .{ 1, -0.5 },
+        .{ 1.125, -0.75 },
+    };
+    const k: [8][2]f32 = .{
+        .{ 0.125, 0 },
+        .{ 0.25, 0.25 },
+        .{ 0.375, 0.5 },
+        .{ 0.5, 0 },
+        .{ 0.625, 0.25 },
+        .{ 0.75, 0.5 },
+        .{ 0.875, 0 },
+        .{ 1, 0.25 },
+    };
+    const v: [3][8][2]f32 = .{
+        .{
+            .{ 1, 1 },
+            .{ 2, -1 },
+            .{ 3, 1 },
+            .{ 4, -1 },
+            .{ 5, 1 },
+            .{ 6, -1 },
+            .{ 7, 1 },
+            .{ 8, -1 },
+        },
+        .{
+            .{ 11, 1 },
+            .{ 12, -1 },
+            .{ 13, 1 },
+            .{ 14, -1 },
+            .{ 15, 1 },
+            .{ 16, -1 },
+            .{ 17, 1 },
+            .{ 18, -1 },
+        },
+        .{
+            .{ 21, 1 },
+            .{ 22, -1 },
+            .{ 23, 1 },
+            .{ 24, -1 },
+            .{ 25, 1 },
+            .{ 26, -1 },
+            .{ 27, 1 },
+            .{ 28, -1 },
+        },
+    };
+    const partial: [6][2]f32 = .{
+        .{ 1, 1 },
+        .{ 1.47657967, 0.0468406975 },
+        .{ 1.90655768, 0.337706238 },
+        .{ 2.5735445, -0.0490297116 },
+        .{ 3.13540077, 0.168398201 },
+        .{ 3.64714932, -0.0468406975 },
+    };
+    const packed_sequences: [9][2]f32 = .{
+        .{ 1, 1 },
+        .{ 1.47657967, 0.0468406975 },
+        .{ 1.90655768, 0.337706238 },
+        .{ 2.5735445, -0.0490297116 },
+        .{ 3.13540077, 0.168398201 },
+        .{ 3.64714932, -0.0468406975 },
+        .{ 11.5117168, -0.0234332103 },
+        .{ 12, 0.333333343 },
+        .{ 21.9687614, 0.333821356 },
+    };
+    const prefix: [2][2]f32 = .{
+        .{ 1.4882834, 0.0234332103 },
+        .{ 1.93759143, 0.335282177 },
+    };
+    const decode: [3][2]f32 = .{
+        .{ 1.96876144, 0.333821356 },
+        .{ 13.0388136, 0.169545963 },
+        .{ 24.7172451, 0.00492759887 },
+    };
+    const complete: [8][2]f32 = .{
+        .{ 1, 1 },
+        .{ 1.47657967, 0.0468406975 },
+        .{ 1.90655768, 0.337706238 },
+        .{ 2.5735445, -0.0490297116 },
+        .{ 11, 1 },
+        .{ 11.4765797, 0.0468406975 },
+        .{ 12.0312386, 0.333821356 },
+        .{ 12.6531963, -0.102130704 },
+    };
+};
+// END GENERATED PAGED ATTENTION REFERENCE
+
+test "StableHLO paged attention handles a partial final query page" {
+    try testStablehloPagedAttention(.{ .query_counts = .{ 6, 0, 0 }, .capacity = 6, .expected = &PagedAttentionTestData.partial });
+}
+
+test "StableHLO paged attention advances between packed sequences" {
+    try testStablehloPagedAttention(.{
+        .query_counts = .{ 6, 2, 1 },
+        .context_lengths = .{ 0, 1, 2 },
+        .capacity = 9,
+        .expected = &PagedAttentionTestData.packed_sequences,
+    });
+}
+
+test "StableHLO paged attention handles a partial page after a cached prefix" {
+    try testStablehloPagedAttention(.{
+        .query_counts = .{ 2, 0, 0 },
+        .context_lengths = .{ 1, 0, 0 },
+        .capacity = 4,
+        .expected = &PagedAttentionTestData.prefix,
+        .unused_k = std.math.nan(f32),
+        .unused_v = std.math.nan(f32),
+        .check_single_page = true,
+    });
+}
+
+test "StableHLO paged attention ignores NaNs in unused keys during decode" {
+    try testStablehloPagedAttention(.{
+        .query_counts = .{ 1, 1, 1 },
+        .context_lengths = .{ 2, 4, 7 },
+        .capacity = 4,
+        .expected = &PagedAttentionTestData.decode,
+        .unused_k = std.math.nan(f32),
+    });
+}
+
+test "StableHLO paged attention ignores NaNs in unused values during decode" {
+    try testStablehloPagedAttention(.{
+        .query_counts = .{ 1, 1, 1 },
+        .context_lengths = .{ 2, 4, 7 },
+        .capacity = 4,
+        .expected = &PagedAttentionTestData.decode,
+        .unused_v = std.math.nan(f32),
+    });
+}
+
+test "StableHLO paged attention zeroes unused output rows" {
+    try testStablehloPagedAttention(.{ .query_counts = .{ 6, 0, 0 }, .capacity = 10, .expected = &PagedAttentionTestData.partial });
+}
+
+test "StableHLO paged attention handles complete query pages" {
+    try testStablehloPagedAttention(.{ .query_counts = .{ 4, 4, 0 }, .capacity = 8, .expected = &PagedAttentionTestData.complete });
+}
+
+test "StableHLO paged attention handles a query buffer smaller than one page" {
+    try testStablehloPagedAttention(.{ .query_counts = .{ 2, 0, 0 }, .capacity = 2, .expected = PagedAttentionTestData.partial[0..2] });
+}
+
+fn testStablehloPagedAttention(case: struct {
+    query_counts: [3]u32,
+    context_lengths: [3]u32 = .{ 0, 0, 0 },
+    capacity: u32,
+    expected: []const [2]f32,
+    unused_k: f32 = 0,
+    unused_v: f32 = 0,
+    check_single_page: bool = false,
+}) !void {
+    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const page_size = 4;
+    const parameters = Parameters.init(.fromBackend(.{
+        .backend = .stablehlo,
+        .is_prefill = true,
+        .batch_size = 3,
+        .seq_len = 12,
+        .max_num_pages = 3,
+        .max_token_count = case.capacity,
+        .num_heads = 1,
+        .num_kv_heads = 1,
+        .head_dim = 2,
+        .max_seqlen_q = case.capacity,
+    })).stablehlo;
+    const q: zml.Tensor = .init(.{ .b = case.capacity, .hkv = 1, .hg = 1, .hd = 2 }, .f32);
+    const kv_shape: zml.Shape = .init(.{ .page = 10, .k_chunk = page_size, .hkv = 1, .hd = 2 }, .f32);
+    const kv_cache: KvCache = .{ .split = .{ .k = .fromShape(kv_shape), .v = .fromShape(kv_shape) } };
+
+    var q_data: [12][2]f32 = @splat(@splat(std.math.nan(f32)));
+    var k_data: [10][page_size][2]f32 = @splat(@splat(@splat(case.unused_k)));
+    var v_data: [10][page_size][2]f32 = @splat(@splat(@splat(case.unused_v)));
+    var expected: [12][2]f32 = @splat(@splat(0));
+    var seq_lens: [3]i32 = undefined;
+    var query_start_len: [4]i32 = .{ 0, 0, 0, 0 };
+    var block_table: [3][3]i32 = @splat(@splat(-1));
+    // Keep physical pages out of sequence order and leave page zero unused.
+    const pages: [3][3]usize = .{ .{ 3, 1, 7 }, .{ 8, 2, 6 }, .{ 5, 9, 4 } };
+    for (case.query_counts, case.context_lengths, 0..) |query_count, context_length, seq| {
+        const seq_len = context_length + query_count;
+        seq_lens[seq] = @intCast(seq_len);
+        query_start_len[seq + 1] = query_start_len[seq] + @as(i32, @intCast(query_count));
+        for (0..seq_len) |pos| {
+            const page = pages[seq][pos / page_size];
+            block_table[seq][pos / page_size] = @intCast(page);
+            k_data[page][pos % page_size] = PagedAttentionTestData.k[pos];
+            v_data[page][pos % page_size] = PagedAttentionTestData.v[seq][pos];
+        }
+    }
+    const query_count: usize = @intCast(query_start_len[3]);
+    try std.testing.expectEqual(query_count, case.expected.len);
+    try std.testing.expect(query_count <= case.capacity);
+    @memcpy(q_data[0..query_count], PagedAttentionTestData.q[0..query_count]);
+    @memcpy(expected[0..query_count], case.expected);
+
+    var parameters_d: zml.Bufferized(triton.paged.Parameters) = .{
+        .block_table = try .fromBytes(io, platform, parameters.block_table.shape(), std.mem.sliceAsBytes(&block_table)),
+        .seq_lens = try .fromBytes(io, platform, parameters.seq_lens.shape(), std.mem.sliceAsBytes(&seq_lens)),
+        .query_start_len = try .fromBytes(io, platform, parameters.query_start_len.shape(), std.mem.sliceAsBytes(&query_start_len)),
+    };
+    defer zml.Buffer.deinitAll(triton.paged.Parameters, &parameters_d);
+    var q_d = try zml.Buffer.fromBytes(io, platform, q.shape(), std.mem.sliceAsBytes(q_data[0..case.capacity]));
+    defer q_d.deinit();
+    var k_d = try zml.Buffer.fromBytes(io, platform, kv_shape, std.mem.sliceAsBytes(&k_data));
+    defer k_d.deinit();
+    var v_d = try zml.Buffer.fromBytes(io, platform, kv_shape, std.mem.sliceAsBytes(&v_data));
+    defer v_d.deinit();
+    const kv_cache_d: zml.Bufferized(KvCache) = .{ .split = .{ .k = k_d, .v = v_d } };
+    var exe = try platform.compileFn(allocator, io, stablehlo_pagedAttention, .{ parameters, q, kv_cache, .{ .scale = 1 } }, .{});
+    defer exe.deinit();
+    var output = try exe.eval(allocator, io, .{ parameters_d, q_d, kv_cache_d, .{} });
+    defer output.deinit();
+    try zml.testing.expectEqualShapes(q.shape(), output.shape());
+    try zml.testing.expectClose(io, zml.Slice.init(q.shape(), std.mem.sliceAsBytes(expected[0..case.capacity])), output, .{
+        .absolute_tolerance = 1e-5,
+        .relative_tolerance = 1e-5,
+        .minimum_close_fraction = 1,
+    });
+
+    // Zeroing unused K/V entries can hide an extra page visit in the output.
+    // When all keys fit in one page, one step must finish the sequence.
+    if (case.check_single_page) {
+        const Step = struct {
+            fn forward(params: triton.paged.Parameters, queries: zml.Tensor, cache: KvCache) zml.Tensor {
+                const loop: AttentionLoop = .{ .q = queries, .kv_cache = cache, .parameters = params, .opts = .{} };
+                return loop.body(.{
+                    .slot_id = .scalar(0, .i32),
+                    .seq_id = .scalar(0, .i32),
+                    .q_page_idx = .scalar(0, .i32),
+                    .k_page_idx = .scalar(0, .i32),
+                    .partial_softmax_prefill = .zeroes(queries.shape().setDim(.b, cache.split.k.dim(.k_chunk)).withDtype(.f32)),
+                    .partial_softmax_decode = .zeroes(queries.shape().setDim(.b, 1).withDtype(.f32)),
+                    .out = .zeroes(queries.shape()),
+                }).seq_id;
+            }
+        };
+        var step_exe = try platform.compileFn(allocator, io, Step.forward, .{ parameters, q, kv_cache }, .{});
+        defer step_exe.deinit();
+        var next_seq = try step_exe.eval(allocator, io, .{ parameters_d, q_d, kv_cache_d });
+        defer next_seq.deinit();
+        try std.testing.expectEqual(@as(i32, 1), try next_seq.getValue(i32, io));
+    }
+}
+
 fn stablehlo_pagedAttention(
     parameters: triton.paged.Parameters,
     q: zml.Tensor,
