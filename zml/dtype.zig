@@ -342,15 +342,6 @@ pub const DataType = enum(u8) {
             try std.testing.expectEqual(C128.init(1, 2), Value.init(.c128, C64.init(1, 2)).c128);
         }
 
-        test as {
-            // Every float dtype must be convertible to a native float via `as`,
-            // including the narrow formats added alongside f8e4m3/f8e8m0.
-            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f4e2m1, 1).as(f32));
-            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f8e3m4, 1).as(f32));
-            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f8e4m3, 1).as(f32));
-            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f8e8m0, 1).as(f32));
-        }
-
         pub fn dtype(self: Value) DataType {
             return std.meta.activeTag(self);
         }
@@ -377,6 +368,13 @@ pub const DataType = enum(u8) {
                 else => {},
             }
             std.debug.panic("Unsupported conversion {} -> {s}", .{ self.dtype(), @typeName(T) });
+        }
+
+        test as {
+            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f4e2m1, 1).as(f32));
+            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f8e3m4, 1).as(f32));
+            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f8e4m3, 1).as(f32));
+            try std.testing.expectEqual(@as(f32, 1.0), Value.init(.f8e8m0, 1).as(f32));
         }
     };
 };
