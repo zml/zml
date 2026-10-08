@@ -1,0 +1,21 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "lunasvg",
+    srcs = glob(["source/*.cpp", "source/*.h"]),
+    hdrs = ["include/lunasvg.h"],
+    defines = ["LUNASVG_BUILD_STATIC"],
+    includes = ["include"],
+    local_defines = ["LUNASVG_DISABLE_LOAD_SYSTEM_FONTS"],
+    visibility = ["//visibility:public"],
+    deps = [":plutovg"],
+)
+
+cc_library(
+    name = "plutovg",
+    srcs = glob(["plutovg/source/*.c", "plutovg/source/*.h"]),
+    hdrs = ["plutovg/include/plutovg.h"],
+    defines = ["PLUTOVG_BUILD_STATIC"],
+    includes = ["plutovg/include"],
+    local_defines = ["PLUTOVG_DISABLE_FONT_FACE_CACHE_LOAD"],
+)
