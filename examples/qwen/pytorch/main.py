@@ -12,15 +12,16 @@ transformer = (
     if not hasattr(pipe, "transformer")
     else pipe.transformer
 )
+# print(transformer)
 if transformer is None:
     exit(1)
 
-# 1. Print named submodules to map key paths directly to safetensors
-for name, module in transformer.named_children():
-    print(name, "->", type(module))
+# # 1. Print named submodules to map key paths directly to safetensors
+# for name, module in transformer.named_children():
+#     print(name, "->", type(module))
 
 # 2. Inspect a single block's internals
-print(transformer.transformer_blocks[0])
+# print(transformer.transformer_blocks[0])
 
 # Enable VAE tiling and slicing directly on the VAE module
 pipe.vae.enable_tiling()
@@ -43,6 +44,7 @@ output, activations = pipe(
 # `output` can be `None` if activations collection
 # has stopped before the end of the inference
 if output:
+    print("Saving image output")
     output.images[0].save("t2i_example.png")
 
 # Save activations to a file.
