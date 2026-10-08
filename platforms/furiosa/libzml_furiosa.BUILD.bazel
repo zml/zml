@@ -1,0 +1,23 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# XLA owns the full payload. ZML only places it in the platform's runfiles.
+copy_to_directory(
+    name = "sandbox",
+    srcs = glob(
+        [
+            "bin/**",
+            "include/**",
+            "lib/**",
+        ],
+        allow_empty = False,
+    ),
+    add_directory_to_runfiles = True,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "libzml_furiosa",
+    data = [":sandbox"],
+    visibility = ["//visibility:public"],
+)

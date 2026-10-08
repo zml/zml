@@ -63,7 +63,7 @@ pub const Meshes = struct {
                     .experts = try platform.registerMeshWithStrategy("experts", .mesh(.{ .experts = .high_bandwidth }), strategy_experts),
                 };
             },
-            .cuda, .rocm, .oneapi, .neuron, .metal, .cpu => return .{
+            .cuda, .rocm, .oneapi, .neuron, .metal, .cpu, .furiosa => return .{
                 .model = try platform.registerMesh("model", .mesh(.{ .model = .high_bandwidth })),
                 .experts = try platform.registerMesh("experts", .mesh(.{ .experts = .high_bandwidth })),
             },
