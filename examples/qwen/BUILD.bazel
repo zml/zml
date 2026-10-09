@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
     name = "qwen",
@@ -22,3 +22,22 @@ zig_binary(
         "@zml//zml",
     ],
 )
+
+# Runs a test target for every nested test file
+[
+    zig_test(
+        name = file.removesuffix(".zig").replace("/", "_") + "_test",
+        srcs = [
+            "blocks.zig",
+            "compiler.zig",
+            "testing.zig",
+            "torch2zml.zig",
+        ] + glob(["blocks/*.zig"]),
+        main = file,
+        deps = [
+            "@zml//stdx",
+            "@zml//zml",
+        ],
+    )
+    for file in glob(["**/*.zig"])
+]

@@ -31,7 +31,7 @@ pipe.vae.enable_slicing()
 pipe.enable_model_cpu_offload()
 
 pipe = zml_utils.ActivationCollector(
-    pipe, skip=560, max_layers=590, stop_after_first_step=True
+    pipe, skip=0, max_layers=500, stop_after_first_step=True
 )
 output, activations = pipe(
     prompt='A neon shop sign that reads "QWEN IMAGE 2.1", rainy night, reflections on wet pavement',
