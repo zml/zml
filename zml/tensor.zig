@@ -2783,7 +2783,8 @@ pub const Tensor = struct {
     }
 
     pub fn zeroes(sh: Shape) Tensor {
-        return Tensor.constant(sh.dtype().zero()).broad(sh);
+        const result = Tensor.constant(sh.dtype().zero()).broad(sh);
+        return _resultPropagateSharding(sh, result.value());
     }
 
     pub fn uninitialized(sh: Shape) Tensor {
