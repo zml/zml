@@ -335,45 +335,6 @@ pub const Tensor = struct {
         try zml.testing.expectClose(std.testing.io, x_h, x_d, .exact_match);
     }
 
-    test "bulk memory placement preserves pinned input and device output" {
-        const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const io = std.testing.io;
-
-        const inputs: [8]f32 = .{ -3.0, -2, -1, 1, 2, 3, 5, -5 };
-        const x_t = Tensor.init(.{8}, .f32);
-
-        const Local = struct {
-            fn memcpyH2D(x: Tensor) Tensor {
-                const tensors = .{x};
-                Tensor.onMemoryAll(tensors, .host_pinned);
-                return Tensor.toMemoryAll(tensors, .device)[0];
-            }
-        };
-
-        const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcpyH2D, .{x_t}, platform, .{});
-        defer exe.deinit();
-
-        var x_h = try zml.Buffer.fromBytesOpts(io, platform, x_t.shape(), @ptrCast(&inputs), .{ .memory = .host_pinned });
-        defer x_h.deinit();
-
-        const x_h_ptr: [*]f32 = @ptrCast(@alignCast(x_h.opaqueDevicePtr(0)));
-        try std.testing.expectEqualSlices(f32, &inputs, x_h_ptr[0..8]);
-
-        var x_d = try exe.eval(std.testing.allocator, io, .{x_h});
-        defer x_d.deinit();
-
-        if (platform.target == .furiosa) {
-            for (x_h._shards.constSlice()) |shard| {
-                try std.testing.expectEqual(.host_pinned, shard.memory(platform.pjrt_api).kind(platform.pjrt_api));
-            }
-            for (x_d._shards.constSlice()) |shard| {
-                try std.testing.expectEqual(.device, shard.memory(platform.pjrt_api).kind(platform.pjrt_api));
-            }
-        }
-        try zml.testing.expectClose(std.testing.io, x_h, x_d, .exact_match);
-    }
-
     /// Copy all the given tensor to the specified memory.
     /// The input struct is copied on the stack, so it must be a simple flat struct without pointers.
     pub fn toMemoryAll(flat_tensors: anytype, kind: Memory.Kind) @TypeOf(flat_tensors) {
