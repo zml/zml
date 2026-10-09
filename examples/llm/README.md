@@ -38,4 +38,4 @@ bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/
 - `--model=<path>`: Required. Model repository to load. This can be a local path or a huggingface/S3 URI such as `hf://...` or `s3://...`.
 - `--prompt=<string>`: Optional. Runs a single prompt instead of opening the interactive chat loop.
 - `--seqlen=<number>`: Optional. Maximum sequence length. Defaults to `2048`.
-- `--backend=<vanilla|cuda_fa2|cuda_fa3>`: Optional. Attention backend. If omitted, the program auto-selects one for the current platform.
+- `--backend=<vanilla>`: Optional. Attention backend. If omitted, the program auto-selects one for the current platform.

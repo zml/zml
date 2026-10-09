@@ -132,11 +132,11 @@ pub const Session = struct {
         defer actual_seq_len_buf.deinit();
 
         const params = self.compiled_model.params;
-        var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
+        var attention_metadata_buffers: zml.Bufferized(zml.flash_attention.Metadata) = switch (params.attention_metadata) {
             .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
             else => try params.attention_metadata.initBuffer(self.io, self.platform),
         };
-        defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        defer zml.flash_attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         var conv_cache_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, 0, .u32);
         defer conv_cache_index_buffer.deinit();
@@ -173,7 +173,7 @@ pub const Session = struct {
 
         const params = self.compiled_model.params;
         var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform);
-        defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        defer zml.flash_attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];

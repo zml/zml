@@ -141,16 +141,11 @@ pub const Session = struct {
         defer prefill_tokens_buffer.deinit();
 
         const params = self.compiled_model.params;
-        var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
-            .attnd => .{ .attnd = .{
-                .conversation_id = try .scalar(self.io, self.platform, self.conversation_id, .u64),
-                .layer_id = try .scalar(self.io, self.platform, 0, .u16),
-                .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32),
-            } },
+        var attention_metadata_buffers: zml.Bufferized(zml.flash_attention.Metadata) = switch (params.attention_metadata) {
             .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
-            .vanilla, .cuda_fa2, .cuda_fa3, .nki => try params.attention_metadata.initBuffer(self.io, self.platform),
+            .vanilla, .nki => try params.attention_metadata.initBuffer(self.io, self.platform),
         };
-        defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        defer zml.flash_attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         inference.run(&self.prefill, .{
             .io = self.io,
@@ -177,15 +172,8 @@ pub const Session = struct {
         defer current_token_buffer.deinit();
 
         const params = self.compiled_model.params;
-        var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
-            .attnd => .{ .attnd = .{
-                .conversation_id = try .scalar(self.io, self.platform, self.conversation_id, .u64),
-                .layer_id = try .scalar(self.io, self.platform, 0, .u16),
-                .num_tokens = try .scalar(self.io, self.platform, 1, .u32),
-            } },
-            .vanilla, .cuda_fa2, .cuda_fa3, .nki, .metal_fa => try params.attention_metadata.initBuffer(self.io, self.platform),
-        };
-        defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform);
+        defer zml.flash_attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         generation: while (true) {
             if (isEosToken(self.config, last_token_id)) break :generation;

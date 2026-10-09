@@ -6,7 +6,6 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 pub const Target = @import("platforms").Platform;
 
-const attention = @import("attention.zig");
 const constants = @import("constants.zig");
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
@@ -382,12 +381,6 @@ pub const Platform = struct {
 
         switch (target) {
             .cuda => {
-                zml.attention.flashattn.load(arena, io) catch {
-                    log.warn("Failed to load flashattn", .{});
-                };
-                zml.attention.flashattn.register(platform) catch {
-                    log.warn("Failed to register flashattn custom call", .{});
-                };
                 if (zml.moe.cutlass_flashinfer.load(arena, io, platform)) {
                     zml.moe.cutlass_flashinfer.register(platform) catch |err| {
                         log.warn(

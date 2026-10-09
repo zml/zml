@@ -117,7 +117,7 @@ pub const LoadedModel = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
-        backend: zml.attention.Backend,
+        backend: zml.flash_attention.Backend,
         meshes: common.Meshes,
         seqlen: usize,
         progress: *std.Progress.Node,
@@ -651,13 +651,13 @@ pub const SelfAttn = struct {
         k = partitionCachedKv(k, kv_head_meshe);
         v = partitionCachedKv(v, kv_head_meshe);
 
-        const attn_output = zml.attention.attention(
+        const attn_output = zml.flash_attention.attention(
             q,
             k,
             v,
             token_index,
-            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads), tp),
-            zml.attention.Parameters.init(.fromBackend(.vanilla)),
+            zml.flash_attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads), tp),
+            zml.flash_attention.Parameters.init(.fromBackend(.vanilla)),
         ).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());
