@@ -111,25 +111,25 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         io,
         platform,
-        "transformer.transformer_blocks.0.attn",
+        "transformer.transformer_blocks.0",
         &activations_store,
-        Wrapper{ .tblock = transformer_blocks[0].attn, .args = compile_args },
-        .{ .tblock = transformer_blocks_buffer[0].attn, .args = compile_args_buffers },
+        Wrapper{ .tblock = transformer_blocks[0], .args = compile_args },
+        .{ .tblock = transformer_blocks_buffer[0], .args = compile_args_buffers },
     );
 }
 
 const Wrapper = struct {
-    tblock: block.Attn,
+    tblock: block.TransformerBlock,
     args: CompileArgs,
 
     pub fn forward(
         self: Wrapper,
         x: zml.Tensor,
-        // mod: zml.Tensor,
-        rotary: zml.Tensor,
-        // token_mask: zml.Tensor,
+        modulation: zml.Tensor,
+        rotary_emb: zml.Tensor,
+        target_token_mask: zml.Tensor,
     ) zml.Tensor {
         const tagged = x.withTags(.{ .bs, .seq_len, .d });
-        return self.tblock.forward(tagged, rotary.withTags(.{ .seq_len, .d }), self.args);
+        return self.tblock.forward(tagged, modulation, rotary_emb.withTags(.{ .seq_len, .d }), target_token_mask, self.args);
     }
 };
