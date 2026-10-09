@@ -1,11 +1,12 @@
 //! Shared public-entry-point tests. Hardware absence is the only runtime skip:
 //! supported cases are explicit, and errors in those cases must fail the test.
 const std = @import("std");
+
 const zml = @import("../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const reference = @import("stablehlo.zig");
 const Placement = @import("fused_experts.zig").RoutingWeightPlacement;
+const reference = @import("stablehlo.zig");
 
 const Case = struct {
     backend: zml.moe.Backend,
@@ -519,6 +520,24 @@ test "Triton compatibility matrix" {
         .placements = &.{ .before_down, .after_down },
         .biases = &.{ false, true },
     }, .{});
+}
+
+test "Triton MoE prefill launch buckets fit shared memory" {
+    const platform = zml.testing.env();
+    if (!zml.moe.Backend.triton.isAvailable(platform) or platform.target != .rocm) return error.SkipZigTest;
+
+    for ([_]i64{ 8, 32, 96, 128, 256, 512, 1024, 2048, 3072, 4096 }) |tokens| {
+        const case: Case = .{
+            .backend = .triton,
+            .tokens = tokens,
+            .width = 256,
+            .intermediate = 128,
+            .topk = 2,
+        };
+        var exe = try case.compile(std.testing.allocator, std.testing.io, platform);
+        defer exe.deinit();
+        try case.check(std.testing.allocator, std.testing.io, platform, &exe);
+    }
 }
 
 test "FlashInfer compatibility matrix" {
