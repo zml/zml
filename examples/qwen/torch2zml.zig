@@ -107,6 +107,24 @@ pub fn main(init: std.process.Init) !void {
         .attention_metadata = try attention_metadata.initBuffer(io, platform, model_sharding),
     };
 
+    const vae_scale_factor = 16;
+    const multiple_of = vae_scale_factor * 2;
+    _ = multiple_of; // autofix
+    const width = 2048;
+    _ = width; // autofix
+    const height = 2048;
+    _ = height; // autofix
+
+    const batch_size = 1;
+    _ = batch_size; // autofix
+
+    const input_image_sizes: [][2]usize = &.{};
+    _ = input_image_sizes; // autofix
+    const input_images: [][2]usize = undefined;
+    _ = input_images; // autofix
+    const vae_images: [][2]usize = undefined;
+    _ = vae_images; // autofix
+
     try testing.testLayer(
         allocator,
         io,
@@ -133,3 +151,7 @@ const Wrapper = struct {
         return self.tblock.forward(tagged, modulation, rotary_emb.withTags(.{ .seq_len, .d }), target_token_mask, self.args);
     }
 };
+
+test {
+    _ = @import("./blocks/tokenizer.zig");
+}
