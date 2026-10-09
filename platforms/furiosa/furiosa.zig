@@ -28,17 +28,15 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         log.err("Missing Furiosa sandbox runfile", .{});
         return error.FileNotFound;
     };
+
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(io, sandbox, allocator);
+    defer allocator.free(root);
+
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const runfile = try stdx.Io.Dir.path.bufJoin(&lib_path_buf, &.{ sandbox, "lib", "libzml_furiosa.so" });
-    // Tests can expose individual runfiles as symlinks. Keep SDK discovery
-    // relative to the actual assembled bundle containing the plugin.
-    const resolved = try std.Io.Dir.cwd().realPathFileAlloc(io, runfile, allocator);
-    defer allocator.free(resolved);
-    const library_dir = std.fs.path.dirname(resolved) orelse return error.InvalidPath;
-    const root = std.fs.path.dirname(library_dir) orelse return error.InvalidPath;
     try setEnv("XLA_FURIOSA_SDK_ROOT", try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{root}), 1);
     try setEnv("XLA_FURIOSA_VISIBLE_DEVICES", "0", 0);
-    const library = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{resolved});
+
+    const library = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ root, "lib", "libzml_furiosa.so" });
     log.info("Loading Furiosa plugin: {s}", .{library});
     return .loadFrom(library);
 }
