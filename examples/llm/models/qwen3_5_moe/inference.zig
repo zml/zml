@@ -186,6 +186,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                 }, .{});
                 args.kv_cache_buffers.self_attn.k = layer_cache.k;
                 args.kv_cache_buffers.self_attn.v = layer_cache.v;
+                layer_cache.layer_index.deinit();
             },
             .linear_attention => |*layer| {
                 const index_buffer = switch (layer_index_buffer) {
@@ -207,6 +208,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                 }, .{});
                 args.kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
                 args.kv_cache_buffers.gated_delta_net.recurrent_state = layer_cache.recurrent_state;
+                layer_cache.layer_index.deinit();
             },
         }
     }

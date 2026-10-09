@@ -179,6 +179,7 @@ pub fn run(runner: *KernelRunner, args: Args, layer_index_buffers: []const zml.B
                 }, .{});
                 args.kv_cache_buffers.self_attn.k = layer_cache.k;
                 args.kv_cache_buffers.self_attn.v = layer_cache.v;
+                layer_cache.layer_index.deinit();
             },
             .linear_attention => |*layer| {
                 var layer_cache: zml.Bufferized(model.KvCache.GatedDeltaNetCache) = .{
@@ -196,6 +197,7 @@ pub fn run(runner: *KernelRunner, args: Args, layer_index_buffers: []const zml.B
                 }, .{});
                 args.kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
                 args.kv_cache_buffers.gated_delta_net.recurrent_state = layer_cache.recurrent_state;
+                layer_cache.layer_index.deinit();
             },
         }
     }
