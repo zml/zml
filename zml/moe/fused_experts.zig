@@ -499,7 +499,7 @@ pub const Routing = struct {
 // Config / validation helpers
 // =============================================================================
 
-const LaunchConfig = struct {
+pub const LaunchConfig = struct {
     block_size_m: usize,
     block_size_n: usize,
     block_size_k: usize,

@@ -16,6 +16,22 @@ const kernels = @import("triton_kernels/triton_kernels.zig");
 
 const log = std.log.scoped(.@"zml/moe/triton");
 
+fn numStages(config: shared.LaunchConfig) i32 {
+    const platform = zml.Compiler.current().platform;
+    if (platform.target != .rocm) return config.num_stages;
+
+    // ROCm buffers num_stages - 1 BF16 operand pairs in LDS. A single stage
+    // reuses scratch space between operand layout conversions.
+    const bytes_per_stage: i64 = @intCast(2 * config.block_size_k * (config.block_size_m + config.block_size_n));
+    var stages = config.num_stages;
+    for (platform.devices) |device| {
+        const attribute = device.pjrt_desc.attribute(platform.pjrt_api, "shared_memory_per_block_optin");
+        const limit = if (attribute) |value| value.int64 else 64 * 1024;
+        stages = @intCast(@min(stages, @divTrunc(limit, bytes_per_stage) + 1));
+    }
+    return stages;
+}
+
 pub fn call(opts: shared.GemmOptions) Tensor {
     // Native FP4 tensors expose logical K; the Triton operand is byte-packed.
     const weight = if (opts.quant_scheme == .mxfp4 and opts.weight.dtype() == .f4e2m1)
@@ -123,7 +139,7 @@ pub fn call(opts: shared.GemmOptions) Tensor {
             },
             .grid = .{ @intCast(grid_x), 1, 1 },
             .num_warps = opts.launch_config.num_warps,
-            .num_stages = opts.launch_config.num_stages,
+            .num_stages = numStages(opts.launch_config),
         },
     ).c;
 }
