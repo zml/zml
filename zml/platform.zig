@@ -39,7 +39,7 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         return error.MissingDevices;
     }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
                 return error.InvalidDeviceCount;
@@ -88,7 +88,7 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
-            .cuda, .rocm, .oneapi, .tpu => {
+            .cuda, .rocm, .oneapi, .tpu, .furiosa => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
                     "pinned_host".len => .host_pinned,
@@ -224,7 +224,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa => device.id(),
     };
 }
 
@@ -255,6 +255,7 @@ pub const State = union(Target) {
     neuron: void,
     oneapi: void,
     metal: void,
+    furiosa: void,
 
     pub const CudaState = struct {
         fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
@@ -276,6 +277,7 @@ pub const State = union(Target) {
             .neuron => .{ .neuron = {} },
             .oneapi => .{ .oneapi = {} },
             .metal => .{ .metal = {} },
+            .furiosa => .{ .furiosa = {} },
         };
     }
 
@@ -421,6 +423,7 @@ pub const Platform = struct {
             .cuda,
             .oneapi,
             .metal,
+            .furiosa,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -690,10 +693,10 @@ pub const Platform = struct {
         // inline cause `default` is a huge ass struct allocated on the stack,
         // and toMemoryLayout returns slices into it.
         // There is probably a better way of doing this,
-        // but given it's compiled out (except for TPU), I'm not gonna care for now.
+        // The queried layout can include backend-specific tiling.
         return switch (platform.target) {
-            .tpu => {
-                if (comptime !Target.tpu.isEnabled()) unreachable;
+            .tpu, .furiosa => {
+                if (comptime !Target.tpu.isEnabled() and !Target.furiosa.isEnabled()) unreachable;
                 const element_type = pjrtx.bufferTypeFromDtype(dtype);
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
@@ -732,9 +735,18 @@ pub const CreateOptions = struct {
     cuda: XlaGpu = .{ .allocator = .{ .vmm = .{ .memory_fraction = 0.90 } } },
     tpu: struct {} = .{},
     neuron: struct {} = .{},
+    furiosa: Furiosa = .{},
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     io_impl: Platform.IoImpl = .threaded,
+
+    pub const Furiosa = struct {
+        pe_count: u8 = 8,
+
+        fn writeNamedValues(self: Furiosa, values: *std.ArrayList(pjrt.NamedValue)) void {
+            values.appendAssumeCapacity(.init(.int64, "pe_count", self.pe_count));
+        }
+    };
 
     pub const Cpu = struct {
         device_count: u32,
@@ -815,6 +827,7 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
+            .furiosa => self.furiosa.writeNamedValues(&values),
             .cuda => self.cuda.writeNamedValues(target, &values),
             .rocm => self.rocm.writeNamedValues(target, &values),
             .oneapi => self.oneapi.writeNamedValues(target, &values),
@@ -1038,6 +1051,11 @@ test "platform defaultMemoryLayout is boring" {
         // This allows to bypass the PJRT calls and the string of pjrt_client.defaultMemoryLayout.
         const default_layout = try platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, pjrtx.bufferTypeFromDtype(.f32), dims);
         const mem_layout = default_layout.toMemoryLayout();
+
+        if (platform.target == .furiosa) {
+            try std.testing.expectEqualDeep(mem_layout, platform.defaultMemoryLayout(dims, .f32));
+            continue;
+        }
 
         // Note: I'm not just calling platform.defaultMemoryLayout because I'm investigating
         // wether TPU requires its special branch.
