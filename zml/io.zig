@@ -689,13 +689,10 @@ pub const MemoryWriter = union(enum) {
             .cuda, .rocm, .oneapi => .{
                 .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, buffer, memory),
             },
-            .furiosa => .{
-                .buffered = try .init(allocator, io, platform, shape, buffer, memory),
-            },
-            .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
+            .tpu, .neuron, .cpu, .metal, .furiosa => if (memory == .host_pinned)
                 std.debug.panic("Host pinned memory is not supported on {}", .{platform.target})
             else
-                .{ .buffered = try .init(allocator, io, platform, shape, buffer, memory) },
+                .{ .buffered = try .init(allocator, io, platform, shape, buffer) },
         };
     }
 
@@ -726,16 +723,14 @@ pub const BufferedMemoryWriter = struct {
     platform: *const Platform,
     shape: Shape,
     buffer: *Buffer,
-    memory: Memory.Kind,
     interface: std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer, memory: Memory.Kind) !BufferedMemoryWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer) !BufferedMemoryWriter {
         return .{
             .io = io,
             .platform = platform,
             .shape = shape,
             .buffer = buffer,
-            .memory = memory,
             .interface = .{
                 .buffer = try allocator.alloc(u8, shape.byteSize()),
                 .vtable = &.{
@@ -761,7 +756,7 @@ pub const BufferedMemoryWriter = struct {
             self.platform,
             self.shape,
             @ptrCast(self.interface.buffer),
-            .{ .wait = true, .memory = self.memory },
+            .{ .wait = true },
         ) catch return std.Io.Writer.Error.WriteFailed;
     }
 };
