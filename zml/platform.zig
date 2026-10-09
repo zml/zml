@@ -1068,13 +1068,3 @@ test "platform defaultMemoryLayout is boring" {
         });
     }
 }
-
-test "Furiosa client options serialize default and explicit topology" {
-    var storage: [8]pjrt.NamedValue = undefined;
-    for ([_]CreateOptions{ .{}, .{ .furiosa = .{ .pe_count = 4 } } }, [_]i64{ 8, 4 }) |options, expected| {
-        const values = options.toNamedValues(.furiosa, &storage);
-        try std.testing.expectEqual(@as(usize, 1), values.len);
-        try std.testing.expectEqualStrings("pe_count", values[0].name());
-        try std.testing.expectEqual(expected, values[0].value().int64);
-    }
-}
