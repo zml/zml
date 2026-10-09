@@ -372,6 +372,11 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
                 else => unreachable,
             }
         },
+        .array => {
+            for (model, bufferized_) |src, *dst| {
+                try bufferizeInner(allocator, src, dst);
+            }
+        },
         .void, .int, .@"enum", .bool, .enum_literal, .float, .vector => {},
         else => unreachable,
     }
@@ -383,4 +388,76 @@ pub inline fn bufferize(allocator: std.mem.Allocator, comptime ModelType: type, 
     var bufferized: Bufferized(ModelType) = undefined;
     try bufferizeInner(allocator, model.*, &bufferized);
     return bufferized;
+}
+
+test "bufferize walks arrays" {
+    const allocator = std.testing.allocator;
+    const Conv = struct {
+        weight: Tensor,
+        bias: ?Tensor,
+        stride: u32,
+    };
+    const Block = struct {
+        convs: [2]Conv,
+    };
+    const Model = struct {
+        blocks: []Block,
+        name: []const u8,
+    };
+
+    var blocks: [2]Block = .{
+        .{ .convs = .{
+            .{
+                .weight = .init(.{ .out = 2, .in = 3, .k = 1 }, .f32),
+                .bias = Tensor.init(.{ .out = 2 }, .f32),
+                .stride = 1,
+            },
+            .{
+                .weight = .init(.{ .out = 4, .in = 5, .k = 3 }, .bf16),
+                .bias = null,
+                .stride = 2,
+            },
+        } },
+        .{ .convs = .{
+            .{
+                .weight = .init(.{ .out = 6, .in = 7, .k = 1 }, .f16),
+                .bias = null,
+                .stride = 1,
+            },
+            .{
+                .weight = .init(.{ .out = 8, .in = 9, .k = 3 }, .f32),
+                .bias = Tensor.init(.{ .out = 8 }, .f32),
+                .stride = 2,
+            },
+        } },
+    };
+    const model: Model = .{
+        .blocks = &blocks,
+        .name = "array regression",
+    };
+
+    const buffers = try bufferize(allocator, Model, &model);
+    defer allocator.free(buffers.blocks);
+
+    try std.testing.expect(!@hasField(Bufferized(Model), "name"));
+    try std.testing.expect(!@hasField(Bufferized(Conv), "stride"));
+    try std.testing.expectEqual(model.blocks.len, buffers.blocks.len);
+
+    for (model.blocks, buffers.blocks) |block, buffer_block| {
+        for (block.convs, buffer_block.convs) |conv, buffer_conv| {
+            try std.testing.expect(
+                conv.weight.shape().eqlWithTags(buffer_conv.weight.shape()),
+            );
+            try std.testing.expectEqual(0, buffer_conv.weight._shards.len);
+            try std.testing.expectEqual(conv.bias == null, buffer_conv.bias == null);
+
+            if (conv.bias) |bias| {
+                const buffer_bias = buffer_conv.bias.?;
+                try std.testing.expect(
+                    bias.shape().eqlWithTags(buffer_bias.shape()),
+                );
+                try std.testing.expectEqual(0, buffer_bias._shards.len);
+            }
+        }
+    }
 }
