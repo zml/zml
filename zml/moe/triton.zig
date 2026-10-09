@@ -18,6 +18,7 @@ const log = std.log.scoped(.@"zml/moe/triton");
 
 fn numStages(config: shared.LaunchConfig) i32 {
     const platform = zml.Compiler.current().platform;
+    if (platform.target != .rocm) return config.num_stages;
 
     // ROCm buffers num_stages - 1 BF16 operand pairs in LDS. A single stage
     // reuses scratch space between operand layout conversions.

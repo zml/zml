@@ -524,7 +524,7 @@ test "Triton compatibility matrix" {
 
 test "Triton MoE prefill launch buckets fit shared memory" {
     const platform = zml.testing.env();
-    if (!zml.moe.Backend.triton.isAvailable(platform)) return error.SkipZigTest;
+    if (!zml.moe.Backend.triton.isAvailable(platform) or platform.target != .rocm) return error.SkipZigTest;
 
     for ([_]i64{ 8, 32, 96, 128, 256, 512, 1024, 2048, 3072, 4096 }) |tokens| {
         const case: Case = .{
