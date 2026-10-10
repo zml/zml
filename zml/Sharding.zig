@@ -168,7 +168,7 @@ pub const Partitioner = union(enum) {
 
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal, .furiosa => .shardy,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal, .furiosa, .tt => .shardy,
         };
     }
 };
@@ -893,7 +893,7 @@ pub const PhysicalMesh = struct {
         return switch (self.target) {
             .tpu => &.{ .link_x, .link_y, .link_z },
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
-            .cuda, .rocm => &.{.link},
+            .cuda, .rocm, .tt => &.{.link},
             .cpu, .metal, .furiosa => &.{.bus},
             .oneapi => &.{ .link, .bus },
         };
@@ -1101,6 +1101,7 @@ pub const PhysicalMesh = struct {
             .tpu => tpu(allocator, platform_devices),
             .neuron => return neuron(allocator, platform_devices),
             .oneapi, .metal, .furiosa => cpu(allocator, platform_devices),
+            .tt => tt(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 
@@ -1127,6 +1128,22 @@ pub const PhysicalMesh = struct {
             .branch = .{
                 .tag = .bus,
                 .geometry = .tree,
+                .children = nodes,
+            },
+        };
+    }
+
+    /// Tenstorrent chips are linked chip-to-chip over Ethernet; tt-pjrt
+    /// exposes no device coordinates, so devices are ordered by id.
+    pub fn tt(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
+        const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
+
+        for (nodes, platform_devices) |*n, d| n.* = .device(d);
+
+        return .{
+            .branch = .{
+                .tag = .link,
+                .geometry = if (nodes.len >= 2) .{ .ring = .closed_ring } else .point_to_point,
                 .children = nodes,
             },
         };

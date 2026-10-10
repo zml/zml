@@ -39,7 +39,7 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         return error.MissingDevices;
     }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa, .tt => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
                 return error.InvalidDeviceCount;
@@ -97,7 +97,7 @@ pub const Memory = struct {
                 };
                 return zml_kind == kind_;
             },
-            .cpu, .neuron, .metal => return true,
+            .cpu, .neuron, .metal, .tt => return true,
         }
     }
 
@@ -224,7 +224,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa, .tt => device.id(),
     };
 }
 
@@ -256,6 +256,7 @@ pub const State = union(Target) {
     oneapi: void,
     metal: void,
     furiosa: void,
+    tt: void,
 
     pub const CudaState = struct {
         fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
@@ -278,6 +279,7 @@ pub const State = union(Target) {
             .oneapi => .{ .oneapi = {} },
             .metal => .{ .metal = {} },
             .furiosa => .{ .furiosa = {} },
+            .tt => .{ .tt = {} },
         };
     }
 
@@ -417,6 +419,7 @@ pub const Platform = struct {
 
     pub fn auto(allocator: std.mem.Allocator, io: std.Io, options: CreateOptions) !*Platform {
         const ordered_targets: []const Target = &.{
+            .tt,
             .tpu,
             .neuron,
             .rocm,
@@ -427,7 +430,10 @@ pub const Platform = struct {
             .cpu,
         };
         return for (ordered_targets) |target| {
-            break init(allocator, io, target, options) catch continue;
+            break init(allocator, io, target, options) catch |err| {
+                if (err != error.Unavailable) log.warn("Failed to initialize platform {t}: {t}", .{ target, err });
+                continue;
+            };
         } else error.Unavailable;
     }
 
@@ -701,7 +707,7 @@ pub const Platform = struct {
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal => .{
+            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal, .tt => .{
                 // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
@@ -736,6 +742,7 @@ pub const CreateOptions = struct {
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     furiosa: Furiosa = .{},
+    tt: struct {} = .{},
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     io_impl: Platform.IoImpl = .threaded,

@@ -90,6 +90,9 @@ pub const Options = struct {
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     xla_dump_emitter_re: ?[]const u8 = null,
+    /// Tenstorrent-only. Overrides `ZML_TT_TRACE` for this compile, e.g. to
+    /// disable trace for a program whose outputs are not all device-resident.
+    tt_enable_trace: ?bool = null,
 };
 
 /// Errors surfaced while lowering and compiling a ZML program.
@@ -828,6 +831,46 @@ pub fn tensorShardingAttr(
     };
 }
 
+/// Sets the tt-xla compile options (see tt-xla `compile_options.h`). Each
+/// default can be overridden with a `ZML_TT_*` environment variable.
+fn setTtCompileOptions(overrides_map: *c.upb_Map, upb_arena: *c.upb_Arena, opts: Options) !void {
+    const env = struct {
+        fn get(name: [*:0]const u8) ?[]const u8 {
+            return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
+        }
+
+        fn flag(name: [*:0]const u8) ?bool {
+            const v = get(name) orelse return null;
+            return !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
+        }
+    };
+
+    // opt=2 enables the L1-sharding optimizer; bfp_bf8 weights halve DRAM traffic.
+    const optimization_level: i64 = if (env.get("ZML_TT_OPTIMIZATION_LEVEL")) |v| std.fmt.parseInt(i64, v, 10) catch 2 else 2;
+    try setXlaOverrideFlag(overrides_map, "optimization_level", optimization_level, upb_arena);
+    try setXlaOverrideFlag(overrides_map, "math_fidelity", env.get("ZML_TT_MATH_FIDELITY") orelse "hifi3", upb_arena);
+    try setXlaOverrideFlag(overrides_map, "experimental_weight_dtype", env.get("ZML_TT_WEIGHT_DTYPE") orelse "bfp_bf8", upb_arena);
+    try setXlaOverrideFlag(overrides_map, "fp32_dest_acc_en", env.flag("ZML_TT_FP32_DEST_ACC_EN") orelse false, upb_arena);
+
+    // Trace replays the whole program from device-side command buffers, which
+    // removes host dispatch overhead (~10x decode speedup on Llama).
+    if (opts.tt_enable_trace orelse env.flag("ZML_TT_TRACE") orelse false) {
+        try setXlaOverrideFlag(overrides_map, "enable_trace", true, upb_arena);
+    }
+
+    // Moving const-eval'd weights to system memory makes every execute re-upload
+    // them once the cache is invalidated; set to 0 for multi-program inference.
+    if (env.flag("ZML_TT_CONST_EVAL_INPUTS_TO_SYSTEM_MEMORY")) |enable| {
+        try setXlaOverrideFlag(overrides_map, "enable_const_eval_inputs_to_system_memory", enable, upb_arena);
+    }
+
+    // Dumps the MLIR of every stage (vhlo, shlo, ttir, ttnn) under `<path>/<program_name>`.
+    if (env.get("ZML_TT_EXPORT_PATH")) |path| {
+        try setXlaOverrideFlag(overrides_map, "export_path", path, upb_arena);
+        try setXlaOverrideFlag(overrides_map, "export_model_name", opts.program_name, upb_arena);
+    }
+}
+
 fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_arena: *c.upb_Arena) !void {
     const result = c.upb_Map_Set(
         map,
@@ -978,6 +1021,7 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_ragged_dot_grouped_gemm", false, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_enable_tiling_propagation", false, upb_arena);
             },
+            .tt => try setTtCompileOptions(overrides_map, upb_arena, opts),
             else => {},
         }
 

@@ -239,6 +239,9 @@ use_repo(furiosa, "libzml_furiosa")
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libzml_tpu")
 
+tt = use_extension("//platforms/tt:tt.bzl", "tt_packages")
+use_repo(tt, "libpjrt_tt")
+
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "aws-neuronx-tools", "libgcc_s1", "libgomp1", "libstdcpp6", "libzml_neuron")
 

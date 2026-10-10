@@ -274,7 +274,7 @@ pub const Tensor = struct {
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal => return self,
+            .cpu, .neuron, .metal, .tt => return self,
             .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
@@ -340,7 +340,7 @@ pub const Tensor = struct {
     pub fn toMemoryAll(flat_tensors: anytype, kind: Memory.Kind) @TypeOf(flat_tensors) {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal => return flat_tensors,
+            .cpu, .neuron, .metal, .tt => return flat_tensors,
             .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
@@ -358,7 +358,7 @@ pub const Tensor = struct {
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .metal => return self,
+            .cpu, .neuron, .metal, .tt => return self,
             .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
@@ -377,7 +377,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             // Only one memory kind on those platform
-            .cpu, .neuron, .metal => return,
+            .cpu, .neuron, .metal, .tt => return,
             .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
@@ -3854,7 +3854,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa, .tt => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice(a, .{ .end = k });
@@ -4811,7 +4811,8 @@ pub const Tensor = struct {
                     }
                 }).body, .{ .input = input, .name = full_name }, {});
             },
-            .oneapi, .neuron, .furiosa => {},
+            // tt-pjrt has no host FFI callbacks.
+            .oneapi, .neuron, .furiosa, .tt => {},
         }
     }
 

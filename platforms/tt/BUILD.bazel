@@ -1,0 +1,37 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+exports_files([
+    "libpjrt_tt.BUILD.bazel",
+    "libsfpi.BUILD.bazel",
+])
+
+zig_library(
+    name = "tt",
+    import_name = "platforms/tt",
+    main = "tt.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//pjrt",
+        "//platforms:options",
+        "//stdx",
+    ] + select({
+        "//platforms:tt.enabled": ["@libpjrt_tt"],
+        "//conditions:default": [],
+    }),
+)
+
+# TT-specific `stablehlo.custom_call` emit helpers. Pure mlir, no zml dep, so
+# zml/ can call in without forming a cycle.
+zig_library(
+    name = "tt_ops",
+    import_name = "platforms/tt/ops",
+    main = "ops.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//mlir/dialects",
+    ],
+)

@@ -10,6 +10,7 @@ const pjrt = @import("pjrt");
 const platforms_options = @import("platforms/options");
 const rocm = @import("platforms/rocm");
 const tpu = @import("platforms/tpu");
+const tt = @import("platforms/tt");
 
 const platforms = @This();
 
@@ -22,6 +23,7 @@ pub const Platform = enum {
     oneapi,
     metal,
     furiosa,
+    tt,
 
     pub fn selectFirstAcceleratorEnabled() error{Unavailable}!Platform {
         inline for (@typeInfo(Platform).@"enum".fields) |field| {

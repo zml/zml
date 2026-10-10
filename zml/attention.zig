@@ -7,6 +7,7 @@ pub const fly = @import("attention/fly_kernels/sparse_mla.zig");
 pub const metal = @import("attention/metal_attention.zig");
 pub const nki = @import("attention/nki/attention.zig");
 pub const paged_attention = @import("attention/paged_attention.zig");
+pub const tenstorrent = @import("attention/tenstorrent.zig");
 pub const tpu = @import("attention/tpu_attention.zig");
 pub const triton = @import("attention/triton_attention.zig");
 pub const triton_kernels = @import("attention/triton_kernels/unified_attention.zig");
@@ -23,6 +24,7 @@ pub const Backend = enum {
     cuda_fa2,
     cuda_fa3,
     metal_fa,
+    tenstorrent,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -32,6 +34,7 @@ pub const Backend = enum {
             },
             .neuron => .nki,
             .metal => .metal_fa,
+            .tt => .tenstorrent,
             .cpu, .rocm, .tpu, .oneapi, .furiosa => .vanilla,
         };
     }
@@ -42,6 +45,7 @@ pub const Backend = enum {
             .attnd => true, // attnd runs over network
             .nki => platform.target == .neuron,
             .metal_fa => platform.target == .metal,
+            .tenstorrent => platform.target == .tt,
             .cuda_fa2 => platform.target == .cuda,
             .cuda_fa3 => if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(.{ .major = 9, .minor = 0 }) else false,
         };
@@ -55,6 +59,7 @@ pub const Parameters = union(Backend) {
     cuda_fa2: flashattn.fa2.Parameters,
     cuda_fa3: flashattn.fa3.Parameters,
     metal_fa: void,
+    tenstorrent: void,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
@@ -63,6 +68,7 @@ pub const Parameters = union(Backend) {
         cuda_fa2: flashattn.fa2.Parameters.InitOptions,
         cuda_fa3: flashattn.fa3.Parameters.InitOptions,
         metal_fa: void,
+        tenstorrent: void,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
@@ -72,6 +78,7 @@ pub const Parameters = union(Backend) {
                 .cuda_fa2 => .{ .cuda_fa2 = .{} },
                 .cuda_fa3 => .{ .cuda_fa3 = .{} },
                 .metal_fa => .{ .metal_fa = {} },
+                .tenstorrent => .{ .tenstorrent = {} },
             };
         }
     };
@@ -84,6 +91,7 @@ pub const Parameters = union(Backend) {
             .cuda_fa2 => |v| .{ .cuda_fa2 = .init(v) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = .init(v) },
             .metal_fa => .{ .metal_fa = {} },
+            .tenstorrent => .{ .tenstorrent = {} },
         };
     }
 };
@@ -95,6 +103,7 @@ pub const Metadata = union(Backend) {
     cuda_fa2: flashattn.fa2.Metadata,
     cuda_fa3: flashattn.fa3.Metadata,
     metal_fa: metal.Metadata,
+    tenstorrent: void,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
@@ -103,6 +112,7 @@ pub const Metadata = union(Backend) {
         cuda_fa2: flashattn.fa2.Metadata.InitOptions,
         cuda_fa3: flashattn.fa3.Metadata.InitOptions,
         metal_fa: void,
+        tenstorrent: void,
 
         pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
             return switch (backend) {
@@ -112,6 +122,7 @@ pub const Metadata = union(Backend) {
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
                 .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads } },
                 .metal_fa => .{ .metal_fa = {} },
+                .tenstorrent => .{ .tenstorrent = {} },
             };
         }
     };
@@ -124,6 +135,7 @@ pub const Metadata = union(Backend) {
             .cuda_fa2 => |o| .{ .cuda_fa2 = .init(o, mesh) },
             .cuda_fa3 => |o| .{ .cuda_fa3 = .init(o, mesh) },
             .metal_fa => .{ .metal_fa = .init() },
+            .tenstorrent => .{ .tenstorrent = {} },
         };
     }
 
@@ -131,6 +143,7 @@ pub const Metadata = union(Backend) {
         return switch (self) {
             .vanilla => .{ .vanilla = {} },
             .nki => .{ .nki = {} },
+            .tenstorrent => .{ .tenstorrent = {} },
             inline else => |v, tag| @unionInit(zml.Bufferized(Metadata), @tagName(tag), try v.initBuffer(io, platform)),
         };
     }
@@ -143,6 +156,7 @@ pub const Metadata = union(Backend) {
             .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
             .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
             .metal_fa => |*v| metal.Metadata.deinitBuffer(v),
+            .tenstorrent => {},
         }
     }
 };
@@ -176,6 +190,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
         .metal_fa => metal.attention(q, k, v, token_index, metadata.metal_fa),
+        .tenstorrent => tenstorrent.attention(q, k, v, token_index),
     };
 }
 
