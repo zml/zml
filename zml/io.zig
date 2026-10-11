@@ -238,7 +238,8 @@ pub const TensorStore = struct {
             shape._sharding = sharding;
             if (sharding.mesh) |mesh_| shape = shape.withPartitioning(mesh_, sharding.partition);
 
-            const tensor: Tensor = .fromShape(shape);
+            var tensor: Tensor = .fromShape(shape);
+            tensor.is_parameter = true;
             self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;
@@ -260,7 +261,8 @@ pub const TensorStore = struct {
             const tensors = tensor_list.toOwnedSlice(arena) catch unreachable;
             errdefer arena.free(tensors);
 
-            const tensor: Tensor = .fromShape(shape);
+            var tensor: Tensor = .fromShape(shape);
+            tensor.is_parameter = true;
             self.store.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .transformed = true }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
             return tensor;

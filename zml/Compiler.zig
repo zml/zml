@@ -18,6 +18,7 @@ const ops = @import("ops.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const tracer = @import("profiling/tracer.zig");
+const tt_ops = @import("platforms/tt/ops");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
@@ -628,6 +629,15 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
             const packed_shape = og_shape.packedShape();
             const mlir_type = mlirx.Type.rankedTensor(ctx.compiler.mlir_ctx, packed_shape);
             var value = ctx.scope.block.addArgument(mlir_type, .unknown(ctx.compiler.mlir_ctx));
+
+            // TT-FIX: tt-xla treats unmarked arguments as per-call inputs. Weights
+            // are tagged as `<parameter>` so they stay device-resident across calls
+            // and trace captures.
+            if (ctx.compiler.platform.target == .tt and tensor.is_parameter) {
+                var name_buf: [32]u8 = undefined;
+                const name = std.fmt.bufPrint(&name_buf, "parameter_{d}", .{ctx.current_argument_id}) catch unreachable;
+                tt_ops.markArgument(ctx.compiler.mlir_ctx, ctx.scope.block, value, name);
+            }
 
             // But immediately create the MLIR value corresponding to the fp4 data.
             // That way the user code only sees a proper fp4 tensor.

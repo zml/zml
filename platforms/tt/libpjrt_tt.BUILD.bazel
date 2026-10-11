@@ -1,4 +1,32 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@bazel_lib//lib:run_binary.bzl", "run_binary")
+
+# tt-mlir's compiler and runtime link a pybind11 bridge (for tt-lang kernels)
+# and leave ~110 CPython symbols for a Python host to provide. ZML never takes
+# that path, so those symbols are made weak: unresolved, they bind to null and
+# the plugin loads without an interpreter in the process.
+WEAKENED_LIBS = [
+    "pjrt_plugin_tt/lib64/libTTMLIRCompiler.so",
+    "pjrt_plugin_tt/lib64/libTTMLIRRuntime.so",
+]
+
+[
+    run_binary(
+        name = "weak_" + lib.split("/")[-1],
+        srcs = [lib],
+        outs = ["weak/" + lib],
+        args = [
+            "-p",
+            "Py*",
+            "-p",
+            "_Py*",
+            "$(location {})".format(lib),
+            "$(location weak/{})".format(lib),
+        ],
+        tool = "@zml//platforms/tt:weakify",
+    )
+    for lib in WEAKENED_LIBS
+]
 
 filegroup(
     name = "plugin_tree",
@@ -10,7 +38,7 @@ filegroup(
         exclude = [
             "pjrt_plugin_tt/__init__.py",
             "pjrt_plugin_tt/wrapper.py",
-        ],
+        ] + WEAKENED_LIBS,
     ),
 )
 
@@ -21,12 +49,13 @@ copy_to_directory(
     srcs = [
         ":plugin_tree",
         "@libsfpi//:files",
-    ],
+    ] + ["weak/" + lib for lib in WEAKENED_LIBS],
     add_directory_to_runfiles = True,
     include_external_repositories = ["**"],
     replace_prefixes = {
         "compiler": "pjrt_plugin_tt/tt-metal/runtime/sfpi/compiler",
         "include": "pjrt_plugin_tt/tt-metal/runtime/sfpi/include",
+        "weak/": "",
     },
 )
 

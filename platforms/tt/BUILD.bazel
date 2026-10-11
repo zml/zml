@@ -1,9 +1,18 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
 exports_files([
     "libpjrt_tt.BUILD.bazel",
     "libsfpi.BUILD.bazel",
 ])
+
+# Rewrites matching `.dynsym` entries to STB_WEAK, so a wheel library built
+# for a Python host loads without libpython (see libpjrt_tt.BUILD.bazel).
+cc_binary(
+    name = "weakify",
+    srcs = ["weakify.c"],
+    visibility = ["@libpjrt_tt//:__subpackages__"],
+)
 
 zig_library(
     name = "tt",

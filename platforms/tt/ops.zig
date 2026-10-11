@@ -7,6 +7,35 @@ const std = @import("std");
 const mlir = @import("mlir");
 const dialects = @import("mlir/dialects");
 
+/// `tt.mark_argument` — tags a block arg as `<parameter>` so tt-xla keeps it
+/// device-resident across trace captures. `has_side_effect=true` prevents the
+/// canonicalizer from dropping the op.
+pub fn markArgument(
+    ctx: *mlir.Context,
+    block: *mlir.Block,
+    arg: *const mlir.Value,
+    name: []const u8,
+) void {
+    const frontend_attributes: *const mlir.Attribute = .dict(ctx, &.{
+        .named(ctx, "ttcore.argument_type", .string(ctx, "parameter")),
+        .named(ctx, "ttir.name", .string(ctx, name)),
+    });
+    _ = dialects.stablehlo.custom_call(
+        ctx,
+        &.{arg},
+        &.{arg.type_()},
+        .{
+            .call_target_name = "tt.mark_argument",
+            .has_side_effect = true,
+            .backend_config = .{ .original = "" },
+            .additional_attributes = &.{
+                .named(ctx, "mhlo.frontend_attributes", frontend_attributes),
+            },
+        },
+        .unknown(ctx),
+    ).appendTo(block);
+}
+
 /// `tt.scaled_dot_product_attention[_decode]` — TTNN-native SDPA. Operands are
 /// `[B,H,S,D]` (decode `q` is `[1,B,H,D]`); decode passes `cur_pos[B]` as a
 /// 4th operand. Attrs are parsed as strings (`parseBoolFromStringAttr`).

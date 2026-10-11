@@ -28,6 +28,9 @@ pub const Tensor = struct {
 
     id: Tensor.Id,
     auto_broadcast: bool = false,
+    /// Set on weights created from a `TensorStore`. Backends that distinguish
+    /// weights from activations (Tenstorrent) use it to keep them on device.
+    is_parameter: bool = false,
     _shape: Shape,
     _value: ?*const mlir.Value = null,
 
