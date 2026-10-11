@@ -209,3 +209,9 @@ zig_test(
     name = "test",
     deps = ["//zml"],
 )
+
+zig_test(
+    name = "sparse_paged_attention_test",
+    main = "attention/sparse_decode_test.zig",
+    deps = ["//zml"],
+)

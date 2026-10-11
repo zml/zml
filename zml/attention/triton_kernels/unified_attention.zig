@@ -1207,3 +1207,123 @@ fn reduceSegments(
         .{ .mask = dim_mask },
     );
 }
+
+/// Head-parallel SIMT specialization for small-batch sparse BF16 decode.
+/// Each head/split owns a softmax partial; empty splits have zero mass.
+pub const SparseDecode = struct {
+    pub const Config = struct {
+        heads: i32,
+        groups: i32,
+        kv_heads: i32,
+        page_size: i32,
+        page_count: i32,
+        table_width: i32,
+        count: i32,
+        tile: i32,
+        splits: i32,
+        output_tile: i32,
+        scale: f32,
+    };
+
+    pub const Stage = struct {
+        pub const Kernel = tri.Kernel(Config, .{
+            .name = "kernel_paged_attention_sparse_decode",
+            .inputs = &.{ "q", "k", "v", "indices", "table", "lengths", "starts" },
+            .outputs = &.{ "partial", "maxima", "sums" },
+            .run = run,
+        });
+
+        fn run(b: *tri.Builder, cfg: Config) tri.FinishError!void {
+            const a = try b.declareArgs(.{
+                .q = .{ .ptr = .bf16 },
+                .k = .{ .ptr = .bf16 },
+                .v = .{ .ptr = .bf16 },
+                .indices = .{ .ptr = .i32 },
+                .table = .{ .ptr = .i32 },
+                .lengths = .{ .ptr = .i32 },
+                .starts = .{ .ptr = .i32 },
+                .partial = .{ .ptr = .f32 },
+                .maxima = .{ .ptr = .f32 },
+                .sums = .{ .ptr = .f32 },
+            });
+            const head = b.programId(.x);
+            const split = b.programId(.y);
+            const sequence = b.programId(.z);
+            const row = b.load(a.starts.addPtr(sequence));
+            const end = b.load(a.starts.addPtr(sequence.add(1)));
+            b.returnIf(row.eq(end), .{});
+            const length = b.load(a.lengths.addPtr(sequence));
+            const d = b.arange(0, 256, .i32);
+            const slots = split.mul(cfg.tile).add(b.arange(0, cfg.tile, .i32));
+            const pos = b.loadOpts(a.indices.addPtr(row.to(.i64).mul(cfg.count).add(slots.to(.i64))), .{
+                .mask = slots.lt(cfg.count),
+                .other = b.full(&.{cfg.tile}, -1, .i32),
+            });
+            const logical_page = pos.maximum(0).div(cfg.page_size);
+            var valid = slots.lt(cfg.count).bitAnd(pos.ge(0)).bitAnd(pos.lt(length)).bitAnd(logical_page.lt(cfg.table_width));
+            const page = b.loadOpts(a.table.addPtr(sequence.to(.i64).mul(cfg.table_width).add(logical_page.to(.i64))), .{
+                .mask = valid,
+                .other = b.full(&.{cfg.tile}, -1, .i32),
+            });
+            valid = valid.bitAnd(page.ge(0)).bitAnd(page.lt(cfg.page_count));
+            var nonempty = b.openIfElse(b.sum(valid.to(.i32)).gt(0), .{ b.tensorTy(&.{256}, .f32), b.scalarTy(.f32), b.scalarTy(.f32) });
+            {
+                const q = b.load(a.q.addPtr(row.to(.i64).mul(cfg.heads).add(head.to(.i64)).mul(256).add(d.to(.i64)))).to(.f32);
+                const offset = page.to(.i64).mul(cfg.page_size).add(pos.rem(cfg.page_size).to(.i64)).mul(cfg.kv_heads)
+                    .add(head.div(cfg.groups).to(.i64)).mul(256).expandDims(1).add(d.to(.i64).expandDims(0));
+                const keys = b.loadOpts(a.k.addPtr(offset), .{
+                    .mask = b.broadcastTo(valid.expandDims(1), &.{ cfg.tile, 256 }),
+                    .other = b.zeros(&.{ cfg.tile, 256 }, .bf16),
+                }).to(.f32);
+                const scores = b.where(valid, b.sumOpts(keys.mul(q.expandDims(0)), .{ .axis = 1 }).mul(cfg.scale), b.full(&.{cfg.tile}, -std.math.inf(f32), .f32));
+                const maximum = b.max(scores);
+                const p = b.exp(scores.sub(maximum));
+                const sum = b.sum(p);
+                const values = b.loadOpts(a.v.addPtr(offset), .{
+                    .mask = b.broadcastTo(valid.expandDims(1), &.{ cfg.tile, 256 }),
+                    .other = b.zeros(&.{ cfg.tile, 256 }, .bf16),
+                }).to(.f32);
+                const output = b.sumOpts(values.mul(p.expandDims(1)), .{ .axis = 0 });
+                nonempty.yieldThen(.{ output, maximum, sum });
+            }
+            {
+                nonempty.yieldElse(.{ b.zeros(&.{256}, .f32), b.liftAs(-std.math.inf(f32), .f32), b.liftAs(0.0, .f32) });
+            }
+            const part = row.to(.i64).mul(cfg.heads).add(head.to(.i64)).mul(cfg.splits).add(split.to(.i64));
+            b.store(a.partial.addPtr(part.mul(256).add(d.to(.i64))), nonempty.results[0]);
+            b.store(a.maxima.addPtr(part), nonempty.results[1]);
+            b.store(a.sums.addPtr(part), nonempty.results[2]);
+        }
+    };
+
+    pub const Reduce = struct {
+        pub const Kernel = tri.Kernel(Config, .{
+            .name = "kernel_paged_attention_sparse_decode_reduce",
+            .inputs = &.{ "partial", "maxima", "sums" },
+            .outputs = &.{"output"},
+            .run = run,
+        });
+
+        fn run(b: *tri.Builder, cfg: Config) tri.FinishError!void {
+            const a = try b.declareArgs(.{
+                .partial = .{ .ptr = .f32 },
+                .maxima = .{ .ptr = .f32 },
+                .sums = .{ .ptr = .f32 },
+                .output = .{ .ptr = .bf16 },
+            });
+            const row_head = b.programId(.x).to(.i64);
+            const s = b.arange(0, cfg.splits, .i32);
+            const d = b.programId(.y).mul(cfg.output_tile).add(b.arange(0, cfg.output_tile, .i32));
+            const part = row_head.mul(cfg.splits).add(s.to(.i64));
+            const maxima = b.load(a.maxima.addPtr(part));
+            const sums = b.load(a.sums.addPtr(part));
+            const maximum = b.max(maxima);
+            const safe_maximum = b.where(maximum.gt(-std.math.inf(f32)), maximum, b.liftAs(0.0, .f32));
+            const alpha = b.exp(maxima.sub(safe_maximum));
+            const denominator = b.sum(alpha.mul(sums));
+            const partial = b.load(a.partial.addPtr(part.mul(256).expandDims(1).add(d.to(.i64).expandDims(0))));
+            const output = b.sumOpts(partial.mul(alpha.expandDims(1)), .{ .axis = 0 }).div(b.where(denominator.gt(0.0), denominator, b.liftAs(1.0, .f32)));
+            b.store(a.output.addPtr(row_head.mul(256).add(d.to(.i64))), output.to(.bf16));
+        }
+    };
+};

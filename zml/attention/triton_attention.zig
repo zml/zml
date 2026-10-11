@@ -292,6 +292,12 @@ pub const paged = struct {
                         .options_ = self.options,
                     };
 
+                    // Decode metadata can retain a prefill-sized max_seqlen_q.
+                    // Use the actual token count, and specialize after sharding.
+                    if (useSparseDecode(parameters_, self.q, self.k_cache, self.v_cache, self.opts)) {
+                        return pagedAttentionSparseDecode(parameters_, self.q, self.k_cache, self.v_cache, self.opts);
+                    }
+
                     const cu_count = getCuCount();
                     const num_heads: usize = @intCast(self.q.dim(.hkv) * self.q.dim(.hg));
                     const num_kv_heads: usize = @intCast(self.k_cache.dim(.hkv));
@@ -367,6 +373,69 @@ pub const paged = struct {
         );
 
         return output;
+    }
+
+    fn useSparseDecode(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: AttentionOptions) bool {
+        // Tuned on GB300 for at most two single-token requests. Other shapes,
+        // dtypes, masks and sinks keep the general paged-attention path.
+        return !parameters.options().is_prefill and
+            q.dim(.b) == parameters.options().batch_size and
+            parameters.options().batch_size > 0 and parameters.options().batch_size <= 2 and
+            isCudaComputeCapability(.{ .major = 10, .minor = 3 }) and
+            opts.mask == .indices and opts.sink == null and
+            q.dtype() == .bf16 and q.dim(.hd) == 256 and
+            k.dtype() == .bf16 and v.dtype() == .bf16 and
+            q.dim(.hkv) == k.dim(.hkv) and k.dim(.hd) == 256 and k.shape().eqlWithTags(v.shape()) and
+            opts.mask.indices.dtype() == .i32 and opts.mask.indices.dim(.b) == q.dim(.b) and
+            opts.mask.indices.dim(.topk) > 0 and opts.mask.indices.dim(.topk) <= 4096;
+    }
+
+    fn pagedAttentionSparseDecode(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        const query = q.transpose(.{ .b, .hkv, .hg, .hd });
+        const indices = opts.mask.indices;
+        const count = indices.dim(.topk);
+        const splits: i64 = 32;
+        const tile = std.math.ceilPowerOfTwoAssert(u32, @intCast(@divTrunc(count + splits - 1, splits)));
+        const heads = query.dim(.hkv) * query.dim(.hg);
+        const cfg: kernels.SparseDecode.Config = .{
+            .heads = @intCast(heads),
+            .groups = @intCast(query.dim(.hg)),
+            .kv_heads = @intCast(k_cache.dim(.hkv)),
+            .page_size = @intCast(k_cache.dim(.k_chunk)),
+            .page_count = @intCast(k_cache.dim(.page)),
+            .table_width = @intCast(parameters.block_table.dim(.p)),
+            .count = @intCast(count),
+            .tile = @intCast(tile),
+            .splits = splits,
+            .output_tile = 256,
+            .scale = opts.scale orelse 0.0625,
+        };
+        const parts = kernels.SparseDecode.Stage.Kernel.call(.{
+            .q = query,
+            .k = k_cache.transpose(.{ .page, .k_chunk, .hkv, .hd }),
+            .v = v_cache.transpose(.{ .page, .k_chunk, .hkv, .hd }),
+            .indices = indices.transpose(.{ .b, .topk }),
+            .table = parameters.block_table,
+            .lengths = parameters.seq_lens,
+            .starts = parameters.query_start_len,
+        }, .{
+            .partial = zml.Shape.init(.{ .b = query.dim(.b), .h = heads, .split = splits, .hd = 256 }, .f32),
+            .maxima = zml.Shape.init(.{ .b = query.dim(.b), .h = heads, .split = splits }, .f32),
+            .sums = zml.Shape.init(.{ .b = query.dim(.b), .h = heads, .split = splits }, .f32),
+        }, .{
+            .cfg = cfg,
+            .grid = .{ @intCast(heads), @intCast(splits), @intCast(parameters.seq_lens.dim(.b)) },
+            .num_warps = 4,
+            .num_stages = 1,
+        });
+        return kernels.SparseDecode.Reduce.Kernel.call(.{ .partial = parts.partial, .maxima = parts.maxima, .sums = parts.sums }, .{
+            .output = query.shape(),
+        }, .{
+            .cfg = cfg,
+            .grid = .{ @intCast(query.dim(.b) * heads), @intCast(@divExact(256, cfg.output_tile)), 1 },
+            .num_warps = 4,
+            .num_stages = 1,
+        }).output.transpose(q.shape().tags());
     }
 
     pub fn pagedAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
