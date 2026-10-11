@@ -9,6 +9,7 @@ pub const triton_mxfp4 = @import("triton_mxfp4.zig");
 pub const cute_mxfp4 = @import("cute_mxfp4.zig");
 pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
 pub const metal = @import("metal.zig");
+pub const tenstorrent = @import("tenstorrent.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
 pub const triton = @import("triton.zig");
 pub const fly = @import("fly_kernels/moe.zig");
@@ -85,6 +86,7 @@ pub const Backend = enum {
     fly,
     mosaic_tpu,
     metal,
+    tenstorrent,
 
     pub fn auto(platform: *const zml.Platform, scheme: ?zml.Quantization.Scheme, dtype: zml.DataType) !Backend {
         // Keep the dtype as an argument because non scheme-specific backends may depend on it later
@@ -129,6 +131,7 @@ pub const Backend = enum {
                     .mxfp4 => error.UnsupportedQuantization,
                 };
             },
+            .tt => if (scheme == null) .tenstorrent else error.UnsupportedQuantization,
             else => error.UnimplementedMoEBackend,
         };
     }
@@ -149,6 +152,7 @@ pub const Backend = enum {
             },
             .mosaic_tpu => platform.target == .tpu,
             .metal => platform.target == .metal,
+            .tenstorrent => platform.target == .tt,
         };
     }
 
@@ -163,6 +167,7 @@ pub const Backend = enum {
                 else => error.UnsupportedQuantization,
             } else .{ .gate_up = .concatenated, .gate_up_order = .up_gate, .packing = .plain },
             .mosaic_tpu, .metal => .{ .gate_up = .concatenated, .packing = .plain },
+            .tenstorrent => if (scheme == null) .{ .gate_up = .concatenated, .packing = .plain } else error.UnsupportedQuantization,
             .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };
     }
@@ -175,6 +180,7 @@ pub const Backend = enum {
             .triton, .fly => {},
             .mosaic_tpu => {},
             .metal => {},
+            .tenstorrent => {},
         };
     }
 };
@@ -205,6 +211,7 @@ pub fn forwardMoe(
         inline .triton, .fly => |b| fused_experts.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, b),
         .mosaic_tpu => mosaic_tpu.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
         .metal => metal.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
+        .tenstorrent => tenstorrent.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
     };
 }
 
