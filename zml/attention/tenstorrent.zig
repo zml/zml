@@ -8,6 +8,8 @@ pub const paged_cache = @import("tt_kernels/paged_cache.zig");
 pub const sdpa_decode = @import("tt_kernels/sdpa_decode.zig");
 /// tt-metal's flash-attention prefill, plain or chunked over a paged cache.
 pub const sdpa = @import("tt_kernels/sdpa.zig");
+/// tt-metal's chunked Gated Delta Rule.
+pub const gated_delta_net = @import("tt_kernels/gated_delta_net.zig");
 
 /// Cores the attention kernels run on.
 const grid: [2]u32 = .{ 8, 8 };

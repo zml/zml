@@ -1773,6 +1773,9 @@ pub const GatedDeltaNet = struct {
         initial_state: Input,
         active_length: Tensor,
     ) Output {
+        if (zml.Compiler.current().platform.target == .tt and zml.attention.tenstorrent.gated_delta_net.supports(queries, values)) {
+            return zml.attention.tenstorrent.gated_delta_net.gatedDeltaNet(queries, keys, values, alphas, betas, initial_state, active_length, .{});
+        }
         const gdn: GatedDeltaNet = .{
             .queries = queries,
             .keys = keys,
