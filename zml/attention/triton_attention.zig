@@ -145,6 +145,30 @@ pub const Config3D = struct {
 };
 
 fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
+    if (options.head_parallel) {
+        const segments = 32;
+        const tile = std.math.ceilPowerOfTwoAssert(usize, (options.indices_count + segments - 1) / segments);
+        return .{
+            .attention = .{
+                .tile_size = tile,
+                .num_segments_per_seq = segments,
+                .num_warps = 4,
+                .num_stages = 1,
+                .block_m = 1,
+                .block_q = 1,
+                .total_q_blocks = options.batch_size,
+            },
+            .reduce = .{
+                .tile_size = tile,
+                .num_segments_per_seq = segments,
+                .num_warps = 4,
+                .num_stages = 1,
+                .block_m = 1,
+                .block_q = 1,
+            },
+        };
+    }
+
     var reduce_num_warps: usize = 2;
     // Intel decode needs more warps to spread the work and avoid register spill.
     const attn_warps: usize = if (options.all_decode and isOneapiTarget()) 8 else 2;
@@ -262,6 +286,7 @@ pub const paged = struct {
         scale: ?f32,
         /// Number of indices for sparse attention
         indices_count: usize,
+        head_parallel: bool = false,
 
         pub fn numQueriesPerKv(self: PagedAttentionOptions) usize {
             return self.num_heads / self.num_kv_heads;
@@ -291,12 +316,6 @@ pub const paged = struct {
                         .query_start_len = self.query_start_len,
                         .options_ = self.options,
                     };
-
-                    // Decode metadata can retain a prefill-sized max_seqlen_q.
-                    // Use the actual token count, and specialize after sharding.
-                    if (useSparseDecode(parameters_, self.q, self.k_cache, self.v_cache, self.opts)) {
-                        return pagedAttentionSparseDecode(parameters_, self.q, self.k_cache, self.v_cache, self.opts);
-                    }
 
                     const cu_count = getCuCount();
                     const num_heads: usize = @intCast(self.q.dim(.hkv) * self.q.dim(.hg));
@@ -338,13 +357,14 @@ pub const paged = struct {
                         .num_2d_prgms = num_2d_prgms,
                         .max_seqlen_q = self.options.max_seqlen_q,
                         .scale = self.opts.scale,
+                        .head_parallel = useHeadParallelSparseAttention(parameters_, self.q, self.k_cache, self.v_cache, self.opts),
                         .indices_count = switch (self.opts.mask) {
                             .indices => |indices| @intCast(indices.dim(.topk)),
                             else => 0,
                         },
                     };
 
-                    const use_2d_kernel = use2dKernel(
+                    const use_2d_kernel = !paged_attention_opts.head_parallel and use2dKernel(
                         paged_attention_opts.all_decode,
                         paged_attention_opts.batch_size,
                         paged_attention_opts.num_kv_heads,
@@ -375,7 +395,9 @@ pub const paged = struct {
         return output;
     }
 
-    fn useSparseDecode(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: AttentionOptions) bool {
+    fn useHeadParallelSparseAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: AttentionOptions) bool {
+        // Decode metadata can retain a prefill-sized max_seqlen_q.
+        // Tune using the actual token count after sharding.
         // Tuned on GB300 for at most two single-token requests. Other shapes,
         // dtypes, masks and sinks keep the general paged-attention path.
         return !parameters.options().is_prefill and
@@ -388,56 +410,6 @@ pub const paged = struct {
             q.dim(.hkv) == k.dim(.hkv) and k.dim(.hd) == 256 and k.shape().eqlWithTags(v.shape()) and
             opts.mask.indices.dtype() == .i32 and opts.mask.indices.dim(.b) == q.dim(.b) and
             opts.mask.indices.dim(.topk) > 0 and opts.mask.indices.dim(.topk) <= 4096;
-    }
-
-    fn pagedAttentionSparseDecode(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-        const query = q.transpose(.{ .b, .hkv, .hg, .hd });
-        const indices = opts.mask.indices;
-        const count = indices.dim(.topk);
-        const splits: i64 = 32;
-        const tile = std.math.ceilPowerOfTwoAssert(u32, @intCast(@divTrunc(count + splits - 1, splits)));
-        const heads = query.dim(.hkv) * query.dim(.hg);
-        const cfg: kernels.SparseDecode.Config = .{
-            .heads = @intCast(heads),
-            .groups = @intCast(query.dim(.hg)),
-            .kv_heads = @intCast(k_cache.dim(.hkv)),
-            .page_size = @intCast(k_cache.dim(.k_chunk)),
-            .page_count = @intCast(k_cache.dim(.page)),
-            .table_width = @intCast(parameters.block_table.dim(.p)),
-            .count = @intCast(count),
-            .tile = @intCast(tile),
-            .splits = splits,
-            // Expose four reduction blocks per head for small batches without
-            // increasing the intermediate buffers.
-            .output_tile = 64,
-            .scale = opts.scale orelse 0.0625,
-        };
-        const parts = kernels.SparseDecode.Stage.Kernel.call(.{
-            .q = query,
-            .k = k_cache.transpose(.{ .page, .k_chunk, .hkv, .hd }),
-            .v = v_cache.transpose(.{ .page, .k_chunk, .hkv, .hd }),
-            .indices = indices.transpose(.{ .b, .topk }),
-            .table = parameters.block_table,
-            .lengths = parameters.seq_lens,
-            .starts = parameters.query_start_len,
-        }, .{
-            .partial = zml.Shape.init(.{ .b = query.dim(.b), .h = heads, .split = splits, .hd = 256 }, .f32),
-            .maxima = zml.Shape.init(.{ .b = query.dim(.b), .h = heads, .split = splits }, .f32),
-            .sums = zml.Shape.init(.{ .b = query.dim(.b), .h = heads, .split = splits }, .f32),
-        }, .{
-            .cfg = cfg,
-            .grid = .{ @intCast(heads), @intCast(splits), @intCast(parameters.seq_lens.dim(.b)) },
-            .num_warps = 4,
-            .num_stages = 1,
-        });
-        return kernels.SparseDecode.Reduce.Kernel.call(.{ .partial = parts.partial, .maxima = parts.maxima, .sums = parts.sums }, .{
-            .output = query.shape(),
-        }, .{
-            .cfg = cfg,
-            .grid = .{ @intCast(query.dim(.b) * heads), @intCast(@divExact(256, cfg.output_tile)), 1 },
-            .num_warps = 4,
-            .num_stages = 1,
-        }).output.transpose(q.shape().tags());
     }
 
     pub fn pagedAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
@@ -549,6 +521,7 @@ pub const paged = struct {
             .all_decode = paged_attention_opts.all_decode,
             .is_causal = opts.mask.isCausal(),
             .indices_count = @intCast(paged_attention_opts.indices_count),
+            .num_blocks = @intCast(paged_attention_opts.num_blocks),
         };
         log.debug("pagedAttention3d attention config: {any}", .{attn_kernel_config});
 
@@ -578,7 +551,7 @@ pub const paged = struct {
 
         const attn_grid: [3]i32 = .{
             @intCast(config.attention.total_q_blocks),
-            @intCast(paged_attention_opts.num_kv_heads),
+            @intCast(if (paged_attention_opts.head_parallel) paged_attention_opts.num_heads else paged_attention_opts.num_kv_heads),
             @intCast(config.attention.num_segments_per_seq),
         };
 

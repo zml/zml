@@ -184,6 +184,7 @@ pub const KernelUnifiedAttention3dPtr = struct {
         all_decode: bool = false,
         is_causal: bool = true,
         indices_count: i64 = 0,
+        num_blocks: i64 = 0,
     };
 
     pub const Kernel = tri.Kernel(Config, .{
@@ -798,17 +799,21 @@ fn kernelUnifiedAttention3d(
     const NUM_SEGMENTS_PER_SEQ: i64 = config.num_segments_per_seq;
     const SLIDING_WINDOW: i64 = config.sliding_window;
 
+    // A single sparse query head uses vector reductions instead of padded
+    // tensor-core query tiles. The cache still shares keys across GQA heads.
+    const HEAD_PARALLEL = config.indices_count > 0 and config.all_decode and BLOCK_M == 1;
     const q_block_global_idx = k.programId(.x);
-    const kv_head_idx = k.programId(.y);
+    const head_idx = k.programId(.y);
+    const kv_head_idx = if (HEAD_PARALLEL) head_idx.div(@as(i32, @intCast(NUM_QUERIES_PER_KV))) else head_idx;
     const segm_idx = k.programId(.z);
 
     const qk_scale = scale.mul(RCP_LN2);
 
-    const seq_idx = findSeqIdx(k, query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, true);
+    const seq_idx = if (HEAD_PARALLEL) q_block_global_idx else findSeqIdx(k, query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, true);
 
     const q_start_raw = k.load(query_start_len_ptr.addPtr(seq_idx));
     const q_block_start_idx = q_start_raw.div(@as(i32, @intCast(BLOCK_Q))).add(seq_idx);
-    const q_block_local_idx = q_block_global_idx.sub(q_block_start_idx);
+    const q_block_local_idx = if (HEAD_PARALLEL) k.liftAs(0, .i32) else q_block_global_idx.sub(q_block_start_idx);
 
     const cur_batch_in_all_start_index = q_start_raw;
     // Match Python's left-to-right `query_start_len_ptr + seq_idx + 1`: two `tt.addptr`s.
@@ -838,7 +843,7 @@ fn kernelUnifiedAttention3d(
         q_local_bq.add(offs_m.div(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
 
     const query_offset_0 = cur_batch_in_all_start_index.add(query_pos);
-    const query_offset_1 = kv_head_idx.mul(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
+    const query_offset_1 = if (HEAD_PARALLEL) head_idx.splatTo(&.{BLOCK_M}) else kv_head_idx.mul(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
         .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
 
     // query_offset = qo_0[:, None]*qstride_0 + qo_1[:, None]*qstride_1 + offs_d[None, :]
@@ -938,12 +943,26 @@ fn kernelUnifiedAttention3d(
             selection_mask.bitAnd(seq_offset.ge(0)).bitAnd(seq_offset.lt(seq_len))
         else
             selection_mask;
+        if (config.indices_count > 0) {
+            tile_mask = tile_mask.bitAnd(seq_offset.div(@as(i32, @intCast(BLOCK_SIZE))).to(.i64).lt(block_table_stride));
+        }
         const safe_offset = k.where(tile_mask, seq_offset, k.zeros(&.{TILE_SIZE}, .i32));
         const physical_block_idx = k.loadOpts(
             block_tables_ptr.addPtr(block_table_offset).addPtr(safe_offset.div(@as(i32, @intCast(BLOCK_SIZE)))),
             .{ .mask = tile_mask, .other = k.full(&.{TILE_SIZE}, -1, .i32) },
         ).to(.i64);
         tile_mask = tile_mask.bitAnd(physical_block_idx.ge(0));
+        if (config.indices_count > 0 and config.num_blocks > 0) {
+            tile_mask = tile_mask.bitAnd(physical_block_idx.lt(config.num_blocks));
+        }
+
+        // Sparse selections may contain padding anywhere, including whole
+        // splits. Avoid loading/reducing KV tiles with no valid positions.
+        var nonempty = if (HEAD_PARALLEL) k.openIfElse(k.sum(tile_mask.to(.i32)).gt(0), .{
+            k.tensorTy(&.{BLOCK_M}, .f32),
+            k.tensorTy(&.{BLOCK_M}, .f32),
+            k.tensorTy(&.{ BLOCK_M, HEAD_SIZE_PADDED }, .f32),
+        }) else null;
 
         const v_offset = k.expandDims(physical_block_idx, 1).mul(stride_v_cache_0)
             .add(kv_head_idx.to(.i64).mul(stride_v_cache_2))
@@ -986,7 +1005,10 @@ fn kernelUnifiedAttention3d(
         } else k.broadcastTo(tile_mask.expandDims(0), &.{ BLOCK_M, TILE_SIZE });
 
         const acc_zero = k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32);
-        const qk = k.dot(Q, K, acc_zero);
+        const qk = if (HEAD_PARALLEL)
+            k.sumOpts(K.to(.f32).mul(k.reshape(Q.to(.f32), &.{HEAD_SIZE_PADDED}).expandDims(1)), .{ .axis = 0 }).expandDims(0)
+        else
+            k.dot(Q, K, acc_zero);
         var S = qk_scale.mul(qk);
 
         if (config.use_softcap) {
@@ -1036,13 +1058,22 @@ fn kernelUnifiedAttention3d(
         const new_L = L.mul(alpha).add(l_j);
 
         const P_cast = P.to(config.q_dtype);
-        const new_acc = k.dot(P_cast, V, acc_scaled);
+        const new_acc = if (HEAD_PARALLEL)
+            k.sumOpts(V.to(.f32).mul(k.reshape(P, &.{TILE_SIZE}).expandDims(1)), .{ .axis = 0 }).expandDims(0).add(acc_scaled)
+        else
+            k.dot(P_cast, V, acc_scaled);
 
         const new_M = if (config.indices_count > 0)
             k.where(new_L.gt(0.0), m_j, k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32))
         else
             m_j;
-        loop.yield(.{ new_M, new_L, new_acc });
+        if (nonempty) |*branch| {
+            branch.yieldThen(.{ new_M, new_L, new_acc });
+            branch.yieldElse(.{ M, L, acc });
+            loop.yield(.{ branch.results[0], branch.results[1], branch.results[2] });
+        } else {
+            loop.yield(.{ new_M, new_L, new_acc });
+        }
     }
     const M_final = loop.results[0];
     const L_final = loop.results[1];
@@ -1207,123 +1238,3 @@ fn reduceSegments(
         .{ .mask = dim_mask },
     );
 }
-
-/// Head-parallel SIMT specialization for small-batch sparse BF16 decode.
-/// Each head/split owns a softmax partial; empty splits have zero mass.
-pub const SparseDecode = struct {
-    pub const Config = struct {
-        heads: i32,
-        groups: i32,
-        kv_heads: i32,
-        page_size: i32,
-        page_count: i32,
-        table_width: i32,
-        count: i32,
-        tile: i32,
-        splits: i32,
-        output_tile: i32,
-        scale: f32,
-    };
-
-    pub const Stage = struct {
-        pub const Kernel = tri.Kernel(Config, .{
-            .name = "kernel_paged_attention_sparse_decode",
-            .inputs = &.{ "q", "k", "v", "indices", "table", "lengths", "starts" },
-            .outputs = &.{ "partial", "maxima", "sums" },
-            .run = run,
-        });
-
-        fn run(b: *tri.Builder, cfg: Config) tri.FinishError!void {
-            const a = try b.declareArgs(.{
-                .q = .{ .ptr = .bf16 },
-                .k = .{ .ptr = .bf16 },
-                .v = .{ .ptr = .bf16 },
-                .indices = .{ .ptr = .i32 },
-                .table = .{ .ptr = .i32 },
-                .lengths = .{ .ptr = .i32 },
-                .starts = .{ .ptr = .i32 },
-                .partial = .{ .ptr = .f32 },
-                .maxima = .{ .ptr = .f32 },
-                .sums = .{ .ptr = .f32 },
-            });
-            const head = b.programId(.x);
-            const split = b.programId(.y);
-            const sequence = b.programId(.z);
-            const row = b.load(a.starts.addPtr(sequence));
-            const end = b.load(a.starts.addPtr(sequence.add(1)));
-            b.returnIf(row.eq(end), .{});
-            const length = b.load(a.lengths.addPtr(sequence));
-            const d = b.arange(0, 256, .i32);
-            const slots = split.mul(cfg.tile).add(b.arange(0, cfg.tile, .i32));
-            const pos = b.loadOpts(a.indices.addPtr(row.to(.i64).mul(cfg.count).add(slots.to(.i64))), .{
-                .mask = slots.lt(cfg.count),
-                .other = b.full(&.{cfg.tile}, -1, .i32),
-            });
-            const logical_page = pos.maximum(0).div(cfg.page_size);
-            var valid = slots.lt(cfg.count).bitAnd(pos.ge(0)).bitAnd(pos.lt(length)).bitAnd(logical_page.lt(cfg.table_width));
-            const page = b.loadOpts(a.table.addPtr(sequence.to(.i64).mul(cfg.table_width).add(logical_page.to(.i64))), .{
-                .mask = valid,
-                .other = b.full(&.{cfg.tile}, -1, .i32),
-            });
-            valid = valid.bitAnd(page.ge(0)).bitAnd(page.lt(cfg.page_count));
-            var nonempty = b.openIfElse(b.sum(valid.to(.i32)).gt(0), .{ b.tensorTy(&.{256}, .f32), b.scalarTy(.f32), b.scalarTy(.f32) });
-            {
-                const q = b.load(a.q.addPtr(row.to(.i64).mul(cfg.heads).add(head.to(.i64)).mul(256).add(d.to(.i64)))).to(.f32);
-                const offset = page.to(.i64).mul(cfg.page_size).add(pos.rem(cfg.page_size).to(.i64)).mul(cfg.kv_heads)
-                    .add(head.div(cfg.groups).to(.i64)).mul(256).expandDims(1).add(d.to(.i64).expandDims(0));
-                const keys = b.loadOpts(a.k.addPtr(offset), .{
-                    .mask = b.broadcastTo(valid.expandDims(1), &.{ cfg.tile, 256 }),
-                    .other = b.zeros(&.{ cfg.tile, 256 }, .bf16),
-                }).to(.f32);
-                const scores = b.where(valid, b.sumOpts(keys.mul(q.expandDims(0)), .{ .axis = 1 }).mul(cfg.scale), b.full(&.{cfg.tile}, -std.math.inf(f32), .f32));
-                const maximum = b.max(scores);
-                const p = b.exp(scores.sub(maximum));
-                const sum = b.sum(p);
-                const values = b.loadOpts(a.v.addPtr(offset), .{
-                    .mask = b.broadcastTo(valid.expandDims(1), &.{ cfg.tile, 256 }),
-                    .other = b.zeros(&.{ cfg.tile, 256 }, .bf16),
-                }).to(.f32);
-                const output = b.sumOpts(values.mul(p.expandDims(1)), .{ .axis = 0 });
-                nonempty.yieldThen(.{ output, maximum, sum });
-            }
-            {
-                nonempty.yieldElse(.{ b.zeros(&.{256}, .f32), b.liftAs(-std.math.inf(f32), .f32), b.liftAs(0.0, .f32) });
-            }
-            const part = row.to(.i64).mul(cfg.heads).add(head.to(.i64)).mul(cfg.splits).add(split.to(.i64));
-            b.store(a.partial.addPtr(part.mul(256).add(d.to(.i64))), nonempty.results[0]);
-            b.store(a.maxima.addPtr(part), nonempty.results[1]);
-            b.store(a.sums.addPtr(part), nonempty.results[2]);
-        }
-    };
-
-    pub const Reduce = struct {
-        pub const Kernel = tri.Kernel(Config, .{
-            .name = "kernel_paged_attention_sparse_decode_reduce",
-            .inputs = &.{ "partial", "maxima", "sums" },
-            .outputs = &.{"output"},
-            .run = run,
-        });
-
-        fn run(b: *tri.Builder, cfg: Config) tri.FinishError!void {
-            const a = try b.declareArgs(.{
-                .partial = .{ .ptr = .f32 },
-                .maxima = .{ .ptr = .f32 },
-                .sums = .{ .ptr = .f32 },
-                .output = .{ .ptr = .bf16 },
-            });
-            const row_head = b.programId(.x).to(.i64);
-            const s = b.arange(0, cfg.splits, .i32);
-            const d = b.programId(.y).mul(cfg.output_tile).add(b.arange(0, cfg.output_tile, .i32));
-            const part = row_head.mul(cfg.splits).add(s.to(.i64));
-            const maxima = b.load(a.maxima.addPtr(part));
-            const sums = b.load(a.sums.addPtr(part));
-            const maximum = b.max(maxima);
-            const safe_maximum = b.where(maximum.gt(-std.math.inf(f32)), maximum, b.liftAs(0.0, .f32));
-            const alpha = b.exp(maxima.sub(safe_maximum));
-            const denominator = b.sum(alpha.mul(sums));
-            const partial = b.load(a.partial.addPtr(part.mul(256).expandDims(1).add(d.to(.i64).expandDims(0))));
-            const output = b.sumOpts(partial.mul(alpha.expandDims(1)), .{ .axis = 0 }).div(b.where(denominator.gt(0.0), denominator, b.liftAs(1.0, .f32)));
-            b.store(a.output.addPtr(row_head.mul(256).add(d.to(.i64))), output.to(.bf16));
-        }
-    };
-};
