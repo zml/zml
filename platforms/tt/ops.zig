@@ -88,3 +88,38 @@ pub fn scaledDotProductAttention(
     ).appendTo(block);
     return op.result(0);
 }
+
+/// `tt.tt_lang_op` carrying a pre-built kernel artifact (see tt-mlir's
+/// `--ttnn-lower-tt-lang-to-generic`): runs custom kernels on Tenstorrent.
+/// `inputs` are the "in" operands; one result per `out_types` entry. tt-mlir
+/// allocates the outputs and passes `inputs ++ outputs` to the kernels as
+/// io-tensors, in that order.
+pub fn kernel(
+    ctx: *mlir.Context,
+    block: *mlir.Block,
+    inputs: []const *const mlir.Value,
+    out_types: []const *const mlir.Type,
+    kernel_id: []const u8,
+    arg_roles: []const u8,
+    artifact: []const u8,
+) *mlir.Operation {
+    const frontend_attrs = mlir.Attribute.dict(ctx, &.{
+        .named(ctx, "kernel_id", .string(ctx, kernel_id)),
+        .named(ctx, "version_tag", .string(ctx, "zml")),
+        .named(ctx, "arg_roles", .string(ctx, arg_roles)),
+        .named(ctx, "kernel_artifact", .string(ctx, artifact)),
+    });
+    return dialects.stablehlo.custom_call(
+        ctx,
+        inputs,
+        out_types,
+        .{
+            .call_target_name = "tt.tt_lang_op",
+            .has_side_effect = false,
+            .additional_attributes = &.{
+                .named(ctx, "mhlo.frontend_attributes", frontend_attrs),
+            },
+        },
+        .unknown(ctx),
+    ).appendTo(block);
+}

@@ -1133,6 +1133,52 @@ test "fly custom call, both entry ABIs" {
     }
 }
 
+pub const TtKernelOpts = struct {
+    /// Stable kernel identifier, used in diagnostics.
+    kernel_id: []const u8,
+    /// tt-mlir `tt.tt_lang_op` artifact (`format_version` 3 for ZML kernels).
+    artifact: []const u8,
+    /// Indices of the inputs the kernel updates in place, in increasing
+    /// order; their new values are returned first.
+    inouts: []const usize = &.{},
+};
+
+/// Runs a custom Tenstorrent kernel. The kernel sees the inputs that are not
+/// in `opts.inouts`, then the in-place inputs, then the outputs as its
+/// io-tensors, in that order; tt-mlir allocates the outputs. Returns the
+/// updated in-place inputs, then the outputs.
+pub fn ttKernel(inputs: []const Tensor, output_shapes: []const Shape, opts: TtKernelOpts) []Tensor {
+    const ctx = Compiler.current();
+    switch (ctx.platform.target) {
+        .tt => {},
+        .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi, .metal, .furiosa => {
+            stdx.debug.panic("ttKernel is only available on Tenstorrent, got {s}", .{@tagName(ctx.platform.target)});
+        },
+    }
+    const tt_ops = @import("platforms/tt/ops");
+
+    const allocator = ctx.arena.allocator();
+    const values = allocator.alloc(*const mlir.Value, inputs.len) catch @panic("OOM");
+    for (values, inputs) |*v, t| v.* = t.value();
+    const result_shapes = allocator.alloc(Shape, opts.inouts.len + output_shapes.len) catch @panic("OOM");
+    for (result_shapes[0..opts.inouts.len], opts.inouts) |*s, i| s.* = inputs[i].shape();
+    @memcpy(result_shapes[opts.inouts.len..], output_shapes);
+    const types = allocator.alloc(*const mlir.Type, result_shapes.len) catch @panic("OOM");
+    for (types, result_shapes) |*t, s| t.* = mlirx.Type.rankedTensor(ctx.mlir_ctx, s);
+
+    var roles: std.ArrayList(u8) = .empty;
+    for (0..inputs.len + output_shapes.len) |i| {
+        if (i > 0) roles.append(allocator, ',') catch @panic("OOM");
+        const role = if (i >= inputs.len) "out" else if (std.mem.indexOfScalar(usize, opts.inouts, i) != null) "inout" else "in";
+        roles.appendSlice(allocator, role) catch @panic("OOM");
+    }
+
+    const op = tt_ops.kernel(ctx.mlir_ctx, ctx.currentScope().block, values, types, opts.kernel_id, roles.items, opts.artifact);
+    const results = ctx.alloc(Tensor, result_shapes.len);
+    for (results, result_shapes, 0..) |*r, s, i| r.* = Tensor._result(s, op.result(i));
+    return results;
+}
+
 pub const NeuronNkiOps = struct {
     name: []const u8,
     entrypoint: []const u8,
