@@ -1,0 +1,40 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+cc_library(
+    name = "ttkernel_capi",
+    srcs = ["ttkernel_capi.cc"],
+    hdrs = ["ttkernel_capi.h"],
+    strip_include_prefix = ".",
+    tags = ["manual"],
+    visibility = ["//mlir/dialects:__subpackages__"],
+    deps = [
+        "@llvm-project//mlir:CAPIIR",
+        "@tt_lang//:TTLangCAPI",
+    ],
+    alwayslink = True,
+)
+
+zig_library(
+    name = "ttkernel",
+    srcs = [
+        "ops.zig",
+        "ttcore.zig",
+        "ttcore_ops.zig",
+    ],
+    import_name = "mlir/dialects/ttkernel",
+    main = "ttkernel.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ttkernel_capi",
+        "//mlir",
+        "//mlir:c",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":ttkernel"],
+)

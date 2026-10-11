@@ -1,0 +1,30 @@
+diff --git a/include/ttlang/Dialect/TTKernel/IR/TTKernelBase.td b/include/ttlang/Dialect/TTKernel/IR/TTKernelBase.td
+index 6cde374..d05de33 100644
+--- a/include/ttlang/Dialect/TTKernel/IR/TTKernelBase.td
++++ b/include/ttlang/Dialect/TTKernel/IR/TTKernelBase.td
+@@ -22,6 +22,10 @@ def TTKernel_Dialect : Dialect {
+ 
+     let useDefaultTypePrinterParser = 1;
+     let useDefaultAttributePrinterParser = 1;
++    // Newer MLIR rejects inherent attributes left to attr-dict in declarative
++    // assembly formats. Keep tt-lang's textual IR format until upstream
++    // migrates its ops to prop-dict.
++    let useStrictPropertiesInAssemblyFormat = 0;
+     let extraClassDeclaration = [{
+         void registerTypes();
+     }];
+diff --git a/include/ttlang/Dialect/TTL/IR/TTLBase.td b/include/ttlang/Dialect/TTL/IR/TTLBase.td
+index c819e89..fdfc4b1 100644
+--- a/include/ttlang/Dialect/TTL/IR/TTLBase.td
++++ b/include/ttlang/Dialect/TTL/IR/TTLBase.td
+@@ -24,6 +24,10 @@ def TTL_Dialect : Dialect {
+ 
+   let useDefaultTypePrinterParser = 1;
+   let useDefaultAttributePrinterParser = 1;
++  // Newer MLIR rejects inherent attributes left to attr-dict in declarative
++  // assembly formats. Keep tt-lang's textual IR format until upstream
++  // migrates its ops to prop-dict.
++  let useStrictPropertiesInAssemblyFormat = 0;
+ 
+   let extraClassDeclaration = [{
+     void registerTypes();

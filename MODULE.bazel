@@ -327,6 +327,7 @@ use_repo(
     "org_swig_swig",
     "stb",
     "translate-c",
+    "tt_lang",
     "uucode",
     "xla",
     "zigimg",

@@ -1,0 +1,23 @@
+diff --git a/lib/Target/TTKernel/TTKernelToCpp.cpp b/lib/Target/TTKernel/TTKernelToCpp.cpp
+index b0ee8d12d..46349f418 100644
+--- a/lib/Target/TTKernel/TTKernelToCpp.cpp
++++ b/lib/Target/TTKernel/TTKernelToCpp.cpp
+@@ -250,12 +250,17 @@ public:
+       }
+     });
+ 
+-    // Insert default template parameters before "reduce.h" inclusion.
++    // Insert default template parameters before "reduce.h" inclusion,
++    // unless the kernel's defines set them.
+     if (headers.count("api/compute/reduce.h")) {
++      builder->create<emitc::VerbatimOp>(loc, "#ifndef REDUCE_OP");
+       builder->create<emitc::VerbatimOp>(loc,
+                                          "#define REDUCE_OP PoolType::SUM");
++      builder->create<emitc::VerbatimOp>(loc, "#endif");
++      builder->create<emitc::VerbatimOp>(loc, "#ifndef REDUCE_DIM");
+       builder->create<emitc::VerbatimOp>(
+           loc, "#define REDUCE_DIM ReduceDim::REDUCE_COL");
++      builder->create<emitc::VerbatimOp>(loc, "#endif");
+     }
+ 
+     // The descriptor definition must precede user headers because those

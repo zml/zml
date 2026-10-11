@@ -1,0 +1,22 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "ttl_builder",
+    import_name = "kernels/ttl/builder",
+    main = "builder.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//kernels/common",
+        "//kernels/ttkernel:program",
+        "//mlir",
+        "//mlir/dialects",
+        "//mlir/dialects/ttkernel",
+        "//mlir/dialects/ttl",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":ttl_builder"],
+)

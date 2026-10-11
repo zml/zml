@@ -1,0 +1,78 @@
+diff --git a/lib/Conversion/TTKernelToEmitC/TTKernelToEmitC.cpp b/lib/Conversion/TTKernelToEmitC/TTKernelToEmitC.cpp
+--- a/lib/Conversion/TTKernelToEmitC/TTKernelToEmitC.cpp
++++ b/lib/Conversion/TTKernelToEmitC/TTKernelToEmitC.cpp
+@@ -2377,6 +2377,12 @@
+               op.getContext(), boolValue.getValue() ? "true" : "false"));
+           continue;
+         }
++        // A string is a C++ expression written as is, e.g. an enumerator.
++        if (auto text = dyn_cast<StringAttr>(templateArg)) {
++          opaqueArgs.push_back(
++              emitc::OpaqueAttr::get(op.getContext(), text.getValue()));
++          continue;
++        }
+         auto integerValue = dyn_cast<IntegerAttr>(templateArg);
+         if (!integerValue) {
+           return rewriter.notifyMatchFailure(
+@@ -2418,14 +2424,48 @@
+       }
+     }
+ 
++    // `ttlang.thread` ("math", "pack" or "unpack"): a call only one compute
++    // thread makes, as tt-metal's MATH((...)) / PACK((...)) / UNPACK((...)),
++    // for the functions declared on that thread only.
++    auto thread = op->getAttrOfType<StringAttr>("ttlang.thread");
++    if (thread && !resultTypes.empty()) {
++      return rewriter.notifyMatchFailure(
++          op, "a thread-only opaque_call cannot return a value");
++    }
++    if (thread) {
++      rewriter.create<emitc::VerbatimOp>(
++          op.getLoc(), "#ifdef TRISC_" + thread.getValue().upper());
++    }
++    // `ttlang.args`: the call's arguments in order, operand indices or C++
++    // expressions written as is (e.g. enumerators), for parameters no value
++    // can stand for.
++    ArrayAttr emitcArgs;
++    if (auto args = op->getAttrOfType<ArrayAttr>("ttlang.args")) {
++      SmallVector<Attribute> list;
++      for (Attribute arg : args) {
++        if (auto text = dyn_cast<StringAttr>(arg)) {
++          list.push_back(emitc::OpaqueAttr::get(op.getContext(), text.getValue()));
++        } else if (auto index = dyn_cast<IntegerAttr>(arg)) {
++          list.push_back(rewriter.getIndexAttr(index.getInt()));
++        } else {
++          return rewriter.notifyMatchFailure(
++              op, "ttlang.args entries are operand indices or strings");
++        }
++      }
++      emitcArgs = ArrayAttr::get(op.getContext(), list);
++    }
+     auto callOp = rewriter.replaceOpWithNewOp<emitc::CallOpaqueOp>(
+-        op, resultTypes, op.getCallee(), nullptr, emitcTemplateArgs,
++        op, resultTypes, op.getCallee(), emitcArgs, emitcTemplateArgs,
+         callArguments);
+     callOp->setAttr("ttlang.opaque_header",
+                     rewriter.getStringAttr(op.getHeader()));
+     if (hasDescriptor) {
+       callOp->setAttr("ttlang.requires_dfb_descriptor", rewriter.getUnitAttr());
+     }
++    if (thread) {
++      rewriter.setInsertionPointAfter(callOp);
++      rewriter.create<emitc::VerbatimOp>(op.getLoc(), "#endif");
++    }
+     return success();
+   }
+ };
+diff --git a/lib/Dialect/TTKernel/IR/TTKernelOps.cpp b/lib/Dialect/TTKernel/IR/TTKernelOps.cpp
+--- a/lib/Dialect/TTKernel/IR/TTKernelOps.cpp
++++ b/lib/Dialect/TTKernel/IR/TTKernelOps.cpp
+@@ -1090,7 +1090,7 @@
+     return success();
+   }
+   for (Attribute templateArg : *templateArgs) {
+-    if (isa<BoolAttr, DFBDescriptorAttr>(templateArg)) {
++    if (isa<BoolAttr, DFBDescriptorAttr, StringAttr>(templateArg)) {
+       continue;
+     }
+     auto integerArg = dyn_cast<IntegerAttr>(templateArg);

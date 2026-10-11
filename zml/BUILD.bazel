@@ -165,6 +165,8 @@ zig_library(
         "//kernels/fly:fly_builder",
         "//kernels/mosaic_tpu:mosaic_tpu_builder",
         "//kernels/triton:triton_builder",
+        "//kernels/ttkernel:ttkernel_builder",
+        "//kernels/ttl:ttl_builder",
         "//mlir",
         "//mlir/dialects",
         "//mlir/dialects/cuda_tile",

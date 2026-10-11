@@ -13,6 +13,7 @@ load("//third_party/mnist:repo.bzl", mnist = "repo")
 load("//third_party/org_swig_swig:repo.bzl", org_swig_swig = "repo")
 load("//third_party/stb:repo.bzl", stb = "repo")
 load("//third_party/translate-c:repo.bzl", translate_c = "repo")
+load("//third_party/tt_lang:repo.bzl", tt_lang = "repo")
 load("//third_party/uucode:repo.bzl", uucode = "repo")
 load("//third_party/xla:repo.bzl", xla = "repo")
 load("//third_party/zigimg:repo.bzl", zigimg = "repo")
@@ -37,6 +38,7 @@ def _non_module_deps_impl(mctx):
     cuda_tile()
     flydsl()
     cute_ir()
+    tt_lang()
     zio()
 
     return mctx.extension_metadata(

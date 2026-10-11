@@ -9,6 +9,8 @@ const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
 const stdx = @import("stdx");
 const tpu_dialect = @import("mlir/dialects/mosaic_tpu");
 const triton_builder = @import("kernels/triton/builder");
+const ttkernel_builder = @import("kernels/ttkernel/builder");
+const ttl_builder = @import("kernels/ttl/builder");
 
 const Compiler = @import("Compiler.zig");
 const DataType = @import("dtype.zig").DataType;
@@ -890,6 +892,191 @@ pub const fly = struct {
                     .output_operand_aliases = aliases.constSlice(),
                 });
 
+                var results: Results = undefined;
+                inline for (spec.outputs, 0..) |fname, i| @field(results, fname) = tensor_results[i];
+                return results;
+            }
+        };
+    }
+};
+
+/// Tenstorrent kernels in the TTKernel DSL (`kernels/ttkernel/builder.zig`):
+/// `run` describes the host program (circular buffers and reader, compute
+/// and writer kernels) like a pykernel `PyKernelOp.invoke`.
+pub const ttkernel = struct {
+    pub const Builder = ttkernel_builder.Builder;
+    pub const Program = ttkernel_builder.Program;
+    pub const Value = ttkernel_builder.Value;
+    pub const CircularBuffer = ttkernel_builder.CircularBuffer;
+    /// The DSL itself: threads, host argument kinds, `Tensor` handles.
+    pub const dsl = ttkernel_builder;
+
+    pub fn from(dt: DataType) ttkernel_builder.program.DataType {
+        return switch (dt) {
+            .f32 => .f32,
+            .f16 => .f16,
+            .bf16 => .bf16,
+            .u32 => .u32,
+            .u16 => .u16,
+            .u8 => .u8,
+            .i32 => .si32,
+            else => std.debug.panic("zml.kernel.ttkernel.from: dtype {s} has no Tenstorrent equivalent", .{@tagName(dt)}),
+        };
+    }
+
+    fn Spec(comptime Config: type) type {
+        return struct {
+            name: [:0]const u8,
+            inputs: []const [:0]const u8,
+            outputs: []const [:0]const u8,
+            run: *const fn (*Program, Config) anyerror!void,
+        };
+    }
+
+    pub fn Kernel(
+        comptime ConfigT: type,
+        comptime spec: Spec(ConfigT),
+    ) type {
+        return struct {
+            pub const name: [:0]const u8 = spec.name;
+            pub const Config = ConfigT;
+            pub const Inputs = StructOf(spec.inputs, Tensor);
+            pub const Outputs = StructOf(spec.outputs, Shape);
+            pub const Results = StructOf(spec.outputs, Tensor);
+            pub const arg_names = spec.inputs ++ spec.outputs;
+            /// The io-tensors by name.
+            pub const Args = StructOf(arg_names, ttkernel_builder.Tensor);
+
+            pub const CallOpts = struct {
+                cfg: ConfigT,
+            };
+
+            /// The io-tensors `run` sees.
+            pub fn args(p: *const Program) Args {
+                var out: Args = undefined;
+                inline for (arg_names, 0..) |fname, i| @field(out, fname) = p.tensor(i);
+                return out;
+            }
+
+            /// The `tt.tt_lang_op` artifact; `shapes` is inputs, then outputs.
+            pub fn emit(allocator: std.mem.Allocator, cfg: ConfigT, shapes: []const Shape) ![]u8 {
+                std.debug.assert(shapes.len == arg_names.len);
+                const ctx = try ttkernel_builder.newContext();
+                defer ctx.deinit();
+
+                var tensors: [arg_names.len]ttkernel_builder.Tensor = undefined;
+                for (&tensors, shapes, 0..) |*t, shape, i| {
+                    t.* = .{ .index = @intCast(i), .shape = shape.dims(), .dtype = from(shape.dtype()) };
+                }
+                var p: Program = .init(allocator, ctx, &tensors);
+                defer p.deinit();
+                try spec.run(&p, cfg);
+                return p.artifact(allocator);
+            }
+
+            pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
+                const cur = Compiler.current();
+
+                var inputs_arr: [spec.inputs.len]Tensor = undefined;
+                inline for (spec.inputs, 0..) |fname, i| inputs_arr[i] = @field(inputs, fname);
+                var outputs_arr: [spec.outputs.len]Shape = undefined;
+                inline for (spec.outputs, 0..) |fname, i| outputs_arr[i] = @field(outputs, fname);
+
+                var shapes: [arg_names.len]Shape = undefined;
+                inline for (0..spec.inputs.len) |i| shapes[i] = inputs_arr[i].shape();
+                inline for (0..spec.outputs.len) |i| shapes[spec.inputs.len + i] = outputs_arr[i];
+
+                const artifact = emit(cur.arena.allocator(), opts.cfg, &shapes) catch |err|
+                    std.debug.panic("zml.kernel.ttkernel.Kernel({s}).call: emit failed: {}", .{ name, err });
+
+                const tensor_results = ops.ttKernel(&inputs_arr, &outputs_arr, .{ .kernel_id = name, .artifact = artifact });
+                var results: Results = undefined;
+                inline for (spec.outputs, 0..) |fname, i| @field(results, fname) = tensor_results[i];
+                return results;
+            }
+        };
+    }
+};
+
+/// Tenstorrent kernels in the TTL DSL (`kernels/ttl/builder.zig`): `run`
+/// declares the dataflow buffers and the compute and data-movement threads
+/// of a tt-lang `@ttl.operation`.
+pub const ttl = struct {
+    pub const Builder = ttl_builder.Builder;
+    pub const Operation = ttl_builder.Operation;
+    pub const Block = ttl_builder.Block;
+    pub const DataflowBuffer = ttl_builder.DataflowBuffer;
+    pub const TensorArg = ttl_builder.TensorArg;
+    pub const Scalar = ttl_builder.Scalar;
+    /// The DSL itself: `Tensor` and `Dfb` handles, tests.
+    pub const dsl = ttl_builder;
+
+    fn Spec(comptime Config: type) type {
+        return struct {
+            name: [:0]const u8,
+            inputs: []const [:0]const u8,
+            outputs: []const [:0]const u8,
+            run: *const fn (*Operation, Config) anyerror!void,
+        };
+    }
+
+    pub fn Kernel(
+        comptime ConfigT: type,
+        comptime spec: Spec(ConfigT),
+    ) type {
+        return struct {
+            pub const name: [:0]const u8 = spec.name;
+            pub const Config = ConfigT;
+            pub const Inputs = StructOf(spec.inputs, Tensor);
+            pub const Outputs = StructOf(spec.outputs, Shape);
+            pub const Results = StructOf(spec.outputs, Tensor);
+            pub const arg_names = spec.inputs ++ spec.outputs;
+            /// The io-tensors by name.
+            pub const Args = StructOf(arg_names, ttl_builder.Tensor);
+
+            pub const CallOpts = struct {
+                cfg: ConfigT,
+            };
+
+            /// The io-tensors `run` sees.
+            pub fn args(op: *const Operation) Args {
+                var out: Args = undefined;
+                inline for (arg_names, 0..) |fname, i| @field(out, fname) = op.tensor(i);
+                return out;
+            }
+
+            /// The `tt.tt_lang_op` artifact; `shapes` is inputs, then outputs.
+            pub fn emit(allocator: std.mem.Allocator, cfg: ConfigT, shapes: []const Shape) ![]u8 {
+                std.debug.assert(shapes.len == arg_names.len);
+                const ctx = try ttl_builder.newContext();
+                defer ctx.deinit();
+
+                var tensors: [arg_names.len]ttl_builder.Tensor = undefined;
+                for (&tensors, shapes, 0..) |*t, shape, i| {
+                    t.* = .{ .index = @intCast(i), .shape = shape.dims(), .dtype = ttkernel.from(shape.dtype()) };
+                }
+                var op: Operation = .init(allocator, ctx, &tensors);
+                defer op.deinit();
+                try spec.run(&op, cfg);
+                return op.artifact(allocator);
+            }
+
+            pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
+                const cur = Compiler.current();
+
+                var inputs_arr: [spec.inputs.len]Tensor = undefined;
+                inline for (spec.inputs, 0..) |fname, i| inputs_arr[i] = @field(inputs, fname);
+                var outputs_arr: [spec.outputs.len]Shape = undefined;
+                inline for (spec.outputs, 0..) |fname, i| outputs_arr[i] = @field(outputs, fname);
+
+                var shapes: [arg_names.len]Shape = undefined;
+                inline for (0..spec.inputs.len) |i| shapes[i] = inputs_arr[i].shape();
+                inline for (0..spec.outputs.len) |i| shapes[spec.inputs.len + i] = outputs_arr[i];
+
+                const artifact = emit(cur.arena.allocator(), opts.cfg, &shapes) catch |err|
+                    std.debug.panic("zml.kernel.ttl.Kernel({s}).call: emit failed: {}", .{ name, err });
+
+                const tensor_results = ops.ttKernel(&inputs_arr, &outputs_arr, .{ .kernel_id = name, .artifact = artifact });
                 var results: Results = undefined;
                 inline for (spec.outputs, 0..) |fname, i| @field(results, fname) = tensor_results[i];
                 return results;

@@ -1,0 +1,34 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "program",
+    import_name = "kernels/ttkernel/program",
+    main = "program.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+zig_test(
+    name = "program_test",
+    deps = [":program"],
+)
+
+zig_library(
+    name = "ttkernel_builder",
+    import_name = "kernels/ttkernel/builder",
+    main = "builder.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":program",
+        "//kernels/common",
+        "//mlir",
+        "//mlir/dialects",
+        "//mlir/dialects/ttkernel",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":ttkernel_builder"],
+)

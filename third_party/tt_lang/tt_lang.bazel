@@ -1,0 +1,633 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(
+    default_visibility = ["//visibility:public"],
+    features = [
+        "-parse_headers",
+        "-use_header_modules",
+    ],
+    licenses = ["notice"],
+)
+
+exports_files(["LICENSE"])
+
+# Mirrors lib/Target/TTKernel/CMakeLists.txt's LLK_HEADERS: each LLK header is
+# embedded as a raw string into TTKernelToCpp's generated C++.
+_LLK_HEADERS = [
+    "experimental_constant_table",
+    "experimental_coord_translation",
+    "experimental_fabric_1d_routing",
+    "experimental_fabric_2d_routing",
+    "experimental_fabric_api",
+    "experimental_fabric_topology_info",
+    "experimental_invoke_sfpi_llks",
+    "experimental_matmul_llks",
+    "experimental_pack_untilize_llks",
+    "experimental_padding_llks",
+    "experimental_reg_api",
+    "experimental_routing_plane",
+    "experimental_routing_plane_scatter_write",
+    "experimental_routing_plane_write",
+    "experimental_row_normalization",
+    "experimental_semaphore",
+    "experimental_tilize_llks",
+    "experimental_untilize_llks",
+]
+
+# Same output as cmake/modules/GenerateRawStringHeader.cmake (the header
+# comment carries the repository-relative path instead of an absolute one).
+_RAW_STRING_HEADER_CMD = """{
+  printf '// Auto-generated from %s - Do not edit directly\\n' '@SRC@'
+  printf 'static constexpr char %s[] = R"TTLANG_STR_DELIM(\\n' '@VAR@'
+  cat $<
+  printf ')TTLANG_STR_DELIM";\\n'
+  printf 'static constexpr unsigned int %s_len = sizeof(%s) - 1;\\n' '@VAR@' '@VAR@'
+} > $@
+"""
+
+[
+    genrule(
+        name = "llk_{}_generated".format(name),
+        srcs = ["include/ttlang/Target/TTKernel/LLKs/{}.h".format(name)],
+        outs = ["include/ttlang/Target/TTKernel/LLKs/{}_generated.h".format(name)],
+        cmd = _RAW_STRING_HEADER_CMD.replace(
+            "@SRC@",
+            "include/ttlang/Target/TTKernel/LLKs/{}.h".format(name),
+        ).replace("@VAR@", "{}_generated".format(name)),
+    )
+    for name in _LLK_HEADERS
+]
+
+genrule(
+    name = "dfb_descriptor_prelude_generated",
+    srcs = ["include/ttlang/Target/TTKernel/DFBDescriptorPrelude.inc"],
+    outs = ["include/ttlang/Target/TTKernel/DFBDescriptorPrelude_generated.h"],
+    cmd = _RAW_STRING_HEADER_CMD.replace(
+        "@SRC@",
+        "include/ttlang/Target/TTKernel/DFBDescriptorPrelude.inc",
+    ).replace("@VAR@", "dfb_descriptor_prelude_generated"),
+)
+
+# include/ttlang/Config.h.in, configured like CMake does without a device and
+# without a git tag to derive the version from.
+genrule(
+    name = "config_h",
+    srcs = ["include/ttlang/Config.h.in"],
+    outs = ["include/ttlang/Config.h"],
+    cmd = "sed -e 's/@TTLANG_HAS_DEVICE_INT@/0/' -e 's/@TTLANG_VERSION@/0.0.0+unknown/' $< > $@",
+)
+
+cc_library(
+    name = "TTLangConfig",
+    hdrs = [":config_h"],
+    includes = ["include"],
+)
+
+td_library(
+    name = "td_files",
+    srcs = glob(["include/ttlang/**/*.td"]),
+    includes = ["include"],
+    deps = [
+        "@llvm-project//mlir:BuiltinDialectTdFiles",
+        "@llvm-project//mlir:CallInterfacesTdFiles",
+        "@llvm-project//mlir:ControlFlowInterfacesTdFiles",
+        "@llvm-project//mlir:DestinationStyleOpInterfaceTdFiles",
+        "@llvm-project//mlir:FunctionInterfacesTdFiles",
+        "@llvm-project//mlir:IndexingMapOpInterfaceTdFiles",
+        "@llvm-project//mlir:InferIntRangeInterfaceTdFiles",
+        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:PassBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+        "@llvm-project//mlir:TilingInterfaceTdFiles",
+        "@llvm-project//mlir:ViewLikeInterfaceTdFiles",
+    ],
+)
+
+# TTCore: add_mlir_dialect(TTCoreOps ttcore) + attr interfaces, attrdefs, enums.
+gentbl_cc_library(
+    name = "ttcore_ops_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Dialect/TTCore/IR/TTCoreOps.cpp.inc": ["--gen-op-defs"],
+        "include/ttlang/Dialect/TTCore/IR/TTCoreOps.h.inc": ["--gen-op-decls"],
+        "include/ttlang/Dialect/TTCore/IR/TTCoreOpsAttrDefs.cpp.inc": ["--gen-attrdef-defs"],
+        "include/ttlang/Dialect/TTCore/IR/TTCoreOpsAttrDefs.h.inc": ["--gen-attrdef-decls"],
+        "include/ttlang/Dialect/TTCore/IR/TTCoreOpsDialect.cpp.inc": [
+            "--gen-dialect-defs",
+            "--dialect=ttcore",
+        ],
+        "include/ttlang/Dialect/TTCore/IR/TTCoreOpsDialect.h.inc": [
+            "--gen-dialect-decls",
+            "--dialect=ttcore",
+        ],
+        "include/ttlang/Dialect/TTCore/IR/TTCoreOpsTypes.cpp.inc": [
+            "--gen-typedef-defs",
+            "--typedefs-dialect=ttcore",
+        ],
+        "include/ttlang/Dialect/TTCore/IR/TTCoreOpsTypes.h.inc": [
+            "--gen-typedef-decls",
+            "--typedefs-dialect=ttcore",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Dialect/TTCore/IR/TTCoreOps.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ttcore_attr_interfaces_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Dialect/TTCore/IR/TTCoreAttrInterfaces.cpp.inc": ["--gen-attr-interface-defs"],
+        "include/ttlang/Dialect/TTCore/IR/TTCoreAttrInterfaces.h.inc": ["--gen-attr-interface-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Dialect/TTCore/IR/TTCoreAttrInterfaces.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ttcore_enums_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Dialect/TTCore/IR/TTCoreOpsEnums.cpp.inc": ["--gen-enum-defs"],
+        "include/ttlang/Dialect/TTCore/IR/TTCoreOpsEnums.h.inc": ["--gen-enum-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Dialect/TTCore/IR/TTCoreOpsEnums.td",
+    deps = [":td_files"],
+)
+
+# TTKernel: add_mlir_dialect(TTKernelOps ttkernel) + attrdefs, enums.
+gentbl_cc_library(
+    name = "ttkernel_ops_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Dialect/TTKernel/IR/TTKernelOps.cpp.inc": ["--gen-op-defs"],
+        "include/ttlang/Dialect/TTKernel/IR/TTKernelOps.h.inc": ["--gen-op-decls"],
+        "include/ttlang/Dialect/TTKernel/IR/TTKernelOpsDialect.cpp.inc": [
+            "--gen-dialect-defs",
+            "--dialect=ttkernel",
+        ],
+        "include/ttlang/Dialect/TTKernel/IR/TTKernelOpsDialect.h.inc": [
+            "--gen-dialect-decls",
+            "--dialect=ttkernel",
+        ],
+        "include/ttlang/Dialect/TTKernel/IR/TTKernelOpsTypes.cpp.inc": [
+            "--gen-typedef-defs",
+            "--typedefs-dialect=ttkernel",
+        ],
+        "include/ttlang/Dialect/TTKernel/IR/TTKernelOpsTypes.h.inc": [
+            "--gen-typedef-decls",
+            "--typedefs-dialect=ttkernel",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Dialect/TTKernel/IR/TTKernelOps.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ttkernel_attrs_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Dialect/TTKernel/IR/TTKernelOpsAttrDefs.cpp.inc": ["--gen-attrdef-defs"],
+        "include/ttlang/Dialect/TTKernel/IR/TTKernelOpsAttrDefs.h.inc": ["--gen-attrdef-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Dialect/TTKernel/IR/TTKernelOpsTypes.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ttkernel_enums_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Dialect/TTKernel/IR/TTKernelOpsEnums.cpp.inc": ["--gen-enum-defs"],
+        "include/ttlang/Dialect/TTKernel/IR/TTKernelOpsEnums.h.inc": ["--gen-enum-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Dialect/TTKernel/IR/TTKernelOpsEnums.td",
+    deps = [":td_files"],
+)
+
+# TTL: add_mlir_dialect(TTLOps ttl) + op interfaces, enums, attrdefs, passes.
+gentbl_cc_library(
+    name = "ttl_ops_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Dialect/TTL/IR/TTLOps.cpp.inc": ["--gen-op-defs"],
+        "include/ttlang/Dialect/TTL/IR/TTLOps.h.inc": ["--gen-op-decls"],
+        "include/ttlang/Dialect/TTL/IR/TTLOpsDialect.cpp.inc": [
+            "--gen-dialect-defs",
+            "--dialect=ttl",
+        ],
+        "include/ttlang/Dialect/TTL/IR/TTLOpsDialect.h.inc": [
+            "--gen-dialect-decls",
+            "--dialect=ttl",
+        ],
+        "include/ttlang/Dialect/TTL/IR/TTLOpsTypes.cpp.inc": [
+            "--gen-typedef-defs",
+            "--typedefs-dialect=ttl",
+        ],
+        "include/ttlang/Dialect/TTL/IR/TTLOpsTypes.h.inc": [
+            "--gen-typedef-decls",
+            "--typedefs-dialect=ttl",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Dialect/TTL/IR/TTLOps.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ttl_interfaces_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Dialect/TTL/IR/TTLInterfaces.cpp.inc": ["--gen-op-interface-defs"],
+        "include/ttlang/Dialect/TTL/IR/TTLInterfaces.h.inc": ["--gen-op-interface-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Dialect/TTL/IR/TTLInterfaces.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ttl_enums_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Dialect/TTL/IR/TTLOpsEnums.cpp.inc": ["--gen-enum-defs"],
+        "include/ttlang/Dialect/TTL/IR/TTLOpsEnums.h.inc": ["--gen-enum-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Dialect/TTL/IR/TTLOpsEnums.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ttl_attrs_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Dialect/TTL/IR/TTLOpsAttrDefs.cpp.inc": ["--gen-attrdef-defs"],
+        "include/ttlang/Dialect/TTL/IR/TTLOpsAttrDefs.h.inc": ["--gen-attrdef-decls"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Dialect/TTL/IR/TTLOpsAttrs.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ttl_passes_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Dialect/TTL/Passes.h.inc": [
+            "--gen-pass-decls",
+            "--name=TTL",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Dialect/TTL/Passes.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "conversion_passes_inc_gen",
+    tbl_outs = {
+        "include/ttlang/Conversion/Passes.h.inc": [
+            "--gen-pass-decls",
+            "--name=TTLangConversion",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttlang/Conversion/Passes.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "TTLangAnalysis",
+    srcs = glob(["lib/Analysis/*.cpp"]),
+    hdrs = glob(["include/ttlang/Analysis/*.h"]),
+    includes = ["include"],
+    deps = [
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:Analysis",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:ControlFlowInterfaces",
+        "@llvm-project//mlir:DialectUtils",
+        "@llvm-project//mlir:EmitCDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:LoopLikeInterface",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TensorDialect",
+    ],
+)
+
+cc_library(
+    name = "TTCoreDialect",
+    srcs = glob(["lib/Dialect/TTCore/IR/*.cpp"]),
+    hdrs = glob(["include/ttlang/Dialect/TTCore/IR/*.h"]) + [
+        "include/ttlang/AffineMapUtils.h",
+        "include/ttlang/Asserts.h",
+        "include/ttlang/Dialect/Utils/OpaqueCallVerifyUtils.h",
+        "include/ttlang/Dialect/Utils/ValueUseUtils.h",
+        "include/ttlang/Target/TargetInfo.h",
+        "include/ttlang/Utils.h",
+    ],
+    includes = ["include"],
+    # tt-lang does not use flatbuffers (see BuildTTLangDialects.cmake).
+    local_defines = ["TTLANG_NO_FLATBUFFERS"],
+    deps = [
+        ":ttcore_attr_interfaces_inc_gen",
+        ":ttcore_enums_inc_gen",
+        ":ttcore_ops_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:AffineDialect",
+        "@llvm-project//mlir:AffineToStandard",
+        "@llvm-project//mlir:AllPassesAndDialects",
+        "@llvm-project//mlir:BufferizationDialect",
+        "@llvm-project//mlir:BytecodeOpInterface",
+        "@llvm-project//mlir:CAPIIR",
+        "@llvm-project//mlir:ControlFlowInterfaces",
+        "@llvm-project//mlir:DestinationStyleOpInterface",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:MemRefDialect",
+        "@llvm-project//mlir:QuantOps",
+        "@llvm-project//mlir:SideEffectInterfaces",
+        "@llvm-project//mlir:Support",
+    ],
+)
+
+cc_library(
+    name = "TTKernelDialect",
+    srcs = glob(["lib/Dialect/TTKernel/IR/*.cpp"]),
+    hdrs = glob(["include/ttlang/Dialect/TTKernel/IR/*.h"]),
+    includes = ["include"],
+    deps = [
+        ":TTCoreDialect",
+        ":ttkernel_attrs_inc_gen",
+        ":ttkernel_enums_inc_gen",
+        ":ttkernel_ops_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:AffineDialect",
+        "@llvm-project//mlir:AllPassesAndDialects",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:BytecodeOpInterface",
+        "@llvm-project//mlir:ControlFlowDialect",
+        "@llvm-project//mlir:ControlFlowInterfaces",
+        "@llvm-project//mlir:DestinationStyleOpInterface",
+        "@llvm-project//mlir:DialectUtils",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferIntRangeInterface",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:MemRefDialect",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:SideEffectInterfaces",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TensorDialect",
+        "@llvm-project//mlir:TransformUtils",
+    ],
+)
+
+cc_library(
+    name = "TTLDialect",
+    srcs = glob([
+        "lib/Dialect/TTL/IR/*.cpp",
+        "lib/Dialect/TTL/IR/*.h",
+    ]),
+    hdrs = glob(["include/ttlang/Dialect/TTL/IR/*.h"]),
+    includes = ["include"],
+    textual_hdrs = ["include/ttlang/Dialect/TTL/TTLElementwiseOps.def"],
+    deps = [
+        ":TTCoreDialect",
+        ":TTKernelDialect",
+        ":TTLangAnalysis",
+        ":ttl_attrs_inc_gen",
+        ":ttl_enums_inc_gen",
+        ":ttl_interfaces_inc_gen",
+        ":ttl_ops_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:AffineDialect",
+        "@llvm-project//mlir:AffineUtils",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:ArithUtils",
+        "@llvm-project//mlir:BytecodeOpInterface",
+        "@llvm-project//mlir:ControlFlowInterfaces",
+        "@llvm-project//mlir:DestinationStyleOpInterface",
+        "@llvm-project//mlir:DialectUtils",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:IndexingMapOpInterface",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:SideEffectInterfaces",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TensorDialect",
+        "@llvm-project//mlir:TilingInterface",
+        "@llvm-project//mlir:ViewLikeInterface",
+    ],
+)
+
+# The TTL pass declarations (Passes.td) cover the passes of both TTLTransforms
+# and TTKernelTransforms, and TTKernelTransforms also uses a few TTL transform
+# helpers, so the TTL transform headers live in their own library.
+cc_library(
+    name = "TTLTransformsHeaders",
+    hdrs = glob(["include/ttlang/Dialect/TTL/Transforms/*.h"]) + [
+        "include/ttlang/Dialect/TTL/Passes.h",
+        "include/ttlang/Dialect/Utils/ConversionUtils.h",
+    ],
+    includes = ["include"],
+    deps = [
+        ":TTCoreDialect",
+        ":TTKernelDialect",
+        ":TTLDialect",
+        ":TTLangAnalysis",
+        ":ttl_passes_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:AffineDialect",
+        "@llvm-project//mlir:AffineUtils",
+        "@llvm-project//mlir:Analysis",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:DialectUtils",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TensorDialect",
+        "@llvm-project//mlir:TransformUtils",
+    ],
+)
+
+cc_library(
+    name = "TTKernelTransforms",
+    srcs = glob(["lib/Dialect/TTKernel/Transforms/*.cpp"]),
+    hdrs = glob(["include/ttlang/Dialect/TTKernel/Transforms/*.h"]),
+    includes = ["include"],
+    deps = [
+        ":TTCoreDialect",
+        ":TTKernelDialect",
+        ":TTLDialect",
+        ":TTLTransformsHeaders",
+        ":TTLangAnalysis",
+        ":ttl_passes_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:Analysis",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:DialectUtils",
+        "@llvm-project//mlir:EmitCDialect",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:FuncTransforms",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:MemRefDialect",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:SCFTransforms",
+        "@llvm-project//mlir:SCFUtils",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@llvm-project//mlir:Transforms",
+    ],
+)
+
+cc_library(
+    name = "TTLTransforms",
+    srcs = glob([
+        "lib/Dialect/TTL/Transforms/*.cpp",
+        "lib/Dialect/TTL/Transforms/*.h",
+    ]),
+    includes = ["include"],
+    deps = [
+        ":TTCoreDialect",
+        ":TTKernelDialect",
+        ":TTKernelTransforms",
+        ":TTLDialect",
+        ":TTLTransformsHeaders",
+        ":TTLangAnalysis",
+        ":ttl_passes_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:AffineDialect",
+        "@llvm-project//mlir:AffineTransforms",
+        "@llvm-project//mlir:AffineUtils",
+        "@llvm-project//mlir:Analysis",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:ArithUtils",
+        "@llvm-project//mlir:DialectUtils",
+        "@llvm-project//mlir:EmitCDialect",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:LinalgDialect",
+        "@llvm-project//mlir:MathDialect",
+        "@llvm-project//mlir:MemRefDialect",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:SCFTransforms",
+        "@llvm-project//mlir:SCFUtils",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TensorDialect",
+        "@llvm-project//mlir:TilingInterface",
+        "@llvm-project//mlir:TransformUtils",
+        "@llvm-project//mlir:Transforms",
+    ],
+)
+
+cc_library(
+    name = "TTKernelToEmitC",
+    srcs = glob(["lib/Conversion/TTKernelToEmitC/*.cpp"]),
+    hdrs = glob(["include/ttlang/Conversion/**/*.h"]),
+    includes = ["include"],
+    deps = [
+        ":TTCoreDialect",
+        ":TTKernelDialect",
+        ":conversion_passes_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithToEmitC",
+        "@llvm-project//mlir:EmitCDialect",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:MemRefDialect",
+        "@llvm-project//mlir:MemRefToEmitC",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:SCFToEmitC",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TargetCpp",
+        "@llvm-project//mlir:TransformUtils",
+        "@llvm-project//mlir:Transforms",
+    ],
+)
+
+cc_library(
+    name = "TTLPipelines",
+    srcs = ["lib/Dialect/TTL/Pipelines/TTLPipelines.cpp"],
+    hdrs = glob(["include/ttlang/Dialect/TTL/Pipelines/*.h"]),
+    includes = ["include"],
+    deps = [
+        ":TTKernelToEmitC",
+        ":TTLTransforms",
+        ":TTLTransformsHeaders",
+        "@llvm-project//mlir:AffineToStandard",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:EmitCTransforms",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:Transforms",
+    ],
+)
+
+cc_library(
+    name = "TTKernelToCpp",
+    srcs = [
+        "lib/Target/TTKernel/TTKernelToCpp.cpp",
+        "lib/Target/TTKernel/TTKernelToCppRegistration.cpp",
+    ],
+    hdrs = [
+        "include/ttlang/Target/TTKernel/TTKernelIncludesMap.h",
+        "include/ttlang/Target/TTKernel/TTKernelToCpp.h",
+        ":dfb_descriptor_prelude_generated",
+    ] + [":llk_{}_generated".format(name) for name in _LLK_HEADERS],
+    includes = ["include"],
+    deps = [
+        ":TTCoreDialect",
+        ":TTKernelDialect",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:EmitCDialect",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:MemRefDialect",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TargetCpp",
+        "@llvm-project//mlir:TranslateLib",
+    ],
+)
+
+cc_library(
+    name = "TTLangCAPI",
+    srcs = glob(["lib/CAPI/*.cpp"]),
+    hdrs = glob(["include/ttlang-c/*.h"]),
+    includes = ["include"],
+    deps = [
+        ":TTCoreDialect",
+        ":TTKernelDialect",
+        ":TTKernelToCpp",
+        ":TTKernelToEmitC",
+        ":TTLDialect",
+        ":TTLPipelines",
+        ":TTLTransforms",
+        ":TTLTransformsHeaders",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:AffineDialect",
+        "@llvm-project//mlir:AffineToStandard",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:CAPIIR",
+        "@llvm-project//mlir:CAPITransforms",
+        "@llvm-project//mlir:ControlFlowDialect",
+        "@llvm-project//mlir:EmitCDialect",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:IndexDialect",
+        "@llvm-project//mlir:MathDialect",
+        "@llvm-project//mlir:MemRefDialect",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TensorDialect",
+        "@llvm-project//mlir:Transforms",
+        "@llvm-project//mlir:UBDialect",
+    ],
+)
