@@ -525,12 +525,16 @@ pub const paged = struct {
         };
         log.debug("pagedAttention3d attention config: {any}", .{attn_kernel_config});
 
+        // Four channel tiles per 256-wide head expose more reduction blocks
+        // for small batches, with the same segment buffer layout.
+        const output_tile: i64 = if (paged_attention_opts.head_parallel) 64 else head_size_padded;
         const reduce_kernel_config: kernels.ReduceSegmentsPtr.Config = .{
             .o_dtype = triton.from(q.dtype()),
             .num_query_heads = @intCast(paged_attention_opts.num_heads),
             .tile_size = @intCast(config.reduce.tile_size),
             .head_size = @intCast(paged_attention_opts.head_dim),
             .head_size_padded = head_size_padded,
+            .output_tile = output_tile,
             .block_q = @intCast(config.reduce.block_q),
             .num_segments_per_seq = @intCast(config.reduce.num_segments_per_seq),
             .indices_count = @intCast(paged_attention_opts.indices_count),
@@ -620,7 +624,7 @@ pub const paged = struct {
                 .grid = .{
                     @intCast(paged_attention_opts.num_tokens),
                     @intCast(paged_attention_opts.num_heads),
-                    1,
+                    @intCast(@divExact(head_size_padded, output_tile)),
                 },
                 .num_stages = @intCast(config.reduce.num_stages),
                 .num_warps = @intCast(config.reduce.num_warps),

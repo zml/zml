@@ -294,6 +294,8 @@ pub const ReduceSegmentsPtr = struct {
         tile_size: i64,
         head_size: i64,
         head_size_padded: i64,
+        /// Zero reduces the entire padded head in one block.
+        output_tile: i64 = 0,
 
         block_q: i64,
         num_segments_per_seq: i64,
@@ -1133,6 +1135,7 @@ fn reduceSegments(
     const TILE_SIZE: i64 = config.tile_size;
     const HEAD_SIZE: i64 = config.head_size;
     const HEAD_SIZE_PADDED: i64 = config.head_size_padded;
+    const OUTPUT_TILE: i64 = if (config.output_tile > 0) config.output_tile else HEAD_SIZE_PADDED;
     const NUM_QUERY_HEADS: i64 = config.num_query_heads;
     const NUM_SEGMENTS_PER_SEQ: i64 = config.num_segments_per_seq;
     const BLOCK_Q: i64 = config.block_q;
@@ -1154,11 +1157,11 @@ fn reduceSegments(
     const seg_range = k.arange(0, NUM_SEGMENTS_PER_SEQ, .i32);
     const segm_mask = seg_range.lt(act_num_segments);
 
-    const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);
+    const offs_d = k.programId(.z).mul(@as(i32, @intCast(OUTPUT_TILE))).add(k.arange(0, OUTPUT_TILE, .i32));
     const dim_mask: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
         offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
     else
-        k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
+        k.full(&.{OUTPUT_TILE}, 1, .i1);
 
     // segm_offset = query_token_idx*NQH*NSPS + query_head_idx*NSPS + arange(NSPS)
     const tok_stride: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ;
@@ -1199,15 +1202,15 @@ fn reduceSegments(
         const dim_row_i32 = k.expandDims(offs_d, 0); // (1, HSP) i32
         break :b dim_row_i32.to(.i64); // extsi → (1, HSP) i64
     };
-    const seg_offset_2d_full = k.broadcastTo(base.add(seg_off_2d), &.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED });
-    const dim_offset_2d_full = k.broadcastTo(dim_off_2d, &.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED });
+    const seg_offset_2d_full = k.broadcastTo(base.add(seg_off_2d), &.{ NUM_SEGMENTS_PER_SEQ, OUTPUT_TILE });
+    const dim_offset_2d_full = k.broadcastTo(dim_off_2d, &.{ NUM_SEGMENTS_PER_SEQ, OUTPUT_TILE });
     const segm_output_offset = seg_offset_2d_full.add(dim_offset_2d_full);
 
     var segm_output = k.loadOpts(
         segm_output_ptr.addPtr(segm_output_offset),
         .{
-            .mask = k.mask2d(segm_mask, dim_mask, NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED),
-            .other = k.zeros(&.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED }, .f32),
+            .mask = k.mask2d(segm_mask, dim_mask, NUM_SEGMENTS_PER_SEQ, OUTPUT_TILE),
+            .other = k.zeros(&.{ NUM_SEGMENTS_PER_SEQ, OUTPUT_TILE }, .f32),
         },
     );
     const rescale = k.exp2(segm_max.sub(overall_max));
@@ -1216,7 +1219,7 @@ fn reduceSegments(
 
     var acc = k.where(
         overall_expsum.eq(0.0),
-        k.full(&.{HEAD_SIZE_PADDED}, 0.0, .f32),
+        k.full(&.{OUTPUT_TILE}, 0.0, .f32),
         acc_sum.div(overall_expsum),
     );
 
@@ -1224,8 +1227,8 @@ fn reduceSegments(
         acc = acc.mul(out_scale_inv);
         acc = k.clampf(
             acc,
-            k.full(&.{HEAD_SIZE_PADDED}, config.fp8_min, .f32),
-            k.full(&.{HEAD_SIZE_PADDED}, config.fp8_max, .f32),
+            k.full(&.{OUTPUT_TILE}, config.fp8_min, .f32),
+            k.full(&.{OUTPUT_TILE}, config.fp8_max, .f32),
         );
     }
 
