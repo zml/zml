@@ -407,7 +407,9 @@ pub const paged = struct {
             .count = @intCast(count),
             .tile = @intCast(tile),
             .splits = splits,
-            .output_tile = 256,
+            // Expose four reduction blocks per head for small batches without
+            // increasing the intermediate buffers.
+            .output_tile = 64,
             .scale = opts.scale orelse 0.0625,
         };
         const parts = kernels.SparseDecode.Stage.Kernel.call(.{
