@@ -138,7 +138,7 @@ pub fn main(init: std.process.Init) !void {
     // );
 
     const pipeline = block.Pipeline.init(allocator, io, platform);
-    pipeline.runOnce("Coucou la team, créé un personnage burger", .{ .seq_len = 16415 });
+    try pipeline.runOnce("Coucou la team, créé un personnage burger", .{ .seq_len = 16415 });
 }
 
 const Wrapper = struct {

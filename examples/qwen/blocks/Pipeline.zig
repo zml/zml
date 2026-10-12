@@ -22,7 +22,7 @@ const Params = struct {
 };
 
 pub fn runOnce(
-    self: *Pipeline,
+    self: Pipeline,
     prompt: []const u8,
     params: Params,
 ) !void {
