@@ -13,9 +13,10 @@ zig_binary(
     srcs = [
         "blocks.zig",
         "compiler.zig",
+        "store.zig",
         "testing.zig",
         "torch2zml.zig",
-    ] + glob(["blocks/*.zig"]),
+    ] + glob(["blocks/*.zig"]) + glob(["store/*.zig"]),
     main = "torch2zml.zig",
     deps = [
         "@zml//stdx",
