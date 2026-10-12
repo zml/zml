@@ -686,10 +686,10 @@ pub const MemoryWriter = union(enum) {
         memory: Memory.Kind,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .rocm, .oneapi => .{
+            .cuda, .rocm, .oneapi, .furiosa => .{
                 .direct = try .init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, buffer, memory),
             },
-            .tpu, .neuron, .cpu, .metal, .furiosa => if (memory == .host_pinned)
+            .tpu, .neuron, .cpu, .metal => if (memory == .host_pinned)
                 std.debug.panic("Host pinned memory is not supported on {}", .{platform.target})
             else
                 .{ .buffered = try .init(allocator, io, platform, shape, buffer) },
