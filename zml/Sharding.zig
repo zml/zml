@@ -410,33 +410,82 @@ pub const Partitioning = packed struct {
     /// The default value is important.
     /// In Tensor code unspecified axis will be inferred as `.open` while in shape code, it's `.replicated`.
     pub fn parse(tags: []const [*:0]const u8, mesh: *const Mesh, default_value: PartitionSpec, partitioning: anytype) Partitioning {
-        var partition_: Partitioning = .repeat(default_value, tags.len);
+        // capture all the comptime logic in the Logical struct.
+        const logical = comptime Logical.parse(partitioning);
+        return logical.applyUseAll(tags, mesh, default_value);
+    }
 
-        const T = @TypeOf(partitioning);
-        stdx.debug.assertComptime(stdx.meta.isStruct(T), "parsePartitioning expected a struct of enum literals eg {{ .b = .data, .d = .model }}, got: {any}", .{T});
-        inline for (comptime std.meta.fieldNames(T)) |field_name| {
-            const shape_tag = Shape.toTag(field_name);
-            const shape_ax = Shape.axisFromTagMaybe(tags, shape_tag) orelse {
-                std.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ stdx.fmt.stringsZ(tags), field_name });
-            };
+    pub const Logical = struct {
+        src: Shape.TagsArray,
+        tgt: Shape.TagsArray,
 
-            const value = @field(partitioning, field_name);
-            const spec: PartitionSpec = if (@TypeOf(value) == PartitionSpec) value else switch (value) {
-                .replicated => .replicated,
-                .out_of_bound => std.debug.panic("value out_of_bound not allowed", .{}),
-                .open => .open,
-                else => spec: {
-                    const mesh_tag = Shape.toTag(value);
+        const replicated: Shape.Tag = Shape.toTag(.replicated);
+        const open: Shape.Tag = Shape.toTag(.open);
+
+        pub fn parse(v: anytype) Logical {
+            const V = @TypeOf(v);
+
+            var src_: Shape.TagsArray = .empty;
+            var tgt_: Shape.TagsArray = .empty;
+
+            if (comptime stdx.meta.isStruct(V)) {
+                const field_names = std.meta.fieldNames(V);
+                stdx.debug.assertComptime(field_names.len <= @TypeOf(src_).max_len, "Too many tags in struct {} ({d})", .{ V, field_names.len });
+                inline for (field_names) |field_name| {
+                    const fv = @field(v, field_name);
+                    tgt_.appendAssumeCapacity(@tagName(fv));
+
+                    if (!comptime stdx.meta.isTuple(V)) {
+                        src_.appendAssumeCapacity(field_name);
+                    }
+                }
+                return .{ .src = src_, .tgt = tgt_ };
+            }
+
+            stdx.debug.compileError("Sharding.Partitioning.parse expects a struct of enum literals, eg {{ .b = .data, .d = .model }}, got: {any}", .{V});
+        }
+
+        test "Logical.parse" {
+            const logical = comptime Logical.parse(.{ .a = .x, .b = .y });
+
+            try std.testing.expectEqualSlices(Shape.Tag, &.{ "a".ptr, "b".ptr }, logical.src.constSlice());
+            try std.testing.expectEqualSlices(Shape.Tag, &.{ "x".ptr, "y".ptr }, logical.tgt.constSlice());
+        }
+
+        pub fn apply(logical: *const Logical, tags: []const [*:0]const u8, mesh: *const Mesh, default_value: PartitionSpec) struct { Partitioning, ?u8 } {
+            var partition_: Partitioning = .repeat(default_value, tags.len);
+            var missing_src_axis: ?u8 = null;
+
+            for (0.., logical.src.slice(), logical.tgt.slice()) |i, shape_tag, mesh_tag| {
+                const shape_ax = Shape.axisFromTagMaybe(tags, shape_tag) orelse {
+                    missing_src_axis = @intCast(i);
+                    continue;
+                };
+
+                const spec: PartitionSpec = if (mesh_tag == Logical.replicated)
+                    .replicated
+                else if (mesh_tag == Logical.open)
+                    .open
+                else spec: {
                     const mesh_ax = mesh.resolveLogicalAxis(mesh_tag) orelse {
                         stdx.debug.panic("{f} has no logical axis '{s}'", .{ mesh, mesh_tag });
                     };
                     break :spec .sharded(@intCast(mesh_ax));
-                },
-            };
-            partition_ = partition_.set(shape_ax, spec);
+                };
+                partition_ = partition_.set(shape_ax, spec);
+            }
+            return .{ partition_, missing_src_axis };
         }
-        return partition_;
-    }
+
+        pub fn applyUseAll(logical: *const Logical, tags: []const [*:0]const u8, mesh: *const Mesh, default_value: PartitionSpec) Partitioning {
+            const p, const missing_shape_axis = logical.apply(tags, mesh, default_value);
+
+            if (missing_shape_axis) |ax| {
+                std.debug.panic("{f} doesn't have an axis {s} to be partitioned on.", .{ stdx.fmt.stringsZ(tags), logical.src.get(ax) });
+            }
+            return p;
+        }
+    };
 };
 
 /// Device as part of a PhysicalMesh.
@@ -1471,8 +1520,14 @@ pub const Mesh = struct {
     }
 
     pub fn resolveLogicalAxis(self: *const Mesh, tag: Shape.Tag) ?u8 {
-        for (0.., self.logical.axes.slice()) |i, logical_axis| {
-            if (std.mem.eql(u8, std.mem.span(logical_axis), std.mem.span(tag))) return @truncate(i);
+        if (@inComptime()) {
+            for (0.., self.logical.axes.slice()) |i, logical_axis| {
+                if (std.mem.eql(u8, std.mem.span(logical_axis), std.mem.span(tag))) return @truncate(i);
+            }
+        } else {
+            for (0.., self.logical.axes.slice()) |i, logical_axis| {
+                if (logical_axis == tag) return @truncate(i);
+            }
         }
         return null;
     }
