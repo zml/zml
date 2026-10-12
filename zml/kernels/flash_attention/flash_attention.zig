@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const stdx = @import("stdx");
+
 pub const cute = @import("cute/cute.zig");
 pub const metal = @import("metal/metal.zig");
 pub const nki = @import("nki/nki.zig");
@@ -9,8 +11,16 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+pub fn isAvailable(platform: *const zml.Platform) bool {
+    return switch (platform.target) {
+        .neuron => true,
+        .metal => true,
+        .cuda => if (cute.isAvailable(platform)) true else false,
+        .cpu, .rocm, .tpu, .oneapi, .furiosa => false,
+    };
+}
+
 pub const Backend = enum {
-    vanilla,
     cute,
     nki,
     metal,
@@ -19,14 +29,13 @@ pub const Backend = enum {
         return switch (platform.target) {
             .neuron => .nki,
             .metal => .metal,
-            .cuda => if (cute.isAvailable(platform)) .cute else .vanilla,
-            .cpu, .rocm, .tpu, .oneapi, .furiosa => .vanilla,
+            .cuda => .cute,
+            .cpu, .rocm, .tpu, .oneapi, .furiosa => stdx.debug.panic("Flash attention is not available on the {} platform", .{platform.target}),
         };
     }
 
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
-            .vanilla => true,
             .cute => cute.isAvailable(platform),
             .nki => platform.target == .neuron,
             .metal => platform.target == .metal,
@@ -35,20 +44,17 @@ pub const Backend = enum {
 };
 
 pub const Parameters = union(Backend) {
-    vanilla: void,
     cute: void,
     nki: nki.Parameters,
     metal: void,
 
     pub const InitOptions = union(Backend) {
-        vanilla: void,
         cute: void,
         nki: nki.Parameters,
         metal: void,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
-                .vanilla => .{ .vanilla = {} },
                 .cute => .{ .cute = {} },
                 .nki => .{ .nki = .init() },
                 .metal => .{ .metal = {} },
@@ -58,7 +64,6 @@ pub const Parameters = union(Backend) {
 
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
-            .vanilla => .{ .vanilla = {} },
             .cute => .{ .cute = {} },
             .nki => |v| .{ .nki = v },
             .metal => .{ .metal = {} },
@@ -67,20 +72,17 @@ pub const Parameters = union(Backend) {
 };
 
 pub const Metadata = union(Backend) {
-    vanilla: void,
     cute: void,
     nki: void,
     metal: metal.Metadata,
 
     pub const InitOptions = union(Backend) {
-        vanilla: void,
         cute: void,
         nki: void,
         metal: void,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
-                .vanilla => .{ .vanilla = {} },
                 .cute => .{ .cute = {} },
                 .nki => .{ .nki = {} },
                 .metal => .{ .metal = {} },
@@ -90,7 +92,6 @@ pub const Metadata = union(Backend) {
 
     pub fn init(opts: InitOptions) Metadata {
         return switch (opts) {
-            .vanilla => .{ .vanilla = {} },
             .cute => .{ .cute = {} },
             .nki => .{ .nki = {} },
             .metal => .{ .metal = .init() },
@@ -99,7 +100,6 @@ pub const Metadata = union(Backend) {
 
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
         return switch (self) {
-            .vanilla => .{ .vanilla = {} },
             .cute => .{ .cute = {} },
             .nki => .{ .nki = {} },
             inline else => |v, tag| @unionInit(zml.Bufferized(Metadata), @tagName(tag), try v.initBuffer(io, platform)),
@@ -108,7 +108,6 @@ pub const Metadata = union(Backend) {
 
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
         switch (self.*) {
-            .vanilla => {},
             .cute => {},
             .nki => {},
             .metal => |*v| metal.Metadata.deinitBuffer(v),
@@ -129,17 +128,6 @@ pub const Metadata = union(Backend) {
 ///   - .hd is the head dimension
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
     return switch (parameters) {
-        .vanilla => b: {
-            // Generate the attention mask.
-            const seq_len = k.dim(.k);
-            var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, q.dtype(), null);
-
-            // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
-            // then slice into it, but XLA is able to optimize this correctly.
-            attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.appendAxes(.{.coord}), .{});
-            const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
-            break :b attn_output;
-        },
         .cute => cute.attention(q, k, v, token_index),
         .nki => nki.attention(q, k, v, token_index, parameters.nki),
         .metal => metal.attention(q, k, v, token_index, metadata.metal),
@@ -240,23 +228,22 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
     defer token_index.deinit();
 
     const meshes = platform.meshes.values();
-    const vanilla_exe = try platform.compileFn(allocator, io, attention, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, .vanilla, .vanilla }, .{
-        .program_name = "attention_vanilla",
+    const reference_metadata: zml.attention.Metadata = .{ .stablehlo = {} };
+    const reference_parameters: zml.attention.Parameters = .{ .stablehlo = {} };
+    const reference_exe = try platform.compileFn(allocator, io, zml.attention.attention, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, reference_metadata, reference_parameters }, .{
+        .program_name = "attention_stablehlo",
         .meshes = meshes,
     });
-    defer vanilla_exe.deinit();
+    defer reference_exe.deinit();
 
-    var vanilla_d = try vanilla_exe.eval(allocator, io, .{ q, k, v, token_index, .vanilla });
-    defer vanilla_d.deinit();
-    try vanilla_d.await(io);
-    const vanilla_h: zml.Slice = try vanilla_d.toSliceAlloc(allocator, io);
-    defer vanilla_h.free(allocator);
+    var reference_d = try reference_exe.eval(allocator, io, .{ q, k, v, token_index, reference_metadata });
+    defer reference_d.deinit();
+    try reference_d.await(io);
+    const reference_h: zml.Slice = try reference_d.toSliceAlloc(allocator, io);
+    defer reference_h.free(allocator);
 
     for (backends) |backend| {
-        switch (backend) {
-            .vanilla => continue,
-            else => if (!backend.isAvailable(platform)) continue,
-        }
+        if (!backend.isAvailable(platform)) continue;
 
         const metadata: Metadata = .init(.fromBackend(backend));
         const parameters: Parameters = .init(.fromBackend(backend));
@@ -285,8 +272,8 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
             \\ Attention test failed, {0t} output doesn't match reference.
             \\ - reference: {1d}
             \\ - {0t}: {2d}
-        , .{ backend, vanilla_h, output_h });
-        try zml.testing.expectClose(io, vanilla_h, output_h, .{
+        , .{ backend, reference_h, output_h });
+        try zml.testing.expectClose(io, reference_h, output_h, .{
             .absolute_tolerance = 5e-3,
             .relative_tolerance = 1e-2,
             .epsilon_relative = 1e-3,

@@ -18,7 +18,7 @@ const Args = struct {
     prompt: ?[]const u8 = null,
     seqlen: u32 = 2048,
     topk: u32 = 4,
-    backend: ?zml.attention.Backend = null,
+    backend: ?enum { stablehlo, cute, nki, metal } = null,
     profile: bool = false,
 
     pub const help =
@@ -31,7 +31,7 @@ const Args = struct {
         \\   --prompt=<string>   Prompt to use for generation (default: none)
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
-        \\   --backend=<text>    Attention backend to use ([vanilla, cute, nki, metal], default: auto-selection)
+        \\   --backend=<text>    Attention backend to use ([stablehlo, cute, nki, metal], default: auto-selection)
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\
     ;
@@ -86,7 +86,12 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    const backend = args.backend orelse zml.attention.Backend.auto(platform);
+    const backend: zml.attention.Backend = if (args.backend) |selected| switch (selected) {
+        .stablehlo => .{ .stablehlo = {} },
+        .cute => .{ .flash_attention = .cute },
+        .nki => .{ .flash_attention = .nki },
+        .metal => .{ .flash_attention = .metal },
+    } else zml.attention.Backend.auto(platform);
     log.info("Selected backend: {}", .{backend});
 
     //

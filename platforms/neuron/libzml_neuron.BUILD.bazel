@@ -107,7 +107,7 @@ copy_to_directory(
     visibility = [
         "@zml//tools/neuron:__pkg__",
         "@zml//zml:__pkg__",
-        "@zml//zml/kernels/attention/nki:__pkg__",
+        "@zml//zml/kernels/flash_attention/nki:__pkg__",
     ],
 )
 

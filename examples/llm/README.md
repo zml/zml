@@ -38,4 +38,4 @@ bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/
 - `--model=<path>`: Required. Model repository to load. This can be a local path or a huggingface/S3 URI such as `hf://...` or `s3://...`.
 - `--prompt=<string>`: Optional. Runs a single prompt instead of opening the interactive chat loop.
 - `--seqlen=<number>`: Optional. Maximum sequence length. Defaults to `2048`.
-- `--backend=<vanilla|cute|nki|metal>`: Optional. Attention backend. `cute` uses CuTe flash attention on CUDA GPUs with compute capability 8.0 or newer. If omitted, the program auto-selects one for the current platform, including `cute` on supported CUDA GPUs.
+- `--backend=<stablehlo|cute|nki|metal>`: Optional. Attention backend. `cute` uses CuTe flash attention on CUDA GPUs with compute capability 8.0 or newer. If omitted, the program auto-selects one for the current platform, including `cute` on supported CUDA GPUs.

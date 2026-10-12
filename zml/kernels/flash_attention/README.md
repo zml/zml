@@ -1,7 +1,7 @@
 # Flash attention semantics
 
 This directory exposes causal scaled dot-product attention through
-[`zml.attention.attention`](attention.zig). This document describes
+[`zml.flash_attention.attention`](flash_attention.zig). This document describes
 the attention operation, the FlashAttention algorithm, and ZML's current semantic
 contract. Shapes below are logical tensor shapes. Sharding describes ownership
 of those tensors across devices; platform-specific execution layouts are outside
@@ -265,7 +265,7 @@ are not uniformly supported by the current kernels; an existing prefill path
 requires equal query/key lengths and assumes positions begin at zero. Treat
 these as current conformance gaps, not alternative definitions of causality.
 
-The tests in [attention.zig](attention.zig) compare results
+The tests in [flash_attention.zig](flash_attention.zig) compare results
 against `sdpa` with the gathered causal mask. The original shared cases cover
 `D = 64`, MHA and GQA,
 single-token decode at full and partial context lengths, batched decode with

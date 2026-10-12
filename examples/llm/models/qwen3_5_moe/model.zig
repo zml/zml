@@ -640,8 +640,8 @@ pub const SelfAttn = struct {
             k,
             v,
             token_index,
-            zml.attention.Metadata.init(.fromBackend(.vanilla)),
-            zml.attention.Parameters.init(.fromBackend(.vanilla)),
+            zml.attention.Metadata.init(.fromBackend(.stablehlo)),
+            zml.attention.Parameters.init(.fromBackend(.stablehlo)),
         ).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());

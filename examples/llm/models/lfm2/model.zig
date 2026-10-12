@@ -567,7 +567,7 @@ pub const Attention = struct {
 
         stdx.debug.assert(q.dim(.batch) == 1, "LFM attention currently expects batch size 1 for flash attention backend, got {}", .{q.dim(.batch)});
         const attn = switch (attention_parameters) {
-            .vanilla => zml.attention.attention(
+            .stablehlo => zml.attention.attention(
                 q,
                 k,
                 v,

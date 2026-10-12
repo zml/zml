@@ -13,7 +13,7 @@ pub const std_options: std.Options = .{
 const Args = struct {
     model: []const u8,
     activations: []const u8,
-    backend: ?zml.attention.Backend = null,
+    backend: ?enum { stablehlo, cute, nki, metal } = null,
 
     pub const help =
         \\Use lfm2_tests --model=<path> --activations=<path> [options]
@@ -52,7 +52,12 @@ pub fn main(init: std.process.Init) !void {
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
-    const backend = args.backend orelse zml.attention.Backend.auto(platform);
+    const backend: zml.attention.Backend = if (args.backend) |selected| switch (selected) {
+        .stablehlo => .{ .stablehlo = {} },
+        .cute => .{ .flash_attention = .cute },
+        .nki => .{ .flash_attention = .nki },
+        .metal => .{ .flash_attention = .metal },
+    } else zml.attention.Backend.auto(platform);
     const params = lfm2.CompilationParameters.init(
         repo_model.inner,
         repo_model.parsed_config.value,

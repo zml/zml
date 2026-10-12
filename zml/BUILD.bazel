@@ -78,6 +78,7 @@ zig_library(
     srcs = [
         "Compiler.zig",
         "Sharding.zig",
+        "attention/attention.zig",
         "buffer.zig",
         "buffer/HostAccessible.zig",
         "constants.zig",
@@ -86,7 +87,7 @@ zig_library(
         "floats.zig",
         "io.zig",
         "kernel.zig",
-        "kernels/attention/attention.zig",
+        "kernels/flash_attention/flash_attention.zig",
         "kernels/paged_attention/paged_attention.zig",
         "logo.zig",
         "mem.zig",
@@ -123,9 +124,9 @@ zig_library(
         "tensor.zig",
         "testing.zig",
         "zml.zig",
-        "//zml/kernels/attention/cute",
-        "//zml/kernels/attention/metal",
-        "//zml/kernels/attention/nki",
+        "//zml/kernels/flash_attention/cute",
+        "//zml/kernels/flash_attention/metal",
+        "//zml/kernels/flash_attention/nki",
         "//zml/kernels/paged_attention/metal",
         "//zml/kernels/paged_attention/mosaic_tpu",
         "//zml/kernels/paged_attention/stablehlo",
@@ -133,7 +134,7 @@ zig_library(
     ],
     data = select({
         "//platforms:neuron.enabled": [
-            "//zml/kernels/attention/nki:attention_kernel",
+            "//zml/kernels/flash_attention/nki:attention_kernel",
         ],
         "//conditions:default": [],
     }),
