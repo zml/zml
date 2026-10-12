@@ -4,10 +4,9 @@ const mlir = @import("mlir");
 const ragged_paged = @import("platforms/tpu/ragged_paged");
 const stdx = @import("stdx");
 
-const Compiler = @import("../Compiler.zig");
-const zml = @import("../zml.zig");
-const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
-const ragged_attention = @import("mosaic_tpu_kernels/ragged_attention.zig");
+const zml = @import("../../../zml.zig");
+const AttentionOptions = @import("../paged_attention.zig").AttentionOptions;
+const ragged_attention = @import("ragged_attention.zig");
 
 const log = std.log.scoped(.tpu_attention);
 
@@ -89,7 +88,7 @@ pub const mosaic_tpu = struct {
         num_seqs: zml.Tensor,
         cfg: ragged_paged.Cfg,
     ) zml.Tensor {
-        const mlir_ctx = Compiler.current().mlir_ctx;
+        const mlir_ctx = zml.Compiler.current().mlir_ctx;
         const out = ragged_attention.Kernel.call(
             .{
                 .kv_lens = seq_lens,

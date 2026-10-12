@@ -13,7 +13,8 @@ const runfiles = @import("runfiles");
 pub const stdx = @import("stdx");
 pub const tokenizer = @import("zml/tokenizer");
 
-pub const attention = @import("attention.zig");
+pub const flash_attention = @import("kernels/flash_attention/flash_attention.zig");
+pub const paged_attention = @import("kernels/paged_attention/paged_attention.zig");
 pub const Buffer = @import("buffer.zig").Buffer;
 pub const Compiler = @import("Compiler.zig");
 pub const constants = @import("constants.zig");

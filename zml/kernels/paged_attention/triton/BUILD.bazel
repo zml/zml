@@ -1,0 +1,10 @@
+package(default_visibility = ["//zml:__pkg__"])
+
+filegroup(
+    name = "triton",
+    srcs = [
+        "triton.zig",
+        "unified_attention.zig",
+        "unified_attention_oneapi.zig",
+    ],
+)

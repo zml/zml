@@ -1,16 +1,8 @@
 const std = @import("std");
 
-pub const attnd = @import("attention/attnd.zig");
-pub const cute = @import("attention/cute_kernels/sparse_mla.zig");
-pub const flashattn = @import("attention/flashattn.zig");
-pub const fly = @import("attention/fly_kernels/sparse_mla.zig");
-pub const metal = @import("attention/metal_attention.zig");
-pub const nki = @import("attention/nki/attention.zig");
-pub const paged_attention = @import("attention/paged_attention.zig");
-pub const tpu = @import("attention/tpu_attention.zig");
-pub const triton = @import("attention/triton_attention.zig");
-pub const triton_kernels = @import("attention/triton_kernels/unified_attention.zig");
-const zml = @import("zml.zig");
+pub const metal = @import("metal/metal.zig");
+pub const nki = @import("nki/nki.zig");
+const zml = @import("../../zml.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -18,59 +10,40 @@ test {
 
 pub const Backend = enum {
     vanilla,
-    attnd,
     nki,
-    cuda_fa2,
-    cuda_fa3,
     metal_fa,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
-            .cuda => b: {
-                const cc = zml.platform.cuda.computeCapability(platform) orelse break :b .vanilla;
-                break :b if (cc.eql(.{ .major = 9, .minor = 0 })) .cuda_fa3 else .cuda_fa2;
-            },
             .neuron => .nki,
             .metal => .metal_fa,
-            .cpu, .rocm, .tpu, .oneapi, .furiosa => .vanilla,
+            .cuda, .cpu, .rocm, .tpu, .oneapi, .furiosa => .vanilla,
         };
     }
 
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
             .vanilla => true,
-            .attnd => true, // attnd runs over network
             .nki => platform.target == .neuron,
             .metal_fa => platform.target == .metal,
-            .cuda_fa2 => platform.target == .cuda,
-            .cuda_fa3 => if (zml.platform.cuda.computeCapability(platform)) |cc| cc.eql(.{ .major = 9, .minor = 0 }) else false,
         };
     }
 };
 
 pub const Parameters = union(Backend) {
     vanilla: void,
-    attnd: attnd.Parameters,
     nki: nki.Parameters,
-    cuda_fa2: flashattn.fa2.Parameters,
-    cuda_fa3: flashattn.fa3.Parameters,
     metal_fa: void,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
-        attnd: void,
         nki: nki.Parameters,
-        cuda_fa2: flashattn.fa2.Parameters.InitOptions,
-        cuda_fa3: flashattn.fa3.Parameters.InitOptions,
         metal_fa: void,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
-                .attnd => @panic("Must be initialized manually"),
                 .nki => .{ .nki = .init() },
-                .cuda_fa2 => .{ .cuda_fa2 = .{} },
-                .cuda_fa3 => .{ .cuda_fa3 = .{} },
                 .metal_fa => .{ .metal_fa = {} },
             };
         }
@@ -79,10 +52,7 @@ pub const Parameters = union(Backend) {
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
-            .attnd => @panic("Must be initialized manually"),
             .nki => |v| .{ .nki = v },
-            .cuda_fa2 => |v| .{ .cuda_fa2 = .init(v) },
-            .cuda_fa3 => |v| .{ .cuda_fa3 = .init(v) },
             .metal_fa => .{ .metal_fa = {} },
         };
     }
@@ -90,39 +60,30 @@ pub const Parameters = union(Backend) {
 
 pub const Metadata = union(Backend) {
     vanilla: void,
-    attnd: attnd.Metadata,
     nki: void,
-    cuda_fa2: flashattn.fa2.Metadata,
-    cuda_fa3: flashattn.fa3.Metadata,
     metal_fa: metal.Metadata,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
-        attnd: void,
         nki: void,
-        cuda_fa2: flashattn.fa2.Metadata.InitOptions,
-        cuda_fa3: flashattn.fa3.Metadata.InitOptions,
         metal_fa: void,
 
         pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
+            _ = seqlen; // autofix
+            _ = num_heads; // autofix
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
-                .attnd => .{ .attnd = {} },
                 .nki => .{ .nki = {} },
-                .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
-                .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads } },
                 .metal_fa => .{ .metal_fa = {} },
             };
         }
     };
 
     pub fn init(opts: InitOptions, mesh: *const zml.Sharding.Mesh) Metadata {
+        _ = mesh; // autofix
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
-            .attnd => @panic("Must be initialized manually"),
             .nki => .{ .nki = {} },
-            .cuda_fa2 => |o| .{ .cuda_fa2 = .init(o, mesh) },
-            .cuda_fa3 => |o| .{ .cuda_fa3 = .init(o, mesh) },
             .metal_fa => .{ .metal_fa = .init() },
         };
     }
@@ -138,10 +99,7 @@ pub const Metadata = union(Backend) {
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
         switch (self.*) {
             .vanilla => {},
-            .attnd => |*v| attnd.Metadata.deinitBuffer(v),
             .nki => {},
-            .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
-            .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
             .metal_fa => |*v| metal.Metadata.deinitBuffer(v),
         }
     }
@@ -171,37 +129,9 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
             break :b attn_output;
         },
-        .attnd => attnd.causalAttention(q, k, v, token_index, metadata.attnd, parameters.attnd),
         .nki => nki.attention(q, k, v, token_index, parameters.nki),
-        .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
-        .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
         .metal_fa => metal.attention(q, k, v, token_index, metadata.metal_fa),
     };
-}
-
-test "FlashAttention metadata initializes with explicit sharding outside compilation" {
-    try std.testing.expect(zml.Compiler.currentOrNull() == null);
-    const mesh: zml.Sharding.Mesh = .{
-        .name = "metadata_mesh",
-        .physical = undefined,
-        .logical = .mesh(.{ .model = .high_bandwidth }),
-        .bindings = .init(&.{.init(&.{.link_x})}),
-        .folds = .empty,
-        .folds_consumed = .empty,
-    };
-    inline for (.{ Backend.cuda_fa2, Backend.cuda_fa3 }) |backend| {
-        const metadata: Metadata = .init(.fromBackend(backend, 16, 8), &mesh);
-        const cuda_metadata = @field(metadata, @tagName(backend));
-        inline for (std.meta.fields(@TypeOf(cuda_metadata))) |field| {
-            const shape = @field(cuda_metadata, field.name).shape();
-            try std.testing.expectEqual(&mesh, shape._sharding.mesh);
-            if (shape.hasTag(.h)) |axis| {
-                try std.testing.expectEqual(zml.Sharding.PartitionSpec.sharded(0), shape.partition(axis));
-            } else {
-                try std.testing.expectEqual(zml.Sharding.PartitionSpec.replicated, shape.partition(.meta));
-            }
-        }
-    }
 }
 
 test "attention: q=1,qh=64,kh=8" {
@@ -256,6 +186,10 @@ test "attention: q=8,qh=64,kh=8" {
 }
 
 pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []const u32) !void {
+    return testAttentionBackends(q_shape, k_shape, token_index_h, std.enums.values(Backend));
+}
+
+fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []const u32, backends: []const Backend) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
 
@@ -265,7 +199,7 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const token_index_shape: zml.Shape = if (q_shape.hasTag(.b)) |_| b: {
+    const token_index_shape: zml.Shape = if (token_index_h.len > 1) b: {
         std.debug.assert(token_index_h.len == q_shape.dim(.b));
         break :b .init(.{ .b = q_shape.dim(.b) }, .u32);
     } else .init(.{}, .u32);
@@ -284,16 +218,11 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
         .token_index = .fromShape(token_index_shape),
     };
 
-    const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{ .mean = 0, .stddev = 1 } }, .{});
-    defer rng_q.deinit();
-    const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{ .mean = 0, .stddev = 1 } }, .{});
-    defer rng_k.deinit();
-
-    var q = try rng_q.eval(allocator, io, {});
+    var q = try attentionTestInput(q_shape, 17);
     defer q.deinit();
-    var k = try rng_k.eval(allocator, io, {});
+    var k = try attentionTestInput(k_shape, 29);
     defer k.deinit();
-    var v = try rng_k.eval(allocator, io, {});
+    var v = try attentionTestInput(k_shape, 43);
     defer v.deinit();
     var token_index = try zml.Buffer.fromBytes(io, platform, token_index_shape, @ptrCast(token_index_h));
     defer token_index.deinit();
@@ -311,9 +240,9 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
     const vanilla_h: zml.Slice = try vanilla_d.toSliceAlloc(allocator, io);
     defer vanilla_h.free(allocator);
 
-    for (std.enums.values(Backend)) |backend| {
+    for (backends) |backend| {
         switch (backend) {
-            .attnd, .vanilla => continue,
+            .vanilla => continue,
             else => if (!backend.isAvailable(platform)) continue,
         }
 
@@ -351,5 +280,86 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
             .epsilon_relative = 1e-3,
             .minimum_close_fraction = 0.99,
         });
+    }
+}
+
+fn attentionTestInput(shape: zml.Shape, seed: u64) !zml.Buffer {
+    const host = try zml.Slice.alloc(std.testing.allocator, shape);
+    defer host.free(std.testing.allocator);
+    var prng: std.Random.DefaultPrng = .init(seed);
+    const random = prng.random();
+    switch (shape.dtype()) {
+        inline .bf16, .f16, .f32 => |dtype| {
+            for (host.items(dtype.toZigType())) |*value| {
+                const x = random.float(f32) * 4 - 2;
+                value.* = if (dtype == .bf16) .fromF32(x) else @floatCast(x);
+            }
+        },
+        else => unreachable,
+    }
+    return zml.Buffer.fromSlice(std.testing.io, zml.testing.env(), host);
+}
+
+/// Independent f64 oracle: the SDPA reference uses fast dot precision, so its
+/// f32 result alone cannot establish the accuracy of the kernel's f32 arithmetic.
+fn checkAttentionF32(q: zml.Slice, k: zml.Slice, v: zml.Slice, positions: []const u32, output: zml.Slice) !void {
+    const Layout = struct {
+        b: usize,
+        s: usize,
+        h: usize,
+        d: usize,
+
+        fn stride(shape: zml.Shape, tag: anytype) usize {
+            const axis = shape.hasTag(tag) orelse return 0;
+            var result: usize = 1;
+            for (shape.dims()[axis + 1 ..]) |dim| result *= @intCast(dim);
+            return result;
+        }
+
+        fn init(shape: zml.Shape) @This() {
+            return .{ .b = stride(shape, .b), .s = if (shape.hasTag(.q) != null) stride(shape, .q) else stride(shape, .k), .h = stride(shape, .h), .d = stride(shape, .hd) };
+        }
+
+        fn offset(self: @This(), b: usize, s: usize, h: usize, d: usize) usize {
+            return b * self.b + s * self.s + h * self.h + d * self.d;
+        }
+    };
+    const ql = Layout.init(q.shape);
+    const kl = Layout.init(k.shape);
+    const vl = Layout.init(v.shape);
+    const batch: usize = if (q.shape.hasTag(.b) != null) @intCast(q.shape.dim(.b)) else 1;
+    const queries: usize = @intCast(q.shape.dim(.q));
+    const heads: usize = @intCast(q.shape.dim(.h));
+    const dim: usize = @intCast(q.shape.dim(.hd));
+    const group: usize = @intCast(@divExact(q.shape.dim(.h), k.shape.dim(.h)));
+    const scores = try std.testing.allocator.alloc(f64, @intCast(k.shape.dim(.k)));
+    defer std.testing.allocator.free(scores);
+    const scale = 1.0 / @sqrt(@as(f64, @floatFromInt(dim)));
+    for (0..batch) |b| {
+        const start: usize = positions[if (positions.len == 1) 0 else b];
+        for (0..queries) |i| {
+            for (0..heads) |h| {
+                var maximum: f64 = -std.math.inf(f64);
+                const active = scores[0 .. start + i + 1];
+                for (active, 0..) |*score, j| {
+                    var dot: f64 = 0;
+                    for (0..dim) |d| dot += @as(f64, q.items(f32)[ql.offset(b, i, h, d)]) * @as(f64, k.items(f32)[kl.offset(b, j, h / group, d)]);
+                    score.* = dot * scale;
+                    maximum = @max(maximum, score.*);
+                }
+                var sum: f64 = 0;
+                for (active) |*score| {
+                    score.* = @exp(score.* - maximum);
+                    sum += score.*;
+                }
+                for (0..dim) |d| {
+                    var expected: f64 = 0;
+                    for (active, 0..) |weight, j| expected += weight * @as(f64, v.items(f32)[vl.offset(b, j, h / group, d)]);
+                    expected /= sum;
+                    const actual = output.items(f32)[ql.offset(b, i, h, d)];
+                    try std.testing.expectApproxEqAbs(expected, @as(f64, actual), 2e-5 + 2e-5 * @abs(expected));
+                }
+            }
+        }
     }
 }

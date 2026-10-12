@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
-const zml = @import("../zml.zig");
+const zml = @import("../../../zml.zig");
 
 const log = std.log.scoped(.@"zml/attnd");
 var context: ?*Context = null;

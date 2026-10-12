@@ -14,12 +14,12 @@ pub const CompilationParameters = struct {
     batch_dim: usize,
     rng: zml.Tensor.Rng,
     cache: model.Cache,
-    attention_metadata: zml.attention.Metadata,
-    attention_parameters: zml.attention.Parameters,
+    attention_metadata: zml.flash_attention.Metadata,
+    attention_parameters: zml.flash_attention.Parameters,
     seqlen: u32,
     meshes: common.Meshes,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, meshes: common.Meshes) CompilationParameters {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.flash_attention.Backend, meshes: common.Meshes) CompilationParameters {
         stdx.debug.assert(seqlen >= config.conv_L_cache, "seqlen ({}) must be at least conv_L_cache ({})", .{ seqlen, config.conv_L_cache });
         const cache: model.Cache = .{
             .kv = .init(.init(.{
@@ -59,7 +59,7 @@ pub const Args = struct {
     actual_seq_len_buf: *zml.Buffer,
     rng_buf: *zml.Bufferized(zml.Tensor.Rng),
     cache_buffers: *zml.Bufferized(model.Cache),
-    attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata),
+    attention_metadata_buffers: zml.Bufferized(zml.flash_attention.Metadata),
 };
 
 pub const CompiledModel = struct {

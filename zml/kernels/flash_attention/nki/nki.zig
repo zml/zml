@@ -1,6 +1,6 @@
 const platforms = @import("platforms");
 
-const zml = @import("../../zml.zig");
+const zml = @import("../../../zml.zig");
 const stdx = zml.stdx;
 
 const KernelSpec = struct {

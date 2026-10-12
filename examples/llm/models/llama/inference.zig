@@ -14,13 +14,13 @@ pub const CompilationParameters = struct {
     token_index: zml.Tensor,
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
-    attention_metadata: zml.attention.Metadata,
-    prefill_attention_parameters: zml.attention.Parameters,
-    decode_attention_parameters: zml.attention.Parameters,
+    attention_metadata: zml.flash_attention.Metadata,
+    prefill_attention_parameters: zml.flash_attention.Parameters,
+    decode_attention_parameters: zml.flash_attention.Parameters,
     seqlen: usize,
     meshes: common.Meshes,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, meshes: common.Meshes) CompilationParameters {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.flash_attention.Backend, meshes: common.Meshes) CompilationParameters {
         const head_dim = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads);
 
         return .{
@@ -34,30 +34,9 @@ pub const CompilationParameters = struct {
                 .hd = head_dim,
             }, mdl.model.embed_tokens.weight.dtype()), meshes.model),
             .rng = .init(),
-            .attention_metadata = switch (backend) {
-                .attnd => .{ .attnd = .init() },
-                else => .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads)), meshes.model),
-            },
-            .prefill_attention_parameters = switch (backend) {
-                .attnd => .{ .attnd = .init(.{
-                    .model_id = .@"llama-3.1-8B",
-                    .head_dim = head_dim,
-                    .num_attention_heads = config.num_attention_heads,
-                    .num_kv_heads = @intCast(config.num_key_value_heads),
-                    .is_prefill = true,
-                }) },
-                else => .init(.fromBackend(backend)),
-            },
-            .decode_attention_parameters = switch (backend) {
-                .attnd => .{ .attnd = .init(.{
-                    .model_id = .@"llama-3.1-8B",
-                    .head_dim = head_dim,
-                    .num_attention_heads = config.num_attention_heads,
-                    .num_kv_heads = @intCast(config.num_key_value_heads),
-                    .is_prefill = false,
-                }) },
-                else => .init(.fromBackend(backend)),
-            },
+            .attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads)), meshes.model),
+            .prefill_attention_parameters = .init(.fromBackend(backend)),
+            .decode_attention_parameters = .init(.fromBackend(backend)),
             .seqlen = seqlen,
             .meshes = meshes,
         };
@@ -72,7 +51,7 @@ pub const Args = struct {
     token_index_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
-    attention_metadata_buffers: *const zml.Bufferized(zml.attention.Metadata),
+    attention_metadata_buffers: *const zml.Bufferized(zml.flash_attention.Metadata),
 };
 
 pub const CompiledModel = struct {
@@ -117,8 +96,8 @@ const Forward = struct {
         token_index: zml.Tensor,
         kv_cache: model.KvCache,
         rng: zml.Tensor.Rng,
-        attention_metadata: zml.attention.Metadata,
-        attention_parameters: zml.attention.Parameters,
+        attention_metadata: zml.flash_attention.Metadata,
+        attention_parameters: zml.flash_attention.Parameters,
     };
 
     pub const Output = struct {
@@ -199,7 +178,7 @@ fn compileKernel(
     llama_model: model.Model,
     parameters: CompilationOptions,
     seqlen: usize,
-    attention_parameters: zml.attention.Parameters,
+    attention_parameters: zml.flash_attention.Parameters,
     phase: Phase,
     progress: *std.Progress.Node,
 ) !KernelExe {

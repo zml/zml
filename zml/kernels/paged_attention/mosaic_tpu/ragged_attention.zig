@@ -1,6 +1,6 @@
 const ragged_paged = @import("platforms/tpu/ragged_paged");
 
-const zml = @import("../../zml.zig");
+const zml = @import("../../../zml.zig");
 
 test {
     _ = Kernel;

@@ -18,7 +18,7 @@ const Args = struct {
     prompt: ?[]const u8 = null,
     seqlen: u32 = 2048,
     topk: u32 = 4,
-    backend: ?zml.attention.Backend = null,
+    backend: ?zml.flash_attention.Backend = null,
     attnd_ip: ?[]const u8 = null,
     profile: bool = false,
 
@@ -32,7 +32,7 @@ const Args = struct {
         \\   --prompt=<string>   Prompt to use for generation (default: none)
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
-        \\   --backend=<text>    Attention backend to use ([vanilla, attnd, nki, cuda_fa2, cuda_fa3], default: auto-selection)
+        \\   --backend=<text>    Attention backend to use ([vanilla, attnd, nki], default: auto-selection)
         \\   --attnd-ip=<addr>   Register and prefer the `attnd` backend at the provided `IP:PORT`
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\
@@ -88,14 +88,7 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    const backend = args.backend orelse if (args.attnd_ip) |attnd_ip| b: {
-        try zml.attention.attnd.register(allocator, io, platform, .{
-            .destination = try .parseLiteral(attnd_ip),
-            .mtu = 9000,
-        });
-        break :b zml.attention.Backend.attnd;
-    } else zml.attention.Backend.auto(platform);
-    defer if (args.attnd_ip) |_| zml.attention.attnd.deinit();
+    const backend = args.backend orelse zml.flash_attention.Backend.auto(platform);
     log.info("Selected backend: {}", .{backend});
 
     //
