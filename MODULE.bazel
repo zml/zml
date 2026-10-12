@@ -182,7 +182,6 @@ use_repo(pip_neuron, "neuron_py_deps")
 # For downloading models
 pip.parse(
     download_only = True,
-    experimental_index_url = "https://pypi.org/simple",
     hub_name = "huggingface_hub",
     python_version = "3.12",
     requirements_lock = "//tools/hf:requirements.lock.txt",
@@ -191,7 +190,6 @@ use_repo(pip, "huggingface_hub")
 
 pip.parse(
     download_only = True,
-    experimental_index_url = "https://pypi.org/simple",
     # fsspec[gcs] -> gcsfs -> fsspec is a circular dependency, install them together.
     experimental_requirement_cycles = {
         "fsspec": [
