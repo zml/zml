@@ -1,5 +1,6 @@
 const std = @import("std");
 
+pub const cute = @import("cute/cute.zig");
 pub const metal = @import("metal/metal.zig");
 pub const nki = @import("nki/nki.zig");
 const zml = @import("../../zml.zig");
@@ -10,6 +11,7 @@ test {
 
 pub const Backend = enum {
     vanilla,
+    cute,
     nki,
     metal_fa,
 
@@ -17,13 +19,15 @@ pub const Backend = enum {
         return switch (platform.target) {
             .neuron => .nki,
             .metal => .metal_fa,
-            .cuda, .cpu, .rocm, .tpu, .oneapi, .furiosa => .vanilla,
+            .cuda => if (cute.isAvailable(platform)) .cute else .vanilla,
+            .cpu, .rocm, .tpu, .oneapi, .furiosa => .vanilla,
         };
     }
 
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
             .vanilla => true,
+            .cute => cute.isAvailable(platform),
             .nki => platform.target == .neuron,
             .metal_fa => platform.target == .metal,
         };
@@ -32,17 +36,20 @@ pub const Backend = enum {
 
 pub const Parameters = union(Backend) {
     vanilla: void,
+    cute: void,
     nki: nki.Parameters,
     metal_fa: void,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
+        cute: void,
         nki: nki.Parameters,
         metal_fa: void,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
+                .cute => .{ .cute = {} },
                 .nki => .{ .nki = .init() },
                 .metal_fa => .{ .metal_fa = {} },
             };
@@ -52,6 +59,7 @@ pub const Parameters = union(Backend) {
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
+            .cute => .{ .cute = {} },
             .nki => |v| .{ .nki = v },
             .metal_fa => .{ .metal_fa = {} },
         };
@@ -60,11 +68,13 @@ pub const Parameters = union(Backend) {
 
 pub const Metadata = union(Backend) {
     vanilla: void,
+    cute: void,
     nki: void,
     metal_fa: metal.Metadata,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
+        cute: void,
         nki: void,
         metal_fa: void,
 
@@ -73,6 +83,7 @@ pub const Metadata = union(Backend) {
             _ = num_heads; // autofix
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
+                .cute => .{ .cute = {} },
                 .nki => .{ .nki = {} },
                 .metal_fa => .{ .metal_fa = {} },
             };
@@ -83,6 +94,7 @@ pub const Metadata = union(Backend) {
         _ = mesh; // autofix
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
+            .cute => .{ .cute = {} },
             .nki => .{ .nki = {} },
             .metal_fa => .{ .metal_fa = .init() },
         };
@@ -91,6 +103,7 @@ pub const Metadata = union(Backend) {
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
         return switch (self) {
             .vanilla => .{ .vanilla = {} },
+            .cute => .{ .cute = {} },
             .nki => .{ .nki = {} },
             inline else => |v, tag| @unionInit(zml.Bufferized(Metadata), @tagName(tag), try v.initBuffer(io, platform)),
         };
@@ -99,6 +112,7 @@ pub const Metadata = union(Backend) {
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
         switch (self.*) {
             .vanilla => {},
+            .cute => {},
             .nki => {},
             .metal_fa => |*v| metal.Metadata.deinitBuffer(v),
         }
@@ -129,6 +143,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
             break :b attn_output;
         },
+        .cute => cute.attention(q, k, v, token_index),
         .nki => nki.attention(q, k, v, token_index, parameters.nki),
         .metal_fa => metal.attention(q, k, v, token_index, metadata.metal_fa),
     };

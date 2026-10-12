@@ -123,6 +123,7 @@ zig_library(
         "tensor.zig",
         "testing.zig",
         "zml.zig",
+        "//zml/kernels/flash_attention/cute",
         "//zml/kernels/flash_attention/metal",
         "//zml/kernels/flash_attention/nki",
         "//zml/kernels/paged_attention/metal",
