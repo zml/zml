@@ -19,7 +19,6 @@ const Args = struct {
     seqlen: u32 = 2048,
     topk: u32 = 4,
     backend: ?zml.attention.Backend = null,
-    attnd_ip: ?[]const u8 = null,
     profile: bool = false,
 
     pub const help =
@@ -33,7 +32,6 @@ const Args = struct {
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([vanilla, cute, nki, metal], default: auto-selection)
-        \\   --attnd-ip=<addr>   Register and prefer the `attnd` backend at the provided `IP:PORT`
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\
     ;
