@@ -19,7 +19,7 @@ const TokenizedPrompt = struct {
     encoder: zml.tokenizer.Tokenizer.Encoder,
     tokens: []u32,
 
-    fn deinit(self: *TokenizedPrompt, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *TokenizedPrompt, allocator: std.mem.Allocator) void {
         self.encoder.deinit();
         self.tokenizer.deinit();
         allocator.free(self.tokens);
@@ -49,8 +49,8 @@ pub fn tokenize(
 const drop_idx = 14;
 
 const BufferizedPrompt = struct {
-    input_ids: zml.Tensor,
-    attention_mask: zml.Tensor,
+    input_ids: zml.Buffer,
+    attention_mask: zml.Buffer,
     token_type_ids: zml.Tensor,
 };
 
@@ -78,7 +78,7 @@ pub fn bufferize(
 
     const attention_mask_slice = try zml.Slice.alloc(allocator, .init(.{ .b = 1, .s = seq_len }, .bool));
     defer attention_mask_slice.free(allocator);
-    @memcpy(attention_mask_slice.items(bool)[0..sliced_tokens.len], true);
+    @memset(attention_mask_slice.items(bool)[0..sliced_tokens.len], true);
     @memset(attention_mask_slice.items(bool)[sliced_tokens.len..], false);
 
     var tokens_buffer = try zml.Buffer.fromSlice(io, platform, tokens_slice, .replicated);
