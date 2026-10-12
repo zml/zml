@@ -13,12 +13,12 @@ pub const Backend = enum {
     vanilla,
     cute,
     nki,
-    metal_fa,
+    metal,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
             .neuron => .nki,
-            .metal => .metal_fa,
+            .metal => .metal,
             .cuda => if (cute.isAvailable(platform)) .cute else .vanilla,
             .cpu, .rocm, .tpu, .oneapi, .furiosa => .vanilla,
         };
@@ -29,7 +29,7 @@ pub const Backend = enum {
             .vanilla => true,
             .cute => cute.isAvailable(platform),
             .nki => platform.target == .neuron,
-            .metal_fa => platform.target == .metal,
+            .metal => platform.target == .metal,
         };
     }
 };
@@ -38,20 +38,20 @@ pub const Parameters = union(Backend) {
     vanilla: void,
     cute: void,
     nki: nki.Parameters,
-    metal_fa: void,
+    metal: void,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
         cute: void,
         nki: nki.Parameters,
-        metal_fa: void,
+        metal: void,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
                 .cute => .{ .cute = {} },
                 .nki => .{ .nki = .init() },
-                .metal_fa => .{ .metal_fa = {} },
+                .metal => .{ .metal = {} },
             };
         }
     };
@@ -61,7 +61,7 @@ pub const Parameters = union(Backend) {
             .vanilla => .{ .vanilla = {} },
             .cute => .{ .cute = {} },
             .nki => |v| .{ .nki = v },
-            .metal_fa => .{ .metal_fa = {} },
+            .metal => .{ .metal = {} },
         };
     }
 };
@@ -70,13 +70,13 @@ pub const Metadata = union(Backend) {
     vanilla: void,
     cute: void,
     nki: void,
-    metal_fa: metal.Metadata,
+    metal: metal.Metadata,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
         cute: void,
         nki: void,
-        metal_fa: void,
+        metal: void,
 
         pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
             _ = seqlen; // autofix
@@ -85,7 +85,7 @@ pub const Metadata = union(Backend) {
                 .vanilla => .{ .vanilla = {} },
                 .cute => .{ .cute = {} },
                 .nki => .{ .nki = {} },
-                .metal_fa => .{ .metal_fa = {} },
+                .metal => .{ .metal = {} },
             };
         }
     };
@@ -96,7 +96,7 @@ pub const Metadata = union(Backend) {
             .vanilla => .{ .vanilla = {} },
             .cute => .{ .cute = {} },
             .nki => .{ .nki = {} },
-            .metal_fa => .{ .metal_fa = .init() },
+            .metal => .{ .metal = .init() },
         };
     }
 
@@ -114,7 +114,7 @@ pub const Metadata = union(Backend) {
             .vanilla => {},
             .cute => {},
             .nki => {},
-            .metal_fa => |*v| metal.Metadata.deinitBuffer(v),
+            .metal => |*v| metal.Metadata.deinitBuffer(v),
         }
     }
 };
@@ -145,7 +145,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         },
         .cute => cute.attention(q, k, v, token_index),
         .nki => nki.attention(q, k, v, token_index, parameters.nki),
-        .metal_fa => metal.attention(q, k, v, token_index, metadata.metal_fa),
+        .metal => metal.attention(q, k, v, token_index, metadata.metal),
     };
 }
 
