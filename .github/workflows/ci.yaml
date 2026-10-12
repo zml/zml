@@ -64,7 +64,7 @@ jobs:
           - target: metal
             bazel_opts: "--@zml//platforms:metal=true --@zml//platforms:cpu=false"
             run_tests: true
-            runner_labels: ["self-hosted", "ZMLs-Mac-mini"]
+            runner_labels: ["self-hosted", "macOS", "ARM64"]
 
     runs-on: ${{ matrix.runner_labels }}
     steps:
