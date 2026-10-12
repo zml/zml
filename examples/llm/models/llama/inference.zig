@@ -34,30 +34,9 @@ pub const CompilationParameters = struct {
                 .hd = head_dim,
             }, mdl.model.embed_tokens.weight.dtype()), meshes.model),
             .rng = .init(),
-            .attention_metadata = switch (backend) {
-                .attnd => .{ .attnd = .init() },
-                else => .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads)), meshes.model),
-            },
-            .prefill_attention_parameters = switch (backend) {
-                .attnd => .{ .attnd = .init(.{
-                    .model_id = .@"llama-3.1-8B",
-                    .head_dim = head_dim,
-                    .num_attention_heads = config.num_attention_heads,
-                    .num_kv_heads = @intCast(config.num_key_value_heads),
-                    .is_prefill = true,
-                }) },
-                else => .init(.fromBackend(backend)),
-            },
-            .decode_attention_parameters = switch (backend) {
-                .attnd => .{ .attnd = .init(.{
-                    .model_id = .@"llama-3.1-8B",
-                    .head_dim = head_dim,
-                    .num_attention_heads = config.num_attention_heads,
-                    .num_kv_heads = @intCast(config.num_key_value_heads),
-                    .is_prefill = false,
-                }) },
-                else => .init(.fromBackend(backend)),
-            },
+            .attention_metadata = .init(.fromBackend(backend)),
+            .prefill_attention_parameters = .init(.fromBackend(backend)),
+            .decode_attention_parameters = .init(.fromBackend(backend)),
             .seqlen = seqlen,
             .meshes = meshes,
         };

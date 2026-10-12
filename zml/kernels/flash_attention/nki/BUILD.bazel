@@ -8,8 +8,8 @@ filegroup(
 )
 
 filegroup(
-    name = "attention",
-    srcs = ["attention.zig"],
+    name = "nki",
+    srcs = ["nki.zig"],
 )
 
 py_binary(

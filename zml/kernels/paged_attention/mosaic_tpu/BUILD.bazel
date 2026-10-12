@@ -1,0 +1,9 @@
+package(default_visibility = ["//zml:__pkg__"])
+
+filegroup(
+    name = "mosaic_tpu",
+    srcs = [
+        "mosaic_tpu.zig",
+        "ragged_attention.zig",
+    ],
+)

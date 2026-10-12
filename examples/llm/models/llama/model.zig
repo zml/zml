@@ -579,25 +579,12 @@ const SelfAttn = struct {
         k = new_kv_cache.keysAt(kv_cache_index).convert(dtype);
         v = new_kv_cache.valuesAt(kv_cache_index).convert(dtype);
 
-        const layer_attention_metadata: zml.attention.Metadata = switch (attention_parameters) {
-            .attnd => .{ .attnd = .{
-                .layer_id = kv_cache_index.convert(.u16),
-                .conversation_id = attention_metadata.attnd.conversation_id,
-                .num_tokens = attention_metadata.attnd.num_tokens,
-            } },
-            .vanilla => attention_metadata,
-            .cuda_fa2 => attention_metadata,
-            .cuda_fa3 => attention_metadata,
-            .nki => attention_metadata,
-            .metal_fa => attention_metadata,
-        };
-
         const attn_output = zml.attention.attention(
             q,
             k,
             v,
             token_index,
-            layer_attention_metadata,
+            attention_metadata,
             attention_parameters,
         );
 
