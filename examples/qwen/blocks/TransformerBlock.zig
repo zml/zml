@@ -23,7 +23,7 @@ pub fn load(
     errdefer unloadBuffers(&buffers);
 
     var loader: zml.io.Loader = try .init(allocator, platform, .default);
-    errdefer loader.deinit();
+    defer loader.deinit();
 
     try loader.load(io, TransformerBlock, self, &buffers, store, &.{}, .{});
     try loader.await(io);
