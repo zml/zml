@@ -1,3 +1,4 @@
+pub const Pipeline = @import("./blocks/Pipeline.zig");
 pub const TransformerBlock = @import("./blocks/TransformerBlock.zig");
 pub const Attn = @import("./blocks/Attn.zig");
 pub const Mlp = @import("./blocks/Mlp.zig");
