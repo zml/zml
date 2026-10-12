@@ -178,7 +178,6 @@ pub const KvCache = union(enum) {
     },
     // TODO: rename `dense` to `fused`.
     dense: zml.Tensor,
-    latent: zml.Tensor,
 
     pub fn update(
         self: KvCache,
@@ -208,13 +207,6 @@ pub const KvCache = union(enum) {
                 },
             },
             .dense => @panic("TODO"),
-            .latent => |latent_kv| .{
-                .latent = latent_kv.scatterSlices(
-                    .{ .page = page_index, .k_chunk = offset },
-                    new_k,
-                    .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
-                ).reuseBuffer(self.latent),
-            },
         };
 
         return kv;
@@ -235,7 +227,7 @@ pub const KvCache = union(enum) {
                 split.k.slice(split.k.axis(.page), .dynSingle(page_index)),
                 split.v.slice(split.k.axis(.page), .dynSingle(page_index)),
             },
-            .dense, .latent => @panic("TODO"),
+            .dense => @panic("TODO"),
         };
     }
 };
@@ -247,22 +239,16 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
         .triton => |triton_parameters| switch (kv_cache) {
             .split => |split| triton.paged.pagedAttention(triton_parameters, q, split.k, split.v, opts),
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
-            .latent => std.debug.panic("latent KV pages are only supported with Multi-Latent Attention", .{}),
         },
         .mosaic_tpu => |mosaic_tpu_parameters| switch (kv_cache) {
             .split => std.debug.panic("split KV pages is not supported with the mosaic_tpu backend", .{}),
-            .latent => std.debug.panic("latent KV pages are only supported with Multi-Latent Attention", .{}),
             .dense => tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, q, kv_cache.dense, opts),
         },
         .metal => |metal_parameters| switch (kv_cache) {
             .split => |split| metal.pagedAttention(metal_parameters, q, split.k, split.v, opts),
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
-            .latent => std.debug.panic("latent KV pages are only supported with Multi-Latent Attention", .{}),
         },
-        .stablehlo => |params| switch (kv_cache) {
-            .latent => std.debug.panic("latent KV pages are only supported with Multi-Latent Attention", .{}),
-            else => stablehlo.pagedAttention(params, q, kv_cache, opts),
-        },
+        .stablehlo => |params| stablehlo.pagedAttention(params, q, kv_cache, opts),
     };
 }
 
