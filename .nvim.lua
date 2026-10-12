@@ -58,7 +58,7 @@ else
 			pattern = "bzl",
 			callback = function()
 				vim.keymap.set("n", "<Leader>f", function()
-					mod.format()
+					conform.format()
 				end, { remap = false, silent = true })
 			end,
 		})
