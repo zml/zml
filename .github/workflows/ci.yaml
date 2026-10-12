@@ -82,6 +82,7 @@ jobs:
           bazelisk-cache: true
           cache-save: false
           bazelrc: |
+            startup --experimental_remote_repo_contents_cache
             common --verbose_failures
             common --keep_going
             common --test_output=streamed
