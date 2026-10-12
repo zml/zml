@@ -26,10 +26,12 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
-    var transformer_blocks_store = try store.TransformerStore.load(allocator, io, platform, cli_args.folder);
+    var transformer_blocks_store: store.TransformerStore = undefined;
+    try transformer_blocks_store.load(allocator, io, platform, cli_args.folder);
     defer transformer_blocks_store.deinit(allocator);
 
-    var activations_store = try store.ActivationStore.load(allocator, io, cli_args.activations);
+    var activations_store: store.ActivationStore = undefined;
+    try activations_store.load(allocator, io, cli_args.activations);
     defer activations_store.deinit();
 
     std.debug.print("\n\nStarting testing\n\n", .{});

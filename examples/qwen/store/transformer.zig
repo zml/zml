@@ -15,22 +15,23 @@ transformer_block_buffers: []zml.Bufferized(block.TransformerBlock) = undefined,
 const TRANSFORMER_BLOCK_COUNT: usize = 1;
 
 pub fn load(
+    self: *TransformerStore,
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
     folder: []const u8,
-) !TransformerStore {
+) !void {
     var transformer_buffer: [256]u8 = undefined;
     const transformer_model_registry_path = try std.fmt.bufPrint(&transformer_buffer, "{s}/{s}", .{ folder, "transformer/diffusion_pytorch_model.safetensors.index.json" });
-    var transformer_model_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, transformer_model_registry_path);
-    log.info("Transformer: Found {} tensors in {s}", .{ transformer_model_registry.tensors.count(), transformer_model_registry_path });
+    self.registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, transformer_model_registry_path);
+    log.info("Transformer: Found {} tensors in {s}", .{ self.registry.tensors.count(), transformer_model_registry_path });
 
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &transformer_model_registry);
+    self.store = .fromRegistry(allocator, &self.registry);
 
     const transformer_blocks: []block.TransformerBlock =
         try allocator.alloc(block.TransformerBlock, TRANSFORMER_BLOCK_COUNT);
 
-    const transformer_blocks_view = store.view().withPrefix("transformer_blocks");
+    const transformer_blocks_view = self.store.view().withPrefix("transformer_blocks");
     for (0..TRANSFORMER_BLOCK_COUNT) |i| {
         const tb_layer_view = transformer_blocks_view.withLayer(i);
 
@@ -69,15 +70,11 @@ pub fn load(
         log.info("Transfering weights....", .{});
         const start: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Transferred weights [{f}]", .{start.untilNow(io, .awake)});
-        transformer_block_buffers[i] = try transformer_blocks[i].load(allocator, io, platform, &store);
+        transformer_block_buffers[i] = try transformer_blocks[i].load(allocator, io, platform, &self.store);
     }
 
-    return .{
-        .store = store,
-        .registry = transformer_model_registry,
-        .transformer_blocks = transformer_blocks,
-        .transformer_block_buffers = transformer_block_buffers,
-    };
+    self.transformer_blocks = transformer_blocks;
+    self.transformer_block_buffers = transformer_block_buffers;
 }
 
 pub fn deinit(self: *TransformerStore, allocator: std.mem.Allocator) void {
