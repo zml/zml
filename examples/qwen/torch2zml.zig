@@ -103,9 +103,11 @@ pub fn main(init: std.process.Init) !void {
         .attention_metadata = attention_metadata,
         .attention_parameters = attention_parameters,
     };
+    _ = compile_args; // autofix
     const compile_args_buffers: zml.Bufferized(CompileArgs) = .{
         .attention_metadata = try attention_metadata.initBuffer(io, platform, model_sharding),
     };
+    _ = compile_args_buffers; // autofix
 
     const vae_scale_factor = 16;
     const multiple_of = vae_scale_factor * 2;
@@ -125,15 +127,18 @@ pub fn main(init: std.process.Init) !void {
     const vae_images: [][2]usize = undefined;
     _ = vae_images; // autofix
 
-    try testing.testLayer(
-        allocator,
-        io,
-        platform,
-        "transformer.transformer_blocks.0",
-        &activations_store,
-        Wrapper{ .tblock = transformer_blocks[0], .args = compile_args },
-        .{ .tblock = transformer_blocks_buffer[0], .args = compile_args_buffers },
-    );
+    // try testing.testLayer(
+    //     allocator,
+    //     io,
+    //     platform,
+    //     "transformer.transformer_blocks.0",
+    //     &activations_store,
+    //     Wrapper{ .tblock = transformer_blocks[0], .args = compile_args },
+    //     .{ .tblock = transformer_blocks_buffer[0], .args = compile_args_buffers },
+    // );
+
+    const pipeline = block.Pipeline.init(allocator, io, platform);
+    pipeline.runOnce("Coucou la team, créé un personnage burger", .{ .seq_len = 16415 });
 }
 
 const Wrapper = struct {

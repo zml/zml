@@ -26,6 +26,7 @@ const TokenizedPrompt = struct {
     }
 };
 
+// Takes in a string and returns the u32 token representation
 pub fn tokenize(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -40,6 +41,59 @@ pub fn tokenize(
     const tokens = try encoder.encodeAlloc(allocator, templated_prompt);
 
     return TokenizedPrompt{ .tokenizer = tokenizer, .encoder = encoder, .tokens = tokens };
+}
+
+// It should not be hardcoded but actually the value is always the same (length of the tokenized system prompt)
+// "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n"
+// -> [151644, 8948, 198, 1092, 30782, 408, 323, 23643, 279, 3897, 9934, 13, 151645, 198]
+const drop_idx = 14;
+
+const BufferizedPrompt = struct {
+    input_ids: zml.Tensor,
+    attention_mask: zml.Tensor,
+    token_type_ids: zml.Tensor,
+};
+
+/// Moves the input_ids to Tensor and creates the attention mask + token_type_ids Tensor
+pub fn bufferize(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    tokenized: TokenizedPrompt,
+    seq_len: usize,
+) !BufferizedPrompt {
+    // In theory, attention_mask should be computed using this image_tokens_id
+    // const image_tokens_id = try tokenized.encoder.encodeAlloc(allocator, image_token);
+    // std.debug.assert(image_tokens_id.len == 1, "image_token_id should only be one token");
+    // const image_token_id = image_tokens_id[0];
+    // _ = image_token_id; // autofix
+
+    const sliced_tokens = tokenized.tokens[drop_idx..];
+
+    const tokens_slice = try zml.Slice.alloc(allocator, .init(.{ .b = 1, .s = seq_len }, .u32));
+    defer tokens_slice.free(allocator);
+    // 0 represents text token "<|pad|>"
+    @memset(tokens_slice.items(u32), 0);
+    @memcpy(tokens_slice.items(u32)[0..sliced_tokens.len], sliced_tokens);
+
+    const attention_mask_slice = try zml.Slice.alloc(allocator, .init(.{ .b = 1, .s = seq_len }, .bool));
+    defer attention_mask_slice.free(allocator);
+    @memcpy(attention_mask_slice.items(bool)[0..sliced_tokens.len], true);
+    @memset(attention_mask_slice.items(bool)[sliced_tokens.len..], false);
+
+    var tokens_buffer = try zml.Buffer.fromSlice(io, platform, tokens_slice, .replicated);
+    defer tokens_buffer.deinit();
+    var attention_mask_buffer = try zml.Buffer.fromSlice(io, platform, attention_mask_slice, .replicated);
+    defer attention_mask_buffer.deinit();
+
+    // 0 is for text
+    const token_type_ids = zml.Tensor.scalar(0, .i32);
+
+    return BufferizedPrompt{
+        .input_ids = tokens_buffer,
+        .attention_mask = attention_mask_buffer,
+        .token_type_ids = token_type_ids,
+    };
 }
 
 fn prompt_template_t2i(allocator: std.mem.Allocator, str: []const u8) ![]const u8 {
