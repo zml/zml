@@ -88,6 +88,7 @@ jobs:
             common --color=yes
             common --show_timestamps
             common --config=remote
+            common --strategy=TestRunner=remote,local
             ${{ format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
 
       - run: bazel mod graph
