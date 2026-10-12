@@ -114,7 +114,7 @@ pub const LoadedModel = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
-        backend: zml.flash_attention.Backend,
+        backend: zml.attention.Backend,
         meshes: common.Meshes,
         seqlen: usize,
         progress: *std.Progress.Node,
@@ -212,8 +212,8 @@ pub const Model = struct {
         actual_seq_len: zml.Tensor,
         rng: zml.Tensor.Rng,
         cache_: Cache,
-        attention_metadata: zml.flash_attention.Metadata,
-        attention_parameters: zml.flash_attention.Parameters,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
         conv_parameters: ConvParameters,
     ) struct { zml.Tensor, Cache, zml.Tensor.Rng } {
         stdx.debug.assert(tokens.shape().hasTags(.{ .batch, .seq }), "Tokens should have tags {{.batch, .seq}}, got {f}", .{tokens.shape()});
@@ -342,8 +342,8 @@ pub const DecoderLayer = struct {
         cache: Cache,
         conv_cache_index: zml.Tensor,
         kv_cache_index: zml.Tensor,
-        attention_metadata: zml.flash_attention.Metadata,
-        attention_parameters: zml.flash_attention.Parameters,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
         conv_parameters: ConvParameters,
     };
 
@@ -537,8 +537,8 @@ pub const Attention = struct {
         tokens_position_offset: zml.Tensor,
         kv_cache: KvCache,
         cache_index: zml.Tensor,
-        attention_metadata: zml.flash_attention.Metadata,
-        attention_parameters: zml.flash_attention.Parameters,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
         const x_qkv = x.withPartitioning(.model, .{ .d = .replicated });
 
@@ -567,7 +567,7 @@ pub const Attention = struct {
 
         stdx.debug.assert(q.dim(.batch) == 1, "LFM attention currently expects batch size 1 for flash attention backend, got {}", .{q.dim(.batch)});
         const attn = switch (attention_parameters) {
-            .vanilla => zml.flash_attention.attention(
+            .vanilla => zml.attention.attention(
                 q,
                 k,
                 v,
@@ -575,7 +575,7 @@ pub const Attention = struct {
                 attention_metadata,
                 attention_parameters,
             ).merge(.{ .d = .{ .h, .hd } }),
-            else => zml.flash_attention.attention(
+            else => zml.attention.attention(
                 q.squeeze(.batch),
                 k.squeeze(.batch),
                 v.squeeze(.batch),

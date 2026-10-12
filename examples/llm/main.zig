@@ -18,7 +18,7 @@ const Args = struct {
     prompt: ?[]const u8 = null,
     seqlen: u32 = 2048,
     topk: u32 = 4,
-    backend: ?zml.flash_attention.Backend = null,
+    backend: ?zml.attention.Backend = null,
     attnd_ip: ?[]const u8 = null,
     profile: bool = false,
 
@@ -88,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    const backend = args.backend orelse zml.flash_attention.Backend.auto(platform);
+    const backend = args.backend orelse zml.attention.Backend.auto(platform);
     log.info("Selected backend: {}", .{backend});
 
     //

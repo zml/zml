@@ -141,11 +141,11 @@ pub const Session = struct {
         defer prefill_tokens_buffer.deinit();
 
         const params = self.compiled_model.params;
-        var attention_metadata_buffers: zml.Bufferized(zml.flash_attention.Metadata) = switch (params.attention_metadata) {
+        var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
             .metal => .{ .metal = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
             .vanilla, .nki, .cute => try params.attention_metadata.initBuffer(self.io, self.platform),
         };
-        defer zml.flash_attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         inference.run(&self.prefill, .{
             .io = self.io,
@@ -173,7 +173,7 @@ pub const Session = struct {
 
         const params = self.compiled_model.params;
         var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform);
-        defer zml.flash_attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         generation: while (true) {
             if (isEosToken(self.config, last_token_id)) break :generation;
