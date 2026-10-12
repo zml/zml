@@ -18,6 +18,7 @@ pub fn init(
 }
 
 const Params = struct {
+    model_dir: []const u8,
     seq_len: usize,
 };
 
@@ -26,7 +27,7 @@ pub fn runOnce(
     prompt: []const u8,
     params: Params,
 ) !void {
-    var tokenized = try tokenizer.tokenize(self.allocator, self.io, prompt);
+    var tokenized = try tokenizer.tokenize(self.allocator, self.io, params.model_dir, prompt);
     defer tokenized.deinit(self.allocator);
     const bufferized = try tokenizer.bufferize(self.allocator, self.io, self.platform, tokenized, params.seq_len);
     _ = bufferized; // autofix

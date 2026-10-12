@@ -30,9 +30,11 @@ const TokenizedPrompt = struct {
 pub fn tokenize(
     allocator: std.mem.Allocator,
     io: std.Io,
+    model_dir: []const u8,
     prompt: []const u8,
 ) !TokenizedPrompt {
-    const tokenizer_path = "/home/erwan/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/d26bb61231c349cf6b7896fa83353113880e1ba3/processor/tokenizer.json";
+    var buffer: [256]u8 = undefined;
+    const tokenizer_path = try std.fmt.bufPrint(&buffer, "{s}/{s}", .{ model_dir, "processor/tokenizer.json" });
     const tokenizer: zml.tokenizer.Tokenizer = try .fromFile(allocator, io, tokenizer_path);
 
     var encoder = try tokenizer.encoder();
