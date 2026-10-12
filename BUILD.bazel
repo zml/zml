@@ -40,6 +40,7 @@ zls_completion(
         "//examples/mnist",
         "//examples/sharding",
         "//examples/io:playground",
+        "//examples/minimax_h3",
         "//stdx",
         "//zml",
         "//zml/tokenizer/iree",
