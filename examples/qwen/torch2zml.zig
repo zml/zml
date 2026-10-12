@@ -59,6 +59,9 @@ pub fn main(init: std.process.Init) !void {
         Wrapper{ .tblock = transformer_blocks_store.transformer_blocks[0], .args = compile_args },
         .{ .tblock = transformer_blocks_store.transformer_block_buffers[0], .args = compile_args_buffers },
     );
+
+    // const pipeline = block.Pipeline.init(allocator, io, platform);
+    // try pipeline.runOnce("Coucou la team, créé un personnage burger", .{ .seq_len = 16415 });
 }
 
 const Wrapper = struct {
