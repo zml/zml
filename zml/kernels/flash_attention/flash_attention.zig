@@ -78,9 +78,7 @@ pub const Metadata = union(Backend) {
         nki: void,
         metal: void,
 
-        pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
-            _ = seqlen; // autofix
-            _ = num_heads; // autofix
+        pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
                 .cute => .{ .cute = {} },
@@ -90,8 +88,7 @@ pub const Metadata = union(Backend) {
         }
     };
 
-    pub fn init(opts: InitOptions, mesh: *const zml.Sharding.Mesh) Metadata {
-        _ = mesh; // autofix
+    pub fn init(opts: InitOptions) Metadata {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
             .cute => .{ .cute = {} },
@@ -261,7 +258,7 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
             else => if (!backend.isAvailable(platform)) continue,
         }
 
-        const metadata: Metadata = .init(.fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)), platform.meshes.get("model").?);
+        const metadata: Metadata = .init(.fromBackend(backend));
         const parameters: Parameters = .init(.fromBackend(backend));
         const exe = try platform.compileFn(
             allocator,

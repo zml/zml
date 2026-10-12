@@ -34,7 +34,7 @@ pub const CompilationParameters = struct {
                 .hd = head_dim,
             }, mdl.model.embed_tokens.weight.dtype()), meshes.model),
             .rng = .init(),
-            .attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads)), meshes.model),
+            .attention_metadata = .init(.fromBackend(backend)),
             .prefill_attention_parameters = .init(.fromBackend(backend)),
             .decode_attention_parameters = .init(.fromBackend(backend)),
             .seqlen = seqlen,
