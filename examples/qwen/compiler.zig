@@ -1,7 +1,8 @@
 const zml = @import("zml");
 
 pub const CompileArgs = struct {
-    // sharding: *const zml.Sharding,
+    seq_len: usize,
+    num_attention_heads: usize,
     attention_metadata: zml.attention.Metadata,
     attention_parameters: zml.attention.Parameters,
 };
