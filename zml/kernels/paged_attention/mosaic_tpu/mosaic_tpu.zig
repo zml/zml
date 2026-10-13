@@ -154,12 +154,13 @@ pub const mosaic_tpu = struct {
             .{ q.dim(.hd), target_head_dim },
         );
         return q.pad(0, .{ .hd = zml.Tensor.Pad{ .high = target_head_dim - q.dim(.hd) } })
-            .withPartitioning(.model, .{ .h = .model });
+            .withPartitioning(q.shape()._sharding.mesh.?, .{ .h = q.shape().partition(.h) });
     }
 
     inline fn prepareInputs(parameters: Parameters, q: zml.Tensor, kv_pages: zml.Tensor) PreparedInputs {
-        const kv_pages_partitioned = kv_pages.withPartitioning(.model, .{ .hkv = .model });
-        const q_merged = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.model, .{ .h = .model });
+        const mesh = zml.Compiler.current().resolveMesh(.{.model});
+        const kv_pages_partitioned = kv_pages.withPartitioning(mesh, .{ .hkv = .model });
+        const q_merged = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(mesh, .{ .h = .model });
         const logical_head_dim: usize = @intCast(q_merged.dim(.hd));
         const cache_head_dim: usize = @intCast(kv_pages_partitioned.dim(.hd));
         stdx.debug.assert(
@@ -168,15 +169,15 @@ pub const mosaic_tpu = struct {
             .{ cache_head_dim, logical_head_dim },
         );
         const q_ragged = alignQueryHeadDimForKernel(q_merged, kv_pages_partitioned.dim(.hd));
-        const query_start_len = parameters.query_start_len.withPartitioning(.model, .{ .b = .replicated });
+        const query_start_len = parameters.query_start_len.withPartitioning(mesh, .{ .b = .replicated });
 
         return .{
             .q = q_ragged,
             .kv_pages = kv_pages_partitioned,
-            .seq_lens = parameters.seq_lens.withPartitioning(.model, .{ ._0 = .replicated }),
-            .block_table = parameters.block_table.withPartitioning(.model, .{ ._0 = .replicated, ._1 = .replicated }),
+            .seq_lens = parameters.seq_lens.withPartitioning(mesh, .{ ._0 = .replicated }),
+            .block_table = parameters.block_table.withPartitioning(mesh, .{ ._0 = .replicated, ._1 = .replicated }),
             .query_start_len = query_start_len,
-            .num_seqs = activeSequenceCount(query_start_len).withPartitioning(.model, .{ ._0 = .replicated }),
+            .num_seqs = activeSequenceCount(query_start_len).withPartitioning(mesh, .{ ._0 = .replicated }),
         };
     }
 
