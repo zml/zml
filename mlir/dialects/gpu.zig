@@ -38,11 +38,11 @@ pub const DimensionAttr = opaque {
         value: Dim,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirGPUDimensionAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirGPUDimensionAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) Dim {
-        return @enumFromInt(c.mlirGPUDimensionAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirGPUDimensionAttrGetValue(self.ptr())));
     }
 };
 
@@ -65,11 +65,11 @@ pub const ShuffleModeAttr = opaque {
         value: ShuffleMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirGPUShuffleModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirGPUShuffleModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) ShuffleMode {
-        return @enumFromInt(c.mlirGPUShuffleModeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirGPUShuffleModeAttrGetValue(self.ptr())));
     }
 };
 
@@ -174,17 +174,17 @@ test "gpu enum attributes are built through the C API" {
     const ctx = try mlir.Context.init(.{});
     defer ctx.deinit();
 
-    inline for (std.meta.fields(Dim)) |field| {
-        const value: Dim = @enumFromInt(field.value);
+    inline for (@typeInfo(Dim).@"enum".field_names) |name| {
+        const value: Dim = @field(Dim, name);
         const attr = try DimensionAttr.get(ctx, .{ .value = value });
         try std.testing.expectEqual(value, attr.getValue());
         try std.testing.expect(attr.attribute().isA(DimensionAttr) != null);
-        try expectPrints("#gpu.dim<" ++ field.name ++ ">", attr);
+        try expectPrints("#gpu.dim<" ++ name ++ ">", attr);
     }
-    inline for (std.meta.fields(ShuffleMode)) |field| {
-        const value: ShuffleMode = @enumFromInt(field.value);
+    inline for (@typeInfo(ShuffleMode).@"enum".field_names) |name| {
+        const value: ShuffleMode = @field(ShuffleMode, name);
         const attr = try ShuffleModeAttr.get(ctx, .{ .value = value });
         try std.testing.expectEqual(value, attr.getValue());
-        try expectPrints("#gpu.shuffle_mode<" ++ field.name ++ ">", attr);
+        try expectPrints("#gpu.shuffle_mode<" ++ name ++ ">", attr);
     }
 }

@@ -2861,7 +2861,7 @@ test {
     std.testing.refAllDecls(cuda);
     inline for (.{ nvvm, cuda }) |namespace| {
         inline for (comptime std.meta.declarations(namespace)) |decl| {
-            const T = @field(namespace, decl.name);
+            const T = @field(namespace, decl);
             if (@TypeOf(T) == type) std.testing.refAllDecls(T);
         }
     }
@@ -3071,17 +3071,17 @@ test "nvvm target rejects what the compiler rejects" {
 fn rebuildEnums(comptime T: type, ctx: *mlir.Context, value: *const T) !*const T {
     var args: T.InitArgs = undefined;
     var buffers: [4][16]u32 = undefined;
-    inline for (@typeInfo(T.InitArgs).@"struct".fields, 0..) |field, i| {
-        const name = [_]u8{comptime std.ascii.toUpper(field.name[0])} ++ field.name[1..];
-        const info = @typeInfo(field.type);
+    inline for (@typeInfo(T.InitArgs).@"struct".field_names, 0..) |field, i| {
+        const name = [_]u8{comptime std.ascii.toUpper(field[0])} ++ field[1..];
+        const info = @typeInfo(@FieldType(T.InitArgs, field));
         if (info == .pointer and info.pointer.size == .slice and @typeInfo(info.pointer.child) == .@"enum") {
             const E = info.pointer.child;
             const count = @field(T, "getNum" ++ name)(value);
             const elements: []E = @ptrCast(buffers[i][0..count]);
             for (elements, 0..) |*element, pos| element.* = @field(T, "get" ++ name[0 .. name.len - 1])(value, pos);
-            @field(args, field.name) = elements;
+            @field(args, field) = elements;
         } else {
-            @field(args, field.name) = @field(T, "get" ++ name)(value);
+            @field(args, field) = @field(T, "get" ++ name)(value);
         }
     }
     return T.get(ctx, args);

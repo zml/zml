@@ -60,11 +60,11 @@ pub const CombiningKindAttr = opaque {
         value: CombiningKind,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirVectorCombiningKindAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirVectorCombiningKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) CombiningKind {
-        return @enumFromInt(c.mlirVectorCombiningKindAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirVectorCombiningKindAttrGetValue(self.ptr())));
     }
 };
 
@@ -87,11 +87,11 @@ pub const IteratorTypeAttr = opaque {
         value: IteratorType,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirVectorIteratorTypeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirVectorIteratorTypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) IteratorType {
-        return @enumFromInt(c.mlirVectorIteratorTypeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirVectorIteratorTypeAttrGetValue(self.ptr())));
     }
 };
 
@@ -834,17 +834,17 @@ test "vector enum attributes are built through the C API" {
     const ctx = try mlir.Context.init(.{});
     defer ctx.deinit();
 
-    inline for (std.meta.fields(CombiningKind)) |field| {
-        const value: CombiningKind = @enumFromInt(field.value);
+    inline for (@typeInfo(CombiningKind).@"enum".field_names) |name| {
+        const value: CombiningKind = @field(CombiningKind, name);
         const attr = try CombiningKindAttr.get(ctx, .{ .value = value });
         try std.testing.expectEqual(value, attr.getValue());
         try std.testing.expect(value.attribute(ctx).isA(CombiningKindAttr) != null);
-        try expectPrints("#vector.kind<" ++ field.name ++ ">", attr);
+        try expectPrints("#vector.kind<" ++ name ++ ">", attr);
     }
-    inline for (std.meta.fields(IteratorType)) |field| {
-        const value: IteratorType = @enumFromInt(field.value);
+    inline for (@typeInfo(IteratorType).@"enum".field_names) |name| {
+        const value: IteratorType = @field(IteratorType, name);
         const attr = try IteratorTypeAttr.get(ctx, .{ .value = value });
         try std.testing.expectEqual(value, attr.getValue());
-        try expectPrints("#vector.iterator_type<" ++ field.name ++ ">", attr);
+        try expectPrints("#vector.iterator_type<" ++ name ++ ">", attr);
     }
 }

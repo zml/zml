@@ -158,11 +158,11 @@ pub const ReductionKindAttr = opaque {
         value: ReductionKind,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirTpuReductionKindAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirTpuReductionKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) ReductionKind {
-        return @enumFromInt(c.mlirTpuReductionKindAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirTpuReductionKindAttrGetValue(self.ptr())));
     }
 };
 
@@ -197,11 +197,11 @@ pub const ContractPrecisionAttr = opaque {
         value: ContractPrecision,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirTpuContractPrecisionAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirTpuContractPrecisionAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) ContractPrecision {
-        return @enumFromInt(c.mlirTpuContractPrecisionAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirTpuContractPrecisionAttrGetValue(self.ptr())));
     }
 };
 
@@ -235,11 +235,11 @@ pub const RoundingModeAttr = opaque {
         value: RoundingMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirTpuRoundingModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirTpuRoundingModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) RoundingMode {
-        return @enumFromInt(c.mlirTpuRoundingModeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirTpuRoundingModeAttrGetValue(self.ptr())));
     }
 };
 
@@ -274,11 +274,11 @@ pub const CoreTypeAttr = opaque {
         value: CoreType,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirTpuCoreTypeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirTpuCoreTypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) CoreType {
-        return @enumFromInt(c.mlirTpuCoreTypeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirTpuCoreTypeAttrGetValue(self.ptr())));
     }
 };
 
@@ -314,11 +314,11 @@ pub const DimensionSemanticsAttr = opaque {
         value: DimensionSemantics,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirTpuDimensionSemanticsAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirTpuDimensionSemanticsAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) DimensionSemantics {
-        return @enumFromInt(c.mlirTpuDimensionSemanticsAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirTpuDimensionSemanticsAttrGetValue(self.ptr())));
     }
 };
 
@@ -352,11 +352,11 @@ pub const PipelineModeAttr = opaque {
         value: PipelineMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirTpuPipelineModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirTpuPipelineModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) PipelineMode {
-        return @enumFromInt(c.mlirTpuPipelineModeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirTpuPipelineModeAttrGetValue(self.ptr())));
     }
 };
 
@@ -390,11 +390,11 @@ pub const RevisitModeAttr = opaque {
         value: RevisitMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirTpuRevisitModeAttrGet(ctx.ptr(), @intFromEnum(args.value));
+        const result = c.mlirTpuRevisitModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) RevisitMode {
-        return @enumFromInt(c.mlirTpuRevisitModeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirTpuRevisitModeAttrGetValue(self.ptr())));
     }
 };
 
@@ -435,16 +435,16 @@ pub const MemorySpaceAttr = opaque {
         coreType: ?CoreType = null,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const core_type: i64 = if (args.coreType) |ct| @intFromEnum(ct) else -1;
-        const result = c.mlirTpuMemorySpaceAttrGet(ctx.ptr(), @intFromEnum(args.value), core_type);
+        const core_type: i64 = if (args.coreType) |ct| @backingInt(ct) else -1;
+        const result = c.mlirTpuMemorySpaceAttrGet(ctx.ptr(), @backingInt(args.value), core_type);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getValue(self: *const Self) MemorySpace {
-        return @enumFromInt(c.mlirTpuMemorySpaceAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirTpuMemorySpaceAttrGetValue(self.ptr())));
     }
     pub fn getCoreType(self: *const Self) ?CoreType {
         const core_type = c.mlirTpuMemorySpaceAttrGetCoreType(self.ptr());
-        return if (core_type < 0) null else @enumFromInt(core_type);
+        return if (core_type < 0) null else @fromBackingInt(@intCast(core_type));
     }
 };
 
@@ -1682,13 +1682,13 @@ fn expectPrints(expected: []const u8, value: anytype) !void {
 
 fn expectEnumAttr(comptime Attr: type, ctx: *mlir.Context) !void {
     const Enum = @FieldType(Attr.InitArgs, "value");
-    inline for (std.meta.fields(Enum)) |field| {
-        const value: Enum = @enumFromInt(field.value);
+    inline for (@typeInfo(Enum).@"enum".field_names) |name| {
+        const value: Enum = @field(Enum, name);
         const attr = try Attr.get(ctx, .{ .value = value });
         try std.testing.expectEqual(value, attr.getValue());
         try std.testing.expect(attr.attribute().isA(Attr) != null);
         try std.testing.expect(value.attribute(ctx).eql(attr.attribute()));
-        try expectPrints("#tpu." ++ Attr.mnemonic ++ "<" ++ field.name ++ ">", attr);
+        try expectPrints("#tpu." ++ Attr.mnemonic ++ "<" ++ name ++ ">", attr);
     }
 }
 
