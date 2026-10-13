@@ -6,13 +6,32 @@ const block = @import("../blocks.zig");
 
 const TransformerStore = @This();
 
+// const TRANSFORMER_BLOCK_COUNT: usize = 32;
+const TRANSFORMER_BLOCK_COUNT: usize = 1;
+
 store: zml.io.TensorStore = undefined,
 registry: zml.safetensors.TensorRegistry = undefined,
 transformer_blocks: []block.TransformerBlock = undefined,
 transformer_block_buffers: []zml.Bufferized(block.TransformerBlock) = undefined,
 
-// const TRANSFORMER_BLOCK_COUNT: usize = 32;
-const TRANSFORMER_BLOCK_COUNT: usize = 1;
+// From transformer/diffusion_pytorch_model-XXXXX-of-00002.safetensors
+//  img_in.weight                                                        (4096, 64)            BF16
+//  modulation.1.weight                                                  (16384, 4096)         BF16
+//  time_text_embed.timestep_embedder.linear_1.weight                    (4096, 256)           BF16
+//  time_text_embed.timestep_embedder.linear_2.weight                    (4096, 4096)          BF16
+//  transformer_blocks.0.attn.norm_k.weight                              (128,)                BF16
+//  transformer_blocks.0.attn.norm_q.weight                              (128,)                BF16
+//  transformer_blocks.0.attn.to_k.weight                                (4096, 4096)          BF16
+//  transformer_blocks.0.attn.to_out.0.weight                            (4096, 4096)          BF16
+//  transformer_blocks.0.attn.to_q.weight                                (4096, 4096)          BF16
+//  transformer_blocks.0.attn.to_v.weight                                (4096, 4096)          BF16
+//  transformer_blocks.0.img_mlp.gate_layer.weight                       (12288, 4096)         BF16
+//  transformer_blocks.0.img_mlp.out.weight                              (4096, 12288)         BF16
+//  transformer_blocks.0.img_mlp.proj.weight                             (12288, 4096)         BF16
+//  txt_in.in_layer.weight                                               (4096, 4096)          BF16
+//  txt_in.out_layer.weight                                              (4096, 4096)          BF16
+//  norm_out.linear.weight                                               (4096, 4096)          BF16
+//  proj_out.weight                                                      (64, 4096)            BF16
 
 pub fn load(
     self: *TransformerStore,
