@@ -56,7 +56,6 @@ pub fn load(
 
         const attn_view = tb_layer_view.withPrefix("attn");
         const attn: block.Attn = .{
-            .seq_len = 16415,
             .num_attention_heads = 128,
             .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dim}, .replicated), null, .d),
             .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dim}, .replicated), null, .d),

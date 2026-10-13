@@ -5,8 +5,6 @@ const CompileArgs = @import("../../compiler.zig").CompileArgs;
 
 pub const Attn = @This();
 
-/// TODO: remove seq_len once it's computed
-seq_len: i64,
 num_attention_heads: i64,
 norm_k: RMSNorm,
 norm_q: RMSNorm,
