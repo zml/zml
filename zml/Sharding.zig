@@ -2038,6 +2038,78 @@ pub const Mesh = struct {
             }
             try writer.writeAll("\n");
         }
+
+        try writer.writeAll("Logical coordinates:\n");
+        var coords: [MAX_MESH_RANK]usize = @splat(0);
+        try self.formatLogicalCoordinates(writer, &coords, 0);
+    }
+
+    fn formatLogicalCoordinates(self: Mesh, writer: *std.Io.Writer, coords: *[MAX_MESH_RANK]usize, depth: usize) std.Io.Writer.Error!void {
+        const axes = self.logical.axes.constSlice();
+        if (axes.len == 0) return;
+        const last = axes.len - 1;
+        if (depth < last) {
+            const size: usize = @intCast(self.numPartitionsForLogicalAxis(axes[depth]));
+            for (0..size) |coord| {
+                coords[depth] = coord;
+                try writer.splatByteAll(' ', 2 + 4 * depth);
+                try writer.print("- {s}={d}", .{ axes[depth], coord });
+                if (depth + 1 < last) {
+                    try writer.writeAll("\n");
+                } else {
+                    try writer.writeAll(", ");
+                }
+                try self.formatLogicalCoordinates(writer, coords, depth + 1);
+            }
+            return;
+        }
+
+        if (last == 0) try writer.writeAll("  - ");
+        try writer.print("{s}=", .{axes[last]});
+        const size: usize = @intCast(self.numPartitionsForLogicalAxis(axes[last]));
+        for (0..size) |coord| {
+            if (coord > 0) try writer.writeAll(",");
+            try writer.print("{d}", .{coord});
+        }
+        try writer.writeAll(", dev=");
+        for (0..size) |coord| {
+            coords[last] = coord;
+            if (coord > 0) try writer.writeAll(",");
+            var count: usize = 0;
+            for (self.devicesInCanonicalOrder()) |device| {
+                if (self.matchesLogicalCoordinates(device, coords[0..axes.len])) count += 1;
+            }
+            // Keep replicas grouped so each entry corresponds to one last-axis coordinate.
+            if (count != 1) try writer.writeAll("[");
+            var written: usize = 0;
+            for (self.devicesInCanonicalOrder()) |device| {
+                if (!self.matchesLogicalCoordinates(device, coords[0..axes.len])) continue;
+                if (written > 0) try writer.writeAll(",");
+                try writer.print("{d}", .{device.id});
+                written += 1;
+            }
+            if (count != 1) try writer.writeAll("]");
+        }
+        try writer.writeAll("\n");
+    }
+
+    fn matchesLogicalCoordinates(self: Mesh, device: Device, coords: []const usize) bool {
+        for (coords, 0..) |expected, logical_axis| {
+            var coord: usize = 0;
+            var used: std.EnumSet(PhysicalAxisTag) = .empty;
+            for (self.binding(logical_axis)) |tag| {
+                const sources = self.foldSources(tag) orelse &.{tag};
+                for (sources) |source| {
+                    if (used.contains(source)) continue;
+                    used.insert(source);
+                    const info = self.physical.axisInfo(source) orelse continue;
+                    const depth = self.physical.axis_traversal.depth(source) orelse continue;
+                    coord = coord * @as(usize, @intCast(info.size)) + device.coords[depth];
+                }
+            }
+            if (coord != expected) return false;
+        }
+        return true;
     }
 };
 
