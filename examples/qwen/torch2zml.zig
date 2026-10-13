@@ -73,10 +73,10 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             platform,
-            "text_encoder.model.language_model.layers.0.mlp",
+            "text_encoder.model.language_model.layers.0.self_attn.k_norm",
             &activations_store.store,
-            TextWrapper{ .model = language_model_store.model.language_model.layers[0].mlp, .args = compile_args },
-            .{ .model = language_model_store.model_buffer.language_model.layers[0].mlp, .args = compile_args_buffers },
+            TextWrapper{ .model = language_model_store.model.language_model.layers[0].self_attn.k_norm, .args = compile_args },
+            .{ .model = language_model_store.model_buffer.language_model.layers[0].self_attn.k_norm, .args = compile_args_buffers },
         );
     } else {
         std.debug.print("NOTHING IS BEING TESTED\n", .{});
@@ -104,21 +104,15 @@ const BlockWrapper = struct {
 };
 
 const TextWrapper = struct {
-    model: block.Qwen3VLTextMLP,
+    model: block.Qwen3VLTextRMSNorm,
     args: CompileArgs,
 
     pub fn forward(
         self: TextWrapper,
         x: zml.Tensor,
-        modulation: zml.Tensor,
-        rotary_emb: zml.Tensor,
-        target_token_mask: zml.Tensor,
     ) zml.Tensor {
-        _ = self; // autofix
-        _ = modulation; // autofix
-        _ = rotary_emb; // autofix
-        _ = target_token_mask; // autofix
-        return x;
+        const tagged = x.withTags(.{ .bs, .seq_len, .h, .hd });
+        return self.model.forward(tagged);
     }
 };
 

@@ -6,7 +6,8 @@ const Qwen3VLTextRotaryEmbedding = @import("./Qwen3VLTextRotaryEmbedding.zig");
 
 const Qwen3VLTextModel = @This();
 
-pub const TEXT_DECODE_LAYER_COUNT = 36;
+// pub const TEXT_DECODE_LAYER_COUNT = 36;
+pub const TEXT_DECODE_LAYER_COUNT = 1;
 
 embedding: zml.nn.TokenEmbedding,
 layers: []Qwen3VLTextDecoderLayer,
