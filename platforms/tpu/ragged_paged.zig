@@ -160,6 +160,8 @@ fn createKvAsyncCopyDescriptors(
 ) void {
     const start_kv_page_idx = k.muli(kv_blk_idx, k.lift(@as(i32, @intCast(cfg.num_kv_pages_per_block))));
     const kv_at_seq = k.scalarLoad(a.kv_lens, &.{k.toIndex(seq_idx)});
+    // A zero-length sequence never enters kv_loop, so it cannot await a transfer.
+    var nonempty = k.openIf(k.cmpi(.sgt, kv_at_seq, k.lift(@as(i32, 0))));
     const end_kv_page_idx = k.minsi(
         k.divsi(k.addi(kv_at_seq, k.lift(@as(i32, @intCast(cfg.page_size - 1)))), k.lift(@as(i32, @intCast(cfg.page_size)))),
         k.lift(@as(i32, @intCast(cfg.pages_per_seq))),
@@ -182,6 +184,7 @@ fn createKvAsyncCopyDescriptors(
     const sem = k.memRefSqueeze(sem_slice, &.{});
 
     k.enqueueDma(src, dst, sem, .{});
+    nonempty.yieldThen(.{});
 }
 
 fn waitKvDma(
@@ -546,7 +549,11 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
     const q_len_end = k.addi(q_len_start, k.lift(@as(i32, @intCast(cfg.numQPerBlk()))));
 
     {
-        var i = k.openIf(k.cmpi(.eq, k.addi(a.heads_blk_idx, a.q_blk_idx), k.lift(@as(i32, 0))));
+        const is_first_block = k.cmpi(.eq, k.addi(a.heads_blk_idx, a.q_blk_idx), k.lift(@as(i32, 0)));
+        const has_queries = k.cmpi(.slt, q_len_start, k.scalarLoad(a.cu_q_lens, &.{k.toIndex(num_seqs)}));
+        const has_sequences = k.cmpi(.slt, init_seq_idx, num_seqs);
+        // The initial transfer is awaited inside q_loop; empty batches must not enqueue it.
+        var i = k.openIf(k.andi(is_first_block, k.andi(has_queries, has_sequences)));
         createKvAsyncCopyDescriptors(k, cfg, a, a.heads_blk_idx, init_seq_idx, k.lift(@as(i32, 0)), init_buf_idx);
         i.yieldThen(.{});
     }
@@ -573,6 +580,21 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
         const q_end = k.scalarLoad(a.cu_q_lens, &.{k.toIndex(k.addi(cur_seq_idx, k.lift(@as(i32, 1))))});
         const q_len = k.subi(q_end, q_start);
         const kv_len = k.scalarLoad(a.kv_lens, &.{k.toIndex(cur_seq_idx)});
+
+        {
+            var empty = k.openIf(k.cmpi(.eq, kv_len, k.lift(@as(i32, 0))));
+            // Inactive drafter rows can retain query positions but have no KV.
+            // Zero their output and keep the prefetch pipeline moving to the next sequence.
+            maskedStoreAcc(k, a.acc_ref, k.zeros(&.{ cfg.numQPerBlk(), cfg.numQHeadsPerBlk(), cfg.head_dim }, .f32), k.cIndex(0), k.subi(q_start, q_len_start), k.subi(q_end, q_len_start));
+            const next_seq_raw = k.select(k.cmpi(.sle, q_end, q_len_end), k.addi(cur_seq_idx, k.lift(@as(i32, 1))), cur_seq_idx);
+            const is_last_seq = k.cmpi(.eq, next_seq_raw, num_seqs);
+            const next_seq = k.select(is_last_seq, k.lift(@as(i32, 0)), next_seq_raw);
+            const next_head = k.select(is_last_seq, k.addi(a.heads_blk_idx, k.lift(@as(i32, 1))), a.heads_blk_idx);
+            var prefetch = k.openIf(k.cmpi(.slt, next_head, k.lift(@as(i32, @intCast(cfg.numHeadsBlks())))));
+            createKvAsyncCopyDescriptors(k, cfg, a, next_head, next_seq, k.lift(@as(i32, 0)), cur_buf_idx);
+            prefetch.yieldThen(.{});
+            empty.yieldThen(.{});
+        }
 
         var kv_loop = k.openWhile(.{ k.lift(@as(i32, 0)), cur_buf_idx }, .{ k.scalarTy(.i32), k.scalarTy(.i32) });
         {
