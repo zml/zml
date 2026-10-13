@@ -33,8 +33,8 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     defer allocator.free(root);
 
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try setEnv("XLA_FURIOSA_SDK_ROOT", try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{root}), 1);
-    try setEnv("XLA_FURIOSA_VISIBLE_DEVICES", "0", 0);
+    try setEnv("FURIOSA_SDK_ROOT", try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{root}), 1);
+    try setEnv("FURIOSA_VISIBLE_DEVICES", "0", 0);
 
     const library = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ root, "lib", "libzml_furiosa.so" });
     log.info("Loading Furiosa plugin: {s}", .{library});
