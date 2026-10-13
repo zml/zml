@@ -21,7 +21,8 @@ _uucode_repo = repository_rule(
 def repo():
     _uucode_repo(
         name = "uucode",
-        commit = "f1c687f09174f9f11eda14d3e3ce497d68ab09a6",
+        # main branch
+        commit = "1fb73433bba5d93366c57f23ff2e9d7939746500",
         build_config = "//third_party/uucode:build_config.zig",
         build_file = "//third_party/uucode:uucode.bazel",
         config_storage_patch = "//third_party/uucode:config-storage-module.patch",

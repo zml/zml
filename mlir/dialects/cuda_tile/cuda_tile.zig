@@ -506,16 +506,16 @@ pub const OptimizationHintsAttr = opaque {
 /// The hint dictionary of one architecture: the non-null fields of `hint`
 /// but `arch`, integers as `i64` like the textual form.
 fn hintDictionary(ctx: *mlir.Context, hint: anytype) *const mlir.Attribute {
-    const fields = @typeInfo(@TypeOf(hint)).@"struct".fields;
-    var entries: stdx.BoundedArray(mlir.NamedAttribute, fields.len) = .empty;
-    inline for (fields) |f| {
-        if (comptime std.mem.eql(u8, f.name, "arch")) continue;
-        if (@field(hint, f.name)) |v| {
+    const field_names = @typeInfo(@TypeOf(hint)).@"struct".field_names;
+    var entries: stdx.BoundedArray(mlir.NamedAttribute, field_names.len) = .empty;
+    inline for (field_names) |field_name| {
+        if (comptime std.mem.eql(u8, field_name, "arch")) continue;
+        if (@field(hint, field_name)) |v| {
             const value: *const mlir.Attribute = switch (@TypeOf(v)) {
                 bool => .boolean(ctx, v),
                 else => .int(ctx, .i64, v),
             };
-            entries.appendAssumeCapacity(.named(ctx, f.name, value));
+            entries.appendAssumeCapacity(.named(ctx, field_name, value));
         }
     }
     return .dict(ctx, entries.constSlice());

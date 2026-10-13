@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const stdx = @import("stdx");
+
 const floats = @import("floats.zig");
 
 const C64 = std.math.Complex(f32);
@@ -139,8 +141,9 @@ pub const DataType = enum(u8) {
     pub fn toPackedZigType(comptime dtype: DataType) type {
         return switch (dtype) {
             .bool => bool,
-            .i2, .i4, .u2, .u4 => |dt| @Vector(8 / dt.bitSizeOf(), @FieldType(Value, @tagName(dtype))),
+            .i2, .i4, .u2, .u4 => |dt| stdx.Packed(@FieldType(Value, @tagName(dt))),
             .f4e2m1 => floats.Float4E2M1.Packed,
+            inline .c64, .c128 => |dt| @FieldType(Value, @tagName(dt)),
             else => {
                 const T = @FieldType(Value, @tagName(dtype));
                 if (@bitSizeOf(T) < 8) @compileLog("Forgot type !", T);
@@ -165,6 +168,8 @@ pub const DataType = enum(u8) {
     pub fn bitSizeOf(self: DataType) u16 {
         return switch (self) {
             .bool => 8, // In PJRT/stablehlo bool always occupy a full byte
+            .c64 => 64,
+            .c128 => 128,
             inline else => |tag| @bitSizeOf(tag.toZigType()),
         };
     }

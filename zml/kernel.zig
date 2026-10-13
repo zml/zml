@@ -50,10 +50,10 @@ fn resolveOutputOperandAliases(
     var out: stdx.BoundedArray(dialects.stablehlo.CustomCallOpts.OutputOperandAlias, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
 
     if (aliases_opt) |a| {
-        inline for (@typeInfo(@TypeOf(a)).@"struct".fields, 0..) |field, output_index| {
-            if (@field(a, field.name)) |operand| out.appendAssumeCapacity(.{
+        inline for (@typeInfo(@TypeOf(a)).@"struct".field_names, 0..) |field_name, output_index| {
+            if (@field(a, field_name)) |operand| out.appendAssumeCapacity(.{
                 .output_index = @intCast(output_index),
-                .operand_index = @as(i64, @intCast(@intFromEnum(operand))) + operand_offset,
+                .operand_index = @as(i64, @intCast(@backingInt(operand))) + operand_offset,
             });
         }
     }
@@ -832,7 +832,7 @@ pub const fly = struct {
 
             /// `zeroed_args` index of an output.
             pub fn zeroedOutput(comptime f: std.meta.FieldEnum(Outputs)) i32 {
-                return @intCast(spec.inputs.len + @intFromEnum(f));
+                return @intCast(spec.inputs.len + @backingInt(f));
             }
 
             /// `shapes` is inputs, then outputs.

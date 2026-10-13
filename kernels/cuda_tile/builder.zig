@@ -84,8 +84,8 @@ pub const Value = struct {
 
     pub fn isFloatElem(self: Value) bool {
         const et = self.elemType();
-        inline for (std.meta.fields(mlir.FloatTypes)) |f| {
-            if (et.isA(mlir.FloatType(@field(mlir.FloatTypes, f.name))) != null) return true;
+        inline for (comptime std.meta.fieldNames(mlir.FloatTypes)) |f_name| {
+            if (et.isA(mlir.FloatType(@field(mlir.FloatTypes, f_name))) != null) return true;
         }
         return false;
     }
@@ -509,13 +509,13 @@ pub const Builder = struct {
 
     pub fn declareArgsOpts(self: *Builder, spec: anytype, opts: Opts) !dsl.NamedArgs(@TypeOf(spec), Value) {
         const Spec = @TypeOf(spec);
-        const fields = @typeInfo(Spec).@"struct".fields;
+        const field_names = @typeInfo(Spec).@"struct".field_names;
 
-        var arg_specs: [fields.len]ArgSpec = undefined;
-        inline for (fields, 0..) |f, i| {
-            const raw = @field(spec, f.name);
+        var arg_specs: [field_names.len]ArgSpec = undefined;
+        inline for (0.., field_names) |i, field_name| {
+            const raw = @field(spec, field_name);
             const kind: ArgSpec.Kind = if (@TypeOf(raw) == ArgSpec.Kind) raw else blk: {
-                const variant = @typeInfo(@TypeOf(raw)).@"struct".fields[0].name;
+                const variant = @typeInfo(@TypeOf(raw)).@"struct".field_names[0];
                 const tag = @field(std.meta.Tag(ArgSpec.Kind), variant);
                 const inner = @field(raw, variant);
                 break :blk switch (tag) {
@@ -526,14 +526,14 @@ pub const Builder = struct {
                     } },
                 };
             };
-            arg_specs[i] = .{ .name = f.name, .kind = kind };
+            arg_specs[i] = .{ .name = field_name, .kind = kind };
         }
 
         try self.declareArgsLowOpts(&arg_specs, opts);
 
         var named: dsl.NamedArgs(Spec, Value) = undefined;
-        inline for (fields, 0..) |f, i| {
-            @field(named, f.name) = self.arg(i);
+        inline for (0.., field_names) |i, field_name| {
+            @field(named, field_name) = self.arg(i);
         }
         return named;
     }
@@ -643,12 +643,12 @@ pub const Builder = struct {
         const info = @typeInfo(T);
         if (info != .@"struct" or !info.@"struct".is_tuple)
             @compileError("Builder.yield expects a tuple literal like `.{ v1, v2 }`");
-        const n = info.@"struct".fields.len;
+        const n = info.@"struct".field_names.len;
         const out = self.arena.allocator().alloc(Value, n) catch @panic("Builder.yield OOM");
-        inline for (info.@"struct".fields, 0..) |f, i| {
-            if (f.type != Value)
-                @compileError("Builder.yield: every tuple element must be a Value; got " ++ @typeName(f.type));
-            out[i] = @field(values, f.name);
+        inline for (info.@"struct".field_names, 0..) |f, i| {
+            if (@FieldType(T, f) != Value)
+                @compileError("Builder.yield: every tuple element must be a Value; got " ++ @typeName(@FieldType(T, f)));
+            out[i] = @field(values, f);
         }
         return out;
     }
@@ -1633,7 +1633,7 @@ pub const Builder = struct {
         inits: anytype,
     ) ForScope(tupleArity(@TypeOf(inits), "openFor: inits")) {
         const N = comptime tupleArity(@TypeOf(inits), "openFor: inits");
-        const fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
 
         // Literals take the type of the first bound that is a Value; all
         // three must agree (`AllTypesMatch` on the op).
@@ -1651,8 +1651,8 @@ pub const Builder = struct {
         block_locs[0] = self.loc();
         var inits_inner: [N]*const mlir.Value = undefined;
         inline for (fields, 0..) |f, i| {
-            const raw = @field(inits, f.name);
-            const v: Value = if (f.type == Value) raw else self.lift(raw);
+            const raw = @field(inits, f);
+            const v: Value = if (@FieldType(@TypeOf(inits), f) == Value) raw else self.lift(raw);
             block_types[i + 1] = v.type_();
             block_locs[i + 1] = self.loc();
             inits_inner[i] = v.inner;
@@ -1692,13 +1692,13 @@ pub const Builder = struct {
         result_types: anytype,
     ) IfScope(tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
         const N = comptime tupleArity(@TypeOf(result_types), "openIfElse: result_types");
-        const fields = @typeInfo(@TypeOf(result_types)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(result_types)).@"struct".field_names;
 
         var types: [N]*const mlir.Type = undefined;
         inline for (fields, 0..) |f, i| {
-            if (f.type != *const mlir.Type)
+            if (@FieldType(@TypeOf(result_types), f) != *const mlir.Type)
                 @compileError("openIfElse: every result_type must be *const mlir.Type (use b.scalarTy/tileTy)");
-            types[i] = @field(result_types, f.name);
+            types[i] = @field(result_types, f);
         }
 
         const then_block = mlir.Block.init(&.{}, &.{});
@@ -1718,14 +1718,14 @@ pub const Builder = struct {
     /// inside an `if`, and close the body with `scope.yield`.
     pub fn openLoop(self: *Builder, inits: anytype) LoopScope(tupleArity(@TypeOf(inits), "openLoop: inits")) {
         const N = comptime tupleArity(@TypeOf(inits), "openLoop: inits");
-        const fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
 
         var block_types: [N]*const mlir.Type = undefined;
         var block_locs: [N]*const mlir.Location = undefined;
         var inits_inner: [N]*const mlir.Value = undefined;
         inline for (fields, 0..) |f, i| {
-            const raw = @field(inits, f.name);
-            const v: Value = if (f.type == Value) raw else self.lift(raw);
+            const raw = @field(inits, f);
+            const v: Value = if (@FieldType(@TypeOf(inits), f) == Value) raw else self.lift(raw);
             block_types[i] = v.type_();
             block_locs[i] = self.loc();
             inits_inner[i] = v.inner;
@@ -1769,7 +1769,7 @@ pub const Builder = struct {
 
         try al.writer.print("{f}", .{self.module.operation()});
 
-        return try self.allocator.dupeZ(u8, al.written());
+        return try self.allocator.dupeSentinel(u8, al.written(), 0);
     }
 };
 
@@ -1799,12 +1799,12 @@ test "empty entry round-trips" {
     const ir = try b.finish(&.{});
     defer std.testing.allocator.free(ir);
 
-    try std.testing.expect(std.mem.indexOf(u8, ir, "cuda_tile.module @empty") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "entry @empty(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "assume") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "div_by<16>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "cuda_tile.entry") == null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "return") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "cuda_tile.module @empty") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "entry @empty(") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "assume") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "div_by<16>") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "cuda_tile.entry") == null);
+    try std.testing.expect(std.mem.find(u8, ir, "return") != null);
     try expectRoundTrip(ctx, ir);
 }
 
@@ -1827,14 +1827,14 @@ test "add_one over pointer tiles matches the XLA milestone kernel" {
     const ir = try b.finish(&.{});
     defer std.testing.allocator.free(ir);
 
-    try std.testing.expect(std.mem.indexOf(u8, ir, "iota : tile<128xi32>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "reshape") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "broadcast") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "offset") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "load_ptr_tko weak") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "addf") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "store_ptr_tko weak") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "token = ") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "iota : tile<128xi32>") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "reshape") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "broadcast") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "offset") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "load_ptr_tko weak") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "addf") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "store_ptr_tko weak") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "token = ") != null);
     try expectRoundTrip(ctx, ir);
 }
 
@@ -1866,13 +1866,13 @@ test "vector_add over partition views" {
     const ir = try b.finish(&.{});
     defer std.testing.allocator.free(ir);
 
-    try std.testing.expect(std.mem.indexOf(u8, ir, "optimization_hints=<sm_120 = {num_worker_warps_per_cta = 4}>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "make_tensor_view") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "partition_view<tile=(64x64), padding_value = zero") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "get_tile_block_id") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "load_view_tko weak") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "rounding<nearest_even>") != null or std.mem.indexOf(u8, ir, "addf") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "store_view_tko weak") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "optimization_hints=<sm_120 = {num_worker_warps_per_cta = 4}>") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "make_tensor_view") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "partition_view<tile=(64x64), padding_value = zero") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "get_tile_block_id") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "load_view_tko weak") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "rounding<nearest_even>") != null or std.mem.find(u8, ir, "addf") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "store_view_tko weak") != null);
     try expectRoundTrip(ctx, ir);
 }
 
@@ -1907,10 +1907,10 @@ test "gemm with a for loop and mmaf" {
     const ir = try b.finish(&.{});
     defer std.testing.allocator.free(ir);
 
-    try std.testing.expect(std.mem.indexOf(u8, ir, "for ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "iter_values") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "mmaf") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "continue ") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "for ") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "iter_values") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "mmaf") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "continue ") != null);
     try expectRoundTrip(ctx, ir);
 }
 
@@ -1997,14 +1997,14 @@ test "if, if-else, loop with break, reduce, scan, cast, select" {
     const ir = try b.finish(&.{});
     defer std.testing.allocator.free(ir);
 
-    try std.testing.expect(std.mem.indexOf(u8, ir, "reduce ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "scan ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "ftoi") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "itof") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "select") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "loop ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "break ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "yield") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "reduce ") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "scan ") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "ftoi") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "itof") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "select") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "loop ") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "break ") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "yield") != null);
     try expectRoundTrip(ctx, ir);
 }
 
@@ -2055,20 +2055,20 @@ test "atomics, print, globals, alloca, dynamic views, strided view, tokens" {
     const ir = try b.finish(&.{});
     defer std.testing.allocator.free(ir);
 
-    try std.testing.expect(std.mem.indexOf(u8, ir, "global @lut") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "get_global @lut") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "tensor_view<?x64xf32") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "get_tensor_shape") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "get_index_space_shape") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "strided_view") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "allow_tma = true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "print_tko") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "atomic_rmw_tko") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "atomic_cas_tko") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "atomic_red_view_tko") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "join_tokens") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "alloca") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "gather_scatter_view") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "global @lut") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "get_global @lut") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "tensor_view<?x64xf32") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "get_tensor_shape") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "get_index_space_shape") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "strided_view") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "allow_tma = true") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "print_tko") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "atomic_rmw_tko") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "atomic_cas_tko") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "atomic_red_view_tko") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "join_tokens") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "alloca") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "gather_scatter_view") != null);
     try expectRoundTrip(ctx, ir);
 }
 
@@ -2192,6 +2192,6 @@ test "every remaining elementwise op verifies" {
 
     const ir = try b.finish(&.{});
     defer std.testing.allocator.free(ir);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "rounding<zero>") != null);
+    try std.testing.expect(std.mem.find(u8, ir, "rounding<zero>") != null);
     try expectRoundTrip(ctx, ir);
 }
