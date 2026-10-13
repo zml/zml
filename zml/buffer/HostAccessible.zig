@@ -1830,7 +1830,7 @@ test "HostAccessible devices holding a shard read one allocation in data-paralle
     const io = std.testing.io;
     // Two data-parallel groups of two tensor-parallel devices.
     const platform = Platform.auto(allocator, io, .{
-        .physical_mesh = .{ .custom = buildMesh2x2 },
+        .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
         .cpu = .{ .device_count = 4 },
     }) catch return error.SkipZigTest;
     defer platform.deinit(allocator, io);
@@ -1874,28 +1874,6 @@ fn expectDevicesReadShards(platform: *const Platform, shape_: Shape) !void {
         const first_row = Coordinates.ofShard(&placement, device).axes[0];
         for (values, 0..) |value, i| try std.testing.expectEqual(@as(i32, @intCast(first_row * row_size + i)), value);
     }
-}
-
-/// Like `zml/io.zig`'s, a 2x2 torus over the first four devices.
-fn buildMesh2x2(
-    allocator: std.mem.Allocator,
-    target: @import("../platform.zig").Target,
-    devices: []const @import("../platform.zig").Device,
-) !Sharding.PhysicalMesh {
-    if (!builtin.is_test) @compileError("buildMesh2x2 is only available in tests");
-
-    if (devices.len < 4) return error.NotEnoughDevices;
-    const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .device(devices[0]),
-            .device(devices[1]),
-        }),
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .device(devices[2]),
-            .device(devices[3]),
-        }),
-    });
-    return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
 }
 
 test "HostAccessible executions read shared inputs on every device" {

@@ -738,6 +738,89 @@ pub const PhysicalMesh = struct {
         return mesh;
     }
 
+    pub fn torus1d(
+        allocator: std.mem.Allocator,
+        target: Target,
+        devices: []const PlatformDevice,
+    ) !Sharding.PhysicalMesh {
+        const nodes = try allocator.alloc(PhysicalNode, devices.len);
+        for (nodes, devices) |*node, device| {
+            node.* = .device(device);
+        }
+
+        return .fromOwnedTree(allocator, target, .axis(.link_x, .{ .mesh = .torus }, nodes));
+    }
+
+    pub fn torus2d(
+        allocator: std.mem.Allocator,
+        target: Target,
+        devices: []const PlatformDevice,
+    ) !Sharding.PhysicalMesh {
+        // Find the best split: 4 -> 2x2, 6 -> 2x3, 8 -> 2x4
+        var link_x: usize = 1;
+        var link_y: usize = devices.len;
+        if (devices.len < 2) return error.NotEnoughDevices;
+
+        for (2..devices.len) |i| {
+            if (@mod(devices.len, i) != 0) continue;
+            const j = @divExact(devices.len, i);
+            if (i <= j) {
+                link_x = i;
+                link_y = j;
+            } else break;
+        }
+
+        // This only happen if number of devices is 1 or a prime number
+        if (link_x == 1) return error.NotEnoughDevices;
+
+        const x_axes = try allocator.alloc(PhysicalNode, link_x);
+        var device_queue = devices;
+        for (x_axes) |*x_ax| {
+            const y_devices = try allocator.alloc(PhysicalNode, link_y);
+            for (y_devices) |*y_dev| {
+                y_dev.* = .device(device_queue[0]);
+                device_queue = device_queue[1..];
+            }
+
+            x_ax.* = .axis(.link_y, .{ .mesh = .torus }, y_devices);
+        }
+
+        return .fromOwnedTree(allocator, target, .axis(.link_x, .{ .mesh = .torus }, x_axes));
+    }
+
+    pub fn torus3d(
+        allocator: std.mem.Allocator,
+        target: Target,
+        devices: []const PlatformDevice,
+    ) !Sharding.PhysicalMesh {
+        if (devices.len < 8) return error.NotEnoughDevices;
+        if (devices.len > 8) @panic("TODO: adapt logic from torus2D");
+        const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+            .axis(.link_y, .{ .mesh = .torus }, &.{
+                .axis(.link_z, .{ .mesh = .torus }, &.{
+                    .device(devices[0]),
+                    .device(devices[1]),
+                }),
+                .axis(.link_z, .{ .mesh = .torus }, &.{
+                    .device(devices[2]),
+                    .device(devices[3]),
+                }),
+            }),
+            .axis(.link_y, .{ .mesh = .torus }, &.{
+                .axis(.link_z, .{ .mesh = .torus }, &.{
+                    .device(devices[4]),
+                    .device(devices[5]),
+                }),
+                .axis(.link_z, .{ .mesh = .torus }, &.{
+                    .device(devices[6]),
+                    .device(devices[7]),
+                }),
+            }),
+        });
+
+        return .fromTree(allocator, target, topology);
+    }
+
     fn populateDevicesInCanonicalOrder(self: *PhysicalMesh, allocator: std.mem.Allocator) !void {
         var devices_: std.ArrayList(Device) = .empty;
         errdefer devices_.deinit(allocator);
