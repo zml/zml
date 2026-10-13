@@ -1787,7 +1787,17 @@ pub const GatedDeltaNet = struct {
             .outputs = .zeroes(values.shape()),
         };
         validateInitialState(gdn, state);
-        const final_state = ops.@"while"(GatedDeltaNet, gdn, state);
+
+        const final_state = if (queries.dim(.s) == 1) blk: {
+            // avoids a `stablehlo.while`, which costs a host sync per call on GPU.
+            const next = gdn.body(state);
+            const run = gdn.cond(state);
+            break :blk GatedDeltaNet.State{
+                .s = run.broad(state.s.shape()).select(next.s, state.s),
+                .outputs = run.broad(state.outputs.shape()).select(next.outputs, state.outputs),
+                .step = run.select(next.step, state.step),
+            };
+        } else ops.@"while"(GatedDeltaNet, gdn, state);
 
         return .{
             .outputs = final_state.outputs,
