@@ -524,7 +524,7 @@ fn hintDictionary(ctx: *mlir.Context, hint: anytype) *const mlir.Attribute {
 /// `#cuda_tile.optimization_hints` from a slice of `EntryHint`,
 /// `LoadStoreHint` or `PtrLoadStoreHint`.
 pub fn optimizationHints(ctx: *mlir.Context, hints: anytype) *const mlir.Attribute {
-    var entries: stdx.BoundedArray(mlir.NamedAttribute, @typeInfo(Arch).@"enum".fields.len) = .empty;
+    var entries: stdx.BoundedArray(mlir.NamedAttribute, std.meta.fieldNames(Arch).len) = .empty;
     for (hints) |h| entries.appendAssumeCapacity(.named(ctx, @tagName(h.arch), hintDictionary(ctx, h)));
     const value: *const mlir.DictionaryAttribute = @ptrCast(mlir.Attribute.dict(ctx, entries.constSlice()));
     const attr = OptimizationHintsAttr.get(ctx, .{ .value = value }) catch
@@ -1430,7 +1430,7 @@ pub fn load_view_tko(ctx: *mlir.Context, view: *const mlir.Value, index: []const
     segs.add(tok.slice());
     var attrs = memAttrs(ctx, opts);
     // Preserve bounds checks unless the caller has proved a coordinate in bounds.
-    const inbounds = [_]i32{0} ** mlir.ShapedType.MAX_RANK;
+    const inbounds: [mlir.ShapedType.MAX_RANK]i32 = @splat(0);
     attrs.appendAssumeCapacity(.named(ctx, "inbounds", .denseArray(ctx, .bool, inbounds[0..index.len])));
     attrs.appendAssumeCapacity(segs.attr(ctx));
     return mlir.Operation.make(ctx, opName("load_view_tko"), .{
@@ -1450,7 +1450,7 @@ pub fn store_view_tko(ctx: *mlir.Context, tile: *const mlir.Value, view: *const 
     segs.add(index);
     segs.add(tok.slice());
     var attrs = memAttrs(ctx, opts);
-    const inbounds = [_]i32{0} ** mlir.ShapedType.MAX_RANK;
+    const inbounds: [mlir.ShapedType.MAX_RANK]i32 = @splat(0);
     attrs.appendAssumeCapacity(.named(ctx, "inbounds", .denseArray(ctx, .bool, inbounds[0..index.len])));
     attrs.appendAssumeCapacity(segs.attr(ctx));
     return mlir.Operation.make(ctx, opName("store_view_tko"), .{

@@ -119,8 +119,8 @@ fn run(b: *B, cfg: Config) cute.FinishError!void {
     unreachable;
 }
 
-fn tupleOf(array: anytype) std.meta.Tuple(&([_]type{Value} ** array.len)) {
-    var result: std.meta.Tuple(&([_]type{Value} ** array.len)) = undefined;
+fn tupleOf(array: anytype) @Tuple(&@as([array.len]type, @splat(Value))) {
+    var result: @Tuple(&@as([array.len]type, @splat(Value))) = undefined;
     inline for (0..array.len) |i| result[i] = array[i];
     return result;
 }
