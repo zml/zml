@@ -1,0 +1,36 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig/zls:toolchain.bzl", "zls_toolchain")
+
+exports_files(glob(["*.bazel"]))
+
+zig_library(
+    name = "build_options",
+    main = "build_options.zig",
+    visibility = ["@zls//:__pkg__"],
+)
+
+zig_library(
+    name = "exe_options",
+    main = "exe_options.zig",
+    visibility = ["@zls//:__pkg__"],
+)
+
+zig_library(
+    name = "tracy_options",
+    import_name = "options",
+    main = "tracy_options.zig",
+    visibility = ["@zls//:__pkg__"],
+)
+
+zls_toolchain(
+    name = "zls",
+    bin = "@zls//:zls",
+    zls_version = "0.17.0-dev+eab2be0fd744",
+)
+
+toolchain(
+    name = "toolchain",
+    target_settings = ["@zig_toolchains//:0.17.0"],
+    toolchain = ":zls",
+    toolchain_type = "@rules_zig//zig/zls:toolchain_type",
+)

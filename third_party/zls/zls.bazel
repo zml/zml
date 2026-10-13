@@ -1,0 +1,53 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+zig_binary(
+    name = "config_gen",
+    extra_srcs = ["src/tools/config.json"],
+    main = "src/tools/config_gen.zig",
+)
+
+genrule(
+    name = "generate_version_data",
+    srcs = ["src/tools/langref.html.in"],
+    outs = ["version_data.zig"],
+    cmd = "$(location :config_gen) --langref-version master --langref-path $(<) --generate-version-data $(@)",
+    tools = [":config_gen"],
+)
+
+zig_library(
+    name = "version_data",
+    main = ":version_data.zig",
+)
+
+zig_library(
+    name = "tracy",
+    main = "src/tracy.zig",
+    deps = ["@zml//third_party/zls:tracy_options"],
+)
+
+zig_library(
+    name = "zls_lib",
+    srcs = glob(["src/**/*.zig"]),
+    import_name = "zls",
+    main = "src/zls.zig",
+    deps = [
+        ":tracy",
+        ":version_data",
+        "@zls_diffz//:diffz",
+        "@zls_lsp//:lsp",
+        "@zml//third_party/zls:build_options",
+    ],
+)
+
+zig_binary(
+    name = "zls",
+    srcs = glob(["src/**/*.zig"]),
+    main = "src/main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tracy",
+        ":zls_lib",
+        "@zls_known_folders//:known-folders",
+        "@zml//third_party/zls:exe_options",
+    ],
+)

@@ -1,0 +1,51 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+# @embedFile resolves a module's root file without parsing it as Zig.
+genrule(
+    name = "meta_model_source",
+    srcs = ["metaModel.json"],
+    outs = ["meta_model.zig"],
+    cmd = "cp $(<) $(@)",
+)
+
+zig_library(
+    name = "meta-model",
+    main = ":meta_model.zig",
+)
+
+zig_binary(
+    name = "codegen",
+    srcs = glob(["src/codegen/*.zig"]),
+    extra_srcs = ["src/codegen/config.zon"],
+    main = "src/codegen/codegen.zig",
+    deps = [":meta-model"],
+)
+
+genrule(
+    name = "generate_types",
+    outs = ["lsp_types.zig"],
+    cmd = "$(location :codegen) $(@)",
+    tools = [":codegen"],
+)
+
+zig_library(
+    name = "parser",
+    main = "src/parser.zig",
+)
+
+zig_library(
+    name = "types",
+    main = ":lsp_types.zig",
+    deps = [":parser"],
+)
+
+zig_library(
+    name = "lsp",
+    srcs = glob(["src/*.zig"]),
+    main = "src/lsp.zig",
+    visibility = ["@zls//:__pkg__"],
+    deps = [
+        ":parser",
+        ":types",
+    ],
+)

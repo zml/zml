@@ -1,0 +1,8 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "known-folders",
+    srcs = glob(["**/*.zig"]),
+    main = "known-folders.zig",
+    visibility = ["@zls//:__pkg__"],
+)
