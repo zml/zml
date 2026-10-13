@@ -26,15 +26,9 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
-    var transformer_blocks_store: store.TransformerStore = undefined;
-    try transformer_blocks_store.load(allocator, io, platform, cli_args.folder);
-    defer transformer_blocks_store.deinit(allocator);
-
     var activations_store: store.ActivationStore = undefined;
     try activations_store.load(allocator, io, cli_args.activations);
     defer activations_store.deinit();
-
-    std.debug.print("\n\nStarting testing\n\n", .{});
 
     const model_sharding = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth }));
     const backend = zml.attention.Backend.auto(platform);
@@ -52,26 +46,53 @@ pub fn main(init: std.process.Init) !void {
         .attention_metadata = try attention_metadata.initBuffer(io, platform, model_sharding),
     };
 
-    try testing.testLayer(
-        allocator,
-        io,
-        platform,
-        "transformer.transformer_blocks.0",
-        &activations_store.store,
-        Wrapper{ .tblock = transformer_blocks_store.transformer_blocks[0], .args = compile_args },
-        .{ .tblock = transformer_blocks_store.transformer_block_buffers[0], .args = compile_args_buffers },
-    );
+    if (std.mem.containsAtLeast(u8, cli_args.activations, 1, "block.")) {
+        std.debug.print("\n\nStarting testing > TransformerBlock\n\n", .{});
+
+        var transformer_blocks_store: store.TransformerStore = undefined;
+        try transformer_blocks_store.load(allocator, io, platform, cli_args.folder);
+        defer transformer_blocks_store.deinit(allocator);
+
+        try testing.testLayer(
+            allocator,
+            io,
+            platform,
+            "transformer.transformer_blocks.0",
+            &activations_store.store,
+            BlockWrapper{ .tblock = transformer_blocks_store.transformer_blocks[0], .args = compile_args },
+            .{ .tblock = transformer_blocks_store.transformer_block_buffers[0], .args = compile_args_buffers },
+        );
+    } else if (std.mem.containsAtLeast(u8, cli_args.activations, 1, "text.")) {
+        std.debug.print("\n\nStarting testing > LanguageModel\n\n", .{});
+
+        var language_model_store: store.LanguageModelStore = undefined;
+        try language_model_store.load(allocator, io, platform, cli_args.folder);
+        defer language_model_store.deinit(allocator);
+
+        try testing.testLayer(
+            allocator,
+            io,
+            platform,
+            "text_encoder.model.language_model.layers.0.mlp",
+            &activations_store.store,
+            TextWrapper{ .model = language_model_store.model.language_model.layers[0].mlp, .args = compile_args },
+            .{ .model = language_model_store.model_buffer.language_model.layers[0].mlp, .args = compile_args_buffers },
+        );
+    } else {
+        std.debug.print("NOTHING IS BEING TESTED\n", .{});
+        unreachable;
+    }
 
     // const pipeline = block.Pipeline.init(allocator, io, platform);
     // try pipeline.runOnce("Coucou la team, créé un personnage burger", .{ .seq_len = 16415 });
 }
 
-const Wrapper = struct {
+const BlockWrapper = struct {
     tblock: block.TransformerBlock,
     args: CompileArgs,
 
     pub fn forward(
-        self: Wrapper,
+        self: BlockWrapper,
         x: zml.Tensor,
         modulation: zml.Tensor,
         rotary_emb: zml.Tensor,
@@ -79,6 +100,25 @@ const Wrapper = struct {
     ) zml.Tensor {
         const tagged = x.withTags(.{ .bs, .seq_len, .d });
         return self.tblock.forward(tagged, modulation, rotary_emb.withTags(.{ .seq_len, .d }), target_token_mask, self.args);
+    }
+};
+
+const TextWrapper = struct {
+    model: block.Qwen3VLTextMLP,
+    args: CompileArgs,
+
+    pub fn forward(
+        self: TextWrapper,
+        x: zml.Tensor,
+        modulation: zml.Tensor,
+        rotary_emb: zml.Tensor,
+        target_token_mask: zml.Tensor,
+    ) zml.Tensor {
+        _ = self; // autofix
+        _ = modulation; // autofix
+        _ = rotary_emb; // autofix
+        _ = target_token_mask; // autofix
+        return x;
     }
 };
 
