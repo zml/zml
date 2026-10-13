@@ -1,7 +1,7 @@
 const zml = @import("zml");
 
 const RMSNorm = @import("./RMSNorm.zig");
-const CompileArgs = @import("../compiler.zig").CompileArgs;
+const CompileArgs = @import("../../compiler.zig").CompileArgs;
 
 pub const Attn = @This();
 

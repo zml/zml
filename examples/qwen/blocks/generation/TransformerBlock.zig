@@ -1,9 +1,31 @@
 const std = @import("std");
 const zml = @import("zml");
-const CompileArgs = @import("../compiler.zig").CompileArgs;
+const CompileArgs = @import("../../compiler.zig").CompileArgs;
 
 const Mlp = @import("./Mlp.zig");
 const Attn = @import("./Attn.zig");
+
+// QwenImage21TransformerBlock(
+//   (img_norm1): LayerNorm((4096,), eps=1e-06, elementwise_affine=False, bias=False)
+//   (attn): QwenImage21Attention(
+//     (to_q): Linear(in_features=4096, out_features=4096, bias=False)
+//     (to_k): Linear(in_features=4096, out_features=4096, bias=False)
+//     (to_v): Linear(in_features=4096, out_features=4096, bias=False)
+//     (to_out): ModuleList(
+//       (0): Linear(in_features=4096, out_features=4096, bias=False)
+//       (1): Dropout(p=0.0, inplace=False)
+//     )
+//     (norm_q): RMSNorm()
+//     (norm_k): RMSNorm()
+//   )
+//   (img_norm2): LayerNorm((4096,), eps=1e-06, elementwise_affine=False, bias=False)
+//   (img_mlp): QwenImage21SwiGLUFeedForward(
+//     (proj): Linear(in_features=4096, out_features=12288, bias=False)
+//     (out): Linear(in_features=12288, out_features=4096, bias=False)
+//     (gate_layer): Linear(in_features=4096, out_features=12288, bias=False)
+//     (activation_fn): SiLU()
+//   )
+// )
 
 pub const TransformerBlock = @This();
 
