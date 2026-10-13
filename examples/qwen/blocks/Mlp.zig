@@ -9,8 +9,8 @@ proj: zml.nn.Linear,
 
 pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
     zml.nn.Linear.unloadBuffers(&self.gate_layer);
-    zml.nn.Linear.unloadBuffers(&self.gate_layer);
-    zml.nn.Linear.unloadBuffers(&self.gate_layer);
+    zml.nn.Linear.unloadBuffers(&self.out);
+    zml.nn.Linear.unloadBuffers(&self.proj);
 }
 
 pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
