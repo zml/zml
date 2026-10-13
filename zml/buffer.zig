@@ -203,6 +203,36 @@ pub const Buffer = struct {
         return fromBytes(io, platform, .scalar(dtype_), x.asBytes());
     }
 
+    /// Creates a Buffer with every element set to val, converted to the shape's dtype.
+    /// Allocates temporary host memory and waits for the transfer before freeing it.
+    pub fn constant(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        shape_: Shape,
+        val_: anytype,
+    ) !Buffer {
+        const val = shape_.dtype().constant(val_);
+        const host = try Slice.alloc(allocator, shape_);
+        defer host.free(allocator);
+
+        switch (val) {
+            inline else => |value, dtype_| {
+                const bit_size = comptime dtype_.bitSizeOf();
+                if (comptime bit_size < 8) {
+                    // Repeat the element's bit pattern in each packed byte.
+                    const bits: @Int(.unsigned, bit_size) = @bitCast(value);
+                    const repetitions: u8 = std.math.maxInt(u8) / @as(u8, std.math.maxInt(@TypeOf(bits)));
+                    @memset(host.data(), @as(u8, bits) * repetitions);
+                } else {
+                    @memset(host.items(@TypeOf(value)), value);
+                }
+            },
+        }
+
+        return fromSlice(io, platform, host);
+    }
+
     pub fn await(self: Buffer, io: std.Io) !void {
         for (self._shards.constSlice()) |buffer| {
             const ev = buffer.readyEvent(self._platform.pjrt_api);
