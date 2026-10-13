@@ -10,8 +10,8 @@ diff --git a/src/Loop.zig b/src/Loop.zig
                      vx.queries_done.store(true, .unordered);
                  },
                  .mouse => |mouse| {
-@@ -480,7 +480,7 @@
-                     vx.caps.multi_cursor = true;
+@@ -484,7 +484,7 @@
+                     vx.caps.program_status = true;
                  },
                  .cap_da1 => {
 -                    std.Io.futexWake(vx.io, std.atomic.Value(u32), &vx.query_futex, 10);
@@ -22,7 +22,7 @@ diff --git a/src/Loop.zig b/src/Loop.zig
 diff --git a/src/Vaxis.zig b/src/Vaxis.zig
 --- a/src/Vaxis.zig
 +++ b/src/Vaxis.zig
-@@ -137,14 +137,13 @@
+@@ -139,14 +139,13 @@
      }
  }
  
@@ -38,10 +38,10 @@ diff --git a/src/Vaxis.zig b/src/Vaxis.zig
      if (self.screen.cursor_shape != .default) {
 -        // In many terminals, `.default` will set to the configured cursor shape. Others, it will
 -        // change to a blinking block.
-         tty.print(ctlseqs.cursor_shape, .{@intFromEnum(Cell.CursorShape.default)}) catch {};
+         tty.print(ctlseqs.cursor_shape, .{@backingInt(Cell.CursorShape.default)}) catch {};
      }
      if (self.state.kitty_keyboard) {
-@@ -157,6 +156,32 @@
+@@ -159,6 +158,32 @@
      if (self.state.bracketed_paste) {
          try self.setBracketedPaste(tty, false);
      }
@@ -74,7 +74,7 @@ diff --git a/src/Vaxis.zig b/src/Vaxis.zig
      if (self.state.alt_screen) {
          try tty.writeAll(ctlseqs.home);
          try tty.writeAll(ctlseqs.erase_below_cursor);
-@@ -169,27 +194,6 @@
+@@ -171,27 +196,6 @@
          }
          try tty.writeAll(ctlseqs.erase_below_cursor);
      }
@@ -102,20 +102,7 @@ diff --git a/src/Vaxis.zig b/src/Vaxis.zig
      try tty.flush();
  }
  
-@@ -272,9 +276,9 @@
-     try self.queryTerminalSend(tty);
-     try std.Io.futexWaitTimeout(
-         self.io,
--        atomic.Value(u32),
--        &self.query_futex,
--        .init(0),
-+        u32,
-+        &self.query_futex.raw,
-+        0,
-         .{
-             .duration = .{
-                 .clock = .real,
-@@ -980,19 +984,19 @@
+@@ -1101,19 +1105,19 @@
      switch (format) {
          .rgb => {
              try tty.print(
@@ -138,7 +125,7 @@ diff --git a/src/Vaxis.zig b/src/Vaxis.zig
                  .{ id, medium_char, encoded },
              );
          },
-@@ -1028,7 +1032,7 @@
+@@ -1149,7 +1153,7 @@
  
      if (bytes.len < 4096) {
          try tty.print(
@@ -147,7 +134,7 @@ diff --git a/src/Vaxis.zig b/src/Vaxis.zig
              .{
                  fmt,
                  width,
-@@ -1041,14 +1045,14 @@
+@@ -1162,14 +1166,14 @@
          var n: usize = 4096;
  
          try tty.print(
@@ -167,9 +154,9 @@ diff --git a/src/Vaxis.zig b/src/Vaxis.zig
 diff --git a/src/c_api.zig b/src/c_api.zig
 --- a/src/c_api.zig
 +++ b/src/c_api.zig
-@@ -951,7 +951,7 @@
-         .cap_color_scheme_updates => vx.caps.color_scheme_updates = true,
+@@ -965,7 +965,7 @@
          .cap_multi_cursor => vx.caps.multi_cursor = true,
+         .cap_program_status => vx.caps.program_status = true,
          .cap_da1 => {
 -            std.Io.futexWake(vx.io, std.atomic.Value(u32), &vx.query_futex, 10);
 +            std.Io.futexWake(vx.io, u32, &vx.query_futex.raw, 10);
@@ -179,7 +166,7 @@ diff --git a/src/c_api.zig b/src/c_api.zig
 diff --git a/src/ctlseqs.zig b/src/ctlseqs.zig
 --- a/src/ctlseqs.zig
 +++ b/src/ctlseqs.zig
-@@ -138,8 +138,8 @@
+@@ -140,8 +140,8 @@
  pub const osc52_clipboard_request = "\x1b]52;c;?\x1b\\";
  
  // Kitty graphics
