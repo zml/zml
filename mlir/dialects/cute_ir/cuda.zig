@@ -353,20 +353,20 @@ pub const ComputeTargetAttr = opaque {
         archs: []const GpuArchitecture,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCudaComputeTargetAttrGet(ctx.ptr(), @intFromEnum(args.representation), @intFromEnum(args.portability), @intCast(args.archs.len), @ptrCast(args.archs.ptr));
+        const result = c.mlirCudaComputeTargetAttrGet(ctx.ptr(), @backingInt(args.representation), @backingInt(args.portability), @intCast(args.archs.len), @ptrCast(args.archs.ptr));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getRepresentation(self: *const Self) ExecutableRepresentation {
-        return @enumFromInt(c.mlirCudaComputeTargetAttrGetRepresentation(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCudaComputeTargetAttrGetRepresentation(self.ptr())));
     }
     pub fn getPortability(self: *const Self) ArchPortability {
-        return @enumFromInt(c.mlirCudaComputeTargetAttrGetPortability(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCudaComputeTargetAttrGetPortability(self.ptr())));
     }
     pub fn getNumArchs(self: *const Self) usize {
         return @intCast(c.mlirCudaComputeTargetAttrGetNumArchs(self.ptr()));
     }
     pub fn getArch(self: *const Self, pos: usize) GpuArchitecture {
-        return @enumFromInt(c.mlirCudaComputeTargetAttrGetArchs(self.ptr(), @intCast(pos)));
+        return @fromBackingInt(@intCast(c.mlirCudaComputeTargetAttrGetArchs(self.ptr(), @intCast(pos))));
     }
 };
 
@@ -439,11 +439,11 @@ pub const ExecutableAttr = opaque {
         format: ExecutableFormat,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirCudaExecutableAttrGet(ctx.ptr(), @intFromEnum(args.format));
+        const result = c.mlirCudaExecutableAttrGet(ctx.ptr(), @backingInt(args.format));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
     pub fn getFormat(self: *const Self) ExecutableFormat {
-        return @enumFromInt(c.mlirCudaExecutableAttrGetFormat(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirCudaExecutableAttrGetFormat(self.ptr())));
     }
 };
 

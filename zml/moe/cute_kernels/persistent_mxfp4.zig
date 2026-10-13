@@ -1032,11 +1032,11 @@ fn runTmaProducer(
 }
 
 fn Tuple(comptime T: type, comptime len: usize) type {
-    return std.meta.Tuple(&([_]type{T} ** len));
+    return @Tuple(&@as([len]type, @splat(T)));
 }
 
 fn arity(comptime T: type) usize {
-    return @typeInfo(T).@"struct".fields.len;
+    return @typeInfo(T).@"struct".field_names.len;
 }
 
 /// The MLIR types of a tuple of values, as `openWhile` expects them.

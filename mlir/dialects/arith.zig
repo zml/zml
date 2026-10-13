@@ -360,7 +360,7 @@ pub fn convertf(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.rounding) |rm| {
-        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", .int(ctx, .i32, @intFromEnum(rm))));
+        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", .int(ctx, .i32, @backingInt(rm))));
     }
     return mlir.Operation.make(ctx, "arith.convertf", .{
         .operands = .{ .flat = &.{src} },
@@ -381,7 +381,7 @@ pub fn scaling_truncf(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.rounding) |rm| {
-        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", .int(ctx, .i32, @intFromEnum(rm))));
+        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", .int(ctx, .i32, @backingInt(rm))));
     }
     return mlir.Operation.make(ctx, "arith.scaling_truncf", .{
         .operands = .{ .flat = &.{ src, scale } },
@@ -406,7 +406,7 @@ pub fn cmpi(
         .operands = .{ .flat = &.{ lhs, rhs } },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "predicate", .int(ctx, .i64, @intFromEnum(predicate))),
+            .named(ctx, "predicate", .int(ctx, .i64, @backingInt(predicate))),
         },
         .location = location,
     });
@@ -423,7 +423,7 @@ pub fn cmpf(
         .operands = .{ .flat = &.{ lhs, rhs } },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "predicate", .int(ctx, .i64, @intFromEnum(predicate))),
+            .named(ctx, "predicate", .int(ctx, .i64, @backingInt(predicate))),
         },
         .location = location,
     });

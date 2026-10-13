@@ -46,7 +46,7 @@ fn setupNeuronEnv(io: std.Io, sandbox_path: []const u8) !void {
     var root_comm_buf: [256]u8 = undefined;
     _ = setenv(
         "NEURON_RT_ROOT_COMM_ID",
-        try std.fmt.bufPrintZ(&root_comm_buf, "127.0.0.1:{d}", .{try findFreeTcpPort(io)}),
+        try std.mem.printSentinel(&root_comm_buf, "127.0.0.1:{d}", .{try findFreeTcpPort(io)}, 0),
         1,
     );
     _ = setenv(
@@ -69,9 +69,9 @@ fn setupNeuronEnv(io: std.Io, sandbox_path: []const u8) !void {
     const old_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "";
     var new_path_buf: [std.posix.PATH_MAX:0]u8 = undefined;
     const new_path = if (old_path.len == 0)
-        try std.fmt.bufPrintZ(&new_path_buf, "{s}", .{bin_path})
+        try std.mem.printSentinel(&new_path_buf, "{s}", .{bin_path}, 0)
     else
-        try std.fmt.bufPrintZ(&new_path_buf, "{s}:{s}", .{ bin_path, old_path });
+        try std.mem.printSentinel(&new_path_buf, "{s}:{s}", .{ bin_path, old_path }, 0);
     if (setenv("PATH", new_path.ptr, 1) != 0) return error.SetEnvFailed;
 
     if (std.c.getenv("NEURON_CC_FLAGS") != null) return;
@@ -81,7 +81,7 @@ fn setupNeuronEnv(io: std.Io, sandbox_path: []const u8) !void {
     var flags_buf: [512:0]u8 = undefined;
     const instance = try neuron.instance();
     const target = @tagName(instance.compilerTarget());
-    const flags = try std.fmt.bufPrintZ(
+    const flags = try std.mem.printSentinel(
         &flags_buf,
         "--target={s} " ++
             "--optlevel=1 " ++
@@ -98,6 +98,7 @@ fn setupNeuronEnv(io: std.Io, sandbox_path: []const u8) !void {
             log_level,
             log_level,
         },
+        0,
     );
 
     _ = setenv("NEURON_CC_FLAGS", flags.ptr, 0);

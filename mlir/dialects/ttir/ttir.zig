@@ -142,51 +142,51 @@ pub const DescriptorReduceKind = enum(i32) {
 };
 
 pub fn programDim(ctx: *mlir.Context, v: ProgramIDDim) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonProgramDimGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonProgramDimGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn cacheModifier(ctx: *mlir.Context, v: CacheModifier) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonCacheModifierGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonCacheModifierGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn evictionPolicy(ctx: *mlir.Context, v: EvictionPolicy) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonEvictionPolicyGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonEvictionPolicyGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn paddingOption(ctx: *mlir.Context, v: PaddingOption) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonPaddingOptionGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonPaddingOptionGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn roundingMode(ctx: *mlir.Context, v: RoundingMode) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonRoundingModeGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonRoundingModeGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn inputPrecision(ctx: *mlir.Context, v: InputPrecision) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonInputPrecisionGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonInputPrecisionGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn rmwOp(ctx: *mlir.Context, v: RMWOp) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonRMWOpGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonRMWOpGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn memSemantic(ctx: *mlir.Context, v: MemSemantic) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonMemSemanticGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonMemSemanticGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn memSyncScope(ctx: *mlir.Context, v: MemSyncScope) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonMemSyncScopeGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonMemSyncScopeGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn propagateNan(ctx: *mlir.Context, v: PropagateNan) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonPropagateNanGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonPropagateNanGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn scaleDotElemType(ctx: *mlir.Context, v: ScaleDotElemType) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonScaleDotElemTypeGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonScaleDotElemTypeGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn descriptorReduceKind(ctx: *mlir.Context, v: DescriptorReduceKind) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonDescriptorReduceKindGet(ctx.ptr(), @intFromEnum(v)).ptr);
+    return @ptrCast(c.mlirTritonDescriptorReduceKindGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 // =============================================================================

@@ -17,6 +17,7 @@ load("//third_party/uucode:repo.bzl", uucode = "repo")
 load("//third_party/xla:repo.bzl", xla = "repo")
 load("//third_party/zigimg:repo.bzl", zigimg = "repo")
 load("//third_party/zio:repo.bzl", zio = "repo")
+load("//third_party/zls:repo.bzl", zls = "repo")
 
 def _non_module_deps_impl(mctx):
     cloud_accelerator_diagnostics()
@@ -38,6 +39,7 @@ def _non_module_deps_impl(mctx):
     flydsl()
     cute_ir()
     zio()
+    zls()
 
     return mctx.extension_metadata(
         reproducible = True,

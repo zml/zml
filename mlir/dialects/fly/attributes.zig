@@ -206,7 +206,7 @@ pub const AddressSpaceAttr = opaque {
     };
 
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
-        const result = c.mlirFlyAddressSpaceAttrGet(ctx.ptr(), @intFromEnum(args.addressSpace));
+        const result = c.mlirFlyAddressSpaceAttrGet(ctx.ptr(), @backingInt(args.addressSpace));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 };
@@ -214,7 +214,7 @@ pub const AddressSpaceAttr = opaque {
 pub const MmaOperand = enum(i32) { a = 0, b = 1, c = 2, d = 3 };
 
 pub fn mmaOperandAttr(ctx: *mlir.Context, operand: MmaOperand) mlir.Error!*const mlir.Attribute {
-    const result = c.mlirFlyMmaOperandAttrGet(ctx.ptr(), @intFromEnum(operand));
+    const result = c.mlirFlyMmaOperandAttrGet(ctx.ptr(), @backingInt(operand));
     return @ptrCast(result.ptr orelse return error.InvalidMlir);
 }
 
@@ -234,6 +234,6 @@ pub const GemmTraversalOrder = enum(i32) {
 };
 
 pub fn gemmTraversalOrderAttr(ctx: *mlir.Context, order: GemmTraversalOrder) mlir.Error!*const mlir.Attribute {
-    const result = c.mlirFlyGemmTraversalOrderAttrGet(ctx.ptr(), @intFromEnum(order));
+    const result = c.mlirFlyGemmTraversalOrderAttrGet(ctx.ptr(), @backingInt(order));
     return @ptrCast(result.ptr orelse return error.InvalidMlir);
 }

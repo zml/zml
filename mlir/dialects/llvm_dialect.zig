@@ -23,7 +23,7 @@ pub const NVPTXAddressSpace = enum(u32) {
 /// `!llvm.ptr<space>`, an opaque pointer. Loads the LLVM dialect into `ctx`.
 pub fn pointerType(ctx: *mlir.Context, space: anytype) *const mlir.Type {
     _ = c.mlirContextGetOrLoadDialect(ctx.ptr(), mlir.stringRef("llvm"));
-    return @ptrCast(c.mlirLLVMPointerTypeGet(ctx.ptr(), @intCast(@intFromEnum(space))).ptr);
+    return @ptrCast(c.mlirLLVMPointerTypeGet(ctx.ptr(), @intCast(@backingInt(space))).ptr);
 }
 
 // =============================================================================

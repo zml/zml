@@ -1264,7 +1264,7 @@ test "HostAccessible.HostPinnedAllocations keeps each region's replicas together
     // replicas arrive interleaved with other regions.
     const shard_shape: Shape = .init(.{4}, .u8);
     for ([_]usize{ 0, 4, 0, 8, 4 }, 0..) |row, i| {
-        allocations.add(shard_shape, .{ .origin = .{ .axes = .{row} ++ .{0} ** (Shape.MAX_RANK - 1) }, .ptr = base + i, .shard_index = undefined, .handle = undefined });
+        allocations.add(shard_shape, .{ .origin = .{ .axes = .{row} ++ @as([Shape.MAX_RANK - 1]usize, @splat(0)) }, .ptr = base + i, .shard_index = undefined, .handle = undefined });
     }
 
     try std.testing.expectEqualSlices([*]u8, &.{ base, base + 2, base + 1, base + 4, base + 3 }, allocations.entries.items(.ptr));

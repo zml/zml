@@ -55,8 +55,8 @@ pub fn dtypeBitwidth(dt: DType) usize {
 }
 
 pub fn mlirToDType(ctx: *mlir.Context, t: *const mlir.Type) DType {
-    inline for (std.meta.fields(DType)) |f| {
-        const dt = @field(DType, f.name);
+    inline for (@typeInfo(DType).@"enum".field_names) |f| {
+        const dt = @field(DType, f);
         if (t.eql(dt.toMlir(ctx))) return dt;
     }
     std.debug.panic("type {f} is not a CuTe DType", .{t});
