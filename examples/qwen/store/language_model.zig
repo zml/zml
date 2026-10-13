@@ -84,7 +84,6 @@ pub fn load(
 
     const language_model = block.Qwen3VLTextModel{ .embedding = embedding, .layers = layers, .rotary_emb = rotary_emb };
     self.model = block.Qwen3VLModel{ .language_model = language_model };
-
     self.model_buffer = try self.model.load(allocator, io, platform, &self.store);
 }
 
@@ -92,6 +91,7 @@ pub fn deinit(self: *LanguageModelStore, allocator: std.mem.Allocator) void {
     block.Qwen3VLModel.unloadBuffers(&self.model_buffer);
 
     allocator.free(self.model.language_model.layers);
+    allocator.free(self.model_buffer.language_model.layers);
     self.store.deinit();
     self.registry.deinit();
 }
