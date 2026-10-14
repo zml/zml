@@ -47,7 +47,7 @@ pub fn forward(
     const rotated_query = apply_rotary_pos_emb(query_states, cos, sin);
     const rotated_key = apply_rotary_pos_emb(key_states, cos, sin);
 
-    const pos_idx = zml.Tensor.scalar(0, .i32).broad(.init(.{ .b = 1 }, .i32));
+    const pos_idx = zml.Tensor.scalar(0, .i32).broad(.init(.{ .b = x.dim(.bs) }, .i32));
     const att = zml.attention.attention(
         rotated_query.rename(.{ .bs = .b, .seq_len = .q }),
         rotated_key.rename(.{ .bs = .b, .seq_len = .k }),

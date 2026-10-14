@@ -40,7 +40,7 @@ pub fn forward(
         query.rename(.{ .bs = .b, .seq_len = .q, .d = .h }),
         key.rename(.{ .bs = .b, .seq_len = .k, .d = .h }),
         value.rename(.{ .bs = .b, .seq_len = .k, .d = .h }),
-        pos_idx.broad(.init(.{ .b = 1 }, .i32)),
+        pos_idx.broad(.init(.{ .b = x.dim(.bs) }, .i32)),
         args.attention_metadata,
         args.attention_parameters,
     );
