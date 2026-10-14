@@ -17,7 +17,7 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
 const Buffer = @import("../buffer.zig").Buffer;
-const emptyShell = @import("../buffer.zig").emptyShell;
+const PjrtBufferMetadata = @import("../buffer.zig").PjrtBufferMetadata;
 const Platform = @import("../platform.zig").Platform;
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
@@ -242,10 +242,15 @@ pub fn init(
         .cpu, .cuda, .rocm => donation == .undonatable,
         else => false,
     };
-    const api = platform.pjrt_api;
 
-    var buffer, const metadata = emptyShell(platform, shape_);
+    var buffer: Buffer = .{
+        ._platform = platform,
+        ._shape = shape_,
+        ._shards = .empty,
+    };
+    const metadata: PjrtBufferMetadata = .init(platform, shape_);
     const devices = platform.physical_mesh.devices_in_canonical_order;
+    const api = platform.pjrt_api;
 
     var allocations: HostPinnedAllocations = .empty;
     errdefer allocations.deinit(allocator);
