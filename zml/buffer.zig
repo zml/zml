@@ -141,7 +141,12 @@ pub const Buffer = struct {
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
-        var buffer, const metadata = emptyShell(platform, shape_);
+        var buffer: Buffer = .{
+            ._platform = platform,
+            ._shape = shape_,
+            ._shards = .empty,
+        };
+        const metadata: PjrtBufferMetadata = .init(platform, shape_);
 
         errdefer for (buffer._shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
@@ -220,7 +225,12 @@ pub const Buffer = struct {
         opts: UnitializedOptions,
     ) !Buffer {
         std.log.debug("uninitialized {f}", .{shape_});
-        var buffer, const metadata = emptyShell(platform, shape_);
+        var buffer: Buffer = .{
+            ._platform = platform,
+            ._shape = shape_,
+            ._shards = .empty,
+        };
+        const metadata: PjrtBufferMetadata = .init(platform, shape_);
         errdefer for (buffer._shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
         };
@@ -398,38 +408,30 @@ test "device round-trip" {
     }
 }
 
-const PjrtBufferMetadata = struct {
+pub const PjrtBufferMetadata = struct {
     shape: Shape,
     ty: pjrt.BufferType,
     placement: Sharding.Placement,
     layout: pjrt.MemoryLayout,
-};
 
-/// Inline because the layout may point to stack memory, as with
-/// `Platform.defaultMemoryLayout`. Outside `Buffer` so that
-/// `Buffer.HostAccessible` can use it without it being part of the API:
-/// zml.zig only exports `Buffer` from this file.
-pub inline fn emptyShell(platform: *const Platform, shape_: Shape) struct { Buffer, PjrtBufferMetadata } {
-    const buf: Buffer = .{
-        ._platform = platform,
-        ._shape = shape_,
-        ._shards = .empty,
-    };
+    /// Inline because the layout may point to stack memory, as with
+    /// `Platform.defaultMemoryLayout`. Outside `Buffer` so that
+    /// `Buffer.HostAccessible` can use it without it being part of the API:
+    /// zml.zig only exports `Buffer` from this file.
+    pub inline fn init(platform: *const Platform, shape_: Shape) PjrtBufferMetadata {
 
-    // Shards use the PJRT shape, which packs sub-byte elements.
-    const packed_shape = shape_.packedShape();
-    const placement = placementOrPanic(platform, packed_shape);
+        // Shards use the PJRT shape, which packs sub-byte elements.
+        const packed_shape = shape_.packedShape();
+        const placement = placementOrPanic(platform, packed_shape);
 
-    return .{
-        buf,
-        .{
+        return .{
             .shape = packed_shape,
             .ty = pjrtx.bufferTypeFromDtype(packed_shape.dtype()),
             .placement = placement,
             .layout = platform.defaultMemoryLayout(placement.shape.dims(), packed_shape.dtype()),
-        },
-    };
-}
+        };
+    }
+};
 
 fn placementOrPanic(platform: *const Platform, shape: Shape) Sharding.Placement {
     var sh = shape;
