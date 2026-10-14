@@ -6,8 +6,8 @@ def _furiosa_impl(mctx):
     http_archive(
         name = "libzml_furiosa",
         build_file = "libzml_furiosa.BUILD.bazel",
-        url = "https://mirror.zml.ai/plugins/202610111616.184.1.0536437b83ad/zml-furiosa-linux-amd64.tar.zst",
-        sha256 = "730469a37671f94ebf095a245d96a9c8585954d92a98698ae675bf73c765e75d",
+        url = "https://mirror.zml.ai/plugins/202610141143.207.1.b026d193d9cb/zml-furiosa-linux-amd64.tar.zst",
+        sha256 = "1225cb3eecc40745669d6e2d8280830d5966a6abe33f7aa1e43b6e5197b6e08a",
     )
 
     return mctx.extension_metadata(
