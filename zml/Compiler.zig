@@ -944,7 +944,7 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 // https://github.com/openxla/xla/pull/46029
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_nccl_user_buffers", true, upb_arena);
                 // Enable for both Blackwell+ and Ampere+
-                // try setXlaOverrideFlag(overrides_map, "xla_gpu_cudnn_gemm_fusion_level", 2, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_cudnn_gemm_fusion_level", 2, upb_arena);
                 // Need to adapt XLA to support that (for other platforms too)
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_enable_tiling_propagation", false, upb_arena);
             },
