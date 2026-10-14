@@ -52,8 +52,7 @@ pub fn load(
 
         const attn_view = layer_view.withPrefix("self_attn");
         const self_attn: block.Qwen3VLTextAttention = .{
-            // .seq_len = 16415,
-            // .num_attention_heads = 128,
+            .head_dim = 128,
             .k_norm = .init(attn_view.createTensor("k_norm.weight", .{.dim}, .replicated), .d),
             .k_proj = .init(attn_view.createTensor("k_proj.weight", .{ .dup, .d }, .replicated), null, .d),
             .o_proj = .init(attn_view.createTensor("o_proj.weight", .{ .dup, .d }, .replicated), null, .d),
