@@ -32,6 +32,7 @@ pub fn main(init: std.process.Init) !void {
 
     const model_sharding = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth }));
     const backend = zml.attention.Backend.auto(platform);
+    // const backend: zml.attention.Backend = .vanilla;
     // 32 from num_attention_heads in text_encoder/config.json and 16415 is a dynamic value
     const attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, 16415, 32));
     const attention_parameters: zml.attention.Parameters = .init(.fromBackend(backend));
@@ -73,10 +74,10 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             platform,
-            "text_encoder.model.language_model.layers.0.self_attn.k_norm",
+            "text_encoder.model.language_model.layers.0.self_attn",
             &activations_store.store,
-            TextWrapper{ .model = language_model_store.model.language_model.layers[0].self_attn.k_norm, .args = compile_args },
-            .{ .model = language_model_store.model_buffer.language_model.layers[0].self_attn.k_norm, .args = compile_args_buffers },
+            TextWrapper{ .model = language_model_store.model.language_model.layers[0].self_attn, .args = compile_args },
+            .{ .model = language_model_store.model_buffer.language_model.layers[0].self_attn, .args = compile_args_buffers },
         );
     } else {
         std.debug.print("NOTHING IS BEING TESTED\n", .{});
@@ -104,15 +105,18 @@ const BlockWrapper = struct {
 };
 
 const TextWrapper = struct {
-    model: block.Qwen3VLTextRMSNorm,
+    model: block.Qwen3VLTextAttention,
     args: CompileArgs,
 
     pub fn forward(
         self: TextWrapper,
         x: zml.Tensor,
+        pos_idx: zml.Tensor,
+        cos: zml.Tensor,
+        sin: zml.Tensor,
     ) zml.Tensor {
-        const tagged = x.withTags(.{ .bs, .seq_len, .h, .hd });
-        return self.model.forward(tagged);
+        const tagged = x.withTags(.{ .bs, .seq_len, .d });
+        return self.model.forward(tagged, pos_idx, cos, sin, self.args);
     }
 };
 
