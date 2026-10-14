@@ -18,6 +18,24 @@ pub const FP8_E4M3_MAX: f32 = 448.0;
 /// `log_2(e)` — pre-multiply with this to turn `exp(x)` into `exp2(x * RCP_LN2)`.
 const RCP_LN2: f32 = 1.4426950408889634;
 
+/// Static sparse partition shared by launch bounds and tile scans.
+pub const SparseSegments = struct {
+    tiles_per_segment: i64,
+    span: i64,
+    launched: i64,
+
+    pub fn init(indices_count: i64, num_segments: i64, tile_size: i64) SparseSegments {
+        std.debug.assert(indices_count > 0 and num_segments > 0 and tile_size > 0);
+        const tiles = std.math.divCeil(i64, indices_count, num_segments * tile_size) catch unreachable;
+        const span = tiles * tile_size;
+        return .{
+            .tiles_per_segment = tiles,
+            .span = span,
+            .launched = std.math.divCeil(i64, indices_count, span) catch unreachable,
+        };
+    }
+};
+
 pub const KernelUnifiedAttention2dPtr = struct {
     pub const Config = struct {
         q_dtype: DType,
@@ -178,10 +196,26 @@ pub const KernelUnifiedAttention3dPtr = struct {
         stride_k_cache_3: i64 = 1,
         stride_v_cache_3: i64 = 1,
 
+        // Known layouts let Triton vectorize paged KV loads. Direct callers may
+        // still supply runtime strides through the existing pointer arguments.
+        block_table_stride: ?i64 = null,
+        query_stride_0: ?i64 = null,
+        query_stride_1: ?i64 = null,
+        stride_k_cache_0: ?i64 = null,
+        stride_k_cache_1: ?i64 = null,
+        stride_k_cache_2: ?i64 = null,
+        stride_v_cache_0: ?i64 = null,
+        stride_v_cache_1: ?i64 = null,
+        stride_v_cache_2: ?i64 = null,
+
         block_q: i64,
         block_m: i64,
         num_segments_per_seq: i64,
         all_decode: bool = false,
+        // Store statistics as [token, segment, head]; must match the reducer.
+        stats_head_minor: bool = false,
+        scale: ?f32 = null,
+        decode_sequence_grid: bool = false,
         is_causal: bool = true,
         indices_count: i64 = 0,
     };
@@ -232,20 +266,20 @@ pub const KernelUnifiedAttention3dPtr = struct {
             .segm_expsum_ptr = .{ .ptr = .f32 },
         });
 
-        const scale = b.load(a.scale_ptr);
+        const scale = if (cfg.scale) |value| b.liftAs(value, cfg.scale_dtype) else b.load(a.scale_ptr);
         const k_scale = b.load(a.k_scale_ptr);
         const v_scale = b.load(a.v_scale_ptr);
         const softcap = b.load(a.softcap_ptr);
-        const block_table_stride = b.load(a.block_table_stride_ptr);
-        const query_stride_0 = b.load(a.query_stride_0_ptr);
-        const query_stride_1 = b.load(a.query_stride_1_ptr);
+        const block_table_stride = if (cfg.block_table_stride) |stride| b.liftAs(stride, .i64) else b.load(a.block_table_stride_ptr);
+        const query_stride_0 = if (cfg.query_stride_0) |stride| b.liftAs(stride, .i64) else b.load(a.query_stride_0_ptr);
+        const query_stride_1 = if (cfg.query_stride_1) |stride| b.liftAs(stride, .i64) else b.load(a.query_stride_1_ptr);
         const qq_bias_stride_0 = b.load(a.qq_bias_stride_0_ptr);
-        const stride_k_cache_0 = b.load(a.stride_k_cache_0_ptr);
-        const stride_k_cache_1 = b.load(a.stride_k_cache_1_ptr);
-        const stride_k_cache_2 = b.load(a.stride_k_cache_2_ptr);
-        const stride_v_cache_0 = b.load(a.stride_v_cache_0_ptr);
-        const stride_v_cache_1 = b.load(a.stride_v_cache_1_ptr);
-        const stride_v_cache_2 = b.load(a.stride_v_cache_2_ptr);
+        const stride_k_cache_0 = if (cfg.stride_k_cache_0) |stride| b.liftAs(stride, .i64) else b.load(a.stride_k_cache_0_ptr);
+        const stride_k_cache_1 = if (cfg.stride_k_cache_1) |stride| b.liftAs(stride, .i64) else b.load(a.stride_k_cache_1_ptr);
+        const stride_k_cache_2 = if (cfg.stride_k_cache_2) |stride| b.liftAs(stride, .i64) else b.load(a.stride_k_cache_2_ptr);
+        const stride_v_cache_0 = if (cfg.stride_v_cache_0) |stride| b.liftAs(stride, .i64) else b.load(a.stride_v_cache_0_ptr);
+        const stride_v_cache_1 = if (cfg.stride_v_cache_1) |stride| b.liftAs(stride, .i64) else b.load(a.stride_v_cache_1_ptr);
+        const stride_v_cache_2 = if (cfg.stride_v_cache_2) |stride| b.liftAs(stride, .i64) else b.load(a.stride_v_cache_2_ptr);
         const num_seqs = b.load(a.num_seqs_ptr);
 
         kernelUnifiedAttention3d(
@@ -293,6 +327,12 @@ pub const ReduceSegmentsPtr = struct {
         tile_size: i64,
         head_size: i64,
         head_size_padded: i64,
+        head_tile_size: i64 = 0,
+        // Must match the attention kernel's statistics layout.
+        stats_head_minor: bool = false,
+        num_seqs: ?i32 = null,
+        output_stride_0: ?i64 = null,
+        output_stride_1: ?i64 = null,
 
         block_q: i64,
         num_segments_per_seq: i64,
@@ -328,10 +368,10 @@ pub const ReduceSegmentsPtr = struct {
             .output_ptr = .{ .ptr = cfg.o_dtype },
         });
 
-        const num_seqs = b.load(a.num_seqs_ptr);
+        const num_seqs = if (cfg.num_seqs) |count| b.liftAs(count, .i32) else b.load(a.num_seqs_ptr);
         const out_scale_inv = b.load(a.out_scale_inv_ptr);
-        const output_stride_0 = b.load(a.output_stride_0_ptr);
-        const output_stride_1 = b.load(a.output_stride_1_ptr);
+        const output_stride_0 = if (cfg.output_stride_0) |stride| b.liftAs(stride, .i64) else b.load(a.output_stride_0_ptr);
+        const output_stride_1 = if (cfg.output_stride_1) |stride| b.liftAs(stride, .i64) else b.load(a.output_stride_1_ptr);
         const block_table_stride = b.load(a.block_table_stride_ptr);
 
         reduceSegments(
@@ -673,7 +713,8 @@ fn kernelUnifiedAttention2d(
         // S = tl.where(qmask_1 & qmask_0 & seq_mask, S, -inf)
         const qm0_2d = query_mask_0.expandDims(1);
         const qm1_2d = query_mask_1.expandDims(1);
-        const keep_mask = qm1_2d.bitAnd(qm0_2d).bitAnd(seq_mask);
+        // Invalid sparse lanes must carry no softmax mass, including causal decode.
+        const keep_mask = qm1_2d.bitAnd(qm0_2d).bitAnd(seq_mask).bitAnd(tile_mask.expandDims(0));
         S = k.where(keep_mask, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
 
         if (SLIDING_WINDOW > 0) {
@@ -798,17 +839,33 @@ fn kernelUnifiedAttention3d(
     const NUM_SEGMENTS_PER_SEQ: i64 = config.num_segments_per_seq;
     const SLIDING_WINDOW: i64 = config.sliding_window;
 
+    std.debug.assert(!config.decode_sequence_grid or
+        (config.indices_count > 0 and config.all_decode and BLOCK_Q == 1));
+    const sparse_segments: ?SparseSegments = if (config.indices_count > 0)
+        SparseSegments.init(config.indices_count, NUM_SEGMENTS_PER_SEQ, TILE_SIZE)
+    else
+        null;
     const q_block_global_idx = k.programId(.x);
-    const kv_head_idx = k.programId(.y);
-    const segm_idx = k.programId(.z);
+    const kv_head_idx = if (NUM_QUERY_HEADS == NUM_QUERIES_PER_KV) k.liftAs(0, .i32) else k.programId(.y);
+    // Start the partial final segment first so sparse decode tails do not
+    // serialize behind blocks that only initialize empty segment statistics.
+    const segm_idx = if (config.decode_sequence_grid) blk: {
+        const last_segment = sparse_segments.?.launched - 1;
+        const slot = k.programId(.z);
+        break :blk k.where(slot.eq(0), k.liftAs(@as(i32, @intCast(last_segment)), .i32), slot.sub(1));
+    } else k.programId(.z);
 
     const qk_scale = scale.mul(RCP_LN2);
 
-    const seq_idx = findSeqIdx(k, query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, true);
+    // Single-token decode can address sequences directly, including empty slots.
+    const seq_idx = if (config.decode_sequence_grid) q_block_global_idx else findSeqIdx(k, query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, true);
 
+    // Decode sequence IDs are already in bounds; fetch length alongside the
+    // query metadata instead of waiting for the active-query branch.
+    const prefetched_seq_len: ?Value = if (config.decode_sequence_grid) k.load(seq_lens_ptr.addPtr(seq_idx)) else null;
     const q_start_raw = k.load(query_start_len_ptr.addPtr(seq_idx));
     const q_block_start_idx = q_start_raw.div(@as(i32, @intCast(BLOCK_Q))).add(seq_idx);
-    const q_block_local_idx = q_block_global_idx.sub(q_block_start_idx);
+    const q_block_local_idx = if (config.decode_sequence_grid) k.liftAs(0, .i32) else q_block_global_idx.sub(q_block_start_idx);
 
     const cur_batch_in_all_start_index = q_start_raw;
     // Match Python's left-to-right `query_start_len_ptr + seq_idx + 1`: two `tt.addptr`s.
@@ -818,7 +875,7 @@ fn kernelUnifiedAttention3d(
     const q_out_of_range = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q))).ge(cur_batch_query_len);
     k.returnIf(q_out_of_range, .{});
 
-    const seq_len = k.load(seq_lens_ptr.addPtr(seq_idx));
+    const seq_len = prefetched_seq_len orelse k.load(seq_lens_ptr.addPtr(seq_idx));
     const attention_len = if (config.indices_count > 0) k.liftAs(config.indices_count, .i32) else seq_len;
     const tiles_per_segment = cdivFn(attention_len, @as(i32, @intCast(NUM_SEGMENTS_PER_SEQ * TILE_SIZE)));
 
@@ -839,7 +896,7 @@ fn kernelUnifiedAttention3d(
 
     const query_offset_0 = cur_batch_in_all_start_index.add(query_pos);
     const query_offset_1 = kv_head_idx.mul(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
-        .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
+        .add(if (config.indices_count > 0) offs_m else offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
 
     // query_offset = qo_0[:, None]*qstride_0 + qo_1[:, None]*qstride_1 + offs_d[None, :]
     // Inline `expandDims(offs_d, 0)` *inside* the chain so it's emitted after
@@ -863,6 +920,36 @@ fn kernelUnifiedAttention3d(
         q_mask_pre.bitAnd(k.expandDims(dim_mask, 0))
     else
         q_mask_pre;
+    // Reject an empty sparse segment before loading/converting the query tile.
+    // The scan is bounded; larger segments still skip individual empty tiles.
+    const segment_size = if (sparse_segments) |segments| segments.tiles_per_segment else 0;
+    if (config.indices_count > 0 and segment_size * TILE_SIZE <= 256) {
+        const scan_size: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(segment_size * TILE_SIZE)));
+        const selected = segm_lo.add(k.arange(0, scan_size, .i32));
+        const scan_mask = selected.lt(config.indices_count).bitAnd(selected.lt(segm_lo.add(segment_size * TILE_SIZE)));
+        const positions = k.loadOpts(
+            indices_ptr.addPtr(cur_batch_in_all_start_index.add(q_local_bq).to(.i64).mul(config.indices_count)).addPtr(selected),
+            .{ .mask = scan_mask, .other = k.full(&.{scan_size}, -1, .i32) },
+        );
+        const valid_positions = scan_mask.bitAnd(positions.ge(0)).bitAnd(positions.lt(seq_len));
+        const empty_segment = k.sum(valid_positions.to(.i32)).eq(0);
+        var empty = k.openIfElse(empty_segment, .{});
+        {
+            const M_final = if (config.use_sinks) k.where(
+                segm_idx.eq(0),
+                k.loadOpts(sink_ptr.addPtr(query_offset_1), .{ .mask = query_mask_1, .other = k.full(&.{BLOCK_M}, -std.math.inf(f32), config.scale_dtype) }).to(.f32).mul(RCP_LN2),
+                k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32),
+            ) else k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32);
+            const L_final = if (config.use_sinks) k.where(segm_idx.eq(0), k.full(&.{BLOCK_M}, 1.0, .f32), k.zeros(&.{BLOCK_M}, .f32)) else k.zeros(&.{BLOCK_M}, .f32);
+            // The reducer masks zero-mass segments, so only sinks need a zero output tile.
+            const acc_final: ?Value = if (config.use_sinks) k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, .f32) else null;
+            storeSegment(k, config, segm_output_ptr, segm_max_ptr, segm_expsum_ptr, query_offset_0, query_offset_1, query_mask_0, query_mask_1, segm_idx, offs_d, dim_mask, M_final, L_final, acc_final);
+            empty.yieldThen(.{});
+        }
+        empty.yieldElse(.{});
+        k.returnIf(empty_segment, .{});
+    }
+
     const q_ptrs = query_ptr.addPtr(query_offset);
     const Q = k.loadOpts(q_ptrs, .{
         .mask = k.broadcastTo(q_mask_partial, &.{ BLOCK_M, HEAD_SIZE_PADDED }),
@@ -888,7 +975,11 @@ fn kernelUnifiedAttention3d(
         break :mb mi.results[0];
     } else k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32);
 
-    const l_init = k.full(&.{BLOCK_M}, 1.0, .f32);
+    // Empty sparse segments carry no softmax mass. Only the first owns sinks.
+    const l_init = if (config.indices_count == 0) k.full(&.{BLOCK_M}, 1.0, .f32) else if (config.use_sinks)
+        k.where(segm_is_zero, k.full(&.{BLOCK_M}, 1.0, .f32), k.zeros(&.{BLOCK_M}, .f32))
+    else
+        k.zeros(&.{BLOCK_M}, .f32);
     const acc_init = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, .f32);
 
     const context_len = seq_len.sub(cur_batch_query_len);
@@ -919,11 +1010,15 @@ fn kernelUnifiedAttention3d(
     const segm_tile_hi = segm_idx.add(1).mul(tiles_per_segment).minimum(num_tiles);
 
     const kv_cache_mod: ttir.CacheModifier =
-        if (config.all_decode) .cg else .none;
+        if (config.all_decode and config.indices_count == 0) .cg else .none;
 
-    var loop = k.openFor(segm_tile_lo, segm_tile_hi, 1, .{ m_init, l_init, acc_init });
+    // Sparse segment length is static. A single-tile segment should compile
+    // without a loop; the selection mask handles the final partial segment.
+    const loop_lo = if (config.indices_count > 0) k.liftAs(0, .i32) else segm_tile_lo;
+    const loop_hi = if (config.indices_count > 0) tiles_per_segment else segm_tile_hi;
+    var loop = k.openFor(loop_lo, loop_hi, 1, .{ m_init, l_init, acc_init });
     {
-        const j = loop.iv;
+        const j = if (config.indices_count > 0) segm_tile_lo.add(loop.iv) else loop.iv;
         const M = loop.carried[0];
         const L = loop.carried[1];
         const acc = loop.carried[2];
@@ -938,6 +1033,16 @@ fn kernelUnifiedAttention3d(
             selection_mask.bitAnd(seq_offset.ge(0)).bitAnd(seq_offset.lt(seq_len))
         else
             selection_mask;
+        // Selected positions may contain holes and a valid tail after padding.
+        // Skip only wholly empty tiles, retaining the running softmax state.
+        var nonempty = k.openIfElse(
+            if (config.indices_count > 0 and !(segment_size == 1 and TILE_SIZE <= 256))
+                k.sum(tile_mask.to(.i32)).gt(0)
+            else
+                // The bounded scan already rejected an empty single tile.
+                k.liftAs(1, .i1),
+            .{ k.tensorTy(&.{BLOCK_M}, .f32), k.tensorTy(&.{BLOCK_M}, .f32), k.tensorTy(&.{ BLOCK_M, HEAD_SIZE_PADDED }, .f32) },
+        );
         const safe_offset = k.where(tile_mask, seq_offset, k.zeros(&.{TILE_SIZE}, .i32));
         const physical_block_idx = k.loadOpts(
             block_tables_ptr.addPtr(block_table_offset).addPtr(safe_offset.div(@as(i32, @intCast(BLOCK_SIZE)))),
@@ -995,7 +1100,8 @@ fn kernelUnifiedAttention3d(
 
         const qm0_2d = query_mask_0.expandDims(1);
         const qm1_2d = query_mask_1.expandDims(1);
-        const keep_mask = qm1_2d.bitAnd(qm0_2d).bitAnd(seq_mask);
+        // Invalid sparse lanes must carry no softmax mass, including causal decode.
+        const keep_mask = qm1_2d.bitAnd(qm0_2d).bitAnd(seq_mask).bitAnd(tile_mask.expandDims(0));
         S = k.where(keep_mask, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
 
         if (SLIDING_WINDOW > 0) {
@@ -1042,41 +1148,69 @@ fn kernelUnifiedAttention3d(
             k.where(new_L.gt(0.0), m_j, k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32))
         else
             m_j;
-        loop.yield(.{ new_M, new_L, new_acc });
+        nonempty.yieldThen(.{ new_M, new_L, new_acc });
+        nonempty.yieldElse(.{ M, L, acc });
+        loop.yield(.{ nonempty.results[0], nonempty.results[1], nonempty.results[2] });
     }
     const M_final = loop.results[0];
     const L_final = loop.results[1];
     const acc_final = loop.results[2];
 
-    // segm_output_offset = qo_0[:, None].to(i64) * (NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-    //                    + qo_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-    //                    + segm_idx * HEAD_SIZE_PADDED + offs_d[None, :]
-    const segm_out_head_stride_i32: i32 = @intCast(NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED);
-    const segm_out_token_stride_i64: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED;
+    storeSegment(k, config, segm_output_ptr, segm_max_ptr, segm_expsum_ptr, query_offset_0, query_offset_1, query_mask_0, query_mask_1, segm_idx, offs_d, dim_mask, M_final, L_final, acc_final);
+}
 
-    // Inline `segm_idx * HEAD_SIZE_PADDED` and `offs_d[None, :]` inside the chain
-    // so each term's ops emit in source order
-    const oo0_2d = k.expandDims(query_offset_0, 1).to(.i64).mul(segm_out_token_stride_i64);
-    const oo1_2d = k.expandDims(query_offset_1, 1).mul(segm_out_head_stride_i32);
-    const segm_output_offset = oo0_2d.add(oo1_2d)
-        .add(segm_idx.mul(@as(i32, @intCast(HEAD_SIZE_PADDED))))
-        .add(k.expandDims(offs_d, 0));
+// Builder helpers emit into the existing kernel; they do not create GPU calls.
+fn storeSegment(
+    k: *Builder,
+    config: KernelUnifiedAttention3dPtr.Config,
+    segm_output_ptr: Value,
+    segm_max_ptr: Value,
+    segm_expsum_ptr: Value,
+    query_offset_0: Value,
+    query_offset_1: Value,
+    query_mask_0: Value,
+    query_mask_1: Value,
+    segm_idx: Value,
+    offs_d: Value,
+    dim_mask: Value,
+    M_final: Value,
+    L_final: Value,
+    acc_final: ?Value,
+) void {
+    const NUM_QUERY_HEADS = config.num_query_heads;
+    const NUM_SEGMENTS_PER_SEQ = config.num_segments_per_seq;
+    const HEAD_SIZE_PADDED = config.head_size_padded;
+    const BLOCK_M = config.block_m;
+    if (acc_final) |acc| {
+        // segm_output_offset = qo_0[:, None].to(i64) * (NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+        //                    + qo_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+        //                    + segm_idx * HEAD_SIZE_PADDED + offs_d[None, :]
+        const segm_out_head_stride_i32: i32 = @intCast(NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED);
+        const segm_out_token_stride_i64: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED;
 
-    const store_mask_2d = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
-        .bitAnd(query_mask_1.expandDims(1));
-    k.storeOpts(
-        segm_output_ptr.addPtr(segm_output_offset),
-        acc_final,
-        .{ .mask = store_mask_2d },
-    );
+        // Inline `segm_idx * HEAD_SIZE_PADDED` and `offs_d[None, :]` inside the chain
+        // so each term's ops emit in source order
+        const oo0_2d = k.expandDims(query_offset_0, 1).to(.i64).mul(segm_out_token_stride_i64);
+        const oo1_2d = k.expandDims(query_offset_1, 1).mul(segm_out_head_stride_i32);
+        const segm_output_offset = oo0_2d.add(oo1_2d)
+            .add(segm_idx.mul(@as(i32, @intCast(HEAD_SIZE_PADDED))))
+            .add(k.expandDims(offs_d, 0));
 
-    // segm_offset = qo_0.to(i64) * (NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ)
-    //             + qo_1 * NUM_SEGMENTS_PER_SEQ + segm_idx
-    const segm_head_stride_i32: i32 = @intCast(NUM_SEGMENTS_PER_SEQ);
+        const store_mask_2d = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
+            .bitAnd(query_mask_1.expandDims(1));
+        k.storeOpts(
+            segm_output_ptr.addPtr(segm_output_offset),
+            acc,
+            .{ .mask = store_mask_2d },
+        );
+    }
+
+    // Use the same statistics layout for populated and empty segments.
+    const segm_head_stride_i32: i32 = if (config.stats_head_minor) 1 else @intCast(NUM_SEGMENTS_PER_SEQ);
     const segm_token_stride_i64: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ;
     const segm_offset = query_offset_0.to(.i64).mul(segm_token_stride_i64)
         .add(query_offset_1.mul(segm_head_stride_i32))
-        .add(segm_idx);
+        .add(segm_idx.mul(@as(i32, if (config.stats_head_minor) @intCast(NUM_QUERY_HEADS) else 1)));
     const store_mask_1d = query_mask_0.bitAnd(query_mask_1);
     k.storeOpts(segm_max_ptr.addPtr(segm_offset), M_final, .{ .mask = store_mask_1d });
     k.storeOpts(segm_expsum_ptr.addPtr(segm_offset), L_final, .{ .mask = store_mask_1d });
@@ -1102,9 +1236,13 @@ fn reduceSegments(
     const TILE_SIZE: i64 = config.tile_size;
     const HEAD_SIZE: i64 = config.head_size;
     const HEAD_SIZE_PADDED: i64 = config.head_size_padded;
+    const BLOCK_D = if (config.head_tile_size > 0) config.head_tile_size else HEAD_SIZE_PADDED;
     const NUM_QUERY_HEADS: i64 = config.num_query_heads;
     const NUM_SEGMENTS_PER_SEQ: i64 = config.num_segments_per_seq;
     const BLOCK_Q: i64 = config.block_q;
+
+    std.debug.assert(BLOCK_D > 0 and BLOCK_D <= HEAD_SIZE_PADDED and
+        std.math.isPowerOfTwo(@as(u64, @intCast(BLOCK_D))));
 
     const query_token_idx = k.programId(.x);
     const query_head_idx = k.programId(.y);
@@ -1123,18 +1261,18 @@ fn reduceSegments(
     const seg_range = k.arange(0, NUM_SEGMENTS_PER_SEQ, .i32);
     const segm_mask = seg_range.lt(act_num_segments);
 
-    const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);
+    const offs_d = k.programId(.z).mul(@as(i32, @intCast(BLOCK_D))).add(k.arange(0, BLOCK_D, .i32));
     const dim_mask: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
         offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
     else
-        k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
+        k.full(&.{BLOCK_D}, 1, .i1);
 
-    // segm_offset = query_token_idx*NQH*NSPS + query_head_idx*NSPS + arange(NSPS)
+    // Read the statistics layout selected by the attention producer.
     const tok_stride: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ;
-    const head_stride: i32 = @intCast(NUM_SEGMENTS_PER_SEQ);
+    const head_stride: i32 = if (config.stats_head_minor) 1 else @intCast(NUM_SEGMENTS_PER_SEQ);
     const segm_offset = query_token_idx.to(.i64).mul(tok_stride)
         .add(query_head_idx.mul(head_stride).to(.i64))
-        .add(seg_range.to(.i64));
+        .add(seg_range.to(.i64).mul(if (config.stats_head_minor) NUM_QUERY_HEADS else @as(i64, 1)));
 
     const segm_max = k.loadOpts(segm_max_ptr.addPtr(segm_offset), .{
         .mask = segm_mask,
@@ -1150,6 +1288,7 @@ fn reduceSegments(
         .mask = segm_mask,
         .other = k.zeros(&.{NUM_SEGMENTS_PER_SEQ}, .f32),
     });
+    const nonempty_segments = segm_expsum.gt(0.0);
     segm_expsum = segm_expsum.mul(k.exp2(segm_max.sub(overall_max)));
     const overall_expsum = k.sum(segm_expsum);
 
@@ -1168,15 +1307,16 @@ fn reduceSegments(
         const dim_row_i32 = k.expandDims(offs_d, 0); // (1, HSP) i32
         break :b dim_row_i32.to(.i64); // extsi → (1, HSP) i64
     };
-    const seg_offset_2d_full = k.broadcastTo(base.add(seg_off_2d), &.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED });
-    const dim_offset_2d_full = k.broadcastTo(dim_off_2d, &.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED });
+    const seg_offset_2d_full = k.broadcastTo(base.add(seg_off_2d), &.{ NUM_SEGMENTS_PER_SEQ, BLOCK_D });
+    const dim_offset_2d_full = k.broadcastTo(dim_off_2d, &.{ NUM_SEGMENTS_PER_SEQ, BLOCK_D });
     const segm_output_offset = seg_offset_2d_full.add(dim_offset_2d_full);
 
     var segm_output = k.loadOpts(
         segm_output_ptr.addPtr(segm_output_offset),
         .{
-            .mask = k.mask2d(segm_mask, dim_mask, NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED),
-            .other = k.zeros(&.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED }, .f32),
+            // Empty segments have no partial-output tile.
+            .mask = k.mask2d(segm_mask.bitAnd(nonempty_segments), dim_mask, NUM_SEGMENTS_PER_SEQ, BLOCK_D),
+            .other = k.zeros(&.{ NUM_SEGMENTS_PER_SEQ, BLOCK_D }, .f32),
         },
     );
     const rescale = k.exp2(segm_max.sub(overall_max));
@@ -1185,7 +1325,7 @@ fn reduceSegments(
 
     var acc = k.where(
         overall_expsum.eq(0.0),
-        k.full(&.{HEAD_SIZE_PADDED}, 0.0, .f32),
+        k.full(&.{BLOCK_D}, 0.0, .f32),
         acc_sum.div(overall_expsum),
     );
 
@@ -1193,8 +1333,8 @@ fn reduceSegments(
         acc = acc.mul(out_scale_inv);
         acc = k.clampf(
             acc,
-            k.full(&.{HEAD_SIZE_PADDED}, config.fp8_min, .f32),
-            k.full(&.{HEAD_SIZE_PADDED}, config.fp8_max, .f32),
+            k.full(&.{BLOCK_D}, config.fp8_min, .f32),
+            k.full(&.{BLOCK_D}, config.fp8_max, .f32),
         );
     }
 
