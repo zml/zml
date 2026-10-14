@@ -61,7 +61,7 @@ pub fn forward(
     return self.o_proj.forward(attn_output, x.dtype());
 }
 
-pub fn apply_rotary_pos_emb(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
+fn apply_rotary_pos_emb(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
     // cos / sin shape: [B, 1, S, D] -> broadcast to match x: [B, H, S, D]
     const cos_x = cos.withTags(.{ .bs, .seq_len, .hd }).broad(x.shape());
     const sin_x = sin.withTags(.{ .bs, .seq_len, .hd }).broad(x.shape());
@@ -69,7 +69,7 @@ pub fn apply_rotary_pos_emb(x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml
     return x.mul(cos_x).add(rotate_half(x).mul(sin_x));
 }
 
-pub fn rotate_half(x: zml.Tensor) zml.Tensor {
+fn rotate_half(x: zml.Tensor) zml.Tensor {
     const half_dim = @divExact(x.dim(-1), 2);
     const x1 = x.slice(-1, .{ .start = 0, .end = half_dim });
     const x2 = x.slice(-1, .{ .start = half_dim, .end = x.dim(-1) });
