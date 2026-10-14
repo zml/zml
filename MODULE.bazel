@@ -305,8 +305,6 @@ use_repo(
     "com_google_sentencepiece",
     "cuda_tile",
     "cute_ir",
-    "flashattn_linux_amd64",
-    "flashattn_linux_arm64",
     "flashinfer_cutlass_moe_linux_amd64",
     "flashinfer_cutlass_moe_linux_arm64",
     "flydsl",

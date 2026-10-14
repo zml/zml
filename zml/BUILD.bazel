@@ -181,7 +181,6 @@ zig_library(
         "//conditions:default": [],
     }) + select({
         "//platforms:cuda.enabled": [
-            "//platforms/cuda/flashattn",
             "//platforms/cuda/flashinfer_cutlass_moe",
         ],
         "//conditions:default": [],
