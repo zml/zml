@@ -5,16 +5,12 @@ const platforms = @import("platforms");
 const zml = @import("../zml.zig");
 const stdx = zml.stdx;
 pub const stablehlo = @import("stablehlo.zig");
-pub const triton_mxfp4 = @import("triton_mxfp4.zig");
-pub const cute_mxfp4 = @import("cute_mxfp4.zig");
+pub const cute = @import("cute.zig");
 pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
 pub const metal = @import("metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
 pub const triton = @import("triton.zig");
-pub const fly = @import("fly_kernels/moe.zig");
-const fused_experts = @import("fused_experts.zig");
-pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
-pub const ProjectionLayout = fused_experts.ProjectionLayout;
+pub const fly = @import("fly.zig");
 
 const log = std.log.scoped(.@"zml/moe");
 
@@ -22,6 +18,9 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("tests.zig");
 }
+
+pub const ProjectionLayout = enum { concatenated, interleaved };
+pub const RoutingWeightPlacement = enum { before_down, after_down };
 
 /// How a backend expects the expert weights to be stored
 /// The packer writes this layout and forwardMoe reads it
@@ -78,8 +77,7 @@ pub const Activation = union(ActivationKind) {
 
 pub const Backend = enum {
     stablehlo,
-    cute_mxfp4,
-    triton_mxfp4,
+    cute,
     flashinfer_cutlass,
     triton,
     fly,
@@ -93,10 +91,8 @@ pub const Backend = enum {
             .cuda => b: {
                 const s = scheme orelse break :b .triton;
                 break :b switch (s) {
-                    .mxfp4 => if (cute_mxfp4.isAvailable(platform))
-                        .cute_mxfp4
-                    else if (triton_mxfp4.isAvailable(platform))
-                        .triton_mxfp4
+                    .mxfp4 => if (cute.isAvailable(platform))
+                        .cute
                     else
                         .triton,
                     .nvfp4 => if (cutlass_flashinfer.isNvfp4Supported(platform))
@@ -136,8 +132,7 @@ pub const Backend = enum {
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
             .stablehlo => true,
-            .triton_mxfp4 => triton_mxfp4.isAvailable(platform),
-            .cute_mxfp4 => cute_mxfp4.isAvailable(platform),
+            .cute => cute.isAvailable(platform),
             .flashinfer_cutlass => cutlass_flashinfer.isAvailable(platform),
             .fly => switch (platform.target) {
                 .rocm => zml.platform.rocm.computeCapability(platform) == .gfx942,
@@ -156,8 +151,7 @@ pub const Backend = enum {
     pub fn expertsLayout(backend: Backend, scheme: ?zml.Quantization.Scheme) !ExpertsLayout {
         return switch (backend) {
             .stablehlo => .{ .gate_up = .concatenated, .packing = .plain },
-            .cute_mxfp4 => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
-            .triton_mxfp4 => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else error.UnsupportedQuantization,
+            .cute => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
             .flashinfer_cutlass => if (scheme) |s| switch (s) {
                 .nvfp4 => .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 },
                 else => error.UnsupportedQuantization,
@@ -170,7 +164,7 @@ pub const Backend = enum {
     pub fn register(backend: Backend, platform: *zml.Platform) !void {
         return switch (backend) {
             .stablehlo => {},
-            .cute_mxfp4, .triton_mxfp4 => {},
+            .cute => {},
             .flashinfer_cutlass => cutlass_flashinfer.register(platform),
             .triton, .fly => {},
             .mosaic_tpu => {},
@@ -184,7 +178,7 @@ pub const Options = struct {
     /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
     quantize_input: bool,
     /// Where routing weights are applied; FlashInfer, Mosaic and Metal require after_down.
-    routing_weight_placement: fused_experts.RoutingWeightPlacement,
+    routing_weight_placement: RoutingWeightPlacement,
 };
 
 /// Routing IDs and weights have shape { b, s, topk }; input has shape { b, s, d }.
@@ -199,10 +193,10 @@ pub fn forwardMoe(
 ) zml.Tensor {
     return switch (backend) {
         .stablehlo => stablehlo.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .cute_mxfp4 => cute_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        .triton_mxfp4 => triton_mxfp4.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
+        .cute => cute.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
         .flashinfer_cutlass => cutlass_flashinfer.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
-        inline .triton, .fly => |b| fused_experts.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts, b),
+        .triton => triton.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
+        .fly => fly.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
         .mosaic_tpu => mosaic_tpu.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
         .metal => metal.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
     };

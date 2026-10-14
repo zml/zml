@@ -842,3 +842,335 @@ pub const CountAndSortExpertTokens = struct {
         }
     }
 };
+
+/// Returns the next power of two.
+fn pow2(x: i64) i64 {
+    return @intCast(std.math.ceilPowerOfTwo(u64, @intCast(x)) catch unreachable);
+}
+
+pub fn quantRows(tokens: i64) i64 {
+    return if (tokens >= 16) 16 else 1;
+}
+
+fn ar(b: *Builder, n: i64) Value {
+    return b.arange(0, n, .i32);
+}
+
+fn ld(b: *Builder, p: Value, mask: Value, dt: tri.DType, other: i64) Value {
+    return b.loadOpts(p, .{ .mask = mask, .other = if (p.isTensor()) b.full(p.shape().constSlice(), other, dt) else b.liftAs(other, dt) });
+}
+
+fn ci(b: *Builder, n: i64) Value {
+    return b.liftAs(n, .i32);
+}
+
+fn quant32(b: *Builder, x: Value) struct { q: Value, s: Value } {
+    const rows = x.shape().constSlice()[0];
+    const cols = x.shape().constSlice()[1];
+    const groups = @divExact(cols, 32);
+    const blocks = b.reshape(x, &.{ rows * groups, 32 });
+    const sf = b.exp2(b.ceil(b.log2(b.maxOpts(b.absf(blocks), .{ .axis = 1 }).maximum(1e-4).mul(1.0 / 448.0))));
+    const q = blocks.div(sf.expandDims(1)).maximum(-448.0).minimum(448.0).to(.f8e4m3fn);
+    const bits = b.shrui(b.bitcast(sf, .i32), b.full(sf.shape().constSlice(), 23, .i32)).bitAnd(255).to(.i8);
+    return .{ .q = b.reshape(q, &.{ rows, cols }), .s = b.reshape(bits, &.{ rows, groups }) };
+}
+
+pub fn combineBlock(tokens: i64, hidden: i64) i64 {
+    // Keep at least 512 CTAs before increasing per-CTA reduction work.
+    const elements = tokens * hidden;
+    if (tokens > 1 and elements >= 512 * 2048) return 2048;
+    if (tokens > 1 and elements >= 512 * 1024) return 1024;
+    return 256;
+}
+
+/// Computes an upper bound on the number of expert tiles needed.
+/// When there is only one token, reserve a single tile per selected expert.
+pub fn tiles(tokens: i64, topk: i64, experts: i64, bn: i64) i64 {
+    if (tokens == 1) return topk;
+    return @min(tokens * topk, @divTrunc(tokens * topk + experts * (bn - 1) + bn - 1, bn));
+}
+
+// =============================================================================
+// mxfp4_triton_quant
+// =============================================================================
+
+pub const Quant = struct {
+    pub const Cfg = struct {
+        tokens: i64,
+        hidden: i64,
+    };
+
+    pub const Kernel = tri.Kernel(Cfg, .{ .name = "mxfp4_triton_quant", .inputs = &.{"x"}, .outputs = &.{ "q", "s" }, .run = run });
+
+    fn run(b: *Builder, c: Cfg) tri.FinishError!void {
+        const a = try b.declareArgs(.{ .x = .{ .ptr = .bf16 }, .q = .{ .ptr = .f8e4m3fn }, .s = .{ .ptr = .i8 } });
+        const rows = b.programId(.x).mul(quantRows(c.tokens)).add(ar(b, quantRows(c.tokens)));
+        const block = b.programId(.y);
+        const cols = block.mul(128).add(ar(b, 128));
+        const offsets = rows.expandDims(1).mul(c.hidden).add(cols.expandDims(0));
+        const mask = rows.lt(c.tokens).expandDims(1);
+        const x = ld(b, a.x.addPtr(offsets), mask, .bf16, 0).to(.f32);
+        const q = quant32(b, x);
+        b.storeOpts(a.q.addPtr(offsets), q.q, .{ .mask = mask });
+        const scale_offsets = rows.expandDims(1).mul(@divTrunc(c.hidden, 32)).add(block.mul(4).add(ar(b, 4)).expandDims(0));
+        b.storeOpts(a.s.addPtr(scale_offsets), q.s, .{ .mask = mask });
+    }
+};
+
+// =============================================================================
+// mxfp4_triton_route
+// =============================================================================
+
+pub const Route = struct {
+    pub const Cfg = struct {
+        tokens: i64,
+        topk: i64,
+        expert_offset: i64,
+    };
+
+    pub const Kernel = tri.Kernel(Cfg, .{ .name = "mxfp4_triton_route", .inputs = &.{"ids"}, .outputs = &.{ "counts", "pos" }, .run = run });
+
+    fn run(b: *Builder, c: Cfg) tri.FinishError!void {
+        const a = try b.declareArgs(.{ .ids = .{ .ptr = .i32 }, .counts = .{ .ptr = .i32 }, .pos = .{ .ptr = .i32 } });
+        const e = b.programId(.x);
+        const p = ar(b, pow2(c.tokens * c.topk));
+        const ids = ld(b, a.ids.addPtr(p), p.lt(c.tokens * c.topk), .i32, -1);
+        const valid = p.lt(c.tokens * c.topk).bitAnd(ids.eq(e.add(c.expert_offset)));
+        b.storeOpts(a.pos.addPtr(p), valid.to(.i32).cumsum().sub(1), .{ .mask = valid });
+        b.store(a.counts.addPtr(e), valid.to(.i32).sum());
+    }
+};
+
+// =============================================================================
+// mxfp4_triton_route_atomic
+// =============================================================================
+
+pub const RouteAtomic = struct {
+    pub const route_block = 1024;
+
+    pub const Cfg = struct {
+        tokens: i64,
+        topk: i64,
+        expert_offset: i64,
+        experts: i64,
+    };
+
+    pub const Kernel = tri.Kernel(Cfg, .{ .name = "mxfp4_triton_route_atomic", .inputs = &.{ "ids", "zeros" }, .outputs = &.{ "counts", "pos" }, .run = run });
+
+    /// Routing for large batches, used by `scheduleForCute`.
+    /// Each route takes the next free slot of its expert with an atomic
+    /// increment of `counts` (zero-initialized through `zeros`). Slots within an
+    /// expert are therefore unordered, which the grouped GEMMs do not care
+    /// about: every routed row is computed independently.
+    fn run(b: *Builder, c: Cfg) tri.FinishError!void {
+        const a = try b.declareArgs(.{ .ids = .{ .ptr = .i32 }, .zeros = .{ .ptr = .i32 }, .counts = .{ .ptr = .i32 }, .pos = .{ .ptr = .i32 } });
+        const p = b.programId(.x).mul(route_block).add(ar(b, route_block));
+        const in_range = p.lt(c.tokens * c.topk);
+        const e = ld(b, a.ids.addPtr(p), in_range, .i32, -1).sub(ci(b, c.expert_offset));
+        const valid = in_range.bitAnd(e.ge(0)).bitAnd(e.lt(c.experts));
+        const slot = b.atomicRmwOpts(.add, a.counts.addPtr(e.maximum(0)), b.full(&.{route_block}, 1, .i32), .{ .mask = valid, .sem = .relaxed });
+        b.storeOpts(a.pos.addPtr(p), slot, .{ .mask = valid });
+    }
+};
+
+// =============================================================================
+// mxfp4_triton_schedule
+// =============================================================================
+
+pub const Schedule = struct {
+    pub const Cfg = struct {
+        tokens: i64,
+        topk: i64,
+        expert_offset: i64,
+        experts: i64,
+        /// Expert groups the schedule may fill.
+        capacity: i64,
+        /// Routed rows per expert group, i.e. the consuming GEMM's tile N.
+        group: i64,
+    };
+
+    pub const Kernel = tri.Kernel(Cfg, .{ .name = "mxfp4_triton_schedule", .inputs = &.{ "ids", "counts", "pos" }, .outputs = &.{ "map", "perm", "sched" }, .run = run });
+
+    fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
+        const nt = cfg.capacity;
+        // Route positions are i32 tensors; keep the group size in that type.
+        const group: i32 = @intCast(cfg.group);
+        const a = try b.declareArgs(.{ .ids = .{ .ptr = .i32 }, .counts = .{ .ptr = .i32 }, .pos = .{ .ptr = .i32 }, .map = .{ .ptr = .i32 }, .perm = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 } });
+        const p = b.programId(.x).mul(128).add(ar(b, 128));
+        const e = ld(b, a.ids.addPtr(p), p.lt(cfg.tokens * cfg.topk), .i32, -1).sub(ci(b, cfg.expert_offset));
+        const es = ar(b, pow2(cfg.experts));
+        const counts = ld(b, a.counts.addPtr(es), es.lt(cfg.experts), .i32, 0);
+        const ts = counts.cdiv(group);
+        const starts = ts.cumsum().sub(ts);
+        var first = b.openIf(b.programId(.x).eq(0));
+        b.store(a.sched.addPtr(2 * nt), ts.sum());
+        first.yieldThen(.{});
+        const live = p.lt(cfg.tokens * cfg.topk).bitAnd(e.ge(0)).bitAnd(e.lt(cfg.experts));
+        const safe = e.maximum(0).minimum(pow2(cfg.experts) - 1);
+        const pos = ld(b, a.pos.addPtr(p), live, .i32, 0);
+        const start = starts.gather(safe, 0);
+        const tile = start.add(pos.div(group));
+        const row = pos.rem(group);
+        b.storeOpts(a.perm.addPtr(p), b.select(live, tile.mul(group).add(row), b.full(&.{128}, -1, .i32)), .{ .mask = p.lt(cfg.tokens * cfg.topk) });
+        b.storeOpts(a.map.addPtr(tile.mul(group).add(row)), p, .{ .mask = live });
+        b.storeOpts(a.sched.addPtr(tile), e, .{ .mask = live.bitAnd(row.eq(0)) });
+        b.storeOpts(a.sched.addPtr(nt).addPtr(tile), counts.gather(safe, 0).sub(pos).minimum(group), .{ .mask = live.bitAnd(row.eq(0)) });
+    }
+};
+
+// =============================================================================
+// mxfp4_triton_combine
+// =============================================================================
+
+pub const Combine = struct {
+    pub const Cfg = struct {
+        tokens: i64,
+        hidden: i64,
+        topk: i64,
+        expert_offset: i64,
+        experts: i64,
+        routing_weight_placement: zml.moe.RoutingWeightPlacement = .before_down,
+        bn: i64,
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{ .name = "mxfp4_triton_combine", .inputs = &.{ "d", "ids", "perm", "rw" }, .outputs = &.{"y"}, .run = run });
+
+    fn run(b: *Builder, c: Cfg) tri.FinishError!void {
+        return combineWithBn(b, c);
+    }
+
+    fn combineWithBn(b: *Builder, c: Cfg) tri.FinishError!void {
+        const a = try b.declareArgs(.{ .d = .{ .ptr = .bf16 }, .ids = .{ .ptr = .i32 }, .perm = .{ .ptr = .i32 }, .rw = .{ .ptr = .f32 }, .y = .{ .ptr = .bf16 } });
+        const t = b.programId(.x);
+        const block = combineBlock(c.tokens, c.hidden);
+        const h = b.programId(.y).mul(block).add(ar(b, block));
+        var acc = b.zeros(&.{block}, .f32);
+        for (0..@intCast(c.topk)) |s| {
+            const pair = t.mul(c.topk).add(@as(i64, @intCast(s)));
+            const row = if (c.tokens == 1) pair.mul(c.bn) else b.load(a.perm.addPtr(pair));
+            const valid = if (c.tokens == 1) v: {
+                const e = b.load(a.ids.addPtr(pair)).sub(ci(b, c.expert_offset));
+                break :v e.ge(0).bitAnd(e.lt(c.experts));
+            } else row.ge(0);
+            var value = ld(b, a.d.addPtr(row.mul(c.hidden).add(h)), valid.bitAnd(h.lt(c.hidden)), .bf16, 0).to(.f32);
+            if (c.routing_weight_placement == .after_down) {
+                value = value.mul(ld(b, a.rw.addPtr(pair), valid, .f32, 0));
+            }
+            acc = acc.add(value);
+        }
+        b.storeOpts(a.y.addPtr(t.mul(c.hidden).add(h)), acc.to(.bf16), .{ .mask = h.lt(c.hidden) });
+    }
+};
+
+// =============================================================================
+// mxfp4 gemm
+// =============================================================================
+
+pub const GateUp = struct {
+    pub const Cfg = GemmConfig;
+
+    pub const Kernel = tri.Kernel(Cfg, .{ .name = "mxfp4_triton_gate_up", .inputs = &.{ "q", "s", "w", "ws", "ids", "rw", "map", "sched" }, .outputs = &.{ "mid", "ms" }, .run = run });
+
+    fn run(b: *Builder, c: Cfg) tri.FinishError!void {
+        return gemm(b, c, .gate_up);
+    }
+};
+
+pub const Down = struct {
+    pub const Cfg = GemmConfig;
+
+    pub const Kernel = tri.Kernel(Cfg, .{ .name = "mxfp4_triton_down", .inputs = &.{ "mid", "ms", "w", "ws", "ids", "sched" }, .outputs = &.{"d"}, .run = run });
+
+    fn run(b: *Builder, c: Cfg) tri.FinishError!void {
+        return gemm(b, c, .down);
+    }
+};
+
+const GemmConfig = struct {
+    tokens: i64,
+    hidden: i64,
+    intermediate: i64,
+    experts: i64,
+    topk: i64,
+    expert_offset: i64 = 0,
+    // Swiglu clamping. Set to 0 to disable.
+    swiglu_limit: f32,
+    scale_stride: i64,
+    routing_weight_placement: zml.moe.RoutingWeightPlacement = .before_down,
+    bn: i64,
+    bk: i64,
+};
+
+const Projection = enum { gate_up, down };
+
+fn gemm(b: *Builder, c: GemmConfig, comptime projection: Projection) tri.FinishError!void {
+    const is_up = projection == .gate_up;
+    const a = if (is_up) try b.declareArgs(.{ .q = .{ .ptr = .f8e4m3fn }, .s = .{ .ptr = .i8 }, .w = .{ .ptr = .i8 }, .ws = .{ .ptr = .i8 }, .ids = .{ .ptr = .i32 }, .rw = .{ .ptr = .f32 }, .map = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 }, .mid = .{ .ptr = .f8e4m3fn }, .ms = .{ .ptr = .i8 } }) else try b.declareArgs(.{ .q = .{ .ptr = .f8e4m3fn }, .s = .{ .ptr = .i8 }, .w = .{ .ptr = .i8 }, .ws = .{ .ptr = .i8 }, .ids = .{ .ptr = .i32 }, .sched = .{ .ptr = .i32 }, .d = .{ .ptr = .bf16 } });
+    const block = b.programId(.x);
+    const tile = b.programId(.y);
+    const n = ar(b, c.bn);
+    const nt = tiles(c.tokens, c.topk, c.experts, c.bn);
+    const expert = if (c.tokens == 1) b.load(a.ids.addPtr(tile)).sub(ci(b, c.expert_offset)) else ld(b, a.sched.addPtr(tile), tile.lt(b.load(a.sched.addPtr(2 * nt))), .i32, 0);
+    const valid = if (c.tokens == 1) expert.ge(0).bitAnd(expert.lt(c.experts)) else tile.lt(b.load(a.sched.addPtr(2 * nt)));
+    var live = b.openIf(valid);
+    const count = if (c.tokens == 1) ci(b, 1) else b.load(a.sched.addPtr(nt).addPtr(tile));
+    const pair = if (c.tokens == 1) b.full(&.{c.bn}, 0, .i32).add(tile) else if (is_up) ld(b, a.map.addPtr(tile.mul(c.bn).add(n)), n.lt(count), .i32, 0) else n;
+    const width: i64 = if (is_up and c.tokens > 8) 256 else 128;
+    const ksize = if (is_up) c.hidden else c.intermediate;
+    const rows = if (is_up) 2 * c.intermediate else c.hidden;
+    const m = block.mul(width).add(ar(b, width));
+    const k = ar(b, c.bk);
+    const ks = ar(b, @divExact(c.bk, 32));
+    const row = if (is_up) pair.div(c.topk) else tile.mul(c.bn).add(n);
+    const wd = b.makeTensorDescriptor(a.w.addPtr(expert.to(.i64).mul(@divTrunc(rows * ksize, 2))), &.{ ci(b, rows), ci(b, @divTrunc(ksize, 2)) }, &.{ b.liftAs(@divTrunc(ksize, 2), .i64), b.liftAs(1, .i64) }, .pad_zero, &.{ width, @divExact(c.bk, 2) }, .i8);
+    var loop = b.openFor(0, @divTrunc(ksize + c.bk - 1, c.bk), 1, .{b.zeros(&.{ width, c.bn }, .f32)});
+    const sk = loop.iv.mul(@divExact(c.bk, 32)).add(ks);
+    const kk = loop.iv.mul(c.bk).add(k);
+    const w = b.descriptorLoad(wd, &.{ block.mul(ci(b, width)), loop.iv.mul(@divExact(c.bk, 2)) }, &.{ width, @divExact(c.bk, 2) }, .i8);
+    const scale_offset = m.expandDims(1).mul(c.scale_stride).add(sk.expandDims(0));
+    const ws = ld(b, a.ws.addPtr(expert.to(.i64).mul(rows * c.scale_stride)).addPtr(scale_offset), sk.expandDims(0).lt(@divTrunc(ksize, 32)), .i8, 127);
+    var mask = kk.expandDims(0).lt(ksize);
+    var smask = sk.expandDims(0).lt(@divTrunc(ksize, 32));
+    // The small-batch epilogue leaves padded rows unwritten.
+    if (is_up or c.tokens <= 8) {
+        mask = mask.bitAnd(n.lt(count).expandDims(1));
+        smask = smask.bitAnd(n.lt(count).expandDims(1));
+    }
+    const x = ld(b, a.q.addPtr(row.expandDims(1).mul(ksize).add(kk.expandDims(0))), mask, .f8e4m3fn, 0);
+    const xs = ld(b, a.s.addPtr(row.expandDims(1).mul(@divTrunc(ksize, 32)).add(sk.expandDims(0))), smask, .i8, 127);
+    loop.yield(.{b.dotScaled(w, b.permute(x, &.{ 1, 0 }), loop.carried[0], ws, xs, .e2m1, .e4m3)});
+    const epilogue_n: i64 = if (c.tokens == 1) 1 else c.bn;
+    const out_n = ar(b, epilogue_n);
+    const acc = if (c.tokens == 1) live_row: {
+        // The remaining MMA columns are padding during single-token decode.
+        // Extract column zero before activation/reduction and output stores.
+        var v = loop.results[0];
+        var cols: i64 = c.bn;
+        while (cols > 1) : (cols = @divTrunc(cols, 2)) {
+            v = b.split(b.reshape(v, &.{ width, @divTrunc(cols, 2), 2 }))[0];
+        }
+        break :live_row b.reshape(v, &.{ 1, width }).to(.bf16);
+    } else b.permute(loop.results[0], &.{ 1, 0 }).to(.bf16);
+    if (is_up) {
+        const columns = @divExact(width, 2);
+        const halves = b.split(b.reshape(acc.to(.f32), &.{ epilogue_n, columns, 2 }));
+        var g = halves[0];
+        var u = halves[1];
+        if (c.swiglu_limit > 0) {
+            g = g.minimum(c.swiglu_limit);
+            u = u.minimum(c.swiglu_limit).maximum(-c.swiglu_limit);
+        }
+        const ex = b.externElementwise(&.{g.mul(-1.0)}, &.{ epilogue_n, columns }, .f32, "libdevice", "", "__nv_expf");
+        var mid = u.mul(b.divRn(g, ex.add(1.0)));
+        if (c.routing_weight_placement == .before_down) {
+            const rw = if (c.tokens == 1) b.load(a.rw.addPtr(tile)) else ld(b, a.rw.addPtr(pair), n.lt(count), .f32, 0).expandDims(1);
+            mid = mid.mul(rw);
+        }
+        // Compute scales and quantize directly from the FP32 SwiGLU result.
+        const q = quant32(b, mid);
+        const col = block.mul(columns).add(ar(b, columns));
+        b.store(a.mid.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(c.intermediate).add(col.expandDims(0))), q.q);
+        const scale_cols = block.mul(@divExact(columns, 32)).add(ar(b, @divExact(columns, 32)));
+        b.store(a.ms.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(@divTrunc(c.intermediate, 32)).add(scale_cols.expandDims(0))), q.s);
+    } else b.store(a.d.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(c.hidden).add(m.expandDims(0))), acc);
+    live.yieldThen(.{});
+}
