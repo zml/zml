@@ -74,10 +74,10 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             platform,
-            "text_encoder.model.language_model.layers.0.self_attn",
+            "text_encoder.model.language_model.layers.0",
             &activations_store.store,
-            TextWrapper{ .model = language_model_store.model.language_model.layers[0].self_attn, .args = compile_args },
-            .{ .model = language_model_store.model_buffer.language_model.layers[0].self_attn, .args = compile_args_buffers },
+            TextWrapper{ .model = language_model_store.model.language_model.layers[0], .args = compile_args },
+            .{ .model = language_model_store.model_buffer.language_model.layers[0], .args = compile_args_buffers },
         );
     } else {
         std.debug.print("NOTHING IS BEING TESTED\n", .{});
@@ -105,7 +105,7 @@ const BlockWrapper = struct {
 };
 
 const TextWrapper = struct {
-    model: block.Qwen3VLTextAttention,
+    model: block.Qwen3VLTextDecoderLayer,
     args: CompileArgs,
 
     pub fn forward(

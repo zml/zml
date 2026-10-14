@@ -68,8 +68,8 @@ pub fn load(
             .up_proj = .init(mlp_view.createTensor("up_proj.weight", .{ .dup, .d }, .replicated), null, .d),
         };
 
-        const input_layernorm = block.Qwen3VLTextRMSNorm.init(layer_view.createTensor("post_attention_layernorm.weight", .{.dim}, .replicated), .d);
-        const post_attention_layernorm = block.Qwen3VLTextRMSNorm.init(layer_view.createTensor("input_layernorm.weight", .{.dim}, .replicated), .d);
+        const input_layernorm = block.Qwen3VLTextRMSNorm.init(layer_view.createTensor("input_layernorm.weight", .{.dim}, .replicated), .d);
+        const post_attention_layernorm = block.Qwen3VLTextRMSNorm.init(layer_view.createTensor("post_attention_layernorm.weight", .{.dim}, .replicated), .d);
 
         layers[i] = block.Qwen3VLTextDecoderLayer{
             .self_attn = self_attn,

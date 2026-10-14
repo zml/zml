@@ -1,6 +1,8 @@
 const std = @import("std");
 const zml = @import("zml");
 
+const CompileArgs = @import("../../compiler.zig").CompileArgs;
+
 const Qwen3VLTextAttention = @import("./Qwen3VLTextAttention.zig");
 const Qwen3VLTextMLP = @import("./Qwen3VLTextMLP.zig");
 const Qwen3VLTextRMSNorm = @import("./Qwen3VLTextRMSNorm.zig");
@@ -17,4 +19,21 @@ pub fn unloadBuffers(self: *zml.Bufferized(Qwen3VLTextDecoderLayer)) void {
     Qwen3VLTextMLP.unloadBuffers(&self.mlp);
     Qwen3VLTextRMSNorm.unloadBuffers(&self.input_layernorm);
     Qwen3VLTextRMSNorm.unloadBuffers(&self.post_attention_layernorm);
+}
+
+pub fn forward(
+    self: Qwen3VLTextDecoderLayer,
+    x: zml.Tensor,
+    position_ids: zml.Tensor,
+    cos: zml.Tensor,
+    sin: zml.Tensor,
+    args: CompileArgs,
+) zml.Tensor {
+    const normed = self.input_layernorm.forward(x.rename(.{ .d = .hd }));
+    const attn = self.self_attn.forward(normed.rename(.{ .hd = .d }), position_ids, cos, sin, args);
+    const with_residual = x.add(attn);
+
+    const post = self.post_attention_layernorm.forward(with_residual.rename(.{ .d = .hd }));
+    const mlp = self.mlp.forward(post.rename(.{ .hd = .d }));
+    return with_residual.add(mlp);
 }
