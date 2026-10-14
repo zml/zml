@@ -153,7 +153,7 @@ pub const Options = struct {
     /// Metal uses weight-only quantization; specialized MXFP4 GEMMs always use MXFP8 inputs.
     /// CuTe additionally rounds the intermediate activation to BF16 before quantizing.
     input_quantization: enum { automatic, none, mxfp8, mxfp8_bf16 } = .automatic,
-    routing_weight_placement: @import("fused_experts.zig").RoutingWeightPlacement = .after_down,
+    routing_weight_placement: zml.moe.RoutingWeightPlacement = .after_down,
 };
 
 pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: Options) Tensor {
