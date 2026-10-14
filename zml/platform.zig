@@ -643,7 +643,7 @@ pub const Platform = struct {
             logical,
             .suggest(logical, &platform.physical_mesh),
         ) catch |err| switch (err) {
-            error.InvalidPhysicalMesh, error.InvalidStrategy, error.InvalidPhysicalAxis => {
+            error.InvalidPhysicalMesh, error.InvalidStrategy, error.InvalidPhysicalAxis, error.OverlappingLogicalAxes => {
                 std.debug.panic("ZML failed to create a valid mesh for logical mesh: {f}\nand physical_mesh: {f}\nPlease report this bug.", .{ logical, platform.physical_mesh });
             },
             error.OutOfMemory => |e| return e,

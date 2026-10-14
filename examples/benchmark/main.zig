@@ -11,10 +11,10 @@ comptime {
 }
 
 const CliArgs = struct {
-    pub const help = "benchmark --iterations=200 --samples=8 --warmup=100";
-    iterations: usize = 200,
-    samples: usize = 8,
-    warmup: usize = 100,
+    pub const help = "benchmark --iterations=1000 --samples=20 --warmup=1000";
+    iterations: usize = 1000,
+    samples: usize = 20,
+    warmup: usize = 1000,
 };
 
 const layouts = [_]Layout{
@@ -130,11 +130,12 @@ noinline fn bufferFromMetadata(platform: *const zml.Platform, shape: zml.Shape, 
     const layout = platform.defaultMemoryLayout(placement.shape.dims(), packed_shape.dtype());
     zml.stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
     const slice = zml.Slice.init(packed_shape, data);
+    const base_ptr = placement.basePtr(slice);
 
-    for (platform.physical_mesh.devices_in_canonical_order) |device| {
+    for (platform.physical_mesh.devices_in_canonical_order, 0..) |device, device_index| {
         const memory = platform.devices[device.id].memory(opts.memory).?;
         const args: pjrt.Client.BufferFromHostBufferArgs = .{
-            .data = placement.shardPtr(device.coords, slice),
+            .data = placement.shardPtr(device_index, base_ptr),
             .dst = .{ .memory = memory.pjrt_memory },
             .layout = layout,
             .dims = placement.shape.dims(),
@@ -458,14 +459,14 @@ fn meshesFor(allocator: std.mem.Allocator, platform: *const zml.Platform, layout
                 .{ .name = "24x56/model-rep", .shape = zml.Shape.init(.{ .m = 24, .n = 56 }, .f32).withPartitioning(mesh, .{ .m = .model }), .offsets = &.{ 0x0, 0x2a0, 0x540, 0x7e0, 0xa80, 0xd20, 0xfc0, 0x1260 } },
                 .{ .name = "24x56/rep-model", .shape = zml.Shape.init(.{ .m = 24, .n = 56 }, .f32).withPartitioning(mesh, .{ .n = .model }), .offsets = &.{ 0x0, 0x1c, 0x38, 0x54, 0x70, 0x8c, 0xa8, 0xc4 } },
                 .{ .name = "24x56/model-data", .shape = zml.Shape.init(.{ .m = 24, .n = 56 }, .f32).withPartitioning(mesh, .{ .m = .model, .n = .data }), .offsets = &.{ 0x0, 0x2a0, 0x540, 0x7e0, 0xa80, 0xd20, 0xfc0, 0x1260 } },
-                .{ .name = "24x56/data-model", .shape = zml.Shape.init(.{ .m = 24, .n = 56 }, .f32).withPartitioning(mesh, .{ .m = .data, .n = .model }), .offsets = &.{ 0x0, 0x2a0, 0x540, 0x7e0, 0xa80, 0xd20, 0xfc0, 0x1260 } },
+                .{ .name = "24x56/data-model", .shape = zml.Shape.init(.{ .m = 24, .n = 56 }, .f32).withPartitioning(mesh, .{ .m = .data, .n = .model }), .offsets = &.{ 0x0, 0x1c, 0x38, 0x54, 0x70, 0x8c, 0xa8, 0xc4 } },
                 .{ .name = "16x24x40/rep-rep-rep", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40 }, .f32).withPartitioning(mesh, .{}), .offsets = &.{ 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 } },
                 .{ .name = "16x24x40/model-rep-rep", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40 }, .f32).withPartitioning(mesh, .{ .m = .model }), .offsets = &.{ 0x0, 0x1e00, 0x3c00, 0x5a00, 0x7800, 0x9600, 0xb400, 0xd200 } },
                 .{ .name = "16x24x40/rep-model-rep", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40 }, .f32).withPartitioning(mesh, .{ .n = .model }), .offsets = &.{ 0x0, 0x1e0, 0x3c0, 0x5a0, 0x780, 0x960, 0xb40, 0xd20 } },
                 .{ .name = "16x24x40/rep-rep-model", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40 }, .f32).withPartitioning(mesh, .{ .e = .model }), .offsets = &.{ 0x0, 0x14, 0x28, 0x3c, 0x50, 0x64, 0x78, 0x8c } },
                 .{ .name = "16x24x40/model-data-rep", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40 }, .f32).withPartitioning(mesh, .{ .m = .model, .n = .data }), .offsets = &.{ 0x0, 0x1e00, 0x3c00, 0x5a00, 0x7800, 0x9600, 0xb400, 0xd200 } },
                 .{ .name = "16x24x40/rep-model-data", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40 }, .f32).withPartitioning(mesh, .{ .n = .model, .e = .data }), .offsets = &.{ 0x0, 0x1e0, 0x3c0, 0x5a0, 0x780, 0x960, 0xb40, 0xd20 } },
-                .{ .name = "16x24x40/data-rep-model", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40 }, .f32).withPartitioning(mesh, .{ .m = .data, .e = .model }), .offsets = &.{ 0x0, 0x1e00, 0x3c00, 0x5a00, 0x7800, 0x9600, 0xb400, 0xd200 } },
+                .{ .name = "16x24x40/data-rep-model", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40 }, .f32).withPartitioning(mesh, .{ .m = .data, .e = .model }), .offsets = &.{ 0x0, 0x14, 0x28, 0x3c, 0x50, 0x64, 0x78, 0x8c } },
                 .{ .name = "16x24x40x56/rep-rep-rep-rep", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{}), .offsets = &.{ 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 } },
                 .{ .name = "16x24x40x56/model-rep-rep-rep", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .m = .model }), .offsets = &.{ 0x0, 0x69000, 0xd2000, 0x13b000, 0x1a4000, 0x20d000, 0x276000, 0x2df000 } },
                 .{ .name = "16x24x40x56/rep-model-rep-rep", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .n = .model }), .offsets = &.{ 0x0, 0x6900, 0xd200, 0x13b00, 0x1a400, 0x20d00, 0x27600, 0x2df00 } },
@@ -474,7 +475,7 @@ fn meshesFor(allocator: std.mem.Allocator, platform: *const zml.Platform, layout
                 .{ .name = "16x24x40x56/model-data-rep-rep", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .m = .model, .n = .data }), .offsets = &.{ 0x0, 0x69000, 0xd2000, 0x13b000, 0x1a4000, 0x20d000, 0x276000, 0x2df000 } },
                 .{ .name = "16x24x40x56/rep-model-data-rep", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .n = .model, .e = .data }), .offsets = &.{ 0x0, 0x6900, 0xd200, 0x13b00, 0x1a400, 0x20d00, 0x27600, 0x2df00 } },
                 .{ .name = "16x24x40x56/rep-rep-model-data", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .e = .model, .p = .data }), .offsets = &.{ 0x0, 0x460, 0x8c0, 0xd20, 0x1180, 0x15e0, 0x1a40, 0x1ea0 } },
-                .{ .name = "16x24x40x56/data-rep-rep-model", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .m = .data, .p = .model }), .offsets = &.{ 0x0, 0x69000, 0xd2000, 0x13b000, 0x1a4000, 0x20d000, 0x276000, 0x2df000 } },
+                .{ .name = "16x24x40x56/data-rep-rep-model", .shape = zml.Shape.init(.{ .m = 16, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .m = .data, .p = .model }), .offsets = &.{ 0x0, 0x1c, 0x38, 0x54, 0x70, 0x8c, 0xa8, 0xc4 } },
                 .{ .name = "32x24x40x56/rep-rep-rep-rep", .shape = zml.Shape.init(.{ .m = 32, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{}), .offsets = &.{ 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 } },
                 .{ .name = "32x24x40x56/model-rep-rep-rep", .shape = zml.Shape.init(.{ .m = 32, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .m = .model }), .offsets = &.{ 0x0, 0xd2000, 0x1a4000, 0x276000, 0x348000, 0x41a000, 0x4ec000, 0x5be000 } },
                 .{ .name = "32x24x40x56/rep-model-rep-rep", .shape = zml.Shape.init(.{ .m = 32, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .n = .model }), .offsets = &.{ 0x0, 0x6900, 0xd200, 0x13b00, 0x1a400, 0x20d00, 0x27600, 0x2df00 } },
@@ -483,7 +484,7 @@ fn meshesFor(allocator: std.mem.Allocator, platform: *const zml.Platform, layout
                 .{ .name = "32x24x40x56/model-data-rep-rep", .shape = zml.Shape.init(.{ .m = 32, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .m = .model, .n = .data }), .offsets = &.{ 0x0, 0xd2000, 0x1a4000, 0x276000, 0x348000, 0x41a000, 0x4ec000, 0x5be000 } },
                 .{ .name = "32x24x40x56/rep-model-data-rep", .shape = zml.Shape.init(.{ .m = 32, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .n = .model, .e = .data }), .offsets = &.{ 0x0, 0x6900, 0xd200, 0x13b00, 0x1a400, 0x20d00, 0x27600, 0x2df00 } },
                 .{ .name = "32x24x40x56/rep-rep-model-data", .shape = zml.Shape.init(.{ .m = 32, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .e = .model, .p = .data }), .offsets = &.{ 0x0, 0x460, 0x8c0, 0xd20, 0x1180, 0x15e0, 0x1a40, 0x1ea0 } },
-                .{ .name = "32x24x40x56/data-rep-rep-model", .shape = zml.Shape.init(.{ .m = 32, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .m = .data, .p = .model }), .offsets = &.{ 0x0, 0xd2000, 0x1a4000, 0x276000, 0x348000, 0x41a000, 0x4ec000, 0x5be000 } },
+                .{ .name = "32x24x40x56/data-rep-rep-model", .shape = zml.Shape.init(.{ .m = 32, .n = 24, .e = 40, .p = 56 }, .f32).withPartitioning(mesh, .{ .m = .data, .p = .model }), .offsets = &.{ 0x0, 0x1c, 0x38, 0x54, 0x70, 0x8c, 0xa8, 0xc4 } },
             }) });
         }
         return meshes.items;

@@ -154,12 +154,13 @@ pub const Buffer = struct {
 
         stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
         const slice = Slice.init(metadata.shape, data_);
+        const base_ptr = metadata.placement.basePtr(slice);
 
-        for (platform.physical_mesh.devices_in_canonical_order) |device| {
+        for (platform.physical_mesh.devices_in_canonical_order, 0..) |device, device_index| {
             const memory = platform.devices[device.id].memory(opts.memory).?;
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
-                .data = metadata.placement.shardPtr(device.coords, slice),
+                .data = metadata.placement.shardPtr(device_index, base_ptr),
                 .dst = .{ .memory = memory.pjrt_memory },
                 // Constant across devices
                 .layout = metadata.layout,
@@ -282,9 +283,9 @@ pub const Buffer = struct {
         stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
 
         const placement = placementOrPanic(self._platform, self._shape);
-        for (self._platform.physical_mesh.devices_in_canonical_order, 0..) |device, shard_index| {
+        for (0..self._platform.physical_mesh.devices_in_canonical_order.len) |shard_index| {
             // TODO: handle replicated information, we shouldn't iterate over all the devices unless needed
-            const sub_slice = placement.shardSlice(device.coords, slice);
+            const sub_slice = placement.shardSlice(shard_index, slice);
             if (!sub_slice.isContiguous()) return error.NonContiguousShardRead;
 
             const size_bytes = placement.shape.byteSize();
@@ -309,8 +310,8 @@ pub const Buffer = struct {
         var shard_slice = try Slice.alloc(allocator, placement.shape);
         defer shard_slice.free(allocator);
 
-        for (self._platform.physical_mesh.devices_in_canonical_order, 0..) |device, shard_index| {
-            const sub_slice = placement.shardSlice(device.coords, slice);
+        for (0..self._platform.physical_mesh.devices_in_canonical_order.len) |shard_index| {
+            const sub_slice = placement.shardSlice(shard_index, slice);
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, shard_slice.data());
             if (maybe_event) |event| {
                 defer event.deinit(self._platform.pjrt_api);

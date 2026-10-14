@@ -984,8 +984,8 @@ const DispatchSpans = struct {
         const ordered_devices = placement.mesh().?.devicesInCanonicalOrder();
 
         var placement_span_count: usize = 0;
-        for (ordered_devices) |device| {
-            placement_span_count += placementSpanCount(shape, placement.slices(device.coords).constSlice());
+        for (0..ordered_devices.len) |device_index| {
+            placement_span_count += placementSpanCount(shape, placement.slices(device_index).constSlice());
         }
 
         var placement_spans: std.ArrayList(PlacementSpan) = try .initCapacity(allocator, placement_span_count);
@@ -993,8 +993,8 @@ const DispatchSpans = struct {
 
         const byte_strides = shape.computeByteStrides();
 
-        for (ordered_devices, 0..) |device, writer_index| {
-            appendShardPlacementSpans(&placement_spans, shape, placement.slices(device.coords).constSlice(), byte_strides.constSlice(), writer_index);
+        for (0..ordered_devices.len) |writer_index| {
+            appendShardPlacementSpans(&placement_spans, shape, placement.slices(writer_index).constSlice(), byte_strides.constSlice(), writer_index);
         }
 
         std.debug.assert(placement_spans.items.len == placement_span_count);
@@ -1473,6 +1473,7 @@ const DirectMemoryWriterDeviceTest = struct {
         defer platform.deinit(self.allocator, self.io);
 
         const mesh: Sharding.Mesh = try .init(scenario.name, &platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
+        std.log.warn("mesh: {f}", .{mesh});
         try self.runDirectMemoryWriter(
             platform,
             scenario.shape.withPartitioning(&mesh, partitioning),

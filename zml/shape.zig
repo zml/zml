@@ -826,6 +826,7 @@ pub const Shape = struct {
         }),
         .folds = .empty,
         .folds_consumed = .empty,
+        .grid = undefined,
     };
 
     pub fn withPartitioning(self: Shape, mesh: *const Sharding.Mesh, partitioning: anytype) Shape {

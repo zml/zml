@@ -244,6 +244,7 @@ pub const Tensor = struct {
             .bindings = .init(&.{.init(&.{.link_x})}),
             .folds = .empty,
             .folds_consumed = .empty,
+            .grid = undefined,
         };
 
         const mp_dp: Sharding.Mesh = .{
@@ -253,6 +254,7 @@ pub const Tensor = struct {
             .bindings = .init(&.{.init(&.{.link_x})}),
             .folds = .empty,
             .folds_consumed = .empty,
+            .grid = undefined,
         };
 
         const x = Tensor.init(.{ .h = 8 }, .f32).withPartitioning(&dp_mp, .{ .h = .model });

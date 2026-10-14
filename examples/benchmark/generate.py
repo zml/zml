@@ -72,8 +72,8 @@ MESH_STRATEGIES = (
 
 # Explicit expectations for Strategy.suggest; do not duplicate its heuristic.
 SUGGESTED_BINDINGS = {
-    'cpu-1': (('model', ('link_x',)), ('data', ('link_x',))),
-    'cuda-8': (('model', ('link_x',)), ('data', ('link_x',))),
+    'cpu-1': (('model', ('link_x',)), ('data', ())),
+    'cuda-8': (('model', ('link_x',)), ('data', ())),
     'cuda-2x2': (('model', ('link_x',)), ('data', ('link_y',))),
     'rocm-2x2x2': (('model', ('link_x',)), ('data', ('link_z',))),
     'neuron-2x2x2x2': (('model', ('link_x',)), ('data', ('link_z',))),
@@ -123,10 +123,9 @@ def expected_offsets(layout, bindings, dims, partition):
     consumed = set()
     splits = []
     for dim, logical_axis in zip(dims, partition):
-        # Shared physical axes partition the first tensor axis using them;
-        # later uses replicate along those axes (e.g. 1D suggested meshes).
-        axes = tuple(a for a in bindings.get(logical_axis, ()) if a not in consumed)
-        consumed.update(axes)
+        # Repeated uses of a logical axis partition only its first tensor dimension.
+        axes = bindings.get(logical_axis, ()) if logical_axis not in consumed else ()
+        consumed.add(logical_axis)
         count = prod(physical_sizes[a] for a in axes)
         if dim % count:
             return None
@@ -250,10 +249,10 @@ comptime {
 }
 
 const CliArgs = struct {
-    pub const help = "benchmark --iterations=200 --samples=8 --warmup=100";
-    iterations: usize = 200,
-    samples: usize = 8,
-    warmup: usize = 100,
+    pub const help = "benchmark --iterations=1000 --samples=20 --warmup=1000";
+    iterations: usize = 1000,
+    samples: usize = 20,
+    warmup: usize = 1000,
 };
 
 @CATALOG@
@@ -361,11 +360,12 @@ noinline fn bufferFromMetadata(platform: *const zml.Platform, shape: zml.Shape, 
     const layout = platform.defaultMemoryLayout(placement.shape.dims(), packed_shape.dtype());
     zml.stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
     const slice = zml.Slice.init(packed_shape, data);
+    const base_ptr = placement.basePtr(slice);
 
-    for (platform.physical_mesh.devices_in_canonical_order) |device| {
+    for (platform.physical_mesh.devices_in_canonical_order, 0..) |device, device_index| {
         const memory = platform.devices[device.id].memory(opts.memory).?;
         const args: pjrt.Client.BufferFromHostBufferArgs = .{
-            .data = placement.shardPtr(device.coords, slice),
+            .data = placement.shardPtr(device_index, base_ptr),
             .dst = .{ .memory = memory.pjrt_memory },
             .layout = layout,
             .dims = placement.shape.dims(),

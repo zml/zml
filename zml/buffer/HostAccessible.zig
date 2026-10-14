@@ -260,7 +260,7 @@ pub fn init(
 
     for (devices, 0..) |device, shard_index| {
         const memory = platform.devices[device.id].memory(.host_pinned).?.pjrt_memory;
-        const origin: Coordinates = .ofShard(&metadata.placement, device);
+        const origin: Coordinates = .ofShard(&metadata.placement, shard_index);
         const shared_region = if (can_share_allocations) allocations.findRegion(origin, metadata.placement.shape) else null;
 
         if (shared_region) |region_index| {
@@ -708,9 +708,10 @@ const Coordinates = struct {
     const zero: Coordinates = .{ .axes = @splat(0) };
 
     /// The global coordinates of the first element of a device's shard.
-    fn ofShard(placement: *const Sharding.Placement, device: Sharding.Device) Coordinates {
+    fn ofShard(placement: *const Sharding.Placement, device_index: usize) Coordinates {
+        // TODO: derive shard coordinates directly from DeviceGrid instead of reconstructing slices.
         var result: Coordinates = .zero;
-        for (placement.slices(device.coords).constSlice(), 0..) |slice, axis| result.axes[axis] = @intCast(slice.start);
+        for (placement.slices(device_index).constSlice(), 0..) |slice, axis| result.axes[axis] = @intCast(slice.start);
         return result;
     }
 
@@ -1865,13 +1866,13 @@ fn expectDevicesReadShards(platform: *const Platform, shape_: Shape) !void {
     const row_size: usize = @intCast(shape_.dim(.d));
     const values = try allocator.alloc(i32, placement.shape.count());
     defer allocator.free(values);
-    for (pinned.buffer._shards.constSlice(), platform.physical_mesh.devices_in_canonical_order) |shard, device| {
+    for (pinned.buffer._shards.constSlice(), 0..) |shard, device_index| {
         @memset(values, -1);
         if (try shard.toHostBuffer(api, std.mem.sliceAsBytes(values))) |event| {
             defer event.deinit(api);
             try event.await(api, io);
         }
-        const first_row = Coordinates.ofShard(&placement, device).axes[0];
+        const first_row = Coordinates.ofShard(&placement, device_index).axes[0];
         for (values, 0..) |value, i| try std.testing.expectEqual(@as(i32, @intCast(first_row * row_size + i)), value);
     }
 }
