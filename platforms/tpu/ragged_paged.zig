@@ -595,9 +595,18 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
             const is_last_kv = k.cmpi(.sge, k.muli(next_kv_blk_raw, k.lift(@as(i32, @intCast(cfg.numKvPerBlk())))), kv_len);
             const next_kv_blk = k.select(is_last_kv, k.lift(@as(i32, 0)), next_kv_blk_raw);
             const cur_seq_end = k.cmpi(.sle, q_end, q_len_end);
-            const next_seq_a = k.select(cur_seq_end, k.addi(cur_seq_idx, k.lift(@as(i32, 1))), cur_seq_idx);
-            const next_seq_b = k.select(is_last_kv, next_seq_a, cur_seq_idx);
-            const next_nonempty_seq = nextNonemptyKvSequence(k, cfg, a, next_seq_b, num_seqs);
+            const next_nonempty_seq = blk: {
+                // Only sequence transitions need to scan for empty KV rows.
+                var next_seq = k.openIfElse(k.andi(is_last_kv, cur_seq_end), .{k.scalarTy(.i32)});
+                {
+                    const start_seq_idx = k.addi(cur_seq_idx, k.lift(@as(i32, 1)));
+                    next_seq.yieldThen(.{nextNonemptyKvSequence(k, cfg, a, start_seq_idx, num_seqs)});
+                }
+                {
+                    next_seq.yieldElse(.{cur_seq_idx});
+                }
+                break :blk next_seq.results[0];
+            };
             const is_last_seq = k.cmpi(.eq, next_nonempty_seq, num_seqs);
             const next_seq_idx = k.select(is_last_seq, k.lift(@as(i32, 0)), next_nonempty_seq);
             const next_heads_blk_idx = k.select(is_last_seq, k.addi(a.heads_blk_idx, k.lift(@as(i32, 1))), a.heads_blk_idx);
