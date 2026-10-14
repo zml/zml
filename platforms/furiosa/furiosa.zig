@@ -19,8 +19,24 @@ pub fn isEnabled() bool {
     return platforms_options.furiosa_enabled;
 }
 
+fn hasFuriosaDevice(io: std.Io) bool {
+    std.Io.Dir.accessAbsolute(io, "/dev/rngd", .{ .read = true }) catch return false;
+    return true;
+}
+
+fn hasDmaHeapAccess(io: std.Io) bool {
+    std.Io.Dir.accessAbsolute(io, "/dev/dma_heap/system", .{ .read = true }) catch return false;
+    return true;
+}
+
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     if (comptime !isEnabled() or builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) return error.Unavailable;
+    if (!hasFuriosaDevice(io)) {
+        return error.Unavailable;
+    }
+    if (!hasDmaHeapAccess(io)) {
+        std.debug.panic("Furiosa needs read access to /dev/dma_heap/system for pinned host memory", .{});
+    }
 
     const r = try bazel.runfiles(bazel_builtin.current_repository);
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
