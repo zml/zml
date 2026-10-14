@@ -79,14 +79,13 @@ pub const LoadedModel = struct {
         loader: *zml.io.Loader,
         progress: ?*std.Progress.Node,
         store: *const zml.io.TensorStore,
-        shardings: []const zml.Sharding,
     ) !Buffers {
         const now: std.Io.Timestamp = .now(io, .awake);
 
         var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
         errdefer self.unloadBuffers(&buffers, allocator);
 
-        try loader.load(Model, &self.inner, &buffers, store, shardings, progress);
+        try loader.load(Model, &self.inner, &buffers, store, progress);
         try loader.awaitAll();
         const total_bytes = loader.bytesLoaded();
 
@@ -108,11 +107,11 @@ pub const LoadedModel = struct {
         io: std.Io,
         platform: *const zml.Platform,
         backend: zml.attention.Backend,
-        shardings: common.Shardings,
+        meshes: common.Meshes,
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, meshes);
         return inference.CompiledModel.init(allocator, io, @constCast(platform), self, self.inner, params, progress);
     }
 };
@@ -164,20 +163,18 @@ pub const Model = struct {
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
-        shardings: common.Shardings,
         load_profile: zml.io.VFS.LoadProfile,
     ) !zml.Bufferized(Model) {
         const now: std.Io.Timestamp = .now(io, .awake);
         var buffers = try zml.mem.bufferize(allocator, Model, self);
         errdefer Model.unloadBuffers(&buffers, allocator);
 
-        const all_shardings = shardings.all();
         var loader = try zml.io.Loader.init(allocator, io, platform, .{
             .load_profile = load_profile,
         });
         defer loader.deinit();
         progress.increaseEstimatedTotalItems(store.view().count());
-        try loader.load(Model, self, &buffers, store, &all_shardings, progress);
+        try loader.load(Model, self, &buffers, store, progress);
         try loader.awaitAll();
         const total_bytes = loader.bytesLoaded();
 
@@ -266,7 +263,7 @@ pub const TokenEmbedding = struct {
     };
 
     pub fn init(store: zml.io.TensorStore.View) TokenEmbedding {
-        return .{ .weight = store.createTensor("weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }) };
+        return .{ .weight = store.createTensor("weight", .{ .voc, .d }, .model, .{ .voc = .replicated, .d = .model }) };
     }
 
     pub fn forward(input: Input) Output {
@@ -436,16 +433,16 @@ pub const ShortConv = struct {
     pub fn init(config: Config, store: zml.io.TensorStore.View) ShortConv {
         stdx.debug.assert(!config.conv_bias, "conv_bias is not supported.", .{});
         return .{
-            .in_proj = .init(store.withPrefix("in_proj").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
-            .out_proj = .init(store.withPrefix("out_proj").createTensor("weight", .{ .out, .d }, .{ .out = .replicated, .d = .model }), null, .d),
-            .kernel = store.createTensor("conv.weight", .{ .out, .in, .kernel_size }, .replicated),
+            .in_proj = .init(store.withPrefix("in_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
+            .out_proj = .init(store.withPrefix("out_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .replicated, .d = .model }), null, .d),
+            .kernel = store.createReplicatedTensor("conv.weight", .{ .out, .in, .kernel_size }),
             .config = config,
         };
     }
 
     pub fn forward(self: ShortConv, input: zml.Tensor, tokens_position_offset: zml.Tensor, actual_seq_len: zml.Tensor, cache_: ConvCache, cache_index: zml.Tensor, parameters: ConvParameters) struct { zml.Tensor, ConvCache } {
         var cache = cache_;
-        const BCx = self.in_proj.forward(input.withPartitioning(.{ .d = .replicated }));
+        const BCx = self.in_proj.forward(input.withPartitioning(.model, .{ .d = .replicated }));
 
         const B, const C, const x = BCx.chunkExact(.d, 3);
         const Bx = B.mul(x);
@@ -511,10 +508,10 @@ pub const Attention = struct {
         const head_dim = config.hidden_size / config.num_attention_heads;
         const num_key_value_groups = config.num_attention_heads / config.num_key_value_heads;
         return .{
-            .q_proj = .init(store.withPrefix("q_proj").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
-            .k_proj = .init(store.withPrefix("k_proj").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
-            .v_proj = .init(store.withPrefix("v_proj").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
-            .out_proj = .init(store.withPrefix("out_proj").createTensor("weight", .{ .out, .d }, .{ .out = .replicated, .d = .model }), null, .d),
+            .q_proj = .init(store.withPrefix("q_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
+            .k_proj = .init(store.withPrefix("k_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
+            .v_proj = .init(store.withPrefix("v_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
+            .out_proj = .init(store.withPrefix("out_proj").createTensor("weight", .{ .out, .d }, .model, .{ .out = .replicated, .d = .model }), null, .d),
             .q_layernorm = RmsNorm.init(store.withPrefix("q_layernorm"), config.norm_eps, .hd),
             .k_layernorm = RmsNorm.init(store.withPrefix("k_layernorm"), config.norm_eps, .hd),
             .head_dim = head_dim,
@@ -532,7 +529,7 @@ pub const Attention = struct {
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
-        const x_qkv = x.withPartitioning(.{ .d = .replicated });
+        const x_qkv = x.withPartitioning(.model, .{ .d = .replicated });
 
         var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
         var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
@@ -559,7 +556,7 @@ pub const Attention = struct {
 
         stdx.debug.assert(q.dim(.batch) == 1, "LFM attention currently expects batch size 1 for flash attention backend, got {}", .{q.dim(.batch)});
         const attn = switch (attention_parameters) {
-            .vanilla => zml.attention.attention(
+            .stablehlo => zml.attention.attention(
                 q,
                 k,
                 v,
@@ -596,8 +593,8 @@ pub const Cache = struct {
     conv: ConvCache,
     kv: KvCache,
 
-    pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(Cache) {
-        return .{ .conv = try self.conv.initBuffers(allocator, io, platform, sharding), .kv = try self.kv.initBuffers(io, platform, sharding) };
+    pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Cache) {
+        return .{ .conv = try self.conv.initBuffers(allocator, io, platform), .kv = try self.kv.initBuffers(io, platform) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Cache)) void {
@@ -617,12 +614,12 @@ pub const ConvCache = struct {
         return .{ .state = .fromShape(shape) };
     }
 
-    pub fn initBuffers(self: ConvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(ConvCache) {
+    pub fn initBuffers(self: ConvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(ConvCache) {
         const sh = self.state.shape();
         const host = try allocator.alloc(u8, sh.byteSize());
         defer allocator.free(host);
         @memset(host, 0);
-        return .{ .state = try zml.Buffer.fromBytes(io, platform, sh, sharding, host) };
+        return .{ .state = try zml.Buffer.fromBytes(io, platform, sh, host) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(ConvCache)) void {
@@ -638,13 +635,13 @@ pub const KvCache = struct {
     k: zml.Tensor,
     v: zml.Tensor,
 
-    pub fn init(kv_shape: zml.Shape) KvCache {
-        const sharded_shape = kv_shape.withPartitioning(.{ .h = .model });
+    pub fn init(kv_shape: zml.Shape, mesh: *const zml.Mesh) KvCache {
+        const sharded_shape = kv_shape.withPartitioning(mesh, .{ .h = .model });
         return .{ .k = .fromShape(sharded_shape), .v = .fromShape(sharded_shape) };
     }
 
-    pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(KvCache) {
-        return .{ .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), sharding, .{}), .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), sharding, .{}) };
+    pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
+        return .{ .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}), .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(KvCache)) void {
@@ -705,9 +702,9 @@ const Mlp = struct {
 
     pub fn init(store: zml.io.TensorStore.View) Mlp {
         return .{
-            .w1 = .init(store.withPrefix("w1").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
-            .w2 = .init(store.withPrefix("w2").createTensor("weight", .{ .out, .d }, .{ .out = .replicated, .d = .model }), null, .d),
-            .w3 = .init(store.withPrefix("w3").createTensor("weight", .{ .out, .d }, .{ .out = .model, .d = .replicated }), null, .d),
+            .w1 = .init(store.withPrefix("w1").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
+            .w2 = .init(store.withPrefix("w2").createTensor("weight", .{ .out, .d }, .model, .{ .out = .replicated, .d = .model }), null, .d),
+            .w3 = .init(store.withPrefix("w3").createTensor("weight", .{ .out, .d }, .model, .{ .out = .model, .d = .replicated }), null, .d),
         };
     }
 
@@ -728,7 +725,7 @@ const RmsNorm = struct {
     tag: zml.Shape.Tag,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32, tag: anytype) RmsNorm {
-        return .{ .weight = store.createTensor("weight", .{tag}, .replicated), .eps = eps, .tag = zml.Shape.toTag(tag) };
+        return .{ .weight = store.createReplicatedTensor("weight", .{tag}), .eps = eps, .tag = zml.Shape.toTag(tag) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {

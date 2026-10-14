@@ -1,15 +1,14 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-PJRT_ONEAPI_RELEASE = "manual-2026-08-17T19-00-00Z"
-PJRT_ONEAPI_ARTIFACT_SHA256 = "af68f460376245013c6d42b661c24e15685dea2aa9ea9f8267d1878ef0c363a1"
-PJRT_ONEAPI_ARTIFACT_URL = "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-oneapi_linux-amd64.tar.gz".format(
-    release = PJRT_ONEAPI_RELEASE,
-)
+_PLUGIN_ONEAPI_URL = "https://mirror.zml.ai/plugins/202610011939.137.1.0d59bb389ee2/zml-oneapi-linux-amd64.tar.zst"
+_PLUGIN_ONEAPI_SHA256 = "9ca5e2c377d938b3d855c46c685d193e90424e44b1c1ea8d0a8e1c924b0d11f1"
 
 ONEAPI_VERSION = "2026.1"
+
 # www.intel.com/content/www/us/en/developer/tools/oneapi/onednn-download.html
 ONEAPI_DNNL_VERSION = "2026.0"
+
 # https://github.com/uxlfoundation/onetbb
 ONEAPI_TBB_VERSION = "2023.1"
 ONEAPI_TCM_VERSION = "1.5"
@@ -69,11 +68,11 @@ filegroup(
     "libigc2": """
 filegroup(
     name = "libigc_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libigc.so.2.36.3+0"],
+    srcs = ["lib/x86_64-linux-gnu/libigc.so.2.40.13+0"],
 )
 filegroup(
     name = "libiga64_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libiga64.so.2.36.3+0"],
+    srcs = ["lib/x86_64-linux-gnu/libiga64.so.2.40.13+0"],
 )
 filegroup(
     name = "libigc2",
@@ -85,11 +84,11 @@ filegroup(
     "libigdfcl2": """
 filegroup(
     name = "libigdfcl_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libigdfcl.so.2.36.3+0"],
+    srcs = ["lib/x86_64-linux-gnu/libigdfcl.so.2.40.13+0"],
 )
 filegroup(
     name = "libopencl_clang",
-    srcs = ["lib/x86_64-linux-gnu/libopencl-clang.so.16"],
+    srcs = ["lib/x86_64-linux-gnu/libopencl-clang.so.17"],
 )
 filegroup(
     name = "libigdfcl2",
@@ -290,8 +289,8 @@ def _oneapi_impl(mctx):
     http_archive(
         name = "libzml_oneapi",
         build_file = "libzml_oneapi.BUILD.bazel",
-        sha256 = PJRT_ONEAPI_ARTIFACT_SHA256,
-        url = PJRT_ONEAPI_ARTIFACT_URL,
+        sha256 = _PLUGIN_ONEAPI_SHA256,
+        url = _PLUGIN_ONEAPI_URL,
     )
 
     for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():

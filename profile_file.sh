@@ -22,4 +22,4 @@ for name in ZML_LOAD_FIXED_READ_PARALLELISM; do
 done
 
 env "${load_env[@]}" \
-    ./bazel.sh run --config=release --@zml//platforms:oneapi=true --run_under="perf record -g -m 16 -F 10000 -o ${perf_data}" //examples/io:playground -- load "${model_path}" "${sharding}"
+    ./bazel.sh run --config=release --@zml//platforms:oneapi=true --run_under="perf record -g -m 16 -F 10000 -o ${perf_data}" //examples/io -- load "${model_path}" "${sharding}"

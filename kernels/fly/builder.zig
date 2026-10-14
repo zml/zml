@@ -107,61 +107,63 @@ pub const Value = struct {
     // Every op below takes a Value or a comptime Layout/Tile/tuple literal,
     // and FlyDSL infers the result type.
 
-    fn unary(self: Value, comptime mnemonic: []const u8) Value {
+    fn unary(self: Value, comptime build: anytype) Value {
         const k = self.kern();
-        return k.emit(fly.inferred(k.ctx, mnemonic, &.{self.inner}, .empty, k.loc()));
+        return k.emit(build(k.ctx, self.inner, k.loc()));
     }
 
-    fn binary(self: Value, comptime mnemonic: []const u8, rhs: anytype) Value {
+    fn binary(self: Value, comptime build: anytype, rhs: anytype) Value {
         const k = self.kern();
         const r = k.lift(rhs);
-        return k.emit(fly.inferred(k.ctx, mnemonic, &.{ self.inner, r.inner }, .empty, k.loc()));
+        return k.emit(build(k.ctx, self.inner, r.inner, k.loc()));
     }
 
     pub fn flatDivide(self: Value, tiler: anytype) Value {
-        return self.binary("flat_divide", tiler);
+        return self.binary(fly.ops.flat_divide, tiler);
     }
     pub fn logicalDivide(self: Value, tiler: anytype) Value {
-        return self.binary("logical_divide", tiler);
+        return self.binary(fly.ops.logical_divide, tiler);
     }
     pub fn zippedDivide(self: Value, tiler: anytype) Value {
-        return self.binary("zipped_divide", tiler);
+        return self.binary(fly.ops.zipped_divide, tiler);
     }
     pub fn tiledDivide(self: Value, tiler: anytype) Value {
-        return self.binary("tiled_divide", tiler);
+        return self.binary(fly.ops.tiled_divide, tiler);
     }
     pub fn logicalProduct(self: Value, tiler: anytype) Value {
-        return self.binary("logical_product", tiler);
+        return self.binary(fly.ops.logical_product, tiler);
     }
     pub fn zippedProduct(self: Value, tiler: anytype) Value {
-        return self.binary("zipped_product", tiler);
+        return self.binary(fly.ops.zipped_product, tiler);
     }
     pub fn tiledProduct(self: Value, tiler: anytype) Value {
-        return self.binary("tiled_product", tiler);
+        return self.binary(fly.ops.tiled_product, tiler);
     }
     pub fn flatProduct(self: Value, tiler: anytype) Value {
-        return self.binary("flat_product", tiler);
+        return self.binary(fly.ops.flat_product, tiler);
     }
     pub fn blockedProduct(self: Value, tiler: anytype) Value {
-        return self.binary("blocked_product", tiler);
+        return self.binary(fly.ops.blocked_product, tiler);
     }
     pub fn rakedProduct(self: Value, tiler: anytype) Value {
-        return self.binary("raked_product", tiler);
+        return self.binary(fly.ops.raked_product, tiler);
     }
     pub fn composition(self: Value, inner: anytype) Value {
-        return self.binary("composition", inner);
+        return self.binary(fly.ops.composition, inner);
     }
     pub fn rightInverse(self: Value) Value {
-        return self.unary("right_inverse");
+        return self.unary(fly.ops.right_inverse);
     }
     pub fn leftInverse(self: Value) Value {
-        return self.unary("left_inverse");
+        return self.unary(fly.ops.left_inverse);
     }
     pub fn coalesce(self: Value) Value {
-        return self.unary("coalesce");
+        const k = self.kern();
+        return k.emit(fly.ops.coalesce(k.ctx, self.inner, null, k.loc()));
     }
     pub fn complement(self: Value) Value {
-        return self.unary("complement");
+        const k = self.kern();
+        return k.emit(fly.ops.complement(k.ctx, self.inner, null, k.loc()));
     }
 
     /// `t[coord]` with a `null` somewhere; `coord` is a tuple literal
@@ -169,66 +171,66 @@ pub const Value = struct {
     pub fn slice(self: Value, coord: anytype) Value {
         const k = self.kern();
         const c = k.intTuple(coord);
-        return k.emit(fly.inferred(k.ctx, "slice", &.{ self.inner, c.inner }, .empty, k.loc()));
+        return k.emit(fly.ops.slice(k.ctx, self.inner, c.inner, k.loc()));
     }
     pub fn dice(self: Value, coord: anytype) Value {
         const k = self.kern();
         const c = k.intTuple(coord);
-        return k.emit(fly.inferred(k.ctx, "dice", &.{ self.inner, c.inner }, .empty, k.loc()));
+        return k.emit(fly.ops.dice(k.ctx, self.inner, c.inner, k.loc()));
     }
 
     /// The sub-tuple / sub-layout at a mode path.
     pub fn get(self: Value, mode: []const i32) Value {
         const k = self.kern();
-        return k.emit(fly.get(k.ctx, self.inner, mode, k.loc()));
+        return k.emit(fly.ops.get(k.ctx, self.inner, .denseArray(k.ctx, .i32, mode), k.loc()));
     }
     pub fn selectModes(self: Value, indices: []const i32) Value {
         const k = self.kern();
-        return k.emit(fly.select(k.ctx, self.inner, indices, k.loc()));
+        return k.emit(fly.ops.select(k.ctx, self.inner, .denseArray(k.ctx, .i32, indices), k.loc()));
     }
     pub fn take(self: Value, begin: i32, end: i32) Value {
         const k = self.kern();
-        return k.emit(fly.takeOrGroup(k.ctx, "take", self.inner, begin, end, k.loc()));
+        return k.emit(fly.ops.take(k.ctx, self.inner, .int(k.ctx, .i32, begin), .int(k.ctx, .i32, end), k.loc()));
     }
     pub fn group(self: Value, begin: i32, end: i32) Value {
         const k = self.kern();
-        return k.emit(fly.takeOrGroup(k.ctx, "group", self.inner, begin, end, k.loc()));
+        return k.emit(fly.ops.group(k.ctx, self.inner, .int(k.ctx, .i32, begin), .int(k.ctx, .i32, end), k.loc()));
     }
 
     /// Emits an op; `shapeStatic` reads the type instead.
     pub fn emitShape(self: Value) Value {
-        return self.unary("get_shape");
+        return self.unary(fly.ops.get_shape);
     }
     pub fn emitStride(self: Value) Value {
-        return self.unary("get_stride");
+        return self.unary(fly.ops.get_stride);
     }
     pub fn emitLayout(self: Value) Value {
-        return self.unary("get_layout");
+        return self.unary(fly.ops.get_layout);
     }
     pub fn emitIter(self: Value) Value {
-        return self.unary("get_iter");
+        return self.unary(fly.ops.get_iter);
     }
     pub fn emitSize(self: Value) Value {
-        return self.unary("size");
+        return self.unary(fly.ops.size);
     }
     pub fn cosize(self: Value) Value {
-        return self.unary("cosize");
+        return self.unary(fly.ops.cosize);
     }
     pub fn productEach(self: Value) Value {
-        return self.unary("int_tuple_product_each");
+        return self.unary(fly.ops.int_tuple_product_each);
     }
 
     /// A register tensor shaped like `self`.
     pub fn makeFragmentLike(self: Value, dtype: ?DType) Value {
         const k = self.kern();
-        const t: ?*const mlir.Type = if (dtype) |d| d.toMlir(k.ctx) else null;
-        return k.emit(fly.makeFragmentLike(k.ctx, self.inner, t, k.loc()));
+        const dtype_attr: ?*const mlir.Attribute = if (dtype) |d| .typeAttr(d.toMlir(k.ctx)) else null;
+        return k.emit(fly.ops.make_fragment_like(k.ctx, self.inner, dtype_attr, k.loc()));
     }
 
     pub fn elemLess(self: Value, rhs: anytype) Value {
         const k = self.kern();
         const r = k.intTuple(rhs);
-        return k.emit(fly.typed(k.ctx, "elem_less", &.{ self.inner, r.inner }, &.{.int(k.ctx, .i1)}, .empty, k.loc()));
+        return k.emit(fly.ops.elem_less(k.ctx, self.inner, r.inner, .int(k.ctx, .i1), k.loc()));
     }
 
     // ---------------------------------------------------------------- tensor access
@@ -237,23 +239,23 @@ pub const Value = struct {
     pub fn at(self: Value, coord: anytype) Value {
         const k = self.kern();
         const c = k.intTuple(coord);
-        return k.emit(fly.inferred(k.ctx, "memref.load", &.{ self.inner, c.inner }, .empty, k.loc()));
+        return k.emit(fly.ops.memref_load(k.ctx, self.inner, c.inner, k.loc()));
     }
 
     pub fn set(self: Value, coord: anytype, value: Value) void {
         const k = self.kern();
         const c = k.intTuple(coord);
-        k.emitNone(fly.effect(k.ctx, "memref.store", &.{ value.inner, self.inner, c.inner }, .empty, k.loc()));
+        k.emitNone(fly.ops.memref_store(k.ctx, value.inner, self.inner, c.inner, k.loc()));
     }
 
     /// The whole register tensor as a `vector<NxT>`.
     pub fn load(self: Value) Value {
-        return self.unary("memref.load_vec");
+        return self.unary(fly.ops.memref_load_vec);
     }
 
     pub fn store(self: Value, vector: Value) void {
         const k = self.kern();
-        k.emitNone(fly.effect(k.ctx, "memref.store_vec", &.{ vector.inner, self.inner }, .empty, k.loc()));
+        k.emitNone(fly.ops.memref_store_vec(k.ctx, vector.inner, self.inner, k.loc()));
     }
 
     /// Store a splat vector of the tensor's static size.
@@ -272,24 +274,24 @@ pub const Value = struct {
     pub fn addOffset(self: Value, offset: anytype) Value {
         const k = self.kern();
         const o = k.intTuple(offset);
-        return k.emit(fly.inferred(k.ctx, "add_offset", &.{ self.inner, o.inner }, .empty, k.loc()));
+        return k.emit(fly.ops.add_offset(k.ctx, self.inner, o.inner, k.loc()));
     }
 
     /// Scalar load.
     pub fn ptrLoad(self: Value) Value {
         const k = self.kern();
         const elem = self.elemDType().toMlir(k.ctx);
-        return k.emit(fly.typed(k.ctx, "ptr.load", &.{self.inner}, &.{elem}, .empty, k.loc()));
+        return k.emit(fly.ops.ptr_load(k.ctx, self.inner, elem, k.loc()));
     }
 
     pub fn ptrStore(self: Value, value: Value) void {
         const k = self.kern();
-        k.emitNone(fly.effect(k.ctx, "ptr.store", &.{ value.inner, self.inner }, .empty, k.loc()));
+        k.emitNone(fly.ops.ptr_store(k.ctx, value.inner, self.inner, k.loc()));
     }
 
     /// A tensor over this pointer.
     pub fn view(self: Value, lay: anytype) Value {
-        return self.binary("make_view", lay);
+        return self.binary(fly.ops.make_view, lay);
     }
 
     // ---------------------------------------------------------------- arithmetic
@@ -529,22 +531,13 @@ pub const Value = struct {
         return self.shuffle(.xor, offset, width);
     }
 
-    pub const ShuffleMode = enum { xor, up, down, idx };
+    pub const ShuffleMode = gpu.ShuffleMode;
 
     pub fn shuffle(self: Value, mode: ShuffleMode, offset: anytype, width: i32) Value {
         const k = self.kern();
         const off: Value = if (@TypeOf(offset) == Value) offset else k.constant(.i32, offset);
         const wid = k.constant(.i32, width);
-        const mode_attr = switch (mode) {
-            inline else => |m| fly.parseAttr(k.ctx, "#gpu<shuffle_mode " ++ @tagName(m) ++ ">"),
-        };
-        const op = fly.make(k.ctx, "gpu.shuffle", .{
-            .operands = .{ .flat = &.{ self.inner, off.inner, wid.inner } },
-            .results = .{ .flat = &.{ self.type_(), .int(k.ctx, .i1) } },
-            .attributes = &.{.named(k.ctx, "mode", mode_attr)},
-            .location = k.loc(),
-        });
-        return k.emit(op);
+        return k.emit(gpu.shuffle(k.ctx, self.inner, off.inner, wid.inner, mode, k.loc()));
     }
 
     pub const ReduceKind = enum { add, mul, minf, maxf, minsi, maxsi, and_, or_, xor };
@@ -600,17 +593,17 @@ pub const ThrCopy = struct {
 
     pub fn partitionS(self: ThrCopy, src: Value) Value {
         const k = self.tiled_copy.kern();
-        return k.emit(fly.inferred(k.ctx, "tiled_copy.partition_src", &.{ self.tiled_copy.inner, src.inner, self.thr.inner }, .empty, k.loc()));
+        return k.emit(fly.ops.tiled_copy_partition_src(k.ctx, self.tiled_copy.inner, src.inner, self.thr.inner, k.loc()));
     }
 
     pub fn partitionD(self: ThrCopy, dst: Value) Value {
         const k = self.tiled_copy.kern();
-        return k.emit(fly.inferred(k.ctx, "tiled_copy.partition_dst", &.{ self.tiled_copy.inner, dst.inner, self.thr.inner }, .empty, k.loc()));
+        return k.emit(fly.ops.tiled_copy_partition_dst(k.ctx, self.tiled_copy.inner, dst.inner, self.thr.inner, k.loc()));
     }
 
     pub fn retile(self: ThrCopy, t: Value) Value {
         const k = self.tiled_copy.kern();
-        return k.emit(fly.inferred(k.ctx, "tiled_copy.retile", &.{ self.tiled_copy.inner, t.inner }, .empty, k.loc()));
+        return k.emit(fly.ops.tiled_copy_retile(k.ctx, self.tiled_copy.inner, t.inner, k.loc()));
     }
 };
 
@@ -627,10 +620,9 @@ pub const TiledMma = struct {
 
     fn makeFragment(self: TiledMma, operand: fly.MmaOperand, input: Value, opts: FragmentOpts) Value {
         const k = self.value.kern();
-        var a: fly.Attrs = .empty;
-        a.appendAssumeCapacity(.named(k.ctx, "operand_id", Builder.must(fly.attributes.mmaOperandAttr(k.ctx, operand))));
-        if (opts.stages) |st| a.appendAssumeCapacity(.named(k.ctx, "stages", .int(k.ctx, .i32, st)));
-        return k.emit(fly.inferred(k.ctx, "mma.make_fragment", &.{ self.value.inner, input.inner }, a, k.loc()));
+        const operand_id = Builder.must(fly.attributes.mmaOperandAttr(k.ctx, operand));
+        const stages: ?*const mlir.Attribute = if (opts.stages) |st| .int(k.ctx, .i32, st) else null;
+        return k.emit(fly.ops.mma_make_fragment(k.ctx, self.value.inner, input.inner, operand_id, stages, k.loc()));
     }
 
     /// Per-thread register fragment for the A operand.
@@ -657,9 +649,8 @@ pub const ThrMma = struct {
 
     fn partition(self: ThrMma, operand: fly.MmaOperand, t: Value) Value {
         const k = self.tiled_mma.kern();
-        return k.emit(fly.inferred(k.ctx, "tiled_mma.partition", &.{ self.tiled_mma.inner, t.inner, self.thr.inner }, fly.attrs(&.{
-            .named(k.ctx, "operand_id", fly.mmaOperandAttr(k.ctx, operand)),
-        }), k.loc()));
+        const operand_id = Builder.must(fly.attributes.mmaOperandAttr(k.ctx, operand));
+        return k.emit(fly.ops.tiled_mma_partition(k.ctx, self.tiled_mma.inner, t.inner, self.thr.inner, operand_id, k.loc()));
     }
 
     pub fn partitionA(self: ThrMma, a: Value) Value {
@@ -736,22 +727,22 @@ pub const Builder = struct {
     /// `.{ .tensor = .{ .dtype = ..., .dims = &.{ ... } } }`.
     pub fn declareArgs(self: *Builder, spec: anytype) !dsl.NamedArgs(@TypeOf(spec), Value) {
         const Spec = @TypeOf(spec);
-        const fields = @typeInfo(Spec).@"struct".fields;
+        const fields = @typeInfo(Spec).@"struct".field_names;
         var specs: [fields.len]ArgSpec = undefined;
         inline for (fields, 0..) |f, i| {
-            const raw = @field(spec, f.name);
-            const variant = @typeInfo(@TypeOf(raw)).@"struct".fields[0].name;
+            const raw = @field(spec, f);
+            const variant = @typeInfo(@TypeOf(raw)).@"struct".field_names[0];
             const inner = @field(raw, variant);
             specs[i] = if (comptime std.mem.eql(u8, variant, "ptr"))
-                .{ .name = f.name, .dtype = inner }
+                .{ .name = f, .dtype = inner }
             else if (comptime std.mem.eql(u8, variant, "tensor"))
-                .{ .name = f.name, .dtype = inner.dtype, .dims = inner.dims, .space = if (@hasField(@TypeOf(inner), "space")) inner.space else .global }
+                .{ .name = f, .dtype = inner.dtype, .dims = inner.dims, .space = if (@hasField(@TypeOf(inner), "space")) inner.space else .global }
             else
-                @compileError("fly.declareArgs: argument `" ++ f.name ++ "` must be `.{ .ptr = dtype }` or `.{ .tensor = .{ .dtype, .dims } }`");
+                @compileError("fly.declareArgs: argument `" ++ f ++ "` must be `.{ .ptr = dtype }` or `.{ .tensor = .{ .dtype, .dims } }`");
         }
         try self.declareArgsLow(&specs);
         var named: dsl.NamedArgs(Spec, Value) = undefined;
-        inline for (fields, 0..) |f, i| @field(named, f.name) = self.arg(i);
+        inline for (fields, 0..) |f, i| @field(named, f) = self.arg(i);
         return named;
     }
 
@@ -900,7 +891,7 @@ pub const Builder = struct {
 
     /// `fly.static` of an already-built type.
     pub fn staticTy(self: *Builder, t: *const mlir.Type) Value {
-        return self.emit(fly.static(self.ctx, t, self.loc()));
+        return self.emit(fly.ops.static(self.ctx, t, self.loc()));
     }
 
     pub fn static(self: *Builder, v: anytype) Value {
@@ -947,7 +938,7 @@ pub const Builder = struct {
         var operands: stdx.BoundedArray(*const mlir.Value, 32) = .empty;
         const spec = self.intTupleSpec(&operands, elems);
         const t = self.intTupleType(spec);
-        return self.emit(fly.makeIntTuple(self.ctx, operands.constSlice(), t, self.loc()));
+        return self.emit(fly.ops.make_int_tuple(self.ctx, operands.constSlice(), t, self.loc()));
     }
 
     /// `intTuple`, spelled for coordinates.
@@ -969,8 +960,8 @@ pub const Builder = struct {
             .comptime_int, .int => return .static(@intCast(v)),
             .@"struct" => |s| {
                 if (!s.is_tuple) @compileError("fly.intTuple: expected an integer, null, Value, IntTuple or tuple, got " ++ @typeName(T));
-                const elems = self.alloc(IntTuple, s.fields.len);
-                inline for (s.fields, 0..) |f, i| elems[i] = self.intTupleSpec(operands, @field(v, f.name));
+                const elems = self.alloc(IntTuple, s.field_names.len);
+                inline for (s.field_names, 0..) |f, i| elems[i] = self.intTupleSpec(operands, @field(v, f));
                 return .{ .tup = elems };
             },
             else => @compileError("fly.intTuple: expected an integer, null, Value, IntTuple or tuple, got " ++ @typeName(T)),
@@ -1038,7 +1029,8 @@ pub const Builder = struct {
 
     pub fn emitFast(self: *Builder, op: *mlir.Operation) Value {
         if (self.fast_math and op.numResults() > 0 and (Value{ .inner = op.result(0), .kernel = self }).isFloatElem()) {
-            op.setAttributeByName("fastmath", fly.parseAttr(self.ctx, "#arith.fastmath<fast>"));
+            const fast = arith.FastMathAttr.get(self.ctx, .{ .value = .fast }) catch unreachable;
+            op.setAttributeByName("fastmath", fast.attribute());
         }
         return self.emit(op);
     }
@@ -1063,20 +1055,14 @@ pub const Builder = struct {
     /// A matrix atom with SSA operands; unlike `gemm`, this needs no register
     /// allocas and can carry its accumulator through control flow.
     pub fn mmaAtomCall(self: *Builder, atom: Value, a: Value, b: Value, c: Value) Value {
-        return self.emit(fly.typed(self.ctx, "mma_atom_call_ssa", &.{ atom.inner, a.inner, b.inner, c.inner }, &.{c.type_()}, .empty, self.loc()));
+        return self.emit(fly.ops.mma_atom_call_ssa(self.ctx, atom.inner, null, &.{a.inner}, &.{b.inner}, c.inner, &.{c.type_()}, self.loc()));
     }
 
     /// AMD byte permutation. ROCDL has no corresponding operation at our pin.
     pub fn perm(self: *Builder, hi: Value, lo: Value, selector: Value) Value {
-        return self.emit(fly.make(self.ctx, "llvm.inline_asm", .{
-            .operands = .{ .flat = &.{ hi.inner, lo.inner, selector.inner } },
-            .results = .{ .flat = &.{.int(self.ctx, .i32)} },
-            .attributes = &.{
-                .named(self.ctx, "asm_string", .string(self.ctx, "v_perm_b32 $0, $1, $2, $3")),
-                .named(self.ctx, "constraints", .string(self.ctx, "=v,v,v,v")),
-            },
-            .location = self.loc(),
-        }));
+        return self.emit(dialects.llvm.inline_asm(self.ctx, "v_perm_b32 $0, $1, $2, $3", &.{ hi.inner, lo.inner, selector.inner }, .int(self.ctx, .i32), .{
+            .constraints = "=v,v,v,v",
+        }, self.loc()));
     }
 
     /// CDNA3 packed FP8 conversion, selecting two bytes from the low/high word.
@@ -1099,9 +1085,7 @@ pub const Builder = struct {
             .workgroup => 3,
             .agent => 1,
         };
-        const llvm_ptr = self.emit(fly.inferred(self.ctx, "to_llvm_ptr", &.{ptr.inner}, fly.attrs(&.{
-            .named(self.ctx, "llvm_address_space", .int(self.ctx, .i32, space)),
-        }), self.loc()));
+        const llvm_ptr = self.emit(fly.ops.to_llvm_ptr(self.ctx, ptr.inner, .int(self.ctx, .i32, space), self.loc()));
         return self.emit(fly.make(self.ctx, "llvm.atomicrmw", .{
             .operands = .{ .flat = &.{ llvm_ptr.inner, value.inner } },
             .results = .{ .flat = &.{value.type_()} },
@@ -1129,14 +1113,14 @@ pub const Builder = struct {
             .named(self.ctx, "allocBytes", .int(self.ctx, .i64, bytes)),
             .named(self.ctx, "allocAlign", .int(self.ctx, .i64, alignment)),
         });
-        const raw = self.emit(fly.makePtr(self.ctx, &.{}, raw_ty, dict, self.loc()));
+        const raw = self.emit(fly.ops.make_ptr(self.ctx, &.{}, raw_ty, dict, self.loc()));
         const typed = self.recast(raw, dtype);
         return typed.view(self.static(Layout{ .shape = .static(n), .stride = .static(1) }));
     }
 
     /// A single atom-sized copy.
     pub fn copyAtomCall(self: *Builder, atom: Value, src: Value, dst: Value) void {
-        self.emitNone(fly.effect(self.ctx, "copy_atom_call", &.{ atom.inner, src.inner, dst.inner }, .empty, self.loc()));
+        self.emitNone(fly.ops.copy_atom_call(self.ctx, atom.inner, src.inner, dst.inner, null, self.loc()));
     }
 
     /// One atom-sized load straight into a `vector<NxT>`.
@@ -1148,23 +1132,12 @@ pub const Builder = struct {
         const n = src.sizeStatic();
         const dt = src.elemDType();
         const vec_ty = mlir.Type.vector(&.{n}, dt.toMlir(self.ctx));
-        const op = fly.make(self.ctx, "fly.copy_atom_call_ssa", .{
-            .operands = .{ .flat = &.{ atom.inner, src.inner } },
-            .results = .{ .flat = &.{vec_ty} },
-            .attributes = &.{.named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ 1, 1, 0, 0 }))},
-            .location = self.loc(),
-        });
-        return self.emit(op);
+        return self.emit(fly.ops.copy_atom_call_ssa(self.ctx, atom.inner, src.inner, null, null, &.{vec_ty}, self.loc()));
     }
 
     /// One atom-sized store of a `vector<NxT>`; see `copyAtomLoad`.
     pub fn copyAtomStore(self: *Builder, atom: Value, vec: Value, dst: Value) void {
-        const op = fly.make(self.ctx, "fly.copy_atom_call_ssa", .{
-            .operands = .{ .flat = &.{ atom.inner, vec.inner, dst.inner } },
-            .attributes = &.{.named(self.ctx, "operandSegmentSizes", .denseArray(self.ctx, .i32, &.{ 1, 1, 1, 0 }))},
-            .location = self.loc(),
-        });
-        self.emitNone(op);
+        self.emitNone(fly.ops.copy_atom_call_ssa(self.ctx, atom.inner, vec.inner, dst.inner, null, &.{}, self.loc()));
     }
 
     // ---------------------------------------------------------------- tensors
@@ -1177,7 +1150,7 @@ pub const Builder = struct {
     /// A coordinate tensor: value == logical coord.
     pub fn identity(self: *Builder, shape: anytype) Value {
         const shp = self.intTuple(shape);
-        const lay = self.emit(fly.inferred(self.ctx, "make_identity_layout", &.{shp.inner}, .empty, self.loc()));
+        const lay = self.emit(fly.ops.make_identity_layout(self.ctx, shp.inner, self.loc()));
         const rank_ = shp.intTupleStatic().rank();
         const zero: IntTuple = if (rank_ == 1) .static(0) else blk: {
             const zeros = self.alloc(IntTuple, rank_);
@@ -1185,7 +1158,7 @@ pub const Builder = struct {
             break :blk .{ .tup = zeros };
         };
         const base_ty = self.intTupleType(zero);
-        const base = self.emit(fly.makeIntTuple(self.ctx, &.{}, base_ty, self.loc()));
+        const base = self.emit(fly.ops.make_int_tuple(self.ctx, &.{}, base_ty, self.loc()));
         return base.view(lay);
     }
 
@@ -1194,21 +1167,21 @@ pub const Builder = struct {
     pub fn rmemTensor(self: *Builder, comptime lay: Layout, dtype: DType) Value {
         const lay_v = self.static(lay);
         const t = self.memRefType(dtype, .register, lay);
-        return self.emit(fly.typed(self.ctx, "memref.alloca", &.{lay_v.inner}, &.{t}, .empty, self.loc()));
+        return self.emit(fly.ops.memref_alloca(self.ctx, lay_v.inner, t, self.loc()));
     }
 
     /// `rmemTensor` with a runtime `Layout`.
     pub fn rmemTensorRuntime(self: *Builder, lay: Layout, dtype: DType) Value {
         const lay_v = self.static(lay);
         const t = self.memRefType(dtype, .register, lay);
-        return self.emit(fly.typed(self.ctx, "memref.alloca", &.{lay_v.inner}, &.{t}, .empty, self.loc()));
+        return self.emit(fly.ops.memref_alloca(self.ctx, lay_v.inner, t, self.loc()));
     }
 
     /// Reinterpret a pointer as another element type, keeping the address
     /// space, alignment and swizzle.
     pub fn recast(self: *Builder, ptr: Value, dtype: DType) Value {
         const t = must(fly.ptrWithElem(self.ctx, ptr.type_(), dtype.toMlir(self.ctx))).type_();
-        return self.emit(fly.typed(self.ctx, "recast_iter", &.{ptr.inner}, &.{t}, .empty, self.loc()));
+        return self.emit(fly.ops.recast_iter(self.ctx, ptr.inner, t, self.loc()));
     }
 
     // ---------------------------------------------------------------- atoms
@@ -1231,19 +1204,19 @@ pub const Builder = struct {
     pub fn copyAtom(self: *Builder, op: CopyOp, dtype: DType) Value {
         const bits: i32 = @intCast(dtype.bitWidth());
         const t = must(fly.types.CopyAtomType.get(self.ctx, .{ .copyOp = op.type_(self.ctx), .valBits = bits })).type_();
-        return self.emit(fly.makeCopyAtom(self.ctx, t, bits, self.loc()));
+        return self.emit(fly.ops.make_copy_atom(self.ctx, &.{}, t, .int(self.ctx, .i32, bits), self.loc()));
     }
 
     /// `op` is an MMA op type, such as a `fly.rocdl.MmaOpCDNA3MFMAType`.
     pub fn mmaAtom(self: *Builder, op: *const mlir.Type) Value {
         const t = must(fly.types.MmaAtomType.get(self.ctx, .{ .mmaOp = op })).type_();
-        return self.emit(fly.makeMmaAtom(self.ctx, t, self.loc()));
+        return self.emit(fly.ops.make_mma_atom(self.ctx, t, self.loc()));
     }
 
     pub fn tiledCopy(self: *Builder, atom: Value, layout_tv: anytype, tile_mn: anytype) TiledCopy {
         const tv = self.lift(layout_tv);
         const tl = self.lift(tile_mn);
-        const v = self.emit(fly.inferred(self.ctx, "make_tiled_copy", &.{ atom.inner, tv.inner, tl.inner }, .empty, self.loc()));
+        const v = self.emit(fly.ops.make_tiled_copy(self.ctx, atom.inner, tv.inner, tl.inner, self.loc()));
         return .{ .value = v, .tile = tl };
     }
 
@@ -1289,7 +1262,7 @@ pub const Builder = struct {
         const one = self.intTuple(1);
         const tile_modes = self.alloc(Tile, modes.len);
         for (modes, 0..) |m, i| {
-            const lay = self.emit(fly.inferred(self.ctx, "make_layout", &.{ tile_size.selectModes(&.{m}).inner, one.inner }, .empty, self.loc()));
+            const lay = self.emit(fly.ops.make_layout(self.ctx, tile_size.selectModes(&.{m}).inner, one.inner, self.loc()));
             tile_modes[i] = .{ .layout = self.readLayout(lay.type_()) };
         }
         return self.tiledCopy(copy_atom, layout_tv, Tile{ .modes = tile_modes });
@@ -1317,16 +1290,13 @@ pub const Builder = struct {
         const flags = self.constant(.i32, 0x27000);
         const elem = t.elemDType();
         const buf_ty = self.ptrType(elem, (must(fly.rocdl.BufferDescAddressAttr.get(self.ctx))).attribute());
-        const buf_ptr = self.emit(fly.makePtr(self.ctx, &.{ ptr.inner, c0.inner, nrec.inner, flags.inner }, buf_ty, null, self.loc()));
+        const buf_ptr = self.emit(fly.ops.make_ptr(self.ctx, &.{ ptr.inner, c0.inner, nrec.inner, flags.inner }, buf_ty, null, self.loc()));
         return buf_ptr.view(lay);
     }
 
     pub fn tiledMma(self: *Builder, atom: Value, atom_layout: anytype, permutation: ?Value) TiledMma {
         const al = self.lift(atom_layout);
-        const v = if (permutation) |p|
-            self.emit(fly.inferred(self.ctx, "make_tiled_mma", &.{ atom.inner, al.inner, p.inner }, .empty, self.loc()))
-        else
-            self.emit(fly.inferred(self.ctx, "make_tiled_mma", &.{ atom.inner, al.inner }, .empty, self.loc()));
+        const v = self.emit(fly.ops.make_tiled_mma(self.ctx, atom.inner, al.inner, if (permutation) |p| p.inner else null, self.loc()));
         return .{ .value = v };
     }
 
@@ -1335,13 +1305,11 @@ pub const Builder = struct {
     };
 
     pub fn copy(self: *Builder, atom: Value, src: Value, dst: Value, opts: CopyOpts) void {
-        self.emitNone(fly.copy(self.ctx, atom.inner, src.inner, dst.inner, .{
-            .pred = if (opts.pred) |p| p.inner else null,
-        }, self.loc()));
+        self.emitNone(fly.ops.copy(self.ctx, atom.inner, src.inner, dst.inner, if (opts.pred) |p| p.inner else null, self.loc()));
     }
 
     pub fn gemm(self: *Builder, atom: Value, d: Value, a: Value, b: Value, c: Value) void {
-        self.emitNone(fly.gemm(self.ctx, atom.inner, d.inner, a.inner, b.inner, c.inner, .{}, self.loc()));
+        self.emitNone(fly.ops.gemm(self.ctx, atom.inner, d.inner, &.{a.inner}, &.{b.inner}, c.inner, null, null, self.loc()));
     }
 
     // ---------------------------------------------------------------- control flow
@@ -1367,7 +1335,7 @@ pub const Builder = struct {
         inits: anytype,
     ) ForScope(tupleArity(@TypeOf(inits), "openFor: inits")) {
         const N = comptime tupleArity(@TypeOf(inits), "openFor: inits");
-        const fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
 
         const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.constIndex(lower);
         const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constLike(upper, lb_v);
@@ -1379,8 +1347,8 @@ pub const Builder = struct {
         block_locs[0] = self.loc();
         var inits_inner: [N]*const mlir.Value = undefined;
         inline for (fields, 0..) |f, i| {
-            if (f.type != Value) @compileError("openFor: every init must be a Value");
-            const v: Value = @field(inits, f.name);
+            if (@TypeOf(@field(inits, f)) != Value) @compileError("openFor: every init must be a Value");
+            const v: Value = @field(inits, f);
             block_types[i + 1] = v.type_();
             block_locs[i + 1] = self.loc();
             inits_inner[i] = v.inner;
@@ -1423,11 +1391,11 @@ pub const Builder = struct {
 
     pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
         const N = comptime tupleArity(@TypeOf(result_types), "openIfElse: result_types");
-        const fields = @typeInfo(@TypeOf(result_types)).@"struct".fields;
+        const fields = @typeInfo(@TypeOf(result_types)).@"struct".field_names;
         var types: [N]*const mlir.Type = undefined;
         inline for (fields, 0..) |f, i| {
-            if (f.type != *const mlir.Type) @compileError("openIfElse: every result_type must be *const mlir.Type");
-            types[i] = @field(result_types, f.name);
+            if (@TypeOf(@field(result_types, f)) != *const mlir.Type) @compileError("openIfElse: every result_type must be *const mlir.Type");
+            types[i] = @field(result_types, f);
         }
         const then_block = mlir.Block.init(&.{}, &.{});
         const else_block = mlir.Block.init(&.{}, &.{});
@@ -1445,16 +1413,16 @@ pub const Builder = struct {
     ) {
         const N = comptime tupleArity(@TypeOf(inits), "openWhile: inits");
         const M = comptime tupleArity(@TypeOf(after_types), "openWhile: after_types");
-        const init_fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
-        const type_fields = @typeInfo(@TypeOf(after_types)).@"struct".fields;
+        const init_fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
+        const type_fields = @typeInfo(@TypeOf(after_types)).@"struct".field_names;
 
         var before_types: [N]*const mlir.Type = undefined;
         var before_locs: [N]*const mlir.Location = undefined;
         var inits_inner: [N]*const mlir.Value = undefined;
         inline for (init_fields, 0..) |f, i| {
-            if (f.type != Value)
+            if (@TypeOf(@field(inits, f)) != Value)
                 @compileError("openWhile: every init must be a Value");
-            const v: Value = @field(inits, f.name);
+            const v: Value = @field(inits, f);
             before_types[i] = v.type_();
             before_locs[i] = self.loc();
             inits_inner[i] = v.inner;
@@ -1464,9 +1432,9 @@ pub const Builder = struct {
         var after_tys: [M]*const mlir.Type = undefined;
         var after_locs: [M]*const mlir.Location = undefined;
         inline for (type_fields, 0..) |f, i| {
-            if (f.type != *const mlir.Type)
+            if (@TypeOf(@field(after_types, f)) != *const mlir.Type)
                 @compileError("openWhile: every after_type must be *const mlir.Type");
-            after_tys[i] = @field(after_types, f.name);
+            after_tys[i] = @field(after_types, f);
             after_locs[i] = self.loc();
         }
         const after_block = mlir.Block.init(&after_tys, &after_locs);
@@ -1500,7 +1468,7 @@ pub const Builder = struct {
         var al: std.Io.Writer.Allocating = .init(self.allocator);
         defer al.deinit();
         try al.writer.print("{f}", .{self.module.operation().fmt(.{ .debug_info = false })});
-        return try self.allocator.dupeZ(u8, al.written());
+        return try self.allocator.dupeSentinel(u8, al.written(), 0);
     }
 };
 
@@ -1784,8 +1752,7 @@ test "tiledMma builds, verifies and re-parses" {
 test "MmaFlavor.atomThreads matches the dialect" {
     const ctx = try testContext();
     defer ctx.deinit();
-    inline for (std.meta.fields(MmaFlavor)) |field| {
-        const flavor: MmaFlavor = @enumFromInt(field.value);
+    inline for (comptime std.enums.values(MmaFlavor)) |flavor| {
         const atom = try fly.types.MmaAtomType.get(ctx, .{ .mmaOp = flavor.atomType(ctx) });
         // `mma_atom.thr_layout` is the wavefront an atom occupies; the launch
         // geometry is derived from it, so a wrong table silently corrupts C.
@@ -1879,6 +1846,34 @@ test "scalar conversions and constants" {
     }
 }
 
+test "shuffles and fast math carry their attributes" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "shuffle");
+    defer b.deinit();
+    _ = try b.declareArgs(.{
+        .x = .{ .tensor = .{ .dtype = .f32, .dims = &.{16} } },
+    });
+
+    b.setFastMath(true);
+    const x = b.constant(.f32, 1.0);
+    _ = x.shuffleXor(1, 64).add(x.shuffle(.idx, 3, 64));
+
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+    for ([_][]const u8{
+        "gpu.shuffle xor",
+        "gpu.shuffle idx",
+        "arith.addf %shuffleResult, %shuffleResult_1 fastmath<fast>",
+    }) |needle| {
+        if (std.mem.indexOf(u8, ir, needle) == null) {
+            std.debug.print("missing `{s}` in:\n{s}\n", .{ needle, ir });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "static queries read inferred types" {
     const ctx = try testContext();
     defer ctx.deinit();
@@ -1892,4 +1887,61 @@ test "static queries read inferred types" {
     const tiled = a.x.flatDivide(tile(.{ 16, 8 }));
     try std.testing.expectEqual(@as(i64, 64 * 32), tiled.sizeStatic());
     try std.testing.expectEqual(@as(usize, 4), tiled.shapeStatic().rank());
+}
+
+test "atomic addition builds, verifies and re-parses" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "atomic_add");
+    defer b.deinit();
+    _ = try b.declareArgs(.{});
+    const counter = b.sharedArray(.i32, 1, 4);
+    _ = b.ptrAtomicAdd(counter.emitIter(), b.constant(.i32, 1), .workgroup);
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+
+    // LLVM's current custom assembly stores alignment in the property dictionary.
+    for ([_][]const u8{
+        "llvm.atomicrmw add",
+        "syncscope(\"workgroup\") monotonic <alignment = 4>",
+        ": !llvm.ptr<3>, i32",
+    }) |needle| {
+        if (std.mem.indexOf(u8, ir, needle) == null) {
+            std.debug.print("IR missing `{s}`:\n{s}\n", .{ needle, ir });
+            return error.TestUnexpectedResult;
+        }
+    }
+    const reparsed = try mlir.Module.parse(ctx, ir);
+    defer reparsed.deinit();
+    try std.testing.expect(reparsed.operation().verify());
+}
+
+test "SSA matrix atom builds, verifies and re-parses" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "mma_atom_ssa");
+    defer b.deinit();
+    _ = try b.declareArgs(.{});
+    const atom_type = try fly.rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
+        .m = 16,
+        .n = 16,
+        .k = 16,
+        .elemTyA = .float(ctx, .bf16),
+        .elemTyB = .float(ctx, .bf16),
+        .elemTyAcc = .float(ctx, .f32),
+    });
+    const atom = b.mmaAtom(atom_type.type_());
+    const lhs = b.constant(.bf16, 0).splat(4);
+    const rhs = b.constant(.bf16, 0).splat(4);
+    const acc = b.constant(.f32, 0).splat(4);
+    const result = b.mmaAtomCall(atom, lhs, rhs, acc);
+    try std.testing.expect(result.type_().eql(acc.type_()));
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+
+    const reparsed = try mlir.Module.parse(ctx, ir);
+    defer reparsed.deinit();
+    try std.testing.expect(reparsed.operation().verify());
 }

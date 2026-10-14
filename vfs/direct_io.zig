@@ -56,17 +56,42 @@ const direct_flag: usize = @as(u32, @bitCast(std.posix.O{ .DIRECT = true }));
 
 /// Sets the flag; a filesystem without direct I/O refuses it.
 pub fn enable(fd: std.posix.fd_t) linux.E {
-    const current = linux.fcntl(fd, linux.F.GETFL, 0);
-    const err = linux.errno(current);
-    if (err != .SUCCESS) return err;
-    return linux.errno(linux.fcntl(fd, linux.F.SETFL, current | direct_flag));
+    const current = switch (getStatusFlags(fd)) {
+        .flags => |flags| flags,
+        .err => |err| return err,
+    };
+    return setStatusFlags(fd, current | direct_flag);
 }
 
 /// Clears the flag, so the inner `Io` may read the descriptor again.
 pub fn disable(fd: std.posix.fd_t) void {
-    const current = linux.fcntl(fd, linux.F.GETFL, 0);
-    if (linux.errno(current) != .SUCCESS) return;
-    _ = linux.fcntl(fd, linux.F.SETFL, current & ~direct_flag);
+    const current = switch (getStatusFlags(fd)) {
+        .flags => |flags| flags,
+        .err => return,
+    };
+    _ = setStatusFlags(fd, current & ~direct_flag);
+}
+
+/// `fcntl(F_GETFL)`, retried on `EINTR`.
+fn getStatusFlags(fd: std.posix.fd_t) union(enum) { flags: usize, err: linux.E } {
+    while (true) {
+        const rc = linux.fcntl(fd, linux.F.GETFL, 0);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return .{ .flags = rc },
+            .INTR => continue,
+            else => |err| return .{ .err = err },
+        }
+    }
+}
+
+/// `fcntl(F_SETFL)`, retried on `EINTR`.
+fn setStatusFlags(fd: std.posix.fd_t, flags: usize) linux.E {
+    while (true) {
+        switch (linux.errno(linux.fcntl(fd, linux.F.SETFL, flags))) {
+            .INTR => continue,
+            else => |err| return err,
+        }
+    }
 }
 
 /// Whole-file cachestat walked every cached folio: about 7 ms per cached GiB

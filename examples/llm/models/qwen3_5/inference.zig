@@ -15,18 +15,18 @@ pub const CompilationParameters = struct {
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
     seqlen: u32,
-    shardings: common.Shardings,
+    meshes: common.Meshes,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, shardings: common.Shardings) CompilationParameters {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, meshes: common.Meshes) CompilationParameters {
         const dtype = mdl.text_model.embed_tokens.weight.dtype();
         return .{
             .prefill_tokens = .init(.{ .b = 1, .s = seqlen }, .u32),
             .decode_tokens = .init(.{ .b = 1, .s = 1 }, .u32),
             .token_index = .init(.{}, .u32),
-            .kv_cache = .init(config, 1, seqlen, dtype, .f32, shardings.model),
+            .kv_cache = .init(config, 1, seqlen, dtype, .f32, meshes.model),
             .rng = .init(),
             .seqlen = seqlen,
-            .shardings = shardings,
+            .meshes = meshes,
         };
     }
 };
@@ -158,7 +158,7 @@ pub fn run(runner: *KernelRunner, args: Args, layer_index_buffers: []const zml.B
             .tokens = args.tokens_buf.*,
         },
         .outputs = .{ .hidden = &hidden_buffer },
-    });
+    }, .{});
     defer hidden_buffer.deinit();
 
     for (runner.layers, layer_index_buffers) |*layer_runner, layer_index_buffer| {
@@ -176,9 +176,10 @@ pub fn run(runner: *KernelRunner, args: Args, layer_index_buffers: []const zml.B
                         .cache = layer_cache,
                     },
                     .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
-                });
+                }, .{});
                 args.kv_cache_buffers.self_attn.k = layer_cache.k;
                 args.kv_cache_buffers.self_attn.v = layer_cache.v;
+                layer_cache.layer_index.deinit();
             },
             .linear_attention => |*layer| {
                 var layer_cache: zml.Bufferized(model.KvCache.GatedDeltaNetCache) = .{
@@ -193,9 +194,10 @@ pub fn run(runner: *KernelRunner, args: Args, layer_index_buffers: []const zml.B
                         .cache = layer_cache,
                     },
                     .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
-                });
+                }, .{});
                 args.kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
                 args.kv_cache_buffers.gated_delta_net.recurrent_state = layer_cache.recurrent_state;
+                layer_cache.layer_index.deinit();
             },
         }
     }
@@ -211,7 +213,7 @@ pub fn run(runner: *KernelRunner, args: Args, layer_index_buffers: []const zml.B
             .rng = args.rng_buffers,
             .token_index = args.token_index_buf,
         },
-    });
+    }, .{});
 }
 
 fn compileKernel(
@@ -244,7 +246,7 @@ fn compileEmbed(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
     defer node.end();
     const from: std.Io.Timestamp = .now(io, .awake);
     defer phase.logCompileDone(log, "embed tokens", io, from);
-    return zml.FnExe(model.EmbedTokens.forward).compile(allocator, io, platform, .{ .shardings = &parameters.shardings.all(), .program_name = phase.programName("qwen3_5", "embed_tokens") }, .{.{
+    return zml.FnExe(model.EmbedTokens.forward).compile(allocator, io, platform, .{ .meshes = &parameters.meshes.all(), .program_name = phase.programName("qwen3_5", "embed_tokens") }, .{.{
         .embedding = .{ .embed_tokens = mdl.text_model.embed_tokens },
         .tokens = zml.Tensor.init(.{ .b = 1, .s = seqlen }, .u32),
     }});
@@ -256,9 +258,9 @@ fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *con
     defer node.end();
     const from: std.Io.Timestamp = .now(io, .awake);
     defer phase.logCompileDone(log, "full attention layer", io, from);
-    return zml.FnExe(model.TransformerLayer.forwardSelfAttn).compile(allocator, io, platform, .{ .shardings = &parameters.shardings.all(), .program_name = phase.programName("qwen3_5", "full_attention_layer") }, .{.{
+    return zml.FnExe(model.TransformerLayer.forwardSelfAttn).compile(allocator, io, platform, .{ .meshes = &parameters.meshes.all(), .program_name = phase.programName("qwen3_5", "full_attention_layer") }, .{.{
         .layer = mdl.text_model.layers[layer_index],
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
         .token_index = parameters.token_index,
         .cache = .{
             .k = parameters.kv_cache.self_attn.k,
@@ -274,9 +276,9 @@ fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *c
     defer node.end();
     const from: std.Io.Timestamp = .now(io, .awake);
     defer phase.logCompileDone(log, "linear attention layer", io, from);
-    return zml.FnExe(model.TransformerLayer.forwardLinearAttn).compile(allocator, io, platform, .{ .shardings = &parameters.shardings.all(), .program_name = phase.programName("qwen3_5", "linear_attention_layer") }, .{.{
+    return zml.FnExe(model.TransformerLayer.forwardLinearAttn).compile(allocator, io, platform, .{ .meshes = &parameters.meshes.all(), .program_name = phase.programName("qwen3_5", "linear_attention_layer") }, .{.{
         .layer = mdl.text_model.layers[layer_index],
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
         .active_length = zml.Tensor.init(.{}, .u32),
         .cache = .{
             .conv_state = parameters.kv_cache.gated_delta_net.conv_state,
@@ -292,19 +294,19 @@ fn compileSample(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.
     defer node.end();
     const from: std.Io.Timestamp = .now(io, .awake);
     defer phase.logCompileDone(log, "sampler", io, from);
-    return zml.FnExe(model.Sampler.sampleTokens).compile(allocator, io, platform, .{ .shardings = &parameters.shardings.all(), .program_name = phase.programName("qwen3_5", "sampler") }, .{.{
+    return zml.FnExe(model.Sampler.sampleTokens).compile(allocator, io, platform, .{ .meshes = &parameters.meshes.all(), .program_name = phase.programName("qwen3_5", "sampler") }, .{.{
         .sampler = mdl.sampler(),
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
         .rng = parameters.rng,
         .token_index = parameters.token_index,
     }});
 }
 
-fn hiddenTensor(mdl: model.Model, seqlen: usize) zml.Tensor {
+fn hiddenTensor(mdl: model.Model, seqlen: usize, mesh: *const zml.Mesh) zml.Tensor {
     return .fromShape(zml.Shape.init(
         .{ .b = 1, .s = seqlen, .d = mdl.config.text_config.hidden_size },
         mdl.text_model.embed_tokens.weight.dtype(),
-    ).withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .replicated }));
+    ).withPartitioning(mesh, .{ .b = .replicated, .s = .replicated, .d = .replicated }));
 }
 
 fn findFirstLayerIndex(layer_types: []const model.LayerType, target: model.LayerType) ?usize {

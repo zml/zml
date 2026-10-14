@@ -1,0 +1,21 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+exports_files(["libzml_furiosa.BUILD.bazel"])
+
+zig_library(
+    name = "furiosa",
+    import_name = "platforms/furiosa",
+    main = "furiosa.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//pjrt",
+        "//platforms:options",
+        "//stdx",
+    ] + select({
+        "//platforms:furiosa.enabled": ["@libzml_furiosa"],
+        "//conditions:default": [],
+    }),
+)

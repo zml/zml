@@ -212,6 +212,7 @@ pub const TensorShardingAttribute = opaque {
             replicated.ptr,
             @intCast(unreduced.len),
             unreduced.ptr,
+            0,
         ).ptr);
     }
 

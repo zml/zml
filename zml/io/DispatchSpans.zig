@@ -1,4 +1,4 @@
-//! Converts a resolved sharding into source byte ranges and packed destination
+//! Converts a shape's placement into source byte ranges and packed destination
 //! offsets. Mirrored ranges share one span and a mask of their destinations.
 
 const std = @import("std");
@@ -7,7 +7,7 @@ const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const Placement = Sharding.Placement;
 
-pub const InitError = std.mem.Allocator.Error || Sharding.Error;
+pub const InitError = std.mem.Allocator.Error || error{IncompatibleSharding};
 
 const DispatchSpans = @This();
 
@@ -28,9 +28,11 @@ const DeviceSpan = struct {
 
 spans: []DispatchSpan,
 
-pub fn init(allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) InitError!DispatchSpans {
-    const placement = try sharding.placement(shape);
-    const ordered_devices = sharding.devicesInCanonicalOrder();
+/// `shape`'s sharding must name a mesh (`backend.placedShape`): its devices,
+/// in canonical order, are the writers the span masks index.
+pub fn init(allocator: std.mem.Allocator, shape: Shape) InitError!DispatchSpans {
+    const placement: Placement = try .init(shape);
+    const ordered_devices = placement.mesh().?.devicesInCanonicalOrder();
     std.debug.assert(ordered_devices.len <= 64);
 
     var device_spans: std.ArrayList(DeviceSpan) = .empty;

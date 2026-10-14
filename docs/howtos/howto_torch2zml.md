@@ -190,7 +190,7 @@ convert it to a `TensorStore`:
 ```zig
 pub fn main(init: std.process.Init) !void {
     ...
-    var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry);
+    var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry, &.{});
     defer model_store.deinit();
 }
 ```
@@ -205,18 +205,18 @@ pub fn main(init: std.process.Init) !void {
 
     const mlp: Mlp = .{
         .up_proj = .init(
-            mlp_view.createTensor("up_proj.weight", .{ .dout, .d }, null),
-            mlp_view.maybeCreateTensor("up_proj.bias", .{.dout}, null),
+            mlp_view.createReplicatedTensor("up_proj.weight", .{ .dout, .d }),
+            mlp_view.maybeCreateReplicatedTensor("up_proj.bias", .{.dout}),
             .d,
         ),
         .gate_proj = .init(
-            mlp_view.createTensor("gate_proj.weight", .{ .dout, .d }, null),
-            mlp_view.maybeCreateTensor("gate_proj.bias", .{.dout}, null),
+            mlp_view.createReplicatedTensor("gate_proj.weight", .{ .dout, .d }),
+            mlp_view.maybeCreateReplicatedTensor("gate_proj.bias", .{.dout}),
             .d,
         ),
         .down_proj = .init(
-            mlp_view.createTensor("down_proj.weight", .{ .d, .dout }, null),
-            mlp_view.maybeCreateTensor("down_proj.bias", .{.d}, null),
+            mlp_view.createReplicatedTensor("down_proj.weight", .{ .d, .dout }),
+            mlp_view.maybeCreateReplicatedTensor("down_proj.bias", .{.d}),
             .dout,
         ),
     };
@@ -235,16 +235,24 @@ Python script. Alternatively, Huggingface's web-interface allows to peek into
 ## Loading an individual layer
 
 Currently, the layer is initialized but the weights are still on the disk.
-ZML provides a convenience to automatically load weights from an initialized model:
+`zml.io.Loader` loads the weights of an initialized model into device buffers.
+Each tensor is placed as its shape says (here replicated):
 
 ```zig
 pub fn main(init: std.process.Init) !void {
     ...
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator);
-    var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, &model_store, .auto);
+    defer platform.deinit(allocator, io);
+
+    var mlp_weights = try zml.mem.bufferize(allocator, Mlp, &mlp);
     defer zml.mem.deinitBufferized(allocator, Mlp, &mlp_weights);
+    {
+        var loader = try zml.io.Loader.init(allocator, io, platform, .auto);
+        defer loader.deinit();
+        try loader.load(Mlp, &mlp, &mlp_weights, &model_store, null);
+        try loader.awaitAll();
+    }
 }
 ```
 
@@ -260,10 +268,10 @@ const Mlp = struct {
     down_proj: zml.nn.Linear,
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        const proj = self.up_proj.forward(x);
-        var output = self.gate_proj.forward(x);
+        const proj = self.up_proj.forward(x, x.dtype());
+        var output = self.gate_proj.forward(x, x.dtype());
         output = output.silu().mul(proj);
-        return self.down_proj.forward(output);
+        return self.down_proj.forward(output, x.dtype());
     }
 };
 ```
@@ -288,7 +296,7 @@ pub const Wrapper = struct {
 pub fn main(init: std.process.Init) !void {
     ...
 
-    var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry);
+    var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry, &.{});
     defer activations_store.deinit();
 
     try zml.testing.testLayer(allocator, io, platform, Wrapper{ .mlp = mlp }, .forward, activations_store.view(), "model.model.layers.0.mlp", .{ .mlp = mlp_weights }, &.{}, .{});

@@ -11,8 +11,8 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 _ROCM_VERSION = "10.1"
 _ROCM_STRIP_PREFIX = "./opt/rocm/core-" + _ROCM_VERSION
-_PLUGIN_ROCM_URL = "https://mirror.zml.ai/plugins/202609101243.20.1.7ca6884ea2cb/zml-rocm-linux-amd64.tar.zst"
-_PLUGIN_ROCM_SHA256 = "d2a311f15532691d7335c0436d4dda13d39e8597e4bb10dbe83b11b02a627546"
+_PLUGIN_ROCM_URL = "https://mirror.zml.ai/plugins/202610141143.207.1.b026d193d9cb/zml-rocm-linux-amd64.tar.zst"
+_PLUGIN_ROCM_SHA256 = "ec895a112ec2f36e4f73a845498235748da47032f32c218605a39c25d39c97ba"
 
 def _rocm_package_name(name):
     return name + _ROCM_VERSION
@@ -21,6 +21,7 @@ def _rocm_repo_name(package_name):
     return package_name.replace(_ROCM_VERSION, "")
 
 _UBUNTU_PACKAGES = {
+    "llvm-libunwind1": packages.filegroup(name = "libunwind", srcs = ["usr/lib/x86_64-linux-gnu/libunwind.so.1"]),
     "libatomic1": packages.filegroup(name = "libatomic1", srcs = ["usr/lib/x86_64-linux-gnu/libatomic.so.1"]),
     "libdrm-common": packages.filegroup(name = "amdgpu_ids", srcs = ["usr/share/libdrm/amdgpu.ids"]),
 }

@@ -14,16 +14,20 @@ var _platform: ?*const Platform = null;
 pub fn env() *const Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
     if (_platform == null) {
+        const memory_fraction = 0.90;
         const platform = Platform.auto(
             std.heap.c_allocator,
             std.testing.io,
             .{
-                .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.85 } } },
+                .cuda = .{ .allocator = .{ .vmm = .{ .memory_fraction = memory_fraction } } },
+                .rocm = .{ .allocator = .{ .vmm = .{ .memory_fraction = memory_fraction } } },
+                .metal = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = memory_fraction } } },
+                .oneapi = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = memory_fraction } } },
             },
         ) catch @panic("Pjrt not available");
 
-        // Register shardings required by flash attention.
-        _ = platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;
+        // Register meshes required by flash attention.
+        _ = platform.registerMesh("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;
         _platform = platform;
     }
 
@@ -358,25 +362,6 @@ fn BufferizedWithArgs(comptime T: type) type {
     return zml.meta.MapType(zml.Tensor, zml.Buffer).map(T);
 }
 
-/// Automatically calls the executable with the given arguments, taking care of arguments and results allocation.
-/// This helper can be used in tests to make the code a bit less verbose.
-/// It doesn't handle pointers in inputs/outputs structs.
-pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Exe, func: anytype, inputs: zml.Bufferized(std.meta.ArgsTuple(@TypeOf(func)))) !zml.Bufferized(stdx.meta.FnReturn(func)) {
-    var args = try exe.args(allocator);
-    defer args.deinit(allocator);
-
-    var results = try exe.results(allocator);
-    defer results.deinit(allocator);
-
-    args.set(inputs);
-    exe.callOpts(io, args, &results, .{ .wait = true });
-
-    var output: zml.Bufferized(stdx.meta.FnReturn(func)) = undefined;
-    results.fill(.{&output});
-
-    return output;
-}
-
 fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
     var count: usize = 0;
     var it = store.store.registry.iterator();
@@ -409,7 +394,7 @@ pub fn testLayer(
     activation_store: zml.io.TensorStore.View,
     name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    shardings: []const *const zml.Sharding,
+    meshes: []const *const zml.Mesh,
     opts: CompareOpts,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -439,12 +424,12 @@ pub fn testLayer(
             var buffer: [256]u8 = undefined;
             const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
 
-            tensor.* = ctx_.activation_store.createTensor(subkey, null, .replicated);
+            tensor.* = ctx_.activation_store.createReplicatedTensor(subkey, null);
             ctx_.index += 1;
         }
     }.cb, &ctx, &args);
 
-    const exe = try platform.compile(allocator, io, layer, func, args, .{ .shardings = if (shardings.len != 0) shardings else &.{} });
+    const exe = try platform.compile(allocator, io, layer, func, args, .{ .meshes = if (meshes.len != 0) meshes else &.{} });
     defer exe.deinit();
 
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});
@@ -462,20 +447,22 @@ pub fn testLayer(
     defer exe_results.deinit(allocator);
 
     var args_buffers = try zml.mem.bufferize(allocator, ArgsT, &args);
-    var loader = try zml.io.Loader.init(allocator, io, platform, .auto);
-    defer loader.deinit();
-    try loader.load(ArgsT, &args, &args_buffers, activation_store.store, shardings, null);
-    try loader.awaitAll();
     defer zml.mem.deinitBufferized(allocator, ArgsT, &args_buffers);
+    {
+        var loader = try zml.io.Loader.init(allocator, io, platform, .auto);
+        defer loader.deinit();
+        try loader.load(ArgsT, &args, &args_buffers, activation_store.store, null);
+        try loader.awaitAll();
+    }
 
     exe_args.set(.{ layer_weights, args_buffers });
-
-    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
 
     var results = try allocator.alloc(zml.Buffer, output_count);
     defer allocator.free(results);
 
+    exe.call(io, exe_args, &exe_results, .{ .wait = true });
     exe_results.fill(.{results});
+    defer for (results) |*result| result.deinit();
 
     var failed: bool = false;
     var reader_buffer: [4096]u8 = undefined;

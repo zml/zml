@@ -2,11 +2,13 @@ const std = @import("std");
 
 const cpu = @import("platforms/cpu");
 const cuda = @import("platforms/cuda");
+const furiosa = @import("platforms/furiosa");
 const metal = @import("platforms/metal");
 const neuron = @import("platforms/neuron");
-const pjrt = @import("pjrt");
-const rocm = @import("platforms/rocm");
 const oneapi = @import("platforms/oneapi");
+const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
+const rocm = @import("platforms/rocm");
 const tpu = @import("platforms/tpu");
 
 const platforms = @This();
@@ -19,10 +21,11 @@ pub const Platform = enum {
     neuron,
     oneapi,
     metal,
+    furiosa,
 
     pub fn selectFirstAcceleratorEnabled() error{Unavailable}!Platform {
-        inline for (@typeInfo(Platform).@"enum".fields) |field| {
-            const target: Platform = @enumFromInt(field.value);
+        inline for (@typeInfo(Platform).@"enum".field_names) |field| {
+            const target: Platform = @field(Platform, field);
             if (comptime (target != .cpu and target.isEnabled())) return target;
         }
 
@@ -32,7 +35,7 @@ pub const Platform = enum {
 
     pub fn isEnabled(target: Platform) bool {
         return switch (target) {
-            inline else => |tag| @field(platforms, @tagName(tag)).isEnabled(),
+            inline else => |tag| @field(platforms_options, @tagName(tag) ++ "_enabled"),
         };
     }
 

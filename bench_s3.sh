@@ -86,4 +86,4 @@ for name in ZML_LOAD_FIXED_READ_PARALLELISM; do
 done
 
 env "${load_env[@]}" \
-    ./bazel.sh run --config=release --@zml//platforms:oneapi=true //examples/io:playground -- load "${model_uri}" "${sharding}"
+    ./bazel.sh run --config=release --@zml//platforms:oneapi=true //examples/io -- load "${model_uri}" "${sharding}"

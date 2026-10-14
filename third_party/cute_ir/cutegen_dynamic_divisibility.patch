@@ -1,0 +1,243 @@
+--- a/cutlass_compiler/cutegen/include/cutegen/dynamic.hpp
++++ b/cutlass_compiler/cutegen/include/cutegen/dynamic.hpp
+@@ -73,13 +73,20 @@
+      * @brief Width (in bits) of the associated dynamic integer
+      */
+     int32_t width = default_dynamic_int_bitwidth();
++    /**
++     * @brief Known positive divisor of the associated dynamic integer; 1 when
++     *        nothing is known. Spelled `div=N` in the dynamic leaf's properties.
++     */
++    static_int_t divisibility = 1;
+     /// Constructor
+     constexpr dynamic_int_properties_t() = default;
+     explicit dynamic_int_properties_t(int32_t w);
++    dynamic_int_properties_t(int32_t w, static_int_t div);
+     /// Equality operators
+     bool                     operator==(const dynamic_int_properties_t& rhs) const;
+     bool                     operator!=(const dynamic_int_properties_t& rhs) const;
+     dynamic_int_properties_t with_width(int32_t w) const;
++    dynamic_int_properties_t with_divisibility(static_int_t div) const;
+     bool                     is_default() const;
+     bool                     are_compatible(static_int_t v) const;
+     static_int_t             minimum() const;
+@@ -475,11 +482,25 @@
+     static std::string to_str(const dynamic_t& d)
+     {
+         std::string s("?");
+-        if(d.get_width() != default_dynamic_int_bitwidth())
++        const bool has_width = d.get_width() != default_dynamic_int_bitwidth();
++        const bool has_div   = d.get_properties().divisibility != 1;
++        if(has_width || has_div)
+         {
+             s.append("{");
+-            s.append("i");
+-            s.append(std::to_string(d.get_width()));
++            if(has_width)
++            {
++                s.append("i");
++                s.append(std::to_string(d.get_width()));
++            }
++            if(has_div)
++            {
++                if(has_width)
++                {
++                    s.append(" ");
++                }
++                s.append("div=");
++                s.append(std::to_string(d.get_properties().divisibility));
++            }
+             s.append("}");
+         }
+         return s;
+@@ -553,6 +574,22 @@
+                     return;
+                 }
+             }
++            else if(kw.value() == "div")
++            {
++                auto eq = parse_type<token_eq>();
++                if(!eq.has_value())
++                {
++                    // Error: missing '=' after 'div'
++                    return;
++                }
++                auto div = parse_type<static_int_t>();
++                if(!div.has_value() || div.value() <= 0)
++                {
++                    // Error: no positive value for the divisor
++                    return;
++                }
++                prop.divisibility = div.value();
++            }
+             else
+             {
+                 // Error: an unexpected keyword was found
+@@ -572,6 +609,7 @@
+     static void encode_value(const dynamic_t& d, TBuffer& buffer)
+     {
+         encode(buffer, d.get_width());
++        encode(buffer, d.get_properties().divisibility);
+     }
+ };
+ 
+@@ -586,7 +624,10 @@
+         if(!w.has_value() ||
+            (widths.end() == std::find(widths.begin(), widths.end(), w.value())))
+             return std::nullopt;
+-        return dynamic_t(w.value());
++        const auto div = decode<static_int_t>(it, end);
++        if(!div.has_value() || div.value() <= 0)
++            return std::nullopt;
++        return dynamic_t(dynamic_int_properties_t(w.value(), div.value()));
+     }
+ };
+ 
+@@ -816,45 +857,72 @@
+ struct property_policy_c_t
+ {
+     using int_t = static_int_t;
++    // The divisibility a result keeps: a sum or difference is a multiple of
++    // the gcd of its operands' divisors, a product of their product, and a
++    // static operand counts as its own absolute value.
++    static static_int_t gcd_div(static_int_t a, static_int_t b)
++    {
++        a = a < 0 ? -a : a;
++        b = b < 0 ? -b : b;
++        while(b != 0)
++        {
++            static_int_t t = a % b;
++            a              = b;
++            b              = t;
++        }
++        return a == 0 ? 1 : a;
++    }
++    static dynamic_int_properties_t with_div(int32_t width, static_int_t div)
++    {
++        return dynamic_int_properties_t(width, div <= 0 ? 1 : div);
++    }
+     //--------------------------------------------------------------------------
+     // resolve_add()
+     static arith_resolve_t resolve_add(const dynamic_t& lhs, const dynamic_t& rhs)
+     {
+         auto res_width = std::max(lhs.get_width(), rhs.get_width());
+-        return arith_op_desc_t(dynamic_int_properties_t(res_width), res_width);
++        auto div       = gcd_div(lhs.get_properties().divisibility,
++                                 rhs.get_properties().divisibility);
++        return arith_op_desc_t(with_div(res_width, div), res_width);
+     }
+     template <typename TInt,
+               std::enable_if_t<std::is_integral_v<TInt>, bool> = true>
+     static arith_resolve_t resolve_add(const dynamic_t& lhs, TInt rhs)
+     {
+         auto res_width = std::max(lhs.get_width(), in_range<int32_t>(rhs) ? 32 : 64);
+-        return arith_op_desc_t(dynamic_int_properties_t(res_width), res_width);
++        auto div       = gcd_div(lhs.get_properties().divisibility, static_int_t(rhs));
++        return arith_op_desc_t(with_div(res_width, div), res_width);
+     }
+     static arith_resolve_t resolve_sub(const dynamic_t& lhs, const dynamic_t& rhs)
+     {
+         auto res_width = std::max(lhs.get_width(), rhs.get_width());
+-        return arith_op_desc_t(dynamic_int_properties_t(res_width), res_width);
++        auto div       = gcd_div(lhs.get_properties().divisibility,
++                                 rhs.get_properties().divisibility);
++        return arith_op_desc_t(with_div(res_width, div), res_width);
+     }
+     template <typename TInt,
+               std::enable_if_t<std::is_integral_v<TInt>, bool> = true>
+     static arith_resolve_t resolve_sub(const dynamic_t& lhs, TInt rhs)
+     {
+         auto res_width = std::max(lhs.get_width(), in_range<int32_t>(rhs) ? 32 : 64);
+-        return arith_op_desc_t(dynamic_int_properties_t(res_width), res_width);
++        auto div       = gcd_div(lhs.get_properties().divisibility, static_int_t(rhs));
++        return arith_op_desc_t(with_div(res_width, div), res_width);
+     }
+     template <typename TInt,
+               std::enable_if_t<std::is_integral_v<TInt>, bool> = true>
+     static arith_resolve_t resolve_sub(TInt lhs, const dynamic_t& rhs)
+     {
+         auto res_width = std::max(rhs.get_width(), in_range<int32_t>(lhs) ? 32 : 64);
+-        return arith_op_desc_t(dynamic_int_properties_t(res_width), res_width);
++        auto div       = gcd_div(rhs.get_properties().divisibility, static_int_t(lhs));
++        return arith_op_desc_t(with_div(res_width, div), res_width);
+     }
+     //--------------------------------------------------------------------------
+     // resolve_mul()
+     static arith_resolve_t resolve_mul(const dynamic_t& lhs, const dynamic_t& rhs)
+     {
+         auto res_width = std::max(lhs.get_width(), rhs.get_width());
+-        return arith_op_desc_t(dynamic_int_properties_t(res_width), res_width);
++        auto div       = lhs.get_properties().divisibility * rhs.get_properties().divisibility;
++        return arith_op_desc_t(with_div(res_width, div), res_width);
+     }
+     template <typename TInt,
+               std::enable_if_t<std::is_integral_v<TInt>, bool> = true>
+@@ -870,7 +938,9 @@
+             return src_operand_index_t(0);
+         }
+         auto res_width = std::max(lhs.get_width(), in_range<int32_t>(rhs) ? 32 : 64);
+-        return arith_op_desc_t(dynamic_int_properties_t(res_width), res_width);
++        auto div       = lhs.get_properties().divisibility *
++                         static_int_t(rhs < 0 ? -rhs : rhs);
++        return arith_op_desc_t(with_div(res_width, div), res_width);
+     }
+     //--------------------------------------------------------------------------
+     // resolve_mod()
+@@ -939,7 +1009,9 @@
+             return src_operand_index_t(0);
+         }
+         auto res_width = std::max(lhs.get_width(), in_range<int32_t>(rhs) ? 32 : 64);
+-        return arith_op_desc_t(dynamic_int_properties_t(res_width), res_width);
++        auto d         = lhs.get_properties().divisibility;
++        auto r         = static_int_t(rhs < 0 ? -rhs : rhs);
++        return arith_op_desc_t(with_div(res_width, d % r == 0 ? d / r : 1), res_width);
+     }
+     template <typename TInt,
+               std::enable_if_t<std::is_integral_v<TInt>, bool> = true>
+@@ -1259,12 +1331,18 @@
+ 
+ inline dynamic_int_properties_t::dynamic_int_properties_t(int32_t w) :
+     width(w)
++{
++}
++
++inline dynamic_int_properties_t::dynamic_int_properties_t(int32_t w, static_int_t div) :
++    width(w),
++    divisibility(div)
+ {
+ }
+ 
+ inline bool dynamic_int_properties_t::operator==(const dynamic_int_properties_t& rhs) const
+ {
+-    return (width == rhs.width);
++    return (width == rhs.width) && (divisibility == rhs.divisibility);
+ }
+ 
+ inline bool dynamic_int_properties_t::operator!=(const dynamic_int_properties_t& rhs) const
+@@ -1284,9 +1362,16 @@
+     return r;
+ }
+ 
++inline dynamic_int_properties_t dynamic_int_properties_t::with_divisibility(static_int_t div) const
++{
++    dynamic_int_properties_t r = *this;
++    r.divisibility             = div;
++    return r;
++}
++
+ inline bool dynamic_int_properties_t::are_compatible(static_int_t v) const
+ {
+-    return in_range_of_width(v, width);
++    return in_range_of_width(v, width) && (v % divisibility == 0);
+ }
+ 
+ inline static_int_t dynamic_int_properties_t::minimum() const
+@@ -1313,7 +1398,7 @@
+ 
+ inline bool dynamic_int_properties_t::is_constrained() const
+ {
+-    return false;
++    return divisibility != 1;
+ }
+ 
+ inline dynamic_t::dynamic_t(int32_t width_) :

@@ -25,7 +25,9 @@ test {
 
 const log = std.log.scoped(.@"zml/vfs");
 
-const CWD_HANDLE: u32 = 0;
+/// Indices 0-2 are the standard streams, so `std.Io.File.stdout()` and
+/// friends resolve to their own descriptor; the cwd placeholder follows.
+const CWD_HANDLE: u32 = 3;
 /// Local files are the VFS's own: a bare path or a `file://` URI resolves
 /// to the inner `Io`, never to a registered backend.
 const local_scheme = "file";
@@ -102,10 +104,11 @@ pub fn init(allocator: std.mem.Allocator, base_io: std.Io) !VFS {
     const base = VFSBase.init(base_io);
 
     var handles: @FieldType(@This(), "handles") = .{};
-    try handles.append(allocator, .{ .handle = CWD_HANDLE, .backend_idx = null });
     try handles.append(allocator, .{ .handle = std.posix.STDIN_FILENO, .backend_idx = null });
     try handles.append(allocator, .{ .handle = std.posix.STDOUT_FILENO, .backend_idx = null });
     try handles.append(allocator, .{ .handle = std.posix.STDERR_FILENO, .backend_idx = null });
+    try handles.append(allocator, .{ .handle = CWD_HANDLE, .backend_idx = null });
+    std.debug.assert(handles.len == CWD_HANDLE + 1);
 
     return .{
         .allocator = allocator,
@@ -133,11 +136,13 @@ pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) Registe
     try self.backends.put(self.allocator, scheme, backend);
 }
 
+/// Handles store their backend's index: no handle of this or any later
+/// registered backend may still be open.
 pub fn unregister(self: *VFS, scheme: []const u8) bool {
     self.mutex.lockUncancelable(self.base.inner);
     defer self.mutex.unlock(self.base.inner);
 
-    return self.backends.remove(scheme);
+    return self.backends.orderedRemove(scheme);
 }
 
 pub fn io(self: *VFS) std.Io {
@@ -456,7 +461,16 @@ fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable
                 .data = o.data,
             } });
         },
-        .device_io_control, .file_write_streaming, .net_receive => {
+        .file_write_streaming => |o| {
+            const handle, const backend = self.getFileHandle(o.file);
+            return backend.vtable.operate(backend.userdata, .{ .file_write_streaming = .{
+                .file = handle.innerFile(),
+                .header = o.header,
+                .data = o.data,
+                .splat = o.splat,
+            } });
+        },
+        .device_io_control, .net_receive, .net_read, .net_send, .net_write => {
             return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
         },
     }
@@ -504,7 +518,7 @@ pub fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, o
     return backend.vtable.dirAccess(backend.userdata, dir_, stripScheme(sub_path), options);
 }
 
-pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.CreateFlags) std.Io.File.OpenError!std.Io.File {
+pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
         log.err("Failed to lookup backend for dir create file '{s}' : {any}", .{ sub_path, err });
@@ -512,25 +526,29 @@ pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u
     };
 
     const file = try backend.vtable.dirCreateFile(backend.userdata, dir_, stripScheme(sub_path), flags);
+    errdefer file.close(backend);
     const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
     handle.* = .{
         .handle = @intCast(file.handle),
         .backend_idx = backend_idx,
+        .flags = file.flags,
     };
-    return .{ .handle = @intCast(idx), .flags = .{ .nonblocking = false } };
+    return .{ .handle = @intCast(idx), .flags = file.flags };
 }
 
-fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
         log.err("Failed to lookup backend for opening file '{s}' : {any}", .{ sub_path, err });
         return std.Io.File.OpenError.Unexpected;
     };
     const file = try backend.vtable.dirOpenFile(backend.userdata, dir_, stripScheme(sub_path), flags);
+    errdefer file.close(backend);
     const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
     handle.* = .{
         .handle = @intCast(file.handle),
         .backend_idx = backend_idx,
+        .flags = file.flags,
         .read_only = flags.mode == .read_only,
     };
     return .{ .handle = @intCast(idx), .flags = handle.flags };
@@ -623,26 +641,42 @@ fn fileWritePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const
 
 fn fileWriteFileStreaming(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.File.Writer.WriteFileError!usize {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+    const own_io = self.io();
+    if (reader.io.userdata != own_io.userdata or reader.io.vtable != own_io.vtable) return error.Unimplemented;
 
     const dst_handle, const dst_backend = self.getFileHandle(file);
-    const src_handle, _ = self.getFileHandle(reader.file);
+    const src_handle, const src_backend = self.getFileHandle(reader.file);
+    if (src_backend.userdata != dst_backend.userdata or src_backend.vtable != dst_backend.vtable) return error.Unimplemented;
 
+    const original_src_io = reader.io;
     const original_src_handle = reader.file;
+    reader.io = src_backend;
     reader.file = self.innerReadable(src_handle);
-    defer reader.file = original_src_handle;
+    defer {
+        reader.io = original_src_io;
+        reader.file = original_src_handle;
+    }
 
     return dst_backend.vtable.fileWriteFileStreaming(dst_backend.userdata, dst_handle.innerFile(), header, reader, limit);
 }
 
 fn fileWriteFilePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit, offset: u64) std.Io.File.WriteFilePositionalError!usize {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+    const own_io = self.io();
+    if (reader.io.userdata != own_io.userdata or reader.io.vtable != own_io.vtable) return error.Unimplemented;
 
     const dst_handle, const dst_backend = self.getFileHandle(file);
-    const src_handle, _ = self.getFileHandle(reader.file);
+    const src_handle, const src_backend = self.getFileHandle(reader.file);
+    if (src_backend.userdata != dst_backend.userdata or src_backend.vtable != dst_backend.vtable) return error.Unimplemented;
 
+    const original_src_io = reader.io;
     const original_src_handle = reader.file;
+    reader.io = src_backend;
     reader.file = self.innerReadable(src_handle);
-    defer reader.file = original_src_handle;
+    defer {
+        reader.io = original_src_io;
+        reader.file = original_src_handle;
+    }
 
     return dst_backend.vtable.fileWriteFilePositional(dst_backend.userdata, dst_handle.innerFile(), header, reader, limit, offset);
 }
@@ -859,4 +893,60 @@ test "VFS reads the same bytes under every direct I/O policy" {
         try std.testing.expectEqualSlices(u8, contents[alignment + 3 ..][0..tail.len], &tail);
         try std.testing.expectEqual(@as(usize, 0), try file.readPositional(vfs_io, &.{plain}, contents.len));
     }
+}
+
+test "standard streams resolve to their own descriptors" {
+    var vfs: VFS = try .init(std.testing.allocator, std.testing.io);
+    defer vfs.deinit();
+
+    const files = [_]std.Io.File{ .stdin(), .stdout(), .stderr() };
+    const fds = [_]std.posix.fd_t{ std.posix.STDIN_FILENO, std.posix.STDOUT_FILENO, std.posix.STDERR_FILENO };
+    for (files, fds) |file, fd| {
+        const handle, const backend = vfs.getFileHandle(file);
+        try std.testing.expectEqual(fd, handle.fd());
+        try std.testing.expect(backend.vtable == vfs.base.inner.vtable);
+    }
+}
+
+test "copy a local file through the VFS" {
+    const allocator = std.testing.allocator;
+    const process_io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source_data: [8192]u8 = @splat('x');
+    try tmp.dir.writeFile(process_io, .{
+        .sub_path = "source",
+        .data = &source_data,
+    });
+
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(process_io, &path_buffer);
+    const source_uri = try std.fmt.allocPrint(allocator, "file://{s}/source", .{path_buffer[0..path_len]});
+    defer allocator.free(source_uri);
+    const destination_uri = try std.fmt.allocPrint(allocator, "file://{s}/destination", .{path_buffer[0..path_len]});
+    defer allocator.free(destination_uri);
+
+    // `file://` is the VFS's own scheme: no backend to register.
+    var vfs: VFS = try .init(allocator, process_io);
+    defer vfs.deinit();
+
+    const vfs_io = vfs.io();
+    {
+        var source = try std.Io.Dir.openFile(.cwd(), vfs_io, source_uri, .{});
+        defer source.close(vfs_io);
+        var destination = try std.Io.Dir.createFile(.cwd(), vfs_io, destination_uri, .{});
+        defer destination.close(vfs_io);
+
+        var reader: std.Io.File.Reader = .initStreaming(source, vfs_io, &.{});
+        var copy_buffer: [4096]u8 align(4096) = undefined;
+        var writer = destination.writer(vfs_io, &copy_buffer);
+        try std.testing.expectEqual(source_data.len, try reader.interface.streamRemaining(&writer.interface));
+        try writer.interface.flush();
+    }
+
+    const copied = try tmp.dir.readFileAlloc(process_io, "destination", allocator, .limited(source_data.len + 1));
+    defer allocator.free(copied);
+    try std.testing.expectEqualSlices(u8, &source_data, copied);
 }

@@ -6,6 +6,7 @@ const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 const upb = @import("upb");
+const zio = @import("zio");
 
 const Buffer = @import("buffer.zig").Buffer;
 const DataType = @import("dtype.zig").DataType;
@@ -19,11 +20,10 @@ const Platform = @import("platform.zig").Platform;
 const tracer = @import("profiling/tracer.zig");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
-const Partitioning = Sharding.Partitioning;
 const Tensor = @import("tensor.zig").Tensor;
 
 const Compiler = @This();
-const log = std.log.scoped(.@"zml/compiler");
+const log = std.log.scoped(.@"zml/Compiler");
 
 allocator: std.mem.Allocator,
 io: std.Io,
@@ -34,17 +34,21 @@ mlir_ctx: *mlir.Context,
 mlir_pass_manager: *mlir.PassManager,
 module: *mlir.Module,
 platform: *const Platform,
-partitioning: Sharding.Partitioning,
+meshes: []const *const Sharding.Mesh,
+partitioner: Sharding.Partitioner,
 
 mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type),
 
 scopes: stdx.BoundedArray(Scope, 16) = .empty,
 manual_computation_depth: usize = 0,
+unknown_location: *const mlir.Location,
+location: *const mlir.Location,
 
 channel_id: i64 = 0,
 composite_id: i64 = 0,
 
 threadlocal var _current: ?*Compiler = null;
+
 var mlir_global_init_mutex: std.Io.Mutex = .init;
 var mlir_global_registry: ?*mlir.DialectRegistry = null;
 
@@ -70,9 +74,16 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
 pub const Options = struct {
     /// Incremented once after successful compilation.
     progress: std.Progress.Node = .none,
-    shardings: []const Sharding = &.{},
+    meshes: []const *const Sharding.Mesh = &.{},
     // If null, will be initialized from the target
     partitioner: ?Sharding.Partitioner = null,
+    /// HACK: Extra bytes added to the device memory size reported to XLA.
+    /// Some buffers (e.g. engram tables) live in host-pinned memory but are declared to XLA as
+    /// device memory, because XLA only supports a few GPU operations reading host-pinned memory.
+    /// XLA then counts them against device memory, leaves no budget for temporary buffers and
+    /// rematerializes aggressively. Callers set this to the per-device size of such buffers to
+    /// compensate. Remove once XLA properly supports host-pinned inputs.
+    extra_device_memory_bytes: u64 = 0,
     // Debugging options
     program_name: []const u8 = "zml",
     xla_dump_to: ?[]const u8 = null,
@@ -133,7 +144,8 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
     var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
     mlir_ctx.loadAllAvailableDialects();
 
-    const module = mlir.Module.init(.unknown(mlir_ctx));
+    const unknown_location: *const mlir.Location = .unknown(mlir_ctx);
+    const module = mlir.Module.init(unknown_location);
     module.operation().setAttributeByName("sym_name", .string(mlir_ctx, opts.program_name));
 
     const pass_manager = mlir.PassManager.init(mlir_ctx);
@@ -152,20 +164,17 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
     var mlir_known_types: std.enums.EnumArray(DataType, *const mlir.Type) = .initUndefined();
     {
         for (0.., &mlir_known_types.values) |i, *mlir_type| {
-            mlir_type.* = mlirx.Type.fromDType(mlir_ctx, @enumFromInt(i));
+            mlir_type.* = mlirx.Type.fromDType(mlir_ctx, @fromBackingInt(@intCast(i)));
         }
     }
 
-    // Ensure replicated sharding is always included as a fallback option.
-    var shardings = std.ArrayList(Sharding).initCapacity(arena.allocator(), opts.shardings.len + 1) catch @panic("OOM");
-    var needs_replicated: bool = true;
-    for (opts.shardings) |sharding| {
-        if (sharding.data == platform.replicated_sharding.data) needs_replicated = false;
-        shardings.appendAssumeCapacity(sharding.resolve(platform));
+    var mesh_list: std.ArrayList(*const Sharding.Mesh) = .empty;
+    mesh_list.appendSlice(arena.allocator(), opts.meshes) catch @panic("OOM");
+    if (std.mem.indexOfScalar(*const Sharding.Mesh, mesh_list.items, platform.replicated_mesh) == null) {
+        mesh_list.append(arena.allocator(), platform.replicated_mesh) catch @panic("OOM");
     }
-    if (needs_replicated) shardings.appendAssumeCapacity(platform.replicated_sharding);
-
-    const partitioning = Sharding.Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), shardings.items) catch @panic("OOM");
+    const meshes = mesh_list.items;
+    validateMeshes(meshes) catch |err| stdx.debug.panic("Incompatible meshes: {t}", .{err});
 
     return .{
         .allocator = allocator,
@@ -177,7 +186,10 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform,
         .mlir_known_types = mlir_known_types,
         .module = module,
         .platform = platform,
-        .partitioning = partitioning,
+        .partitioner = opts.partitioner orelse .fromTarget(platform.target),
+        .meshes = meshes,
+        .location = unknown_location,
+        .unknown_location = unknown_location,
     };
 }
 
@@ -201,7 +213,7 @@ pub fn deactivate(self: *Compiler) void {
 }
 
 pub fn current() *Compiler {
-    return _current.?;
+    return currentOrNull().?;
 }
 
 pub fn currentOrNull() ?*Compiler {
@@ -216,6 +228,75 @@ pub fn pushBlock(self: *Compiler, block: *mlir.Block) *Scope {
     const scope = Scope.initFromBlock(self, block);
     self.scopes.appendAssumeCapacity(scope);
     return self.currentScope();
+}
+
+/// Change `Compiler.location` by appending a frame to the current stack of locations
+/// Must be followed by a `defer compiler.popLocation`
+pub fn pushLocation(self: *Compiler, location: std.builtin.SourceLocation, name: []const u8) void {
+    var callee: *const mlir.Location = .fromSrc(self.mlir_ctx, location);
+    if (name.len > 0) callee = callee.named(self.mlir_ctx, name);
+    self.location = if (self.location == self.unknown_location) callee else .callSite(callee, self.location);
+}
+
+/// see `zml.Compiler.pushLocation`
+pub fn pushLocationFmt(self: *Compiler, location: std.builtin.SourceLocation, comptime fmt: []const u8, args: anytype) void {
+    const name = std.fmt.allocPrint(self.allocator, fmt, args) catch {
+        return self.pushLocation(location, "<truncated>");
+    };
+    defer self.allocator.free(name);
+
+    return self.pushLocation(location, name);
+}
+
+/// Remove last call frame pushed by `zml.Compiler.pushLocation`
+pub fn popLocation(self: *Compiler) void {
+    switch (self.location.inspect()) {
+        .named => {
+            // We only pushed a named, when there was no parent location
+            self.location = self.unknown_location;
+            return;
+        },
+        .callsite => |callsite| {
+            self.location = callsite.caller();
+            return;
+        },
+        .unknown, .file_line_col, .fused => @panic("unexpected location metadata"),
+    }
+}
+
+test pushLocation {
+    const mlir_registry = mlirRegistry(std.testing.io);
+    var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
+    mlir_ctx.loadAllAvailableDialects();
+
+    const unknown_location: *const mlir.Location = .unknown(mlir_ctx);
+
+    var compiler: Compiler = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .arena = undefined,
+        .mlir_registry = mlir_registry,
+        .mlir_ctx = mlir_ctx,
+        .mlir_pass_manager = undefined,
+        .mlir_known_types = undefined,
+        .module = undefined,
+        .platform = undefined,
+        .partitioner = undefined,
+        .meshes = undefined,
+        .location = unknown_location,
+        .unknown_location = unknown_location,
+    };
+
+    compiler.pushLocation(@src(), "loc1");
+    const loc1 = compiler.location;
+
+    compiler.pushLocation(@src(), "loc2");
+    compiler.popLocation();
+
+    try std.testing.expectEqual(loc1, compiler.location);
+    compiler.popLocation();
+
+    try std.testing.expectEqual(unknown_location, compiler.location);
 }
 
 pub fn nextChannelId(self: *Compiler) i64 {
@@ -235,7 +316,7 @@ pub fn mlirType(self: *const Compiler, dt: DataType) *const mlir.Type {
 pub fn dtype(self: *const Compiler, mlir_type: *const mlir.Type) DataType {
     @setRuntimeSafety(false);
     for (0.., &self.mlir_known_types.values) |i, known_type| {
-        if (known_type == mlir_type) return @enumFromInt(i);
+        if (known_type == mlir_type) return @fromBackingInt(@intCast(i));
     }
     std.debug.panic("Can't convert unknown mlir type to dtype: {f}", .{mlir_type});
 }
@@ -251,6 +332,63 @@ pub fn alloc(self: *Compiler, T: type, n: usize) []T {
 
 pub fn allocPrint(self: *Compiler, comptime fmt: []const u8, args: anytype) []u8 {
     return std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch self.abortOOM();
+}
+
+/// Lookup a mesh by it's name
+pub fn mesh(compiler: *const Compiler, name: @EnumLiteral()) *const Sharding.Mesh {
+    const name_slice = @tagName(name);
+    for (compiler.meshes) |m| {
+        if (std.mem.eql(u8, name_slice, m.name)) {
+            return m;
+        }
+    }
+    if (name == .replicated) return compiler.platform.replicated_mesh;
+    std.debug.panic(
+        \\Found no meshes named {s}.
+        \\Try passing more meshes to `zml.compile`.
+        \\Known meshes: {f}
+    , .{ name_slice, stdx.fmt.slice(compiler.meshes) });
+}
+
+/// Find a mesh that covers all the given axes
+pub fn resolveMesh(compiler: *const Compiler, logical_axes: anytype) *const Sharding.Mesh {
+    if (@TypeOf(logical_axes) != []const Shape.Tag) {
+        const comp_tags = comptime Shape.parseTags(logical_axes);
+        const parsed_tags: []const Shape.Tag = comptime comp_tags.constSlice();
+        return compiler.resolveMesh(parsed_tags);
+    }
+
+    var ok_meshe: ?*const Sharding.Mesh = null;
+    for (compiler.meshes) |shd| {
+        var covers_all: bool = true;
+        for (logical_axes) |ax| {
+            const input_axis = Shape.toTag(ax);
+            var covers_this: bool = false;
+            for (shd.logical.axes.slice()) |existing_axis| {
+                if (std.mem.eql(u8, std.mem.span(existing_axis), std.mem.span(input_axis))) {
+                    covers_this = true;
+                    break;
+                }
+            }
+            covers_all = covers_all and covers_this;
+        }
+        if (covers_all) {
+            if (ok_meshe) |first_match| {
+                std.debug.panic(
+                    \\Found two meshes covering axes: {any}, expected exacty one.
+                    \\- First match: {f}
+                    \\- Second match: {f}
+                , .{ logical_axes, first_match, shd });
+            }
+            ok_meshe = shd;
+        }
+    }
+
+    return ok_meshe orelse std.debug.panic(
+        \\Found no meshes covering axes: {any}, expected exacty one.
+        \\Try passing more meshes to `zml.compile`.
+        \\Known meshes: {f}
+    , .{ logical_axes, stdx.fmt.slice(compiler.meshes) });
 }
 
 pub fn Typed(comptime func: anytype) type {
@@ -275,6 +413,24 @@ pub fn compile(
     args: std.meta.ArgsTuple(@TypeOf(func)),
     opts: Options,
 ) Error!Exe {
+    return switch (platform.io_impl) {
+        .threaded => compileInternal(allocator, io, platform, func, args, opts),
+        .zio => try zio.blockInPlace(struct {
+            fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const Platform, args_: @TypeOf(args), opts_: Options) Error!Exe {
+                return try compileInternal(allocator_, io_, platform_, func, args_, opts_);
+            }
+        }.call, .{ allocator, io, platform, args, opts }),
+    };
+}
+
+pub fn compileInternal(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    comptime func: anytype,
+    args: std.meta.ArgsTuple(@TypeOf(func)),
+    opts: Options,
+) Error!Exe {
     // TODO: Here we have somewhat of a requirement
     // Emitting MLIR requires to have the compiler context available at all times using `Compiler.current()`.
     // If in the future, we inject an Io that is not thread-based, we might have some surprises.
@@ -282,22 +438,23 @@ pub fn compile(
     // I think the correct implementation would be to dispatch `emitMlir` to a thread pool, then wait for the result
     // asynchronously using the provided Io. For now, we'll simply make that blocking as it's not a big deal but keep
     // in mind we might want to revisit that later.
-    _ = io;
-    var st_io: std.Io.Threaded = .init_single_threaded;
-    defer st_io.deinit();
+    //
+    // This is NOT compatible with std.Io.Evented.
+    // It is compatible with zio, hence the blockInPlace above.
 
     const span_name = try tracer.formatSpanName(allocator, "zml.module.compile", .{
         .program_name = opts.program_name,
         .arg_count = args.len,
     });
+
     defer allocator.free(span_name);
     var span = tracer.Span.start(span_name);
     defer span.end();
 
-    var compiler: Compiler = .init(allocator, st_io.io(), platform, opts);
+    var compiler: Compiler = .init(allocator, io, platform, opts);
     defer compiler.deinit();
 
-    var result = emitMlir(&compiler, func, args) catch |err| switch (err) {
+    var result = compiler.emitMlir(func, args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -308,9 +465,9 @@ pub fn compile(
 
     _ = result.func.appendTo(compiler.module.body());
 
-    const num_partitions = compiler.partitioning.numPartitions();
-    const num_replicas = compiler.partitioning.numReplicas();
-    const num_devices = compiler.partitioning.numDevices();
+    const num_partitions = compiler.meshes[0].numPartitions();
+    const num_replicas = compiler.meshes[0].numReplicas();
+    const num_devices = num_partitions * num_replicas;
 
     compiler.module.operation().setAttributeByName(
         "mhlo.num_partitions",
@@ -323,15 +480,16 @@ pub fn compile(
 
     compiler.mlir_pass_manager.runOnOp(compiler.module.operation()) catch |err| switch (err) {
         error.MlirUnexpected => {
-            std.log.err("Failed to canonicalize invalid mlir: \n {f} \n ", .{compiler.module.operation()});
+            compiler.handleCompilationError(io, compiler.arena.allocator(), opts, err, "Failed to canonicalize invalid MLIR");
             @panic("ZML generated invalid mlir. Please open a bug report");
         },
     };
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
+    const loaded_executable = compiler.compileModuleToPjrtExecutable(opts) catch |err| {
+        compiler.handleCompilationError(io, compiler.arena.allocator(), opts, err, "Pjrt failed to compile the following MLIR");
+        return err;
+    };
 
-    const loaded_executable = try compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compiler.module, compiler.partitioning, opts);
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
 
     const exe = try Exe.init(
@@ -343,8 +501,7 @@ pub fn compile(
         // This will get copied into exe
         result.input_info.items(.shape),
         result.output_info.items(.shape),
-        result.input_info.items(.sharding),
-        result.output_info.items(.sharding),
+        result.input_info.items(.aliasing_output),
     );
     errdefer exe.deinit();
 
@@ -356,16 +513,15 @@ fn addPartitionerOperations(ctx: *Compiler) !void {
     const allocator = ctx.arena.allocator();
     const mlir_ctx = ctx.mlir_ctx;
     const module = ctx.module;
-    const partitioning = ctx.partitioning;
 
-    switch (partitioning.partitioner) {
+    switch (ctx.partitioner) {
         .gspmd => {},
         .shardy => {
-            for (partitioning.shardings) |sharding| {
-                const attr_str = try sharding.data.sdyMeshAttr(allocator);
+            for (ctx.meshes) |shd| {
+                const attr_str = try shd.sdyMeshAttr(allocator);
                 defer allocator.free(attr_str);
 
-                const name = sharding.data.name;
+                const name = shd.name;
                 const mesh_attr = try mlir.Attribute.parse(mlir_ctx, attr_str);
 
                 const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
@@ -392,7 +548,6 @@ const EmitMlirResult = struct {
 pub const TensorInfo = struct {
     id: Tensor.Id,
     shape: Shape,
-    sharding: Sharding,
     value: *const mlir.Value,
 
     // Only used for input tensors, stores which output tensor ends up with their buffer
@@ -402,12 +557,12 @@ pub const TensorInfo = struct {
         var attrs: AttributeList = .empty;
 
         const mlir_ctx = compiler.mlir_ctx;
-        const sharding_attr = try compiler.partitioning.tensorShardingAttr(arena, mlir_ctx, info.shape, info.sharding);
-        const name = switch (compiler.partitioning.partitioner) {
+        const meshe_attr = try compiler.tensorShardingAttr(arena, mlir_ctx, info.shape);
+        const name = switch (compiler.partitioner) {
             .gspmd => "mhlo.sharding",
             .shardy => "sdy.sharding",
         };
-        attrs.appendAssumeCapacity(.named(mlir_ctx, name, sharding_attr));
+        attrs.appendAssumeCapacity(.named(mlir_ctx, name, meshe_attr));
 
         const memory = scope.id_to_memory.get(info.id) orelse .device;
         if (memory != .device) {
@@ -443,11 +598,10 @@ fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTupl
     var input_info = try createBlockArguments(compiler, fn_scope, &args);
     errdefer input_info.deinit(compiler.allocator);
 
-    var result = result: {
+    var result = blk: {
         compiler.activate();
         defer compiler.deactivate();
-
-        break :result @call(.auto, func, args);
+        break :blk @call(.auto, func, args);
     };
 
     var output_info = try collectOutputInfo(compiler, fn_scope, &result);
@@ -485,16 +639,9 @@ fn createBlockArguments(compiler: *Compiler, scope: *Scope, v: anytype) error{Ou
 
             defer ctx.current_argument_id += 1;
 
-            const input_sharding = ctx.compiler.partitioning.selectSharding(packed_shape) catch |err| switch (err) {
-                error.NoSuitableSharding => std.debug.panic(
-                    "Failed to resolve sharding for input {f}({d}) because it's using unknown sharding. Pass more shardings to `platform.compile`. Known shardings: {f}",
-                    .{ packed_shape, ctx.current_argument_id, stdx.fmt.slice(ctx.compiler.partitioning.shardings) },
-                ),
-            };
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
                 .shape = og_shape,
-                .sharding = input_sharding,
                 .value = value,
             });
         }
@@ -517,7 +664,6 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
 
         fn cb(ctx: *@This(), tensor: *const Tensor) !void {
             const og_shape = tensor.shape();
-            const packed_shape = og_shape.packedShape();
             var value = ctx.scope.id_to_argument.get(tensor.id) orelse
                 tensor._value orelse
                 @panic("no value found for output tensor");
@@ -528,9 +674,9 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{OutOf
 
             try ctx.infos.append(ctx.compiler.allocator, .{
                 .id = tensor.id,
+                // const packed_shape = og_shape.packedShape();
+                // TODO: clarify why this og_shape and not packedShape()
                 .shape = og_shape,
-                // Note: the panic should have been triggered during createBlockArguments or emitMlir
-                .sharding = ctx.compiler.partitioning.selectSharding(packed_shape) catch @panic("failed to resolve output sharding"),
                 .value = value,
             });
         }
@@ -568,14 +714,14 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
         }
     }
 
-    // Input sharding/memory/aliasing attributes
+    // Input mesh/memory/aliasing attributes
     const input_attributes = try arena.alloc(*const mlir.Attribute, input_info.len);
     for (0.., input_attributes) |i, *input_attrs| {
         const attrs_list = try input_info.get(i).attributes(arena, compiler, fn_scope);
         input_attrs.* = .dict(mlir_ctx, attrs_list.constSlice());
     }
 
-    // Output sharding/memory attributes
+    // Output mesh/memory attributes
     const output_attributes = try arena.alloc(*const mlir.Attribute, output_info.len);
     for (0.., output_attributes) |i, *output_attrs| {
         const attrs_list = try output_info.get(i).attributes(arena, compiler, fn_scope);
@@ -650,6 +796,38 @@ fn repack(compiler: *Compiler, scope: *Scope, og_shape: Shape, value: *const mli
     return bit_cast_op.result(0);
 }
 
+fn validateMeshes(meshes: []const *const Sharding.Mesh) !void {
+    stdx.debug.assert(meshes.len >= 1, "Waiting at leat 1 mesh strategy to be implemented", .{});
+
+    const first = meshes[0];
+    const partitions = first.numPartitions();
+    const replicas = first.numReplicas();
+
+    for (meshes[1..]) |s| {
+        if (s.numPartitions() != partitions or s.numReplicas() != replicas) {
+            // todo: deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
+            return error.InconsistentMesheCardinality;
+        }
+    }
+}
+
+pub fn tensorShardingAttr(
+    compiler: *const Compiler,
+    allocator: std.mem.Allocator,
+    mlir_ctx: *mlir.Context,
+    shape: Shape,
+) error{OutOfMemory}!*const mlir.Attribute {
+    const mesh_ = shape._sharding.mesh orelse compiler.platform.replicated_mesh;
+    return switch (compiler.partitioner) {
+        .shardy => (try mesh_.sdyShardingAttrForShape(allocator, mlir_ctx, shape)).asAttr(),
+        .gspmd => mesh_.gspmdShardingAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
+            error.WriteFailed => error.OutOfMemory, // We're writing to memory
+            error.OutOfMemory => error.OutOfMemory,
+            error.IncompatibleSharding => @panic("Shape dimensions must be divisible by their mesh partitions"),
+        },
+    };
+}
+
 fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_arena: *c.upb_Arena) !void {
     const result = c.upb_Map_Set(
         map,
@@ -672,21 +850,25 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
     }
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, partitioning: Partitioning, opts: Options) !*pjrt.LoadedExecutable {
-    var upb_alloc: upb.Allocator = .init(arena);
-    const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
-    defer c.upb_Arena_Free(upb_arena);
-
-    const use_shardy_partitioner = switch (partitioning.partitioner) {
+fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.LoadedExecutable {
+    const use_shardy_partitioner = switch (compiler.partitioner) {
         .shardy => true,
         .gspmd => false,
     };
 
-    const num_partitions = partitioning.numPartitions();
-    const num_replicas = partitioning.numReplicas();
+    const platform = compiler.platform;
+    const main_mesh = compiler.meshes[0];
+    const num_partitions = main_mesh.numPartitions();
+    const num_replicas = main_mesh.numReplicas();
 
-    const device_assignment = try partitioning.deviceAssignment(arena);
+    const device_assignment = try main_mesh.deviceAssignment(compiler.allocator);
+    defer compiler.allocator.free(device_assignment);
 
+    var arena = std.heap.ArenaAllocator.init(compiler.allocator);
+    defer arena.deinit();
+    var upb_alloc: upb.Allocator = .init(arena.allocator());
+    const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
+    defer c.upb_Arena_Free(upb_arena);
     const options = blk: {
         const options = try upb.new(c.xla_CompileOptionsProto, upb_arena);
         c.xla_CompileOptionsProto_set_executable_build_options(options, executable_build_options_blk: {
@@ -711,7 +893,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 device_memory_size = @min(device_memory_size orelse bytes_limit, bytes_limit);
             }
             if (device_memory_size) |bytes_limit| {
-                c.xla_ExecutableBuildOptionsProto_set_device_memory_size(exec_build_options, @intCast(bytes_limit));
+                // HACK: See `Options.extra_device_memory_bytes`.
+                c.xla_ExecutableBuildOptionsProto_set_device_memory_size(exec_build_options, @intCast(bytes_limit + opts.extra_device_memory_bytes));
             }
 
             c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
@@ -750,8 +933,33 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_scaled_dot_with_tile_ir", true, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_enable_subchannel_dequantisation_fusion", true, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_unsupported_enable_triton_multi_output_fusion", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_update_mode", "SKIP_TEMP", upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_collective_kernels", "COLLECTIVE_KERNEL_ALL_REDUCE", upb_arena);
+                // Add collectives to the default list
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "COLLECTIVES_KERNEL,COLLECTIVES,CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION", upb_arena);
+                // With SKIP_TEMP, captured NCCL collectives can retain stale physical mappings
+                // if VMM reclaims their backing under memory pressure, causing silent corruption.
+                // Enable user buffers to assign color 1 and receive the reclaim exemption:
+                // https://github.com/openxla/xla/pull/46029
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_nccl_user_buffers", true, upb_arena);
+                // Enable for both Blackwell+ and Ampere+
+                // try setXlaOverrideFlag(overrides_map, "xla_gpu_cudnn_gemm_fusion_level", 2, upb_arena);
             },
-            .rocm => {},
+            .rocm => {
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_update_mode", "SKIP_TEMP", upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_collective_kernels", "", upb_arena);
+                // Only capture all-reduce and all-gather collectives in HIP graphs; other collective types execute outside command buffers since they are unsupported in HIP graphs.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_collectives_command_buffer_filter", "ALLREDUCE,ALLGATHER", upb_arena);
+                // Add collectives to the default list
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "COLLECTIVES,CUBLAS,CUBLASLT,CUDNN,CUSTOM_CALL,DYNAMIC_SLICE_FUSION,FUSION", upb_arena);
+                // With SKIP_TEMP, captured NCCL collectives can retain stale physical mappings
+                // if VMM reclaims their backing under memory pressure, causing silent corruption.
+                // Enable user buffers to assign color 1 and receive the reclaim exemption:
+                // https://github.com/openxla/xla/pull/46029
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_nccl_user_buffers", true, upb_arena);
+            },
             .metal => {
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_metal_fast_math", false, upb_arena);
             },
@@ -759,12 +967,11 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // More efficient for the allgather/broadcast implementation of the collective permute.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_collective_permute_connected_components", true, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_autotune_level", 0, upb_arena);
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "", upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLASLT,CUSTOM_CALL,FUSION", upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_command_buffer_scheduling_mode", "CONCURRENT", upb_arena);
 
-                // Not supported by OneAPI
-                try setXlaOverrideFlag(overrides_map, "xla_disable_hlo_passes", "scan-rewriter", upb_arena);
+                // Grouped GEMM still needs a oneDNN lowering.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_ragged_dot_grouped_gemm", false, upb_arena);
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_cub_radix_sort", false, upb_arena);
             },
             else => {},
         }
@@ -796,12 +1003,64 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
     const loaded_executable = try pjrtx.Client.compile(
         platform.pjrt_client,
         platform.pjrt_api,
-        arena,
-        io,
-        module,
+        compiler.allocator,
+        compiler.io,
+        compiler.module,
         try upb.serialize(options, upb_arena),
     );
     errdefer loaded_executable.deinit();
 
     return loaded_executable;
+}
+
+fn handleCompilationError(compiler: *Compiler, io: std.Io, allocator: std.mem.Allocator, opts: Options, err: anyerror, msg: []const u8) void {
+    const module_op = compiler.module.operation().fmt(.{ .debug_info = true, .debug_info_pretty_form = true });
+    const truncated_msg = "...<truncated>";
+    var too_big: bool = true;
+
+    const buffer: []u8 = allocator.alloc(u8, 8192) catch {
+        log.err("{s} ({}):\n{f}", .{ msg, err, module_op });
+        return;
+    };
+    defer allocator.free(buffer);
+
+    var buffer_writer: std.Io.Writer = .fixed(buffer);
+    const module_mlir: []const u8 = module_mlir: {
+        module_op.format(&buffer_writer) catch {
+            @memcpy(buffer[8192 - truncated_msg.len ..], truncated_msg);
+            too_big = true;
+            break :module_mlir buffer;
+        };
+        too_big = false;
+        break :module_mlir buffer_writer.buffered();
+    };
+
+    log.err("{s} ({}):\n{s}", .{ msg, err, module_mlir });
+    if (!too_big) return;
+
+    if (opts.xla_dump_to == null) {
+        log.warn("To see the full .mlir, set `zml.Compiler.Options.xla_dump_to`", .{});
+        return;
+    }
+    const xla_dir = opts.xla_dump_to.?;
+    const dir = std.Io.Dir.openDirAbsolute(io, xla_dir, .{}) catch dir: {
+        std.Io.Dir.createDirAbsolute(io, xla_dir, .default_dir) catch |e| {
+            log.err("failed to dump mlir to {s}: {}", .{ xla_dir, e });
+            return;
+        };
+        break :dir std.Io.Dir.openDirAbsolute(io, xla_dir, .{}) catch unreachable;
+    };
+    const filename = std.fmt.allocPrint(allocator, "{s}.mlir", .{opts.program_name}) catch return;
+    const mlir_file = dir.createFile(io, filename, .{ .truncate = true }) catch |e| {
+        log.err("failed to dump mlir to {s}/{s}: {}", .{ xla_dir, filename, e });
+        return;
+    };
+
+    // Reuse the previously allocated buffer
+    var mlir_file_writer = mlir_file.writer(io, buffer);
+    module_op.format(&mlir_file_writer.interface) catch |e| {
+        log.err("Partial mlir dump at: {s}/{s} ({})", .{ xla_dir, filename, e });
+        return;
+    };
+    log.warn("Full .mlir at: {s}/{s}", .{ xla_dir, filename });
 }

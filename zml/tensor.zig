@@ -38,7 +38,7 @@ pub const Tensor = struct {
     }
 
     fn nextTensorId() Id {
-        return @enumFromInt(Tensor.current_id.fetchAdd(1, .seq_cst));
+        return @fromBackingInt(@intCast(Tensor.current_id.fetchAdd(1, .seq_cst)));
     }
 
     pub fn fromShape(shape_: Shape) Tensor {
@@ -77,10 +77,13 @@ pub const Tensor = struct {
     /// Internal use
     ///
     /// Creates a tensor from a Shape and an mlir.Value.
+    /// Note: sharding information is discarded, the output tensor is considered open for replication.
+    /// Use _resultPropagateSharding when the shape sharding should be propagated.
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
-        const res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
+        var res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
+        res._shape._sharding.partition = .open(sh.rank());
 
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             // Check that the MLIR value actually have the same shape.
             const other = fromMlirValue(val);
             const eql_dtype = sh.dtype() == other.dtype();
@@ -91,9 +94,16 @@ pub const Tensor = struct {
         return res;
     }
 
+    pub fn _resultPropagateSharding(sh: Shape, val: *const mlir.Value) Tensor {
+        var res = _result(sh, val);
+        res._shape._sharding = sh._sharding;
+        return res;
+    }
+
     /// Creates a Tensor from a mlir.Value
     ///
     /// The shape is derived from the type of the mlir.Value.
+    /// mesh is `unknown`
     pub fn fromMlirValue(val: *const mlir.Value) Tensor {
         const ctx = Compiler.current();
         const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
@@ -101,13 +111,15 @@ pub const Tensor = struct {
 
         stdx.debug.assert(n <= constants.MAX_RANK, "Can't represent MLIR tensor of rank {}, max supported rank is {}.", .{ n, constants.MAX_RANK });
 
-        var sh: Shape = .{ ._dtype = ctx.dtype(ranked_tensor.elementType()) };
+        var sh: Shape = .{
+            ._dtype = ctx.dtype(ranked_tensor.elementType()),
+            ._dims = .empty,
+            ._tags = .{ .buffer = @splat(Shape.TagUnknown), .len = n },
+            ._sharding = .replicated,
+        };
         for (0..n) |i| {
             sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
         }
-        sh._tags.appendNTimes(Shape.TagUnknown, n) catch unreachable;
-        sh._partitioning.appendNTimes(.unknown, n) catch unreachable;
-
         return .{ ._shape = sh, ._value = val, .id = nextTensorId() };
     }
 
@@ -153,8 +165,24 @@ pub const Tensor = struct {
         return res;
     }
 
-    pub fn withPartitioning(self: Tensor, axes_: anytype) Tensor {
-        const partitioned_shape = self._shape.withPartitioning(axes_);
+    /// Specify the mesh of the input tensor.
+    /// * mesh: *const zml.Mesh, but during compilation the `.meshe_name` syntax can used to get
+    /// a known mesh from the compilation options.
+    /// * partition spec: a struct where the field names match the axis of the given mesh
+    ///
+    /// eg `x.withPartitioning(tp, .{ .h = .model }))` or `x.withPartitioning(.tp, .{ .h = .model }))`
+    pub fn withPartitioning(self: Tensor, mesh_: anytype, partitioning: anytype) Tensor {
+        if (@TypeOf(mesh_) == @EnumLiteral()) {
+            const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit *const zml.Mesh object as input");
+            return self.withPartitioning(compiler.mesh(mesh_), partitioning);
+        }
+
+        if (@TypeOf(partitioning) != Sharding.Partitioning) {
+            const parsed = Sharding.Partitioning.parse(self._shape.tags(), mesh_, .open, partitioning);
+            return self.withPartitioning(mesh_, parsed);
+        }
+
+        const partitioned_shape = self._shape.withPartitioning(mesh_, partitioning);
 
         const ctx = Compiler.currentOrNull() orelse {
             var res = self;
@@ -162,15 +190,9 @@ pub const Tensor = struct {
             return res;
         };
 
-        const sharding = ctx.partitioning.selectSharding(partitioned_shape) catch |err| switch (err) {
-            error.NoSuitableSharding => std.debug.panic(
-                "{f}.withPartitioning({f}) failed to resolve because it's using unknown sharding. Pass more shardings to `zml.compile`. Known shardings: {f}",
-                .{ self, partitioned_shape, stdx.fmt.slice(ctx.partitioning.shardings) },
-            ),
-        };
-        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, sharding) catch @panic("OOM");
+        const attr = ctx.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape) catch @panic("OOM");
 
-        const op_result = switch (ctx.partitioning.partitioner) {
+        const op_result = switch (ctx.partitioner) {
             .shardy => blk: {
                 const op = mlir.Operation.make(ctx.mlir_ctx, "sdy.sharding_constraint", .{
                     .operands = .{ .flat = &.{self.value()} },
@@ -178,6 +200,7 @@ pub const Tensor = struct {
                     .attributes = &.{
                         .named(ctx.mlir_ctx, "sharding", attr),
                     },
+                    .location = ctx.location,
                 }).appendTo(currentBlock());
                 break :blk op.result(0);
             },
@@ -194,13 +217,57 @@ pub const Tensor = struct {
                             .named(ctx.mlir_ctx, "mhlo.sharding", attr),
                         },
                     },
-                    .unknown(ctx.mlir_ctx),
+                    ctx.location,
                 ).appendTo(currentBlock());
                 break :blk op.result(0);
             },
         };
 
-        return _result(partitioned_shape, op_result);
+        return _resultPropagateSharding(partitioned_shape, op_result);
+    }
+
+    /// Force the input tensor to be fully replicated.
+    /// This can be detrimental for performance.
+    pub fn replicate(self: Tensor) Tensor {
+        const compiler = Compiler.current();
+        const partitioning: Sharding.Partitioning = .repeat(.replicated, self.rank());
+        return self.withPartitioning(compiler.platform.replicated_mesh, partitioning);
+    }
+
+    test withPartitioning {
+        // Create two similar meshes,
+        // Then check that tensor.withPartitioning don't confuse the meshes
+        const dp_mp: Sharding.Mesh = .{
+            .name = "dp_mp",
+            .physical = undefined,
+            .logical = .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
+            .bindings = .init(&.{.init(&.{.link_x})}),
+            .folds = .empty,
+            .folds_consumed = .empty,
+        };
+
+        const mp_dp: Sharding.Mesh = .{
+            .name = "mp_dp",
+            .physical = undefined,
+            .logical = .mesh(.{ .model = .low_bandwidth, .data = .high_bandwidth }),
+            .bindings = .init(&.{.init(&.{.link_x})}),
+            .folds = .empty,
+            .folds_consumed = .empty,
+        };
+
+        const x = Tensor.init(.{ .h = 8 }, .f32).withPartitioning(&dp_mp, .{ .h = .model });
+        try std.testing.expectEqual(&dp_mp, x.shape()._sharding.mesh);
+        try std.testing.expectEqual(Sharding.PartitionSpec.sharded(1), x.shape().partition(.h));
+        try std.testing.expectEqual(&dp_mp, x.shape().reshape(.{ 2, 4 })._sharding.mesh);
+
+        const x2 = x.withPartitioning(&mp_dp, .{ .h = .model });
+        try std.testing.expectEqual(&mp_dp, x2.shape()._sharding.mesh);
+        try std.testing.expectEqual(Sharding.PartitionSpec.sharded(0), x2.shape().partition(.h));
+        try std.testing.expectEqual(&mp_dp, x2.shape().reshape(.{ 2, 4 })._sharding.mesh);
+
+        const x2_replicated = x.withPartitioning(&mp_dp, .{ .h = .replicated });
+        try std.testing.expectEqual(&mp_dp, x2_replicated.shape()._sharding.mesh);
+        try std.testing.expectEqual(Sharding.PartitionSpec.replicated, x2_replicated.shape().partition(.h));
     }
 
     /// Copy the given tensor to the specified memory.
@@ -208,7 +275,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return self,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
         const frontend_attributes: *const mlir.Attribute = .dict(ctx.mlir_ctx, &.{
@@ -231,7 +298,7 @@ pub const Tensor = struct {
                     .named(ctx.mlir_ctx, "mhlo.frontend_attributes", frontend_attributes),
                 },
             },
-            .unknown(ctx.mlir_ctx),
+            ctx.location,
         ).appendTo(currentBlock());
 
         const res = _result(self._shape, op.result(0));
@@ -256,13 +323,13 @@ pub const Tensor = struct {
         const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcpyH2D, .{x_t}, platform, .{});
         defer exe.deinit();
 
-        var x_h = try zml.Buffer.fromBytesOpts(io, platform, x_t.shape(), .replicated, @ptrCast(&inputs), .{ .memory = .host_pinned });
+        var x_h = try zml.Buffer.fromBytesOpts(io, platform, x_t.shape(), @ptrCast(&inputs), .{ .memory = .host_pinned });
         defer x_h.deinit();
 
         const x_h_ptr: [*]f32 = @ptrCast(@alignCast(x_h.opaqueDevicePtr(0)));
         try std.testing.expectEqualSlices(f32, &inputs, x_h_ptr[0..8]);
 
-        var x_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcpyH2D, .{x_h});
+        var x_d = try exe.eval(std.testing.allocator, io, .{x_h});
         defer x_d.deinit();
 
         try zml.testing.expectClose(std.testing.io, x_h, x_d, .exact_match);
@@ -274,7 +341,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return flat_tensors,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
         var copy = flat_tensors;
@@ -292,7 +359,7 @@ pub const Tensor = struct {
         const ctx = Compiler.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return self,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
         if (ctx.currentScope().id_to_argument.get(self.id) == null) {
@@ -311,7 +378,7 @@ pub const Tensor = struct {
         switch (ctx.platform.target) {
             // Only one memory kind on those platform
             .cpu, .neuron, .metal => return,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .furiosa => {},
         }
 
         meta.visit(struct {
@@ -355,8 +422,11 @@ pub const Tensor = struct {
     /// but this API allows to reuse buffer between input and output arguments
     /// of a given function.
     /// Note this is visible from the outside. The caller of a function with donations
-    /// is not allowed to reuse the donated input buffer after the call.
+    /// cannot use the donated input's contents after execution. Runners destroy its
+    /// handle automatically; raw `Exe.call` leaves it for the caller to deinit.
     /// For `reuseBuffer` to be effective, it needs to propagate all the way through the output.
+    ///
+    /// The sharding of the origin tensor is propagated to this one.
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
         const compilation_context = Compiler.current();
         const scope = compilation_context.currentScope();
@@ -367,8 +437,30 @@ pub const Tensor = struct {
                 .explicit => og_donation,
             };
             scope.id_to_donation.put(scope.arena.allocator(), self.id, donation) catch @panic("OOM");
+
+            // The origin is mapped to a physical buffer either because it's an input or through `reuseBuffer`
+            // We can now look at its sharding.
+            if (origin._shape.isFullyReplicated()) {
+                stdx.debug.assert(self.byteSize() == origin.byteSize(), ".reuseBuffer expects two tensors with same byteSize, got {f} ({B}) and {f} ({B})", .{ self, self.byteSize(), origin, origin.byteSize() });
+            } else {
+                // Origin is sharded, we can't just use the global byte size, we actually need the same byte size per shard.
+                // We are stricter here and require the same shape.
+                stdx.debug.assert(self._shape.eql(origin._shape), ".reuseBuffer expects two sharded tensors with same shape, got {f} and {f}", .{ self, origin });
+
+                // Normally self sharding is unspecified and we can just propagate origin sharding,
+                // but if the user called `.withPartitioning` explicitly it would be weird to override it silently, hence the check.
+                stdx.debug.assert(self._shape._sharding.isCompatible(origin._shape._sharding), ".reuseBuffer expects compatible shardings, got {f} and {f}", .{ self, origin });
+            }
+
+            var res = self;
+            res._shape._sharding = origin._shape._sharding;
+            return res;
+        } else {
+            // Origin tensor doesn't has any physical buffer associated so we can move on.
+            // This is allowed to allow a function like KVCache.update to call `reuseBuffer`,
+            // even though the caller may have constructed the inputs internally.
+            return self;
         }
-        return self;
     }
 
     test reuseBuffer {
@@ -376,7 +468,7 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
         const io = std.testing.io;
 
-        const inputs: [6]@Vector(2, i4) = .{ .{ -3.0, -2 }, .{ -1, 1 }, .{ 2, 3 }, .{ 1, 2 }, .{ 3, 4 }, .{ 5, -5 } };
+        const inputs: [6]stdx.Packed(i4) = .{ .pack(-3.0, -2), .pack(-1, 1), .pack(2, 3), .pack(1, 2), .pack(3, 4), .pack(5, -5) };
         const x_t = Tensor.init(.{ 6, 2 }, .i4);
         const y_t = Tensor.init(.{ 6, 2 }, .i4);
         const z_t = Tensor.init(.{ 6, 2 }, .i4);
@@ -391,13 +483,13 @@ pub const Tensor = struct {
         const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcopy, .{ x_t, y_t, z_t }, platform, .{});
         defer exe.deinit();
 
-        var x_d = try zml.Buffer.fromBytes(io, platform, x_t.shape(), .replicated, @ptrCast(&inputs));
+        var x_d = try zml.Buffer.fromBytes(io, platform, x_t.shape(), @ptrCast(&inputs));
         defer x_d.deinit();
 
-        var y_d = try zml.Buffer.uninitialized(io, platform, y_t.shape(), .replicated, .{});
+        var y_d = try zml.Buffer.uninitialized(io, platform, y_t.shape(), .{});
         defer y_d.deinit();
 
-        var z_d = try zml.Buffer.uninitialized(io, platform, z_t.shape(), .replicated, .{});
+        var z_d = try zml.Buffer.uninitialized(io, platform, z_t.shape(), .{});
         defer z_d.deinit();
 
         var y_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
@@ -405,25 +497,33 @@ pub const Tensor = struct {
             y_memory[dev] = y_d.opaqueDevicePtr(dev);
         }
 
-        const y2_d, const z2_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcopy, .{ x_d, y_d, z_d });
+        var runner = try exe.runner(std.testing.allocator);
+        defer runner.deinit(std.testing.allocator);
 
-        var output_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
-        for (0..y2_d.numShards()) |dev| {
-            output_memory[dev] = y2_d.opaqueDevicePtr(dev);
-        }
+        for ([_]bool{ false, true }) |wait| {
+            var z2_d: zml.Buffer = undefined;
+            runner.run(io, .{ x_d, y_d, z_d }, .{ &y_d, &z2_d }, .{ .wait = wait });
+            defer z2_d.deinit();
+            try y_d.await(io);
 
-        // Check that y_d and y2_d point to the same addresses on the devices.
-        try std.testing.expectEqualSlices(*anyopaque, y_memory[0..y_d.numShards()], output_memory[0..y2_d.numShards()]);
+            var output_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
+            for (0..y_d.numShards()) |dev| {
+                output_memory[dev] = y_d.opaqueDevicePtr(dev);
+            }
 
-        // Check that z_d and z2_d DO NOT POINT to the same addresses
-        for (0..z2_d.numShards()) |dev| {
-            try std.testing.expect(z2_d.opaqueDevicePtr(dev) != z_d.opaqueDevicePtr(dev));
+            // Check that the replacement y_d reuses the donated device memory.
+            try std.testing.expectEqualSlices(*anyopaque, y_memory[0..y_d.numShards()], output_memory[0..y_d.numShards()]);
+
+            // Check that z_d and z2_d DO NOT POINT to the same addresses
+            for (0..z2_d.numShards()) |dev| {
+                try std.testing.expect(z2_d.opaqueDevicePtr(dev) != z_d.opaqueDevicePtr(dev));
+            }
         }
     }
 
     /// Returns a Tensor containing the absolute value of each element of the input Tensor.
     pub fn abs(self: Tensor) Tensor {
-        const op = dialects.stablehlo.abs(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.abs(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         const dt = switch (self.dtype()) {
             .c64 => .f32,
             .c128 => .f64,
@@ -458,7 +558,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             mlirx.Type.rankedTensor(mlirCtx(), res_shape),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
 
         return _result(res_shape, op.result(0));
@@ -471,26 +571,26 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise number of leading 0 bits in the input Tensor.
     pub fn countLeadingZeros(self: Tensor) Tensor {
-        const op = dialects.stablehlo.count_leading_zeros(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.count_leading_zeros(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing booleans indicating if each element of the input Tensor is finite.
     pub fn isFinite(self: Tensor) Tensor {
-        const op = dialects.stablehlo.is_finite(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.is_finite(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape.withDtype(.bool), op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise number of bits set in the input Tensor.
     pub fn popcnt(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isInteger(), "popcnt expects tensor type to be an integer, got {}", .{self.dtype()});
-        const op = dialects.stablehlo.popcnt(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.popcnt(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the sign of the input Tensor element-wise.
     pub fn sign(self: Tensor) Tensor {
-        const op = dialects.stablehlo.sign(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.sign(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -522,10 +622,11 @@ pub const Tensor = struct {
             );
             defer exe.deinit();
 
-            var input_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&i));
+            var input_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&i));
             defer input_buffer.deinit();
 
-            const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.fmod, .{input_buffer});
+            var output = try exe.eval(std.testing.allocator, std.testing.io, .{input_buffer});
+            defer output.deinit();
 
             try zml.testing.expectClose(std.testing.io, zml.Slice.init(zml.Shape.init(.{6}, .f32), std.mem.sliceAsBytes(&e)), output, .{});
         }
@@ -553,7 +654,7 @@ pub const Tensor = struct {
     pub fn cholesky(self: Tensor, lower: bool) Tensor {
         stdx.debug.assert(self.rank() <= 2, "cholesky expects tensor rank to be <= 2, got {}", .{self.rank()});
 
-        const op = dialects.stablehlo.cholesky(mlirCtx(), self.value(), lower, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.cholesky(mlirCtx(), self.value(), lower, currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -562,7 +663,7 @@ pub const Tensor = struct {
         stdx.debug.assert(self.dtype() == other.dtype(), "triangularSolve expects tensors to be of the same type, got {} and {}", .{ self.dtype(), other.dtype() });
         stdx.debug.assert(self.rank() >= 2 and self.rank() == other.rank(), "triangularSolve expects tensors to have the same rank >= 2, got {} and {}", .{ self.rank(), other.rank() });
 
-        const op = dialects.stablehlo.triangular_solve(mlirCtx(), self.value(), other.value(), opts, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.triangular_solve(mlirCtx(), self.value(), other.value(), opts, currentLoc()).appendTo(currentBlock());
         return _result(other._shape, op.result(0));
     }
 
@@ -570,7 +671,7 @@ pub const Tensor = struct {
     pub fn roundNearestAfz(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isFloat(), "roundNearestAfz expects tensor type to be a float, got {}", .{self.dtype()});
 
-        const op = dialects.stablehlo.round_nearest_afz(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.round_nearest_afz(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -578,7 +679,7 @@ pub const Tensor = struct {
     pub fn roundNearestEven(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isFloat(), "roundNearestEven expects tensor type to be a float, got {}", .{self.dtype()});
 
-        const op = dialects.stablehlo.round_nearest_even(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.round_nearest_even(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -587,7 +688,7 @@ pub const Tensor = struct {
         stdx.debug.assert(re._shape.eql(im._shape), "complex expects tensor shapes to match, got {f} and {f}", .{ re._shape, im._shape });
         stdx.debug.assert(re.dtype() == .f32 or re.dtype() == .f64, "complex expects tensors type to be f32 or f64, got {}", .{re.dtype()});
 
-        const op = dialects.stablehlo.complex(mlirCtx(), re.value(), im.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.complex(mlirCtx(), re.value(), im.value(), currentLoc()).appendTo(currentBlock());
         const dt: DataType = if (re.dtype() == .f32) .c64 else .c128;
         return _result(re._shape.withDtype(dt), op.result(0));
     }
@@ -607,7 +708,7 @@ pub const Tensor = struct {
             .c128 => .f64,
             else => unreachable,
         };
-        const op = dialects.stablehlo.real(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.real(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape.withDtype(dt), op.result(0));
     }
 
@@ -628,7 +729,7 @@ pub const Tensor = struct {
             .c128 => .f64,
             else => unreachable,
         };
-        const op = dialects.stablehlo.imag(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.imag(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape.withDtype(dt), op.result(0));
     }
 
@@ -672,7 +773,7 @@ pub const Tensor = struct {
             },
         };
 
-        const op = dialects.stablehlo.fft(mlirCtx(), self.value(), opts, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.fft(mlirCtx(), self.value(), opts, currentLoc()).appendTo(currentBlock());
         return _result(sh, op.result(0));
     }
 
@@ -718,9 +819,9 @@ pub const Tensor = struct {
             return .{ ._state = .init(.{2}, .u64) };
         }
 
-        pub fn initBuffer(io: std.Io, platform: *const Platform, sharding: Sharding, seed: u128) !Buffer {
+        pub fn initBuffer(rng: Rng, io: std.Io, platform: *const Platform, seed: u128) !Buffer {
             return .{
-                ._state = try .fromBytes(io, platform, Shape.init(.{2}, .u64), sharding, std.mem.asBytes(&seed)),
+                ._state = try .fromBytes(io, platform, rng._state._shape, std.mem.asBytes(&seed)),
             };
         }
 
@@ -740,14 +841,14 @@ pub const Tensor = struct {
                 self._state.value(),
                 mlirx.Type.rankedTensor(mlirCtx(), self._state.shape()),
                 mlirx.Type.rankedTensor(mlirCtx(), sh),
-                .unknown(mlirCtx()),
+                currentLoc(),
             ).appendTo(currentBlock());
-            return .{ self.update(op.result(0)), _result(sh, op.result(1)) };
+            return .{ self.update(op.result(0)), _resultPropagateSharding(sh, op.result(1)) };
         }
 
         fn update(self: Rng, new_state: *const mlir.Value) Rng {
             return .{
-                ._state = _result(self._state._shape, new_state).reuseBuffer(self._state),
+                ._state = _resultPropagateSharding(self._state._shape, new_state).reuseBuffer(self._state),
                 .algorithm = self.algorithm,
             };
         }
@@ -788,7 +889,7 @@ pub const Tensor = struct {
             floats = floats.mul(scalar(opts.max - opts.min, dt)).addConstant(opts.min);
 
             // Convert back to integer if needed.
-            return .{ rng, floats.convert(shape_.dtype()) };
+            return .{ rng, _resultPropagateSharding(shape_, floats.convert(shape_.dtype()).value()) };
         }
 
         test uniform {
@@ -823,18 +924,20 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.uniformStats, .{ Rng.init(), Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } }, platform, .{});
             defer exe.deinit();
 
-            var rng_buffer = try Rng.initBuffer(std.testing.io, platform, .replicated, 1234);
+            var rng_buffer = try Rng.init().initBuffer(std.testing.io, platform, 1234);
             defer rng_buffer._state.deinit();
 
-            var rand, var stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.uniformStats, .{rng_buffer});
-            defer rand._state.deinit();
+            var stats: zml.Bufferized(Stats) = undefined;
+            var runner = try exe.runner(std.testing.allocator);
+            defer runner.deinit(std.testing.allocator);
+            runner.run(std.testing.io, .{rng_buffer}, .{ &rng_buffer, &stats }, .{ .wait = true });
             defer stats.mean.deinit();
             defer stats.variance.deinit();
             defer stats.min.deinit();
             defer stats.max.deinit();
 
             // Check the Rng state has been modified.
-            try std.testing.expect(try rand._state.getValue(u128, std.testing.io) != 1234);
+            try std.testing.expect(try rng_buffer._state.getValue(u128, std.testing.io) != 1234);
 
             // Check the mean and variance are close to theoritical values.
             const mean_ = try stats.mean.getValue(f32, std.testing.io);
@@ -864,8 +967,8 @@ pub const Tensor = struct {
             const a = Tensor.constant(DataType.Value.init(sh.dtype(), opts.mean));
             const b = Tensor.constant(DataType.Value.init(sh.dtype(), opts.stddev));
             const res_tensor_shape = Tensor.constantTensor(Shape.init(.{sh.rank()}, .i64), std.mem.sliceAsBytes(sh.dims()));
-            const op = dialects.stablehlo.rng(mlirCtx(), a.value(), b.value(), res_tensor_shape.value(), .NORMAL, .unknown(mlirCtx())).appendTo(currentBlock());
-            return _result(sh, op.result(0));
+            const op = dialects.stablehlo.rng(mlirCtx(), a.value(), b.value(), res_tensor_shape.value(), .NORMAL, currentLoc()).appendTo(currentBlock());
+            return _resultPropagateSharding(sh, op.result(0));
         }
 
         /// Returns a Tensor of the given shape, filled with floating point numbers sampled from a Gumbel distribution, and a new Rng state.
@@ -883,7 +986,8 @@ pub const Tensor = struct {
                 // We don't want 0 to be sampled otherwise `log` will return -inf.
                 .{ .min = std.math.floatEps(f32), .max = 1 },
             );
-            return .{ rand, u.log().scale(-1).log().scale(-1).convert(shape_.dtype()) };
+            const result = u.log().scale(-1).log().scale(-1).convert(shape_.dtype());
+            return .{ rand, _resultPropagateSharding(shape_, result.value()) };
         }
 
         test gumbel {
@@ -931,19 +1035,21 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.gumbelStats, .{ Rng.init(), tgt_dist }, platform, .{});
             defer exe.deinit();
 
-            var rng_buffer = try Rng.initBuffer(std.testing.io, platform, .replicated, 1234);
+            var rng_buffer = try Rng.init().initBuffer(std.testing.io, platform, 1234);
             defer rng_buffer._state.deinit();
-            var tgt_dist_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), .replicated, @ptrCast(&tgt_dist_data));
+            var tgt_dist_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), @ptrCast(&tgt_dist_data));
             defer tgt_dist_buffer.deinit();
 
-            var rand, var stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.gumbelStats, .{ rng_buffer, tgt_dist_buffer });
-            defer rand._state.deinit();
+            var stats: zml.Bufferized(Stats) = undefined;
+            var runner = try exe.runner(std.testing.allocator);
+            defer runner.deinit(std.testing.allocator);
+            runner.run(std.testing.io, .{ rng_buffer, tgt_dist_buffer }, .{ &rng_buffer, &stats }, .{ .wait = true });
             defer stats.mean.deinit();
             defer stats.variance.deinit();
             defer stats.actual_dist.deinit();
 
             // Check the Rng state has been modified.
-            try std.testing.expect(try rand._state.getValue(i128, std.testing.io) != 1234);
+            try std.testing.expect(try rng_buffer._state.getValue(i128, std.testing.io) != 1234);
 
             // Check the mean and variance are close to theoritical values.
             const mean_ = try stats.mean.getValue(f32, std.testing.io);
@@ -970,7 +1076,7 @@ pub const Tensor = struct {
         stdx.debug.assert(1 <= exponent_bits, "reducePrecision expects 'exponent_bits' to be >= 1, got {}", .{exponent_bits});
         stdx.debug.assert(0 <= mantissa_bits, "reducePrecision expects 'mantissa_bits' to be positive, got {}", .{mantissa_bits});
 
-        const op = dialects.stablehlo.reduce_precision(mlirCtx(), self.value(), exponent_bits, mantissa_bits, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.reduce_precision(mlirCtx(), self.value(), exponent_bits, mantissa_bits, currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -1063,7 +1169,7 @@ pub const Tensor = struct {
             other.value(),
             mlirx.Type.rankedTensor(mlirCtx(), new_shape),
             used_opts,
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
 
         return _result(new_shape, op.result(0));
@@ -1239,12 +1345,12 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise floor operation of the input Tensor.
     pub fn floor(self: Tensor) Tensor {
-        return _result(self._shape, dialects.stablehlo.floor(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock()).result(0));
+        return _result(self._shape, dialects.stablehlo.floor(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock()).result(0));
     }
 
     /// Returns a Tensor containing the element-wise ceil operation of the input Tensor.
     pub fn ceil(self: Tensor) Tensor {
-        return _result(self._shape, dialects.stablehlo.ceil(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock()).result(0));
+        return _result(self._shape, dialects.stablehlo.ceil(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock()).result(0));
     }
 
     /// Returns a Tensor containing the element-wise conversion to another type.
@@ -1254,7 +1360,7 @@ pub const Tensor = struct {
         }
 
         const res_type = mlirx.Type.rankedTensor(mlirCtx(), self.shape().withDtype(to));
-        const op = dialects.stablehlo.convert(mlirCtx(), self.value(), res_type, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.convert(mlirCtx(), self.value(), res_type, currentLoc()).appendTo(currentBlock());
         return _result(self._shape.withDtype(to), op.result(0));
     }
 
@@ -1279,10 +1385,11 @@ pub const Tensor = struct {
         );
         defer exe.deinit();
 
-        var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_d.shape(), .replicated, @ptrCast(&x_f32));
+        var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_d.shape(), @ptrCast(&x_f32));
         defer x_d_buffer.deinit();
 
-        var x_f4_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
+        var x_f4_xla_d = try exe.eval(std.testing.allocator, std.testing.io, .{x_d_buffer});
+        defer x_f4_xla_d.deinit();
         const x_f4_xla = try x_f4_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
         defer x_f4_xla.free(std.testing.allocator);
         const x_f4_items = x_f4_xla.items(floats.Float4E2M1.Packed);
@@ -1310,10 +1417,11 @@ pub const Tensor = struct {
         );
         defer exe.deinit();
 
-        var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_d.shape(), .replicated, std.mem.sliceAsBytes(&x));
+        var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_d.shape(), std.mem.sliceAsBytes(&x));
         defer x_d_buffer.deinit();
 
-        var x_f8e3_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
+        var x_f8e3_xla_d = try exe.eval(std.testing.allocator, std.testing.io, .{x_d_buffer});
+        defer x_f8e3_xla_d.deinit();
         const x_f8e3_xla = try x_f8e3_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
         defer x_f8e3_xla.free(std.testing.allocator);
 
@@ -1324,8 +1432,8 @@ pub const Tensor = struct {
     test "convert u2 -> u8" {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
-        const x_u2: [2]@Vector(4, u2) = .{ .{ 0, 1, 2, 3 }, .{ 3, 2, 1, 0 } };
-        std.debug.assert(@sizeOf(@TypeOf(x_u2)) == 2);
+        const x_u2: [2]stdx.Packed(u2) = .{ .pack(0, 1, 2, 3), .pack(3, 2, 1, 0) };
+        comptime std.debug.assert(@sizeOf(@TypeOf(x_u2)) == 2);
         const x_u8: [8]u8 = .{ 0, 1, 2, 3, 3, 2, 1, 0 };
 
         const x_u2_t: Tensor = .init(.{8}, .u2);
@@ -1339,10 +1447,10 @@ pub const Tensor = struct {
         );
         defer exe.deinit();
 
-        var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_u2_t.shape(), .replicated, @ptrCast(&x_u2));
+        var x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_u2_t.shape(), @ptrCast(&x_u2));
         defer x_d_buffer.deinit();
 
-        var x_u8_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
+        var x_u8_xla_d = try exe.eval(std.testing.allocator, std.testing.io, .{x_d_buffer});
         defer x_u8_xla_d.deinit();
         const x_u8_xla = try x_u8_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
         defer x_u8_xla.free(std.testing.allocator);
@@ -1367,10 +1475,11 @@ pub const Tensor = struct {
         );
         defer exe.deinit();
 
-        var x_f4_d: zml.Buffer = try .fromBytes(std.testing.io, platform, x_t.shape(), .replicated, @ptrCast(&x_f4_packed));
+        var x_f4_d: zml.Buffer = try .fromBytes(std.testing.io, platform, x_t.shape(), @ptrCast(&x_f4_packed));
         defer x_f4_d.deinit();
 
-        var x_f32_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_f4_d});
+        var x_f32_d = try exe.eval(std.testing.allocator, std.testing.io, .{x_f4_d});
+        defer x_f32_d.deinit();
         const x_f32_h = try x_f32_d.toSliceAlloc(std.testing.allocator, std.testing.io);
         defer x_f32_h.free(std.testing.allocator);
 
@@ -1381,13 +1490,13 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise rounding operation of the input Tensor.
     pub fn round(self: Tensor) Tensor {
-        const round_op = dialects.stablehlo.round_nearest_even(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const round_op = dialects.stablehlo.round_nearest_even(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, round_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise clamping operation of the input Tensor.
     pub fn clamp(self: Tensor, min_: Tensor, max_: Tensor) Tensor {
-        const op = dialects.stablehlo.clamp(mlirCtx(), min_.value(), self.value(), max_.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.clamp(mlirCtx(), min_.value(), self.value(), max_.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -1508,7 +1617,7 @@ pub const Tensor = struct {
 
         const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
-        var res_shape: Shape = .{ ._dtype = lhs.dtype() };
+        var res_shape: Shape = .scalar(lhs.dtype());
         // Validate batching axes
         var lhs_batching_axes: Axes = .empty;
         var rhs_batching_axes: Axes = .empty;
@@ -1566,14 +1675,14 @@ pub const Tensor = struct {
                 .rhs_contracting_dimensions = rhs_contracting_axes.constSlice(),
                 .dot_precision = .fast,
             },
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
     }
 
     /// Returns a Tensor containing the sigmoid function applied to each element of the input Tensor.
     pub fn sigmoid(self: Tensor) Tensor {
-        const op = dialects.stablehlo.logistic(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.logistic(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -1608,10 +1717,10 @@ pub const Tensor = struct {
         );
         defer exe.deinit();
 
-        var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ -0.6884, 1.6795 }));
+        var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.6884, 1.6795 }));
         defer input_buffer.deinit();
 
-        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.leakyReLU, .{input_buffer});
+        var res = try exe.eval(std.testing.allocator, std.testing.io, .{input_buffer});
         defer res.deinit();
 
         const expectation: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[2]f32{ -0.0688, 1.6795 }));
@@ -1652,30 +1761,30 @@ pub const Tensor = struct {
         );
         defer exe.deinit();
 
-        var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[4]f32{ 1, 0, 1, 2 }));
+        var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&[4]f32{ 1, 0, 1, 2 }));
         defer input_buffer.deinit();
 
-        var w_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, w.shape(), .replicated, std.mem.sliceAsBytes(&[3][4]f32{
+        var w_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, w.shape(), std.mem.sliceAsBytes(&[3][4]f32{
             .{ 1, 0, 2, 0 },
             .{ 2, 1, 3, 3 },
             .{ 1, 1, 0, 0 },
         }));
         defer w_buffer.deinit();
 
-        var v_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, v.shape(), .replicated, std.mem.sliceAsBytes(&[3][4]f32{
+        var v_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, v.shape(), std.mem.sliceAsBytes(&[3][4]f32{
             .{ 0, 0, 2, 1 },
             .{ 1, 2, 1, 3 },
             .{ 0, 0, 2, 0 },
         }));
         defer v_buffer.deinit();
 
-        var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), .replicated, std.mem.sliceAsBytes(&[3]f32{ 1, 1, 1 }));
+        var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), std.mem.sliceAsBytes(&[3]f32{ 1, 1, 1 }));
         defer b_buffer.deinit();
 
-        var c_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, c.shape(), .replicated, std.mem.sliceAsBytes(&[3]f32{ 2, 2, 2 }));
+        var c_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, c.shape(), std.mem.sliceAsBytes(&[3]f32{ 2, 2, 2 }));
         defer c_buffer.deinit();
 
-        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.swiglu, .{ input_buffer, w_buffer, v_buffer, b_buffer, c_buffer });
+        var res = try exe.eval(std.testing.allocator, std.testing.io, .{ input_buffer, w_buffer, v_buffer, b_buffer, c_buffer });
         defer res.deinit();
 
         const output_shape = Shape.init(.{ .c = 3, .e = 3 }, .f32);
@@ -1686,6 +1795,105 @@ pub const Tensor = struct {
         }));
 
         try zml.testing.expectClose(std.testing.io, expectation, res, .{});
+    }
+
+    /// Returns an element-wise approximation of the error function, computed and returned in FP32.
+    /// Uses the Eigen rational approximation from CHLO's FP32 erf legalization:
+    /// https://github.com/openxla/stablehlo/blob/95ee4c70146864ed7d0a21dd135ccec37ece1b52/stablehlo/transforms/ChloLegalizeToStablehlo.cpp#L1038
+    pub fn erf(input: Tensor) Tensor {
+        const x = input.convert(.f32).clamp(.scalar(-4, .f32), .scalar(4, .f32));
+        const x2 = x.mul(x);
+        // Coefficients run from the highest degree to the constant term.
+        const alpha = [_]f32{
+            -2.72614225801306e-10,
+            2.77068142495902e-08,
+            -2.10102402082508e-06,
+            -5.69250639462346e-05,
+            -7.34990630326855e-04,
+            -2.95459980854025e-03,
+            -1.60960333262415e-02,
+        };
+        const beta = [_]f32{
+            -1.45660718464996e-05,
+            -2.13374055278905e-04,
+            -1.68282697438203e-03,
+            -7.37332916720468e-03,
+            -1.42647390514189e-02,
+        };
+        var numerator = x2.scale(alpha[0]).addConstant(alpha[1]);
+        inline for (alpha[2..]) |coefficient| {
+            numerator = numerator.mul(x2).addConstant(coefficient);
+        }
+        var denominator = x2.scale(beta[0]).addConstant(beta[1]);
+        inline for (beta[2..]) |coefficient| {
+            denominator = denominator.mul(x2).addConstant(coefficient);
+        }
+        return x.mul(numerator).div(denominator).clamp(.scalar(-1, .f32), .scalar(1, .f32));
+    }
+
+    /// Returns an element-wise approximation of the complementary error function in FP32.
+    /// Uses CHLO's Cephes-based approximation to preserve the small positive tail:
+    /// https://github.com/openxla/stablehlo/blob/95ee4c70146864ed7d0a21dd135ccec37ece1b52/stablehlo/transforms/ChloLegalizeToStablehlo.cpp#L1018
+    pub fn erfc(input: Tensor) Tensor {
+        const x = input.convert(.f32);
+        const abs_x = x.abs();
+        const x2 = x.mul(x);
+        const one = Tensor.scalar(1, .f32);
+
+        // For |x| < 1, erf(x) = x T(x^2). Coefficients run from highest degree to constant.
+        const t = [_]f32{
+            7.853861353153693e-5,
+            -8.010193625184903e-4,
+            5.188327685732524e-3,
+            -2.685381193529856e-2,
+            1.128358514861418e-1,
+            -3.761262582423300e-1,
+            1.128379165726710,
+        };
+        var small_poly = x2.scale(t[0]).addConstant(t[1]);
+        inline for (t[2..]) |coefficient| {
+            small_poly = small_poly.mul(x2).addConstant(coefficient);
+        }
+        const small = x.mul(small_poly).negate().addConstant(1);
+
+        // For |x| >= 1, evaluate exp(-x^2) / |x| times P(1/x^2) or R(1/x^2).
+        const p = [_]f32{
+            2.326819970068386e-2,
+            -1.387039388740657e-1,
+            3.687424674597105e-1,
+            -5.824733027278666e-1,
+            6.210004621745983e-1,
+            -4.944515323274145e-1,
+            3.404879937665872e-1,
+            -2.741127028184656e-1,
+            5.638259427386472e-1,
+        };
+        const r = [_]f32{
+            -1.047766399936249e1,
+            1.297719955372516e1,
+            -7.495518717768503,
+            2.921019019210786,
+            -1.015265279202700,
+            4.218463358204948e-1,
+            -2.820767439740514e-1,
+            5.641895067754075e-1,
+        };
+        const reciprocal_x2 = one.div(x2);
+        var middle_poly = reciprocal_x2.scale(p[0]).addConstant(p[1]);
+        inline for (p[2..]) |coefficient| {
+            middle_poly = middle_poly.mul(reciprocal_x2).addConstant(coefficient);
+        }
+        var tail_poly = reciprocal_x2.scale(r[0]).addConstant(r[1]);
+        inline for (r[2..]) |coefficient| {
+            tail_poly = tail_poly.mul(reciprocal_x2).addConstant(coefficient);
+        }
+        const poly = abs_x.cmp(.LT, .scalar(2, .f32)).select(middle_poly, tail_poly);
+        const z = x2.negate();
+        const tail = z.exp().mul(one.div(abs_x)).mul(poly);
+        // Match CHLO's underflow cutoff, then use erfc(-x) = 2 - erfc(x).
+        const positive = z.cmp(.LT, .scalar(-88.72283905206835, .f32)).select(.scalar(0, .f32), tail);
+        const large = x.cmp(.LT, .scalar(0, .f32)).select(positive.negate().addConstant(2), positive);
+        return abs_x.cmp(.LT, one).select(small, large);
     }
 
     /// Returns a Tensor containing the Gaussian Error Linear Units (GeLU) activation function applied to each element of the input Tensor.
@@ -1831,10 +2039,10 @@ pub const Tensor = struct {
         );
         defer exe.deinit();
 
-        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, @ptrCast(&[2][5]f32{ .{ 0, 1, 1, 0, 1 }, .{ 3, 1, 0, 2, 1 } }));
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), @ptrCast(&[2][5]f32{ .{ 0, 1, 1, 0, 1 }, .{ 3, 1, 0, 2, 1 } }));
         defer x_buffer.deinit();
 
-        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._cumsum, .{x_buffer});
+        var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
         defer res.deinit();
 
         try std.testing.expectEqual([2][5]f32{ .{ 0, 1, 2, 2, 3 }, .{ 3, 4, 4, 6, 7 } }, try res.getValue([2][5]f32, std.testing.io));
@@ -1871,7 +2079,7 @@ pub const Tensor = struct {
             self.value(),
             mlirx.Type.rankedTensor(mlirCtx(), res_shape),
             .{ .permutation = toI64(permutation).constSlice() },
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
     }
@@ -1902,7 +2110,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             mlirx.Type.rankedTensor(mlirCtx(), new_shape),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(new_shape, reshaped_val.result(0));
     }
@@ -1918,7 +2126,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             mlirx.Type.rankedTensor(mlirCtx(), new_shape),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(new_shape, reshaped_val.result(0));
     }
@@ -2070,7 +2278,7 @@ pub const Tensor = struct {
             self.value(),
             new_shape.dims(),
             start_indices[0..rk],
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
 
         const res = _result(new_shape, op.result(0));
@@ -2094,15 +2302,15 @@ pub const Tensor = struct {
             res_shape = res_shape.setDim(a, std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable);
         }
 
-        const ctx = mlirCtx();
+        const ctx = Compiler.current();
         const slice_op = dialects.stablehlo.slice(
-            ctx,
+            ctx.mlir_ctx,
             self.value(),
             start_indices[0..self.rank()],
             limit_indices[0..self.rank()],
             strides[0..self.rank()],
-            mlirx.Type.rankedTensor(ctx, res_shape),
-            .unknown(ctx),
+            mlirx.Type.rankedTensor(ctx.mlir_ctx, res_shape),
+            ctx.location,
         ).appendTo(currentBlock());
 
         var res = _result(res_shape, slice_op.result(0));
@@ -2119,7 +2327,7 @@ pub const Tensor = struct {
 
         const x: Tensor = .init(.{ 2, 5 }, .f32);
 
-        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
         defer x_buffer.deinit();
 
         // Wrap slice to hide the anytype in the signature.
@@ -2146,7 +2354,7 @@ pub const Tensor = struct {
             );
             defer exe.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._slice1dAxis, .{ x_buffer, .{} });
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{ x_buffer, .{} });
             defer res.deinit();
 
             try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
@@ -2174,12 +2382,12 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.dynSliceResolved, .{ x, ax, .dyn(z, 2) }, platform, .{});
             defer exe.deinit();
 
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_data));
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&x_data));
             defer x_buffer.deinit();
-            var z_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, z.shape(), .replicated, std.mem.asBytes(&z_value));
+            var z_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, z.shape(), std.mem.asBytes(&z_value));
             defer z_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.dynSliceResolved, .{ x_buffer, .{ .dyn_start = z_buffer } });
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{ x_buffer, .{ .dyn_start = z_buffer } });
             defer res.deinit();
 
             try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
@@ -2207,7 +2415,7 @@ pub const Tensor = struct {
         }
 
         const res_shape = tensors[0]._shape.set(a, concatenated_dim);
-        const op = dialects.stablehlo.concatenate(mlirCtx(), buffer, a, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.concatenate(mlirCtx(), buffer, a, currentLoc()).appendTo(currentBlock());
         // log.debug("concatenate({}, {}, {d}) -> {d}", .{ tensors[0], tensors[1], a, res_shape });
         return _result(res_shape, op.result(0));
     }
@@ -2300,10 +2508,11 @@ pub const Tensor = struct {
             );
             defer exe.deinit();
 
-            var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&input_data));
+            var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&input_data));
             defer input_buffer.deinit();
 
-            const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.repeat1d, .{input_buffer});
+            var output = try exe.eval(std.testing.allocator, std.testing.io, .{input_buffer});
+            defer output.deinit();
             try std.testing.expectEqual(expectation, try output.getValue(@TypeOf(expectation), std.testing.io));
         }
     }
@@ -2363,65 +2572,66 @@ pub const Tensor = struct {
             );
             defer exe.deinit();
 
-            var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&input_data));
+            var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&input_data));
             defer input_buffer.deinit();
 
-            const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.stutter1d, .{input_buffer});
+            var output = try exe.eval(std.testing.allocator, std.testing.io, .{input_buffer});
+            defer output.deinit();
             try std.testing.expectEqual(expectation, try output.getValue(@TypeOf(expectation), std.testing.io));
         }
     }
 
     /// Returns a Tensor containing the element-wise negation of the input Tensor.
     pub fn negate(self: Tensor) Tensor {
-        const negate_op = dialects.stablehlo.negate(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const negate_op = dialects.stablehlo.negate(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, negate_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise cosine of the input Tensor.
     pub fn cos(self: Tensor) Tensor {
-        const cosine_op = dialects.stablehlo.cosine(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const cosine_op = dialects.stablehlo.cosine(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, cosine_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise sine of the input Tensor.
     pub fn sin(self: Tensor) Tensor {
-        const sine_op = dialects.stablehlo.sine(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const sine_op = dialects.stablehlo.sine(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, sine_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise exponential operation of the input Tensor.
     pub fn exp(self: Tensor) Tensor {
-        const op = dialects.stablehlo.exponential(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.exponential(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise logarithm operation of the input Tensor.
     pub fn log(self: Tensor) Tensor {
-        const op = dialects.stablehlo.log(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.log(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise square-root of the input Tensor.
     pub fn sqrt(self: Tensor) Tensor {
-        const sqrt_op = dialects.stablehlo.sqrt(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const sqrt_op = dialects.stablehlo.sqrt(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, sqrt_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise reverse square-root of the input Tensor.
     pub fn rsqrt(self: Tensor) Tensor {
-        const rsqrt_op = dialects.stablehlo.rsqrt(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const rsqrt_op = dialects.stablehlo.rsqrt(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, rsqrt_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise hyperbolic tangent of the input Tensor.
     pub fn tanh(self: Tensor) Tensor {
-        const tanh_op = dialects.stablehlo.tanh(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const tanh_op = dialects.stablehlo.tanh(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, tanh_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise exponential minus one operation of the input Tensor.
     pub fn exponentialMinusOne(self: Tensor) Tensor {
-        const expm1_op = dialects.stablehlo.exponential_minus_one(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const expm1_op = dialects.stablehlo.exponential_minus_one(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, expm1_op.result(0));
     }
 
@@ -2442,7 +2652,7 @@ pub const Tensor = struct {
             mlirCtx(),
             0,
             mlirx.Type.rankedTensor(mlirCtx(), sh),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         var res = _result(sh, op.result(0));
 
@@ -2471,7 +2681,8 @@ pub const Tensor = struct {
         );
         defer exe.deinit();
 
-        const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.arange, {});
+        var output = try exe.eval(std.testing.allocator, std.testing.io, {});
+        defer output.deinit();
 
         try zml.testing.expectClose(
             std.testing.io,
@@ -2495,7 +2706,7 @@ pub const Tensor = struct {
             mlirCtx(),
             a,
             mlirx.Type.rankedTensor(mlirCtx(), res_shape),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
     }
@@ -2517,7 +2728,7 @@ pub const Tensor = struct {
             mlirCtx(),
             0,
             mlirx.Type.rankedTensor(mlirCtx(), sh),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         var res = _result(sh, iota_op.result(0));
 
@@ -2566,7 +2777,7 @@ pub const Tensor = struct {
             &.{},
             mlirx.Type.fromDType(mlirCtx(), val.dtype()),
             val.asBytes(),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(.init(&.{}, val.dtype()), op.result(0));
     }
@@ -2583,9 +2794,9 @@ pub const Tensor = struct {
             null,
             null,
         );
-        const buffer = dialects.stablehlo.createBuffer(ctx.mlir_ctx, buffer_type, .unknown(ctx.mlir_ctx))
+        const buffer = dialects.stablehlo.createBuffer(ctx.mlir_ctx, buffer_type, ctx.location)
             .appendTo(currentBlock());
-        const tensor = dialects.stablehlo.unpin(ctx.mlir_ctx, buffer.result(0), .unknown(ctx.mlir_ctx))
+        const tensor = dialects.stablehlo.unpin(ctx.mlir_ctx, buffer.result(0), ctx.location)
             .appendTo(currentBlock());
         return _result(sh, tensor.result(0));
     }
@@ -2594,7 +2805,7 @@ pub const Tensor = struct {
     pub fn constantTensor(sh: Shape, bytes_: []const u8) Tensor {
         const elem_type = mlirx.Type.fromDType(mlirCtx(), sh.dtype());
         //const elem_type = mlirx.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {f}", .{val.shape()});
-        const constant_op = dialects.stablehlo.constant(mlirCtx(), sh.dims(), elem_type, bytes_, .unknown(mlirCtx())).appendTo(currentBlock());
+        const constant_op = dialects.stablehlo.constant(mlirCtx(), sh.dims(), elem_type, bytes_, currentLoc()).appendTo(currentBlock());
         return _result(sh, constant_op.result(0));
     }
 
@@ -2630,7 +2841,7 @@ pub const Tensor = struct {
             return _result(res_shape, self.value());
         }
         const result_type = mlirx.Type.rankedTensor(mlirCtx(), res_shape);
-        const broadcast_op = dialects.stablehlo.broadcast_in_dim(mlirCtx(), self.value(), axes_, result_type, .unknown(mlirCtx())).appendTo(currentBlock());
+        const broadcast_op = dialects.stablehlo.broadcast_in_dim(mlirCtx(), self.value(), axes_, result_type, currentLoc()).appendTo(currentBlock());
         return _result(res_shape, broadcast_op.result(0));
     }
 
@@ -2690,7 +2901,7 @@ pub const Tensor = struct {
             ctx.mlir_ctx,
             &.{self.value()},
             &.{self.value().type_()},
-            .unknown(ctx.mlir_ctx),
+            ctx.location,
         ).appendTo(ctx.currentScope().block);
 
         return _result(self.shape(), op.result(0));
@@ -2700,7 +2911,7 @@ pub const Tensor = struct {
     pub fn reshape(self: Tensor, output_shape_: anytype) Tensor {
         const output_shape = self._shape.reshape(output_shape_);
         const tensor_type = mlirx.Type.rankedTensor(mlirCtx(), output_shape);
-        const reshape_value = dialects.stablehlo.reshape(mlirCtx(), self.value(), tensor_type, .unknown(mlirCtx())).appendTo(currentBlock());
+        const reshape_value = dialects.stablehlo.reshape(mlirCtx(), self.value(), tensor_type, currentLoc()).appendTo(currentBlock());
         return _result(output_shape, reshape_value.result(0));
     }
 
@@ -2742,7 +2953,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             Tensor.scalar(padding_value, self.dtype()).value(),
-            .unknown(mlirCtx()),
+            currentLoc(),
             .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
         ).appendTo(currentBlock());
 
@@ -2788,7 +2999,7 @@ pub const Tensor = struct {
     pub fn reverse(self: Tensor, axes_: anytype) Tensor {
         const actual_axes = self._shape.axes(axes_);
 
-        const reverse_op = dialects.stablehlo.reverse(mlirCtx(), self.value(), toI64(actual_axes.constSlice()).constSlice(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const reverse_op = dialects.stablehlo.reverse(mlirCtx(), self.value(), toI64(actual_axes.constSlice()).constSlice(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, reverse_op.result(0));
     }
 
@@ -2983,7 +3194,7 @@ pub const Tensor = struct {
                 .index_vector_dim = index_coord_axis,
                 .indices_are_sorted = opts.indices_are_sorted,
             },
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(res_shape, gather_op.result(0));
     }
@@ -3053,7 +3264,7 @@ pub const Tensor = struct {
         );
         defer exe.deinit();
 
-        var indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, indices.shape(), .replicated, std.mem.sliceAsBytes(&[2][2]i32{ .{ 2, 1 }, .{ 0, 3 } }));
+        var indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, indices.shape(), std.mem.sliceAsBytes(&[2][2]i32{ .{ 2, 1 }, .{ 0, 3 } }));
         defer indices_buffer.deinit();
         var operand_buffer: zml.Buffer = b: {
             const temp_func = struct {
@@ -3064,11 +3275,11 @@ pub const Tensor = struct {
             var temp_exe = try zml.module.compile(std.testing.allocator, std.testing.io, temp_func, .{}, platform, .{});
             defer temp_exe.deinit();
 
-            const buffer = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &temp_exe, temp_func, {});
+            const buffer = try temp_exe.eval(std.testing.allocator, std.testing.io, {});
             break :b buffer;
         };
         defer operand_buffer.deinit();
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._gatherSlices, .{ operand_buffer, indices_buffer });
+        var result = try exe.eval(std.testing.allocator, std.testing.io, .{ operand_buffer, indices_buffer });
         defer result.deinit();
 
         const expected: zml.Slice = .init(Shape.init(.{ 2, 2, 2, 3 }, .u16), std.mem.sliceAsBytes(&[2][2][2][3]u16{
@@ -3271,14 +3482,13 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, platform, .{});
             defer exe.deinit();
 
-            var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }));
+            var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }));
             defer a_buffer.deinit();
-            var scatter_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, scatter_indices.shape(), .replicated, @ptrCast(&[2]i32{ 0, 2 }));
+            var scatter_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, scatter_indices.shape(), @ptrCast(&[2]i32{ 0, 2 }));
             defer scatter_indices_buffer.deinit();
-            var updates_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, updates.shape(), .replicated, std.mem.sliceAsBytes(&[2][3]i32{ .{ 10, 20, 30 }, .{ 70, 80, 90 } }));
+            var updates_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, updates.shape(), std.mem.sliceAsBytes(&[2][3]i32{ .{ 10, 20, 30 }, .{ 70, 80, 90 } }));
             defer updates_buffer.deinit();
-
-            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatter, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer });
+            var result = try exe.eval(std.testing.allocator, std.testing.io, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer });
             defer result.deinit();
 
             const expected = [3][3]i32{ .{ 10, 21, 32 }, .{ 3, 4, 5 }, .{ 76, 87, 98 } };
@@ -3295,14 +3505,13 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, platform, .{});
             defer exe.deinit();
 
-            var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }));
+            var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }));
             defer a_buffer.deinit();
-            var scatter_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, scatter_indices.shape(), .replicated, std.mem.sliceAsBytes(&[2]i32{ 2, 7 }));
+            var scatter_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, scatter_indices.shape(), std.mem.sliceAsBytes(&[2]i32{ 2, 7 }));
             defer scatter_indices_buffer.deinit();
-            var updates_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, updates.shape(), .replicated, std.mem.sliceAsBytes(&[2]i32{ 20, 70 }));
+            var updates_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, updates.shape(), std.mem.sliceAsBytes(&[2]i32{ 20, 70 }));
             defer updates_buffer.deinit();
-
-            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatter, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer });
+            var result = try exe.eval(std.testing.allocator, std.testing.io, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer });
             defer result.deinit();
 
             const expected = [9]i32{ 0, 1, 22, 3, 4, 5, 6, 77, 8 };
@@ -3318,9 +3527,9 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatterCB, .{ operand, start_indices, values }, platform, .{});
             defer exe.deinit();
 
-            var operand_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, operand.shape(), .replicated, std.mem.sliceAsBytes(&@as([2 * 3 * 4 * 2]u16, @splat(0))));
+            var operand_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, operand.shape(), std.mem.sliceAsBytes(&@as([2 * 3 * 4 * 2]u16, @splat(0))));
             defer operand_buffer.deinit();
-            var start_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, start_indices.shape(), .replicated, std.mem.sliceAsBytes(&[2][2][3][2]i32{
+            var start_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, start_indices.shape(), std.mem.sliceAsBytes(&[2][2][3][2]i32{
                 .{
                     .{ .{ 0, 0 }, .{ 1, 0 }, .{ 2, 1 } },
                     .{ .{ 0, 1 }, .{ 1, 1 }, .{ 0, 9 } },
@@ -3331,10 +3540,9 @@ pub const Tensor = struct {
                 },
             }));
             defer start_indices_buffer.deinit();
-            var values_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, values.shape(), .replicated, std.mem.sliceAsBytes(&@as([2 * 2 * 3 * 2 * 2]u16, @splat(1))));
+            var values_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, values.shape(), std.mem.sliceAsBytes(&@as([2 * 2 * 3 * 2 * 2]u16, @splat(1))));
             defer values_buffer.deinit();
-
-            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatterCB, .{ operand_buffer, start_indices_buffer, values_buffer });
+            var result = try exe.eval(std.testing.allocator, std.testing.io, .{ operand_buffer, start_indices_buffer, values_buffer });
             defer result.deinit();
 
             const expected = [2][3][4][2]u16{
@@ -3437,10 +3645,13 @@ pub const Tensor = struct {
         defer exe.deinit();
 
         {
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[1][5]f32{.{ 5.0, 4.1, 7.9, 0, 7.9 }}));
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[1][5]f32{.{ 5.0, 4.1, 7.9, 0, 7.9 }}));
             defer x_buffer.deinit();
 
-            var res = try zml.testing.autoCall(allocator, std.testing.io, &exe, ArgMaxTest._fwd, .{x_buffer});
+            var res: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
+            var runner = try exe.runner(allocator);
+            defer runner.deinit(allocator);
+            runner.run(std.testing.io, .{x_buffer}, .{&res}, .{ .wait = true });
             defer res.values.deinit();
             defer res.indices.deinit();
             const max_ = res.values.getValue(f32, std.testing.io);
@@ -3451,10 +3662,13 @@ pub const Tensor = struct {
         }
 
         {
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[1][5]f32{.{ 5.0, std.math.nan(f32), 7.9, 0, 7.9 }}));
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[1][5]f32{.{ 5.0, std.math.nan(f32), 7.9, 0, 7.9 }}));
             defer x_buffer.deinit();
 
-            var res = try zml.testing.autoCall(allocator, std.testing.io, &exe, ArgMaxTest._fwd, .{x_buffer});
+            var res: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
+            var runner = try exe.runner(allocator);
+            defer runner.deinit(allocator);
+            runner.run(std.testing.io, .{x_buffer}, .{&res}, .{ .wait = true });
             defer res.values.deinit();
             defer res.indices.deinit();
             const max_ = try res.values.getValue(f32, std.testing.io);
@@ -3505,10 +3719,10 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{} }, platform, .{});
             defer exe.deinit();
 
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ -0.9264, 0.7156, 1.0202, 0.3992, 1.2349, 1.0003, -0.1932, 1.3935, 0.7316, 0.0851 }));
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.9264, 0.7156, 1.0202, 0.3992, 1.2349, 1.0003, -0.1932, 1.3935, 0.7316, 0.0851 }));
             defer x_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
             defer res.deinit();
 
             const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
@@ -3524,7 +3738,7 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{ .descending = true } }, platform, .{});
             defer exe.deinit();
 
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f16{
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]f16{
                 -0.2505, 1.2520,  -0.7041, 0.1066,  1.2773,  -1.7246, 0.8389,  1.1094,  0.0601,  1.0684,
                 0.9619,  1.3916,  1.2246,  -0.1406, 0.3674,  -1.2480, -1.7051, -0.0934, 0.3435,  0.4373,
                 1.3809,  0.5444,  -0.6079, 1.2031,  -0.6880, 1.2979,  -0.1869, 0.2991,  0.0156,  0.1847,
@@ -3533,7 +3747,7 @@ pub const Tensor = struct {
             }));
             defer x_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
             defer res.deinit();
 
             const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
@@ -3555,7 +3769,7 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 3, .{} }, platform, .{});
             defer exe.deinit();
 
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]i32{
                 89, 31, 22, 42,
                 64, 39, 0,  30,
                 64, 71, 46, 31,
@@ -3567,7 +3781,7 @@ pub const Tensor = struct {
             }));
             defer x_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
             defer res.deinit();
 
             const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
@@ -3595,8 +3809,8 @@ pub const Tensor = struct {
         const has_name: ?[:0]const u8, const a = switch (@typeInfo(@TypeOf(named_axis_))) {
             .int, .comptime_int => .{ null, self.axis(@as(i64, @intCast(named_axis_))) },
             .@"struct" => |info| blk: {
-                stdx.debug.assertComptime(info.fields.len == 1, err_msg, .{});
-                break :blk .{ info.fields[0].name, self.axis(@field(named_axis_, info.fields[0].name)) };
+                stdx.debug.assertComptime(info.field_names.len == 1, err_msg, .{});
+                break :blk .{ info.field_names[0], self.axis(@field(named_axis_, info.field_names[0])) };
             },
             else => stdx.debug.compileError(err_msg, .{}),
         };
@@ -3628,7 +3842,7 @@ pub const Tensor = struct {
                         .has_side_effect = false,
                         .backend_config = .{ .original = backend_config },
                     },
-                    .unknown(ctx.mlir_ctx),
+                    ctx.location,
                 ).appendTo(currentBlock());
 
                 var values = Tensor._result(values_shape, op.result(0));
@@ -3640,7 +3854,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice(a, .{ .end = k });
@@ -3892,20 +4106,14 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._split, .{ x, ax, &args }, platform, .{});
             defer exe.deinit();
 
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_data));
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&x_data));
             defer x_buffer.deinit();
-
-            var exe_args = try exe.args(std.testing.allocator);
-            defer exe_args.deinit(std.testing.allocator);
-            exe_args.set(.{x_buffer});
-
-            var results = try exe.results(std.testing.allocator);
-            defer results.deinit(std.testing.allocator);
-            exe.callOpts(std.testing.io, exe_args, &results, .{ .wait = true });
 
             const res = try std.testing.allocator.alloc(zml.Buffer, expectation.len);
             defer std.testing.allocator.free(res);
-            results.fill(res);
+            var runner = try exe.runner(std.testing.allocator);
+            defer runner.deinit(std.testing.allocator);
+            runner.run(std.testing.io, .{x_buffer}, res, .{ .wait = true });
             defer for (res) |*buffer| buffer.deinit();
 
             inline for (expectation, 0..) |expected, i| {
@@ -4005,7 +4213,7 @@ pub const Tensor = struct {
             self.value(),
             update.value(),
             offset_values[0..self.rank()],
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
@@ -4026,14 +4234,14 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ .a = ids }, y }, platform, .{});
             defer exe.deinit();
 
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
             defer x_buffer.deinit();
-            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), .replicated, std.mem.sliceAsBytes(&[2]f32{ -1, -1 }));
+            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[2]f32{ -1, -1 }));
             defer y_buffer.deinit();
-            var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{4}));
+            var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), std.mem.sliceAsBytes(&[1]i32{4}));
             defer ids_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ .a = ids_buffer }, y_buffer });
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{ x_buffer, .{ .a = ids_buffer }, y_buffer });
             defer res.deinit();
 
             try std.testing.expectEqual([10]f32{ 0, 1, 2, 3, -1, -1, 6, 7, 8, 9 }, try res.getValue([10]f32, std.testing.io));
@@ -4052,14 +4260,14 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, ids, y }, platform, .{});
             defer exe.deinit();
 
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
             defer x_buffer.deinit();
-            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), .replicated, std.mem.sliceAsBytes(&[2]f32{ -1, -1 }));
+            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[2]f32{ -1, -1 }));
             defer y_buffer.deinit();
-            var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{3}));
+            var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), std.mem.sliceAsBytes(&[1]i32{3}));
             defer ids_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, ids_buffer, y_buffer });
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{ x_buffer, ids_buffer, y_buffer });
             defer res.deinit();
 
             try std.testing.expectEqualDeep(
@@ -4081,14 +4289,14 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, ids, y }, platform, .{});
             defer exe.deinit();
 
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
             defer x_buffer.deinit();
-            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), .replicated, std.mem.sliceAsBytes(&[2][1]f32{ .{-1}, .{-1} }));
+            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[2][1]f32{ .{-1}, .{-1} }));
             defer y_buffer.deinit();
-            var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{3}));
+            var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), std.mem.sliceAsBytes(&[1]i32{3}));
             defer ids_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, ids_buffer, y_buffer });
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{ x_buffer, ids_buffer, y_buffer });
             defer res.deinit();
 
             try std.testing.expectEqualDeep(
@@ -4111,16 +4319,16 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ .a = idx_a, .b = idx_b }, y }, platform, .{});
             defer exe.deinit();
 
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
             defer x_buffer.deinit();
-            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), .replicated, std.mem.sliceAsBytes(&[1]f32{-1}));
+            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[1]f32{-1}));
             defer y_buffer.deinit();
-            var idx_a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_a.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{1}));
+            var idx_a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_a.shape(), std.mem.sliceAsBytes(&[1]i32{1}));
             defer idx_a_buffer.deinit();
-            var idx_b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_b.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{3}));
+            var idx_b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_b.shape(), std.mem.sliceAsBytes(&[1]i32{3}));
             defer idx_b_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ .a = idx_a_buffer, .b = idx_b_buffer }, y_buffer });
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{ x_buffer, .{ .a = idx_a_buffer, .b = idx_b_buffer }, y_buffer });
             defer res.deinit();
 
             try std.testing.expectEqualDeep(
@@ -4143,16 +4351,16 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ idx_a, idx_b }, y }, platform, .{});
             defer exe.deinit();
 
-            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
             defer x_buffer.deinit();
-            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), .replicated, std.mem.sliceAsBytes(&[1][1]f32{.{-1}}));
+            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[1][1]f32{.{-1}}));
             defer y_buffer.deinit();
-            var idx_a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_a.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{1}));
+            var idx_a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_a.shape(), std.mem.sliceAsBytes(&[1]i32{1}));
             defer idx_a_buffer.deinit();
-            var idx_b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_b.shape(), .replicated, std.mem.sliceAsBytes(&[1]i32{3}));
+            var idx_b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_b.shape(), std.mem.sliceAsBytes(&[1]i32{3}));
             defer idx_b_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ idx_a_buffer, idx_b_buffer }, y_buffer });
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{ x_buffer, .{ idx_a_buffer, idx_b_buffer }, y_buffer });
             defer res.deinit();
 
             try std.testing.expectEqualDeep(
@@ -4177,7 +4385,7 @@ pub const Tensor = struct {
             other.value(),
             dialects.stablehlo.ComparisonDirection.init(mlirCtx(), direction).getValue(),
             getComparisonType(mlirCtx(), self.dtype()).getValue(),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
 
         return _result(self._shape.withDtype(.bool), op.result(0));
@@ -4189,12 +4397,12 @@ pub const Tensor = struct {
         stdx.debug.assert(self.rank() < constants.MAX_RANK - 1, "toDiagonal expects input up to {d} rank, got {f}", .{ constants.MAX_RANK - 1, self });
         const a = self.axis(axis_);
         const d = self.dim(a);
-        const p = self.shape()._partitioning.get(a);
+        const p = self.shape()._sharding.partition.get(a);
         var res_shape = self._shape;
         res_shape._dims.replaceRange(a, 1, &.{ d, d }) catch unreachable;
         res_shape._tags.replaceRange(a, 1, &.{ @tagName(new_tags[0]), @tagName(new_tags[1]) }) catch unreachable;
-        // TODO(Corentin): Not sure about that
-        res_shape._partitioning.replaceRange(a, 1, &.{ p, p }) catch unreachable;
+
+        res_shape._sharding.partition = res_shape._sharding.partition.insert(a, p);
 
         const values = self.insertAxes(a + 1, .{new_tags[1]}).broad(res_shape);
         const zeros = Tensor.constant(self.dtype().zero()).broad(res_shape);
@@ -4223,10 +4431,10 @@ pub const Tensor = struct {
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._toDiag, .{x}, platform, .{});
         defer exe.deinit();
 
-        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[2][2]u8{ .{ 1, 2 }, .{ 3, 4 } }));
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][2]u8{ .{ 1, 2 }, .{ 3, 4 } }));
         defer x_buffer.deinit();
 
-        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._toDiag, .{x_buffer});
+        var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
         defer res.deinit();
 
         try std.testing.expectEqual(
@@ -4271,7 +4479,7 @@ pub const Tensor = struct {
 
         const x: Tensor = .init(.{ 3, 3 }, .u8);
 
-        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[3][3]u8{
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[3][3]u8{
             .{ 1, 1, 1 },
             .{ 1, 1, 1 },
             .{ 1, 1, 1 },
@@ -4282,7 +4490,7 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, 0 }, platform, .{});
             defer exe.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
             defer res.deinit();
 
             try std.testing.expectEqual(
@@ -4298,7 +4506,7 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, 1 }, platform, .{});
             defer exe.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
             defer res.deinit();
 
             try std.testing.expectEqual(
@@ -4314,7 +4522,7 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, -1 }, platform, .{});
             defer exe.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            var res = try exe.eval(std.testing.allocator, std.testing.io, .{x_buffer});
             defer res.deinit();
 
             try std.testing.expectEqual(
@@ -4349,7 +4557,7 @@ pub const Tensor = struct {
             bool_tensor.value(),
             on_true.value(),
             on_false.value(),
-            .unknown(mlirCtx()),
+            currentLoc(),
         ).appendTo(currentBlock());
 
         return _result(on_true._shape, op.result(0));
@@ -4361,7 +4569,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise not logical operation of the input Tensor.
     pub fn not(self: Tensor) Tensor {
-        const op = dialects.stablehlo.not(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.not(mlirCtx(), self.value(), currentLoc()).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -4453,12 +4661,16 @@ pub const Tensor = struct {
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._cartesianProduct2, .{ x, y }, platform, .{});
         defer exe.deinit();
 
-        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3, 4, 5 }));
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3, 4, 5 }));
         defer x_buffer.deinit();
-        var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3 }));
+        var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3 }));
         defer y_buffer.deinit();
 
-        var xs, var ys = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._cartesianProduct2, .{ x_buffer, y_buffer });
+        var xs: zml.Buffer = undefined;
+        var ys: zml.Buffer = undefined;
+        var runner = try exe.runner(std.testing.allocator);
+        defer runner.deinit(std.testing.allocator);
+        runner.run(std.testing.io, .{ x_buffer, y_buffer }, .{ &xs, &ys }, .{ .wait = true });
         defer xs.deinit();
         defer ys.deinit();
 
@@ -4526,12 +4738,12 @@ pub const Tensor = struct {
         var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, y }, platform, .{});
         defer exe.deinit();
 
-        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3, 4, 5 }));
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3, 4, 5 }));
         defer x_buffer.deinit();
-        var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3 }));
+        var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3 }));
         defer y_buffer.deinit();
 
-        var z = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._fwd, .{ x_buffer, y_buffer });
+        var z = try exe.eval(std.testing.allocator, std.testing.io, .{ x_buffer, y_buffer });
         defer z.deinit();
 
         try std.testing.expectEqualDeep(
@@ -4599,12 +4811,16 @@ pub const Tensor = struct {
                     }
                 }).body, .{ .input = input, .name = full_name }, {});
             },
-            .oneapi, .neuron => {},
+            .oneapi, .neuron, .furiosa => {},
         }
     }
 
     fn mlirCtx() *mlir.Context {
         return Compiler.current().mlir_ctx;
+    }
+
+    fn currentLoc() *const mlir.Location {
+        return Compiler.current().location;
     }
 
     fn currentBlock() *mlir.Block {
@@ -4674,10 +4890,13 @@ test "Tensor.maxPool1d" {
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, platform, .{});
     defer exe.deinit();
 
-    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&data));
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&data));
     defer x_buffer.deinit();
 
-    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, MaxPool._fwd, .{x_buffer});
+    var result: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
+    var runner = try exe.runner(std.testing.allocator);
+    defer runner.deinit(std.testing.allocator);
+    runner.run(std.testing.io, .{x_buffer}, .{&result}, .{ .wait = true });
     defer result.values.deinit();
     defer result.indices.deinit();
 
@@ -4713,10 +4932,13 @@ test "Tensor.maxPool2d" {
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, platform, .{});
     defer exe.deinit();
 
-    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&data));
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&data));
     defer x_buffer.deinit();
 
-    var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, MaxPool._fwd, .{x_buffer});
+    var result: zml.Bufferized(Tensor.ArgMaxRes) = undefined;
+    var runner = try exe.runner(std.testing.allocator);
+    defer runner.deinit(std.testing.allocator);
+    runner.run(std.testing.io, .{x_buffer}, .{&result}, .{ .wait = true });
     defer result.values.deinit();
     defer result.indices.deinit();
 

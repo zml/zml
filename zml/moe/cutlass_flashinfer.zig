@@ -1,74 +1,44 @@
 const std = @import("std");
+const stdx = @import("stdx");
 
 const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
 const platforms = @import("platforms");
 const zml = @import("../zml.zig");
 
-const log = std.log.scoped(.moe_cutlass_flashinfer);
+const log = std.log.scoped(.@"zml/moe/cutlass_flashinfer");
 
 pub const auto_tactic: i32 = -1;
 
 pub const Options = struct {
     /// Device used at graph-construction time to select the architecture
     /// library and size the XLA-owned scratch buffer.
-    workspace_query_device: i32 = 0,
-    activation: Activation = .swiglu,
-    enable_pdl: bool = false,
-    gemm1_tactic: i32 = auto_tactic,
+    workspace_query_device: i32,
+    activation: zml.moe.Activation,
+    enable_pdl: bool,
+    gemm1_tactic: i32,
     /// GEMM2 uses FlashInfer's absolute tactic index. Query tacticCounts() to
     /// obtain the first valid GEMM2 index.
-    gemm2_tactic: i32 = auto_tactic,
-};
+    gemm2_tactic: i32,
 
-pub const Activation = enum {
-    swiglu,
-    geglu,
-    geglu_tanh,
-    swiglu_step,
-    relu2,
-};
-
-pub const Parameters = struct {
-    num_experts_per_tok: u32,
-    activation: ActivationMode,
-    workspace_query_device: i32 = 0,
-    enable_pdl: bool = false,
-    gemm1_tactic: i32 = auto_tactic,
-    gemm2_tactic: i32 = auto_tactic,
-
-    pub const ActivationMode = enum {
-        silu,
-        relu,
-        gelu,
-    };
-
-    pub const InitOptions = struct {
-        num_experts_per_tok: u32,
-        activation: ActivationMode,
-    };
-
-    pub fn init(opts: InitOptions) Parameters {
+    pub fn fromGlobalOptions(opts: zml.moe.Options) Options {
         return .{
-            .num_experts_per_tok = opts.num_experts_per_tok,
+            .workspace_query_device = 0,
             .activation = opts.activation,
-        };
-    }
-
-    pub fn runnerOptions(self: Parameters) !Options {
-        return .{
-            .workspace_query_device = self.workspace_query_device,
-            .activation = switch (self.activation) {
-                .silu => .swiglu,
-                // Tensor.gelu() is ZML's tanh GELU approximation.
-                .gelu => .geglu_tanh,
-                .relu => .relu2,
-            },
-            .enable_pdl = self.enable_pdl,
-            .gemm1_tactic = self.gemm1_tactic,
-            .gemm2_tactic = self.gemm2_tactic,
+            .enable_pdl = false,
+            .gemm1_tactic = auto_tactic,
+            .gemm2_tactic = auto_tactic,
         };
     }
 };
+
+pub fn validateOptions(opts: zml.moe.Options) void {
+    stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
+    stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
+    stdx.debug.assert(opts.activation == .swiglu, "cute_mxfp4 backend only accepts swiglu activation, got {}", .{opts.activation});
+    stdx.debug.assert(opts.activation.swiglu.limit == null, "Activation thresholds require the Triton MoE backend", .{});
+    stdx.debug.assert(opts.activation.swiglu.bias == null, "flashinfer_cutlass backend requires swiglu bias to be null", .{});
+    stdx.debug.assert(opts.activation.swiglu.scale == null, "flashinfer_cutlass backend requires swiglu scale to be null", .{});
+}
 
 const Input = struct {
     hidden_states: zml.Tensor,
@@ -125,7 +95,7 @@ pub const Variant = enum {
 const max_num_devices = zml.platform.Platform.MAX_NUM_DEVICES;
 
 pub const Runners = struct {
-    runners: [std.meta.fields(Variant).len][max_num_devices]?DeviceRunner =
+    runners: [std.meta.fieldNames(Variant).len][max_num_devices]?DeviceRunner =
         @splat(@splat(null)),
 
     pub fn deinit(self: *Runners) void {
@@ -142,7 +112,7 @@ pub const Runners = struct {
         if (device < 0 or device >= max_num_devices) return error.UnsupportedDevice;
 
         const index: usize = @intCast(device);
-        const variant_index: usize = @intFromEnum(variant);
+        const variant_index: usize = @backingInt(variant);
         if (self.runners[variant_index][index]) |runner| return runner;
 
         const api = try fi_cutlass_moe.apiForDevice(device);
@@ -201,13 +171,15 @@ fn currentRunners() !*Runners {
     return runners orelse error.RunnersNotLoaded;
 }
 
-fn cutlassActivation(activation: Activation) i32 {
+fn cutlassActivation(activation: zml.moe.Activation) i32 {
     return switch (activation) {
+        .gelu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_GELU,
+        .relu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_RELU,
+        .silu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_SILU,
         .swiglu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU,
+        .swiglu_step => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU_STEP,
         .geglu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU,
         .geglu_tanh => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU_TANH,
-        .swiglu_step => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU_STEP,
-        .relu2 => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_RELU2,
     };
 }
 
@@ -280,7 +252,7 @@ fn ffiCallNvfp4(
 
 const routedNvfp4Call = zml.ops.CustomCall(Input, Output, Attributes, ffiCallNvfp4, .{
     .name = "flashinfer_cutlass_nvfp4_routed_moe",
-    // Expert sharding is owned by forwardMoe outer manual computation.
+    // Expert mesh is owned by forwardMoe outer manual computation.
     .sharding_aware = false,
     .has_side_effect = false,
 });
@@ -366,6 +338,7 @@ pub fn register(platform: *const zml.Platform) !void {
 }
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
+    if (platform.target != .cuda) return false;
     if (platform.state.cuda.fi_cutlass_moe_runners == null) return false;
     _ = computeCapability(platform) catch return false;
     return true;
@@ -404,11 +377,11 @@ pub fn fc1BlockScaleShape(
     num_experts: i64,
     hidden_size: i64,
     intermediate_size: i64,
-    activation: Activation,
+    activation: zml.moe.Activation,
 ) zml.Shape {
     const rows = switch (activation) {
+        .silu, .gelu, .relu => intermediate_size,
         .swiglu, .geglu, .geglu_tanh, .swiglu_step => 2 * intermediate_size,
-        .relu2 => intermediate_size,
     };
     return .init(
         .{ num_experts, roundUp(rows, 128), roundUp(@divExact(hidden_size, 16), 4) },
@@ -473,8 +446,8 @@ fn validateInputs(
     const num_experts = fc1_weights.dim(0);
     const fc1_rows = fc1_weights.dim(1);
     const intermediate_size = switch (options.activation) {
+        .silu, .gelu, .relu => fc1_rows,
         .swiglu, .geglu, .geglu_tanh, .swiglu_step => @divExact(fc1_rows, 2),
-        .relu2 => fc1_rows,
     };
     const top_k = topk_ids.dim(2);
 
@@ -544,9 +517,9 @@ pub fn fusedExpertsNvfp4(
     fc2_weight_block: zml.Tensor,
     fc2_global: zml.Tensor,
     options: Options,
-) !zml.Tensor {
-    const runners = try currentRunners();
-    var attributes = try validateInputs(
+) zml.Tensor {
+    const runners = currentRunners() catch |e| stdx.debug.panic("Failed to get runners: {}", .{e});
+    var attributes = validateInputs(
         hidden_states,
         fc1_weights,
         fc2_weights,
@@ -559,20 +532,21 @@ pub fn fusedExpertsNvfp4(
         fc2_weight_block,
         fc2_global,
         options,
-    );
+    ) catch |e| stdx.debug.panic("Invalid inputs: {}", .{e});
+
     attributes.runners = @intFromPtr(runners);
-    const deviceRunner = try runners.ensureRunner(options.workspace_query_device, .nvfp4xnvfp4);
+    const deviceRunner = runners.ensureRunner(options.workspace_query_device, .nvfp4xnvfp4) catch |e| stdx.debug.panic("Failed to ensure runner: {}", .{e});
     const context = makeContext(attributes);
     var requirements = std.mem.zeroes(fi_cutlass_moe.WorkspaceRequirements);
     requirements.struct_size = @sizeOf(fi_cutlass_moe.WorkspaceRequirements);
-    try checkStatus(
+    checkStatus(
         deviceRunner.api,
         deviceRunner.api.getWorkspaceRequirements(
             deviceRunner.runner,
             &context,
             &requirements,
         ),
-    );
+    ) catch |e| stdx.debug.panic("Failed to get workspace requirements: {}", .{e});
 
     const result = routedNvfp4Call.call(
         .{
@@ -606,7 +580,7 @@ pub fn fusedExpertsBf16(
     topk_weights: zml.Tensor,
     topk_ids: zml.Tensor,
     options: Options,
-) !zml.Tensor {
+) zml.Tensor {
     if (hidden_states.dtype() != .bf16 or
         fc1_weights.dtype() != .bf16 or
         fc2_weights.dtype() != .bf16 or
@@ -618,7 +592,8 @@ pub fn fusedExpertsBf16(
         topk_weights.rank() != 3 or
         topk_ids.rank() != 3)
     {
-        return error.InvalidInput;
+        // TODO(Corentin): Better error message
+        @panic("InvalidInput");
     }
 
     const batch = hidden_states.dim(0);
@@ -627,8 +602,8 @@ pub fn fusedExpertsBf16(
     const numExperts = fc1_weights.dim(0);
     const fc1Rows = fc1_weights.dim(1);
     const intermediateSize = switch (options.activation) {
+        .silu, .gelu, .relu => fc1Rows,
         .swiglu, .geglu, .geglu_tanh, .swiglu_step => @divExact(fc1Rows, 2),
-        .relu2 => fc1Rows,
     };
     const topK = topk_ids.dim(2);
     if (batch <= 0 or sequence <= 0 or hiddenSize <= 0 or
@@ -644,10 +619,11 @@ pub fn fusedExpertsBf16(
         topk_ids.dim(0) != batch or
         topk_ids.dim(1) != sequence)
     {
-        return error.InvalidShape;
+        // TODO(Corentin): Better error message
+        @panic("InvalidShape");
     }
 
-    const runners = try currentRunners();
+    const runners = currentRunners() catch |e| stdx.debug.panic("Failed to get runners: {}", .{e});
     const attributes: Attributes = .{
         .runners = @intFromPtr(runners),
         .num_tokens = batch * sequence,
@@ -662,18 +638,18 @@ pub fn fusedExpertsBf16(
         .gemm1_tactic = options.gemm1_tactic,
         .gemm2_tactic = options.gemm2_tactic,
     };
-    const deviceRunner = try runners.ensureRunner(options.workspace_query_device, .bf16xbf16);
+    const deviceRunner = runners.ensureRunner(options.workspace_query_device, .bf16xbf16) catch |e| stdx.debug.panic("Failed to ensure runner: {}", .{e});
     const context = makeContext(attributes);
     var requirements = std.mem.zeroes(fi_cutlass_moe.WorkspaceRequirements);
     requirements.struct_size = @sizeOf(fi_cutlass_moe.WorkspaceRequirements);
-    try checkStatus(
+    checkStatus(
         deviceRunner.api,
         deviceRunner.api.getWorkspaceRequirements(
             deviceRunner.runner,
             &context,
             &requirements,
         ),
-    );
+    ) catch |e| stdx.debug.panic("Failed to get workspace requirements: {}", .{e});
 
     const result = routedBf16Call.call(
         .{
@@ -690,4 +666,217 @@ pub fn fusedExpertsBf16(
         attributes,
     );
     return result.output;
+}
+
+pub fn fusedExperts(
+    input: zml.Tensor,
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
+    gate_up: zml.nn.Linear,
+    down: zml.nn.Linear,
+    opts: zml.moe.Options,
+) zml.Tensor {
+    if (comptime !platforms.isEnabled(.cuda)) {
+        @panic("FlashInfer CUTLASS MoE is only supported on CUDA platforms");
+    }
+
+    if (gate_up.bias != null or down.bias != null) {
+        @panic("FlashInfer CUTLASS MoE does not support bias in gate_up or down linear layers");
+    }
+
+    const runner_options: Options = .fromGlobalOptions(opts);
+    const expert_partition = gate_up.weight.shape().partition(.expert);
+
+    const quant_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
+
+    if (quant_scheme != null and quant_scheme == .nvfp4) {
+        const gate_up_weight_unpacked = zml.moe.unpackedWeight(gate_up);
+        const down_weight_unpacked = zml.moe.unpackedWeight(down);
+
+        // TODO(Corentin): Do error checking on nvfp4
+        // Also, maybe pass `zml.nn.Linear` directly
+        if (expert_partition.isSharded()) {
+            return zml.ops.manualComputation(
+                (struct {
+                    input: zml.Tensor,
+                    topk_ids: zml.Tensor,
+                    topk_weights: zml.Tensor,
+                    gate_up_weight_unpacked: zml.Tensor,
+                    down_weight_unpacked: zml.Tensor,
+                    gate_up_input_scale: zml.Tensor,
+                    gate_up_scales: zml.Tensor,
+                    gate_up_global_scale: zml.Tensor,
+                    down_input_scale: zml.Tensor,
+                    down_scales: zml.Tensor,
+                    down_global_scale: zml.Tensor,
+                    activation: zml.moe.Activation,
+                    enable_pdl: bool,
+                    gemm1_tactic: i32,
+                    gemm2_tactic: i32,
+                    workspace_query_device: i32,
+
+                    fn body(
+                        self: @This(),
+                        _: zml.Shape,
+                    ) zml.Tensor {
+                        const local_num_experts = self.gate_up_weight_unpacked.dim(.expert);
+                        const partition_id = zml.ops.partitionId().convert(.i32);
+                        const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                        const expert_end = expert_start.addConstant(local_num_experts);
+
+                        const local_route_mask = self.topk_ids
+                            .cmp(.GE, expert_start)
+                            .logical(.AND, self.topk_ids.cmp(.LT, expert_end));
+                        const local_topk_ids = local_route_mask.select(
+                            self.topk_ids.sub(expert_start),
+                            zml.Tensor.scalar(-1, .i32),
+                        );
+                        const local_topk_weights = local_route_mask.select(
+                            self.topk_weights,
+                            zml.Tensor.scalar(-1, self.topk_weights.dtype()),
+                        );
+
+                        const local_output = fusedExpertsNvfp4(
+                            self.input,
+                            self.gate_up_weight_unpacked,
+                            self.down_weight_unpacked,
+                            local_topk_weights,
+                            local_topk_ids,
+                            self.gate_up_input_scale,
+                            self.gate_up_scales,
+                            self.gate_up_global_scale,
+                            self.down_input_scale,
+                            self.down_scales,
+                            self.down_global_scale,
+                            .{
+                                .workspace_query_device = self.workspace_query_device,
+                                .activation = self.activation,
+                                .enable_pdl = self.enable_pdl,
+                                .gemm1_tactic = self.gemm1_tactic,
+                                .gemm2_tactic = self.gemm2_tactic,
+                            },
+                        );
+                        const local_reshaped = local_output
+                            .reshape(self.input.shape().dims())
+                            .withTags(.{ .b, .s, .d });
+                        return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
+                    }
+                }).body,
+                .{
+                    .input = input,
+                    .topk_ids = topk_ids,
+                    .topk_weights = topk_weights,
+                    .gate_up_weight_unpacked = gate_up_weight_unpacked,
+                    .down_weight_unpacked = down_weight_unpacked,
+                    .gate_up_input_scale = gate_up.quantization.?.input_scale.?.asMultiplier(),
+                    .gate_up_scales = gate_up.quantization.?.scales,
+                    .gate_up_global_scale = gate_up.quantization.?.global_scale.?.asMultiplier(),
+                    .down_input_scale = down.quantization.?.input_scale.?.asMultiplier(),
+                    .down_scales = down.quantization.?.scales,
+                    .down_global_scale = down.quantization.?.global_scale.?.asMultiplier(),
+                    .activation = runner_options.activation,
+                    .enable_pdl = runner_options.enable_pdl,
+                    .gemm1_tactic = runner_options.gemm1_tactic,
+                    .gemm2_tactic = runner_options.gemm2_tactic,
+                    .workspace_query_device = runner_options.workspace_query_device,
+                },
+                input.shape(),
+            );
+        }
+
+        return fusedExpertsNvfp4(
+            input,
+            gate_up_weight_unpacked,
+            down_weight_unpacked,
+            topk_weights,
+            topk_ids,
+            gate_up.quantization.?.input_scale.?.asMultiplier(),
+            gate_up.quantization.?.scales,
+            gate_up.quantization.?.global_scale.?.asMultiplier(),
+            down.quantization.?.input_scale.?.asMultiplier(),
+            down.quantization.?.scales,
+            down.quantization.?.global_scale.?.asMultiplier(),
+            runner_options,
+        );
+    }
+
+    if (expert_partition.isSharded()) {
+        return zml.ops.manualComputation(
+            (struct {
+                input: zml.Tensor,
+                topk_ids: zml.Tensor,
+                topk_weights: zml.Tensor,
+                weights_gate_up: zml.Tensor,
+                weights_down: zml.Tensor,
+                activation: zml.moe.Activation,
+                enable_pdl: bool,
+                gemm1_tactic: i32,
+                gemm2_tactic: i32,
+                workspace_query_device: i32,
+
+                fn body(
+                    self: @This(),
+                    _: zml.Shape,
+                ) zml.Tensor {
+                    const local_num_experts = self.weights_gate_up.dim(.expert);
+                    const partition_id = zml.ops.partitionId().convert(.i32);
+                    const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                    const expert_end = expert_start.addConstant(local_num_experts);
+
+                    const local_route_mask = self.topk_ids
+                        .cmp(.GE, expert_start)
+                        .logical(.AND, self.topk_ids.cmp(.LT, expert_end));
+                    const local_topk_ids = local_route_mask.select(
+                        self.topk_ids.sub(expert_start),
+                        zml.Tensor.scalar(-1, .i32),
+                    );
+                    const local_topk_weights = local_route_mask.select(
+                        self.topk_weights,
+                        zml.Tensor.scalar(-1, self.topk_weights.dtype()),
+                    );
+
+                    const local_output = fusedExpertsBf16(
+                        self.input,
+                        self.weights_gate_up,
+                        self.weights_down,
+                        local_topk_weights,
+                        local_topk_ids,
+                        .{
+                            .workspace_query_device = self.workspace_query_device,
+                            .activation = self.activation,
+                            .enable_pdl = self.enable_pdl,
+                            .gemm1_tactic = self.gemm1_tactic,
+                            .gemm2_tactic = self.gemm2_tactic,
+                        },
+                    );
+                    const local_reshaped = local_output
+                        .reshape(self.input.shape().dims())
+                        .withTags(.{ .b, .s, .d });
+                    return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
+                }
+            }).body,
+            .{
+                .input = input,
+                .topk_ids = topk_ids,
+                .topk_weights = topk_weights,
+                .weights_gate_up = gate_up.weight,
+                .weights_down = down.weight,
+                .activation = runner_options.activation,
+                .enable_pdl = runner_options.enable_pdl,
+                .gemm1_tactic = runner_options.gemm1_tactic,
+                .gemm2_tactic = runner_options.gemm2_tactic,
+                .workspace_query_device = runner_options.workspace_query_device,
+            },
+            input.shape(),
+        );
+    }
+
+    return fusedExpertsBf16(
+        input,
+        gate_up.weight,
+        down.weight,
+        topk_weights,
+        topk_ids,
+        runner_options,
+    );
 }

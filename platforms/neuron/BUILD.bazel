@@ -24,9 +24,9 @@ zig_shared_library(
     deps = [
         ":libnrt_headers",
         ":neuron_nrt",
-        ":zmlxneuron",
         "//bazel",
         "//pjrt",
+        "//platforms:options",
         "//stdx",
         "@rules_zig//zig/runfiles",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
@@ -69,18 +69,6 @@ cc_library(
         "@rules_python//python/cc:current_py_cc_headers",
         "@rules_python//python/cc:current_py_cc_libs",
     ],
-)
-
-cc_library(
-    name = "empty",
-    defines = ["ZML_RUNTIME_NEURON_DISABLED"],
-    tags = ["manual"],
-)
-
-cc_library(
-    name = "zmlxneuron",
-    defines = ["ZML_RUNTIME_NEURON"],
-    tags = ["manual"],
 )
 
 cc_library(
@@ -169,17 +157,17 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
+        "//platforms:options",
     ] + select({
         "//platforms:neuron.enabled": [
             ":libnrt_headers",
             ":neuron_nrt",
-            ":zmlxneuron",
             "//bazel",
             "//stdx",
             "@libzml_neuron",
             "@rules_zig//zig/runfiles",
         ],
-        "//conditions:default": [":empty"],
+        "//conditions:default": [],
     }),
 )
 
@@ -192,6 +180,5 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         ":neuron",
-        ":zmlxneuron",
     ],
 )

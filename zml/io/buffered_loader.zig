@@ -1,4 +1,6 @@
-//! Whole-tensor staging for platforms that use Buffer.from.
+//! Whole-tensor staging for platforms that use Buffer.from. A composite
+//! destination is assembled in the staging: its gaps zeroed, each part read
+//! at its offset, then the whole tensor is placed as any other.
 //! The shared front end owns source lookup, executable bindings and admission.
 const std = @import("std");
 
@@ -7,11 +9,13 @@ const stdx = @import("stdx");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
+const Memory = @import("../platform.zig").Memory;
 const Platform = @import("../platform.zig").Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
-const Sharding = @import("../Sharding.zig");
 const backend = @import("backend.zig");
+const load_testing = @import("testing.zig");
+const LoadPart = backend.LoadPart;
 const LoadSpec = backend.LoadSpec;
 const log = @import("log.zig").load;
 
@@ -23,7 +27,7 @@ const log = @import("log.zig").load;
 const staging_tensors: usize = 12;
 
 pub const Loader = struct {
-    pub const AwaitError = std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError || std.Io.File.Reader.SeekError || safetensors.TensorReader.ReadPositionalError || error{SourceSizeMismatch};
+    pub const AwaitError = std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError || std.Io.File.Reader.SeekError || safetensors.TensorReader.ReadPositionalError || backend.PartsError;
     /// A submission refuses on the sticky error, so it fails as an await does.
     pub const SubmitError = AwaitError;
 
@@ -71,16 +75,34 @@ pub const Loader = struct {
         return self;
     }
 
-    /// Spawns one bounded read task per spec. Nothing runs when this fails.
+    /// Spawns one bounded read task per spec, which assembles its
+    /// destination. The batch keeps a copy of every spec's parts. Nothing
+    /// runs when this fails.
     pub fn submit(self: *Loader, specs: []const LoadSpec, progress: ?*std.Progress.Node) SubmitError!*Batch {
         try self.checkOpen();
         var largest: usize = 0;
-        for (specs) |spec| largest = @max(largest, spec.shape.byteSize());
-        self.admission.widen(self.io, largest, self.staging_slots);
-        const batch = try self.allocator.create(Batch);
-        batch.* = .{ .pending = .init(1 + specs.len) };
+        var part_count: usize = 0;
         for (specs) |spec| {
-            self.submitOne(batch, spec.source, spec.shape, spec.sharding, spec.output, progress);
+            largest = @max(largest, spec.shape.byteSize());
+            part_count += spec.parts.len;
+        }
+        const batch = try self.allocator.create(Batch);
+        errdefer self.allocator.destroy(batch);
+        const parts = try self.allocator.alloc(LoadPart, part_count);
+        batch.* = .{ .pending = .init(1 + specs.len), .parts = parts };
+        self.admission.widen(self.io, largest, self.staging_slots);
+        var next: usize = 0;
+        for (specs) |spec| {
+            const spec_parts = parts[next..][0..spec.parts.len];
+            next += spec.parts.len;
+            @memcpy(spec_parts, spec.parts);
+            self.submitOne(batch, .{
+                .shape = spec.shape,
+                .memory = spec.memory,
+                .output = spec.output,
+                .parts = spec_parts,
+                .zero_fill = spec.zero_fill,
+            }, progress);
         }
         // Every task is spawned: drop the sentinel.
         batch.finish(self.io);
@@ -90,6 +112,7 @@ pub const Loader = struct {
     /// Waits for the batch's tasks, frees it and returns the sticky error.
     pub fn awaitBatch(self: *Loader, batch: *Batch) AwaitError!void {
         batch.done.waitUncancelable(self.io);
+        self.allocator.free(batch.parts);
         self.allocator.destroy(batch);
         try self.checkOpen();
     }
@@ -112,55 +135,80 @@ pub const Loader = struct {
         if (code != 0) return @errorCast(@errorFromInt(code));
     }
 
-    fn loadOne(
-        self: *Loader,
-        source: *safetensors.Tensor,
-        shape: Shape,
-        sharding: Sharding,
-        output: *Buffer,
-    ) AwaitError!void {
+    fn loadOne(self: *Loader, spec: LoadSpec) void {
         if (self.first_error.load(.acquire) != 0) return;
+        std.debug.assert(spec.parts.len != 0);
         var stage: []const u8 = "validate";
-        errdefer |err| self.recordError(err, "{s} tensor {s}: file={s}, offset={d}, source_bytes={d}, destination_bytes={d}", .{ stage, source.name, source.file_uri, source.offset, source.byteSize(), shape.byteSize() });
-        const tensor_bytes = shape.byteSize();
-        // The whole source becomes this tensor's bytes, so the two sizes are
-        // the same thing. Staging is reused, so a source that does not fill
-        // it would publish another tensor's bytes rather than the zeroes a
-        // fresh allocation used to give.
-        if (source.byteSize() != tensor_bytes) return error.SourceSizeMismatch;
+        var part = &spec.parts[0];
+        self.loadOneStaged(spec, &stage, &part) catch |err| {
+            self.recordError(err, "{s} tensor {s}: file={s}, offset={d}, source_bytes={d}, parts={d}, destination_bytes={d}", .{ stage, part.source.name, part.source.file_uri, part.source.offset, part.source.byteSize(), spec.parts.len, spec.shape.byteSize() });
+        };
+    }
+
+    /// `loadOne`'s steps; `stage` names the one that failed and `part` the
+    /// part it was at.
+    fn loadOneStaged(
+        self: *Loader,
+        spec: LoadSpec,
+        stage: *[]const u8,
+        part: **const LoadPart,
+    ) AwaitError!void {
+        const tensor_bytes = spec.shape.byteSize();
+        // Staging is reused, so a byte no part writes would publish another
+        // tensor's bytes rather than the zeroes a fresh allocation used to
+        // give: the parts must cover the tensor, or its gaps be zeroed below.
+        try backend.checkParts(spec.parts, tensor_bytes, spec.zero_fill);
         self.admission.reserve(self.io, tensor_bytes);
         defer self.admission.release(self.io, tensor_bytes);
-        stage = "open source for";
-        var reader = try source.reader(self.io, &.{}, .{});
-        defer reader.deinit();
-        stage = "allocate staging for";
+        stage.* = "allocate staging for";
         const staging = try self.staging.acquire(self.allocator, self.io, tensor_bytes);
         defer self.staging.release(self.allocator, self.io, staging);
-        stage = "read";
-        try self.readInto(&reader, staging[0..tensor_bytes]);
-        stage = "transfer";
-        output.* = try Buffer.from(
+        const tensor = staging[0..tensor_bytes];
+        if (spec.zero_fill) {
+            // Only the gaps: the parts overwrite the rest.
+            var covered_end: usize = 0;
+            for (spec.parts) |covered| {
+                const start: usize = @intCast(covered.dst_offset);
+                @memset(tensor[covered_end..start], 0);
+                covered_end = start + @as(usize, @intCast(covered.width));
+            }
+            @memset(tensor[covered_end..], 0);
+        }
+        for (spec.parts) |*current| {
+            part.* = current;
+            stage.* = "open source for";
+            var reader = try current.source.reader(self.io, &.{}, .{});
+            defer reader.deinit();
+            stage.* = "read";
+            const start: usize = @intCast(current.dst_offset);
+            try self.readInto(&reader, current.src_offset, tensor[start..][0..@intCast(current.width)]);
+        }
+        stage.* = "transfer";
+        // The shape's sharding places the bytes; a shape without a mesh is
+        // replicated, as `Buffer.from` places it.
+        spec.output.* = try Buffer.from(
             self.io,
             self.platform,
-            shape,
-            sharding,
-            staging[0..tensor_bytes],
-            .{ .wait = true },
+            spec.shape,
+            tensor,
+            .{ .wait = true, .memory = spec.memory },
         );
     }
 
-    /// Fills `destination` from `reader`, splitting it across helper tasks
-    /// when the source permits are free. The permits are released before the
-    /// caller's transfer, so a tensor staging to the device lends its read
-    /// budget to one still reading.
+    /// Fills `destination` from `reader`'s bytes at `source_offset`,
+    /// splitting it across helper tasks when the source permits are free.
+    /// The permits are released before the caller's transfer, so a tensor
+    /// staging to the device lends its read budget to one still reading.
     fn readInto(
         self: *Loader,
         reader: *const safetensors.TensorReader,
+        source_offset: u64,
         destination: []u8,
     ) safetensors.TensorReader.ReadPositionalError!void {
         if (destination.len == 0) return;
         var work: ChunkedRead = .{
             .reader = reader,
+            .source_offset = source_offset,
             .destination = destination,
             .chunk_size = self.read_chunk_size,
         };
@@ -199,31 +247,26 @@ pub const Loader = struct {
         if (code != 0) return @errorCast(@errorFromInt(code));
     }
 
+    /// `spec.parts` belong to the batch.
     fn submitOne(
         self: *Loader,
         batch: *Batch,
-        source: *safetensors.Tensor,
-        shape: Shape,
-        sharding: Sharding,
-        output: *Buffer,
+        spec: LoadSpec,
         progress: ?*std.Progress.Node,
     ) void {
         self.group.async(self.io, struct {
             fn run(
                 loader: *Loader,
                 batch_: *Batch,
-                source_: *safetensors.Tensor,
-                shape_: Shape,
-                sharding_: Sharding,
-                output_: *Buffer,
+                spec_: LoadSpec,
                 progress_: ?*std.Progress.Node,
             ) void {
                 defer batch_.finish(loader.io);
-                var node = if (progress_) |parent| parent.start(source_.name, 1) else null;
+                var node = if (progress_) |parent| parent.start(spec_.parts[0].source.name, 1) else null;
                 defer if (node) |*n| n.end();
-                loader.loadOne(source_, shape_, sharding_, output_) catch {};
+                loader.loadOne(spec_);
             }
-        }.run, .{ self, batch, source, shape, sharding, output, progress });
+        }.run, .{ self, batch, spec, progress });
     }
 };
 
@@ -232,6 +275,8 @@ pub const Loader = struct {
 pub const Batch = struct {
     pending: std.atomic.Value(usize),
     done: std.Io.Event = .unset,
+    /// Every spec's parts, which the tasks read until the batch is done.
+    parts: []LoadPart,
 
     fn finish(self: *Batch, io: std.Io) void {
         if (self.pending.fetchSub(1, .acq_rel) == 1) self.done.set(io);
@@ -330,6 +375,8 @@ const ReadPermits = struct {
 /// the source can actually carry turns into extra requests.
 const ChunkedRead = struct {
     reader: *const safetensors.TensorReader,
+    /// Where `destination` starts in the tensor's bytes.
+    source_offset: u64 = 0,
     destination: []u8,
     chunk_size: usize,
     /// Reads this tensor may have in flight; the owner raises it when it
@@ -348,7 +395,7 @@ const ChunkedRead = struct {
     fn readOne(self: *ChunkedRead) bool {
         if (self.failure.load(.acquire) != 0) return false;
         const span = self.claim() orelse return false;
-        self.reader.readPositionalAll(span.bytes, span.offset) catch |err| {
+        self.reader.readPositionalAll(span.bytes, self.source_offset + span.offset) catch |err| {
             _ = self.failure.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
             return false;
         };
@@ -383,7 +430,7 @@ const ChunkedRead = struct {
 const StagingPool = struct {
     mutex: std.Io.Mutex = .init,
     /// Buffers no task holds, and their total length.
-    free: std.ArrayListUnmanaged([]u8) = .empty,
+    free: std.ArrayList([]u8) = .empty,
     retained_bytes: usize = 0,
     /// What the running tasks hold now, and the most they ever held.
     live_bytes: usize = 0,
@@ -551,4 +598,78 @@ test "staging pool retains up to the peak the tasks held and prefers the sizes t
     try std.testing.expectEqual(@as(usize, 1), pool.free.items.len);
     try std.testing.expectEqual(@as(usize, 24), pool.free.items[0].len);
     try std.testing.expectEqual(@as(usize, 24), pool.retained_bytes);
+}
+
+test "buffered loader assembles a composite destination in reused staging" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    // Always on an owned CPU platform: Buffer.from places on the platform's
+    // whole mesh, which a sub-mesh of an accelerator's devices is not.
+    var devices: load_testing.Devices = undefined;
+    try devices.initCpu(allocator, io, 2);
+    defer devices.deinit();
+    const platform = devices.platform;
+    const mesh = try devices.mesh("tp");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    var a: [48]u8 = undefined;
+    load_testing.pattern(&a, 1);
+    var b: [32]u8 = undefined;
+    load_testing.pattern(&b, 2);
+    var full: [128]u8 = undefined;
+    load_testing.pattern(&full, 3);
+    try load_testing.writeSafetensors(allocator, io, tmp.dir, "weights.safetensors", &registry, &.{
+        .{ .name = "a", .dtype = "U16", .dims = &.{ 3, 8 }, .bytes = &a },
+        .{ .name = "b", .dtype = "U16", .dims = &.{ 2, 8 }, .bytes = &b },
+        .{ .name = "full", .dtype = "U16", .dims = &.{ 8, 8 }, .bytes = &full },
+    });
+    // Rows split over the two devices: b at row 1 and a's last two rows
+    // (from byte 16 of a) at row 4 of 8, around a leading row, a gap and
+    // a tail of zeros.
+    const shape = Shape.init(.{ .row = 8, .col = 8 }, .u16).withPartitioning(&mesh, .{ .row = .model });
+    const parts = [_]LoadPart{
+        .{ .source = registry.tensors.getPtr("b").?, .dst_offset = 16, .width = 32 },
+        .{ .source = registry.tensors.getPtr("a").?, .src_offset = 16, .dst_offset = 64, .width = 32 },
+    };
+    var expected: [128]u8 = @splat(0);
+    @memcpy(expected[16..48], &b);
+    @memcpy(expected[64..96], a[16..48]);
+    const whole = [_]LoadPart{.whole(registry.tensors.getPtr("full").?)};
+
+    const loader = try Loader.create(allocator, io, platform, 2, .local);
+    defer loader.destroy();
+    for ([_]Memory.Kind{ .default, .host_pinned }) |memory| {
+        // A whole tensor first, so the composite reuses its staging buffer
+        // and only the zeroing keeps its bytes out of the gaps.
+        var first: Buffer = undefined;
+        try loader.awaitBatch(try loader.submit(&.{.{ .shape = shape, .memory = memory, .output = &first, .parts = &whole }}, null));
+        defer first.deinit();
+        try load_testing.expectShards(allocator, io, &first, &full);
+        try expectMemory(platform, &first, memory);
+        var output: Buffer = undefined;
+        try loader.awaitBatch(try loader.submit(&.{.{ .shape = shape, .memory = memory, .output = &output, .parts = &parts, .zero_fill = true }}, null));
+        defer output.deinit();
+        try load_testing.expectShards(allocator, io, &output, &expected);
+        try expectMemory(platform, &output, memory);
+        try std.testing.expectEqual(@as(usize, 128), loader.staging.retained_bytes);
+    }
+
+    // Without zero fill the same parts are a size mismatch, found by the
+    // worker and sticky from then on.
+    var never_written: Buffer = undefined;
+    const batch = try loader.submit(&.{.{ .shape = shape, .output = &never_written, .parts = &parts }}, null);
+    try std.testing.expectError(error.SourceSizeMismatch, loader.awaitBatch(batch));
+    try std.testing.expectError(error.SourceSizeMismatch, loader.submit(&.{.{ .shape = shape, .output = &never_written, .parts = &whole }}, null));
+}
+
+/// Every shard of `buffer` is in its device's `memory` space.
+fn expectMemory(platform: *const Platform, buffer: *const Buffer, memory: Memory.Kind) !void {
+    const devices = backend.placedShape(platform, buffer.shape())._sharding.mesh.?.devicesInCanonicalOrder();
+    try std.testing.expectEqual(devices.len, buffer._shards.len);
+    for (devices, buffer._shards.constSlice()) |device, shard| {
+        try std.testing.expect(shard.memory(platform.pjrt_api) == platform.devices[device.id].memory(memory).?.pjrt_memory);
+    }
 }

@@ -34,7 +34,7 @@ pub fn supports(opts: shared.FusedExpertsArgs) bool {
             else => return false,
         }
     }
-    const routes = opts.hidden_states.dim(.b) * opts.hidden_states.dim(.s) * opts.topk_ids.dim(.top_expert);
+    const routes = opts.hidden_states.dim(.b) * opts.hidden_states.dim(.s) * opts.topk_ids.dim(.topk);
     return routes > 0 and routes <= std.math.maxInt(i32) / 5120;
 }
 

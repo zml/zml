@@ -81,7 +81,6 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
             // I'm not sure I like that. I'd rather set all fields but _shards than leaving most of the m undefined.
             ._shape = model._shape,
             ._shards = .empty,
-            ._sharding = undefined,
             ._platform = undefined,
         };
         return;
@@ -91,12 +90,12 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
     switch (type_info) {
         .@"struct" => |struct_type_info| {
             var initialized_fields: usize = 0;
-            errdefer inline for (struct_type_info.fields, 0..) |field, index| {
+            errdefer inline for (struct_type_info.field_names, 0..) |field_name, index| {
                 if (index < initialized_fields)
-                    deinitBufferizedInner(allocator, &@field(bufferized_, field.name));
+                    deinitBufferizedInner(allocator, &@field(bufferized_, field_name));
             };
-            inline for (struct_type_info.fields) |field| {
-                try bufferizeInner(allocator, @field(model, field.name), &@field(bufferized_, field.name));
+            inline for (struct_type_info.field_names) |field_name| {
+                try bufferizeInner(allocator, @field(model, field_name), &@field(bufferized_, field_name));
                 initialized_fields += 1;
             }
         },
@@ -119,7 +118,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
         .pointer => |p| {
             switch (p.size) {
                 .slice => {
-                    const allocated = try allocator.alignedAlloc(p.child, .fromByteUnits(p.alignment orelse @alignOf(p.child)), model.len);
+                    const allocated = try allocator.alignedAlloc(p.child, .fromByteUnits(p.attrs.@"align" orelse @alignOf(p.child)), model.len);
                     var initialized: usize = 0;
                     errdefer {
                         for (allocated[0..initialized]) |*element| deinitBufferizedInner(allocator, element);
@@ -156,8 +155,8 @@ fn deinitBufferizedInner(allocator: std.mem.Allocator, value: anytype) void {
         return;
     }
     switch (@typeInfo(T)) {
-        .@"struct" => |info| inline for (info.fields) |field| {
-            deinitBufferizedInner(allocator, &@field(value, field.name));
+        .@"struct" => |info| inline for (info.field_names) |field_name| {
+            deinitBufferizedInner(allocator, &@field(value, field_name));
         },
         .@"union" => switch (value.*) {
             inline else => |*payload| deinitBufferizedInner(allocator, payload),

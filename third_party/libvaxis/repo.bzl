@@ -4,8 +4,8 @@ def repo():
     git_repository(
         name = "libvaxis",
         remote = "https://github.com/rockorager/libvaxis.git",
-        commit = "a3ae1d53feeeeaeb6218de3d38837559811acae4",
+        commit = "14b7684272234a3d66316c0d1bbdc876d4e8997c",
         build_file = "//third_party/libvaxis:libvaxis.bazel",
-        patches = ["//third_party/libvaxis:bump-zig.patch", "//third_party/libvaxis:fixes.patch"],
+        patches = ["//third_party/libvaxis:fixes.patch"],
         patch_args = ["-p1"],
     )

@@ -1,8 +1,9 @@
 # Loading checkpoints
 
 `zml.io.Loader` turns checkpoint sources into device buffers. `load` submits
-the single-source tensors of a model; `loadExecute` submits the sources of
-executable bindings. Reads and transfers may start before submission returns.
+the tensors of a model, each from one source or, for a composite tensor, from
+several sources assembled in its destination; `loadExecute` submits the
+sources of executable bindings. Reads and transfers may start before submission returns.
 Submissions are retired in submission order: the loader waits for the reads,
 then for `loadExecute` runs each executable in binding order on the calling
 task, writes its output and frees its inputs.
@@ -16,13 +17,29 @@ var loader = try zml.io.Loader.init(allocator, io, platform, .{
 });
 defer loader.deinit();
 
-try loader.load(Model, &model, &buffers, &store, shardings, null);
+try loader.load(Model, &model, &buffers, &store, null);
 try loader.awaitAll();
 ```
 
-`load` accepts shardings for each submission; an empty slice
-selects replicated placement. `loadExecute` uses the executable’s input and
-output shardings. The loader does not retain the shardings slice.
+Placement comes from each tensor's shape, not from the submission: the mesh
+and partitioning the tensor was created with (`View.createTensor(subkey, tags,
+.mesh_name, partitioning)` resolves the mesh among those passed to
+`TensorStore.fromRegistry`; `createReplicatedTensor` replicates it on every
+device). A binding's memory kind picks the destination memory space on each
+device: a tensor created with `createHostPinnedTensor` lands in the device's
+`host_pinned` memory, every other tensor in its default memory.
+`TensorStore.setMemory(tensor, kind)` (or `View.setMemory`) changes it after
+the tensor was created, for a placement decided later.
+`loadExecute` places the inputs and checks the outputs against the
+executable's `input_shapes` and `output_shapes`, whose shardings carry the
+placement; a binding's tensor must match the executable's output placement.
+
+```zig
+const tp = try platform.registerMesh("tp", .mesh(.{ .model = .high_bandwidth }));
+var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{tp});
+const w = store.view().createTensor("w", .{ .out, .in }, .tp, .{ .out = .model });
+const b = store.view().createReplicatedTensor("b", .{.out});
+```
 
 The store is passed to each `load` or `loadExecute` submission.
 Initialization needs no store. These submission calls also accept an optional
@@ -30,9 +47,10 @@ progress node as their final argument (`null` disables reporting). Keep it
 alive until `awaitAll` or `deinit` returns.
 The caller owns the estimated total. For a whole checkpoint loaded once,
 `store.view().count()` estimates the number of source tensors. Each loaded
-source completes one item; bulk loads skip already delivered transformed
-tensors, and executable loads count their input sources, not their outputs.
-Unused or repeatedly loaded sources can make the checkpoint estimate inexact.
+tensor completes one item, a composite tensor once for all its sources; bulk
+loads skip already delivered transformed tensors, and executable loads count
+their input sources, not their outputs. Unused, repeatedly loaded or
+concatenated sources can make the checkpoint estimate inexact.
 Source progress completes before the executable runs; keep the enclosing node
 alive until `awaitAll` returns to cover the full loading lifecycle.
 The caller owns the store, platform, model buffers, and executable outputs.
@@ -55,15 +73,77 @@ therefore be written by a later `loadExecute` or by `awaitAll`.
 
 `awaitAll` retires everything and returns the first error; a failure is
 sticky: later submissions are refused and `awaitAll` keeps returning it.
-`bytesLoaded` counts the logical bytes of submissions retired with execution.
+`bytesLoaded` counts the logical bytes of submissions retired with execution:
+each destination's shape once, so a composite tensor counts its padding and
+not each of its sources.
 `deinit` awaits what is still pending without executing it (outputs
 unwritten, inputs freed), then destroys the backend. There is no
 per-submission handle and no memory knob.
 
+## Composite tensors
+
+A composite tensor is one destination filled by several source byte ranges,
+with every byte no range covers set to zero. The loader assembles it with
+the ordinary `load`: no program, no `loadExecute`, no buffer per source. The
+destination is placed like any tensor, by its shape's sharding, into the
+memory space its binding names (`.default` or `.host_pinned`), and it is
+allocated once per device whatever its parts: in `.default` that is device
+memory, while a `.host_pinned` destination takes none.
+
+```zig
+// a, b and c end to end along dimension 0, padded to a multiple of 8 rows,
+// row-sharded, in host pinned memory.
+const table = store.view().createConcatenated(&.{ "a", "b", "c" }, .{ .row, .channel }, .tp, .{ .row = .model }, .{
+    .pad_rows_to_multiple = 8,
+    .memory = .host_pinned,
+});
+// One source padded to 8 rows: the engram-style table.
+const padded = store.view().createConcatenated(&.{"weight"}, .{ .row, .channel }, .tp, .{ .row = .model }, .{ .pad_rows_to_multiple = 8 });
+```
+
+`createConcatenated` (and `maybeCreateConcatenated`, null when a source is
+missing) takes the sources' dtype and dimensions past the first; dimension 0
+is their total, rounded up to `pad_rows_to_multiple`, or `rows` when given.
+Concatenating along the outermost axis concatenates the byte streams, so
+each source becomes one contiguous range of the destination.
+`createComposite(subkeys, shape, layout, memory)` is the general form: the
+binding's `TensorStore.Layout` holds one `Part` per source, a byte map into
+the destination's logical bytes (row-major bytes of its packed shape, before
+the sharding splits them). A `Part` already has the fields of a strided map
+(`rows`, `src_pitch`, `dst_pitch`) so interleaved or broadcast layouts can be
+added without changing it.
+
+`load` checks a composite binding before submitting anything. It must have
+at least one source, a part must be non-empty and inside its source and the
+destination, parts must not overlap, and every source must have the
+destination's dtype, with its dimensions past the first equal to the
+destination's innermost ones and the part cutting whole rows of them;
+otherwise `InvalidLayout`. A zero-byte source is `EmptyTensor`. Strided parts and nonzero fills are valid
+layouts that this loader does not assemble yet: `UnsupportedLayout`.
+
+The front end turns a composite binding into one `LoadSpec` whose parts all
+share the destination. The direct backend plans each part like a tensor: the
+part's source bytes map to the destination's logical offsets, which the
+destination's dispatch spans place on the devices. Neighbouring pieces of one
+destination merge across parts when block, writers and both offsets are
+contiguous. The parts of one destination may come from different files and
+plans; each device's target still closes on the submission that completes its
+placement bytes. The zero fill goes out with the plan of the destination's
+first part, as one last job of that plan. That job reads nothing; it submits
+pieces from one pinned zero block that the loader detaches from its block
+pool when it is created and keeps until it is destroyed. The buffered backend
+zeroes the gaps of its staging buffer, reads each part at its offset, then
+places the whole tensor as usual.
+
+What stays a program: anything that computes rather than moves bytes,
+such as a dtype conversion, dequantization, a block-scale swizzle or a row
+interleave. These remain transformed bindings delivered by `loadExecute`.
+
 ## Errors and diagnostics
 
-The public operations declare `Loader.InitError`, `Loader.LoadError`,
-`Loader.LoadExecuteError`, and `Loader.AwaitError`. Their finite error sets
+The public operations declare `Loader.LoadError`,
+`Loader.LoadExecuteError`, and `Loader.AwaitError`; `Loader.init` returns an
+inferred error set. Their finite error sets
 include the underlying file I/O, allocation, cancellation, sharding, and PJRT
 errors. For example, missing files still return `FileNotFound`, truncated
 reads return `UnexpectedEndOfFile`. Host-memory allocation and DMA registration
@@ -78,8 +158,8 @@ values that explain it. Frames that only propagate an error do not log it
 again, and subsequent calls return the stored error. Worker cancellation and
 normal shutdown use `debug`. A planning failure before the first file is
 published is recoverable; the same failure after partial publication is
-terminal. The direct backend validates source sizes before publication,
-while the buffered backend checks them in its workers.
+terminal. The direct backend validates source sizes and parts before
+publication, while the buffered backend checks them in its workers.
 
 Loader-specific errors use these shared names:
 
@@ -88,6 +168,8 @@ Loader-specific errors use these shared names:
 | `InvalidOptions` | Invalid profile, parallelism, or alignment |
 | `UnsupportedPlatform` | Unsupported host-memory target or device configuration |
 | `SourceSizeMismatch` | Source bytes differ from the destination shape in either backend |
+| `InvalidLayout` | A composite binding's parts do not fit its tensor |
+| `UnsupportedLayout` | A composite layout this loader does not assemble yet |
 | `InvalidTensorRange` | A source range cannot be represented |
 | `Internal` | A planning or transfer bookkeeping invariant failed |
 | `Closed` | An internal pool or scheduler has shut down |
@@ -124,10 +206,14 @@ builds because the Zig test runner counts logged errors as failures.
 | `zml/io/dma_calibration.zig` | Representative-device measurement and DMA block selection |
 | `zml/io/host_memory.zig` | Internal host arenas, block leases and placement |
 | `zml/io/log.zig` | The loader's log scopes: one log per failure, `err` demoted in test builds |
+| `zml/io/testing.zig` | Test support: device counts, safetensors files, per-shard read-back |
 | `zml/mem.zig` | Generic buffer conversion and public host-memory placement policy |
 
-The shared front end resolves sources and shardings once. Each `LoadSpec`
-contains a source, target shape, resolved sharding, and caller-owned output.
+The shared front end resolves sources and placements once, from each tensor's
+shape (or the executable's input shapes). Each `LoadSpec` is one destination:
+the target shape with its placement, the destination memory kind, the
+caller-owned output, and the parts that fill it, one whole source for a plain
+tensor.
 Backends consume those specs without knowing about model traversal or
 executable bindings.
 
@@ -139,7 +225,8 @@ The `Scheduler` publishes and claims those jobs in submission/file order.
 Workers read them, and per-device pumps submit the preplanned transfer pieces.
 
 One block may feed several outputs or devices. Its lease stays alive until
-every consuming transfer completes or is abandoned. A batch owns its plans
+every consuming transfer completes or is abandoned. A fill job's one block is
+the zero block, which nothing leases or releases. A batch owns its plans
 and callback contexts until every job completes. The last-transfer flag goes
 on the submission that completes a destination's byte count, allowing reads
 and DMA to complete out of source order. Failure retires unclaimed work and
@@ -170,9 +257,10 @@ backend caps its pinned arenas at a fixed 16 GiB, a safety guard rather than
 an allocation target; callers never supply a workspace, a budget, a NUMA
 policy or a calibration result. Page-backed arenas automatically interleave across the
 host's memory-bearing NUMA nodes when more than one is discoverable.
-`Loader.calibration()` reports the sizing selected during initialization, or
-null for buffered loading. There is no separate public benchmark or
-recalibration operation.
+The direct backend keeps the sizing selected during initialization
+(`loader.backend.direct.calibration`, which the `examples/io` `dma-bench`
+command prints); buffered loading has none. There is no separate public
+benchmark or recalibration operation.
 
 CPU uses default transfer sizing without measurement. Buffered backends skip
 calibration. CUDA and oneAPI register host pages with PJRT; ROCm obtains pinned

@@ -227,7 +227,7 @@ defer results.deinit(allocator);
 args.set(.{ layer_buffers, input_buffer });
 
 // call our executable 
-executable.call(args, &results);
+executable.call(io, args, &results, .{});
 
 // Retrieve the resulting buffer
 var result = results.get(zml.Buffer);
@@ -246,6 +246,15 @@ std.debug.print(
 Note that the result of a computation is usually residing in the memory of the
 computation device, so with `.toSliceAlloc()` we bring it back to CPU memory in
 the form of a `Slice`. After that, we can print it.
+
+`call(io, args, &results, .{})` enqueues execution and returns immediately. Use
+`call(io, args, &results, .{ .wait = true })` to wait for execution to finish before returning.
+Here, `toSliceAlloc()` waits for the result before reading it.
+
+Raw calls leave input buffer handles owned by the caller, including inputs donated
+with `reuseBuffer()`. Deinit their original handles after calling. Runners and
+`eval` destroy donated input handles automatically. With runners, use output
+destinations pointing to those buffers to replace them with the returned outputs.
 
 And that's it! Now, let's have a look at building and actually running this
 example!
@@ -385,7 +394,7 @@ pub fn main(init: std.process.Init) !void {
     args.set(.{ layer_buffers, input_buffer });
 
     // call our executable
-    executable.call(args, &results);
+    executable.call(io, args, &results, .{});
 
     // Retrieve the resulting buffer
     var result = results.get(zml.Buffer);

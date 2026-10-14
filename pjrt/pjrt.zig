@@ -31,18 +31,18 @@ pub const meta = struct {
     }
 
     pub fn Struct(comptime T: type) type {
-        const fields = std.meta.fields(T);
-        var names: [fields.len][]const u8 = undefined;
-        var types: [fields.len]type = undefined;
-        var attributes: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
-        for (fields, &names, &types, &attributes) |field, *name, *type_, *attr| {
-            name.* = field.name;
-            type_.* = field.type;
+        const info = @typeInfo(T).@"struct";
+        var names: [info.field_names.len][]const u8 = undefined;
+        var types: [info.field_names.len]type = undefined;
+        var attributes: [info.field_names.len]std.builtin.Type.Struct.FieldAttributes = undefined;
+        for (info.field_names, info.field_types, &names, &types, &attributes) |field_name, Field, *name, *type_, *attr| {
+            name.* = field_name;
+            type_.* = Field;
             attr.* = .{
-                .default_value_ptr = @ptrCast(if (std.mem.eql(u8, field.name, "struct_size"))
+                .default_value_ptr = @ptrCast(if (std.mem.eql(u8, field_name, "struct_size"))
                     &structSize(T)
                 else
-                    &std.mem.zeroes(field.type)),
+                    &std.mem.zeroes(Field)),
             };
         }
         return @Struct(
@@ -153,7 +153,7 @@ pub const Api = struct {
         const fti = @typeInfo(@FieldType(c.PJRT_Api, @tagName(func)));
         const fn_ptr = @typeInfo(fti.optional.child);
         const fn_type_info = @typeInfo(fn_ptr.pointer.child);
-        const arg_array_type_info = @typeInfo(fn_type_info.@"fn".params[0].type.?);
+        const arg_array_type_info = @typeInfo(fn_type_info.@"fn".param_types[0].?);
         return arg_array_type_info.pointer.child;
     }
 
@@ -194,7 +194,6 @@ pub const Api = struct {
             layouts = c.PJRT_Extension_Type_Layouts,
             ffi = c.PJRT_Extension_Type_FFI,
             memory_descriptions = c.PJRT_Extension_Type_MemoryDescriptions,
-            triton = c.PJRT_Extension_Type_Triton,
             raw_buffer = c.PJRT_Extension_Type_RawBuffer,
             phase_compile = c.PJRT_Extension_Type_PhaseCompile,
             unknown = c.PJRT_Extension_Type_Unknown,
@@ -207,7 +206,6 @@ pub const Api = struct {
             layouts: *const c.PJRT_Layouts_Extension,
             ffi: *const c.PJRT_FFI_Extension,
             memory_descriptions: *const c.PJRT_MemoryDescriptions_Extension,
-            triton: *const c.PJRT_Triton_Extension,
             raw_buffer: *const c.PJRT_RawBuffer_Extension,
             phase_compile: *const c.PJRT_PhaseCompile_Extension,
             unknown: *const c.PJRT_Extension_Base,
@@ -257,7 +255,7 @@ pub const Api = struct {
     pub fn stablehloCurrentVersion(self: *const Api) ?[]const u8 {
         const state = struct {
             var buf: [32]u8 = undefined;
-            var str: ?[:0]const u8 = null;
+            var str: ?[]const u8 = null;
         };
         if (state.str) |str| {
             return str;
@@ -265,7 +263,7 @@ pub const Api = struct {
         if (self.pluginAttribute("stablehlo_current_version")) |nv| {
             switch (nv.value()) {
                 .int64list => |v| {
-                    state.str = std.fmt.bufPrintZ(&state.buf, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) catch unreachable;
+                    state.str = std.mem.print(&state.buf, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) catch unreachable;
                 },
                 else => unreachable,
             }
@@ -367,7 +365,7 @@ pub const Error = opaque {
         const ret = api.call(.PJRT_Error_GetCode, .{
             .@"error" = self.inner(),
         }) catch unreachable;
-        return @enumFromInt(ret.code);
+        return @fromBackingInt(@intCast(ret.code));
     }
 
     pub fn getMessage(self: *Error, api: *const Api) []const u8 {
@@ -392,7 +390,7 @@ pub const ShapeSpec = extern struct {
             .inner = .{
                 .dims = @ptrCast(@constCast(dims_)),
                 .num_dims = dims_.len,
-                .element_type = @intFromEnum(bt),
+                .element_type = @backingInt(bt),
             },
         };
     }
@@ -402,7 +400,7 @@ pub const ShapeSpec = extern struct {
     }
 
     pub fn bufferType(self: ShapeSpec) BufferType {
-        return @enumFromInt(self.inner.element_type);
+        return @fromBackingInt(@intCast(self.inner.element_type));
     }
 };
 
@@ -496,13 +494,13 @@ pub const Client = opaque {
         const ret = try api.call(.PJRT_Client_BufferFromHostBuffer, .{
             .client = self.inner(),
             .data = @constCast(args.data),
-            .type = @intFromEnum(args.buffer_type),
+            .type = @backingInt(args.buffer_type),
             .dims = @ptrCast(@constCast(args.dims)),
             .num_dims = args.dims.len,
             .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs)) else null,
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .device_layout = @ptrCast(@constCast(&args.layout.toCStruct())),
-            .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
+            .host_buffer_semantics = @backingInt(args.host_buffer_semantics),
             .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
             .memory = if (args.dst == .memory) args.dst.memory.inner() else null,
         });
@@ -523,11 +521,14 @@ pub const Client = opaque {
     }
 
     pub const CreateViewOfDeviceBufferArgs = struct {
-        data: *anyopaque,
+        device_buffer_ptr: *anyopaque,
         dims: []const i64,
         element_type: BufferType,
         layout: MemoryLayout,
         device: ?*const Device = null,
+        /// The memory holding `device_buffer_ptr`. Takes precedence over `device`,
+        /// which designates its default memory.
+        memory: ?*const Memory = null,
         on_delete_callback: *const fn (device_buffer_ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.c) void = &struct {
             fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {}
         }.call,
@@ -539,15 +540,16 @@ pub const Client = opaque {
         const layout = args.layout.toCStruct();
         const ret = try api.call(.PJRT_Client_CreateViewOfDeviceBuffer, .{
             .client = self.inner(),
-            .device_buffer_ptr = @constCast(args.data),
+            .device_buffer_ptr = @constCast(args.device_buffer_ptr),
             .dims = args.dims.ptr,
             .num_dims = args.dims.len,
-            .element_type = @intFromEnum(args.element_type),
+            .element_type = @backingInt(args.element_type),
             .layout = @ptrCast(@constCast(&layout)),
             .device = @ptrCast(@constCast(args.device)),
             .on_delete_callback = args.on_delete_callback,
             .on_delete_callback_arg = args.on_delete_callback_arg,
             .stream = @bitCast(@intFromPtr(args.stream)),
+            .memory = if (args.memory) |memory| memory.inner() else null,
         });
         return @ptrCast(ret.buffer.?);
     }
@@ -607,7 +609,7 @@ pub const Client = opaque {
             .struct_size = c.PJRT_Layouts_PJRT_Client_GetDefaultLayout_Args_STRUCT_SIZE,
             .extension_start = null,
             .client = self.inner(),
-            .type = @intFromEnum(element_type),
+            .type = @backingInt(element_type),
             .dims = dims.ptr,
             .num_dims = dims.len,
             .layout = null,
@@ -668,7 +670,7 @@ pub const Client = opaque {
             .client = self.inner(),
             .shape_dims = args.dims.ptr,
             .shape_num_dims = args.dims.len,
-            .shape_element_type = @intFromEnum(args.element_type),
+            .shape_element_type = @backingInt(args.element_type),
             .shape_layout = @ptrCast(&layout),
             .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
             .memory = if (args.dst == .memory) args.dst.memory.inner() else null,
@@ -689,38 +691,36 @@ pub const Device = opaque {
             self.deleter(self.state);
         }
 
+        /// String and list values remain valid until this owner is deinitialized.
         pub fn get(self: Attributes, name: []const u8) ?NamedValue.Value {
             for (self.values) |attribute| {
-                if (std.mem.eql(u8, attribute.name(), name))
-                    return attribute.value();
+                if (std.mem.eql(u8, attribute.name(), name)) return attribute.value();
             }
             return null;
         }
     };
+
+    pub fn attributes(self: *const Device, api: *const Api) ApiError!Attributes {
+        const ret = try api.call(.PJRT_Device_GetAttributes, .{ .device = self.inner() });
+
+        const deleter = ret.attributes_deleter.?;
+        errdefer deleter(ret.device_attributes);
+
+        const state = ret.device_attributes.?;
+        std.debug.assert((ret.attributes == null) == (ret.num_attributes == 0));
+
+        return .{
+            .values = if (ret.attributes == null) &.{} else @ptrCast(ret.attributes[0..ret.num_attributes]),
+            .state = state,
+            .deleter = deleter,
+        };
+    }
 
     pub fn getDescription(self: *const Device, api: *const Api) *const DeviceDescription {
         const ret = api.call(.PJRT_Device_GetDescription, .{
             .device = self.inner(),
         }) catch unreachable;
         return @ptrCast(ret.device_description.?);
-    }
-
-    /// Returns runtime device attributes. The values remain valid until the
-    /// returned owner is deinitialized.
-    pub fn attributes(self: *const Device, api: *const Api) ApiError!Attributes {
-        const ret = try api.call(.PJRT_Device_GetAttributes, .{
-            .device = self.inner(),
-        });
-        const state = ret.device_attributes orelse return error.Internal;
-        const deleter = ret.attributes_deleter orelse return error.Internal;
-        return .{
-            .values = if (ret.attributes == null)
-                &.{}
-            else
-                @ptrCast(ret.attributes[0..ret.num_attributes]),
-            .state = state,
-            .deleter = deleter,
-        };
     }
 
     pub fn isAddressable(self: *const Device, api: *const Api) bool {
@@ -808,7 +808,7 @@ pub const Device = opaque {
         const ret = try api.call(.PJRT_Device_MemoryStats, .{
             .device = self.inner(),
         });
-        return .fromCStruct(@bitCast(ret));
+        return .fromCStruct(ret);
     }
 };
 
@@ -1107,6 +1107,35 @@ pub const MemoryLayout = union(MemoryLayoutType) {
             },
         };
     }
+
+    fn fromCStruct(self: c.PJRT_Buffer_MemoryLayout) MemoryLayout {
+        return switch (self.type) {
+            c.PJRT_Buffer_MemoryLayout_Type_Tiled => b: {
+                const tiled = self.unnamed_0.tiled;
+
+                const minor_to_major: []const i64 = if (tiled.minor_to_major == null) &.{} else tiled.minor_to_major[0..tiled.minor_to_major_size];
+                const tile_dims_sizes: []const usize = if (tiled.tile_dim_sizes == null) &.{} else tiled.tile_dim_sizes[0..tiled.num_tiles];
+
+                const tile_dims: []const i64 = if (tiled.tile_dims == null) &.{} else td: {
+                    var tile_dim_len: usize = 0;
+                    for (tile_dims_sizes) |size| tile_dim_len += size;
+                    break :td tiled.tile_dims[0..tile_dim_len];
+                };
+
+                break :b .{
+                    .tiled = .{
+                        .minor_to_major = minor_to_major,
+                        .tile_dims = tile_dims,
+                        .tile_dims_sizes = tile_dims_sizes,
+                    },
+                };
+            },
+            c.PJRT_Buffer_MemoryLayout_Type_Strides => .{
+                .strides = .{ .byte_strides = self.unnamed_0.strides.byte_strides[0..self.unnamed_0.strides.num_byte_strides] },
+            },
+            else => unreachable,
+        };
+    }
 };
 
 pub const DefaultMemoryLayout = struct {
@@ -1258,7 +1287,7 @@ pub const Buffer = opaque {
         const ret = api.call(.PJRT_Buffer_ElementType, .{
             .buffer = self.inner(),
         }) catch unreachable;
-        return @enumFromInt(ret.type);
+        return @fromBackingInt(@intCast(ret.type));
     }
 
     pub fn dimensions(self: *const Buffer, api: *const Api) []const i64 {
@@ -1346,6 +1375,11 @@ pub const Buffer = opaque {
             .buffer = self.inner(),
         });
     }
+
+    pub fn memoryLayout(self: *const Buffer, api: *const Api) ApiError!MemoryLayout {
+        const ret = try api.call(.PJRT_Buffer_GetMemoryLayout, .{ .buffer = self.inner() });
+        return .fromCStruct(ret.layout);
+    }
 };
 
 pub const Event = opaque {
@@ -1374,7 +1408,8 @@ pub const Event = opaque {
 
     pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
         if (self.isReady(api)) {
-            return;
+            const err = self.getEventError(api) orelse return;
+            return interpretPjrtError(api, err, "PJRT_Event_Await");
         }
 
         const Ctx = struct {
@@ -1586,7 +1621,7 @@ pub const NamedValue = extern struct {
     };
 
     pub fn kind(self: NamedValue) Kind {
-        return @enumFromInt(self.inner.type);
+        return @fromBackingInt(@intCast(self.inner.type));
     }
 
     pub fn name(self: NamedValue) []const u8 {
@@ -1603,14 +1638,14 @@ pub const NamedValue = extern struct {
         };
     }
 
-    pub fn init(comptime kind_: Kind, name_: []const u8, value_: std.meta.fieldInfo(Value, kind_).type) NamedValue {
+    pub fn init(comptime kind_: Kind, name_: []const u8, value_: @FieldType(Value, @tagName(kind_))) NamedValue {
         return .{
             .inner = .{
                 .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
                 .extension_start = null,
                 .name = @ptrCast(name_),
                 .name_size = name_.len,
-                .type = @intFromEnum(kind_),
+                .type = @backingInt(kind_),
                 .unnamed_0 = switch (kind_) {
                     .string => .{ .string_value = @ptrCast(@constCast(value_)) },
                     .int64 => .{ .int64_value = value_ },

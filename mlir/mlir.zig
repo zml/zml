@@ -9,6 +9,39 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+test "variadic operation groups preserve order and dense array segment sizes" {
+    const ctx = try Context.init(.{});
+    defer ctx.deinit();
+    ctx.setAllowUnregisteredDialects(true);
+    const loc = Location.unknown(ctx);
+    const i32_type = Type.int(ctx, .i32);
+    const i64_type = Type.int(ctx, .i64);
+    const block = Block.init(&.{ i32_type, i64_type, i32_type }, &.{ loc, loc, loc });
+    defer block.deinit();
+    const op = Operation.make(ctx, "test.segmented", .{
+        .operands = .{ .variadic = &.{
+            &.{block.argument(0)},
+            &.{},
+            &.{ block.argument(1), block.argument(2) },
+        } },
+        .results = .{ .variadic = &.{
+            &.{},
+            &.{ i64_type, i32_type },
+            &.{i64_type},
+        } },
+        .location = loc,
+    });
+    defer op.deinit();
+    try std.testing.expectEqual(@as(usize, 3), op.numOperands());
+    for (0..3) |i| try std.testing.expect(op.operand(i).eql(block.argument(i)));
+    try std.testing.expectEqual(@as(usize, 3), op.numResults());
+    try std.testing.expect(op.result(0).type_().eql(i64_type));
+    try std.testing.expect(op.result(1).type_().eql(i32_type));
+    try std.testing.expect(op.result(2).type_().eql(i64_type));
+    try std.testing.expect(op.attributeByName("operandSegmentSizes").?.eql(.denseArray(ctx, .i32, &.{ 1, 0, 2 })));
+    try std.testing.expect(op.attributeByName("resultSegmentSizes").?.eql(.denseArray(ctx, .i32, &.{ 0, 2, 1 })));
+}
+
 pub const Error = error{
     /// Invalid Mlir was created.
     InvalidMlir,
@@ -55,16 +88,16 @@ pub fn registerFuncExtensions(registry: *DialectRegistry) void {
 }
 
 fn isPtrConst(comptime T: type) bool {
-    return @typeInfo(T).pointer.is_const;
+    return @typeInfo(T).pointer.attrs.@"const";
 }
 
 fn CastedPtr(comptime T1: type, comptime T2: type) type {
-    return if (@typeInfo(T1).pointer.is_const) *const T2 else *T2;
+    return if (@typeInfo(T1).pointer.attrs.@"const") *const T2 else *T2;
 }
 
 pub fn Methods(comptime T: type, comptime NativeT: type) type {
     return struct {
-        pub const IsPtrConst = @typeInfo(@typeInfo(@FieldType(NativeT, "ptr")).optional.child).pointer.is_const;
+        pub const IsPtrConst = @typeInfo(@typeInfo(@FieldType(NativeT, "ptr")).optional.child).pointer.attrs.@"const";
         pub const Ptr = if (IsPtrConst) *const T else *T;
 
         pub fn ptr(self: anytype) NativeT {
@@ -315,7 +348,7 @@ pub const Location = opaque {
 
     pub fn namedFmt(loc: *const Location, ctx: *Context, comptime fmt: []const u8, args: anytype) *const Location {
         var buf: [256]u8 = undefined;
-        return loc.named(loc, ctx, std.fmt.bufPrint(&buf, fmt, args) catch blk: {
+        return loc.named(ctx, std.fmt.bufPrint(&buf, fmt, args) catch blk: {
             buf[buf.len - 3 ..].* = "...".*;
             break :blk &buf;
         });
@@ -328,6 +361,77 @@ pub const Location = opaque {
     pub fn unknown(ctx: *Context) *const Location {
         return @ptrCast(c.mlirLocationUnknownGet(ctx.ptr()).ptr);
     }
+
+    pub const Tagged = union(enum) {
+        unknown,
+        named: *const Named,
+        callsite: *const Callsite,
+        file_line_col: *const FileLineCol,
+        fused: *const Fused,
+    };
+
+    pub fn inspect(location: *const Location) Tagged {
+        const loc_ptr = location.ptr();
+        return if (c.mlirLocationIsAUnknown(loc_ptr))
+            .unknown
+        else if (c.mlirLocationIsAName(loc_ptr))
+            .{ .named = @ptrCast(location) }
+        else if (c.mlirLocationIsACallSite(loc_ptr))
+            .{ .callsite = @ptrCast(location) }
+        else if (c.mlirLocationIsAFileLineColRange(loc_ptr))
+            .{ .file_line_col = @ptrCast(location) }
+        else if (c.mlirLocationIsAFused(loc_ptr))
+            .{ .fused = @ptrCast(location) }
+        else
+            // Theoritically the C++ API has "OpaqueLoc" but it's not part of C bindings,
+            // I think in this case it's fine to fall back to .unknown
+            // https://mlir.llvm.org/docs/Dialects/Builtin/#opaqueloc
+            .unknown;
+    }
+
+    pub const Named = opaque {
+        pub fn name(location: *const Named) []const u8 {
+            const identifier: *const Identifier = @ptrCast(c.mlirLocationNameGetName(.{ .ptr = location }).ptr);
+            return identifier.str();
+        }
+
+        pub fn childLoc(location: *const Named) *const Location {
+            return @ptrCast(c.mlirLocationNameGetChildLoc(.{ .ptr = location }).ptr);
+        }
+    };
+
+    pub const Callsite = opaque {
+        pub fn callee(location: *const Callsite) *const Location {
+            return @ptrCast(c.mlirLocationCallSiteGetCallee(.{ .ptr = location }).ptr);
+        }
+
+        pub fn caller(location: *const Callsite) *const Location {
+            return @ptrCast(c.mlirLocationCallSiteGetCaller(.{ .ptr = location }).ptr);
+        }
+    };
+
+    pub const FileLineCol = opaque {
+        pub fn src(location: *const FileLineCol) *const std.builtin.SourceLocation {
+            const file_id: *const Identifier = @ptrCast(c.mlirLocationFileLineColRangeGetFilename(.{ .ptr = location }).ptr);
+            return .{
+                .file = file_id.str(),
+                .line = @truncate(c.mlirLocationFileLineColRangeGetStartLine(.{ .ptr = location })),
+                .column = @truncate(c.mlirLocationFileLineColRangeGetStartColumn(.{ .ptr = location })),
+            };
+        }
+    };
+
+    pub const Fused = opaque {
+        pub fn len(location: *const Fused) u32 {
+            return @intCast(c.mlirLocationFusedGetNumLocations(.{ .ptr = location }));
+        }
+
+        pub fn locations(location: *const Fused, allocator: std.mem.Allocator) error{OutOfMemory}![]*const Location {
+            const result = try allocator.alloc(*const Location, location.len());
+            c.mlirLocationFusedGetLocations(.{ .ptr = location }, @ptrCast(result.ptr));
+            return result;
+        }
+    };
 };
 
 pub const Type = opaque {
@@ -1271,7 +1375,7 @@ pub const Operation = opaque {
         attributes: ?[]const NamedAttribute = null,
         blocks: ?[]const *Block = null,
         verify: bool = true,
-        location: ?*const Location = null,
+        location: ?*const Location,
     };
 
     pub fn try_make(ctx: *Context, name_: []const u8, args: MakeArgs) !*Operation {
@@ -1288,7 +1392,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_operands.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "operandSegmentSizes", .denseElements(RankedTensorType.get(&.{@intCast(sizes.len)}, .int(ctx, .i32), null).shaped(), sizes.constSlice())),
+                    .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, sizes.constSlice())),
                 });
             },
         };
@@ -1301,7 +1405,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_results.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "resultSegmentSizes", .denseElements(RankedTensorType.get(&.{@intCast(sizes.len)}, .int(ctx, .i32), null).shaped(), sizes.constSlice())),
+                    .named(ctx, "resultSegmentSizes", .denseArray(ctx, .i32, sizes.constSlice())),
                 });
             },
         };
@@ -1363,11 +1467,11 @@ pub const Operation = opaque {
             (struct {
                 pub fn callback(op: c.MlirOperation, ctx_: ?*anyopaque) callconv(.c) c.MlirWalkResult {
                     const inner_ctx_: *ContextType = @ptrCast(@alignCast(ctx_));
-                    return @intFromEnum(walkfn(inner_ctx_.ctx, @ptrCast(op.ptr)));
+                    return @backingInt(walkfn(inner_ctx_.ctx, @ptrCast(op.ptr)));
                 }
             }).callback,
             &inner_ctx,
-            @intFromEnum(order),
+            @backingInt(order),
         );
     }
 

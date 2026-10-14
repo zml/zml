@@ -5,7 +5,7 @@ load("@zml//platforms/cuda:cuda.bzl", "CUDA_COMPAT_FILES")
 
 patchelf(
     name = "libzml_cuda_so",
-    src = "libzml_cuda.so",
+    src = "lib/libzml_cuda.so",
     add_needed = [
         "libzmlxcuda.so.0",
     ],
@@ -18,6 +18,7 @@ patchelf(
 copy_to_directory(
     name = "sandbox",
     srcs = [
+        "lib/cutlass_ir.so",
         ":libzml_cuda_so",
         "@zml//platforms/cuda:compat_probe",
         "@zml//platforms/cuda:zmlxcuda",
@@ -38,6 +39,7 @@ copy_to_directory(
             "@libnvjitlink_linux_x86_64//:libnvjitlink",
             "@libnvshmem_linux_x86_64//:libnvshmem",
             "@libnvvm_linux_x86_64//:libnvvm",
+            "@llvm-libunwind1_linux_amd64//:libunwind",
             "@nccl_linux_amd64//:nccl",
             "@zlib1g_linux_amd64//:zlib1g",
         ],
@@ -57,6 +59,7 @@ copy_to_directory(
             "@libnvjitlink_linux_sbsa//:libnvjitlink",
             "@libnvshmem_linux_sbsa//:libnvshmem",
             "@libnvvm_linux_sbsa//:libnvvm",
+            "@llvm-libunwind1_linux_arm64//:libunwind",
             "@nccl_linux_arm64//:nccl",
             "@zlib1g_linux_arm64//:zlib1g",
         ],
@@ -70,6 +73,8 @@ copy_to_directory(
         "libzml_cuda_so": "lib",
         "lib/x86_64-linux-gnu": "lib",
         "lib/aarch64-linux-gnu": "lib",
+        "usr/lib/x86_64-linux-gnu": "lib",
+        "usr/lib/aarch64-linux-gnu": "lib",
         "platforms/cuda/compat_probe": "bin/compat_probe",
         "platforms/cuda/libzmlxcuda": "lib/libzmlxcuda",
     } | {

@@ -190,22 +190,27 @@ pub fn main(init: std.process.Init) !void {
             try stdout_writer.flush();
         },
         .load => {
-            const ShardingType = enum { replicated, sharded };
+            const MeshType = enum { replicated, sharded };
 
-            const sharding_type: ShardingType = std.meta.stringToEnum(ShardingType, it.next() orelse "sharded") orelse return error.InvalidShardingKind;
+            const mesh_type: MeshType = std.meta.stringToEnum(MeshType, it.next() orelse "sharded") orelse return error.InvalidMesheKind;
 
             // A platform setting, not a loader knob: a smaller pool lets a
             // run observe the loader's admission on a device with room.
-            const memory_fraction: f32 = if (init.environ_map.get("ZML_GPU_MEMORY_FRACTION")) |text|
-                std.fmt.parseFloat(f32, text) catch {
+            // Unset keeps the platform's allocator defaults (VMM on CUDA and
+            // ROCm); set, every XLA GPU target gets a preallocated BFC pool of
+            // that fraction, whose `bytes_limit` admission measures against.
+            var platform_options: zml.platform.CreateOptions = .{};
+            if (init.environ_map.get("ZML_GPU_MEMORY_FRACTION")) |text| {
+                const memory_fraction = std.fmt.parseFloat(f32, text) catch {
                     log.err("ZML_GPU_MEMORY_FRACTION must be a number", .{});
                     return error.InvalidArgument;
-                }
-            else
-                0.90;
-            const platform: *zml.Platform = try .auto(allocator, io, .{
-                .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = memory_fraction } } },
-            });
+                };
+                const pool: zml.platform.CreateOptions.XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = memory_fraction } } };
+                platform_options.cuda = pool;
+                platform_options.rocm = pool;
+                platform_options.oneapi = pool;
+            }
+            const platform: *zml.Platform = try .auto(allocator, io, platform_options);
             defer platform.deinit(allocator, io);
 
             const load_dma_block_sizes = try envMibList(
@@ -217,13 +222,14 @@ pub fn main(init: std.process.Init) !void {
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();
 
-            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
-            defer store.deinit();
-
-            const sharded_sharding: zml.Sharding = try platform.registerSharding(
-                "playground_model",
+            const tensor_parallel: *const zml.Mesh = try platform.registerMesh(
+                "tp",
                 .mesh(.{ .model = .high_bandwidth }),
             );
+            const tp_partitioning: zml.Sharding.Partitioning = .init(&.{.sharded(@intCast(tensor_parallel.resolveLogicalAxis("model").?))});
+
+            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{tensor_parallel});
+            defer store.deinit();
 
             // Expert-pack instrument: N bindings of W same-shape rank-2 tensors,
             // each loaded through `loadExecute` with a stack executable.
@@ -235,7 +241,7 @@ pub fn main(init: std.process.Init) !void {
                 .max_elements = try envUsize(init.environ_map, "ZML_LOAD_PACK_MAX_ELEMENTS", std.math.maxInt(i32)),
             };
             if (pack_options.width == 0) return error.InvalidArgument;
-            const pack_plan = try planPacks(init.arena.allocator(), allocator, io, platform, &registry, &store, sharded_sharding, pack_options);
+            const pack_plan = try planPacks(init.arena.allocator(), allocator, io, platform, &registry, &store, pack_options);
             defer for (pack_plan.exes) |*exe| exe.deinit();
             if (pack_options.packs > 0) {
                 log.info("pack plan: packs={d} requested={d} width={d} pairs={d} executables={d} bytes={Bi:.2}", .{
@@ -257,18 +263,26 @@ pub fn main(init: std.process.Init) !void {
             const tensors = try allocator.alloc(zml.Tensor, tensor_count);
             defer allocator.free(tensors);
 
+            // `ZML_LOAD_MEMORY=host_pinned` binds every tensor into host
+            // pinned memory instead of device memory.
+            const load_memory = std.meta.stringToEnum(zml.Memory.Kind, init.environ_map.get("ZML_LOAD_MEMORY") orelse "default") orelse {
+                log.err("ZML_LOAD_MEMORY must be default, host_pinned, host_unpinned or device", .{});
+                return error.InvalidArgument;
+            };
+
             var registry_it = registry.iterator();
             var registry_index: usize = 0;
             var load_count: usize = 0;
             while (registry_it.next()) |entry| : (registry_index += 1) {
                 if (pack_plan.packed_mask[registry_index]) continue;
-                tensors[load_count] = switch (sharding_type) {
-                    .replicated => store.view().createTensor(entry.key_ptr.*, null, .replicated),
+                tensors[load_count] = switch (mesh_type) {
+                    .replicated => store.view().createReplicatedTensor(entry.key_ptr.*, null),
                     .sharded => if (entry.value_ptr.shape.rank() > 0)
-                        store.view().createTensor(entry.key_ptr.*, null, .{ ._0 = .model })
+                        store.view().createTensor(entry.key_ptr.*, null, .tp, tp_partitioning)
                     else
-                        store.view().createTensor(entry.key_ptr.*, null, .replicated),
+                        store.view().createReplicatedTensor(entry.key_ptr.*, null),
                 };
+                if (load_memory != .default) store.view().setMemory(tensors[load_count], load_memory);
                 load_count += 1;
             }
 
@@ -279,7 +293,6 @@ pub fn main(init: std.process.Init) !void {
                 .estimated_total_items = store.view().count(),
                 .disable_printing = true,
             });
-
             defer progress.end();
 
             try platform.warmupDeviceAllocators(io);
@@ -343,7 +356,7 @@ pub fn main(init: std.process.Init) !void {
                     try loader.loadExecute(&store, bindings[0..count], &progress);
                     next_pack += count;
                 }
-                try loader.load(AllTensorsModel, &model, &loaded, &store, &.{sharded_sharding}, &progress);
+                try loader.load(AllTensorsModel, &model, &loaded, &store, &progress);
                 try loader.awaitAll();
                 packs_loaded = pack_plan.packs.len;
                 total_bytes = loader.bytesLoaded();
@@ -412,7 +425,6 @@ fn planPacks(
     platform: *const zml.Platform,
     registry: *const zml.safetensors.TensorRegistry,
     store: *zml.io.TensorStore,
-    sharding: zml.Sharding,
     options: PackOptions,
 ) !PackPlan {
     const keys = registry.tensors.keys();
@@ -483,14 +495,13 @@ fn planPacks(
             class.members.clearRetainingCapacity();
             packed_count += options.width;
 
-            const shape = packShape(entry.shape, options.width);
+            const shape = packShape(platform, entry.shape, options.width);
             const tensor = store.view().maybeCreateBinding(source_keys, shape) orelse return error.MissingPackSource;
             if (class.exe_index == null) {
                 const inputs = try allocator.alloc(zml.Tensor, options.width);
                 defer allocator.free(inputs);
                 for (inputs) |*input| input.* = .fromShape(entry.shape);
                 try exes.append(arena, try platform.compileFn(allocator, io, stackPack, .{inputs}, .{
-                    .shardings = &.{sharding},
                     .program_name = "playground_pack",
                 }));
                 class.exe_index = exes.items.len - 1;
@@ -510,19 +521,20 @@ fn planPacks(
     };
 }
 
-/// Pack output shape: a leading `expert` axis, fully replicated so that the
+/// Pack output shape: a leading `expert` axis, fully replicated on the
+/// platform's replicated mesh, the mesh `stackPack` names, so that the
 /// loader's expected output placement equals the executable's.
-fn packShape(source: zml.Shape, width: usize) zml.Shape {
+fn packShape(platform: *const zml.Platform, source: zml.Shape, width: usize) zml.Shape {
     return source
         .insert(0, .{ .expert = width })
         .withTags(.{ .expert, .rows, .cols })
-        .withReplicatedPartitioning();
+        .withPartitioning(platform.replicated_mesh, .{ .expert = .replicated, .rows = .replicated, .cols = .replicated });
 }
 
 fn stackPack(inputs: []const zml.Tensor) zml.Tensor {
     return zml.Tensor.stack(inputs, 0, .expert)
         .withTags(.{ .expert, .rows, .cols })
-        .withPartitioning(.{ .expert = .replicated, .rows = .replicated, .cols = .replicated });
+        .withPartitioning(.replicated, .{ .expert = .replicated, .rows = .replicated, .cols = .replicated });
 }
 
 /// Reads the first, middle and last pack back to host and compares each
@@ -731,7 +743,7 @@ fn printTree(io: std.Io, writer: *std.Io.Writer, dir: std.Io.Dir, prefix: []cons
         const extension = if (is_last) "    " else "│   ";
 
         const size: u64 = switch (entry.kind) {
-            .file => blk: {
+            .file, .sym_link => blk: {
                 const stat = try dir.statFile(io, entry.name, .{});
                 break :blk stat.size;
             },

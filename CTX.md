@@ -13,6 +13,9 @@ design" records the target, the evidence gathered, and the day's baselines.
 `origin/master` was `e1e983c8` during the 2026-09-02 audit; never assume that
 ref is still current.
 
+2026-10-14: merged with zml/monorepo master; see "Twentieth pass" for the
+merge policy, the API changes it forced and the B70 re-validation.
+
 The tenth-pass review below updates the module/API map and ownership fixes.
 Earlier snapshots and measurements retain their historical names. The current
 reader-facing design is in `docs/learn/loader.md`.
@@ -125,8 +128,9 @@ Zig formatting, Buildifier, and `git diff --check` passed.
   (`mem.DmaWorkspace.isSupported`; CPU arenas are plain pages, see "Ninth
   pass") and the buffered path for TPU, neuron and metal. A loader owns its
   worker pool and every submission it published, kept in a FIFO until
-  retired. `load(Model, model, buffers, store, shardings, progress)` submits
-  all single-source tensors of a model; `loadExecute(store, bindings,
+  retired. `load(Model, model, buffers, store, progress)` submits all
+  single-source tensors of a model (no `shardings` argument since the
+  2026-10-14 master merge: placement comes from each tensor's shape); `loadExecute(store, bindings,
   progress)` submits the sources of one or more `Binding{tensor, output,
   exe}` as ONE planned submission so adjacent sources of different bindings
   coalesce; both return `!void` (fourteenth pass; before it every submission
@@ -4198,7 +4202,479 @@ With the async allocation model: 0.85 + 3.8 + 0.25 = 4.9 s.
 Not worth doing (measured): more H2D streams, a larger piece cap, a
 dedicated H2D callback thread, wider reads.
 
+## Twentieth pass: merge with master (2026-10-14)
+
+Both checkouts are jj merges of `brabier/adaptive-concurrency` with
+`master`, resolved in the working-copy commit:
+
+| repo | branch | master | base | conflicted files |
+| --- | --- | --- | --- | --- |
+| zml | `553690e8` | `fe25f16b` (#935) | `550f2bbe` | 21 (+30 files changed on both sides) |
+| monorepo | `6011a514` | `c40c5b92` (zig 0.17, #646) | `3c6f9944` | 8 |
+
+Master moved ~100 commits in zml (zig 0.17 #923, sharding in the tensor's
+shape #868, loader memory kinds #815, Exe eval/Runner #896/#897, Buffer
+`HostAccessible` #899 and `PjrtBufferMetadata` #935, furiosa #871, device NUMA
+node #891, `Platform.io_impl` #841, hf snapshots #872) and ~90 in llmd.
+
+### Merge policy (what wins where)
+
+- Master's API wins outside the loader and the VFS: sharding/mesh model,
+  `Tensor`, `Exe`, `Buffer`, `Platform`, zig 0.17 idioms.
+- The branch's loader (`zml/io/*.zig`) and VFS architecture win. Master's
+  loader-facing features are ported into them, not dropped.
+- Merged public loader API: `Loader.init(allocator, io, platform, opts)`,
+  `load(Model, &model, &buffers, store, progress)`, `loadExecute(store,
+  bindings, progress)`, `awaitAll()`, `bytesLoaded()`. The `shardings`
+  argument of `load` is gone: placement comes from each tensor's shape
+  (`Sharding.Placement.init(shape)`; a null mesh means
+  `platform.replicated_mesh`), and `loadExecute` takes input/output placement
+  from `exe.input_shapes` / `exe.output_shapes`.
+- `TensorStore` is master's API (`fromRegistry(allocator, registry, meshes)`,
+  `createTensor(subkey, tags, mesh, partitioning)`, `createReplicatedTensor`,
+  `createHostPinnedTensor`, `Binding{tensors, transformed, memory}`) living
+  in the branch's `zml/io/TensorStore.zig`. Branch-only additions kept.
+- zig 0.17 removed `errdefer |err|`: the one log line that relied on it in
+  `direct_loader` sizing (BlockPool.init failure) is gone; the error still
+  propagates.
+
+### Notable resolutions, zml
+
+- `zml/io.zig` stays the branch's thin facade. Master's monolithic loader,
+  `MemoryWriter`, `ProgressWriter`, `DirectShardWriter` and
+  `mem.DmaAllocator`/`UninitializedBufferAllocator`/`DmaMapAllocator` are not
+  re-exported (no zml caller; monorepo callers were rewritten).
+- Master #815 host-pinned bindings are delivered by the branch loader into
+  `device.memory(.host_pinned)` (option "a": staged through the pinned block
+  pool and a PJRT transfer manager on that memory), excluded from HBM
+  admission and from submitted/allocated device bytes. Accepted on CPU
+  (master panicked); tpu/neuron/metal/furiosa return
+  `error.UnsupportedMemoryKind`. `loadExecute` inputs still land in
+  `.default`; the executable decides the output memory.
+- Master #894 (transfer-manager init error handling) and #896 (donated and
+  non-donated inputs freed once) are ported with their tests.
+- `vfs/file.zig` stays deleted (branch). Master's write support through the
+  VFS for local paths and the EINTR-safe `fcntl` helpers are ported into the
+  branch's local case; master's "copy a local file through the VFS" test
+  passes.
+- `platform.zig`: master's `numaNode() ?u32` replaces the branch's `?usize`
+  duplicate; `pjrt.Device.attributes()` is master's.
+- The branch's strictness is kept: a model tensor with no store binding is
+  `error.TensorNotFound` (master's loader skipped it silently).
+- Root `BUILD.bazel`: `//examples/io:playground` dropped (the branch renamed
+  the target to `//examples/io`). The root `bench_*.sh`/`profile_file.sh`
+  scripts still say `playground` (already stale on the branch).
+
+### Notable resolutions, monorepo
+
+- The five `*dflash*.zig` files master deleted stay deleted.
+- `llmd/main.zig`: master's file with `bff6c633` re-applied (early
+  `Loader.init` in `io.concurrent` with `vfs.loadProfile`, `registerBackend`,
+  no `VFS.File`), inside master's scoped loader block.
+- `llmd/weights.zig`: master's recipes win; `6011a514` re-applied (pack
+  programs compiled with `io.async` at discovery and awaited at first use;
+  packs submitted as grouped `loadExecute`s of up to 8 GiB of outputs). The
+  branch's per-member `replicated()` pin is dropped because master #566
+  already pins the stacked tensor replicated for the same all-to-all reason.
+- `aacae994` ("load only deepseek": stubbed deepseek41 bodies and
+  `if (true) return;` in main) is NOT in the merge. It was a measurement hack
+  for the eighteenth/nineteenth passes; re-create it as a separate commit if
+  those load-only measurements are repeated.
+- Master's engram path (`MemoryWriter(.host_pinned)` + zero padding on
+  `loader.group`) and #634's `streamConcatenatedRows` used old loader
+  internals. Stopgap: `weights.streamRowsToHostPinned`, one sequential CPU
+  reader per table straight into PJRT `pinned_host` buffers (row-sharded,
+  zero-padded, replicas memcpy'd), with `weights.markDelivered` poking
+  `loader.delivered` so `load` skips the table. Its bytes are not in
+  `bytesLoaded()`. Device-memory `concatenate_rows` (qwen4 without
+  `offload_ngram`) falls back to the `llmd_concatenate_rows` pack program
+  (replicated inputs): a regression against master #634 until the loader
+  supports multi-source destinations.
+- Superseded the same day by the twenty-first pass: the engram tables and
+  same-dtype row concatenation are loader-native composite destinations,
+  and the stopgap helpers are deleted.
+
+### Verification (2026-10-14, B70 host, CPU build unless noted)
+
+- zml: `bazel test //... --test_output=errors`: 26/26 targets
+  (`//zml:test` 300 passed, 12 GPU-only skips; `//vfs:test` 43; `//stdx:test`
+  28). `bazel build //zml:zml //examples/llm //examples/io
+  --//platforms:cuda=true --//platforms:rocm=true --//platforms:oneapi=true`
+  succeeds (comptime GPU paths type-check). `bazel build --nobuild //...`
+  analyses 231 targets.
+- monorepo: `bazel build --config=localzml //llmd/...` (16 non-manual
+  targets), `bazel test --config=localzml //llmd/...` 6/6, and
+  `//llmd:llmd --@zml//platforms:cuda=true` builds.
+
+### Review of the resolution (four lenses, each finding verified)
+
+Lenses: master changes preserved, branch changes preserved, loader-port
+semantics, monorepo. 9 findings, 6 distinct confirmed, all low severity,
+all fixed; 3 rejected (the VMM allocator does report `bytes_limit`, so
+admission stays on; `Device.attributes()` panicking on a null state is
+master's contract; the examples/io BFC-preallocation default change is
+deliberate):
+
+- `Buffer.Shard.toHost` (branch-added) leaked the PJRT event that master
+  #854 taught every other host copy to destroy.
+- `direct_loader` sizing: the zig 0.17 rewrite of `errdefer |err|` had
+  narrowed its log to the arena growth; a `BlockPool.init` failure is
+  logged again.
+- `loadExecute` compared the bound tensor's shape with the executable's
+  output by dims and dtype only. `validateOutputPlacement` now compares
+  device ids and per-device slices (not mesh pointers, so a null-mesh
+  replicated tensor matches an output on `replicated_mesh`); a mutation
+  check confirmed the new test fails without it.
+- The host-pinned loader test passed vacuously on CPU (every memory kind
+  resolves to one space); it now skips that comparison only where the two
+  kinds are the same PJRT memory.
+- monorepo: the stopgap's streamed bytes were missing from
+  `bytesLoaded()` (`addStreamedBytes`), and it now refuses targets whose
+  pinned buffers are not dense row-major.
+
+### Runtime check on the local 4x B70 (oneAPI), 2026-10-14
+
+| arm | branch tip `553690e8` | merged |
+| --- | --- | --- |
+| examples/io `load` Llama-3.1-8B sharded, batch elapsed | 0.676-0.678 s | 0.684-0.687 s |
+| same, replicated | 1.255-1.256 s | 1.263-1.279 s (1.251-1.254 at 8 MiB) |
+| `ZML_LOAD_CHECK=1` read-back | - | ok 291/291 |
+| DMA calibration pick | 8 MiB, 49.3 GiB/s | 2 MiB, 50.4 GiB/s |
+
+Interleaved, same host, warm cache. Plain loads are within ~1.2% of the
+branch and of the 0.636-0.676 s anchor; replicated is ~9% above the old
+1.147 s anchor in both trees (host drift). "Loaded weights" in examples/io
+includes `Loader.init` and its ~0.73 s calibration, so compare batch
+elapsed. The branch tip needed its scratch copy patched to load
+`libpjrt_oneapi.so` (its `oneapi.zig` asks for `libzml_oneapi.so`, which
+its packaging does not ship, and silently falls back to CPU); the merged
+tree loads the plugin.
+
+- Host-pinned delivery runs on Level Zero: with `--//platforms:oneapi=true`
+  `Platform.auto` picks oneAPI in tests, and every shard of the
+  host-pinned test lives in `pinned_host` memory, distinct from `device`,
+  on all four devices; the admission ledger counts only the device tensor.
+- A genuine merge bug, found only at run time: master's VFS routes
+  `file_write_streaming` through its handle table, whose index 0 was the
+  CWD, so `stdout()` (fd 1) resolved to the stdin entry and every write to
+  stdout went to fd 0 (`examples/llm` failed with `WriteFailed` whenever
+  stdin was not a tty). Fixed in `vfs/vfs.zig` (std streams at indices
+  0-2) with a test.
+- The direct_loader planner/scheduler/dispatch tests used `Platform.auto`
+  with a CPU option and broke on accelerator builds (they picked 4 B70s);
+  they now use `Platform.init(.cpu)`. Pre-existing on the branch.
+- `bazel test //zml:test --//platforms:oneapi=true` aborts in master's moe
+  "Triton compatibility matrix" test (Level Zero cannot create
+  `per_token_group_quant_fp8`); with it skipped, 301 pass, 11 skip.
+- llmd (master's oneAPI plugin `202610011939`) segfaults while compiling
+  Llama-3.1-8B: oneDNN `gemmstone::Generator<Core 8>::gemmAccessC` under
+  `xla::gpu::SyclGemmWorkspacePass` in `PJRT_Client_Compile`, on 1 or 4
+  GPUs, before any load. Not loader-related; the 2026-09 llmd run on this
+  host used the August plugin. `examples/llm` compiles and generates.
+- `examples/llm` Llama-3.1-8B on the merged tree loads in 21-22.5 s
+  against 7.5 s on the branch tip: both plan ~1.56M DMA pieces
+  (column-sharded weights), but per-piece latency is 3.4-3.7 ms against
+  1.2 ms. See the attribution below.
+- Leftover from the branch: `direct_loader.zig:164` logs
+  `TMP loader created_at raw_ns` at debug level.
+
+### Attribution: master's oneAPI plugin serializes piece completions
+
+`examples/llm` Llama-3.1-8B on four B70 (column-sharded weights, ~1.56M
+DMA pieces): code tree x oneAPI pins, three interleaved rounds each,
+Loaded weights / batch elapsed / `dma_piece_latency_ms`:
+
+| arm | runs |
+| --- | --- |
+| merged code + master pins | 20.6-21.9 s / 20.6-21.8 s / 3.33-3.53 |
+| merged code + branch pins | 7.4-7.6 s / 7.4-7.5 s / 1.18-1.21 |
+| branch code + branch pins | 7.4-7.6 s / 7.3-7.5 s / 1.18-1.20 |
+| branch code + master pins | 21.0-22.3 s / 20.9-22.2 s / 3.38-3.60 |
+
+Swapping single libraries into the merged binary's runfiles: the old
+plugin alone restores 7.5-7.6 s; the old SYCL/UR runtime, the old Level
+Zero driver + IGC, each alone with the new plugin, stay at ~21-22 s. So
+the plugin binary (`mirror.zml.ai/plugins/202610011939.137.1.0d59bb389ee2`
+against `pjrt-artifacts manual-2026-08-17`) is necessary and sufficient;
+the merge's zml code is not involved. Platform creation sends identical
+oneAPI options in both trees (BFC, preallocate, fraction 0.90), and
+`io_impl` only reaches `Compiler.zig`.
+
+Mechanism: both plugins issue each piece as an async H2D memcpy plus a
+SYCL event. With the old plugin the four per-device `py_xla_callback`
+threads each run ~85% CPU completing pieces in parallel; with the new
+one a single SYCL `ThreadPool` worker runs at ~100% in
+`DispatchHostTask -> Scheduler::NotifyHostTaskCompletion ->
+cleanupCommands -> pthread_rwlock_trywrlock` while the callback threads
+idle: every completion goes through a SYCL `host_task` and the scheduler's
+global lock, ~13 us per piece, ~75k pieces/s for all four devices
+together. `SYCL_QUEUE_THREAD_POOL_SIZE=4/8` (24.3/23.5 s) and a DMA depth
+of 16 (23.1 s) do not help. The 2 MiB calibration pick is a symptom
+(forcing 8 MiB stays at 22.5 s). Big-piece loads (examples/io) are
+unaffected because they issue few pieces.
+
+Levers: (1) the plugin should complete events on per-device callback
+threads again instead of SYCL host tasks (raise with whoever builds the
+mirror plugins); pinning the August plugin with the new runtime worked by
+library swap (7.6 s) but was not tried as a bazel build. (2) Loader side,
+independent of the plugin: stop cutting column-sharded tensors into one
+piece per row by packing each device's strided shard contiguously in the
+pinned block (the destination-ordered placement of the composite-tensor
+design) so a block is one transfer per device. Scripts and logs:
+session scratchpad `swap/`.
+
+## Twenty-first pass: composite destinations, engram resident in host memory (2026-10-14)
+
+Question from the user: does llmd (deepseek41) load the engram tables into
+host memory and keep them there, and if not, make it so. Answer before this
+pass: monorepo master did it on CUDA with three model-local mechanisms
+built on master's old loader internals (`MemoryWriter(.host_pinned)` plus
+`splatByteAll(0)` padding on `loader.group`, then
+`swapEngramHostPinnedBuffers`). The merge replaced the first with a slow
+stopgap. This pass makes the loader deliver them natively and checks the
+"keep it there" part on the B70s.
+
+### Engram facts (derived from the code, no checkpoint on this host)
+
+- Engram layers 1 and 14 of DeepSeek-V4.1. Each row is 256 bytes of fp8
+  values (`weight [row, channel]`) plus 8 bytes of ue8m0 scales
+  (`scale [row, group]`). Rows per layer are the sum of 24 primes >= 16M:
+  384,006,168 and 384,016,682 (padded to 384,016,688), about 94.4 GiB per
+  layer, **~189 GiB in total**. Per device with `.row = .model`: 94.4 GiB
+  at TP=2, 23.6 GiB at TP=8. The 278 GiB DeepSeek fixture of the
+  eighteenth/nineteenth passes did not include engram.
+- Rows are padded to a multiple of 8 (#555) and sharded on rows (#502)
+  over `.tp_mesh`, memory `.host_pinned`.
+- "Keep it there" (master #490, #645, unchanged by the merge): after
+  loading, each table shard is wrapped by `Buffer.createView()` into a
+  device-kind PJRT view of the pinned pointer; the owning pinned buffers
+  stay in `Model.engram_host_buffers`. The program sees device memory and
+  the GPU gathers through the mapping (zero copy). Declaring the tables as
+  `pinned_host` to XLA instead would make `toMemory` copy the whole table
+  to HBM every step. `engramHostPinnedBytes` is passed as
+  `extra_device_memory_bytes` so XLA does not believe HBM is full; KV-cache
+  sizing subtracts the engram bytes. qwen4 does the same for its offloaded
+  n-gram tables.
+- `XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB` must cover the engram bytes plus any
+  other pinned use; nothing in zml checks it.
+
+### The change: composite destinations (first slice of the concat design)
+
+A `TensorStore` binding may now carry a layout: several sources placed into
+ONE destination, with zero fill for uncovered bytes, in any memory kind the
+loader supports, loaded by plain `Loader.load` (no program, no
+`loadExecute`).
+
+- `TensorStore.Binding.layout: ?*const Layout`; `Layout{ parts, fill = 0 }`;
+  `Part{ src_offset, src_pitch, dst_offset, dst_pitch, width, rows }` in the
+  destination's logical bytes. This slice accepts contiguous parts only
+  (`rows == 1`, no pitch) and fill 0; anything else is
+  `error.UnsupportedLayout`. The strided fields exist so interleaves,
+  broadcasts and swizzles can be added without API churn.
+- `View.createConcatenated(subkeys, tags, mesh, partitioning,
+  .{ .rows | .pad_rows_to_multiple, .memory })` concatenates along dim 0;
+  one subkey with `.pad_rows_to_multiple = 8` is the engram case.
+  `View.createComposite(subkeys, shape, layout, memory)` is the general
+  form. `TensorStore.setMemory(tensor, kind)` replaces callers poking
+  `id_to_sources` (qwen4); `createHostPinnedTensor` uses it.
+- Front end: one `LoadSpec` per destination with N `LoadPart`s
+  (`parts`, `zero_fill`). Validation before anything is submitted: one
+  part per source, same dtype, the source's dims past the first equal the
+  destination's innermost dims, offsets and widths in whole source rows,
+  parts sorted by destination offset, disjoint, inside source and
+  destination, non-empty (`InvalidLayout`); without fill the parts must
+  cover every byte (`SourceSizeMismatch`).
+- Direct backend: `Item` is split into `Destination` (shape, placement,
+  memory, output, LazyOnce transfer state) and `Part` (what the planner
+  sorts by file offset, as before). Source byte -> part -> logical offset
+  -> DispatchSpans -> (device mask, device offset). Pieces merge across
+  parts of the same destination when block, writer mask, block offset and
+  destination offset are all contiguous. Parts of one destination may sit
+  in several files and plans; `Target.total` stays the placement bytes and
+  the last-transfer flag stays "by bytes", so pieces from any part, plan or
+  fill close the buffer whatever their order.
+- Zero fill: sizing pre-grows one extra block; after `BlockPool.init`,
+  `detachBlock` takes it out of the pool for good, zeroes it, and hands it
+  to the pipeline. The plan holding a destination's first part gets one
+  final fill job carrying every gap (cut by spans and block size); a worker
+  claims it like a read job (credit, batch unit) but takes no read gate,
+  no pool lease (`Lease.pool` is now optional) and opens no file.
+- Buffered backend: staging zeroes only the gaps and reads each part at
+  its offset (`ChunkedRead.source_offset`).
+- Accounting: device bytes once per destination per device, host kinds on
+  neither the submitted nor the allocated side; `bytesLoaded()` counts each
+  destination's shape bytes once, padding included; progress is one node
+  per destination counting bytes read.
+- Found on the way: `enqueueBlocks` now checks the pipeline's sticky error
+  while holding every pump lock. Before, a failure recorded between a
+  worker's last `errorValue()` check and the locks could let `abortReady`
+  drain the queues first, and whatever was queued afterwards never
+  completed (the batch hung). Pre-existing on the read path.
+- Tests (CPU, and on the 4 B70s with `--//platforms:oneapi=true`):
+  `zml/io/testing.zig` (new) builds an N-device platform (the accelerator
+  from `testing.env()` when it has >= N devices, else CPU) and reads shards
+  back in mesh order. A planner replay on a 2x2 mesh (3 parts, 2 files, a
+  gap, a tail; row/column/replicated; 64 and 16 byte blocks: every device
+  byte written exactly once). An end-to-end loader test (concatenated +
+  padded, single-source padded = engram, out-of-file-order parts, setMemory;
+  2 and 4 devices; row, column, replicated; default and host_pinned; exact
+  per-device allocated bytes, 0 for host memory). Error cases, a buffered
+  composite with a nonzero `src_offset`. Mutation checks: disabling the
+  dtype rule, sorting parts by source offset, or dropping `source_offset`
+  each make `//zml:test` fail.
+- llmd: deepseek41 binds both engram tables with `createConcatenated`
+  (weight padded to 8 rows, scale sized to the weight's rows), producing the
+  same shapes, tags, mesh, partitioning and memory as master (a test
+  asserts it), and they load in the same `loader.load` as the rest of the
+  model, so `swapEngramHostPinnedBuffers` finds them where it always did.
+  Same-dtype `Packer.concatenateRows` (qwen4 n-grams) is a composite
+  binding in any memory kind: device-memory concatenation streams straight
+  into the final placement again (master #634), host-pinned via
+  `setMemory`. `streamRowsToHostPinned`, `streamConcatenatedRows`,
+  `markDelivered` and `addStreamedBytes` are deleted; dtype-changing
+  concatenation stays the `llmd_concatenate_rows` program.
+
+### On-device results (4x B70, oneAPI, 2026-10-14)
+
+- Every composite and host-pinned test passes on Level Zero (309 passed,
+  11 skipped, with master's moe Triton test skipped). All 78 host-pinned
+  shards report `pinned_host` memory against `device` for default.
+- "Keep it there" works on Level Zero, not only CUDA. Test "a padded
+  host-pinned table stays in host memory and serves device gathers through
+  device views" (kept in `zml/io/loader.zig`): a 100,003 x 264 byte table,
+  padded to 8, row-sharded over 4 devices, host_pinned, wrapped with
+  `Buffer.createView` like llmd, then a per-device gather of 256 rows under
+  `manualComputation` (first row, last rows incl. padding). Results are
+  byte-exact; owner shards `pinned_host`, views `device`, same pointer.
+  Device `bytes_in_use`: 256 B before and after load + views, 68,864 B
+  after the gather (indices + output only); the device-memory control grows
+  by one shard. A temporary 1,000,003-row run (66 MB shards): same, and the
+  per-device peak stayed at 277 KB, so XLA made no transient copy.
+- Throughput of host-pinned delivery (staging block -> PJRT transfer into
+  `pinned_host`, "option a"), examples/io with the new
+  `ZML_LOAD_MEMORY=host_pinned` knob, warm, interleaved, batch elapsed:
+
+| model, placement | default | host_pinned |
+| --- | --- | --- |
+| Llama-3.1-8B (14.96 GiB) sharded | 0.690-0.695 s (21.7 GiB/s) | 2.235-2.331 s (6.5 GiB/s) |
+| LFM2.5-1.2B replicated | 0.187-0.200 s | 1.686-1.726 s (4 copies) |
+| LFM2.5-1.2B sharded | 0.102-0.108 s | 0.437-0.452 s |
+
+  ~60% of the host-pinned time is the PJRT pinned_host allocation inside
+  `TensorTransfer.init` on the worker's read path: 12.0-12.7 ms per tensor
+  against 0.013 ms for device memory (~1,918 inits x 12 ms / 17 workers =
+  ~1.35 s of 2.3 s); DMA piece latency 1.56-1.87 ms against 0.78-1.07.
+  Microbenchmarks: a first 8 GiB `pinned_host` allocation takes 0.61-0.78 s
+  (10-13 GiB/s, serial; reallocation after a free ~1 ms, the plugin
+  caches); memcpy into pinned memory 8-9 GiB/s on one thread, 29.5-31 GiB/s
+  on 16. Under memory pressure (6 GB free, 4 GB swapped) the same load took
+  14.4 s (76 ms per init, 22 ms per piece). Replicated host-pinned Llama was
+  not run: one pinned copy per device is 59.8 GiB on this 62 GiB host.
+- Plain default-memory loads unchanged: Llama sharded 0.690-0.695 s,
+  replicated 1.273-1.294 s; `ZML_LOAD_CHECK=1` ok 291/291 for sharded
+  default, sharded host_pinned and replicated default.
+
+### What to do next for host-resident tables
+
+1. Take the pinned destination allocation off the read path (allocate a
+   host-resident destination ahead of its reads, in parallel, or at
+   submit): it is most of option (a)'s cost and helps option (b) too.
+2. Option (b): read straight into the pinned destination (iovecs over the
+   destination's host pointer, no block pool, pump or host-to-host copy),
+   with ONE allocation shared by replicas through views (as
+   `Buffer.HostAccessible` does on cpu/cuda/rocm; oneAPI sharing is
+   unverified). Decisive for replicated host tensors (4x pinned RAM, 8.9x
+   time today); for row-sharded engram the estimate is 1.6-2.3x, and a cold
+   189 GiB read from NVMe may already be the bound.
+3. A zml-owned device view (`createView` whose delete callback releases a
+   ref-counted owner) would let llmd drop `engram_host_buffers` /
+   `ngram_host_buffers`; a compiler-side "host-mapped" marker could compute
+   `extra_device_memory_bytes` instead of each model doing it.
+4. Not verified on CUDA hardware in this pass: the DeepSeek-V4.1 engram
+   load through the loader (pinned_host on CUDA, `createView` swap on
+   loader-produced buffers) and its load time against master's writer.
+
+## Concatenating tensors in the loader: design (2026-10-14, exploration)
+
+The user's framing: packing is "just moving bytes to the right place".
+Inventory of `llmd/weights.zig` (monorepo master) by class:
+
+- **A, pure placement** (each source byte has one destination): expert
+  stacks with members concatenated (`packStack`, all `.down` weights and
+  scales), `fuse .copy` with groups=1, concat rows of one dtype (now
+  native), engram padding (now native), NVFP4 weight stacks (the f4 dtype is
+  a relabel), broadcast fills (A*: one source, many destinations).
+- **B, data-independent permutation**: MXFP4 gate/up row interleave (row r
+  of member m -> row 2r+m; ~2/3 of DeepSeek's expert bytes), `fuse` with
+  groups > 1 (strided), the 128x4 block-scale swizzle (expert scales on
+  cute_mxfp4 / NVFP4, `swizzle_block_fp8_scale` #548/#577 with its 128x
+  "spread" broadcast).
+- **C, compute**: `dequantize_block_fp8` (wo_a #593), `dequantize_blocks`,
+  `convert_rows`, dtype-changing concat, NVFP4 globals (tiny reductions),
+  CDNA3 `normalize_block_fp8` (byte-local, could run on the host block).
+
+On the DeepSeek-V4.1 fixture every pack program is an expert stack (A or
+B). What loader-native stacking removes, from the eighteenth/nineteenth
+pass numbers: the 0.85 s wait for the first pack compile and 2.8 s of
+compile CPU; ~0.95 s of H2D stalls behind pack executes (no-execute arm
+4.92-4.95 s against 5.87-6.01 s); the 2x replication (each GPU receives
+~279 GiB today, ~144 GiB when each expert's bytes go only to its owner);
+most of the ~97k 256-512 KiB scale pieces. Estimate: 5.9 s -> ~4.0-4.1 s
+without any plugin patch, possibly ~3.2 s if halving DMA traffic lifts the
+read ceiling (unmeasured). Transient device memory per group drops from
+replicated inputs + output to the output alone.
+
+Phases (Phase 1's contiguous slice is the twenty-first pass):
+
+1. Contiguous parts + zero fill + memory kinds (done). Next in this phase:
+   `createStacked` for expert stacks (members concatenated), so the `.down`
+   stacks and concatenated gate/up leave the pack programs; gate/up that
+   must be interleaved can load concatenated and be interleaved by a local,
+   collective-free program compiled at init and run after `awaitAll`.
+   `normalizeBlockFp8` / `maybeSwizzleBlockFp8Scales` in llmd read the
+   `.fuse`/`.stack` recipe to compose their programs, and still poke
+   `id_to_sources` to mark bindings transformed; they must learn about
+   layouts first.
+2. Strided parts (`rows`, pitches, `src_pitch = 0` broadcast), expanded
+   lazily per job, never per row up front (an interleave is ~1M chunks per
+   tensor), and destination-ordered reads: a job's `preadv` scatters each
+   chunk to its destination-ordered position in the pinned blocks (free on
+   buffered reads; the 18th pass measured 8 vs 64 iovecs at parity,
+   1,024-iovec cost unmeasured), so one DMA piece covers a destination run.
+   Under O_DIRECT with sub-4 KiB chunks, a bounce copy in the worker. The
+   same machinery fixes column-sharded tensors cut into one piece per row
+   (Llama-3.1-8B on four B70: ~1.56M pieces, see the attribution above).
+   Atomic units (an expert's w1+w3, a swizzle tile group) must stay inside
+   one job; an expert split across two safetensors files needs a join or a
+   post-pass.
+3. Host-side unit transforms in the pinned block: the 128x4 swizzle and
+   the CDNA3 FNUZ map; delete `packStackNvfp4CutlassBlockScale`,
+   `packSwizzleBlockFp8Scale`, `packNormalizedBlockFp8`.
+4. Class C hygiene: inputs sharded like the output (`bf16Linear` already
+   does), compile at init, submit after the bulk load so no execute
+   overlaps DMA.
+
+Full exploration with file:line inventory: session scratchpad
+`explore_concat.md` (not durable; the points above are the substance).
+
 ## Open work
+
+- 2026-10-14 merge and composite destinations (twentieth and twenty-first
+  passes): the merge commit is not described or split yet (resolution,
+  review fixes and the composite/engram feature share the working-copy
+  commit in both repos). Not run on CUDA hardware: the DeepSeek-V4.1
+  engram load through the loader and the `createView` swap on
+  loader-produced `pinned_host` buffers. Host-resident destinations:
+  allocate them off the read path, then option (b) direct reads with
+  replica sharing. Concat phases 1 (expert stacks) to 4 above. oneAPI:
+  master's plugin `202610011939` serializes piece completions (3x on
+  tiny-piece loads) and segfaults compiling llmd's Llama; master's moe
+  Triton test aborts on Level Zero. `Buffer.toSlice`/`toSliceAlloc`
+  misread a buffer placed on a sub-mesh (they walk the platform's full
+  physical mesh). `--test_filter` is ignored by the rules_zig test runner.
+  llmd `swapEngramHostPinnedBuffers`' errdefer deinits owners it leaves in
+  the list (pre-existing on master). `direct_loader.zig` still logs
+  `TMP loader created_at` at debug level.
 
 Third-pass items left open; `PLAN.md` holds the checklist.
 

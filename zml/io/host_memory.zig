@@ -37,7 +37,7 @@ const Backend = union(enum) {
     const PjrtHost = struct {
         platform: *const Platform,
         host_nodes: []HostNode,
-        allocations: std.ArrayListUnmanaged(PinnedHostAllocation) = .empty,
+        allocations: std.ArrayList(PinnedHostAllocation) = .empty,
     };
 
     /// Registration only avoids staging if the plugin recognizes the range as
@@ -48,7 +48,7 @@ const Backend = union(enum) {
     /// staging, not improved DMA.
     const Pages = struct {
         allocator: HugePageAllocator,
-        allocations: std.ArrayListUnmanaged([]align(std.heap.page_size_min) u8) = .empty,
+        allocations: std.ArrayList([]align(std.heap.page_size_min) u8) = .empty,
     };
 
     fn init(
@@ -80,14 +80,15 @@ const Backend = union(enum) {
                 // PJRT-pinned allocations choose placement through the device's
                 // host memory space, not our mbind policy. Retain one allocation
                 // path per reported node; the common block pool stays unpartitioned.
-                var discovered_nodes: std.ArrayListUnmanaged(struct {
+                var discovered_nodes: std.ArrayList(struct {
                     device_index: usize,
                     node: usize,
                 }) = .empty;
                 defer discovered_nodes.deinit(allocator);
                 devices: for (platform.devices, 0..) |device, device_index| {
                     std.debug.assert(device.memory(.host_pinned) != null);
-                    const node = device.numaNode() orelse continue;
+                    // The plugin's `numa_node` device attribute (`Device.numaNode`).
+                    const node: usize = device.numaNode() orelse continue;
                     for (discovered_nodes.items) |existing| {
                         if (existing.node == node) continue :devices;
                     }
@@ -107,7 +108,7 @@ const Backend = union(enum) {
                     .host_nodes = host_nodes,
                 } };
             },
-            .tpu, .neuron, .metal => @panic("DMA is not accessible on this platform and shouldn't have been called."),
+            .tpu, .neuron, .metal, .furiosa => @panic("DMA is not accessible on this platform and shouldn't have been called."),
         };
     }
 
@@ -421,12 +422,14 @@ pub const BlockPool = struct {
     pub const Block = []u8;
 
     pub const Lease = struct {
-        pool: *BlockPool,
+        /// Where the block returns on its last completion; null for a block
+        /// no pool leases (the direct loader's zero block).
+        pool: ?*BlockPool,
         io: std.Io,
         data: []u8,
         remaining: std.atomic.Value(usize),
 
-        pub fn init(pool: *BlockPool, io: std.Io, block: Block, references: usize) Lease {
+        pub fn init(pool: ?*BlockPool, io: std.Io, block: Block, references: usize) Lease {
             std.debug.assert(references > 0);
             return .{
                 .pool = pool,
@@ -440,14 +443,16 @@ pub const BlockPool = struct {
         pub fn complete(self: *Lease) bool {
             const previous = self.remaining.fetchSub(1, .acq_rel);
             std.debug.assert(previous > 0);
-            if (previous == 1) self.pool.release(self.io, self.data);
+            if (previous == 1) {
+                if (self.pool) |pool| pool.release(self.io, self.data);
+            }
             return previous == 1;
         }
     };
 
     allocator: Allocator,
     workspace: Workspace,
-    free_blocks: std.ArrayListUnmanaged(Block),
+    free_blocks: std.ArrayList(Block),
     block_size: usize,
     /// Blocks carved from the arenas, fixed for the pool's life.
     capacity: usize,
@@ -472,7 +477,7 @@ pub const BlockPool = struct {
         std.debug.assert(block_size != 0);
 
         var capacity: usize = 0;
-        var free_blocks: std.ArrayListUnmanaged(Block) = .empty;
+        var free_blocks: std.ArrayList(Block) = .empty;
         errdefer free_blocks.deinit(allocator);
 
         for (0..workspace.backend.arenaCount()) |i| {
@@ -535,6 +540,17 @@ pub const BlockPool = struct {
 
     pub fn release(self: *BlockPool, io: std.Io, block: Block) void {
         self.releaseMany(io, &.{block});
+    }
+
+    /// Takes one free block out of the pool for good, for a caller that
+    /// keeps it as long as the pool: it no longer counts in `capacity`, so
+    /// `deinit`'s accounting holds without it. Only before any lease. Null
+    /// when the pool has no block.
+    pub fn detachBlock(self: *BlockPool) ?Block {
+        std.debug.assert(self.in_use == 0 and self.free_blocks.items.len == self.capacity);
+        const block = self.free_blocks.pop() orelse return null;
+        self.capacity -= 1;
+        return block;
     }
 
     pub fn close(self: *BlockPool, io: std.Io) void {

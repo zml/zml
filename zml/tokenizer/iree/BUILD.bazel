@@ -7,8 +7,19 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "@iree//runtime/src/iree/tokenizer",
+        "@iree//runtime/src/iree/tokenizer:normalizer",
+        "@iree//runtime/src/iree/tokenizer/format/huggingface:normalizer_json",
         "@iree//runtime/src/iree/tokenizer/format/huggingface:tokenizer_json",
-        "@iree//runtime/src/iree/tokenizer/vocab:vocab",
+        "@iree//runtime/src/iree/tokenizer/normalizer:lowercase",
+        "@iree//runtime/src/iree/tokenizer/normalizer:nfc",
+        "@iree//runtime/src/iree/tokenizer/normalizer:nfd",
+        "@iree//runtime/src/iree/tokenizer/normalizer:nfkd",
+        "@iree//runtime/src/iree/tokenizer/normalizer:regex_replace",
+        "@iree//runtime/src/iree/tokenizer/normalizer:replace",
+        "@iree//runtime/src/iree/tokenizer/normalizer:sequence",
+        "@iree//runtime/src/iree/tokenizer/normalizer:strip",
+        "@iree//runtime/src/iree/tokenizer/normalizer:strip_accents",
+        "@iree//runtime/src/iree/tokenizer/vocab",
     ],
 )
 

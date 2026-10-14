@@ -7,7 +7,7 @@ py_binary(
     main = "main.py",
     tags = ["manual"],
     visibility = ["//visibility:public"],
-    deps = ["@xprof_nightly//xprof_nightly:pkg"],
+    deps = ["@xprof//xprof:pkg"],
 )
 
 uv_lock(

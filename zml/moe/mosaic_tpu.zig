@@ -7,20 +7,13 @@ const zml = @import("../zml.zig");
 const Tensor = zml.Tensor;
 pub const gmm_ep = @import("mosaic_tpu_kernels/gmm_ep.zig");
 
-const log = std.log.scoped(.moe_mosaic_tpu);
+const log = std.log.scoped(.@"zml/moe/mosaic_tpu");
 
 var gate_up_transpose: std.atomic.Value(bool) = .init(false);
 var down_transpose: std.atomic.Value(bool) = .init(false);
 
-pub const ActivationMode = enum {
-    silu,
-    relu,
-    gelu,
-    quick_gelu_plus_one,
-};
-
 pub const Options = struct {
-    activation: ActivationMode = .silu,
+    activation: zml.moe.Activation,
     global_num_experts: i64 = -1,
     expert_map: ?Tensor = null,
     w1_scale: ?Tensor = null,
@@ -29,26 +22,12 @@ pub const Options = struct {
     w2_bias: ?Tensor = null,
 };
 
-pub const Parameters = struct {
-    num_experts_per_tok: u32,
-    activation: ActivationMode,
-
-    pub const InitOptions = struct {
-        num_experts_per_tok: u32,
-        activation: ActivationMode = .silu,
-    };
-
-    pub fn init(opts: InitOptions) Parameters {
-        return .{
-            .num_experts_per_tok = opts.num_experts_per_tok,
-            .activation = opts.activation,
-        };
-    }
-};
-
-fn validateOptions(opts: Options) !void {
-    if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
-    if (opts.w1_scale != null or opts.w2_scale != null) return error.UnsupportedQuantization;
+fn validateOptions(opts: zml.moe.Options) void {
+    stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
+    stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
+    // TODO(Corentin): find where to put that
+    //if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
+    //if (opts.w1_scale != null or opts.w2_scale != null) return error.UnsupportedQuantization;
 }
 
 fn validateInputs(hidden: Tensor, gate_up: Tensor, down: Tensor, weights: Tensor, ids: Tensor) !void {
@@ -244,24 +223,101 @@ pub fn callGmmEp(
     return out.slice(.out, .{ .end = out_n });
 }
 
-fn applyActivation(x: Tensor, mode: ActivationMode) Tensor {
-    const mid = @divFloor(x.dim(.out), 2);
-    const gate = x.slice(.out, .{ .end = mid });
-    const up = x.slice(.out, .{ .start = mid });
+pub fn fusedExperts(
+    input: zml.Tensor,
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
+    gate_up: zml.nn.Linear,
+    down: zml.nn.Linear,
+    opts: zml.moe.Options,
+) zml.Tensor {
+    validateOptions(opts);
 
-    return switch (mode) {
-        .silu => gate.silu().mul(up),
-        .gelu => gate.gelu().mul(up),
-        .relu => x.relu().powByConst(2),
-        .quick_gelu_plus_one => blk: {
-            const gate_clamped = gate.minimum(Tensor.scalar(7, gate.dtype()).broad(gate.shape()));
-            const up_clamped = up.clamp(
-                Tensor.scalar(-7, up.dtype()).broad(up.shape()),
-                Tensor.scalar(7, up.dtype()).broad(up.shape()),
-            );
-            break :blk gate_clamped.quickGelu().mul(up_clamped.addConstant(1));
+    const gate_up_scales: ?zml.Tensor = if (gate_up.quantization) |q| q.scales else null;
+    const down_scales: ?zml.Tensor = if (down.quantization) |q| q.scales else null;
+
+    const expert_partition = gate_up.weight.shape().partition(.expert);
+
+    if (expert_partition.isSharded()) {
+        const global_num_experts = down.weight.dim(.expert);
+        const partial_output = zml.ops.manualComputation(
+            (struct {
+                input: zml.Tensor,
+                topk_ids: zml.Tensor,
+                topk_weights: zml.Tensor,
+                weights_gate_up: zml.Tensor,
+                weights_down: zml.Tensor,
+                activation: zml.moe.Activation,
+                global_num_experts: i64,
+                gate_up_scales: ?zml.Tensor,
+                bias_gate_up: ?zml.Tensor,
+                down_scales: ?zml.Tensor,
+                bias_down: ?zml.Tensor,
+
+                fn body(self: @This(), _: zml.Shape) zml.Tensor {
+                    const local_num_experts = self.weights_gate_up.dim(.expert);
+                    const partition_id = zml.ops.partitionId().convert(.i32);
+                    const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                    const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
+
+                    const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
+                        .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
+                    const expert_map = local_expert_mask.select(
+                        global_expert_ids.sub(expert_start),
+                        zml.Tensor.scalar(-1, .i32),
+                    );
+                    const local_output = fusedExpertsImpl(
+                        self.input,
+                        self.weights_gate_up,
+                        self.weights_down,
+                        self.topk_weights,
+                        self.topk_ids,
+                        .{
+                            .activation = self.activation,
+                            .global_num_experts = self.global_num_experts,
+                            .expert_map = expert_map,
+                            .w1_scale = self.gate_up_scales,
+                            .w2_scale = self.down_scales,
+                            .w1_bias = self.bias_gate_up,
+                            .w2_bias = self.bias_down,
+                        },
+                    );
+                    return local_output.reshape(self.input.shape().dims()).withTags(.{ .b, .s, .d });
+                }
+            }).body,
+            .{
+                .input = input,
+                .topk_ids = topk_ids,
+                .topk_weights = topk_weights,
+                .weights_gate_up = gate_up.weight,
+                .weights_down = down.weight,
+                .activation = opts.activation,
+                .global_num_experts = global_num_experts,
+                .gate_up_scales = gate_up_scales,
+                .bias_gate_up = gate_up.bias,
+                .down_scales = down_scales,
+                .bias_down = down.bias,
+            },
+            input.shape(),
+        );
+        return zml.ops.allReduce(partial_output, zml.Tensor.add);
+    }
+
+    return fusedExpertsImpl(
+        input,
+        gate_up.weight,
+        down.weight,
+        topk_weights,
+        topk_ids,
+        .{
+            .activation = opts.activation,
+            .global_num_experts = gate_up.weight.dim(.expert),
+            .w1_scale = gate_up_scales,
+            .w2_scale = down_scales,
+            .w1_bias = gate_up.bias,
+            .w2_bias = down.bias,
         },
-    };
+    );
 }
 
 pub fn fusedExpertsImpl(
@@ -271,21 +327,20 @@ pub fn fusedExpertsImpl(
     topk_weights: Tensor,
     topk_ids: Tensor,
     opts: Options,
-) !Tensor {
-    try validateOptions(opts);
-
+) Tensor {
     const b = hidden_states.dim(.b);
     const s = hidden_states.dim(.s);
     const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
-    const gate_up = try canonicalizeGateUp(w1, hidden.dim(.in));
-    const down = try canonicalizeDown(w2, hidden.dim(.in), gate_up.dim(.out));
-    const weights = topk_weights.reshape(.{ .token = b * s, .topk = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
-    const ids = topk_ids.reshape(.{ .token = b * s, .topk = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
+    // TODO(Corentin): Better error message
+    const gate_up = canonicalizeGateUp(w1, hidden.dim(.in)) catch |e| stdx.debug.panic("Invalid gate_up weights for fusedExpertsImpl: {}", .{e});
+    const down = canonicalizeDown(w2, hidden.dim(.in), gate_up.dim(.out)) catch |e| stdx.debug.panic("Invalid down weights for fusedExpertsImpl: {}", .{e});
+    const weights = topk_weights.reshape(.{ .token = b * s, .topk = topk_weights.dim(.topk) }).withTags(.{ .token, .topk });
+    const ids = topk_ids.reshape(.{ .token = b * s, .topk = topk_ids.dim(.topk) }).withTags(.{ .token, .topk });
 
     const num_experts = if (opts.global_num_experts != -1) opts.global_num_experts else gate_up.dim(.expert);
     if (opts.expert_map) |expert_map| {
-        if (expert_map.dtype() != .i32) return error.UnsupportedType;
-        if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) return error.InvalidShape;
+        if (expert_map.dtype() != .i32) stdx.debug.panic("expert_map must be of dtype i32, got {}", .{expert_map.dtype()});
+        if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) stdx.debug.panic("expert_map must be a 1D tensor of length num_experts, got shape {}", .{expert_map.shape()});
     }
 
     const flat_ids_global = ids.transpose(.{ .topk, .token }).flatten().withTags(.{.route});
@@ -330,7 +385,7 @@ pub fn fusedExpertsImpl(
         gate_up_out = gate_up_out.add(bias_per_token);
     }
 
-    const activated = applyActivation(gate_up_out, opts.activation);
+    const activated = zml.moe.applyActivation(gate_up_out, opts.activation, .concatenated);
 
     const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
     var down_out = callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)

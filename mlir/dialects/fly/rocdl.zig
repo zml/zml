@@ -3,6 +3,8 @@ const std = @import("std");
 const c = @import("c");
 const mlir = @import("mlir");
 
+pub const ops = @import("rocdl_ops.zig");
+
 /// `#fly_rocdl.buffer_desc`, an address space for buffer-descriptor pointers.
 pub const BufferDescAddressAttr = opaque {
     const Self = @This();

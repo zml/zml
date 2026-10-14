@@ -145,8 +145,8 @@ const Mnist = struct {
 
         pub fn init(store: zml.io.TensorStore.View) Layer {
             return .{
-                .weight = store.createTensor("weight", .{ .d_out, .d }, .replicated),
-                .bias = store.createTensor("bias", .{.d_out}, .replicated),
+                .weight = store.createReplicatedTensor("weight", .{ .d_out, .d }),
+                .bias = store.createReplicatedTensor("bias", .{.d_out}),
             };
         }
 
@@ -168,7 +168,6 @@ const Mnist = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
-        shardings: []const zml.Sharding,
     ) !zml.Bufferized(Mnist) {
         var buffers = try zml.mem.bufferize(allocator, Mnist, self);
         errdefer unloadBuffers(&buffers);
@@ -177,7 +176,7 @@ const Mnist = struct {
             .read_parallelism = 1,
         });
         defer loader.deinit();
-        try loader.load(Mnist, self, &buffers, store, shardings, null);
+        try loader.load(Mnist, self, &buffers, store, null);
         try loader.awaitAll();
 
         return buffers;
@@ -202,19 +201,20 @@ const Mnist = struct {
 };
 ```
 
-Direct CUDA, ROCm, oneAPI and CPU loaders (CPU arenas are plain pages) use
-platform-owned 4 MiB/eight-transfer per-device defaults. Applications may
-optionally calibrate synthetic transfers once before loading and hand the
-result to the loader:
+The direct loader (CUDA, ROCm, oneAPI and CPU; CPU arenas are plain pages)
+sizes its transfers once, during `Loader.init`: it calibrates synthetic
+transfers on one representative device and keeps the result for the whole
+load. Tune the screen through the loader options:
 
 ```zig
-var pools = try zml.mem.DmaWorkspace.init(allocator, io, platform, .{});
-const calibration = try zml.io.dma.benchmark(&pools, platform, .{});
+var loader = try zml.io.Loader.init(allocator, io, platform, .{
+    .dma = .{ .block_parallelism = 8 },
+});
 ```
 
-`benchmark` warms every device allocator first. On CPU it returns the
-defaults without measuring: the plugin's transfer is a memcpy, and a load
-takes the same time at every block size.
+On CPU the calibration returns the 4 MiB/eight-transfer defaults without
+measuring: the plugin's transfer is a memcpy, and a load takes the same time
+at every block size.
 
 For a full walkthrough, see:
 

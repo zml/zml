@@ -300,7 +300,7 @@ pub const Duration = struct {
     }
 
     pub fn hz(self: std.Io.Duration) u64 {
-        return @intCast(std.time.ns_per_s / self.nanoseconds);
+        return @intCast(@divTrunc(std.time.ns_per_s, self.nanoseconds));
     }
 
     pub fn hzFloat(self: std.Io.Duration) f64 {

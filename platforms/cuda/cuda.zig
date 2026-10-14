@@ -5,6 +5,7 @@ const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
 const compat_probe = @import("compat_probe.zig");
@@ -26,7 +27,7 @@ fn findCudaSandbox(
 }
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_CUDA");
+    return platforms_options.cuda_enabled;
 }
 
 pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
@@ -46,7 +47,7 @@ pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
         log.err("Failed to run CUDA compatibility probe: {any}", .{err});
         return err;
     };
-    const result: compat_probe.ExitCode = @enumFromInt(res.exited);
+    const result: compat_probe.ExitCode = @fromBackingInt(@intCast(res.exited));
 
     return switch (result) {
         .Success => true,
@@ -68,7 +69,7 @@ fn hasNvidiaDevice(io: std.Io) bool {
 
 fn hasCudaPathInLDPath() bool {
     const ldLibraryPath = std.c.getenv("LD_LIBRARY_PATH") orelse return false;
-    return std.ascii.indexOfIgnoreCase(std.mem.span(ldLibraryPath), nvidiaLibsPath) != null;
+    return std.ascii.findIgnoreCase(std.mem.span(ldLibraryPath), nvidiaLibsPath) != null;
 }
 
 fn setupXlaGpuCudaDirFlag(allocator: std.mem.Allocator, sandbox: []const u8) !void {
@@ -113,7 +114,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         };
 
         if (cudaCompat) {
-            log.warn("Detected NVIDIA GPU that requires CUDA compatibility libraries.", .{});
+            log.info("Detected NVIDIA GPU that requires CUDA compatibility libraries.", .{});
             var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "compat", "libcuda.so.1" });
             _ = std.c.dlopen(path, .{ .NOW = true }) orelse {

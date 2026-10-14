@@ -10,19 +10,19 @@ const log = std.log.scoped(.qwen3_5_moe);
 pub const CompilationParameters = struct {
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
-    moe_parameters: zml.moe.Parameters,
+    moe_backend: zml.moe.Backend,
     seqlen: u32,
-    shardings: common.Shardings,
+    meshes: common.Meshes,
     xla_dump_to: ?[]const u8,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, moe_backend: zml.moe.Backend, shardings: common.Shardings) CompilationParameters {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, moe_backend: zml.moe.Backend, meshes: common.Meshes) CompilationParameters {
         const dtype = mdl.text_model.embed_tokens.weight.dtype();
         return .{
-            .kv_cache = .init(config, 1, seqlen, dtype, .f32, shardings.model),
+            .kv_cache = .init(config, 1, seqlen, dtype, .f32, meshes.model),
             .rng = .init(),
-            .moe_parameters = .init(.fromBackend(moe_backend, config.text_config.num_experts_per_tok, zml.moe.ActivationMode.silu)),
+            .moe_backend = moe_backend,
             .seqlen = seqlen,
-            .shardings = shardings,
+            .meshes = meshes,
             .xla_dump_to = "/home/ubuntu/xla_dump",
         };
     }
@@ -161,7 +161,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
             .tokens = args.tokens_buffer.*,
         },
         .outputs = .{ .hidden = &hidden_buffer },
-    });
+    }, .{});
     defer hidden_buffer.deinit();
 
     for (runner.layers, args.layer_index_buffers) |*layer_runner, layer_index_buffer| {
@@ -183,9 +183,10 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                         .cache = layer_cache,
                     },
                     .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
-                });
+                }, .{});
                 args.kv_cache_buffers.self_attn.k = layer_cache.k;
                 args.kv_cache_buffers.self_attn.v = layer_cache.v;
+                layer_cache.layer_index.deinit();
             },
             .linear_attention => |*layer| {
                 const index_buffer = switch (layer_index_buffer) {
@@ -204,9 +205,10 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
                         .cache = layer_cache,
                     },
                     .outputs = .{ .hidden = &hidden_buffer, .cache = &layer_cache },
-                });
+                }, .{});
                 args.kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
                 args.kv_cache_buffers.gated_delta_net.recurrent_state = layer_cache.recurrent_state;
+                layer_cache.layer_index.deinit();
             },
         }
     }
@@ -222,7 +224,7 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
             .rng = args.rng_buffers,
             .token_index = args.token_index_buffer,
         },
-    });
+    }, .{});
 }
 
 fn compileKernel(
@@ -274,7 +276,7 @@ fn compileEmbed(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
 fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardSelfAttn) {
     return compileExe(allocator, io, platform, model.TransformerLayer.forwardSelfAttn, .{.{
         .layer = mdl.text_model.layers[layer_index],
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
         .token_index = zml.Tensor.init(.{}, .u32),
         .cache = .{
             .k = parameters.kv_cache.self_attn.k,
@@ -282,14 +284,14 @@ fn compileFullAttention(allocator: std.mem.Allocator, io: std.Io, platform: *con
             .layer_index = zml.Tensor.init(.{}, .u32),
         },
         .config = mdl.config,
-        .moe_parameters = parameters.moe_parameters,
+        .moe_backend = parameters.moe_backend,
     }}, parameters, progress, phase, "full-attention layer");
 }
 
 fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, layer_index: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.TransformerLayer.forwardLinearAttn) {
     return compileExe(allocator, io, platform, model.TransformerLayer.forwardLinearAttn, .{.{
         .layer = mdl.text_model.layers[layer_index],
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
         .active_length = zml.Tensor.init(.{}, .u32),
         .cache = .{
             .conv_state = parameters.kv_cache.gated_delta_net.conv_state,
@@ -297,14 +299,14 @@ fn compileLinearAttention(allocator: std.mem.Allocator, io: std.Io, platform: *c
             .layer_index = zml.Tensor.init(.{}, .u32),
         },
         .config = mdl.config,
-        .moe_parameters = parameters.moe_parameters,
+        .moe_backend = parameters.moe_backend,
     }}, parameters, progress, phase, "linear-attention layer");
 }
 
 fn compileSample(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, mdl: model.Model, parameters: CompilationParameters, seqlen: usize, phase: []const u8, progress: *std.Progress.Node) !zml.FnExe(model.Sampler.sampleTokens) {
     return compileExe(allocator, io, platform, model.Sampler.sampleTokens, .{.{
         .sampler = mdl.text_model.sampler(),
-        .hidden = hiddenTensor(mdl, seqlen),
+        .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
         .rng = parameters.rng,
         .token_index = zml.Tensor.init(.{}, .u32),
     }}, parameters, progress, phase, "sampling");
@@ -329,16 +331,16 @@ fn compileExe(
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Compiled {s} {s} [{f}]", .{ phase, component, now.untilNow(io, .awake) });
     return zml.FnExe(function).compile(allocator, io, platform, .{
-        .shardings = &parameters.shardings.all(),
+        .meshes = &parameters.meshes.all(),
         .xla_dump_to = parameters.xla_dump_to,
     }, args);
 }
 
-fn hiddenTensor(mdl: model.Model, seqlen: usize) zml.Tensor {
+fn hiddenTensor(mdl: model.Model, seqlen: usize, mesh: *const zml.Mesh) zml.Tensor {
     return .fromShape(zml.Shape.init(
         .{ .b = 1, .s = seqlen, .d = mdl.config.text_config.hidden_size },
         mdl.text_model.embed_tokens.weight.dtype(),
-    ).withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .replicated }));
+    ).withPartitioning(mesh, .{ .b = .replicated, .s = .replicated, .d = .replicated }));
 }
 
 fn findFirstLayerIndex(layer_types: []const model.LayerType, target: model.LayerType) ?usize {

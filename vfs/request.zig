@@ -311,7 +311,7 @@ pub const Redirects = enum {
 
     fn behavior(self: Redirects) std.http.Client.Request.RedirectBehavior {
         return switch (self) {
-            .follow => @enumFromInt(3),
+            .follow => .init(3),
             .surface => .unhandled,
             .forbid => .not_allowed,
         };
@@ -394,7 +394,7 @@ pub fn exchange(
             log.warn("{s}: {s} answered {d}; retrying once with a fresh request", .{
                 spec.backend,
                 spec.target,
-                @intFromEnum(res.head.status),
+                @backingInt(res.head.status),
             });
             return .{ .retry = .{ .failure = .transient, .status = res.head.status } };
         }

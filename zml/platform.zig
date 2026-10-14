@@ -6,7 +6,6 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 pub const Target = @import("platforms").Platform;
 
-const attention = @import("attention.zig");
 const constants = @import("constants.zig");
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
@@ -39,7 +38,7 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         return error.MissingDevices;
     }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
                 return error.InvalidDeviceCount;
@@ -88,7 +87,7 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
-            .cuda, .rocm, .oneapi, .tpu => {
+            .cuda, .rocm, .oneapi, .tpu, .furiosa => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
                     "pinned_host".len => .host_pinned,
@@ -190,18 +189,6 @@ pub const Device = struct {
         return self.pjrt_desc.attribute(self.platform.pjrt_api, name);
     }
 
-    /// Returns the device's NUMA node when PJRT reports a valid one. NUMA is a
-    /// runtime device attribute, not part of the static topology description.
-    pub fn numaNode(self: Device) ?usize {
-        const attributes = self.pjrt_device.attributes(self.platform.pjrt_api) catch return null;
-        defer attributes.deinit();
-        const value = attributes.get("numa_node") orelse return null;
-        return switch (value) {
-            .int64 => |node| if (node >= 0) std.math.cast(usize, node) else null,
-            else => null,
-        };
-    }
-
     pub fn debugString(self: Device) []const u8 {
         return self.pjrt_desc.debugString(self.platform.pjrt_api);
     }
@@ -214,6 +201,20 @@ pub const Device = struct {
         return self.pjrt_device.memoryStats(self.platform.pjrt_api) catch .zeroes;
     }
 
+    /// NUMA node closest to the device, when the plugin reports a valid one.
+    /// NUMA is a runtime device attribute, not part of the static topology description.
+    pub fn numaNode(self: Device) ?u32 {
+        const attributes = self.pjrt_device.attributes(self.platform.pjrt_api) catch return null;
+        defer attributes.deinit();
+
+        const value = attributes.get("numa_node") orelse return null;
+
+        return switch (value) {
+            .int64 => |node| std.math.cast(u32, node),
+            else => null,
+        };
+    }
+
     pub fn format(self: Device, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{s} ({s})", .{
             self.pjrt_desc.kind(self.platform.pjrt_api),
@@ -222,14 +223,14 @@ pub const Device = struct {
     }
 
     pub fn memory(self: *const Device, memory_kind: Memory.Kind) ?*const Memory {
-        return self.memory_by_kind.values[@intFromEnum(memory_kind)];
+        return self.memory_by_kind.values[@backingInt(memory_kind)];
     }
 };
 
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa => device.id(),
     };
 }
 
@@ -244,7 +245,7 @@ fn sortDevicesById(target: Target, devices: []Device) void {
 
     std.mem.sort(Device, devices, Context{ .target = target }, Context.lessThan);
 
-    if (builtin.mode == .Debug) {
+    if (builtin.mode == .debug) {
         for (devices, 0..) |device, expected_id| {
             std.debug.assert(platformDeviceSortId(target, device) == expected_id);
         }
@@ -260,6 +261,7 @@ pub const State = union(Target) {
     neuron: void,
     oneapi: void,
     metal: void,
+    furiosa: void,
 
     pub const CudaState = struct {
         fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
@@ -281,6 +283,7 @@ pub const State = union(Target) {
             .neuron => .{ .neuron = {} },
             .oneapi => .{ .oneapi = {} },
             .metal => .{ .metal = {} },
+            .furiosa => .{ .furiosa = {} },
         };
     }
 
@@ -301,10 +304,16 @@ pub const Platform = struct {
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
-    replicated_sharding: zml.Sharding,
-    shardings: std.StringArrayHashMapUnmanaged(zml.Sharding),
+    meshes: std.StringArrayHashMapUnmanaged(*const zml.Mesh),
+    replicated_mesh: *const zml.Mesh,
+    io_impl: IoImpl,
 
     pub const MAX_NUM_DEVICES: u16 = if (Target.tpu.isEnabled()) 64 else 32;
+
+    pub const IoImpl = enum {
+        threaded,
+        zio,
+    };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
         const api = try loadOrGetApi(allocator, io, target);
@@ -337,12 +346,13 @@ pub const Platform = struct {
                 .pjrt_api = api,
                 .pjrt_client = pjrt_client,
                 .state = State.init(target),
-                .shardings = .empty,
+                .meshes = .empty,
+                .replicated_mesh = undefined,
                 // set below
                 .devices = undefined,
                 .memories = undefined,
                 .physical_mesh = undefined,
-                .replicated_sharding = undefined,
+                .io_impl = options.io_impl,
             };
             break :platform platform;
         };
@@ -350,7 +360,7 @@ pub const Platform = struct {
         const arena = platform.arena.allocator();
         errdefer platform.arena.deinit();
         errdefer if (comptime Target.cuda.isEnabled()) platform.state.deinit();
-        try platform.shardings.ensureTotalCapacity(arena, 8);
+        try platform.meshes.ensureTotalCapacity(arena, 8);
 
         {
             const devices = try arena.alloc(Device, pjrt_devices.len);
@@ -376,17 +386,11 @@ pub const Platform = struct {
                 .custom => |builder| builder(arena, target, devices),
             };
             errdefer platform.physical_mesh.deinit(arena);
-            platform.replicated_sharding = try platform.registerSharding("replicated", .mesh(.{ .x = .high_bandwidth }));
+            platform.replicated_mesh = try platform.registerMesh("replicated", .mesh(.{ .all = .high_bandwidth }));
         }
 
         switch (target) {
             .cuda => {
-                zml.attention.flashattn.load(arena, io) catch {
-                    log.warn("Failed to load flashattn", .{});
-                };
-                zml.attention.flashattn.register(platform) catch {
-                    log.warn("Failed to register flashattn custom call", .{});
-                };
                 if (zml.moe.cutlass_flashinfer.load(arena, io, platform)) {
                     zml.moe.cutlass_flashinfer.register(platform) catch |err| {
                         log.warn(
@@ -422,6 +426,7 @@ pub const Platform = struct {
             .cuda,
             .oneapi,
             .metal,
+            .furiosa,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -681,38 +686,37 @@ pub const Platform = struct {
         return try profiler_.profiler(self.pjrt_api, allocator, io, options);
     }
 
-    /// Create a Sharding based on the given logical mesh and the default strategy.
+    /// Create a Mesh based on the given logical mesh and the default strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerSharding(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) error{OutOfMemory}!Sharding {
-        return platform.registerShardingWithStrategy(
+    pub fn registerMesh(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) error{OutOfMemory}!*const Sharding.Mesh {
+        return platform.registerMeshWithStrategy(
             name,
             logical,
             .suggest(logical, &platform.physical_mesh),
         ) catch |err| switch (err) {
             error.InvalidPhysicalMesh, error.InvalidStrategy, error.InvalidPhysicalAxis => {
-                std.debug.panic("ZML failed to create a valid sharding for logical mesh: {f}\nand physical_mesh: {f}\nPlease report this bug.", .{ logical, platform.physical_mesh });
+                std.debug.panic("ZML failed to create a valid mesh for logical mesh: {f}\nand physical_mesh: {f}\nPlease report this bug.", .{ logical, platform.physical_mesh });
             },
             error.OutOfMemory => |e| return e,
         };
     }
 
-    /// Create a Sharding based on the given logical mesh and a strategy.
+    /// Create a Mesh based on the given logical mesh and a strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerShardingWithStrategy(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !Sharding {
+    pub fn registerMeshWithStrategy(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !*const Sharding.Mesh {
         const arena = platform.arena.allocator();
-        const entry = try platform.shardings.getOrPut(arena, name);
+        const entry = try platform.meshes.getOrPut(arena, name);
         if (entry.found_existing) {
-            std.debug.panic("Another sharding already exists with this name: {s}", .{name});
+            std.debug.panic("Another mesh already exists with this name: {s}", .{name});
         }
 
         const owned_name = try arena.dupe(u8, name);
-        const owned_data = try arena.create(Sharding.Data);
-        owned_data.* = try .init(owned_name, &platform.physical_mesh, logical, strategy);
-        const sharding: Sharding = .{ .data = owned_data };
+        const owned_mesh = try arena.create(Sharding.Mesh);
+        owned_mesh.* = try .init(owned_name, &platform.physical_mesh, logical, strategy);
         entry.key_ptr.* = owned_name;
-        entry.value_ptr.* = sharding;
+        entry.value_ptr.* = owned_mesh;
 
-        return sharding;
+        return owned_mesh;
     }
 
     fn memoryFromPjrt(self: *const Platform, pjrt_memory: *const pjrt.Memory) *const Memory {
@@ -733,10 +737,10 @@ pub const Platform = struct {
         // inline cause `default` is a huge ass struct allocated on the stack,
         // and toMemoryLayout returns slices into it.
         // There is probably a better way of doing this,
-        // but given it's compiled out (except for TPU), I'm not gonna care for now.
+        // The queried layout can include backend-specific tiling.
         return switch (platform.target) {
-            .tpu => {
-                if (comptime !Target.tpu.isEnabled()) unreachable;
+            .tpu, .furiosa => {
+                if (comptime !Target.tpu.isEnabled() and !Target.furiosa.isEnabled()) unreachable;
                 const element_type = pjrtx.bufferTypeFromDtype(dtype);
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
@@ -771,11 +775,22 @@ pub const CreateOptions = struct {
     // bump memory fraction from XLA defaults of 75% to 90%.
     // Even on a 8GB GPU it should leave enough space for the platform driver/runtime.
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
-    xla_gpu: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    rocm: XlaGpu = .{ .allocator = .{ .vmm = .{ .memory_fraction = 0.90 } } },
+    cuda: XlaGpu = .{ .allocator = .{ .vmm = .{ .memory_fraction = 0.90 } } },
     tpu: struct {} = .{},
     neuron: struct {} = .{},
-    oneapi: struct {} = .{},
-    metal: struct {} = .{},
+    furiosa: Furiosa = .{},
+    oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    io_impl: Platform.IoImpl = .threaded,
+
+    pub const Furiosa = struct {
+        pe_count: u8 = 8,
+
+        fn writeNamedValues(self: Furiosa, values: *std.ArrayList(pjrt.NamedValue)) void {
+            values.appendAssumeCapacity(.init(.int64, "pe_count", self.pe_count));
+        }
+    };
 
     pub const Cpu = struct {
         device_count: u32,
@@ -789,7 +804,7 @@ pub const CreateOptions = struct {
         allocator: Allocator = .{ .bfc = .{} },
         /// The PJRT C API still exposes this under legacy
         /// `use_tfrt_gpu_client` name.
-        gpu_async_dispatch: bool = true,
+        gpu_async_dispatch: bool = false,
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
         // visible_devices: []const i64 = &.{},
         // node_id
@@ -802,6 +817,8 @@ pub const CreateOptions = struct {
             bfc: Options,
             /// use cudaMallocAsync
             async: Options,
+            /// use virtual memory allocator
+            vmm: VmmOptions,
             /// use raw cuMalloc
             platform,
 
@@ -809,6 +826,10 @@ pub const CreateOptions = struct {
                 preallocate: bool = true,
                 memory_fraction: f32 = 0.90,
                 collective_memory_size_mb: i64 = 0,
+            };
+
+            pub const VmmOptions = struct {
+                memory_fraction: f32 = 0.90,
             };
         };
 
@@ -821,7 +842,7 @@ pub const CreateOptions = struct {
                     values.appendAssumeCapacity(.init(.string, "allocator", switch (self.allocator) {
                         .bfc => "bfc",
                         .async => "cuda_async",
-                        .platform => unreachable,
+                        .platform, .vmm => unreachable,
                     }));
                     values.appendAssumeCapacity(.init(.bool, "preallocate", opt.preallocate));
                     if (opt.memory_fraction > 0) {
@@ -829,6 +850,12 @@ pub const CreateOptions = struct {
                     }
                     if (opt.collective_memory_size_mb > 0) {
                         values.appendAssumeCapacity(.init(.int64, "collective_memory_size", opt.collective_memory_size_mb * 1024 * 1024));
+                    }
+                },
+                .vmm => |opt| {
+                    values.appendAssumeCapacity(.init(.string, "allocator", "vmm"));
+                    if (opt.memory_fraction > 0) {
+                        values.appendAssumeCapacity(.init(.float, "memory_fraction", opt.memory_fraction));
                     }
                 },
             }
@@ -844,7 +871,11 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(target, &values),
+            .furiosa => self.furiosa.writeNamedValues(&values),
+            .cuda => self.cuda.writeNamedValues(target, &values),
+            .rocm => self.rocm.writeNamedValues(target, &values),
+            .oneapi => self.oneapi.writeNamedValues(target, &values),
+            .metal => self.metal.writeNamedValues(target, &values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
@@ -1025,7 +1056,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     } else return error.MemoryNotFound;
 
     var pjrt_buffer = try pjrt_client.createViewOfDeviceBuffer(pjrt_api, .{
-        .data = buffer.data,
+        .device_buffer_ptr = buffer.data,
         .dims = shape.dims(),
         .element_type = pjrtx.bufferTypeFromDtype(shape.dtype()),
         .device = device,
@@ -1064,6 +1095,11 @@ test "platform defaultMemoryLayout is boring" {
         // This allows to bypass the PJRT calls and the string of pjrt_client.defaultMemoryLayout.
         const default_layout = try platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, pjrtx.bufferTypeFromDtype(.f32), dims);
         const mem_layout = default_layout.toMemoryLayout();
+
+        if (platform.target == .furiosa) {
+            try std.testing.expectEqualDeep(mem_layout, platform.defaultMemoryLayout(dims, .f32));
+            continue;
+        }
 
         // Note: I'm not just calling platform.defaultMemoryLayout because I'm investigating
         // wether TPU requires its special branch.

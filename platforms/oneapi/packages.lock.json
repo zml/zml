@@ -3,13 +3,13 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-ccl-2022.1_2022.1.0-142_amd64",
+			"key": "intel-oneapi-ccl-2022.1_2022.1.2-9_amd64",
 			"name": "intel-oneapi-ccl-2022.1",
-			"sha256": "3569a089879b6b7358c5afb496ae782754715c8ace5137e00797e6b111fb4cc5",
+			"sha256": "432e62469978f60a9b35b55216cfd495b0adc76c334707d3bbc81f69b7cc2948",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-ccl-2022.1-2022.1.0-142_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-ccl-2022.1-2022.1.2-9_amd64.deb"
 			],
-			"version": "2022.1.0-142"
+			"version": "2022.1.2-9"
 		},
 		{
 			"arch": "amd64",
@@ -25,24 +25,24 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1_2026.1.0-235_amd64",
+			"key": "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1_2026.1.1-325_amd64",
 			"name": "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1",
-			"sha256": "f557b04243b6bb2087646b9d9eee94026bf1abc80b188dcfa3e3b689e292d95e",
+			"sha256": "df0413d57cff5a9c67bd02c1e958d7e0512f77878bbcf976c9e08af7c0b1069c",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1-2026.1.0-235_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1-2026.1.1-325_amd64.deb"
 			],
-			"version": "2026.1.0-235"
+			"version": "2026.1.1-325"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-compiler-shared-runtime-2026.1_2026.1.0-235_amd64",
+			"key": "intel-oneapi-compiler-shared-runtime-2026.1_2026.1.1-325_amd64",
 			"name": "intel-oneapi-compiler-shared-runtime-2026.1",
-			"sha256": "b5a077f78f192f93bba608f5497d7c138f77ec211a9d86356696a0ca68d3bf5d",
+			"sha256": "c0c77700243af0413f7fbefd26649943c4959171ead91b6ace36ef0c8dfb2630",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-compiler-shared-runtime-2026.1-2026.1.0-235_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-compiler-shared-runtime-2026.1-2026.1.1-325_amd64.deb"
 			],
-			"version": "2026.1.0-235"
+			"version": "2026.1.1-325"
 		},
 		{
 			"arch": "amd64",
@@ -201,57 +201,57 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libigdgmm12_22.10.0-1_24.04_ppa1_amd64",
+			"key": "libigdgmm12_22.10.1-1_24.04_ppa1_amd64",
 			"name": "libigdgmm12",
-			"sha256": "63fe9e124c3394193226c6cb8398dcabdc9306b5a10f63668118f7c799f5d792",
+			"sha256": "2c68fcb150cba1b679063266cdf0054f26f18af90de71d6d3b614eaf95c98f80",
 			"urls": [
-				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-gmmlib/libigdgmm12_22.10.0-1~24.04~ppa1_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260930T000000Z/pool/main/i/intel-gmmlib/libigdgmm12_22.10.1-1~24.04~ppa1_amd64.deb"
 			],
-			"version": "22.10.0-1~24.04~ppa1"
+			"version": "22.10.1-1~24.04~ppa1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libigc2_2.36.3-2_24.04_amd64",
+			"key": "libigc2_2.40.13-p-ds1-1_24.04_amd64",
 			"name": "libigc2",
-			"sha256": "c11dd6e083d1010c50bbc33cabf5b614e64df53b61d349955e97efdababb85bf",
+			"sha256": "c57e4ca8c780dc85a309e35b4d3249fc866251fea7bf3ebe68a5ab5ef5f71362",
 			"urls": [
-				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-graphics-compiler/libigc2_2.36.3-2~24.04_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260930T000000Z/pool/main/i/intel-graphics-compiler/libigc2_2.40.13+ds1-1~24.04_amd64.deb"
 			],
-			"version": "2.36.3-2~24.04"
+			"version": "2.40.13+ds1-1~24.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libigdfcl2_2.36.3-2_24.04_amd64",
+			"key": "libigdfcl2_2.40.13-p-ds1-1_24.04_amd64",
 			"name": "libigdfcl2",
-			"sha256": "019c4d2802b03d5e1ddad888543e6b7b6003a46a14ccf2e16a2320e8923ad007",
+			"sha256": "e71f41b4dd54c9cda7024680528034204cd911a1c2f644ec2bc3c06e968f5afe",
 			"urls": [
-				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-graphics-compiler/libigdfcl2_2.36.3-2~24.04_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260930T000000Z/pool/main/i/intel-graphics-compiler/libigdfcl2_2.40.13+ds1-1~24.04_amd64.deb"
 			],
-			"version": "2.36.3-2~24.04"
+			"version": "2.40.13+ds1-1~24.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libze-intel-gpu1_26.22.38646.6-1_24.04_ppa1_amd64",
+			"key": "libze-intel-gpu1_26.31.39395.14-1_24.04_ppa1_amd64",
 			"name": "libze-intel-gpu1",
-			"sha256": "5d0903aae7ac4f94f43ae7d282a394bc988a0da12f813d92533dea1650eb91ff",
+			"sha256": "39f10740e40cf0de1015997d0de094a3c3dc6371c3b9ea1dcd15771d64559c14",
 			"urls": [
-				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-compute-runtime/libze-intel-gpu1_26.22.38646.6-1~24.04~ppa1_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260930T000000Z/pool/main/i/intel-compute-runtime/libze-intel-gpu1_26.31.39395.14-1~24.04~ppa1_amd64.deb"
 			],
-			"version": "26.22.38646.6-1~24.04~ppa1"
+			"version": "26.31.39395.14-1~24.04~ppa1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libze1_1.28.6-1_24.04_ppa1_amd64",
+			"key": "libze1_1.32.0-1_24.04_ppa1_amd64",
 			"name": "libze1",
-			"sha256": "ca4aec5982d46f92875659e74e459372f24c9d8add2810556c1c7e71531e1ec0",
+			"sha256": "d4001dc474d3cb74ded50a449b9f646cfdfbb31e69e70b8af38f2d18273dfce1",
 			"urls": [
-				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/l/level-zero-loader/libze1_1.28.6-1~24.04~ppa1_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260930T000000Z/pool/main/l/level-zero-loader/libze1_1.32.0-1~24.04~ppa1_amd64.deb"
 			],
-			"version": "1.28.6-1~24.04~ppa1"
+			"version": "1.32.0-1~24.04~ppa1"
 		},
 		{
 			"arch": "amd64",

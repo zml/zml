@@ -3,7 +3,7 @@ const std = @import("std");
 const zml = @import("zml");
 
 const common = @import("models/common.zig");
-pub const Shardings = common.Shardings;
+pub const Meshes = common.Meshes;
 pub const GenerationOptions = common.GenerationOptions;
 pub const parseConfig = common.parseConfig;
 pub const lfm2 = @import("models/lfm2.zig");
@@ -55,12 +55,19 @@ pub const LoadedModel = union(ModelType) {
         }
     }
 
-    pub fn loadBuffers(self: *LoadedModel, allocator: std.mem.Allocator, io: std.Io, loader: *zml.io.Loader, progress: ?*std.Progress.Node, store: *const zml.io.TensorStore, shardings: []const zml.Sharding) !Buffers {
+    pub fn loadBuffers(
+        self: *LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        loader: *zml.io.Loader,
+        progress: ?*std.Progress.Node,
+        store: *const zml.io.TensorStore,
+    ) !Buffers {
         return switch (self.*) {
             inline else => |*m, t| @unionInit(
                 Buffers,
                 @tagName(t),
-                try m.loadBuffers(allocator, io, loader, progress, store, shardings),
+                try m.loadBuffers(allocator, io, loader, progress, store),
             ),
         };
     }
@@ -77,7 +84,7 @@ pub const LoadedModel = union(ModelType) {
         io: std.Io,
         platform: *const zml.Platform,
         backend: zml.attention.Backend,
-        shardings: Shardings,
+        meshes: Meshes,
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !CompiledModel {
@@ -85,7 +92,7 @@ pub const LoadedModel = union(ModelType) {
             inline else => |*m, t| @unionInit(
                 CompiledModel.Inner,
                 @tagName(t),
-                try m.compile(allocator, io, platform, backend, shardings, seqlen, progress),
+                try m.compile(allocator, io, platform, backend, meshes, seqlen, progress),
             ),
         };
         return .{

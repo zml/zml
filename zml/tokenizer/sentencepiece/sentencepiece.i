@@ -85,6 +85,8 @@ namespace sentencepiece {
         virtual sentencepiece::util::Status Encode(absl::string_view input, std::vector<int> *ids) const;
         virtual sentencepiece::util::Status Decode(const std::vector<int> &ids, std::string *detokenized) const;
         virtual int PieceToId(absl::string_view piece) const;
+        virtual const std::string &IdToPiece(int id) const;
+        virtual int GetPieceSize() const;
         virtual int unk_id() const;
         virtual int bos_id() const;
         virtual int eos_id() const;

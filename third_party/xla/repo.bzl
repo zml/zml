@@ -4,7 +4,7 @@ def repo():
     git_repository(
         name = "xla",
         remote = "https://github.com/openxla/xla.git",
-        commit = "41370d1124c74d7b93a207136a636d8c631cbed9",
+        commit = "f3dee9ae87745e151837b2ff1b0485928f8e5a5d",
         patches = [
             "//third_party/xla:cuda-root-path-local-defines.patch",
         ],

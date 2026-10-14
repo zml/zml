@@ -1,0 +1,39 @@
+--- a/include/flydsl/Dialect/Fly/IR/FlyDialect.td
++++ b/include/flydsl/Dialect/Fly/IR/FlyDialect.td
+@@ -19,6 +19,11 @@
+   
+   let useDefaultTypePrinterParser = 1;
+   let useDefaultAttributePrinterParser = 1;
++
++  // ZML custom-call inputs use Fly assembly printed by a separately pinned
++  // MLIR/Fly build. Keep accepting its inherent attributes in attr-dict until
++  // the producer and consumer can migrate to prop-dict together.
++  let useStrictPropertiesInAssemblyFormat = 0;
+ }
+ 
+ class Fly_Type<string typeName, string typeMnemonic, list<Trait> traits = []>
+@@ -38,7 +43,10 @@
+ }
+ 
+ class Fly_EnumAttr<Fly_I32EnumAttr enumInfo, string attrMnemonic, list<Trait> traits = []>
+-    : EnumAttr<Fly_Dialect, enumInfo, attrMnemonic, traits>;
++    : EnumAttr<Fly_Dialect, enumInfo, attrMnemonic, traits> {
++  // Keep the Fly text ABI independent of MLIR's default enum delimiters.
++  let assemblyFormat = "$value";
++}
+ 
+ class Fly_Op<string mnemonic, list<Trait> traits = []> 
+     : Op<Fly_Dialect, mnemonic, traits> {
+diff --git a/include/flydsl/Dialect/FlyROCDL/IR/Ops.td b/include/flydsl/Dialect/FlyROCDL/IR/Ops.td
+index 2b745065..875d8a69 100644
+--- a/include/flydsl/Dialect/FlyROCDL/IR/Ops.td
++++ b/include/flydsl/Dialect/FlyROCDL/IR/Ops.td
+@@ -44,7 +44,7 @@ class FlyROCDL_MakeTiledTdmAtomOp<string mnemonic>
+   let results = (outs AnyType:$atom, AnyType:$coordTensor);
+ 
+   let assemblyFormat = [{
+-    $tensor `,` $smemLayout `,` $tiler attr-dict `:` type(operands)
++    $tensor `,` $smemLayout `,` $tiler prop-dict attr-dict `:` type(operands)
+   }];
+ }
+ 

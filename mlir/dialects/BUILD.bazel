@@ -1,27 +1,58 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+# What upstream's C API leaves out of the dialects bound here.
+cc_library(
+    name = "capi",
+    srcs = [
+        "arith_capi.cc",
+        "gpu_capi.cc",
+        "vector_capi.cc",
+    ],
+    hdrs = [
+        "arith_capi.h",
+        "gpu_capi.h",
+        "vector_capi.h",
+    ],
+    strip_include_prefix = ".",
+    tags = ["manual"],
+    visibility = ["//mlir/dialects:__subpackages__"],
+    deps = [
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:CAPIIR",
+        "@llvm-project//mlir:GPUDialect",
+        "@llvm-project//mlir:VectorDialect",
+    ],
+    alwayslink = True,
+)
 
 zig_library(
     name = "dialects",
-    tags = ["manual"],
     srcs = [
         "affine.zig",
         "arith.zig",
         "cf.zig",
+        "cuda.zig",
         "func.zig",
         "gpu.zig",
+        "llvm_dialect.zig",
         "math.zig",
         "memref.zig",
-        "shardy.zig",
+        "nvvm.zig",
         "scf.zig",
+        "shardy.zig",
         "vector.zig",
     ],
     import_name = "mlir/dialects",
     main = "dialects.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
+        ":capi",
         "//mlir",
         "//mlir:c",
         "//mlir/dialects/cuda_tile",
+        "//mlir/dialects/cute_ir",
         "//mlir/dialects/fly",
         "//mlir/dialects/mosaic_tpu",
         "//mlir/dialects/stablehlo",

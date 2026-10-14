@@ -1,0 +1,18 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "dialect",
+    srcs = [
+        "NVVMDialect.cpp",
+        "NVVMInference.cpp",
+    ],
+    deps = [
+        "//mlir/dialects/cute_ir/include/cute_ir/Dialect/NVVM/IR:headers",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:LLVMDialect",
+    ],
+)

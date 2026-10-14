@@ -1,0 +1,142 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+td_library(
+    name = "td_files",
+    srcs = glob(["*.td"]),
+    includes = ["/mlir/dialects/cute_ir/include"],
+    deps = [
+        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "dialect_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            [
+                "-gen-dialect-decls",
+                "-dialect=cuda",
+            ],
+            "CudaDialect.h.inc",
+        ),
+        (
+            [
+                "-gen-dialect-defs",
+                "-dialect=cuda",
+            ],
+            "CudaDialect.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CudaDialect.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "enums_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            ["-gen-enum-decls"],
+            "CudaEnums.h.inc",
+        ),
+        (
+            ["-gen-enum-defs"],
+            "CudaEnums.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CudaEnums.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "attrs_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            [
+                "-gen-attrdef-decls",
+                "-attrdefs-dialect=cuda",
+            ],
+            "CudaAttrs.h.inc",
+        ),
+        (
+            [
+                "-gen-attrdef-defs",
+                "-attrdefs-dialect=cuda",
+            ],
+            "CudaAttrs.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CudaAttrs.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "types_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            [
+                "-gen-typedef-decls",
+                "-typedefs-dialect=cuda",
+            ],
+            "CudaTypes.h.inc",
+        ),
+        (
+            [
+                "-gen-typedef-defs",
+                "-typedefs-dialect=cuda",
+            ],
+            "CudaTypes.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CudaTypes.td",
+    deps = [":td_files"],
+)
+
+# Every cuda operation of the compiler's registry.
+gentbl_cc_library(
+    name = "ops_inc_gen",
+    includes = ["../../../.."],
+    tbl_outs = [
+        (
+            ["-gen-op-decls"],
+            "CudaOps.h.inc",
+        ),
+        (
+            ["-gen-op-defs"],
+            "CudaOps.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CudaOps.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "headers",
+    hdrs = ["CudaDialect.h"],
+    includes = ["../../../.."],
+    deps = [
+        ":attrs_inc_gen",
+        ":dialect_inc_gen",
+        ":enums_inc_gen",
+        ":ops_inc_gen",
+        ":types_inc_gen",
+        "@llvm-project//mlir:BytecodeOpInterface",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:SideEffectInterfaces",
+    ],
+)

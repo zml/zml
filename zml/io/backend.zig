@@ -3,11 +3,10 @@ const std = @import("std");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
-const mem = @import("../mem.zig");
+const Memory = @import("../platform.zig").Memory;
 const Platform = @import("../platform.zig").Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
-const Sharding = @import("../Sharding.zig");
 const buffered_loader = @import("buffered_loader.zig");
 const direct_loader = @import("direct_loader.zig");
 const dma_calibration = @import("dma_calibration.zig");
@@ -57,14 +56,102 @@ pub const Options = struct {
     }
 };
 
-/// One resolved source placement and its caller-owned output. A backend copies
-/// each spec during submission; its source and output stay alive until await.
+/// One destination, its caller-owned output and the source ranges that fill
+/// it. A backend copies each spec and its parts during submission; the
+/// sources and the output stay alive until await.
 pub const LoadSpec = struct {
-    source: *safetensors.Tensor,
+    /// The destination's global shape, which the output buffer keeps. Its
+    /// sharding places the bytes on the devices; a shape without a mesh is
+    /// replicated over every device (`placedShape`).
     shape: Shape,
-    sharding: Sharding,
+    /// The memory space of each device that receives the bytes, from the
+    /// source's `TensorStore` binding. The front end only submits kinds
+    /// `supportsMemory` accepts.
+    memory: Memory.Kind = .default,
     output: *Buffer,
+    /// What fills the destination's logical bytes, in ascending, disjoint
+    /// destination order (`checkParts`): one whole source for a plain
+    /// tensor, one range per source for a composite one.
+    parts: []const LoadPart,
+    /// Whether bytes no part covers are zero. Without it the parts must
+    /// cover every byte, so a source of the wrong size is
+    /// `error.SourceSizeMismatch`, not a silently padded tensor.
+    zero_fill: bool = false,
 };
+
+/// `width` bytes of `source` from `src_offset` (relative to the tensor's
+/// data) land at `dst_offset` of the destination's logical bytes: the
+/// row-major bytes of its packed shape, before the sharding splits them.
+pub const LoadPart = struct {
+    source: *safetensors.Tensor,
+    src_offset: u64 = 0,
+    dst_offset: u64 = 0,
+    width: u64,
+
+    /// The whole of `source`, at the start of the destination.
+    pub fn whole(source: *safetensors.Tensor) LoadPart {
+        return .{ .source = source, .width = source.byteSize() };
+    }
+};
+
+pub const PartsError = error{ SourceSizeMismatch, InvalidLayout };
+
+/// What both backends rely on from a spec's parts: there is at least one,
+/// each is a non-empty range inside its source, they come in ascending destination order without
+/// overlapping, and they stay inside the destination's `destination_bytes`.
+/// Without `zero_fill` they must cover every destination byte; a plain
+/// tensor whose source is larger or smaller than its shape fails there,
+/// with `SourceSizeMismatch`. Every other violation is `InvalidLayout`.
+pub fn checkParts(parts: []const LoadPart, destination_bytes: u64, zero_fill: bool) PartsError!void {
+    if (parts.len == 0) return error.InvalidLayout;
+    var end: u64 = 0;
+    var covered: u64 = 0;
+    for (parts) |part| {
+        const source_end = std.math.add(u64, part.src_offset, part.width) catch return error.InvalidLayout;
+        const part_end = std.math.add(u64, part.dst_offset, part.width) catch return error.InvalidLayout;
+        if (part.width == 0 or source_end > part.source.byteSize() or part.dst_offset < end) return error.InvalidLayout;
+        end = part_end;
+        covered += part.width;
+    }
+    if (!zero_fill and covered != destination_bytes) return error.SourceSizeMismatch;
+    if (end > destination_bytes) return error.InvalidLayout;
+}
+
+/// `shape` with the platform's replicated mesh when it names none, which is
+/// how a buffer places an unsharded shape (`PjrtBufferMetadata.init`): every
+/// placement the loader computes goes through this, so the bytes it counts,
+/// the devices it allocates on and the spans it writes agree.
+pub fn placedShape(platform: *const Platform, shape: Shape) Shape {
+    var placed = shape;
+    if (placed._sharding.mesh == null) placed._sharding.mesh = platform.replicated_mesh;
+    return placed;
+}
+
+/// Whether the loader can deliver into `kind` on `platform`: every device
+/// must expose that memory space, and host-pinned delivery needs the direct
+/// pipeline, as on master, where TPU, neuron, metal and furiosa refused it.
+/// CPU takes the direct pipeline here, so it accepts `.host_pinned` (its
+/// plugin resolves every kind to its one memory space).
+pub fn supportsMemory(platform: *const Platform, kind: Memory.Kind) bool {
+    if (kind == .default) return true;
+    switch (platform.target) {
+        .cuda, .rocm, .oneapi, .cpu => {},
+        .tpu, .neuron, .metal, .furiosa => if (kind == .host_pinned) return false,
+    }
+    for (platform.devices) |*device| {
+        if (device.memory(kind) == null) return false;
+    }
+    return true;
+}
+
+/// Whether bytes delivered into `kind` take device memory, which loadExecute
+/// admission measures. Host memory spaces never count against a device.
+pub fn countsAgainstDevice(kind: Memory.Kind) bool {
+    return switch (kind) {
+        .default, .device => true,
+        .host_pinned, .host_unpinned => false,
+    };
+}
 
 /// The transfer implementation selected for the platform.
 pub const Backend = union(enum) {
@@ -86,7 +173,8 @@ pub const Backend = union(enum) {
         // reduced roughly 900 source calls to 278. Both coalescing and blind
         // width growth changed, and network results varied between days.
         // TPU symbols alone did not prove a working transfer implementation;
-        // TPU, neuron and metal keep the buffered path pending runtime checks.
+        // TPU, neuron, metal and furiosa keep the buffered path pending
+        // runtime checks.
         return switch (platform.target) {
             .cuda, .rocm, .oneapi, .cpu => .{
                 .direct = try direct_loader.Loader.create(
@@ -96,7 +184,7 @@ pub const Backend = union(enum) {
                     opts,
                 ),
             },
-            .tpu, .neuron, .metal => .{
+            .tpu, .neuron, .metal, .furiosa => .{
                 .buffered = try buffered_loader.Loader.create(
                     allocator,
                     io,

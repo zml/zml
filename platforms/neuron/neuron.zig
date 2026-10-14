@@ -5,6 +5,7 @@ const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
+const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/platforms/neuron");
@@ -81,21 +82,21 @@ pub const Instance = struct {
 
 pub fn instance() !Instance {
     var info = std.mem.zeroes(c.struct_nrt_instance_info);
-    info.family = @intFromEnum(Family.unknown);
-    info.size = @intFromEnum(Size.unknown);
+    info.family = @backingInt(Family.unknown);
+    info.size = @backingInt(Size.unknown);
 
     if (c.nrt_get_instance_info(&info, @sizeOf(c.struct_nrt_instance_info)) != c.NRT_SUCCESS) {
         return error.Unavailable;
     }
 
     return .{
-        .family = @enumFromInt(info.family),
-        .size = @enumFromInt(info.size),
+        .family = @fromBackingInt(@intCast(info.family)),
+        .size = @fromBackingInt(@intCast(info.size)),
     };
 }
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_NEURON");
+    return platforms_options.neuron_enabled;
 }
 
 fn hasNeuronDevice(io: std.Io) bool {
