@@ -3,9 +3,9 @@ const std = @import("std");
 const mtt = @import("kernels/mosaic_tpu/builder");
 const stdx = @import("stdx");
 
-const zml = @import("../zml.zig");
+const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
-pub const gmm_ep = @import("mosaic_tpu_kernels/gmm_ep.zig");
+pub const gmm_ep = @import("gmm_ep.zig");
 
 const log = std.log.scoped(.@"zml/moe/mosaic_tpu");
 

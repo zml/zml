@@ -3,7 +3,7 @@
 const std = @import("std");
 const stdx = @import("stdx");
 
-const zml = @import("../zml.zig");
+const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 

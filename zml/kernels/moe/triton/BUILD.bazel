@@ -1,0 +1,9 @@
+package(default_visibility = ["//zml:__pkg__"])
+
+filegroup(
+    name = "triton",
+    srcs = [
+        "moe.zig",
+        "triton.zig",
+    ],
+)

@@ -3,7 +3,7 @@ const stdx = @import("stdx");
 
 const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
 const platforms = @import("platforms");
-const zml = @import("../zml.zig");
+const zml = @import("../../../zml.zig");
 
 const log = std.log.scoped(.@"zml/moe/cutlass_flashinfer");
 

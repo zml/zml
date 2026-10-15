@@ -2,8 +2,8 @@
 
 const stdx = @import("stdx");
 
-const zml = @import("../zml.zig");
-pub const kernels = @import("cute_kernels/moe.zig");
+const zml = @import("../../../zml.zig");
+pub const kernels = @import("moe.zig");
 
 // `moe.zig`'s `refAllDecls` reaches this file but not its imports, so the
 // kernel emit tests are only collected if `kernels` is referenced here.
