@@ -132,6 +132,7 @@ zig_library(
         "//zml/kernels/paged_attention/mosaic_tpu",
         "//zml/kernels/paged_attention/stablehlo",
         "//zml/kernels/paged_attention/triton",
+        "//zml/kernels/topk",
     ],
     data = select({
         "//platforms:neuron.enabled": [

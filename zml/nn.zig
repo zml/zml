@@ -2091,7 +2091,19 @@ pub const DynamicSamplingStrategy = struct {
 /// * top_p: only sample among top scoring tokens whose probabilities sum up to top_p
 /// * min_p: drop tokens whose probabilities are lower than a ratio of the most likely token
 pub fn sampleTokensDynamic(logits: Tensor, opts: DynamicSamplingStrategy, rng: Tensor.Rng) struct { Tensor, Tensor.Rng } {
-    var x, const topk_indices = fixupLogits(logits, opts);
+    return sampleTokensDynamicOpts(logits, opts, rng, .{});
+}
+
+pub const SampleTokensOpts = struct {
+    /// Rows to sample, with the shape of the logits without `.voc`, which must
+    /// be their last axis. The tokens of other rows are unspecified, and cheaper
+    /// to compute on CUDA, see `zml.topk`.
+    row_mask: ?Tensor = null,
+};
+
+/// `sampleTokensDynamic` with options.
+pub fn sampleTokensDynamicOpts(logits: Tensor, opts: DynamicSamplingStrategy, rng: Tensor.Rng, sample_opts: SampleTokensOpts) struct { Tensor, Tensor.Rng } {
+    var x, const topk_indices = fixupLogitsOpts(logits, opts, sample_opts);
 
     // the rest is similar to sampleTokens
     const next_rng, const gumbel_noise = rng.gumbel(x.shape());
@@ -2103,11 +2115,15 @@ pub fn sampleTokensDynamic(logits: Tensor, opts: DynamicSamplingStrategy, rng: T
 }
 
 fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
+    return fixupLogitsOpts(logits, opts, .{});
+}
+
+fn fixupLogitsOpts(logits: Tensor, opts: DynamicSamplingStrategy, sample_opts: SampleTokensOpts) [2]Tensor {
     const min_inf = Tensor.constant(logits.dtype().minValue());
 
     // First reduce the vocab size to a reasonable sub set of candidate.
     const full_topk = if (opts.max_top_k > 0)
-        logits.topK(.{ .voc = .voc }, opts.max_top_k, .{ .descending = true })
+        zml.topk.topK(logits, .{ .voc = .voc }, opts.max_top_k, .{ .row_mask = sample_opts.row_mask })
     else
         logits.sort(.voc, .{ .descending = true });
 
