@@ -104,7 +104,7 @@ pub fn fusedExpertsBase(
                 );
 
                 const local_output = fusedExpertsImpl(mapped_args);
-                const local_reshaped = local_output.reshape(local_args.hidden_states.shape().dims()).withTags(.{ .b, .s, .d });
+                const local_reshaped = local_output.reshape(local_args.hidden_states.shape()).withTags(.{ .t, .d });
                 return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
             }
         }).call,
@@ -131,9 +131,7 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
     const hidden_states = opts.hidden_states;
     const topk_weights = opts.topk_weights;
     const topk_ids = opts.topk_ids;
-    const b = hidden_states.dim(.b);
-    const s = hidden_states.dim(.s);
-    const num_tokens = b * s;
+    const num_tokens = hidden_states.dim(.t);
     var launch_config = launchConfigForTokens(num_tokens);
 
     const gate_up_scheme = opts.gate_up.quantizationScheme();
@@ -231,12 +229,12 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
         .launch_config = down_launch_config,
         .quant_scheme = down_scheme,
         .top_k = 1,
-        .output_shape = Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
+        .output_shape = Shape.init(.{ .token = num_tokens, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     });
 
     const output = down_out.convert(.f32).sum(.topk).squeeze(.topk).convert(.bf16);
 
-    return output.reshape(.{ .b = b, .token = s, .out = down.dim(.out) });
+    return output.reshape(.{ .t = num_tokens, .d = down.dim(.out) });
 }
 
 pub const GemmOptions = struct {
@@ -763,8 +761,8 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
                 gate_up.quantization.?.scales = gate_up.quantization.?.scales.bitCast(.f8e8m0);
                 down.quantization.?.scales = down.quantization.?.scales.bitCast(.f8e8m0);
             }
-            const route = Tensor.arange(.{ .end = 2 }, .i32).reshape(.{ .b = 1, .s = 1, .topk = 2 })
-                .broad(Shape.init(.{ .b = 1, .s = x.dim(.s), .topk = 2 }, .i32));
+            const route = Tensor.arange(.{ .end = 2 }, .i32).reshape(.{ .t = 1, .topk = 2 })
+                .broad(Shape.init(.{ .t = x.dim(.t), .topk = 2 }, .i32));
             return fusedExpertsImpl(.{
                 .hidden_states = x,
                 .gate_up = gate_up,
@@ -780,7 +778,7 @@ test "fused experts support BF16 and MXFP4 layouts, bias, and routing weights" {
     };
     for ([_]DataType{ .bf16, .u8, .f4e2m1 }) |storage_dtype| {
         const tokens: i64 = if (storage_dtype == .u8) 17 else 1;
-        const x: Tensor = .init(.{ .b = 1, .s = tokens, .d = 128 }, .bf16);
+        const x: Tensor = .init(.{ .t = tokens, .d = 128 }, .bf16);
         const host = try zml.Slice.alloc(allocator, x.shape());
         defer host.free(allocator);
         @memset(host.items(zml.floats.BFloat16), .fromF32(1.0 / 128.0));

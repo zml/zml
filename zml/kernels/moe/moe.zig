@@ -181,7 +181,18 @@ pub const Options = struct {
     routing_weight_placement: RoutingWeightPlacement,
 };
 
-/// Routing IDs and weights have shape { b, s, topk }; input has shape { b, s, d }.
+/// Check the shared token-wise contract for activations and routing tensors.
+pub fn validateRoutingInputs(input: zml.Tensor, ids: zml.Tensor, weights: zml.Tensor) void {
+    stdx.debug.assert(input.rank() == 2 and ids.rank() == 2 and weights.rank() == 2, "MoE expects input {{.t, .d}} and routing {{.t, .topk}}, got {f}, {f}, {f}", .{ input.shape(), ids.shape(), weights.shape() });
+    stdx.debug.assert(input.dim(.t) == ids.dim(.t) and input.dim(.t) == weights.dim(.t), "MoE input and routing token counts must match", .{});
+    stdx.debug.assert(ids.dim(.topk) == weights.dim(.topk), "MoE routing ids and weights must have matching top-k dimensions", .{});
+    stdx.debug.assert(input.shape().hasTag(.t) == 0 and input.shape().hasTag(.d) == 1 and
+        ids.shape().hasTag(.t) == 0 and ids.shape().hasTag(.topk) == 1 and
+        weights.shape().hasTag(.t) == 0 and weights.shape().hasTag(.topk) == 1, "MoE expects ordered tags {{.t, .d}} for input and {{.t, .topk}} for routing", .{});
+}
+
+/// Input has shape {.t, .d}; routing IDs and weights have shape {.t, .topk}.
+/// Returns {.t, .d}. Flatten batched input with merge(.{ .t = .{ .b, .s } }).
 pub fn forwardMoe(
     input: zml.Tensor,
     topk_ids: zml.Tensor,
@@ -191,6 +202,7 @@ pub fn forwardMoe(
     backend: Backend,
     opts: Options,
 ) zml.Tensor {
+    validateRoutingInputs(input, topk_ids, topk_weights);
     return switch (backend) {
         .stablehlo => stablehlo.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),
         .cute => cute.fusedExperts(input, topk_ids, topk_weights, gate_up, down, opts),

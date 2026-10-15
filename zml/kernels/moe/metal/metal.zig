@@ -149,10 +149,8 @@ pub fn fusedExpertsImpl(
     stdx.debug.assert(is_topk_weights_valid_dtype, "metal backend expected topk_weights data type to be bf16, f16 or f32, got {}", .{topk_weights.dtype()});
     stdx.debug.assert(topk_ids.dtype() == .i32, "metal backend expected topk_ids data type to be i32, got {}", .{topk_ids.dtype()});
 
-    const b = hidden_states.dim(.b);
-    const s = hidden_states.dim(.s);
     const d = hidden_states.dim(.d);
-    const num_tokens = b * s;
+    const num_tokens = hidden_states.dim(.t);
     const topk = topk_ids.dim(.topk);
     const num_routes = num_tokens * topk;
 
@@ -193,5 +191,5 @@ pub fn fusedExpertsImpl(
     const combined = weighted.splitAxis(.r, .{ .token = num_tokens, .topk = topk })
         .sum(.topk).squeeze(.topk);
 
-    return combined.reshape(.{ .b = b, .s = s, .d = down.dim(.d) });
+    return combined.reshape(.{ .t = num_tokens, .d = down.dim(.d) });
 }
