@@ -68,7 +68,7 @@ copy_to_directory(
     include_external_repositories = ["**"],
     replace_prefixes = {
         "compat": "lib/compat",
-        "nvidia/nccl/lib": "lib",
+        "nvcuextend": "lib/compat",
         "nvvm/lib64": "lib",
         "libzml_cuda_so": "lib",
         "lib/x86_64-linux-gnu": "lib",
