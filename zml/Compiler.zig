@@ -515,13 +515,16 @@ pub fn compileInternal(
     return exe;
 }
 
+/// Declare all logical meshes used by this program
 fn addPartitionerOperations(ctx: *Compiler) !void {
     const allocator = ctx.arena.allocator();
     const mlir_ctx = ctx.mlir_ctx;
     const module = ctx.module;
 
     switch (ctx.partitioner) {
-        .gspmd => {},
+        .gspmd => {
+            // GSPMD doesn't use meshes, but explicit partitioning operations.
+        },
         .shardy => {
             for (ctx.meshes) |shd| {
                 const attr_str = try shd.sdyMeshAttr(allocator);

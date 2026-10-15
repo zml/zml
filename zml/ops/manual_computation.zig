@@ -111,7 +111,11 @@ noinline fn manualComputationInternal(
         .mesh => |m| m,
         .incompatible => |incomp| std.debug.panic("manualComputation expects all inputs and outputs to use the same mesh, got input {}: {} and input {}: {}", .{ incomp[0], input_tensors[incomp[0]], incomp[1], input_tensors[incomp[1]] }),
     };
-    log.debug("manualComputation({s}) will use mesh {s}", .{ functor_name, mesh.name });
+    const manual_axes = collectManualAxes(mesh, input_tensors);
+    log.debug("manualComputation({s}) will use mesh {s}, manual axes: {f}", .{ functor_name, mesh.name, stdx.fmt.stringsZ(manual_axes.constSlice()) });
+
+    const input_shapes = try arena.alloc(Shape, input_tensors.len);
+    for (input_shapes, input_tensors) |*shape, tensor| shape.* = tensor._shape;
 
     const input_types = try arena.alloc(*const mlir.Type, input_tensors.len);
     for (input_types, input_tensors) |*input_ty, tensor_ptr| {
@@ -126,11 +130,6 @@ noinline fn manualComputationInternal(
     const input_values = try arena.alloc(*const mlir.Value, input_tensors.len);
     for (input_values, input_tensors) |*input_val, tensor_ptr| {
         input_val.* = global_scope.value(tensor_ptr.*);
-    }
-
-    const input_shapes = try arena.alloc(Shape, input_tensors.len);
-    for (input_shapes, input_tensors) |*shape, tensor_ptr| {
-        shape.* = tensor_ptr._shape;
     }
 
     const manual_block = mlir.Block.init(input_types, input_locs);
@@ -221,12 +220,12 @@ noinline fn manualComputationInternal(
     return local_outputs;
 }
 
-const ResolvedMesh = union(enum) {
+const ChosenMesh = union(enum) {
     mesh: *const Sharding.Mesh,
     incompatible: [2]u32,
 };
 
-fn chooseCommonMesh(inputs: []const *const Tensor, fallback: *const Sharding.Mesh) ResolvedMesh {
+fn chooseCommonMesh(inputs: []const *const Tensor, fallback: *const Sharding.Mesh) ChosenMesh {
     var mesh: ?*const Sharding.Mesh = null;
     var mesh_source_id: u32 = @intCast(inputs.len);
     for (0.., inputs) |i, input| {
@@ -251,11 +250,58 @@ test chooseCommonMesh {
     const sharded = Tensor.init(.{ .a = 8 }, .f32).withPartitioning(&first, .{ .a = .data });
     const other = Tensor.init(.{ .a = 8 }, .f32).withPartitioning(&second, .{ .a = .experts });
 
-    try std.testing.expectEqual(ResolvedMesh{ .mesh = &fallback }, chooseCommonMesh(&.{}, &fallback));
-    try std.testing.expectEqual(ResolvedMesh{ .mesh = &fallback }, chooseCommonMesh(&.{&replicated}, &fallback));
-    try std.testing.expectEqual(ResolvedMesh{ .mesh = &first }, chooseCommonMesh(&.{&sharded}, &fallback));
-    try std.testing.expectEqual(ResolvedMesh{ .mesh = &first }, chooseCommonMesh(&.{ &replicated, &sharded, &sharded }, &fallback));
-    try std.testing.expectEqual(ResolvedMesh{ .incompatible = .{ 0, 1 } }, chooseCommonMesh(&.{ &sharded, &other }, &fallback));
+    try std.testing.expectEqual(ChosenMesh{ .mesh = &fallback }, chooseCommonMesh(&.{}, &fallback));
+    try std.testing.expectEqual(ChosenMesh{ .mesh = &fallback }, chooseCommonMesh(&.{&replicated}, &fallback));
+    try std.testing.expectEqual(ChosenMesh{ .mesh = &first }, chooseCommonMesh(&.{&sharded}, &fallback));
+    try std.testing.expectEqual(ChosenMesh{ .mesh = &first }, chooseCommonMesh(&.{ &replicated, &sharded, &sharded }, &fallback));
+    try std.testing.expectEqual(ChosenMesh{ .incompatible = .{ 0, 1 } }, chooseCommonMesh(&.{ &sharded, &other }, &fallback));
+}
+
+fn collectManualAxes(mesh: *const Sharding.Mesh, inputs: []const *const Tensor) stdx.BoundedArray(Shape.Tag, Sharding.MAX_MESH_RANK) {
+    var used: [Sharding.MAX_MESH_RANK]bool = @splat(false);
+    for (inputs) |input| {
+        const sharding = input.shape()._sharding;
+        if (sharding.mesh == null) continue;
+        std.debug.assert(sharding.mesh.? == mesh);
+        for (0..input.rank()) |dim| {
+            if (sharding.partition.get(dim).meshAxis()) |axis| used[axis] = true;
+        }
+    }
+
+    var axes: stdx.BoundedArray(Shape.Tag, Sharding.MAX_MESH_RANK) = .empty;
+    for (mesh.logical.axes.constSlice(), 0..) |axis, i| {
+        if (used[i]) axes.appendAssumeCapacity(axis);
+    }
+    return axes;
+}
+
+test collectManualAxes {
+    const mesh: Sharding.Mesh = .initTest(.manual, .{ .data, .model, .unused });
+    var data = Tensor.init(.{ .a = 8 }, .f32).withPartitioning(&mesh, .{ .a = .data });
+    var model = Tensor.init(.{ .a = 8 }, .f32).withPartitioning(&mesh, .{ .a = .model });
+    const replicated = Tensor.init(.{ .a = 8 }, .f32);
+    const open = Tensor.init(.{ .a = 8 }, .f32).withPartitioning(&mesh, .{ .a = .open });
+
+    const axes = collectManualAxes(&mesh, &.{ &model, &replicated, &data, &model, &open });
+    data = replicated;
+    model = replicated;
+    try std.testing.expectEqual(@as(usize, 2), axes.len);
+    try std.testing.expectEqualStrings("data", std.mem.span(axes.get(0)));
+    try std.testing.expectEqualStrings("model", std.mem.span(axes.get(1)));
+    try std.testing.expectEqual(@as(usize, 0), collectManualAxes(&mesh, &.{ &replicated, &open }).len);
+    try std.testing.expectEqual(@as(usize, 0), collectManualAxes(&mesh, &.{}).len);
+
+    const registry: *mlir.DialectRegistry = try .init();
+    defer registry.deinit();
+    registry.registerDialect("sdy");
+    const ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    const expected = dialects.shardy.ManualAxesAttribute.init(ctx, &.{
+        .init(ctx, "data"),
+        .init(ctx, "model"),
+    }).asAttr();
+    try std.testing.expect(shardy.manualAxesAttr(ctx, axes.constSlice()).eql(expected));
 }
 
 const gspmd = struct {
@@ -297,5 +343,13 @@ const gspmd = struct {
             compiler.location,
         ).appendTo(scope.block);
         return .{ shard_to_full.result(0), global_type };
+    }
+};
+
+const shardy = struct {
+    pub fn manualAxesAttr(mlir_ctx: *mlir.Context, axes: []const Shape.Tag) *const mlir.Attribute {
+        var attrs: stdx.BoundedArray(*const mlir.StringAttribute, Sharding.MAX_MESH_RANK) = .empty;
+        for (axes) |axis| attrs.appendAssumeCapacity(.init(mlir_ctx, std.mem.span(axis)));
+        return dialects.shardy.ManualAxesAttribute.init(mlir_ctx, attrs.constSlice()).asAttr();
     }
 };
