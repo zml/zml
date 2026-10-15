@@ -1823,21 +1823,13 @@ pub const Mesh = struct {
     }
 
     pub fn format(self: Mesh, writer: *std.Io.Writer) !void {
-        try writer.print("Mesh(name={s})\n", .{self.name});
+        try writer.print("Mesh(name={s}, partitions={d}, replicas={d})\n", .{ self.name, self.numPartitions(), self.numReplicas() });
 
-        try writer.writeAll("Bindings:\n");
-        for (self.logical.axes.slice(), self.logical.intents.slice(), self.bindings.slice()) |l_tag, l_intent, bind| {
-            try writer.print("  - {s} ({s}) -> ", .{ l_tag, @tagName(l_intent) });
-
-            if (bind.len == 0) {
-                try writer.writeAll("unbound\n");
-            } else {
-                for (bind.slice(), 0..) |physical, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(@tagName(physical));
-                }
-                try writer.writeAll("\n");
-            }
+        try writer.writeAll("Mappings (logical coordinates from physical coordinates):\n");
+        for (self.logical.axes.slice(), self.logical.intents.slice(), 0..) |tag, intent, logical_axis| {
+            try writer.print("  - {s} ({s}) -> ", .{ tag, @tagName(intent) });
+            try self.formatAxisMapping(writer, logical_axis);
+            try writer.writeAll("\n");
         }
 
         try writer.print("{f}\n", .{self.physical});
@@ -1845,6 +1837,73 @@ pub const Mesh = struct {
         try writer.writeAll("Logical coordinates:\n");
         var coords: [MAX_MESH_RANK]usize = @splat(0);
         try self.formatLogicalCoordinates(writer, &coords, 0);
+    }
+
+    /// Reverse engineer the mapping logical -> physical from the device grid.
+    fn formatAxisMapping(self: Mesh, writer: *std.Io.Writer, logical_axis: usize) !void {
+        const Part = struct {
+            tag: PhysicalAxisTag,
+            physical_size: usize,
+            physical_stride: usize,
+            size: usize,
+            logical_stride: usize,
+        };
+        // A u8 coordinate has at most eight nontrivial mixed-radix digits.
+        var parts: stdx.BoundedArray(Part, @bitSizeOf(u8)) = .empty;
+        const logical_size = self.grid.axis_sizes[logical_axis];
+        var logical_stride: usize = 1;
+        while (logical_stride < logical_size) {
+            const remaining = @divExact(logical_size, logical_stride);
+            var size = remaining;
+            const part: Part = found: {
+                // Prefer the largest matching portion, so whole axes stay readable.
+                while (size > 1) : (size -= 1) {
+                    if (remaining % size != 0) continue;
+                    for (self.physical.axisOrder().constSlice()) |tag| {
+                        const physical_size: usize = @intCast(self.physical.axis(tag));
+                        const depth = self.physical.axis_traversal.depth(tag).?;
+                        var physical_stride: usize = 1;
+                        while (physical_stride * size <= physical_size) : (physical_stride += 1) {
+                            if (physical_size % (physical_stride * size) != 0) continue;
+                            for (self.devicesInCanonicalOrder(), 0..) |device, i| {
+                                const coords: [MAX_MESH_RANK]u8 = self.grid.logical_coords[i];
+                                if ((coords[logical_axis] / logical_stride) % size !=
+                                    (device.coords[depth] / physical_stride) % size) break;
+                            } else {
+                                break :found .{
+                                    .tag = tag,
+                                    .physical_size = physical_size,
+                                    .physical_stride = physical_stride,
+                                    .size = size,
+                                    .logical_stride = logical_stride,
+                                };
+                            }
+                        }
+                    }
+                }
+                try writer.writeAll("device-dependent (see logical coordinates)");
+                return;
+            };
+            parts.appendAssumeCapacity(part);
+            logical_stride *= part.size;
+        }
+        if (parts.len == 0) {
+            try writer.writeAll("0 (replicated)");
+            return;
+        }
+        var i: usize = parts.len;
+        while (i > 0) {
+            i -= 1;
+            const part = parts.constSlice()[i];
+            if (i + 1 < parts.len) try writer.writeAll(" + ");
+            const partial = part.size != part.physical_size;
+            if (partial) try writer.writeAll("(");
+            try writer.writeAll(@tagName(part.tag));
+            if (part.physical_stride > 1) try writer.print(" / {d}", .{part.physical_stride});
+            if (part.physical_stride * part.size < part.physical_size) try writer.print(" % {d}", .{part.size});
+            if (partial) try writer.writeAll(")");
+            if (part.logical_stride > 1) try writer.print(" * {d}", .{part.logical_stride});
+        }
     }
 
     fn formatLogicalCoordinates(self: Mesh, writer: *std.Io.Writer, coords: *[MAX_MESH_RANK]usize, depth: usize) std.Io.Writer.Error!void {
@@ -2739,6 +2798,7 @@ test "DeviceGrid resolves folds once in strategy order" {
         try std.testing.expectEqual(coord, mesh_.grid.logical_coords[i][0]);
     }
     const formatted = try std.fmt.allocPrint(allocator, "{f}", .{mesh_});
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "model (balanced) -> link_z * 2 + link_x\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, formatted, "model=0,1,2,3 -> devices=[11,9,7],[5,3,1],[10,8,6],[4,2,0]") != null);
 }
 
