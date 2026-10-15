@@ -79,7 +79,7 @@ pub fn load(
         };
     }
 
-    const rotary_emb = block.Qwen3VLTextRotaryEmbedding{ .eps = 1e-6, .tag = zml.Shape.toTag(.d) };
+    const rotary_emb = block.Qwen3VLTextRotaryEmbedding.init();
 
     const language_model = block.Qwen3VLTextModel{ .embedding = embedding, .layers = layers, .rotary_emb = rotary_emb };
     self.model = block.Qwen3VLModel{ .language_model = language_model };

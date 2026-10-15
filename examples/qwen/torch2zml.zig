@@ -40,6 +40,8 @@ pub fn main(init: std.process.Init) !void {
     const compile_args: CompileArgs = .{
         .seq_len = 16415,
         .num_attention_heads = 32,
+        .head_dim = 128,
+        .rope_theta = 5000000,
         .attention_metadata = attention_metadata,
         .attention_parameters = attention_parameters,
     };
@@ -74,10 +76,10 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             platform,
-            "text_encoder.model.language_model.layers.0",
+            "text_encoder.model.language_model.rotary_emb",
             &activations_store.store,
-            TextWrapper{ .model = language_model_store.model.language_model.layers[0], .args = compile_args },
-            .{ .model = language_model_store.model_buffer.language_model.layers[0], .args = compile_args_buffers },
+            TextWrapper{ .model = language_model_store.model.language_model.rotary_emb, .args = compile_args },
+            .{ .args = compile_args_buffers },
         );
     } else {
         std.debug.print("NOTHING IS BEING TESTED\n", .{});
@@ -105,18 +107,18 @@ const BlockWrapper = struct {
 };
 
 const TextWrapper = struct {
-    model: block.Qwen3VLTextDecoderLayer,
+    model: block.Qwen3VLTextRotaryEmbedding,
     args: CompileArgs,
 
     pub fn forward(
         self: TextWrapper,
         x: zml.Tensor,
         pos_idx: zml.Tensor,
-        cos: zml.Tensor,
-        sin: zml.Tensor,
-    ) zml.Tensor {
+        // cos: zml.Tensor,
+        // sin: zml.Tensor,
+    ) [2]zml.Tensor {
         const tagged = x.withTags(.{ .bs, .seq_len, .d });
-        return self.model.forward(tagged, pos_idx, cos, sin, self.args);
+        return self.model.forward(tagged, pos_idx, self.args);
     }
 };
 
