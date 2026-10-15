@@ -2305,6 +2305,13 @@ pub const Placement = struct {
     byte_steps: @Vector(MAX_MESH_RANK, u64),
 
     pub fn init(shape: Shape) error{IncompatibleSharding}!Placement {
+        const byte_strides = shape.computeByteStrides();
+        return initWithByteStrides(shape, byte_strides.constSlice());
+    }
+
+    /// byte_strides must be the contiguous byte strides of shape.
+    pub inline fn initWithByteStrides(shape: Shape, byte_strides: []const i64) error{IncompatibleSharding}!Placement {
+        std.debug.assert(byte_strides.len == shape.rank());
         var pl: Placement = .{
             .shape = shape, // modified below
             .global_shape = if (builtin.mode == .debug) shape else {},
@@ -2315,7 +2322,6 @@ pub const Placement = struct {
         const mesh_ = shape._sharding.mesh.?;
         var used_axes: u8 = 0;
         var byte_steps: [MAX_MESH_RANK]u64 = @splat(0);
-        const byte_strides = shape.computeByteStrides();
         for (shape.dims(), 0..) |dim, ax| {
             const logical_axis = shape.partition(ax).meshAxis() orelse continue;
             const bit = @as(u8, 1) << @intCast(logical_axis);
@@ -2326,7 +2332,7 @@ pub const Placement = struct {
             if (@rem(dim, count) != 0) return error.IncompatibleSharding;
             const local_dim = @divExact(dim, count);
             pl.shape._dims.set(ax, local_dim);
-            byte_steps[logical_axis] = @intCast(local_dim * byte_strides.get(ax));
+            byte_steps[logical_axis] = @intCast(local_dim * byte_strides[ax]);
         }
         pl.byte_steps = byte_steps;
         return pl;
@@ -2368,7 +2374,7 @@ pub const Placement = struct {
     }
 
     /// device_index is a canonical ordinal, never a PJRT device ID.
-    /// base_ptr must come from basePtr for this placement and source slice.
+    /// base_ptr must reference validated contiguous data for the global shape.
     pub fn shardPtr(pl: *const Placement, device_index: usize, base_ptr: [*]const u8) [*]const u8 {
         return base_ptr + pl.byteOffset(device_index);
     }

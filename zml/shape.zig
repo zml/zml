@@ -1134,21 +1134,27 @@ pub const Shape = struct {
         }
     }
 
+    test "byte strides handle zero dimensions and maximum rank" {
+        const empty = Shape.init(.{ 2, 0, 5 }, .f32).computeByteStrides();
+        try std.testing.expectEqualSlices(i64, &.{ 0, 20, 4 }, empty.constSlice());
+        const full_rank = Shape.init(.{ 2, 3, 5, 7, 11, 13, 17, 19 }, .u8).computeByteStrides();
+        try std.testing.expectEqualSlices(i64, &.{ 4849845, 1616615, 323323, 46189, 4199, 323, 19, 1 }, full_rank.constSlice());
+        const large = Shape.init(.{std.math.maxInt(i64)}, .f64).computeByteStrides();
+        try std.testing.expectEqualSlices(i64, &.{8}, large.constSlice());
+    }
+
     fn computeStrides(self: Shape, element_size: i64) stdx.BoundedArray(i64, constants.MAX_RANK) {
         const rk = self.rank();
         var strides: stdx.BoundedArray(i64, constants.MAX_RANK) = .{ .buffer = undefined, .len = rk };
-        if (rk == 0) return strides;
+        var stride = element_size;
+        var ax: usize = rk;
+        while (ax > 0) {
+            ax -= 1;
+            strides.buffer[ax] = stride;
+            // Axis 0 is not part of any stride; avoid computing the total size.
+            if (ax > 0) stride *= self._dims.buffer[ax];
+        }
 
-        const V = @Vector(constants.MAX_RANK, i64);
-        const rank_mask = std.simd.iota(u8, constants.MAX_RANK) < @as(@Vector(constants.MAX_RANK, u8), @splat(rk));
-        // For each axis compute the product of all following dimensions
-        // and the element size in bytes.
-        var d: V = @bitCast(self._dims.buffer);
-        d = @select(i64, rank_mask, d, @as(V, @splat(1)));
-        d = std.simd.shiftElementsLeft(d, 1, element_size);
-        d = std.simd.prefixScan(.Mul, -1, d);
-
-        strides.buffer = @bitCast(d);
         return strides;
     }
 

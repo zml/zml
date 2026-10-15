@@ -117,7 +117,7 @@ fn summarize(results: *const [layouts.len]Result) void {
     std.log.info("Linear fit (metadata only, equal weight per layout): Buffer.from = {d:.0}ns + {d:.0}ns * num_devices", .{ @floor(base), @floor(perDevice) });
 }
 
-// Mirrors Buffer.from and emptyShell. Keep this in sync with zml/buffer.zig.
+// Mirrors Buffer.from. Keep this in sync with zml/buffer.zig.
 // Synthetic handles are never dereferenced or passed to PJRT, including deinit.
 // Compiler barriers stand in for the external call consuming each upload's args.
 noinline fn bufferFromMetadata(platform: *const zml.Platform, shape: zml.Shape, data: []const u8, opts: zml.Buffer.FromOptions) !zml.Buffer {
@@ -125,12 +125,14 @@ noinline fn bufferFromMetadata(platform: *const zml.Platform, shape: zml.Shape, 
     const packed_shape = shape.packedShape();
     var placed_shape = packed_shape;
     if (placed_shape._sharding.mesh == null) placed_shape._sharding.mesh = platform.replicated_mesh;
-    const placement = try Sharding.Placement.init(placed_shape);
+    const byte_strides = packed_shape.computeByteStrides();
+    const placement = try Sharding.Placement.initWithByteStrides(placed_shape, byte_strides.constSlice());
     const ty = zml.pjrtx.bufferTypeFromDtype(packed_shape.dtype());
     const layout = platform.defaultMemoryLayout(placement.shape.dims(), packed_shape.dtype());
     zml.stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
-    const slice = zml.Slice.init(packed_shape, data);
-    const base_ptr = placement.basePtr(slice);
+    const byte_size = packed_shape.byteSize();
+    zml.stdx.debug.assert(data.len == byte_size, "Expected data length {}, got {}", .{ byte_size, data.len });
+    const base_ptr = data.ptr;
 
     for (platform.physical_mesh.devices_in_canonical_order, 0..) |device, device_index| {
         const memory = platform.devices[device.id].memory(opts.memory).?;
@@ -140,7 +142,7 @@ noinline fn bufferFromMetadata(platform: *const zml.Platform, shape: zml.Shape, 
             .layout = layout,
             .dims = placement.shape.dims(),
             .buffer_type = ty,
-            .byte_strides = slice.byte_strides.constSlice(),
+            .byte_strides = byte_strides.constSlice(),
             .host_buffer_semantics = .ImmutableUntilTransferCompletes,
         };
         std.mem.doNotOptimizeAway(&args);

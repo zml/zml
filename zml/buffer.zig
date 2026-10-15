@@ -141,32 +141,40 @@ pub const Buffer = struct {
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
-        var buffer: Buffer = .{
-            ._platform = platform,
-            ._shape = shape_,
-            ._shards = .empty,
+        var buffer: Buffer = .{ ._platform = platform, ._shape = shape_, ._shards = .empty };
+        // TODO: benchmark against
+        // const metadata: PjrtBufferMetadata = .init(platform, shape_);
+        const packed_shape = shape_.packedShape();
+        var placed_shape = packed_shape;
+        if (placed_shape._sharding.mesh == null) placed_shape._sharding.mesh = platform.replicated_mesh;
+        const byte_strides = packed_shape.computeByteStrides();
+        const placement = Sharding.Placement.initWithByteStrides(placed_shape, byte_strides.constSlice()) catch |err| {
+            @branchHint(.cold);
+            std.debug.panic("Buffer shape {f} is incompatible with its mesh: {t}", .{ packed_shape, err });
         };
-        const metadata: PjrtBufferMetadata = .init(platform, shape_);
+        const ty = pjrtx.bufferTypeFromDtype(packed_shape.dtype());
+        const layout = platform.defaultMemoryLayout(placement.shape.dims(), packed_shape.dtype());
 
         errdefer for (buffer._shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
         };
 
         stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
-        const slice = Slice.init(metadata.shape, data_);
-        const base_ptr = metadata.placement.basePtr(slice);
+        const byte_size = packed_shape.byteSize();
+        stdx.debug.assert(data_.len == byte_size, "Expected data length {}, got {}", .{ byte_size, data_.len });
+        const base_ptr = data_.ptr;
 
         for (platform.physical_mesh.devices_in_canonical_order, 0..) |device, device_index| {
             const memory = platform.devices[device.id].memory(opts.memory).?;
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
-                .data = metadata.placement.shardPtr(device_index, base_ptr),
+                .data = placement.shardPtr(device_index, base_ptr),
                 .dst = .{ .memory = memory.pjrt_memory },
                 // Constant across devices
-                .layout = metadata.layout,
-                .dims = metadata.placement.shape.dims(),
-                .buffer_type = metadata.ty,
-                .byte_strides = slice.byte_strides.constSlice(),
+                .layout = layout,
+                .dims = placement.shape.dims(),
+                .buffer_type = ty,
+                .byte_strides = byte_strides.constSlice(),
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
             };
 
