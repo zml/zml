@@ -31,8 +31,8 @@ pub fn forward(
     const x = self.embedding.forward(input_ids);
     const B, const S = &.{ input_ids.dim(0), input_ids.dim(1) };
 
-    const position_ids = zml.Tensor.arange(.{ .end = S }, .i64).broad(.init(.{ .bs = B, .seq_len = S }, .i64));
-    const rope_position_ids = position_ids.broad(.init(.{ .rope = 4, .bs = B, .seq_len = S }, .i64));
+    const position_ids = zml.Tensor.arange(.{ .end = S }, .i64).withTags(.{.seq_len}).broad(.init(.{ .bs = B, .seq_len = S }, .i64));
+    const rope_position_ids = position_ids.broad(.init(.{ .rope = 3, .bs = B, .seq_len = S }, .i64));
 
     const position_embeddings = self.rotary_emb.forward(x, rope_position_ids);
     _ = position_embeddings; // autofix
