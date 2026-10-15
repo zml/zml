@@ -1497,45 +1497,6 @@ pub const LogicalMesh = struct {
 
 pub const PhysicalList = stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK);
 
-pub const Fold = struct {
-    target: PhysicalAxisTag,
-    sources: PhysicalList,
-};
-pub const Folds = stdx.BoundedArray(Fold, MAX_MESH_RANK);
-
-pub const Axis = struct {
-    tag: PhysicalAxisTag,
-    size: i64,
-    geometry: ?AxisGeometry,
-    folded: stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK),
-
-    pub fn contains(self: *const Axis, tag: PhysicalAxisTag) bool {
-        if (self.tag == tag) return true;
-        for (self.folded.slice()) |t| if (t == tag) return true;
-        return false;
-    }
-};
-
-pub const PhysicalView = struct {
-    axes: stdx.BoundedArray(Axis, MAX_MESH_RANK),
-    total_devices: i64,
-
-    pub fn axisCoordFromLinearShard(self: *const PhysicalView, axis_index: usize, linear_idx: usize) usize {
-        const stride = self.axisStrideForLinear(axis_index);
-        const axis_size: usize = @intCast(self.axes.slice()[axis_index].size);
-        return (linear_idx / stride) % axis_size;
-    }
-
-    pub fn axisStrideForLinear(self: *const PhysicalView, axis_index: usize) usize {
-        var stride: usize = 1;
-        var j = axis_index + 1;
-        while (j < self.axes.len) : (j += 1) {
-            stride *= @intCast(self.axes.slice()[j].size);
-        }
-        return stride;
-    }
-};
-
 pub const Mesh = struct {
     pub const zml_no_meta_visit: void = {};
 
@@ -1547,10 +1508,6 @@ pub const Mesh = struct {
 
     /// Compact binding table: logical axis -> physical axes
     bindings: stdx.BoundedArray(PhysicalList, MAX_MESH_RANK),
-
-    /// Explicit folding rules: kept axis -> ordered source axes.
-    folds: Folds,
-    folds_consumed: std.EnumSet(PhysicalAxisTag),
 
     pub fn shardableDim(mesh: *const Mesh, dim: i64, logical_axis: anytype, must_divide: i64) DimSharding {
         const partitions = mesh.numPartitionsForLogicalAxis(logical_axis);
@@ -1615,26 +1572,14 @@ pub const Mesh = struct {
             }
         }
 
-        var folds: Folds = .empty;
-        var folds_consumed: std.EnumSet(PhysicalAxisTag) = .empty;
-        for (strategy.folding.slice()) |entry| {
-            for (entry.sources.slice()) |src| {
-                if (!physical.hasAxis(src)) return error.InvalidPhysicalAxis;
-                folds_consumed.insert(src);
-            }
-            folds.appendAssumeCapacity(.{ .target = entry.target, .sources = entry.sources });
-        }
-
         var mesh: Mesh = .{
             .name = name_,
             .logical = logical,
             .grid = undefined,
             .physical = physical,
             .bindings = bindings,
-            .folds = folds,
-            .folds_consumed = folds_consumed,
         };
-        mesh.grid = try DeviceGrid.init(&mesh);
+        mesh.grid = try DeviceGrid.init(&mesh, &strategy);
         std.debug.assert(num_devices == physical.devices_in_canonical_order.len);
         std.debug.assert(@mod(mesh.numDevices(), mesh.numPartitions()) == 0);
         if (mesh.numReplicas() > 1 and !std.mem.eql(u8, "replicated", name_)) {
@@ -1655,58 +1600,11 @@ pub const Mesh = struct {
             .physical = undefined,
             .grid = undefined,
             .bindings = .empty,
-            .folds = .empty,
-            .folds_consumed = .empty,
         };
-    }
-
-    fn foldSources(self: *const Mesh, tag: PhysicalAxisTag) ?[]const PhysicalAxisTag {
-        for (self.folds.slice()) |*f| {
-            if (f.target == tag) return f.sources.slice();
-        }
-        return null;
     }
 
     pub fn devicesInCanonicalOrder(mesh: *const Mesh) []const Device {
         return mesh.physical.devices_in_canonical_order;
-    }
-
-    pub fn physicalView(self: *const Mesh) PhysicalView {
-        const physical = self.physical;
-        var view: PhysicalView = .{
-            .axes = .empty,
-            .total_devices = 1,
-        };
-
-        const axis_order = physical.axisOrder().slice();
-
-        for (axis_order) |tag| {
-            if (!physical.hasAxis(tag)) continue;
-            if (self.folds_consumed.contains(tag) and self.foldSources(tag) == null) continue;
-
-            var folded: stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK) = .empty;
-            var size: i64 = 1;
-
-            if (self.foldSources(tag)) |sources| {
-                for (sources) |src| {
-                    folded.appendAssumeCapacity(src);
-                    size *= physical.axis(src);
-                }
-            } else {
-                folded.appendAssumeCapacity(tag);
-                size = physical.axis(tag);
-            }
-
-            view.total_devices *= size;
-            view.axes.appendAssumeCapacity(.{
-                .tag = tag,
-                .size = size,
-                .geometry = physical.geometry(tag),
-                .folded = folded,
-            });
-        }
-
-        return view;
     }
 
     pub fn logicalIndexFromCoords(self: *const Mesh, coords: []const u8) usize {
@@ -1981,14 +1879,14 @@ pub const Mesh = struct {
             coords[last] = coord;
             if (coord > 0) try writer.writeAll(",");
             var count: usize = 0;
-            for (self.devicesInCanonicalOrder()) |device| {
-                if (self.matchesLogicalCoordinates(device, coords[0..axes.len])) count += 1;
+            for (0..self.grid.device_count) |device_index| {
+                if (self.matchesLogicalCoordinates(device_index, coords[0..axes.len])) count += 1;
             }
             // Keep replicas grouped so each entry corresponds to one last-axis coordinate.
             if (count != 1) try writer.writeAll("[");
             var written: usize = 0;
-            for (self.devicesInCanonicalOrder()) |device| {
-                if (!self.matchesLogicalCoordinates(device, coords[0..axes.len])) continue;
+            for (self.devicesInCanonicalOrder(), 0..) |device, device_index| {
+                if (!self.matchesLogicalCoordinates(device_index, coords[0..axes.len])) continue;
                 if (written > 0) try writer.writeAll(",");
                 try writer.print("{d}", .{device.id});
                 written += 1;
@@ -1998,28 +1896,16 @@ pub const Mesh = struct {
         try writer.writeAll("\n");
     }
 
-    fn matchesLogicalCoordinates(self: Mesh, device: Device, coords: []const usize) bool {
+    fn matchesLogicalCoordinates(self: Mesh, device_index: usize, coords: []const usize) bool {
+        const actual: [MAX_MESH_RANK]u8 = self.grid.logical_coords[device_index];
         for (coords, 0..) |expected, logical_axis| {
-            var coord: usize = 0;
-            var used: std.EnumSet(PhysicalAxisTag) = .empty;
-            for (self.binding(logical_axis)) |tag| {
-                const sources = self.foldSources(tag) orelse &.{tag};
-                for (sources) |source| {
-                    if (used.contains(source)) continue;
-                    used.insert(source);
-                    const info = self.physical.axisInfo(source) orelse continue;
-                    const depth = self.physical.axis_traversal.depth(source) orelse continue;
-                    coord = coord * @as(usize, @intCast(info.size)) + device.coords[depth];
-                }
-            }
-            if (coord != expected) return false;
+            if (actual[logical_axis] != expected) return false;
         }
         return true;
     }
 };
 
-/// Resolved logical coordinates in canonical physical-device order. Each row is
-/// one packed four-byte row; the contiguous table is 16-byte aligned.
+/// Resolved logical coordinates in canonical physical-device order.
 /// Unused logical axes have coordinate zero.
 pub const DeviceGrid = struct {
     pub const Coordinates = @Vector(MAX_MESH_RANK, u8);
@@ -2033,7 +1919,12 @@ pub const DeviceGrid = struct {
     axis_sizes: [MAX_MESH_RANK]u32,
     logical_coords: [Platform.MAX_NUM_DEVICES]Coordinates align(16),
 
-    fn init(mesh_: *const Mesh) !DeviceGrid {
+    fn init(mesh_: *const Mesh, strategy: *const Strategy) !DeviceGrid {
+        for (strategy.folding.constSlice()) |entry| {
+            for (entry.sources.constSlice()) |source| {
+                if (!mesh_.physical.hasAxis(source)) return error.InvalidPhysicalAxis;
+            }
+        }
         const devices = mesh_.devicesInCanonicalOrder();
         if (devices.len > Platform.MAX_NUM_DEVICES) return error.InvalidPhysicalMesh;
         var grid: DeviceGrid = .{
@@ -2046,7 +1937,7 @@ pub const DeviceGrid = struct {
         for (0..grid.rank) |logical_axis| {
             var used: std.EnumSet(PhysicalAxisTag) = .empty;
             for (mesh_.binding(logical_axis)) |tag| {
-                for (mesh_.foldSources(tag) orelse &.{tag}) |source| {
+                for (strategy.foldSources(tag) orelse &.{tag}) |source| {
                     if (used.contains(source)) continue;
                     used.insert(source);
                     if (claimed.contains(source)) return error.OverlappingLogicalAxes;
@@ -2121,6 +2012,13 @@ pub const Strategy = struct {
         var list: PhysicalList = .empty;
         list.appendAssumeCapacity(physical);
         self.bindings.appendAssumeCapacity(.{ .logical = raw_tag, .physical = list });
+    }
+
+    fn foldSources(self: *const Strategy, tag: PhysicalAxisTag) ?[]const PhysicalAxisTag {
+        for (self.folding.constSlice()) |*fold| {
+            if (fold.target == tag) return fold.sources.constSlice();
+        }
+        return null;
     }
 
     /// Explicitly fold axes: `target` is the kept axis, `sources` define order.
@@ -2344,8 +2242,8 @@ const ShardingTest = struct {
         mesh: *const Mesh,
         shape: Shape,
 
-        expected_num_partitions: i32,
-        expected_num_replicas: i32,
+        expected_num_partitions: u32,
+        expected_num_replicas: u32,
         expect_error: ?anyerror = null,
         expected_sdy: ?[]const u8 = null,
         expected_shards: []const ExpectedShard = &.{},
@@ -2820,6 +2718,42 @@ test "DeviceGrid stores aligned logical coordinates in canonical order" {
         try std.testing.expectEqual(offset, placement.byteOffset(i));
         try std.testing.expectEqual(@intFromPtr(&data) + 16 + offset, @intFromPtr(placement.shardPtr(i, base_ptr)));
     }
+}
+
+test "DeviceGrid resolves folds once in strategy order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const runner: ShardingTest = .init(allocator);
+    const physical = try runner.physical(.{ 2, 3, 2 }, .{ .mesh = .torus });
+    for (physical.devices_in_canonical_order, 0..) |*device, i| device.id = @intCast(11 - i);
+    var strategy: Strategy = .parseBindings(.{ .model = .{ .link_x, .link_z } });
+    strategy.addFold(.link_x, &.{ .link_z, .link_x });
+    const mesh_ = try Mesh.init("folded", &physical, .mesh(.{ .model = .balanced }), strategy);
+    strategy.folding = .empty;
+
+    try std.testing.expectEqual(4, mesh_.numPartitions());
+    try std.testing.expectEqual(3, mesh_.numReplicas());
+    const expected = [_]u8{ 0, 2, 0, 2, 0, 2, 1, 3, 1, 3, 1, 3 };
+    for (expected, 0..) |coord, i| {
+        try std.testing.expectEqual(coord, mesh_.grid.logical_coords[i][0]);
+    }
+    const formatted = try std.fmt.allocPrint(allocator, "{f}", .{mesh_});
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "model=0,1,2,3 -> devices=[11,9,7],[5,3,1],[10,8,6],[4,2,0]") != null);
+}
+
+test "DeviceGrid validates fold sources and overlapping folded axes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+    const physical = try runner.physical(.{ 2, 2 }, .{ .mesh = .torus });
+    var strategy: Strategy = .parseBindings(.{ .model = .link_x });
+    strategy.addFold(.link_y, &.{ .link_y, .link_z });
+    try std.testing.expectError(error.InvalidPhysicalAxis, Mesh.init("invalid", &physical, .mesh(.{ .model = .balanced }), strategy));
+
+    strategy = .parseBindings(.{ .model = .link_x, .data = .link_y });
+    strategy.addFold(.link_x, &.{ .link_x, .link_y });
+    try std.testing.expectError(error.OverlappingLogicalAxes, Mesh.init("overlap", &physical, .mesh(.{ .model = .balanced, .data = .balanced }), strategy));
 }
 
 test "Placement owns dimensions and byte steps across copies" {

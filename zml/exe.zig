@@ -682,7 +682,7 @@ test "FnExe runner replaces unchanged donated buffers" {
     const value: Tensor = .init(.{2}, .i32);
     const exe = try Model.compile(allocator, io, platform, .{}, .{.{ .value = value }});
     defer exe.deinit();
-    try std.testing.expectEqualSlices(usize, &.{0}, exe.raw.donated_input_indices);
+    try std.testing.expectEqualSlices(u32, &.{0}, exe.raw.donated_input_indices);
 
     var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), std.mem.asBytes(&[2]i32{ 1, 2 }));
     defer value_buffer.deinit();

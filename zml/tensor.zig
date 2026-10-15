@@ -242,8 +242,6 @@ pub const Tensor = struct {
             .physical = undefined,
             .logical = .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
             .bindings = .init(&.{.init(&.{.link_x})}),
-            .folds = .empty,
-            .folds_consumed = .empty,
             .grid = undefined,
         };
 
@@ -252,8 +250,6 @@ pub const Tensor = struct {
             .physical = undefined,
             .logical = .mesh(.{ .model = .low_bandwidth, .data = .high_bandwidth }),
             .bindings = .init(&.{.init(&.{.link_x})}),
-            .folds = .empty,
-            .folds_consumed = .empty,
             .grid = undefined,
         };
 

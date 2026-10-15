@@ -824,8 +824,6 @@ pub const Shape = struct {
             .init(&.{.link_y}),
             .init(&.{.link_z}),
         }),
-        .folds = .empty,
-        .folds_consumed = .empty,
         .grid = undefined,
     };
 
