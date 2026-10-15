@@ -1571,55 +1571,6 @@ pub const PhysicalView = struct {
     }
 };
 
-/// Resolved logical coordinates in canonical physical-device order. Each row is
-/// one packed four-byte row; the contiguous table is 16-byte aligned.
-/// Unused logical axes have coordinate zero.
-pub const DeviceGrid = struct {
-    pub const Coordinates = @Vector(MAX_MESH_RANK, u8);
-
-    comptime {
-        std.debug.assert(Platform.MAX_NUM_DEVICES <= 256);
-    }
-
-    rank: u8,
-    device_count: usize,
-    axis_sizes: [MAX_MESH_RANK]u32,
-    logical_coords: [Platform.MAX_NUM_DEVICES]Coordinates align(16),
-
-    fn init(mesh_: *const Mesh) !DeviceGrid {
-        const devices = mesh_.devicesInCanonicalOrder();
-        if (devices.len > Platform.MAX_NUM_DEVICES) return error.InvalidPhysicalMesh;
-        var grid: DeviceGrid = .{
-            .rank = @intCast(mesh_.logical.axes.len),
-            .device_count = devices.len,
-            .axis_sizes = @splat(1),
-            .logical_coords = @splat(@splat(0)),
-        };
-        var claimed: std.EnumSet(PhysicalAxisTag) = .empty;
-        for (0..grid.rank) |logical_axis| {
-            var used: std.EnumSet(PhysicalAxisTag) = .empty;
-            for (mesh_.binding(logical_axis)) |tag| {
-                for (mesh_.foldSources(tag) orelse &.{tag}) |source| {
-                    if (used.contains(source)) continue;
-                    used.insert(source);
-                    if (claimed.contains(source)) return error.OverlappingLogicalAxes;
-                    claimed.insert(source);
-                    const info = mesh_.physical.axisInfo(source) orelse continue;
-                    const depth = mesh_.physical.axis_traversal.depth(source) orelse continue;
-                    const size: u32 = @intCast(info.size);
-                    grid.axis_sizes[logical_axis] *= size;
-                    for (devices, 0..) |device, i| {
-                        var coords: [MAX_MESH_RANK]u8 = grid.logical_coords[i];
-                        coords[logical_axis] = @intCast(@as(u32, coords[logical_axis]) * size + device.coords[depth]);
-                        grid.logical_coords[i] = coords;
-                    }
-                }
-            }
-        }
-        return grid;
-    }
-};
-
 pub const Mesh = struct {
     pub const zml_no_meta_visit: void = {};
 
@@ -2116,6 +2067,55 @@ pub const Mesh = struct {
             if (coord != expected) return false;
         }
         return true;
+    }
+};
+
+/// Resolved logical coordinates in canonical physical-device order. Each row is
+/// one packed four-byte row; the contiguous table is 16-byte aligned.
+/// Unused logical axes have coordinate zero.
+pub const DeviceGrid = struct {
+    pub const Coordinates = @Vector(MAX_MESH_RANK, u8);
+
+    comptime {
+        std.debug.assert(Platform.MAX_NUM_DEVICES <= 256);
+    }
+
+    rank: u8,
+    device_count: usize,
+    axis_sizes: [MAX_MESH_RANK]u32,
+    logical_coords: [Platform.MAX_NUM_DEVICES]Coordinates align(16),
+
+    fn init(mesh_: *const Mesh) !DeviceGrid {
+        const devices = mesh_.devicesInCanonicalOrder();
+        if (devices.len > Platform.MAX_NUM_DEVICES) return error.InvalidPhysicalMesh;
+        var grid: DeviceGrid = .{
+            .rank = @intCast(mesh_.logical.axes.len),
+            .device_count = devices.len,
+            .axis_sizes = @splat(1),
+            .logical_coords = @splat(@splat(0)),
+        };
+        var claimed: std.EnumSet(PhysicalAxisTag) = .empty;
+        for (0..grid.rank) |logical_axis| {
+            var used: std.EnumSet(PhysicalAxisTag) = .empty;
+            for (mesh_.binding(logical_axis)) |tag| {
+                for (mesh_.foldSources(tag) orelse &.{tag}) |source| {
+                    if (used.contains(source)) continue;
+                    used.insert(source);
+                    if (claimed.contains(source)) return error.OverlappingLogicalAxes;
+                    claimed.insert(source);
+                    const info = mesh_.physical.axisInfo(source) orelse continue;
+                    const depth = mesh_.physical.axis_traversal.depth(source) orelse continue;
+                    const size: u32 = @intCast(info.size);
+                    grid.axis_sizes[logical_axis] *= size;
+                    for (devices, 0..) |device, i| {
+                        var coords: [MAX_MESH_RANK]u8 = grid.logical_coords[i];
+                        coords[logical_axis] = @intCast(@as(u32, coords[logical_axis]) * size + device.coords[depth]);
+                        grid.logical_coords[i] = coords;
+                    }
+                }
+            }
+        }
+        return grid;
     }
 };
 
