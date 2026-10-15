@@ -809,11 +809,18 @@ fn repack(compiler: *Compiler, scope: *Scope, og_shape: Shape, value: *const mli
 fn validateMeshes(meshes: []const *const Sharding.Mesh) !void {
     stdx.debug.assert(meshes.len >= 1, "Waiting at leat 1 mesh strategy to be implemented", .{});
 
+    for (meshes) |m| {
+        const num_replicas = m.numReplicas();
+        if (num_replicas > 1 and !std.mem.eql(u8, "replicated", m.name)) {
+            log.warn("Mesh({s}) has numReplicas() == {d}. This imply that all tensor put on this mesh will be implicitly replicated {d} times.\n{f}", .{ m.name, num_replicas, num_replicas, m });
+        }
+    }
+
     const first = meshes[0];
     const devices = first.numDevices();
 
-    for (meshes[1..]) |s| {
-        if (s.numDevices() != devices) {
+    for (meshes[1..]) |m| {
+        if (m.numDevices() != devices) {
             // todo: deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
             return error.InconsistentMesheCardinality;
         }

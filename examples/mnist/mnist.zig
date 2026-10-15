@@ -92,13 +92,17 @@ pub fn main(init: std.process.Init) !void {
     // Auto-select platform
     const target: zml.Target = try .selectFirstAcceleratorEnabled();
     const platform: *zml.Platform = try .init(allocator, io, target, .{
-        .physical_mesh = if (target == .cpu) .{ .custom = zml.Sharding.PhysicalMesh.torus2d } else .auto,
+        .physical_mesh = .auto,
     });
     defer platform.deinit(allocator, io);
 
     // Decide how to partition the devices of our hardware.
     // Here we use a mixed Data parallel / Model parallel
-    const dp_mp = try platform.registerMesh("DP-MP", .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }));
+    const dp_mp = try platform.registerMesh("DP-MP", try .init(
+        .{ .data, .model },
+        &.{ .low_bandwidth, .high_bandwidth },
+        &.{ 2, -1 },
+    ));
     log.info("topology used: {f}", .{dp_mp});
 
     var profiler = try platform.profiler(allocator, io, .{
