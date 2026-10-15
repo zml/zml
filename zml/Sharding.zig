@@ -509,13 +509,6 @@ pub const Device = struct {
     fn hasValidCoords(device: Device) bool {
         return @as(u32, @bitCast(device.coords)) != @as(u32, @bitCast(undefined_coords));
     }
-
-    pub fn format(device: Device, writer: *std.Io.Writer) !void {
-        try writer.print(
-            "Device(id={d} coords={any})",
-            .{ device.id, device.coords },
-        );
-    }
 };
 
 /// Physical axis tags represent hardware interconnect tiers.
@@ -1048,15 +1041,14 @@ pub const PhysicalMesh = struct {
         try writer.print("├── {f}\n", .{self.axis_traversal});
         try writer.print("│  \n", .{});
 
-        try formatNode(self.root, writer, "", true);
+        try formatNode(self.root, writer, "", 0, true);
     }
 
-    fn formatNode(node: PhysicalNode, writer: *std.Io.Writer, prefix: []const u8, is_last: bool) !void {
+    fn formatNode(node: PhysicalNode, writer: *std.Io.Writer, prefix: []const u8, depth: u8, is_last: bool) !void {
         try writer.print("{s}{s}", .{ prefix, if (is_last) "└── " else "├── " });
-
         switch (node) {
-            .leaf => |d| {
-                try writer.print("{f}\n", .{d});
+            .leaf => |device| {
+                try writer.print("Device(id={d}, coords={any})\n", .{ device.id, device.coords[0..depth] });
             },
             .branch => |b| {
                 try writer.print("[{s}] x{d} ({s})\n", .{ @tagName(b.tag), b.children.len, @tagName(b.geometry) });
@@ -1066,7 +1058,7 @@ pub const PhysicalMesh = struct {
 
                 for (b.children, 0..) |child, i| {
                     const child_is_last = (i == b.children.len - 1);
-                    try formatNode(child, writer, new_prefix, child_is_last);
+                    try formatNode(child, writer, new_prefix, depth +| 1, child_is_last);
                 }
             },
         }
@@ -1577,6 +1569,8 @@ pub const Mesh = struct {
     name: []const u8,
     physical: *const PhysicalMesh,
     logical: LogicalMesh,
+
+    num_devices: u32,
     grid: DeviceGrid,
 
     /// Compact binding table: logical axis -> physical axes
@@ -1663,6 +1657,7 @@ pub const Mesh = struct {
             .grid = undefined,
             .physical = physical,
             .bindings = bindings,
+            .num_devices = @intCast(physical.countDevices()),
             .folds = folds,
             .folds_consumed = folds_consumed,
         };
@@ -1746,6 +1741,7 @@ pub const Mesh = struct {
 
     pub fn numPartitionsForLogicalAxis(self: *const Mesh, logical_axis: anytype) i64 {
         const logical_tag = Shape.toTag(logical_axis);
+
         const logical_ax = self.resolveLogicalAxis(logical_tag) orelse std.debug.panic("mesh {f} has no axis {s}", .{ self, logical_tag });
         return self.grid.axis_sizes[logical_ax];
     }
@@ -1930,8 +1926,7 @@ pub const Mesh = struct {
     }
 
     pub fn deviceAssignment(self: *const Mesh, allocator: std.mem.Allocator) ![]u32 {
-        const view = self.physicalView();
-        const count: u32 = @intCast(view.total_devices);
+        const count = self.physical.devices_in_canonical_order.len;
 
         var ids = try allocator.alloc(u32, count);
         @memset(ids, std.math.maxInt(u32));
@@ -1967,34 +1962,7 @@ pub const Mesh = struct {
             }
         }
 
-        const view = self.physicalView();
-
-        try writer.print("Physical capacity: {d}\n", .{view.total_devices});
-
-        try writer.writeAll("Physical axes: ");
-        if (view.axes.len == 0) {
-            try writer.writeAll("(none)\n");
-        } else {
-            for (view.axes.slice(), 0..) |axis, i| {
-                if (i > 0) try writer.writeAll(" × ");
-                try writer.print("{s}[{d}]", .{ @tagName(axis.tag), axis.size });
-            }
-            try writer.writeAll("\n");
-        }
-
-        try writer.writeAll("Geometries: ");
-        if (view.axes.len == 0) {
-            try writer.writeAll("(none)\n");
-        } else {
-            for (view.axes.slice(), 0..) |axis, i| {
-                if (i > 0) try writer.writeAll(", ");
-                try writer.print("{s}={s}", .{
-                    @tagName(axis.tag),
-                    @tagName(axis.geometry orelse .point_to_point),
-                });
-            }
-            try writer.writeAll("\n");
-        }
+        try writer.print("{f}\n", .{self.physical});
 
         try writer.writeAll("Logical coordinates:\n");
         var coords: [MAX_MESH_RANK]usize = @splat(0);
