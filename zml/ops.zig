@@ -2886,6 +2886,7 @@ fn customCallArgsFromPjrtCallFrame(I: type, O: type, A: type, call_frame: *pjrt.
 test customCall {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
+    const tp = zml.testing.tpMesh();
 
     var comp: zml.Compiler = .init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
@@ -2896,7 +2897,7 @@ test customCall {
     const scope = comp.pushBlock(block);
     defer scope.pop();
 
-    const shape = zml.Shape.init(.{128}, .bf16).withPartitioning(platform.meshes.get("model").?, .{ ._0 = .model });
+    const shape = zml.Shape.init(.{128}, .bf16).withPartitioning(tp, .{ ._0 = .model });
     const input = Tensor.constant(zml.DataType.bf16.constant(0)).broad(shape);
     const output = customCall("my_custom_call", .{input}, .{zml.Shape.init(.{128}, .bf16)}, .{}, .{
         .has_side_effect = false,

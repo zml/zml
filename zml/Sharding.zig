@@ -180,7 +180,7 @@ fn shapeHasAxisPartition(shape: Shape) bool {
     return false;
 }
 
-pub const DimMeshe = union(enum) {
+pub const DimSharding = union(enum) {
     sharded: struct {
         dim: i64,
         factor: u32,
@@ -410,8 +410,12 @@ pub const Partitioning = packed struct {
     /// The default value is important.
     /// In Tensor code unspecified axis will be inferred as `.open` while in shape code, it's `.replicated`.
     pub fn parse(tags: []const [*:0]const u8, mesh: *const Mesh, default_value: PartitionSpec, partitioning: anytype) Partitioning {
-        // capture all the comptime logic in the Logical struct.
-        const logical = comptime Logical.parse(partitioning);
+        const logical = if (@TypeOf(partitioning) == Logical)
+            partitioning
+        else
+            // capture all the comptime logic in the Logical struct.
+            comptime Logical.parse(partitioning);
+
         return logical.applyUseAll(tags, mesh, default_value);
     }
 
@@ -1498,7 +1502,7 @@ pub const Mesh = struct {
     folds: Folds,
     folds_consumed: std.EnumSet(PhysicalAxisTag),
 
-    pub fn shardableDim(mesh: *const Mesh, dim: i64, logical_axis: anytype, must_divide: i64) DimMeshe {
+    pub fn shardableDim(mesh: *const Mesh, dim: i64, logical_axis: anytype, must_divide: i64) DimSharding {
         const partitions = mesh.numPartitionsForLogicalAxis(logical_axis);
 
         if (@mod(dim, partitions) == 0) {
