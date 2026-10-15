@@ -129,7 +129,7 @@ fn roundedInput(x: Tensor, linear: zml.nn.Linear, opts: Options, dtype: zml.Data
     if (scheme == .mxfp8 or scheme == .fp8_block32) scale = scale.log().scale(1 / @log(@as(f32, 2))).ceil().scale(@log(@as(f32, 2))).exp();
     const broad = scale.broad(grouped.shape());
     return grouped.div(broad).clamp(Tensor.scalar(-max_value, .f32), Tensor.scalar(max_value, .f32))
-        .convert(output_dtype).convert(.f32).mul(broad).reshape(x.shape().withDtype(.f32));
+        .convert(output_dtype).optimizationBarrier().convert(.f32).mul(broad).reshape(x.shape().withDtype(.f32));
 }
 
 fn project(x: Tensor, linear: zml.nn.Linear, ids: Tensor, opts: Options, dtype: zml.DataType) Tensor {
