@@ -144,6 +144,7 @@ pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64
         .group_size = up_cfg.groupRows(),
         .capacity = routing.groups,
         .direct = direct,
+        .lanes_per_block = boundary.quantizeLanes(tokens),
     });
     const q2 = persistent.upQuantized(up_cfg, .{
         .weight = a.w1,
@@ -163,7 +164,6 @@ pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64
         .tokens = tokens,
         .hidden = hidden,
         .topk = topk,
-        .columns_per_cta = boundary.combineColumns(tokens, hidden),
     });
 }
 
