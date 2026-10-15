@@ -1,14 +1,13 @@
-//! Shared public-entry-point tests. Hardware absence is the only runtime skip:
-//! supported cases are explicit, and errors in those cases must fail the test.
+//! Shared MoE compatibility cases, canonical fixtures, and backend layout preparation.
 const std = @import("std");
 
-const zml = @import("../../zml.zig");
+const zml = @import("zml");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const reference = @import("stablehlo/stablehlo.zig");
-const Placement = @import("moe.zig").RoutingWeightPlacement;
+const reference = zml.moe.stablehlo;
+const Placement = zml.moe.RoutingWeightPlacement;
 
-const Case = struct {
+pub const Case = struct {
     backend: zml.moe.Backend,
     activation: zml.moe.Activation = .{ .swiglu = .{} },
     scheme: ?zml.Quantization.Scheme = null,
@@ -21,6 +20,32 @@ const Case = struct {
     width: i64 = 128,
     intermediate: i64 = 128,
     experts: i64 = 8,
+
+    pub fn options(c: Case) zml.moe.Options {
+        return .{ .activation = c.activation, .quantize_input = c.quantize_input, .routing_weight_placement = c.placement };
+    }
+
+    pub fn referenceOptions(c: Case, target: zml.Target) reference.Options {
+        return .{
+            .activation = c.activation,
+            .quantize_input = c.quantize_input,
+            .routing_weight_placement = c.placement,
+            .input_quantization = switch (c.backend) {
+                .metal => .none,
+                .cute => .mxfp8_bf16,
+                .triton => if (c.scheme == .mxfp4 and target == .cuda) .mxfp8 else .automatic,
+                else => .automatic,
+            },
+        };
+    }
+
+    pub fn tolerance(c: Case) zml.testing.CompareOpts {
+        return .{
+            .absolute_tolerance = if (c.scheme == .nvfp4) 0.078125 else 0.015625,
+            .relative_tolerance = 0.02,
+            .minimum_close_fraction = 1,
+        };
+    }
 
     pub fn compile(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Exe {
         std.debug.assert(c.backend.isAvailable(platform));
@@ -54,13 +79,7 @@ const Case = struct {
 
         // BF16 intermediate rounding and different GEMM reduction orders. Every
         // element must pass; near-zero values use the absolute bound.
-        try zml.testing.expectClose(io, output.expected, output.actual, .{
-            // The NVFP4 matrix observed a maximum absolute error of 0.07519531.
-            // Allow a small margin; this is an empirical comparison budget.
-            .absolute_tolerance = if (c.scheme == .nvfp4) 0.078125 else 0.015625,
-            .relative_tolerance = 0.02,
-            .minimum_close_fraction = 1,
-        });
+        try zml.testing.expectClose(io, output.expected, output.actual, c.tolerance());
     }
 };
 
@@ -70,42 +89,46 @@ const Case = struct {
 /// value[i] = (((i * multiplier + 3) % 17) - 8) / divisor
 ///
 /// Then reshape to the requested shape and convert to f32.
-fn generateDeterministicTensor(shape: Shape, multiplier: i64, divisor: f64) Tensor {
-    return Tensor.arange(.{ .end = @intCast(shape.count()) }, .i32)
-        .mul(Tensor.scalar(multiplier, .i32)).addConstant(3)
-        .remainder(Tensor.scalar(17, .i32)).addConstant(-8)
+fn generateDeterministicTensor(shape: Shape, multiplier: i64, divisor: f64, seed: Tensor) Tensor {
+    return Tensor.arange(.{ .end = @intCast(shape.count()) }, .i64).add(seed.convert(.i64))
+        .mul(Tensor.scalar(multiplier, .i64)).addConstant(3)
+        .remainder(Tensor.scalar(17, .i64)).addConstant(-8)
         .convert(.f32).scale(1 / divisor).reshape(shape.withDtype(.f32));
 }
 
 /// Select exactly representable FP4 values with distinct even/odd sequences.
-fn generateFp4Tensor(shape: Shape, multiplier: i64) Tensor {
+fn generateFp4Tensor(shape: Shape, multiplier: i64, seed: Tensor) Tensor {
     const values = Tensor.constantTensor(.init(.{ .value = 16 }, .f32), std.mem.sliceAsBytes(&[_]f32{
         0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6,
     }));
-    const index = Tensor.arange(.{ .end = @intCast(shape.count()) }, .i32);
-    const pair = index.div(Tensor.scalar(2, .i32));
+    const index = Tensor.arange(.{ .end = @intCast(shape.count()) }, .i64).add(seed.convert(.i64));
+    const pair = index.div(Tensor.scalar(2, .i64));
     // Prime periods distinguish experts, output rows, and gate/up halves.
-    const even = pair.mul(Tensor.scalar(multiplier, .i32)).addConstant(3)
-        .remainder(Tensor.scalar(17, .i32)).remainder(Tensor.scalar(16, .i32));
-    const odd = pair.mul(Tensor.scalar(3, .i32)).addConstant(7)
-        .remainder(Tensor.scalar(19, .i32)).remainder(Tensor.scalar(16, .i32));
-    const indices = index.remainder(Tensor.scalar(2, .i32)).cmp(.EQ, Tensor.scalar(0, .i32)).select(even, odd);
+    const even = pair.mul(Tensor.scalar(multiplier, .i64)).addConstant(3)
+        .remainder(Tensor.scalar(17, .i64)).remainder(Tensor.scalar(16, .i64));
+    const odd = pair.mul(Tensor.scalar(3, .i64)).addConstant(7)
+        .remainder(Tensor.scalar(19, .i64)).remainder(Tensor.scalar(16, .i64));
+    const indices = index.remainder(Tensor.scalar(2, .i64)).cmp(.EQ, Tensor.scalar(0, .i64)).select(even, odd);
     return values.gather(.{ .value = indices }, .{}).convert(.f4e2m1).reshape(shape.withDtype(.f4e2m1));
 }
 
 /// Create a Linear fixture with a reproducible pattern, optionally quantized and biased.
-fn linear(shape: Shape, scheme: ?zml.Quantization.Scheme, bias: bool, multiplier: i64) zml.nn.Linear {
-    const fixture_bias = if (bias) generateDeterministicTensor(shape.remove(2), 3, 32).convert(shape.dtype()) else null;
+fn linear(shape: Shape, scheme: ?zml.Quantization.Scheme, bias: bool, multiplier: i64, mode: FixtureMode, seed: Tensor) zml.nn.Linear {
+    const fixture_bias = if (bias) fixtureTensor(shape.remove(2), 3, 32, mode, seed) else null;
 
     const s = scheme orelse return .{
-        .weight = generateDeterministicTensor(shape, multiplier, 16).convert(shape.dtype()),
+        .weight = fixtureTensor(shape, multiplier, 16, mode, seed),
         .tag = shape.tag(2),
         .bias = fixture_bias,
     };
 
     const weight = switch (s) {
-        .mxfp4, .nvfp4 => generateFp4Tensor(shape, multiplier),
-        else => generateDeterministicTensor(shape, multiplier, 16).convert(.f8e4m3fn),
+        .mxfp4, .nvfp4 => switch (mode) {
+            .template => Tensor.fromShape(shape.withDtype(.f4e2m1)),
+            .fixture => generateFp4Tensor(shape, multiplier, seed),
+            .random => randomFp4(shape, seed.addConstant(multiplier)),
+        },
+        else => fixtureTensor(shape.withDtype(.f8e4m3fn), multiplier, 16, mode, seed),
     };
 
     const scale_shape: Shape = switch (s) {
@@ -117,12 +140,12 @@ fn linear(shape: Shape, scheme: ?zml.Quantization.Scheme, bias: bool, multiplier
         .fp8_block32 => .init(.{ shape.dim(0), @divExact(shape.dim(1), 32), @divExact(shape.dim(2), 32) }, .f32),
     };
 
-    const scales = Tensor.arange(.{ .end = @intCast(scale_shape.count()) }, .i32)
-        .remainder(Tensor.scalar(2, .i32)).convert(.f32).addConstant(1).scale(1.0 / 16.0)
+    const scales = if (mode == .template) Tensor.fromShape(scale_shape) else if (mode == .random and (s == .mxfp4 or s == .nvfp4)) randomScales(scale_shape, seed.addConstant(multiplier + 17)) else (if (mode == .random) randomBits(scale_shape, seed).reshape(.{ .value = scale_shape.count() }).remainder(Tensor.scalar(2, .u32)).convert(.i64) else Tensor.arange(.{ .end = @intCast(scale_shape.count()) }, .i64).add(seed.convert(.i64)))
+        .remainder(Tensor.scalar(2, .i64)).convert(.f32).addConstant(1).scale(1.0 / 16.0)
         .reshape(scale_shape.withDtype(.f32)).convert(scale_shape.dtype());
 
-    const input_scale: ?zml.Quantization.GlobalScale = if (s == .nvfp4) .{ .value = Tensor.scalar(1, .f32), .operation = .multiply } else null;
-    const global_scale: ?zml.Quantization.GlobalScale = if (s == .nvfp4) .{ .value = Tensor.scalar(1, .f32).broad(.init(.{ .expert = shape.dim(0) }, .f32)), .operation = .multiply } else null;
+    const input_scale: ?zml.Quantization.GlobalScale = if (s == .nvfp4) .{ .value = if (mode == .template) Tensor.init(.{}, .f32) else Tensor.scalar(1, .f32), .operation = .multiply } else null;
+    const global_scale: ?zml.Quantization.GlobalScale = if (s == .nvfp4) .{ .value = if (mode == .template) Tensor.init(.{ .expert = shape.dim(0) }, .f32) else Tensor.scalar(1, .f32).broad(.init(.{ .expert = shape.dim(0) }, .f32)), .operation = .multiply } else null;
 
     return .{
         .weight = weight,
@@ -137,20 +160,27 @@ fn linear(shape: Shape, scheme: ?zml.Quantization.Scheme, bias: bool, multiplier
     };
 }
 
-const ExpertFixture = struct {
+pub const ExpertFixture = struct {
     gate_up: zml.nn.Linear,
     down: zml.nn.Linear,
 };
 
 /// Canonical weights use logical dimensions, concatenated gate/up, and plain scales.
-fn makeExpertFixture(c: Case) ExpertFixture {
+pub fn makeExpertFixture(c: Case) ExpertFixture {
+    return expertFixture(c, .fixture, Tensor.scalar(0, .u32));
+}
+
+pub const FixtureMode = enum { template, fixture, random };
+
+/// `template` describes canonical operands without requiring a compiler context.
+pub fn expertFixture(c: Case, mode: FixtureMode, seed: Tensor) ExpertFixture {
     const projection_width: i64 = switch (c.activation) {
         .silu, .gelu, .relu => c.intermediate,
         else => 2 * c.intermediate,
     };
     return .{
-        .gate_up = linear(.init(.{ .expert = c.experts, .dout = projection_width, .d = c.width }, c.activation_dtype), c.scheme, c.bias, 7),
-        .down = linear(.init(.{ .expert = c.experts, .d = c.width, .dout = c.intermediate }, c.activation_dtype), c.scheme, c.bias, 11),
+        .gate_up = linear(.init(.{ .expert = c.experts, .dout = projection_width, .d = c.width }, c.activation_dtype), c.scheme, c.bias, 7, mode, seed),
+        .down = linear(.init(.{ .expert = c.experts, .d = c.width, .dout = c.intermediate }, c.activation_dtype), c.scheme, c.bias, 11, mode, seed),
     };
 }
 
@@ -190,7 +220,7 @@ fn prepareGateUp(tensor: Tensor, layout: zml.moe.ExpertsLayout) Tensor {
 }
 
 /// Adapt a copy of both projections to the backend's storage and layout contract.
-fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertFixture {
+pub fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertFixture {
     var prepared = canonical;
     const scheme = canonical.gate_up.quantizationScheme();
     const layout = backend.expertsLayout(scheme) catch |err| zml.stdx.debug.panic("fixture layout: {}", .{err});
@@ -248,24 +278,10 @@ fn forward(input: Tensor, c: Case) Outputs {
     const ids = route.mul(Tensor.scalar(5, .i32)).addConstant(2).remainder(Tensor.scalar(@min(c.experts, 6), .i32));
 
     const weights = route.remainder(Tensor.scalar(3, .i32)).convert(.f32).addConstant(1).scale(0.25);
-    const options: zml.moe.Options = .{
-        .activation = c.activation,
-        .quantize_input = c.quantize_input,
-        .routing_weight_placement = c.placement,
-    };
+    const options = c.options();
 
     const actual = zml.moe.forwardMoe(input, ids, weights, prepared.gate_up, prepared.down, c.backend, options);
-    const expected = reference.reference(input, ids, weights, canonical.gate_up, canonical.down, .{
-        .activation = c.activation,
-        .quantize_input = c.quantize_input,
-        .routing_weight_placement = c.placement,
-        .input_quantization = switch (c.backend) {
-            .metal => .none,
-            .cute => .mxfp8_bf16,
-            .triton => if (c.scheme == .mxfp4 and zml.Compiler.current().platform.target == .cuda) .mxfp8 else .automatic,
-            else => .automatic,
-        },
-    });
+    const expected = reference.reference(input, ids, weights, canonical.gate_up, canonical.down, c.referenceOptions(zml.Compiler.current().platform.target));
 
     return .{ .actual = actual, .expected = expected };
 }
@@ -286,7 +302,7 @@ const clipped_swiglu = [_]zml.moe.Activation{
     .{ .swiglu = .{ .limit = 7 } },
 };
 
-const FixtureShape = struct {
+pub const FixtureShape = struct {
     tokens: i64 = 1,
     topk: i64 = 1,
     width: i64 = 128,
@@ -307,12 +323,12 @@ const specialized_shapes = [_]FixtureShape{
     .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 34, .topk = 2 },
 };
 
-const Format = struct {
+pub const Format = struct {
     scheme: ?zml.Quantization.Scheme = null,
     activation_dtype: zml.DataType = .bf16,
 };
 
-const Matrix = struct {
+pub const Matrix = struct {
     formats: []const Format = &.{.{}},
     activations: []const zml.moe.Activation,
     quantize_inputs: []const bool = &.{false},
@@ -357,158 +373,8 @@ const Matrix = struct {
     }
 };
 
-const Options = struct {
-    producers: usize = 16,
-    consumers: usize = 1,
-    case_queue_capacity: usize = 16,
-    executable_queue_capacity: usize = 16,
-};
-
-const CaseJob = struct {
-    index: usize,
-    case: Case,
-};
-
-const ExecutableJob = struct {
-    job: CaseJob,
-    exe: zml.Exe,
-};
-
-const Result = struct {
-    case: Case,
-    outcome: union(enum) {
-        passed,
-        skipped,
-        compilation_failed: anyerror,
-        check_failed: anyerror,
-    },
-};
-
-const Pipeline = struct {
-    platform: *const zml.Platform,
-
-    fn generateCases(self: *const Pipeline, io: std.Io, backend: zml.moe.Backend, matrix: Matrix, case_queue: *std.Io.Queue(CaseJob), results: []?Result) std.Io.Cancelable!void {
-        defer case_queue.close(io);
-        const available = backend.isAvailable(self.platform);
-
-        var index: usize = 0;
-        for (0..matrix.count()) |local_index| {
-            const c = matrix.caseAt(backend, local_index);
-            if (available) {
-                case_queue.putOne(io, .{ .index = index, .case = c }) catch |err| return switch (err) {
-                    error.Closed => {},
-                    error.Canceled => error.Canceled,
-                };
-            } else {
-                results[index] = .{ .case = c, .outcome = .skipped };
-            }
-            index += 1;
-        }
-    }
-
-    fn compileExecutablesWorker(self: *const Pipeline, io: std.Io, allocator: std.mem.Allocator, case_queue: *std.Io.Queue(CaseJob), executable_queue: *std.Io.Queue(ExecutableJob), results: []?Result) std.Io.Cancelable!void {
-        while (true) {
-            const job = case_queue.getOne(io) catch |err| return switch (err) {
-                error.Closed => {},
-                error.Canceled => error.Canceled,
-            };
-            var exe = job.case.compile(allocator, io, self.platform) catch |err| {
-                if (err == error.Canceled) return error.Canceled;
-                results[job.index] = .{ .case = job.case, .outcome = .{ .compilation_failed = err } };
-                continue;
-            };
-            // Ownership transfers only on a successful enqueue.
-            executable_queue.putOne(io, .{ .job = job, .exe = exe }) catch |err| {
-                exe.deinit();
-                return switch (err) {
-                    error.Closed => {},
-                    error.Canceled => error.Canceled,
-                };
-            };
-        }
-    }
-
-    fn runTestCaseWorker(self: *const Pipeline, io: std.Io, allocator: std.mem.Allocator, executable_queue: *std.Io.Queue(ExecutableJob), results: []?Result) std.Io.Cancelable!void {
-        while (true) {
-            var compiled = executable_queue.getOne(io) catch |err| return switch (err) {
-                error.Closed => {},
-                error.Canceled => error.Canceled,
-            };
-            defer compiled.exe.deinit();
-            const job = compiled.job;
-            job.case.check(allocator, io, self.platform, &compiled.exe) catch |err| {
-                if (err == error.Canceled) return error.Canceled;
-                results[job.index] = .{ .case = job.case, .outcome = .{ .check_failed = err } };
-                continue;
-            };
-            results[job.index] = .{ .case = job.case, .outcome = .passed };
-        }
-    }
-
-    fn run(self: *const Pipeline, io: std.Io, allocator: std.mem.Allocator, backend: zml.moe.Backend, matrix: Matrix, options: Options) !void {
-        var arena: std.heap.ArenaAllocator = .init(allocator);
-        defer arena.deinit();
-
-        const cases_buffer = try arena.allocator().alloc(CaseJob, options.case_queue_capacity);
-        const executables_buffer = try arena.allocator().alloc(ExecutableJob, options.executable_queue_capacity);
-        const results = try arena.allocator().alloc(?Result, matrix.count());
-        @memset(results, null);
-
-        var case_queue: std.Io.Queue(CaseJob) = .init(cases_buffer);
-        var executable_queue: std.Io.Queue(ExecutableJob) = .init(executables_buffer);
-
-        var enumerator: std.Io.Group = .init;
-        var producers: std.Io.Group = .init;
-        var consumers: std.Io.Group = .init;
-        defer {
-            case_queue.close(io);
-            executable_queue.close(io);
-            enumerator.cancel(io);
-            producers.cancel(io);
-            consumers.cancel(io);
-            // On partial startup or cancellation, queued executables still own resources.
-            while (executable_queue.getOneUncancelable(io)) |compiled| {
-                compiled.exe.deinit();
-            } else |_| {}
-        }
-
-        for (0..options.consumers) |_| try consumers.concurrent(io, runTestCaseWorker, .{ self, io, allocator, &executable_queue, results });
-        for (0..options.producers) |_| try producers.concurrent(io, compileExecutablesWorker, .{ self, io, allocator, &case_queue, &executable_queue, results });
-        try enumerator.concurrent(io, generateCases, .{ self, io, backend, matrix, &case_queue, results });
-
-        try enumerator.await(io);
-        try producers.await(io);
-        // Closed queues drain before getOne returns error.Closed.
-        executable_queue.close(io);
-        try consumers.await(io);
-
-        try report(results);
-    }
-
-    fn report(results: []const ?Result) !void {
-        var failed: usize = 0;
-        for (results, 0..) |result, index| {
-            const r = result orelse return error.MissingCaseResult;
-            switch (r.outcome) {
-                .passed, .skipped => {},
-                inline .compilation_failed, .check_failed => |err, stage| {
-                    failed += 1;
-                    std.debug.print("MoE case {}/{} {s}: {any}\nError: {}\n", .{
-                        index + 1, results.len, @tagName(stage), r.case, err,
-                    });
-                },
-            }
-        }
-        if (failed != 0) return error.MoeComplianceFailed;
-    }
-};
-
-test "Triton compatibility matrix" {
-    const platform = zml.testing.env();
-
-    const pipeline: Pipeline = .{ .platform = platform };
-
-    try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
+pub const matrices = struct {
+    pub const triton_base: Matrix = .{
         .formats = &.{
             .{},
             .{ .scheme = .mxfp8 },
@@ -522,113 +388,52 @@ test "Triton compatibility matrix" {
         .quantize_inputs = &.{ false, true },
         .placements = &.{ .before_down, .after_down },
         .biases = &.{ false, true },
-    }, .{});
+    };
 
-    if (platform.target != .cuda) {
-        // Other platforms retain the general MXFP4 path and its full contract.
-        try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
-            .formats = &.{.{ .scheme = .mxfp4 }},
-            .activations = &all_activations,
-            .quantize_inputs = &.{ false, true },
-            .placements = &.{ .before_down, .after_down },
-            .biases = &.{ false, true },
-        }, .{});
-        return;
-    }
+    pub const triton_mxfp4_general: Matrix = .{
+        .formats = &.{.{ .scheme = .mxfp4 }},
+        .activations = &all_activations,
+        .quantize_inputs = &.{ false, true },
+        .placements = &.{ .before_down, .after_down },
+        .biases = &.{ false, true },
+    };
 
-    // Preserve the 12 supported cases from the former general MXFP4 matrix.
-    // Its other 252 cases require activations or projection bias unsupported
-    // by the simplified path. The former specialized matrix remains below.
-    try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
+    pub const triton_mxfp4_cuda_small: Matrix = .{
         .formats = &.{.{ .scheme = .mxfp4 }},
         .activations = &.{gated_activations[1]},
         .quantize_inputs = &.{ false, true },
         .placements = &.{ .before_down, .after_down },
-    }, .{});
-}
+    };
 
-// Keep triton mxfp4 separate because it only supports a subset for now
-test "Triton MXFP4 compatibility matrix" {
-    const platform = zml.testing.env();
-    if (platform.target != .cuda) return error.SkipZigTest;
-    const pipeline: Pipeline = .{ .platform = platform };
-
-    // The merged backend uses the former specialized MXFP4 path: clipped
-    // SwiGLU without projection bias, with unconditional MXFP8 activations.
-    try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
+    pub const triton_mxfp4_cuda: Matrix = .{
         .formats = &.{.{ .scheme = .mxfp4 }},
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
         .placements = &.{ .before_down, .after_down },
-    }, .{});
-}
+    };
 
-test "Triton MoE prefill launch buckets fit shared memory" {
-    const platform = zml.testing.env();
-    if (!zml.moe.Backend.triton.isAvailable(platform) or platform.target != .rocm) return error.SkipZigTest;
-
-    for ([_]i64{ 8, 32, 96, 128, 256, 512, 1024, 2048, 3072, 4096 }) |tokens| {
-        const case: Case = .{
-            .backend = .triton,
-            .tokens = tokens,
-            .width = 256,
-            .intermediate = 128,
-            .topk = 2,
-        };
-        var exe = try case.compile(std.testing.allocator, std.testing.io, platform);
-        defer exe.deinit();
-        try case.check(std.testing.allocator, std.testing.io, platform, &exe);
-    }
-}
-
-test "FlashInfer compatibility matrix" {
-    const platform = zml.testing.env();
-
-    const pipeline: Pipeline = .{ .platform = platform };
-
-    // Only default SwiGLU, no linear bias, and routing after the down projection.
-    try pipeline.run(std.testing.io, std.testing.allocator, .flashinfer_cutlass, .{
+    pub const flashinfer: Matrix = .{
         .formats = &.{ .{}, .{ .scheme = .nvfp4 } },
         .activations = &.{.{ .swiglu = .{} }},
-    }, .{});
-}
+    };
 
-test "specialized CuTe MXFP4 compatibility matrix" {
-    const platform = zml.testing.env();
-
-    const pipeline: Pipeline = .{ .platform = platform };
-
-    try pipeline.run(std.testing.io, std.testing.allocator, .cute, .{
+    pub const cute: Matrix = .{
         .formats = &.{.{ .scheme = .mxfp4 }},
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
         .placements = &.{.before_down},
         .shapes = &specialized_shapes,
-    }, .{});
-}
+    };
 
-test "Fly compatibility matrix" {
-    const platform = zml.testing.env();
-
-    const pipeline: Pipeline = .{ .platform = platform };
-
-    // These constraints keep execution on Fly rather than its Triton fallback.
-    try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
+    pub const fly: Matrix = .{
         .formats = &.{.{ .scheme = .mxfp4 }},
         .activations = &gated_activations,
         .quantize_inputs = &.{ false, true },
         .placements = &.{.before_down},
         .shapes = &specialized_shapes,
-    }, .{});
-}
+    };
 
-test "Metal compatibility matrix" {
-    const platform = zml.testing.env();
-
-    const pipeline: Pipeline = .{ .platform = platform };
-
-    // Quantized Metal kernels require BF16 activations and do not support bias.
-    try pipeline.run(std.testing.io, std.testing.allocator, .metal, .{
+    pub const metal: Matrix = .{
         .formats = &.{
             .{},
             .{ .activation_dtype = .f16 },
@@ -641,19 +446,77 @@ test "Metal compatibility matrix" {
             .{ .scheme = .fp8_block32 },
         },
         .activations = &all_activations,
-    }, .{});
-}
+    };
 
-test "Mosaic TPU compatibility matrix" {
-    const platform = zml.testing.env();
-
-    const pipeline: Pipeline = .{ .platform = platform };
-
-    // canonicalizeDown currently requires a gated projection; quantized weights
-    // are not supported by gmmDType. Plain activations need a backend fix first.
-    try pipeline.run(std.testing.io, std.testing.allocator, .mosaic_tpu, .{
+    pub const mosaic_tpu: Matrix = .{
         .formats = &.{ .{}, .{ .activation_dtype = .f16 }, .{ .activation_dtype = .f32 } },
         .activations = &gated_activations,
         .biases = &.{ false, true },
-    }, .{});
+    };
+
+    pub const stablehlo: Matrix = .{
+        .activations = &all_activations,
+        .placements = &.{ .before_down, .after_down },
+    };
+};
+
+pub fn matricesFor(backend: zml.moe.Backend, target: zml.platform.Target) []const Matrix {
+    return switch (backend) {
+        .triton => if (target == .cuda) &.{ matrices.triton_base, matrices.triton_mxfp4_cuda_small, matrices.triton_mxfp4_cuda } else &.{ matrices.triton_base, matrices.triton_mxfp4_general },
+        .cute => &.{matrices.cute},
+        .flashinfer_cutlass => &.{matrices.flashinfer},
+        .fly => &.{matrices.fly},
+        .metal => &.{matrices.metal},
+        .mosaic_tpu => &.{matrices.mosaic_tpu},
+        .stablehlo => &.{matrices.stablehlo},
+    };
+}
+
+// Counter-based integer hashing keeps random fixtures reproducible across machines.
+fn randomBits(shape: Shape, seed: Tensor) Tensor {
+    var x = Tensor.arange(.{ .end = @intCast(shape.count()) }, .u32).add(seed);
+    x = x.logical(.XOR, x.shiftRightLogical(Tensor.scalar(16, .u32))).mul(Tensor.scalar(0x7feb352d, .u32));
+    x = x.logical(.XOR, x.shiftRightLogical(Tensor.scalar(15, .u32))).mul(Tensor.scalar(0x846ca68b, .u32));
+    return x.logical(.XOR, x.shiftRightLogical(Tensor.scalar(16, .u32))).reshape(shape.withDtype(.u32));
+}
+
+fn fixtureTensor(shape: Shape, multiplier: i64, divisor: f64, mode: FixtureMode, seed: Tensor) Tensor {
+    return switch (mode) {
+        .template => Tensor.fromShape(shape),
+        .fixture => generateDeterministicTensor(shape, multiplier, divisor, seed).convert(shape.dtype()),
+        .random => randomBits(shape, seed.addConstant(multiplier)).shiftRightLogical(Tensor.scalar(8, .u32))
+            .convert(.f32).scale(2.0 / 16777216.0).addConstant(-1).convert(shape.dtype()),
+    };
+}
+
+fn randomFp4(shape: Shape, seed: Tensor) Tensor {
+    const values = Tensor.constantTensor(.init(.{ .value = 16 }, .f32), std.mem.sliceAsBytes(&[_]f32{
+        0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6,
+    }));
+    const index = randomBits(shape, seed).remainder(Tensor.scalar(16, .u32)).convert(.i32).flatten();
+    return values.gather(.{ .value = index }, .{}).convert(.f4e2m1).reshape(shape.withDtype(.f4e2m1));
+}
+
+fn randomScales(shape: Shape, seed: Tensor) Tensor {
+    const values = Tensor.constantTensor(.init(.{ .value = 4 }, .f32), std.mem.sliceAsBytes(&[_]f32{ 1.0 / 512.0, 1.0 / 256.0, 1.0 / 128.0, 1.0 / 64.0 }));
+    const index = randomBits(shape, seed).remainder(Tensor.scalar(4, .u32)).convert(.i32).flatten();
+    return values.gather(.{ .value = index }, .{}).convert(shape.dtype()).reshape(shape);
+}
+
+test "MoE matrix coverage remains stable" {
+    try std.testing.expectEqual(@as(usize, 1584), matrices.triton_base.count());
+    try std.testing.expectEqual(@as(usize, 264), matrices.triton_mxfp4_general.count());
+    try std.testing.expectEqual(@as(usize, 12), matrices.triton_mxfp4_cuda_small.count());
+    try std.testing.expectEqual(@as(usize, 24), matrices.triton_mxfp4_cuda.count());
+    try std.testing.expectEqual(@as(usize, 6), matrices.flashinfer.count());
+    try std.testing.expectEqual(@as(usize, 12), matrices.cute.count());
+    try std.testing.expectEqual(@as(usize, 48), matrices.fly.count());
+    try std.testing.expectEqual(@as(usize, 297), matrices.metal.count());
+    try std.testing.expectEqual(@as(usize, 144), matrices.mosaic_tpu.count());
+    try std.testing.expectEqual(@as(usize, 66), matrices.stablehlo.count());
+    const first = matrices.cute.caseAt(.cute, 0);
+    const last = matrices.cute.caseAt(.cute, 11);
+    try std.testing.expectEqual(@as(i64, 5120), first.width);
+    try std.testing.expectEqual(@as(i64, 34), last.tokens);
+    try std.testing.expectEqual(@as(?f32, 7), last.activation.swiglu.limit);
 }

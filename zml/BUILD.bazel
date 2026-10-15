@@ -89,7 +89,6 @@ zig_library(
         "kernel.zig",
         "kernels/flash_attention/flash_attention.zig",
         "kernels/moe/moe.zig",
-        "kernels/moe/tests.zig",
         "kernels/paged_attention/paged_attention.zig",
         "logo.zig",
         "mem.zig",
@@ -191,6 +190,14 @@ zig_library(
 )
 
 zig_test(
-    name = "test",
+    name = "core_test",
     deps = ["//zml"],
+)
+
+test_suite(
+    name = "test",
+    tests = [
+        ":core_test",
+        "//zml/kernels/moe/tests:test",
+    ],
 )

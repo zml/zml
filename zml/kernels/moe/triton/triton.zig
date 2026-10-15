@@ -984,6 +984,37 @@ pub fn validateInputs(
     if (!s2.shape().eql(shapes.s2)) return error.InvalidInputShape;
 }
 
+/// Execute one local expert interval without a collective. Uses the same kernels
+/// as the sharded entry point; useful for measuring a rank on a single device.
+pub fn fusedExpertsMxfp4Local(
+    input: Tensor,
+    ids: Tensor,
+    weights: Tensor,
+    gate_up: zml.nn.Linear,
+    down: zml.nn.Linear,
+    options: zml.moe.Options,
+    global_experts: i64,
+    expert_offset: i64,
+) Tensor {
+    validateOptions(options);
+    const context: Context = .{
+        .input = input,
+        .ids = ids,
+        .weights = weights,
+        .w1 = gate_up.weight.bitCast(.u8),
+        .s1 = gate_up.quantization.?.scales,
+        .w2 = down.weight.bitCast(.u8),
+        .s2 = down.quantization.?.scales,
+        .global_experts = global_experts,
+        .expert_offset = expert_offset,
+        .topk = ids.dim(.topk),
+        .limit = options.activation.swiglu.limit.?,
+        .routing_weight_placement = options.routing_weight_placement,
+        .expert_parallel = false,
+    };
+    return context.body(input.shape());
+}
+
 const Context = struct {
     input: zml.Tensor,
     ids: zml.Tensor,
@@ -993,6 +1024,7 @@ const Context = struct {
     w2: zml.Tensor,
     s2: zml.Tensor,
     global_experts: i64,
+    expert_offset: i64 = 0,
     topk: i64,
     limit: f32,
     routing_weight_placement: RoutingWeightPlacement,
@@ -1017,6 +1049,7 @@ const Context = struct {
             .intermediate = intermediate,
             .experts = experts,
             .global_experts = self.global_experts,
+            .expert_offset = self.expert_offset,
             .topk = self.topk,
             .swiglu_limit = self.limit,
             .routing_weight_placement = self.routing_weight_placement,

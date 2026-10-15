@@ -1,0 +1,16 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "fixtures",
+    main = "fixtures.zig",
+    visibility = ["//zml/kernels/moe/bench:__pkg__"],
+    deps = ["//zml"],
+)
+
+zig_test(
+    name = "test",
+    srcs = ["fixtures.zig"],
+    main = "tests.zig",
+    visibility = ["//zml:__pkg__"],
+    deps = ["//zml"],
+)

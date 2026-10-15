@@ -1,0 +1,32 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
+zig_binary(
+    name = "bench",
+    srcs = [
+        "cases.zig",
+        "results.zig",
+        "runner.zig",
+        "workload.zig",
+    ],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel/stamp:zig",
+        "//zml",
+    ],
+)
+
+zig_test(
+    name = "test",
+    srcs = [
+        "cases.zig",
+        "results.zig",
+        "runner.zig",
+        "workload.zig",
+    ],
+    main = "main.zig",
+    deps = [
+        "//bazel/stamp:zig",
+        "//zml",
+    ],
+)

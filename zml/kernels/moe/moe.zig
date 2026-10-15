@@ -16,7 +16,6 @@ const log = std.log.scoped(.@"zml/moe");
 
 test {
     std.testing.refAllDecls(@This());
-    _ = @import("tests.zig");
 }
 
 pub const ProjectionLayout = enum { concatenated, interleaved };
