@@ -381,7 +381,7 @@ pub const Shape = struct {
     pub fn count(self: Shape) usize {
         var res: i64 = 1;
         for (self.dims()) |d| {
-            stdx.debug.assert(d >= 0, "Can't count elements in shape with negative dimension: {f}", .{self});
+            stdx.debug.assert(d >= 0, "Can't count elements in shape with negative dimension: {f}", .{&self});
             res *= d;
         }
         return @intCast(res);
@@ -1144,6 +1144,7 @@ pub const Shape = struct {
     }
 
     fn computeStrides(self: Shape, element_size: i64) stdx.BoundedArray(i64, constants.MAX_RANK) {
+        @setRuntimeSafety(false);
         const rk = self.rank();
         var strides: stdx.BoundedArray(i64, constants.MAX_RANK) = .{ .buffer = undefined, .len = rk };
         var stride = element_size;

@@ -120,12 +120,11 @@ def bindings_for(layout, strategy):
 def expected_offsets(layout, bindings, dims, partition):
     """Return None for indivisible slices; otherwise enumerate slice origins."""
     physical_sizes = dict(zip(PHYSICAL_AXES, layout.sizes))
-    consumed = set()
+    logical_axes = [axis for axis in partition if axis is not None]
+    assert len(logical_axes) == len(set(logical_axes)), "logical axes must be unique"
     splits = []
     for dim, logical_axis in zip(dims, partition):
-        # Repeated uses of a logical axis partition only its first tensor dimension.
-        axes = bindings.get(logical_axis, ()) if logical_axis not in consumed else ()
-        consumed.add(logical_axis)
+        axes = bindings.get(logical_axis, ())
         count = prod(physical_sizes[a] for a in axes)
         if dim % count:
             return None
@@ -248,6 +247,8 @@ comptime {
     _ = zml.bazel;
 }
 
+extern fn zml_benchmark_pjrt_api() *const @FieldType(pjrt.Api, "inner");
+
 const CliArgs = struct {
     pub const help = "benchmark --iterations=1000 --samples=20 --warmup=1000";
     iterations: usize = 1000,
@@ -270,8 +271,8 @@ pub fn main(init: std.process.Init) !void {
 
     const data = try allocator.alloc(u8, maxDataBytes);
     @memset(data, 0);
-    std.log.info("Buffer.from metadata only; mode={s}; iterations={d}; samples={d}; warmup={d}", .{ @tagName(builtin.mode), args.iterations, args.samples, args.warmup });
-    std.log.info("Synthetic platforms; no PJRT, transfers, events or waits. Setup and pointer checks excluded. Compiler barriers and buffer storage included.", .{});
+    std.log.info("Buffer.from mock PJRT; mode={s}; iterations={d}; samples={d}; warmup={d}", .{ @tagName(builtin.mode), args.iterations, args.samples, args.warmup });
+    std.log.info("Real Buffer.from and PJRT wrapper; opaque C mock, no transfers, events or waits. Setup and pointer checks excluded.", .{});
     const iterations: u64 = @intCast(args.iterations);
     const calls_per_case = iterations * @as(u64, @intCast(args.samples));
     var results: [layouts.len]Result = undefined;
@@ -282,15 +283,15 @@ pub fn main(init: std.process.Init) !void {
         var count: u64 = 0;
         for (meshes) |mesh| {
             for (mesh.cases) |case| {
-                const caseData = data[0..case.shape.byteSize()];
-                try batch(platform, case.shape, caseData, args.warmup, &buffers);
-                try checkBuffers(buffers.items, caseData, layout.name, mesh.name, case);
+                const case_data = data[0..case.shape.byteSize()];
+                try batch(init.io, platform, case.shape, case_data, args.warmup, &buffers);
+                try checkBuffers(buffers.items, case_data, layout.name, mesh.name, case);
                 buffers.clearRetainingCapacity();
                 for (0..args.samples) |_| {
                     const start: std.Io.Timestamp = .now(init.io, .awake);
-                    try batch(platform, case.shape, caseData, args.iterations, &buffers);
+                    try batch(init.io, platform, case.shape, case_data, args.iterations, &buffers);
                     const ns: u64 = @intCast(start.untilNow(init.io, .awake).toNanoseconds());
-                    try checkBuffers(buffers.items, caseData, layout.name, mesh.name, case);
+                    try checkBuffers(buffers.items, case_data, layout.name, mesh.name, case);
                     buffers.clearRetainingCapacity();
                     total += ns;
                 }
@@ -306,6 +307,14 @@ pub fn main(init: std.process.Init) !void {
         };
     }
     summarize(&results);
+}
+
+fn batch(io: std.Io, platform: *const zml.Platform, shape: zml.Shape, data: []const u8, iterations: usize, out: *std.ArrayList(zml.Buffer)) !void {
+    for (0..iterations) |_| {
+        const slot = out.addOneAssumeCapacity();
+        errdefer out.items.len -= 1;
+        slot.* = try zml.Buffer.from(io, platform, shape, data, .{ .wait = false });
+    }
 }
 
 const Result = struct {
@@ -344,43 +353,7 @@ fn summarize(results: *const [layouts.len]Result) void {
     }
     const perDevice = covariance / variance;
     const base = meanNs - perDevice * meanDevices;
-    std.log.info("Linear fit (metadata only, equal weight per layout): Buffer.from = {d:.0}ns + {d:.0}ns * num_devices", .{ @floor(base), @floor(perDevice) });
-}
-
-// Mirrors Buffer.from. Keep this in sync with zml/buffer.zig.
-// Synthetic handles are never dereferenced or passed to PJRT, including deinit.
-// Compiler barriers stand in for the external call consuming each upload's args.
-noinline fn bufferFromMetadata(platform: *const zml.Platform, shape: zml.Shape, data: []const u8, opts: zml.Buffer.FromOptions) !zml.Buffer {
-    var buffer: zml.Buffer = .{ ._platform = platform, ._shape = shape, ._shards = .empty };
-    const packed_shape = shape.packedShape();
-    var placed_shape = packed_shape;
-    if (placed_shape._sharding.mesh == null) placed_shape._sharding.mesh = platform.replicated_mesh;
-    const byte_strides = packed_shape.computeByteStrides();
-    const placement = try Sharding.Placement.initWithByteStrides(placed_shape, byte_strides.constSlice());
-    const ty = zml.pjrtx.bufferTypeFromDtype(packed_shape.dtype());
-    const layout = platform.defaultMemoryLayout(placement.shape.dims(), packed_shape.dtype());
-    zml.stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
-    const byte_size = packed_shape.byteSize();
-    zml.stdx.debug.assert(data.len == byte_size, "Expected data length {}, got {}", .{ byte_size, data.len });
-    const base_ptr = data.ptr;
-
-    for (platform.physical_mesh.devices_in_canonical_order, 0..) |device, device_index| {
-        const memory = platform.devices[device.id].memory(opts.memory).?;
-        const args: pjrt.Client.BufferFromHostBufferArgs = .{
-            .data = placement.shardPtr(device_index, base_ptr),
-            .dst = .{ .memory = memory.pjrt_memory },
-            .layout = layout,
-            .dims = placement.shape.dims(),
-            .buffer_type = ty,
-            .byte_strides = byte_strides.constSlice(),
-            .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-        };
-        std.mem.doNotOptimizeAway(&args);
-        // Smuggle the "data" pointer passed to BufferFromHostBufferArgs into the result Buffer object,
-        // to allow checking the correctness of the operation `checkBuffers`
-        buffer._shards.appendAssumeCapacity(@ptrCast(@constCast(args.data)));
-    }
-    return buffer;
+    std.log.info("Linear fit (equal weight per layout): Buffer.from = {d:.0}ns + {d:.0}ns * num_devices", .{ @floor(base), @floor(perDevice) });
 }
 
 const Layout = struct {
@@ -407,8 +380,13 @@ fn syntheticPlatform(allocator: std.mem.Allocator, layout: Layout) !*zml.Platfor
     const platform = try allocator.create(zml.Platform);
     var next_id: u32 = 0;
     const root = try physicalTree(allocator, layout.sizes, 0, &next_id);
-    // Only metadata fields are initialized. Runtime/client fields must never be used.
+    // Only fields used by the upload path are initialized.
     platform.* = undefined;
+    const api = try allocator.create(pjrt.Api);
+    api.* = .{ .inner = zml_benchmark_pjrt_api().* };
+    platform.pjrt_api = api;
+    // The mock never dereferences the synthetic client or memory handles.
+    platform.pjrt_client = @ptrFromInt(4096);
     platform.target = layout.target;
     platform.physical_mesh = try .fromTree(allocator, layout.target, root);
     if (layout.reverse_ids) {
@@ -447,12 +425,6 @@ const MeshCases = struct {
 
 @CASES@
 
-fn batch(platform: *const zml.Platform, shape: zml.Shape, data: []const u8, iterations: usize, out: *std.ArrayList(zml.Buffer)) !void {
-    for (0..iterations) |_| {
-        const buffer = try bufferFromMetadata(platform, shape, data, .{ .wait = false });
-        out.appendAssumeCapacity(buffer);
-    }
-}
 
 pub fn checkBuffers(buffers: []const zml.Buffer, data: []const u8, layout: []const u8, mesh: []const u8, case: Case) !void {
     const offsets = case.offsets;

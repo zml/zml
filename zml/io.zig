@@ -980,12 +980,12 @@ const DispatchSpans = struct {
     mirror_writers: []usize,
 
     fn init(allocator: std.mem.Allocator, shape: Shape) !DispatchSpans {
-        const placement = try Sharding.Placement.init(shape);
+        const placement = try Sharding.Placement.init(&shape);
         const ordered_devices = placement.mesh().?.devicesInCanonicalOrder();
 
         var placement_span_count: usize = 0;
         for (0..ordered_devices.len) |device_index| {
-            placement_span_count += placementSpanCount(shape, placement.slices(device_index).constSlice());
+            placement_span_count += placementSpanCount(shape, placement.slices(device_index, shape).constSlice());
         }
 
         var placement_spans: std.ArrayList(PlacementSpan) = try .initCapacity(allocator, placement_span_count);
@@ -994,7 +994,7 @@ const DispatchSpans = struct {
         const byte_strides = shape.computeByteStrides();
 
         for (0..ordered_devices.len) |writer_index| {
-            appendShardPlacementSpans(&placement_spans, shape, placement.slices(writer_index).constSlice(), byte_strides.constSlice(), writer_index);
+            appendShardPlacementSpans(&placement_spans, shape, placement.slices(writer_index, shape).constSlice(), byte_strides.constSlice(), writer_index);
         }
 
         std.debug.assert(placement_spans.items.len == placement_span_count);
@@ -1199,7 +1199,7 @@ pub const DirectMemoryWriter = struct {
     ) !DirectMemoryWriter {
         var placed_shape = shape;
         if (placed_shape._sharding.mesh == null) placed_shape._sharding.mesh = platform.replicated_mesh;
-        const placement = try Sharding.Placement.init(placed_shape);
+        const placement = try Sharding.Placement.init(&placed_shape);
         const mesh = placement.mesh().?;
         const ordered_devices = mesh.devicesInCanonicalOrder();
         var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
@@ -1216,7 +1216,7 @@ pub const DirectMemoryWriter = struct {
             const shard_dma_allocator = dma_allocators[device.id].allocator();
             const pjrt_mem = platform.devices[device.id].memory(memory).?;
 
-            shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape);
+            shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.localShape(placed_shape));
             initialized += 1;
 
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);

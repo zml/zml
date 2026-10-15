@@ -1978,7 +1978,7 @@ pub const Mesh = struct {
     }
 
     fn gspmdTileAssignment(self: *const Mesh, allocator: std.mem.Allocator, shape: Shape) ![]u32 {
-        _ = try Placement.init(shape);
+        _ = try Sharding.Placement.init(&shape);
         const devices = self.devicesInCanonicalOrder();
         var tile_axes: stdx.BoundedArray(u8, MAX_MESH_RANK) = .empty;
         var used_axes: u8 = 0;
@@ -2280,8 +2280,8 @@ pub const Strategy = struct {
 /// For a given shape, compute the shape of the slice each shard will receive.
 pub fn shardedShape(shape: Shape) error{IncompatibleSharding}!Shape {
     if (shape._sharding.mesh != null) {
-        const pl: Placement = try .init(shape);
-        var local_shape = pl.shape;
+        const pl: Placement = try Sharding.Placement.init(&shape);
+        var local_shape = pl.localShape(shape);
         local_shape._sharding = .replicated;
         return local_shape;
     } else {
@@ -2290,7 +2290,7 @@ pub fn shardedShape(shape: Shape) error{IncompatibleSharding}!Shape {
     }
 }
 
-/// Precompute mesh information common to all devices for a given shape.
+/// Owns per-device addressing metadata for a shape.
 pub const Placement = struct {
     pub const Slices = stdx.BoundedArray(Slice1d, Shape.MAX_RANK);
     pub const Slice1d = struct {
@@ -2298,63 +2298,63 @@ pub const Placement = struct {
         size: i64,
     };
 
-    // Note this shape is mainly use to indicate the dims of the sharded buffer.
-    // We may want to only store that.
-    shape: Shape,
-    global_shape: if (builtin.mode == .debug) Shape else void,
-    byte_steps: @Vector(MAX_MESH_RANK, u64),
+    local_dims: stdx.BoundedArray(i64, Shape.MAX_RANK),
+    mesh_ptr: ?*const Mesh,
+    byte_steps: [MAX_MESH_RANK]u64,
 
-    pub fn init(shape: Shape) error{IncompatibleSharding}!Placement {
+    pub fn init(shape: *const Shape) error{IncompatibleSharding}!Placement {
         const byte_strides = shape.computeByteStrides();
         return initWithByteStrides(shape, byte_strides.constSlice());
     }
 
-    /// byte_strides must be the contiguous byte strides of shape.
-    pub inline fn initWithByteStrides(shape: Shape, byte_strides: []const i64) error{IncompatibleSharding}!Placement {
+    /// Reuse the caller's contiguous byte strides without recomputing them.
+    pub fn initWithByteStrides(shape: *const Shape, byte_strides: []const i64) error{IncompatibleSharding}!Placement {
         std.debug.assert(byte_strides.len == shape.rank());
-        var pl: Placement = .{
-            .shape = shape, // modified below
-            .global_shape = if (builtin.mode == .debug) shape else {},
+        if (builtin.mode == .debug) std.debug.assert(shape._sharding.partition.hasUniqueAxes());
+        var result: Placement = .{
+            .local_dims = .{ .buffer = undefined, .len = shape.rank() },
+            .mesh_ptr = shape._sharding.mesh,
             .byte_steps = @splat(0),
         };
-        // mesh == null => replicated => zero byte steps
-        if (shape._sharding.mesh == null) return pl;
-        const mesh_ = shape._sharding.mesh.?;
-        var used_axes: u8 = 0;
-        var byte_steps: [MAX_MESH_RANK]u64 = @splat(0);
-        for (shape.dims(), 0..) |dim, ax| {
+        for (shape.dims(), result.local_dims.slice(), 0..) |dim, *result_local_dim, ax| {
+            const mesh_ = result.mesh_ptr orelse continue;
             const logical_axis = shape.partition(ax).meshAxis() orelse continue;
-            const bit = @as(u8, 1) << @intCast(logical_axis);
-            // Reusing a logical axis partitions only the first tensor dimension.
-            if (used_axes & bit != 0) continue;
-            used_axes |= bit;
             const count = mesh_.grid.axis_sizes[logical_axis];
             if (@rem(dim, count) != 0) return error.IncompatibleSharding;
             const local_dim = @divExact(dim, count);
-            pl.shape._dims.set(ax, local_dim);
-            byte_steps[logical_axis] = @intCast(local_dim * byte_strides[ax]);
+            result_local_dim.* = local_dim;
+            result.byte_steps[logical_axis] = @intCast(local_dim * byte_strides[ax]);
         }
-        pl.byte_steps = byte_steps;
-        return pl;
+        return result;
     }
 
     pub fn mesh(pl: *const Placement) ?*const Mesh {
-        return pl.shape._sharding.mesh;
+        return pl.mesh_ptr;
     }
 
-    pub fn slices(pl: *const Placement, device_index: usize) Slices {
-        var res: Slices = .{ .buffer = undefined, .len = pl.shape.rank() };
-        if (pl.mesh() == null) {
-            for (res.slice(), pl.shape.dims()) |*slice, dim| slice.* = .{ .start = 0, .size = dim };
+    /// Reconstruct metadata only for consumers that need a full shard shape.
+    pub fn localShape(pl: *const Placement, source: Shape) Shape {
+        std.debug.assert(source.rank() == pl.local_dims.len);
+        var result = source;
+        @memcpy(result._dims.slice(), pl.local_dims.constSlice());
+        result._sharding.mesh = pl.mesh_ptr;
+        return result;
+    }
+
+    pub fn slices(pl: *const Placement, device_index: usize, source: Shape) Slices {
+        std.debug.assert(source.rank() == pl.local_dims.len);
+        var res: Slices = .{ .buffer = undefined, .len = pl.local_dims.len };
+        if (pl.mesh_ptr == null) {
+            for (res.slice(), pl.local_dims.constSlice()) |*slice, dim| slice.* = .{ .start = 0, .size = dim };
             return res;
         }
-        const grid = &pl.mesh().?.grid;
+        const grid = &pl.mesh_ptr.?.grid;
         std.debug.assert(device_index < grid.device_count);
         const coords: [MAX_MESH_RANK]u8 = grid.logical_coords[device_index];
         var used_axes: u8 = 0;
-        for (res.slice(), pl.shape.dims(), 0..) |*r, size, ax| {
+        for (res.slice(), pl.local_dims.constSlice(), 0..) |*r, size, ax| {
             var coordinate: i64 = 0;
-            if (pl.shape.partition(ax).meshAxis()) |logical_axis| {
+            if (source.partition(ax).meshAxis()) |logical_axis| {
                 const bit = @as(u8, 1) << @intCast(logical_axis);
                 if (used_axes & bit == 0) coordinate = coords[logical_axis];
                 used_axes |= bit;
@@ -2368,7 +2368,7 @@ pub const Placement = struct {
     /// The returned pointer includes the slice's byte offset.
     pub fn basePtr(pl: *const Placement, slice: Slice) [*]const u8 {
         if (builtin.mode == .debug) {
-            std.debug.assert(pl.global_shape.eql(slice.shape));
+            std.debug.assert(pl.local_dims.len == slice.shape.rank());
         }
         return slice.constData().ptr;
     }
@@ -2383,7 +2383,7 @@ pub const Placement = struct {
         const mesh_ = pl.mesh() orelse return 0;
         std.debug.assert(device_index < mesh_.grid.device_count);
         const coords: [MAX_MESH_RANK]u8 = mesh_.grid.logical_coords[device_index];
-        const steps: [MAX_MESH_RANK]u64 = pl.byte_steps;
+        const steps = pl.byte_steps;
         // Placement coefficients and grid coordinates describe offsets within the
         // validated source slice. Keep arithmetic checks in debug only.
         return offset: {
@@ -2404,16 +2404,16 @@ pub const Placement = struct {
         return .{
             .bytes = slice.bytes,
             .mutable = slice.mutable,
-            .shape = pl.shape,
+            .shape = pl.localShape(slice.shape),
             .offset_bytes = offset_bytes,
             .byte_strides = slice.byte_strides,
         };
     }
 
-    pub fn format(pl: Placement, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn format(pl: *const Placement, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print(
-            "Placement(shape={f}, byte_steps={any})\n",
-            .{ pl.shape, pl.byte_steps },
+            "Placement(local_dims={any}, mesh={*}, byte_steps={any})\n",
+            .{ pl.local_dims.constSlice(), pl.mesh_ptr, pl.byte_steps },
         );
     }
 };
@@ -2507,13 +2507,13 @@ const ShardingTest = struct {
         if (s.expect_error) |err| {
             errdefer std.log.warn("Expected error failed", .{});
             try std.testing.expect(ordered_devices.len > 0);
-            try std.testing.expectError(err, Sharding.Placement.init(s.shape));
+            try std.testing.expectError(err, Sharding.Placement.init(&s.shape));
             return;
         }
 
         // Verify Shard Slices (Math)
         if (s.expected_shards.len > 0) {
-            const pl: Placement = try .init(s.shape);
+            const pl: Placement = try Sharding.Placement.init(&s.shape);
             errdefer std.log.warn("Expected shards failed. Got {f}", .{pl});
             try std.testing.expectEqual(s.expected_shards.len, ordered_devices.len);
             for (s.expected_shards, ordered_devices, 0..) |expected, device, device_index| {
@@ -2521,7 +2521,7 @@ const ShardingTest = struct {
                     try std.testing.expectEqual(expected.device_id, device.id);
 
                     // Check pl.slices(device)
-                    const actual_slices = pl.slices(device_index);
+                    const actual_slices = pl.slices(device_index, s.shape);
 
                     // Consider rewriting test cases to use Slice1D. This requires passing the axis
                     const actual_start_len = try self.allocator.alloc([2]i64, actual_slices.len);
@@ -2540,7 +2540,7 @@ const ShardingTest = struct {
                         expected_size.* = slice[1];
                     }
 
-                    try std.testing.expectEqualSlices(i64, expected_sizes, pl.shape.dims());
+                    try std.testing.expectEqualSlices(i64, expected_sizes, pl.local_dims.constSlice());
                 }
             }
         }
@@ -2839,7 +2839,7 @@ test "DeviceGrid stores aligned logical coordinates in canonical order" {
     }
     try std.testing.expectEqual(@as(usize, 4), @sizeOf(DeviceGrid.Coordinates));
     const shape = Shape.init(.{ .m = 16, .n = 24 }, .f32).withPartitioning(&mesh_, .{ .m = .model, .n = .data });
-    const placement = try Placement.init(shape);
+    const placement = try Sharding.Placement.init(&shape);
     const offsets = [_]usize{ 0, 768, 48, 816 };
     var data: [16 * 24 * 4 + 16]u8 = undefined;
     var slice = Slice.init(shape, data[16..]);
@@ -2853,6 +2853,26 @@ test "DeviceGrid stores aligned logical coordinates in canonical order" {
     }
 }
 
+test "Placement owns dimensions and byte steps across copies" {
+    const Helper = struct {
+        fn create() !Placement {
+            const shape = Shape.init(.{ .m = 3, .n = 5 }, .f32);
+            return Placement.init(&shape);
+        }
+    };
+    var original = try Helper.create();
+    original.byte_steps[0] = 60;
+    const copied = original;
+    original.local_dims.buffer[0] = 99;
+    original.byte_steps[0] = 100;
+    try std.testing.expectEqualSlices(i64, &.{ 3, 5 }, copied.local_dims.constSlice());
+    try std.testing.expectEqualSlices(u64, &.{ 60, 0, 0, 0 }, &copied.byte_steps);
+    const source = Shape.init(.{ .m = 3, .n = 5 }, .f32);
+    try std.testing.expect(copied.localShape(source).eqlWithTags(source));
+    var data: [3 * 5 * 4]u8 = undefined;
+    try std.testing.expectEqual(@intFromPtr(&data), @intFromPtr(copied.basePtr(.init(source, &data))));
+}
+
 test "Placement byte steps and dot product exceed 32 bits" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2860,7 +2880,7 @@ test "Placement byte steps and dot product exceed 32 bits" {
     const physical = try runner.physical(.{Platform.MAX_NUM_DEVICES}, .{ .mesh = .torus });
     const mesh_ = try Mesh.init("wide", &physical, .mesh(.{ .model = .balanced }), .parseBindings(.{ .model = .link_x }));
     const shape = Shape.init(.{ .m = 2 * Platform.MAX_NUM_DEVICES, .n = 1 << 30 }, .f32).withPartitioning(&mesh_, .{ .m = .model });
-    const placement = try Placement.init(shape);
+    const placement = try Sharding.Placement.init(&shape);
     try std.testing.expectEqual(@as(usize, 1) << 33, placement.byteOffset(1));
     const last_device = Platform.MAX_NUM_DEVICES - 1;
     const coords: [MAX_MESH_RANK]u8 = mesh_.grid.logical_coords[last_device];

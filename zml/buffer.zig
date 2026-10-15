@@ -127,40 +127,42 @@ pub const Buffer = struct {
     }
 
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
-        const pl = Sharding.Placement.init(self._shape) catch |err| {
+        const pl = Sharding.Placement.init(&self._shape) catch |err| {
             return try writer.print("Buffer({f}) with invalid sharding {} ({})", .{ self._shape, self._shape._sharding, err });
         };
         try writer.print("{f}", .{pl});
     }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
-    pub fn from(
+    pub noinline fn from(
         io: std.Io,
         platform: *const Platform,
         shape_: Shape,
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
-        var buffer: Buffer = .{ ._platform = platform, ._shape = shape_, ._shards = .empty };
         // TODO: benchmark against
         // const metadata: PjrtBufferMetadata = .init(platform, shape_);
-        const packed_shape = shape_.packedShape();
-        var placed_shape = packed_shape;
-        if (placed_shape._sharding.mesh == null) placed_shape._sharding.mesh = platform.replicated_mesh;
+        var pjrt_shards: Shards = .empty;
+        var packed_shape = shape_.packedShape();
+        if (packed_shape._sharding.mesh == null) packed_shape._sharding.mesh = platform.replicated_mesh;
         const byte_strides = packed_shape.computeByteStrides();
-        const placement = Sharding.Placement.initWithByteStrides(placed_shape, byte_strides.constSlice()) catch |err| {
+        const placement = Sharding.Placement.initWithByteStrides(&packed_shape, byte_strides.constSlice()) catch |err| {
             @branchHint(.cold);
             std.debug.panic("Buffer shape {f} is incompatible with its mesh: {t}", .{ packed_shape, err });
         };
         const ty = pjrtx.bufferTypeFromDtype(packed_shape.dtype());
-        const layout = platform.defaultMemoryLayout(placement.shape.dims(), packed_shape.dtype());
+        const layout = platform.defaultMemoryLayout(placement.local_dims.constSlice(), packed_shape.dtype());
 
-        errdefer for (buffer._shards.slice()) |shard| {
+        errdefer for (pjrt_shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
         };
 
         stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
-        const byte_size = packed_shape.byteSize();
+        const byte_size: usize = if (packed_shape.rank() == 0)
+            packed_shape.dtype().sizeOf()
+        else
+            @intCast(packed_shape.dim(0) * byte_strides.get(0));
         stdx.debug.assert(data_.len == byte_size, "Expected data length {}, got {}", .{ byte_size, data_.len });
         const base_ptr = data_.ptr;
 
@@ -172,7 +174,7 @@ pub const Buffer = struct {
                 .dst = .{ .memory = memory.pjrt_memory },
                 // Constant across devices
                 .layout = layout,
-                .dims = placement.shape.dims(),
+                .dims = placement.local_dims.constSlice(),
                 .buffer_type = ty,
                 .byte_strides = byte_strides.constSlice(),
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
@@ -181,14 +183,14 @@ pub const Buffer = struct {
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
             if (event) |ev| ev.deinit(platform.pjrt_api);
 
-            buffer._shards.appendAssumeCapacity(pjrt_buffer);
+            pjrt_shards.appendAssumeCapacity(pjrt_buffer);
         }
 
         if (opts.wait) {
-            try buffer.await(io);
+            try awaitShards(pjrt_shards.constSlice(), platform, io);
         }
 
-        return buffer;
+        return .{ ._platform = platform, ._shape = shape_, ._shards = pjrt_shards };
     }
 
     /// Copies the given Zig bytes to the accelerator memory and
@@ -218,10 +220,14 @@ pub const Buffer = struct {
     }
 
     pub fn await(self: Buffer, io: std.Io) !void {
-        for (self._shards.constSlice()) |buffer| {
-            const ev = buffer.readyEvent(self._platform.pjrt_api);
-            defer ev.deinit(self._platform.pjrt_api);
-            try ev.await(self._platform.pjrt_api, io);
+        try awaitShards(self._shards.constSlice(), self._platform, io);
+    }
+
+    fn awaitShards(pjrt_shards: []const *pjrt.Buffer, platform: *const Platform, io: std.Io) !void {
+        for (pjrt_shards) |shard| {
+            const event = shard.readyEvent(platform.pjrt_api);
+            defer event.deinit(platform.pjrt_api);
+            try event.await(platform.pjrt_api, io);
         }
     }
 
@@ -253,7 +259,7 @@ pub const Buffer = struct {
                 .dst = .{ .memory = memory.pjrt_memory },
                 // Constant across devices
                 .layout = metadata.layout,
-                .dims = metadata.placement.shape.dims(),
+                .dims = metadata.placement.local_dims.constSlice(),
                 .element_type = metadata.ty,
             };
 
@@ -296,7 +302,7 @@ pub const Buffer = struct {
             const sub_slice = placement.shardSlice(shard_index, slice);
             if (!sub_slice.isContiguous()) return error.NonContiguousShardRead;
 
-            const size_bytes = placement.shape.byteSize();
+            const size_bytes = placement.localShape(self._shape).byteSize();
             const destination = sub_slice.data()[0..size_bytes];
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, destination);
 
@@ -315,7 +321,7 @@ pub const Buffer = struct {
 
         const placement = placementOrPanic(self._platform, self._shape);
 
-        var shard_slice = try Slice.alloc(allocator, placement.shape);
+        var shard_slice = try Slice.alloc(allocator, placement.localShape(self._shape));
         defer shard_slice.free(allocator);
 
         for (0..self._platform.physical_mesh.devices_in_canonical_order.len) |shard_index| {
@@ -339,7 +345,7 @@ pub const Buffer = struct {
     /// `shard_byte_size` can be up to `self.shape().byteSize()` when the buffer is fully replicated.
     pub fn byteSize(self: Buffer) usize {
         const placement = placementOrPanic(self._platform, self._shape);
-        return placement.shape.byteSize() * self._shards.len;
+        return placement.localShape(self._shape).byteSize() * self._shards.len;
     }
 
     pub fn opaqueDevicePtr(self: Buffer, device_id: usize) *anyopaque {
@@ -437,7 +443,7 @@ pub const PjrtBufferMetadata = struct {
             .shape = packed_shape,
             .ty = pjrtx.bufferTypeFromDtype(packed_shape.dtype()),
             .placement = placement,
-            .layout = platform.defaultMemoryLayout(placement.shape.dims(), packed_shape.dtype()),
+            .layout = platform.defaultMemoryLayout(placement.local_dims.constSlice(), packed_shape.dtype()),
         };
     }
 };
@@ -445,7 +451,7 @@ pub const PjrtBufferMetadata = struct {
 fn placementOrPanic(platform: *const Platform, shape: Shape) Sharding.Placement {
     var sh = shape;
     if (sh._sharding.mesh == null) sh._sharding.mesh = platform.replicated_mesh;
-    return Sharding.Placement.init(sh) catch |err| {
+    return Sharding.Placement.init(&sh) catch |err| {
         @branchHint(.cold);
         std.debug.panic("Buffer shape {f} is incompatible with its mesh: {t}", .{ shape, err });
     };
