@@ -471,8 +471,9 @@ pub fn compileInternal(
 
     _ = result.func.appendTo(compiler.module.body());
 
-    const num_partitions = compiler.meshes[0].numPartitions();
-    const num_replicas = compiler.meshes[0].numReplicas();
+    // Mesh replication is encoded in shardings within one SPMD executable.
+    const num_partitions = compiler.meshes[0].numDevices();
+    const num_replicas = 1;
     const num_devices = num_partitions * num_replicas;
 
     compiler.module.operation().setAttributeByName(
@@ -502,7 +503,7 @@ pub fn compileInternal(
         allocator,
         platform,
         loaded_executable,
-        @intCast(num_devices),
+        num_devices,
         num_partitions,
         // This will get copied into exe
         result.input_info.items(.shape),
@@ -809,11 +810,10 @@ fn validateMeshes(meshes: []const *const Sharding.Mesh) !void {
     stdx.debug.assert(meshes.len >= 1, "Waiting at leat 1 mesh strategy to be implemented", .{});
 
     const first = meshes[0];
-    const partitions = first.numPartitions();
-    const replicas = first.numReplicas();
+    const devices = first.numDevices();
 
     for (meshes[1..]) |s| {
-        if (s.numPartitions() != partitions or s.numReplicas() != replicas) {
+        if (s.numDevices() != devices) {
             // todo: deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
             return error.InconsistentMesheCardinality;
         }
@@ -866,8 +866,9 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
 
     const platform = compiler.platform;
     const main_mesh = compiler.meshes[0];
-    const num_partitions = main_mesh.numPartitions();
-    const num_replicas = main_mesh.numReplicas();
+    // Mesh replicas are part of the SPMD device set, not XLA program replicas.
+    const num_partitions: i32 = @intCast(main_mesh.numDevices());
+    const num_replicas = 1;
 
     const device_assignment = try main_mesh.deviceAssignment(compiler.allocator);
     defer compiler.allocator.free(device_assignment);

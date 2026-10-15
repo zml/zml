@@ -639,32 +639,6 @@ pub const PhysicalMesh = struct {
             return self.depth_by_tag.get(tag);
         }
 
-        pub fn format(self: AxisTraversal, writer: *std.Io.Writer) !void {
-            try writer.writeAll("AxisTraversal(order=[");
-
-            for (self.order.slice(), 0..) |tag, i| {
-                if (i > 0) try writer.writeAll(", ");
-                try writer.writeAll(@tagName(tag));
-            }
-
-            try writer.writeAll("], depth_by_tag={");
-
-            const field_names = comptime std.meta.fieldNames(PhysicalAxisTag);
-            inline for (field_names, 0..) |field_name, i| {
-                if (i > 0) try writer.writeAll(", ");
-                const tag = @field(PhysicalAxisTag, field_name);
-                try writer.writeAll(field_name);
-                try writer.writeAll("=");
-                if (self.depth_by_tag.get(tag)) |d| {
-                    try writer.print("{d}", .{d});
-                } else {
-                    try writer.writeAll("null");
-                }
-            }
-
-            try writer.writeAll("})");
-        }
-
         /// Canonical DFS axis order:
         ///
         /// Tree:
@@ -1038,7 +1012,6 @@ pub const PhysicalMesh = struct {
 
     pub fn format(self: PhysicalMesh, writer: *std.Io.Writer) !void {
         try writer.print("\nPhysicalMesh(platform={s} shardable_axes={any} num_devices={d})\n", .{ @tagName(self.target), self.shardableAxes(), self.countDevices() });
-        try writer.print("├── {f}\n", .{self.axis_traversal});
         try writer.print("│  \n", .{});
 
         try formatNode(self.root, writer, "", 0, true);
@@ -1051,7 +1024,7 @@ pub const PhysicalMesh = struct {
                 try writer.print("Device(id={d}, coords={any})\n", .{ device.id, device.coords[0..depth] });
             },
             .branch => |b| {
-                try writer.print("[{s}] x{d} ({s})\n", .{ @tagName(b.tag), b.children.len, @tagName(b.geometry) });
+                try writer.print("[{s}] 0..{d} ({s})\n", .{ @tagName(b.tag), b.children.len, @tagName(b.geometry) });
 
                 var buf: [256]u8 = undefined;
                 const new_prefix = std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, if (is_last) "    " else "│   " }) catch unreachable;
@@ -1570,7 +1543,6 @@ pub const Mesh = struct {
     physical: *const PhysicalMesh,
     logical: LogicalMesh,
 
-    num_devices: u32,
     grid: DeviceGrid,
 
     /// Compact binding table: logical axis -> physical axes
@@ -1620,6 +1592,8 @@ pub const Mesh = struct {
         logical: LogicalMesh,
         strategy: Strategy,
     ) !Mesh {
+        const num_devices = physical.countDevices();
+        std.debug.assert(num_devices == physical.devices_in_canonical_order.len);
         const axis_order = physical.axisOrder().slice();
         if (axis_order.len == 0) return error.InvalidPhysicalMesh;
         if (strategy.bindings.len == 0) return error.InvalidStrategy;
@@ -1651,18 +1625,22 @@ pub const Mesh = struct {
             folds.appendAssumeCapacity(.{ .target = entry.target, .sources = entry.sources });
         }
 
-        var mesh_: Mesh = .{
+        var mesh: Mesh = .{
             .name = name_,
             .logical = logical,
             .grid = undefined,
             .physical = physical,
             .bindings = bindings,
-            .num_devices = @intCast(physical.countDevices()),
             .folds = folds,
             .folds_consumed = folds_consumed,
         };
-        mesh_.grid = try DeviceGrid.init(&mesh_);
-        return mesh_;
+        mesh.grid = try DeviceGrid.init(&mesh);
+        std.debug.assert(num_devices == physical.devices_in_canonical_order.len);
+        std.debug.assert(@mod(mesh.numDevices(), mesh.numPartitions()) == 0);
+        if (mesh.numReplicas() > 1 and !std.mem.eql(u8, "replicated", name_)) {
+            std.log.scoped(.zml).warn("Created a Mesh with numReplicas() == {0d}. This imply that all tensor put on this mesh will be implicitly replicated {0d} times.\n{1f}", .{ mesh.numReplicas(), mesh });
+        }
+        return mesh;
     }
 
     pub fn initTest(name_: @EnumLiteral(), tagz: anytype) Mesh {
@@ -1735,23 +1713,25 @@ pub const Mesh = struct {
         return self.physical.linearIndexFromCoords(coords);
     }
 
-    pub fn numPartitions(self: *const Mesh) i32 {
-        return @intCast(self.physicalView().total_devices);
+    pub fn numPartitions(self: *const Mesh) u32 {
+        var partitions: u32 = 1;
+        for (self.grid.axis_sizes[0..self.grid.rank]) |size| partitions *= size;
+        return @intCast(partitions);
     }
 
-    pub fn numPartitionsForLogicalAxis(self: *const Mesh, logical_axis: anytype) i64 {
+    pub fn numPartitionsForLogicalAxis(self: *const Mesh, logical_axis: anytype) u32 {
         const logical_tag = Shape.toTag(logical_axis);
 
         const logical_ax = self.resolveLogicalAxis(logical_tag) orelse std.debug.panic("mesh {f} has no axis {s}", .{ self, logical_tag });
         return self.grid.axis_sizes[logical_ax];
     }
 
-    pub fn numReplicas(_: *const Mesh) i32 {
-        return 1;
+    pub fn numDevices(self: *const Mesh) u32 {
+        return @intCast(self.physical.devices_in_canonical_order.len);
     }
 
-    pub fn numDevices(self: *const Mesh) i32 {
-        return self.numPartitions() * self.numReplicas();
+    pub fn numReplicas(self: *const Mesh) u32 {
+        return @divExact(self.numDevices(), self.numPartitions());
     }
 
     pub fn sdyMeshAttr(self: *const Mesh, allocator: std.mem.Allocator) ![]const u8 {
@@ -1996,7 +1976,7 @@ pub const Mesh = struct {
             if (coord > 0) try writer.writeAll(",");
             try writer.print("{d}", .{coord});
         }
-        try writer.writeAll(", dev=");
+        try writer.writeAll(" -> devices=");
         for (0..size) |coord| {
             coords[last] = coord;
             if (coord > 0) try writer.writeAll(",");
@@ -2364,12 +2344,14 @@ const ShardingTest = struct {
         mesh: *const Mesh,
         shape: Shape,
 
+        expected_num_partitions: i32,
+        expected_num_replicas: i32,
         expect_error: ?anyerror = null,
         expected_sdy: ?[]const u8 = null,
         expected_shards: []const ExpectedShard = &.{},
 
         pub fn format(scenario: Scenario, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            try writer.print("Scenario:\n", .{});
+            try writer.print("Scenario: partitions={d}, replicas={d}\n", .{ scenario.expected_num_partitions, scenario.expected_num_replicas });
             if (scenario.expect_error) |err| try writer.print("- error {}\n", .{err});
             if (scenario.expected_sdy) |sdy| try writer.print("- shardy: {s}\n", .{sdy});
             if (scenario.expected_shards.len > 0) try writer.print("- shards:\n", .{});
@@ -2417,6 +2399,10 @@ const ShardingTest = struct {
     pub fn run(self: ShardingTest, s: Scenario) !void {
         const mesh = s.mesh;
         errdefer std.log.warn("Failed mesh {f}", .{s});
+
+        try std.testing.expectEqual(s.expected_num_partitions, mesh.numPartitions());
+        try std.testing.expectEqual(s.expected_num_replicas, mesh.numReplicas());
+        try std.testing.expectEqual(mesh.grid.device_count, @as(usize, @intCast(mesh.numDevices())));
 
         // Verify MLIR String
         if (s.expected_sdy) |expected_attr| {
@@ -2494,6 +2480,8 @@ test "mesh: unknown partitioning implies replication" {
     const mesh: Sharding.Mesh = try .init("folded_mesh", &physical, logical, strategy);
 
     try runner.run(.{
+        .expected_num_partitions = 2,
+        .expected_num_replicas = 2,
         .mesh = &mesh,
         // No partitioning on shape
         .shape = Shape.init(.{ .batch = 8 }, .f32),
@@ -2523,6 +2511,8 @@ test "mesh: suggest strategy realization" {
     const mesh: Mesh = try .init("suggested_mesh", &physical, logical, strategy);
 
     try runner.run(.{
+        .expected_num_partitions = 4,
+        .expected_num_replicas = 2,
         .mesh = &mesh,
         .shape = Shape.init(.{ .batch = 4, .model = 4 }, .f32)
             .withPartitioning(&mesh, .{ .batch = .batch, .model = .model }),
@@ -2556,6 +2546,8 @@ test "mesh: suggest leaves conflicting logical axes replicated" {
 
     const mesh: Mesh = try .init("fold_mesh", &physical, logical, strategy);
     try runner.run(.{
+        .expected_num_partitions = 4,
+        .expected_num_replicas = 1,
         .mesh = &mesh,
         .shape = Shape.init(.{ .model = 4, .experts = 4 }, .f32)
             .withPartitioning(&mesh, .{ .model = .model, .experts = .experts }),
@@ -2569,6 +2561,8 @@ test "mesh: suggest leaves conflicting logical axes replicated" {
     });
     // Swapping tensor dimensions must not change which logical axis owns the devices.
     try runner.run(.{
+        .expected_num_partitions = 4,
+        .expected_num_replicas = 1,
         .mesh = &mesh,
         .shape = Shape.init(.{ .experts = 4, .model = 4 }, .f32)
             .withPartitioning(&mesh, .{ .experts = .experts, .model = .model }),
@@ -2593,6 +2587,8 @@ test "mesh: multiple physical axes on one logical dimension (folding)" {
         const strategy: Strategy = .parseBindings(.{ .model = .{ .link_x, .link_y } });
         const mesh: Mesh = try .init("folded_mesh", &physical, logical, strategy);
         try runner.run(.{
+            .expected_num_partitions = 4,
+            .expected_num_replicas = 1,
             .mesh = &mesh,
             .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(&mesh, .{ .model = .model }),
             .expected_sdy = "#sdy.sharding<@folded_mesh, [{\"model\"}]>",
@@ -2611,6 +2607,8 @@ test "mesh: multiple physical axes on one logical dimension (folding)" {
         const strategy: Strategy = .parseBindings(.{ .model = .{ .link_y, .link_x } });
         const mesh: Mesh = try .init("folded_mesh", &physical, logical, strategy);
         try runner.run(.{
+            .expected_num_partitions = 4,
+            .expected_num_replicas = 1,
             .mesh = &mesh,
             .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(&mesh, .{ .model = .model }),
             .expected_sdy = "#sdy.sharding<@folded_mesh, [{\"model\"}]>",
@@ -2637,6 +2635,8 @@ test "mesh: explicit strategy folding" {
 
     const mesh: Mesh = try .init("strategy_fold", &physical, logical, strategy);
     try runner.run(.{
+        .expected_num_partitions = 4,
+        .expected_num_replicas = 2,
         .mesh = &mesh,
         .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(&mesh, .{ .model = .model }),
         .expected_sdy = "#sdy.sharding<@strategy_fold, [{\"model\"}], replicated={\"__replica_0\"}>",
@@ -2665,6 +2665,8 @@ test "mesh: open and replicated dimension mix" {
 
     const mesh: Mesh = try .init("mix_mesh", &physical, logical, strategy);
     try runner.run(.{
+        .expected_num_partitions = 4,
+        .expected_num_replicas = 1,
         .mesh = &mesh,
         .shape = Shape.init(.{ .batch = 8, .model = 8 }, .f32).withPartitioning(&mesh, .{ .batch = .open, .model = .replicated }),
         .expected_sdy = "#sdy.sharding<@mix_mesh, [{?}, {}], replicated={\"batch\", \"model\"}>",
@@ -2693,6 +2695,8 @@ test "mesh: full 3D cluster mesh" {
 
     const mesh: Mesh = try .init("3d_mesh", &physical, logical, strategy);
     try runner.run(.{
+        .expected_num_partitions = 8,
+        .expected_num_replicas = 1,
         .mesh = &mesh,
         // Note: .context and .model are swapped compared to .link_x and .link_z
         .shape = Shape.init(.{ .batch = 4, .context = 4, .model = 4 }, .f32)
@@ -2729,6 +2733,36 @@ test "mesh: num partitions for logical axis" {
 
     try std.testing.expectEqual(4, mesh.numPartitionsForLogicalAxis(.model));
     try std.testing.expectEqual(1, mesh.numPartitionsForLogicalAxis(.batch));
+}
+
+test "mesh: size-one and unbound logical axes leave all devices replicated" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+    const physical = try runner.physical(.{ 1, 6 }, .{ .mesh = .torus });
+    const mesh_ = try Mesh.init("replicas", &physical, .mesh(.{ .data = .balanced, .model = .balanced }), .parseBindings(.{ .data = .link_x }));
+    try runner.run(.{
+        .mesh = &mesh_,
+        .shape = Shape.init(.{ .batch = 12 }, .f32).withPartitioning(&mesh_, .{ .batch = .data }),
+        .expected_num_partitions = 1,
+        .expected_num_replicas = 6,
+    });
+}
+
+test "mesh: logical partitions and replicas can have different sizes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
+    const physical = try runner.physical(.{ 2, 3, 2 }, .{ .mesh = .torus });
+    var strategy: Strategy = .parseBindings(.{ .model = .link_x });
+    strategy.addFold(.link_x, &.{ .link_z, .link_x });
+    const mesh_ = try Mesh.init("folded", &physical, .mesh(.{ .model = .balanced }), strategy);
+    try runner.run(.{
+        .mesh = &mesh_,
+        .shape = Shape.init(.{ .model = 8 }, .f32).withPartitioning(&mesh_, .{ .model = .model }),
+        .expected_num_partitions = 4,
+        .expected_num_replicas = 3,
+    });
 }
 
 test "localized shapes do not retain global sharding" {
