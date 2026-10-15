@@ -1125,7 +1125,7 @@ fn gemm(b: *Builder, c: GemmConfig, comptime projection: Projection) tri.FinishE
     var loop = b.openFor(0, @divTrunc(ksize + c.bk - 1, c.bk), 1, .{b.zeros(&.{ width, c.bn }, .f32)});
     const sk = loop.iv.mul(@divExact(c.bk, 32)).add(ks);
     const kk = loop.iv.mul(c.bk).add(k);
-    const w = b.descriptorLoad(wd, &.{ block.mul(ci(b, width)), loop.iv.mul(@divExact(c.bk, 2)) }, &.{ width, @divExact(c.bk, 2) }, .i8);
+    const w = b.descriptorLoad(wd, &.{ block.mul(ci(b, width)), loop.iv.mul(ci(b, @divExact(c.bk, 2))) }, &.{ width, @divExact(c.bk, 2) }, .i8);
     const scale_offset = m.expandDims(1).mul(c.scale_stride).add(sk.expandDims(0));
     const ws = ld(b, a.ws.addPtr(expert.to(.i64).mul(rows * c.scale_stride)).addPtr(scale_offset), sk.expandDims(0).lt(@divTrunc(ksize, 32)), .i8, 127);
     var mask = kk.expandDims(0).lt(ksize);

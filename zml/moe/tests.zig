@@ -209,17 +209,24 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertF
             q.scales = swizzleScales(q.scales);
             q.swizzled_scales = true;
         }
-        if (backend == .cute) {
-            projection.weight = packFp4Bytes(projection.weight);
-            projection.quantization.?.scales = projection.quantization.?.scales.bitCast(.u8);
-        }
-        if (backend == .mosaic_tpu) projection.weight = projection.weight.transpose(.{ 0, 2, 1 });
-        if (backend == .metal) {
-            if (projection.quantization) |*q| {
+        switch (backend) {
+            .cute => {
+                projection.weight = packFp4Bytes(projection.weight);
+                projection.quantization.?.scales = projection.quantization.?.scales.bitCast(.u8);
+            },
+            .triton => if (scheme == .mxfp4) {
+                projection.weight = packFp4Bytes(projection.weight);
+            },
+            .mosaic_tpu => {
+                projection.weight = projection.weight.transpose(.{ 0, 2, 1 });
+            },
+            .metal => if (projection.quantization) |*q| {
                 if (q.scheme != .nvfp4) q.scales = q.scales.convert(.bf16);
-            }
+            },
+            else => {},
         }
     }
+
     if (backend == .metal and scheme == .nvfp4) {
         const global = &prepared.gate_up.quantization.?.global_scale.?;
         global.value = global.value.appendAxes(.{.proj}).repeat1d(.proj, 2);
@@ -256,6 +263,7 @@ fn forward(input: Tensor, c: Case) Outputs {
         .input_quantization = switch (c.backend) {
             .metal => .none,
             .cute => .mxfp8_bf16,
+            .triton => if (c.scheme == .mxfp4) .mxfp8 else .automatic,
             else => .automatic,
         },
     });
@@ -506,7 +514,6 @@ test "Triton compatibility matrix" {
     try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
         .formats = &.{
             .{},
-            .{ .scheme = .mxfp4 },
             .{ .scheme = .mxfp8 },
             .{ .scheme = .fp8_per_tensor },
             .{ .scheme = .fp8_per_channel },
@@ -514,10 +521,35 @@ test "Triton compatibility matrix" {
             .{ .scheme = .fp8_block32 },
         },
         .activations = &all_activations,
-        // BF16 and MXFP4 ignore this option; exercise both accepted settings.
+        // BF16 ignores this option; exercise both accepted settings.
         .quantize_inputs = &.{ false, true },
         .placements = &.{ .before_down, .after_down },
         .biases = &.{ false, true },
+    }, .{});
+
+    // Preserve the 12 supported cases from the former general MXFP4 matrix.
+    // Its other 252 cases require activations or projection bias unsupported
+    // by the simplified path. The former specialized matrix remains below.
+    try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
+        .formats = &.{.{ .scheme = .mxfp4 }},
+        .activations = &.{gated_activations[1]},
+        .quantize_inputs = &.{ false, true },
+        .placements = &.{ .before_down, .after_down },
+    }, .{});
+}
+
+// Keep triton mxfp4 separate because it only supports a subset for now
+test "Triton MXFP4 compatibility matrix" {
+    const platform = zml.testing.env();
+    const pipeline: Pipeline = .{ .platform = platform };
+
+    // The merged backend uses the former specialized MXFP4 path: clipped
+    // SwiGLU without projection bias, with unconditional MXFP8 activations.
+    try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
+        .formats = &.{.{ .scheme = .mxfp4 }},
+        .activations = &clipped_swiglu,
+        .quantize_inputs = &.{ false, true },
+        .placements = &.{ .before_down, .after_down },
     }, .{});
 }
 
@@ -550,21 +582,6 @@ test "FlashInfer compatibility matrix" {
         .activations = &.{.{ .swiglu = .{} }},
     }, .{});
 }
-
-// TODO(Corendos): enable that back but in the generic triton test case
-//test "specialized Triton MXFP4 compatibility matrix" {
-//    const platform = zml.testing.env();
-//
-//    const pipeline: Pipeline = .{ .platform = platform };
-//
-//    // The kernel always quantizes inputs to MXFP8, independently of the option.
-//    try pipeline.run(std.testing.io, std.testing.allocator, .triton_mxfp4, .{
-//        .formats = &.{.{ .scheme = .mxfp4 }},
-//        .activations = &clipped_swiglu,
-//        .quantize_inputs = &.{ false, true },
-//        .placements = &.{ .before_down, .after_down },
-//    }, .{});
-//}
 
 test "specialized CuTe MXFP4 compatibility matrix" {
     const platform = zml.testing.env();
