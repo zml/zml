@@ -1,7 +1,7 @@
 //! qaic: the graph plugin's paged attention over its own KV pool (`qaic$paged_attn`). The attention writes the step's new K
 //! and V rows into the pool itself, in place, and reads its pages there: the KV cache tensors are never read or written
-//! (`KvCache.update` leaves them; they size the pool by their page count). Pages of 16 rows, head_dim 64, 128 or 256, at
-//! most 8 query heads a KV head, causal masks only.
+//! (`KvCache.update` leaves them; they size the pool by their page count: a cache a pool). Pages of 16 rows, head_dim
+//! a multiple of 64, causal masks, optionally a sliding window (each token sees its last `sliding_window` positions).
 const std = @import("std");
 const stdx = @import("stdx");
 
@@ -14,10 +14,13 @@ const Tensor = zml.Tensor;
 /// q [b, hkv, hg, hd], k and v [b, hkv, hd] (this step's rows), the cache [page, k_chunk, hkv, hd]; each device the pool
 /// of its heads (q's partitioning).
 pub fn pagedAttention(parameters: triton.paged.Parameters, q: Tensor, k: Tensor, v: Tensor, k_cache: Tensor, opts: AttentionOptions) Tensor {
-    switch (opts.mask) {
-        .standard => |mask| stdx.debug.assert(mask.causal and mask.sliding_window == null, "qaic paged attention is causal, without a sliding window", .{}),
+    const window: u32 = switch (opts.mask) {
+        .standard => |mask| b: {
+            stdx.debug.assert(mask.causal, "qaic paged attention is causal", .{});
+            break :b mask.sliding_window orelse 0;
+        },
         .indices => stdx.debug.panic("qaic paged attention has no sparse mask", .{}),
-    }
+    };
     stdx.debug.assert(opts.sink == null, "qaic paged attention has no attention sink", .{});
     const tokens = q.dim(.b);
     const page_size = k_cache.dim(.k_chunk);
@@ -45,6 +48,7 @@ pub fn pagedAttention(parameters: triton.paged.Parameters, q: Tensor, k: Tensor,
         .lens = replicatedOn(lens, q),
         .scale = scale,
         .num_pages = k_cache.dim(.page),
+        .window = window,
     };
     return zml.ops.manualComputation(Context.body, context, q.shape());
 }
@@ -69,6 +73,7 @@ const Context = struct {
     lens: Tensor,
     scale: f32,
     num_pages: i64,
+    window: u32,
 
     fn body(self: Context, _: zml.Shape) Tensor {
         const kv_heads = self.q.dim(.hkv);
@@ -79,7 +84,7 @@ const Context = struct {
             "qaic$paged_attn",
             .{ qh, kh, vh, self.slot.convert(.i32), self.pages.convert(.i32), self.lens.convert(.i32) },
             qh.shape(),
-            .{ .scale = self.scale, .pages = self.num_pages },
+            .{ .scale = self.scale, .pages = self.num_pages, .window = @as(i64, self.window) },
             .{ .has_side_effect = false },
         );
         return out.convert(self.q.dtype()).splitAxis(.h, .{ .hkv = kv_heads, .hg = .auto }).transpose(self.q.shape());
