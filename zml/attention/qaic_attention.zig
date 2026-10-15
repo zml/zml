@@ -2,7 +2,8 @@
 //! and V rows into the pool itself, in place, and reads its pages there: the KV cache tensors are never read or written
 //! (`KvCache.update` leaves them; they size the pool by their page count: a cache a pool). Pages of 16 rows, head_dim
 //! a multiple of 64, causal masks, optionally a sliding window (each token sees its last `sliding_window` positions)
-//! and attention sinks (each head's extra softmax logit, `opts.sink` [h]).
+//! or a sparse mask (`.indices` [b, topk]: the positions each token attends, -1 for none: an indexer's selection), and
+//! attention sinks (each head's extra softmax logit, `opts.sink` [h]).
 const std = @import("std");
 const stdx = @import("stdx");
 
@@ -15,12 +16,12 @@ const Tensor = zml.Tensor;
 /// q [b, hkv, hg, hd], k and v [b, hkv, hd] (this step's rows), the cache [page, k_chunk, hkv, hd]; each device the pool
 /// of its heads (q's partitioning).
 pub fn pagedAttention(parameters: triton.paged.Parameters, q: Tensor, k: Tensor, v: Tensor, k_cache: Tensor, opts: AttentionOptions) Tensor {
-    const window: u32 = switch (opts.mask) {
+    const window: u32, const rows: ?Tensor = switch (opts.mask) {
         .standard => |mask| b: {
             stdx.debug.assert(mask.causal, "qaic paged attention is causal", .{});
-            break :b mask.sliding_window orelse 0;
+            break :b .{ mask.sliding_window orelse 0, null };
         },
-        .indices => stdx.debug.panic("qaic paged attention has no sparse mask", .{}),
+        .indices => |indices| .{ 0, indices.transpose(.{ .b, .topk }) },
     };
     if (opts.sink) |sink| stdx.debug.assert(sink.rank() == 1, "qaic paged attention: sinks [h], got {f}", .{sink});
     const tokens = q.dim(.b);
@@ -51,6 +52,7 @@ pub fn pagedAttention(parameters: triton.paged.Parameters, q: Tensor, k: Tensor,
         .num_pages = k_cache.dim(.page),
         .window = window,
         .sink = if (opts.sink) |sink| sinksLike(sink, q) else null,
+        .rows = if (rows) |r| replicatedOn(r, q) else null,
     };
     return zml.ops.manualComputation(Context.body, context, q.shape());
 }
@@ -83,6 +85,7 @@ const Context = struct {
     num_pages: i64,
     window: u32,
     sink: ?Tensor,
+    rows: ?Tensor,
 
     fn body(self: Context, _: zml.Shape) Tensor {
         const kv_heads = self.q.dim(.hkv);
@@ -93,10 +96,19 @@ const Context = struct {
         const slot = self.slot.convert(.i32);
         const pages = self.pages.convert(.i32);
         const lens = self.lens.convert(.i32);
-        const out = if (self.sink) |sink|
-            zml.ops.customCall("qaic$paged_attn", .{ qh, kh, vh, slot, pages, lens, sink.convert(.f32) }, qh.shape(), config, .{ .has_side_effect = false })
+        // (the optional operands in their order: sinks, then the selected rows)
+        const sink: ?Tensor = if (self.sink) |x| x.convert(.f32) else null;
+        const rows: ?Tensor = if (self.rows) |x| x.convert(.i32) else null;
+        const target = "qaic$paged_attn";
+        const call: zml.ops.CustomCallOptions = .{ .has_side_effect = false };
+        const out = if (sink != null and rows != null)
+            zml.ops.customCall(target, .{ qh, kh, vh, slot, pages, lens, sink.?, rows.? }, qh.shape(), config, call)
+        else if (sink) |x|
+            zml.ops.customCall(target, .{ qh, kh, vh, slot, pages, lens, x }, qh.shape(), config, call)
+        else if (rows) |x|
+            zml.ops.customCall(target, .{ qh, kh, vh, slot, pages, lens, x }, qh.shape(), config, call)
         else
-            zml.ops.customCall("qaic$paged_attn", .{ qh, kh, vh, slot, pages, lens }, qh.shape(), config, .{ .has_side_effect = false });
+            zml.ops.customCall(target, .{ qh, kh, vh, slot, pages, lens }, qh.shape(), config, call);
         return out.convert(self.q.dtype()).splitAxis(.h, .{ .hkv = kv_heads, .hg = .auto }).transpose(self.q.shape());
     }
 };
