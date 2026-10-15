@@ -127,6 +127,7 @@ zig_library(
         "//zml/kernels/flash_attention/cute",
         "//zml/kernels/flash_attention/metal",
         "//zml/kernels/flash_attention/nki",
+        "//zml/kernels/paged_attention/cute",
         "//zml/kernels/paged_attention/metal",
         "//zml/kernels/paged_attention/mosaic_tpu",
         "//zml/kernels/paged_attention/stablehlo",

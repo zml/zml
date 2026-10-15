@@ -3,6 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const zml = @import("../../zml.zig");
+const cute = @import("cute/cute.zig");
 const metal = @import("metal/metal.zig");
 const tpu = @import("mosaic_tpu/mosaic_tpu.zig");
 const triton = @import("triton/triton.zig");
@@ -18,6 +19,7 @@ test {
 }
 
 pub const Backend = enum {
+    cute,
     triton,
     mosaic_tpu,
     metal,
@@ -37,6 +39,7 @@ pub const Backend = enum {
 
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
+            .cute => cute.isAvailable(platform),
             .stablehlo => true,
             .triton => platform.target != .cpu,
             .metal => platform.target == .metal,
@@ -46,6 +49,7 @@ pub const Backend = enum {
 };
 
 pub const Options = union(Backend) {
+    cute: cute.Options,
     triton: triton.paged.Options,
     mosaic_tpu: tpu.mosaic_tpu.Options,
     metal: metal.Options,
@@ -80,7 +84,7 @@ pub const Options = union(Backend) {
                     .head_dim = args.head_dim,
                 },
             },
-            inline .triton, .metal, .stablehlo => |t| @unionInit(Options, @tagName(t), .{
+            inline .cute, .triton, .metal, .stablehlo => |t| @unionInit(Options, @tagName(t), .{
                 .batch_size = args.batch_size,
                 .max_num_pages = args.max_num_pages,
                 .max_seqlen_q = args.max_seqlen_q,
@@ -103,6 +107,7 @@ pub const Options = union(Backend) {
 };
 
 pub const Parameters = union(Backend) {
+    cute: cute.Parameters,
     triton: triton.paged.Parameters,
     mosaic_tpu: tpu.mosaic_tpu.Parameters,
     metal: metal.Parameters,
@@ -191,7 +196,7 @@ pub const KvCache = union(enum) {
 
         const kv: KvCache = switch (self) {
             .split => |split| switch (backend) {
-                .triton, .mosaic_tpu, .metal, .stablehlo => .{
+                .cute, .triton, .mosaic_tpu, .metal, .stablehlo => .{
                     .split = .{
                         .k = split.k.scatterSlices(
                             .{ .page = page_index, .k_chunk = offset },
@@ -236,6 +241,10 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
     _ = k;
     _ = v;
     return switch (parameters) {
+        .cute => |p| switch (kv_cache) {
+            .split => |split| cute.pagedAttention(p, q, split.k, split.v, opts),
+            .dense => @panic("CuTe paged attention requires split KV pages"),
+        },
         .triton => |triton_parameters| switch (kv_cache) {
             .split => |split| triton.paged.pagedAttention(triton_parameters, q, split.k, split.v, opts),
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
@@ -444,7 +453,7 @@ test pagedAttention {
 
             const parameters_d: zml.Bufferized(Parameters) = switch (parameters) {
                 .triton => triton_parameters_d,
-                inline .metal, .mosaic_tpu, .stablehlo => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
+                inline .cute, .metal, .mosaic_tpu, .stablehlo => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
                     .block_table = triton_parameters_d.triton.block_table,
                     .seq_lens = triton_parameters_d.triton.seq_lens,
                     .query_start_len = triton_parameters_d.triton.query_start_len,
