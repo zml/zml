@@ -59,26 +59,7 @@ fn isCudaComputeCapability(expected: zml.platform.cuda.ComputeCapability) bool {
 /// Triton codegen bug is not diagnosed; this only keeps us out of it.
 const max_query_tile_elements: usize = 16 * 1024;
 
-fn select2dSparseConfig(options: paged.PagedAttentionOptions) Config2D {
-    const tile_size: usize = switch (options.indices_count) {
-        0...16 => 16,
-        17...32 => 32,
-        else => if (options.head_dim > 128) 32 else 64,
-    };
-
-    return .{
-        .block_m = @max(16, std.math.ceilPowerOfTwoAssert(usize, options.numQueriesPerKv())),
-        .block_q = 1,
-        .tile_size = tile_size,
-        .num_warps = 4,
-        .num_stages = 1,
-        .total_q_blocks = options.num_tokens + options.batch_size,
-    };
-}
-
 fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
-    if (options.indices_count > 0) return select2dSparseConfig(options);
-
     const max_num_stages_2d: usize = if (options.head_dim <= 128) 4 else 2;
 
     // Until we test on other platforms, gate the fix to GB300
@@ -145,7 +126,7 @@ fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     var reduce_num_warps: usize = 2;
     // Intel decode needs more warps to spread the work and avoid register spill.
     const attn_warps: usize = if (options.all_decode and isOneapiTarget()) 8 else 2;
-    const tile_size = if (options.indices_count > 0) 32 else options.block_size;
+    const tile_size = options.block_size;
 
     //const MAX_SEGMENTS: usize = @min(128, std.math.divCeil(usize, max_seqlen_k, tile_size));
     var num_segments = std.math.divCeil(usize, options.target_num_prgms, options.num_2d_prgms) catch unreachable;
@@ -257,8 +238,6 @@ pub const paged = struct {
         num_2d_prgms: usize,
         max_seqlen_q: usize,
         scale: ?f32,
-        /// Number of indices for sparse attention
-        indices_count: usize,
 
         pub fn numQueriesPerKv(self: PagedAttentionOptions) usize {
             return self.num_heads / self.num_kv_heads;
@@ -270,6 +249,8 @@ pub const paged = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        if (opts.mask == .indices) @panic("sparse attention is not supported");
+
         const output = zml.ops.manualComputation(
             (struct {
                 q: zml.Tensor,
@@ -296,12 +277,10 @@ pub const paged = struct {
                     // Intel decode: pack exactly one GQA group per tile (block_q == 1) so the
                     // single decode query token doesn't carry masked-out fp32 acc lanes.
                     // oneAPI decode keeps one GQA group per tile, padded to a power of two so tt.make_range emits legal Triton IR.
-                    const block_m: usize = if (self.opts.mask == .indices)
-                        @max(16, std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv))
-                    else if (!self.options.is_prefill and isOneapiTarget())
+                    const block_m: usize = if (!self.options.is_prefill and isOneapiTarget())
                         std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv)
                     else if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
-                    const block_q: usize = if (self.opts.mask == .indices) 1 else block_m / num_queries_per_kv;
+                    const block_q: usize = block_m / num_queries_per_kv;
                     const num_tokens: usize = @intCast(self.q.dim(.b));
                     const num_seqs: usize = @intCast(parameters_.block_table.dim(.b));
                     const total_q_blocks: usize = num_tokens / block_q + num_seqs;
@@ -329,10 +308,6 @@ pub const paged = struct {
                         .num_2d_prgms = num_2d_prgms,
                         .max_seqlen_q = self.options.max_seqlen_q,
                         .scale = self.opts.scale,
-                        .indices_count = switch (self.opts.mask) {
-                            .indices => |indices| @intCast(indices.dim(.topk)),
-                            else => 0,
-                        },
                     };
 
                     const use_2d_kernel = use2dKernel(
@@ -342,7 +317,7 @@ pub const paged = struct {
                     );
                     const output = if (use_2d_kernel)
                         pagedAttention2d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
-                    else if (isOneapiTarget() and self.opts.mask != .indices)
+                    else if (isOneapiTarget())
                         pagedAttention3dOneapi(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
                     else
                         pagedAttention3d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts);
@@ -389,7 +364,6 @@ pub const paged = struct {
             .use_fp8 = false,
             .all_decode = paged_attention_opts.all_decode,
             .is_causal = opts.mask.isCausal(),
-            .indices_count = @intCast(paged_attention_opts.indices_count),
         };
         log.debug("pagedAttention2d config: {any}", .{kernel_config});
 
@@ -409,10 +383,6 @@ pub const paged = struct {
         const output = kernels.KernelUnifiedAttention2dPtr.Kernel.call(
             .{
                 .query_ptr = q,
-                .indices_ptr = switch (opts.mask) {
-                    .indices => |indices| indices.transpose(.{ .b, .topk }),
-                    else => dummy,
-                },
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
                 .sink_ptr = sink,
@@ -474,7 +444,6 @@ pub const paged = struct {
             .num_segments_per_seq = @intCast(config.attention.num_segments_per_seq),
             .all_decode = paged_attention_opts.all_decode,
             .is_causal = opts.mask.isCausal(),
-            .indices_count = @intCast(paged_attention_opts.indices_count),
         };
         log.debug("pagedAttention3d attention config: {any}", .{attn_kernel_config});
 
@@ -486,7 +455,6 @@ pub const paged = struct {
             .head_size_padded = head_size_padded,
             .block_q = @intCast(config.reduce.block_q),
             .num_segments_per_seq = @intCast(config.reduce.num_segments_per_seq),
-            .indices_count = @intCast(paged_attention_opts.indices_count),
             .use_fp8 = false,
         };
         log.debug("pagedAttention3d reduce config: {any}", .{reduce_kernel_config});
@@ -513,10 +481,6 @@ pub const paged = struct {
         const attn_output = kernels.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
                 .query_ptr = q,
-                .indices_ptr = switch (opts.mask) {
-                    .indices => |indices| indices.transpose(.{ .b, .topk }),
-                    else => dummy,
-                },
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
                 .sink_ptr = sink,
