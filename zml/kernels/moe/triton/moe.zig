@@ -7,7 +7,7 @@
 
 const std = @import("std");
 
-const zml = @import("../../zml.zig");
+const zml = @import("../../../zml.zig");
 const tri = zml.kernel.triton;
 const Builder = tri.Builder;
 const Value = tri.Value;

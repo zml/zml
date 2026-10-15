@@ -1,5 +1,5 @@
 const std = @import("std");
-const zml = @import("../../zml.zig");
+const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const fly = zml.kernel.fly;

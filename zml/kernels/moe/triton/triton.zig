@@ -2,11 +2,11 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const zml = @import("../zml.zig");
+const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const DataType = zml.DataType;
-const kernels = @import("triton/triton.zig");
+const kernels = @import("moe.zig");
 const toDType = zml.kernel.triton.from;
 const ProjectionLayout = zml.moe.ProjectionLayout;
 const RoutingWeightPlacement = zml.moe.RoutingWeightPlacement;

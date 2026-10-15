@@ -1,0 +1,11 @@
+package(default_visibility = ["//zml:__pkg__"])
+
+filegroup(
+    name = "cute",
+    srcs = [
+        "cute.zig",
+        "moe.zig",
+        "mxfp4.zig",
+        "persistent_mxfp4.zig",
+    ],
+)

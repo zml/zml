@@ -2,10 +2,10 @@
 //! supported cases are explicit, and errors in those cases must fail the test.
 const std = @import("std");
 
-const zml = @import("../zml.zig");
+const zml = @import("../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const reference = @import("stablehlo.zig");
+const reference = @import("stablehlo/stablehlo.zig");
 const Placement = @import("moe.zig").RoutingWeightPlacement;
 
 const Case = struct {

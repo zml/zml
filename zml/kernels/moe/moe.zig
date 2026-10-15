@@ -2,15 +2,15 @@ const std = @import("std");
 
 const platforms = @import("platforms");
 
-const zml = @import("../zml.zig");
+const zml = @import("../../zml.zig");
 const stdx = zml.stdx;
-pub const stablehlo = @import("stablehlo.zig");
-pub const cute = @import("cute.zig");
-pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
-pub const metal = @import("metal.zig");
-pub const mosaic_tpu = @import("mosaic_tpu.zig");
-pub const triton = @import("triton.zig");
-pub const fly = @import("fly.zig");
+pub const stablehlo = @import("stablehlo/stablehlo.zig");
+pub const cute = @import("cute/cute.zig");
+pub const cutlass_flashinfer = @import("cutlass_flashinfer/cutlass_flashinfer.zig");
+pub const metal = @import("metal/metal.zig");
+pub const mosaic_tpu = @import("mosaic_tpu/mosaic_tpu.zig");
+pub const triton = @import("triton/triton.zig");
+pub const fly = @import("fly/fly.zig");
 
 const log = std.log.scoped(.@"zml/moe");
 

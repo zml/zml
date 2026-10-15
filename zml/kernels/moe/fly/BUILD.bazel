@@ -1,0 +1,9 @@
+package(default_visibility = ["//zml:__pkg__"])
+
+filegroup(
+    name = "fly",
+    srcs = [
+        "fly.zig",
+        "moe.zig",
+    ],
+)
