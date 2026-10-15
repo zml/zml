@@ -98,14 +98,13 @@ const Result = struct {
 };
 
 fn summarize(results: *const [layouts.len]Result) void {
-    // std.log.info("layout,devices,cases,avg_ns_per_call,avg_ns_per_device", .{});
+    std.log.info("layout,devices,cases,avg_ns_per_call,avg_ns_per_device", .{});
     var meanDevices: f64 = 0;
     var meanNs: f64 = 0;
     for (layouts, results) |layout, result| {
-        _ = layout; // autofix
         const devices: f64 = @floatFromInt(result.devices);
         const nsPerCall = @as(f64, @floatFromInt(result.elapsedNs)) / @as(f64, @floatFromInt(result.calls));
-        // std.log.info("{s},{d},{d},{d},{d}", .{ layout.name, result.devices, result.cases, result.elapsedNs / result.calls, result.elapsedNs / result.calls / result.devices });
+        std.log.info("{s},{d},{d},{d},{d}", .{ layout.name, result.devices, result.cases, result.elapsedNs / result.calls, result.elapsedNs / result.calls / result.devices });
         meanDevices += devices;
         meanNs += nsPerCall;
     }
@@ -122,13 +121,12 @@ fn summarize(results: *const [layouts.len]Result) void {
         variance += dx * dx;
     }
     if (variance == 0) {
-        // std.log.info("Linear fit unavailable: need distinct device counts", .{});
+        std.log.info("Linear fit unavailable: need distinct device counts", .{});
         return;
     }
     const perDevice = covariance / variance;
     const base = meanNs - perDevice * meanDevices;
-    _ = base; // autofix
-    // std.log.info("Linear fit (equal weight per layout): Buffer.from = {d:.0}ns + {d:.0}ns * num_devices", .{ @floor(base), @floor(perDevice) });
+    std.log.info("Linear fit (equal weight per layout): Buffer.from = {d:.0}ns + {d:.0}ns * num_devices", .{ @floor(base), @floor(perDevice) });
 }
 
 const Layout = struct {
