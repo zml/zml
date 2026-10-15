@@ -28,6 +28,7 @@ const Params = struct {
     experts: i64,
     expert_offset: i64,
     tile: ?i64,
+    two_cta: ?bool,
 };
 
 fn forward(x: zml.Tensor, ids: zml.Tensor, weights: zml.Tensor, w1: zml.Tensor, s1: zml.Tensor, w2: zml.Tensor, s2: zml.Tensor, p: Params) zml.Tensor {
@@ -44,14 +45,14 @@ fn forward(x: zml.Tensor, ids: zml.Tensor, weights: zml.Tensor, w1: zml.Tensor, 
         .w2 = w2,
         .s2 = s2,
         .ids = local_ids,
-    }, p.tile);
+    }, p.tile, p.two_cta);
 }
 
 pub fn main(init: std.process.Init) !void {
     const CliArgs = struct {
         pub const help =
             \\ moe_bench --tokens=4096 [--routing=uniform|skewed] [--sigma=0.6] [--expert_offset=0]
-            \\           [--tile=64] [--iters=20] [--dump=out.bin] [--compare=ref.bin]
+            \\           [--tile=64] [--two-cta=1] [--iters=20] [--dump=out.bin] [--compare=ref.bin]
         ;
         tokens: i64 = 4096,
         topk: i64 = 6,
@@ -67,6 +68,8 @@ pub fn main(init: std.process.Init) !void {
         active_experts: i64 = 0,
         /// Tile N override; 0 keeps the kernel's own choice.
         tile: i64 = 0,
+        /// CTA pairs for the GEMMs: 1 on, 0 off, -1 the kernel's own choice.
+        two_cta: i64 = -1,
         iters: u32 = 20,
         seed: u64 = 1,
         dump: ?[]const u8 = null,
@@ -180,6 +183,7 @@ pub fn main(init: std.process.Init) !void {
         .experts = e,
         .expert_offset = args.expert_offset,
         .tile = if (args.tile == 0) null else args.tile,
+        .two_cta = if (args.two_cta < 0) null else args.two_cta != 0,
     };
 
     var exe = blk: {
