@@ -2420,6 +2420,17 @@ pub const Builder = struct {
         _ = llvm.inline_asm(self.ctx, assembly, &.{}, null, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
     }
 
+    /// `namedBarrier` with a barrier id (i32) chosen at run time, e.g. one per
+    /// warpgroup running the same code.
+    pub fn namedBarrierDynamic(self: *Builder, id: Value, participants: i32) void {
+        const assembly = std.fmt.allocPrint(
+            self.arena.allocator(),
+            "bar.sync $0, {d};",
+            .{participants},
+        ) catch @panic("namedBarrier OOM");
+        _ = llvm.inline_asm(self.ctx, assembly, &.{self.liftAs(id, .i32).inner}, null, .{ .constraints = "r", .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
+    }
+
     /// Build the CuTe first-class divisor used by CUTLASS's persistent tile
     /// scheduler.  Its arithmetic is lowered to the same multiply/shift
     /// sequence as Python CuTe DSL rather than an integer div/rem pair.
