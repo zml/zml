@@ -1,0 +1,9 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+# Single-GPU harness for the CuTe MXFP4 MoE kernels at the DeepSeek V4.1
+# expert geometry. Run it under nsys for per-kernel times.
+zig_binary(
+    name = "moe_bench",
+    main = "main.zig",
+    deps = ["//zml"],
+)
