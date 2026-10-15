@@ -13,7 +13,7 @@ const CliArgs = struct {
         \\ torch2zml --folder=<path> --activations=<path>
     ;
     folder: [:0]const u8,
-    activations: [:0]const u8,
+    activations: ?[:0]const u8 = null,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -25,10 +25,6 @@ pub fn main(init: std.process.Init) !void {
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
-
-    var activations_store: store.ActivationStore = undefined;
-    try activations_store.load(allocator, io, cli_args.activations);
-    defer activations_store.deinit();
 
     const model_sharding = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth }));
     const backend = zml.attention.Backend.auto(platform);
@@ -49,7 +45,22 @@ pub fn main(init: std.process.Init) !void {
         .attention_metadata = try attention_metadata.initBuffer(io, platform, model_sharding),
     };
 
-    if (std.mem.containsAtLeast(u8, cli_args.activations, 1, "block.")) {
+    if (cli_args.activations == null) {
+        // Run the pipeline then
+        std.debug.print("\n\nStarting testing > Pipeline\n\n", .{});
+
+        const pipeline = try block.Pipeline.init(allocator, io, platform, cli_args.folder);
+        try pipeline.run_once("Coucou la team, créé un personnage burger", .{ .seq_len = 16415, .compile_args = compile_args, .compile_args_buffers = compile_args_buffers });
+        return;
+    }
+
+    const activations_path = cli_args.activations.?;
+
+    var activations_store: store.ActivationStore = undefined;
+    try activations_store.load(allocator, io, activations_path);
+    defer activations_store.deinit();
+
+    if (std.mem.containsAtLeast(u8, activations_path, 1, "block.")) {
         std.debug.print("\n\nStarting testing > TransformerBlock\n\n", .{});
 
         var transformer_blocks_store: store.TransformerStore = undefined;
@@ -65,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
             BlockWrapper{ .tblock = transformer_blocks_store.transformer_blocks[0], .args = compile_args },
             .{ .tblock = transformer_blocks_store.transformer_block_buffers[0], .args = compile_args_buffers },
         );
-    } else if (std.mem.containsAtLeast(u8, cli_args.activations, 1, "text.")) {
+    } else if (std.mem.containsAtLeast(u8, activations_path, 1, "text.")) {
         std.debug.print("\n\nStarting testing > LanguageModel\n\n", .{});
 
         var language_model_store: store.LanguageModelStore = undefined;
@@ -85,9 +96,6 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("NOTHING IS BEING TESTED\n", .{});
         unreachable;
     }
-
-    // const pipeline = block.Pipeline.init(allocator, io, platform);
-    // try pipeline.runOnce("Coucou la team, créé un personnage burger", .{ .seq_len = 16415 });
 }
 
 const BlockWrapper = struct {

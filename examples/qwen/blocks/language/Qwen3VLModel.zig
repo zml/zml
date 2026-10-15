@@ -94,3 +94,7 @@ pub fn load(
 pub fn unloadBuffers(self: *zml.Bufferized(Qwen3VLModel)) void {
     Qwen3VLTextModel.unloadBuffers(&self.language_model);
 }
+
+pub fn forward(self: Qwen3VLModel, input_ids: zml.Tensor, args: CompileArgs) zml.Tensor {
+    return self.language_model.forward(input_ids, args);
+}

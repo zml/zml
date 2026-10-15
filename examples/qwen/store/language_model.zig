@@ -32,7 +32,7 @@ pub fn load(
     self: *LanguageModelStore,
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *zml.Platform,
+    platform: *const zml.Platform,
     folder: []const u8,
 ) !void {
     var buffer: [256]u8 = undefined;

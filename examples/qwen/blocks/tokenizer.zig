@@ -52,8 +52,12 @@ const drop_idx = 14;
 
 const BufferizedPrompt = struct {
     input_ids: zml.Buffer,
-    attention_mask: zml.Buffer,
-    token_type_ids: zml.Tensor,
+    // attention_mask: zml.Buffer,
+
+    pub fn deinit(self: *BufferizedPrompt) void {
+        self.input_ids.deinit();
+        // self.attention_mask.deinit();
+    }
 };
 
 /// Moves the input_ids to Tensor and creates the attention mask + token_type_ids Tensor
@@ -62,7 +66,6 @@ pub fn bufferize(
     io: std.Io,
     platform: *const zml.Platform,
     tokenized: TokenizedPrompt,
-    seq_len: usize,
 ) !BufferizedPrompt {
     // In theory, attention_mask should be computed using this image_tokens_id
     // const image_tokens_id = try tokenized.encoder.encodeAlloc(allocator, image_token);
@@ -72,29 +75,23 @@ pub fn bufferize(
 
     const sliced_tokens = tokenized.tokens[drop_idx..];
 
-    const tokens_slice = try zml.Slice.alloc(allocator, .init(.{ .b = 1, .s = seq_len }, .u32));
+    const tokens_slice = try zml.Slice.alloc(allocator, .init(.{ .b = 1, .s = tokenized.tokens.len }, .u32));
     defer tokens_slice.free(allocator);
     // 0 represents text token "<|pad|>"
     @memset(tokens_slice.items(u32), 0);
     @memcpy(tokens_slice.items(u32)[0..sliced_tokens.len], sliced_tokens);
 
-    const attention_mask_slice = try zml.Slice.alloc(allocator, .init(.{ .b = 1, .s = seq_len }, .bool));
-    defer attention_mask_slice.free(allocator);
-    @memset(attention_mask_slice.items(bool)[0..sliced_tokens.len], true);
-    @memset(attention_mask_slice.items(bool)[sliced_tokens.len..], false);
+    // const attention_mask_slice = try zml.Slice.alloc(allocator, .init(.{ .b = 1, .s = tokenized.tokens.len }, .bool));
+    // defer attention_mask_slice.free(allocator);
+    // @memset(attention_mask_slice.items(bool)[0..sliced_tokens.len], true);
+    // @memset(attention_mask_slice.items(bool)[sliced_tokens.len..], false);
 
-    var tokens_buffer = try zml.Buffer.fromSlice(io, platform, tokens_slice, .replicated);
-    defer tokens_buffer.deinit();
-    var attention_mask_buffer = try zml.Buffer.fromSlice(io, platform, attention_mask_slice, .replicated);
-    defer attention_mask_buffer.deinit();
-
-    // 0 is for text
-    const token_type_ids = zml.Tensor.scalar(0, .i32);
+    const tokens_buffer = try zml.Buffer.fromSlice(io, platform, tokens_slice, .replicated);
+    // const attention_mask_buffer = try zml.Buffer.fromSlice(io, platform, attention_mask_slice, .replicated);
 
     return BufferizedPrompt{
         .input_ids = tokens_buffer,
-        .attention_mask = attention_mask_buffer,
-        .token_type_ids = token_type_ids,
+        // .attention_mask = attention_mask_buffer,
     };
 }
 
