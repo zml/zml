@@ -53,6 +53,7 @@ pub const Slice = slice.Slice;
 pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
+pub const topk = @import("kernels/topk/topk.zig");
 
 /// Deprecated, use `zml.Compiler` instead
 pub const module = struct {

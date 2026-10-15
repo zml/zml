@@ -1,0 +1,6 @@
+package(default_visibility = ["//zml:__pkg__"])
+
+filegroup(
+    name = "topk",
+    srcs = ["topk.zig"],
+)
