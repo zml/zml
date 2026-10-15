@@ -1505,8 +1505,20 @@ pub const Tensor = struct {
     /// Axes with the same tag on both sides, and which aren't contracting,
     /// are considered "batching axes".
     pub fn dot(lhs: Tensor, rhs: Tensor, args: anytype) Tensor {
+        return lhs.dotOpts(rhs, args, .{});
+    }
+
+    pub const DotOpts = struct {
+        /// Element type of the result, defaults to the operand type.
+        /// A wider type, eg `.f32` for `.bf16` operands, returns the accumulator
+        /// without rounding it to the operand type.
+        result_dtype: ?DataType = null,
+    };
+
+    /// Same as `dot`, with options.
+    pub fn dotOpts(lhs: Tensor, rhs: Tensor, args: anytype, opts: DotOpts) Tensor {
         const dot_axes = lhs.dotAxes(rhs, args);
-        return lhs.dotGeneral(rhs, dot_axes.contracting.constSlice(), dot_axes.batching.constSlice());
+        return lhs.dotGeneralOpts(rhs, dot_axes.contracting.constSlice(), dot_axes.batching.constSlice(), opts);
     }
 
     pub const DotAxes = struct {
@@ -1613,11 +1625,22 @@ pub const Tensor = struct {
         contracting_axes: []const [2]i8,
         batching_axes: []const [2]i8,
     ) Tensor {
+        return lhs.dotGeneralOpts(rhs, contracting_axes, batching_axes, .{});
+    }
+
+    /// Same as `dotGeneral`, with options.
+    pub fn dotGeneralOpts(
+        lhs: Tensor,
+        rhs: Tensor,
+        contracting_axes: []const [2]i8,
+        batching_axes: []const [2]i8,
+        opts: DotOpts,
+    ) Tensor {
         stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
 
         const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
-        var res_shape: Shape = .scalar(lhs.dtype());
+        var res_shape: Shape = .scalar(opts.result_dtype orelse lhs.dtype());
         // Validate batching axes
         var lhs_batching_axes: Axes = .empty;
         var rhs_batching_axes: Axes = .empty;
