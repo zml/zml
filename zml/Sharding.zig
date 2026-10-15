@@ -1599,6 +1599,7 @@ pub const Mesh = struct {
             .logical = .{
                 .axes = .init(axes_tags.slice()),
                 .intents = .{ .buffer = @splat(.high_bandwidth), .len = axes_tags.len },
+                .dimensions = @splat(-1),
             },
             .physical = undefined,
             .grid = undefined,
@@ -1966,7 +1967,7 @@ pub const Mesh = struct {
 /// Resolved logical coordinates in canonical physical-device order.
 /// Unused logical axes have coordinate zero.
 pub const DeviceGrid = struct {
-    pub const Coordinates = @Vector(MAX_MESH_RANK, u8);
+    pub const Coordinates = [MAX_MESH_RANK]u8;
 
     comptime {
         std.debug.assert(Platform.MAX_NUM_DEVICES <= 256);
