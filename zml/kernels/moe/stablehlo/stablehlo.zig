@@ -157,19 +157,16 @@ pub const Options = struct {
 };
 
 pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up: zml.nn.Linear, down: zml.nn.Linear, opts: Options) Tensor {
-    stdx.debug.assert(input.rank() == 3 and topk_ids.rank() == 3 and topk_weights.rank() == 3, "reference expects rank-three input and routing tensors", .{});
     stdx.debug.assert(topk_ids.dtype() == .i32, "reference expects i32 expert ids", .{});
     stdx.debug.assert(gate_up.weight.rank() == 3 and down.weight.rank() == 3, "reference expects rank-three expert weights", .{});
     stdx.debug.assert(gate_up.weight.dim(.expert) == down.weight.dim(.expert), "reference expert counts must match", .{});
-    const b = input.dim(.b);
-    const s = input.dim(.s);
+    const tokens = input.dim(.t);
     const k = topk_ids.dim(.topk);
     stdx.debug.assert(k > 0 and k <= gate_up.weight.dim(.expert), "reference top-k must fit the expert count", .{});
-    stdx.debug.assert(topk_ids.dim(.b) == b and topk_ids.dim(.s) == s and topk_weights.dim(.b) == b and topk_weights.dim(.s) == s and topk_weights.dim(.topk) == k, "reference routing dimensions must match input and ids", .{});
-    const ids = topk_ids.reshape(.{ .route = b * s * k });
-    const weights = topk_weights.reshape(.{ .route = b * s * k }).convert(.f32);
-    const hidden = input.reshape(.{ .token = b * s, .in = input.dim(.d) })
-        .insertAxes(.in, .{.topk}).broad(Shape.init(.{ .token = b * s, .topk = k, .in = input.dim(.d) }, input.dtype()))
+    const ids = topk_ids.reshape(.{ .route = tokens * k });
+    const weights = topk_weights.reshape(.{ .route = tokens * k }).convert(.f32);
+    const hidden = input.reshape(.{ .token = tokens, .in = input.dim(.d) })
+        .insertAxes(.in, .{.topk}).broad(Shape.init(.{ .token = tokens, .topk = k, .in = input.dim(.d) }, input.dtype()))
         .merge(.{ .route = .{ .token, .topk } });
     // Keep the projection's rounding boundary when XLA fuses activation/routing
     // arithmetic; otherwise the reference can disagree with explicit BF16 GEMMs.
@@ -179,7 +176,7 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
     var output = project(activated.rename(.{ .out = .in }), down, ids, opts, input.dtype());
     if (opts.routing_weight_placement == .after_down) output = output.mul(weights.broad(output.shape()));
     return output.convert(input.dtype()).convert(.f32)
-        .reshape(.{ .b = b, .s = s, .topk = k, .d = output.dim(.out) })
+        .reshape(.{ .t = tokens, .topk = k, .d = output.dim(.out) })
         .sum(.topk).squeeze(.topk).convert(input.dtype());
 }
 

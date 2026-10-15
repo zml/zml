@@ -18,19 +18,18 @@ const Case = struct {
     bias: bool = false,
     tokens: i64 = 1,
     topk: i64 = 1,
-    batch: i64 = 1,
     width: i64 = 128,
     intermediate: i64 = 128,
     experts: i64 = 8,
 
     pub fn compile(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Exe {
         std.debug.assert(c.backend.isAvailable(platform));
-        const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
+        const x: Tensor = .init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype);
         return platform.compileFn(allocator, io, forward, .{ x, c }, .{});
     }
 
     pub fn check(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, exe: *const zml.Exe) !void {
-        const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
+        const x: Tensor = .init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype);
 
         var host = try zml.Slice.alloc(allocator, x.shape());
         defer host.free(allocator);
@@ -242,7 +241,7 @@ fn forward(input: Tensor, c: Case) Outputs {
     const canonical = makeExpertFixture(c);
     const prepared = prepareForBackend(canonical, c.backend);
 
-    const route_shape = Shape.init(.{ .b = c.batch, .s = c.tokens, .topk = c.topk }, .i32);
+    const route_shape = Shape.init(.{ .t = c.tokens, .topk = c.topk }, .i32);
     const route = Tensor.arange(.{ .end = @intCast(route_shape.count()) }, .i32).reshape(route_shape);
 
     // Only six of eight experts receive routes, with nonuniform counts.
@@ -268,7 +267,7 @@ fn forward(input: Tensor, c: Case) Outputs {
         },
     });
 
-    return .{ .actual = actual.reshape(input.shape()), .expected = expected };
+    return .{ .actual = actual, .expected = expected };
 }
 
 const gated_activations = [_]zml.moe.Activation{
@@ -288,7 +287,6 @@ const clipped_swiglu = [_]zml.moe.Activation{
 };
 
 const FixtureShape = struct {
-    batch: i64 = 1,
     tokens: i64 = 1,
     topk: i64 = 1,
     width: i64 = 128,
@@ -296,17 +294,17 @@ const FixtureShape = struct {
     experts: i64 = 8,
 };
 
-// Every option combination runs on decode, prefill, and batched prefill.
+// Every option combination runs with 1, 17, and 34 flattened tokens.
 // Shapes and floating-point parameter values are representative finite sets.
 const fixture_shapes = [_]FixtureShape{
     .{},
     .{ .tokens = 17, .topk = 2 },
-    .{ .batch = 2, .tokens = 17, .topk = 3 },
+    .{ .tokens = 34, .topk = 3 },
 };
 const specialized_shapes = [_]FixtureShape{
     .{ .width = 5120, .intermediate = 2304, .experts = 2 },
     .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 17, .topk = 2 },
-    .{ .width = 5120, .intermediate = 2304, .experts = 2, .batch = 2, .tokens = 17, .topk = 2 },
+    .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 34, .topk = 2 },
 };
 
 const Format = struct {
@@ -350,7 +348,6 @@ const Matrix = struct {
             .quantize_input = quantize_input,
             .placement = placement,
             .bias = bias,
-            .batch = shape.batch,
             .tokens = shape.tokens,
             .topk = shape.topk,
             .width = shape.width,
