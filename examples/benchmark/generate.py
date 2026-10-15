@@ -37,6 +37,11 @@ LAYOUTS = (
     Layout('cuda-2x2', 'cuda', (2, 2)),
     Layout('rocm-2x2x2', 'rocm', (2, 2, 2)),
     Layout('neuron-2x2x2x2', 'neuron', (2, 2, 2, 2)),
+    # Representative slices of the two main TPU topology families (chip counts).
+    # 2D torus, v5e: https://docs.cloud.google.com/tpu/docs/v5e
+    Layout('tpu-4x4', 'tpu', (4, 4)),
+    # 3D slice, v4-32: https://docs.cloud.google.com/tpu/docs/v4
+    Layout('tpu-2x2x4', 'tpu', (2, 2, 4)),
     Layout('cuda-4x2x2x2-reversed', 'cuda', (4, 2, 2, 2), True),
 )
 
@@ -77,10 +82,12 @@ SUGGESTED_BINDINGS = {
     'cuda-2x2': (('model', ('link_x',)), ('data', ('link_y',))),
     'rocm-2x2x2': (('model', ('link_x',)), ('data', ('link_z',))),
     'neuron-2x2x2x2': (('model', ('link_x',)), ('data', ('link_z',))),
+    'tpu-4x4': (('model', ('link_x',)), ('data', ('link_y',))),
+    'tpu-2x2x4': (('model', ('link_x',)), ('data', ('link_z',))),
     'cuda-4x2x2x2-reversed': (('model', ('link_x',)), ('data', ('bus',))),
 }
 
-# Include a dimension divisible by 32 to exercise all-axis sharding on 32 devices.
+# Dimensions 32 and 64 exercise all-axis sharding on the larger layouts.
 SHAPES = ((64,), (24, 56), (16, 24, 40), (16, 24, 40, 56), (32, 24, 40, 56))
 
 
@@ -171,7 +178,8 @@ def strategy_code(logical, strategy, layout):
                 for tag in tags:
                     lines.append(f'strategy.addBinding(.{axis}, .{tag});')
     lines += ['const mesh = try allocator.create(zml.Mesh);',
-              f'mesh.* = try .init("{strategy.name}", &platform.physical_mesh, logical, strategy);']
+              f'mesh.* = try .init("{strategy.name}", &platform.physical_mesh, logical, strategy);',
+              'std.log.info("{s} -> {f}", .{ layout, mesh });']
     return lines
 
 
@@ -387,7 +395,8 @@ fn syntheticPlatform(allocator: std.mem.Allocator, layout: Layout) !*zml.Platfor
     platform.pjrt_api = api;
     // The mock never dereferences the synthetic client or memory handles.
     platform.pjrt_client = @ptrFromInt(4096);
-    platform.target = layout.target;
+    // TPU topology is tested without a real backend or its memory-layout query.
+    platform.target = if (layout.target == .tpu) .cpu else layout.target;
     platform.physical_mesh = try .fromTree(allocator, layout.target, root);
     if (layout.reverse_ids) {
         for (platform.physical_mesh.devices_in_canonical_order) |*device| device.id = next_id - 1 - device.id;
