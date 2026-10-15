@@ -1011,9 +1011,7 @@ pub const PhysicalMesh = struct {
     }
 
     pub fn format(self: PhysicalMesh, writer: *std.Io.Writer) !void {
-        try writer.print("\nPhysicalMesh(platform={s} shardable_axes={any} num_devices={d})\n", .{ @tagName(self.target), self.shardableAxes(), self.countDevices() });
-        try writer.print("│  \n", .{});
-
+        try writer.print("PhysicalMesh(platform={s} shardable_axes={any} num_devices={d})\n", .{ @tagName(self.target), self.shardableAxes(), self.countDevices() });
         try formatNode(self.root, writer, "", 0, true);
     }
 
@@ -1830,16 +1828,17 @@ pub const Mesh = struct {
     pub fn format(self: Mesh, writer: *std.Io.Writer) !void {
         try writer.print("Mesh(name={s}, partitions={d}, replicas={d})\n", .{ self.name, self.numPartitions(), self.numReplicas() });
 
-        try writer.writeAll("Mappings (logical coordinates from physical coordinates):\n");
+        try writer.writeAll("┌ Mappings (logical coordinates from physical coordinates):\n");
+        const num_axes = self.logical.axes.len;
         for (self.logical.axes.slice(), self.logical.intents.slice(), 0..) |tag, intent, logical_axis| {
-            try writer.print("  - {s} ({s}) -> ", .{ tag, @tagName(intent) });
+            try writer.print("{s}── {s} ({s}) -> ", .{ if (logical_axis == num_axes - 1) "└" else "├", tag, @tagName(intent) });
             try self.formatAxisMapping(writer, logical_axis);
             try writer.writeAll("\n");
         }
+        try writer.writeAll("\n");
+        try writer.print("┌ {f}\n", .{self.physical});
 
-        try writer.print("{f}\n", .{self.physical});
-
-        try writer.writeAll("Logical coordinates:\n");
+        try writer.writeAll("┌ Logical coordinates:\n");
         var coords: [MAX_MESH_RANK]usize = @splat(0);
         try self.formatLogicalCoordinates(writer, &coords, 0);
     }
@@ -1919,20 +1918,15 @@ pub const Mesh = struct {
             const size: usize = @intCast(self.numPartitionsForLogicalAxis(axes[depth]));
             for (0..size) |coord| {
                 coords[depth] = coord;
-                try writer.splatByteAll(' ', 2 + 4 * depth);
-                try writer.print("- {s}={d}", .{ axes[depth], coord });
-                if (depth + 1 < last) {
-                    try writer.writeAll("\n");
-                } else {
-                    try writer.writeAll(", ");
-                }
+                try writer.splatByteAll(' ', 4 * depth);
+                try writer.print("└── {s}={d}\n", .{ axes[depth], coord });
                 try self.formatLogicalCoordinates(writer, coords, depth + 1);
             }
             return;
         }
 
-        if (last == 0) try writer.writeAll("  - ");
-        try writer.print("{s}=", .{axes[last]});
+        try writer.splatByteAll(' ', 4 * depth);
+        try writer.print("└── {s}=", .{axes[last]});
         const size: usize = @intCast(self.numPartitionsForLogicalAxis(axes[last]));
         for (0..size) |coord| {
             if (coord > 0) try writer.writeAll(",");
