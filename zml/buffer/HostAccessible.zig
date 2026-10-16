@@ -1818,11 +1818,9 @@ test "HostAccessible.View scalar, empty ranges and rank-one padding" {
 
 test "HostAccessible devices holding a shard read one allocation" {
     const platform = testing.env();
-    const tp = testing.tpMesh();
-
     const shape_ = Shape.init(.{ .b = @as(i64, @intCast(platform.devices.len)), .d = 5 }, .i32);
     try expectDevicesReadShards(platform, shape_);
-    try expectDevicesReadShards(platform, shape_.withPartitioning(tp, .{ .b = .model }));
+    try expectDevicesReadShards(platform, shape_.withPartitioning(platform.meshes.get("model").?, .{ .b = .model }));
 }
 
 test "HostAccessible devices holding a shard read one allocation in data-parallel groups" {

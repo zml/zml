@@ -113,7 +113,6 @@ zig_library(
         "moe/triton_mxfp4.zig",
         "nn.zig",
         "ops.zig",
-        "ops/manual_computation.zig",
         "pjrtx.zig",
         "platform.zig",
         "profiling/profiler.zig",
