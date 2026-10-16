@@ -15,6 +15,8 @@ test {
     std.testing.refAllDecls(Options);
     std.testing.refAllDecls(Parameters);
     std.testing.refAllDecls(KvCache);
+
+    _ = stablehlo;
 }
 
 pub const Backend = enum {
