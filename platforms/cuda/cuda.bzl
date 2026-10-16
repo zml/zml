@@ -9,7 +9,7 @@ CUDA_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cuda/redist/
 CUDA_VERSION = "13.4.3"
 CUDA_MAJOR_MINOR = ".".join(CUDA_VERSION.split(".")[:2])
 CUDA_VARIANT = "cuda{}".format(CUDA_MAJOR_MINOR)
-CUDA_REDIST_JSON_SHA256 = "1420d5c676cad98a5ff423d529f116fee92f6b99559a3afdad41e782d6a11dba"
+CUDA_REDIST_JSON_SHA256 = "8e99511eee1bd78664bdb6cf43dc17a7ba6afeab78c8162bd5f23571ed6423c6"
 
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
 CUDNN_VERSION = "9.27.0"
