@@ -369,7 +369,7 @@ pub const paged = struct {
         const indices = opts.mask.indices;
         stdx.debug.assert(indices.rank() == 2 and indices.dtype() == .i32, "Sparse indices must be an i32 [query, topk] tensor, got {f}", .{indices.shape()});
         stdx.debug.assert(indices.dim(.b) == q.dim(.b) and indices.dim(.topk) > 0, "Sparse indices {f} must match queries {f} with a nonempty selection capacity", .{ indices.shape(), q.shape() });
-        stdx.debug.assert(indices.shape().hasTags(.{ .b, .topk }), "Sparse indices expect to have { .b, .topk } tags", .{});
+        stdx.debug.assert(indices.shape().hasTags(.{ .b, .topk }), "Sparse indices expect to have .b, .topk tags", .{});
         stdx.debug.assert(q.dtype() == k_cache.dtype() and q.dtype() == v_cache.dtype(), "Sparse attention requires matching query and KV dtypes", .{});
 
         return zml.ops.manualComputation(
