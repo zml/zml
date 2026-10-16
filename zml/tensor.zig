@@ -190,7 +190,7 @@ pub const Tensor = struct {
             return res;
         };
 
-        const attr = ctx.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape) catch @panic("OOM");
+        const attr = ctx.tensorShardingAttr(ctx.allocator, partitioned_shape) catch @panic("OOM");
 
         const op_result = switch (ctx.partitioner) {
             .shardy => blk: {

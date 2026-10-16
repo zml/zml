@@ -47,11 +47,20 @@ pub fn BoundedArrayAligned(
         buffer: [buffer_capacity]T align(alignment.toByteUnits()),
         len: usize,
 
+        pub const max_len: usize = buffer_capacity;
+
         pub const empty: Self = .{ .buffer = undefined, .len = 0 };
 
         pub fn init(m: []const T) Self {
             var buf: Self = .{ .buffer = undefined, .len = m.len };
             @memcpy(buf.buffer[0..m.len], m);
+            return buf;
+        }
+
+        pub fn repeat(value: T, len: usize) Self {
+            std.debug.assert(len <= buffer_capacity);
+            var buf: Self = .{ .buffer = undefined, .len = len };
+            @memset(buf.buffer[0..len], value);
             return buf;
         }
 

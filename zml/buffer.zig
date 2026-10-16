@@ -367,6 +367,7 @@ test "device round-trip" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const platform = zml.testing.env();
+    const tp = zml.testing.tpMesh();
 
     const x: [8][8]u32 = .{
         .{ 0, 1, 2, 3, 4, 5, 6, 7 },
@@ -379,10 +380,9 @@ test "device round-trip" {
         .{ 56, 57, 58, 59, 60, 61, 62, 63 },
     };
 
-    const mp: *const zml.Mesh = platform.meshes.get("model").?;
     const x_h: zml.Slice = .init(.withPartitioning(
         .init(.{ .b = 8, .d = 8 }, .u32),
-        mp,
+        tp,
         .{ .b = .model },
     ), std.mem.asBytes(&x));
     // no free: x_h is stack allocated

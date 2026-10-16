@@ -136,6 +136,12 @@ pub const Scope = struct {
     pub fn registerTensorAsBlockArgument(scope: *Scope, id: Tensor.Id, arg_id: usize) void {
         scope.id_to_argument.put(scope.arena.allocator(), id, scope.block.argument(arg_id)) catch @panic("OOM");
     }
+
+    pub fn value(scope: *Scope, x: Tensor) *const mlir.Value {
+        return scope.id_to_argument.get(x.id) orelse
+            x._value orelse
+            @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
+    }
 };
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: Options) Compiler {
@@ -557,12 +563,12 @@ pub const TensorInfo = struct {
         var attrs: AttributeList = .empty;
 
         const mlir_ctx = compiler.mlir_ctx;
-        const meshe_attr = try compiler.tensorShardingAttr(arena, mlir_ctx, info.shape);
+        const mesh_attr = try compiler.tensorShardingAttr(arena, info.shape);
         const name = switch (compiler.partitioner) {
             .gspmd => "mhlo.sharding",
             .shardy => "sdy.sharding",
         };
-        attrs.appendAssumeCapacity(.named(mlir_ctx, name, meshe_attr));
+        attrs.appendAssumeCapacity(.named(mlir_ctx, name, mesh_attr));
 
         const memory = scope.id_to_memory.get(info.id) orelse .device;
         if (memory != .device) {
@@ -814,13 +820,12 @@ fn validateMeshes(meshes: []const *const Sharding.Mesh) !void {
 pub fn tensorShardingAttr(
     compiler: *const Compiler,
     allocator: std.mem.Allocator,
-    mlir_ctx: *mlir.Context,
     shape: Shape,
 ) error{OutOfMemory}!*const mlir.Attribute {
     const mesh_ = shape._sharding.mesh orelse compiler.platform.replicated_mesh;
     return switch (compiler.partitioner) {
-        .shardy => (try mesh_.sdyShardingAttrForShape(allocator, mlir_ctx, shape)).asAttr(),
-        .gspmd => mesh_.gspmdShardingAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
+        .shardy => (try mesh_.sdyShardingAttrForShape(allocator, compiler.mlir_ctx, shape)).asAttr(),
+        .gspmd => mesh_.gspmdShardingAttrForShape(allocator, compiler.mlir_ctx, shape) catch |err| switch (err) {
             error.WriteFailed => error.OutOfMemory, // We're writing to memory
             error.OutOfMemory => error.OutOfMemory,
             error.IncompatibleSharding => @panic("Shape dimensions must be divisible by their mesh partitions"),

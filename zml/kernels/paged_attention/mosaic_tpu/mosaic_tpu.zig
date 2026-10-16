@@ -153,8 +153,9 @@ pub const mosaic_tpu = struct {
             "mosaic_tpu ragged paged attention q head_dim {} exceeds kernel/cache head_dim {}",
             .{ q.dim(.hd), target_head_dim },
         );
-        return q.pad(0, .{ .hd = zml.Tensor.Pad{ .high = target_head_dim - q.dim(.hd) } })
-            .withPartitioning(q.shape()._sharding.mesh.?, .{ .h = q.shape().partition(.h) });
+        var q_padded = q.pad(0, .{ .hd = zml.Tensor.Pad{ .high = target_head_dim - q.dim(.hd) } });
+        q_padded._shape._sharding = q._shape._sharding;
+        return q_padded;
     }
 
     inline fn prepareInputs(parameters: Parameters, q: zml.Tensor, kv_pages: zml.Tensor) PreparedInputs {
