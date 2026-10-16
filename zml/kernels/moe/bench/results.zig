@@ -43,8 +43,11 @@ pub const Comparison = struct {
     exact: usize = 0,
     elements: usize = 0,
     outside_tolerance: usize = 0,
+    nonfinite: usize = 0,
+    relative_l2_error: ?f64 = null,
     max_absolute_error: f64 = 0,
     sum_squared_error: f64 = 0,
+    sum_squared_actual: f64 = 0,
     sum_squared_reference: f64 = 0,
 };
 
@@ -130,6 +133,7 @@ pub fn environment(allocator: std.mem.Allocator, environ: *const std.process.Env
         if (std.mem.startsWith(u8, name, "ZML_MOE_") or
             std.mem.eql(u8, name, "CUDA_VISIBLE_DEVICES") or
             std.mem.eql(u8, name, "XLA_FLAGS") or
+            std.mem.eql(u8, name, "SKIP_PJRT_PROFILER") or
             std.mem.eql(u8, name, "ZML_AUTOTUNE_CACHE_DIR"))
         {
             try result.append(allocator, .{ .name = name, .value = entry.value_ptr.* });
@@ -147,8 +151,11 @@ pub const Record = struct {
     reason: ?[]const u8 = null,
     // Recorded once for the graph; other runtime variants share graph_id.
     compile_ns: ?i64 = null,
+    reference_compile_ns: ?i64 = null,
+    cute_launch: ?zml.moe.cute.kernels.LaunchPlan = null,
     statistics: ?Statistics = null,
     reference_check: ?Comparison = null,
+    replay_comparison: ?Comparison = null,
     dump_comparison: ?Comparison = null,
     dump_source: ?Source = null,
 };

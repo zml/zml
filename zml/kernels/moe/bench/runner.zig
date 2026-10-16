@@ -7,17 +7,16 @@ const results = @import("results.zig");
 const Record = results.Record;
 const Comparison = results.Comparison;
 
-/// Weight preparation and the one-row reference do not depend on token count.
-/// Keep one compatible setup alive across consecutive graph groups.
+/// Weight preparation does not depend on token count or top-k. Keep one compatible
+/// setup alive across consecutive graph groups.
 pub const Setup = struct {
     setup: zml.Exe,
-    reference: ?zml.Exe,
+    experts_mesh: *const zml.Mesh,
     template: workload.Generated,
     workload: cases.Workload,
     compile_ns: i64,
 
     pub fn deinit(c: *const Setup) void {
-        if (c.reference) |ref| ref.deinit();
         c.setup.deinit();
     }
 
@@ -26,6 +25,8 @@ pub const Setup = struct {
         var b = w;
         a.case.tokens = 1;
         b.case.tokens = 1;
+        a.case.topk = 1;
+        b.case.topk = 1;
         return a.sameGraph(b);
     }
 };
@@ -40,8 +41,12 @@ pub fn compileSetup(allocator: std.mem.Allocator, io: std.Io, platform: *const z
     }, .{ .meshes = &.{experts_mesh} });
     errdefer setup.deinit();
     const template = workload.withOutputShapes(workload.templates(w, check), setup.output_shapes);
-    // One reference row bounds the gathered expert matrices independently of prefill size.
-    const reference = if (template.canonical) |canonical| try platform.compileFn(allocator, io, zml.moe.stablehlo.reference, .{
+    return .{ .setup = setup, .experts_mesh = experts_mesh, .template = template, .workload = w, .compile_ns = @intCast(start.untilNow(io, .awake).toNanoseconds()) };
+}
+
+fn compileReference(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, experts_mesh: *const zml.Mesh, w: cases.Workload, template: workload.Generated) !?zml.Exe {
+    const c = w.case;
+    return if (template.canonical) |canonical| try platform.compileFn(allocator, io, zml.moe.stablehlo.reference, .{
         zml.Tensor.init(.{ .t = 1, .d = c.width }, c.activation_dtype),
         zml.Tensor.init(.{ .t = 1, .topk = c.topk }, .i32),
         zml.Tensor.init(.{ .t = 1, .topk = c.topk }, .f32),
@@ -49,12 +54,12 @@ pub fn compileSetup(allocator: std.mem.Allocator, io: std.Io, platform: *const z
         canonical.down,
         c.referenceOptions(platform.target),
     }, .{ .meshes = &.{experts_mesh} }) else null;
-    return .{ .setup = setup, .reference = reference, .template = template, .workload = w, .compile_ns = @intCast(start.untilNow(io, .awake).toNanoseconds()) };
 }
 
 pub const Compiled = struct {
     timed: zml.Exe,
     compile_ns: i64,
+    cute_launch: ?zml.moe.cute.kernels.LaunchPlan,
 
     pub fn deinit(c: *const Compiled) void {
         c.timed.deinit();
@@ -65,6 +70,7 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Pl
     std.debug.assert(setup.compatible(w));
     const start: std.Io.Timestamp = .now(io, .awake);
     const c = w.case;
+    const cute_launch = if (c.backend == .cute) try zml.moe.cute.kernels.launchPlan(platform, c.tokens, c.width, c.intermediate, w.global_experts, c.topk) else null;
     const timed = try platform.compileFn(allocator, io, zml.moe.forwardMoe, .{
         zml.Tensor.init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype),
         zml.Tensor.init(.{ .t = c.tokens, .topk = c.topk }, .i32),
@@ -74,7 +80,7 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Pl
         c.backend,
         c.options(),
     }, .{ .meshes = &.{experts_mesh} });
-    return .{ .timed = timed, .compile_ns = @intCast(start.untilNow(io, .awake).toNanoseconds()) };
+    return .{ .timed = timed, .compile_ns = @intCast(start.untilNow(io, .awake).toNanoseconds()), .cute_launch = cute_launch };
 }
 
 pub const Prepared = struct {
@@ -158,9 +164,17 @@ pub fn runCase(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Pl
         try writeDumpMetadata(allocator, io, path, w, host_output.constData().len);
     }
     if (output_mismatch) return error.OutputMismatch;
-    if (setup.reference) |*ref| {
+    if (setup.template.canonical != null) {
+        // Keep a reference executable local to its operands. Reusing it across
+        // large weight regenerations produced incorrect CUDA reference
+        // results, even though the corresponding CuTe outputs stayed correct.
+        // One row bounds gathered expert storage independently of token count.
+        const reference_start: std.Io.Timestamp = .now(io, .awake);
+        const fresh_reference = (try compileReference(allocator, io, platform, setup.experts_mesh, w, setup.template)).?;
+        defer fresh_reference.deinit();
+        record.reference_compile_ns = @intCast(reference_start.untilNow(io, .awake).toNanoseconds());
         record.reference_check = .{};
-        try checkReference(allocator, io, platform, w, ref, prepared.buffers.canonical.?, host, routes, host_output, &record.reference_check.?);
+        try checkReference(allocator, io, platform, w, &fresh_reference, prepared.buffers.canonical.?, host, routes, host_output, &record.reference_check.?);
     }
     if (nonfinite != 0) return error.NonFiniteOutput;
     // Identify the workload and completed batches in GPU profiles. Setup and
@@ -173,6 +187,18 @@ pub fn runCase(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Pl
         return err;
     };
     range.end();
+    errdefer allocator.free(timing.samples_us);
+    // Exercise the warmed executable once more outside the timed range. A
+    // successful first launch alone does not validate command-buffer replay.
+    var replayed: zml.Buffer = undefined;
+    runner.run(io, inputs, .{&replayed}, .{ .wait = true });
+    defer replayed.deinit();
+    const replayed_host = try replayed.toSliceAlloc(allocator, io);
+    defer replayed_host.free(allocator);
+    record.replay_comparison = .{};
+    try compareValues(c, replayed_host.constData(), host_output.constData(), &record.replay_comparison.?);
+    const replay = record.replay_comparison.?;
+    if (replay.outside_tolerance != 0 or (args.compare_exact and replay.exact != replay.elements)) return error.ReplayMismatch;
     const wall_us = timing.median_us;
     record.statistics = .{
         .timing = timing,
@@ -186,7 +212,7 @@ pub fn runCase(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Pl
         .output_mean_absolute = sum_abs / @as(f64, @floatFromInt(host_output.shape.count())),
         .nonfinite = nonfinite,
     };
-    record.status = if (setup.reference != null or compare_path != null) .passed else .measured;
+    record.status = if (setup.template.canonical != null or compare_path != null) .passed else .measured;
 }
 
 fn baselinePath(allocator: std.mem.Allocator, path: ?[]const u8, directory: ?[]const u8, id: []const u8) !?[]const u8 {
@@ -209,7 +235,9 @@ fn measureBatch(io: std.Io, runner: *zml.Exe.Runner, inputs: anytype, iterations
     return @floatFromInt(start.untilNow(io, .awake).toNanoseconds());
 }
 
-fn measure(allocator: std.mem.Allocator, io: std.Io, runner: *zml.Exe.Runner, inputs: anytype, args: cases.Args) !results.Timing {
+/// Measure completed public API calls; setup and validation belong outside this function.
+/// The caller owns the returned `samples_us` allocation.
+pub fn measure(allocator: std.mem.Allocator, io: std.Io, runner: *zml.Exe.Runner, inputs: anytype, args: cases.Args) !results.Timing {
     if (args.warmup != 0) _ = measureBatch(io, runner, inputs, args.warmup);
     const target_ns: f64 = @as(f64, @floatFromInt(args.sample_ms)) * 1e6;
     const samples = try allocator.alloc(f64, args.samples);
@@ -307,14 +335,19 @@ fn compareValues(c: cases.Case, actual: []const u8, expected: []const u8, result
         result.exact += @intFromBool(std.mem.eql(u8, actual[i * bytes ..][0..bytes], expected[i * bytes ..][0..bytes]));
         if (!std.math.isFinite(a) or !std.math.isFinite(e)) {
             result.outside_tolerance += 1;
+            result.nonfinite += 1;
             continue;
         }
         const diff = @abs(a - e);
         result.max_absolute_error = @max(result.max_absolute_error, diff);
         result.sum_squared_error += diff * diff;
+        result.sum_squared_actual += a * a;
         result.sum_squared_reference += e * e;
         if (diff > tolerance.absolute_tolerance + tolerance.relative_tolerance * @max(@abs(a), @abs(e))) result.outside_tolerance += 1;
     }
+    result.relative_l2_error = if (result.nonfinite != 0) null else if (result.sum_squared_reference != 0)
+        @sqrt(result.sum_squared_error / result.sum_squared_reference)
+    else if (result.sum_squared_error == 0) 0 else null;
 }
 
 fn checkReference(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, w: cases.Workload, ref: *const zml.Exe, canonical: zml.Bufferized(workload.Experts), host: zml.Slice, routes: workload.Routes, output: zml.Slice, comparison: *Comparison) !void {
@@ -357,6 +390,8 @@ test "comparison uses the compliance tolerance and rejects nonfinite values" {
     try std.testing.expectEqual(@as(usize, 1), comparison.outside_tolerance);
     try compareValues(c, std.mem.sliceAsBytes(&[_]f32{std.math.nan(f32)}), std.mem.sliceAsBytes(&[_]f32{0}), &comparison);
     try std.testing.expectEqual(@as(usize, 2), comparison.outside_tolerance);
+    try std.testing.expectEqual(@as(usize, 1), comparison.nonfinite);
+    try std.testing.expect(comparison.relative_l2_error == null);
     try std.testing.expectError(error.OutputSizeMismatch, compareValues(c, &.{0}, &.{}, &comparison));
 }
 
@@ -411,10 +446,13 @@ test "benchmark executes the public MoE API with sharded experts" {
             defer allocator.free(record.statistics.?.timing.samples_us);
             defer allocator.free(record.statistics.?.ranks);
             try std.testing.expectEqual(@as(usize, 0), record.reference_check.?.outside_tolerance);
+            try std.testing.expectEqual(@as(usize, 0), record.replay_comparison.?.outside_tolerance);
+            try std.testing.expectEqual(record.reference_check.?.elements, record.replay_comparison.?.elements);
             const timing = record.statistics.?.timing;
             for (timing.samples_us) |sample| try std.testing.expect(sample * @as(f64, @floatFromInt(timing.iterations_per_sample)) >= 1000);
             var larger = w;
             larger.case.tokens += 1;
+            larger.case.topk = 1;
             const next = try compile(allocator, io, platform, experts_mesh, larger, &setup);
             defer next.deinit();
             var next_record: Record = .{ .id = "reused-setup", .graph_id = "reused-setup", .workload = larger, .status = .passed };

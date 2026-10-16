@@ -1,9 +1,10 @@
 //! Select explicit workloads, compile each graph once, then measure its runtime variants.
 const std = @import("std");
 const zml = @import("zml");
-const cases = @import("cases.zig");
-const runner = @import("runner.zig");
-const results = @import("results.zig");
+const bench = @import("moe_bench");
+const cases = bench.cases;
+const runner = bench.runner;
+const results = bench.results;
 const log = std.log.scoped(.moe_bench);
 
 pub fn main(init: std.process.Init) !void {
@@ -35,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (json) |writer| try results.writeJsonLine(writer, .{
         .kind = "run",
-        .schema_version = 4,
+        .schema_version = 5,
         .timestamp_ns = std.Io.Timestamp.now(io, .real).nanoseconds,
         .source = results.source(),
         .platform = platform.target,
@@ -125,7 +126,7 @@ fn runGroup(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platf
     }
     var setup_compile_ns: i64 = 0;
     if (setup.* == null) {
-        log.info("compiling expert setup and reference", .{});
+        log.info("compiling expert setup", .{});
         setup.* = runner.compileSetup(allocator, io, platform, experts_mesh, w, args.check) catch |err| {
             if (err == error.Canceled) return error.Canceled;
             return reportCompilationFailure(group, err, stdout, json);
@@ -140,6 +141,7 @@ fn runGroup(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platf
     var failures: usize = 0;
     for (group.cases.items, 0..) |selected, index| {
         var record = group.record(selected, .measured);
+        record.cute_launch = compiled.cute_launch;
         if (index == 0) record.compile_ns = compiled.compile_ns + setup_compile_ns;
         // Weights stay on device across routing variants with the same seed.
         if (prepared.* != null and prepared.*.?.seed != selected.workload.seed) {
@@ -176,12 +178,4 @@ fn reportCompilationFailure(group: Group, err: anyerror, stdout: *std.Io.Writer,
         try results.report(stdout, json, record);
     }
     return group.cases.items.len;
-}
-
-test {
-    _ = zml.bazel;
-    _ = cases;
-    _ = @import("workload.zig");
-    _ = runner;
-    _ = results;
 }

@@ -7,7 +7,7 @@ pub const Data = enum { fixture, random };
 
 pub const Args = struct {
     pub const help =
-        \\MoE kernel tuning benchmark
+        \\MoE workload benchmark
         \\  --preset=smoke|deepseek-decode|deepseek-prefill|laguna-decode|gemma-prefill|many-experts|all
         \\  --backend=cute,triton --scheme=none,mxfp4 --dtype=bf16,f32
         \\  --activation=swiglu --quantize-input=false,true

@@ -141,8 +141,16 @@ bazel run --config=release //zml/kernels/moe/bench -- \
 `--check` compares against the independent StableHLO reference using the same
 global experts and inputs, including projection bias and expert-parallel
 collectives. The reference evaluates one token at a time to bound temporary
-memory. Comparisons use absolute and relative tolerances and require every
-element to pass. Runs without `--check` record that validation was not performed.
+memory. Each checked workload owns its reference executable: this prevents
+incorrect CUDA reference results after large weight regenerations. Its
+compilation time is recorded separately in `reference_compile_ns` and excluded
+from all timing samples. Comparisons use absolute and relative tolerances and require every
+element to pass. They also record exact matches, nonfinite counts, maximum
+absolute error, and relative L2 error; a small aggregate error does not silently
+waive individual tolerance failures. Runs without `--check` record that reference validation was not performed.
+Every measured workload also compares the warmed executable with its initial
+output outside the timed range, so command-buffer replay errors cannot silently
+pass a first-launch check. `--compare-exact` makes this comparison bitwise too.
 
 `--json=results.jsonl` writes one complete JSON object per line and flushes each
 record. Run metadata records the source revision, dirty state, source hash, compiler
@@ -177,13 +185,63 @@ For device-only timing, run a narrowly selected case with the existing
 `--config=nsys` or `--config=rocprofv3` profiling configurations. Profiles contain
 `moe_bench.measure/<case ID>` and nested `moe_bench.batch#iterations=N#` ranges.
 The last `samples_us.len` batch ranges are the retained samples; earlier ranges
-are warmup or duration calibration. Verify complete graph replays before
-comparing kernel durations. Report kernel sums separately from elapsed GPU
+are warmup or duration calibration. Verify complete launches before comparing kernel durations. Report kernel sums separately from elapsed GPU
 time: kernels and collective communication can overlap, and synchronized wall
 time also includes host dispatch and gaps.
 
 Workload axes describe the MoE operation, not kernel implementation choices.
 Backend tuning overrides belong in environment variables and driver scripts;
 use the same workloads, seeds, validation, and profiling boundaries for every
-setting. The benchmark modules can also support stage-specific backend benches
-without duplicating data generation or result formats.
+setting. The CLI depends on `//zml/kernels/moe/bench:lib` (`@import("moe_bench")`).
+Stage-specific benches under `zml/kernels` can reuse `cases`, `workload`,
+`runner.measure`, and `results` without duplicating data generation or formats.
+The library owns no process-wide state; callers own platforms, executables,
+prepared weights, and output writers.
+
+CuTe reads these overrides when compiling each graph; restart the process after
+changing them. Each measured case records the resolved `cute_launch` plan.
+
+| Environment variable | Accepted values |
+|---|---|
+| `ZML_MOE_CUTE_TILE_N` | `8`, `16`, `32`, `64`, `128` for grouped routing; direct single-token decode retains its dedicated 8-row tile |
+| `ZML_MOE_CUTE_TWO_CTA` | `true`, `false`; pairs require a wide tile and multiple tokens |
+| `ZML_MOE_CUTE_QUANTIZE_LANES` | `1`, `4` |
+| `ZML_MOE_CUTE_PERSISTENT_CTAS` | Positive count no greater than the smallest participating GPU's SM count; even for pairs |
+
+Unset variables use the backend policy. Invalid combinations fail explicitly.
+The backend supports compute capability 10.x and the DeepSeek expert geometry;
+overrides do not bypass these requirements. Default grids use device attributes,
+and routing density uses the global expert count, independently of mesh size.
+
+The backend's shell driver varies implementation settings, keeps workload
+arguments fixed, and compares every candidate bit for bit against its default:
+
+```sh
+bazel build --config=release --@zml//platforms:cuda=true //zml/kernels/moe/bench
+CUDA_VISIBLE_DEVICES=0,1 NSYS=nsys TILES='32 64 128' QUANTIZE_LANES='1 4' \
+  bash zml/kernels/moe/cute/tune.sh bazel-bin/zml/kernels/moe/bench/bench /tmp/moe-tuning \
+  --backend=cute --experts=192 --global-experts=384 --topk=6 \
+  --tokens=1,256,2048,4096,8192,16384 --routing=uniform,skewed --seeds=1,2
+```
+
+The output directory must be new. Omit `NSYS` for wall-time controls. `TILES`,
+`QUANTIZE_LANES`, and `PERSISTENT_CTAS` are space-separated driver selections;
+an empty value omits that part of the sweep. Check a small workload selection
+with `--check` first, then profile representative full-sized configurations.
+
+Export an Nsight capture and summarize only the retained batches:
+
+```sh
+nsys export --type=sqlite --output=/tmp/moe-tuning/default.sqlite /tmp/moe-tuning/default.nsys-rep
+bazel run //zml/kernels/moe/bench:profile_metrics -- \
+  /tmp/moe-tuning/default.sqlite /tmp/moe-tuning/default.jsonl \
+  --output=/tmp/moe-tuning/default-metrics.json
+```
+
+The analyzer rejects incomplete batches, missing ranks, changing graph nodes,
+and incomplete ordinary launch counts. It reports kernel work, the union of GPU
+activity, overlapping work, memory-only activity, and time without recorded GPU
+activity. These account for the full measured batch, per rank and across ranks.
+Replay spans are available when each invocation is captured as one graph;
+ordinary or mixed launches use counts instead. None of these metrics infer a
+dependency critical path. Failed or skipped workloads remain in `unmeasured`.
