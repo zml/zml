@@ -25,10 +25,10 @@ pub const Exe = struct {
 
     /// Inputs whose buffers are donated to an output (`reuseBuffer`).
     /// Runners destroy their PJRT handles after the raw call returns.
-    donated_input_indices: []const u32,
+    donated_input_indices: []const usize,
 
-    num_devices: u32,
-    num_partitions: u32,
+    num_devices: usize,
+    num_partitions: i32,
 
     arena: std.heap.ArenaAllocator,
 
@@ -36,8 +36,8 @@ pub const Exe = struct {
         allocator: std.mem.Allocator,
         platform: *const Platform,
         exe: *pjrt.LoadedExecutable,
-        num_devices: u32,
-        num_partitions: u32,
+        num_devices: usize,
+        num_partitions: i32,
         input_shapes: []const Shape,
         output_shapes: []const Shape,
         input_aliasing: []const ?u32,
@@ -51,12 +51,12 @@ pub const Exe = struct {
         var donated_count: usize = 0;
         for (input_aliasing) |aliasing| donated_count += @intFromBool(aliasing != null);
 
-        const donated_input_indices = try arena.allocator().alloc(u32, donated_count);
+        const donated_input_indices = try arena.allocator().alloc(usize, donated_count);
 
         var donated_index: usize = 0;
         for (input_aliasing, 0..) |aliasing, input_index| {
             if (aliasing == null) continue;
-            donated_input_indices[donated_index] = @intCast(input_index);
+            donated_input_indices[donated_index] = input_index;
             donated_index += 1;
         }
 
@@ -649,7 +649,7 @@ test "Exe raw calls leave donated input handle cleanup to the caller" {
     const weight: Tensor = .init(.{2}, .i32);
     const exe = try platform.compileFn(allocator, io, Functions.forward, .{ value, weight }, .{});
     defer exe.deinit();
-    try std.testing.expectEqualSlices(u32, &.{0}, exe.donated_input_indices);
+    try std.testing.expectEqualSlices(usize, &.{0}, exe.donated_input_indices);
 
     var weight_buffer = try Buffer.fromBytes(io, platform, weight.shape(), std.mem.asBytes(&[2]i32{ 10, 20 }));
     defer weight_buffer.deinit();
@@ -778,7 +778,7 @@ test "FnExe runner replaces unchanged donated buffers" {
     const value: Tensor = .init(.{2}, .i32);
     const exe = try Model.compile(allocator, io, platform, .{}, .{.{ .value = value }});
     defer exe.deinit();
-    try std.testing.expectEqualSlices(u32, &.{0}, exe.raw.donated_input_indices);
+    try std.testing.expectEqualSlices(usize, &.{0}, exe.raw.donated_input_indices);
 
     var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), std.mem.asBytes(&[2]i32{ 1, 2 }));
     defer value_buffer.deinit();

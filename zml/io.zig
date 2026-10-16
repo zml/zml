@@ -980,12 +980,12 @@ const DispatchSpans = struct {
     mirror_writers: []usize,
 
     fn init(allocator: std.mem.Allocator, shape: Shape) !DispatchSpans {
-        const placement = try Sharding.Placement.init(&shape);
+        const placement = try Sharding.Placement.init(shape);
         const ordered_devices = placement.mesh().?.devicesInCanonicalOrder();
 
         var placement_span_count: usize = 0;
-        for (0..ordered_devices.len) |device_index| {
-            placement_span_count += placementSpanCount(shape, placement.slices(device_index, shape).constSlice());
+        for (ordered_devices) |device| {
+            placement_span_count += placementSpanCount(shape, placement.slices(device.coords).constSlice());
         }
 
         var placement_spans: std.ArrayList(PlacementSpan) = try .initCapacity(allocator, placement_span_count);
@@ -993,8 +993,8 @@ const DispatchSpans = struct {
 
         const byte_strides = shape.computeByteStrides();
 
-        for (0..ordered_devices.len) |writer_index| {
-            appendShardPlacementSpans(&placement_spans, shape, placement.slices(writer_index, shape).constSlice(), byte_strides.constSlice(), writer_index);
+        for (ordered_devices, 0..) |device, writer_index| {
+            appendShardPlacementSpans(&placement_spans, shape, placement.slices(device.coords).constSlice(), byte_strides.constSlice(), writer_index);
         }
 
         std.debug.assert(placement_spans.items.len == placement_span_count);
@@ -1199,7 +1199,7 @@ pub const DirectMemoryWriter = struct {
     ) !DirectMemoryWriter {
         var placed_shape = shape;
         if (placed_shape._sharding.mesh == null) placed_shape._sharding.mesh = platform.replicated_mesh;
-        const placement = try Sharding.Placement.init(&placed_shape);
+        const placement = try Sharding.Placement.init(placed_shape);
         const mesh = placement.mesh().?;
         const ordered_devices = mesh.devicesInCanonicalOrder();
         var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
@@ -1216,7 +1216,7 @@ pub const DirectMemoryWriter = struct {
             const shard_dma_allocator = dma_allocators[device.id].allocator();
             const pjrt_mem = platform.devices[device.id].memory(memory).?;
 
-            shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.localShape(placed_shape));
+            shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape);
             initialized += 1;
 
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
@@ -1446,6 +1446,72 @@ pub const DirectMemoryWriter = struct {
     }
 };
 
+fn buildMesh2(
+    allocator: std.mem.Allocator,
+    target: @import("platform.zig").Target,
+    devices: []const @import("platform.zig").Device,
+) !Sharding.PhysicalMesh {
+    if (devices.len < 2) return error.NotEnoughDevices;
+    const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+        .device(devices[0]),
+        .device(devices[1]),
+    });
+
+    return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
+}
+
+fn buildMesh2x2(
+    allocator: std.mem.Allocator,
+    target: @import("platform.zig").Target,
+    devices: []const @import("platform.zig").Device,
+) !Sharding.PhysicalMesh {
+    if (devices.len < 4) return error.NotEnoughDevices;
+    const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+        .axis(.link_y, .{ .mesh = .torus }, &.{
+            .device(devices[0]),
+            .device(devices[1]),
+        }),
+        .axis(.link_y, .{ .mesh = .torus }, &.{
+            .device(devices[2]),
+            .device(devices[3]),
+        }),
+    });
+
+    return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
+}
+
+fn buildMesh2x2x2(
+    allocator: std.mem.Allocator,
+    target: @import("platform.zig").Target,
+    devices: []const @import("platform.zig").Device,
+) !Sharding.PhysicalMesh {
+    if (devices.len < 8) return error.NotEnoughDevices;
+    const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+        .axis(.link_y, .{ .mesh = .torus }, &.{
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(devices[0]),
+                .device(devices[1]),
+            }),
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(devices[2]),
+                .device(devices[3]),
+            }),
+        }),
+        .axis(.link_y, .{ .mesh = .torus }, &.{
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(devices[4]),
+                .device(devices[5]),
+            }),
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(devices[6]),
+                .device(devices[7]),
+            }),
+        }),
+    });
+
+    return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
+}
+
 const DirectMemoryWriterDeviceTest = struct {
     const WriteMode = enum {
         stream_remaining,
@@ -1473,7 +1539,6 @@ const DirectMemoryWriterDeviceTest = struct {
         defer platform.deinit(self.allocator, self.io);
 
         const mesh: Sharding.Mesh = try .init(scenario.name, &platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
-        std.log.warn("mesh: {f}", .{mesh});
         try self.runDirectMemoryWriter(
             platform,
             scenario.shape.withPartitioning(&mesh, partitioning),
@@ -1562,7 +1627,7 @@ const DirectMemoryWriterDeviceTest = struct {
     }
 };
 
-test "DirectMemoryWriter: replicated tensor" {
+test "DirectMemoryWriter: replicated with auto topology" {
     const case: DirectMemoryWriterDeviceTest = .{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
@@ -1571,7 +1636,7 @@ test "DirectMemoryWriter: replicated tensor" {
     try case.run(.{
         .name = "replicated_auto",
         .create_options = .{
-            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
+            .physical_mesh = .auto,
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .rows = 8, .cols = 128 }, .f32),
@@ -1589,7 +1654,7 @@ test "DirectMemoryWriter: 1D model split with 2x2 physical mesh" {
     try case.run(.{
         .name = "model_auto",
         .create_options = .{
-            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
+            .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32),
@@ -1607,7 +1672,7 @@ test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
     try case.run(.{
         .name = "batch_model_2d_torus",
         .create_options = .{
-            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
+            .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .batch = 8, .model = 1024 }, .f32),
@@ -1628,7 +1693,7 @@ test "DirectMemoryWriter: folded model mesh with 2x2 physical mesh" {
     try case.run(.{
         .name = "model_folded_2d_torus",
         .create_options = .{
-            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
+            .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .model = 4096 }, .f32),
@@ -1650,7 +1715,7 @@ test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
     try case.run(.{
         .name = "model_auto_writable_slice",
         .create_options = .{
-            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
+            .physical_mesh = .{ .custom = buildMesh2x2 },
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32),
@@ -1671,7 +1736,7 @@ test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
     try case.run(.{
         .name = "topology_3d_folded_model",
         .create_options = .{
-            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus3d },
+            .physical_mesh = .{ .custom = buildMesh2x2x2 },
             .cpu = .{ .device_count = 8 },
         },
         .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32),
@@ -1696,7 +1761,7 @@ test "MemoryWriter can produce a host pinned buffer" {
     try case.run(.{
         .name = "host_pinned",
         .create_options = .{
-            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus1d },
+            .physical_mesh = .{ .custom = buildMesh2 },
         },
         .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),

@@ -190,7 +190,7 @@ pub const Tensor = struct {
             return res;
         };
 
-        const attr = ctx.tensorShardingAttr(ctx.allocator, partitioned_shape) catch @panic("OOM");
+        const attr = ctx.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape) catch @panic("OOM");
 
         const op_result = switch (ctx.partitioner) {
             .shardy => blk: {
@@ -242,7 +242,8 @@ pub const Tensor = struct {
             .physical = undefined,
             .logical = .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
             .bindings = .init(&.{.init(&.{.link_x})}),
-            .grid = undefined,
+            .folds = .empty,
+            .folds_consumed = .empty,
         };
 
         const mp_dp: Sharding.Mesh = .{
@@ -250,7 +251,8 @@ pub const Tensor = struct {
             .physical = undefined,
             .logical = .mesh(.{ .model = .low_bandwidth, .data = .high_bandwidth }),
             .bindings = .init(&.{.init(&.{.link_x})}),
-            .grid = undefined,
+            .folds = .empty,
+            .folds_consumed = .empty,
         };
 
         const x = Tensor.init(.{ .h = 8 }, .f32).withPartitioning(&dp_mp, .{ .h = .model });

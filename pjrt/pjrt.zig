@@ -5,8 +5,7 @@ const c = @import("c");
 
 pub const ffi = @import("ffi.zig");
 
-const log_scope = .pjrt;
-const log = std.log.scoped(log_scope);
+const log = std.log.scoped(.pjrt);
 
 test {
     std.testing.refAllDecls(@This());
@@ -75,12 +74,10 @@ pub const ApiError = error{
     Unauthenticated,
 };
 
-inline fn interpretPjrtError(api: *const Api, pjrt_error: *Error, context: []const u8, comptime log_level: std.log.Level) ApiError {
+inline fn interpretPjrtError(api: *const Api, pjrt_error: *Error, context: []const u8) ApiError {
     defer pjrt_error.deinit(api);
     const err_code = pjrt_error.getCode(api).toApiError();
-    if (comptime std.log.logEnabled(log_level, log_scope)) {
-        std.options.logFn(log_level, log_scope, "[{s}] {t}: {s}", .{ context, err_code, pjrt_error.getMessage(api) });
-    }
+    log.warn("[{s}] {t}: {s}", .{ context, err_code, pjrt_error.getMessage(api) });
     return err_code;
 }
 
@@ -168,33 +165,24 @@ pub const Api = struct {
         };
     }
 
-    inline fn innerCall(self: *const Api, comptime method: Funcs, arg: *PJRTFnArg(method)) ?*Error {
+    inline fn innerCall(self: *const Api, comptime method: Funcs, arg: *PJRTFnArg(method)) ApiError!void {
         if (@offsetOf(c.PJRT_Api, @tagName(method)) > self.inner.struct_size) {
             std.debug.panic("PJRT Api method {s} not available in this plugin", .{@tagName(method)});
         }
         const fn_ptr = @field(&self.inner, @tagName(method)).?;
         const result = fn_ptr(arg);
         if (@TypeOf(result) == void) {
-            return null;
+            return;
         }
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
-            return pjrt_error;
+            return interpretPjrtError(self, pjrt_error, @tagName(method));
         }
-        return null;
     }
 
     inline fn call(self: *const Api, comptime method: Funcs, arg: PJRTFnArgWithDefault(method)) ApiError!PJRTFnArgWithDefault(method) {
         var ret = arg;
-        const pjrt_error = innerCall(self, method, @ptrCast(&ret));
-        if (pjrt_error) |err| return interpretPjrtError(self, err, @tagName(method), .warn);
-        return ret;
-    }
-
-    inline fn callSilent(self: *const Api, comptime method: Funcs, arg: PJRTFnArgWithDefault(method)) ApiError!PJRTFnArgWithDefault(method) {
-        var ret = arg;
-        const pjrt_error = innerCall(self, method, @ptrCast(&ret));
-        if (pjrt_error) |err| return interpretPjrtError(self, err, @tagName(method), .debug);
+        try innerCall(self, method, @ptrCast(&ret));
         return ret;
     }
 
@@ -826,8 +814,7 @@ pub const Device = opaque {
     };
 
     pub fn memoryStats(self: *const Device, api: *const Api) ApiError!MemoryStats {
-        // callSilent: If this API is not available no point in printing it at every call
-        const ret = try api.callSilent(.PJRT_Device_MemoryStats, .{
+        const ret = try api.call(.PJRT_Device_MemoryStats, .{
             .device = self.inner(),
         });
         return .fromCStruct(ret);
@@ -1442,7 +1429,7 @@ pub const Event = opaque {
     pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
         if (self.isReady(api)) {
             const err = self.getEventError(api) orelse return;
-            return interpretPjrtError(api, err, "PJRT_Event_Await", .warn);
+            return interpretPjrtError(api, err, "PJRT_Event_Await");
         }
 
         const Ctx = struct {
@@ -1459,7 +1446,7 @@ pub const Event = opaque {
         }.call, &ctx);
         ctx.event.waitUncancelable(io);
 
-        if (ctx.err) |err| return interpretPjrtError(api, err, "PJRT_Event_OnReady", .warn);
+        if (ctx.err) |err| return interpretPjrtError(api, err, "PJRT_Event_OnReady");
     }
 
     pub fn awaitRaw(self: *const Event, api: *const Api) ApiError!void {

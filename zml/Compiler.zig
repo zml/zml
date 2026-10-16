@@ -136,12 +136,6 @@ pub const Scope = struct {
     pub fn registerTensorAsBlockArgument(scope: *Scope, id: Tensor.Id, arg_id: usize) void {
         scope.id_to_argument.put(scope.arena.allocator(), id, scope.block.argument(arg_id)) catch @panic("OOM");
     }
-
-    pub fn value(scope: *Scope, x: Tensor) *const mlir.Value {
-        return scope.id_to_argument.get(x.id) orelse
-            x._value orelse
-            @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
-    }
 };
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: Options) Compiler {
@@ -471,9 +465,8 @@ pub fn compileInternal(
 
     _ = result.func.appendTo(compiler.module.body());
 
-    // Mesh replication is encoded in shardings within one SPMD executable.
-    const num_partitions = compiler.meshes[0].numDevices();
-    const num_replicas = 1;
+    const num_partitions = compiler.meshes[0].numPartitions();
+    const num_replicas = compiler.meshes[0].numReplicas();
     const num_devices = num_partitions * num_replicas;
 
     compiler.module.operation().setAttributeByName(
@@ -503,7 +496,7 @@ pub fn compileInternal(
         allocator,
         platform,
         loaded_executable,
-        num_devices,
+        @intCast(num_devices),
         num_partitions,
         // This will get copied into exe
         result.input_info.items(.shape),
@@ -516,16 +509,13 @@ pub fn compileInternal(
     return exe;
 }
 
-/// Declare all logical meshes used by this program
 fn addPartitionerOperations(ctx: *Compiler) !void {
     const allocator = ctx.arena.allocator();
     const mlir_ctx = ctx.mlir_ctx;
     const module = ctx.module;
 
     switch (ctx.partitioner) {
-        .gspmd => {
-            // GSPMD doesn't use meshes, but explicit partitioning operations.
-        },
+        .gspmd => {},
         .shardy => {
             for (ctx.meshes) |shd| {
                 const attr_str = try shd.sdyMeshAttr(allocator);
@@ -567,12 +557,12 @@ pub const TensorInfo = struct {
         var attrs: AttributeList = .empty;
 
         const mlir_ctx = compiler.mlir_ctx;
-        const mesh_attr = try compiler.tensorShardingAttr(arena, info.shape);
+        const meshe_attr = try compiler.tensorShardingAttr(arena, mlir_ctx, info.shape);
         const name = switch (compiler.partitioner) {
             .gspmd => "mhlo.sharding",
             .shardy => "sdy.sharding",
         };
-        attrs.appendAssumeCapacity(.named(mlir_ctx, name, mesh_attr));
+        attrs.appendAssumeCapacity(.named(mlir_ctx, name, meshe_attr));
 
         const memory = scope.id_to_memory.get(info.id) orelse .device;
         if (memory != .device) {
@@ -809,25 +799,12 @@ fn repack(compiler: *Compiler, scope: *Scope, og_shape: Shape, value: *const mli
 fn validateMeshes(meshes: []const *const Sharding.Mesh) !void {
     stdx.debug.assert(meshes.len >= 1, "Waiting at leat 1 mesh strategy to be implemented", .{});
 
-    for (meshes) |m| {
-        const num_replicas = m.numReplicas();
-        if (num_replicas > 1 and !std.mem.eql(u8, "replicated", m.name)) {
-            // This seems like a performance footgun, rather that something anyone would want to use.
-            // It's generally better to have meshes that cover all devices,
-            // even if later it means that some mesh axis is never used.
-            // Otherwise a "sharded" tensor can in fact be replicated because the underlying mesh has replicas
-            // TODO(#914): decide if we should forbid this altogether
-            // currently DirectMemoryWriter tests have replicated meshes depending on the platform they target
-            log.warn("Mesh({s}) has numReplicas() == {d}. This imply that all tensor put on this mesh will be implicitly replicated {d} times.\n{f}", .{ m.name, num_replicas, num_replicas, m });
-        }
-        log.debug("Using {f}", .{m});
-    }
-
     const first = meshes[0];
-    const devices = first.numDevices();
+    const partitions = first.numPartitions();
+    const replicas = first.numReplicas();
 
-    for (meshes[1..]) |m| {
-        if (m.numDevices() != devices) {
+    for (meshes[1..]) |s| {
+        if (s.numPartitions() != partitions or s.numReplicas() != replicas) {
             // todo: deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
             return error.InconsistentMesheCardinality;
         }
@@ -837,12 +814,13 @@ fn validateMeshes(meshes: []const *const Sharding.Mesh) !void {
 pub fn tensorShardingAttr(
     compiler: *const Compiler,
     allocator: std.mem.Allocator,
+    mlir_ctx: *mlir.Context,
     shape: Shape,
 ) error{OutOfMemory}!*const mlir.Attribute {
     const mesh_ = shape._sharding.mesh orelse compiler.platform.replicated_mesh;
     return switch (compiler.partitioner) {
-        .shardy => (try mesh_.sdyShardingAttrForShape(allocator, compiler.mlir_ctx, shape)).asAttr(),
-        .gspmd => mesh_.gspmdShardingAttrForShape(allocator, compiler.mlir_ctx, shape) catch |err| switch (err) {
+        .shardy => (try mesh_.sdyShardingAttrForShape(allocator, mlir_ctx, shape)).asAttr(),
+        .gspmd => mesh_.gspmdShardingAttrForShape(allocator, mlir_ctx, shape) catch |err| switch (err) {
             error.WriteFailed => error.OutOfMemory, // We're writing to memory
             error.OutOfMemory => error.OutOfMemory,
             error.IncompatibleSharding => @panic("Shape dimensions must be divisible by their mesh partitions"),
@@ -880,9 +858,8 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
 
     const platform = compiler.platform;
     const main_mesh = compiler.meshes[0];
-    // Mesh replicas are part of the SPMD device set, not XLA program replicas.
-    const num_partitions: i32 = @intCast(main_mesh.numDevices());
-    const num_replicas = 1;
+    const num_partitions = main_mesh.numPartitions();
+    const num_replicas = main_mesh.numReplicas();
 
     const device_assignment = try main_mesh.deviceAssignment(compiler.allocator);
     defer compiler.allocator.free(device_assignment);

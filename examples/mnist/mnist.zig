@@ -2,12 +2,11 @@ const std = @import("std");
 const log = std.log;
 
 const zml = @import("zml");
+const stdx = zml.stdx;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
 };
-
-pub const Img = [28 * 28]u8;
 
 /// Model definition
 const Mnist = struct {
@@ -138,13 +137,13 @@ pub fn main(init: std.process.Init) !void {
 
     // inference - can be looped
     const idx = rng.random().uintLessThan(u64, 10000);
-    var sample: Img align(16) = undefined;
-    _ = try dataset.readPositionalAll(io, &sample, 16 + (idx * @sizeOf(Img)));
+    var sample: [28 * 28]u8 align(16) = undefined;
+    _ = try dataset.readPositionalAll(io, &sample, 16 + (idx * 28 * 28));
 
     var input_buffer: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(input.shape(), &sample));
     defer input_buffer.deinit();
 
-    printDigit(&sample);
+    printDigit(sample);
 
     args.set(.{ mnist_buffers, input_buffer });
     exe.call(io, args, &results, .{});
@@ -160,14 +159,14 @@ pub fn main(init: std.process.Init) !void {
     , .{digits[try result.getValue(u8, io)]});
 }
 
-pub fn printDigit(digit_flat: *const Img) void {
-    const digit: *const [28][28]u8 = @ptrCast(digit_flat);
+fn printDigit(digit: [28 * 28]u8) void {
     var buffer: [28][30][2]u8 = undefined;
     for (0..28) |y| {
         buffer[y][0] = .{ '|', ' ' };
         buffer[y][29] = .{ '|', '\n' };
         for (1..29) |x| {
-            const val = digit[y][x - 1];
+            const idx = (y * 28) + (x - 1);
+            const val = digit[idx];
             buffer[y][x] = blk: {
                 if (val > 240) break :blk .{ '*', '*' };
                 if (val > 225) break :blk .{ 'o', 'o' };
@@ -186,7 +185,7 @@ pub fn printDigit(digit_flat: *const Img) void {
     , .{std.mem.asBytes(&buffer)});
 }
 
-pub const digits = [_][]const u8{
+const digits = [_][]const u8{
     \\                       |     ###     |
     \\                       |    #   #    |
     \\                       |   #     #   |

@@ -15,16 +15,6 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     dialectHandle().insertDialect(registry);
 }
 
-pub const attr = struct {
-    pub fn mesh(ctx: *mlir.Context, mesh_: MeshAttribute.Mesh) *const mlir.Attribute {
-        return MeshAttribute.init(ctx, mesh_).asAttr();
-    }
-
-    pub fn shardingsPerValue(ctx: *mlir.Context, shardings: []const *const TensorShardingAttribute) *const mlir.Attribute {
-        return TensorShardingPerValueAttribute.init(ctx, shardings).asAttr();
-    }
-};
-
 pub const MeshAxisAttribute = opaque {
     const M = mlir.Methods(MeshAxisAttribute, c.MlirAttribute);
 
@@ -134,8 +124,8 @@ pub const AxisRefAttribute = opaque {
     }
 
     pub fn subAxisInfo(self: *const AxisRefAttribute) ?*const SubAxisInfoAttribute {
-        const attr_ = c.sdyAxisRefAttrGetSubAxisInfo(self.ptr());
-        return if (attr_.ptr == null) null else @ptrCast(attr_.ptr);
+        const attr = c.sdyAxisRefAttrGetSubAxisInfo(self.ptr());
+        return if (attr.ptr == null) null else @ptrCast(attr.ptr);
     }
 };
 
