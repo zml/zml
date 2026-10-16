@@ -32,15 +32,22 @@ pub fn tokenize(
     io: std.Io,
     model_dir: []const u8,
     prompt: []const u8,
+    opts: struct { templated: bool = false },
 ) !TokenizedPrompt {
     var buffer: [256]u8 = undefined;
     const tokenizer_path = try std.fmt.bufPrint(&buffer, "{s}/{s}", .{ model_dir, "processor/tokenizer.json" });
     const tokenizer: zml.tokenizer.Tokenizer = try .fromFile(allocator, io, tokenizer_path);
 
     var encoder = try tokenizer.encoder();
-    const templated_prompt = try prompt_template_t2i(allocator, prompt);
-    defer allocator.free(templated_prompt);
-    const tokens = try encoder.encodeAlloc(allocator, templated_prompt);
+
+    var tokens: []u32 = undefined;
+    if (opts.templated) {
+        const templated_prompt = try prompt_template_t2i(allocator, prompt);
+        defer allocator.free(templated_prompt);
+        tokens = try encoder.encodeAlloc(allocator, templated_prompt);
+    } else {
+        tokens = try encoder.encodeAlloc(allocator, prompt);
+    }
 
     return TokenizedPrompt{ .tokenizer = tokenizer, .encoder = encoder, .tokens = tokens };
 }
@@ -107,13 +114,35 @@ fn prompt_template_t2i(allocator: std.mem.Allocator, str: []const u8) ![]const u
 //     return try std.fmt.bufPrint(buffer, "{s}{s}{s}{s}{s}{s}", .{ line1, line2_start_t2i, line2_start_ti2i, str, line2_end, line3 });
 // }
 
-test "Default prompt" {
-    const prompt =
-        \\A neon shop sign that reads "QWEN IMAGE 2.1", rainy night, reflections on wet pavement
-    ;
+test "Templated" {
+    const prompt = "A neon shop sign that reads \"QWEN IMAGE 2.1\", rainy night, reflections on wet pavement";
+    const expected = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\nA neon shop sign that reads \"QWEN IMAGE 2.1\", rainy night, reflections on wet pavement<|im_end|>\n<|im_start|>assistant\n";
+
+    const templated_prompt = try prompt_template_t2i(std.testing.allocator, prompt);
+    defer std.testing.allocator.free(templated_prompt);
+
+    try std.testing.expectEqualSlices(u8, templated_prompt, expected);
+}
+
+test "Default prompt templated" {
+    const TEST_MODEL_PATH = "/home/erwan/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/d26bb61231c349cf6b7896fa83353113880e1ba3";
+
+    const prompt = "A neon shop sign that reads \"QWEN IMAGE 2.1\", rainy night, reflections on wet pavement";
     const expected = .{ 151644, 8948, 198, 1092, 30782, 408, 323, 23643, 279, 3897, 9934, 13, 151645, 198, 151644, 872, 198, 32, 46652, 8061, 1841, 429, 15804, 330, 48, 54, 953, 33669, 220, 17, 13, 16, 497, 62757, 3729, 11, 62751, 389, 14401, 64342, 151645, 198, 151644, 77091, 198 };
 
-    var result = try tokenize(std.testing.allocator, std.testing.io, prompt);
+    var result = try tokenize(std.testing.allocator, std.testing.io, TEST_MODEL_PATH, prompt, .{ .templated = true });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u32, &expected, result.tokens);
+}
+
+test "Default prompt non templated" {
+    const TEST_MODEL_PATH = "/home/erwan/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/d26bb61231c349cf6b7896fa83353113880e1ba3";
+
+    const prompt = "A neon shop sign that reads \"QWEN IMAGE 2.1\", rainy night, reflections on wet pavement";
+    const expected = .{ 32, 46652, 8061, 1841, 429, 15804, 330, 48, 54, 953, 33669, 220, 17, 13, 16, 497, 62757, 3729, 11, 62751, 389, 14401, 64342 };
+
+    var result = try tokenize(std.testing.allocator, std.testing.io, TEST_MODEL_PATH, prompt, .{ .templated = false });
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqualSlices(u32, &expected, result.tokens);
