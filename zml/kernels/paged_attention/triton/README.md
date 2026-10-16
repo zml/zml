@@ -11,9 +11,10 @@ when sharding `.hkv`, with matching query and cache ownership and complete
 `.hg` and `.hd` axes. Each local computation needs its full key range and the
 matching sequence metadata.
 
-The wrapper chooses between a 2D kernel and a 3D split-key kernel followed by
-segment reduction. Prefill uses the 2D path; all-decode batches select a path
-based on batch size and KV head count. oneAPI forces split-key execution for
+For standard masks, the wrapper chooses between a 2D kernel and a 3D split-key
+kernel followed by segment reduction. Prefill uses the 2D path; all-decode
+batches select a path based on batch size and KV head count. Explicit indices
+use the dedicated sparse path described below. oneAPI forces split-key execution for
 all-decode batches and has a specialized path for standard masks. Segment
 reduction combines softmax maxima, exponential sums, and weighted values to
 preserve one normalization over the key range.
@@ -26,3 +27,30 @@ The shared tests in [paged_attention.zig](../paged_attention.zig) exercise
 trailing inactive sequences, and option-specific comparisons. Kernel selection
 and numerical behavior depend on the target; these cases do not establish
 support for every shape or dtype.
+
+## Sparse attention
+
+`.indices` mask dispatches to a dedicated sparse kernel in `unified_attention.zig`.
+The `i32` tensor has shape `{ .b = T, .topk = K }`, with one list per packed
+query shared across heads. Each entry is a logical position within that query's
+sequence, including its cached prefix. The kernel translates each selected
+position through the existing page table; it does not compute top-k selection.
+Negative and out-of-sequence entries are ignored, including holes before valid
+tail entries. Duplicate entries count repeatedly. Indices replace the standard
+mask, so they do not implicitly enforce causality. Empty selections return zero;
+optional attention sinks contribute only to the softmax denominator.
+
+Prefill processes one query and one KV-head group per program and writes the
+normalized result directly. Decode uses 16- or 32-position gather tiles and an
+occupancy-based split count bounded by selection length. Single-token decode
+addresses sequence slots directly; other query layouts use packed-query lookup.
+Inactive sequence slots and unused query capacity are skipped. Only segments
+covering selection slots launch. Small empty segments skip Q and KV loading,
+and larger segments skip wholly empty tiles. Known strides and scale are
+specialized, and sparse gathers use the default cache policy.
+
+Split-K decode writes FP32 partials and contiguous-head statistics. Its reducer
+handles at most 64 features per program, ignores unlaunched and zero-mass
+segments, and never reads their unwritten partial outputs. The direct and split
+paths use the same online softmax and support non-power-of-two GQA groups and
+padded head dimensions. Dense attention retains its existing dispatch and kernels.
