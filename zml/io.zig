@@ -1562,7 +1562,7 @@ const DirectMemoryWriterDeviceTest = struct {
     }
 };
 
-test "DirectMemoryWriter: replicated with auto topology" {
+test "DirectMemoryWriter: replicated tensor" {
     const case: DirectMemoryWriterDeviceTest = .{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
@@ -1571,7 +1571,7 @@ test "DirectMemoryWriter: replicated with auto topology" {
     try case.run(.{
         .name = "replicated_auto",
         .create_options = .{
-            .physical_mesh = .auto,
+            .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .rows = 8, .cols = 128 }, .f32),
