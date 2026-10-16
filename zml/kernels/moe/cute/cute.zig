@@ -66,6 +66,7 @@ pub fn fusedExperts(
         .topk = ids.dim(.topk),
         .swiglu_limit = options.activation.swiglu.limit.?,
         .expert_parallel = expert_parallelism,
+        .global_experts = gate_up.weight.dim(.expert),
     };
     return if (expert_parallelism)
         zml.ops.manualComputation(Context.body, context, input.shape())
@@ -84,6 +85,7 @@ const Context = struct {
     topk: i64,
     swiglu_limit: f32,
     expert_parallel: bool,
+    global_experts: i64,
 
     fn body(self: Context, _: zml.Shape) zml.Tensor {
         const experts = self.w1.dim(.expert);
@@ -100,7 +102,7 @@ const Context = struct {
             const local = ids.cmp(.GE, expert_start).logical(.AND, ids.cmp(.LT, expert_end));
             ids = local.select(ids.sub(expert_start), .scalar(-1, .i32));
         }
-        const result = kernels.forward(tokens, hidden, intermediate, experts, self.topk, self.swiglu_limit, .{
+        const result = kernels.forward(tokens, hidden, intermediate, experts, self.global_experts, self.topk, self.swiglu_limit, .{
             .x = self.input.reshape(.{ tokens, hidden }),
             .routing_weights = routing_weights,
             .w1 = self.w1,

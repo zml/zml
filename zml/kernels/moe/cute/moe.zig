@@ -44,22 +44,22 @@ fn isDirect(tokens: i64) bool {
 /// GEMM tile N, which is also the routed expert-group size. Wider tiles
 /// reuse each weight tile across more routes but pad more rows per expert,
 /// so they only pay off once experts receive tens of routes.
-fn tileN(tokens: i64, experts: i64, topk: i64) i64 {
+fn tileN(tokens: i64, global_experts: i64, topk: i64) i64 {
     // Direct routing keeps one row per group: the narrowest MMA wastes the
     // least of each B tile and leaves room for a 12-stage A/B ring.
     if (isDirect(tokens)) return 8;
-    if (tokens < 512) return 16;
     // Prefill: each group re-reads the whole expert weight matrix, so widen
-    // the tile once experts hold enough routes to fill it. Half the routes
-    // are remote under expert parallelism, hence the conservative estimate.
+    // the tile once experts hold enough routes to fill it. Use the global
+    // count: the same estimate applies to unsharded weights and any EP mesh.
     // The thresholds are measured on the DeepSeek V4.1 expert geometry, with
     // the 64- and 128-row tiles on CTA pairs (`twoCta`): from 64 routes per
     // expert, reading each expert's weights once in half-empty 128-row
     // groups beats reading them twice in 64-row ones.
-    const routes_per_expert = @divTrunc(tokens * topk, 2 * experts);
+    const routes_per_expert = @divTrunc(tokens * topk, global_experts);
     if (routes_per_expert >= 64) return 128;
     if (routes_per_expert >= 32) return 64;
-    return 32;
+    if (routes_per_expert >= 16) return 32;
+    return 16;
 }
 
 /// Whether the tile-`n` GEMMs run each 256xN MMA on a cluster of two CTAs
@@ -71,14 +71,109 @@ fn twoCta(n: i64, hidden: i64, intermediate: i64) bool {
     return n >= 64 and @rem(hidden, 256) == 0 and @rem(2 * intermediate, 256) == 0;
 }
 
-/// One persistent CTA per SM. Each CTA needs the full 227 KiB of shared
-/// memory, so launching more CTAs than SMs (e.g. 160 on a 152-SM GB300)
-/// runs the surplus as a second wave and nearly doubles the GEMM time.
-fn persistentCtas() i64 {
-    const platform = zml.Compiler.current().platform;
-    if (platform.devices.len == 0) return 148;
-    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 148;
-    return if (attribute.int64 > 0) attribute.int64 else 148;
+pub const LaunchPlan = struct {
+    tile_n: i64,
+    two_cta: bool,
+    persistent_ctas: i64,
+    quantize_lanes: i64,
+};
+
+/// Compile-time overrides for experiments. Workload selection belongs to the
+/// benchmark; launch parameters belong to the backend that implements them.
+pub const Tuning = struct {
+    tile_n: ?i64 = null,
+    two_cta: ?bool = null,
+    persistent_ctas: ?i64 = null,
+    quantize_lanes: ?i64 = null,
+
+    pub fn fromEnvironment() !Tuning {
+        return .{
+            .tile_n = try envInteger("ZML_MOE_CUTE_TILE_N"),
+            .two_cta = if (std.c.getenv("ZML_MOE_CUTE_TWO_CTA")) |raw| blk: {
+                const value = std.mem.span(raw);
+                if (std.mem.eql(u8, value, "true")) break :blk true;
+                if (std.mem.eql(u8, value, "false")) break :blk false;
+                return error.InvalidCuteTwoCta;
+            } else null,
+            .persistent_ctas = try envInteger("ZML_MOE_CUTE_PERSISTENT_CTAS"),
+            .quantize_lanes = try envInteger("ZML_MOE_CUTE_QUANTIZE_LANES"),
+        };
+    }
+
+    fn envInteger(comptime name: [:0]const u8) !?i64 {
+        const raw = std.c.getenv(name) orelse return null;
+        return std.fmt.parseInt(i64, std.mem.span(raw), 10) catch error.InvalidCuteTuningInteger;
+    }
+
+    pub fn resolve(self: Tuning, tokens: i64, hidden: i64, intermediate: i64, global_experts: i64, topk: i64, sm_count: i64) !LaunchPlan {
+        const requested_n = self.tile_n orelse tileN(tokens, global_experts, topk);
+        switch (requested_n) {
+            8, 16, 32, 64, 128 => {},
+            else => return error.InvalidCuteTileN,
+        }
+        // Direct decode has one live row per group and a dedicated narrow
+        // epilogue. Tile overrides tune grouped routing only.
+        const n = if (isDirect(tokens)) 8 else requested_n;
+        const paired = self.two_cta orelse (!isDirect(tokens) and twoCta(n, hidden, intermediate));
+        if (paired and (isDirect(tokens) or !twoCta(n, hidden, intermediate))) return error.InvalidCuteCtaPair;
+        const ctas = self.persistent_ctas orelse (if (paired) sm_count - @mod(sm_count, 2) else sm_count);
+        // Paired launches need complete clusters. More CTAs than SMs create
+        // another wave of these shared-memory-heavy persistent kernels.
+        if (ctas < (if (paired) @as(i64, 2) else 1) or ctas > sm_count or (paired and @mod(ctas, 2) != 0)) return error.InvalidCutePersistentCtas;
+        const lanes = self.quantize_lanes orelse boundary.quantizeLanes(tokens);
+        if (lanes != 1 and lanes != 4) return error.InvalidCuteQuantizeLanes;
+        const threads = @divExact(hidden, @divExact(32, lanes));
+        if ((lanes == 1 and threads > 1024) or (lanes == 4 and @mod(threads, 128) != 0)) return error.InvalidCuteQuantizeGeometry;
+        return .{ .tile_n = n, .two_cta = paired, .persistent_ctas = ctas, .quantize_lanes = lanes };
+    }
+};
+
+/// The same executable may run on every device in the mesh. Size its grid for
+/// the smallest participating GPU instead of assuming a particular GB model.
+fn persistentCtas(platform: *const zml.Platform) !i64 {
+    if (platform.devices.len == 0) return error.MissingCudaCoreCount;
+    var count: i64 = std.math.maxInt(i64);
+    for (platform.devices) |device| {
+        const attribute = device.pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return error.MissingCudaCoreCount;
+        if (attribute != .int64 or attribute.int64 <= 0) return error.MissingCudaCoreCount;
+        count = @min(count, attribute.int64);
+    }
+    return count;
+}
+
+pub fn launchPlan(platform: *const zml.Platform, tokens: i64, hidden: i64, intermediate: i64, global_experts: i64, topk: i64) !LaunchPlan {
+    const tuning = try Tuning.fromEnvironment();
+    return tuning.resolve(tokens, hidden, intermediate, global_experts, topk, try persistentCtas(platform));
+}
+
+test "CuTe launch policy uses global experts and validates tuning overrides" {
+    const defaults: Tuning = .{};
+    const sparse = try defaults.resolve(512, 5120, 2304, 384, 6, 152);
+    try std.testing.expectEqual(@as(i64, 16), sparse.tile_n);
+    try std.testing.expectEqual(@as(i64, 4), sparse.quantize_lanes);
+    const dense = try defaults.resolve(256, 5120, 2304, 8, 6, 152);
+    try std.testing.expectEqual(@as(i64, 128), dense.tile_n);
+    const ep2 = try defaults.resolve(2048, 5120, 2304, 384, 6, 152);
+    try std.testing.expectEqual(@as(i64, 64), ep2.tile_n);
+    try std.testing.expect(ep2.two_cta);
+    try std.testing.expectEqual(@as(i64, 4), ep2.quantize_lanes);
+    const prefill = try defaults.resolve(4096, 5120, 2304, 384, 6, 152);
+    try std.testing.expectEqual(@as(i64, 1), prefill.quantize_lanes);
+    const unsharded = try defaults.resolve(2048, 5120, 2304, 192, 6, 148);
+    try std.testing.expectEqual(@as(i64, 128), unsharded.tile_n);
+    const odd = try defaults.resolve(2048, 5120, 2304, 384, 6, 147);
+    try std.testing.expectEqual(@as(i64, 146), odd.persistent_ctas);
+    const direct = try defaults.resolve(1, 5120, 2304, 384, 6, 132);
+    try std.testing.expectEqual(@as(i64, 8), direct.tile_n);
+    try std.testing.expect(!direct.two_cta);
+    inline for (.{
+        .{ Tuning{ .tile_n = 7 }, error.InvalidCuteTileN },
+        .{ Tuning{ .tile_n = 32, .two_cta = true }, error.InvalidCuteCtaPair },
+        .{ Tuning{ .persistent_ctas = 153 }, error.InvalidCutePersistentCtas },
+        .{ Tuning{ .persistent_ctas = 151 }, error.InvalidCutePersistentCtas },
+        .{ Tuning{ .quantize_lanes = 2 }, error.InvalidCuteQuantizeLanes },
+    }) |case| try std.testing.expectError(case[1], case[0].resolve(2048, 5120, 2304, 384, 6, 152));
+    try std.testing.expectError(error.InvalidCuteCtaPair, (Tuning{ .two_cta = true }).resolve(1, 5120, 2304, 384, 6, 152));
 }
 
 // TODO(Corentin): settle on groups/capacity.
@@ -171,14 +266,23 @@ fn route(tokens: i64, experts: i64, topk: i64, n: i64, direct: bool, ids: zml.Te
 }
 
 /// `[tokens, hidden]` BF16 output of the MoE layer.
-pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs) zml.Tensor {
-    return forwardWithTile(tokens, hidden, intermediate, experts, topk, swiglu_limit, a, null, null);
+pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, global_experts: i64, topk: i64, swiglu_limit: f32, a: Inputs) zml.Tensor {
+    const plan = launchPlan(zml.Compiler.current().platform, tokens, hidden, intermediate, global_experts, topk) catch |err|
+        std.debug.panic("invalid CuTe MoE launch configuration: {s}", .{@errorName(err)});
+    return forwardWithPlan(tokens, hidden, intermediate, experts, topk, swiglu_limit, a, plan);
 }
 
 /// `forward` with an explicit GEMM tile N and CTA pairing, for tuning.
 /// `null` selects them from the batch size.
 pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs, tile_n: ?i64, two_cta: ?bool) zml.Tensor {
-    const n = tile_n orelse tileN(tokens, experts, topk);
+    const tuning: Tuning = .{ .tile_n = tile_n, .two_cta = two_cta };
+    const plan = tuning.resolve(tokens, hidden, intermediate, experts, topk, persistentCtas(zml.Compiler.current().platform) catch @panic("missing CUDA core count")) catch |err|
+        std.debug.panic("invalid CuTe MoE launch configuration: {s}", .{@errorName(err)});
+    return forwardWithPlan(tokens, hidden, intermediate, experts, topk, swiglu_limit, a, plan);
+}
+
+fn forwardWithPlan(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs, plan: LaunchPlan) zml.Tensor {
+    const n = plan.tile_n;
     const direct = isDirect(tokens);
     const routing = route(tokens, experts, topk, n, direct, a.ids);
     const routes = tokens * topk;
@@ -189,12 +293,12 @@ pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64
         .n = n,
         .k = hidden,
         .groups = routing.groups,
-        .persistent_ctas = persistentCtas(),
+        .persistent_ctas = plan.persistent_ctas,
         .epilogue = .swiglu_mxfp8,
         .routes = routes,
         .direct = direct,
         .swiglu_limit = swiglu_limit,
-        .two_cta = two_cta orelse twoCta(n, hidden, intermediate),
+        .two_cta = plan.two_cta,
     };
     var down_cfg = up_cfg;
     down_cfg.m = hidden;
@@ -208,7 +312,7 @@ pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64
         .group_size = up_cfg.groupRows(),
         .capacity = routing.groups,
         .direct = direct,
-        .lanes_per_block = boundary.quantizeLanes(tokens),
+        .lanes_per_block = plan.quantize_lanes,
     });
     const q2 = persistent.upQuantized(up_cfg, .{
         .weight = a.w1,
@@ -236,7 +340,7 @@ test {
     _ = persistent;
 }
 
-test "CTA-pair GEMMs match single-CTA GEMMs bit for bit" {
+test "CuTe CTA-pair GEMMs match single-CTA GEMMs bit for bit" {
     const platform = zml.testing.env();
     if (!@import("cute.zig").isAvailable(platform)) return error.SkipZigTest;
     const allocator = std.testing.allocator;
