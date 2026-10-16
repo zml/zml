@@ -3,9 +3,9 @@ const std = @import("std");
 const mtt = @import("kernels/mosaic_tpu/builder");
 const stdx = @import("stdx");
 
-const zml = @import("../zml.zig");
+const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
-pub const gmm_ep = @import("mosaic_tpu_kernels/gmm_ep.zig");
+pub const gmm_ep = @import("gmm_ep.zig");
 
 const log = std.log.scoped(.@"zml/moe/mosaic_tpu");
 
@@ -282,7 +282,7 @@ pub fn fusedExperts(
                             .w2_bias = self.bias_down,
                         },
                     );
-                    return local_output.reshape(self.input.shape().dims()).withTags(.{ .b, .s, .d });
+                    return local_output.reshape(self.input.shape()).withTags(.{ .t, .d });
                 }
             }).body,
             .{
@@ -328,14 +328,13 @@ pub fn fusedExpertsImpl(
     topk_ids: Tensor,
     opts: Options,
 ) Tensor {
-    const b = hidden_states.dim(.b);
-    const s = hidden_states.dim(.s);
-    const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
+    const tokens = hidden_states.dim(.t);
+    const hidden = hidden_states.reshape(.{ .token = tokens, .in = hidden_states.dim(.d) });
     // TODO(Corentin): Better error message
     const gate_up = canonicalizeGateUp(w1, hidden.dim(.in)) catch |e| stdx.debug.panic("Invalid gate_up weights for fusedExpertsImpl: {}", .{e});
     const down = canonicalizeDown(w2, hidden.dim(.in), gate_up.dim(.out)) catch |e| stdx.debug.panic("Invalid down weights for fusedExpertsImpl: {}", .{e});
-    const weights = topk_weights.reshape(.{ .token = b * s, .topk = topk_weights.dim(.topk) }).withTags(.{ .token, .topk });
-    const ids = topk_ids.reshape(.{ .token = b * s, .topk = topk_ids.dim(.topk) }).withTags(.{ .token, .topk });
+    const weights = topk_weights.reshape(.{ .token = tokens, .topk = topk_weights.dim(.topk) });
+    const ids = topk_ids.reshape(.{ .token = tokens, .topk = topk_ids.dim(.topk) });
 
     const num_experts = if (opts.global_num_experts != -1) opts.global_num_experts else gate_up.dim(.expert);
     if (opts.expert_map) |expert_map| {
@@ -403,5 +402,5 @@ pub fn fusedExpertsImpl(
     const unsorted = weighted.gather(.{ .token = restore_indices }, .{}).rename(.{ .restore = .route });
     const restored = unsorted.reshape(.{ .topk = ids.dim(.topk), .token = hidden.dim(.token), .out = down.dim(.out) });
     const combined = restored.sum(.topk).squeeze(.topk);
-    return combined.reshape(.{ .b = b, .s = s, .d = down.dim(.out) });
+    return combined.reshape(.{ .t = tokens, .d = down.dim(.out) });
 }

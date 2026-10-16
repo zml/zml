@@ -2,11 +2,11 @@
 //! supported cases are explicit, and errors in those cases must fail the test.
 const std = @import("std");
 
-const zml = @import("../zml.zig");
+const zml = @import("../../zml.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const Placement = @import("fused_experts.zig").RoutingWeightPlacement;
-const reference = @import("stablehlo.zig");
+const reference = @import("stablehlo/stablehlo.zig");
+const Placement = @import("moe.zig").RoutingWeightPlacement;
 
 const Case = struct {
     backend: zml.moe.Backend,
@@ -18,19 +18,18 @@ const Case = struct {
     bias: bool = false,
     tokens: i64 = 1,
     topk: i64 = 1,
-    batch: i64 = 1,
     width: i64 = 128,
     intermediate: i64 = 128,
     experts: i64 = 8,
 
     pub fn compile(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Exe {
         std.debug.assert(c.backend.isAvailable(platform));
-        const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
+        const x: Tensor = .init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype);
         return platform.compileFn(allocator, io, forward, .{ x, c }, .{});
     }
 
     pub fn check(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, exe: *const zml.Exe) !void {
-        const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
+        const x: Tensor = .init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype);
 
         var host = try zml.Slice.alloc(allocator, x.shape());
         defer host.free(allocator);
@@ -209,17 +208,24 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertF
             q.scales = swizzleScales(q.scales);
             q.swizzled_scales = true;
         }
-        if (backend == .cute_mxfp4 or backend == .triton_mxfp4) {
-            projection.weight = packFp4Bytes(projection.weight);
-            projection.quantization.?.scales = projection.quantization.?.scales.bitCast(.u8);
-        }
-        if (backend == .mosaic_tpu) projection.weight = projection.weight.transpose(.{ 0, 2, 1 });
-        if (backend == .metal) {
-            if (projection.quantization) |*q| {
+        switch (backend) {
+            .cute => {
+                projection.weight = packFp4Bytes(projection.weight);
+                projection.quantization.?.scales = projection.quantization.?.scales.bitCast(.u8);
+            },
+            .triton => if (scheme == .mxfp4) {
+                projection.weight = packFp4Bytes(projection.weight);
+            },
+            .mosaic_tpu => {
+                projection.weight = projection.weight.transpose(.{ 0, 2, 1 });
+            },
+            .metal => if (projection.quantization) |*q| {
                 if (q.scheme != .nvfp4) q.scales = q.scales.convert(.bf16);
-            }
+            },
+            else => {},
         }
     }
+
     if (backend == .metal and scheme == .nvfp4) {
         const global = &prepared.gate_up.quantization.?.global_scale.?;
         global.value = global.value.appendAxes(.{.proj}).repeat1d(.proj, 2);
@@ -235,7 +241,7 @@ fn forward(input: Tensor, c: Case) Outputs {
     const canonical = makeExpertFixture(c);
     const prepared = prepareForBackend(canonical, c.backend);
 
-    const route_shape = Shape.init(.{ .b = c.batch, .s = c.tokens, .topk = c.topk }, .i32);
+    const route_shape = Shape.init(.{ .t = c.tokens, .topk = c.topk }, .i32);
     const route = Tensor.arange(.{ .end = @intCast(route_shape.count()) }, .i32).reshape(route_shape);
 
     // Only six of eight experts receive routes, with nonuniform counts.
@@ -255,13 +261,13 @@ fn forward(input: Tensor, c: Case) Outputs {
         .routing_weight_placement = c.placement,
         .input_quantization = switch (c.backend) {
             .metal => .none,
-            .cute_mxfp4 => .mxfp8_bf16,
-            .triton_mxfp4 => .mxfp8,
+            .cute => .mxfp8_bf16,
+            .triton => if (c.scheme == .mxfp4 and zml.Compiler.current().platform.target == .cuda) .mxfp8 else .automatic,
             else => .automatic,
         },
     });
 
-    return .{ .actual = actual.reshape(input.shape()), .expected = expected };
+    return .{ .actual = actual, .expected = expected };
 }
 
 const gated_activations = [_]zml.moe.Activation{
@@ -281,7 +287,6 @@ const clipped_swiglu = [_]zml.moe.Activation{
 };
 
 const FixtureShape = struct {
-    batch: i64 = 1,
     tokens: i64 = 1,
     topk: i64 = 1,
     width: i64 = 128,
@@ -289,17 +294,17 @@ const FixtureShape = struct {
     experts: i64 = 8,
 };
 
-// Every option combination runs on decode, prefill, and batched prefill.
+// Every option combination runs with 1, 17, and 34 flattened tokens.
 // Shapes and floating-point parameter values are representative finite sets.
 const fixture_shapes = [_]FixtureShape{
     .{},
     .{ .tokens = 17, .topk = 2 },
-    .{ .batch = 2, .tokens = 17, .topk = 3 },
+    .{ .tokens = 34, .topk = 3 },
 };
 const specialized_shapes = [_]FixtureShape{
     .{ .width = 5120, .intermediate = 2304, .experts = 2 },
     .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 17, .topk = 2 },
-    .{ .width = 5120, .intermediate = 2304, .experts = 2, .batch = 2, .tokens = 17, .topk = 2 },
+    .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 34, .topk = 2 },
 };
 
 const Format = struct {
@@ -343,7 +348,6 @@ const Matrix = struct {
             .quantize_input = quantize_input,
             .placement = placement,
             .bias = bias,
-            .batch = shape.batch,
             .tokens = shape.tokens,
             .topk = shape.topk,
             .width = shape.width,
@@ -507,7 +511,6 @@ test "Triton compatibility matrix" {
     try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
         .formats = &.{
             .{},
-            .{ .scheme = .mxfp4 },
             .{ .scheme = .mxfp8 },
             .{ .scheme = .fp8_per_tensor },
             .{ .scheme = .fp8_per_channel },
@@ -515,10 +518,48 @@ test "Triton compatibility matrix" {
             .{ .scheme = .fp8_block32 },
         },
         .activations = &all_activations,
-        // BF16 and MXFP4 ignore this option; exercise both accepted settings.
+        // BF16 ignores this option; exercise both accepted settings.
         .quantize_inputs = &.{ false, true },
         .placements = &.{ .before_down, .after_down },
         .biases = &.{ false, true },
+    }, .{});
+
+    if (platform.target != .cuda) {
+        // Other platforms retain the general MXFP4 path and its full contract.
+        try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
+            .formats = &.{.{ .scheme = .mxfp4 }},
+            .activations = &all_activations,
+            .quantize_inputs = &.{ false, true },
+            .placements = &.{ .before_down, .after_down },
+            .biases = &.{ false, true },
+        }, .{});
+        return;
+    }
+
+    // Preserve the 12 supported cases from the former general MXFP4 matrix.
+    // Its other 252 cases require activations or projection bias unsupported
+    // by the simplified path. The former specialized matrix remains below.
+    try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
+        .formats = &.{.{ .scheme = .mxfp4 }},
+        .activations = &.{gated_activations[1]},
+        .quantize_inputs = &.{ false, true },
+        .placements = &.{ .before_down, .after_down },
+    }, .{});
+}
+
+// Keep triton mxfp4 separate because it only supports a subset for now
+test "Triton MXFP4 compatibility matrix" {
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
+    const pipeline: Pipeline = .{ .platform = platform };
+
+    // The merged backend uses the former specialized MXFP4 path: clipped
+    // SwiGLU without projection bias, with unconditional MXFP8 activations.
+    try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
+        .formats = &.{.{ .scheme = .mxfp4 }},
+        .activations = &clipped_swiglu,
+        .quantize_inputs = &.{ false, true },
+        .placements = &.{ .before_down, .after_down },
     }, .{});
 }
 
@@ -552,26 +593,12 @@ test "FlashInfer compatibility matrix" {
     }, .{});
 }
 
-test "specialized Triton MXFP4 compatibility matrix" {
-    const platform = zml.testing.env();
-
-    const pipeline: Pipeline = .{ .platform = platform };
-
-    // The kernel always quantizes inputs to MXFP8, independently of the option.
-    try pipeline.run(std.testing.io, std.testing.allocator, .triton_mxfp4, .{
-        .formats = &.{.{ .scheme = .mxfp4 }},
-        .activations = &clipped_swiglu,
-        .quantize_inputs = &.{ false, true },
-        .placements = &.{ .before_down, .after_down },
-    }, .{});
-}
-
 test "specialized CuTe MXFP4 compatibility matrix" {
     const platform = zml.testing.env();
 
     const pipeline: Pipeline = .{ .platform = platform };
 
-    try pipeline.run(std.testing.io, std.testing.allocator, .cute_mxfp4, .{
+    try pipeline.run(std.testing.io, std.testing.allocator, .cute, .{
         .formats = &.{.{ .scheme = .mxfp4 }},
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },

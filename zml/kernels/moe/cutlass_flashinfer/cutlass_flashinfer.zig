@@ -3,7 +3,7 @@ const stdx = @import("stdx");
 
 const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
 const platforms = @import("platforms");
-const zml = @import("../zml.zig");
+const zml = @import("../../../zml.zig");
 
 const log = std.log.scoped(.@"zml/moe/cutlass_flashinfer");
 
@@ -34,7 +34,7 @@ pub const Options = struct {
 pub fn validateOptions(opts: zml.moe.Options) void {
     stdx.debug.assert(!opts.quantize_input, "Optional FP8 input quantization requires the Triton MoE backend", .{});
     stdx.debug.assert(opts.routing_weight_placement == .after_down, "Non-Triton MoE backends require routing weights after the down projection", .{});
-    stdx.debug.assert(opts.activation == .swiglu, "cute_mxfp4 backend only accepts swiglu activation, got {}", .{opts.activation});
+    stdx.debug.assert(opts.activation == .swiglu, "flashinfer_cutlass backend only accepts swiglu activation, got {}", .{opts.activation});
     stdx.debug.assert(opts.activation.swiglu.limit == null, "Activation thresholds require the Triton MoE backend", .{});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "flashinfer_cutlass backend requires swiglu bias to be null", .{});
     stdx.debug.assert(opts.activation.swiglu.scale == null, "flashinfer_cutlass backend requires swiglu scale to be null", .{});
@@ -431,27 +431,26 @@ fn validateInputs(
     {
         return error.UnsupportedType;
     }
-    if (hidden_states.rank() != 3 or
+    if (hidden_states.rank() != 2 or
         fc1_weights.rank() != 3 or
         fc2_weights.rank() != 3 or
-        topk_weights.rank() != 3 or
-        topk_ids.rank() != 3)
+        topk_weights.rank() != 2 or
+        topk_ids.rank() != 2)
     {
         return error.InvalidShape;
     }
 
-    const batch = hidden_states.dim(0);
-    const sequence = hidden_states.dim(1);
-    const hidden_size = hidden_states.dim(2);
+    const tokens = hidden_states.dim(.t);
+    const hidden_size = hidden_states.dim(.d);
     const num_experts = fc1_weights.dim(0);
     const fc1_rows = fc1_weights.dim(1);
     const intermediate_size = switch (options.activation) {
         .silu, .gelu, .relu => fc1_rows,
         .swiglu, .geglu, .geglu_tanh, .swiglu_step => @divExact(fc1_rows, 2),
     };
-    const top_k = topk_ids.dim(2);
+    const top_k = topk_ids.dim(.topk);
 
-    if (batch <= 0 or sequence <= 0 or hidden_size <= 0 or
+    if (tokens <= 0 or hidden_size <= 0 or
         num_experts <= 0 or intermediate_size <= 0 or
         @mod(hidden_size, 16) != 0 or @mod(intermediate_size, 16) != 0 or
         top_k <= 0 or top_k > num_experts)
@@ -462,11 +461,9 @@ fn validateInputs(
         fc2_weights.dim(0) != num_experts or
         fc2_weights.dim(1) != hidden_size or
         fc2_weights.dim(2) != intermediate_size or
-        topk_weights.dim(0) != batch or
-        topk_weights.dim(1) != sequence or
-        topk_weights.dim(2) != top_k or
-        topk_ids.dim(0) != batch or
-        topk_ids.dim(1) != sequence or
+        topk_weights.dim(.t) != tokens or
+        topk_weights.dim(.topk) != top_k or
+        topk_ids.dim(.t) != tokens or
         !fc1_weight_block.shape().eql(fc1BlockScaleShape(
             num_experts,
             hidden_size,
@@ -487,7 +484,7 @@ fn validateInputs(
     }
 
     return .{
-        .num_tokens = batch * sequence,
+        .num_tokens = tokens,
         .hidden_size = hidden_size,
         .intermediate_size = intermediate_size,
         .num_experts = @intCast(num_experts),
@@ -586,38 +583,35 @@ pub fn fusedExpertsBf16(
         fc2_weights.dtype() != .bf16 or
         topk_weights.dtype() != .f32 or
         topk_ids.dtype() != .i32 or
-        hidden_states.rank() != 3 or
+        hidden_states.rank() != 2 or
         fc1_weights.rank() != 3 or
         fc2_weights.rank() != 3 or
-        topk_weights.rank() != 3 or
-        topk_ids.rank() != 3)
+        topk_weights.rank() != 2 or
+        topk_ids.rank() != 2)
     {
         // TODO(Corentin): Better error message
         @panic("InvalidInput");
     }
 
-    const batch = hidden_states.dim(0);
-    const sequence = hidden_states.dim(1);
-    const hiddenSize = hidden_states.dim(2);
+    const tokens = hidden_states.dim(.t);
+    const hiddenSize = hidden_states.dim(.d);
     const numExperts = fc1_weights.dim(0);
     const fc1Rows = fc1_weights.dim(1);
     const intermediateSize = switch (options.activation) {
         .silu, .gelu, .relu => fc1Rows,
         .swiglu, .geglu, .geglu_tanh, .swiglu_step => @divExact(fc1Rows, 2),
     };
-    const topK = topk_ids.dim(2);
-    if (batch <= 0 or sequence <= 0 or hiddenSize <= 0 or
+    const topK = topk_ids.dim(.topk);
+    if (tokens <= 0 or hiddenSize <= 0 or
         numExperts <= 0 or intermediateSize <= 0 or
         topK <= 0 or topK > numExperts or
         fc1_weights.dim(2) != hiddenSize or
         fc2_weights.dim(0) != numExperts or
         fc2_weights.dim(1) != hiddenSize or
         fc2_weights.dim(2) != intermediateSize or
-        topk_weights.dim(0) != batch or
-        topk_weights.dim(1) != sequence or
-        topk_weights.dim(2) != topK or
-        topk_ids.dim(0) != batch or
-        topk_ids.dim(1) != sequence)
+        topk_weights.dim(.t) != tokens or
+        topk_weights.dim(.topk) != topK or
+        topk_ids.dim(.t) != tokens)
     {
         // TODO(Corentin): Better error message
         @panic("InvalidShape");
@@ -626,7 +620,7 @@ pub fn fusedExpertsBf16(
     const runners = currentRunners() catch |e| stdx.debug.panic("Failed to get runners: {}", .{e});
     const attributes: Attributes = .{
         .runners = @intFromPtr(runners),
-        .num_tokens = batch * sequence,
+        .num_tokens = tokens,
         .hidden_size = hiddenSize,
         .intermediate_size = intermediateSize,
         .num_experts = @intCast(numExperts),
@@ -758,7 +752,7 @@ pub fn fusedExperts(
                         );
                         const local_reshaped = local_output
                             .reshape(self.input.shape().dims())
-                            .withTags(.{ .b, .s, .d });
+                            .withTags(.{ .t, .d });
                         return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
                     }
                 }).body,
@@ -851,7 +845,7 @@ pub fn fusedExperts(
                     );
                     const local_reshaped = local_output
                         .reshape(self.input.shape().dims())
-                        .withTags(.{ .b, .s, .d });
+                        .withTags(.{ .t, .d });
                     return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
                 }
             }).body,
