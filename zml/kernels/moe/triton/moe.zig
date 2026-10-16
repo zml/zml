@@ -870,7 +870,18 @@ fn quant32(b: *Builder, x: Value) struct { q: Value, s: Value } {
     const groups = @divExact(cols, 32);
     const blocks = b.reshape(x, &.{ rows * groups, 32 });
     const sf = b.exp2(b.ceil(b.log2(b.maxOpts(b.absf(blocks), .{ .axis = 1 }).maximum(1e-4).mul(1.0 / 448.0))));
-    const q = blocks.div(sf.expandDims(1)).maximum(-448.0).minimum(448.0).to(.f8e4m3fn);
+    const scaled = blocks.div(sf.expandDims(1)).maximum(-448.0).minimum(448.0);
+    // TODO(Corentin): We should gate that behind a platform check so that we don't do useless stuff on non-SM89 platforms.
+    // Find a way to add that to the builder, maybe a `b.platform()` or something like that.
+    const q = b: {
+        // SM89 lowers FP32 -> FP8 through FP16 with truncation. Round to odd at
+        // FP16 precision first so that this intermediate cannot turn a value just
+        // above an FP8 midpoint into an exact tie. Direct FP8 conversion is unchanged.
+        const scaled_bits = b.bitcast(scaled, .i32);
+        const sticky = b.select(scaled_bits.bitAnd(0x1fff).ne(0), b.full(scaled.shape().constSlice(), 0x2000, .i32), b.zeros(scaled.shape().constSlice(), .i32));
+        const prepared = b.bitcast(scaled_bits.bitAnd(-0x2000).bitOr(sticky), .f32);
+        break :b prepared.to(.f8e4m3fn);
+    };
     const bits = b.shrui(b.bitcast(sf, .i32), b.full(sf.shape().constSlice(), 23, .i32)).bitAnd(255).to(.i8);
     return .{ .q = b.reshape(q, &.{ rows, cols }), .s = b.reshape(bits, &.{ rows, groups }) };
 }
