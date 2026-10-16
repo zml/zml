@@ -69,7 +69,9 @@ const Context = struct {
         const cfg: kernel.Config = .{
             .head_dim = q.dim(.hd),
             .kv_tile = kv_tile,
-            .load_buffers = if (kv_tile == 128) 3 else 2,
+            // Prefetch an extra feature stage for non-split D512 decode;
+            // split workloads retain the smaller shared-memory footprint.
+            .load_buffers = if (kv_tile == 128 or (all_decode and q.dim(.hd) == 512 and splits == 1)) 3 else 2,
             .tokens = q.dim(.b),
             .batch = p.block_table.dim(.b),
             .kv_heads = k.dim(.hkv),
