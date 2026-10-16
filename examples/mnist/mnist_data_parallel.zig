@@ -90,10 +90,7 @@ pub fn main(init: std.process.Init) !void {
     defer registry.deinit();
 
     // Auto-select platform
-    const target: zml.Target = try .selectFirstAcceleratorEnabled();
-    const platform: *zml.Platform = try .init(allocator, io, target, .{
-        .physical_mesh = .auto,
-    });
+    const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
     // Decide how to partition the devices of our hardware.
