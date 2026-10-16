@@ -44,7 +44,9 @@ pub fn fusedExperts(
     // HACK(Corentin): only rely on the scheme of gate_up for now.
 
     if (gate_up.quantization) |q| switch (q.scheme) {
-        .mxfp4 => return fusedExpertsMxfp4(input, ids, weights, gate_up, down, options),
+        .mxfp4 => if (zml.Compiler.current().platform.target == .cuda) {
+            return fusedExpertsMxfp4(input, ids, weights, gate_up, down, options);
+        },
         else => {},
     };
 
