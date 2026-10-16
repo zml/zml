@@ -3158,10 +3158,11 @@ test "GSPMD attributes preserve folded logical axis order" {
 
 test "GSPMD executes a reduction across a folded logical axis" {
     if (comptime !Target.cpu.isEnabled()) return error.SkipZigTest;
-    const Tensor = @import("tensor.zig").Tensor;
-    const Buffer = @import("buffer.zig").Buffer;
-    const allocator = std.testing.allocator;
+
+    const zml = @import("zml.zig");
     const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
     const platform = try Platform.init(allocator, io, .cpu, .{
         .cpu = .{ .device_count = 8 },
         .physical_mesh = .{ .custom = PhysicalMesh.torus3d },
@@ -3170,12 +3171,13 @@ test "GSPMD executes a reduction across a folded logical axis" {
     var strategy: Strategy = .parseBindings(.{ .model = .link_x, .data = .link_y });
     strategy.addFold(.link_x, &.{ .link_z, .link_x });
     const mesh_ = try platform.registerMeshWithStrategy("logical", .mesh(.{ .data = .balanced, .model = .balanced }), strategy);
+
     const Functions = struct {
-        fn forward(input: Tensor) Tensor {
+        fn forward(input: zml.Tensor) zml.Tensor {
             return input.sum(.m).squeeze(.m).withPartitioning(input.shape()._sharding.mesh.?, .{ .n = .data });
         }
     };
-    const input = Tensor.init(.{ .m = 8, .n = 4 }, .i32).withPartitioning(mesh_, .{ .m = .model, .n = .data });
+    const input = zml.Tensor.init(.{ .m = 8, .n = 4 }, .i32).withPartitioning(mesh_, .{ .m = .model, .n = .data });
     const exe = try platform.compileFn(allocator, io, Functions.forward, .{input}, .{
         .meshes = &.{mesh_},
         .partitioner = .gspmd,
@@ -3189,15 +3191,10 @@ test "GSPMD executes a reduction across a folded logical axis" {
             expected[n] += value.*;
         }
     }
-    var input_buffer = try Buffer.fromBytes(io, platform, input.shape(), std.mem.asBytes(&values));
+
+    var input_buffer = try zml.Buffer.fromBytes(io, platform, input.shape(), std.mem.asBytes(&values));
     defer input_buffer.deinit();
-    var args = try exe.args(allocator);
-    defer args.deinit(allocator);
-    var results = try exe.results(allocator);
-    defer results.deinit(allocator);
-    args.set(.{input_buffer});
-    exe.call(io, args, &results, .{});
-    var output = results.get(Buffer);
+    var output = try exe.eval(allocator, io, .{input_buffer});
     defer output.deinit();
     try std.testing.expectEqual(expected, try output.getValue([4]i32, io));
 }
