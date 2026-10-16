@@ -98,12 +98,14 @@ pub fn BoundedArrayAligned(
 
         /// Return the element at index `i` of the slice.
         pub fn get(self: Self, i: usize) T {
-            return self.constSlice()[i];
+            std.debug.assert(i < self.len);
+            return self.buffer[i];
         }
 
         /// Set the value of the element at index `i` of the slice.
         pub fn set(self: *Self, i: usize, item: T) void {
-            self.slice()[i] = item;
+            std.debug.assert(i < self.len);
+            self.buffer[i] = item;
         }
 
         /// Return the maximum length of a slice.
@@ -285,17 +287,6 @@ pub fn BoundedArrayAligned(
             assert(self.len <= buffer_capacity);
             @memset(self.slice()[old_len..self.len], value);
         }
-
-        //pub const Writer = if (T != u8)
-        //    @compileError("The Writer interface is only defined for BoundedArray(u8, ...) " ++
-        //        "but the given type is BoundedArray(" ++ @typeName(T) ++ ", ...)")
-        //else
-        //    std.io.GenericWriter(*Self, error{Overflow}, appendWrite);
-
-        ///// Initializes a writer which will write into the array.
-        //pub fn writer(self: *Self) Writer {
-        //    return .{ .context = self };
-        //}
 
         /// Same as `appendSlice` except it returns the number of bytes written, which is always the same
         /// as `m.len`. The purpose of this function existing is to match `std.io.GenericWriter` API.

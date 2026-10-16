@@ -260,8 +260,8 @@ pub fn init(
 
     for (devices, 0..) |device, shard_index| {
         const memory = platform.devices[device.id].memory(.host_pinned).?.pjrt_memory;
-        const origin: Coordinates = .ofShard(&metadata.placement, device);
-        const shared_region = if (can_share_allocations) allocations.findRegion(origin, metadata.placement.shape) else null;
+        const origin: Coordinates = .ofShard(&metadata.placement, shard_index, metadata.shape);
+        const shared_region = if (can_share_allocations) allocations.findRegion(origin, metadata.placement.localShape(metadata.shape)) else null;
 
         if (shared_region) |region_index| {
             // Devices sharing allocations add no replicas: the region has a single entry.
@@ -273,7 +273,7 @@ pub fn init(
             }
             buffer._shards.appendAssumeCapacity(try platform.pjrt_client.createViewOfDeviceBuffer(api, .{
                 .device_buffer_ptr = try existing.handle.opaqueDeviceMemoryDataPointer(api),
-                .dims = metadata.placement.shape.dims(),
+                .dims = metadata.placement.local_dims.constSlice(),
                 .element_type = metadata.ty,
                 .layout = try existing.handle.memoryLayout(api),
                 // The backing host allocation is accessible across devices
@@ -284,14 +284,14 @@ pub fn init(
             }));
         } else {
             const handle = try platform.pjrt_client.createUninitializedBuffer(api, .{
-                .dims = metadata.placement.shape.dims(),
+                .dims = metadata.placement.local_dims.constSlice(),
                 .element_type = metadata.ty,
                 .layout = metadata.layout,
                 .dst = .{ .memory = memory },
             });
             buffer._shards.appendAssumeCapacity(handle);
             // The pointer is read once the creation completes, after `await` below.
-            allocations.add(metadata.placement.shape, .{
+            allocations.add(metadata.placement.localShape(metadata.shape), .{
                 .origin = origin,
                 .ptr = undefined,
                 .shard_index = shard_index,
@@ -305,7 +305,7 @@ pub fn init(
 
     return .{
         .buffer = buffer,
-        .mapping = try .create(allocator, metadata.shape, metadata.placement.shape, metadata.layout, allocations),
+        .mapping = try .create(allocator, metadata.shape, metadata.placement.localShape(metadata.shape), metadata.layout, allocations),
     };
 }
 
@@ -708,9 +708,10 @@ const Coordinates = struct {
     const zero: Coordinates = .{ .axes = @splat(0) };
 
     /// The global coordinates of the first element of a device's shard.
-    fn ofShard(placement: *const Sharding.Placement, device: Sharding.Device) Coordinates {
+    fn ofShard(placement: *const Sharding.Placement, device_index: usize, shape: Shape) Coordinates {
+        // TODO: derive shard coordinates directly from DeviceGrid instead of reconstructing slices.
         var result: Coordinates = .zero;
-        for (placement.slices(device.coords).constSlice(), 0..) |slice, axis| result.axes[axis] = @intCast(slice.start);
+        for (placement.slices(device_index, shape).constSlice(), 0..) |slice, axis| result.axes[axis] = @intCast(slice.start);
         return result;
     }
 
@@ -1830,7 +1831,7 @@ test "HostAccessible devices holding a shard read one allocation in data-paralle
     const io = std.testing.io;
     // Two data-parallel groups of two tensor-parallel devices.
     const platform = Platform.auto(allocator, io, .{
-        .physical_mesh = .{ .custom = buildMesh2x2 },
+        .physical_mesh = .{ .custom = Sharding.PhysicalMesh.torus2d },
         .cpu = .{ .device_count = 4 },
     }) catch return error.SkipZigTest;
     defer platform.deinit(allocator, io);
@@ -1854,48 +1855,26 @@ fn expectDevicesReadShards(platform: *const Platform, shape_: Shape) !void {
     const api = platform.pjrt_api;
     const pinned = try HostAccessible.init(allocator, io, platform, shape_, .undonatable);
     defer pinned.deinit(allocator);
-    const placement: Sharding.Placement = try .init(shape_);
+    const placement: Sharding.Placement = try Sharding.Placement.init(&shape_);
     const expected_allocations = switch (platform.target) {
-        .cpu, .cuda, .rocm => shape_.count() / placement.shape.count(),
+        .cpu, .cuda, .rocm => shape_.count() / placement.localShape(shape_).count(),
         else => platform.devices.len,
     };
     try std.testing.expectEqual(expected_allocations, pinned.mapping.allocations.entries.len);
 
     pinned.view(i32).fillIota(0, 1);
     const row_size: usize = @intCast(shape_.dim(.d));
-    const values = try allocator.alloc(i32, placement.shape.count());
+    const values = try allocator.alloc(i32, placement.localShape(shape_).count());
     defer allocator.free(values);
-    for (pinned.buffer._shards.constSlice(), platform.physical_mesh.devices_in_canonical_order) |shard, device| {
+    for (pinned.buffer._shards.constSlice(), 0..) |shard, device_index| {
         @memset(values, -1);
         if (try shard.toHostBuffer(api, std.mem.sliceAsBytes(values))) |event| {
             defer event.deinit(api);
             try event.await(api, io);
         }
-        const first_row = Coordinates.ofShard(&placement, device).axes[0];
+        const first_row = Coordinates.ofShard(&placement, device_index, shape_).axes[0];
         for (values, 0..) |value, i| try std.testing.expectEqual(@as(i32, @intCast(first_row * row_size + i)), value);
     }
-}
-
-/// Like `zml/io.zig`'s, a 2x2 torus over the first four devices.
-fn buildMesh2x2(
-    allocator: std.mem.Allocator,
-    target: @import("../platform.zig").Target,
-    devices: []const @import("../platform.zig").Device,
-) !Sharding.PhysicalMesh {
-    if (!builtin.is_test) @compileError("buildMesh2x2 is only available in tests");
-
-    if (devices.len < 4) return error.NotEnoughDevices;
-    const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .device(devices[0]),
-            .device(devices[1]),
-        }),
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .device(devices[2]),
-            .device(devices[3]),
-        }),
-    });
-    return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
 }
 
 test "HostAccessible executions read shared inputs on every device" {

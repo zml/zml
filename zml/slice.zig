@@ -6,6 +6,7 @@ const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const floats = @import("floats.zig");
 const Shape = @import("shape.zig").Shape;
+const builtin = @import("builtin");
 
 pub fn isBytes(comptime T: type) bool {
     const type_info = @typeInfo(T);
@@ -135,13 +136,13 @@ pub const Slice = struct {
 
     pub fn data(slice: Slice) []u8 {
         std.debug.assert(slice.mutable);
-        std.debug.assert(slice.isContiguous());
+        if (builtin.mode == .debug) std.debug.assert(slice.isContiguous());
         const end = slice.offset_bytes + slice.shape.byteSize();
         return @constCast(slice.bytes[slice.offset_bytes..end]);
     }
 
     pub fn constData(slice: Slice) []const u8 {
-        std.debug.assert(slice.isContiguous());
+        if (builtin.mode == .debug) std.debug.assert(slice.isContiguous());
         const end = slice.offset_bytes + slice.shape.byteSize();
         return slice.bytes[slice.offset_bytes..end];
     }
