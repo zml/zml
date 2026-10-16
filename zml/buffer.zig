@@ -134,15 +134,13 @@ pub const Buffer = struct {
     }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
-    pub noinline fn from(
+    pub fn from(
         io: std.Io,
         platform: *const Platform,
         shape_: Shape,
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
-        // TODO: benchmark against
-        // const metadata: PjrtBufferMetadata = .init(platform, shape_);
         var pjrt_shards: Shards = .empty;
         var packed_shape = shape_.packedShape();
         if (packed_shape._sharding.mesh == null) packed_shape._sharding.mesh = platform.replicated_mesh;
