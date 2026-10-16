@@ -820,6 +820,7 @@ fn validateMeshes(meshes: []const *const Sharding.Mesh) !void {
             // currently DirectMemoryWriter tests have replicated meshes depending on the platform they target
             log.warn("Mesh({s}) has numReplicas() == {d}. This imply that all tensor put on this mesh will be implicitly replicated {d} times.\n{f}", .{ m.name, num_replicas, num_replicas, m });
         }
+        log.debug("Using {f}", .{m});
     }
 
     const first = meshes[0];
