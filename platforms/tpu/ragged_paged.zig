@@ -547,9 +547,15 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
 
     {
         var i = k.openIf(k.cmpi(.eq, k.addi(a.heads_blk_idx, a.q_blk_idx), k.lift(@as(i32, 0))));
-        createKvAsyncCopyDescriptors(k, cfg, a, a.heads_blk_idx, init_seq_idx, k.lift(@as(i32, 0)), init_buf_idx);
+        const first_seq_idx = nextNonemptyKvSequence(k, cfg, a, init_seq_idx, num_seqs);
+        var nonempty = k.openIf(k.cmpi(.slt, first_seq_idx, num_seqs));
+        createKvAsyncCopyDescriptors(k, cfg, a, a.heads_blk_idx, first_seq_idx, k.lift(@as(i32, 0)), init_buf_idx);
+        nonempty.yieldThen(.{});
         i.yieldThen(.{});
     }
+
+    // Empty rows skip flashAttention, so their accumulator must already be zero.
+    k.vectorStoreAt(a.acc_ref, k.zeros(&.{ cfg.numQPerBlk(), cfg.numQHeadsPerBlk(), cfg.head_dim }, .f32), &.{ k.cIndex(0), k.cIndex(0), k.cIndex(0) });
 
     var q_loop = k.openWhile(.{ k.lift(@as(i32, 0)), init_seq_idx, init_buf_idx }, .{ k.scalarTy(.i32), k.scalarTy(.i32), k.scalarTy(.i32) });
     {
@@ -589,10 +595,20 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
             const is_last_kv = k.cmpi(.sge, k.muli(next_kv_blk_raw, k.lift(@as(i32, @intCast(cfg.numKvPerBlk())))), kv_len);
             const next_kv_blk = k.select(is_last_kv, k.lift(@as(i32, 0)), next_kv_blk_raw);
             const cur_seq_end = k.cmpi(.sle, q_end, q_len_end);
-            const next_seq_a = k.select(cur_seq_end, k.addi(cur_seq_idx, k.lift(@as(i32, 1))), cur_seq_idx);
-            const next_seq_b = k.select(is_last_kv, next_seq_a, cur_seq_idx);
-            const is_last_seq = k.cmpi(.eq, next_seq_b, num_seqs);
-            const next_seq_idx = k.select(is_last_seq, k.lift(@as(i32, 0)), next_seq_b);
+            const next_nonempty_seq = blk: {
+                // Only sequence transitions need to scan for empty KV rows.
+                var next_seq = k.openIfElse(k.andi(is_last_kv, cur_seq_end), .{k.scalarTy(.i32)});
+                {
+                    const start_seq_idx = k.addi(cur_seq_idx, k.lift(@as(i32, 1)));
+                    next_seq.yieldThen(.{nextNonemptyKvSequence(k, cfg, a, start_seq_idx, num_seqs)});
+                }
+                {
+                    next_seq.yieldElse(.{cur_seq_idx});
+                }
+                break :blk next_seq.results[0];
+            };
+            const is_last_seq = k.cmpi(.eq, next_nonempty_seq, num_seqs);
+            const next_seq_idx = k.select(is_last_seq, k.lift(@as(i32, 0)), next_nonempty_seq);
             const next_heads_blk_idx = k.select(is_last_seq, k.addi(a.heads_blk_idx, k.lift(@as(i32, 1))), a.heads_blk_idx);
             const next_buf = k.extui(k.cmpi(.eq, cur_buf, k.lift(@as(i32, 0))), .i32);
 
@@ -657,6 +673,33 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
     k.scalarStore(a.seq_buf_idx, buf_idx_out, &.{k.cIndex(1)});
 
     k.vectorStoreAt(a.o, k.refLoad(a.acc_ref).to(cfg.q_dtype), &.{ k.cIndex(0), k.cIndex(0), k.cIndex(0) });
+}
+
+// Fixed drafter blocks can have query tokens without visible KV tokens.
+// Keep their query positions, but never schedule a DMA for an empty KV row.
+fn nextNonemptyKvSequence(
+    k: *mtt.Builder,
+    cfg: Cfg,
+    a: anytype,
+    start_seq_idx: mtt.Value,
+    num_seqs: mtt.Value,
+) mtt.Value {
+    var loop = k.openWhile(.{start_seq_idx}, .{k.scalarTy(.i32)});
+    {
+        const seq_idx = loop.before_carried[0];
+        // The terminal index can equal the metadata array length.
+        const safe_seq_idx = k.minsi(seq_idx, k.lift(@as(i32, @intCast(cfg.max_num_seqs - 1))));
+        const kv_len = k.scalarLoad(a.kv_lens, &.{k.toIndex(safe_seq_idx)});
+        const skip = k.andi(
+            k.cmpi(.slt, seq_idx, num_seqs),
+            k.cmpi(.sle, kv_len, k.lift(@as(i32, 0))),
+        );
+        loop.yieldBefore(skip, .{seq_idx});
+    }
+    {
+        loop.yieldAfter(.{k.addi(loop.after_carried[0], k.lift(@as(i32, 1)))});
+    }
+    return loop.results[0];
 }
 
 /// Open a builder, run the kernel body, and return the canonicalized MLIR IR.
