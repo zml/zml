@@ -51,7 +51,7 @@ pub fn run_once(
     params: Params,
 ) !void {
     // Tokenizer
-    var tokenized = try tokenizer.tokenize(self.allocator, self.io, self.model_dir, prompt);
+    var tokenized = try tokenizer.tokenize(self.allocator, self.io, self.model_dir, prompt, .{});
     defer tokenized.deinit(self.allocator);
 
     // Compile the model
