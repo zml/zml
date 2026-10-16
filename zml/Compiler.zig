@@ -812,6 +812,12 @@ fn validateMeshes(meshes: []const *const Sharding.Mesh) !void {
     for (meshes) |m| {
         const num_replicas = m.numReplicas();
         if (num_replicas > 1 and !std.mem.eql(u8, "replicated", m.name)) {
+            // This seems like a performance footgun, rather that something anyone would want to use.
+            // It's generally better to have meshes that cover all devices,
+            // even if later it means that some mesh axis is never used.
+            // Otherwise a "sharded" tensor can in fact be replicated because the underlying mesh has replicas
+            // TODO(#914): decide if we should forbid this altogether
+            // currently DirectMemoryWriter tests have replicated meshes depending on the platform they target
             log.warn("Mesh({s}) has numReplicas() == {d}. This imply that all tensor put on this mesh will be implicitly replicated {d} times.\n{f}", .{ m.name, num_replicas, num_replicas, m });
         }
     }
