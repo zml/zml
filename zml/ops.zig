@@ -763,11 +763,11 @@ test "if" {
         }
 
         pub fn onTrue(ctx: @This()) Tensor {
-            return ctx.a.dotGeneral(ctx.b, &.{.{ 1, 0 }}, &.{});
+            return ctx.a.dotGeneral(ctx.b, &.{.{ 1, 0 }}, &.{}, ctx.a.dtype());
         }
 
         pub fn onFalse(ctx: @This()) Tensor {
-            return ctx.b.dotGeneral(ctx.a, &.{.{ 1, 0 }}, &.{});
+            return ctx.b.dotGeneral(ctx.a, &.{.{ 1, 0 }}, &.{}, ctx.b.dtype());
         }
     };
 
@@ -845,8 +845,8 @@ test if2 {
         pub fn _fwd(pred: Tensor, a: Tensor, b: Tensor) Tensor {
             return if2(
                 pred.convert(.bool),
-                a.dotGeneral(b, &.{.{ 1, 0 }}, &.{}),
-                b.dotGeneral(a, &.{.{ 1, 0 }}, &.{}),
+                a.dotGeneral(b, &.{.{ 1, 0 }}, &.{}, a.dtype()),
+                b.dotGeneral(a, &.{.{ 1, 0 }}, &.{}, b.dtype()),
             );
         }
     };

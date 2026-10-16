@@ -1555,8 +1555,8 @@ pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Ten
     // actually do the interpolation.
     // Note: ideally this matmul should be inlined with the gather, but that's currently not the case.
     // TODO: not being able to use dot here is a bit annoying.
-    var res = values.dotGeneral(weights, &.{.{ values.axis(._neighbors), weights.axis(._neighbors) }}, &.{});
-    res = pos.dotGeneral(res, &.{.{ pos.axis(._interpolated), res.axis(._interpolated) }}, &.{.{ 0, 0 }});
+    var res = values.dotGeneral(weights, &.{.{ values.axis(._neighbors), weights.axis(._neighbors) }}, &.{}, values.dtype());
+    res = pos.dotGeneral(res, &.{.{ pos.axis(._interpolated), res.axis(._interpolated) }}, &.{.{ 0, 0 }}, pos.dtype());
 
     // the current axis is outputted in first position because it's a batching dim, put it back in place.
     if (axis != 0) {
