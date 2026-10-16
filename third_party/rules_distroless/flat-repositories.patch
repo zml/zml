@@ -1,0 +1,59 @@
+diff --git a/apt/private/deb_resolve.bzl b/apt/private/deb_resolve.bzl
+--- a/apt/private/deb_resolve.bzl
++++ b/apt/private/deb_resolve.bzl
+@@ -46,7 +46,10 @@
+     sources = []
+
+     for src in manifest["sources"]:
+-        distr, components = src["channel"].split(" ", 1)
++        if src["channel"].endswith("/"):
++            distr, components = src["channel"], ""
++        else:
++            distr, components = src["channel"].split(" ", 1)
+         for comp in components.split(" "):
+             # TODO: only support urls before 1.0
+             if "urls" in src:
+@@ -60,6 +63,7 @@
+                 urls,
+                 distr,
+                 comp,
++                src.get("archs", manifest["archs"]),
+             ))
+
+     repository = deb_repository.new(rctx, sources = sources, archs = manifest["archs"])
+diff --git a/apt/private/apt_deb_repository.bzl b/apt/private/apt_deb_repository.bzl
+--- a/apt/private/apt_deb_repository.bzl
++++ b/apt/private/apt_deb_repository.bzl
+@@ -13,7 +13,7 @@
+     return use_netrc(netrc, urls, {})
+
+ def _fetch_package_index(rctx, urls, dist, comp, arch, integrity):
+-    target_triple = "{dist}/{comp}/{arch}".format(dist = dist, comp = comp, arch = arch)
++    target_triple = "{dist}/{comp}/{arch}".format(dist = dist.strip("/") or ".", comp = comp, arch = arch)
+
+     # See https://linux.die.net/man/1/xz , https://linux.die.net/man/1/gzip , and https://linux.die.net/man/1/bzip2
+     #  --keep       -> keep the original file (Bazel might be still committing the output to the cache)
+@@ -35,7 +35,10 @@
+         download = None
+         for (ext, cmd) in supported_extensions:
+             output = "{}/Packages{}".format(target_triple, ext)
+-            dist_url = "{}/dists/{}/{}/binary-{}/Packages{}".format(url, dist, comp, arch, ext)
++            if dist.endswith("/"):
++                dist_url = "{}/{}Packages{}".format(url, dist.lstrip("/"), ext)
++            else:
++                dist_url = "{}/dists/{}/{}/binary-{}/Packages{}".format(url, dist, comp, arch, ext)
+             auth = {}
+             if url in base_auth:
+                 auth = {dist_url: base_auth[url]}
+@@ -167,7 +170,10 @@
+     )
+
+     for arch in archs:
+-        for (urls, dist, comp) in sources:
++        for (urls, dist, comp, source_archs) in sources:
++            if arch not in source_archs:
++                continue
++
+             # We assume that `url` does not contain a trailing forward slash when passing to
+             # functions below. If one is present, remove it. Some HTTP servers do not handle
+             # redirects properly when a path contains "//"

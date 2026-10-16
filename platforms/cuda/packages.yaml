@@ -8,6 +8,12 @@ sources:
     url: https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z
   - channel: llvm-toolchain-bookworm-22 main
     url: https://apt.llvm.org/bookworm
+  - channel: /
+    url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64
+    archs: [amd64]
+  - channel: /
+    url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/sbsa
+    archs: [arm64]
 
 archs:
   - "amd64"
@@ -16,3 +22,5 @@ archs:
 packages:
   - "llvm-libunwind1" # LLVM 22 runtime from llvm-toolchain-bookworm-22.
   - "zlib1g"
+  - "cuda-compat-13-4"
+  - "libnccl2"
