@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
             platform,
             "text_encoder.model.language_model.rotary_emb",
             &activations_store.store,
-            TextWrapper{ .model = language_model_store.model.language_model.rotary_emb, .args = compile_args },
+            TextWrapper{ .model = language_model_store.model.language_model.language_model.rotary_emb, .args = compile_args },
             .{ .args = compile_args_buffers },
         );
     } else {
