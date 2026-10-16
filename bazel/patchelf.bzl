@@ -1,76 +1,78 @@
 def _patchelf_impl(ctx):
-    output_name = ctx.file.src.basename
-    if ctx.attr.soname:
-        output_name = ctx.attr.soname
-    output = ctx.actions.declare_file("{}/{}".format(ctx.attr.name, output_name))
+    output_name = ctx.attr.soname or ctx.file.src.basename
+    output = ctx.actions.declare_file("{}/{}".format(ctx.label.name, output_name))
 
-    commands = [
-        "set -e",
-        'cp -f "$2" "$3"',
-        'chmod +w "$3"',
+    inputs = [ctx.file.src]
+    args = ctx.actions.args()
+
+    # --- soname -----------------------------------------------------------
+    if ctx.attr.soname:
+        args.add("--set-soname", ctx.attr.soname)
+
+    # --- DT_NEEDED --------------------------------------------------------
+    args.add_all(ctx.attr.remove_needed, before_each = "--remove-needed")
+    args.add_all(ctx.attr.add_needed, before_each = "--add-needed")
+    for old, new in ctx.attr.replace_needed.items():
+        args.add("--replace-needed")
+        args.add(old)
+        args.add(new)
+
+    # --- RPATH / RUNPATH --------------------------------------------------
+    # patchelf only accepts one rpath operation per invocation.
+    rpath_ops = [
+        bool(ctx.attr.set_rpath),
+        bool(ctx.attr.add_rpath),
+        ctx.attr.remove_rpath,
     ]
-
-    if ctx.attr.soname:
-        commands.append(""" "$1" --set-soname '{}' "$3" """.format(ctx.attr.soname))
-    if ctx.attr.remove_needed:
-        for v in ctx.attr.remove_needed:
-            commands.append(""" "$1" --remove-needed '{}' "$3" """.format(v))
-    if ctx.attr.add_needed:
-        for v in ctx.attr.add_needed:
-            commands.append(""" "$1" --add-needed '{}' "$3" """.format(v))
-    if ctx.attr.replace_needed:
-        for k, v in ctx.attr.replace_needed.items():
-            commands.append(""" "$1" --replace-needed '{}' '{}' "$3" """.format(k, v))
+    if len([op for op in rpath_ops if op]) > 1:
+        fail("patchelf: set_rpath, add_rpath and remove_rpath are mutually exclusive")
 
     if ctx.attr.set_rpath:
-        commands.append(""" "$1" --set-rpath '{}' --force-rpath "$3" """.format(ctx.attr.set_rpath))
-    if ctx.attr.add_rpath:
-        for path in ctx.attr.add_rpath:
-            commands.append(""" "$1" --add-rpath '{}' --force-rpath "$3" """.format(path))
-    if ctx.attr.remove_rpath:
-        for path in ctx.attr.remove_rpath:
-            commands.append(""" "$1" --remove-rpath '{}' "$3" """.format(path))
+        args.add("--force-rpath")
+        args.add("--set-rpath", ctx.attr.set_rpath)
+    elif ctx.attr.add_rpath:
+        args.add("--force-rpath")
+        args.add("--add-rpath", ":".join(ctx.attr.add_rpath))
+    elif ctx.attr.remove_rpath:
+        args.add("--remove-rpath")
 
-    renamed_syms = ctx.actions.declare_file("{}.rename.txt".format(ctx.label.name))
+    # --- dynamic symbol renames ------------------------------------------
     if ctx.attr.rename_dynamic_symbols:
-        content = "\n".join([
-            "{} {}".format(k, v)
-            for k, v in ctx.attr.rename_dynamic_symbols.items()
-        ])
-        ctx.actions.write(renamed_syms, content)
-        commands.append(""" "$1" --rename-dynamic-symbols '{}' "$3" """.format(renamed_syms.path))
-    else:
-        ctx.actions.write(renamed_syms, "")
+        symbols = ctx.actions.declare_file(ctx.label.name + ".symbols")
+        ctx.actions.write(symbols, "".join([
+            "{} {}\n".format(old, new)
+            for old, new in ctx.attr.rename_dynamic_symbols.items()
+        ]))
+        inputs.append(symbols)
+        args.add("--rename-dynamic-symbols", symbols)
 
-    ctx.actions.run_shell(
-        inputs = [ctx.file.src, renamed_syms],
+    args.add("--output", output)
+    args.add(ctx.file.src)
+
+    ctx.actions.run(
+        executable = ctx.executable._patchelf,
+        inputs = inputs,
         outputs = [output],
-        arguments = [ctx.executable._patchelf.path, ctx.file.src.path, output.path],
-        command = "\n".join(commands),
-        tools = [ctx.executable._patchelf],
+        arguments = [args],
+        mnemonic = "Patchelf",
+        progress_message = "Patching ELF %{output}",
     )
-
-    return [
-        DefaultInfo(
-            files = depset([output]),
-        ),
-    ]
+    return [DefaultInfo(files = depset([output]))]
 
 patchelf = rule(
     implementation = _patchelf_impl,
     attrs = {
         "src": attr.label(allow_single_file = True, mandatory = True),
-        "soname": attr.string(),
+        "soname": attr.string(doc = "Set DT_SONAME; also used as the output file name."),
         "add_needed": attr.string_list(),
         "remove_needed": attr.string_list(),
-        "replace_needed": attr.string_dict(),
-        "rename_dynamic_symbols": attr.string_dict(),
+        "replace_needed": attr.string_dict(doc = "old -> new DT_NEEDED replacements."),
+        "rename_dynamic_symbols": attr.string_dict(doc = "old -> new symbol renames."),
         "set_rpath": attr.string(),
-        "add_rpath": attr.string_list(),
-        "remove_rpath": attr.string_list(),
+        "add_rpath": attr.string_list(doc = "Entries appended to the existing RPATH (joined with ':')."),
+        "remove_rpath": attr.bool(default = False, doc = "Strip the DT_RPATH/DT_RUNPATH entry entirely."),
         "_patchelf": attr.label(
             default = "@patchelf",
-            allow_single_file = True,
             executable = True,
             cfg = "exec",
         ),
