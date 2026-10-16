@@ -262,7 +262,7 @@ fn forward(input: Tensor, c: Case) Outputs {
         .input_quantization = switch (c.backend) {
             .metal => .none,
             .cute => .mxfp8_bf16,
-            .triton => if (c.scheme == .mxfp4) .mxfp8 else .automatic,
+            .triton => if (c.scheme == .mxfp4 and zml.Compiler.current().platform.target == .cuda) .mxfp8 else .automatic,
             else => .automatic,
         },
     });
@@ -524,6 +524,18 @@ test "Triton compatibility matrix" {
         .biases = &.{ false, true },
     }, .{});
 
+    if (platform.target != .cuda) {
+        // Other platforms retain the general MXFP4 path and its full contract.
+        try pipeline.run(std.testing.io, std.testing.allocator, .triton, .{
+            .formats = &.{.{ .scheme = .mxfp4 }},
+            .activations = &all_activations,
+            .quantize_inputs = &.{ false, true },
+            .placements = &.{ .before_down, .after_down },
+            .biases = &.{ false, true },
+        }, .{});
+        return;
+    }
+
     // Preserve the 12 supported cases from the former general MXFP4 matrix.
     // Its other 252 cases require activations or projection bias unsupported
     // by the simplified path. The former specialized matrix remains below.
@@ -538,6 +550,7 @@ test "Triton compatibility matrix" {
 // Keep triton mxfp4 separate because it only supports a subset for now
 test "Triton MXFP4 compatibility matrix" {
     const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
     const pipeline: Pipeline = .{ .platform = platform };
 
     // The merged backend uses the former specialized MXFP4 path: clipped
