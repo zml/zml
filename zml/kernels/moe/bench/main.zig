@@ -20,7 +20,7 @@ pub fn main(init: std.process.Init) !void {
     if ((args.dump != null or args.compare != null) and plan.runnable != 1) zml.stdx.flags.fatal("--dump/--compare require one runnable case, selected {d}; narrow axes or use --list", .{plan.runnable});
 
     var stdout_buffer: [8192]u8 = undefined;
-    var stdout_file = std.Io.File.stdout().writer(io, &stdout_buffer);
+    var stdout_file = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     const stdout = &stdout_file.interface;
     const json_file: ?std.Io.File = if (args.json) |path| try std.Io.Dir.createFile(.cwd(), io, path, .{}) else null;
     defer if (json_file) |f| f.close(io);
@@ -35,11 +35,13 @@ pub fn main(init: std.process.Init) !void {
     }
     if (json) |writer| try results.writeJsonLine(writer, .{
         .kind = "run",
-        .schema_version = 3,
+        .schema_version = 4,
         .timestamp_ns = std.Io.Timestamp.now(io, .real).nanoseconds,
         .source = results.source(),
         .platform = platform.target,
         .devices = devices,
+        .device_details = try results.deviceDetails(arena.allocator(), platform),
+        .environment = try results.environment(arena.allocator(), init.environ_map),
         .pjrt_version = platform.pjrt_api.version(),
         .expert_partitions = experts_mesh.numPartitionsForLogicalAxis(.experts),
         .args = args,
@@ -56,7 +58,11 @@ pub fn main(init: std.process.Init) !void {
     if (plan.runnable == 0) return error.NoRunnableCases;
 
     var failures: usize = 0;
-    for (plan.groups) |group| failures += try runGroup(allocator, io, platform, experts_mesh, args, group, stdout, json);
+    var setup: ?runner.Setup = null;
+    defer if (setup) |*s| s.deinit();
+    var prepared: ?runner.Prepared = null;
+    defer if (prepared) |*p| p.deinit();
+    for (plan.groups) |group| failures += try runGroup(allocator, io, platform, experts_mesh, args, group, &setup, &prepared, stdout, json);
     if (failures != 0) return error.BenchmarkFailed;
 }
 
@@ -108,31 +114,40 @@ const Plan = struct {
     }
 };
 
-fn runGroup(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, experts_mesh: *const zml.Mesh, args: cases.Args, group: Group, stdout: *std.Io.Writer, json: ?*std.Io.Writer) !usize {
+fn runGroup(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, experts_mesh: *const zml.Mesh, args: cases.Args, group: Group, setup: *?runner.Setup, prepared: *?runner.Prepared, stdout: *std.Io.Writer, json: ?*std.Io.Writer) !usize {
     log.info("compiling {s} ({d} runtime variants)", .{ group.id, group.cases.items.len });
-    const compiled = runner.compile(allocator, io, platform, experts_mesh, group.cases.items[0].workload, args.check) catch |err| {
+    const w = group.cases.items[0].workload;
+    if (setup.* != null and !setup.*.?.compatible(w)) {
+        if (prepared.*) |*p| p.deinit();
+        prepared.* = null;
+        setup.*.?.deinit();
+        setup.* = null;
+    }
+    var setup_compile_ns: i64 = 0;
+    if (setup.* == null) {
+        log.info("compiling expert setup and reference", .{});
+        setup.* = runner.compileSetup(allocator, io, platform, experts_mesh, w, args.check) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
+            return reportCompilationFailure(group, err, stdout, json);
+        };
+        setup_compile_ns = setup.*.?.compile_ns;
+    }
+    const compiled = runner.compile(allocator, io, platform, experts_mesh, w, &setup.*.?) catch |err| {
         if (err == error.Canceled) return error.Canceled;
-        for (group.cases.items) |selected| {
-            var record = group.record(selected, .compilation_failed);
-            record.reason = @errorName(err);
-            try results.report(stdout, json, record);
-        }
-        return group.cases.items.len;
+        return reportCompilationFailure(group, err, stdout, json);
     };
     defer compiled.deinit();
-    var prepared: ?runner.Prepared = null;
-    defer if (prepared) |*p| p.deinit();
     var failures: usize = 0;
     for (group.cases.items, 0..) |selected, index| {
         var record = group.record(selected, .measured);
-        if (index == 0) record.compile_ns = compiled.compile_ns;
+        if (index == 0) record.compile_ns = compiled.compile_ns + setup_compile_ns;
         // Weights stay on device across routing variants with the same seed.
-        if (prepared != null and prepared.?.seed != selected.workload.seed) {
-            prepared.?.deinit();
-            prepared = null;
+        if (prepared.* != null and prepared.*.?.seed != selected.workload.seed) {
+            prepared.*.?.deinit();
+            prepared.* = null;
         }
-        if (prepared == null) {
-            prepared = runner.Prepared.init(allocator, io, platform, &compiled, selected.workload) catch |err| {
+        if (prepared.* == null) {
+            prepared.* = runner.Prepared.init(allocator, io, platform, &setup.*.?, selected.workload) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
                 record.status = .execution_failed;
                 record.reason = @errorName(err);
@@ -143,7 +158,7 @@ fn runGroup(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platf
         }
         var arena: std.heap.ArenaAllocator = .init(allocator);
         defer arena.deinit();
-        runner.runCase(arena.allocator(), io, platform, args, &compiled, &prepared.?, &record) catch |err| {
+        runner.runCase(arena.allocator(), io, platform, args, &compiled, &setup.*.?, &prepared.*.?, &record) catch |err| {
             if (err == error.Canceled) return error.Canceled;
             record.status = .execution_failed;
             record.reason = @errorName(err);
@@ -152,6 +167,15 @@ fn runGroup(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platf
         try results.report(stdout, json, record);
     }
     return failures;
+}
+
+fn reportCompilationFailure(group: Group, err: anyerror, stdout: *std.Io.Writer, json: ?*std.Io.Writer) !usize {
+    for (group.cases.items) |selected| {
+        var record = group.record(selected, .compilation_failed);
+        record.reason = @errorName(err);
+        try results.report(stdout, json, record);
+    }
+    return group.cases.items.len;
 }
 
 test {

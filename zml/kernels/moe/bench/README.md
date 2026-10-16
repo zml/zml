@@ -47,6 +47,9 @@ Cartesian product; duplicate effective workloads are removed:
   `--intermediate`, `--experts`, and `--swiglu-limit`.
 - Runtime axes: `--routing` and `--seeds`. `--seed` selects one seed; `--seeds`
   overrides it with a list.
+- `--input-scale=0,1,16` scales activations; `--routing-scale=1,2.5` scales
+  normalized routing weights. Both reuse compilation. Use zero inputs/weights
+  and larger activations to exercise zero output and SwiGLU clipping.
 - `--swiglu-limit=none,7,10` applies to SwiGLU and SwiGLU-step. `none` removes
   clipping; other activation kinds do not use the limit.
 - `--filter=<substring>` narrows the complete case IDs printed by `--list`.
@@ -80,8 +83,10 @@ selection; `workload.zig` owns operands, layouts, input generation, and routing;
 Routing distributions and seeds do not trigger recompilation. The data mode is
 part of the graph key because it changes the setup graph. Compilation, weight
 generation, layout conversion, data transfers, output inspection, and reference
-checks are outside timing. Only one graph group's device data is retained at a
-time; routing variants with the same seed reuse prepared weights.
+checks are outside timing. Only one compatible setup is retained at a time.
+Consecutive token counts reuse weight generation, prepared weights for the same
+seed, and the one-row reference executable. Routing and operand-scale variants
+also reuse them.
 
 Defaults are three synchronized warmups, seven measurement samples, and at least
 20 calls and 20 milliseconds per sample. `--warmup`, `--samples`, `--iters`, and
@@ -90,8 +95,11 @@ including host dispatch and synchronization. Results include the median,
 median absolute deviation (`mad_us`), minimum/maximum, sample count, and
 individual `samples_us` so an agent can distinguish
 noise from a performance change. Expert-parallel timing includes the public
-API's collectives. TFLOP/s and touched-weight bandwidth are per-rank estimates
-based on rank 0 routing, rather than hardware counters.
+API's collectives. The `ranks` array reports actual route count, touched experts,
+largest expert load and padded rows for every rank. The legacy scalar routing
+statistics, TFLOP/s and touched-weight bandwidth still describe rank 0; they are
+estimates, not hardware counters. A decode rank can receive no routes, so inspect
+all ranks.
 
 Execution is in process. Recoverable errors become failed case records; panics
 or device faults can stop the run. Completed JSONL records remain readable.
@@ -138,7 +146,9 @@ element to pass. Runs without `--check` record that validation was not performed
 
 `--json=results.jsonl` writes one complete JSON object per line and flushes each
 record. Run metadata records the source revision, dirty state, source hash, compiler
-version/optimization, platform and devices, and measurement settings. Case records include their full configuration,
+version/optimization, platform, device IDs, compute capabilities and SM counts,
+measurement settings, and relevant environment overrides (`ZML_MOE_*`,
+`CUDA_VISIBLE_DEVICES`, `XLA_FLAGS`, `ZML_AUTOTUNE_CACHE_DIR`). Case records include their full configuration,
 preset, status and skip/failure reason, compilation time, timing samples, routing
 statistics, output statistics, and comparison results. Keep the settings and
 hardware fixed when comparing runs.
@@ -155,5 +165,25 @@ CUDA_VISIBLE_DEVICES=0 bazel run --config=release --@zml//platforms:cuda=true \
 The dump also writes `/tmp/moe-before.bin.json` with its workload identity.
 Keep both files together. Repeat with `--compare=/tmp/moe-before.bin` after
 changing the kernel; comparisons require matching baseline metadata. Comparison
-reports exact matches, maximum absolute error, and tolerance failures. For device-only timing, run a narrowly selected case with the existing
-`--config=nsys` or `--config=rocprofv3` profiling configurations.
+reports exact matches, maximum absolute error, and tolerance failures.
+
+Use `--dump-dir=/path/before` and `--compare-dir=/path/before` to validate an
+entire sweep. Filenames hash the workload ID; each sidecar verifies the full
+identity, dtype, shape, and byte count. `--compare-exact` requires every output
+bit to match, while ordinary comparison uses the numerical tolerances. Default
+operand scales retain the identities of older baselines.
+
+For device-only timing, run a narrowly selected case with the existing
+`--config=nsys` or `--config=rocprofv3` profiling configurations. Profiles contain
+`moe_bench.measure/<case ID>` and nested `moe_bench.batch#iterations=N#` ranges.
+The last `samples_us.len` batch ranges are the retained samples; earlier ranges
+are warmup or duration calibration. Verify complete graph replays before
+comparing kernel durations. Report kernel sums separately from elapsed GPU
+time: kernels and collective communication can overlap, and synchronized wall
+time also includes host dispatch and gaps.
+
+Workload axes describe the MoE operation, not kernel implementation choices.
+Backend tuning overrides belong in environment variables and driver scripts;
+use the same workloads, seeds, validation, and profiling boundaries for every
+setting. The benchmark modules can also support stage-specific backend benches
+without duplicating data generation or result formats.

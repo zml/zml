@@ -281,7 +281,8 @@ pub fn makeInput(allocator: std.mem.Allocator, w: cases.Workload) !zml.Slice {
         inline .bf16, .f16, .f32 => |dtype| {
             for (host.items(dtype.toZigType()), 0..) |*value, i| {
                 const f = if (w.data == .random) rng.random().float(f32) * 2 - 1 else @as(f32, @floatFromInt(@as(i32, @intCast((i * 13 + i / 128) % 23)) - 11)) / 32;
-                value.* = if (dtype == .bf16) .fromF32(f) else @floatCast(f);
+                const scaled = f * w.input_scale;
+                value.* = if (dtype == .bf16) .fromF32(scaled) else @floatCast(scaled);
             }
         },
         else => unreachable,
@@ -297,12 +298,21 @@ pub const Routes = struct {
     touched: i64 = 0,
     maximum: i64 = 0,
     padded_rows: [5]i64 = @splat(0),
+    ranks: []RankStatistics,
 
     pub fn deinit(r: Routes, allocator: std.mem.Allocator) void {
         allocator.free(r.ids);
         allocator.free(r.weights);
         allocator.free(r.counts);
+        allocator.free(r.ranks);
     }
+};
+
+pub const RankStatistics = struct {
+    routes: i64 = 0,
+    touched_experts: i64 = 0,
+    maximum_routes: i64 = 0,
+    padded_rows: [5]i64 = @splat(0),
 };
 
 pub fn generateRoutes(allocator: std.mem.Allocator, w: cases.Workload) !Routes {
@@ -312,13 +322,17 @@ pub fn generateRoutes(allocator: std.mem.Allocator, w: cases.Workload) !Routes {
         .ids = try allocator.alloc(i32, count),
         .weights = undefined,
         .counts = undefined,
+        .ranks = undefined,
     };
     errdefer allocator.free(r.ids);
     r.weights = try allocator.alloc(f32, count);
     errdefer allocator.free(r.weights);
-    r.counts = try allocator.alloc(i64, @intCast(c.experts));
+    r.counts = try allocator.alloc(i64, @intCast(w.global_experts));
     errdefer allocator.free(r.counts);
     @memset(r.counts, 0);
+    r.ranks = try allocator.alloc(RankStatistics, @intCast(@divExact(w.global_experts, c.experts)));
+    errdefer allocator.free(r.ranks);
+    @memset(r.ranks, .{});
     var eligible: std.ArrayList(i32) = .empty;
     defer eligible.deinit(allocator);
     for (0..@intCast(w.global_experts)) |i| {
@@ -350,21 +364,24 @@ pub fn generateRoutes(allocator: std.mem.Allocator, w: cases.Workload) !Routes {
             const id = eligible.items[chosen];
             r.ids[index] = id;
             r.weights[index] = 0.1 + 0.3 * rng.random().float(f32);
-            if (id < c.experts) {
-                r.counts[@intCast(id)] += 1;
-                r.local_routes += 1;
-            }
+            r.counts[@intCast(id)] += 1;
         }
         const token_weights = r.weights[token * k ..][0..k];
         var total_weight: f32 = 0;
         for (token_weights) |weight| total_weight += weight;
-        for (token_weights) |*weight| weight.* /= total_weight;
+        for (token_weights) |*weight| weight.* = (weight.* / total_weight) * w.routing_scale;
     }
-    for (r.counts) |n| {
-        r.touched += @intFromBool(n > 0);
-        r.maximum = @max(r.maximum, n);
-        for ([_]i64{ 8, 16, 32, 64, 128 }, &r.padded_rows) |tile, *rows| rows.* += @divTrunc(n + tile - 1, tile) * tile;
+    for (r.counts, 0..) |n, expert| {
+        const rank = &r.ranks[expert / @as(usize, @intCast(c.experts))];
+        rank.routes += n;
+        rank.touched_experts += @intFromBool(n > 0);
+        rank.maximum_routes = @max(rank.maximum_routes, n);
+        for ([_]i64{ 8, 16, 32, 64, 128 }, &rank.padded_rows) |tile, *rows| rows.* += @divTrunc(n + tile - 1, tile) * tile;
     }
+    r.local_routes = r.ranks[0].routes;
+    r.touched = r.ranks[0].touched_experts;
+    r.maximum = r.ranks[0].maximum_routes;
+    r.padded_rows = r.ranks[0].padded_rows;
     return r;
 }
 
@@ -398,7 +415,35 @@ test "routing is reproducible, distinct, and respects active experts" {
         if (routing == .balanced) try std.testing.expect(@abs(a.counts[0] - a.counts[1]) <= 1);
         try std.testing.expectEqual(@as(i64, 0), a.counts[2]);
         try std.testing.expectEqual(@as(i64, 0), a.counts[3]);
+        try std.testing.expectEqual(w.case.tokens * w.case.topk, a.ranks[0].routes + a.ranks[1].routes);
+        try std.testing.expectEqual(a.local_routes, a.ranks[0].routes);
+        try std.testing.expectEqualSlices(i64, &a.padded_rows, &a.ranks[0].padded_rows);
     }
+}
+
+test "zero inputs and scaled routing retain the selected expert workload" {
+    const allocator = std.testing.allocator;
+    var w: cases.Workload = .{
+        .case = .{ .tokens = 3, .topk = 2, .experts = 4 },
+        .routing = .uniform,
+        .global_experts = 8,
+        .active_experts = 0,
+        .sigma = 0.6,
+        .seed = 1,
+        .data = .random,
+        .input_scale = 0,
+        .routing_scale = 2.5,
+    };
+    const host = try makeInput(allocator, w);
+    defer host.free(allocator);
+    for (host.items(zml.DataType.bf16.toZigType())) |value| try std.testing.expectEqual(@as(f32, 0), value.toF32());
+    const a = try generateRoutes(allocator, w);
+    defer a.deinit(allocator);
+    w.routing_scale = 1;
+    const b = try generateRoutes(allocator, w);
+    defer b.deinit(allocator);
+    try std.testing.expectEqualSlices(i32, a.ids, b.ids);
+    for (a.weights, b.weights) |actual, original| try std.testing.expectEqual(original * 2.5, actual);
 }
 
 test "expert templates retain packed layouts and optional scale metadata" {

@@ -16,10 +16,12 @@ pub const Args = struct {
         \\  --intermediate=2304 --experts=192 --swiglu-limit=none,7,10
         \\  --global-experts=384 --active-experts=0
         \\  --routing=uniform,skewed,balanced --sigma=0.6
+        \\  --input-scale=0,1,16 --routing-scale=1,2.5
         \\  --data=fixture|random --seed=1 --seeds=1,2,3
         \\  --warmup=3 --iters=20 --samples=7 --sample-ms=20
         \\  --platform=cuda --cpu-devices=2 --filter=<case substring> --list
         \\  --check --json=results.jsonl --dump=out.bin --compare=ref.bin
+        \\  --dump-dir=baselines --compare-dir=baselines --compare-exact
         \\
         \\Presets are visible seeds, independent of the correctness-test matrix.
         \\Each supplied axis replaces that preset value; comma lists form a Cartesian product.
@@ -54,6 +56,8 @@ pub const Args = struct {
     global_experts: ?i64 = null,
     active_experts: i64 = 0,
     sigma: f32 = 0.6,
+    input_scale: []const u8 = "1",
+    routing_scale: []const u8 = "1",
     data: Data = .random,
     seed: u64 = 1,
     seeds: ?[]const u8 = null,
@@ -69,11 +73,24 @@ pub const Args = struct {
     json: ?[]const u8 = null,
     dump: ?[]const u8 = null,
     compare: ?[]const u8 = null,
+    dump_dir: ?[]const u8 = null,
+    compare_dir: ?[]const u8 = null,
+    compare_exact: bool = false,
 
     pub fn validate(a: Args) !void {
+        if ((a.dump != null and a.dump_dir != null) or (a.compare != null and a.compare_dir != null)) return error.ConflictingOutputPaths;
+        if (a.dump_dir) |path| if (a.compare_dir) |other| if (std.mem.eql(u8, path, other)) return error.ConflictingOutputPaths;
+        if (a.compare_exact and a.compare == null and a.compare_dir == null) return error.MissingComparisonBaseline;
         if (a.iters == 0 or a.samples == 0 or a.sample_ms == 0) return error.InvalidIterationCount;
         if (a.cpu_devices == 0) return error.InvalidDeviceCount;
         if (a.active_experts < 0 or !std.math.isFinite(a.sigma) or a.sigma < 0) return error.InvalidRouting;
+        inline for (.{ a.input_scale, a.routing_scale }) |list| {
+            var it = std.mem.splitScalar(u8, list, ',');
+            while (it.next()) |value| {
+                const scale = try std.fmt.parseFloat(f32, value);
+                if (!std.math.isFinite(scale) or scale < 0) return error.InvalidDataScale;
+            }
+        }
         if (a.global_experts) |e| if (e <= 0 or e > std.math.maxInt(i32)) return error.InvalidExpertCount;
         try validateEnumList(zml.moe.Backend, a.backend);
         try validateEnumList(zml.DataType, a.dtype);
@@ -242,6 +259,8 @@ pub const Workload = struct {
     sigma: f32,
     seed: u64,
     data: Data,
+    input_scale: f32 = 1,
+    routing_scale: f32 = 1,
 
     pub fn isSharded(w: Workload) bool {
         return w.global_experts != w.case.experts;
@@ -271,7 +290,11 @@ pub const Workload = struct {
     pub fn id(w: Workload, allocator: std.mem.Allocator) ![]const u8 {
         const graph = try w.graphId(allocator);
         defer allocator.free(graph);
-        return std.fmt.allocPrint(allocator, "{s}/routing={s}/active-experts={d}/sigma={d}/seed={d}", .{ graph, @tagName(w.routing), w.active_experts, w.sigma, w.seed });
+        const base = try std.fmt.allocPrint(allocator, "{s}/routing={s}/active-experts={d}/sigma={d}/seed={d}", .{ graph, @tagName(w.routing), w.active_experts, w.sigma, w.seed });
+        // Preserve identities of existing baselines with unscaled operands.
+        if (w.input_scale == 1 and w.routing_scale == 1) return base;
+        defer allocator.free(base);
+        return std.fmt.allocPrint(allocator, "{s}/input-scale={d}/routing-scale={d}", .{ base, w.input_scale, w.routing_scale });
     }
 
     pub fn unsupported(w: Workload, target: zml.Target) ?[]const u8 {
@@ -283,6 +306,7 @@ pub const Workload = struct {
         if (w.global_experts < c.experts or @mod(w.global_experts, c.experts) != 0) return "global-experts must be a multiple of local experts";
         if (w.active_experts < 0 or w.active_experts > c.experts) return "active-experts must be between zero and local experts";
         if (!std.math.isFinite(w.sigma) or w.sigma < 0) return "routing sigma must be finite and nonnegative";
+        if (!std.math.isFinite(w.input_scale) or w.input_scale < 0 or !std.math.isFinite(w.routing_scale) or w.routing_scale < 0) return "data scales must be finite and nonnegative";
         const active = if (w.active_experts == 0) c.experts else w.active_experts;
         if (c.topk > @divTrunc(w.global_experts, c.experts) * active) return "top-k exceeds eligible global experts";
         if (c.tokens > @divTrunc(std.math.maxInt(i32), c.topk) or c.tokens * c.topk > @divTrunc(std.math.maxInt(i32), @max(c.width, 2 * c.intermediate))) return "route tensor exceeds kernel i32 indexing";
@@ -455,7 +479,15 @@ fn appendRoutings(allocator: std.mem.Allocator, args: Args, workload: Workload, 
     while (routings.next()) |r| {
         var w = workload;
         w.routing = std.meta.stringToEnum(Routing, r).?;
-        try append(allocator, args, w, result, seen);
+        var input_scales = std.mem.splitScalar(u8, args.input_scale, ',');
+        while (input_scales.next()) |input_scale| {
+            w.input_scale = try std.fmt.parseFloat(f32, input_scale);
+            var routing_scales = std.mem.splitScalar(u8, args.routing_scale, ',');
+            while (routing_scales.next()) |routing_scale| {
+                w.routing_scale = try std.fmt.parseFloat(f32, routing_scale);
+                try append(allocator, args, w, result, seen);
+            }
+        }
     }
 }
 
@@ -498,6 +530,23 @@ test "shape overrides deduplicate while routing and seeds reuse graphs" {
     try std.testing.expectEqual(@as(usize, 2), graphs.count());
     try std.testing.expect(selected[0].workload.sameGraph(selected[1].workload));
     try std.testing.expect(!std.mem.eql(u8, selected[0].id, selected[1].id));
+}
+
+test "operand scale sweeps reuse graphs and preserve baseline identities" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const selected = try select(arena.allocator(), .{
+        .backend = "cute",
+        .routing = "uniform",
+        .input_scale = "0,1,16",
+        .routing_scale = "1,2.5",
+    }, .cuda, 1);
+    try std.testing.expectEqual(@as(usize, 6), selected.len);
+    for (selected) |s| try std.testing.expect(s.workload.sameGraph(selected[0].workload));
+    try std.testing.expect(std.mem.indexOf(u8, selected[2].id, "input-scale") == null);
+    try std.testing.expect(!std.mem.eql(u8, selected[0].id, selected[1].id));
+    try std.testing.expectError(error.InvalidDataScale, (Args{ .input_scale = "nan" }).validate());
+    try std.testing.expectError(error.InvalidDataScale, (Args{ .routing_scale = "-1" }).validate());
 }
 
 test "backend contracts reject unaligned and incompatible sweep combinations" {

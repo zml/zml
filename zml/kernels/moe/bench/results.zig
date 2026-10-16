@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const stamp = @import("bazel/stamp").stamp;
+const zml = @import("zml");
 const cases = @import("cases.zig");
 
 pub const Source = struct {
@@ -87,11 +88,55 @@ pub const Statistics = struct {
     touched_experts: i64,
     maximum_routes: i64,
     padded_rows: [5]i64,
+    ranks: []const @import("workload.zig").RankStatistics,
     implied_tflops: f64,
     implied_weight_gbs: f64,
     output_mean_absolute: f64,
     nonfinite: usize,
 };
+
+pub const DeviceDetails = struct {
+    name: []const u8,
+    id: u32,
+    local_hardware_id: i32,
+    core_count: ?i64,
+    compute_capability: ?[]const u8,
+};
+
+pub fn deviceDetails(allocator: std.mem.Allocator, platform: *const zml.Platform) ![]DeviceDetails {
+    const result = try allocator.alloc(DeviceDetails, platform.devices.len);
+    for (platform.devices, result) |device, *details| {
+        const cores = device.pjrt_desc.attribute(platform.pjrt_api, "core_count");
+        const capability = device.pjrt_desc.attribute(platform.pjrt_api, "compute_capability");
+        details.* = .{
+            .name = device.kind(),
+            .id = device.id(),
+            .local_hardware_id = device.localHardwareId(),
+            .core_count = if (cores) |value| if (value == .int64) value.int64 else null else null,
+            .compute_capability = if (capability) |value| if (value == .string) value.string else null else null,
+        };
+    }
+    return result;
+}
+
+const EnvironmentEntry = struct { name: []const u8, value: []const u8 };
+
+/// Only record settings relevant to reproducibility, never the whole environment.
+pub fn environment(allocator: std.mem.Allocator, environ: *const std.process.Environ.Map) ![]EnvironmentEntry {
+    var result: std.ArrayList(EnvironmentEntry) = .empty;
+    var it = environ.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (std.mem.startsWith(u8, name, "ZML_MOE_") or
+            std.mem.eql(u8, name, "CUDA_VISIBLE_DEVICES") or
+            std.mem.eql(u8, name, "XLA_FLAGS") or
+            std.mem.eql(u8, name, "ZML_AUTOTUNE_CACHE_DIR"))
+        {
+            try result.append(allocator, .{ .name = name, .value = entry.value_ptr.* });
+        }
+    }
+    return result.toOwnedSlice(allocator);
+}
 
 pub const Record = struct {
     kind: enum { case } = .case,
