@@ -920,7 +920,7 @@ pub const GatedDeltaNet = struct {
 
         const beta = b.sigmoid();
         const aLog_type = self.aLog.dtype();
-        const g = self.aLog.broad(a.shape()).exp().mul(softplus(a.convert(aLog_type).add(self.dt_bias.convert(aLog_type).broad(a.shape())))).negate();
+        const g = self.aLog.broad(a.shape()).exp().mul(zml.nn.softplus(a.convert(aLog_type).add(self.dt_bias.convert(aLog_type).broad(a.shape())), .{})).negate();
 
         const query_for_rule = b: {
             if (self.qk_head_repetition == 1) break :b query;
@@ -1298,7 +1298,3 @@ pub const KvCache = struct {
         };
     }
 };
-
-fn softplus(x: zml.Tensor) zml.Tensor {
-    return x.exp().addConstant(1).log();
-}
