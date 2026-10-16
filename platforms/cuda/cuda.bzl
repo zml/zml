@@ -240,8 +240,8 @@ _PLUGINS = {
         "url": "https://mirror.zml.ai/plugins/202610160837.234.1.e1adc5dca29d/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "f6819007f6d1ab5f3a1c7b79d7e2ddc9b33eba8f61d45589c322931d6379e672",
-        "url": "https://mirror.zml.ai/plugins/202610160837.234.1.e1adc5dca29d/zml-cuda-linux-arm64.tar.zst",
+        "sha256": "c7eb68169e0976157606c96f10be8b15066a9be661ae91369996bbe303a3cc3b",
+        "url": "file:///tmp/claude-46326/-home-benjamin-github-openxla-xla/fd2bd4cb-e7f4-43f1-8087-c8f42f8bc175/scratchpad/zml-cuda-bound-args-fixed-arm64.tar.zst",
     },
 }
 
