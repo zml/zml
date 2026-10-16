@@ -65,7 +65,7 @@ pub fn BoundedArrayAligned(
         }
 
         /// View the internal array as a slice whose size was previously set.
-        pub fn slice(noalias self: anytype) switch (@TypeOf(&self.buffer)) {
+        pub fn slice(self: anytype) switch (@TypeOf(&self.buffer)) {
             *align(alignment.toByteUnits()) [buffer_capacity]T => []align(alignment.toByteUnits()) T,
             *align(alignment.toByteUnits()) const [buffer_capacity]T => []align(alignment.toByteUnits()) const T,
             else => unreachable,
@@ -74,19 +74,19 @@ pub fn BoundedArrayAligned(
         }
 
         /// View the internal array as a constant slice whose size was previously set.
-        pub fn constSlice(noalias self: *const Self) []align(alignment.toByteUnits()) const T {
+        pub fn constSlice(self: *const Self) []align(alignment.toByteUnits()) const T {
             return self.slice();
         }
 
         /// Adjust the slice's length to `len`.
         /// Does not initialize added items if any.
-        pub fn resize(noalias self: *Self, len: usize) error{Overflow}!void {
+        pub fn resize(self: *Self, len: usize) error{Overflow}!void {
             if (len > buffer_capacity) return error.Overflow;
             self.len = len;
         }
 
         /// Remove all elements from the slice.
-        pub fn clear(noalias self: *Self) void {
+        pub fn clear(self: *Self) void {
             self.len = 0;
         }
 
@@ -97,13 +97,13 @@ pub fn BoundedArrayAligned(
         }
 
         /// Return the element at index `i` of the slice.
-        pub fn get(noalias self: *const Self, i: usize) T {
+        pub fn get(self: Self, i: usize) T {
             std.debug.assert(i < self.len);
             return self.buffer[i];
         }
 
         /// Set the value of the element at index `i` of the slice.
-        pub fn set(noalias self: *Self, i: usize, item: T) void {
+        pub fn set(self: *Self, i: usize, item: T) void {
             std.debug.assert(i < self.len);
             self.buffer[i] = item;
         }
@@ -121,14 +121,14 @@ pub fn BoundedArrayAligned(
         }
 
         /// Increase length by 1, returning a pointer to the new item.
-        pub fn addOne(noalias self: *Self) error{Overflow}!*T {
+        pub fn addOne(self: *Self) error{Overflow}!*T {
             try self.ensureUnusedCapacity(1);
             return self.addOneAssumeCapacity();
         }
 
         /// Increase length by 1, returning pointer to the new item.
         /// Asserts that there is space for the new item.
-        pub fn addOneAssumeCapacity(noalias self: *Self) *T {
+        pub fn addOneAssumeCapacity(self: *Self) *T {
             assert(self.len < buffer_capacity);
             self.len += 1;
             return &self.slice()[self.len - 1];
@@ -136,7 +136,7 @@ pub fn BoundedArrayAligned(
 
         /// Resize the slice, adding `n` new elements, which have `undefined` values.
         /// The return value is a pointer to the array of uninitialized elements.
-        pub fn addManyAsArray(noalias self: *Self, comptime n: usize) error{Overflow}!*align(alignment.toByteUnits()) [n]T {
+        pub fn addManyAsArray(self: *Self, comptime n: usize) error{Overflow}!*align(alignment.toByteUnits()) [n]T {
             const prev_len = self.len;
             try self.resize(self.len + n);
             return self.slice()[prev_len..][0..n];
@@ -144,14 +144,14 @@ pub fn BoundedArrayAligned(
 
         /// Resize the slice, adding `n` new elements, which have `undefined` values.
         /// The return value is a slice pointing to the uninitialized elements.
-        pub fn addManyAsSlice(noalias self: *Self, n: usize) error{Overflow}![]align(alignment.toByteUnits()) T {
+        pub fn addManyAsSlice(self: *Self, n: usize) error{Overflow}![]align(alignment.toByteUnits()) T {
             const prev_len = self.len;
             try self.resize(self.len + n);
             return self.slice()[prev_len..][0..n];
         }
 
         /// Remove and return the last element from the slice, or return `null` if the slice is empty.
-        pub fn pop(noalias self: *Self) ?T {
+        pub fn pop(self: *Self) ?T {
             if (self.len == 0) return null;
             const item = self.get(self.len - 1);
             self.len -= 1;
@@ -162,7 +162,7 @@ pub fn BoundedArrayAligned(
         /// This can be useful for writing directly into it.
         /// Note that such an operation must be followed up with a
         /// call to `resize()`
-        pub fn unusedCapacitySlice(noalias self: *Self) []align(alignment.toByteUnits()) T {
+        pub fn unusedCapacitySlice(self: *Self) []align(alignment.toByteUnits()) T {
             return self.buffer[self.len..];
         }
 
@@ -184,7 +184,7 @@ pub fn BoundedArrayAligned(
 
         /// Insert slice `items` at index `i` by moving `slice[i .. slice.len]` to make room.
         /// This operation is O(N).
-        pub fn insertSlice(noalias self: *Self, i: usize, items: []const T) error{Overflow}!void {
+        pub fn insertSlice(self: *Self, i: usize, items: []const T) error{Overflow}!void {
             try self.ensureUnusedCapacity(items.len);
             self.len += items.len;
             mem.copyBackwards(T, self.slice()[i + items.len .. self.len], self.constSlice()[i .. self.len - items.len]);
@@ -221,14 +221,14 @@ pub fn BoundedArrayAligned(
         }
 
         /// Extend the slice by 1 element.
-        pub fn append(noalias self: *Self, item: T) error{Overflow}!void {
+        pub fn append(self: *Self, item: T) error{Overflow}!void {
             const new_item_ptr = try self.addOne();
             new_item_ptr.* = item;
         }
 
         /// Extend the slice by 1 element, asserting the capacity is already
         /// enough to store the new item.
-        pub fn appendAssumeCapacity(noalias self: *Self, item: T) void {
+        pub fn appendAssumeCapacity(self: *Self, item: T) void {
             const new_item_ptr = self.addOneAssumeCapacity();
             new_item_ptr.* = item;
         }
@@ -237,7 +237,7 @@ pub fn BoundedArrayAligned(
         /// `i` forward, and return the removed element.
         /// Asserts the slice has at least one item.
         /// This operation is O(N).
-        pub fn orderedRemove(noalias self: *Self, i: usize) T {
+        pub fn orderedRemove(self: *Self, i: usize) T {
             const newlen = self.len - 1;
             if (newlen == i) return self.pop().?;
             const old_item = self.get(i);
@@ -250,7 +250,7 @@ pub fn BoundedArrayAligned(
         /// Remove the element at the specified index and return it.
         /// The empty slot is filled from the end of the slice.
         /// This operation is O(1).
-        pub fn swapRemove(noalias self: *Self, i: usize) T {
+        pub fn swapRemove(self: *Self, i: usize) T {
             if (self.len - 1 == i) return self.pop().?;
             const old_item = self.get(i);
             self.set(i, self.pop().?);
@@ -258,14 +258,14 @@ pub fn BoundedArrayAligned(
         }
 
         /// Append the slice of items to the slice.
-        pub fn appendSlice(noalias self: *Self, items: []const T) error{Overflow}!void {
+        pub fn appendSlice(self: *Self, items: []const T) error{Overflow}!void {
             try self.ensureUnusedCapacity(items.len);
             self.appendSliceAssumeCapacity(items);
         }
 
         /// Append the slice of items to the slice, asserting the capacity is already
         /// enough to store the new items.
-        pub fn appendSliceAssumeCapacity(noalias self: *Self, items: []const T) void {
+        pub fn appendSliceAssumeCapacity(self: *Self, items: []const T) void {
             const old_len = self.len;
             self.len += items.len;
             @memcpy(self.slice()[old_len..][0..items.len], items);
@@ -273,7 +273,7 @@ pub fn BoundedArrayAligned(
 
         /// Append a value to the slice `n` times.
         /// Allocates more memory as necessary.
-        pub fn appendNTimes(noalias self: *Self, value: T, n: usize) error{Overflow}!void {
+        pub fn appendNTimes(self: *Self, value: T, n: usize) error{Overflow}!void {
             const old_len = self.len;
             try self.resize(old_len + n);
             @memset(self.slice()[old_len..self.len], value);
@@ -281,27 +281,16 @@ pub fn BoundedArrayAligned(
 
         /// Append a value to the slice `n` times.
         /// Asserts the capacity is enough.
-        pub fn appendNTimesAssumeCapacity(noalias self: *Self, value: T, n: usize) void {
+        pub fn appendNTimesAssumeCapacity(self: *Self, value: T, n: usize) void {
             const old_len = self.len;
             self.len += n;
             assert(self.len <= buffer_capacity);
             @memset(self.slice()[old_len..self.len], value);
         }
 
-        //pub const Writer = if (T != u8)
-        //    @compileError("The Writer interface is only defined for BoundedArray(u8, ...) " ++
-        //        "but the given type is BoundedArray(" ++ @typeName(T) ++ ", ...)")
-        //else
-        //    std.io.GenericWriter(*Self, error{Overflow}, appendWrite);
-
-        ///// Initializes a writer which will write into the array.
-        //pub fn writer(noalias self: *Self) Writer {
-        //    return .{ .context = self };
-        //}
-
         /// Same as `appendSlice` except it returns the number of bytes written, which is always the same
         /// as `m.len`. The purpose of this function existing is to match `std.io.GenericWriter` API.
-        fn appendWrite(noalias self: *Self, m: []const u8) error{Overflow}!usize {
+        fn appendWrite(self: *Self, m: []const u8) error{Overflow}!usize {
             try self.appendSlice(m);
             return m.len;
         }
