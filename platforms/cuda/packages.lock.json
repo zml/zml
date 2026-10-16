@@ -88,60 +88,6 @@
 			"version": "1:1.2.13.dfsg-1"
 		},
 		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "cuda-compat-13-4_615.71.09-2ubuntu1_amd64",
-			"name": "cuda-compat-13-4",
-			"sha256": "1b814aa705b4dfe955420c967bd545f39ef7b67f32bd0f285a005ea296b02831",
-			"urls": [
-				"https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/./cuda-compat-13-4_615.71.09-2ubuntu1_amd64.deb"
-			],
-			"version": "615.71.09-2ubuntu1"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "libstdc-p--p-6_12.2.0-14-p-deb12u1_amd64",
-					"name": "libstdc++6",
-					"version": "12.2.0-14+deb12u1"
-				},
-				{
-					"key": "libgcc-s1_12.2.0-14-p-deb12u1_amd64",
-					"name": "libgcc-s1",
-					"version": "12.2.0-14+deb12u1"
-				},
-				{
-					"key": "libc6_2.36-9-p-deb12u10_amd64",
-					"name": "libc6",
-					"version": "2.36-9+deb12u10"
-				},
-				{
-					"key": "gcc-12-base_12.2.0-14-p-deb12u1_amd64",
-					"name": "gcc-12-base",
-					"version": "12.2.0-14+deb12u1"
-				}
-			],
-			"key": "libnccl2_2.32.3-1-p-cuda13.4_amd64",
-			"name": "libnccl2",
-			"sha256": "55a3e32a3f560f20e2f423cd38f1f284951e92093d1e8fbaabb4c42ac76f3195",
-			"urls": [
-				"https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/./libnccl2_2.32.3-1+cuda13.4_amd64.deb"
-			],
-			"version": "2.32.3-1+cuda13.4"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "libstdc-p--p-6_12.2.0-14-p-deb12u1_amd64",
-			"name": "libstdc++6",
-			"sha256": "5cd3171216d4ab0fc911cfe9c35509bf2dd8f47761c43b7f6a4296701551a24d",
-			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/g/gcc-12/libstdc++6_12.2.0-14+deb12u1_amd64.deb"
-			],
-			"version": "12.2.0-14+deb12u1"
-		},
-		{
 			"arch": "arm64",
 			"dependencies": [
 				{
@@ -227,60 +173,6 @@
 				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_arm64.deb"
 			],
 			"version": "1:1.2.13.dfsg-1"
-		},
-		{
-			"arch": "arm64",
-			"dependencies": [],
-			"key": "cuda-compat-13-4_615.71.09-2ubuntu1_arm64",
-			"name": "cuda-compat-13-4",
-			"sha256": "83cdca90db73a36784a077693e3b48565d852158c63f604194c1f0d42c2e5458",
-			"urls": [
-				"https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/sbsa/./cuda-compat-13-4_615.71.09-2ubuntu1_arm64.deb"
-			],
-			"version": "615.71.09-2ubuntu1"
-		},
-		{
-			"arch": "arm64",
-			"dependencies": [
-				{
-					"key": "libstdc-p--p-6_12.2.0-14-p-deb12u1_arm64",
-					"name": "libstdc++6",
-					"version": "12.2.0-14+deb12u1"
-				},
-				{
-					"key": "libgcc-s1_12.2.0-14-p-deb12u1_arm64",
-					"name": "libgcc-s1",
-					"version": "12.2.0-14+deb12u1"
-				},
-				{
-					"key": "libc6_2.36-9-p-deb12u10_arm64",
-					"name": "libc6",
-					"version": "2.36-9+deb12u10"
-				},
-				{
-					"key": "gcc-12-base_12.2.0-14-p-deb12u1_arm64",
-					"name": "gcc-12-base",
-					"version": "12.2.0-14+deb12u1"
-				}
-			],
-			"key": "libnccl2_2.32.3-1-p-cuda13.4_arm64",
-			"name": "libnccl2",
-			"sha256": "809a6eea2f8a570050229bc218e30d4280829cbe01e824e052c96ee9203a7fe5",
-			"urls": [
-				"https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/sbsa/./libnccl2_2.32.3-1+cuda13.4_arm64.deb"
-			],
-			"version": "2.32.3-1+cuda13.4"
-		},
-		{
-			"arch": "arm64",
-			"dependencies": [],
-			"key": "libstdc-p--p-6_12.2.0-14-p-deb12u1_arm64",
-			"name": "libstdc++6",
-			"sha256": "26e138c677a985775331373828a6c286c551ff397cb735d00e2383cb273d1cb2",
-			"urls": [
-				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/g/gcc-12/libstdc++6_12.2.0-14+deb12u1_arm64.deb"
-			],
-			"version": "12.2.0-14+deb12u1"
 		}
 	],
 	"version": 1

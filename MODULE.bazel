@@ -37,7 +37,6 @@ single_version_override(
     patch_strip = 1,
     patches = [
         "//:third_party/rules_distroless/accept-nospace-version-constraints.patch",
-        "//:third_party/rules_distroless/flat-repositories.patch",
     ],
     version = "0.8.0",
 )
