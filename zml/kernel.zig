@@ -512,6 +512,7 @@ pub const cuda_tile = struct {
 };
 
 pub const cute = struct {
+    pub const AlgebraExpr = cute_builder.AlgebraExpr;
     pub const Builder = cute_builder.Builder;
     pub const ArgSpec = cute_builder.ArgSpec;
     pub const Value = cute_builder.Value;

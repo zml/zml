@@ -322,6 +322,11 @@ const specialized_shapes = [_]FixtureShape{
     .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 17, .topk = 2 },
     .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 34, .topk = 2 },
 };
+const cute_shapes = specialized_shapes ++ [_]FixtureShape{
+    // Singleton TMA expert and group dimensions, in direct and grouped routing.
+    .{ .width = 5120, .intermediate = 2304, .experts = 1 },
+    .{ .width = 5120, .intermediate = 2304, .experts = 1, .tokens = 2 },
+};
 
 pub const Format = struct {
     scheme: ?zml.Quantization.Scheme = null,
@@ -422,7 +427,7 @@ pub const matrices = struct {
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
         .placements = &.{.before_down},
-        .shapes = &specialized_shapes,
+        .shapes = &cute_shapes,
     };
 
     pub const fly: Matrix = .{
@@ -509,14 +514,14 @@ test "MoE matrix coverage remains stable" {
     try std.testing.expectEqual(@as(usize, 12), matrices.triton_mxfp4_cuda_small.count());
     try std.testing.expectEqual(@as(usize, 24), matrices.triton_mxfp4_cuda.count());
     try std.testing.expectEqual(@as(usize, 6), matrices.flashinfer.count());
-    try std.testing.expectEqual(@as(usize, 12), matrices.cute.count());
+    try std.testing.expectEqual(@as(usize, 20), matrices.cute.count());
     try std.testing.expectEqual(@as(usize, 48), matrices.fly.count());
     try std.testing.expectEqual(@as(usize, 297), matrices.metal.count());
     try std.testing.expectEqual(@as(usize, 144), matrices.mosaic_tpu.count());
     try std.testing.expectEqual(@as(usize, 66), matrices.stablehlo.count());
     const first = matrices.cute.caseAt(.cute, 0);
-    const last = matrices.cute.caseAt(.cute, 11);
+    const last = matrices.cute.caseAt(.cute, matrices.cute.count() - 1);
     try std.testing.expectEqual(@as(i64, 5120), first.width);
-    try std.testing.expectEqual(@as(i64, 34), last.tokens);
+    try std.testing.expectEqual(@as(i64, 2), last.tokens);
     try std.testing.expectEqual(@as(?f32, 7), last.activation.swiglu.limit);
 }

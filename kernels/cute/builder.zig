@@ -1516,6 +1516,15 @@ pub const Builder = struct {
         return .{ .inner = value.inner, .kernel = self };
     }
 
+    /// Materialize a layout with dynamic shape leaves and static strides.
+    /// Keeping singleton extents dynamic preserves their TMA coordinates.
+    pub fn makeLayoutShapeValues(self: *Builder, spec: LayoutSpec, values: anytype) View {
+        const shape = self.makeShapeValues(values, cute.algebraType(self.ctx, .shape, spec.shape.text) catch @panic("invalid shape"));
+        const stride = self.emit(cute.static(self.ctx, cute.algebraType(self.ctx, .stride, spec.stride.text) catch @panic("invalid stride"), self.loc()));
+        const layout = self.emit(cute.make_layout(self.ctx, shape.inner, stride.inner, self.layoutType(spec), self.loc()));
+        return .{ .inner = layout.inner, .kernel = self };
+    }
+
     pub fn tileToShapeTyped(self: *Builder, input: anytype, shape: anytype, order: View, result_type: *const mlir.Type) View {
         const result = self.emit(cute.tile_to_shape(
             self.ctx,

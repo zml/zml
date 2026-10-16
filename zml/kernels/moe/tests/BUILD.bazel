@@ -14,3 +14,14 @@ zig_test(
     visibility = ["//zml:__pkg__"],
     deps = ["//zml"],
 )
+
+zig_test(
+    name = "cute_test",
+    srcs = ["fixtures.zig"],
+    main = "tests.zig",
+    zigopts = [
+        "--test-filter",
+        "CuTe",
+    ],
+    deps = ["//zml"],
+)
