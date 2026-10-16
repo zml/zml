@@ -8,8 +8,8 @@ const LanguageModelStore = @This();
 
 store: zml.io.TensorStore = undefined,
 registry: zml.safetensors.TensorRegistry = undefined,
-model: block.Qwen3VLForConditionalGeneration,
-model_buffer: zml.Bufferized(block.Qwen3VLForConditionalGeneration),
+model: block.Qwen3VLModel,
+model_buffer: zml.Bufferized(block.Qwen3VLModel),
 
 const LAYER_COUNT = block.Qwen3VLTextModel.TEXT_DECODE_LAYER_COUNT;
 
@@ -82,17 +82,15 @@ pub fn load(
     const rotary_emb = block.Qwen3VLTextRotaryEmbedding.init();
 
     const language_model = block.Qwen3VLTextModel{ .embedding = embedding, .layers = layers, .rotary_emb = rotary_emb };
-    const model = block.Qwen3VLModel{ .language_model = language_model };
-    const lm_head = zml.nn.Linear.init(self.store.view().createTensor("lm_head.weight", .{ .tokens, .d }, .replicated), null, .d);
-    self.model = block.Qwen3VLForConditionalGeneration{ .language_model = model, .lm_head = lm_head };
+    self.model = block.Qwen3VLModel{ .language_model = language_model };
     self.model_buffer = try self.model.load(allocator, io, platform, &self.store);
 }
 
 pub fn deinit(self: *LanguageModelStore, allocator: std.mem.Allocator) void {
-    block.Qwen3VLForConditionalGeneration.unloadBuffers(&self.model_buffer);
+    block.Qwen3VLModel.unloadBuffers(&self.model_buffer);
 
-    allocator.free(self.model.language_model.language_model.layers);
-    allocator.free(self.model_buffer.language_model.language_model.layers);
+    allocator.free(self.model.language_model.layers);
+    allocator.free(self.model_buffer.language_model.layers);
     self.store.deinit();
     self.registry.deinit();
 }

@@ -1,7 +1,6 @@
 pub const Pipeline = @import("./blocks/Pipeline.zig");
 
 // Text Encoding
-pub const Qwen3VLForConditionalGeneration = @import("./blocks/language/Qwen3VLForConditionalGeneration.zig");
 pub const Qwen3VLModel = @import("./blocks/language/Qwen3VLModel.zig");
 pub const Qwen3VLTextModel = @import("./blocks/language/Qwen3VLTextModel.zig");
 pub const Qwen3VLTextDecoderLayer = @import("./blocks/language/Qwen3VLTextDecoderLayer.zig");
