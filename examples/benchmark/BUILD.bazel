@@ -1,25 +1,13 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "benchmark",
     main = "main.zig",
-    deps = [
-        ":mock_pjrt",
-        "//zml",
-    ],
+    deps = ["//zml"],
 )
 
 build_test(
     name = "test",
     targets = [":benchmark"],
-)
-
-# Native code only: keep the mock opaque to the Zig optimizer even with LTO enabled elsewhere.
-cc_library(
-    name = "mock_pjrt",
-    srcs = ["mock_pjrt.c"],
-    copts = ["-fno-lto"],
-    deps = ["@xla//xla/pjrt/c:pjrt_c_api_hdrs"],
 )
