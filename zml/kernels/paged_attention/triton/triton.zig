@@ -369,9 +369,13 @@ pub const paged = struct {
     pub fn pagedAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
         const config = select2dConfig(paged_attention_opts);
 
+        const k_strides = k_cache.shape().computeElementStrides().constSlice();
+        const v_strides = v_cache.shape().computeElementStrides().constSlice();
+
         const kernel_config: kernels.KernelUnifiedAttention2dPtr.Config = .{
             .q_dtype = triton.from(q.dtype()),
             .kv_dtype = triton.from(k_cache.dtype()),
+            .kv_stride_align = kernels.kvStrideAlign(k_strides, v_strides),
             .o_dtype = triton.from(q.dtype()),
             .num_query_heads = @intCast(paged_attention_opts.num_heads),
             .num_queries_per_kv = @intCast(paged_attention_opts.numQueriesPerKv()),
@@ -398,8 +402,6 @@ pub const paged = struct {
 
         const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
         const q_strides = q_shape.computeElementStrides().constSlice();
-        const k_strides = k_cache.shape().computeElementStrides().constSlice();
-        const v_strides = v_cache.shape().computeElementStrides().constSlice();
 
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const num_seqs = parameters.block_table.dim(0);
@@ -455,9 +457,13 @@ pub const paged = struct {
         const config = select3dConfig(paged_attention_opts);
 
         const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim));
+        const k_strides = k_cache.shape().computeElementStrides().constSlice();
+        const v_strides = v_cache.shape().computeElementStrides().constSlice();
+
         const attn_kernel_config: kernels.KernelUnifiedAttention3dPtr.Config = .{
             .q_dtype = triton.from(q.dtype()),
             .kv_dtype = triton.from(k_cache.dtype()),
+            .kv_stride_align = kernels.kvStrideAlign(k_strides, v_strides),
             .num_query_heads = @intCast(paged_attention_opts.num_heads),
             .num_queries_per_kv = @intCast(paged_attention_opts.numQueriesPerKv()),
             .block_size = @intCast(paged_attention_opts.block_size),
@@ -496,8 +502,6 @@ pub const paged = struct {
 
         const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
         const q_strides = q_shape.computeElementStrides().constSlice();
-        const k_strides = k_cache.shape().computeElementStrides().constSlice();
-        const v_strides = v_cache.shape().computeElementStrides().constSlice();
 
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const num_seqs = parameters.block_table.dim(0);
