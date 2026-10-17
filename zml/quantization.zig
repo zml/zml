@@ -127,13 +127,13 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
     return switch (quantization.scheme) {
         .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input.convert(.bf16), global_scale, axis) else null,
         .fp8_block32, .fp8_block128 => blk: {
-            const dtype: DataType = switch (platform.target) {
+            const dtype: DataType = switch (platform.compute_capability) {
                 .cuda => .f8e4m3fn,
-                .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
+                .rocm => |cc| switch (cc.architecture()) {
                     .cdna4, .rdna4 => .f8e4m3fn,
                     .cdna3 => .f8e4m3fnuz,
-                    .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => return null,
-                } else return null,
+                    .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5, .unknown => return null,
+                },
                 else => return null,
             };
 
@@ -167,13 +167,13 @@ pub fn quantizeMxfp4(x: Tensor, axis: anytype) QuantizedInput {
 pub fn quantizeMxfp8(x: Tensor, axis: anytype) QuantizedInput {
     const platform = zml.Compiler.current().platform;
 
-    const dtype: ?DataType = switch (platform.target) {
+    const dtype: ?DataType = switch (platform.compute_capability) {
         .cuda, .cpu, .tpu => .f8e4m3fn,
-        .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
+        .rocm => |cc| switch (cc.architecture()) {
             .cdna4, .rdna4 => .f8e4m3fn,
             .cdna3 => .f8e4m3fnuz,
-            .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => null,
-        } else null,
+            .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5, .unknown => null,
+        },
         else => null,
     };
 
@@ -259,7 +259,13 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) Quan
 }
 
 fn supportsNvfp4InputQuantization(platform: *const Platform) bool {
-    return if (platform_mod.cuda.computeCapability(platform)) |cc| cc.atLeast(.{ .major = 10, .minor = 0 }) else false;
+    return switch (platform.compute_capability) {
+        .cuda => |cc| switch (cc) {
+            .sm100, .sm103 => true,
+            .unknown, .sm70, .sm72, .sm75, .sm80, .sm86, .sm87, .sm89, .sm90, .sm101, .sm110, .sm120, .sm121 => false,
+        },
+        .cpu, .rocm, .tpu, .neuron, .oneapi, .metal, .furiosa => false,
+    };
 }
 
 fn isPackedFp4(scheme: ?Quantization.Scheme, weight_dtype: DataType) bool {

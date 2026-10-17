@@ -1,13 +1,20 @@
 const std = @import("std");
+
 const zml = @import("../../zml.zig");
-const shared = @import("../fused_experts.zig");
-const mxfp4 = @import("mxfp4.zig");
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const fly = zml.kernel.fly;
 const Builder = fly.Builder;
-
+const shared = @import("../fused_experts.zig");
 pub const Parameters = shared.Parameters;
+const mxfp4 = @import("mxfp4.zig");
+
+pub fn isAvailable(platform: *const zml.Platform) bool {
+    return switch (platform.compute_capability) {
+        .rocm => true,
+        else => false,
+    };
+}
 
 pub fn supports(opts: shared.FusedExpertsArgs) bool {
     if (opts.hidden_states.dtype() != .bf16 or opts.gate_up.quantizationScheme() != .mxfp4 or
