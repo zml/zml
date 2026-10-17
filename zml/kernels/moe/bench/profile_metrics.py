@@ -28,6 +28,7 @@ def union(events):
 def summarize(values):
     median = statistics.median(values)
     return {
+        'mean': statistics.fmean(values),
         'median': median,
         'mad': statistics.median(abs(x - median) for x in values),
         'min': min(values),
@@ -38,8 +39,12 @@ def summarize(values):
 
 def extract(db_path, records_path):
     rows = [json.loads(x) for x in pathlib.Path(records_path).read_text().splitlines()]
-    metadata = next((x for x in rows if x['kind'] == 'run'))
-    case_records = {x['id']: x for x in rows if x['kind'] == 'case'}
+    runs = [x for x in rows if x['kind'] == 'run']
+    require(len(runs) == 1, 'expected exactly one run record')
+    metadata = runs[0]
+    cases = [x for x in rows if x['kind'] == 'case']
+    case_records = {x['id']: x for x in cases}
+    require(len(case_records) == len(cases), 'duplicate workload records')
     records = {key: row for key, row in case_records.items() if row.get('statistics')}
     db = sqlite3.connect(f'file:{pathlib.Path(db_path).resolve()}?mode=ro', uri=True)
     db.row_factory = sqlite3.Row
@@ -60,15 +65,19 @@ def extract(db_path, records_path):
             memories.extend((dict(x) for x in db.execute(f'select * from {table}')))
     db.close()
     output = []
+    seen_measurements = set()
     for m in measurements:
         identity = m['name'].split('moe_bench.measure/', 1)[1]
         require(identity in case_records, ('unknown workload range', identity))
+        require(identity not in seen_measurements, ('duplicate workload range', identity))
+        seen_measurements.add(identity)
         if identity not in records:
             continue
         record = records[identity]
         timing = record['statistics']['timing']
         n = timing['iterations_per_sample']
         samples = len(timing['samples_us'])
+        require(n > 0 and samples > 0, ('empty timing samples', identity))
         bs = [b for b in batches
               if b['globalTid'] == m['globalTid'] and b['start'] >= m['start']
               and b['end'] <= m['end']][-samples:]
@@ -174,13 +183,14 @@ def extract(db_path, records_path):
             'nodes': expected_nodes,
             'launch_modes': launch_modes,
         })
-    require(len(output) == len(records), ('missing workload ranges', len(output), len(records)))
+    require(seen_measurements >= records.keys(), ('missing workload ranges', sorted(records.keys() - seen_measurements)))
     return {
         'metadata': metadata,
         'timing_boundary': (
             'Last retained synchronized batches; per-call batch span includes host dispatch, '
             'disposal and inter-call gaps. Kernel work is a sum; kernel union removes overlap. '
             'Replay span excludes inter-call gaps. All is a union over every participating GPU. '
+            'Mean component times are additive across samples; component medians need not sum. '
             'Replay spans are omitted for ordinary or mixed launches; those use per-call '
             'launch-count validation. No dependency critical path inferred.'
         ),

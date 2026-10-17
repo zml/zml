@@ -39,6 +39,15 @@ pub const Status = enum {
     }
 };
 
+pub const Difference = struct {
+    /// Flat output index, including all previously compared reference rows.
+    index: usize,
+    // Null represents a nonfinite operand, keeping JSON valid.
+    actual: ?f64,
+    expected: ?f64,
+    allowed_error: ?f64,
+};
+
 pub const Comparison = struct {
     exact: usize = 0,
     elements: usize = 0,
@@ -46,6 +55,8 @@ pub const Comparison = struct {
     nonfinite: usize = 0,
     relative_l2_error: ?f64 = null,
     max_absolute_error: f64 = 0,
+    max_absolute_error_index: ?usize = null,
+    first_failure: ?Difference = null,
     sum_squared_error: f64 = 0,
     sum_squared_actual: f64 = 0,
     sum_squared_reference: f64 = 0,
@@ -175,10 +186,29 @@ pub fn report(stdout: *std.Io.Writer, json: ?*std.Io.Writer, record: Record) !vo
         try stdout.print("  routes {d}, touched {d}/{d}, max {d}; implied {d:.2} TFLOP/s, {d:.2} GB/s; mean |output| {d:.6}\n", .{ stats.local_routes, stats.touched_experts, record.workload.case.experts, stats.maximum_routes, stats.implied_tflops, stats.implied_weight_gbs, stats.output_mean_absolute });
     }
     if (record.reason) |reason| try stdout.print("  {s}\n", .{reason});
-    if (record.reference_check) |c| try stdout.print("  reference: exact {d}/{d}, max |diff| {d:.6}, outside tolerance {d}\n", .{ c.exact, c.elements, c.max_absolute_error, c.outside_tolerance });
-    if (record.dump_comparison) |c| try stdout.print("  baseline: exact {d}/{d}, max |diff| {d:.6}, outside tolerance {d}\n", .{ c.exact, c.elements, c.max_absolute_error, c.outside_tolerance });
+    if (record.reference_check) |c| {
+        try stdout.print("  reference: exact {d}/{d}, max |diff| {d:.6}, outside tolerance {d}\n", .{ c.exact, c.elements, c.max_absolute_error, c.outside_tolerance });
+        try reportDifference(stdout, record.workload.case.width, c);
+    }
+    if (record.dump_comparison) |c| {
+        try stdout.print("  baseline: exact {d}/{d}, max |diff| {d:.6}, outside tolerance {d}\n", .{ c.exact, c.elements, c.max_absolute_error, c.outside_tolerance });
+        try reportDifference(stdout, record.workload.case.width, c);
+    }
+    if (record.replay_comparison) |c| if (record.status.failed()) {
+        try stdout.print("  replay: exact {d}/{d}, max |diff| {d:.6}, outside tolerance {d}\n", .{ c.exact, c.elements, c.max_absolute_error, c.outside_tolerance });
+        try reportDifference(stdout, record.workload.case.width, c);
+    };
     try stdout.flush();
     if (json) |writer| try writeJsonLine(writer, record);
+}
+
+fn reportDifference(writer: *std.Io.Writer, width: i64, comparison: Comparison) !void {
+    if (comparison.first_failure) |d| {
+        const columns: usize = @intCast(width);
+        try writer.print("  first failure: token {d}, column {d}, actual {?d}, expected {?d}, allowed |diff| {?d}\n", .{
+            d.index / columns, d.index % columns, d.actual, d.expected, d.allowed_error,
+        });
+    }
 }
 
 test "timing summary preserves samples and reports median absolute deviation" {

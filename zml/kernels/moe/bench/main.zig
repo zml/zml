@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (json) |writer| try results.writeJsonLine(writer, .{
         .kind = "run",
-        .schema_version = 5,
+        .schema_version = 6,
         .timestamp_ns = std.Io.Timestamp.now(io, .real).nanoseconds,
         .source = results.source(),
         .platform = platform.target,

@@ -85,8 +85,8 @@ part of the graph key because it changes the setup graph. Compilation, weight
 generation, layout conversion, data transfers, output inspection, and reference
 checks are outside timing. Only one compatible setup is retained at a time.
 Consecutive token counts reuse weight generation, prepared weights for the same
-seed, and the one-row reference executable. Routing and operand-scale variants
-also reuse them.
+seed. Routing and operand-scale variants also reuse them; each checked workload
+compiles a fresh reference as described below.
 
 Defaults are three synchronized warmups, seven measurement samples, and at least
 20 calls and 20 milliseconds per sample. `--warmup`, `--samples`, `--iters`, and
@@ -146,7 +146,8 @@ incorrect CUDA reference results after large weight regenerations. Its
 compilation time is recorded separately in `reference_compile_ns` and excluded
 from all timing samples. Comparisons use absolute and relative tolerances and require every
 element to pass. They also record exact matches, nonfinite counts, maximum
-absolute error, and relative L2 error; a small aggregate error does not silently
+absolute error and its output index, relative L2 error, and the first failing
+index with both values and its allowed error; a small aggregate error does not silently
 waive individual tolerance failures. Runs without `--check` record that reference validation was not performed.
 Every measured workload also compares the warmed executable with its initial
 output outside the timed range, so command-buffer replay errors cannot silently
@@ -196,7 +197,10 @@ setting. The CLI depends on `//zml/kernels/moe/bench:lib` (`@import("moe_bench")
 Stage-specific benches under `zml/kernels` can reuse `cases`, `workload`,
 `runner.measure`, and `results` without duplicating data generation or formats.
 The library owns no process-wide state; callers own platforms, executables,
-prepared weights, and output writers.
+prepared weights, and output writers. `runner.measure` disposes every tensor
+output, so stages returning both quantized values and scales can use it directly.
+It rejects executables that donate inputs: repeated measurements need immutable
+operands, and would otherwise reuse a freed input after the first call.
 
 CuTe reads these overrides when compiling each graph; restart the process after
 changing them. Each measured case records the resolved `cute_launch` plan.
@@ -224,7 +228,10 @@ CUDA_VISIBLE_DEVICES=0,1 NSYS=nsys TILES='32 64 128' QUANTIZE_LANES='1 4' \
   --tokens=1,256,2048,4096,8192,16384 --routing=uniform,skewed --seeds=1,2
 ```
 
-The output directory must be new. Omit `NSYS` for wall-time controls. `TILES`,
+The output directory must be new. The driver selects CuTe and owns validation
+and output options; listing/help and conflicting options are rejected. It saves
+the binary SHA-256 and replayable commands with the effective environment.
+Omit `NSYS` for wall-time controls. `TILES`,
 `QUANTIZE_LANES`, and `PERSISTENT_CTAS` are space-separated driver selections;
 an empty value omits that part of the sweep. Check a small workload selection
 with `--check` first, then profile representative full-sized configurations.
@@ -241,7 +248,10 @@ bazel run //zml/kernels/moe/bench:profile_metrics -- \
 The analyzer rejects incomplete batches, missing ranks, changing graph nodes,
 and incomplete ordinary launch counts. It reports kernel work, the union of GPU
 activity, overlapping work, memory-only activity, and time without recorded GPU
-activity. These account for the full measured batch, per rank and across ranks.
+activity. These account for the full measured batch, per rank and across ranks. Use the
+reported means for additive tables; independently computed component medians
+need not sum to the median batch time. Duplicate workloads or measurement
+ranges are rejected.
 Replay spans are available when each invocation is captured as one graph;
 ordinary or mixed launches use counts instead. None of these metrics infer a
 dependency critical path. Failed or skipped workloads remain in `unmeasured`.

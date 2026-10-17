@@ -1,3 +1,5 @@
+load("@rules_python//python:py_test.bzl", "py_test")
+
 package(default_visibility = ["//zml:__pkg__"])
 
 exports_files(["tune.sh"])
@@ -10,4 +12,10 @@ filegroup(
         "mxfp4.zig",
         "persistent_mxfp4.zig",
     ],
+)
+
+py_test(
+    name = "tune_test",
+    srcs = ["tune_test.py"],
+    data = ["tune.sh"],
 )

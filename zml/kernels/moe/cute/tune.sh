@@ -9,8 +9,25 @@ fi
 bench=$(realpath "$1")
 out=$(realpath -m "$2")
 shift 2
+# The driver owns output/validation options. In particular, --list can exit
+# successfully without producing or checking a single baseline.
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h|--list|--list=*|--json|--json=*|--dump|--dump=*|--dump-dir|--dump-dir=*|--compare|--compare=*|--compare-dir|--compare-dir=*|--compare-exact|--compare-exact=*)
+            printf 'The tuning driver owns this option: %s\n' "$arg" >&2
+            exit 2 ;;
+        --backend=cute) ;;
+        --backend|--backend=*)
+            printf 'The CuTe tuning driver requires --backend=cute\n' >&2
+            exit 2 ;;
+    esac
+done
+[[ -x $bench ]] || { printf 'Benchmark is not executable: %s\n' "$bench" >&2; exit 2; }
 mkdir "$out"
 mkdir "$out/baseline"
+sha256sum "$bench" > "$out/benchmark.sha256"
+# Default backend selection would also run unrelated implementations.
+set -- --backend=cute "$@"
 unset ZML_MOE_CUTE_TILE_N ZML_MOE_CUTE_TWO_CTA ZML_MOE_CUTE_QUANTIZE_LANES ZML_MOE_CUTE_PERSISTENT_CTAS
 failures=0
 
@@ -23,7 +40,17 @@ run() {
         profiler=("$NSYS" profile --trace=cuda,nvtx --cuda-graph-trace=node --sample=none --cpuctxsw=none "--output=$out/$name")
     fi
     printf 'Running %s\n' "$name"
-    printf '%q ' "${profiler[@]}" "$bench" "$@" "--json=$out/$name.jsonl" > "$out/$name.command"
+    # Clear inherited overrides when replaying the saved command, then restore
+    # the exact settings used here. JSON records the remaining provenance.
+    local variable
+    local -a command_env=(env)
+    for variable in ZML_MOE_CUTE_TILE_N ZML_MOE_CUTE_TWO_CTA ZML_MOE_CUTE_QUANTIZE_LANES ZML_MOE_CUTE_PERSISTENT_CTAS CUDA_VISIBLE_DEVICES XLA_FLAGS SKIP_PJRT_PROFILER ZML_AUTOTUNE_CACHE_DIR; do
+        command_env+=(-u "$variable")
+    done
+    for variable in ZML_MOE_CUTE_TILE_N ZML_MOE_CUTE_TWO_CTA ZML_MOE_CUTE_QUANTIZE_LANES ZML_MOE_CUTE_PERSISTENT_CTAS CUDA_VISIBLE_DEVICES XLA_FLAGS SKIP_PJRT_PROFILER ZML_AUTOTUNE_CACHE_DIR; do
+        if [[ -v $variable ]]; then command_env+=("$variable=${!variable}"); fi
+    done
+    printf '%q ' "${command_env[@]}" "${profiler[@]}" "$bench" "$@" "--json=$out/$name.jsonl" > "$out/$name.command"
     printf '\n' >> "$out/$name.command"
     if ! "${profiler[@]}" "$bench" "$@" "--json=$out/$name.jsonl" > "$out/$name.stdout" 2> "$out/$name.stderr"; then
         printf 'FAILED: %s (see %s/%s.stderr)\n' "$name" "$out" "$name" >&2

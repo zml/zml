@@ -222,30 +222,35 @@ fn baselinePath(allocator: std.mem.Allocator, path: ?[]const u8, directory: ?[]c
     return try std.fmt.allocPrint(allocator, "{s}/{x:0>16}.bin", .{ dir, std.hash.Wyhash.hash(0, id) });
 }
 
-fn measureBatch(io: std.Io, runner: *zml.Exe.Runner, inputs: anytype, iterations: u32) f64 {
+fn measureBatch(io: std.Io, runner: *zml.Exe.Runner, inputs: anytype, outputs: []zml.Buffer, iterations: u32) f64 {
     var range = zml.tracer.span("moe_bench.batch", .{ .iterations = iterations });
     defer range.end();
     const start: std.Io.Timestamp = .now(io, .awake);
     for (0..iterations) |_| {
-        var output: zml.Buffer = undefined;
         // Measure completed public-API calls, without relying on backend queue ordering.
-        runner.run(io, inputs, .{&output}, .{ .wait = true });
-        output.deinit();
+        runner.run(io, inputs, .{outputs}, .{ .wait = true });
+        for (outputs) |*output| output.deinit();
     }
     return @floatFromInt(start.untilNow(io, .awake).toNanoseconds());
 }
 
 /// Measure completed public API calls; setup and validation belong outside this function.
+/// Any number of tensor outputs is supported; output handles are reused and
+/// their device allocations disposed after each call. Inputs must not be donated.
 /// The caller owns the returned `samples_us` allocation.
 pub fn measure(allocator: std.mem.Allocator, io: std.Io, runner: *zml.Exe.Runner, inputs: anytype, args: cases.Args) !results.Timing {
-    if (args.warmup != 0) _ = measureBatch(io, runner, inputs, args.warmup);
+    if (args.iters == 0 or args.samples == 0 or args.sample_ms == 0) return error.InvalidIterationCount;
+    if (runner.exe.donated_input_indices.len != 0) return error.DonatedBenchmarkInputs;
+    const outputs = try allocator.alloc(zml.Buffer, runner.exe.output_shapes.len);
+    defer allocator.free(outputs);
+    if (args.warmup != 0) _ = measureBatch(io, runner, inputs, outputs, args.warmup);
     const target_ns: f64 = @as(f64, @floatFromInt(args.sample_ms)) * 1e6;
     const samples = try allocator.alloc(f64, args.samples);
     errdefer allocator.free(samples);
     var iterations = args.iters;
     var accepted: usize = 0;
     while (accepted < samples.len) {
-        const elapsed = measureBatch(io, runner, inputs, iterations);
+        const elapsed = measureBatch(io, runner, inputs, outputs, iterations);
         if (elapsed < target_ns) {
             const next = @as(f64, @floatFromInt(iterations)) * @min(10, 1.2 * target_ns / @max(elapsed, 1));
             if (iterations == std.math.maxInt(u32) or next > std.math.maxInt(u32)) return error.TooManyTimingIterations;
@@ -325,25 +330,44 @@ fn valueAt(dtype: zml.DataType, bytes: []const u8, index: usize) f64 {
 }
 
 fn compareValues(c: cases.Case, actual: []const u8, expected: []const u8, result: *Comparison) !void {
-    if (actual.len != expected.len) return error.OutputSizeMismatch;
     const bytes = c.activation_dtype.sizeOf();
+    if (actual.len != expected.len or actual.len % bytes != 0) return error.OutputSizeMismatch;
     const tolerance = c.tolerance();
     for (0..actual.len / bytes) |i| {
         const a = valueAt(c.activation_dtype, actual, i);
         const e = valueAt(c.activation_dtype, expected, i);
+        const index = result.elements;
         result.elements += 1;
         result.exact += @intFromBool(std.mem.eql(u8, actual[i * bytes ..][0..bytes], expected[i * bytes ..][0..bytes]));
         if (!std.math.isFinite(a) or !std.math.isFinite(e)) {
             result.outside_tolerance += 1;
             result.nonfinite += 1;
+            if (result.first_failure == null) result.first_failure = .{
+                .index = index,
+                .actual = if (std.math.isFinite(a)) a else null,
+                .expected = if (std.math.isFinite(e)) e else null,
+                .allowed_error = null,
+            };
             continue;
         }
         const diff = @abs(a - e);
-        result.max_absolute_error = @max(result.max_absolute_error, diff);
+        if (diff > result.max_absolute_error) {
+            result.max_absolute_error = diff;
+            result.max_absolute_error_index = index;
+        }
         result.sum_squared_error += diff * diff;
         result.sum_squared_actual += a * a;
         result.sum_squared_reference += e * e;
-        if (diff > tolerance.absolute_tolerance + tolerance.relative_tolerance * @max(@abs(a), @abs(e))) result.outside_tolerance += 1;
+        const allowed = tolerance.absolute_tolerance + tolerance.relative_tolerance * @max(@abs(a), @abs(e));
+        if (diff > allowed) {
+            result.outside_tolerance += 1;
+            if (result.first_failure == null) result.first_failure = .{
+                .index = index,
+                .actual = a,
+                .expected = e,
+                .allowed_error = allowed,
+            };
+        }
     }
     result.relative_l2_error = if (result.nonfinite != 0) null else if (result.sum_squared_reference != 0)
         @sqrt(result.sum_squared_error / result.sum_squared_reference)
@@ -388,11 +412,63 @@ test "comparison uses the compliance tolerance and rejects nonfinite values" {
     try compareValues(c, std.mem.sliceAsBytes(&[_]f32{ 1, 1.03, 2 }), std.mem.sliceAsBytes(&[_]f32{ 1, 1, 1 }), &comparison);
     try std.testing.expectEqual(@as(usize, 1), comparison.exact);
     try std.testing.expectEqual(@as(usize, 1), comparison.outside_tolerance);
+    try std.testing.expectEqual(@as(usize, 2), comparison.first_failure.?.index);
+    try std.testing.expectEqual(@as(f64, 2), comparison.first_failure.?.actual.?);
+    try std.testing.expectEqual(@as(usize, 2), comparison.max_absolute_error_index.?);
     try compareValues(c, std.mem.sliceAsBytes(&[_]f32{std.math.nan(f32)}), std.mem.sliceAsBytes(&[_]f32{0}), &comparison);
     try std.testing.expectEqual(@as(usize, 2), comparison.outside_tolerance);
     try std.testing.expectEqual(@as(usize, 1), comparison.nonfinite);
     try std.testing.expect(comparison.relative_l2_error == null);
     try std.testing.expectError(error.OutputSizeMismatch, compareValues(c, &.{0}, &.{}, &comparison));
+}
+
+test "comparison diagnostics retain global indices across reference rows" {
+    const c: cases.Case = .{ .backend = .stablehlo, .activation_dtype = .f32 };
+    var comparison: Comparison = .{};
+    try compareValues(c, std.mem.sliceAsBytes(&[_]f32{ 0, 1 }), std.mem.sliceAsBytes(&[_]f32{ 0, 1 }), &comparison);
+    try compareValues(c, std.mem.sliceAsBytes(&[_]f32{ 2, 4 }), std.mem.sliceAsBytes(&[_]f32{ 2, 2 }), &comparison);
+    try std.testing.expectEqual(@as(usize, 3), comparison.first_failure.?.index);
+    try std.testing.expectEqual(@as(usize, 3), comparison.max_absolute_error_index.?);
+    try std.testing.expectEqual(@as(f64, 4), comparison.first_failure.?.actual.?);
+    try std.testing.expectEqual(@as(f64, 2), comparison.first_failure.?.expected.?);
+    try std.testing.expectError(error.OutputSizeMismatch, compareValues(c, &.{0}, &.{0}, &comparison));
+    var nonfinite: Comparison = .{};
+    try compareValues(c, std.mem.sliceAsBytes(&[_]f32{std.math.inf(f32)}), std.mem.sliceAsBytes(&[_]f32{0}), &nonfinite);
+    try std.testing.expect(nonfinite.first_failure.?.actual == null);
+    try std.testing.expectEqual(@as(f64, 0), nonfinite.first_failure.?.expected.?);
+}
+
+test "measurement supports multiple stage outputs and rejects donated inputs" {
+    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const Functions = struct {
+        fn stage(x: zml.Tensor) [2]zml.Tensor {
+            return .{ x.addConstant(1), x.scale(2) };
+        }
+        fn donated(x: zml.Tensor) zml.Tensor {
+            return x.addConstant(1).reuseBuffer(x);
+        }
+    };
+    const shape: zml.Shape = .init(.{4}, .f32);
+    var input = try zml.Buffer.fromBytes(io, platform, shape, std.mem.asBytes(&[4]f32{ 1, 2, 3, 4 }));
+    defer input.deinit();
+    const exe = try platform.compileFn(allocator, io, Functions.stage, .{zml.Tensor.fromShape(shape)}, .{});
+    defer exe.deinit();
+    var runner = try exe.runner(allocator);
+    defer runner.deinit(allocator);
+    const timing = try measure(allocator, io, &runner, .{input}, .{ .warmup = 1, .iters = 2, .samples = 2, .sample_ms = 1 });
+    defer allocator.free(timing.samples_us);
+    try std.testing.expectEqual(@as(usize, 2), timing.samples_us.len);
+    const preserved = try input.toSliceAlloc(allocator, io);
+    defer preserved.free(allocator);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, preserved.constItems(f32));
+    try std.testing.expectError(error.InvalidIterationCount, measure(allocator, io, &runner, .{input}, .{ .samples = 0 }));
+    const donated = try platform.compileFn(allocator, io, Functions.donated, .{zml.Tensor.fromShape(shape)}, .{});
+    defer donated.deinit();
+    var donated_runner = try donated.runner(allocator);
+    defer donated_runner.deinit(allocator);
+    try std.testing.expectError(error.DonatedBenchmarkInputs, measure(allocator, io, &donated_runner, .{input}, .{}));
 }
 
 test "benchmark executes the public MoE API with sharded experts" {

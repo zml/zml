@@ -59,6 +59,29 @@ class CaptureTest(unittest.TestCase):
         self.assertAlmostEqual(metrics["no_recorded_gpu_activity_us_per_call"]["median"], 0.035)
         self.assertEqual(result["retained_samples"], 2)
 
+    def test_duplicate_records_and_ranges_are_rejected(self):
+        original = self.records_path.read_text()
+        for line, error in ((original.splitlines()[0], "exactly one run"),
+                            (original.splitlines()[1], "duplicate workload records")):
+            with self.subTest(error=error):
+                self.records_path.write_text(original + "\n" + line)
+                with self.assertRaisesRegex(ValueError, error):
+                    self.extract()
+        self.records_path.write_text(original)
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("INSERT INTO NVTX_EVENTS SELECT * FROM NVTX_EVENTS WHERE text='moe_bench.measure/case1'")
+        with self.assertRaisesRegex(ValueError, "duplicate workload range"):
+            self.extract()
+
+    def test_means_preserve_additive_accounting_with_variable_overlap(self):
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("UPDATE CUPTI_ACTIVITY_KIND_KERNEL SET start=start+10, end=end+10 WHERE start>250 AND graphNodeId=2")
+        metrics = self.extract()["cases"][0]["devices"]["all"]
+        value = lambda key: metrics[key + "_us_per_call"]["mean"]
+        self.assertAlmostEqual(value("kernel_work") - value("overlap"), value("kernel_union"))
+        self.assertAlmostEqual(value("kernel_union") + value("memory_only") + value("no_recorded_gpu_activity"),
+                               value("full_batch"))
+
     def test_failed_replay_stays_visible_without_timing_claims(self):
         records = [json.loads(line) for line in self.records_path.read_text().splitlines()]
         records[1].update(statistics=None, status="execution_failed", reason="ReplayMismatch")
