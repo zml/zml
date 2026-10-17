@@ -75,7 +75,7 @@ the first selected preset's name as provenance.
 
 ## Execution and measurements
 
-`main.zig` selects and validates cases, groups identical graphs, compiles each
+`suite.zig` selects and validates cases, groups identical graphs, compiles each
 group, and measures its runtime variants. `cases.zig` owns the catalog and
 selection; `workload.zig` owns operands, layouts, input generation, and routing;
 `runner.zig` owns compilation, correctness checks, and measurements.
@@ -156,8 +156,7 @@ pass a first-launch check. `--compare-exact` makes this comparison bitwise too.
 `--json=results.jsonl` writes one complete JSON object per line and flushes each
 record. Run metadata records the source revision, dirty state, source hash, compiler
 version/optimization, platform, device IDs, compute capabilities and SM counts,
-measurement settings, and relevant environment overrides (`ZML_MOE_*`,
-`CUDA_VISIBLE_DEVICES`, `XLA_FLAGS`, `ZML_AUTOTUNE_CACHE_DIR`). Case records include their full configuration,
+measurement settings, and relevant environment settings (`CUDA_VISIBLE_DEVICES`, `XLA_FLAGS`, `ZML_AUTOTUNE_CACHE_DIR`). Case records include their full configuration,
 preset, status and skip/failure reason, compilation time, timing samples, routing
 statistics, output statistics, and comparison results. Keep the settings and
 hardware fixed when comparing runs.
@@ -190,60 +189,77 @@ are warmup or duration calibration. Verify complete launches before comparing ke
 time: kernels and collective communication can overlap, and synchronized wall
 time also includes host dispatch and gaps.
 
-Workload axes describe the MoE operation, not kernel implementation choices.
-Backend tuning overrides belong in environment variables and driver scripts;
-use the same workloads, seeds, validation, and profiling boundaries for every
-setting. The CLI depends on `//zml/kernels/moe/bench:lib` (`@import("moe_bench")`).
-Stage-specific benches under `zml/kernels` can reuse `cases`, `workload`,
-`runner.measure`, and `results` without duplicating data generation or formats.
-The library owns no process-wide state; callers own platforms, executables,
-prepared weights, and output writers. `runner.measure` disposes every tensor
-output, so stages returning both quantized values and scales can use it directly.
-It rejects executables that donate inputs: repeated measurements need immutable
-operands, and would otherwise reuse a freed input after the first call.
+Workload axes describe the MoE operation. Implementation-specific executables
+own kernel parameter sweeps. The main CLI depends on
+`//zml/kernels/moe/bench:lib` (`@import("moe_bench")`): `suite.run` accepts an
+implementation-owned compiler and reuses selection, setup, validation, timing,
+and reporting. It owns no process-wide state; callers own platforms and meshes.
+Stage benches can also use `cases`, `workload`, `runner.measure`, and `results`
+individually. The timer disposes every tensor output, so stages returning both
+quantized values and scales can use it directly. It rejects executables that
+donate inputs, since the next call would otherwise reuse a freed input.
 
-CuTe reads these overrides when compiling each graph; restart the process after
-changing them. Each measured case records the resolved `cute_launch` plan.
+## CuTe tuning
 
-| Environment variable | Accepted values |
-|---|---|
-| `ZML_MOE_CUTE_TILE_N` | `8`, `16`, `32`, `64`, `128` for grouped routing; direct single-token decode retains its dedicated 8-row tile |
-| `ZML_MOE_CUTE_TWO_CTA` | `true`, `false`; pairs require a wide tile and multiple tokens |
-| `ZML_MOE_CUTE_QUANTIZE_LANES` | `1`, `4` |
-| `ZML_MOE_CUTE_PERSISTENT_CTAS` | Positive count no greater than the smallest participating GPU's SM count; even for pairs |
-
-Unset variables use the backend policy. Invalid combinations fail explicitly.
-The backend supports compute capability 10.x and the DeepSeek expert geometry;
-overrides do not bypass these requirements. Default grids use device attributes,
-and routing density uses the global expert count, independently of mesh size.
-
-The backend's shell driver varies implementation settings, keeps workload
-arguments fixed, and compares every candidate bit for bit against its default:
+`//zml/kernels/moe/cute:tune` is a Zig executable. It resolves typed `Tuning`
+values into a `LaunchPlan` and passes each plan directly to
+`cute.fusedExpertsWithPlan`. The same wrapper handles unsharded and
+expert-parallel execution. Production CuTe uses its default launch policy and
+reads no tuning environment variables. The former `ZML_MOE_CUTE_*` controls
+and `tune.sh` have been removed.
 
 ```sh
-bazel build --config=release --@zml//platforms:cuda=true //zml/kernels/moe/bench
-CUDA_VISIBLE_DEVICES=0,1 NSYS=nsys TILES='32 64 128' QUANTIZE_LANES='1 4' \
-  bash zml/kernels/moe/cute/tune.sh bazel-bin/zml/kernels/moe/bench/bench /tmp/moe-tuning \
-  --backend=cute --experts=192 --global-experts=384 --topk=6 \
+CUDA_VISIBLE_DEVICES=0,1 bazel run --config=release --@zml//platforms:cuda=true \
+  //zml/kernels/moe/cute:tune -- --output=/tmp/moe-tuning \
+  --tiles=32,64,128 --quantize-lanes=1,4 \
+  --experts=192 --global-experts=384 --topk=6 \
   --tokens=1,256,2048,4096,8192,16384 --routing=uniform,skewed --seeds=1,2
 ```
 
-The output directory must be new. The driver selects CuTe and owns validation
-and output options; listing/help and conflicting options are rejected. It saves
-the binary SHA-256 and replayable commands with the effective environment.
-Omit `NSYS` for wall-time controls. `TILES`,
-`QUANTIZE_LANES`, and `PERSISTENT_CTAS` are space-separated driver selections;
-an empty value omits that part of the sweep. Check a small workload selection
-with `--check` first, then profile representative full-sized configurations.
+The output directory must be new. The tuner first measures the production
+public API and saves a baseline, then requires every candidate output and
+warmed replay to match it bit for bit. `--check` additionally checks the
+independent reference. A failed baseline stops the sweep; failed candidates
+remain recorded and the rest continue, with a nonzero final exit status.
+Compilation and validation remain outside timed samples.
 
-Export an Nsight capture and summarize only the retained batches:
+| Tuner option | Values |
+|---|---|
+| `--tiles` | Comma-separated `8,16,32,64,128`; wide tiles run paired and single-CTA controls; single-token decode retains its dedicated 8-row tile |
+| `--quantize-lanes` | Comma-separated `1,4` |
+| `--persistent-ctas` | Positive counts no greater than the smallest participating GPU's SM count; pairs require even counts |
+| `--configuration` | One generated name, such as `tile-64-single` or `quantize-4`; the default baseline still runs first |
+
+Each axis varies independently against the defaults. Use `none` to omit an axis;
+`--persistent-ctas` defaults to `none`. Workload arguments are identical to the
+main bench. The tuner owns backend, output, and baseline options; `--list`,
+`--json`, `--dump*`, and `--compare*` are rejected. Each setting gets a separate
+JSONL file containing its requested configuration, source provenance, workload
+arguments, and the resolved `cute_launch` plan for every graph.
+
+The backend supports compute capability 10.x and the DeepSeek expert geometry;
+explicit plans do not bypass these requirements. Grids use device attributes,
+and routing density uses the global expert count independently of mesh size.
+
+For profiling, build the tuner and run it under Nsight with a narrow selection:
 
 ```sh
-nsys export --type=sqlite --output=/tmp/moe-tuning/default.sqlite /tmp/moe-tuning/default.nsys-rep
+bazel build --config=release --@zml//platforms:cuda=true //zml/kernels/moe/cute:tune
+CUDA_VISIBLE_DEVICES=0,1 SKIP_PJRT_PROFILER=true nsys profile \
+  --trace=cuda,nvtx --cuda-graph-trace=node --sample=none --cpuctxsw=none \
+  --output=/tmp/moe-tune bazel-bin/zml/kernels/moe/cute/tune \
+  --output=/tmp/moe-tuning-profile --configuration=tile-64-single \
+  --experts=192 --global-experts=384 --topk=6 --tokens=4096 --routing=uniform
+nsys export --type=sqlite --output=/tmp/moe-tune.sqlite /tmp/moe-tune.nsys-rep
 bazel run //zml/kernels/moe/bench:profile_metrics -- \
-  /tmp/moe-tuning/default.sqlite /tmp/moe-tuning/default.jsonl \
-  --output=/tmp/moe-tuning/default-metrics.json
+  /tmp/moe-tune.sqlite /tmp/moe-tuning-profile/tile-64-single.jsonl \
+  --output=/tmp/moe-tuning-profile/tile-64-single-metrics.json
 ```
+
+Configuration NVTX ranges let the analyzer select the matching setting from a
+single capture even when several settings use identical workload IDs. To
+isolate settings in separate processes, invoke the tuner again with a different
+`--configuration` and a new output directory.
 
 The analyzer rejects incomplete batches, missing ranks, changing graph nodes,
 and incomplete ordinary launch counts. It reports kernel work, the union of GPU

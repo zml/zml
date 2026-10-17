@@ -76,6 +76,17 @@ pub const LaunchPlan = struct {
     two_cta: bool,
     persistent_ctas: i64,
     quantize_lanes: i64,
+
+    pub fn validate(self: LaunchPlan, platform: *const zml.Platform, tokens: i64, hidden: i64, intermediate: i64, global_experts: i64, topk: i64) !void {
+        const tuning: Tuning = .{
+            .tile_n = self.tile_n,
+            .two_cta = self.two_cta,
+            .persistent_ctas = self.persistent_ctas,
+            .quantize_lanes = self.quantize_lanes,
+        };
+        const resolved = try tuning.resolveFor(platform, tokens, hidden, intermediate, global_experts, topk);
+        if (!std.meta.eql(self, resolved)) return error.InvalidCuteLaunchPlan;
+    }
 };
 
 /// Compile-time overrides for experiments. Workload selection belongs to the
@@ -86,23 +97,8 @@ pub const Tuning = struct {
     persistent_ctas: ?i64 = null,
     quantize_lanes: ?i64 = null,
 
-    pub fn fromEnvironment() !Tuning {
-        return .{
-            .tile_n = try envInteger("ZML_MOE_CUTE_TILE_N"),
-            .two_cta = if (std.c.getenv("ZML_MOE_CUTE_TWO_CTA")) |raw| blk: {
-                const value = std.mem.span(raw);
-                if (std.mem.eql(u8, value, "true")) break :blk true;
-                if (std.mem.eql(u8, value, "false")) break :blk false;
-                return error.InvalidCuteTwoCta;
-            } else null,
-            .persistent_ctas = try envInteger("ZML_MOE_CUTE_PERSISTENT_CTAS"),
-            .quantize_lanes = try envInteger("ZML_MOE_CUTE_QUANTIZE_LANES"),
-        };
-    }
-
-    fn envInteger(comptime name: [:0]const u8) !?i64 {
-        const raw = std.c.getenv(name) orelse return null;
-        return std.fmt.parseInt(i64, std.mem.span(raw), 10) catch error.InvalidCuteTuningInteger;
+    pub fn resolveFor(self: Tuning, platform: *const zml.Platform, tokens: i64, hidden: i64, intermediate: i64, global_experts: i64, topk: i64) !LaunchPlan {
+        return self.resolve(tokens, hidden, intermediate, global_experts, topk, try persistentCtas(platform));
     }
 
     pub fn resolve(self: Tuning, tokens: i64, hidden: i64, intermediate: i64, global_experts: i64, topk: i64, sm_count: i64) !LaunchPlan {
@@ -142,8 +138,7 @@ fn persistentCtas(platform: *const zml.Platform) !i64 {
 }
 
 pub fn launchPlan(platform: *const zml.Platform, tokens: i64, hidden: i64, intermediate: i64, global_experts: i64, topk: i64) !LaunchPlan {
-    const tuning = try Tuning.fromEnvironment();
-    return tuning.resolve(tokens, hidden, intermediate, global_experts, topk, try persistentCtas(platform));
+    return (Tuning{}).resolveFor(platform, tokens, hidden, intermediate, global_experts, topk);
 }
 
 test "CuTe launch policy uses global experts and validates tuning overrides" {
@@ -174,6 +169,20 @@ test "CuTe launch policy uses global experts and validates tuning overrides" {
         .{ Tuning{ .quantize_lanes = 2 }, error.InvalidCuteQuantizeLanes },
     }) |case| try std.testing.expectError(case[1], case[0].resolve(2048, 5120, 2304, 384, 6, 152));
     try std.testing.expectError(error.InvalidCuteCtaPair, (Tuning{ .two_cta = true }).resolve(1, 5120, 2304, 384, 6, 152));
+}
+
+test "CuTe explicit plans validate device limits and direct routing" {
+    const platform = zml.testing.env();
+    if (!@import("cute.zig").isAvailable(platform)) return error.SkipZigTest;
+    const plan = try (Tuning{ .tile_n = 64, .two_cta = false, .quantize_lanes = 1 }).resolveFor(platform, 17, 5120, 2304, 8, 4);
+    try plan.validate(platform, 17, 5120, 2304, 8, 4);
+    try std.testing.expectEqual(@as(i64, 64), plan.tile_n);
+    try std.testing.expectEqual(@as(i64, 1), plan.quantize_lanes);
+    try std.testing.expect(!plan.two_cta);
+    var invalid = plan;
+    invalid.persistent_ctas += 1;
+    try std.testing.expectError(error.InvalidCutePersistentCtas, invalid.validate(platform, 17, 5120, 2304, 8, 4));
+    try std.testing.expectError(error.InvalidCuteLaunchPlan, plan.validate(platform, 1, 5120, 2304, 8, 4));
 }
 
 // TODO(Corentin): settle on groups/capacity.
@@ -281,7 +290,8 @@ pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64
     return forwardWithPlan(tokens, hidden, intermediate, experts, topk, swiglu_limit, a, plan);
 }
 
-fn forwardWithPlan(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs, plan: LaunchPlan) zml.Tensor {
+/// Low-level entry point for a resolved plan; the public expert wrapper validates it.
+pub fn forwardWithPlan(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs, plan: LaunchPlan) zml.Tensor {
     const n = plan.tile_n;
     const direct = isDirect(tokens);
     const routing = route(tokens, experts, topk, n, direct, a.ids);

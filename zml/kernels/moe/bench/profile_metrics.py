@@ -55,6 +55,13 @@ def extract(db_path, records_path):
             globalTid
         FROM NVTX_EVENTS WHERE end IS NOT NULL ORDER BY start
     """)]
+    if metadata.get('configuration_name') is not None:
+        name = 'moe_bench.configuration/' + metadata['configuration_name']
+        scopes = [x for x in markers if x['name'] == name]
+        require(len(scopes) == 1, ('missing or duplicate configuration range', name))
+        scope = scopes[0]
+        markers = [x for x in markers if x['globalTid'] == scope['globalTid']
+                   and x['start'] >= scope['start'] and x['end'] <= scope['end']]
     measurements = [x for x in markers if (x['name'] or '').startswith('moe_bench.measure/')]
     batches = [x for x in markers if (x['name'] or '').startswith('moe_bench.batch#')]
     kernels = [dict(x) for x in db.execute('select * from CUPTI_ACTIVITY_KIND_KERNEL order by start')]

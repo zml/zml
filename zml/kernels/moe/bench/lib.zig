@@ -2,6 +2,7 @@
 pub const cases = @import("cases.zig");
 pub const workload = @import("workload.zig");
 pub const runner = @import("runner.zig");
+pub const suite = @import("suite.zig");
 pub const results = @import("results.zig");
 
 test {
@@ -10,4 +11,5 @@ test {
     _ = workload;
     _ = runner;
     _ = results;
+    _ = suite;
 }

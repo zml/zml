@@ -32,6 +32,22 @@ pub fn fusedExperts(
     down: zml.nn.Linear,
     options: zml.moe.Options,
 ) zml.Tensor {
+    const plan = kernels.launchPlan(zml.Compiler.current().platform, input.dim(.t), down.weight.dim(1), down.weight.dim(2) * 2, gate_up.weight.dim(.expert), ids.dim(.topk)) catch |err|
+        stdx.debug.panic("invalid CuTe MoE launch configuration: {s}", .{@errorName(err)});
+    return fusedExpertsWithPlan(input, ids, weights, gate_up, down, options, plan);
+}
+
+/// The normal expert-parallel path with an explicitly resolved launch plan.
+/// Configuration is baked into the compiled graph, never read from the environment.
+pub fn fusedExpertsWithPlan(
+    input: zml.Tensor,
+    ids: zml.Tensor,
+    weights: zml.Tensor,
+    gate_up: zml.nn.Linear,
+    down: zml.nn.Linear,
+    options: zml.moe.Options,
+    plan: kernels.LaunchPlan,
+) zml.Tensor {
     validateOptions(options);
     stdx.debug.assert(input.dtype() == .bf16, "cute backend only supports bf16 inputs, got {}", .{input.dtype()});
     stdx.debug.assert(gate_up.bias == null and down.bias == null, "cute backend expects gate_up bias and down bias to be null", .{});
@@ -50,6 +66,8 @@ pub fn fusedExperts(
 
     // The CuTe GEMMs are specialized on one set of dimensions
     kernels.validateShapes(hidden, intermediate);
+    plan.validate(zml.Compiler.current().platform, input.dim(.t), hidden, intermediate, gate_up.weight.dim(.expert), ids.dim(.topk)) catch |err|
+        stdx.debug.panic("invalid CuTe MoE launch configuration: {s}", .{@errorName(err)});
 
     // The SwiGLU clamp is a kernel parameter, but the routing weight is
     // multiplied in the up epilogue, before the down projection: applying it
@@ -66,7 +84,7 @@ pub fn fusedExperts(
         .topk = ids.dim(.topk),
         .swiglu_limit = options.activation.swiglu.limit.?,
         .expert_parallel = expert_parallelism,
-        .global_experts = gate_up.weight.dim(.expert),
+        .plan = plan,
     };
     return if (expert_parallelism)
         zml.ops.manualComputation(Context.body, context, input.shape())
@@ -85,7 +103,7 @@ const Context = struct {
     topk: i64,
     swiglu_limit: f32,
     expert_parallel: bool,
-    global_experts: i64,
+    plan: kernels.LaunchPlan,
 
     fn body(self: Context, _: zml.Shape) zml.Tensor {
         const experts = self.w1.dim(.expert);
@@ -102,7 +120,7 @@ const Context = struct {
             const local = ids.cmp(.GE, expert_start).logical(.AND, ids.cmp(.LT, expert_end));
             ids = local.select(ids.sub(expert_start), .scalar(-1, .i32));
         }
-        const result = kernels.forward(tokens, hidden, intermediate, experts, self.global_experts, self.topk, self.swiglu_limit, .{
+        const result = kernels.forwardWithPlan(tokens, hidden, intermediate, experts, self.topk, self.swiglu_limit, .{
             .x = self.input.reshape(.{ tokens, hidden }),
             .routing_weights = routing_weights,
             .w1 = self.w1,
@@ -110,7 +128,7 @@ const Context = struct {
             .w2 = self.w2,
             .s2 = self.s2,
             .ids = ids,
-        }).reshape(self.input.shape().dims()).withTags(self.input.shape());
+        }, self.plan).reshape(self.input.shape().dims()).withTags(self.input.shape());
 
         return if (self.expert_parallel)
             zml.ops.allReduce(result, zml.Tensor.add)

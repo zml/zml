@@ -23,6 +23,7 @@ zig_library(
         "cases.zig",
         "results.zig",
         "runner.zig",
+        "suite.zig",
         "workload.zig",
     ],
     import_name = "moe_bench",

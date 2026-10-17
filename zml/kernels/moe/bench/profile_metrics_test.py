@@ -92,6 +92,26 @@ class CaptureTest(unittest.TestCase):
             "id": "case1", "status": "execution_failed", "reason": "ReplayMismatch",
         }])
 
+    def test_tuning_capture_selects_its_configuration(self):
+        records = [json.loads(line) for line in self.records_path.read_text().splitlines()]
+        records[0]['configuration_name'] = 'default'
+        self.records_path.write_text("\n".join(map(json.dumps, records)))
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("INSERT INTO NVTX_EVENTS SELECT start+500,end+500,text,textId,globalTid FROM NVTX_EVENTS")
+            db.execute("INSERT INTO NVTX_EVENTS VALUES(0,450,'moe_bench.configuration/default',NULL,1)")
+            db.execute("INSERT INTO NVTX_EVENTS VALUES(500,950,'moe_bench.configuration/tile-64-single',NULL,1)")
+            db.execute("INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL SELECT start+500,end+500,globalPid,deviceId,contextId,correlationId+100,graphId+1,graphNodeId,demangledName FROM CUPTI_ACTIVITY_KIND_KERNEL")
+        first = self.extract()
+        self.assertEqual(len(first['cases']), 1)
+        records[0]['configuration_name'] = 'tile-64-single'
+        self.records_path.write_text("\n".join(map(json.dumps, records)))
+        second = self.extract()
+        self.assertEqual(first['cases'][0]['devices'], second['cases'][0]['devices'])
+        records[0]['configuration_name'] = 'missing'
+        self.records_path.write_text("\n".join(map(json.dumps, records)))
+        with self.assertRaisesRegex(ValueError, 'configuration range'):
+            self.extract()
+
     def test_missing_graph_node_is_rejected(self):
         with sqlite3.connect(self.db_path) as db:
             db.execute("DELETE FROM CUPTI_ACTIVITY_KIND_KERNEL WHERE correlationId=11 AND graphNodeId=2")

@@ -1,8 +1,6 @@
-load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 package(default_visibility = ["//zml:__pkg__"])
-
-exports_files(["tune.sh"])
 
 filegroup(
     name = "cute",
@@ -14,8 +12,21 @@ filegroup(
     ],
 )
 
-py_test(
+zig_binary(
+    name = "tune",
+    main = "tune.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+        "//zml/kernels/moe/bench:lib",
+    ],
+)
+
+zig_test(
     name = "tune_test",
-    srcs = ["tune_test.py"],
-    data = ["tune.sh"],
+    main = "tune.zig",
+    deps = [
+        "//zml",
+        "//zml/kernels/moe/bench:lib",
+    ],
 )

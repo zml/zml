@@ -141,8 +141,7 @@ pub fn environment(allocator: std.mem.Allocator, environ: *const std.process.Env
     var it = environ.iterator();
     while (it.next()) |entry| {
         const name = entry.key_ptr.*;
-        if (std.mem.startsWith(u8, name, "ZML_MOE_") or
-            std.mem.eql(u8, name, "CUDA_VISIBLE_DEVICES") or
+        if (std.mem.eql(u8, name, "CUDA_VISIBLE_DEVICES") or
             std.mem.eql(u8, name, "XLA_FLAGS") or
             std.mem.eql(u8, name, "SKIP_PJRT_PROFILER") or
             std.mem.eql(u8, name, "ZML_AUTOTUNE_CACHE_DIR"))
