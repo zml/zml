@@ -164,7 +164,11 @@ pub const Loader = struct {
         const staging = try self.staging.acquire(self.allocator, self.io, tensor_bytes);
         defer self.staging.release(self.allocator, self.io, staging);
         const tensor = staging[0..tensor_bytes];
-        if (spec.zero_fill) {
+        var strided = false;
+        for (spec.parts) |covered| strided = strided or covered.dims.len != 0;
+        if (spec.zero_fill and strided) {
+            @memset(tensor, 0);
+        } else if (spec.zero_fill) {
             // Only the gaps: the parts overwrite the rest.
             var covered_end: usize = 0;
             for (spec.parts) |covered| {
@@ -181,7 +185,20 @@ pub const Loader = struct {
             defer reader.deinit();
             stage.* = "read";
             const start: usize = @intCast(current.dst_offset);
-            try self.readInto(&reader, current.src_offset, tensor[start..][0..@intCast(current.width)]);
+            if (current.dims.len == 0) {
+                try self.readInto(&reader, current.src_offset, tensor[start..][0..@intCast(current.width)]);
+                continue;
+            }
+            // A strided part: its source range once, then each run where it lands.
+            const lattice = current.lattice();
+            const source = try self.allocator.alloc(u8, @intCast(lattice.spans().?.src));
+            defer self.allocator.free(source);
+            try self.readInto(&reader, current.src_offset, source);
+            const width: usize = @intCast(current.width);
+            var runs: backend.Lattice.Cursor = .init(lattice, 0, lattice.runs());
+            while (runs.next()) |run| {
+                @memcpy(tensor[@intCast(run.dst)..][0..width], source[@intCast(run.src - current.src_offset)..][0..width]);
+            }
         }
         stage.* = "transfer";
         // The shape's sharding places the bytes; a shape without a mesh is

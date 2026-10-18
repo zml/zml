@@ -4751,6 +4751,35 @@ not committed); llmd needs no change (same `LoadSpec`/`TensorStore` API).
 - CPU default memory could take `host_direct` too (it is host memory); not
   done, CPU default keeps the transfer managers.
 
+## Twenty-third pass: monorepo re-merge with newer master (2026-10-18)
+
+- The user redid the monorepo merge as `rwotnntx` (`jj new master
+  brabier/adaptive-concurrency`), with master at `3a8b1dae` (2026-10-15,
+  "llmd/crash/Sentry: missing upgrade to zig 0.17"). Conflicts: `main.zig`,
+  `weights.zig`, `models/deepseek41.zig` and the five `*dflash*.zig` files.
+- The twentieth/twenty-first pass resolution survives as `kqxnstry`
+  (`052a7d2d`, no description), a merge of `6011a514` and the old master
+  `c40c5b92` (zig 0.17, #646).
+- Method: each file is a 3-way merge with the old master as base, `kqxnstry`
+  as ours and the new master as theirs. Master changed 14 files since then.
+  Only `deepseek41.zig` and `qwen3_5.zig` overlap with the resolution, and
+  `git merge-file` merged both cleanly: compile progress nodes in
+  `compileModel`, and the #701 prefill priority in qwen3_5. The dflash files
+  are gone on master and stay deleted.
+- Checks: `jj diff --from master --to @` touches exactly the 8 files that
+  `kqxnstry` changed against the old master. `jj diff --from kqxnstry --to @`
+  matches master's 14-file delta (114+/189-).
+- Monorepo master moved its zml pin from `c1492917` to `e385d9c2`. Neither
+  commit is in the local zml repo, which has not been fetched since
+  2026-10-14; the zml merge is on master `cddc9cf6` (#928).
+  `--config=localzml` builds against the local merge without needing either
+  commit.
+- Verified on the B70 host: `bazel build --config=localzml //llmd/...` (22
+  targets), `bazel test --config=localzml //llmd/...` 6/6, and the same
+  build with `--@zml//platforms:oneapi=true` and with
+  `--@zml//platforms:cuda=true`. llmd was not run.
+- Uncommitted: `@` (`rwotnntx`) holds the resolution, with no description.
+
 ## Concatenating tensors in the loader: design (2026-10-14, exploration)
 
 The user's framing: packing is "just moving bytes to the right place".
@@ -4814,8 +4843,769 @@ Phases (Phase 1's contiguous slice is the twenty-first pass):
 Full exploration with file:line inventory: session scratchpad
 `explore_concat.md` (not durable; the points above are the substance).
 
+## Concatenation API: Source expressions (2026-10-18, proposal)
+
+The user asked to compare the loader's concatenation API with the API they
+landed on in monorepo `brabier/weights-add-explicit-tags-and-paritins`, to
+list everything llmd needs, and to improve the zml API using the branch as
+inspiration. The branch is one commit (`rsqorxts` / `898fb0b2`,
+2026-10-09, "llmd/weights: use explicit tags and partitioning", on master
+`13d57911`, +1099/-844 in 16 files). It is not in master, so master and the
+merge still use `FusionSpec`. Nothing below is implemented yet.
+
+### What exists
+
+- zml (twenty-first pass): `View.createConcatenated(subkeys, tags, mesh,
+  partitioning, .{ .rows | .pad_rows_to_multiple, .memory })` (dimension 0
+  only); `View.createComposite(subkeys, shape, Layout{ parts, fill },
+  memory)` with byte `Part`s the caller computes; `setMemory` and
+  `createHostPinnedTensor`; `maybeCreateBinding` for program inputs
+  (`loadExecute`). The loader takes one contiguous part per source, of the
+  tensor's dtype, landing as whole rows.
+- llmd on master and in the merge: `Packer.fusedLinear(store,
+  FusionSpec{ members{ name, count, width }, groups, source, partitioning:
+  BlockPartitioning }, out, k)` records `Recipe.fuse` for the `packFused`
+  program. `splitFused` registers alias names in the checkpoint registry to
+  split pre-fused tensors. `experts` gives `Recipe.stack` and `packStack`.
+  `concatenateRows` is a composite for one dtype, a program otherwise.
+  Counts: 28 `fusedLinear` sites in 11 model files, 10 `experts` sites,
+  4 `splitFused` sites.
+- The branch:
+  - `linear.View{ store, definition, start, rows }` is a checkpoint Linear
+    (weight, scale, bias, global scale) restricted to a range of output
+    rows. `split(.{ .{ .name, .rows }, ... })` checks every component's row
+    grid (block scales) and registers nothing; its tests assert no aliases
+    and no bindings until assembly.
+  - `concatenateLinears(views, out, k, partitioning)` and
+    `interleaveLinears(.finest | .explicit{ rows_per_group }, out, k,
+    partitioning)` return `FusedLinear{ linear, layout }`.
+    `layout.extractOutput(y, i)` undoes the interleave on the output and
+    keeps `y`'s tags and partitioning. That frees the group count from the
+    head structure (master's `memberHeads` assumed groups = KV heads).
+  - Partitioning is keyed by tags everywhere (`.{ .dout = .model, .d =
+    .replicated }`), replacing `.out`, `.contracted`, `.none` and
+    `BlockPartitioning`.
+  - `splitTensor` binds contiguous slices of a non-Linear tensor (conv1d)
+    without a program.
+  - Still: every assembly records a `Recipe` and runs a pack program.
+    Slices are made by editing `safetensors.Tensor.offset` and `.shape` in
+    llmd, then bound by writing `store.id_to_sources` directly
+    (`bindSources`). The branch predates the composite work, so rebasing it
+    onto the merge conflicts in `weights.zig` (`streamConcatenatedRows`,
+    `concatenateRows`).
+
+### What llmd needs
+
+Byte-only cases (each is modelled below under "Evidence"):
+
+- Fused projections, groups > 1: qkv by KV head (llama, qwen3_5, gemma3/4,
+  laguna, ministral3, muse_glimmer, lfm2, qwen4, dflash), gate/up
+  (finest), the qwen3_5/qwen4 GDN `in_proj_qkvz` (three slices of the fused
+  `in_proj_qkv` plus `in_proj_z`), and the lfm2 `in_proj` rows
+  `[B; C; x]` to `b0 c0 x0 b1 ...`.
+- Fused projections, groups = 1: deepseek41 `wq_a`+`wkv`, and qwen4
+  `down_inject` and `key_value_proj`.
+- Splits of pre-fused checkpoint tensors: `in_proj_qkv` and `conv1d`
+  (qwen3_5, qwen4), and lfm2 `in_proj`.
+- Broadcasts: the per-tensor FP8 scales of fused members become one scale
+  per channel; NVFP4 global scales are repeated over each member's rows.
+- Expert stacks: members concatenated (stablehlo, triton/fly without mxfp4,
+  flashinfer, metal, tpu); rows interleaved (mxfp4 on cute/triton/fly);
+  scalars `[E, P]`. NVFP4 weights are unpacked (u8 to 2 x f4e2m1, a
+  relabel).
+- Engram padding to 8 rows and n-gram shard concatenation, in pinned host
+  memory.
+- 128x4 block-scale swizzles (cute_mxfp4, flashinfer NVFP4, Blackwell FP8
+  with its 128x row spread): pad, split, transpose and broadcast.
+
+Compute, which stays a program: `dequantize_block_fp8` (wo_a),
+`dequantize_blocks`, `convert_rows` and dtype-changing concatenation,
+NVFP4 globals (max and reciprocal), and the CDNA3 fn -> fnuz map.
+
+### Proposal: `TensorStore.Source`, Tensor's shape ops over checkpoint bytes
+
+```zig
+/// A tensor whose bytes the loader takes from checkpoint tensors by moving
+/// them: a checkpoint tensor, or slices, reshapes, transposes, broadcasts,
+/// paddings, concatenations and stacks of them. Same op names, tags and
+/// argument conventions as zml.Tensor. Built during model init.
+pub const Source = struct {
+    store: *TensorStore,
+    _shape: Shape, // tags, dims, dtype; no sharding until bind
+    pieces: []const Piece, // see "Representation and lowering"
+
+    pub fn shape(self: Source) Shape;
+    pub fn dim(self: Source, axis_: anytype) i64;
+    // Relabel only, never move a byte:
+    pub fn withTags(self: Source, tags: anytype) Source;
+    pub fn rename(self: Source, renames: anytype) Source;
+    pub fn splitAxis(self: Source, axis_: anytype, split_shape: anytype) Source;
+    pub fn merge(self: Source, merges: anytype) Source;
+    pub fn reshape(self: Source, output_shape: anytype) Source;
+    pub fn bitCast(self: Source, dt: DataType) Source;
+    // Move bytes:
+    pub fn slice(self: Source, axis_: anytype, s: Tensor.Slice) Source; // step 1, no dyn_start
+    pub fn split(self: Source, axis_: anytype, sizes: []const i64) []Source;
+    pub fn chunkExact(self: Source, axis_: anytype, comptime n: comptime_int) [n]Source;
+    pub fn transpose(self: Source, axes_: anytype) Source;
+    pub fn pad(self: Source, value: anytype, paddings: anytype) Source; // value 0 = the fill
+    pub fn broad(self: Source, other: Shape) Source; // repeats: source stride 0
+    pub fn concatenate(sources: []const Source, axis_: anytype) Source;
+    pub fn stack(sources: []const Source, axis_: anytype, tag: anytype) Source;
+
+    /// The model tensor the loader fills from this source: placed on `mesh`
+    /// by `partitioning` (keyed by this source's tags; unspecified axes
+    /// replicated; `.replicated` for no mesh), in `opts.memory`.
+    pub fn bind(self: Source, mesh: @EnumLiteral(), partitioning: anytype, opts: BindOptions) Tensor;
+};
+
+pub const BindOptions = struct { memory: Memory.Kind = .default };
+
+// On View. `createTensor(k, tags, mesh, p)` stays, as `source(k, tags).bind(mesh, p, .{})`.
+pub fn source(self: View, subkey: []const u8, comptime tags: anytype) Source; // panics when missing
+pub fn maybeSource(self: View, subkey: []const u8, comptime tags: anytype) ?Source;
+```
+
+- What the branch does by convention, zml now guarantees. A Source is a
+  value: it never touches the registry or the bindings; only `bind` records
+  a binding.
+- Tags flow through ops the way they do for Tensor, so the partitioning is
+  given once, at `bind`, keyed by the final tags. Memory is a bind option;
+  `createHostPinnedTensor` and `setMemory` stay as shorthands.
+- The ops mirror Tensor's names and conventions, so the existing pack
+  functions port almost verbatim. The examples below are generic over the
+  type to show that; requiring generic code is not the goal (see "Why
+  mirror Tensor's ops" below). With `T = zml.Tensor` the code builds a
+  program; with `T = Source` it is a load-time byte move:
+
+```zig
+fn interleave(comptime T: type, members: []const T, groups: i64) T {
+    var parts: [MAX_MEMBERS]T = undefined;
+    for (members, parts[0..members.len]) |member, *part| part.* = member.splitAxis(.qout, .{ .qg = groups, .qs = -1 });
+    return T.concatenate(parts[0..members.len], .qs).merge(.{ .qout = .{ .qg, .qs } });
+}
+
+fn stackExperts(comptime T: type, members: []const []const T, layout: zml.moe.ProjectionLayout) T {
+    var stacked: [MAX_MEMBERS]T = undefined;
+    for (members, stacked[0..members.len]) |experts, *s| s.* = T.stack(experts, 0, .expert);
+    return switch (layout) {
+        .concatenated => T.concatenate(stacked[0..members.len], .qout),
+        .interleaved => T.stack(stacked[0..members.len], 2, .proj)
+            .withTags(.{ .expert, .row, .proj, .qk })
+            .merge(.{ .qout = .{ .row, .proj } }),
+    };
+}
+```
+
+- Call sites (llmd):
+
+```zig
+// deepseek41 engram. Today:
+//   store.createConcatenated(&.{"weight"}, .{ .row, .channel }, .tp_mesh,
+//       .{ .row = .model, .channel = .replicated }, .{ .pad_rows_to_multiple = 8, .memory = .host_pinned })
+const table = store.source("weight", .{ .row, .channel });
+const weight = table.pad(0, .{ .row = .{ .high = paddingTo(table.dim(.row), 8) } })
+    .bind(.tp_mesh, .{ .row = .model }, .{ .memory = .host_pinned });
+
+// qwen4 n-grams. Today concatenateRows computes byte Parts for createComposite.
+const ngrams = Source.concatenate(shards, .voc).bind(.tp_mesh, .{ .voc = .model }, .{ .memory = memory });
+
+// The branch's linear.View on Sources: zml does the slicing and bindSources goes away.
+pub fn weight(self: View) Source {
+    return self.store.source(self.definition.weight, .{ .qout, .qk })
+        .slice(.qout, .{ .start = self.start, .len = self.rows });
+}
+// interleaveLinears records no recipe, so it no longer needs the Packer:
+const weight = interleave(Source, weights, groups).rename(.{ .qout = out, .qk = k })
+    .bind(.tp_mesh, partitioning, .{});
+```
+
+- The loader contract becomes bytes only. Sources are valid by
+  construction (in bounds, disjoint), so the loader keeps its bounds and
+  disjointness checks and drops the same-dtype and whole-row rules, which
+  forbid `bitCast` (fp4 unpack). `Layout` and `Part` stop being public.
+  `createComposite`, `createConcatenated` and `ConcatenateOptions` go away;
+  only llmd used them.
+
+### Why mirror Tensor's ops
+
+The user asked what writing the pack code once for both types buys. Less
+than the first wording suggested. The benefit with measurements behind it
+is the loader path itself. On DeepSeek (design above) it removes the
+0.85 s compile wait, 2.8 s of compile CPU and ~0.95 s of H2D stalls
+behind pack executes, and each GPU receives ~144 GiB instead of ~279 GiB;
+estimate 5.9 s -> ~4.0 s. Code generic over the type helps in three
+places:
+
+- Porting. `packFused`, `packStack` and the swizzles already encode the
+  layouts the kernels expect and run in production. With the same ops
+  they move to `Source` by changing the type. A layout bug produces wrong
+  outputs, not an error.
+- Choosing where it runs. The same description can run in the loader (on
+  the host) or as a program (on the device). That serves as a fallback
+  while the loader cannot run a lowered shape yet (phases 2 and 3), and
+  possibly for the 4-byte-chunk swizzles, where a permute on the device
+  may beat a host copy (unmeasured).
+- Tests. The Tensor evaluation (XLA) is an independent reference for the
+  loader's lowering.
+
+Costs: `Source` must keep Tensor's semantics (names, tag rules, `-1`
+inference, `Slice`); `comptime T` code is harder to read; Tensor-only ops
+(`convert`, `withPartitioning`) break it; and once phases 2 and 3 land,
+production code only instantiates `T = Source`. Proposed: mirror the
+vocabulary, write llmd's layout code against `Source`, and keep generic
+code for zml's tests and, if a measurement favors the device, the
+swizzles.
+
+### Interleave per shard, not at the finest granularity
+
+`extractOutput` works for any group count. When a fused tensor is
+partitioned on `.dout` over D devices, every device holds the same rows of
+each member for any group count that is a multiple of D. With groups = D
+(1 when replicated), each member lands as one contiguous run per device.
+In the model at Llama-3.1-8B sizes, per layer:
+
+- gate/up at the finest granularity: 28,672 chunks of 8 KiB. At D = 4:
+  8 chunks of 28 MiB.
+- qkv by KV head: 24 chunks of 1 MiB. At D = 4: 12 chunks of 2 MiB.
+
+This is valid whenever the sharding is. A block-FP8 member needs R_i/D to
+be whole scale blocks, which row sharding already requires. Heads stay
+whole when D divides the head counts, which tensor parallelism already
+requires. With groups = D, the weights, block scales and biases of every
+fused projection in llmd (the lfm2 `in_proj` included) lower to D
+contiguous parts per member. The loader takes those today once one source
+may feed several parts. The broadcast scalars need phase 2 below or keep
+their small program. `.explicit` stays
+for layouts a kernel imposes (mxfp4 experts); `.finest` has no remaining
+use.
+
+### Representation and lowering
+
+- A Source is a shape plus pieces. A piece reads one checkpoint tensor
+  through an affine lattice of up to 8 dims. Each dim has a count, a source
+  byte stride (0 repeats), and the visible axis and index step it moves
+  along. Destination offsets are implicit: row-major of the final shape.
+- Cost of each op on the pieces:
+  - Reshapes (merge, aligned `splitAxis`, `bitCast`, `withTags`) only
+    change the shape or the steps.
+  - `concatenate`, `stack` and `pad` shift origins; `transpose` permutes.
+  - `slice` clips, adding at most 3 pieces per nesting level.
+  - `splitAxis` cuts a piece only when a lattice dim straddles a row
+    boundary.
+  - No op ever enumerates rows.
+- At `bind`, destination strides come from the final shape and dims are
+  sorted and coalesced. The loader contract becomes `Part{ source: u32,
+  src_offset, dst_offset, dims: [<= 8]{ count, src_stride, dst_stride } }`,
+  where the innermost contiguous run is the chunk.
+- Execution follows the lowered shape:
+  - 1-D parts work as today.
+  - A few large chunks (>= 1 MiB, <= 64 of them) expand into 1-D parts.
+  - Many chunks of >= 4 KiB go to destination-ordered jobs that scatter
+    each read with iovecs (phase 2 of the design above).
+  - Chunks under 4 KiB and stride-0 dims use a contiguous read, then a host
+    strided copy or replicate in the pinned block (swizzles, broadcasts).
+
+### Evidence: a model of the algebra
+
+`scratchpad/apidesign/lattice.py` (session scratchpad, not durable) is a
+pure-Python model of the representation above. Each case is written once
+against a facade and evaluated two ways: as lattice pieces lowered to
+bytes, and as reference index arithmetic. All 15 cases are byte-exact at
+small sizes, and the per-index fallback never triggered. The pieces and
+chunks below are at full sizes (Llama-3.1-8B per layer; DeepSeek-like
+experts: E = 256, 2048 rows, 3584 B per fp4 row):
+
+| case | pieces | chunks | smallest chunk |
+| --- | ---: | ---: | ---: |
+| qkv, groups = KV heads | 3 | 24 | 1 MiB |
+| qkv, groups = 4 shards | 3 | 12 | 2 MiB |
+| gate/up, finest (1 row) | 2 | 28,672 | 8 KiB |
+| gate/up, groups = 4 shards | 2 | 8 | 28 MiB |
+| per-tensor FP8 scales to per channel | 3 | 6,144 | 4 B, stride 0 |
+| experts, members concatenated | 512 | 512 | 7 MiB |
+| experts, rows interleaved (mxfp4) | 512 | 1,048,576 | 3.5 KiB |
+| expert scalars `[E, P]` | 512 | 512 | 4 B |
+| lfm2 `[B; C; x]`, 1 row per group | 1 | 6,144 | 4 KiB |
+| engram, pad to 8 rows | 1 | 1 | 91.6 GiB |
+| n-gram shards (8 x 1,000,003 x 1024 bf16) | 8 | 8 | 1.9 GiB |
+| GDN: fused qkv split, interleaved with z | 4 | 64 | 512 KiB |
+| NVFP4 block scales, 128x4 swizzle | 512 | 117,440,512 | 4 B |
+| FP8 scale, x128 spread | 1 | 7,168 | 56 B, stride 0 |
+| fp4 unpack (u8 to 2 x f4) | 256 | 256 | 7 MiB |
+
+The pieces stay proportional to the sources in every case. The chunk
+counts give the execution class: contiguous, iovec scatter, or host copy.
+Swizzles and stride-0 broadcasts must never become one read or DMA piece
+per chunk.
+
+### Phases
+
+1. zml `Source` (algebra, lowering, `bind`). In the loader: parts name
+   their source, checks become bytes only, and small chunk counts expand.
+   - Tests: each generic pack function runs both as a Tensor program on CPU
+     and as a bound Source through `Loader.load`, and the bytes match per
+     shard on 1, 2 and 4 devices (row, column and replicated; default and
+     host_pinned), with the `zml/io/testing.zig` helpers.
+   - llmd: rebase the branch's `linear.View` onto Sources, interleave per
+     shard, and stack concatenated experts; move engram, n-grams and splits
+     to Sources. The `fuse`, `stack` (concatenated) and same-dtype
+     `concatenate_rows` recipes and their programs go away.
+2. Strided parts in the loader: mxfp4 row-interleaved experts (about 1M
+   chunks of 3.5 KiB per DeepSeek layer) and broadcasts.
+3. Swizzles become generic Source code on the host copy path, and their
+   programs are deleted.
+4. Programs take Sources as inputs (dequantize, convert, normalize,
+   globals), with inputs placed like their outputs. Today `normalizeBlockFp8`
+   and `maybeSwizzleBlockFp8Scales` compose with recipes and set
+   `transformed` on bindings directly.
+
+### Open points
+
+- Naming: `Source` and `bind`.
+- Intermediate pieces live in the store's arena. A DeepSeek-sized model
+  builds about 150k pieces at init (roughly 20 to 50 MB), so use a scratch
+  arena reset after init.
+- The Linear-level verbs (split, concatenate, interleave over every
+  quantization component) stay in llmd for now. Once they depend only on
+  Source, they could move to `zml.nn` next to `Linear`.
+- llmd ignores `ExpertsLayout.gate_up_order` (`.up_gate` for flashinfer
+  without quantization). This is harmless while `Backend.auto` picks
+  flashinfer only for NVFP4; `Source.concatenate` makes the order explicit.
+
+## Twenty-fourth pass: Source phase 1 implemented (2026-10-18)
+
+The user approved the proposal above ("Ok do it"). Phase 1 is in place in
+both repositories; nothing is described, committed as final or pushed.
+
+### jj state
+
+- zml: `@` (`omuqxqpu`, undescribed) holds the Source work and these notes.
+  Under it, `tnxxsqww` is a duplicate of the user's `c865a2cb` "zml: Add
+  Shape.Partitionning" (bookmark `brabier/shape-partitioning@origin`), which
+  the monorepo branch needs (`Sharding.Partitioning.Logical`,
+  `Shape.partitioning()`, `eqlWithTagsAndPartitioning`). Two adaptations:
+  its `io.zig` hunk now lives in `io/TensorStore.zig`
+  (`maybeCreateHostPinnedTensor` takes a runtime partitioning), and
+  `std.meta.fields` became `std.meta.fieldNames` (Zig 0.17). Below that is
+  the side session's `mppyywvr`. `brabier/adaptive-concurrency` was not
+  moved.
+- monorepo: `@` (`rwqvkpqy`, undescribed) holds the llmd Source work. Under
+  it, `vqvklyks` is a duplicate of the user's branch commit `rsqorxts`
+  ("llmd/weights: use explicit tags and partitioning"), rebased onto the
+  merge `rwotnntx` with its conflicts resolved: five hunks in
+  `weights.zig` (the merge's async pack compiles and grouped `loadExecute`,
+  plus the branch's `output_shape` arguments and `withLayout`), and qwen4's
+  `GatedResidual`, written with `concatenateLinears`. The original branch
+  and bookmark are untouched. `vqvklyks` alone does not build against the
+  new zml, because it still calls `createConcatenated` and
+  `maybeCreateComposite`; build it together with `rwqvkpqy`, or squash the
+  two.
+
+### zml
+
+- `zml/io/Source.zig` (`TensorStore.Source`) implements Tensor's shape ops:
+  `withTags`, `rename`, `renameTag`, `splitAxis`, `merge`, `reshape`,
+  `flatten`, `insertAxes`, `appendAxes`, `squeeze`, `bitCast`, `slice`,
+  `split`, `chunkExact`, `transpose`, `pad` (zeros only), `broad`,
+  `concatenate` and `stack`. It also has `bind(mesh, partitioning,
+  .{ .memory })` and `bindAs(shape, .{ .memory })` (the tags and sharding of
+  a shape built elsewhere), and the aliases `Pad` and `Slice`. Pieces are
+  affine lattices kept in flat row-major order, so reshapes never touch
+  them. An op that addresses axes rewrites a piece in coordinates, cutting
+  it at row boundaries only where a dimension carries, then flattens it
+  again. `bind` lowers pieces to byte `Part`s. A whole checkpoint tensor
+  stays a plain binding. Checkpoint tensors are deduplicated by registry
+  entry (name pointer and offset), since every `View.source` returns its own
+  copy.
+- `View.source(subkey, tags)` and `maybeSource` create Sources.
+  `createConcatenated`, `createComposite`, `ConcatenateOptions` and
+  `Layout.fill` are gone. `Layout` is now `{ shape, parts }`, and `Part` is
+  `{ source index, src_offset, dst_offset, width, dims[]{ count,
+  src_stride, dst_stride } }`.
+- Loader:
+  - Checks are bytes only: the same-dtype and whole-row rules are gone.
+    The layout must fill the tensor's bytes, and parts must reference
+    sources the binding has, stay in bounds and not overlap.
+  - Several parts may read one source.
+  - A strided part becomes one load part per run, accepted for at most 64
+    runs or for runs of at least 1 MiB; anything else is
+    `UnsupportedLayout`.
+  - A transformed binding with a layout feeds the assembled tensor to its
+    executable as the one input; `loadExecute` checks it against
+    `layout.shape`.
+- `Tensor.Slice.absolute` ignored `.len` when `.end` was left at its
+  default, so `.{ .start, .len }` took the rest of the axis. The first
+  real-model run caught it (an LFM2 `in_proj` member got the rows of the
+  members after it). `.len` is now checked first, with a test in `tensor.zig`
+  and a `SliceByLength` Source case.
+- Tests:
+  - Every Source op is evaluated against the same function run as a Tensor
+    program on the test platform, byte for byte: 22 cases, including
+    interleaves, expert stacks, transposes, slices of interleaves, pads,
+    broadcasts, bitcasts both ways and a 128x4 swizzle at small scale.
+  - Exact lowering checks, and a size check: gate/up at Llama scale stays
+    one piece per member.
+  - Loader composites on 2 and 4 devices: concatenated, padded, row
+    sharded, column sharded and replicated, in default and host pinned
+    memory; per-device qkv interleave; expert stacks concatenated and row
+    interleaved; split across two checkpoint tensors; hand-built invalid
+    layouts; one source feeding several parts; a strided part expanded;
+    a composite as an executable's input.
+- Results: `bazel test //zml:test //vfs:test` passes on CPU. On the four
+  B70s (`--//platforms:oneapi=true`) 320 pass and 11 skip, with master's
+  moe "Triton compatibility matrix" test skipped by a temporary local patch
+  (pre-existing Level Zero abort, see the twentieth pass), since reverted.
+  `docs/learn/loader.md` describes Sources.
+
+### llmd
+
+- `linear.View` components (`weight`, `scale`, `bias`, `globalScale`) are
+  Sources: a split slices the rows at each component's granularity.
+  `linear.sameTensor` replaces the name-and-offset comparison.
+- `Interleaving.finest` became `.per_shard`: one group per device of the
+  output axis (`outputShards`), one when replicated. Every `.finest` and
+  `.explicit` call site moved to `.per_shard` (qkv, gate/up, GDN qkvz,
+  lfm2 `in_proj`, muse_glimmer qkvg, gemma4 qkv); `.explicit` stays for
+  layouts a kernel imposes. The locals that only computed `rows_per_group`
+  are gone.
+- `bindFused`: copied components (weights, block scales, biases) are
+  composites bound with `bindAs`, with no recipe or program. Broadcast
+  scalars (per-tensor FP8 scales across members, NVFP4 globals) keep
+  `Recipe.fuse` and `packFused`, because the loader does not repeat bytes
+  yet.
+- `bindExpert(..., .assembled | .program)`: concatenated or
+  single-projection stacks (values, global and input scales, biases) are
+  Source stacks bound with `bindAs`, each expert's bytes going only to its
+  devices. Row-interleaved stacks (mxfp4) and swizzled scales
+  (`.program`, used by the `stack_nvfp4_cutlass_block_scale` recipe) and the
+  flashinfer NVFP4 path keep their programs.
+- Also on Sources: same-dtype `concatenateRows`, `splitTensor`, and the
+  deepseek41 engram tables (`pad` plus `bind`, host pinned).
+- `program()` gives a composite binding one input of `layout.shape`.
+  `normalizeBlockFp8` (CDNA3) and `maybeSwizzleBlockFp8Scales` (Blackwell)
+  therefore compose with composites through their `.copy` source:
+  `normalizeLinearBlockFp8` and `composeBlockFp8Normalization` were split
+  out so a test can call them. `Recipe.Fuse`'s `.copy` kind is now reached
+  only by the branch's FP8 transform test.
+- The test fixture registers `tp_mesh` and `experts` itself, so
+  `weights_test` no longer imports `parallelism.zig`, which would pull in
+  every model.
+- Tests in `weights_test`:
+  - views split without registering anything (first-member dims checked
+    too, which the slice bug slipped past);
+  - `extractOutput` for 1 and 2 groups;
+  - per-shard qkv loaded on 1, 2 and 4 CPU devices;
+  - experts stacked on 1, 2 and 4 devices;
+  - a fused block-FP8 weight normalized through the assembled input (FN to
+    FNUZ bytes and doubled scales checked);
+  - shared and independent FP8 scales; block-scale boundaries;
+    `splitTensor`; n-gram rows.
+
+  Mutation check: forcing one group fails two tests.
+- Results: `bazel test --config=localzml //llmd/...` passes 7/7.
+  `//llmd:llmd` builds with `--@zml//platforms:cuda=true`, `rocm=true` and
+  `oneapi=true`.
+
+### End to end on the four B70s (TP=4)
+
+llmd release build with the August oneAPI plugin (master's plugin segfaults
+compiling llmd): a private runfiles copy in the session scratchpad
+(`e2e/`), with `libzml_oneapi.so` pointing at the cached
+`libpjrt_oneapi.so` from manual-2026-08-17. Each run sends one greedy chat
+request ("What is the capital of France? ..."):
+
+| model | load | answer |
+| --- | --- | --- |
+| LFM2.5-1.2B-Thinking | 2.18 GiB, 3.09 s | coherent reasoning, Paris |
+| Llama-3.1-8B-Instruct | 14.96 GiB, 10.0 s | "The capital of France is Paris." |
+| Qwen3.5-4B (GDN) | 7.83 GiB, 8.0 s | coherent reasoning, Paris |
+| gemma-4-26B-A4B-it (MoE) | 47.00 GiB, 11.4 s | "The capital of France is Paris." |
+| Laguna-XS-2.1 (256 experts), `--io-impl=threaded` | 62.29 GiB, 9.4 s | coherent reasoning, Paris |
+
+- These runs cover the loader-assembled `in_proj` split and interleave,
+  per-shard qkv and gate/up, GDN qkv slices interleaved with z, and expert
+  stacks with each expert on its own device.
+- LFM2.5-8B-A1B: llmd reports `InvalidModelType` (unsupported model type,
+  not related).
+- Laguna with the default `--io-impl=zio` segfaults compiling its forward
+  pass. The debug build shows a stack overflow on a zio coroutine
+  (`laguna.compileModel` -> `FnExe.compile` -> `Compiler.emitMlir`, a
+  149 KiB frame probe); zio stacks are capped at 8 MiB
+  (`RuntimeOptions.stack_pool.maximum_size`). It compiles and serves with
+  threaded Io. This does not involve loading, and whether it predates the
+  merge or the branch is not established.
+- Llama-3.1-8B takes 10 s here. Column-sharded `o_proj`/`down_proj` give
+  one DMA piece per row, which took 7.5 s with this plugin in the twentieth
+  pass. Fixed in the twenty-fifth pass (0.76 s).
+
+### Left open
+
+- Phase 2: strided parts in the loader (mxfp4 row-interleaved experts,
+  broadcast scalars), then retire `Recipe.fuse` and the interleaved
+  `Recipe.stack`. Done in the twenty-sixth pass. Phase 3: swizzles as Source code. Phase 4: programs that
+  take Sources as inputs, placed like their outputs (composites are fed
+  replicated today, as single checkpoint inputs were).
+- The zio coroutine stack overflow compiling Laguna.
+- Not run: CUDA and ROCm hardware (the Blackwell swizzle and CDNA3
+  normalization composition were tested only through the CPU FP8 test),
+  and DeepSeek-V4.1.
+
+## Twenty-fifth pass: column-sharded loads staged by destination (2026-10-18)
+
+Request from the user: keep threaded Io on Intel; 10 s to load Llama is
+far too slow; one device should load at 20-30 GiB/s and TP=4 not far
+below.
+
+### Cause
+
+Measured with `examples/io load <model> tp`, a new mode that shards like
+llmd's tensor parallelism (`o_proj`/`down_proj` on their input axis, the
+rest on their first axis), August oneAPI plugin, four B70, page cache warm:
+
+| layout | planned DMA submissions | loader elapsed | `dma_piece_latency_ms` |
+| --- | --- | --- | --- |
+| rows (`sharded`) | 3,034 | 0.673 s | 0.43 |
+| tp, file-order blocks | 1,051,178 | 5.144 s | 1.22 (pumps stopped full 1.05M times) |
+
+`DispatchSpans` gives a column-sharded tensor one span per row and device,
+and the planner turned every span into a submission: 2-7 KiB pieces, at
+most 64 in flight per device, ~1.2 ms each. Threaded Io did not change
+llmd (9.9 s against 10.0 s with zio).
+
+### Change (zml `direct_loader.zig`)
+
+- The planner collects a DMA job's pieces first (read-relative, not cut by
+  blocks), then places them (`JobCut.appendDmaTransfers`). In file order
+  as before, unless staging saves at least `Config.minimum_staging_gain`
+  submissions (default 64, one device's in-flight pieces) and the pieces
+  tile the job's bytes once (overlapping parts never stage). A staged job's
+  read lands in its blocks grouped by (destination, writer mask) in order
+  of first appearance, each group sorted by destination offset, so a
+  device takes one piece per block of its group.
+- `Plan.segments` (`{offset, len}` u32 pairs, file order, merged where
+  their landings touch) say where each run of the read lands;
+  `Job.segment_start/segment_len/data_offset`, `Plan.direct_reads`,
+  `staged_jobs` in the `batch planning` line.
+- `readStaged`: a buffered read scatters straight into the blocks,
+  `max_positional_iovecs` ranges per `preadv`, under one hold of the read
+  gate. A direct read (iovecs must be aligned) lands in a per-worker bounce
+  buffer, page aligned, allocated on first use at a job's block size, and
+  is copied into place.
+- Tests: the composite planner test also runs staged (gain 1, exact and
+  widened reads) and replays each job's blocks from its segments; a new
+  load test puts row-sharded and two column-sharded tensors (12,000
+  one-byte pieces, several vectored reads) through a real load, exact and
+  widened, and checks every shard. Mutating the buffered scatter or the
+  bounce copy fails it.
+- `docs/learn/loader.md` describes staging.
+
+### Results
+
+`examples/io`, Llama-3.1-8B, four B70, same plugin:
+
+| run | submissions | staged jobs | loader elapsed |
+| --- | --- | --- | --- |
+| tp, warm | 5,468 | 599 | 0.714-0.745 s (~20-21 GiB/s) |
+| rows, warm | 3,034 | 0 | 0.673 s |
+| tp, cold (O_DIRECT, bounce copy) | 4,881 | | 1.631 s |
+| rows, cold | 3,077 | | 1.604 s |
+
+Cold runs evict the files with `posix_fadvise(DONTNEED)`; both layouts are
+bound by the NVMe (Samsung 9100 PRO, ~9.2 GiB/s here).
+`ZML_LOAD_CHECK=1` read back all 291 tensors (14.96 GiB) correctly, warm
+and cold.
+
+llmd end to end, `--io-impl=threaded`, August plugin, one greedy question,
+`Loaded weights`:
+
+| model | before (24th pass) | now | answer |
+| --- | --- | --- | --- |
+| Llama-3.1-8B, TP=4, warm | 10.0 s | 0.759-0.769 s (19.5-19.7 GiB/s) | Paris |
+| Llama-3.1-8B, one B70 (`ZE_AFFINITY_MASK=0`), warm | | 0.658 s (22.7 GiB/s) | Paris |
+| Llama-3.1-8B, TP=4, cold | | 1.834 s (8.2 GiB/s) | Paris |
+| LFM2.5-1.2B-Thinking | 3.09 s | 0.134 s | reasoning, Paris |
+| Qwen3.5-4B, warm | 8.0 s | 0.437-0.448 s (17.5-17.9 GiB/s) | reasoning, Paris |
+| gemma-4-26B-A4B (47 GiB) | 11.4 s | 4.99-5.01 s (9.4 GiB/s) | reasoning, Paris |
+| Laguna-XS-2.1 (62 GiB) | 9.4 s | 6.34 s (9.8 GiB/s) | reasoning, Paris |
+
+- gemma-4 and Laguna do not fit beside llmd in this host's 62 GB of page
+  cache: gemma's first file was 9% cached and read direct, the reads took
+  13 ms per 8 MiB with no credit or DMA waits. They are disk-bound.
+- One Qwen3.5 run at 0.96 s had its first file 66% cached; the warm runs
+  are the two above (batch elapsed 0.38-0.39 s, 467 staged jobs).
+- Planning stays 73-112 ms per batch (it was 0.102 s for the unstaged tp
+  plan): `DispatchSpans` still enumerates one span per row and device.
+- `bazel test //zml:test` passes on CPU; on the B70s 321 pass, 11 skip
+  (the moe Triton test skipped by a temporary local patch, reverted).
+  `bazel test --config=localzml //llmd/...` 7/7.
+
+### Left open
+
+- Planning cost: a strided span representation (phase 2's lattices) would
+  let the planner cut a column-sharded tensor without enumerating its rows.
+  Fixed in the twenty-sixth pass (1-4 ms).
+- llmd TP=4 at 0.76 s against 0.66 s on one device: staged submissions
+  cost 20-39 us each to submit (8 us for row pieces); not investigated.
+- Not run on CUDA or ROCm hardware.
+
+## Twenty-sixth pass: strided parts in the loader, placement without rows (2026-10-18)
+
+Request from the user: "Ok do phase 2", after asking whether strided
+support would cut the planning cost. Uncommitted in both working copies, on
+top of the twenty-fourth and twenty-fifth passes.
+
+### zml
+
+- `zml/io/ShardGrid.zig` replaces `DispatchSpans.zig`. `Sharding.Placement`
+  splits every axis evenly, so the devices hold the boxes of a grid, each
+  packed row-major; devices with one box are one writer mask. Box order and
+  logical order agree on a box's elements, so a contiguous logical range
+  lands as one contiguous range of every box it touches: `rankIn(box,
+  offset)` gives it by arithmetic. Aligned runs of `run` bytes (a shard of
+  the innermost split axis) each land in one box (`boxOf`, `boxOffset`).
+  Nothing lists rows: a column-sharded tensor was one span per row and
+  device. Tests compare every range walk with the devices' slices, element
+  by element (replicated, packed u2, mirrored, folded, 2D, 3D with two split
+  axes, a scalar).
+- Planner (`direct_loader.zig`): a read job's pieces are logical ranges of
+  their destinations. File order lists runs (`appendRunTransfers`); a
+  staged job lands each piece's bytes box by box (`JobCut.stage`), its
+  `Item`s recording per box where they start in the blocks (`landings`);
+  the worker walks the runs as it reads (`landJob`, `walkItem`, a scatter
+  sink for buffered reads, a copy sink from the bounce buffer for direct
+  ones). `Plan.segments` is gone. The staging decision estimates file
+  order's submissions and lists runs only when the estimate is within
+  merges and block crossings of deciding; a job already in file order (each
+  box one run, groups in run order) is not staged, as before.
+- Strided parts: the front end (`loader.zig`) still expands a strided part
+  of at most 64 runs, or of runs of at least 1 MiB. A composite with any
+  other strided part goes to the backend whole, as `LoadPart`s with `dims`
+  (`backend.Lattice`, a cursor walks runs without a division each).
+  `checkParts` requires strided parts to land in run order, in bounds, and
+  proves two interleaved parts disjoint exactly when their footprints (the
+  destination side, touching dimensions merged) repeat with one stride;
+  other interleaving pairs are `UnsupportedLayout`, strided parts into host
+  memory too.
+- Gather jobs (`JobCut.appendGatherJobs`): a destination with strided parts
+  is planned whole, with the file of its first part, cut into logical
+  ranges of at most a job. Each range is one job: for every part with runs
+  in it, an `Extent` reads the source range those runs come from, from
+  whichever file holds it (`Planner.Reads` decides each file's alignment
+  once, kept in `SourceSlot.alignment`), and the range lands box by box,
+  one transfer per box and block, bytes no part covers zeroed. A part whose
+  source runs are in order reads only its runs of the range, scattered
+  straight into the blocks when the read is exact and tiled; a broadcast or
+  a transpose reads its whole source range in every job through the bounce
+  buffer. One that does not fit a read is refused at submit, before
+  publication (`createDestinations`), not during planning.
+- Buffered backend: a strided part reads its source range once and copies
+  its runs into the staging tensor.
+- `Source.stack(..., .last, ...)` did not compile (`rank()` is `u4`); no
+  caller had used it. Fixed, with a Source case (`InterleaveExpertVectors`).
+- Tests: a load through `Loader` on 1, 2 and 4 devices of a row interleave
+  of two members from two files, scalar broadcasts and a padded transpose,
+  sharded by rows, by columns and replicated, jobs of 128 bytes, exact and
+  widened; the composite planner test replays staged jobs through
+  `landJob` over an in-memory reader; a transpose larger than a read is
+  refused at submit and the loader stays usable; the layout error test now
+  loads the transpose it used to refuse and checks overlapping and
+  unprovable strided pairs. Mutating the copy sink (source + 1) or the
+  scatter sink (landing ^ 16) fails the gather, staged and column-sharded
+  tests.
+
+### llmd (`weights.zig`)
+
+- `bindFused` `.broadcast`: each member's scalar is broadcast over its rows
+  of every group, then concatenated and merged like the copied components
+  (`Packer.Fusion`). Per-tensor FP8 scales across members and NVFP4 global
+  scales no longer take a program.
+- `bindExpert` `.assembled` takes interleaved stacks too: `Source.stack`
+  of the projections at axis 2 (`.last` for per-expert vectors), then
+  `reshape`. The `.program` path (swizzled block scales) records no recipe
+  of its own; its caller records `stack_nvfp4_cutlass_block_scale`.
+- Removed: `Recipe.fuse`, `Recipe.stack`, `Recipe.Fuse`, `packFused`, the
+  `.fuse`/`.stack` sources of the FP8 normalization and swizzle recipes
+  (they read the assembled tensor, `.copy`, the only case left), their
+  compile arms and `bindSources`. `packStack` stays for the NVFP4 programs.
+- Tests: interleaved expert weights and biases loaded on 1, 2 and 4 CPU
+  devices (80 rows per member, so the loader gathers them); independent
+  FP8 per-tensor scales of q (512 rows) and kv (256) repeated per shard on 1,
+  2 and 4 devices; the split-views test now expects a composite and no
+  recipe; the FP8 transform test feeds the assembled scales.
+
+### Results
+
+`examples/io load Llama-3.1-8B tp`, four B70, August plugin, warm:
+
+| | before (25th pass) | now |
+| --- | --- | --- |
+| planning (4 plans) | 0.085 s | 0.002-0.004 s |
+| published / sealed | +0.014 s / +0.086 s | +0.001 s / +0.002-0.005 s |
+| loader elapsed | 0.714-0.745 s | 0.688-0.692 s |
+| submissions, staged jobs | 5,468, 599 | 5,468, 599 |
+| sharded (rows) | 0.673 s | 0.668 s |
+| tp cold (O_DIRECT) | 1.631 s | 1.630 s |
+
+`ZML_LOAD_CHECK=1` read back all 291 tensors correctly, warm and cold.
+
+llmd, `--io-impl=threaded`, with the loader's debug scopes (a temporary
+build, reverted): planning 1-2 ms per batch (73-112 ms in the 25th pass).
+
+| model | load | jobs | answer |
+| --- | --- | --- | --- |
+| Llama-3.1-8B, TP=4 | 0.73-0.97 s (see below) | 474-884 staged, 0 gather | Paris |
+| LFM2.5-1.2B-Thinking | 0.113 s (0.134 s) | 143 staged | reasoning, Paris |
+| Qwen3.5-4B | 0.44 s warm (0.62 s first) | 260-467 staged | reasoning, Paris |
+| gemma-4-26B-A4B | 5.02 s (5.0 s, disk-bound) | 376 staged | Paris |
+| Laguna-XS-2.1 | 6.66 s (6.34 s, disk-bound) | 241 staged | reasoning, Paris |
+
+- Llama's llmd loads varied more this time for both builds: the 25th-pass
+  binary, which measured 0.76 s then, took 1.05 and 1.15 s alternating with
+  the new one at 0.84 and 0.95 s; the new one gave 0.73 s right after
+  `cat`-warming the files and 0.94-0.97 s otherwise, read-bound (4.3-5.7 ms
+  per 8-16 MiB read, DMA pumps never full). The calibration also picked
+  8 MiB or 16 MiB requests from run to run.
+- No model here takes gather jobs: none has MXFP4 experts or per-tensor FP8
+  scales across members. The gather path is exercised by the zml and llmd
+  tests above, on CPU and on the B70s.
+- Tests: `bazel test //zml:test //vfs:test` passes on CPU (322 pass, 12
+  skip). On the B70s 323 pass, 11 skip (master's moe Triton test skipped by
+  the same temporary patch, reverted). `bazel test --config=localzml
+  //llmd/...` 7/7 (`weights_test` 16 tests). `//llmd:llmd` builds with
+  `--@zml//platforms:cuda=true` and `rocm=true`.
+
+### Left open
+
+- No measurement with a model that gathers (DeepSeek MXFP4 experts, FP8
+  per-tensor checkpoints): neither the checkpoints nor the hardware are
+  here. For MXFP4 block scales (rows of 224 bytes) a buffered gather
+  scatters one iovec per row, about 37k per 8 MiB job; whether a bounce
+  copy beats that is unmeasured.
+- Two strided parts interleaving with different strides are refused
+  (`UnsupportedLayout`) rather than proven disjoint; none of llmd's layouts
+  does that.
+- Phase 3 (swizzles as Source code): a permutation's source is read whole
+  in every job, so it must fit one read; per-expert swizzles do, a
+  model-wide one would not.
+- A destination with strided parts is planned whole in the plan of its
+  first part's file, so its jobs are claimed with that file's.
+
 ## Open work
 
+- 2026-10-18 strided parts in the loader and placement without rows
+  (twenty-sixth pass, uncommitted, zml and llmd): Llama TP=4 plans in 1-4 ms
+  (was 85 ms); row interleaves, broadcasts and small transposes load as
+  gather jobs; llmd's `Recipe.fuse` and interleaved `Recipe.stack` are gone.
+  Not measured on a model that gathers.
+- 2026-10-18 column-sharded loads are staged by destination (twenty-fifth
+  pass, uncommitted, zml only): Llama-3.1-8B TP=4 on the B70s loads in
+  0.76 s (was 10 s). `examples/io load` gained a `tp` mode.
+- 2026-10-18 `TensorStore.Source` phase 1 is implemented (twenty-fourth
+  pass), uncommitted in both working copies, on top of duplicates of the
+  user's `zml: Add Shape.Partitionning` and `llmd/weights: use explicit
+  tags and partitioning`. Next: phase 2 (strided parts), the zio stack
+  overflow compiling Laguna, CUDA/ROCm hardware runs.
 - 2026-10-14 merge and composite destinations (twentieth and twenty-first
   passes): the merge commit is not described or split yet (resolution,
   review fixes and the composite/engram feature share the working-copy

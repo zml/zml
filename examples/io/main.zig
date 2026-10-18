@@ -190,7 +190,10 @@ pub fn main(init: std.process.Init) !void {
             try stdout_writer.flush();
         },
         .load => {
-            const MeshType = enum { replicated, sharded };
+            // `tp` shards like tensor parallelism: the input axis of
+            // `o_proj` and `down_proj` (column-sharded, strided on every
+            // device), the first axis of everything else.
+            const MeshType = enum { replicated, sharded, tp };
 
             const mesh_type: MeshType = std.meta.stringToEnum(MeshType, it.next() orelse "sharded") orelse return error.InvalidMesheKind;
 
@@ -227,6 +230,7 @@ pub fn main(init: std.process.Init) !void {
                 .mesh(.{ .model = .high_bandwidth }),
             );
             const tp_partitioning: zml.Sharding.Partitioning = .init(&.{.sharded(@intCast(tensor_parallel.resolveLogicalAxis("model").?))});
+            const column_partitioning: zml.Sharding.Partitioning = .init(&.{ .replicated, .sharded(@intCast(tensor_parallel.resolveLogicalAxis("model").?)) });
 
             var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{tensor_parallel});
             defer store.deinit();
@@ -278,6 +282,13 @@ pub fn main(init: std.process.Init) !void {
                 tensors[load_count] = switch (mesh_type) {
                     .replicated => store.view().createReplicatedTensor(entry.key_ptr.*, null),
                     .sharded => if (entry.value_ptr.shape.rank() > 0)
+                        store.view().createTensor(entry.key_ptr.*, null, .tp, tp_partitioning)
+                    else
+                        store.view().createReplicatedTensor(entry.key_ptr.*, null),
+                    .tp => if (entry.value_ptr.shape.rank() == 2 and
+                        (std.mem.endsWith(u8, entry.key_ptr.*, "o_proj.weight") or std.mem.endsWith(u8, entry.key_ptr.*, "down_proj.weight")))
+                        store.view().createTensor(entry.key_ptr.*, null, .tp, column_partitioning)
+                    else if (entry.value_ptr.shape.rank() > 0)
                         store.view().createTensor(entry.key_ptr.*, null, .tp, tp_partitioning)
                     else
                         store.view().createReplicatedTensor(entry.key_ptr.*, null),

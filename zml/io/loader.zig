@@ -38,7 +38,7 @@ const DeliveryMap = std.AutoHashMapUnmanaged(Tensor.Id, void);
 const PrepareError = std.mem.Allocator.Error || error{ TensorNotFound, EmptyTensor, TransformedTensorNotDelivered, UnsupportedMemoryKind } || LayoutError;
 /// A composite binding the loader cannot place: `InvalidLayout` when its
 /// parts do not fit the tensor, `UnsupportedLayout` for a layout this loader
-/// does not assemble yet (strided parts, a nonzero fill).
+/// does not assemble yet (a strided part of many small chunks).
 const LayoutError = error{ InvalidLayout, UnsupportedLayout };
 const BindingError = error{ ExecutablePlatformMismatch, ExecutableInputCountMismatch, ExecutableOutputCountMismatch, ExecutableInputShapeMismatch, ExecutableOutputShapeMismatch, ExecutablePlacementMismatch };
 /// Placing the sources on the devices, then the backend's own submission.
@@ -55,7 +55,7 @@ const SubmitError = error{IncompatibleSharding} || backend.SubmitError || error{
 pub const Loader = struct {
     pub const AwaitError = backend.AwaitError || std.mem.Allocator.Error;
     pub const LoadError = PrepareError || SubmitError || AwaitError;
-    pub const LoadExecuteError = BindingError || SubmitError || AwaitError || error{ TensorNotFound, EmptyTensor };
+    pub const LoadExecuteError = BindingError || SubmitError || AwaitError || LayoutError || error{ TensorNotFound, EmptyTensor };
 
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -103,8 +103,9 @@ pub const Loader = struct {
     pub const Options = backend.Options;
 
     /// One executable over a binding. `tensor`'s sources are loaded into
-    /// fresh input buffers; when the submission is retired, `exe` runs over
-    /// them and its result is written to `output.*`.
+    /// fresh input buffers, one per source, or, for a composite binding, the
+    /// assembled tensor into the one input; when the submission is retired,
+    /// `exe` runs over them and its result is written to `output.*`.
     pub const Binding = struct {
         tensor: Tensor,
         output: *Buffer,
@@ -241,24 +242,41 @@ pub const Loader = struct {
             for (executables[0..prepared]) |*executable| executable.deinit(self.allocator);
             self.allocator.free(executables);
         }
-        var source_count: usize = 0;
+        var spec_count: usize = 0;
+        var part_count: usize = 0;
         for (bindings, executables) |binding, *executable| {
             executable.* = try BoundExecutable.init(self.allocator, self.platform, store, binding);
             prepared += 1;
-            source_count += executable.sources.len;
+            spec_count += executable.inputs.len;
+            part_count += loadPartCount(executable.binding);
         }
         const execution = try self.allocator.alloc(u64, self.platform.devices.len);
         errdefer self.allocator.free(execution);
         try self.admit(executables, execution);
         try self.delivered.ensureUnusedCapacity(self.allocator, @intCast(bindings.len));
-        const specs = try self.allocator.alloc(LoadSpec, source_count);
+        const specs = try self.allocator.alloc(LoadSpec, spec_count);
         defer self.allocator.free(specs);
-        const parts = try self.allocator.alloc(LoadPart, source_count);
-        defer self.allocator.free(parts);
+        var parts: std.ArrayList(LoadPart) = .empty;
+        defer parts.deinit(self.allocator);
+        // Exact, so the specs' slices stay where they point.
+        try parts.ensureTotalCapacityPrecise(self.allocator, part_count);
         var next: usize = 0;
-        for (executables) |executable| {
+        for (bindings, executables) |binding, executable| {
+            if (executable.binding.layout) |layout| {
+                const first = parts.items.len;
+                try appendCompositeParts(&parts, binding.tensor.id, executable.exe.input_shapes[0], executable.binding, layout);
+                specs[next] = .{
+                    .shape = executable.exe.input_shapes[0],
+                    .memory = .default,
+                    .output = &executable.inputs[0],
+                    .parts = parts.items[first..],
+                    .zero_fill = true,
+                };
+                next += 1;
+                continue;
+            }
             for (
-                executable.sources,
+                executable.binding.tensors,
                 executable.exe.input_shapes,
                 executable.inputs,
             ) |source, shape, *input| {
@@ -266,16 +284,18 @@ pub const Loader = struct {
                     load_log.debug("executable input {s} in {s} is empty", .{ source.name, source.file_uri });
                     return error.EmptyTensor;
                 }
-                parts[next] = .whole(source);
+                const first = parts.items.len;
+                parts.appendAssumeCapacity(.whole(source));
                 specs[next] = .{
                     .shape = shape,
                     .memory = .default,
                     .output = input,
-                    .parts = parts[next..][0..1],
+                    .parts = parts.items[first..],
                 };
                 next += 1;
             }
         }
+        std.debug.assert(next == specs.len and parts.items.len == part_count);
         try self.submit(specs, executables, execution, progress);
         for (bindings) |binding| self.delivered.putAssumeCapacity(binding.tensor.id, {});
     }
@@ -534,7 +554,7 @@ fn prepareModelLoad(
     meta.forEachVisit(model, *const Tensor, struct {
         fn call(_: usize, tensor: *const Tensor, store_: *const TensorStore, count: *usize) void {
             const sources = store_.getSourcesById(tensor.id) orelse return;
-            if (!sources.transformed) count.* += sources.tensors.len;
+            if (!sources.transformed) count.* += loadPartCount(sources);
         }
     }.call, .{ store, &part_count });
 
@@ -580,7 +600,7 @@ fn prepareModelLoad(
             }
             const first_part = context.parts.items.len;
             if (sources.layout) |layout| {
-                appendCompositeParts(context.parts, tensor, sources, layout) catch |err| {
+                appendCompositeParts(context.parts, tensor.id, tensor.shape(), sources, layout) catch |err| {
                     context.err = err;
                     return;
                 };
@@ -617,59 +637,103 @@ fn prepareModelLoad(
     };
 }
 
-/// Appends a composite binding's parts in destination order, checked
-/// against the tensor they fill: one contiguous part per source and a zero
-/// fill (the part of `TensorStore.Layout` this loader assembles), sources of
-/// the tensor's dtype whose rows land as whole rows of the tensor's trailing
-/// dimensions, then what the backends check themselves (`checkParts`: inside
-/// each source and the tensor, disjoint).
+/// A strided part with few chunks, or with large ones, expands into one
+/// part per chunk, each read and transferred on its own: at most
+/// `max_part_chunks` chunks, or chunks of at least `large_chunk_bytes`. A
+/// composite with any other strided part goes to the backend whole, as
+/// strided parts (`backend.Lattice`), which the direct backend reads by
+/// destination ranges.
+const max_part_chunks = 64;
+const large_chunk_bytes = 1 << 20;
+
+fn expandable(part: TensorStore.Part) bool {
+    return part.dims.len == 0 or part.chunks() <= max_part_chunks or part.width >= large_chunk_bytes;
+}
+
+fn expandsAll(layout: *const TensorStore.Layout) bool {
+    for (layout.parts) |part| {
+        if (!expandable(part)) return false;
+    }
+    return true;
+}
+
+/// The load parts `binding` takes: its chunks when every part expands,
+/// else one per part.
+fn loadPartCount(binding: TensorStore.Binding) usize {
+    const layout = binding.layout orelse return binding.tensors.len;
+    if (!expandsAll(layout)) return layout.parts.len;
+    var n: usize = 0;
+    for (layout.parts) |part| n += part.chunks();
+    return n;
+}
+
+/// Appends a composite binding's parts in destination order, each expanded
+/// into its contiguous chunks or, when one of them does not expand, all as
+/// strided parts. They are checked against the `shape` they fill: the
+/// layout's size and sources, then what the backends check themselves
+/// (`checkParts`: inside each source and the tensor, disjoint). Strided
+/// parts must not go to a host memory space.
 fn appendCompositeParts(
     parts: *std.ArrayList(LoadPart),
-    tensor: *const Tensor,
+    id: Tensor.Id,
+    shape: Shape,
     binding: TensorStore.Binding,
     layout: *const TensorStore.Layout,
 ) (LayoutError || error{EmptyTensor})!void {
-    const shape = tensor.shape();
-    if (layout.parts.len != binding.tensors.len) {
-        load_log.debug("composite tensor {} {f}: {d} parts for {d} sources", .{ tensor.id, shape, layout.parts.len, binding.tensors.len });
+    if (layout.shape.byteSize() != shape.byteSize()) {
+        load_log.debug("composite tensor {} {f}: its layout fills {f}", .{ id, shape, layout.shape });
         return error.InvalidLayout;
     }
-    if (binding.tensors.len == 0) {
-        load_log.debug("composite tensor {} {f} has no sources", .{ tensor.id, shape });
+    if (layout.parts.len == 0) {
+        load_log.debug("composite tensor {} {f} has no parts", .{ id, shape });
         return error.InvalidLayout;
     }
-    if (layout.fill != 0) {
-        load_log.debug("composite tensor {} {f}: fill {d}, only zero fill is supported", .{ tensor.id, shape, layout.fill });
+    const strided = !expandsAll(layout);
+    if (strided and !backend.countsAgainstDevice(binding.memory)) {
+        load_log.debug("composite tensor {} {f}: strided parts into {t} memory, which this loader does not assemble", .{ id, shape, binding.memory });
         return error.UnsupportedLayout;
     }
     const first = parts.items.len;
-    for (binding.tensors, layout.parts) |source, part| {
+    for (layout.parts) |part| {
+        if (part.source >= binding.tensors.len) {
+            load_log.debug("composite tensor {} {f}: a part reads source {d} of {d}", .{ id, shape, part.source, binding.tensors.len });
+            return error.InvalidLayout;
+        }
+        const source = binding.tensors[part.source];
         if (source.byteSize() == 0) {
-            load_log.debug("composite tensor {} has empty source {s} in {s}", .{ tensor.id, source.name, source.file_uri });
+            load_log.debug("composite tensor {} has empty source {s} in {s}", .{ id, source.name, source.file_uri });
             return error.EmptyTensor;
         }
-        if (source.shape.dtype() != shape.dtype()) {
-            load_log.debug("composite tensor {} {f}: source {s} is {t}", .{ tensor.id, shape, source.name, source.shape.dtype() });
-            return error.InvalidLayout;
+        if (strided) {
+            parts.appendAssumeCapacity(.{
+                .source = source,
+                .src_offset = part.src_offset,
+                .dst_offset = part.dst_offset,
+                .width = part.width,
+                .dims = part.dims,
+            });
+            continue;
         }
-        if (!part.isContiguous()) {
-            load_log.debug("composite tensor {} {f}: source {s} has a strided part ({d} rows, pitches {d}/{d}), only contiguous parts are supported", .{ tensor.id, shape, source.name, part.rows, part.src_pitch, part.dst_pitch });
-            return error.UnsupportedLayout;
+        var chunk: u64 = 0;
+        while (chunk < part.chunks()) : (chunk += 1) {
+            var rest = chunk;
+            var src_offset = part.src_offset;
+            var dst_offset = part.dst_offset;
+            var d = part.dims.len;
+            while (d > 0) {
+                d -= 1;
+                const index = rest % part.dims[d].count;
+                rest /= part.dims[d].count;
+                src_offset += index * part.dims[d].src_stride;
+                dst_offset += index * part.dims[d].dst_stride;
+            }
+            parts.appendAssumeCapacity(.{
+                .source = source,
+                .src_offset = src_offset,
+                .dst_offset = dst_offset,
+                .width = part.width,
+            });
         }
-        const row_bytes = landingRowBytes(source.shape, shape) orelse {
-            load_log.debug("composite tensor {} {f}: source {s} {f} does not land as whole rows of it", .{ tensor.id, shape, source.name, source.shape });
-            return error.InvalidLayout;
-        };
-        if (part.src_offset % row_bytes != 0 or part.dst_offset % row_bytes != 0 or part.width % row_bytes != 0) {
-            load_log.debug("composite tensor {} {f}: source {s} part {d}+{d} -> {d} cuts its {d}-byte rows", .{ tensor.id, shape, source.name, part.src_offset, part.width, part.dst_offset, row_bytes });
-            return error.InvalidLayout;
-        }
-        parts.appendAssumeCapacity(.{
-            .source = source,
-            .src_offset = part.src_offset,
-            .dst_offset = part.dst_offset,
-            .width = part.width,
-        });
     }
     const appended = parts.items[first..];
     std.mem.sort(LoadPart, appended, {}, struct {
@@ -678,23 +742,9 @@ fn appendCompositeParts(
         }
     }.lessThan);
     backend.checkParts(appended, shape.byteSize(), true) catch |err| {
-        load_log.debug("composite tensor {} {f} of {d} bytes: parts overlap or leave the sources or the tensor ({s})", .{ tensor.id, shape, shape.byteSize(), @errorName(err) });
-        return error.InvalidLayout;
+        load_log.debug("composite tensor {} {f} of {d} bytes: parts overlap or leave the sources or the tensor ({s})", .{ id, shape, shape.byteSize(), @errorName(err) });
+        return if (err == error.UnsupportedLayout) error.UnsupportedLayout else error.InvalidLayout;
     };
-}
-
-/// The bytes of one row of `source` (one step along its dimension 0) when
-/// those rows can land as whole rows of `destination`: its dimensions past
-/// the first are `destination`'s innermost ones, and a row is a whole number
-/// of bytes. A scalar source is one element.
-fn landingRowBytes(source: Shape, destination: Shape) ?u64 {
-    const inner = if (source.rank() == 0) source.dims() else source.dims()[1..];
-    if (inner.len > destination.rank()) return null;
-    if (!std.mem.eql(i64, inner, destination.dims()[destination.rank() - inner.len ..])) return null;
-    var bits: u64 = source.dtype().bitSizeOf();
-    for (inner) |dim| bits *= @intCast(dim);
-    if (bits == 0 or bits % 8 != 0) return null;
-    return bits / 8;
 }
 
 fn logNotDelivered(arena: std.mem.Allocator, tensor: *const Tensor, sources: []const *safetensors.Tensor) void {
@@ -729,7 +779,7 @@ fn validateOptions(opts: Loader.Options) error{InvalidOptions}!void {
 /// One executable of a `loadExecute` submission and the input shells its
 /// sources are loaded into.
 const BoundExecutable = struct {
-    sources: []const *safetensors.Tensor,
+    binding: TensorStore.Binding,
     inputs: []Buffer,
     output: *Buffer,
     exe: *const Exe,
@@ -740,12 +790,12 @@ const BoundExecutable = struct {
         store: *const TensorStore,
         binding: Loader.Binding,
     ) !BoundExecutable {
-        const sources = (store.getSourcesById(binding.tensor.id) orelse {
+        const sources = store.getSourcesById(binding.tensor.id) orelse {
             load_log.debug("executable binding tensor {} {f} has no checkpoint sources", .{ binding.tensor.id, binding.tensor.shape() });
             return error.TensorNotFound;
-        }).tensors;
+        };
         try validateExecutableBinding(platform, binding.tensor, sources, binding.exe);
-        const inputs = try allocator.alloc(Buffer, sources.len);
+        const inputs = try allocator.alloc(Buffer, binding.exe.input_shapes.len);
         for (inputs, binding.exe.input_shapes) |*input, shape| {
             input.* = .{
                 ._platform = platform,
@@ -754,7 +804,7 @@ const BoundExecutable = struct {
             };
         }
         return .{
-            .sources = sources,
+            .binding = sources,
             .inputs = inputs,
             .output = binding.output,
             .exe = binding.exe,
@@ -786,38 +836,49 @@ const BoundExecutable = struct {
 fn validateExecutableBinding(
     platform: *const Platform,
     tensor: Tensor,
-    sources: []const *safetensors.Tensor,
+    binding: TensorStore.Binding,
     exe: *const Exe,
 ) BindingError!void {
-    checkExecutableBinding(platform, tensor, sources, exe) catch |err| {
-        load_log.debug("executable binding for tensor {} {f}: {s}; sources={d}, input_shapes={d}, output_shapes={d}, platform_matches={}", .{ tensor.id, tensor.shape(), @errorName(err), sources.len, exe.input_shapes.len, exe.output_shapes.len, exe.platform == platform });
+    checkExecutableBinding(platform, tensor, binding, exe) catch |err| {
+        load_log.debug("executable binding for tensor {} {f}: {s}; sources={d}, composite={}, input_shapes={d}, output_shapes={d}, platform_matches={}", .{ tensor.id, tensor.shape(), @errorName(err), binding.tensors.len, binding.layout != null, exe.input_shapes.len, exe.output_shapes.len, exe.platform == platform });
         return err;
     };
 }
 
 /// The executable's inputs and output carry their placement in their
-/// shapes' shardings, as compiled.
+/// shapes' shardings, as compiled. A composite binding is one input of its
+/// layout's shape; any other binding is one input per source, of its shape.
 fn checkExecutableBinding(
     platform: *const Platform,
     tensor: Tensor,
-    sources: []const *safetensors.Tensor,
+    binding: TensorStore.Binding,
     exe: *const Exe,
 ) BindingError!void {
     if (exe.platform != platform) return error.ExecutablePlatformMismatch;
     if (exe.output_shapes.len != 1)
         return error.ExecutableOutputCountMismatch;
-    if (exe.input_shapes.len != sources.len)
-        return error.ExecutableInputCountMismatch;
     if (!tensor.shape().eql(exe.output_shapes[0])) {
         load_log.debug("executable output shape: expected {f}, actual {f}", .{ tensor.shape(), exe.output_shapes[0] });
         return error.ExecutableOutputShapeMismatch;
     }
-    for (sources, exe.input_shapes) |source, shape| {
-        if (!source.shape.eql(shape)) {
-            load_log.debug("executable input {s}: source shape {f}, executable shape {f}", .{ source.name, source.shape, shape });
+    if (binding.layout) |layout| {
+        if (exe.input_shapes.len != 1)
+            return error.ExecutableInputCountMismatch;
+        if (!layout.shape.eql(exe.input_shapes[0])) {
+            load_log.debug("executable input: composite shape {f}, executable shape {f}", .{ layout.shape, exe.input_shapes[0] });
             return error.ExecutableInputShapeMismatch;
         }
-        try validateExecutablePlacement(platform, shape, exe.num_devices);
+        try validateExecutablePlacement(platform, exe.input_shapes[0], exe.num_devices);
+    } else {
+        if (exe.input_shapes.len != binding.tensors.len)
+            return error.ExecutableInputCountMismatch;
+        for (binding.tensors, exe.input_shapes) |source, shape| {
+            if (!source.shape.eql(shape)) {
+                load_log.debug("executable input {s}: source shape {f}, executable shape {f}", .{ source.name, source.shape, shape });
+                return error.ExecutableInputShapeMismatch;
+            }
+            try validateExecutablePlacement(platform, shape, exe.num_devices);
+        }
     }
     try validateExecutablePlacement(platform, exe.output_shapes[0], exe.num_devices);
     try validateOutputPlacement(platform, tensor.shape(), exe.output_shapes[0]);
@@ -1483,11 +1544,12 @@ test "loader reports source size mismatches without changing publication semanti
     }
 }
 
-/// Two safetensors files for composite loads, every row 16 bytes: `first`
-/// holds `a` [3, 8] then `b` [2, 8], adjacent, then `spacer`; `second`
-/// holds `plain` [4, 8], then `c` [4, 8], `bytes` [2, 16] u8, `narrow`
-/// [2, 4] and `halves` [2, 8] f16. `empty` [0, 8] is registered without
-/// bytes. Pinned after `init`.
+/// Two safetensors files for composite loads, every row 16 bytes (8 u16):
+/// `first` holds `a` [3, 8] then `b` [2, 8], adjacent, then `spacer`, then
+/// `q` [8, 8], `k` [4, 8] and `v` [4, 8]; `second` holds `plain` [4, 8],
+/// then `c` [4, 8], the experts `e{0..3}.w1` and `e{0..3}.w3` [2, 8] and
+/// `wide` [64, 8]. `empty` [0, 8] is registered without bytes. Pinned after
+/// `init`.
 const CompositeFixture = struct {
     tmp: std.testing.TmpDir,
     registry: safetensors.TensorRegistry,
@@ -1495,6 +1557,17 @@ const CompositeFixture = struct {
     b: [32]u8,
     c: [64]u8,
     plain: [64]u8,
+    q: [128]u8,
+    k: [64]u8,
+    v: [64]u8,
+    w1: [4][32]u8,
+    w3: [4][32]u8,
+    wide: [1024]u8,
+
+    const expert_names = [2][4][]const u8{
+        .{ "e0.w1", "e1.w1", "e2.w1", "e3.w1" },
+        .{ "e0.w3", "e1.w3", "e2.w3", "e3.w3" },
+    };
 
     fn init(self: *CompositeFixture, allocator: std.mem.Allocator, io: std.Io) !void {
         self.tmp = std.testing.tmpDir(.{});
@@ -1505,25 +1578,36 @@ const CompositeFixture = struct {
         load_testing.pattern(&self.b, 2);
         load_testing.pattern(&self.c, 3);
         load_testing.pattern(&self.plain, 4);
+        load_testing.pattern(&self.q, 9);
+        load_testing.pattern(&self.k, 10);
+        load_testing.pattern(&self.v, 11);
+        for (&self.w1, &self.w3, 0..) |*w1, *w3, e| {
+            load_testing.pattern(w1, @intCast(20 + e));
+            load_testing.pattern(w3, @intCast(30 + e));
+        }
         var spacer: [16]u8 = undefined;
         load_testing.pattern(&spacer, 5);
-        var bytes: [32]u8 = undefined;
-        load_testing.pattern(&bytes, 6);
-        var narrow: [16]u8 = undefined;
-        load_testing.pattern(&narrow, 7);
-        var halves: [32]u8 = undefined;
-        load_testing.pattern(&halves, 8);
+        load_testing.pattern(&self.wide, 6);
         try load_testing.writeSafetensors(allocator, io, self.tmp.dir, "first.safetensors", &self.registry, &.{
             .{ .name = "a", .dtype = "U16", .dims = &.{ 3, 8 }, .bytes = &self.a },
             .{ .name = "b", .dtype = "U16", .dims = &.{ 2, 8 }, .bytes = &self.b },
             .{ .name = "spacer", .dtype = "U16", .dims = &.{ 1, 8 }, .bytes = &spacer },
+            .{ .name = "q", .dtype = "U16", .dims = &.{ 8, 8 }, .bytes = &self.q },
+            .{ .name = "k", .dtype = "U16", .dims = &.{ 4, 8 }, .bytes = &self.k },
+            .{ .name = "v", .dtype = "U16", .dims = &.{ 4, 8 }, .bytes = &self.v },
         });
         try load_testing.writeSafetensors(allocator, io, self.tmp.dir, "second.safetensors", &self.registry, &.{
             .{ .name = "plain", .dtype = "U16", .dims = &.{ 4, 8 }, .bytes = &self.plain },
             .{ .name = "c", .dtype = "U16", .dims = &.{ 4, 8 }, .bytes = &self.c },
-            .{ .name = "bytes", .dtype = "U8", .dims = &.{ 2, 16 }, .bytes = &bytes },
-            .{ .name = "narrow", .dtype = "U16", .dims = &.{ 2, 4 }, .bytes = &narrow },
-            .{ .name = "halves", .dtype = "F16", .dims = &.{ 2, 8 }, .bytes = &halves },
+            .{ .name = expert_names[0][0], .dtype = "U16", .dims = &.{ 2, 8 }, .bytes = &self.w1[0] },
+            .{ .name = expert_names[1][0], .dtype = "U16", .dims = &.{ 2, 8 }, .bytes = &self.w3[0] },
+            .{ .name = expert_names[0][1], .dtype = "U16", .dims = &.{ 2, 8 }, .bytes = &self.w1[1] },
+            .{ .name = expert_names[1][1], .dtype = "U16", .dims = &.{ 2, 8 }, .bytes = &self.w3[1] },
+            .{ .name = expert_names[0][2], .dtype = "U16", .dims = &.{ 2, 8 }, .bytes = &self.w1[2] },
+            .{ .name = expert_names[1][2], .dtype = "U16", .dims = &.{ 2, 8 }, .bytes = &self.w3[2] },
+            .{ .name = expert_names[0][3], .dtype = "U16", .dims = &.{ 2, 8 }, .bytes = &self.w1[3] },
+            .{ .name = expert_names[1][3], .dtype = "U16", .dims = &.{ 2, 8 }, .bytes = &self.w3[3] },
+            .{ .name = "wide", .dtype = "U16", .dims = &.{ 64, 8 }, .bytes = &self.wide },
         });
         try self.registry.registerTensor(.{
             .file_uri = self.registry.tensors.get("a").?.file_uri,
@@ -1537,9 +1621,13 @@ const CompositeFixture = struct {
         self.registry.deinit();
         self.tmp.cleanup();
     }
+
+    fn rows(view: TensorStore.View, name: []const u8) TensorStore.Source {
+        return view.source(name, .{ .row, .col });
+    }
 };
 
-test "loader assembles concatenated and padded tensors on every placement and memory kind" {
+test "loader assembles concatenated and padded sources on every placement and memory kind" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var fixture: CompositeFixture = undefined;
@@ -1557,6 +1645,8 @@ test "loader assembles concatenated and padded tensors on every placement and me
     @memcpy(reversed[0..32], &fixture.b);
     @memcpy(reversed[32..80], &fixture.a);
 
+    const Source = TensorStore.Source;
+    const rows = CompositeFixture.rows;
     const Model = struct { concatenated: Tensor, padded: Tensor, reversed: Tensor, plain: Tensor };
     for ([_]usize{ 2, 4 }) |device_count| {
         var devices: load_testing.Devices = undefined;
@@ -1574,14 +1664,18 @@ test "loader assembles concatenated and padded tensors on every placement and me
                 if (!backend.supportsMemory(platform, memory)) continue;
                 const view = store.view();
                 const model: Model = .{
-                    .concatenated = view.createConcatenated(&.{ "a", "b", "c" }, .{ .row, .col }, .tp, partitioning, .{ .pad_rows_to_multiple = 8, .memory = memory }),
+                    .concatenated = Source.concatenate(&.{ rows(view, "a"), rows(view, "b"), rows(view, "c") }, .row)
+                        .pad(0, .{ .row = Source.Pad{ .high = 7 } })
+                        .bind(.tp, partitioning, .{ .memory = memory }),
                     // The padded engram-style table: one source.
-                    .padded = view.createConcatenated(&.{"c"}, .{ .row, .col }, .tp, partitioning, .{ .pad_rows_to_multiple = 8, .memory = memory }),
+                    .padded = rows(view, "c").pad(0, .{ .row = Source.Pad{ .high = 4 } }).bind(.tp, partitioning, .{ .memory = memory }),
                     // Out of file order, on the platform's replicated mesh.
-                    .reversed = view.createConcatenated(&.{ "b", "a" }, .{ .row, .col }, .replicated, .{}, .{ .rows = 6, .memory = memory }),
-                    .plain = view.createTensor("plain", .{ .row, .col }, .tp, partitioning),
+                    .reversed = Source.concatenate(&.{ rows(view, "b"), rows(view, "a") }, .row)
+                        .pad(0, .{ .row = Source.Pad{ .high = 1 } })
+                        .bind(.replicated, .{}, .{ .memory = memory }),
+                    .plain = rows(view, "plain").bind(.tp, partitioning, .{ .memory = memory }),
                 };
-                view.setMemory(model.plain, memory);
+                try std.testing.expect(store.getSourcesById(model.plain.id).?.layout == null);
                 var buffers = try mem.bufferize(allocator, Model, &model);
                 defer mem.deinitBufferized(allocator, Model, &buffers);
                 var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
@@ -1626,6 +1720,193 @@ test "loader assembles concatenated and padded tensors on every placement and me
     }
 }
 
+test "loader assembles interleaved, stacked and split sources" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture: CompositeFixture = undefined;
+    try fixture.init(allocator, io);
+    defer fixture.deinit();
+    const Source = TensorStore.Source;
+    const rows = CompositeFixture.rows;
+    const row = 16;
+
+    // Experts with their two projections concatenated, then row by row.
+    var concatenated_experts: [256]u8 = undefined;
+    var interleaved_experts: [256]u8 = undefined;
+    for (0..4) |e| {
+        @memcpy(concatenated_experts[e * 64 ..][0..32], &fixture.w1[e]);
+        @memcpy(concatenated_experts[e * 64 + 32 ..][0..32], &fixture.w3[e]);
+        for (0..2) |r| {
+            @memcpy(interleaved_experts[e * 64 + r * 2 * row ..][0..row], fixture.w1[e][r * row ..][0..row]);
+            @memcpy(interleaved_experts[e * 64 + (r * 2 + 1) * row ..][0..row], fixture.w3[e][r * row ..][0..row]);
+        }
+    }
+
+    const Model = struct { qkv: Tensor, concatenated: Tensor, interleaved: Tensor, head: Tensor, tail: Tensor };
+    for ([_]usize{ 2, 4 }) |device_count| {
+        var devices: load_testing.Devices = undefined;
+        try devices.init(allocator, io, device_count);
+        defer devices.deinit();
+        const platform = devices.platform;
+        const tp = try devices.mesh("tp");
+        var store: TensorStore = .fromRegistry(allocator, &fixture.registry, &.{&tp});
+        defer store.deinit();
+        const view = store.view();
+        const groups: i64 = @intCast(device_count);
+
+        // q, k and v cut in one group per device: each device holds its rows
+        // of every member, contiguous. Every part has `groups` runs.
+        var members: [3]Source = undefined;
+        for (&members, [_][]const u8{ "q", "k", "v" }) |*member, name| {
+            member.* = rows(view, name).splitAxis(.row, .{ .group = groups, .r = -1 });
+        }
+        var experts: [2]Source = undefined;
+        for (&experts, CompositeFixture.expert_names) |*stacked, names| {
+            var per_expert: [4]Source = undefined;
+            for (&per_expert, names) |*expert, name| expert.* = rows(view, name);
+            stacked.* = Source.stack(&per_expert, 0, .expert);
+        }
+        const fused = Source.concatenate(&.{ rows(view, "q"), rows(view, "k") }, .row);
+        // A part of q, and the rest of q with all of k.
+        const head, const tail = fused.split(.row, &.{ 4, 8 })[0..2].*;
+        const model: Model = .{
+            .qkv = Source.concatenate(&members, .r).merge(.{ .row = .{ .group, .r } }).bind(.tp, .{ .row = .model }, .{}),
+            // Experts are whole rows of the merged axis, one or two per device.
+            .concatenated = Source.concatenate(&experts, .row)
+                .merge(.{ .rows = .{ .expert, .row } })
+                .bind(.tp, .{ .rows = .model }, .{}),
+            .interleaved = Source.stack(&experts, 2, .proj)
+                .merge(.{ .rows = .{ .expert, .row, .proj } })
+                .bind(.tp, .{ .rows = .model }, .{}),
+            .head = head.bind(.replicated, .{}, .{}),
+            .tail = tail.bind(.tp, .{ .row = .model }, .{}),
+        };
+        const qkv_layout = store.getSourcesById(model.qkv.id).?.layout.?;
+        try std.testing.expectEqual(@as(usize, 3), qkv_layout.parts.len);
+        for (qkv_layout.parts) |part| try std.testing.expectEqual(@as(u64, device_count), part.chunks());
+
+        var buffers = try mem.bufferize(allocator, Model, &model);
+        defer mem.deinitBufferized(allocator, Model, &buffers);
+        var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
+        defer loader.deinit();
+        try loader.load(Model, &model, &buffers, &store, null);
+        try loader.awaitAll();
+
+        var qkv: [256]u8 = undefined;
+        var at: usize = 0;
+        for (0..device_count) |g| {
+            for ([_][]const u8{ &fixture.q, &fixture.k, &fixture.v }) |member| {
+                const per_group = member.len / device_count;
+                @memcpy(qkv[at..][0..per_group], member[g * per_group ..][0..per_group]);
+                at += per_group;
+            }
+        }
+        try load_testing.expectShards(allocator, io, &buffers.qkv, &qkv);
+        try load_testing.expectShards(allocator, io, &buffers.concatenated, &concatenated_experts);
+        try load_testing.expectShards(allocator, io, &buffers.interleaved, &interleaved_experts);
+        try load_testing.expectShards(allocator, io, &buffers.head, fixture.q[0..64]);
+        var tail_bytes: [128]u8 = undefined;
+        @memcpy(tail_bytes[0..64], fixture.q[64..128]);
+        @memcpy(tail_bytes[64..], &fixture.k);
+        try load_testing.expectShards(allocator, io, &buffers.tail, &tail_bytes);
+    }
+}
+
+test "loader gathers strided sources: a row interleave across files, broadcasts and a transpose" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const Source = TensorStore.Source;
+    // Rows of 16 bytes: g and u interleave row by row, 96 runs each; s0 and
+    // s1 repeat 100 and 60 times; z [24, 4] is transposed, 96 runs of two
+    // bytes, then padded with two zero rows. Every part has more runs than
+    // expand, so the direct backend gathers them, its jobs reading g's rows
+    // from one file and u's from the other.
+    var g: [96 * 16]u8 = undefined;
+    var u: [96 * 16]u8 = undefined;
+    var z: [24 * 8]u8 = undefined;
+    var s0: [4]u8 = undefined;
+    var s1: [4]u8 = undefined;
+    load_testing.pattern(&g, 1);
+    load_testing.pattern(&u, 2);
+    load_testing.pattern(&z, 3);
+    load_testing.pattern(&s0, 4);
+    load_testing.pattern(&s1, 5);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try load_testing.writeSafetensors(allocator, io, tmp.dir, "first.safetensors", &registry, &.{
+        .{ .name = "g", .dtype = "U16", .dims = &.{ 96, 8 }, .bytes = &g },
+        .{ .name = "s0", .dtype = "F32", .dims = &.{}, .bytes = &s0 },
+        .{ .name = "z", .dtype = "U16", .dims = &.{ 24, 4 }, .bytes = &z },
+    });
+    try load_testing.writeSafetensors(allocator, io, tmp.dir, "second.safetensors", &registry, &.{
+        .{ .name = "s1", .dtype = "F32", .dims = &.{}, .bytes = &s1 },
+        .{ .name = "u", .dtype = "U16", .dims = &.{ 96, 8 }, .bytes = &u },
+    });
+
+    var interleaved: [192 * 16]u8 = undefined;
+    for (0..96) |r| {
+        @memcpy(interleaved[2 * r * 16 ..][0..16], g[r * 16 ..][0..16]);
+        @memcpy(interleaved[(2 * r + 1) * 16 ..][0..16], u[r * 16 ..][0..16]);
+    }
+    var scales: [160 * 4]u8 = undefined;
+    for (0..160) |i| @memcpy(scales[i * 4 ..][0..4], if (i < 100) &s0 else &s1);
+    var transposed: [6 * 48]u8 = @splat(0);
+    for (0..4) |column| {
+        for (0..24) |row| @memcpy(transposed[column * 48 + row * 2 ..][0..2], z[row * 8 + column * 2 ..][0..2]);
+    }
+
+    const Model = struct { by_rows: Tensor, by_columns: Tensor, scales_by_rows: Tensor, scales_by_columns: Tensor, transposed: Tensor, transposed_by_columns: Tensor };
+    for ([_]usize{ 1, 2, 4 }) |device_count| {
+        for ([_]usize{ 0, 64 }) |alignment| {
+            var devices: load_testing.Devices = undefined;
+            try devices.init(allocator, io, device_count);
+            defer devices.deinit();
+            const tp = try devices.mesh("tp");
+            var store: TensorStore = .fromRegistry(allocator, &registry, &.{&tp});
+            defer store.deinit();
+            const view = store.view();
+            const rows = Source.stack(&.{ view.source("g", .{ .row, .col }), view.source("u", .{ .row, .col }) }, 1, .proj)
+                .merge(.{ .row = .{ .row, .proj } });
+            const repeated = Source.concatenate(&.{
+                view.source("s0", .{}).broad(Shape.init(.{ .c = 100 }, .f32)),
+                view.source("s1", .{}).broad(Shape.init(.{ .c = 60 }, .f32)),
+            }, .c).splitAxis(.c, .{ .row = 40, .col = 4 });
+            const flipped = view.source("z", .{ .row, .col }).transpose(.{ .col, .row }).withTags(.{ .row, .col })
+                .pad(0, .{ .row = Tensor.Pad{ .high = 2 } });
+            const model: Model = .{
+                .by_rows = rows.bind(.tp, .{ .row = .model }, .{}),
+                .by_columns = rows.bind(.tp, .{ .col = .model }, .{}),
+                .scales_by_rows = repeated.bind(.tp, .{ .row = .model }, .{}),
+                .scales_by_columns = repeated.bind(.tp, .{ .col = .model }, .{}),
+                .transposed = flipped.bind(.replicated, .{}, .{}),
+                .transposed_by_columns = flipped.bind(.tp, .{ .col = .model }, .{}),
+            };
+            var buffers = try mem.bufferize(allocator, Model, &model);
+            defer mem.deinitBufferized(allocator, Model, &buffers);
+            var loader = try Loader.init(allocator, io, devices.platform, .{ .read_parallelism = 2 });
+            defer loader.deinit();
+            // Jobs of 128 bytes: every destination takes several.
+            switch (loader.backend) {
+                .direct => |direct| {
+                    direct.plan_config.request_size = 256;
+                    direct.plan_config.alignment = alignment;
+                },
+                .buffered => {},
+            }
+            try loader.load(Model, &model, &buffers, &store, null);
+            try loader.awaitAll();
+            try load_testing.expectShards(allocator, io, &buffers.by_rows, &interleaved);
+            try load_testing.expectShards(allocator, io, &buffers.by_columns, &interleaved);
+            try load_testing.expectShards(allocator, io, &buffers.scales_by_rows, &scales);
+            try load_testing.expectShards(allocator, io, &buffers.scales_by_columns, &scales);
+            try load_testing.expectShards(allocator, io, &buffers.transposed, &transposed);
+            try load_testing.expectShards(allocator, io, &buffers.transposed_by_columns, &transposed);
+        }
+    }
+}
+
 test "composite layouts that do not fit their tensor fail before submission" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -1635,34 +1916,68 @@ test "composite layouts that do not fit their tensor fail before submission" {
     const platform = testing.env();
     var store: TensorStore = .fromRegistry(allocator, &fixture.registry, &.{platform.replicated_mesh});
     defer store.deinit();
-    const view = store.view();
     var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
     defer loader.deinit();
     const destination: Shape = .init(.{ 8, 8 }, .u16);
+    const Part = TensorStore.Part;
+    const Composite = struct {
+        fn bind(store_: *TensorStore, registry: *safetensors.TensorRegistry, names: []const []const u8, shape: Shape, parts: []const Part) Tensor {
+            return bindAs(store_, registry, names, shape, shape, parts);
+        }
+
+        /// A tensor of `shape` whose layout fills `filled`.
+        fn bindAs(store_: *TensorStore, registry: *safetensors.TensorRegistry, names: []const []const u8, shape: Shape, filled: Shape, parts: []const Part) Tensor {
+            const arena = store_.arena.allocator();
+            const tensors = arena.alloc(*safetensors.Tensor, names.len) catch unreachable;
+            for (tensors, names) |*tensor, name| tensor.* = registry.tensors.getPtr(name).?;
+            const layout = arena.create(TensorStore.Layout) catch unreachable;
+            layout.* = .{ .shape = filled, .parts = parts };
+            const tensor: Tensor = .fromShape(shape);
+            store_.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .transformed = false, .layout = layout }) catch unreachable;
+            return tensor;
+        }
+    };
+    const s = &store;
+    const r = &fixture.registry;
 
     const Case = struct { tensor: Tensor, expected: anyerror };
     const cases = [_]Case{
-        // No source at all.
-        .{ .tensor = view.createComposite(&.{}, destination, .{ .parts = &.{} }, .default), .expected = error.InvalidLayout },
-        // A source of another dtype of the same width, then sources of
-        // another dtype or other inner dimensions.
-        .{ .tensor = view.createConcatenated(&.{ "a", "halves" }, null, .replicated, .{}, .{}), .expected = error.InvalidLayout },
-        .{ .tensor = view.createConcatenated(&.{ "a", "bytes" }, null, .replicated, .{}, .{}), .expected = error.InvalidLayout },
-        .{ .tensor = view.createConcatenated(&.{ "a", "narrow" }, null, .replicated, .{}, .{}), .expected = error.InvalidLayout },
-        // Five rows of sources in four.
-        .{ .tensor = view.createConcatenated(&.{ "a", "b" }, null, .replicated, .{}, .{ .rows = 4 }), .expected = error.InvalidLayout },
-        .{ .tensor = view.createConcatenated(&.{ "a", "empty" }, null, .replicated, .{}, .{}), .expected = error.EmptyTensor },
+        // No part at all, and a part of a source the binding lacks.
+        .{ .tensor = Composite.bind(s, r, &.{"a"}, destination, &.{}), .expected = error.InvalidLayout },
+        .{ .tensor = Composite.bind(s, r, &.{"a"}, destination, &.{.{ .source = 1, .dst_offset = 0, .width = 16 }}), .expected = error.InvalidLayout },
+        // A layout of another size than its tensor.
+        .{ .tensor = Composite.bindAs(s, r, &.{"a"}, destination, .init(.{ 4, 8 }, .u16), &.{.{ .dst_offset = 0, .width = 48 }}), .expected = error.InvalidLayout },
+        // Past the end of its source, and of the tensor.
+        .{ .tensor = Composite.bind(s, r, &.{"a"}, destination, &.{.{ .src_offset = 16, .dst_offset = 0, .width = 48 }}), .expected = error.InvalidLayout },
+        .{ .tensor = Composite.bind(s, r, &.{"a"}, destination, &.{.{ .dst_offset = 96, .width = 48 }}), .expected = error.InvalidLayout },
         // Overlapping parts.
-        .{ .tensor = view.createComposite(&.{ "a", "b" }, destination, .{ .parts = &.{
-            .{ .dst_offset = 0, .width = 48 },
-            .{ .dst_offset = 32, .width = 32 },
-        } }, .default), .expected = error.InvalidLayout },
-        // Past the end of its source, and half a row in.
-        .{ .tensor = view.createComposite(&.{"a"}, destination, .{ .parts = &.{.{ .src_offset = 16, .dst_offset = 0, .width = 48 }} }, .default), .expected = error.InvalidLayout },
-        .{ .tensor = view.createComposite(&.{"a"}, destination, .{ .parts = &.{.{ .dst_offset = 8, .width = 48 }} }, .default), .expected = error.InvalidLayout },
-        // Valid layouts this loader does not assemble yet.
-        .{ .tensor = view.createComposite(&.{"a"}, destination, .{ .parts = &.{.{ .dst_offset = 0, .dst_pitch = 32, .src_pitch = 16, .width = 16, .rows = 3 }} }, .default), .expected = error.UnsupportedLayout },
-        .{ .tensor = view.createComposite(&.{"a"}, destination, .{ .parts = &.{.{ .dst_offset = 0, .width = 48 }}, .fill = 0xff }, .default), .expected = error.UnsupportedLayout },
+        .{ .tensor = Composite.bind(s, r, &.{ "a", "b" }, destination, &.{
+            .{ .source = 0, .dst_offset = 0, .width = 48 },
+            .{ .source = 1, .dst_offset = 32, .width = 32 },
+        }), .expected = error.InvalidLayout },
+        .{ .tensor = Composite.bind(s, r, &.{ "a", "empty" }, destination, &.{
+            .{ .source = 0, .dst_offset = 0, .width = 48 },
+            .{ .source = 1, .dst_offset = 48, .width = 16 },
+        }), .expected = error.EmptyTensor },
+        // Strided parts whose runs overlap; two whose runs interleave with
+        // different strides, which the checks cannot prove disjoint.
+        .{ .tensor = Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{
+            .{ .dst_offset = 0, .width = 2, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 4 }} },
+            .{ .dst_offset = 2, .width = 4, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 4 }} },
+        }), .expected = error.InvalidLayout },
+        .{ .tensor = Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{
+            .{ .dst_offset = 0, .width = 1, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 4 }} },
+            .{ .dst_offset = 2, .width = 1, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 8 }} },
+        }), .expected = error.UnsupportedLayout },
+        // Strided parts into host memory.
+        .{ .tensor = host: {
+            const tensor = Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{.{ .dst_offset = 0, .width = 2, .dims = &.{
+                .{ .count = 8, .src_stride = 2, .dst_stride = 128 },
+                .{ .count = 64, .src_stride = 16, .dst_stride = 2 },
+            } }});
+            s.setMemory(tensor, .host_pinned);
+            break :host tensor;
+        }, .expected = error.UnsupportedLayout },
     };
     var output: Buffer = undefined;
     for (cases) |case| {
@@ -1671,29 +1986,106 @@ test "composite layouts that do not fit their tensor fail before submission" {
         try std.testing.expect(loader.failure == null);
     }
 
-    // The loader stays usable: a part placed past a gap, the rest zero.
-    const sparse = view.createComposite(&.{"b"}, destination, .{ .parts = &.{.{ .src_offset = 16, .dst_offset = 64, .width = 16 }} }, .default);
-    try loader.load(Tensor, &sparse, &output, &store, null);
+    // The loader stays usable. A part placed past a gap, the rest zero; parts
+    // listed out of destination order; one source feeding two parts; a
+    // strided part of few runs, expanded; and a transpose, 512 runs of two
+    // bytes, gathered.
+    const sparse = Composite.bind(s, r, &.{"b"}, destination, &.{.{ .src_offset = 16, .dst_offset = 64, .width = 16 }});
+    const descending = Composite.bind(s, r, &.{ "a", "b" }, destination, &.{
+        .{ .source = 0, .dst_offset = 64, .width = 48 },
+        .{ .source = 1, .dst_offset = 0, .width = 32 },
+    });
+    const swapped = Composite.bind(s, r, &.{"a"}, destination, &.{
+        .{ .src_offset = 32, .dst_offset = 0, .width = 16 },
+        .{ .src_offset = 0, .dst_offset = 16, .width = 32 },
+    });
+    const strided = Composite.bind(s, r, &.{"a"}, destination, &.{.{ .dst_offset = 0, .width = 16, .dims = &.{
+        .{ .count = 3, .src_stride = 16, .dst_stride = 32 },
+    } }});
+    const transposed = Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{.{ .dst_offset = 0, .width = 2, .dims = &.{
+        .{ .count = 8, .src_stride = 2, .dst_stride = 128 },
+        .{ .count = 64, .src_stride = 16, .dst_stride = 2 },
+    } }});
+    const Model = struct { sparse: Tensor, descending: Tensor, swapped: Tensor, strided: Tensor, transposed: Tensor };
+    const model: Model = .{ .sparse = sparse, .descending = descending, .swapped = swapped, .strided = strided, .transposed = transposed };
+    var buffers = try mem.bufferize(allocator, Model, &model);
+    defer mem.deinitBufferized(allocator, Model, &buffers);
+    try loader.load(Model, &model, &buffers, &store, null);
     try loader.awaitAll();
-    defer output.deinit();
+
     var expected: [128]u8 = @splat(0);
     @memcpy(expected[64..80], fixture.b[16..32]);
+    try load_testing.expectShards(allocator, io, &buffers.sparse, &expected);
+    expected = @splat(0);
+    @memcpy(expected[0..32], &fixture.b);
+    @memcpy(expected[64..112], &fixture.a);
+    try load_testing.expectShards(allocator, io, &buffers.descending, &expected);
+    expected = @splat(0);
+    @memcpy(expected[0..16], fixture.a[32..48]);
+    @memcpy(expected[16..48], fixture.a[0..32]);
+    try load_testing.expectShards(allocator, io, &buffers.swapped, &expected);
+    expected = @splat(0);
+    for (0..3) |i| @memcpy(expected[i * 32 ..][0..16], fixture.a[i * 16 ..][0..16]);
+    try load_testing.expectShards(allocator, io, &buffers.strided, &expected);
+    var transposed_bytes: [1024]u8 = undefined;
+    for (0..8) |column| {
+        for (0..64) |row| @memcpy(transposed_bytes[column * 128 + row * 2 ..][0..2], fixture.wide[row * 16 + column * 2 ..][0..2]);
+    }
+    try load_testing.expectShards(allocator, io, &buffers.transposed, &transposed_bytes);
+}
+
+test "a composite binding feeds its executable the assembled tensor" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture: CompositeFixture = undefined;
+    try fixture.init(allocator, io);
+    defer fixture.deinit();
+    const platform = testing.env();
+    var store: TensorStore = .fromRegistry(allocator, &fixture.registry, &.{platform.replicated_mesh});
+    defer store.deinit();
+    const Source = TensorStore.Source;
+    const view = store.view();
+
+    // a then b, assembled by the loader, then incremented by the executable:
+    // the way an FP8 conversion composes with a fused projection.
+    const assembled = Source.concatenate(&.{ CompositeFixture.rows(view, "a"), CompositeFixture.rows(view, "b") }, .row);
+    const tensor = assembled.bind(.replicated, .{}, .{});
+    store.id_to_sources.getPtr(tensor.id).?.transformed = true;
+    const Increment = struct {
+        fn call(input: Tensor) Tensor {
+            return input.addConstant(1);
+        }
+    };
+    var exe = try platform.compileFn(allocator, io, Increment.call, .{Tensor.fromShape(tensor.shape())}, .{});
+    defer exe.deinit();
+    var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
+    defer loader.deinit();
+    var output: Buffer = undefined;
+    try loader.loadExecute(&store, &.{.{ .tensor = tensor, .output = &output, .exe = &exe }}, null);
+    try loader.awaitAll();
+    defer output.deinit();
+    var expected: [80]u8 = undefined;
+    @memcpy(expected[0..48], &fixture.a);
+    @memcpy(expected[48..], &fixture.b);
+    for (0..40) |i| {
+        const value = std.mem.readInt(u16, expected[i * 2 ..][0..2], .little);
+        std.mem.writeInt(u16, expected[i * 2 ..][0..2], value +% 1, .little);
+    }
     try load_testing.expectShards(allocator, io, &output, &expected);
 
-    // Parts listed out of destination order, with gaps: sorted before they
-    // are checked and filled.
-    const descending = view.createComposite(&.{ "a", "b" }, destination, .{ .parts = &.{
-        .{ .dst_offset = 64, .width = 48 },
-        .{ .dst_offset = 0, .width = 32 },
-    } }, .default);
-    var descending_output: Buffer = undefined;
-    try loader.load(Tensor, &descending, &descending_output, &store, null);
-    try loader.awaitAll();
-    defer descending_output.deinit();
-    var descending_expected: [128]u8 = @splat(0);
-    @memcpy(descending_expected[0..32], &fixture.b);
-    @memcpy(descending_expected[64..112], &fixture.a);
-    try load_testing.expectShards(allocator, io, &descending_output, &descending_expected);
+    // An executable of another input shape does not take it.
+    const Reshape = struct {
+        fn call(input: Tensor) Tensor {
+            return input.reshape(.{ 5, 8 });
+        }
+    };
+    var other = try platform.compileFn(allocator, io, Reshape.call, .{Tensor.fromShape(.init(.{ 4, 10 }, .u16))}, .{});
+    defer other.deinit();
+    var unused: Buffer = undefined;
+    try std.testing.expectError(
+        error.ExecutableInputShapeMismatch,
+        loader.loadExecute(&store, &.{.{ .tensor = tensor, .output = &unused, .exe = &other }}, null),
+    );
 }
 
 test "a padded host-pinned table stays in host memory and serves device gathers through device views" {
@@ -1766,15 +2158,11 @@ fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
     });
     var store: TensorStore = .fromRegistry(allocator, &registry, &.{mesh});
     defer store.deinit();
+    const source = store.view().source("table", .{ .row, .channel })
+        .pad(0, .{ .row = TensorStore.Source.Pad{ .high = @intCast(padded_rows - rows) } });
     const table = switch (placement) {
-        .rows => store.view().createConcatenated(&.{"table"}, .{ .row, .channel }, .model, .{ .row = .model }, .{
-            .pad_rows_to_multiple = 8,
-            .memory = .host_pinned,
-        }),
-        .replicated => store.view().createConcatenated(&.{"table"}, .{ .row, .channel }, .model, .{}, .{
-            .pad_rows_to_multiple = 8,
-            .memory = .host_pinned,
-        }),
+        .rows => source.bind(.model, .{ .row = .model }, .{ .memory = .host_pinned }),
+        .replicated => source.bind(.model, .{}, .{ .memory = .host_pinned }),
     };
     try std.testing.expectEqual(@as(i64, @intCast(padded_rows)), table.dim(.row));
 
@@ -1876,8 +2264,8 @@ fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
     // devices' usage, so the residency check above can fail.
     if (!distinct_memory) return;
     const device_copy = switch (placement) {
-        .rows => store.view().createConcatenated(&.{"table"}, .{ .row, .channel }, .model, .{ .row = .model }, .{ .pad_rows_to_multiple = 8 }),
-        .replicated => store.view().createConcatenated(&.{"table"}, .{ .row, .channel }, .model, .{}, .{ .pad_rows_to_multiple = 8 }),
+        .rows => source.bind(.model, .{ .row = .model }, .{}),
+        .replicated => source.bind(.model, .{}, .{}),
     };
     var in_use_control: [Platform.MAX_NUM_DEVICES]u64 = undefined;
     for (devices) |device| in_use_control[device.id] = platform.devices[device.id].memoryStats().bytes_in_use;

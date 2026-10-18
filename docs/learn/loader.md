@@ -82,49 +82,67 @@ per-submission handle and no memory knob.
 
 ## Composite tensors
 
-A composite tensor is one destination filled by several source byte ranges,
-with every byte no range covers set to zero. The loader assembles it with
-the ordinary `load`: no program, no `loadExecute`, no buffer per source. The
-destination is placed like any tensor, by its shape's sharding, into the
+A composite tensor is one destination filled from several checkpoint byte
+ranges, with every byte no range covers set to zero. The loader assembles it
+with the ordinary `load`: no program, no `loadExecute`, no buffer per source.
+The destination is placed like any tensor, by its shape's sharding, into the
 memory space its binding names (`.default` or `.host_pinned`), and it is
 allocated once per device whatever its parts: in `.default` that is device
 memory, while a `.host_pinned` destination takes none.
 
+A composite is described with `TensorStore.Source`: a checkpoint tensor
+(`View.source(subkey, tags)`, or `maybeSource`) and `zml.Tensor`'s shape ops
+over it, with the same names, tags and arguments: `slice`, `split`,
+`chunkExact`, `splitAxis`, `merge`, `reshape`, `transpose`, `pad` (with
+zeros), `broad`, `bitCast`, `concatenate` and `stack`. A source records
+nothing until `bind(mesh, partitioning, .{ .memory })` makes the model tensor,
+partitioned by the source's final tags like `createTensor`.
+
 ```zig
-// a, b and c end to end along dimension 0, padded to a multiple of 8 rows,
-// row-sharded, in host pinned memory.
-const table = store.view().createConcatenated(&.{ "a", "b", "c" }, .{ .row, .channel }, .tp, .{ .row = .model }, .{
-    .pad_rows_to_multiple = 8,
-    .memory = .host_pinned,
-});
-// One source padded to 8 rows: the engram-style table.
-const padded = store.view().createConcatenated(&.{"weight"}, .{ .row, .channel }, .tp, .{ .row = .model }, .{ .pad_rows_to_multiple = 8 });
+const Source = zml.io.TensorStore.Source;
+// a, b and c end to end along the rows, padded to 16 rows, row-sharded, in
+// host pinned memory.
+const abc = Source.concatenate(&.{ view.source("a", .{ .row, .channel }), view.source("b", .{ .row, .channel }), view.source("c", .{ .row, .channel }) }, .row);
+const table = abc.pad(0, .{ .row = Source.Pad{ .high = 16 - abc.dim(.row) } })
+    .bind(.tp, .{ .row = .model }, .{ .memory = .host_pinned });
+// q, k and v cut in one group per device and interleaved, so that each
+// device holds its rows of every projection: one contiguous run per member.
+var members: [3]Source = undefined;
+for (&members, [_][]const u8{ "q.weight", "k.weight", "v.weight" }) |*m, key| {
+    m.* = view.source(key, .{ .dout, .d }).splitAxis(.dout, .{ .group = devices, .r = -1 });
+}
+const qkv = Source.concatenate(&members, .r).merge(.{ .dout = .{ .group, .r } }).bind(.tp, .{ .dout = .model }, .{});
 ```
 
-`createConcatenated` (and `maybeCreateConcatenated`, null when a source is
-missing) takes the sources' dtype and dimensions past the first; dimension 0
-is their total, rounded up to `pad_rows_to_multiple`, or `rows` when given.
-Concatenating along the outermost axis concatenates the byte streams, so
-each source becomes one contiguous range of the destination.
-`createComposite(subkeys, shape, layout, memory)` is the general form: the
-binding's `TensorStore.Layout` holds one `Part` per source, a byte map into
-the destination's logical bytes (row-major bytes of its packed shape, before
-the sharding splits them). A `Part` already has the fields of a strided map
-(`rows`, `src_pitch`, `dst_pitch`) so interleaved or broadcast layouts can be
-added without changing it.
+A source is a few pieces, each an affine lattice over one checkpoint tensor;
+reshapes never touch them, and the other ops rewrite them without
+enumerating rows. `bind` lowers them to the binding's `TensorStore.Layout`:
+byte `Part`s of the destination's logical bytes (row-major bytes of its
+shape, before the sharding splits them), each a run of `width` bytes
+repeated over strided dimensions. A source that is one whole checkpoint
+tensor binds plainly, like `createTensor`.
 
-`load` checks a composite binding before submitting anything. It must have
-at least one source, a part must be non-empty and inside its source and the
-destination, parts must not overlap, and every source must have the
-destination's dtype, with its dimensions past the first equal to the
-destination's innermost ones and the part cutting whole rows of them;
-otherwise `InvalidLayout`. A zero-byte source is `EmptyTensor`. Strided parts and nonzero fills are valid
-layouts that this loader does not assemble yet: `UnsupportedLayout`.
+`load` checks a composite binding before submitting anything: the layout
+fills the tensor's bytes, it has a part, each part reads a source of the
+binding, stays inside it and the destination, and parts do not overlap;
+otherwise `InvalidLayout`. A zero-byte source is `EmptyTensor`. A strided
+part of at most 64 runs, or of runs of at least 1 MiB, becomes one load part
+per run. A composite with any other strided part (many small runs: row
+interleaves, transposes, broadcasts) goes to the backend as strided parts,
+which the direct backend gathers (below). Strided parts must land in run
+order without overlapping; two that interleave are checked exactly when they
+repeat with the same stride, and are `UnsupportedLayout` otherwise. Strided
+parts into a host memory space are `UnsupportedLayout` too. A transformed
+binding with a layout feeds the assembled tensor to its executable as the
+one input (`loadExecute`).
 
 The front end turns a composite binding into one `LoadSpec` whose parts all
 share the destination. The direct backend plans each part like a tensor: the
 part's source bytes map to the destination's logical offsets, which the
-destination's dispatch spans place on the devices. Neighbouring pieces of one
+destination's grid places on the devices (`ShardGrid`: every device holds
+one box of an even grid over the tensor, so a contiguous logical range lands
+as one contiguous range of each box it touches, found by arithmetic rather
+than by listing rows). Neighbouring pieces of one
 destination merge across parts when block, writers and both offsets are
 contiguous. The parts of one destination may come from different files and
 plans; each device's target still closes on the submission that completes its
@@ -133,11 +151,24 @@ first part, as one last job of that plan. That job reads nothing; it submits
 pieces from one pinned zero block that the loader detaches from its block
 pool when it is created and keeps until it is destroyed. The buffered backend
 zeroes the gaps of its staging buffer, reads each part at its offset, then
-places the whole tensor as usual.
+places the whole tensor as usual; a strided part reads its source range once
+and copies each run where it lands.
 
-What stays a program: anything that computes rather than moves bytes,
-such as a dtype conversion, dequantization, a block-scale swizzle or a row
-interleave. These remain transformed bindings delivered by `loadExecute`.
+A destination fed by strided parts is gathered: the direct backend plans it
+whole, with the file of its first part, cutting its logical bytes into
+ranges of at most a job. Each range is one job that reads, for every part
+with runs in it, the source range those runs come from (from whichever file
+holds it), and lands the range in its blocks box by box, so every device
+takes one piece per block, whatever the interleave's granularity. A part
+whose source runs are in order reads just its runs of the range, scattered
+straight into place when the read is exact; a broadcast or a transpose reads
+its whole source range in every job through the worker's bounce buffer, and
+must fit one read. Bytes no part covers land as zeros.
+
+What stays a program: anything that computes rather than moves bytes, such
+as a dtype conversion or dequantization, and the block-scale swizzles, which
+are still written as programs. These remain transformed bindings delivered
+by `loadExecute`.
 
 ## Errors and diagnostics
 
@@ -201,7 +232,7 @@ builds because the Zig test runner counts logged errors as failures.
 | `zml/io/TensorStore.zig` | Checkpoint lookup, source bindings and prefixed model views |
 | `zml/io/direct_loader.zig` | Planning, FIFO scheduling, source workers and transfer completion |
 | `vfs/request.zig` | The governed request loop: retries and the backend-wide hold on rate limiting |
-| `zml/io/DispatchSpans.zig` | Pure expansion of sharding into source ranges and destination offsets |
+| `zml/io/ShardGrid.zig` | Pure arithmetic placing logical byte ranges on the devices' boxes |
 | `zml/io/buffered_loader.zig` | Whole-tensor staging and bounded positional reads |
 | `zml/io/dma_calibration.zig` | Representative-device measurement and DMA block selection |
 | `zml/io/host_memory.zig` | Internal host arenas, block leases and placement |
@@ -223,6 +254,20 @@ Touching or overlapping source ranges share reads; gaps and file boundaries
 remain separate. Jobs keep their planning order, which is file order.
 The `Scheduler` publishes and claims those jobs in submission/file order.
 Workers read them, and per-device pumps submit the preplanned transfer pieces.
+
+A job's read normally lands in its blocks in file order. A tensor sharded
+along any axis but its first then gives every device one piece per row (a
+column-sharded `o_proj`), and the per-piece cost dominates: Llama-3.1-8B
+sharded that way on four B70 took 1.05M submissions and 5.1 s. Where it
+saves at least 64 submissions, the planner stages the job instead: its read
+lands grouped by destination and writer set, in destination order, so each
+device takes one piece per block (5,468 submissions, 0.71 s). A buffered
+read scatters straight into place; a direct read, whose ranges must stay
+aligned, lands in a per-worker bounce buffer and is copied from there.
+Neither the plan nor the worker lists rows ahead: a staged job records, per
+piece, where each box's bytes start in its blocks, and the worker walks the
+runs as it reads. Llama's plans take 1-4 ms, against 73-112 ms when every
+row and device was a span.
 
 One block may feed several outputs or devices. Its lease stays alive until
 every consuming transfer completes or is abandoned. A fill job's one block is
