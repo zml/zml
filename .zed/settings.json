@@ -33,6 +33,11 @@
     },
     "lsp": {
         "zls": {
+            "settings": {
+                "zls": {
+                    "enable_build_on_save": false
+                }
+            },
             "binary": {
                 "path": "tools/zls.sh"
             }

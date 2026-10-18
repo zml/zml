@@ -5,13 +5,18 @@ def repo():
     git_repository(
         name = "zls",
         remote = "https://github.com/zigtools/zls.git",
-        commit = "eab2be0fd74443a27662da809b771c4ad0d2afcf",
+        commit = "4e83599939e9723a8cf7961bb77214549c885116",
         build_file = Label("//third_party/zls:zls.bazel"),
+        patch_args = ["-p1"],
+        patches = [
+            Label("//third_party/zls:absolute-lazy-paths.patch"),
+            Label("//third_party/zls:known-build-graphs.patch"),
+        ],
     )
     git_repository(
         name = "zls_lsp",
         remote = "https://github.com/zigtools/lsp-kit.git",
-        commit = "d148676ace1eaecf3c703ce7d350d0e94e502ed7",
+        commit = "3e1058db66079911fdde82f833fdce6856e0a706",
         build_file = Label("//third_party/zls:lsp.bazel"),
     )
     git_repository(

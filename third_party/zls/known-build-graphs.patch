@@ -1,0 +1,236 @@
+diff --git a/src/DocumentStore.zig b/src/DocumentStore.zig
+--- a/src/DocumentStore.zig
++++ b/src/DocumentStore.zig
+@@ -52,6 +52,7 @@
+ /// Represents a `build.zig`
+ pub const BuildFile = struct {
+     uri: Uri,
++    is_workspace: std.atomic.Value(bool) = .init(false),
+     /// this build file may have an explicitly specified path to builtin.zig
+     builtin_uri: ?Uri = null,
+     /// config options extracted from zls.build.json
+@@ -61,6 +62,7 @@
+         build_runner_state: BuildRunnerState = .idle,
+         version: u32 = 0,
+         config: ?bsp.BuildConfig = null,
++        load_failed: bool = false,
+     } = .{},
+
+     const BuildRunnerState = enum {
+@@ -110,7 +112,11 @@
+         var module_root_source_file_paths: std.ArrayList([]const u8) = .empty;
+
+         {
+-            const build_config = build_file.tryLockConfig(io) orelse return .unknown;
++            const build_config = build_file.tryLockConfig(io) orelse {
++                try build_file.impl.mutex.lock(io);
++                defer build_file.impl.mutex.unlock(io);
++                return if (build_file.impl.load_failed) .no else .unknown;
++            };
+             defer build_file.unlockConfig(io);
+
+             const module_paths = build_config.modules.map.keys();
+@@ -236,74 +242,71 @@
+         try self.impl.lock.lock(document_store.io);
+         defer self.impl.lock.unlock(document_store.io);
+
+-        const unresolved = switch (self.impl.associated_build_file) {
+-            .init => blk: {
+-                const potential_build_files = try document_store.collectPotentialBuildFiles(self.uri);
+-                errdefer document_store.allocator.free(potential_build_files);
+-
+-                if (potential_build_files.len == 0) {
+-                    self.impl.associated_build_file = .none;
+-                    return .none;
++        if (isInStd(self.uri)) return .none;
++        if (self.impl.associated_build_file == .resolved)
++            return .{ .resolved = self.impl.associated_build_file.resolved };
++
++        const known_build_files = blk: {
++            try document_store.mutex.lock(document_store.io);
++            defer document_store.mutex.unlock(document_store.io);
++            break :blk try document_store.allocator.dupe(*BuildFile, document_store.build_files.values());
++        };
++        defer document_store.allocator.free(known_build_files);
++
++        const in_workspace = for (known_build_files) |build_file| {
++            if (!build_file.is_workspace.load(.monotonic)) continue;
++            const directory = build_file.uri.raw[0 .. build_file.uri.raw.len - "build.zig".len];
++            if (std.mem.startsWith(u8, self.uri.raw, directory)) break true;
++        } else false;
++
++        // External dependencies should inherit their workspace configuration,
++        // rather than running an independent build in the dependency checkout.
++        if (!in_workspace) {
++            for (known_build_files) |build_file| {
++                if (!build_file.is_workspace.load(.monotonic)) continue;
++                switch (try build_file.isAssociatedWith(self.uri, document_store)) {
++                    .unknown => return .unresolved,
++                    .no => {},
++                    .yes => |root_source_file| return self.associateWith(document_store.allocator, build_file, root_source_file),
+                 }
+-
+-                var has_been_checked: std.bit_set.Dynamic = try .initEmpty(document_store.allocator, potential_build_files.len);
+-                errdefer has_been_checked.deinit(document_store.allocator);
+-
+-                self.impl.associated_build_file = .{ .unresolved = .{
+-                    .has_been_checked = has_been_checked,
+-                    .potential_build_files = potential_build_files,
+-                } };
+-
+-                break :blk &self.impl.associated_build_file.unresolved;
+-            },
+-            .unresolved => |*unresolved| unresolved,
+-            .none => return .none,
+-            .resolved => |resolved| return .{ .resolved = resolved },
+-        };
+-
+-        var has_missing_build_config = false;
+-
+-        var it = unresolved.has_been_checked.iterator(.{
+-            .kind = .unset,
+-            .direction = .reverse,
+-        });
+-        while (it.next()) |i| {
+-            const build_file = unresolved.potential_build_files[i];
++            }
++        }
++
++        // Discover ancestors before accepting another project's graph. Wait for
++        // higher-priority configurations instead of caching a lower-priority hit.
++        const ancestors = try document_store.collectPotentialBuildFiles(self.uri);
++        defer document_store.allocator.free(ancestors);
++        var i = ancestors.len;
++        while (i > 0) {
++            i -= 1;
++            const build_file = ancestors[i];
+             switch (try build_file.isAssociatedWith(self.uri, document_store)) {
+-                .unknown => {
+-                    has_missing_build_config = true;
+-                    continue;
+-                },
+-                .no => {
+-                    // the build file should be skipped in future calls.
+-                    unresolved.has_been_checked.set(i);
+-                    continue;
+-                },
+-                .yes => |root_source_file| {
+-                    // log.debug("Resolved build file of '{s}' as '{s}' root={s}", .{ self.uri.raw, build_file.uri.raw, root_source_file });
+-                    errdefer comptime unreachable;
+-                    self.impl.associated_build_file.deinit(document_store.allocator);
+-                    self.impl.associated_build_file = .{
+-                        .resolved = .{
+-                            .build_file = build_file,
+-                            .root_source_file = root_source_file,
+-                        },
+-                    };
+-                    return .{ .resolved = self.impl.associated_build_file.resolved };
+-                },
+-            }
+-        }
+-
+-        if (has_missing_build_config) {
+-            // when build configs are missing we keep the state at .unresolved so that
+-            // future calls will retry until all build config are resolved.
+-            // Then will have a conclusive result on whether or not there is a associated build file.
+-            return .unresolved;
+-        }
+-
+-        self.impl.associated_build_file.deinit(document_store.allocator);
+-        self.impl.associated_build_file = .none;
++                .unknown => return .unresolved,
++                .no => {},
++                .yes => |root_source_file| return self.associateWith(document_store.allocator, build_file, root_source_file),
++            }
++        }
++
++        // Module roots and their relative imports can also live outside every
++        // build directory. Membership, not path proximity, permits this fallback.
++        for (known_build_files) |build_file| {
++            switch (try build_file.isAssociatedWith(self.uri, document_store)) {
++                .unknown => return .unresolved,
++                .no => {},
++                .yes => |root_source_file| return self.associateWith(document_store.allocator, build_file, root_source_file),
++            }
++        }
++        // A later workspace/configuration may contain this document.
+         return .none;
++    }
++
++    fn associateWith(self: *Handle, allocator: std.mem.Allocator, build_file: *BuildFile, root_source_file: []const u8) AssociatedBuildFile {
++        self.impl.associated_build_file.deinit(allocator);
++        self.impl.associated_build_file = .{ .resolved = .{
++            .build_file = build_file,
++            .root_source_file = root_source_file,
++        } };
++        return .{ .resolved = self.impl.associated_build_file.resolved };
+     }
+
+     pub const GetAssociatedCompilationUnitsResult = union(enum) {
+@@ -789,6 +792,25 @@
+     self.invalidateBuildFile(new_build_file.uri);
+
+     return new_build_file;
++}
++
++/// Register workspace build roots before any source document needs association.
++pub fn setWorkspace(self: *DocumentStore, uri: Uri, active: bool) error{ Canceled, OutOfMemory }!void {
++    if (!supports_build_system) return;
++    const directory = uri.toFsPath(self.allocator) catch |err| switch (err) {
++        error.UnsupportedScheme => return,
++        error.OutOfMemory => return error.OutOfMemory,
++    };
++    defer self.allocator.free(directory);
++    const path = try std.Io.Dir.path.join(self.allocator, &.{ directory, "build.zig" });
++    defer self.allocator.free(path);
++    const build_uri = try Uri.fromPath(self.allocator, path);
++    defer build_uri.deinit(self.allocator);
++    const build_file = if (active) blk: {
++        if (!try buildDotZigExists(self.io, directory)) return;
++        break :blk try self.getOrLoadBuildFile(build_uri);
++    } else self.getBuildFile(build_uri) orelse return;
++    build_file.is_workspace.store(active, .monotonic);
+ }
+
+ /// Opens a document that is synced over the LSP protocol (`textDocument/didOpen`).
+@@ -1156,7 +1178,10 @@
+         defer build_file.impl.mutex.unlock(self.io);
+
+         switch (build_file.impl.build_runner_state) {
+-            .idle => build_file.impl.build_runner_state = .running,
++            .idle => {
++                build_file.impl.load_failed = false;
++                build_file.impl.build_runner_state = .running;
++            },
+             .running => {
+                 build_file.impl.build_runner_state = .running_but_already_invalidated;
+                 return;
+@@ -1195,6 +1220,7 @@
+                 build_file.impl.mutex.lockUncancelable(self.io);
+                 defer build_file.impl.mutex.unlock(self.io);
+                 build_file.impl.build_runner_state = .idle;
++                build_file.impl.load_failed = true;
+                 return;
+             },
+         };
+diff --git a/src/Server.zig b/src/Server.zig
+--- a/src/Server.zig
++++ b/src/Server.zig
+@@ -839,6 +839,7 @@
+ fn addWorkspace(server: *Server, uri: Uri) error{ Canceled, OutOfMemory }!void {
+     try server.workspaces.ensureUnusedCapacity(server.allocator, 1);
+     server.workspaces.appendAssumeCapacity(try Workspace.init(server, uri));
++    try server.document_store.setWorkspace(uri, true);
+
+     if (BuildOnSave.isSupportedComptime() and
+         // Don't initialize build on save until initialization finished.
+@@ -865,6 +866,9 @@
+ }
+
+ fn removeWorkspace(server: *Server, uri: Uri) void {
++    server.document_store.setWorkspace(uri, false) catch |err| {
++        log.warn("failed to unregister workspace build file: {t}", .{err});
++    };
+     for (server.workspaces.items, 0..) |workspace, i| {
+         if (workspace.uri.eql(uri)) {
+             var removed_workspace = server.workspaces.swapRemove(i);
