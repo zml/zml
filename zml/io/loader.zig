@@ -1697,13 +1697,28 @@ test "composite layouts that do not fit their tensor fail before submission" {
 }
 
 test "a padded host-pinned table stays in host memory and serves device gathers through device views" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
     // The engram arrangement: one source of 264-byte rows, an odd row count
     // padded to a multiple of 8, rows sharded over every device, delivered
     // into host pinned memory. A program then reads it through device-kind
     // views of that memory (`Buffer.createView`), as llmd does, and gathers
     // rows from each device's local shard.
+    try expectHostTableGathers(.rows);
+}
+
+test "a replicated host-pinned table is one allocation that every device reads through device views" {
+    // The same table on every device: where the platform shares host memory
+    // across devices (`direct_loader.sharesHostMemory`), the loader makes it
+    // one allocation, each device's shard a view of it, and every device's
+    // kernels gather from it.
+    try expectHostTableGathers(.replicated);
+}
+
+/// Loads a padded table into host pinned memory, rows sharded over every
+/// device or replicated on each, wraps it in device-kind views and gathers
+/// rows of each device's shard on that device.
+fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
     const rows: usize = 100_003;
     const row_bytes: usize = 264;
     const gathered: usize = 256;
@@ -1730,8 +1745,8 @@ test "a padded host-pinned table stays in host memory and serves device gathers 
         platform.devices[devices[0].id].memory(.default).?.pjrt_memory;
 
     const padded_rows = std.mem.alignForward(usize, rows, 8);
-    const shard_rows = padded_rows / shard_count;
-    try std.testing.expectEqual(padded_rows, shard_rows * shard_count);
+    const shard_rows = if (placement == .rows) padded_rows / shard_count else padded_rows;
+    if (placement == .rows) try std.testing.expectEqual(padded_rows, shard_rows * shard_count);
     const padded = try allocator.alloc(u8, padded_rows * row_bytes);
     defer allocator.free(padded);
     @memset(padded, 0);
@@ -1751,10 +1766,16 @@ test "a padded host-pinned table stays in host memory and serves device gathers 
     });
     var store: TensorStore = .fromRegistry(allocator, &registry, &.{mesh});
     defer store.deinit();
-    const table = store.view().createConcatenated(&.{"table"}, .{ .row, .channel }, .model, .{ .row = .model }, .{
-        .pad_rows_to_multiple = 8,
-        .memory = .host_pinned,
-    });
+    const table = switch (placement) {
+        .rows => store.view().createConcatenated(&.{"table"}, .{ .row, .channel }, .model, .{ .row = .model }, .{
+            .pad_rows_to_multiple = 8,
+            .memory = .host_pinned,
+        }),
+        .replicated => store.view().createConcatenated(&.{"table"}, .{ .row, .channel }, .model, .{}, .{
+            .pad_rows_to_multiple = 8,
+            .memory = .host_pinned,
+        }),
+    };
     try std.testing.expectEqual(@as(i64, @intCast(padded_rows)), table.dim(.row));
 
     var in_use_before: [Platform.MAX_NUM_DEVICES]u64 = undefined;
@@ -1776,7 +1797,16 @@ test "a padded host-pinned table stays in host memory and serves device gathers 
     var device_table = try host_table.createView();
     defer device_table.deinit();
     const shard_bytes = shard_rows * row_bytes;
+    const first_pointer = try host_table._shards.get(0).opaqueDeviceMemoryDataPointer(platform.pjrt_api);
     for (devices, host_table._shards.constSlice(), device_table._shards.constSlice()) |device, owner, view| {
+        // Replicas share one allocation where the platform shares host
+        // memory across devices; row shards never do.
+        const pointer = try owner.opaqueDeviceMemoryDataPointer(platform.pjrt_api);
+        const shares = placement == .replicated and shard_count > 1 and switch (platform.target) {
+            .cpu, .cuda, .rocm, .oneapi => true,
+            else => false,
+        };
+        if (device.id != devices[0].id) try std.testing.expectEqual(shares, pointer == first_pointer);
         const pinned_memory = platform.devices[device.id].memory(.host_pinned).?.pjrt_memory;
         const default_memory = platform.devices[device.id].memory(.default).?.pjrt_memory;
         try std.testing.expect(owner.memory(platform.pjrt_api) == pinned_memory);
@@ -1793,7 +1823,7 @@ test "a padded host-pinned table stays in host memory and serves device gathers 
     }
 
     // Each device gathers `gathered` rows of its own shard, the padding
-    // rows of the last one included.
+    // rows of the last one included (of every replica, replicated).
     const Gather = struct {
         fn forward(table_: Tensor, indices: Tensor) Tensor {
             const output: Shape = Shape.init(.{ .shard = indices.dim(.shard), .bytes = indices.dim(.k) * table_.dim(.channel) }, .u8)
@@ -1835,7 +1865,8 @@ test "a padded host-pinned table stays in host memory and serves device gathers 
     defer allocator.free(expected);
     for (0..shard_count) |shard| {
         for (0..gathered) |k| {
-            const row = shard * shard_rows + indices[shard * gathered + k];
+            const first_row = if (placement == .rows) shard * shard_rows else 0;
+            const row = first_row + indices[shard * gathered + k];
             @memcpy(expected[(shard * gathered + k) * row_bytes ..][0..row_bytes], padded[row * row_bytes ..][0..row_bytes]);
         }
     }
@@ -1844,7 +1875,10 @@ test "a padded host-pinned table stays in host memory and serves device gathers 
     // The control: the same table in device memory does show up in the
     // devices' usage, so the residency check above can fail.
     if (!distinct_memory) return;
-    const device_copy = store.view().createConcatenated(&.{"table"}, .{ .row, .channel }, .model, .{ .row = .model }, .{ .pad_rows_to_multiple = 8 });
+    const device_copy = switch (placement) {
+        .rows => store.view().createConcatenated(&.{"table"}, .{ .row, .channel }, .model, .{ .row = .model }, .{ .pad_rows_to_multiple = 8 }),
+        .replicated => store.view().createConcatenated(&.{"table"}, .{ .row, .channel }, .model, .{}, .{ .pad_rows_to_multiple = 8 }),
+    };
     var in_use_control: [Platform.MAX_NUM_DEVICES]u64 = undefined;
     for (devices) |device| in_use_control[device.id] = platform.devices[device.id].memoryStats().bytes_in_use;
     var device_buffer: Buffer = undefined;
