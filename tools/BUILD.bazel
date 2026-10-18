@@ -1,5 +1,6 @@
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
 py_library(
@@ -23,4 +24,19 @@ sh_binary(
     ],
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//visibility:public"],
+)
+
+exports_files([
+    "zls.sh",
+    "zls_launcher.py",
+])
+
+py_test(
+    name = "zls_launcher_test",
+    srcs = [
+        "zls_launcher.py",
+        "zls_launcher_test.py",
+    ],
+    imports = ["."],
+    main = "zls_launcher_test.py",
 )

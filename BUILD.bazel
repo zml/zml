@@ -1,6 +1,7 @@
 load("@@apple_support+//xcode:xcode_config.bzl", "xcode_config")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_zig//zig/translate-c:toolchain.bzl", "translate_c_toolchain")
-load("@rules_zig//zig/zls:zls_completion.bzl", "zls_completion")
+load("//bazel:zls.bzl", "zls_metadata")
 
 # Dummy xcode_config so we don't need to build xcode_locator in the repository rule.
 xcode_config(
@@ -31,15 +32,18 @@ toolchain(
     visibility = ["//visibility:public"],
 )
 
-zls_completion(
-    name = "completion",
-    visibility = ["//visibility:public"],
-    deps = [
+zls_metadata(
+    name = "completion_metadata",
+    roots = [
         "//bin/zml-smi",
         "//examples/llm",
         "//examples/mnist",
         "//examples/sharding",
         "//examples/io:playground",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//platforms",
         "//stdx",
         "//zml",
         "//zml/tokenizer/iree",
@@ -60,5 +64,12 @@ platform(
         "container-image": "docker://ubuntu:22.04",
         "OSFamily": "Linux",
     },
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "completion",
+    srcs = ["//tools:zls.sh"],
+    data = ["//tools:zls_launcher.py"],
     visibility = ["//visibility:public"],
 )

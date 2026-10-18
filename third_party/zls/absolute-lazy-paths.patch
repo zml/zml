@@ -1,0 +1,11 @@
+--- a/src/bsp.zig
++++ b/src/bsp.zig
+@@ -680,7 +680,7 @@
+             const base_path = base_paths.get(relative.flags.base) orelse return null;
+             const sub_path = relative.sub_path.slice(c);
+             if (sub_path.len == 0) return base_path;
+-            return try Dir.path.join(arena, &.{ base_path, sub_path });
++            return try Dir.path.resolveAlloc(arena, &.{ base_path, sub_path });
+         },
+         .generated => |gen| {
+             const gf = generated_files.get(gen.index) orelse return null;
