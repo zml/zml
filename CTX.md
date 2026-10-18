@@ -4576,6 +4576,8 @@ loader supports, loaded by plain `Loader.load` (no program, no
 
 ### What to do next for host-resident tables
 
+Items 1 and 2 are done in the twenty-second pass below.
+
 1. Take the pinned destination allocation off the read path (allocate a
    host-resident destination ahead of its reads, in parallel, or at
    submit): it is most of option (a)'s cost and helps option (b) too.
@@ -4593,6 +4595,161 @@ loader supports, loaded by plain `Loader.load` (no program, no
 4. Not verified on CUDA hardware in this pass: the DeepSeek-V4.1 engram
    load through the loader (pinned_host on CUDA, `createView` swap on
    loader-produced buffers) and its load time against master's writer.
+
+## Twenty-second pass: host-resident delivery without DMA (2026-10-18)
+
+Task: speed up loader delivery into `.host_pinned` destinations, items 1
+and 2 of the twenty-first pass's "What to do next". zml only (working copy,
+not committed); llmd needs no change (same `LoadSpec`/`TensorStore` API).
+
+### Where the time went (4x B70, oneAPI, Llama-3.1-8B sharded, warm)
+
+- Baseline today, interleaved, batch elapsed: default 0.671-0.675 s,
+  host_pinned 2.020-2.031 s (`tensor_init_ms_per_read` 10.2-10.3).
+- First-time pinned allocation (a temporary microbenchmark binary, since
+  deleted): `createUninitializedBuffer` and
+  `createBuffersForAsyncHostToDevice` in `pinned_host` alike, 13.6-15.3
+  GiB/s whatever the thread count (1, 4 and 16 threads, 1-64 MiB buffers,
+  round-robin over the four devices' host spaces); 1 MiB buffers 7.4 GiB/s.
+  After a free the plugin reuses the memory (8 GiB in ~1-10 ms). strace:
+  nearly all of it is `DRM_IOCTL_XE_VM_BIND` on one device fd (4, 8, 16 ms
+  per call, sizes doubling), the kernel populating and binding pages. It is
+  serialized below the loader; nothing in zml can parallelize it.
+- The first CPU write into a fresh allocation faults its CPU mapping in:
+  memset 9.4 GiB/s on one thread against 21.5 GiB/s on reused memory, 30.5
+  GiB/s on 16 threads. Allocating 6 GiB takes 0.577 s alone and 0.724-0.726
+  s while 16 threads first-touch another 6 GiB (the touch takes 0.19-0.20 s
+  either way): allocation and writes into pinned memory add up more than
+  they overlap.
+- Step 1 alone (allocation ahead, the DMA path kept): 2.03 -> 1.934-1.953
+  s. The allocation task took 1.54 s and the host-to-host DMA became the
+  stall (DMA stage 13.3 ms per request, credit waits 5.4 ms).
+- Option (b) split in two, for attribution (synchronous allocation before
+  publishing, a temporary switch): allocating every destination 1.151 s,
+  then the reads into them 0.562-0.571 s (26 GiB/s, first touch included,
+  faster than DMA into device memory). Overlapped: 1.66 s.
+
+### The change
+
+- Allocation ahead (`Loader.startAllocations`): a batch with host-resident
+  destinations gets one task on the worker group that calls `ensureState`
+  for `Batch.host_destinations`, each destination once, in the order of its
+  first part in the sorted part order, which is claim order
+  (`Planner.hostDestinationsInOrder`). It holds one completion unit, taken
+  before the publish sentinel is dropped, and stops at a pipeline failure;
+  a worker that reaches a destination first creates it itself (`LazyOnce`).
+  Metric `ahead_init_ms`, debug line `batch allocations: ... done=+s`.
+- Delivery classes (`Delivery`: `dma`, `host_direct`, `host_bounce`).
+  `Destination.hostResident()` is a memory kind that does not count against
+  the devices (host_pinned, host_unpinned). `Planner.JobCut` cuts a file's
+  DMA parts and host parts separately (no job mixes them), merges the jobs
+  back into file order (stable sort) and adds one fill job per class. Host
+  transfers are not cut by blocks: `block_index` 0, `block_offset` from the
+  read's start. A host job is `host_direct` when its read has no alignment
+  padding and its transfers cover the read in order, each byte once
+  (`coversReadInOrder`). Otherwise it is `host_bounce`: reads widened for
+  direct I/O, and runs holding overlapping or duplicate parts. One overlap
+  sends its whole job through blocks.
+- Host jobs take no block contexts and no events (`Plan.create` takes the
+  DMA submission count); a host job's request ends with its worker's
+  scheduling reference. `host_direct` (`HostScatter`): iovecs over the
+  destination ranges (memory-contiguous ones merged), read under the read
+  gate in as many `readFilePositionalAllV` calls as
+  `max_positional_iovecs` needs (a column-sharded tensor is one iovec per
+  row per device), then copies to unshared replicas. `host_bounce`: leases
+  the blocks, reads like a DMA job, `copyFromBlocks` to each writer,
+  releases. Host fill: memset per writer.
+- Host state (`TensorTransfer.initHost`): `createUninitializedBuffer` in
+  each device's host space, awaited, host pointer read. Replicas (devices
+  whose `Placement.slices` start at the same coordinates) share ONE
+  allocation where `sharesHostMemory` (cpu, cuda, rocm, oneapi):
+  `SharedHostAllocation` owns a buffer that is not a shard, every device's
+  shard is a `createViewOfDeviceBuffer` in that device's host space whose
+  `on_delete_callback` drops a reference, and the last drop destroys the
+  owner (on `smp_allocator`, outliving the loader). Shards can therefore be
+  freed in any order. oneAPI checked: the callback fires on view destroy,
+  views read back on every device, and kernels gather through device-kind
+  views of them (new test). Loader field `share_host_allocations` (tests
+  clear it to cover the copies). Donating a shared shard to an execution
+  that writes it shows on every device (the `HostAccessible.undonatable`
+  rule).
+- `Batch.fullySubmitted` covers host destinations: `host_written` (bytes
+  times the devices a write lands on) against `host_total`.
+- Planner and lifecycle invariants updated in `direct_loader.zig`
+  comments: batch completion units (plus the allocation unit), plan
+  contexts (DMA jobs' blocks only), `Job.block_start`/`block_len` and
+  `Transfer` for host jobs, at most two fill jobs per plan.
+
+### Results (4x B70, oneAPI, warm, interleaved, batch elapsed)
+
+| model, placement | default | host_pinned before | host_pinned now |
+| --- | --- | --- | --- |
+| Llama-3.1-8B sharded | 0.669-0.672 s | 2.020-2.031 s | 1.626-1.644 s |
+| Llama-3.1-8B replicated | 1.256-1.268 s | not runnable (4 x 15 GiB pinned, 62 GiB host) | 1.849-1.874 s |
+| LFM2.5-1.2B sharded | 0.103-0.106 s | 0.437-0.452 s (21st pass) | 0.359-0.363 s |
+| LFM2.5-1.2B replicated | 0.184-0.192 s | 1.686-1.726 s (21st pass) | 0.361-0.372 s |
+
+- Allocation-bound. Llama: allocations done at +1.41 s, batch at
+  +1.64-1.66 s; LFM: allocations end 5-10 ms before the batch. The target
+  "sharded host_pinned near the 21.7 GiB/s ceiling" is out of reach on this
+  host: allocating 15 GiB of pinned memory alone takes 1.15 s, and ~1.41 s
+  beside the reads. The reads themselves run at 26 GiB/s into pinned
+  memory, above DMA into device memory.
+- Replicated host_pinned is 1.13x a sharded host_pinned load (target met):
+  one allocation of 15 GiB instead of four. Its reads take 7.5 ms per read
+  against 4.8 sharded; a guess, unverified: the 16 workers fault into a
+  quarter as many buffers.
+- Forced direct I/O (`ZML_DIRECT_IO=on`: every host job `host_bounce`,
+  disk-bound): default 1.600-1.605 s, host_pinned 2.298-2.320 s
+  (allocations done at +1.56 s).
+- `ZML_LOAD_CHECK=1` ok 291/291 for sharded host_pinned, replicated
+  host_pinned (every replica, 59.83 GiB compared) and direct-I/O host_pinned.
+- Default memory unchanged (21st pass: 0.690-0.695 and 1.273-1.294 s).
+
+### Tests
+
+- `//zml:test` CPU: 311 passed, 12 skipped. oneAPI on the four B70: 312
+  passed, 11 skipped (master's moe Triton test skipped locally, as in the
+  twenty-first pass; the skip is not in the tree).
+- Planner replay of composite destinations (2x2 mesh) also with host_pinned
+  destinations at alignment 0 and 8: deliveries, no blocks or events for
+  host jobs, every device byte written exactly once.
+- "host-resident and DMA parts never share a job, and overlapping host
+  parts read through blocks": class split, file order, bounce for a
+  duplicated source, events and blocks for DMA only, allocation order.
+- "host-resident destinations are written in place, through blocks when
+  reads are widened or overlap, and replicas share one allocation": four
+  devices (the B70s or CPU); rows, columns (8,192 transfers in one job,
+  several vectored reads), replicated, a duplicated source, and a device
+  tensor in one file; shared and unshared replicas; alignment 0 and 64;
+  pool blocks and credits back to zero; host memory spaces; one pointer per
+  replicated output when shared; every `SharedHostAllocation` released
+  whatever the shard free order. Each run writes its own file: with one
+  file, an unshared run found the previous run's bytes in recycled memory.
+- "a replicated host-pinned table is one allocation that every device
+  reads through device views" (new) and "a padded host-pinned table stays
+  in host memory and serves device gathers through device views" (kept,
+  now `expectHostTableGathers(.rows)`): both pass on oneAPI.
+- "loader failures clean up ..." runs every failure with host_pinned
+  destinations too.
+- Mutations caught: dropping the replica copies, a bounce copy from offset
+  0, writing every replica of a shared region, forcing overlapping jobs
+  direct.
+
+### Left open
+
+- The allocation floor: a faster pinned allocation (plugin or driver), or
+  allocating host destinations while something other than host writes
+  runs, e.g. llmd submitting engram before the device weights, or a
+  "prepare" API. Not tried.
+- Not verified on CUDA: shared-allocation outputs with `on_delete`
+  callbacks, pinned allocation speed and contention.
+- One overlap in a host run sends the whole job through blocks.
+- `host_bounce` under direct I/O copies twice; reading O_DIRECT straight
+  into the destination needs destination and file offsets congruent modulo
+  the alignment.
+- CPU default memory could take `host_direct` too (it is host memory); not
+  done, CPU default keeps the transfer managers.
 
 ## Concatenating tensors in the loader: design (2026-10-14, exploration)
 
@@ -4664,9 +4821,9 @@ Full exploration with file:line inventory: session scratchpad
   review fixes and the composite/engram feature share the working-copy
   commit in both repos). Not run on CUDA hardware: the DeepSeek-V4.1
   engram load through the loader and the `createView` swap on
-  loader-produced `pinned_host` buffers. Host-resident destinations:
-  allocate them off the read path, then option (b) direct reads with
-  replica sharing. Concat phases 1 (expert stacks) to 4 above. oneAPI:
+  loader-produced `pinned_host` buffers. Host-resident destinations
+  (twenty-second pass, uncommitted): allocation-bound on oneAPI; see its
+  "Left open". Concat phases 1 (expert stacks) to 4 above. oneAPI:
   master's plugin `202610011939` serializes piece completions (3x on
   tiny-piece loads) and segfaults compiling llmd's Llama; master's moe
   Triton test aborts on Level Zero. `Buffer.toSlice`/`toSliceAlloc`
