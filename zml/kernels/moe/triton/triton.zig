@@ -87,30 +87,18 @@ pub fn fusedExpertsBase(
     return zml.ops.manualComputation(
         (struct {
             args: FusedExpertsArgs,
-            global_num_experts: i64,
-
             fn call(self: @This(), _: zml.Shape) zml.Tensor {
-                const local_args = self.args;
+                var local_args = self.args;
                 const local_num_experts = local_args.gate_up.weight.dim(.expert);
-                const partition_id = zml.ops.partitionId().convert(.i32);
-                const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
-
-                // Map global expert ids to local ids, or -1 for experts outside this partition.
-                const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
-                    .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
-                var mapped_args = local_args;
-                mapped_args.expert_map = local_expert_mask.select(
-                    global_expert_ids.sub(expert_start),
-                    zml.Tensor.scalar(-1, .i32),
-                );
-
-                const local_output = fusedExpertsImpl(mapped_args);
+                const expert_start = zml.ops.partitionId().convert(.i32).scale(local_num_experts);
+                local_args.topk_ids = local_args.topk_ids.sub(expert_start);
+                local_args.compact_local = true;
+                const local_output = fusedExpertsImpl(local_args);
                 const local_reshaped = local_output.reshape(local_args.hidden_states.shape()).withTags(.{ .t, .d });
                 return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
             }
         }).call,
-        .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert) },
+        .{ .args = args },
         input.shape(),
     );
 }
@@ -123,6 +111,7 @@ pub const FusedExpertsArgs = struct {
     topk_ids: Tensor,
     activation: zml.moe.Activation,
     expert_map: ?Tensor = null,
+    compact_local: bool = false,
     /// Use FP8 activations for FP8 weights; false keeps BF16 activations.
     quantize_input: bool,
     gate_up_layout: ProjectionLayout,
@@ -189,7 +178,8 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
         stdx.debug.assert(expert_map.dtype() == .i32 and expert_map.rank() == 1, "triton backend expected a rank-1 i32 expert map, got rank {} and dtype {}", .{ expert_map.rank(), expert_map.dtype() });
 
     const num_experts = if (opts.expert_map) |expert_map| expert_map.dim(.expert) else gate_up.dim(.expert);
-    const routing = prepareRouting(ids, num_experts, @intCast(launch_config.block_size_m));
+    const local = if (opts.compact_local) prepareLocalRouting(ids, num_experts, @intCast(launch_config.block_size_m)) else null;
+    const routing = if (local) |r| r.routing else prepareRouting(ids, num_experts, @intCast(launch_config.block_size_m));
 
     const expert_ids = if (opts.expert_map) |expert_map|
         expert_map.gather(.{ .expert = routing.expert_ids }, .{}).withTags(.{.g})
@@ -200,6 +190,7 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
 
     const gate_up_out = gemm(.{
         .input = hidden_quant,
+        .gather_input = opts.compact_local,
         .weight = gate_up,
         .bias = opts.gate_up.bias,
         .input_scale = input_scale,
@@ -212,12 +203,33 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
         .output_shape = Shape.init(.{ .token = routing.num_assignments, .out = gate_up.dim(.out) }, .bf16),
     });
 
-    var activated = zml.moe.applyActivation(gate_up_out, opts.activation, opts.gate_up_layout);
-    if (opts.routing_weight_placement == .before_down) {
-        const weights = routing_weights.reshape(.{ .token = routing.num_assignments }).convert(.f32);
-        activated = activated.mul(weights.broad(activated.shape()));
-    }
-    const activated_quant, const down_input_scale = prepareInput(activated, down_scheme, down.dtype(), opts.quantize_input);
+    const activated_quant, const down_input_scale = if (local) |r| blk: {
+        const quantize = opts.quantize_input and down_scheme != null and down_scheme != .mxfp4;
+        const activated = kernels.LocalActivation.Kernel.call(
+            .{ .x = gate_up_out, .count = r.count, .map = r.map, .weights = routing_weights },
+            .{ .y = Shape.init(.{ .token = routing.num_assignments, .out = down_k }, if (quantize) .f32 else .bf16) },
+            .{ .cfg = .{
+                .width = down_k,
+                .activation = opts.activation,
+                .layout = opts.gate_up_layout,
+                .weights_dtype = toDType(routing_weights.dtype()),
+                .before_down = opts.routing_weight_placement == .before_down,
+                .output_dtype = if (quantize) .f32 else .bf16,
+            }, .grid = .{ @intCast(routing.num_assignments), @intCast(std.math.divCeil(i64, down_k, 256) catch unreachable), 1 }, .num_warps = 4, .num_stages = 1 },
+        ).y;
+        if (quantize) {
+            const q, const scale = quantizeFp8InputRows(activated, down_scheme.?, down.dtype(), r.count);
+            break :blk .{ q, @as(?Tensor, scale) };
+        }
+        break :blk .{ activated, @as(?Tensor, null) };
+    } else blk: {
+        var activated = zml.moe.applyActivation(gate_up_out, opts.activation, opts.gate_up_layout);
+        if (opts.routing_weight_placement == .before_down) {
+            const weights = routing_weights.reshape(.{ .token = routing.num_assignments }).convert(.f32);
+            activated = activated.mul(weights.broad(activated.shape()));
+        }
+        break :blk prepareInput(activated, down_scheme, down.dtype(), opts.quantize_input);
+    };
 
     const down_out = gemm(.{
         .input = activated_quant,
@@ -234,7 +246,11 @@ pub fn fusedExpertsImpl(opts: FusedExpertsArgs) Tensor {
         .output_shape = Shape.init(.{ .token = num_tokens, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
     });
 
-    const output = down_out.convert(.f32).sum(.topk).squeeze(.topk).convert(.bf16);
+    const output = if (local) |r| kernels.LocalCombine.Kernel.call(
+        .{ .d = down_out, .perm = r.perm },
+        .{ .y = Shape.init(.{ .token = num_tokens, .out = down.dim(.out) }, .bf16) },
+        .{ .cfg = .{ .tokens = num_tokens, .hidden = down.dim(.out), .topk = ids.dim(.topk) }, .grid = .{ @intCast(num_tokens), @intCast(std.math.divCeil(i64, down.dim(.out), kernels.combineBlock(num_tokens, down.dim(.out))) catch unreachable), 1 }, .num_warps = 4, .num_stages = 1 },
+    ).y else down_out.convert(.f32).sum(.topk).squeeze(.topk).convert(.bf16);
 
     return output.reshape(.{ .t = num_tokens, .d = down.dim(.out) });
 }
@@ -251,6 +267,7 @@ pub const GemmOptions = struct {
     launch_config: LaunchConfig,
     quant_scheme: ?zml.Quantization.Scheme = null,
     top_k: usize,
+    gather_input: bool = false,
     output_shape: Shape,
 };
 
@@ -286,9 +303,11 @@ pub fn gemm(opts: GemmOptions) Tensor {
     else
         opts.routing.max_num_tokens_padded;
     stdx.debug.assert(@mod(em_effective, block_size_m) == 0, "routing capacity {} must be a multiple of block size {}", .{ em_effective, block_size_m });
-    const grid_x =
+    const max_grid_x =
         @divExact(em_effective, block_size_m) *
         (std.math.divCeil(i64, weight.dim(1), block_size_n) catch unreachable);
+
+    const grid_x = if (opts.routing.assignment_map != null) @min(max_grid_x, 512) else max_grid_x;
 
     const weight_scale: ?Tensor = if (opts.weight_scale) |scale| blk: {
         const scheme = opts.quant_scheme orelse break :blk scale;
@@ -322,6 +341,7 @@ pub fn gemm(opts: GemmOptions) Tensor {
             .b_scale_ptr = weight_scale orelse Tensor.scalar(1.0, .f32),
             .routing_weights_ptr = opts.routing_weights orelse Tensor.scalar(1.0, .f32),
             .sorted_token_ids_ptr = opts.routing.sorted_token_ids,
+            .assignment_map_ptr = opts.routing.assignment_map orelse Tensor.scalar(0, .i32),
             .expert_ids_ptr = opts.expert_ids,
             .num_tokens_post_padded_ptr = opts.routing.num_tokens_post_padded,
             .N_ptr = Tensor.constant(.{ .i64 = weight.dim(1) }).reshape(.{1}),
@@ -356,6 +376,8 @@ pub fn gemm(opts: GemmOptions) Tensor {
                 .group_size_m = opts.launch_config.group_size_m,
                 .top_k = opts.top_k,
                 .naive_block_assignment = opts.routing.naive_block_assignment,
+                .compact = opts.routing.assignment_map != null,
+                .gather_input = opts.gather_input,
                 .compute_type = .bf16,
                 .quant_scheme = opts.quant_scheme,
             },
@@ -373,6 +395,7 @@ pub const Routing = struct {
     max_num_tokens_padded: i64,
     num_assignments: i64,
     naive_block_assignment: bool,
+    assignment_map: ?Tensor = null,
 };
 
 pub fn prepareRouting(topk_ids: Tensor, num_experts: i64, block_size_m: i64) Routing {
@@ -516,6 +539,10 @@ pub fn prepareInput(x: Tensor, scheme: ?zml.Quantization.Scheme, output_dtype: z
 }
 
 fn quantizeFp8Input(x: Tensor, scheme: zml.Quantization.Scheme, output_dtype: DataType) struct { Tensor, Tensor } {
+    return quantizeFp8InputRows(x, scheme, output_dtype, null);
+}
+
+fn quantizeFp8InputRows(x: Tensor, scheme: zml.Quantization.Scheme, output_dtype: DataType, rows: ?Tensor) struct { Tensor, Tensor } {
     const group_size: i64, const scale_dtype: DataType, const absmax_epsilon: f32 = switch (scheme) {
         .mxfp8 => .{ 32, .u8, 1e-10 },
         .fp8_per_channel, .fp8_per_tensor => .{ x.dim(1), .f32, 1e-10 },
@@ -537,6 +564,7 @@ fn quantizeFp8Input(x: Tensor, scheme: zml.Quantization.Scheme, output_dtype: Da
             .y_num_columns_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
             .y_row_stride_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
             .eps_ptr = Tensor.scalar(absmax_epsilon, .f32),
+            .rows_ptr = rows orelse Tensor.scalar(0, .i32),
         },
         .{ .y_q = quantized.shape(), .y_s = scales.shape() },
         .{
@@ -546,6 +574,7 @@ fn quantizeFp8Input(x: Tensor, scheme: zml.Quantization.Scheme, output_dtype: Da
                 .scale_dtype = toDType(scale_dtype),
                 .block = std.math.ceilPowerOfTwoAssert(usize, @intCast(group_size)),
                 .quant_scheme = scheme,
+                .local_rows = rows != null,
             },
             .grid = .{ @intCast(x.dim(0) * groups_per_row), 1, 1 },
             .num_stages = 1,
@@ -1159,3 +1188,46 @@ const Context = struct {
             result;
     }
 };
+
+const LocalRouting = struct {
+    routing: Routing,
+    map: Tensor,
+    perm: Tensor,
+    count: Tensor,
+};
+
+fn prepareLocalRouting(ids: Tensor, experts: i64, group: i64) LocalRouting {
+    const tokens = ids.dim(.token);
+    const topk = ids.dim(.topk);
+    const assignments = tokens * topk;
+    const capacity = kernels.tiles(tokens, topk, experts, group) * group;
+    const counts_shape = Shape.init(.{experts}, .i32);
+    const pos_shape = Shape.init(.{assignments}, .i32);
+    const counts, const pos = if (assignments <= 4096) blk: {
+        const r = kernels.Route.Kernel.call(
+            .{ .ids = ids },
+            .{ .counts = counts_shape, .pos = pos_shape },
+            .{ .cfg = .{ .tokens = tokens, .topk = topk, .expert_offset = 0 }, .grid = .{ @intCast(experts), 1, 1 }, .num_warps = 4, .num_stages = 1 },
+        );
+        break :blk .{ r.counts, r.pos };
+    } else blk: {
+        const r = kernels.RouteAtomic.Kernel.call(
+            .{ .ids = ids, .zeros = Tensor.zeroes(counts_shape) },
+            .{ .counts = counts_shape, .pos = pos_shape },
+            .{ .cfg = .{ .tokens = tokens, .topk = topk, .expert_offset = 0, .experts = experts }, .grid = .{ @intCast(std.math.divCeil(i64, assignments, kernels.RouteAtomic.route_block) catch unreachable), 1, 1 }, .num_warps = 4, .num_stages = 1, .output_operand_aliases = .{ .counts = .zeros } },
+        );
+        break :blk .{ r.counts, r.pos };
+    };
+    const sorted_shape = Shape.init(.{ .g = capacity }, .i32);
+    const schedule = kernels.LocalSchedule.Kernel.call(
+        .{ .ids = ids, .counts = counts, .pos = pos, .padding = Tensor.scalar(assignments, .i32).broad(sorted_shape) },
+        .{ .sorted = sorted_shape, .map = pos_shape, .perm = pos_shape, .experts = Shape.init(.{ .g = @divExact(capacity, group) }, .i32), .padded_count = Shape.init(.{1}, .i32), .local_count = Shape.init(.{1}, .i32) },
+        .{ .cfg = .{ .assignments = assignments, .experts = experts, .group = group }, .grid = .{ @intCast(std.math.divCeil(i64, assignments, 128) catch unreachable), 1, 1 }, .num_warps = 4, .num_stages = 1, .output_operand_aliases = .{ .sorted = .padding } },
+    );
+    return .{
+        .routing = .{ .sorted_token_ids = schedule.sorted, .expert_ids = schedule.experts, .num_tokens_post_padded = schedule.padded_count, .max_num_tokens_padded = capacity, .num_assignments = assignments, .naive_block_assignment = false, .assignment_map = schedule.map },
+        .map = schedule.map,
+        .perm = schedule.perm,
+        .count = schedule.local_count,
+    };
+}

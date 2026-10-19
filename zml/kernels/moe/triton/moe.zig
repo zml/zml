@@ -34,10 +34,11 @@ pub const PerTokenGroupQuantFp8 = struct {
         scale_dtype: DType,
         block: usize,
         quant_scheme: zml.Quantization.Scheme,
+        local_rows: bool = false,
     };
     pub const Kernel = tri.Kernel(Cfg, .{
         .name = "per_token_group_quant_fp8",
-        .inputs = &.{ "y_ptr", "group_size_ptr", "y_num_columns_ptr", "y_row_stride_ptr", "eps_ptr" },
+        .inputs = &.{ "y_ptr", "group_size_ptr", "y_num_columns_ptr", "y_row_stride_ptr", "eps_ptr", "rows_ptr" },
         .outputs = &.{ "y_q", "y_s" },
         .run = run,
     });
@@ -48,6 +49,7 @@ pub const PerTokenGroupQuantFp8 = struct {
             .y_num_columns_ptr = .{ .ptr = .i64 },
             .y_row_stride_ptr = .{ .ptr = .i64 },
             .eps_ptr = .{ .ptr = .f32 },
+            .rows_ptr = .{ .ptr = .i32 },
             .y_q_ptr = .{ .ptr = cfg.output_dtype },
             .y_s_ptr = .{ .ptr = cfg.scale_dtype },
         });
@@ -76,6 +78,7 @@ pub const PerTokenGroupQuantFp8 = struct {
         // y_ptr += (g_id // groups_per_row) * y_row_stride + (g_id % groups_per_row) * group_size
         // Python emit order: divsi, remsi, muli (row * stride), muli (row_g_id * group_size), addi.
         const row = g_id.div(groups_per_row);
+        if (cfg.local_rows) b.returnIfOpts(row.ge(b.load(a.rows_ptr).to(.i64)), .{}, .{ .inline_return = true });
         const row_g_id = g_id.rem(groups_per_row);
         const row_off = row.mul(y_row_stride);
         const grp_off = row_g_id.mul(group_size);
@@ -204,6 +207,8 @@ pub const FusedMoe = struct {
         group_size_m: usize,
         top_k: usize,
         naive_block_assignment: bool,
+        compact: bool = false,
+        gather_input: bool = false,
         compute_type: DType,
         quant_scheme: ?zml.Quantization.Scheme,
     };
@@ -214,7 +219,7 @@ pub const FusedMoe = struct {
             "routing_weights_ptr", "sorted_token_ids_ptr", "expert_ids_ptr",       "num_tokens_post_padded_ptr", "N_ptr",
             "K_ptr",               "EM_ptr",               "num_valid_tokens_ptr", "stride_am_ptr",              "stride_be_ptr",
             "stride_bn_ptr",       "stride_cm_ptr",        "stride_asm_ptr",       "stride_ask_ptr",             "stride_bse_ptr",
-            "stride_bsk_ptr",      "stride_bsn_ptr",       "stride_bbe_ptr",       "stride_bbn_ptr",
+            "stride_bsk_ptr",      "stride_bsn_ptr",       "stride_bbe_ptr",       "stride_bbn_ptr",             "assignment_map_ptr",
         },
         .outputs = &.{"c"},
         .run = run,
@@ -258,6 +263,7 @@ pub const FusedMoe = struct {
             .stride_bsn_ptr = .{ .ptr = .i64 },
             .stride_bbe_ptr = .{ .ptr = .i64 },
             .stride_bbn_ptr = .{ .ptr = .i64 },
+            .assignment_map_ptr = .{ .ptr = .i32 },
             .c_ptr = .{ .ptr = cfg.c_dtype },
         });
 
@@ -294,10 +300,15 @@ pub const FusedMoe = struct {
         // promote at the use site — emit the cdivs first, then extsi at the
         // first i64 use. Manual order keeps `extsi pid` after the cdivs in TTIR.
         const pid_i32 = b.programId(.x);
-        const num_pid_m = em_block.cdiv(block_size_m);
+        const local_padded = if (cfg.compact) b.load(a.num_tokens_post_padded_ptr).to(.i64) else em_block;
+        const num_pid_m = local_padded.cdiv(block_size_m);
         const num_pid_n = n_block.cdiv(block_size_n);
         const num_pid_in_group = num_pid_n.mul(group_size_m);
-        const pid = pid_i32.to(.i64);
+        // A bounded grid strides over the live local tiles. This avoids
+        // launching the worst-case global number of CTAs while allowing every
+        // assignment to land on one partition without truncation.
+        var tiles_loop = if (cfg.compact) b.openFor(pid_i32.to(.i64), num_pid_m.mul(num_pid_n), b.numPrograms(.x).to(.i64), .{}) else null;
+        const pid = if (tiles_loop) |l| l.iv else pid_i32.to(.i64);
         const group_id = pid.div(num_pid_in_group);
         const first_pid_m = group_id.mul(group_size_m);
         const gsm_actual = num_pid_m.sub(first_pid_m).minimum(group_size_m);
@@ -315,7 +326,7 @@ pub const FusedMoe = struct {
         const num_tokens_post_padded = num_tokens_post_padded_i32.to(.i64);
         const out_of_range = pid_m_block.ge(num_tokens_post_padded);
 
-        b.returnIfOpts(out_of_range, .{}, .{ .inline_return = true });
+        if (!cfg.compact) b.returnIfOpts(out_of_range, .{}, .{ .inline_return = true });
 
         const offs_token = if (cfg.naive_block_assignment)
             b.select(
@@ -329,29 +340,36 @@ pub const FusedMoe = struct {
             break :off b.load(ids_ptrs).to(.i64);
         };
         const token_mask = offs_token.lt(num_valid_tokens);
+        const assignment = if (cfg.compact and (cfg.gather_input or cfg.routing_weights_dtype != null))
+            b.loadOpts(a.assignment_map_ptr.addPtr(offs_token), .{ .mask = token_mask, .other = b.zeros(&.{block_size_m}, .i32) }).to(.i64)
+        else
+            offs_token;
+        const input_token = if (cfg.gather_input) assignment else offs_token;
 
         // off_experts = expert_ids[pid_m].to(i64). pid_m is i64; Python's
         // `expert_ids_ptr + pid_m` keeps the offset as i64.
         const off_experts = b.load(a.expert_ids_ptr.addPtr(pid_m)).to(.i64);
-        const is_dead = off_experts.eq(-1);
+        if (!cfg.compact) {
+            const is_dead = off_experts.eq(-1);
 
-        // Python: if off_experts == -1: write_zeros_to_output(...); return
-        var dead_ret = b.openReturnIf(is_dead);
-        dead_ret.inline_return = true;
-        {
-            writeZerosToOutput(
-                b,
-                a.c_ptr,
-                stride_cm_block,
-                pid_n,
-                n_block,
-                offs_token,
-                token_mask,
-                block_size_m,
-                block_size_n,
-                compute_type,
-            );
-            dead_ret.yieldReturn(.{});
+            // Python: if off_experts == -1: write_zeros_to_output(...); return
+            var dead_ret = b.openReturnIf(is_dead);
+            dead_ret.inline_return = true;
+            {
+                writeZerosToOutput(
+                    b,
+                    a.c_ptr,
+                    stride_cm_block,
+                    pid_n,
+                    n_block,
+                    offs_token,
+                    token_mask,
+                    block_size_m,
+                    block_size_n,
+                    compute_type,
+                );
+                dead_ret.yieldReturn(.{});
+            }
         }
 
         // CSE `pid_n * BLOCK_SIZE_N` so it reuses across offs_bn / offs_cn.
@@ -364,7 +382,7 @@ pub const FusedMoe = struct {
         // a_ptrs: `offs_token[:, None] // top_k * stride_am + offs_k[None, :]`.
         // (stride_ak == 1 here, so `* stride_ak` folds away.) Build with explicit
         // broadcastTo to match Python's emit shape.
-        const offs_token_col = b.expandDims(offs_token, 1);
+        const offs_token_col = b.expandDims(input_token, 1);
         const am_col = offs_token_col.div(top_k).mul(stride_am_block);
         const offs_k_row = b.expandDims(offs_k_i32, 0).to(.i64);
         const am_term = b.broadcastTo(am_col, &.{ block_size_m, block_size_k });
@@ -441,7 +459,7 @@ pub const FusedMoe = struct {
                         .other = b.full(&.{ block_size_n, scale_k }, 127, .i8),
                     });
                     const a_scales: ?Value = if (cfg.a_scale_dtype != null) input_scales: {
-                        const a_rows = offs_token.div(top_k).mul(b.load(a.stride_asm_ptr)).expandDims(1);
+                        const a_rows = input_token.div(top_k).mul(b.load(a.stride_asm_ptr)).expandDims(1);
                         const a_cols = groups.mul(b.load(a.stride_ask_ptr)).expandDims(0);
                         const a_offsets = b.broadcastTo(a_rows, &.{ block_size_m, scale_k })
                             .add(b.broadcastTo(a_cols, &.{ block_size_m, scale_k }));
@@ -481,7 +499,7 @@ pub const FusedMoe = struct {
                     var scaled_dot = dot.mul(b_s.expandDims(0));
                     if (cfg.a_scale_dtype) |dtype| {
                         const a_scale_ptrs = a.a_scale_ptr.addPtr(
-                            offs_token.div(top_k).mul(b.load(a.stride_asm_ptr))
+                            input_token.div(top_k).mul(b.load(a.stride_asm_ptr))
                                 .add(k_iter.mul(b.load(a.stride_ask_ptr))),
                         );
                         const a_s = b.loadOpts(a_scale_ptrs, .{
@@ -524,7 +542,7 @@ pub const FusedMoe = struct {
             }).to(.f32);
             accumulator = accumulator.mul(scales.expandDims(0));
             if (cfg.a_scale_dtype) |dtype| {
-                const offsets_a = offs_token.div(top_k).mul(b.load(a.stride_asm_ptr));
+                const offsets_a = input_token.div(top_k).mul(b.load(a.stride_asm_ptr));
                 const scales_a = b.loadOpts(a.a_scale_ptr.addPtr(offsets_a), .{
                     .mask = token_mask,
                     .other = b.zeros(&.{block_size_m}, dtype),
@@ -546,7 +564,7 @@ pub const FusedMoe = struct {
 
         if (cfg.routing_weights_dtype) |dtype| {
             const other = b.zeros(&.{block_size_m}, dtype);
-            const routing_weights = b.loadOpts(a.routing_weights_ptr.addPtr(offs_token), .{ .mask = token_mask, .other = other });
+            const routing_weights = b.loadOpts(a.routing_weights_ptr.addPtr(assignment), .{ .mask = token_mask, .other = other });
             accumulator = accumulator.mul(routing_weights.to(.f32).expandDims(1));
         }
 
@@ -569,6 +587,7 @@ pub const FusedMoe = struct {
         const token_mask_full_c = b.broadcastTo(token_mask_col_c, &.{ block_size_m, block_size_n });
         const offs_cn_lt_full = b.broadcastTo(offs_cn_lt_2d, &.{ block_size_m, block_size_n });
         b.storeOpts(c_ptrs, accumulator, .{ .mask = token_mask_full_c.bitAnd(offs_cn_lt_full) });
+        if (tiles_loop) |*l| l.yield(.{});
     }
 };
 
@@ -1168,3 +1187,119 @@ fn gemm(b: *Builder, c: GemmConfig, comptime projection: Projection) tri.FinishE
     } else b.store(a.d.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(c.hidden).add(m.expandDims(0))), acc);
     live.yieldThen(.{});
 }
+
+/// Dense local rows and a separately padded GEMM schedule. Capacity is a worst
+/// case bound, never an estimate based on balanced expert routing.
+pub const LocalSchedule = struct {
+    pub const Cfg = struct { assignments: i64, experts: i64, group: i64 };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "moe_local_schedule",
+        .inputs = &.{ "ids", "counts", "pos", "padding" },
+        .outputs = &.{ "sorted", "map", "perm", "experts", "padded_count", "local_count" },
+        .run = run,
+    });
+    fn run(b: *Builder, c: Cfg) tri.FinishError!void {
+        const a = try b.declareArgs(.{ .ids = .{ .ptr = .i32 }, .counts = .{ .ptr = .i32 }, .pos = .{ .ptr = .i32 }, .padding = .{ .ptr = .i32 }, .sorted = .{ .ptr = .i32 }, .map = .{ .ptr = .i32 }, .perm = .{ .ptr = .i32 }, .experts = .{ .ptr = .i32 }, .padded_count = .{ .ptr = .i32 }, .local_count = .{ .ptr = .i32 } });
+        const p = b.programId(.x).mul(128).add(ar(b, 128));
+        const e = ld(b, a.ids.addPtr(p), p.lt(c.assignments), .i32, -1);
+        const es = ar(b, pow2(c.experts));
+        const counts = ld(b, a.counts.addPtr(es), es.lt(c.experts), .i32, 0);
+        const group: i32 = @intCast(c.group);
+        const padded = counts.cdiv(group).mul(group);
+        const starts = counts.cumsum().sub(counts);
+        const padded_starts = padded.cumsum().sub(padded);
+        var first = b.openIf(b.programId(.x).eq(0));
+        b.store(a.local_count, counts.sum());
+        b.store(a.padded_count, padded.sum());
+        first.yieldThen(.{});
+        const live = p.lt(c.assignments).bitAnd(e.ge(0)).bitAnd(e.lt(c.experts));
+        const safe = e.maximum(0).minimum(ci(b, c.experts - 1));
+        const pos = ld(b, a.pos.addPtr(p), live, .i32, 0);
+        const row = starts.gather(safe, 0).add(pos);
+        const padded_row = padded_starts.gather(safe, 0).add(pos);
+        b.storeOpts(a.perm.addPtr(p), b.select(live, row, b.full(&.{128}, -1, .i32)), .{ .mask = p.lt(c.assignments) });
+        b.storeOpts(a.map.addPtr(row), p, .{ .mask = live });
+        b.storeOpts(a.sorted.addPtr(padded_row), row, .{ .mask = live });
+        b.storeOpts(a.experts.addPtr(padded_row.div(group)), e, .{ .mask = live.bitAnd(pos.rem(group).eq(0)) });
+    }
+};
+
+/// Only live local rows touch activation memory; the unused capacity is neither
+/// read nor initialized. Quantization and both GEMMs obey the same row bound.
+pub const LocalActivation = struct {
+    pub const Cfg = struct {
+        width: i64,
+        activation: zml.moe.Activation,
+        layout: zml.moe.ProjectionLayout,
+        weights_dtype: DType,
+        before_down: bool,
+        output_dtype: DType,
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{ .name = "moe_local_activation", .inputs = &.{ "x", "count", "map", "weights" }, .outputs = &.{"y"}, .run = run });
+    fn silu(b: *Builder, x: Value) Value {
+        const ex = b.exp(x.mul(-1.0));
+        return x.mul(b.divRn(b.full(x.shape().constSlice(), 1.0, .f32), ex.add(1.0)));
+    }
+    fn gelu(b: *Builder, x: Value) Value {
+        const z = x.add(x.mul(x).mul(x).mul(0.044715)).mul(@sqrt(2.0 / std.math.pi));
+        // Express tanh through sigmoid: the XLA Triton pipeline does not
+        // legalize math.tanh for custom kernels on all supported runtimes.
+        return b.divRn(b.full(x.shape().constSlice(), 1.0, .f32), b.exp(z.mul(-2.0)).add(1.0)).mul(x);
+    }
+    fn run(b: *Builder, c: Cfg) tri.FinishError!void {
+        const a = try b.declareArgs(.{ .x = .{ .ptr = .bf16 }, .count = .{ .ptr = .i32 }, .map = .{ .ptr = .i32 }, .weights = .{ .ptr = c.weights_dtype }, .y = .{ .ptr = c.output_dtype } });
+        const row = b.programId(.x);
+        b.returnIfOpts(row.ge(b.load(a.count)), .{}, .{ .inline_return = true });
+        const col = b.programId(.y).mul(256).add(ar(b, 256));
+        const gated = switch (c.activation) {
+            .gelu, .relu, .silu => false,
+            else => true,
+        };
+        const stride: i64 = if (gated) c.width * 2 else c.width;
+        const gate_col = if (gated and c.layout == .interleaved) col.mul(2) else col;
+        var gate = ld(b, a.x.addPtr(row.mul(stride).add(gate_col)), col.lt(c.width), .bf16, 0).to(.f32);
+        var up = if (gated) ld(b, a.x.addPtr(row.mul(stride).add(if (c.layout == .interleaved) gate_col.add(1) else col.add(c.width))), col.lt(c.width), .bf16, 0).to(.f32) else gate;
+        var y = switch (c.activation) {
+            .relu => gate.maximum(0.0),
+            .gelu => gelu(b, gate),
+            .silu => silu(b, gate),
+            .geglu, .geglu_tanh => gelu(b, gate).mul(up),
+            .swiglu => |params| blk: {
+                std.debug.assert(params.scale == null);
+                if (params.limit) |limit| {
+                    gate = gate.minimum(limit);
+                    up = up.minimum(limit).maximum(-limit);
+                }
+                if (params.bias) |bias| up = up.add(bias);
+                break :blk silu(b, gate).mul(up);
+            },
+            .swiglu_step => |params| blk: {
+                gate = silu(b, gate);
+                if (params.limit) |limit| {
+                    gate = gate.minimum(limit);
+                    up = up.minimum(limit).maximum(-limit);
+                }
+                break :blk gate.mul(up);
+            },
+        };
+        if (c.before_down) y = y.mul(b.load(a.weights.addPtr(b.load(a.map.addPtr(row)))).to(.f32));
+        b.storeOpts(a.y.addPtr(row.mul(c.width).add(col)), y.to(c.output_dtype), .{ .mask = col.lt(c.width) });
+    }
+};
+
+pub const LocalCombine = struct {
+    pub const Cfg = struct { tokens: i64, hidden: i64, topk: i64 };
+    pub const Kernel = tri.Kernel(Cfg, .{ .name = "moe_local_combine", .inputs = &.{ "d", "perm" }, .outputs = &.{"y"}, .run = run });
+    fn run(b: *Builder, c: Cfg) tri.FinishError!void {
+        const a = try b.declareArgs(.{ .d = .{ .ptr = .bf16 }, .perm = .{ .ptr = .i32 }, .y = .{ .ptr = .bf16 } });
+        const t = b.programId(.x);
+        const block = combineBlock(c.tokens, c.hidden);
+        const h = b.programId(.y).mul(block).add(ar(b, block));
+        var acc = b.zeros(&.{block}, .f32);
+        for (0..@intCast(c.topk)) |s| {
+            const row = b.load(a.perm.addPtr(t.mul(c.topk).add(@as(i64, @intCast(s)))));
+            acc = acc.add(ld(b, a.d.addPtr(row.maximum(0).mul(c.hidden).add(h)), row.ge(0).bitAnd(h.lt(c.hidden)), .bf16, 0).to(.f32));
+        }
+        b.storeOpts(a.y.addPtr(t.mul(c.hidden).add(h)), acc.to(.bf16), .{ .mask = h.lt(c.hidden) });
+    }
+};
