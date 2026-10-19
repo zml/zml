@@ -20,3 +20,11 @@ timestep_embedder: TimestepEmbedding,
 pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21TimestepProjEmbeddings)) void {
     TimestepEmbedding.unloadBuffers(&self.timestep_embedder);
 }
+pub fn forward(
+    self: QwenImage21TimestepProjEmbeddings,
+    timestep: zml.Tensor,
+    x: zml.Tensor,
+) zml.Tensor {
+    const timesteps_proj = self.time_proj.forward(timestep);
+    return self.timestep_embedder.forward(timesteps_proj.convert(x.dtype()));
+}
