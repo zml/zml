@@ -34,12 +34,23 @@ pub fn main(init: std.process.Init) !void {
     const attention_parameters: zml.attention.Parameters = .init(.fromBackend(backend));
 
     const compile_args: CompileArgs = .{
+        .width = 2048,
+        .height = 2048,
+
+        .in_channels = 64,
+        .num_inference_steps = 4,
+        .vae_scale_factor = 16,
+
         .seq_len = 16415,
         .num_attention_heads = 32,
         .head_dim = 128,
         .rope_theta = 5000000,
         .attention_metadata = attention_metadata,
         .attention_parameters = attention_parameters,
+
+        .max_image_seq_len = 8192,
+        .base_shift = 0.5,
+        .max_shift = 0.9,
     };
     const compile_args_buffers: zml.Bufferized(CompileArgs) = .{
         .attention_metadata = try attention_metadata.initBuffer(io, platform, model_sharding),
@@ -50,7 +61,8 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("\n\nStarting testing > Pipeline\n\n", .{});
 
         const pipeline = try block.Pipeline.init(allocator, io, platform, cli_args.folder);
-        try pipeline.run_once("Coucou la team, créé un personnage burger", .{ .seq_len = 16415, .compile_args = compile_args, .compile_args_buffers = compile_args_buffers });
+        const prompt = "A neon shop sign that reads \"QWEN IMAGE 2.1\", rainy night, reflections on wet pavement";
+        try pipeline.run_once(prompt, .{ .seq_len = 16415, .compile_args = compile_args, .compile_args_buffers = compile_args_buffers });
         return;
     }
 
