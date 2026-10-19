@@ -83,10 +83,10 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             platform,
-            "transformer.time_text_embed",
+            "transformer.txt_in",
             &activations_store.store,
-            BlockWrapper{ .tblock = transformer_store.model.time_text_embed, .args = compile_args },
-            .{ .tblock = transformer_store.model_buffer.time_text_embed, .args = compile_args_buffers },
+            BlockWrapper{ .tblock = transformer_store.model.txt_in, .args = compile_args },
+            .{ .tblock = transformer_store.model_buffer.txt_in, .args = compile_args_buffers },
         );
     } else if (std.mem.containsAtLeast(u8, activations_path, 1, "text.")) {
         std.debug.print("\n\nStarting testing > LanguageModel\n\n", .{});
@@ -111,15 +111,14 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const BlockWrapper = struct {
-    tblock: block.QwenImage21TimestepProjEmbeddings,
+    tblock: block.QwenImage21TextProjection,
     args: CompileArgs,
 
     pub fn forward(
         self: BlockWrapper,
-        timestep: zml.Tensor,
         x: zml.Tensor,
     ) zml.Tensor {
-        return self.tblock.forward(timestep.withTags(.{.bs}), x.withTags(.{ .bs, .seq_len, .d }));
+        return self.tblock.forward(x.withTags(.{ .bs, .seq_len, .d }));
     }
 };
 
