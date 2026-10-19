@@ -1671,6 +1671,13 @@ fn runEpilogue(
         .phase = tiles.after_carried[5],
     };
     const stage = accumulator_state.index;
+    const chunk_rows: usize = comptime @intCast(tile.chunkRows());
+    const tile_chunks = comptime tile.chunks();
+    // Route metadata does not depend on the accumulator: load it while this
+    // tile's MMAs still run, instead of between the accumulator loads and
+    // the stores of every chunk.
+    var routed: [tile_chunks]RoutedLanes = undefined;
+    inline for (&routed, 0..) |*r, chunk| r.* = routedLanes(b, tile, operands, group, chunk);
     b.mbarrierTryWaitParity(barrierAt(b, storage.accumulator_full_barriers, stage), accumulator_state.phase, 10_000_000);
 
     const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, stage);
@@ -1682,16 +1689,12 @@ fn runEpilogue(
     // A warp lane holds one routed row, so tiles wider than a warp are drained
     // 32 rows at a time. The accumulator stage is released once its last chunk
     // is in registers.
-    const chunk_rows: usize = comptime @intCast(tile.chunkRows());
-    const tile_chunks = comptime tile.chunks();
-    inline for (0..tile_chunks) |chunk| {
+    inline for (routed, 0..) |chunk_routed, chunk| {
         const chunk_tmem = if (chunk == 0) warp_tmem else b.addOffsetTyped(
             warp_tmem,
             b.makeIntTuple(.{@as(i32, @intCast(chunk * chunk_rows))}),
             b.ptrTy(.f32, .tmem, offsetAlignment(16, @intCast(chunk * chunk_rows), 4)) catch @panic("bad epilogue TMEM pointer"),
         ).value();
-        // Route metadata does not depend on the accumulator.
-        const routed = routedLanes(b, tile, operands, group, chunk);
         const values = b.tmemLoadVector(chunk_tmem, @intCast(chunk_rows), .{ .num_dp = 32, .num_b = 32, .num_rep = @intCast(chunk_rows) });
         b.fenceTmemLoad();
         if (chunk + 1 == tile_chunks) {
@@ -1704,8 +1707,8 @@ fn runEpilogue(
         var columns: [@intCast(@min(n, 32))]V = undefined;
         inline for (&columns, 0..) |*column, i| column.* = b.vectorExtract(values, i, .i32).bitCast(.f32);
         switch (epilogue) {
-            .swiglu_mxfp8 => storeTileSwiglu(b, tile, storage, operands, thread, routed, tile_m, group, &columns, chunk),
-            .route_rows => storeTileRows(b, tile, storage, operands, thread, routed, tile_m, &columns, chunk),
+            .swiglu_mxfp8 => storeTileSwiglu(b, tile, storage, operands, thread, chunk_routed, tile_m, group, &columns, chunk),
+            .route_rows => storeTileRows(b, tile, storage, operands, thread, chunk_routed, tile_m, &columns, chunk),
         }
     }
     const groups = comptime tile.epilogueGroups();
