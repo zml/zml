@@ -65,7 +65,7 @@ pub fn load(
 
     const text_in_view = self.store.view().withPrefix("txt_in");
     const txt_in = block.QwenImage21TextProjection{
-        .text_norm = block.QwenImage21ZeroCenterRMSNorm.init(),
+        .text_norm = .{ .weight = text_in_view.createTensor("text_norm.weight", .{.d}, .replicated), .eps = 1e-6 },
         .in_layer = .init(text_in_view.createTensor("in_layer.weight", .{ .dout, .d }, .replicated), null, .d),
         .out_layer = .init(text_in_view.createTensor("out_layer.weight", .{ .dout, .d }, .replicated), null, .d),
     };
