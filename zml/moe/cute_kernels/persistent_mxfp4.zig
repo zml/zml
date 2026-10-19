@@ -9,7 +9,8 @@
 //!
 //! One CTA computes a 128xN output tile of one expert group: warp 5 drives
 //! the TMA ring, warp 4 issues the S2T scale copies and UMMA, and warps 0-3
-//! drain the accumulator from tensor memory into one of the two epilogues.
+//! and 6-9, one warpgroup per accumulator stage, drain the accumulator from
+//! tensor memory into one of the two epilogues.
 const std = @import("std");
 const mlir = @import("mlir");
 
@@ -19,6 +20,41 @@ const B = cute.Builder;
 const V = cute.Value;
 
 const accumulator_stages = 2;
+
+/// Most epilogue warpgroups of a tile, `Tile.epilogueGroups`.
+const max_epilogue_groups = accumulator_stages;
+
+/// The epilogue thread's accumulator row and its warpgroup. A warp reaches
+/// TMEM lanes `32 * (warp % 4)` and up, which is row `tid % 128` for both
+/// warpgroups.
+const EpilogueThread = struct {
+    /// Accumulator row of the tile, 0-127.
+    row: V,
+    /// TMEM lane quadrant, `row / 32`.
+    warp: V,
+    /// Epilogue warpgroup, which is also its accumulator stage.
+    group: V,
+
+    fn current(b: *B) EpilogueThread {
+        const tid = b.threadIdx().x;
+        return .{
+            .row = tid.rem(128),
+            .warp = b.makeWarpUniform(b.makeWarpUniform(tid.rem(128).div(32))),
+            .group = b.makeWarpUniform(b.makeWarpUniform(tid.div(32).ge(6).to(.i32))),
+        };
+    }
+
+    /// Synchronize the thread's warpgroup on its own named barrier, 1 or 3.
+    fn syncWarpgroup(self: EpilogueThread, b: *B) void {
+        b.namedBarrier(self.group.mul(2).add(1), 128);
+    }
+};
+
+/// Named barrier of the MMA warp and the epilogue warps around TMEM
+/// allocation. The epilogue warpgroups use 1 and 3.
+const tmem_alloc_barrier = 2;
+/// Named barrier of the epilogue warps once they are done with TMEM.
+const tmem_release_barrier = 4;
 
 /// Shared-memory plan of the Python kernel for one tile width, copied from
 /// its generated `SharedStorage` (`smem.struct_fields`).  The A/B ring depth
@@ -39,8 +75,9 @@ pub const Tile = struct {
     b: i64,
     sfa: i64,
     sfb: i64,
-    /// Bytes reserved at `c`. Only the epilogue scratch is used; the wide
-    /// prefill tiles keep just that instead of two full C stages.
+    /// Bytes reserved at `c`. Only the epilogue scratch and staging are
+    /// used; the wide prefill tiles keep just those instead of two full C
+    /// stages.
     c_bytes: ?i64 = null,
 
     pub fn of(comptime n: i64) Tile {
@@ -96,11 +133,12 @@ pub const Tile = struct {
             // Prefill tiles. One expert weight tile feeds 64 or 128 routed
             // rows instead of 32, which is what keeps large batches from
             // re-reading the expert weights once per group. They hold only
-            // the epilogue scratch at `c`, so the A/B ring stays deep.
+            // the epilogue scratch and staging at `c`, so the A/B ring stays
+            // deep.
             64 => .{
                 .n = 64,
                 .stages = 8,
-                .smem_bytes = 206848,
+                .smem_bytes = 223232,
                 .tmem_columns = 256,
                 .empty_barriers = 64,
                 .accumulator_full = 128,
@@ -108,16 +146,16 @@ pub const Tile = struct {
                 .tmem_dealloc = 160,
                 .tmem_holding = 168,
                 .c = 1024,
-                .c_bytes = 512,
-                .a = 2048,
-                .sfa = 133120,
-                .sfb = 137216,
-                .b = 141312,
+                .c_bytes = staging_offset + staging_bytes,
+                .a = 18432,
+                .sfa = 149504,
+                .sfb = 153600,
+                .b = 157696,
             },
             128 => .{
                 .n = 128,
                 .stages = 6,
-                .smem_bytes = 204800,
+                .smem_bytes = 221184,
                 .tmem_columns = 512,
                 .empty_barriers = 48,
                 .accumulator_full = 96,
@@ -125,11 +163,11 @@ pub const Tile = struct {
                 .tmem_dealloc = 128,
                 .tmem_holding = 136,
                 .c = 1024,
-                .c_bytes = 512,
-                .a = 2048,
-                .b = 100352,
-                .sfa = 198656,
-                .sfb = 201728,
+                .c_bytes = staging_offset + staging_bytes,
+                .a = 18432,
+                .b = 116736,
+                .sfa = 215040,
+                .sfb = 218112,
             },
             else => @compileError("unsupported MXFP4 tile N"),
         };
@@ -138,6 +176,33 @@ pub const Tile = struct {
     /// Routed rows an epilogue pass handles: one per warp lane.
     pub fn chunkRows(self: Tile) i64 {
         return @min(self.n, 32);
+    }
+
+    /// Warps 0-3 and, with two groups, 6-9 are the epilogue warpgroups; warp
+    /// 4 issues the MMAs and warp 5 the TMA loads. With two, each warpgroup
+    /// owns one accumulator stage and drains every other tile, so a tile's
+    /// epilogue has two mainloops to finish: one warp per scheduler cannot
+    /// hide the latency of the SwiGLU epilogue. A direct-routing tile has a
+    /// single live row and keeps one.
+    fn epilogueGroups(self: Tile) usize {
+        return if (self.n <= 8) 1 else max_epilogue_groups;
+    }
+
+    fn threads(self: Tile) i32 {
+        return @intCast(32 * (2 + 4 * self.epilogueGroups()));
+    }
+
+    /// The grouped epilogues stage one pass of rows per warpgroup in `sC`,
+    /// after the SwiGLU scratch: BF16 `[routed row][128 columns]` for the
+    /// down projection, `[routed row][64 activations]` for the up one.
+    const staging_offset = 1024;
+    const staging_bytes = max_epilogue_groups * 32 * 128 * 2;
+
+    /// Every tile's `sC` holds its staging, so the grouped epilogues always
+    /// stage their rows.
+    fn stagingFits(self: Tile) bool {
+        const c_bytes = self.c_bytes orelse accumulator_stages * self.cStageElements() * 4;
+        return c_bytes >= staging_offset + @as(i64, @intCast(self.epilogueGroups())) * self.chunkRows() * 128 * 2;
     }
 
     /// Epilogue passes over the tile width.
@@ -188,6 +253,8 @@ pub const Tile = struct {
 };
 
 const StageStorage = struct {
+    /// Epilogue staging, `Tile.staging_offset` into `sC`.
+    staging: V,
     a: V,
     b: V,
     sfa: V,
@@ -449,6 +516,7 @@ const EpilogueTypes = struct {
 
 fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: Epilogue) cute.FinishError!void {
     @setEvalBranchQuota(20_000);
+    comptime std.debug.assert(tile.stagingFits());
     std.debug.assert(@rem(cfg.m, 128) == 0);
     std.debug.assert(@rem(cfg.k, 128) == 0);
     const L = Layouts(tile);
@@ -525,7 +593,7 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
     buildUmmaDevice(b, cfg, tile, epilogue, d);
     // The epilogue has written every row this CTA owns.
     b.launchDependents();
-    b.endFunction(.{ 192, 1, 1 });
+    b.endFunction(.{ tile.threads(), 1, 1 });
 
     // Public host ABI: the XLA operands, the outputs, then the problem shape.
     // XLA owns packed storage as signless bytes. Recast only inside the host
@@ -1409,10 +1477,15 @@ const EpilogueOperands = struct {
     group_rows: i64 = 0,
     /// `Config.swiglu_limit`.
     swiglu_limit: f32 = 10.0,
+    /// Bytes of one output row of the down projection.
+    row_bytes: i64 = 0,
+    /// Activations per routed row of the up projection's output.
+    q_columns: i64 = 0,
 };
 
-/// Warps 0-3 drain each TMEM accumulator stage into registers, release it to
-/// the MMA warp, then write the tile out according to `epilogue`.
+/// The epilogue warpgroups drain each TMEM accumulator stage into registers,
+/// release it to the MMA warp, then write the tile out according to
+/// `epilogue`.
 fn runEpilogue(
     b: *B,
     comptime tile: Tile,
@@ -1425,16 +1498,19 @@ fn runEpilogue(
     operands: EpilogueOperands,
 ) void {
     const n = tile.n;
-    const tid = b.threadIdx().x;
-    const warp = b.makeWarpUniform(b.makeWarpUniform(tid.div(32)));
+    const thread = EpilogueThread.current(b);
+    const warp = b.makeWarpUniform(b.makeWarpUniform(b.threadIdx().x.div(32)));
     const tmem = b.retrieveTmemPtr(tmem_holding, .f32, 16);
 
     const div_m = b.fastDivmodCreate(tiles_m);
     const div_n = b.fastDivmodCreate(1);
-    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.cst(.i32, 0), active, tiles_m, div_m, div_n, direct);
+    // With two warpgroups, warpgroup `g` drains tiles `g`, `g + 2`, ... of
+    // this CTA, all from accumulator stage `g`.
+    const ctas = b.gridDim().z;
+    const initial_work = persistentWorkAt(b, b.blockIdx().z.add(thread.group.mul(ctas)), thread.group, active, tiles_m, div_m, div_n, direct);
     const carried = .{
         initial_work.m,        initial_work.n, initial_work.group, initial_work.valid,
-        b.cst(.i32, 0),        b.cst(.i32, 0), b.cst(.i32, 0),     initial_work.linear,
+        b.cst(.i32, 0),        thread.group,   b.cst(.i32, 0),     initial_work.linear,
         initial_work.executed,
     };
     var tiles = b.openWhile(carried, .{
@@ -1469,7 +1545,7 @@ fn runEpilogue(
     const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, stage);
     const warp_tmem = b.addOffsetTyped(
         accumulator_tmem,
-        b.makeIntTupleDivBy(warp.mul(32 * 65536), 4),
+        b.makeIntTupleDivBy(thread.warp.mul(32 * 65536), 4),
         b.ptrTy(.f32, .tmem, 16) catch @panic("bad epilogue TMEM pointer"),
     ).value();
     // A warp lane holds one routed row, so tiles wider than a warp are drained
@@ -1495,12 +1571,18 @@ fn runEpilogue(
         var columns: [@intCast(@min(n, 32))]V = undefined;
         inline for (&columns, 0..) |*column, i| column.* = b.vectorExtract(values, i, .i32).bitCast(.f32);
         switch (epilogue) {
-            .swiglu_mxfp8 => storeTileSwiglu(b, tile, storage, operands, routed, tile_m, group, &columns, chunk),
-            .route_rows => storeTileRows(b, tile, operands, routed, tile_m, &columns, chunk),
+            .swiglu_mxfp8 => storeTileSwiglu(b, tile, storage, operands, thread, routed, tile_m, group, &columns, chunk),
+            .route_rows => storeTileRows(b, tile, storage, operands, thread, routed, tile_m, &columns, chunk),
         }
     }
-    const next_accumulator_state = advancePipeline(b, accumulator_state.index, accumulator_state.phase, accumulator_stages);
-    const next_work = advancePersistentWork(b, tiles.after_carried[6], tiles.after_carried[7], b.gridDim().z, active, tiles_m, div_m, div_n, direct);
+    const groups = comptime tile.epilogueGroups();
+    // With one warpgroup per stage, the warpgroup's next tile reuses its
+    // stage; a single warpgroup alternates between them.
+    const next_accumulator_state: PipelinePosition = if (groups == accumulator_stages)
+        .{ .index = accumulator_state.index, .phase = accumulator_state.phase.bitXor(1) }
+    else
+        advancePipeline(b, accumulator_state.index, accumulator_state.phase, accumulator_stages);
+    const next_work = advancePersistentWork(b, tiles.after_carried[6], tiles.after_carried[7].add(@as(i32, @intCast(groups - 1))), ctas.mul(@as(i32, @intCast(groups))), active, tiles_m, div_m, div_n, direct);
     tiles.yieldAfter(.{
         next_work.m,
         next_work.n,
@@ -1517,7 +1599,8 @@ fn runEpilogue(
     // Permit release and deallocation are warp collective as well.
     b.relinquishTmemAllocPermit(.{});
     release_warp.yieldThen(.{});
-    b.namedBarrier(1, 128);
+    // Every epilogue warpgroup is done with TMEM.
+    b.namedBarrier(tmem_release_barrier, @intCast(128 * tile.epilogueGroups()));
     var dealloc_warp = b.openIf(warp.eq(0));
     b.deallocTmem(tmem, tile.tmem_columns, .{});
     dealloc_warp.yieldThen(.{});
@@ -1575,128 +1658,212 @@ fn routedLanes(b: *B, comptime tile: Tile, operands: EpilogueOperands, group: V,
 /// independent rows. Do not duplicate this body under a full-group branch:
 /// ptxas then loses track of convergence at the tile loop's warp-uniform
 /// shuffles, and lanes still outside the gate-lane stores read garbage.
-fn storeTileSwiglu(b: *B, comptime tile: Tile, storage: StageStorage, operands: EpilogueOperands, routed: RoutedLanes, tile_m: V, group: V, columns: []const V, comptime chunk: usize) void {
-    // Direct routing has exactly one live row per group.
+fn storeTileSwiglu(b: *B, comptime tile: Tile, storage: StageStorage, operands: EpilogueOperands, thread: EpilogueThread, routed: RoutedLanes, tile_m: V, group: V, columns: []const V, comptime chunk: usize) void {
     if (operands.direct)
-        swigluRows(b, tile, storage, operands, routed, tile_m, group, columns, 1, false, chunk)
+        swigluDirect(b, tile, storage, operands, thread, routed, tile_m, group, columns, chunk)
     else
-        swigluRows(b, tile, storage, operands, routed, tile_m, group, columns, comptime @intCast(tile.chunkRows()), true, chunk);
+        swigluStaged(b, tile, storage, operands, thread, routed, tile_m, group, columns, chunk);
 }
 
 const swiglu_chunk = 8;
 
-/// The first `live` rows of `storeTileSwiglu`; with `skip_padding`, chunks
-/// of rows past `count` are skipped.
-fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: EpilogueOperands, routed: RoutedLanes, tile_m: V, group: V, columns: []const V, comptime live: usize, comptime skip_padding: bool, comptime chunk: usize) void {
-    const n = comptime tile.chunkRows();
-    // First routed row of this epilogue pass.
-    const chunk_first: i32 = comptime @intCast(chunk * @as(usize, @intCast(tile.chunkRows())));
-    const tid = b.threadIdx().x;
-    const lane = tid.rem(32);
-    const warp = b.makeWarpUniform(b.makeWarpUniform(tid.div(32)));
-    const is_gate = tid.rem(2).eq(0);
-    const first_row = group.mul(operands.group_rows);
-    const f32_type = cute.DType.f32.toMlir(b.ctx);
-    // The TMA C staging buffer is unused by this epilogue.
-    const scratch_layout = b.layoutSpec(.{ 4, n }, .{ n, 1 });
-    const scratch = b.makeViewTyped(storage.c, b.staticLayout(scratch_layout), b.memrefType(.f32, .smem, 1024, b.layoutType(scratch_layout)));
-    const row_chunks = std.math.divCeil(usize, live, swiglu_chunk) catch unreachable;
+/// The epilogue staging area in `sC`, BF16 `[warpgroup][pass row][columns]`,
+/// and the shared address of this thread's warpgroup's part of it.
+const Staging = struct {
+    view: cute.View,
+    base: V,
 
-    var activations: [@intCast(n)]V = undefined;
-    // Lane `c` collects the warp maximum of column `c`.
-    var lane_maximum = b.cst(.f32, 0);
-    for (0..row_chunks) |row_chunk| {
-        const first = row_chunk * swiglu_chunk;
-        const last = @min(first + swiglu_chunk, live);
-        // Row 0 of an active group is always live.
-        const guarded = skip_padding and (row_chunk > 0 or chunk > 0);
-        const types: [swiglu_chunk + 1]*const mlir.Type = @splat(f32_type);
-        // `@TypeOf` does not evaluate its operand.
-        var guard: ?@TypeOf(b.openIfElse(routed.count, tupleOf(types))) = if (guarded) b.openIfElse(routed.count.gt(chunk_first + @as(i32, @intCast(first))), tupleOf(types)) else null;
-        var chunk_maximum = lane_maximum;
-        for (columns[first..last], activations[first..last], first..) |value, *activation, column| {
-            const c: i32 = @intCast(column);
+    fn of(b: *B, storage: StageStorage, thread: EpilogueThread, comptime rows: i64, comptime columns: i64) Staging {
+        const layout = b.layoutSpec(.{ max_epilogue_groups, rows, columns }, .{ rows * columns, columns, 1 });
+        return .{
+            .view = b.makeViewTyped(storage.staging, b.staticLayout(layout), b.memrefType(.bf16, .smem, 1024, b.layoutType(layout))),
+            .base = b.ptrToInt(storage.staging, .i32).add(thread.group.mul(@as(i32, @intCast(rows * columns * 2)))),
+        };
+    }
+};
+
+/// Column of MX block `block`'s scale for row `32 * row_quadrant + row_lane`
+/// of a group, in the 128x4 tensor-core scale layout (blocks tiled by 4, rows
+/// by 4x32).
+pub fn scaleColumn(block: V, row_lane: V, row_quadrant: V) V {
+    return block.div(4).mul(512).add(row_lane.mul(16)).add(row_quadrant.mul(4)).add(block.rem(4));
+}
+
+/// `storeTileSwiglu` for grouped routing, quantized through shared memory.
+///
+/// Thread `t` holds accumulator row `t` of every routed row of the pass, the
+/// gate (even `t`) or up (odd `t`) projection of activation `t / 2`. Each
+/// gate thread computes its activations, with the reference model's BF16
+/// roundings, into the warpgroup's staging area `[routed row][64
+/// activations]`. Then four threads take one routed row, a pair of them per
+/// 32-activation MX block: each reduces the maximum of 16 activations in
+/// registers, exchanges it with its partner, and stores its 16 FP8 values
+/// with one 16-byte store, instead of one shuffle reduction and one byte
+/// store per activation and row.
+fn swigluStaged(b: *B, comptime tile: Tile, storage: StageStorage, operands: EpilogueOperands, thread: EpilogueThread, routed: RoutedLanes, tile_m: V, group: V, columns: []const V, comptime chunk: usize) void {
+    const rows: i64 = comptime tile.chunkRows();
+    const chunk_first: i32 = comptime @intCast(chunk * @as(usize, @intCast(rows)));
+    const tid = thread.row;
+    const is_gate = tid.rem(2).eq(0);
+    const limit = operands.swiglu_limit;
+    const staging: Staging = .of(b, storage, thread, rows, 64);
+    const sub_chunks = comptime std.math.divCeil(usize, @intCast(rows), swiglu_chunk) catch unreachable;
+    for (0..sub_chunks) |sub_chunk| {
+        const first = sub_chunk * swiglu_chunk;
+        const last = @min(first + swiglu_chunk, @as(usize, @intCast(rows)));
+        // Row 0 of an active group is always live; `count` is uniform, so
+        // whole padding sub-chunks are skipped.
+        var live: ?@TypeOf(b.openIf(routed.count)) = if (sub_chunk == 0 and chunk == 0) null else b.openIf(routed.count.gt(chunk_first + @as(i32, @intCast(first))));
+        var activations: [swiglu_chunk]V = undefined;
+        for (columns[first..last], activations[0 .. last - first], first..) |value, *activation, column| {
             // The reference model rounds the projection to BF16.
-            const limit = operands.swiglu_limit;
             const gate = value.to(.bf16).to(.f32).minimum(limit);
             const up_value = b.shuffleXor(value, 1).to(.bf16).to(.f32).maximum(-limit).minimum(limit);
             // up * SiLU(gate), with the hardware approximations Python's
             // fastmath selects: exp(-g) = 2^(-g * log2 e).
             const exp_neg = b.unaryF32("ex2.approx.ftz.f32", gate.mul(-std.math.log2e));
-            var result = up_value.mul(gate).mul(b.unaryF32("rcp.approx.ftz.f32", exp_neg.add(1.0)));
-            result = result.mul(b.shuffleIdx(routed.weight.?, c)).to(.bf16).to(.f32);
-            // Odd threads hold no activation and must not raise the maxima.
-            activation.* = b.select(is_gate, result, b.cst(.f32, 0));
-            const maximum = b.warpMaxNonNegative(activation.*.abs());
-            chunk_maximum = b.select(lane.eq(c), maximum, chunk_maximum);
+            const result = up_value.mul(gate).mul(b.unaryF32("rcp.approx.ftz.f32", exp_neg.add(1.0)));
+            activation.* = result.mul(b.shuffleIdx(routed.weight.?, @as(i32, @intCast(column)))).to(.bf16);
         }
-        if (guard) |*g| {
-            var then_values: [swiglu_chunk + 1]V = @splat(chunk_maximum);
-            for (activations[first..last], then_values[0 .. last - first]) |activation, *t| t.* = activation;
-            g.yieldThen(tupleOf(then_values));
-            // Padding chunk: zero activations, maxima unchanged. The zero is
-            // emitted in the else block, where it is used.
-            var else_values: [swiglu_chunk + 1]V = @splat(b.cst(.f32, 0));
-            else_values[swiglu_chunk] = lane_maximum;
-            g.yieldElse(tupleOf(else_values));
-            for (activations[first..last], g.results[0 .. last - first]) |*activation, result| activation.* = result;
-            lane_maximum = g.results[swiglu_chunk];
-        } else {
-            lane_maximum = chunk_maximum;
+        var gate_lane = b.openIf(is_gate);
+        for (activations[0 .. last - first], first..) |activation, column| {
+            staging.view.set(.{ thread.group, b.cst(.i32, @as(i32, @intCast(column))), tid.div(2) }, activation);
         }
+        gate_lane.yieldThen(.{});
+        if (live) |*l| l.yieldThen(.{});
     }
+    thread.syncWarpgroup(b);
+
+    // Four threads per routed row: MX block `(tid / 2) % 2`, half `tid % 2`.
+    const row = tid.div(4);
+    const block = tid.div(2).rem(2);
+    const half = tid.rem(2);
+    var in_pass: ?@TypeOf(b.openIf(routed.count)) = if (rows * 4 < 128) b.openIf(tid.lt(@as(i32, @intCast(rows * 4)))) else null;
+    const first_activation = block.mul(32).add(half.mul(16));
+    const staging_address = staging.base.add(row.mul(64 * 2)).add(first_activation.mul(2));
+    var pairs: [8]V = undefined;
+    for (0..2) |i| {
+        const words = b.loadWords(4, staging_address.add(@as(i32, @intCast(16 * i))), .shared, .{});
+        for (words, 0..) |word, j| pairs[4 * i + j] = word;
+    }
+    var values: [16]V = undefined;
+    for (pairs, 0..) |pair, i| values[2 * i ..][0..2].* = b.unpackBf16x2(pair);
+    var maximum = values[0].abs();
+    for (values[1..]) |value| maximum = maximum.maximum(value.abs());
+    maximum = maximum.maximum(b.shuffleXor(maximum, 1));
+    const scale = mxScale(b, maximum);
+    var packed_words: [4]V = undefined;
+    for (&packed_words, 0..) |*word, i| {
+        word.* = b.packFp8x4(values[4 * i].mul(scale.inverse), values[4 * i + 1].mul(scale.inverse), values[4 * i + 2].mul(scale.inverse), values[4 * i + 3].mul(scale.inverse));
+    }
+    const row_in_group = row.add(chunk_first);
+    var live = b.openIf(row_in_group.lt(routed.count));
+    const q_address = b.ptrToInt(b.getIterTyped(operands.q.?, b.ptrTy(.f8e4m3fn, .gmem, 16) catch @panic("bad q pointer")).value(), .i64)
+        .add(group.mul(operands.group_rows).add(row_in_group).to(.i64).mul(operands.q_columns))
+        .add(tile_m.mul(64).add(first_activation).to(.i64));
+    b.storeWords(4, q_address, .global, packed_words);
+    var scale_lane = b.openIf(half.eq(0));
+    const mx_block = tile_m.mul(2).add(block);
+    operands.s.?.set(.{ group, scaleColumn(mx_block, row_in_group.rem(32), row_in_group.div(32)) }, scale.exponent.to(.i8));
+    scale_lane.yieldThen(.{});
+    live.yieldThen(.{});
+    if (in_pass) |*p| p.yieldThen(.{});
+    // The next pass overwrites the staged activations.
+    thread.syncWarpgroup(b);
+}
+
+/// `storeTileSwiglu` for direct routing, whose groups hold one live row.
+fn swigluDirect(b: *B, comptime tile: Tile, storage: StageStorage, operands: EpilogueOperands, thread: EpilogueThread, routed: RoutedLanes, tile_m: V, group: V, columns: []const V, comptime chunk: usize) void {
+    const n = comptime tile.chunkRows();
+    // First routed row of this epilogue pass.
+    const chunk_first: i32 = comptime @intCast(chunk * @as(usize, @intCast(tile.chunkRows())));
+    const tid = thread.row;
+    const lane = tid.rem(32);
+    const warp = thread.warp;
+    const is_gate = tid.rem(2).eq(0);
+    const first_row = group.mul(operands.group_rows);
+    // The TMA C staging buffer is unused by this epilogue: each warpgroup
+    // exchanges its half-block maxima in its own part of it.
+    const scratch_layout = b.layoutSpec(.{ max_epilogue_groups, 4, n }, .{ 4 * n, n, 1 });
+    const scratch = b.makeViewTyped(storage.c, b.staticLayout(scratch_layout), b.memrefType(.f32, .smem, 1024, b.layoutType(scratch_layout)));
+
+    // The reference model rounds the projection to BF16.
+    const limit = operands.swiglu_limit;
+    const gate = columns[0].to(.bf16).to(.f32).minimum(limit);
+    const up_value = b.shuffleXor(columns[0], 1).to(.bf16).to(.f32).maximum(-limit).minimum(limit);
+    // up * SiLU(gate), with the hardware approximations Python's
+    // fastmath selects: exp(-g) = 2^(-g * log2 e).
+    const exp_neg = b.unaryF32("ex2.approx.ftz.f32", gate.mul(-std.math.log2e));
+    var result = up_value.mul(gate).mul(b.unaryF32("rcp.approx.ftz.f32", exp_neg.add(1.0)));
+    result = result.mul(b.shuffleIdx(routed.weight.?, @as(i32, 0))).to(.bf16).to(.f32);
+    // Odd threads hold no activation and must not raise the maxima.
+    const activation = b.select(is_gate, result, b.cst(.f32, 0));
+    // Lane 0 collects the warp maximum of the live row.
+    const lane_maximum = b.select(lane.eq(0), b.warpMaxNonNegative(activation.abs()), b.cst(.f32, 0));
     var owner = b.openIf(lane.lt(@as(i32, @intCast(n))));
-    scratch.set(.{ warp, lane }, lane_maximum);
+    scratch.set(.{ thread.group, warp, lane }, lane_maximum);
     owner.yieldThen(.{});
-    b.namedBarrier(1, 128);
+    thread.syncWarpgroup(b);
 
     // Lane `c` turns the two half-block maxima of column `c` into its scale.
     const pair = warp.bitAnd(~@as(i32, 1));
     const lane_column = b.select(lane.lt(@as(i32, @intCast(n))), lane, b.cst(.i32, 0));
-    const scale = mxScale(b, scratch.get(.{ pair, lane_column }, .f32).maximum(scratch.get(.{ pair.add(1), lane_column }, .f32)));
+    const scale = mxScale(b, scratch.get(.{ thread.group, pair, lane_column }, .f32).maximum(scratch.get(.{ thread.group, pair.add(1), lane_column }, .f32)));
     // The next tile reuses the scratch maxima.
-    b.namedBarrier(1, 128);
+    thread.syncWarpgroup(b);
 
     const activation_index = tile_m.mul(64).add(tid.div(2));
-    for (0..row_chunks) |row_chunk| {
-        const first = row_chunk * swiglu_chunk;
-        const last = @min(first + swiglu_chunk, live);
-        var guard: ?@TypeOf(b.openIf(routed.count)) = if (skip_padding and (chunk > 0 or first > 0)) b.openIf(routed.count.gt(chunk_first + @as(i32, @intCast(first)))) else null;
-        var inverses: [swiglu_chunk]V = undefined;
-        for (inverses[0 .. last - first], first..) |*inverse, column| inverse.* = b.shuffleIdx(scale.inverse, @as(i32, @intCast(column)));
-        var gate_lane = b.openIf(is_gate);
-        for (activations[first..last], inverses[0 .. last - first], first..) |activation, inverse, column| {
-            const quantized = activation.mul(inverse).maximum(-448.0).minimum(448.0).to(.f8e4m3fn);
-            operands.q.?.set(.{ first_row.add(chunk_first + @as(i32, @intCast(column))), activation_index }, quantized);
-        }
-        gate_lane.yieldThen(.{});
-        if (guard) |*g| g.yieldThen(.{});
-    }
+    const inverse = b.shuffleIdx(scale.inverse, @as(i32, 0));
+    var gate_lane = b.openIf(is_gate);
+    const quantized = activation.mul(inverse).maximum(-448.0).minimum(448.0).to(.f8e4m3fn);
+    operands.q.?.set(.{ first_row.add(chunk_first), activation_index }, quantized);
+    gate_lane.yieldThen(.{});
 
     // Warps 0 and 2 each own one 32-activation block of this tile.
     var scale_lane = b.openIf(warp.rem(2).eq(0).bitAnd(lane.add(chunk_first).lt(routed.count)));
     const block = tile_m.mul(2).add(warp.div(2));
-    const swizzled = block.div(4).mul(512).add(lane.mul(16)).add(chunk * 4).add(block.rem(4));
-    operands.s.?.set(.{ group, swizzled }, scale.exponent.to(.i8));
+    operands.s.?.set(.{ group, scaleColumn(block, lane, b.cst(.i32, @as(i32, @intCast(chunk)))) }, scale.exponent.to(.i8));
     scale_lane.yieldThen(.{});
 }
 
 /// Python `down_epilogue`: store each live routed row at its token/top-k
 /// route, so the final reduction reads rows in route order.
-fn storeTileRows(b: *B, comptime tile: Tile, operands: EpilogueOperands, routed: RoutedLanes, tile_m: V, columns: []const V, comptime chunk: usize) void {
-    const chunk_first: i32 = comptime @intCast(chunk * @as(usize, @intCast(tile.chunkRows())));
-    const output_column = tile_m.mul(128).add(b.threadIdx().x);
+fn storeTileRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: EpilogueOperands, thread: EpilogueThread, routed: RoutedLanes, tile_m: V, columns: []const V, comptime chunk: usize) void {
     if (operands.direct) {
-        operands.rows.?.set(.{ routed.route, output_column }, columns[0].to(.bf16));
+        operands.rows.?.set(.{ routed.route, tile_m.mul(128).add(thread.row) }, columns[0].to(.bf16));
         return;
     }
-    var routes: [32]V = undefined;
-    for (routes[0..columns.len], 0..) |*route, column| route.* = b.shuffleIdx(routed.route, @as(i32, @intCast(column)));
-    for (columns, routes[0..columns.len], 0..) |value, route, column| {
-        var live: ?@TypeOf(b.openIf(routed.count)) = if (column == 0 and chunk == 0) null else b.openIf(routed.count.gt(chunk_first + @as(i32, @intCast(column))));
-        operands.rows.?.set(.{ route, output_column }, value.to(.bf16));
-        if (live) |*l| l.yieldThen(.{});
+    storeStagedRows(b, tile, storage, operands, thread, routed, tile_m, columns, chunk);
+}
+
+/// `storeTileRows` through shared memory: a thread holds one output column
+/// of every routed row, so storing straight from registers writes 2-byte
+/// pieces of 32 different rows. The warpgroup instead stages the pass's rows
+/// in shared memory, then 16 threads write each row's 256 contiguous bytes
+/// with 16-byte stores.
+fn storeStagedRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: EpilogueOperands, thread: EpilogueThread, routed: RoutedLanes, tile_m: V, columns: []const V, comptime chunk: usize) void {
+    const rows: i64 = comptime tile.chunkRows();
+    const chunk_first: i32 = comptime @intCast(chunk * @as(usize, @intCast(rows)));
+    const staging: Staging = .of(b, storage, thread, rows, 128);
+    for (columns, 0..) |value, column| staging.view.set(.{ thread.group, b.cst(.i32, @as(i32, @intCast(column))), thread.row }, value.to(.bf16));
+    thread.syncWarpgroup(b);
+
+    // 16 threads per routed row, eight BF16 columns (16 bytes) each.
+    const segment = thread.row.rem(16);
+    const row_in_pass = thread.row.div(16);
+    const staging_base = staging.base.add(segment.mul(16));
+    const output_base = b.ptrToInt(b.getIterTyped(operands.rows.?, b.ptrTy(.bf16, .gmem, 16) catch @panic("bad output pointer")).value(), .i64)
+        .add(tile_m.mul(128 * 2).add(segment.mul(16)).to(.i64));
+    inline for (0..@intCast(@divExact(rows, 8))) |pass| {
+        const row = row_in_pass.add(@as(i32, @intCast(8 * pass)));
+        const route = b.shuffleIdx(routed.route, row);
+        var live = b.openIf(routed.count.gt(row.add(chunk_first)));
+        const words = b.loadWords(4, staging_base.add(row.mul(128 * 2)), .shared, .{});
+        b.storeWords(4, output_base.add(route.to(.i64).mul(operands.row_bytes)), .global, words);
+        live.yieldThen(.{});
     }
+    // The next pass overwrites the staged rows.
+    thread.syncWarpgroup(b);
 }
 
 fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: Epilogue, d: anytype) void {
@@ -1722,6 +1889,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const tmem_holding = sharedPointerAt(b, shared_base, tile.tmem_holding, .i32, 8);
     const storage: StageStorage = .{
         .c = sharedPointerAt(b, shared_base, tile.c, .f32, 1024),
+        .staging = sharedPointerAt(b, shared_base, tile.c + Tile.staging_offset, .bf16, 1024),
         .a = sharedPointerAt(b, shared_base, tile.a, .i8, 1024),
         .b = sharedPointerAt(b, shared_base, tile.b, .f8e4m3fn, 1024),
         .sfa = sharedPointerAt(b, shared_base, tile.sfa, .f8e8m0fnu, 1024),
@@ -1859,20 +2027,20 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
 
     var mma_warp = b.openIf(warp.eq(4));
     // Python's MMA role reaches its own TmemAllocator.wait_for_alloc site.
-    b.namedBarrier(2, 160);
+    b.namedBarrier(tmem_alloc_barrier, @intCast(32 + 128 * tile.epilogueGroups()));
     switch (k_tiles) {
         inline 18, 40 => |kt| runMmaConsumer(b, tile, kt, storage, tiled_mma, tmem_holding, active, d.tiles_m),
         else => unreachable,
     }
     mma_warp.yieldThen(.{});
 
-    var epilogue_warps = b.openIf(warp.lt(4));
-    // TmemAllocator.allocate is issued collectively by warp 0.  The four
-    // epilogue warps then meet the MMA warp at named barrier 2.
+    var epilogue_warps = b.openIf(warp.lt(4).bitOr(warp.ge(6)));
+    // TmemAllocator.allocate is issued collectively by warp 0.  The epilogue
+    // warps then meet the MMA warp at named barrier 2.
     var alloc_warp = b.openIf(warp.eq(0));
     b.allocTmem(tile.tmem_columns, tmem_holding, .{});
     alloc_warp.yieldThen(.{});
-    b.namedBarrier(2, 160);
+    b.namedBarrier(tmem_alloc_barrier, @intCast(32 + 128 * tile.epilogueGroups()));
     switch (epilogue) {
         .swiglu_mxfp8 => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, direct, .{
             .group_sizes = view(b, d.group_sizes),
@@ -1883,12 +2051,14 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
             .direct = cfg.direct,
             .group_rows = cfg.groupRows(),
             .swiglu_limit = cfg.swiglu_limit,
+            .q_columns = @divExact(cfg.m, 2),
         }),
         .route_rows => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, direct, .{
             .group_sizes = view(b, d.group_sizes),
             .route_inverse = view(b, d.route_inverse),
             .rows = view(b, d.rows),
             .direct = cfg.direct,
+            .row_bytes = cfg.m * 2,
         }),
     }
     epilogue_warps.yieldThen(.{});
@@ -1960,7 +2130,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const grid_z = b.cst(.i32, @min(@divExact(cfg.m, 128) * cfg.groups, cfg.persistent_ctas));
     const config = b.makeLaunchConfig(.{
         .grid = .{ one, one, grid_z },
-        .block = .{ b.cst(.i32, 192), one, one },
+        .block = .{ b.cst(.i32, tile.threads()), one, one },
         .dynamic_smem = b.kernelSmemSize(deviceName(epilogue)),
         .stream = b.cudaStream(),
         .cluster = .{ one, one, one },
@@ -1995,7 +2165,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
 }
 
 test "MXFP4 GEMM programs emit their host launch for every tile width" {
-    inline for (.{ 8, 16, 32 }) |n| {
+    inline for (.{ 8, 16, 32, 64, 128 }) |n| {
         inline for (.{ .{ UpQuantized, Epilogue.swiglu_mxfp8, 4608, 5120 }, .{ DownRows, Epilogue.route_rows, 5120, 2304 } }) |program| {
             const cfg: Config = .{
                 .experts = 192,

@@ -21,6 +21,9 @@ pub const DType = dtypes.DType;
 const isFloatDtype = dtypes.isFloatDtype;
 const dtypeBitwidth = dtypes.dtypeBitwidth;
 
+/// The high BF16 half of a 32-bit word.
+const bf16_high_mask: i32 = @bitCast(@as(u32, 0xffff0000));
+
 test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(Builder);
@@ -2403,21 +2406,23 @@ pub const Builder = struct {
     }
 
     /// Synchronize a fixed subset of the CTA on a named hardware barrier.
-    /// `participants` must be a warp multiple and every participating thread
-    /// must execute the same barrier id.
-    pub fn namedBarrier(self: *Builder, id: i32, participants: i32) void {
+    /// `id` is a literal, or an i32 `Value` chosen at run time, e.g. one per
+    /// warpgroup running the same code. `participants` must be a warp
+    /// multiple and every participating thread must execute the same barrier
+    /// id.
+    pub fn namedBarrier(self: *Builder, id: anytype, participants: i32) void {
         // The embedded CuTe compiler currently reads NVVM through a different
         // MLIR revision.  A generic `nvvm.barrier` with optional operands is
         // accepted, but those operands are discarded and it lowers to
-        // `bar.sync 0`.  Constant inline PTX preserves the named barrier ABI
-        // used by CUTLASS (`2,160` for TMEM allocation and `1,128` for the
-        // epilogue pipeline).
-        const assembly = std.fmt.allocPrint(
-            self.arena.allocator(),
-            "bar.sync {d}, {d};",
-            .{ id, participants },
-        ) catch @panic("namedBarrier OOM");
-        _ = llvm.inline_asm(self.ctx, assembly, &.{}, null, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
+        // `bar.sync 0`.  Inline PTX preserves the named barrier ABI used by
+        // CUTLASS.
+        const dynamic = @TypeOf(id) == Value;
+        const assembly = (if (dynamic)
+            std.fmt.allocPrint(self.arena.allocator(), "bar.sync $0, {d};", .{participants})
+        else
+            std.fmt.allocPrint(self.arena.allocator(), "bar.sync {d}, {d};", .{ id, participants })) catch @panic("namedBarrier OOM");
+        const operands: []const *const mlir.Value = if (dynamic) &.{id.inner} else &.{};
+        _ = llvm.inline_asm(self.ctx, assembly, operands, null, .{ .constraints = if (dynamic) "r" else "", .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
     }
 
     /// Build the CuTe first-class divisor used by CUTLASS's persistent tile
@@ -2494,6 +2499,21 @@ pub const Builder = struct {
             .{ .constraints = "=r,f,f,f,f" },
             self.loc(),
         ));
+    }
+
+    /// The two BF16 values of a 32-bit word as FP32, the low half first.
+    pub fn unpackBf16x2(self: *Builder, word: Value) [2]Value {
+        _ = self;
+        return .{ word.shl(16).bitCast(.f32), word.bitAnd(bf16_high_mask).bitCast(.f32) };
+    }
+
+    /// Two FP32 values rounded to BF16 and packed into one 32-bit word, `low`
+    /// in the low half.
+    pub fn packBf16x2(self: *Builder, low: Value, high: Value) Value {
+        _ = self;
+        const low_bits = low.to(.bf16).to(.f32).bitCast(.i32).shrLogical(16);
+        const high_bits = high.to(.bf16).to(.f32).bitCast(.i32).bitAnd(bf16_high_mask);
+        return low_bits.bitOr(high_bits);
     }
 
     /// One-operand FP32 PTX instruction, e.g. `ex2.approx.ftz.f32`.
