@@ -486,6 +486,9 @@ pub const TmaConfig = struct {
     coordinate_rank: u8,
     format: TmaFormat = .default,
     num_multicast: u32 = 1,
+    /// CTAs of one `cta_group::2` MMA that the copies feed: with 2, each
+    /// CTA's load completes on the mbarrier of the pair's even CTA.
+    cta_group: u8 = 1,
 };
 
 pub const BlockScaledMma = struct {
@@ -529,6 +532,14 @@ fn formatName(format: TmaFormat, dtype: DType) []const u8 {
             .f32 => "F32_RN",
             else => @panic("TMA format must be specified for this dtype"),
         },
+    };
+}
+
+fn tmaLoadKind(config: TmaConfig) []const u8 {
+    return switch (config.cta_group) {
+        1 => "sm_90",
+        2 => "sm_100_2sm",
+        else => @panic("TMA loads feed one or two CTAs"),
     };
 }
 
@@ -1974,7 +1985,7 @@ pub const Builder = struct {
             self.asValue(cta_map).inner,
             self.tmaLoadAtomType(config),
             self.coordTensorType(config.coordinate_rank, config.coordinate_layout),
-            self.parseAttribute("#cute_nvgpu.tiled_tma_load<sm_90>"),
+            self.parseAttribute(std.fmt.allocPrint(self.arena.allocator(), "#cute_nvgpu.tiled_tma_load<{s}>", .{tmaLoadKind(config)}) catch @panic("OOM")),
             .int(self.ctx, .i32, config.num_multicast),
             tmaFormatAttribute(self, config.format),
             self.loc(),
@@ -2031,8 +2042,8 @@ pub const Builder = struct {
     pub fn tmaLoadAtomType(self: *Builder, config: TmaConfig) *const mlir.Type {
         return self.parseType(std.fmt.allocPrint(
             self.arena.allocator(),
-            "!cute_nvgpu.atom.non_exec_tiled_tma_load<sm_90, {s}, copy_bits = {d}, tma_gbasis = <\"{s}\">, tma_format = {s}>",
-            .{ dtypeName(config.dtype), config.copy_bits, config.global_basis.payload(self), formatName(config.format, config.dtype) },
+            "!cute_nvgpu.atom.non_exec_tiled_tma_load<{s}, {s}, copy_bits = {d}, tma_gbasis = <\"{s}\">, tma_format = {s}>",
+            .{ tmaLoadKind(config), dtypeName(config.dtype), config.copy_bits, config.global_basis.payload(self), formatName(config.format, config.dtype) },
         ) catch @panic("OOM"));
     }
 
@@ -2043,7 +2054,7 @@ pub const Builder = struct {
         return self.parseType(std.fmt.allocPrint(
             self.arena.allocator(),
             "!cute_nvgpu.atom.tma_load<{s}, copy_bits = {d}, mode = tiled, num_cta = {d}, g_stride = <\"()\"> tma_gbasis = <\"{s}\">>",
-            .{ dtypeName(config.dtype), config.copy_bits, config.num_multicast, config.global_basis.payload(self) },
+            .{ dtypeName(config.dtype), config.copy_bits, config.cta_group * config.num_multicast, config.global_basis.payload(self) },
         ) catch @panic("OOM"));
     }
 
@@ -2167,8 +2178,11 @@ pub const Builder = struct {
     /// CuTe DSL builds them. Both scale-factor pointers start at `scale_ptr`
     /// and are patched after tensor-memory allocation.
     pub fn makeBlockScaledMma(self: *Builder, cfg: BlockScaledMmaConfig, scale_ptr: Value) BlockScaledMma {
-        if (cfg.m != 128 or cfg.k != 32 or cfg.n < 8 or cfg.n > 256 or cfg.n % 8 != 0) {
-            std.debug.panic("unsupported SM100 block-scaled MMA shape {d}x{d}x{d}", .{ cfg.m, cfg.n, cfg.k });
+        // `cta_group::2` runs M = 256 over a CTA pair, each holding 128 rows
+        // of A and half of B's N columns.
+        const m_ok = (cfg.num_cta == 1 and cfg.m == 128) or (cfg.num_cta == 2 and cfg.m == 256 and cfg.n % 16 == 0);
+        if (!m_ok or cfg.k != 32 or cfg.n < 8 or cfg.n > 256 or cfg.n % 8 != 0) {
+            std.debug.panic("unsupported SM100 block-scaled MMA shape {d}x{d}x{d} on {d} CTAs", .{ cfg.m, cfg.n, cfg.k, cfg.num_cta });
         }
         const disabled = self.cst(.i1, false);
         const atom_type = std.fmt.allocPrint(self.arena.allocator(), "!cute_nvgpu.sm100.mma_bs{s}", .{blockScaledPayload(self, cfg)}) catch @panic("OOM");
@@ -2194,6 +2208,20 @@ pub const Builder = struct {
     /// lane of the MMA warp issues this after each K-stage.
     pub fn tcgen05Commit(self: *Builder, barrier: Value) void {
         self.emitVoid(nvvm.tcgen05_commit(self.ctx, self.sharedBarrierPtr(barrier).inner, .cta_1, self.loc()));
+    }
+
+    /// `tcgen05Commit` of `cta_group::2` MMAs, issued by the pair's even CTA:
+    /// arrive on the mbarrier at the same shared-memory offset in every CTA
+    /// of the cluster whose rank bit is set in `cta_mask`.
+    pub fn tcgen05CommitPair(self: *Builder, barrier: Value, cta_mask: u16) void {
+        self.emitVoid(nvvm.ops.tcgen05_commit(
+            self.ctx,
+            self.sharedBarrierPtr(barrier).inner,
+            self.cst(.i16, @as(i16, @bitCast(cta_mask))).inner,
+            null,
+            (nvvm.ops.CTAGroupKindAttr.get(self.ctx, .{ .value = .cta_2 }) catch unreachable).attribute(),
+            self.loc(),
+        ));
     }
 
     /// Wait until asynchronous tensor-memory loads have reached registers.
@@ -2789,10 +2817,16 @@ pub const Builder = struct {
         return self.emit(nvvm.read_sreg(self.ctx, "cluster.ctarank", self.loc()));
     }
 
-    /// The same shared-memory location (i32 address) in CTA `rank` of the cluster, as a
-    /// `shared::cluster` pointer.
+    /// The same shared-memory location (an i32 address or a shared pointer)
+    /// in CTA `rank` of the cluster, as a `shared::cluster` pointer.
     pub fn mapaShared(self: *Builder, address: Value, rank: Value) Value {
-        return self.emit(nvvm.mapa(self.ctx, self.addressPtr(address, .shared).inner, rank.inner, llvm.pointerType(self.ctx, NVPTXAddressSpace.shared_cluster), self.loc()));
+        return self.emit(nvvm.mapa(self.ctx, self.sharedBarrierPtr(address).inner, rank.inner, llvm.pointerType(self.ctx, NVPTXAddressSpace.shared_cluster), self.loc()));
+    }
+
+    /// Arrive once on the mbarrier at the shared-memory location of
+    /// `barrier` in CTA `rank` of the cluster.
+    pub fn mbarrierArriveCluster(self: *Builder, barrier: Value, rank: Value) void {
+        self.emitVoid(nvvm.ops.mbarrier_arrive(self.ctx, self.mapaShared(barrier, rank).inner, self.cst(.i32, 1).inner, null, null, null, null, self.loc()));
     }
 
     /// Full cluster barrier (arrive.release + wait.acquire, aligned).
