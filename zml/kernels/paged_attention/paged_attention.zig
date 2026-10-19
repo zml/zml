@@ -12,6 +12,7 @@ const stablehlo = @import("stablehlo/stablehlo.zig");
 const PagedAttention = @This();
 
 test {
+    _ = tcl;
     std.testing.refAllDecls(Backend);
     std.testing.refAllDecls(Options);
     std.testing.refAllDecls(Parameters);
@@ -42,7 +43,7 @@ pub const Backend = enum {
         return switch (backend) {
             .stablehlo => true,
             .tcl => platform.target == .furiosa,
-            .triton => platform.target != .cpu,
+            .triton => platform.target != .cpu and platform.target != .furiosa,
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
         };
@@ -300,6 +301,7 @@ test "Backend.auto selects triton on oneAPI" {
 
 test pagedAttention {
     const platform = zml.testing.env();
+    if (!Backend.triton.isAvailable(platform)) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var arena_state: std.heap.ArenaAllocator = .init(allocator);
@@ -401,7 +403,7 @@ test pagedAttention {
     const all_backends = std.enums.values(Backend);
     // stablehlo ignores these options, mosaic_tpu requires a dense
     // KV cache instead of the split cache used by this test.
-    const option_sensitive_backends = [_]Backend{ .triton, .metal };
+    const option_sensitive_backends = [_]Backend{ .triton, .metal, .tcl };
     const test_cases = [_]struct {
         name: []const u8,
         attention_options: AttentionOptions,
@@ -454,14 +456,14 @@ test pagedAttention {
 
             const parameters_d: zml.Bufferized(Parameters) = switch (parameters) {
                 .triton => triton_parameters_d,
-                inline .metal, .mosaic_tpu, .stablehlo => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
+                inline .metal, .mosaic_tpu, .stablehlo, .tcl => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
                     .block_table = triton_parameters_d.triton.block_table,
                     .seq_lens = triton_parameters_d.triton.seq_lens,
                     .query_start_len = triton_parameters_d.triton.query_start_len,
                 }),
             };
 
-            var output_d = try exe.eval(allocator, io, .{ parameters_d, q, new_k, new_v, kv_cache_d, .{} });
+            var output_d = try exe.eval(allocator, io, .{ parameters_d, q, new_k, new_v, kv_cache_d, .{ .mask = .{ .standard = {} }, .sink = null } });
             defer output_d.deinit();
             results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
         }
