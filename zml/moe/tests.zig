@@ -22,11 +22,12 @@ const Case = struct {
     width: i64 = 128,
     intermediate: i64 = 128,
     experts: i64 = 8,
+    experts_mesh: ?*const zml.Mesh = null,
 
     pub fn compile(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Exe {
         std.debug.assert(c.backend.isAvailable(platform));
         const x: Tensor = .init(.{ .b = c.batch, .s = c.tokens, .d = c.width }, c.activation_dtype);
-        return platform.compileFn(allocator, io, forward, .{ x, c }, .{});
+        return platform.compileFn(allocator, io, forward, .{ x, c }, .{ .meshes = if (c.experts_mesh) |mesh| &.{mesh} else &.{} });
     }
 
     pub fn check(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, exe: *const zml.Exe) !void {
@@ -233,7 +234,14 @@ const Outputs = struct { actual: Tensor, expected: Tensor };
 /// reference implementation. Return both outputs for comparison.
 fn forward(input: Tensor, c: Case) Outputs {
     const canonical = makeExpertFixture(c);
-    const prepared = prepareForBackend(canonical, c.backend);
+    var prepared = prepareForBackend(canonical, c.backend);
+    if (c.experts_mesh) |mesh| {
+        for ([_]*zml.nn.Linear{ &prepared.gate_up, &prepared.down }) |projection| {
+            projection.weight = projection.weight.withPartitioning(mesh, .{ .expert = .experts });
+            const q = &projection.quantization.?;
+            q.scales = q.scales.withTags(.{ .expert, .out, .in }).withPartitioning(mesh, .{ .expert = .experts });
+        }
+    }
 
     const route_shape = Shape.init(.{ .b = c.batch, .s = c.tokens, .topk = c.topk }, .i32);
     const route = Tensor.arange(.{ .end = @intCast(route_shape.count()) }, .i32).reshape(route_shape);
@@ -583,6 +591,32 @@ test "specialized CuTe MXFP4 compatibility matrix" {
         .placements = &.{.before_down},
         .shapes = &cute_shapes,
     }, .{});
+}
+
+test "CuTe MXFP4 expert parallel decode and prefill match the reference" {
+    const platform = zml.testing.env();
+    if (!zml.moe.cute_mxfp4.isAvailable(platform) or platform.devices.len < 2) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const mesh = try @constCast(platform).registerMesh("cute_moe_experts", .mesh(.{ .experts = .high_bandwidth }));
+    for ([_]i64{ 1, 64 }) |tokens| {
+        const c: Case = .{
+            .backend = .cute_mxfp4,
+            .activation = .{ .swiglu = .{ .limit = 7 } },
+            .scheme = .mxfp4,
+            .quantize_input = true,
+            .placement = .before_down,
+            .tokens = tokens,
+            .topk = 2,
+            .width = 5120,
+            .intermediate = 2304,
+            .experts = @intCast(mesh.numPartitionsForLogicalAxis(.experts)),
+            .experts_mesh = mesh,
+        };
+        var exe = try c.compile(allocator, io, platform);
+        defer exe.deinit();
+        try c.check(allocator, io, platform, &exe);
+    }
 }
 
 test "Fly compatibility matrix" {

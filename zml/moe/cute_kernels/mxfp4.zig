@@ -39,7 +39,9 @@ pub const GroupedQuantConfig = struct {
 
 /// `GroupedQuantConfig.lanes_per_block` for a batch.
 pub fn quantizeLanes(tokens: i64) i64 {
-    return if (tokens <= 256) 4 else 1;
+    // Four lanes hide latency through medium batches; larger batches favor
+    // the single-lane variant's wider stores.
+    return if (tokens <= 2048) 4 else 1;
 }
 
 pub const CombineConfig = struct {

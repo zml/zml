@@ -41,27 +41,41 @@ fn isDirect(tokens: i64) bool {
     return tokens == 1;
 }
 
-/// GEMM tile N, which is also the routed expert-group size. Wider tiles
-/// reuse each weight tile across more routes but pad more rows per expert,
-/// so they only pay off once experts receive tens of routes.
-fn tileN(tokens: i64, experts: i64, topk: i64) i64 {
-    // Direct routing keeps one row per group: the narrowest MMA wastes the
-    // least of each B tile and leaves room for a 12-stage A/B ring.
-    if (isDirect(tokens)) return 8;
-    if (tokens < 512) return 16;
-    // Prefill: each group re-reads the whole expert weight matrix, so widen
-    // the tile once experts hold enough routes to fill it. Half the routes
-    // are remote under expert parallelism, hence the conservative estimate.
-    // The thresholds are measured on the DeepSeek V4.1 expert geometry.
-    const routes_per_expert = @divTrunc(tokens * topk, 2 * experts);
-    if (routes_per_expert >= 64) return 128;
-    if (routes_per_expert >= 32) return 64;
-    return 32;
-}
+/// How the GEMMs of one MoE layer are tiled and launched.
+const LaunchPolicy = struct {
+    /// GEMM tile N, which is also the routed expert-group size.
+    n: i64,
+    /// Run the GEMMs on CTA pairs (`persistent.Config.two_cta`).
+    paired: bool,
+
+    /// Wider tiles reuse each weight tile across more routes but pad more
+    /// rows per expert, so they only pay off once experts receive tens of
+    /// routes. CTA pairs run every tile wide enough for them.
+    fn of(tokens: i64, global_experts: i64, topk: i64, hidden: i64, intermediate: i64) LaunchPolicy {
+        // Direct routing keeps one row per group: the narrowest MMA wastes
+        // the least of each B tile and leaves room for a 12-stage A/B ring.
+        if (isDirect(tokens)) return .{ .n = 8, .paired = false };
+        // Prefill: each group re-reads the whole expert weight matrix, so
+        // widen the tile once experts hold enough routes to fill it. The
+        // global expert count keeps this estimate independent of the
+        // expert-parallel mesh. With CTA pairs, a half-full 128-row group
+        // already beats reading the expert's weights twice in 64-row groups
+        // on the DeepSeek geometry.
+        const routes_per_expert = @divTrunc(tokens * topk, global_experts);
+        const n: i64 = if (routes_per_expert >= 64) 128 else if (routes_per_expert >= 32) 64 else if (routes_per_expert >= 16) 32 else 16;
+        return .{ .n = n, .paired = pairable(n, hidden, intermediate) };
+    }
+
+    /// CTA pairs run tile N 64 and 128, on 256-row tiles of both projections.
+    fn pairable(n: i64, hidden: i64, intermediate: i64) bool {
+        return n >= 64 and @rem(hidden, 256) == 0 and @rem(2 * intermediate, 256) == 0;
+    }
+};
 
 /// One persistent CTA per SM. Each CTA needs the full 227 KiB of shared
 /// memory, so launching more CTAs than SMs (e.g. 160 on a 152-SM GB300)
 /// runs the surplus as a second wave and nearly doubles the GEMM time.
+/// Use the smallest participating device and complete pairs only.
 fn persistentCtas(paired: bool) i64 {
     const platform = zml.Compiler.current().platform;
     stdx.debug.assert(platform.devices.len > 0, "CuTe MoE requires a CUDA device", .{});
@@ -71,11 +85,8 @@ fn persistentCtas(paired: bool) i64 {
         stdx.debug.assert(attribute == .int64 and attribute.int64 > 0, "invalid CUDA SM count", .{});
         count = @min(count, attribute.int64);
     }
+    stdx.debug.assert(!paired or count >= 2, "CuTe CTA pairs require at least two SMs", .{});
     return if (paired) count - @mod(count, 2) else count;
-}
-
-fn twoCta(n: i64, hidden: i64, intermediate: i64) bool {
-    return n >= 64 and @rem(hidden, 256) == 0 and @rem(2 * intermediate, 256) == 0;
 }
 
 /// Upper bound on the number of `group`-row expert groups for all routes.
@@ -97,7 +108,7 @@ const Routing = struct {
     schedule: zml.Tensor,
 };
 
-fn route(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, n: i64, direct: bool, ids: zml.Tensor) Routing {
+fn route(tokens: i64, hidden: i64, intermediate: i64, experts: i64, global_experts: i64, topk: i64, n: i64, direct: bool, ids: zml.Tensor) Routing {
     const routes = tokens * topk;
     const flat_ids = ids.convert(.i32).reshape(.{routes});
     if (direct) return .{ .groups = routes, .route_map = null, .route_inverse = flat_ids, .schedule = flat_ids };
@@ -107,7 +118,7 @@ fn route(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, n
         .hidden = hidden,
         .intermediate = intermediate,
         .experts = experts,
-        .global_experts = experts,
+        .global_experts = global_experts,
         .topk = topk,
         // Unused: only the routing and scheduling kernels of that config run.
         .swiglu_limit = 0,
@@ -117,18 +128,20 @@ fn route(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, n
 }
 
 /// `[tokens, hidden]` BF16 output of the MoE layer.
-pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs) zml.Tensor {
-    return forwardWithTile(tokens, hidden, intermediate, experts, topk, swiglu_limit, a, null, null);
+pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, global_experts: i64, topk: i64, swiglu_limit: f32, a: Inputs) zml.Tensor {
+    const policy: LaunchPolicy = .of(tokens, global_experts, topk, hidden, intermediate);
+    return forwardWithPolicy(tokens, hidden, intermediate, experts, global_experts, topk, swiglu_limit, a, policy);
 }
 
-/// `forward` with an explicit GEMM tile N, for tuning. `null` selects it from
-/// the batch size.
-fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs, tile_n: ?i64, two_cta: ?bool) zml.Tensor {
+/// `forward` with an explicit launch policy; the GPU test also exercises
+/// these kernels with CTA pairing disabled.
+fn forwardWithPolicy(tokens: i64, hidden: i64, intermediate: i64, experts: i64, global_experts: i64, topk: i64, swiglu_limit: f32, a: Inputs, policy: LaunchPolicy) zml.Tensor {
+    const n = policy.n;
+    const paired = policy.paired;
     const direct = isDirect(tokens);
-    const n = if (direct) 8 else tile_n orelse tileN(tokens, experts, topk);
-    const paired = two_cta orelse (!direct and twoCta(n, hidden, intermediate));
-    stdx.debug.assert(!paired or (!direct and twoCta(n, hidden, intermediate)), "invalid CuTe CTA pair geometry", .{});
-    const routing = route(tokens, hidden, intermediate, experts, topk, n, direct, a.ids);
+    stdx.debug.assert(!direct or n == 8, "direct CuTe routing requires the narrow tile", .{});
+    stdx.debug.assert(!paired or (!direct and LaunchPolicy.pairable(n, hidden, intermediate)), "invalid CuTe CTA pair geometry", .{});
+    const routing = route(tokens, hidden, intermediate, experts, global_experts, topk, n, direct, a.ids);
     const routes = tokens * topk;
 
     const up_cfg: persistent.Config = .{
@@ -202,8 +215,8 @@ test "CuTe CTA-pair GEMMs match single-CTA GEMMs bit for bit" {
         fn both(x: zml.Tensor, ids: zml.Tensor, weights: zml.Tensor, w1: zml.Tensor, s1: zml.Tensor, w2: zml.Tensor, s2: zml.Tensor, tile: i64) [2]zml.Tensor {
             const inputs: Inputs = .{ .x = x, .routing_weights = weights, .w1 = w1, .s1 = s1, .w2 = w2, .s2 = s2, .ids = ids };
             return .{
-                forwardWithTile(tokens, hidden, intermediate, experts, topk, 10.0, inputs, tile, true),
-                forwardWithTile(tokens, hidden, intermediate, experts, topk, 10.0, inputs, tile, false),
+                forwardWithPolicy(tokens, hidden, intermediate, experts, experts, topk, 10.0, inputs, .{ .n = tile, .paired = true }),
+                forwardWithPolicy(tokens, hidden, intermediate, experts, experts, topk, 10.0, inputs, .{ .n = tile, .paired = false }),
             };
         }
     };
@@ -262,4 +275,25 @@ test "CuTe CTA-pair GEMMs match single-CTA GEMMs bit for bit" {
         defer single.free(allocator);
         try std.testing.expectEqualSlices(u8, single.constData(), pair.constData());
     }
+}
+
+test "CuTe launch policy follows global routing density" {
+    const Case = struct { tokens: i64, global_experts: i64, n: i64, paired: bool };
+    const cases = [_]Case{
+        .{ .tokens = 1, .global_experts = 384, .n = 8, .paired = false },
+        .{ .tokens = 512, .global_experts = 384, .n = 16, .paired = false },
+        .{ .tokens = 1024, .global_experts = 384, .n = 32, .paired = false },
+        .{ .tokens = 2048, .global_experts = 384, .n = 64, .paired = true },
+        .{ .tokens = 4096, .global_experts = 384, .n = 128, .paired = true },
+        // Dense unsharded workloads should widen even at small token counts.
+        .{ .tokens = 256, .global_experts = 8, .n = 128, .paired = true },
+        .{ .tokens = 2048, .global_experts = 192, .n = 128, .paired = true },
+    };
+    for (cases) |c| {
+        try std.testing.expectEqual(LaunchPolicy{ .n = c.n, .paired = c.paired }, LaunchPolicy.of(c.tokens, c.global_experts, 6, 5120, 2304));
+    }
+    try std.testing.expect(LaunchPolicy.pairable(64, 5120, 1152));
+    try std.testing.expect(!LaunchPolicy.pairable(64, 5120, 1216));
+    try std.testing.expectEqual(@as(i64, 4), boundary.quantizeLanes(2048));
+    try std.testing.expectEqual(@as(i64, 1), boundary.quantizeLanes(2049));
 }

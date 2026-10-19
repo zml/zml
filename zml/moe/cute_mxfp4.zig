@@ -17,7 +17,7 @@ pub const Parameters = triton_mxfp4.Parameters;
 pub fn isAvailable(platform: *const zml.Platform) bool {
     if (platform.target != .cuda) return false;
     const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
-    return cc.major == 10;
+    return cc.major == 10 and (cc.minor == 0 or cc.minor == 3);
 }
 
 pub fn validateOptions(opts: zml.moe.Options) void {
@@ -67,6 +67,7 @@ pub fn fusedExperts(
         .w2 = down.weight,
         .s2 = dq.scales,
         .topk = ids.dim(.topk),
+        .global_experts = gate_up.weight.dim(.expert),
         .swiglu_limit = options.activation.swiglu.limit.?,
         .expert_parallel = expert_parallelism,
     };
@@ -85,6 +86,8 @@ const Context = struct {
     w2: zml.Tensor,
     s2: zml.Tensor,
     topk: i64,
+    // Captured before manualComputation exposes each rank's local weights.
+    global_experts: i64,
     swiglu_limit: f32,
     expert_parallel: bool,
 
@@ -103,7 +106,7 @@ const Context = struct {
             const local = ids.cmp(.GE, expert_start).logical(.AND, ids.cmp(.LT, expert_end));
             ids = local.select(ids.sub(expert_start), .scalar(-1, .i32));
         }
-        const result = kernels.forward(tokens, hidden, intermediate, experts, self.topk, self.swiglu_limit, .{
+        const result = kernels.forward(tokens, hidden, intermediate, experts, self.global_experts, self.topk, self.swiglu_limit, .{
             .x = self.input.reshape(.{ tokens, hidden }),
             .routing_weights = routing_weights,
             .w1 = self.w1,
