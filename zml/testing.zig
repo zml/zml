@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const stdx = @import("stdx");
 
 const Platform = @import("platform.zig").Platform;
+const Sharding = @import("Sharding.zig");
 const Slice = @import("slice.zig").Slice;
 const zml = @import("zml.zig");
 
@@ -32,6 +33,12 @@ pub fn env() *const Platform {
     }
 
     return _platform.?;
+}
+
+pub fn tpMesh() *const Sharding.Mesh {
+    if (!builtin.is_test) @compileError("Cannot use zml.testing.tpMesh() outside of a test block");
+
+    return _platform.?.meshes.get("model").?;
 }
 
 /// In neural network we generally care about the relative precision,

@@ -97,6 +97,7 @@ zig_library(
         "mlirx.zig",
         "nn.zig",
         "ops.zig",
+        "ops/manual_computation.zig",
         "pjrtx.zig",
         "platform.zig",
         "profiling/profiler.zig",

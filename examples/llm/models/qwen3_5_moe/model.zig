@@ -47,8 +47,8 @@ pub const RopeParameters = struct {
     rope_theta: f32,
 };
 
-fn partitionProjectedKv(kv: zml.Tensor, kv_head_meshe: zml.Sharding.DimMeshe) zml.Tensor {
-    return switch (kv_head_meshe) {
+fn partitionProjectedKv(kv: zml.Tensor, kv_head_sharding: zml.Sharding.DimSharding) zml.Tensor {
+    return switch (kv_head_sharding) {
         .sharded => |heads| blk: {
             const sharded_kv = if (heads.factor != 1) kv.stutter1d(kv.axis(.h), heads.factor) else kv;
             break :blk sharded_kv.withPartitioning(.model, .{ .s = .replicated, .h = .model, .hd = .replicated });
@@ -57,9 +57,9 @@ fn partitionProjectedKv(kv: zml.Tensor, kv_head_meshe: zml.Sharding.DimMeshe) zm
     };
 }
 
-fn partitionCachedKv(tensor: zml.Tensor, kv_head_meshe: zml.Sharding.DimMeshe) zml.Tensor {
+fn partitionCachedKv(tensor: zml.Tensor, kv_head_sharding: zml.Sharding.DimSharding) zml.Tensor {
     var kv = tensor.rename(.{ .s = .k });
-    return switch (kv_head_meshe) {
+    return switch (kv_head_sharding) {
         .sharded => |heads| blk: {
             if (heads.factor != 1) {
                 kv = kv.stutter1d(kv.axis(.h), heads.factor);
@@ -607,12 +607,12 @@ pub const SelfAttn = struct {
         const x_qkv = x.withPartitioning(tp, .{ .d = .replicated });
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
-        const kv_head_meshe = tp.shardableDim(k.dim(.h), .model, q.dim(.h));
+        const kv_head_sharding = tp.shardableDim(k.dim(.h), .model, q.dim(.h));
 
         q = q.withPartitioning(tp, .{ .s = .replicated, .h = .model, .hd = .replicated });
         gate = gate.withPartitioning(tp, .{ .s = .replicated, .d_out_proj = .model });
-        k = partitionProjectedKv(k, kv_head_meshe);
-        v = partitionProjectedKv(v, kv_head_meshe);
+        k = partitionProjectedKv(k, kv_head_sharding);
+        v = partitionProjectedKv(v, kv_head_sharding);
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
 
@@ -625,15 +625,15 @@ pub const SelfAttn = struct {
         q = self.rotary_embed.applyRope(q, cos, sin);
         k = self.rotary_embed.applyRope(k, cos, sin);
         q = q.withPartitioning(tp, .{ .s = .replicated, .h = .model, .hd = .replicated });
-        k = partitionProjectedKv(k, kv_head_meshe);
-        v = partitionProjectedKv(v, kv_head_meshe);
+        k = partitionProjectedKv(k, kv_head_sharding);
+        v = partitionProjectedKv(v, kv_head_sharding);
 
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
         q = q.rename(.{ .s = .q }).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated });
-        k = partitionCachedKv(k, kv_head_meshe);
-        v = partitionCachedKv(v, kv_head_meshe);
+        k = partitionCachedKv(k, kv_head_sharding);
+        v = partitionCachedKv(v, kv_head_sharding);
 
         const attn_output = zml.attention.attention(
             q,
@@ -1049,7 +1049,7 @@ pub const GatedDeltaNet = struct {
 
         const beta = b.sigmoid();
         const aLog_type = self.aLog.dtype();
-        const g = self.aLog.broad(a.shape()).exp().mul(softplus(a.convert(aLog_type).add(self.dt_bias.convert(aLog_type).broad(a.shape())))).negate();
+        const g = self.aLog.broad(a.shape()).exp().mul(zml.nn.softplus(a.convert(aLog_type).add(self.dt_bias.convert(aLog_type).broad(a.shape())), .{})).negate();
 
         const query_for_rule = if (self.qk_head_repetition == 1) query else query.stutter1d(query.axis(.kh), self.qk_head_repetition);
         const key_for_rule = if (self.qk_head_repetition == 1) key else key.stutter1d(key.axis(.kh), self.qk_head_repetition);
@@ -1147,8 +1147,8 @@ pub const KvCache = struct {
                 .h = config.text_config.num_key_value_heads,
                 .hd = config.text_config.head_dim,
             }, dtype);
-            const kv_head_meshe = model_meshe.shardableDim(kv_shape.dim(.h), .model, config.text_config.num_attention_heads);
-            const sharded_kv_shape = switch (kv_head_meshe) {
+            const kv_head_sharding = model_meshe.shardableDim(kv_shape.dim(.h), .model, config.text_config.num_attention_heads);
+            const sharded_kv_shape = switch (kv_head_sharding) {
                 .sharded => |heads| kv_shape.setDim(.h, heads.dim).withPartitioning(model_meshe, .{ .h = .model }),
                 .replicated => kv_shape.withPartitioning(model_meshe, .{ .h = .replicated }),
             };
@@ -1407,9 +1407,3 @@ pub const KvCache = struct {
         };
     }
 };
-
-//========================Utils========================
-
-fn softplus(x: zml.Tensor) zml.Tensor {
-    return x.exp().addConstant(1).log();
-}

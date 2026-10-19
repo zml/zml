@@ -915,6 +915,45 @@ pub fn collectPtrs(
     return context.out.toOwnedSlice(allocator);
 }
 
+/// Finds all X in the given object, and write their mutable pointers into an arraylist.
+pub fn collectMutPtrs(
+    T: type,
+    allocator: std.mem.Allocator,
+    obj: anytype,
+) std.mem.Allocator.Error![]*T {
+    const ok = switch (@typeInfo(@TypeOf(obj))) {
+        .pointer => |ptr_info| !ptr_info.attrs.@"const",
+        else => false,
+    };
+    stdx.debug.assertComptime(ok, "zml.meta.collectMutPtrs requires a mutable pointer input, got: {}", .{@TypeOf(obj)});
+    return @ptrCast(try collectPtrs(T, allocator, obj));
+}
+
+/// Finds all X in the given object, and copy them by value into an arraylist.
+pub fn collectValues(
+    T: type,
+    allocator: std.mem.Allocator,
+    obj: anytype,
+) std.mem.Allocator.Error![]T {
+    const CollectValuesCtx = struct {
+        allocator: std.mem.Allocator,
+        out: std.ArrayList(T) = .empty,
+        oom: bool = false,
+
+        fn cb(ctx: *@This(), val: *const T) void {
+            if (ctx.oom) return;
+            ctx.out.append(ctx.allocator, val.*) catch {
+                ctx.oom = true;
+            };
+        }
+    };
+    var context = CollectValuesCtx{ .allocator = allocator };
+    visit(CollectValuesCtx.cb, &context, obj);
+    if (context.oom) return error.OutOfMemory;
+
+    return context.out.toOwnedSlice(allocator);
+}
+
 fn _CollectCtx(func: anytype) type {
     const params = @typeInfo(@TypeOf(func)).@"fn".param_types;
     if (params.len == 1) return void;
