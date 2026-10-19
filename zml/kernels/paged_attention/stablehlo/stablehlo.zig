@@ -281,12 +281,10 @@ pub fn pagedAttention(
     }
 
     const page_size = kv_cache.split.k.dim(.k_chunk);
-    // Keep full query tiles in bounds without clamping packed sequence offsets.
-    const padded_q = q.pad(0, .{ .b = zml.Tensor.Pad{ .high = page_size - 1 } });
 
     const final_state = zml.ops.@"while"(
         AttentionLoop,
-        .{ .q = padded_q, .kv_cache = kv_cache, .parameters = parameters, .opts = opts },
+        .{ .q = q, .kv_cache = kv_cache, .parameters = parameters, .opts = opts },
         .{
             // i32 to match triton conventions
             .slot_id = .scalar(0, .i32),
@@ -296,7 +294,8 @@ pub fn pagedAttention(
             // Note: we do all partial softmax in f32
             .partial_softmax_prefill = .zeroes(q.shape().setDim(.b, page_size).withDtype(.f32)),
             .partial_softmax_decode = .zeroes(q.shape().setDim(.b, 1).withDtype(.f32)),
-            .out = .zeroes(padded_q.shape()),
+            // Spare rows keep full-page writes in bounds; they are discarded below.
+            .out = .zeroes(q.shape().setDim(.b, q.dim(.b) + page_size - 1)),
         },
     );
 
@@ -396,7 +395,12 @@ const AttentionLoop = struct {
 
     pub fn attentionOnePage(self: While, state: State, q_offset: zml.Tensor, q_chunk: u32, page_size: u32) PartialSoftmax {
         const k_offset = state.k_page_idx.scale(page_size);
-        const active_q = self.q.slice(self.q.axis(.b), .dyn(state.slot_id, q_chunk));
+
+        // Gather within this sequence, then zero the unused rows of its query page.
+        const query_end = self.parameters.query_start_len.slice(0, .dynSingle(state.seq_id.addConstant(1))).asScalar();
+        const q_indices = zml.Tensor.iota(.init(.{ .q_chunk = q_chunk }, .i32), .q_chunk).add(state.slot_id);
+        const valid_q = q_indices.cmp(.LT, query_end);
+        const active_q = self.q.gather(.{ .b = q_indices.minimum(query_end.addConstant(-1)) }, .{}).mask(valid_q, 0).rename(.{ .q_chunk = .b });
 
         const active_k_page_id = self.parameters.block_table.slices(
             .{ .b, .p },
@@ -434,6 +438,7 @@ const AttentionLoop = struct {
     }
 
     pub fn updateState(state: State, valid_slots: zml.Tensor, num_slots: u32, query_has_more_keys: zml.Tensor, sequence_has_more_queries: zml.Tensor, softmax: PartialSoftmax) State {
+        // Writes advance forward, so zeroed padding only touches unprocessed rows.
         const valid = zml.Tensor.iota(.init(.{ .b = num_slots }, .i32), .b).cmp(.LT, valid_slots);
         return zml.ops.if2(
             query_has_more_keys,
