@@ -83,10 +83,10 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             platform,
-            "transformer.txt_in",
+            "transformer.norm_out",
             &activations_store.store,
-            BlockWrapper{ .tblock = transformer_store.model.txt_in, .args = compile_args },
-            .{ .tblock = transformer_store.model_buffer.txt_in, .args = compile_args_buffers },
+            BlockWrapper{ .tblock = transformer_store.model.norm_out, .args = compile_args },
+            .{ .tblock = transformer_store.model_buffer.norm_out, .args = compile_args_buffers },
         );
     } else if (std.mem.containsAtLeast(u8, activations_path, 1, "text.")) {
         std.debug.print("\n\nStarting testing > LanguageModel\n\n", .{});
@@ -111,14 +111,20 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const BlockWrapper = struct {
-    tblock: block.QwenImage21TextProjection,
+    tblock: block.QwenImage21AdaLayerNormContinuous,
     args: CompileArgs,
 
     pub fn forward(
         self: BlockWrapper,
         x: zml.Tensor,
+        conditioning_embedding: zml.Tensor,
+        target_token_mask: zml.Tensor,
     ) zml.Tensor {
-        return self.tblock.forward(x.withTags(.{ .bs, .seq_len, .d }));
+        return self.tblock.forward(
+            x.withTags(.{ .bs, .seq_len, .d }),
+            conditioning_embedding.withTags(.{ .bs, .d }),
+            target_token_mask.withTags(.{.seq_len}),
+        );
     }
 };
 
