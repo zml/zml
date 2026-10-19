@@ -769,9 +769,9 @@ pub const Moe = struct {
         const routing_scores, const topk_ids = self.router.forward(x);
 
         const moe_output = zml.moe.forwardMoe(
-            x,
-            topk_ids,
-            routing_scores,
+            x.merge(.{ .t = .{ .b, .s } }),
+            topk_ids.merge(.{ .t = .{ .b, .s } }),
+            routing_scores.merge(.{ .t = .{ .b, .s } }),
             self.gate_up_proj,
             self.down_proj,
             moe_backend,
@@ -780,7 +780,7 @@ pub const Moe = struct {
                 .quantize_input = false,
                 .routing_weight_placement = .after_down,
             },
-        );
+        ).reshape(x.shape());
 
         const shared_gate = self.shared_expert_gate.forward(x, x.dtype()).sigmoid().broad(x.shape());
         const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate).withPartitioning(.model, .{
