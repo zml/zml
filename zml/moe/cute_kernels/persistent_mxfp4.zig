@@ -46,8 +46,8 @@ const EpilogueThread = struct {
         const tid = b.threadIdx().x;
         return .{
             .row = tid.rem(128),
-            .warp = b.makeWarpUniform(b.makeWarpUniform(tid.rem(128).div(32))),
-            .group = b.makeWarpUniform(b.makeWarpUniform(tid.div(32).ge(6).to(.i32))),
+            .warp = b.makeWarpUniform(tid.rem(128).div(32)),
+            .group = b.makeWarpUniform(tid.div(32).ge(6).to(.i32)),
         };
     }
 
@@ -672,7 +672,7 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
     // Prefetch every tensor-map descriptor before the specialized warps begin
     // the persistent pipeline. This is the work PDL buys us: it runs while the
     // producing grid is still writing the operands.
-    const warp = b.makeWarpUniform(b.makeWarpUniform(b.threadIdx().x.div(32)));
+    const warp = b.makeWarpUniform(b.threadIdx().x.div(32));
     var tma_warp = b.openIf(warp.eq(5));
     inline for (.{ d.tma_a, d.tma_b, d.tma_sfa, d.tma_sfb }) |value| {
         const descriptor: cute.Atom = .{ .inner = value.inner, .kernel = b };
@@ -937,7 +937,7 @@ const CtaPair = struct {
     leader: V,
 
     fn current(b: *B) CtaPair {
-        const rank = b.makeWarpUniform(b.makeWarpUniform(b.clusterCtaRank()));
+        const rank = b.makeWarpUniform(b.clusterCtaRank());
         return .{ .rank = rank, .leader = rank.eq(leader_rank) };
     }
 
@@ -1640,7 +1640,7 @@ fn runEpilogue(
 ) void {
     const n = tile.n;
     const thread = EpilogueThread.current(b);
-    const warp = b.makeWarpUniform(b.makeWarpUniform(b.threadIdx().x.div(32)));
+    const warp = b.makeWarpUniform(b.threadIdx().x.div(32));
     const tmem = b.retrieveTmemPtr(tmem_holding, .f32, 16);
 
     const div_m = b.fastDivmodCreate(tiles_m);
@@ -2056,7 +2056,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     };
 
     const tid = b.threadIdx().x;
-    const warp = b.makeWarpUniform(b.makeWarpUniform(tid.div(32)));
+    const warp = b.makeWarpUniform(tid.div(32));
     const tiled_mma: cute.Atom = .{ .inner = d.mma.inner, .kernel = b };
 
     // Reproduce the Python CuTe path for the two matrix operands:
