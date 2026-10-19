@@ -15,3 +15,8 @@ pub fn unloadBuffers(self: *zml.Bufferized(TimestepEmbedding)) void {
     zml.nn.Linear.unloadBuffers(&self.linear_1);
     zml.nn.Linear.unloadBuffers(&self.linear_2);
 }
+
+pub fn forward(self: TimestepEmbedding, x: zml.Tensor) zml.Tensor {
+    const lin1 = self.linear_1.forward(x, x.dtype()).silu().withTags(.{ .bs, .d });
+    return self.linear_2.forward(lin1, x.dtype());
+}
