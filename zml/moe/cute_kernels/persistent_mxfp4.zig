@@ -504,6 +504,17 @@ fn buildProgram(b: *B, cfg: Config) cute.FinishError!void {
     };
 }
 
+// A static singleton expert/group mode is removed from TMA's coordinate
+// basis. Keep its extent dynamic so all launches retain the same rank-three ABI.
+fn tmaExtent(b: *B, count: i64) cute.AlgebraExpr {
+    return if (count == 1) b.expr(cute.AlgebraToken.dynamic) else b.expr(count);
+}
+
+/// `extent` is the singleton's run-time extent, the constant 1 if null.
+fn tmaLayout(b: *B, spec: cute.LayoutSpec, count: i64, extent: ?V) cute.View {
+    return if (count == 1) b.makeLayoutShapeValues(spec, .{extent orelse b.cst(.i32, 1)}) else b.staticLayout(spec);
+}
+
 /// Types and layouts shared by the device ABI and the host launch.
 fn Layouts(comptime tile: Tile) type {
     return struct {
@@ -514,10 +525,10 @@ fn Layouts(comptime tile: Tile) type {
         const ab_swizzle: B.Swizzle = .{ .bits = 3, .base = 4, .shift = 3 };
 
         fn aCoord(b: *B, cfg: Config) cute.LayoutSpec {
-            return b.layoutSpec(.{ cfg.m, cfg.k, cfg.experts }, .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), b.basis(1, 1, .{2}) });
+            return b.layoutSpec(.{ cfg.m, cfg.k, tmaExtent(b, cfg.experts) }, .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), b.basis(1, 1, .{2}) });
         }
         fn bCoord(b: *B, cfg: Config) cute.LayoutSpec {
-            return b.layoutSpec(.{ cfg.groupRows(), cfg.k, cfg.groups }, .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), b.basis(1, 1, .{2}) });
+            return b.layoutSpec(.{ cfg.groupRows(), cfg.k, tmaExtent(b, cfg.groups) }, .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), b.basis(1, 1, .{2}) });
         }
         fn sfCoord(b: *B) cute.LayoutSpec {
             return b.layoutSpec(
@@ -2062,14 +2073,14 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const m_tiles = @divExact(cfg.m, mma_m);
     const k_tiles = @divExact(cfg.k, 128);
     const a_local_spec = b.layoutSpec(
-        .{ mma_m, 128, m_tiles, k_tiles, cfg.experts },
+        .{ mma_m, 128, m_tiles, k_tiles, tmaExtent(b, cfg.experts) },
         .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), b.basis(mma_m, 1, .{1}), b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
     // The group tile covers all of B's rows, so the N-tile mode has extent one
     // and its stride is inferred as zero. Direct routing is no different: the
     // tensor map still spans a whole tile of rows, zero-filling all but one.
     const b_local_spec = b.layoutSpec(
-        .{ n, 128, 1, k_tiles, cfg.groups },
+        .{ n, 128, 1, k_tiles, tmaExtent(b, cfg.groups) },
         .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), 0, b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
     const all_tiles = .{ cute.AlgebraToken.all, cute.AlgebraToken.all, cute.AlgebraToken.all };
@@ -2081,11 +2092,11 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const a_origin = if (pair != null) "(0,?{div=128},0)" else "(0,0,0)";
     const b_origin = if (pair != null) fmt(b, "(0,?{{div={d}}},0)", .{b_rows}) else "(0,0,0)";
     const a_mma_spec = b.layoutSpec(
-        .{ .{ 128, 32 }, 1, 4, m_tiles, k_tiles, cfg.experts },
+        .{ .{ 128, 32 }, 1, 4, m_tiles, k_tiles, tmaExtent(b, cfg.experts) },
         .{ .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}) }, 0, b.basis(32, 1, .{0}), b.basis(mma_m, 1, .{1}), b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
     const b_mma_spec = b.layoutSpec(
-        .{ .{ b_rows, 32 }, 1, 4, 1, k_tiles, cfg.groups },
+        .{ .{ b_rows, 32 }, 1, 4, 1, k_tiles, tmaExtent(b, cfg.groups) },
         .{ .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}) }, 0, b.basis(32, 1, .{0}), 0, b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
     const mma_a = if (pair) |p|
@@ -2097,14 +2108,14 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     else
         b.tiledMmaPartitionTyped(tiled_mma, tiled_b, .{0}, 1, b.coordTensorType(3, b_mma_spec));
 
-    const a_grouped_layout = b.staticLayout(b.layoutSpec(
-        .{ .{ .{ 128, 32 }, 1, 4 }, m_tiles, k_tiles, cfg.experts },
+    const a_grouped_layout = tmaLayout(b, b.layoutSpec(
+        .{ .{ .{ 128, 32 }, 1, 4 }, m_tiles, k_tiles, tmaExtent(b, cfg.experts) },
         .{ .{ .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}) }, 0, b.basis(32, 1, .{0}) }, b.basis(mma_m, 1, .{1}), b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
-    ));
-    const b_grouped_layout = b.staticLayout(b.layoutSpec(
-        .{ .{ .{ b_rows, 32 }, 1, 4 }, 1, k_tiles, cfg.groups },
+    ), cfg.experts, null);
+    const b_grouped_layout = tmaLayout(b, b.layoutSpec(
+        .{ .{ .{ b_rows, 32 }, 1, 4 }, 1, k_tiles, tmaExtent(b, cfg.groups) },
         .{ .{ .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}) }, 0, b.basis(32, 1, .{0}) }, b.basis(n, 1, .{1}), b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
-    ));
+    ), cfg.groups, null);
     const staged = stagedOperands(b, tile, storage);
     const smem_a_grouped = b.withLayout(staged.a, b.staticLayout(b.layoutSpec(
         .{ .{ .{ 128, 32 }, 1, 4 }, stages },
@@ -2118,11 +2129,11 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const a_partition_layout = b.layoutSpec(.{ .{ Tile.a_stage_bytes, 1 }, stages }, .{ .{ 1, 0 }, Tile.a_stage_bytes });
     const b_partition_layout = b.layoutSpec(.{ .{ tile.bStageBytes(), 1 }, stages }, .{ .{ 1, 0 }, tile.bStageBytes() });
     const a_target_layout = b.layoutSpec(
-        .{ .{ .{ 128, 128 }, 1 }, m_tiles, k_tiles, cfg.experts },
+        .{ .{ .{ 128, 128 }, 1 }, m_tiles, k_tiles, tmaExtent(b, cfg.experts) },
         .{ .{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0 }, b.basis(mma_m, 1, .{1}), b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
     const b_target_layout = b.layoutSpec(
-        .{ .{ .{ 128, b_rows }, 1 }, 1, k_tiles, cfg.groups },
+        .{ .{ .{ 128, b_rows }, 1 }, 1, k_tiles, tmaExtent(b, cfg.groups) },
         .{ .{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0 }, b.basis(n, 1, .{1}), b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
     const partitioned_a = b.tmaPartitionTyped(
@@ -2243,8 +2254,8 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
 fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: Epilogue) cute.FinishError!void {
     const L = Layouts(tile);
     const host_arg = HostArgs(epilogue);
-    const a_layout = b.layoutSpec(.{ cfg.m, cfg.k, cfg.experts }, .{ cfg.k, 1, cfg.m * cfg.k });
-    const b_layout = b.layoutSpec(.{ cfg.groupRows(), cfg.k, cfg.groups }, .{ cfg.k, 1, cfg.k * cfg.groupRows() });
+    const a_layout = b.layoutSpec(.{ cfg.m, cfg.k, tmaExtent(b, cfg.experts) }, .{ cfg.k, 1, cfg.m * cfg.k });
+    const b_layout = b.layoutSpec(.{ cfg.groupRows(), cfg.k, tmaExtent(b, cfg.groups) }, .{ cfg.k, 1, cfg.k * cfg.groupRows() });
     const b_rows = comptime tile.bRows();
     // `cute.tile_to_shape` derives that the dynamic strides step whole
     // 512-byte scale atoms, and the result type has to carry it.
@@ -2254,7 +2265,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         .{ .{ .{ 16, 4 }, sf_stride }, .{ .{ 0, 1 }, 512 }, .{ 0, sf_stride } },
     );
 
-    const gA = b.makeTensorView(b.recastPointer(b.arg(host_arg.weight), .f4e2m1fn, .gmem, 16), b.staticLayout(a_layout));
+    const gA = b.makeTensorView(b.recastPointer(b.arg(host_arg.weight), .f4e2m1fn, .gmem, 16), tmaLayout(b, a_layout, cfg.experts, b.arg(host_arg.expert_count)));
     // `schedule` is `[group experts | group sizes | active count]`.
     const schedule = b.arg(host_arg.schedule);
     const ids = b.makeTensorView(schedule, b.staticLayout(b.layoutSpec(cfg.groups, 1)));
@@ -2264,7 +2275,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         b.ptrTy(.i32, .gmem, offsetAlignment(16, 2 * cfg.groups, 4)) catch @panic("bad active count pointer"),
     );
     const active = b.makeTensorView(active_ptr, b.staticLayout(b.layoutSpec(1, 1)));
-    const gB = b.makeTensorView(b.arg(host_arg.input_quant), b.staticLayout(b_layout));
+    const gB = b.makeTensorView(b.arg(host_arg.input_quant), tmaLayout(b, b_layout, cfg.groups, b.arg(host_arg.problem_l)));
     // Match Python's host construction instead of materializing these two
     // layouts with `cute.static`. In particular, SFB's M extent is one; CuTe
     // must still retain that mode while encoding the tensor map.
@@ -2344,7 +2355,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     b.returnHostStatus(b.cudaResultStatus(launch));
 }
 
-test "MXFP4 GEMM programs emit their host launch for every tile width" {
+test "CuTe MXFP4 GEMM programs emit their host launch for every tile width" {
     // Tile N and CTAs per MMA.
     inline for (.{ .{ 8, 1 }, .{ 16, 1 }, .{ 32, 1 }, .{ 64, 1 }, .{ 128, 1 }, .{ 64, 2 }, .{ 128, 2 } }) |shape| {
         const n = shape[0];

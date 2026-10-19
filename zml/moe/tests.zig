@@ -301,6 +301,11 @@ const specialized_shapes = [_]FixtureShape{
     .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 17, .topk = 2 },
     .{ .width = 5120, .intermediate = 2304, .experts = 2, .batch = 2, .tokens = 17, .topk = 2 },
 };
+const cute_shapes = specialized_shapes ++ [_]FixtureShape{
+    // Preserve all TMA coordinates for singleton expert/group dimensions.
+    .{ .width = 5120, .intermediate = 2304, .experts = 1 },
+    .{ .width = 5120, .intermediate = 2304, .experts = 1, .tokens = 2 },
+};
 
 const Format = struct {
     scheme: ?zml.Quantization.Scheme = null,
@@ -576,7 +581,7 @@ test "specialized CuTe MXFP4 compatibility matrix" {
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
         .placements = &.{.before_down},
-        .shapes = &specialized_shapes,
+        .shapes = &cute_shapes,
     }, .{});
 }
 
