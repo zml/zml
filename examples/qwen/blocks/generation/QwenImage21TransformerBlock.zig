@@ -5,6 +5,8 @@ const CompileArgs = @import("../../compiler.zig").CompileArgs;
 const QwenImage21SwiGLUFeedForward = @import("./QwenImage21SwiGLUFeedForward.zig");
 const QwenImage21Attention = @import("./QwenImage21Attention.zig");
 
+const select_modulation_rows = @import("./utils.zig").select_modulation_rows;
+
 // QwenImage21TransformerBlock(
 //   (img_norm1): LayerNorm((4096,), eps=1e-06, elementwise_affine=False, bias=False)
 //   (attn): QwenImage21Attention(
@@ -73,21 +75,4 @@ fn modulate(
         x.mul(modulated_scale.add(zml.Tensor.scalar(1, scale.dtype()))),
         modulated_gate,
     };
-}
-
-fn select_modulation_rows(x: zml.Tensor, mask: zml.Tensor) zml.Tensor {
-    const broad = x.withTags(.{ .mod, .d }).broad(.init(.{ .x = 1, .mod = 2, .d = x.dim(1) }, x.dtype()));
-    const real, const zero = broad.chunkExact(.mod, 2);
-
-    const tagged = mask.withTags(.{.d});
-    const mask_ = tagged.broad(.init(.{ .x = 1, .d = tagged.dim(.d), .mod = 1 }, .bool))
-        .broad(.init(.{ .x = 1, .d = tagged.dim(.d), .mod = real.dim(.d) }, .bool));
-
-    // Condition (mask) : (1, 16415,    1)  -> Expands to (1, 16415, 4096)
-    // Input 1 (real)   : (1,     1, 4096)  -> Expands to (1, 16415, 4096)
-    // Input 2 (zero)   : (1,     1, 4096)  -> Expands to (1, 16415, 4096)
-    return mask_.select(
-        real.broad(.init(.{ .x = 1, .d = mask_.dim(.d), .mod = real.dim(.d) }, real.dtype())),
-        zero.broad(.init(.{ .x = 1, .d = mask_.dim(.d), .mod = real.dim(.d) }, real.dtype())),
-    );
 }
