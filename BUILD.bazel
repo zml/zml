@@ -57,7 +57,7 @@ platform(
         "@bazel_tools//tools/cpp:clang",
     ],
     exec_properties = {
-        "container-image": "docker://ubuntu:22.04",
+        "container-image": "docker://mirror.gcr.io/library/ubuntu:22.04",
         "OSFamily": "Linux",
     },
     visibility = ["//visibility:public"],
