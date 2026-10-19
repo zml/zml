@@ -3,7 +3,19 @@ const zml = @import("zml");
 const RMSNorm = @import("./RMSNorm.zig");
 const CompileArgs = @import("../../compiler.zig").CompileArgs;
 
-pub const Attn = @This();
+// QwenImage21Attention(
+//   (to_q): Linear(in_features=4096, out_features=4096, bias=False)
+//   (to_k): Linear(in_features=4096, out_features=4096, bias=False)
+//   (to_v): Linear(in_features=4096, out_features=4096, bias=False)
+//   (to_out): ModuleList(
+//     (0): Linear(in_features=4096, out_features=4096, bias=False)
+//     (1): Dropout(p=0.0, inplace=False)
+//   )
+//   (norm_q): RMSNorm()
+//   (norm_k): RMSNorm()
+// )
+
+pub const QwenImage21Attention = @This();
 
 num_attention_heads: i64,
 norm_k: RMSNorm,
@@ -13,7 +25,7 @@ to_out: zml.nn.Linear,
 to_q: zml.nn.Linear,
 to_v: zml.nn.Linear,
 
-pub fn unloadBuffers(self: *zml.Bufferized(Attn)) void {
+pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21Attention)) void {
     RMSNorm.unloadBuffers(&self.norm_k);
     RMSNorm.unloadBuffers(&self.norm_q);
     zml.nn.Linear.unloadBuffers(&self.to_k);
@@ -25,7 +37,7 @@ pub fn unloadBuffers(self: *zml.Bufferized(Attn)) void {
 // Implemented following QwenImage21AttnProcessor (which is the default Processor)
 // and following the prefill part (not decode)
 pub fn forward(
-    self: Attn,
+    self: QwenImage21Attention,
     x: zml.Tensor,
     rotary_emb: zml.Tensor,
     args: CompileArgs,
@@ -54,7 +66,7 @@ fn apply_rotary_emb_qwen(x: zml.Tensor, freqs_cis: zml.Tensor) zml.Tensor {
 
 const PreparedQKV = struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, seq_len_q: i64 };
 // _qwenimage21_prepare_qkv from diffusers/models/transformers/transformer_qwenimage21.py
-fn prepare(self: Attn, x: zml.Tensor, rotary_emb: zml.Tensor) PreparedQKV {
+fn prepare(self: QwenImage21Attention, x: zml.Tensor, rotary_emb: zml.Tensor) PreparedQKV {
     const num_attention_heads: usize = 32;
 
     const query_flat = self.to_q.forward(x, x.dtype());

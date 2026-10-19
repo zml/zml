@@ -2,8 +2,8 @@ const std = @import("std");
 const zml = @import("zml");
 const CompileArgs = @import("../../compiler.zig").CompileArgs;
 
-const Mlp = @import("./Mlp.zig");
-const Attn = @import("./Attn.zig");
+const QwenImage21SwiGLUFeedForward = @import("./QwenImage21SwiGLUFeedForward.zig");
+const QwenImage21Attention = @import("./QwenImage21Attention.zig");
 
 // QwenImage21TransformerBlock(
 //   (img_norm1): LayerNorm((4096,), eps=1e-06, elementwise_affine=False, bias=False)
@@ -27,39 +27,20 @@ const Attn = @import("./Attn.zig");
 //   )
 // )
 
-pub const TransformerBlock = @This();
+pub const QwenImage21TransformerBlock = @This();
 
 img_norm1: zml.nn.LayerNorm,
 img_norm2: zml.nn.LayerNorm,
-img_mlp: Mlp,
-attn: Attn,
+img_mlp: QwenImage21SwiGLUFeedForward,
+attn: QwenImage21Attention,
 
-pub fn load(
-    self: *const TransformerBlock,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    store: *const zml.io.TensorStore,
-) !zml.Bufferized(TransformerBlock) {
-    var buffers = try zml.mem.bufferize(allocator, TransformerBlock, self);
-    errdefer unloadBuffers(&buffers);
-
-    var loader: zml.io.Loader = try .init(allocator, platform, .default);
-    defer loader.deinit();
-
-    try loader.load(io, TransformerBlock, self, &buffers, store, &.{}, .{});
-    try loader.await(io);
-
-    return buffers;
-}
-
-pub fn unloadBuffers(self: *zml.Bufferized(TransformerBlock)) void {
-    Mlp.unloadBuffers(&self.img_mlp);
-    Attn.unloadBuffers(&self.attn);
+pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21TransformerBlock)) void {
+    QwenImage21SwiGLUFeedForward.unloadBuffers(&self.img_mlp);
+    QwenImage21Attention.unloadBuffers(&self.attn);
 }
 
 pub fn forward(
-    self: TransformerBlock,
+    self: QwenImage21TransformerBlock,
     x_: zml.Tensor,
     modulation: zml.Tensor,
     rotary_emb: zml.Tensor,
