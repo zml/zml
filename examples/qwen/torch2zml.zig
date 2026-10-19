@@ -75,18 +75,18 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.containsAtLeast(u8, activations_path, 1, "block.")) {
         std.debug.print("\n\nStarting testing > TransformerBlock\n\n", .{});
 
-        var transformer_blocks_store: store.TransformerStore = undefined;
-        try transformer_blocks_store.load(allocator, io, platform, cli_args.folder);
-        defer transformer_blocks_store.deinit(allocator);
+        var transformer_store: store.TransformerStore = undefined;
+        try transformer_store.load(allocator, io, platform, cli_args.folder);
+        defer transformer_store.deinit(allocator);
 
         try testing.testLayer(
             allocator,
             io,
             platform,
-            "transformer.transformer_blocks.0",
+            "transformer.time_text_embed.time_proj",
             &activations_store.store,
-            BlockWrapper{ .tblock = transformer_blocks_store.transformer_blocks[0], .args = compile_args },
-            .{ .tblock = transformer_blocks_store.transformer_block_buffers[0], .args = compile_args_buffers },
+            BlockWrapper{ .tblock = transformer_store.model.time_text_embed.time_proj, .args = compile_args },
+            .{ .args = compile_args_buffers },
         );
     } else if (std.mem.containsAtLeast(u8, activations_path, 1, "text.")) {
         std.debug.print("\n\nStarting testing > LanguageModel\n\n", .{});
@@ -111,18 +111,15 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const BlockWrapper = struct {
-    tblock: block.TransformerBlock,
+    tblock: block.QwenImage21TemporalTimesteps,
     args: CompileArgs,
 
     pub fn forward(
         self: BlockWrapper,
         x: zml.Tensor,
-        modulation: zml.Tensor,
-        rotary_emb: zml.Tensor,
-        target_token_mask: zml.Tensor,
     ) zml.Tensor {
-        const tagged = x.withTags(.{ .bs, .seq_len, .d });
-        return self.tblock.forward(tagged, modulation, rotary_emb.withTags(.{ .seq_len, .d }), target_token_mask, self.args);
+        const tagged = x.withTags(.{.bs});
+        return self.tblock.forward(tagged);
     }
 };
 

@@ -11,8 +11,9 @@ const TRANSFORMER_BLOCK_COUNT: usize = 1;
 
 store: zml.io.TensorStore = undefined,
 registry: zml.safetensors.TensorRegistry = undefined,
-transformer_blocks: []block.TransformerBlock = undefined,
-transformer_block_buffers: []zml.Bufferized(block.TransformerBlock) = undefined,
+
+model: block.QwenImage21Transformer2DModel,
+model_buffer: zml.Bufferized(block.QwenImage21Transformer2DModel),
 
 // From transformer/diffusion_pytorch_model-XXXXX-of-00002.safetensors
 //  img_in.weight                                                        (4096, 64)            BF16
@@ -47,15 +48,41 @@ pub fn load(
 
     self.store = .fromRegistry(allocator, &self.registry);
 
-    const transformer_blocks: []block.TransformerBlock =
-        try allocator.alloc(block.TransformerBlock, TRANSFORMER_BLOCK_COUNT);
+    const pos_embed = block.QwenImage21Rope.init();
+
+    const time_text_embed_view = self.store.view().withPrefix("time_text_embed.timestep_embedder");
+    const time_text_embed = time_text_embed: {
+        const time_proj = block.QwenImage21TemporalTimesteps.init();
+        const timestep_embedder = block.TimestepEmbedding{
+            .linear_1 = .init(time_text_embed_view.createTensor("linear_1.weight", .{ .dim, .d }, .replicated), null, .d),
+            .linear_2 = .init(time_text_embed_view.createTensor("linear_2.weight", .{ .dim, .d }, .replicated), null, .d),
+        };
+        break :time_text_embed block.QwenImage21TimestepProjEmbeddings{
+            .time_proj = time_proj,
+            .timestep_embedder = timestep_embedder,
+        };
+    };
+
+    const text_in_view = self.store.view().withPrefix("txt_in");
+    const txt_in = block.QwenImage21TextProjection{
+        .text_norm = block.QwenImage21ZeroCenterRMSNorm.init(),
+        .in_layer = .init(text_in_view.createTensor("in_layer.weight", .{ .dim, .d }, .replicated), null, .d),
+        .out_layer = .init(text_in_view.createTensor("out_layer.weight", .{ .dim, .d }, .replicated), null, .d),
+    };
+
+    const img_in = zml.nn.Linear.init(self.store.view().createTensor("img_in.weight", .{ .dim, .d }, .replicated), null, .d);
+
+    const modulation = zml.nn.Linear.init(self.store.view().createTensor("modulation.1.weight", .{ .img, .d }, .replicated), null, .d);
+
+    const transformer_blocks: []block.QwenImage21TransformerBlock =
+        try allocator.alloc(block.QwenImage21TransformerBlock, TRANSFORMER_BLOCK_COUNT);
 
     const transformer_blocks_view = self.store.view().withPrefix("transformer_blocks");
     for (0..TRANSFORMER_BLOCK_COUNT) |i| {
         const tb_layer_view = transformer_blocks_view.withLayer(i);
 
         const attn_view = tb_layer_view.withPrefix("attn");
-        const attn: block.Attn = .{
+        const attn: block.QwenImage21Attention = .{
             .num_attention_heads = 128,
             .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dim}, .replicated), null, .d),
             .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dim}, .replicated), null, .d),
@@ -66,7 +93,7 @@ pub fn load(
         };
 
         const img_mlp_view = tb_layer_view.withPrefix("img_mlp");
-        const img_mlp: block.Mlp = .{
+        const img_mlp: block.QwenImage21SwiGLUFeedForward = .{
             .proj = .init(img_mlp_view.createTensor("proj.weight", .{ .dup, .d }, .replicated), null, .d),
             .out = .init(img_mlp_view.createTensor("out.weight", .{ .dout, .d }, .replicated), null, .d),
             .gate_layer = .init(img_mlp_view.createTensor("gate_layer.weight", .{ .dup, .d }, .replicated), null, .d),
@@ -80,28 +107,34 @@ pub fn load(
         };
     }
 
-    // Load buffers
-    const transformer_block_buffers =
-        try allocator.alloc(zml.Bufferized(block.TransformerBlock), TRANSFORMER_BLOCK_COUNT);
+    const norm_out_view = self.store.view().withPrefix("norm_out");
+    const norm_out = block.QwenImage21AdaLayerNormContinuous{
+        .linear = .init(norm_out_view.createTensor("linear.weight", .{ .dup, .d }, .replicated), null, .d),
+        .norm = .{ .eps = 1e-6 },
+    };
 
-    for (0..TRANSFORMER_BLOCK_COUNT) |i| {
-        log.info("Transfering weights....", .{});
-        const start: std.Io.Timestamp = .now(io, .awake);
-        defer log.info("✅ Transferred weights [{f}]", .{start.untilNow(io, .awake)});
-        transformer_block_buffers[i] = try transformer_blocks[i].load(allocator, io, platform, &self.store);
-    }
+    const proj_out_view = self.store.view();
+    const proj_out = zml.nn.Linear.init(proj_out_view.createTensor("proj_out.weight", .{ .dim, .d }, .replicated), null, .d);
 
-    self.transformer_blocks = transformer_blocks;
-    self.transformer_block_buffers = transformer_block_buffers;
+    self.model = block.QwenImage21Transformer2DModel{
+        .pos_embed = pos_embed,
+        .time_text_embed = time_text_embed,
+        .txt_in = txt_in,
+        .img_in = img_in,
+        .modulation = modulation,
+        .transformer_blocks = transformer_blocks,
+        .norm_out = norm_out,
+        .proj_out = proj_out,
+    };
+
+    self.model_buffer = try self.model.load(allocator, io, platform, &self.store);
 }
 
 pub fn deinit(self: *TransformerStore, allocator: std.mem.Allocator) void {
-    for (0..TRANSFORMER_BLOCK_COUNT) |i| {
-        block.TransformerBlock.unloadBuffers(&self.transformer_block_buffers[i]);
-    }
+    block.QwenImage21Transformer2DModel.unloadBuffers(&self.model_buffer);
 
-    allocator.free(self.transformer_block_buffers);
-    allocator.free(self.transformer_blocks);
+    allocator.free(self.model.transformer_blocks);
+    allocator.free(self.model_buffer.transformer_blocks);
     self.store.deinit();
     self.registry.deinit();
 }
