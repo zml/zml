@@ -55,7 +55,7 @@ pub fn tokenize(
 // It should not be hardcoded but actually the value is always the same (length of the tokenized system prompt)
 // "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n"
 // -> [151644, 8948, 198, 1092, 30782, 408, 323, 23643, 279, 3897, 9934, 13, 151645, 198]
-const drop_idx = 14;
+pub const DROP_IDX = 14;
 
 const BufferizedPrompt = struct {
     input_ids: zml.Buffer,
@@ -80,13 +80,13 @@ pub fn bufferize(
     // const image_token_id = image_tokens_id[0];
     // _ = image_token_id; // autofix
 
-    const sliced_tokens = tokenized.tokens[drop_idx..];
+    // const sliced_tokens = tokenized.tokens[DROP_IDX..];
 
     const tokens_slice = try zml.Slice.alloc(allocator, .init(.{ .b = 1, .s = tokenized.tokens.len }, .u32));
     defer tokens_slice.free(allocator);
     // 0 represents text token "<|pad|>"
-    @memset(tokens_slice.items(u32), 0);
-    @memcpy(tokens_slice.items(u32)[0..sliced_tokens.len], sliced_tokens);
+    // @memset(tokens_slice.items(u32), 0);
+    @memcpy(tokens_slice.items(u32)[0..tokenized.tokens.len], tokenized.tokens);
 
     // const attention_mask_slice = try zml.Slice.alloc(allocator, .init(.{ .b = 1, .s = tokenized.tokens.len }, .bool));
     // defer attention_mask_slice.free(allocator);

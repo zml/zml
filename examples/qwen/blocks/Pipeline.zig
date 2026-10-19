@@ -3,6 +3,7 @@ const stdx = @import("stdx");
 const zml = @import("zml");
 
 const tokenizer = @import("./tokenizer.zig");
+const Scheduler = @import("./Scheduler.zig");
 const CompileArgs = @import("../compiler.zig").CompileArgs;
 const blocks = @import("../blocks.zig");
 const store = @import("../store.zig");
@@ -51,13 +52,15 @@ pub fn run_once(
     params: Params,
 ) !void {
     // Tokenizer
-    var tokenized = try tokenizer.tokenize(self.allocator, self.io, self.model_dir, prompt, .{});
+    var tokenized = try tokenizer.tokenize(self.allocator, self.io, self.model_dir, prompt, .{ .templated = true });
     defer tokenized.deinit(self.allocator);
 
     // Compile the model
+    const rng = zml.Tensor.Rng.init();
     const wrapper = PipelineWrapper{
         .model = self.language_model_store.model,
         .args = params.compile_args,
+        .rng = rng,
     };
 
     const input_tensor = zml.Tensor.init(.{ .bs = 1, .seq_len = tokenized.tokens.len }, .u32);
@@ -82,7 +85,10 @@ pub fn run_once(
     var exe_results = try exe.results(self.allocator);
     defer exe_results.deinit(self.allocator);
 
-    exe_args.set(.{ .{ .model = self.language_model_store.model_buffer, .args = params.compile_args_buffers }, bufferized.input_ids });
+    exe_args.set(.{
+        .{ .model = self.language_model_store.model_buffer, .args = params.compile_args_buffers, .rng = rng },
+        bufferized.input_ids,
+    });
 
     std.debug.print("\n\nStart exec\n\n", .{});
     exe.callOpts(self.io, exe_args, &exe_results, .{ .wait = true });
@@ -92,14 +98,51 @@ pub fn run_once(
     defer self.allocator.free(results);
 
     exe_results.fill(.{results});
-    std.debug.print("{f}\n", .{results[0]._shape});
+    std.debug.print("results[0]._shape: {f}\n", .{results[0]._shape});
 }
+
+// This value is the start of the system prompt
+const DROP_IDX = 14;
 
 const PipelineWrapper = struct {
     model: blocks.Qwen3VLModel,
     args: CompileArgs,
+    rng: zml.Tensor.Rng,
 
     pub fn forward(self: PipelineWrapper, input_ids: zml.Tensor) zml.Tensor {
-        return self.model.forward(input_ids, self.args);
+        const prompt_embeds = self.encode_prompt(input_ids);
+
+        const latent_w = 2 * self.args.width / (self.args.vae_scale_factor * 2);
+        const latent_h = 2 * self.args.height / (self.args.vae_scale_factor * 2);
+        const latents = self.rng.bitGenerator(.init(.{ .bs = 1, .d = latent_w * latent_h, .latents = self.args.in_channels }, .f32))[1];
+
+        const image_pad_mask = zml.Tensor.concatenate(&.{
+            zml.Tensor.constant(.init(.bool, false)).broad(.init(.{ .seq_len = prompt_embeds.dim(.seq_len) }, .bool)),
+            zml.Tensor.constant(.init(.bool, true)).broad(.init(.{ .seq_len = @divExact(latents.dim(.d), 4) }, .bool)),
+        }, .seq_len);
+        _ = image_pad_mask; // autofix
+
+        return latents;
+    }
+
+    // The python impl does nothing more since we don't have images in the prompt
+    fn encode_prompt(self: PipelineWrapper, input_ids: zml.Tensor) zml.Tensor {
+        return self.get_qwen_prompt_embeds(input_ids);
+    }
+
+    fn get_qwen_prompt_embeds(self: PipelineWrapper, input_ids: zml.Tensor) zml.Tensor {
+        const lang = self.model.forward(input_ids, self.args);
+        return lang.slice(.seq_len, .{ .start = DROP_IDX });
+    }
+
+    fn calculate_shift(self: PipelineWrapper, image_seq_len: f32) f32 {
+        const base_seq_len: f32 = @floatFromInt(self.args.base_image_seq_len orelse 256);
+        const max_seq_len: f32 = @floatFromInt(self.args.max_image_seq_len orelse 4096);
+        const base_shift = self.args.base_shift orelse 0.5;
+        const max_shift = self.args.max_shift orelse 1.15;
+
+        const m = (max_shift - base_shift) / (max_seq_len - base_seq_len);
+        const b = base_shift - m * base_seq_len;
+        return image_seq_len * m + b;
     }
 };
