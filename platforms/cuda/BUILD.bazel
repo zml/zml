@@ -1,5 +1,10 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library", "zig_test")
+
+zig_test(
+    name = "test",
+    deps = [":cuda"],
+)
 
 zig_binary(
     name = "compat_probe",
@@ -46,7 +51,11 @@ cc_library(
 
 zig_library(
     name = "cuda",
-    srcs = ["compat_probe.zig"],
+    srcs = [
+        "Capabilities.zig",
+        "compat_probe.zig",
+        "hardware_query.zig",
+    ],
     import_name = "platforms/cuda",
     main = "cuda.zig",
     tags = ["manual"],
@@ -54,11 +63,11 @@ zig_library(
     deps = [
         "//pjrt",
         "//platforms:options",
+        "//stdx",
     ] + select({
         "//platforms:cuda.enabled": [
             ":libzml_cuda",
             "//bazel",
-            "//stdx",
             "@rules_zig//zig/runfiles",
         ],
         "//conditions:default": [],

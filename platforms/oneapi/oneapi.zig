@@ -8,6 +8,12 @@ const pjrt = @import("pjrt");
 const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
+pub const Capabilities = @import("Capabilities.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+}
+
 const log = std.log.scoped(.@"zml/platforms/oneapi");
 
 pub fn isEnabled() bool {

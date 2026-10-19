@@ -51,7 +51,6 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 # repo_name = None prevents rules_swift from eagerly auto-registering toolchains.
 bazel_dep(name = "rules_swift", version = "3.6.1", repo_name = None)
 bazel_dep(name = "rules_zig", version = "0.17.0")
-
 bazel_dep(name = "tar.bzl", version = "0.10.4")
 bazel_dep(name = "llvm", version = "0.8.24")
 bazel_dep(name = "libxml2", version = "2.15.3")
@@ -201,7 +200,7 @@ cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_plugin")
 use_repo(cpu, "libzml_cpu_darwin_amd64", "libzml_cpu_darwin_arm64", "libzml_cpu_linux_amd64")
 
 cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
-use_repo(cuda, "cuda_nvml_dev_linux_sbsa", "cuda_nvml_dev_linux_x86_64", "cuda_nvtx_linux_sbsa", "cuda_nvtx_linux_x86_64", "libzml_cuda_linux_amd64", "libzml_cuda_linux_arm64", "zlib1g_linux_amd64", "zlib1g_linux_arm64")
+use_repo(cuda, "cuda_cudart_linux_sbsa", "cuda_cudart_linux_x86_64", "cuda_nvml_dev_linux_sbsa", "cuda_nvml_dev_linux_x86_64", "cuda_nvtx_linux_sbsa", "cuda_nvtx_linux_x86_64", "libzml_cuda_linux_amd64", "libzml_cuda_linux_arm64", "zlib1g_linux_amd64", "zlib1g_linux_arm64")
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
 use_repo(
@@ -216,6 +215,7 @@ use_repo(
     "amdrocm-profiler-base",
     "amdrocm-rccl",
     "amdrocm-runtime",
+    "amdrocm-runtime-dev",
     "amdrocm-solver",
     "amdrocm-sparse",
     "amdrocm-sysdeps",

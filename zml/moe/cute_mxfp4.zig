@@ -3,8 +3,9 @@
 const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
-const triton_mxfp4 = @import("triton_mxfp4.zig");
 pub const kernels = @import("cute_kernels/moe.zig");
+const triton_mxfp4 = @import("triton_mxfp4.zig");
+pub const Parameters = triton_mxfp4.Parameters;
 
 // `moe.zig`'s `refAllDecls` reaches this file but not its imports, so the
 // kernel emit tests are only collected if `kernels` is referenced here.
@@ -12,12 +13,21 @@ test {
     _ = kernels;
 }
 
-pub const Parameters = triton_mxfp4.Parameters;
-
 pub fn isAvailable(platform: *const zml.Platform) bool {
-    if (platform.target != .cuda) return false;
-    const cc = zml.platform.cuda.computeCapability(platform) orelse return false;
-    return cc.major == 10;
+    return switch (platform.capabilities) {
+        .cuda => |cuda| switch ((cuda orelse return false).compute) {
+            .sm100, .sm103 => true,
+            // Thor (SM101 renamed SM110) has tcgen05 and enough shared memory,
+            // but CuTe 4.8 documents this MMA atom only for SM100a/SM103a.
+            // TODO: validate CuTe compilation and execution on Thor.
+            .sm101, .sm110 => false,
+            // No tcgen05, and the 99 KiB shared-memory limit per CTA is below
+            // the 200-227 KiB required by the current tiles.
+            .sm120, .sm121 => false,
+            .sm70, .sm72, .sm75, .sm80, .sm86, .sm87, .sm89, .sm90 => false,
+        },
+        else => false,
+    };
 }
 
 pub fn validateOptions(opts: zml.moe.Options) void {

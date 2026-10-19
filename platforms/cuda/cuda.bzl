@@ -367,6 +367,8 @@ def _cuda_impl(mctx):
     return mctx.extension_metadata(
         reproducible = True,
         root_module_direct_deps = [
+            "cuda_cudart_linux_x86_64",
+            "cuda_cudart_linux_sbsa",
             "libzml_cuda_linux_amd64",
             "libzml_cuda_linux_arm64",
             "cuda_nvml_dev_linux_x86_64",

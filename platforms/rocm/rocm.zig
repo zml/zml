@@ -9,10 +9,33 @@ const platforms_options = @import("platforms/options");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
+const hardware_query = @import("hardware_query.zig");
+pub const Capabilities = @import("Capabilities.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+}
+
 const log = std.log.scoped(.@"zml/platforms/rocm");
 
 pub fn isEnabled() bool {
     return platforms_options.rocm_enabled;
+}
+
+/// Call after load(), using PJRT's localHardwareId (HIP's visible ordinal).
+/// Open the same bundled HIP runtime as PJRT; never change the current device.
+pub fn queryHardwareProperties(ordinal: i32) !Capabilities.Hardware.Properties {
+    if (comptime !isEnabled() or builtin.os.tag != .linux) return error.Unavailable;
+    if (ordinal < 0) return error.InvalidDevice;
+
+    const r = try bazel.runfiles(bazel_builtin.current_repository);
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const sandbox_path = try r.rlocation("libzml_rocm/sandbox", &path_buf) orelse return error.FileNotFound;
+    var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const lib_path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libamdhip64.so.7" });
+    var driver = try std.DynLib.open(lib_path);
+    defer driver.close();
+    return hardware_query.query(&driver, ordinal);
 }
 
 fn hasRocmDevices(io: std.Io) bool {

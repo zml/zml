@@ -5,8 +5,8 @@ const stdx = @import("stdx");
 const zml = @import("../../zml.zig");
 const metal = @import("metal/metal.zig");
 const tpu = @import("mosaic_tpu/mosaic_tpu.zig");
-const triton = @import("triton/triton.zig");
 const stablehlo = @import("stablehlo/stablehlo.zig");
+const triton = @import("triton/triton.zig");
 
 const PagedAttention = @This();
 
@@ -260,6 +260,7 @@ test "Backend.auto selects mosaic_tpu on TPU" {
         .pjrt_client = undefined,
         .state = zml.platform.State.init(.tpu),
         .devices = &.{},
+        .capabilities = .unknown(.tpu),
         .memories = &.{},
         .physical_mesh = undefined,
         .replicated_mesh = undefined,
@@ -278,6 +279,7 @@ test "Backend.auto selects triton on oneAPI" {
         .pjrt_client = undefined,
         .state = zml.platform.State.init(.oneapi),
         .devices = &.{},
+        .capabilities = .unknown(.oneapi),
         .memories = &.{},
         .physical_mesh = undefined,
         .replicated_mesh = undefined,

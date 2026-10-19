@@ -1,5 +1,5 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library", "zig_test")
 
 exports_files(
     ["merge_amdgpu_ids.zig"],
@@ -25,11 +25,18 @@ cc_library(
     name = "libzml_rocm",
     hdrs = ["rocm.h"],
     tags = ["manual"],
-    deps = ["@libzml_rocm"],
+    deps = [
+        "@amdrocm-runtime-dev//:hip_headers",
+        "@libzml_rocm",
+    ],
 )
 
 zig_library(
     name = "rocm",
+    srcs = [
+        "Capabilities.zig",
+        "hardware_query.zig",
+    ],
     import_name = "platforms/rocm",
     main = "rocm.zig",
     tags = ["manual"],
@@ -46,4 +53,9 @@ zig_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+zig_test(
+    name = "test",
+    deps = [":rocm"],
 )

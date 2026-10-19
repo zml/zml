@@ -227,7 +227,7 @@ test "block128 scaled dot layouts" {
     const platform = zml.testing.env();
     // FIXME: Add rocm when we have a PJRT plugin with native fp8 dot support (by the end of Sept 2026)
     if (platform.target != .cuda) return error.SkipZigTest;
-    const dtype: DataType = if (platform.target == .rocm and @import("platform.zig").rocm.computeCapability(platform) == .gfx942) .f8e4m3fnuz else .f8e4m3fn;
+    const dtype: DataType = .f8e4m3fn;
     const Local = struct {
         const Outputs = struct { actual: Tensor, expected: Tensor, linear: Tensor, linear_expected: Tensor };
 

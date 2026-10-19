@@ -1,5 +1,5 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library", "zig_test")
 
 zig_shared_library(
     name = "zmlxoneapi",
@@ -20,20 +20,26 @@ cc_library(
 
 zig_library(
     name = "oneapi",
+    srcs = ["Capabilities.zig"],
     import_name = "platforms/oneapi",
     main = "oneapi.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
-        "//bazel",
         "//pjrt",
         "//platforms:options",
-        "//stdx",
-        "@rules_zig//zig/runfiles",
     ] + select({
         "//platforms:oneapi.enabled": [
             ":libzml_oneapi",
+            "//bazel",
+            "//stdx",
+            "@rules_zig//zig/runfiles",
         ],
         "//conditions:default": [],
     }),
+)
+
+zig_test(
+    name = "test",
+    deps = [":oneapi"],
 )

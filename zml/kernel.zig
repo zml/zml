@@ -707,12 +707,18 @@ pub const cute = struct {
 };
 
 pub const fly = struct {
+    pub fn isAvailable(p: *const platform_.Platform) bool {
+        return switch (p.capabilities) {
+            .rocm => true,
+            else => false,
+        };
+    }
+
     /// Threads per wavefront: 64 on CDNA, 32 on RDNA.
     pub fn waveSize(p: *const platform_.Platform) i32 {
-        const cc = platform_.rocm.computeCapability(p) orelse return 64;
-        return switch (cc.architecture()) {
-            .cdna1, .cdna2, .cdna3, .cdna4 => 64,
-            .rdna2, .rdna3, .rdna3_5, .rdna4 => 32,
+        return switch (p.capabilities) {
+            .rocm => |rocm| @intCast((rocm orelse return 64).hardware.limits.waveSize),
+            else => @panic("Fly is only available on ROCM."),
         };
     }
 
@@ -740,12 +746,14 @@ pub const fly = struct {
     /// The matrix atom this device provides, or null when it has none: WMMA
     /// arrived with RDNA3, so gfx1030 has no matrix instruction at all.
     pub fn mmaFlavor(p: *const platform_.Platform) ?MmaFlavor {
-        const cc = platform_.rocm.computeCapability(p) orelse return .cdna3_mfma;
-        return switch (cc.architecture()) {
-            .cdna1, .cdna2, .cdna3, .cdna4 => .cdna3_mfma,
-            .rdna3, .rdna3_5 => .gfx11_wmma,
-            .rdna4 => .gfx120x_wmma,
-            .rdna2 => null,
+        return switch (p.capabilities) {
+            .rocm => |rocm| switch ((rocm orelse return null).compute.architecture()) {
+                .cdna1, .cdna2, .cdna3, .cdna4 => .cdna3_mfma,
+                .rdna3, .rdna3_5 => .gfx11_wmma,
+                .rdna4 => .gfx120x_wmma,
+                .rdna2 => null,
+            },
+            .cpu, .cuda, .tpu, .neuron, .oneapi, .metal, .furiosa => null,
         };
     }
     pub const layout = fly_builder.layout;

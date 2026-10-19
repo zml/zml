@@ -9,6 +9,12 @@ const platforms_options = @import("platforms/options");
 const stdx = @import("stdx");
 
 const compat_probe = @import("compat_probe.zig");
+const hardware_query = @import("hardware_query.zig");
+pub const Capabilities = @import("Capabilities.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+}
 
 const nvidiaLibsPath = "/cuda/";
 
@@ -28,6 +34,18 @@ fn findCudaSandbox(
 
 pub fn isEnabled() bool {
     return platforms_options.cuda_enabled;
+}
+
+/// The ordinal is local to CUDA_VISIBLE_DEVICES, as is PJRT's localHardwareId.
+/// Call after load() so the selected compatibility driver is already installed.
+/// Querying a device neither creates a context nor changes the current device.
+pub fn queryHardwareProperties(ordinal: i32) !Capabilities.Hardware.Properties {
+    if (comptime !isEnabled() or builtin.os.tag != .linux) return error.Unavailable;
+    if (ordinal < 0) return error.InvalidDevice;
+
+    var driver = try std.DynLib.open("libcuda.so.1");
+    defer driver.close();
+    return hardware_query.query(&driver, ordinal);
 }
 
 pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
