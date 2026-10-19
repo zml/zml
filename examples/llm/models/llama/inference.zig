@@ -48,7 +48,9 @@ pub const CompilationOptions = CompilationParameters;
 pub const Args = struct {
     io: std.Io,
     tokens_buf: *zml.Buffer,
+    next_token_buf: *zml.Buffer,
     token_index_buf: *zml.Buffer,
+    active_length_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
     attention_metadata_buffers: *const zml.Bufferized(zml.attention.Metadata),
@@ -94,6 +96,7 @@ const Forward = struct {
         weights: model.Model,
         tokens: zml.Tensor,
         token_index: zml.Tensor,
+        active_length: zml.Tensor,
         kv_cache: model.KvCache,
         rng: zml.Tensor.Rng,
         attention_metadata: zml.attention.Metadata,
@@ -129,11 +132,11 @@ const Forward = struct {
         const result = model.LmHead.forward(.{
             .lm_head = .init(input.weights),
             .hidden = hidden,
-            .tokens = input.tokens,
+            .active_length = input.active_length,
             .rng = input.rng,
         });
         return .{
-            .tokens = result.tokens,
+            .tokens = if (input.tokens.dim(.s) == 1) result.tokens.reuseBuffer(input.tokens) else result.tokens,
             .kv_cache = kv_cache.reuseBuffer(input.kv_cache),
             .rng = .{ ._state = result.rng._state.reuseBuffer(input.rng._state) },
         };
@@ -159,12 +162,13 @@ pub fn run(runner: *KernelRunner, args: Args) void {
         .inputs = .{
             .tokens = args.tokens_buf.*,
             .token_index = args.token_index_buf.*,
+            .active_length = args.active_length_buf.*,
             .kv_cache = args.kv_cache_buffers.*,
             .rng = args.rng_buffers.*,
             .attention_metadata = args.attention_metadata_buffers.*,
         },
         .outputs = .{
-            .tokens = args.tokens_buf,
+            .tokens = args.next_token_buf,
             .kv_cache = args.kv_cache_buffers,
             .rng = args.rng_buffers,
         },
@@ -196,6 +200,7 @@ fn compileKernel(
         .weights = llama_model,
         .tokens = zml.Tensor.init(.{ .s = seqlen }, .u32),
         .token_index = parameters.token_index,
+        .active_length = .init(.{}, .u32),
         .kv_cache = parameters.kv_cache,
         .rng = parameters.rng,
         .attention_metadata = parameters.attention_metadata,

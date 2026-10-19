@@ -36,6 +36,7 @@ pub const CompilationOptions = CompilationParameters;
 pub const Args = struct {
     io: std.Io,
     tokens_buf: *zml.Buffer,
+    next_token_buf: *zml.Buffer,
     token_index_buf: *zml.Buffer,
     active_length_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
@@ -205,11 +206,13 @@ pub fn run(runner: *KernelRunner, args: Args, layer_index_buffers: []const zml.B
     runner.sample.run(args.io, .{
         .inputs = .{
             .hidden = hidden_buffer,
+            .tokens = args.tokens_buf.*,
+            .active_length = args.active_length_buf.*,
             .rng = args.rng_buffers.*,
             .token_index = args.token_index_buf.*,
         },
         .outputs = .{
-            .tokens = args.tokens_buf,
+            .tokens = args.next_token_buf,
             .rng = args.rng_buffers,
             .token_index = args.token_index_buf,
         },
@@ -297,6 +300,8 @@ fn compileSample(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.
     return zml.FnExe(model.Sampler.sampleTokens).compile(allocator, io, platform, .{ .meshes = &parameters.meshes.all(), .program_name = phase.programName("qwen3_5", "sampler") }, .{.{
         .sampler = mdl.sampler(),
         .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
+        .tokens = .init(.{ .b = 1, .s = seqlen }, .u32),
+        .active_length = .init(.{}, .u32),
         .rng = parameters.rng,
         .token_index = parameters.token_index,
     }});

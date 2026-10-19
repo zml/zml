@@ -211,6 +211,7 @@ pub const Model = struct {
         self: Model,
         tokens_: zml.Tensor,
         token_index: zml.Tensor,
+        active_length: zml.Tensor,
         kv_cache: KvCache,
         rng: zml.Tensor.Rng,
         attention_metadata: zml.attention.Metadata,
@@ -229,7 +230,7 @@ pub const Model = struct {
         const sample = LmHead.forward(.{
             .lm_head = self.lmHead(),
             .hidden = out,
-            .tokens = tokens,
+            .active_length = active_length,
             .rng = rng,
         });
 
@@ -350,7 +351,7 @@ pub const LmHead = struct {
     pub const Input = struct {
         lm_head: LmHead,
         hidden: zml.Tensor,
-        tokens: zml.Tensor,
+        active_length: zml.Tensor,
         rng: zml.Tensor.Rng,
     };
 
@@ -361,8 +362,8 @@ pub const LmHead = struct {
 
     pub fn forward(input: Input) Output {
         const self = input.lm_head;
-        const tokens = input.tokens.withPartialTags(.{.s});
-        const hidden = self.norm.forward(input.hidden.withPartialTags(.{ .s, .d }));
+        const last_index = input.active_length.convert(.i32).addConstant(-1);
+        const hidden = self.norm.forward(input.hidden.withPartialTags(.{ .s, .d }).slice(.s, .dyn(last_index, 1)));
 
         var logits = blk: {
             if (self.lm_head) |lm_head| {
@@ -376,7 +377,7 @@ pub const LmHead = struct {
             logits = logits.rename(.{ .d = .voc });
 
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_opts, input.rng);
-        return .{ .tokens = next_tokens.convert(tokens.dtype()).reuseBuffer(tokens), .rng = new_rng };
+        return .{ .tokens = next_tokens.convert(.u32), .rng = new_rng };
     }
 };
 

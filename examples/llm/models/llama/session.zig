@@ -139,6 +139,8 @@ pub const Session = struct {
 
         var prefill_tokens_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, prefill_tokens_slice);
         defer prefill_tokens_buffer.deinit();
+        var active_length_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.len, .u32);
+        defer active_length_buffer.deinit();
 
         const params = self.compiled_model.params;
         var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
@@ -150,17 +152,20 @@ pub const Session = struct {
         };
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
+        var next_token_buffer: zml.Buffer = undefined;
         inference.run(&self.prefill, .{
             .io = self.io,
             .tokens_buf = &prefill_tokens_buffer,
+            .next_token_buf = &next_token_buffer,
             .token_index_buf = &self.token_index_buffers[0],
+            .active_length_buf = &active_length_buffer,
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
             .attention_metadata_buffers = &attention_metadata_buffers,
         });
-        try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
 
-        self.last_generated_token = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
+        defer next_token_buffer.deinit();
+        self.last_generated_token = try next_token_buffer.getValue(u32, self.io);
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
@@ -173,6 +178,8 @@ pub const Session = struct {
         var last_token_id: u32 = self.last_generated_token;
         var current_token_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .s = 1 }, .u32), @ptrCast(&last_token_id));
         defer current_token_buffer.deinit();
+        var active_length_buffer: zml.Buffer = try .scalar(self.io, self.platform, 1, .u32);
+        defer active_length_buffer.deinit();
 
         const params = self.compiled_model.params;
         var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform);
@@ -190,7 +197,9 @@ pub const Session = struct {
             inference.run(&self.decode, .{
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
+                .next_token_buf = &current_token_buffer,
                 .token_index_buf = &self.token_index_buffers[all_tokens.items.len],
+                .active_length_buf = &active_length_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
                 .attention_metadata_buffers = &attention_metadata_buffers,

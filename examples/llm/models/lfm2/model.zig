@@ -209,7 +209,7 @@ pub const Model = struct {
         self: Model,
         tokens: zml.Tensor,
         tokens_position_offset: zml.Tensor,
-        actual_seq_len: zml.Tensor,
+        active_length: zml.Tensor,
         rng: zml.Tensor.Rng,
         cache_: Cache,
         attention_metadata: zml.attention.Metadata,
@@ -233,7 +233,7 @@ pub const Model = struct {
                 .layer = layer,
                 .hidden = hidden,
                 .tokens_position_offset = tokens_position_offset,
-                .actual_seq_len = actual_seq_len,
+                .active_length = active_length,
                 .cache = cache,
                 .conv_cache_index = conv_cache_index,
                 .kv_cache_index = kv_cache_index,
@@ -251,6 +251,7 @@ pub const Model = struct {
             .embed_tokens = self.embed_tokens,
             .hidden = hidden,
             .tokens = tokens,
+            .active_length = active_length,
             .rng = rng,
         });
         return .{ result.tokens, cache.reuseBuffer(cache_), result.rng };
@@ -298,6 +299,7 @@ pub const LmHead = struct {
         embed_tokens: TokenEmbedding,
         hidden: zml.Tensor,
         tokens: zml.Tensor,
+        active_length: zml.Tensor,
         rng: zml.Tensor.Rng,
     };
 
@@ -315,9 +317,12 @@ pub const LmHead = struct {
 
     pub fn forward(input: Input) Output {
         const self = input.lm_head;
-        const logits = input.embed_tokens.unembed(self.embedding_norm.forward(input.hidden));
+        const last_index = input.active_length.convert(.i32).addConstant(-1);
+        const hidden = input.hidden.slice(.seq, .dyn(last_index, 1));
+        const logits = input.embed_tokens.unembed(self.embedding_norm.forward(hidden));
         const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, input.rng);
-        return .{ .tokens = new_tokens.convert(input.tokens.dtype()).reuseBuffer(input.tokens), .rng = new_rng };
+        const tokens = new_tokens.convert(.u32);
+        return .{ .tokens = if (input.tokens.dim(.seq) == 1) tokens.reuseBuffer(input.tokens) else tokens, .rng = new_rng };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(LmHead)) void {
@@ -338,7 +343,7 @@ pub const DecoderLayer = struct {
         layer: DecoderLayer,
         hidden: zml.Tensor,
         tokens_position_offset: zml.Tensor,
-        actual_seq_len: zml.Tensor,
+        active_length: zml.Tensor,
         cache: Cache,
         conv_cache_index: zml.Tensor,
         kv_cache_index: zml.Tensor,
@@ -388,7 +393,7 @@ pub const DecoderLayer = struct {
                 const residual, const updated_conv_cache = operator.forward(
                     self.operator_norm.forward(input.hidden),
                     input.tokens_position_offset,
-                    input.actual_seq_len,
+                    input.active_length,
                     cache.conv,
                     conv_cache_index,
                     input.conv_parameters,
@@ -451,7 +456,7 @@ pub const ShortConv = struct {
         };
     }
 
-    pub fn forward(self: ShortConv, input: zml.Tensor, tokens_position_offset: zml.Tensor, actual_seq_len: zml.Tensor, cache_: ConvCache, cache_index: zml.Tensor, parameters: ConvParameters) struct { zml.Tensor, ConvCache } {
+    pub fn forward(self: ShortConv, input: zml.Tensor, tokens_position_offset: zml.Tensor, active_length: zml.Tensor, cache_: ConvCache, cache_index: zml.Tensor, parameters: ConvParameters) struct { zml.Tensor, ConvCache } {
         var cache = cache_;
         const BCx = self.in_proj.forward(input.withPartitioning(.model, .{ .d = .replicated }));
 
@@ -459,10 +464,10 @@ pub const ShortConv = struct {
         const Bx = B.mul(x);
 
         const conv_out = if (parameters.is_prefill) b: {
-            const actual_seq_len_i32 = actual_seq_len.convert(.i32);
-            const start = actual_seq_len_i32.sub(zml.Tensor.scalar(@as(i32, @intCast(self.config.conv_L_cache)), .i32)).maximum(zml.Tensor.scalar(@as(i32, 0), .i32));
+            const active_length_i32 = active_length.convert(.i32);
+            const start = active_length_i32.sub(.scalar(self.config.conv_L_cache, .i32)).maximum(.scalar(0, .i32));
             const cache_seq_indices = lkp: {
-                const n = actual_seq_len_i32.sub(start);
+                const n = active_length_i32.sub(start);
                 const left_pad = zml.Tensor.scalar(@as(i32, @intCast(self.config.conv_L_cache)), .i32).sub(n);
                 const sh = tokens_position_offset.shape().insert(.last, .{ .seq = self.config.conv_L_cache });
                 break :lkp zml.Tensor.iota(sh, .seq).convert(.u32).add(left_pad.convert(.u32).broad(sh)).broad(sh);
