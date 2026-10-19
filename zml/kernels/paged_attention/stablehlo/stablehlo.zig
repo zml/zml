@@ -387,29 +387,16 @@ test "StableHLO paged attention handles a partial page after a cached prefix" {
         .context_lengths = .{ 1, 0, 0 },
         .capacity = 4,
         .expected = &PagedAttentionTestData.prefix,
-        .unused_k = std.math.nan(f32),
-        .unused_v = std.math.nan(f32),
         .check_single_page = true,
     });
 }
 
-test "StableHLO paged attention ignores NaNs in unused keys during decode" {
+test "StableHLO paged attention ignores NaNs in unused keys and values during decode" {
     try testStablehloPagedAttention(.{
         .query_counts = .{ 1, 1, 1 },
         .context_lengths = .{ 2, 4, 7 },
         .capacity = 4,
         .expected = &PagedAttentionTestData.decode,
-        .unused_k = std.math.nan(f32),
-    });
-}
-
-test "StableHLO paged attention ignores NaNs in unused values during decode" {
-    try testStablehloPagedAttention(.{
-        .query_counts = .{ 1, 1, 1 },
-        .context_lengths = .{ 2, 4, 7 },
-        .capacity = 4,
-        .expected = &PagedAttentionTestData.decode,
-        .unused_v = std.math.nan(f32),
     });
 }
 
@@ -430,8 +417,6 @@ fn testStablehloPagedAttention(case: struct {
     context_lengths: [3]u32 = .{ 0, 0, 0 },
     capacity: u32,
     expected: []const [2]f32,
-    unused_k: f32 = 0,
-    unused_v: f32 = 0,
     check_single_page: bool = false,
 }) !void {
     const platform = zml.testing.env();
@@ -455,8 +440,8 @@ fn testStablehloPagedAttention(case: struct {
     const kv_cache: KvCache = .{ .split = .{ .k = .fromShape(kv_shape), .v = .fromShape(kv_shape) } };
 
     var q_data: [12][2]f32 = @splat(@splat(std.math.nan(f32)));
-    var k_data: [10][page_size][2]f32 = @splat(@splat(@splat(case.unused_k)));
-    var v_data: [10][page_size][2]f32 = @splat(@splat(@splat(case.unused_v)));
+    var k_data: [10][page_size][2]f32 = @splat(@splat(@splat(std.math.nan(f32))));
+    var v_data: [10][page_size][2]f32 = @splat(@splat(@splat(std.math.nan(f32))));
     var expected: [12][2]f32 = @splat(@splat(0));
     var seq_lens: [3]i32 = undefined;
     var query_start_len: [4]i32 = .{ 0, 0, 0, 0 };
