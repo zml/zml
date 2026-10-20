@@ -126,7 +126,7 @@ const BlockWrapper = struct {
         return self.tblock.forward(
             x.withTags(.{ .bs, .seq_len, .d }),
             encoder_hidden_states.withTags(.{ .bs, .seq_len, .d }),
-            timestep_,
+            timestep_.withTags(.{.bs}),
             img_mask,
             self.args,
         );

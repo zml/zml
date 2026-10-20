@@ -127,7 +127,7 @@ pub fn forward(
     }, .seq_len);
     const rotary_emb = self.pos_embed.forward(text_len, height, width);
 
-    const timestep = timestep_.convert(x.dtype()).withTags(.{.bs});
+    const timestep = timestep_.convert(x.dtype());
     const timesteps = zml.Tensor.concatenate(&.{ timestep, zml.Tensor.zeroes(.init(.{ .bs = 1 }, timestep.dtype())) }, .bs);
     const temb = self.time_text_embed.forward(timesteps, x).withTags(.{ .bs, .d });
     const modulation = self.modulation.forward(temb.silu(), temb.dtype());
