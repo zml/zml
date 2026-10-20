@@ -157,7 +157,7 @@ pub const Loader = struct {
         // Staging is reused, so a byte no part writes would publish another
         // tensor's bytes rather than the zeroes a fresh allocation used to
         // give: the parts must cover the tensor, or its gaps be zeroed below.
-        try backend.checkParts(spec.parts, tensor_bytes, spec.zero_fill);
+        try backend.checkParts(self.allocator, spec.parts, tensor_bytes, spec.zero_fill);
         self.admission.reserve(self.io, tensor_bytes);
         defer self.admission.release(self.io, tensor_bytes);
         stage.* = "allocate staging for";
@@ -194,11 +194,7 @@ pub const Loader = struct {
             const source = try self.allocator.alloc(u8, @intCast(lattice.spans().?.src));
             defer self.allocator.free(source);
             try self.readInto(&reader, current.src_offset, source);
-            const width: usize = @intCast(current.width);
-            var runs: backend.Lattice.Cursor = .init(lattice, 0, lattice.runs());
-            while (runs.next()) |run| {
-                @memcpy(tensor[@intCast(run.dst)..][0..width], source[@intCast(run.src - current.src_offset)..][0..width]);
-            }
+            lattice.copyRuns(0, lattice.runs(), @intFromPtr(tensor.ptr), @intFromPtr(source.ptr) -% @as(usize, @intCast(current.src_offset)));
         }
         stage.* = "transfer";
         // The shape's sharding places the bytes; a shape without a mesh is

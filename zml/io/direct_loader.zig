@@ -524,7 +524,7 @@ pub const Loader = struct {
                     return error.EmptyTensor;
                 }
             }
-            backend.checkParts(spec.parts, placed_shape.byteSize(), spec.zero_fill) catch |err| {
+            backend.checkParts(self.allocator, spec.parts, placed_shape.byteSize(), spec.zero_fill) catch |err| {
                 load_log.debug("destination {f} from {s} in {s}: {d} parts for {d} bytes, zero_fill={}, first source {d} bytes: {s}", .{ spec.shape, first.name, first.file_uri, spec.parts.len, placed_shape.byteSize(), spec.zero_fill, first.byteSize(), @errorName(err) });
                 return err;
             };
@@ -3129,20 +3129,25 @@ fn landExtent(
     const bounce = try scratch.bounceBuffer(extent.len);
     try reader.read(extent.source_slot, &.{bounce}, extent.file_offset, extent.minimum_len);
     var sink: CopySink = .{ .bounce = bounce, .file_offset = extent.file_offset, .blocks = blocks, .block_size = block_size };
-    for (items) |item| try walkItem(item, landings, &sink);
+    for (items) |item| try copyItem(item, landings, &sink);
 }
 
 /// Hands `sink` every run of `item` as `place(file offset, landing, len)`,
 /// in run order, cut where the destination's box changes
 /// (`ShardGrid.runEnd`).
 fn walkItem(item: Batch.Plan.Item, landings: []const u64, sink: anytype) !void {
-    const grid = &item.destination.grid;
-    const table = landings[item.landing_start..][0..grid.box_count];
-    const width = item.lattice.width;
-    var runs: backend.Lattice.Cursor = .init(item.lattice, item.first, item.end);
+    const table = landings[item.landing_start..][0..item.destination.grid.box_count];
+    try walkRuns(item.lattice, item.first, item.end, item.clip_start, item.clip_end, &item.destination.grid, table, sink);
+}
+
+/// `walkItem` for runs `first` to `end` of `lattice`, clipped to the
+/// destination range `[clip_start, clip_end)`.
+fn walkRuns(lattice: backend.Lattice, first: u64, end: u64, clip_start: u64, clip_end: u64, grid: *const ShardGrid, table: []const u64, sink: anytype) !void {
+    if (first >= end) return;
+    var runs: backend.Lattice.Cursor = .init(lattice, first, end);
     while (runs.next()) |run| {
-        var at = @max(run.dst, item.clip_start);
-        const stop = @min(run.dst + width, item.clip_end);
+        var at = @max(run.dst, clip_start);
+        const stop = @min(run.dst + lattice.width, clip_end);
         var source = run.src + (at - run.dst);
         while (at < stop) {
             const piece_end = grid.runEnd(at, stop);
@@ -3150,6 +3155,46 @@ fn walkItem(item: Batch.Plan.Item, landings: []const u64, sink: anytype) !void {
             source += piece_end - at;
             at = piece_end;
         }
+    }
+}
+
+/// `walkItem` from the bounce buffer, a stretch at a time where that pays:
+/// a stretch of the destination landing in one piece, inside one run of
+/// the grid and one block, has its whole runs copied by
+/// `Lattice.copyRuns`, and only the runs its ends cut go one at a time. A
+/// stretch costs a few bisections, so items with few runs per stretch (a
+/// part of a few wide runs, a grid that cuts every row) are walked.
+fn copyItem(item: Batch.Plan.Item, landings: []const u64, sink: *CopySink) !void {
+    const lattice = item.lattice;
+    const grid = &item.destination.grid;
+    if (lattice.dims.len == 0 or item.first >= item.end) return walkItem(item, landings, sink);
+    const start = @max(item.clip_start, lattice.at(item.first).dst);
+    const stop = @min(item.clip_end, lattice.at(item.end - 1).dst + lattice.width);
+    if (start >= stop) return;
+    const stretches = grid.runCount(start, stop) + (stop - start) / sink.block_size + 1;
+    if (item.end - item.first < 16 * stretches) return walkItem(item, landings, sink);
+    const table = landings[item.landing_start..][0..grid.box_count];
+    const source = @intFromPtr(sink.bounce.ptr) -% @as(usize, @intCast(sink.file_offset));
+    var at = start;
+    while (at < stop) {
+        const landing: usize = @intCast(table[grid.boxOf(at)] +% grid.boxOffset(at));
+        const in_block = landing % sink.block_size;
+        const stretch_end = @min(grid.runEnd(at, stop), at + (sink.block_size - in_block));
+        // The address logical offset zero would have, were the whole
+        // destination laid out like this stretch.
+        const destination = @intFromPtr(sink.blocks[landing / sink.block_size].ptr) + in_block -% @as(usize, @intCast(at));
+        const touched = @max(item.first, lattice.firstEndingAfter(at));
+        const whole = @max(item.first, lattice.firstStartingFrom(at));
+        const whole_end = @min(item.end, lattice.firstEndingAfter(stretch_end));
+        const touched_end = @min(item.end, lattice.firstStartingFrom(stretch_end));
+        if (whole < whole_end) {
+            try walkRuns(lattice, touched, whole, at, stretch_end, grid, table, sink);
+            lattice.copyRuns(whole, whole_end, destination, source);
+            try walkRuns(lattice, whole_end, touched_end, at, stretch_end, grid, table, sink);
+        } else {
+            try walkRuns(lattice, touched, touched_end, at, stretch_end, grid, table, sink);
+        }
+        at = stretch_end;
     }
 }
 

@@ -95,6 +95,15 @@ pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
     return self.id_to_sources.get(id);
 }
 
+/// The source `tensor`'s binding loads, in `tensor`'s shape: to rework a
+/// tensor bound elsewhere with `Source` ops, then `Source.rebind` it. Null
+/// when `tensor` is unbound, or transformed by a program.
+pub fn sourceOf(self: *TensorStore, tensor: Tensor) ?Source {
+    const binding = self.id_to_sources.get(tensor.id) orelse return null;
+    if (binding.transformed) return null;
+    return .ofBinding(self, binding, tensor.shape());
+}
+
 pub fn getShape(self: *const TensorStore, key: []const u8) ?Shape {
     const entry_ptr = self.getPtrFromKey(key) orelse return null;
     return entry_ptr.shape;

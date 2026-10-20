@@ -5591,10 +5591,122 @@ build, reverted): planning 1-2 ms per batch (73-112 ms in the 25th pass).
 - A destination with strided parts is planned whole in the plan of its
   first part's file, so its jobs are claimed with that file's.
 
+## Twenty-seventh pass: swizzles as Sources, DeepSeek on GB300 (2026-10-20)
+
+Phase 3 of `TensorStore.Source`: the block-scale swizzles are written with
+Source ops and the loader places them from the checkpoint; their pack
+programs are gone. Measured on gb300-1 (2 of 4 GB300, 953 GB RAM, four
+NVMe in RAID 0), DeepSeek-V4.1-Flash, warm page cache, llmd with the
+loader's debug scopes (a temporary local edit there, not committed).
+
+### zml
+
+- `Lattice.copyRuns`: copies a range of runs with nested loops over the two
+  innermost dimensions, a run of 1, 2, 4, 8 or 16 bytes as one unaligned
+  load and store, others by `memcpy`; head and tail rows go run by run.
+  The direct loader's bounce copies use it a stretch at a time
+  (`copyItem`): a stretch is a destination range inside one run of the
+  grid and one block, so it lands linearly; the runs a stretch's ends cut,
+  and items with fewer than 16 runs per stretch, keep the per-run walk
+  (`walkRuns`). The buffered loader copies strided parts with it too.
+- Disjointness of strided parts (`checkParts`, which now takes an
+  allocator): parts are grouped into clusters whose spans meet. A cluster
+  of more than 8 parts with at most 2^21 runs lists and sorts its runs (a
+  column-split swizzle: 384 parts each spanning the tensor made the
+  pairwise check quadratic, 20 s of DeepSeek's front end). Otherwise pair
+  by pair (`overlaps`): exact by bisection when one part has at most 1024
+  runs; else a bounded search over index differences when the footprints
+  repeat with the same strides, merged or, failing that, as they are
+  (counts and widths may differ); else `UnsupportedLayout`.
+- `Source.ofBinding` / `TensorStore.sourceOf`: the source a binding loads
+  (a checkpoint tensor relabeled, or the layout's parts as pieces), in a
+  tensor's shape; `Source.rebind` binds a source in place of a tensor's
+  binding, in its memory. llmd reworks a `Linear`'s bound scales with it.
+- `Source.transpose` treats a permutation that only moves axes of one
+  element as a reshape. The FP8 swizzle's `(qout, device, k)` transpose
+  with one column device otherwise cut its lattice into 192 pieces.
+- Tests: `copyRuns` against the cursor on random lattices; footprint and
+  part overlap verdicts against byte enumeration (same strides, different
+  widths and counts, few and many runs); clusters of 9-16 interleaved
+  parts. The layout error test's unprovable pair now has over 1024 runs per
+  part (the 128-run pair is now proven). Shifting the fast copy's
+  destination by one fails three zml and two llmd tests.
+
+### llmd (`weights.zig`)
+
+- `swizzleBlockScales(T, stacked)` and `swizzleBlockFp8Scale(T, scales,
+  spread, shape)`, generic over `Tensor` and `TensorStore.Source`: the
+  former programs' ops, unchanged.
+- `bindExpert` stacking `.swizzled` (cute MXFP4 and FlashInfer NVFP4 block
+  scales) and `.fp4` (FlashInfer NVFP4 weights: the stacked bytes bitcast
+  to `f4e2m1`). `bindExpertNvfp4CutlassWeight` and
+  `bindExpertNvfp4CutlassBlockScale` are gone.
+- `maybeSwizzleBlockFp8Scales` → `swizzleBlockFp8Scales` per projection:
+  `store.sourceOf(scales)`, swizzled, `rebind`; fused scales included.
+- Removed: `Recipe.stack_nvfp4_cutlass_weight`,
+  `stack_nvfp4_cutlass_block_scale`, `swizzle_block_fp8_scale`, `Stack`,
+  `StackNvfp4CutlassWeight`, `packStack` and the three pack programs.
+  NVFP4 global scales and dequantizations stay programs (they compute).
+- Tests (CPU, through the loader, against the kernels' index formula):
+  interleaved expert scales padded to 128x4 on 1, 2 and 4 devices; FP4
+  relabel; block-FP8 scales plain and fused (DeepSeek's `wq_a`+`wkv`),
+  split by rows and by columns, on 1, 2 and 4 devices.
+
+### Results
+
+DeepSeek-V4.1-Flash, `CUDA_VISIBLE_DEVICES=0,1`, `--token-batch-size=256
+--batch-size=1`, cute MXFP4 experts, 467 GiB:
+
+| | baseline (26th pass) | swizzles as Sources |
+| --- | --- | --- |
+| loaded weights | 79.6 s (first), 66.5 s warm, 7.0 GiB/s | 15.4 s, 14.9 s, 30-31 GiB/s |
+| pack programs | 10 programs, 330 tensors, 3 execute batches (17 GiB) | 1 program (`wo_a` to BF16), 40 tensors |
+| main batch | 450 GiB in 65 s | 466 GiB in 14.9 s |
+| worker wait in destination creation | 11.3 ms per read | 0.16-0.2 ms per read |
+| gather jobs | 10,840 | 12,090-23,890 |
+
+- The baseline's workers spent most of their time creating destinations:
+  every per-expert scale was its own program input, about 50K device
+  buffers of 368 KB, each a `createBuffersForAsyncHostToDevice` per device.
+- First swizzle build: 39.5 s, of which 20 s were the front end's quadratic
+  overlap check (above), before the main batch was published.
+- Answers: "Paris" and "391" (17 x 23), with reasoning.
+- The calibration picked 16 MiB requests in one run and 8 MiB in the next.
+- Width sweep, DeepSeek's layer forward stubbed out so compilation takes
+  2.3 s instead of 67 s (a temporary edit on gb300-1, as are the width
+  environment variable and copy counters below): width 16 13.3 s (35.1
+  GiB/s), 24 12.0 s, 32 11.7 s, 48 11.2 s (41.5 GiB/s); the full model at
+  width 32 12.45 s, answers unchanged. Sixteen `dd` with O_DIRECT read
+  57 GB/s from the RAID.
+- Bounce copies (`landExtent` through `copyItem`): 94.8K extents, 119.8
+  GiB, 22-27 s of worker time summed (about 1.5 s per worker at width 16).
+  `direct_io=auto` reads a file buffered when it is mostly cached, so how
+  much goes through the bounce buffer follows the page cache of this
+  shared host: 16.5 GiB in one run.
+- `bazel test //zml:test` 326 pass, 12 skip; `//llmd:weights_test` 19
+  tests pass.
+
+### Left open
+
+- Model compilation takes 67 s before the load starts; llmd compiles in
+  `init` and loads after, so overlapping the two would hide most of the
+  load.
+- The default width (16) leaves DeepSeek 15% slower than 48 on this host;
+  the GB300 sweeps behind the default were flat from 12 to 48 on lighter
+  models.
+- Destination creation still costs 22-27 ms for some tensors (40 above
+  20 ms in one run).
+- Not run: NVFP4 (FlashInfer) checkpoints, Blackwell FP8 models other than
+  DeepSeek, TP=4.
+
 ## Open work
 
+- 2026-10-20 swizzles as Sources (twenty-seventh pass, zml and llmd):
+  DeepSeek-V4.1-Flash loads in 15 s on two GB300 (was 66.5 s) and answers
+  correctly. Next: phase 4, programs that take Sources as inputs.
 - 2026-10-18 strided parts in the loader and placement without rows
-  (twenty-sixth pass, uncommitted, zml and llmd): Llama TP=4 plans in 1-4 ms
+  (twenty-sixth pass, committed with the 24th and 25th as zml omuqxqpu and
+  monorepo rwqvkpqy): Llama TP=4 plans in 1-4 ms
   (was 85 ms); row interleaves, broadcasts and small transposes load as
   gather jobs; llmd's `Recipe.fuse` and interleaved `Recipe.stack` are gone.
   Not measured on a model that gathers.

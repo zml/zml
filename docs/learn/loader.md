@@ -120,7 +120,10 @@ enumerating rows. `bind` lowers them to the binding's `TensorStore.Layout`:
 byte `Part`s of the destination's logical bytes (row-major bytes of its
 shape, before the sharding splits them), each a run of `width` bytes
 repeated over strided dimensions. A source that is one whole checkpoint
-tensor binds plainly, like `createTensor`.
+tensor binds plainly, like `createTensor`. `TensorStore.sourceOf` turns a
+binding back into a source, so code that receives a bound tensor (a
+`Linear`'s scales) can rework it with more ops and `Source.rebind` it in
+place of the old binding.
 
 `load` checks a composite binding before submitting anything: the layout
 fills the tensor's bytes, it has a part, each part reads a source of the
@@ -130,8 +133,11 @@ part of at most 64 runs, or of runs of at least 1 MiB, becomes one load part
 per run. A composite with any other strided part (many small runs: row
 interleaves, transposes, broadcasts) goes to the backend as strided parts,
 which the direct backend gathers (below). Strided parts must land in run
-order without overlapping; two that interleave are checked exactly when they
-repeat with the same stride, and are `UnsupportedLayout` otherwise. Strided
+order without overlapping. Two that interleave are checked exactly when one
+of them has at most 1024 runs (each looked for among the other's), or when
+they repeat with the same strides, before or after merging the runs that
+touch (a search over the differences of their indices); any other pair is
+`UnsupportedLayout`. Strided
 parts into a host memory space are `UnsupportedLayout` too. A transformed
 binding with a layout feeds the assembled tensor to its executable as the
 one input (`loadExecute`).
@@ -163,12 +169,23 @@ takes one piece per block, whatever the interleave's granularity. A part
 whose source runs are in order reads just its runs of the range, scattered
 straight into place when the read is exact; a broadcast or a transpose reads
 its whole source range in every job through the worker's bounce buffer, and
-must fit one read. Bytes no part covers land as zeros.
+must fit one read. From the bounce buffer, the runs of a stretch that lands
+in one piece (one run of the grid, inside one block) are copied by nested
+loops over the part's two innermost dimensions, a run of up to 16 bytes as
+one load and one store (`Lattice.copyRuns`); only the runs a stretch's ends
+cut, and items with few runs per stretch, go one run at a time. Bytes no part
+covers land as zeros.
+
+The block-scale swizzles are sources too: llmd lays MXFP4 and NVFP4 expert
+scales, and Blackwell's block-FP8 scales, out in the 128x4 blocks the
+block-scaled MMA reads with pads, splits, transposes and broadcasts, so the
+loader gathers them from the checkpoint in their final layout: runs of four
+bytes, from a source read once per job. A transpose that only moves axes of
+one element is a reshape and leaves the pieces alone.
 
 What stays a program: anything that computes rather than moves bytes, such
-as a dtype conversion or dequantization, and the block-scale swizzles, which
-are still written as programs. These remain transformed bindings delivered
-by `loadExecute`.
+as a dtype conversion or dequantization. These remain transformed bindings
+delivered by `loadExecute`.
 
 ## Errors and diagnostics
 

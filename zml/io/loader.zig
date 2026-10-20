@@ -264,7 +264,7 @@ pub const Loader = struct {
         for (bindings, executables) |binding, executable| {
             if (executable.binding.layout) |layout| {
                 const first = parts.items.len;
-                try appendCompositeParts(&parts, binding.tensor.id, executable.exe.input_shapes[0], executable.binding, layout);
+                try appendCompositeParts(self.allocator, &parts, binding.tensor.id, executable.exe.input_shapes[0], executable.binding, layout);
                 specs[next] = .{
                     .shape = executable.exe.input_shapes[0],
                     .memory = .default,
@@ -600,7 +600,7 @@ fn prepareModelLoad(
             }
             const first_part = context.parts.items.len;
             if (sources.layout) |layout| {
-                appendCompositeParts(context.parts, tensor.id, tensor.shape(), sources, layout) catch |err| {
+                appendCompositeParts(context.allocator, context.parts, tensor.id, tensor.shape(), sources, layout) catch |err| {
                     context.err = err;
                     return;
                 };
@@ -674,6 +674,7 @@ fn loadPartCount(binding: TensorStore.Binding) usize {
 /// (`checkParts`: inside each source and the tensor, disjoint). Strided
 /// parts must not go to a host memory space.
 fn appendCompositeParts(
+    allocator: std.mem.Allocator,
     parts: *std.ArrayList(LoadPart),
     id: Tensor.Id,
     shape: Shape,
@@ -741,7 +742,7 @@ fn appendCompositeParts(
             return lhs.dst_offset < rhs.dst_offset;
         }
     }.lessThan);
-    backend.checkParts(appended, shape.byteSize(), true) catch |err| {
+    backend.checkParts(allocator, appended, shape.byteSize(), true) catch |err| {
         load_log.debug("composite tensor {} {f} of {d} bytes: parts overlap or leave the sources or the tensor ({s})", .{ id, shape, shape.byteSize(), @errorName(err) });
         return if (err == error.UnsupportedLayout) error.UnsupportedLayout else error.InvalidLayout;
     };
@@ -1959,15 +1960,16 @@ test "composite layouts that do not fit their tensor fail before submission" {
             .{ .source = 0, .dst_offset = 0, .width = 48 },
             .{ .source = 1, .dst_offset = 48, .width = 16 },
         }), .expected = error.EmptyTensor },
-        // Strided parts whose runs overlap; two whose runs interleave with
-        // different strides, which the checks cannot prove disjoint.
+        // Strided parts whose runs overlap; two of over a thousand runs
+        // each that interleave with different strides, which the checks
+        // cannot prove disjoint.
         .{ .tensor = Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{
             .{ .dst_offset = 0, .width = 2, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 4 }} },
             .{ .dst_offset = 2, .width = 4, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 4 }} },
         }), .expected = error.InvalidLayout },
-        .{ .tensor = Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{
-            .{ .dst_offset = 0, .width = 1, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 4 }} },
-            .{ .dst_offset = 2, .width = 1, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 8 }} },
+        .{ .tensor = Composite.bind(s, r, &.{"wide"}, .init(.{ 64, 64 }, .u16), &.{
+            .{ .dst_offset = 0, .width = 1, .dims = &.{.{ .count = 2000, .src_stride = 0, .dst_stride = 4 }} },
+            .{ .dst_offset = 2, .width = 1, .dims = &.{.{ .count = 1300, .src_stride = 0, .dst_stride = 6 }} },
         }), .expected = error.UnsupportedLayout },
         // Strided parts into host memory.
         .{ .tensor = host: {

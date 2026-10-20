@@ -273,6 +273,77 @@ pub const Lattice = struct {
             return current;
         }
     };
+
+    /// Copies runs `first` to `end` (exclusive): the `width` bytes at
+    /// `src + run.src` to `dst + run.dst`, `src` and `dst` being the
+    /// addresses the offsets count from (wrapping). Whole rows of the two
+    /// innermost dimensions go through nested loops, and a run of 1, 2, 4,
+    /// 8 or 16 bytes is one load and one store: a swizzle's 4-byte runs
+    /// cost a few cycles each instead of a cursor step and a `memcpy`.
+    pub fn copyRuns(self: Lattice, first: u64, end: u64, dst: usize, src: usize) void {
+        switch (self.width) {
+            inline 1, 2, 4, 8, 16 => |width| self.copyRunsOf(width, first, end, dst, src),
+            else => self.copyRunsOf(0, first, end, dst, src),
+        }
+    }
+
+    /// `copyRuns` for runs of `width` bytes, or of `self.width` when zero.
+    fn copyRunsOf(self: Lattice, comptime width: usize, first: u64, end: u64, dst: usize, src: usize) void {
+        if (first >= end) return;
+        const inner = self.dims[self.dims.len - @min(self.dims.len, 2) ..];
+        var row: u64 = 1;
+        for (inner) |d| row *= d.count;
+        const rows_start = std.math.divCeil(u64, first, row) catch unreachable;
+        const rows_end = end / row;
+        if (rows_start >= rows_end) return self.copyEach(width, first, end, dst, src);
+        self.copyEach(width, first, rows_start * row, dst, src);
+        const outer: Lattice = .{ .src_offset = self.src_offset, .dst_offset = self.dst_offset, .width = self.width, .dims = self.dims[0 .. self.dims.len - inner.len] };
+        var rows: Cursor = .init(outer, rows_start, rows_end);
+        while (rows.next()) |start| {
+            const row_dst = dst +% start.dst;
+            const row_src = src +% start.src;
+            switch (inner.len) {
+                0 => copyRun(width, self.width, row_dst, row_src),
+                1 => copyLine(width, self.width, inner[0], row_dst, row_src),
+                else => {
+                    var line_dst = row_dst;
+                    var line_src = row_src;
+                    for (0..inner[0].count) |_| {
+                        copyLine(width, self.width, inner[1], line_dst, line_src);
+                        line_dst +%= inner[0].dst_stride;
+                        line_src +%= inner[0].src_stride;
+                    }
+                },
+            }
+        }
+        self.copyEach(width, rows_end * row, end, dst, src);
+    }
+
+    fn copyEach(self: Lattice, comptime width: usize, first: u64, end: u64, dst: usize, src: usize) void {
+        if (first >= end) return;
+        var cursor: Cursor = .init(self, first, end);
+        while (cursor.next()) |run| copyRun(width, self.width, dst +% run.dst, src +% run.src);
+    }
+
+    inline fn copyLine(comptime width: usize, len: u64, d: LoadPart.Dim, dst: usize, src: usize) void {
+        var to = dst;
+        var from = src;
+        for (0..d.count) |_| {
+            copyRun(width, len, to, from);
+            to +%= d.dst_stride;
+            from +%= d.src_stride;
+        }
+    }
+
+    inline fn copyRun(comptime width: usize, len: u64, dst: usize, src: usize) void {
+        if (width == 0) {
+            const n: usize = @intCast(len);
+            @memcpy(@as([*]u8, @ptrFromInt(dst))[0..n], @as([*]const u8, @ptrFromInt(src))[0..n]);
+        } else {
+            const Word = @Int(.unsigned, 8 * width);
+            @as(*align(1) Word, @ptrFromInt(dst)).* = @as(*align(1) const Word, @ptrFromInt(src)).*;
+        }
+    }
 };
 
 pub const PartsError = error{ SourceSizeMismatch, InvalidLayout, UnsupportedLayout };
@@ -283,14 +354,16 @@ pub const PartsError = error{ SourceSizeMismatch, InvalidLayout, UnsupportedLayo
 /// destination's `destination_bytes`. Without `zero_fill` they must cover
 /// every destination byte; a plain tensor whose source is larger or smaller
 /// than its shape fails there, with `SourceSizeMismatch`. Strided parts must
-/// land in index order (`Lattice.dstOrdered`); two of them whose runs
-/// interleave are proven disjoint only when they repeat with the same
-/// stride, other pairs are `UnsupportedLayout`. Every other violation is
-/// `InvalidLayout`.
-pub fn checkParts(parts: []const LoadPart, destination_bytes: u64, zero_fill: bool) PartsError!void {
+/// land in index order (`Lattice.dstOrdered`). Where many of them
+/// interleave, their runs are listed and sorted when there are few enough
+/// (`allocator` holds them while checking); otherwise two interleaved
+/// parts are proven disjoint only when they repeat with the same strides
+/// (`overlaps`), other pairs are `UnsupportedLayout`. Every other violation
+/// is `InvalidLayout`.
+pub fn checkParts(allocator: std.mem.Allocator, parts: []const LoadPart, destination_bytes: u64, zero_fill: bool) PartsError!void {
     if (parts.len == 0) return error.InvalidLayout;
     for (parts) |part| {
-        if (part.dims.len != 0) return checkStridedParts(parts, destination_bytes, zero_fill);
+        if (part.dims.len != 0) return checkStridedParts(allocator, parts, destination_bytes, zero_fill);
     }
     var end: u64 = 0;
     var covered: u64 = 0;
@@ -305,7 +378,7 @@ pub fn checkParts(parts: []const LoadPart, destination_bytes: u64, zero_fill: bo
     if (end > destination_bytes) return error.InvalidLayout;
 }
 
-fn checkStridedParts(parts: []const LoadPart, destination_bytes: u64, zero_fill: bool) PartsError!void {
+fn checkStridedParts(allocator: std.mem.Allocator, parts: []const LoadPart, destination_bytes: u64, zero_fill: bool) PartsError!void {
     var covered: u64 = 0;
     var previous_start: u64 = 0;
     for (parts) |part| {
@@ -321,31 +394,105 @@ fn checkStridedParts(parts: []const LoadPart, destination_bytes: u64, zero_fill:
     if (covered > destination_bytes) return error.InvalidLayout;
     if (!zero_fill and covered != destination_bytes) return error.SourceSizeMismatch;
     // Parts are sorted by their first byte; a part's bytes stay before its
-    // span's end, so only parts whose spans meet can overlap.
-    for (parts, 0..) |part, index| {
+    // span's end, so only parts of one cluster, whose spans meet, can
+    // overlap.
+    var start: usize = 0;
+    while (start < parts.len) {
+        var end = parts[start].dst_offset + parts[start].lattice().spans().?.dst;
+        var runs = parts[start].lattice().runs();
+        var stop = start + 1;
+        while (stop < parts.len and parts[stop].dst_offset < end) : (stop += 1) {
+            end = @max(end, parts[stop].dst_offset + parts[stop].lattice().spans().?.dst);
+            runs += parts[stop].lattice().runs();
+        }
+        try checkCluster(allocator, parts[start..stop], runs);
+        start = stop;
+    }
+}
+
+/// The most runs `checkCluster` lists to sort them.
+const max_listed_runs = 1 << 21;
+
+/// Whether the parts of a cluster, `runs` runs in all, are disjoint. A few
+/// parts (an interleave of members) are checked pair by pair; many that
+/// interleave (a swizzle of a column-sharded grid, each part spanning the
+/// tensor) would make that quadratic, so their runs are sorted instead when
+/// they are few enough to list.
+fn checkCluster(allocator: std.mem.Allocator, cluster: []const LoadPart, runs: u64) PartsError!void {
+    if (cluster.len < 2) return;
+    const Range = struct { start: u64, end: u64 };
+    if (cluster.len > 8 and runs <= max_listed_runs) {
+        if (allocator.alloc(Range, @intCast(runs))) |ranges| {
+            defer allocator.free(ranges);
+            var count: usize = 0;
+            for (cluster) |part| {
+                var cursor: Lattice.Cursor = .init(part.lattice(), 0, part.lattice().runs());
+                while (cursor.next()) |run| {
+                    ranges[count] = .{ .start = run.dst, .end = run.dst + part.width };
+                    count += 1;
+                }
+            }
+            std.mem.sort(Range, ranges, {}, struct {
+                fn lessThan(_: void, lhs: Range, rhs: Range) bool {
+                    return lhs.start < rhs.start;
+                }
+            }.lessThan);
+            for (ranges[1..], ranges[0 .. ranges.len - 1]) |range, previous| {
+                if (range.start < previous.end) return error.InvalidLayout;
+            }
+            return;
+        } else |_| {}
+    }
+    for (cluster, 0..) |part, index| {
         const end = part.dst_offset + part.lattice().spans().?.dst;
-        for (parts[index + 1 ..]) |other| {
+        for (cluster[index + 1 ..]) |other| {
             if (other.dst_offset >= end) break;
-            if (try Footprint.of(part).overlaps(Footprint.of(other))) return error.InvalidLayout;
+            if (try overlaps(part, other)) return error.InvalidLayout;
         }
     }
 }
 
-/// A part's destination bytes alone: dimensions whose runs touch merged
-/// into wider runs.
+/// Whether two strided parts share a destination byte. Exact when one has
+/// few runs: each is looked for among the other's (`Lattice.hasRunIn`).
+/// Otherwise exact when they repeat with the same strides once their
+/// touching runs are merged, or else as they are (`Footprint.overlaps`);
+/// any other pair is `UnsupportedLayout`.
+fn overlaps(part: LoadPart, other: LoadPart) error{UnsupportedLayout}!bool {
+    const few = 1024;
+    for ([2]LoadPart{ part, other }, [2]LoadPart{ other, part }) |a, b| {
+        const footprint: Footprint = .of(a, true);
+        if (footprint.lattice().runs() > few) continue;
+        const against: Footprint = .of(b, true);
+        var cursor: Lattice.Cursor = .init(footprint.lattice(), 0, footprint.lattice().runs());
+        while (cursor.next()) |run| {
+            if (against.lattice().hasRunIn(run.dst, run.dst + footprint.width)) return true;
+        }
+        return false;
+    }
+    const merged = Footprint.of(part, true).overlaps(Footprint.of(other, true)) catch null;
+    return merged orelse Footprint.of(part, false).overlaps(Footprint.of(other, false));
+}
+
+/// A part's destination bytes alone, its dimensions of one step dropped,
+/// and, when `merge`, those whose runs touch merged into wider runs.
 const Footprint = struct {
     start: u64,
     width: u64,
     dims: [max_part_dims]LoadPart.Dim = undefined,
     len: usize = 0,
 
-    fn of(part: LoadPart) Footprint {
+    fn of(part: LoadPart, merge: bool) Footprint {
         var footprint: Footprint = .{ .start = part.dst_offset, .width = part.width };
         var d = part.dims.len;
         while (d > 0) {
             d -= 1;
             const dim = part.dims[d];
             if (dim.count < 2) continue;
+            if (!merge) {
+                footprint.dims[footprint.len] = .{ .count = dim.count, .src_stride = 0, .dst_stride = dim.dst_stride };
+                footprint.len += 1;
+                continue;
+            }
             if (footprint.len == 0 and dim.dst_stride == footprint.width) {
                 footprint.width *= dim.count;
                 continue;
@@ -369,27 +516,59 @@ const Footprint = struct {
     }
 
     /// Whether some byte is in both: exact for a contiguous footprint
-    /// against any, and for two that repeat once with the same stride.
+    /// against any, and for two that repeat with the same strides, counts
+    /// and widths aside (an interleave of members, however many dimensions
+    /// it has).
     fn overlaps(self: Footprint, other: Footprint) error{UnsupportedLayout}!bool {
         if (self.len == 0) return other.lattice().hasRunIn(self.start, self.start + self.width);
         if (other.len == 0) return self.lattice().hasRunIn(other.start, other.start + other.width);
-        if (self.len != 1 or other.len != 1 or self.dims[0].dst_stride != other.dims[0].dst_stride) return error.UnsupportedLayout;
-        // Run i of self and run j of other overlap when the gap between
-        // their starts, diff + (j - i) * stride, lies in (-other.width,
-        // self.width): at most two values of m = j - i, each of which
-        // needs i in [0, n_self) with j in [0, n_other).
-        const stride: i128 = self.dims[0].dst_stride;
-        const diff: i128 = @as(i128, other.start) - @as(i128, self.start);
-        const self_count: i128 = self.dims[0].count;
-        const other_count: i128 = other.dims[0].count;
-        const lowest = std.math.divCeil(i128, 1 - @as(i128, other.width) - diff, stride) catch unreachable;
-        const highest = std.math.divFloor(i128, @as(i128, self.width) - 1 - diff, stride) catch unreachable;
-        var m = lowest;
-        while (m <= highest) : (m += 1) {
-            if (@max(0, -m) < @min(self_count, other_count - m)) return true;
+        if (self.len != other.len) return error.UnsupportedLayout;
+        for (self.dims[0..self.len], other.dims[0..other.len]) |a, b| {
+            if (a.dst_stride != b.dst_stride) return error.UnsupportedLayout;
         }
-        return false;
+        // Run i of self and run j of other overlap when the gap between
+        // their starts, diff + sum((j - i) * stride), lies in
+        // (-other.width, self.width). Each difference m = j - i lies in
+        // (-n_self, n_other) on its dimension, any of which some i and j
+        // give, so the search is for such an m.
+        var search: OverlapSearch = .{ .self = &self, .other = &other };
+        const diff: i128 = @as(i128, other.start) - @as(i128, self.start);
+        return search.find(0, -@as(i128, other.width) - diff, @as(i128, self.width) - diff);
     }
+
+    /// A depth-first search for steps `m` with `sum(m * stride)` in an open
+    /// interval, outermost dimension first. The dimensions are ordered
+    /// (`Lattice.dstOrdered`), so the inner ones reach less than a stride
+    /// of the outer one and each level has few candidates; the search gives
+    /// up past `budget` of them.
+    const OverlapSearch = struct {
+        self: *const Footprint,
+        other: *const Footprint,
+        budget: u32 = 1 << 16,
+
+        fn find(search: *OverlapSearch, d: usize, low: i128, high: i128) error{UnsupportedLayout}!bool {
+            const len = search.self.len;
+            if (d == len) return low < 0 and 0 < high;
+            // What dimensions d + 1 on can add, below and above zero.
+            var below: i128 = 0;
+            var above: i128 = 0;
+            for (d + 1..len) |k| {
+                const stride: i128 = search.self.dims[k].dst_stride;
+                below += (@as(i128, search.self.dims[k].count) - 1) * stride;
+                above += (@as(i128, search.other.dims[k].count) - 1) * stride;
+            }
+            const stride: i128 = search.self.dims[d].dst_stride;
+            const first = @max(1 - @as(i128, search.self.dims[d].count), (std.math.divFloor(i128, low - above, stride) catch unreachable) + 1);
+            const last = @min(@as(i128, search.other.dims[d].count) - 1, (std.math.divCeil(i128, high + below, stride) catch unreachable) - 1);
+            var m = first;
+            while (m <= last) : (m += 1) {
+                if (search.budget == 0) return error.UnsupportedLayout;
+                search.budget -= 1;
+                if (try search.find(d + 1, low - m * stride, high - m * stride)) return true;
+            }
+            return false;
+        }
+    };
 };
 
 /// `shape` with the platform's replicated mesh when it names none, which is
@@ -504,3 +683,158 @@ pub const Submission = union(enum) {
         };
     }
 };
+
+/// A random lattice whose runs land in order (`Lattice.dstOrdered`), its
+/// source strides anything, zero (a broadcast) included.
+fn randomLattice(random: std.Random, dims: []LoadPart.Dim) Lattice {
+    const width = random.intRangeAtMost(u64, 1, 17);
+    var extent = width;
+    var d = dims.len;
+    while (d > 0) {
+        d -= 1;
+        dims[d] = .{
+            .count = random.intRangeAtMost(u64, 1, 5),
+            .src_stride = random.intRangeAtMost(u64, 0, 40),
+            .dst_stride = extent + random.intRangeAtMost(u64, 0, 3) * random.intRangeAtMost(u64, 0, 4),
+        };
+        extent = dims[d].dst_stride * (dims[d].count - 1) + extent;
+    }
+    return .{ .src_offset = random.intRangeAtMost(u64, 0, 9), .dst_offset = random.intRangeAtMost(u64, 0, 9), .width = width, .dims = dims };
+}
+
+test "copyRuns lands every run of a range where the cursor does" {
+    var prng: std.Random.DefaultPrng = .init(0x5eed);
+    const random = prng.random();
+    var source: [4096]u8 = undefined;
+    for (&source, 0..) |*byte, i| byte.* = @truncate(i * 7 + 1);
+    var expected: [4096]u8 = undefined;
+    var actual: [4096]u8 = undefined;
+    var dims_buffer: [5]LoadPart.Dim = undefined;
+    for (0..2000) |_| {
+        var lattice = randomLattice(random, dims_buffer[0..random.intRangeAtMost(usize, 0, dims_buffer.len)]);
+        // The widths `copyRuns` loads as one word, and others.
+        if (random.boolean()) lattice.width = ([_]u64{ 1, 2, 4, 8, 16 })[random.uintLessThan(usize, 5)];
+        const spans = lattice.spans().?;
+        if (lattice.src_offset + spans.src > source.len or lattice.dst_offset + spans.dst > expected.len or !lattice.dstOrdered()) continue;
+        const runs = lattice.runs();
+        const first = random.uintAtMost(u64, runs);
+        const end = random.intRangeAtMost(u64, first, runs);
+        @memset(&expected, 0);
+        @memset(&actual, 0);
+        var cursor: Lattice.Cursor = .init(lattice, first, end);
+        while (cursor.next()) |run| {
+            const width: usize = @intCast(lattice.width);
+            @memcpy(expected[@intCast(run.dst)..][0..width], source[@intCast(run.src)..][0..width]);
+        }
+        lattice.copyRuns(first, end, @intFromPtr(&actual), @intFromPtr(&source));
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+    }
+}
+
+test "footprints with the same strides overlap exactly when a byte is in both" {
+    var prng: std.Random.DefaultPrng = .init(0xf00d);
+    const random = prng.random();
+    var dims_buffer: [4]LoadPart.Dim = undefined;
+    var overlapping: usize = 0;
+    var disjoint: usize = 0;
+    for (0..3000) |_| {
+        const shape = randomLattice(random, dims_buffer[0..random.intRangeAtMost(usize, 1, dims_buffer.len)]);
+        var self: Footprint = .{ .start = random.intRangeAtMost(u64, 0, 40), .width = random.intRangeAtMost(u64, 1, shape.width), .len = shape.dims.len };
+        var other: Footprint = .{ .start = random.intRangeAtMost(u64, 0, 40), .width = random.intRangeAtMost(u64, 1, shape.width), .len = shape.dims.len };
+        for (shape.dims, 0..) |d, k| {
+            self.dims[k] = .{ .count = random.intRangeAtMost(u64, 1, d.count), .src_stride = 0, .dst_stride = d.dst_stride };
+            other.dims[k] = .{ .count = random.intRangeAtMost(u64, 1, d.count), .src_stride = 0, .dst_stride = d.dst_stride };
+        }
+        var bytes: [1024]u2 = @splat(0);
+        var marked = true;
+        for ([_]*const Footprint{ &self, &other }, [_]u2{ 1, 2 }) |footprint, bit| {
+            var cursor: Lattice.Cursor = .init(footprint.lattice(), 0, footprint.lattice().runs());
+            while (cursor.next()) |run| {
+                if (run.dst + footprint.width > bytes.len) marked = false else for (bytes[@intCast(run.dst)..][0..@intCast(footprint.width)]) |*byte| byte.* |= bit;
+            }
+        }
+        if (!marked) continue;
+        const expected = std.mem.indexOfScalar(u2, &bytes, 3) != null;
+        if (expected) overlapping += 1 else disjoint += 1;
+        try std.testing.expectEqual(expected, try self.overlaps(other));
+        try std.testing.expectEqual(expected, try other.overlaps(self));
+    }
+    try std.testing.expect(overlapping > 100 and disjoint > 100);
+}
+
+test "strided parts overlap exactly when a byte is in both, whatever their runs merge into" {
+    var prng: std.Random.DefaultPrng = .init(0xbeef);
+    const random = prng.random();
+    var source: safetensors.Tensor = undefined;
+    var shape_dims: [4]LoadPart.Dim = undefined;
+    var dims: [2][4]LoadPart.Dim = undefined;
+    var decided: usize = 0;
+    for (0..3000) |_| {
+        const shape = randomLattice(random, shape_dims[0..random.intRangeAtMost(usize, 1, shape_dims.len)]);
+        var parts: [2]LoadPart = undefined;
+        for (&parts, &dims) |*part, *part_dims| {
+            for (shape.dims, part_dims[0..shape.dims.len]) |d, *own| own.* = .{ .count = random.intRangeAtMost(u64, 1, d.count), .src_stride = 0, .dst_stride = d.dst_stride };
+            part.* = .{ .source = &source, .dst_offset = random.intRangeAtMost(u64, 0, 40), .width = random.intRangeAtMost(u64, 1, shape.width), .dims = part_dims[0..shape.dims.len] };
+        }
+        var bytes: [1024]u2 = @splat(0);
+        var marked = true;
+        for (parts, [_]u2{ 1, 2 }) |part, bit| {
+            var cursor: Lattice.Cursor = .init(part.lattice(), 0, part.lattice().runs());
+            while (cursor.next()) |run| {
+                if (run.dst + part.width > bytes.len) marked = false else for (bytes[@intCast(run.dst)..][0..@intCast(part.width)]) |*byte| byte.* |= bit;
+            }
+        }
+        if (!marked) continue;
+        const expected = std.mem.indexOfScalar(u2, &bytes, 3) != null;
+        try std.testing.expectEqual(expected, try overlaps(parts[0], parts[1]));
+        decided += 1;
+    }
+    try std.testing.expect(decided > 1000);
+}
+
+test "many interleaved strided parts are checked by sorting their runs" {
+    const allocator = std.testing.allocator;
+    var prng: std.Random.DefaultPrng = .init(0xc0de);
+    const random = prng.random();
+    var source: safetensors.Tensor = .{ .file_uri = "", .name = "source", .shape = Shape.init(.{1 << 16}, .u8), .offset = 0 };
+    const destination_bytes = 4096;
+    var dims: [16][2]LoadPart.Dim = undefined;
+    var outcomes: [2]usize = .{ 0, 0 };
+    for (0..400) |_| {
+        // A grid's columns, each part one of them with a stride of its
+        // own, some columns shifted onto their neighbours'.
+        const count = random.intRangeAtMost(usize, 9, dims.len);
+        var parts: [16]LoadPart = undefined;
+        for (parts[0..count], dims[0..count], 0..) |*part, *part_dims, i| {
+            const row = 4 * count + random.uintLessThan(u64, 2) * 4 * count;
+            part_dims.* = .{
+                .{ .count = random.intRangeAtMost(u64, 1, 3), .src_stride = 0, .dst_stride = 8 * row },
+                .{ .count = random.intRangeAtMost(u64, 1, 8), .src_stride = 1, .dst_stride = row },
+            };
+            const shift = if (random.uintLessThan(u8, 8) == 0) random.uintLessThan(u64, 4) else 0;
+            part.* = .{ .source = &source, .dst_offset = 4 * i + shift, .width = 4, .dims = part_dims };
+        }
+        std.mem.sort(LoadPart, parts[0..count], {}, struct {
+            fn lessThan(_: void, lhs: LoadPart, rhs: LoadPart) bool {
+                return lhs.dst_offset < rhs.dst_offset;
+            }
+        }.lessThan);
+        var bytes: [destination_bytes]u8 = @splat(0);
+        var overlapping = false;
+        for (parts[0..count]) |part| {
+            var cursor: Lattice.Cursor = .init(part.lattice(), 0, part.lattice().runs());
+            while (cursor.next()) |run| for (bytes[@intCast(run.dst)..][0..4]) |*byte| {
+                if (byte.* != 0) overlapping = true;
+                byte.* = 1;
+            };
+        }
+        if (checkParts(allocator, parts[0..count], destination_bytes, true)) {
+            try std.testing.expect(!overlapping);
+        } else |err| {
+            try std.testing.expect(overlapping);
+            try std.testing.expectEqual(error.InvalidLayout, err);
+        }
+        outcomes[@intFromBool(overlapping)] += 1;
+    }
+    try std.testing.expect(outcomes[0] > 50 and outcomes[1] > 50);
+}

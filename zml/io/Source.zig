@@ -78,6 +78,42 @@ pub fn init(store: *TensorStore, tensor: *const safetensors.Tensor, tags: ?[]con
     return .{ .store = store, ._shape = shape_, .pieces = pieces };
 }
 
+/// The source `binding` loads (`TensorStore.sourceOf`), in `shape_`
+/// without its sharding: a checkpoint tensor relabeled, or the layout's
+/// parts as pieces. `shape_` must fill the bytes the binding fills, its
+/// elements whole bytes or packed within the parts' runs.
+pub fn ofBinding(store: *TensorStore, binding: TensorStore.Binding, shape_: Shape) Source {
+    stdx.debug.assert(!binding.transformed, "Source.ofBinding: a transformed binding is a program's input, not a source of {f}", .{shape_});
+    var res_shape = shape_;
+    res_shape._sharding = .replicated;
+    const ebits: u64 = res_shape.dtype().bitSizeOf();
+    const elements: u64 = res_shape.count();
+    var ctx: Rewrite = .init(store);
+    defer ctx.deinit();
+    const layout = binding.layout orelse {
+        const tensor = binding.tensors[0];
+        stdx.debug.assert(tensor.byteSize() == res_shape.byteSize(), "Source.ofBinding: {s} has {d} bytes, {f} {d}", .{ tensor.name, tensor.byteSize(), res_shape, res_shape.byteSize() });
+        if (elements == 0) return ctx.finish(res_shape);
+        var flat: Flat = .{ .tensor = tensor, .offset = 0, .origin = 0 };
+        flat.dims.appendAssumeCapacity(.{ .count = elements, .step = 1, .stride = ebits });
+        ctx.emitFlat(flat);
+        return ctx.finish(res_shape);
+    };
+    stdx.debug.assert(layout.shape.byteSize() == res_shape.byteSize(), "Source.ofBinding: a layout of {f} cannot fill {f}", .{ layout.shape, res_shape });
+    for (layout.parts) |part| {
+        const elementsOf = struct {
+            fn of(bytes: u64, bits: u64) u64 {
+                return std.math.divExact(u64, bytes * 8, bits) catch std.debug.panic("Source.ofBinding: {d} bytes are not whole elements of {d} bits", .{ bytes, bits });
+            }
+        }.of;
+        var flat: Flat = .{ .tensor = binding.tensors[part.source], .offset = part.src_offset * 8, .origin = elementsOf(part.dst_offset, ebits) };
+        for (part.dims) |d| flat.dims.append(.{ .count = d.count, .step = elementsOf(d.dst_stride, ebits), .stride = d.src_stride * 8 }) catch tooManyDims();
+        flat.dims.append(.{ .count = elementsOf(part.width, ebits), .step = 1, .stride = ebits }) catch tooManyDims();
+        ctx.emitFlat(flat);
+    }
+    return ctx.finish(res_shape);
+}
+
 pub fn shape(self: Source) Shape {
     return self._shape;
 }
@@ -276,14 +312,18 @@ pub fn transpose(self: Source, axes_: anytype) Source {
         stdx.debug.assert(given.len == r, "transpose expects {d} axes for {f}, got {d}", .{ r, self._shape, given.len });
         @memcpy(permutation[0..r], given.constSlice());
     }
-    const identity = for (permutation[0..r], 0..) |p, i| {
-        if (p != i) break false;
-    } else true;
-    if (identity) return self;
-
     var as_i64: [constants.MAX_RANK]i64 = undefined;
     for (permutation[0..r], as_i64[0..r]) |p, *q| q.* = p;
     const res_shape = self._shape.transpose(as_i64[0..r]);
+    // Axes of one element move nothing: when the others keep their order,
+    // the row-major order is unchanged, so are the pieces.
+    var previous: ?u3 = null;
+    const moves = for (permutation[0..r]) |p| {
+        if (self.dim(p) == 1) continue;
+        if (previous) |q| if (p < q) break true;
+        previous = p;
+    } else false;
+    if (!moves) return self.reshaped(res_shape);
     var inverse: [constants.MAX_RANK]u3 = undefined;
     for (permutation[0..r], 0..) |p, i| inverse[p] = @intCast(i);
     var ctx: Rewrite = .init(self.store);
@@ -480,6 +520,14 @@ pub fn bindAs(self: Source, placed: Shape, opts: BindOptions) Tensor {
     const tensor: Tensor = .fromShape(placed);
     self.store.putSourcesNoClobber(tensor.id, self.lower(opts.memory)) catch oom();
     return tensor;
+}
+
+/// Like `bindAs`, in place of `tensor`'s binding, in the memory it named:
+/// for a source made from that binding (`TensorStore.sourceOf`), whose
+/// result the model then holds instead of `tensor`.
+pub fn rebind(self: Source, tensor: Tensor, placed: Shape) Tensor {
+    const replaced = self.store.id_to_sources.fetchRemove(tensor.id) orelse std.debug.panic("Source.rebind: {f} has no binding", .{tensor});
+    return self.bindAs(placed, .{ .memory = replaced.value.memory });
 }
 
 /// The binding: the checkpoint tensors the pieces read, deduplicated and
