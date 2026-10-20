@@ -132,8 +132,6 @@ jobs:
 
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
         with:
           version: 0.17.0
           mirror: https://mirror.zml.ai/zig
