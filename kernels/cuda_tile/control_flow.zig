@@ -81,7 +81,7 @@ pub fn IfOnlyScope(comptime BuilderT: type, comptime ValueT: type) type {
             const k = self.kernel;
             terminate(ValueT, 0, k, self.then_block, .yield, values, "IfOnlyScope.yieldThen");
             k.popBlock();
-            _ = ct.if_(k.ctx, self.cond_inner, &.{}, self.then_block, null, k.loc()).appendTo(k.currentBlock());
+            _ = ct.if_(k.ctx, self.cond_inner, &.{}, self.then_block, .{}, k.loc()).appendTo(k.currentBlock());
         }
     };
 }
@@ -108,7 +108,7 @@ pub fn IfScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usize
             const k = self.kernel;
             terminate(ValueT, N, k, self.else_block, .yield, values, "IfScope.yieldElse");
             k.popBlock();
-            const if_op = ct.if_(k.ctx, self.cond_inner, &self.result_types, self.then_block, self.else_block, k.loc());
+            const if_op = ct.if_(k.ctx, self.cond_inner, &self.result_types, self.then_block, .{ .else_block = self.else_block }, k.loc());
             _ = if_op.appendTo(k.currentBlock());
             for (0..N) |i| self.results[i] = .{ .inner = if_op.result(i), .kernel = k };
         }

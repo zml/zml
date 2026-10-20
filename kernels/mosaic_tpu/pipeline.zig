@@ -5,14 +5,14 @@
 //! inputs peeled as sync copy; `trace_scopes`. Unsupported features panic.
 
 const std = @import("std");
+const func = @import("mlir/dialects/func");
 const mlir = @import("mlir");
-const dialects = @import("mlir/dialects");
+const arith = @import("mlir/dialects/arith");
+const memref = @import("mlir/dialects/memref");
+const scf = @import("mlir/dialects/scf");
 const builder = @import("builder.zig");
 
 const tpu = @import("mlir/dialects/mosaic_tpu");
-const arith = dialects.arith;
-const scf = dialects.scf;
-const memref = dialects.memref;
 
 const Builder = builder.Builder;
 const Value = builder.Value;
@@ -1110,7 +1110,7 @@ test "trivial input-output ref is copied in and out" {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
     inline for (builder.dialects_needed) |dialect| registry.registerDialect(dialect);
-    mlir.registerFuncExtensions(registry);
+    func.registerExtensions(registry);
 
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();

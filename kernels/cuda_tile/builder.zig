@@ -887,11 +887,11 @@ pub const Builder = struct {
     }
 
     pub fn assumeDivBy(self: *Builder, v: Value, n: u64) Value {
-        return self.emit(ct.assume(self.ctx, v.inner, ct.divBy(self.ctx, n, null, null), self.loc()));
+        return self.emit(ct.assume(self.ctx, v.inner, ct.divBy(self.ctx, n, .{}), self.loc()));
     }
 
     pub fn assumeDivByEvery(self: *Builder, v: Value, n: u64, every: i64, along: i64) Value {
-        return self.emit(ct.assume(self.ctx, v.inner, ct.divBy(self.ctx, n, every, along), self.loc()));
+        return self.emit(ct.assume(self.ctx, v.inner, ct.divBy(self.ctx, n, .{ .every = every, .along = along }), self.loc()));
     }
 
     pub fn assumeSameElements(self: *Builder, v: Value, values: []const i64) Value {
@@ -899,7 +899,7 @@ pub const Builder = struct {
     }
 
     pub fn assumeBounded(self: *Builder, v: Value, lb: ?i64, ub: ?i64) Value {
-        return self.emit(ct.assume(self.ctx, v.inner, ct.bounded(self.ctx, lb, ub), self.loc()));
+        return self.emit(ct.assume(self.ctx, v.inner, ct.bounded(self.ctx, .{ .lb = lb, .ub = ub }), self.loc()));
     }
 
     pub fn tensorView(self: *Builder, base: Value, shape: []const i64, strides: []const i64) Value {
@@ -947,7 +947,7 @@ pub const Builder = struct {
     /// masked. That is why this DSL has no mask tile.
     pub fn partitionView(self: *Builder, tv: Value, tile: []const i64, opts: PartitionOpts) Value {
         if (!dtypes.tileLegal(tile)) std.debug.panic("Builder.partitionView: {any} is not a legal tile shape", .{tile});
-        const ty: *const mlir.Type = @ptrCast(ct.PartitionViewType.get(self.ctx, self.i32Slice(tile), tv.type_(), opts.dim_map, opts.padding));
+        const ty: *const mlir.Type = @ptrCast(ct.PartitionViewType.get(self.ctx, self.i32Slice(tile), tv.type_(), opts.dim_map, .{ .padding = opts.padding }));
         return self.emit(ct.make_partition_view(self.ctx, tv.inner, ty, self.loc()));
     }
 
@@ -955,7 +955,14 @@ pub const Builder = struct {
     /// per index instead of a whole tile.
     pub fn stridedView(self: *Builder, tv: Value, tile: []const i64, traversal_strides: []const i64, opts: PartitionOpts) Value {
         if (!dtypes.tileLegal(tile)) std.debug.panic("Builder.stridedView: {any} is not a legal tile shape", .{tile});
-        const ty: *const mlir.Type = @ptrCast(ct.StridedViewType.get(self.ctx, self.i32Slice(tile), self.i32Slice(traversal_strides), tv.type_(), opts.dim_map, opts.padding));
+        const ty: *const mlir.Type = @ptrCast(ct.StridedViewType.get(
+            self.ctx,
+            self.i32Slice(tile),
+            self.i32Slice(traversal_strides),
+            tv.type_(),
+            opts.dim_map,
+            .{ .padding = opts.padding },
+        ));
         return self.emit(ct.make_strided_view(self.ctx, tv.inner, ty, self.loc()));
     }
 
@@ -963,7 +970,7 @@ pub const Builder = struct {
     /// `tile[sparse_dim]` indices (every other index stays rank 0).
     pub fn gatherScatterView(self: *Builder, tv: Value, tile: []const i64, sparse_dim: u32, padding: ?PaddingValue) Value {
         if (!dtypes.tileLegal(tile)) std.debug.panic("Builder.gatherScatterView: {any} is not a legal tile shape", .{tile});
-        const ty = ct.gatherScatterViewType(self.ctx, tile, tv.type_(), sparse_dim, padding);
+        const ty = ct.gatherScatterViewType(self.ctx, tile, tv.type_(), sparse_dim, .{ .padding = padding });
         return self.emit(ct.make_gather_scatter_view(self.ctx, tv.inner, ty, self.loc()));
     }
 
@@ -1056,7 +1063,7 @@ pub const Builder = struct {
     }
 
     pub fn printOpts(self: *Builder, str: []const u8, args: []const Value, token: ?Value) Value {
-        return self.emit(ct.print_tko(self.ctx, str, self.innerSlice(args), innerOpt(token), self.loc()));
+        return self.emit(ct.print_tko(self.ctx, str, self.innerSlice(args), .{ .token = innerOpt(token) }, self.loc()));
     }
 
     fn atomicOpts(opts: AtomicOpts) ct.AtomicOpts {
@@ -1172,11 +1179,11 @@ pub const Builder = struct {
         return self.emit(ct.atan2(self.ctx, x.inner, y.inner, self.loc()));
     }
     pub fn exp(self: *Builder, x: Value) Value {
-        return self.emit(ct.exp(self.ctx, x.inner, null, self.loc()));
+        return self.emit(ct.exp(self.ctx, x.inner, .{}, self.loc()));
     }
     /// 13.3: `exp` with an explicit rounding mode.
     pub fn expRound(self: *Builder, x: Value, rounding: RoundingMode) Value {
-        return self.emit(ct.exp(self.ctx, x.inner, rounding, self.loc()));
+        return self.emit(ct.exp(self.ctx, x.inner, .{ .rounding = rounding }, self.loc()));
     }
     pub fn exp2(self: *Builder, x: Value) Value {
         return self.exp2Opts(x, false);
@@ -1218,11 +1225,11 @@ pub const Builder = struct {
         return self.emit(ct.cosh(self.ctx, x.inner, self.loc()));
     }
     pub fn tanh(self: *Builder, x: Value) Value {
-        return self.emit(ct.tanh(self.ctx, x.inner, null, self.loc()));
+        return self.emit(ct.tanh(self.ctx, x.inner, .{}, self.loc()));
     }
     /// 13.2: `tanh` with an explicit rounding mode.
     pub fn tanhRound(self: *Builder, x: Value, rounding: RoundingMode) Value {
-        return self.emit(ct.tanh(self.ctx, x.inner, rounding, self.loc()));
+        return self.emit(ct.tanh(self.ctx, x.inner, .{ .rounding = rounding }, self.loc()));
     }
     pub fn ceil(self: *Builder, x: Value) Value {
         return self.emit(ct.ceil(self.ctx, x.inner, self.loc()));
@@ -1278,7 +1285,7 @@ pub const Builder = struct {
         return self.diviOpts(lhs, rhs, .{ .signedness = signedness });
     }
     pub fn diviOpts(self: *Builder, lhs: Value, rhs: Value, opts: DivIOpts) Value {
-        return self.emit(ct.divi(self.ctx, lhs.inner, rhs.inner, opts.signedness, opts.rounding, self.loc()));
+        return self.emit(ct.divi(self.ctx, lhs.inner, rhs.inner, opts.signedness, .{ .rounding = opts.rounding }, self.loc()));
     }
     pub fn remi(self: *Builder, lhs: Value, rhs: Value, signedness: Signedness) Value {
         return self.emit(ct.remi(self.ctx, lhs.inner, rhs.inner, signedness, self.loc()));
@@ -1351,7 +1358,7 @@ pub const Builder = struct {
     }
     pub fn ftofOpts(self: *Builder, src: Value, dtype: DType, opts: CastOpts) Value {
         const rounding: RoundingMode = opts.rounding orelse (if (dtype == .f8e8m0fnu) .zero else .nearest_even);
-        return self.emit(ct.ftof(self.ctx, src.inner, self.tileLike(src, dtype.toMlir(self.ctx)), rounding, self.loc()));
+        return self.emit(ct.ftof(self.ctx, src.inner, self.tileLike(src, dtype.toMlir(self.ctx)), .{ .rounding = rounding }, self.loc()));
     }
     /// Float -> integer, truncating toward zero (the only rounding `ftoi`
     /// admits).

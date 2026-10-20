@@ -1,20 +1,19 @@
+const cute_nvgpu = @import("mlir/dialects/cute_nvgpu");
 const std = @import("std");
 
 const cute = @import("mlir/dialects/cute_ir");
-const dialects = @import("mlir/dialects");
+const arith = @import("mlir/dialects/arith");
+const cuda = @import("mlir/dialects/cuda");
+const func = @import("mlir/dialects/func");
+const gpu = @import("mlir/dialects/gpu");
+const llvm = @import("mlir/dialects/llvm");
+const math = @import("mlir/dialects/math");
+const nvvm = @import("mlir/dialects/nvvm");
+const vector = @import("mlir/dialects/vector");
 const dsl = @import("kernels/common");
 const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
 const stdx = @import("stdx");
-
-const arith = dialects.arith;
-const cuda = dialects.cuda;
-const func = dialects.func;
-const gpu = dialects.gpu;
-const llvm = dialects.llvm;
-const math = dialects.math;
-const nvvm = dialects.nvvm;
-const vector = dialects.vector;
 
 const dtypes = @import("dtype.zig");
 pub const DType = dtypes.DType;
@@ -30,10 +29,10 @@ test {
     std.testing.refAllDecls(Atom);
 }
 
-/// `nvvm` and `cuda` are NVIDIA's (`cute.nvvm`, `cute.cuda`, handles `cute_nvvm`
+/// `nvvm` and `cuda` are NVIDIA's (`nvvm.ops`, `cuda.ops`, handles `cute_nvvm`
 /// and `cuda`); `llvm` is upstream's, whose types and operations NVIDIA's
 /// compiler reads as its own.
-pub const dialects_needed = [_][]const u8{ "func", "gpu", "cute", "cute_nvgpu", cute.nvvm.dialect_handle, cute.cuda.dialect_handle, "llvm", "arith", "scf", "math", "cf", "vector" };
+pub const dialects_needed = [_][]const u8{ "func", "gpu", "cute", "cute_nvgpu", nvvm.ops.dialect_handle, cuda.ops.dialect_handle, "llvm", "arith", "scf", "math", "cf", "vector" };
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -429,7 +428,7 @@ pub const Atom = struct {
             self.kernel.asValue(value_)
         else
             self.kernel.lift(value_);
-        const result = self.kernel.emit(cute.nvgpu.atom_set_value(
+        const result = self.kernel.emit(cute_nvgpu.atom_set_value(
             self.kernel.ctx,
             self.inner,
             new_value.inner,
@@ -1004,7 +1003,7 @@ pub const Builder = struct {
     // ==================== types ====================
 
     pub fn ptrTy(self: *Builder, dt: DType, space: MemorySpace, alignment: u64) !*const mlir.Type {
-        return cute.pointerType(self.ctx, dt.toMlir(self.ctx), space, alignment);
+        return cute.pointerType(self.ctx, space, alignment, .{ .element_type = dt.toMlir(self.ctx) });
     }
 
     pub fn swizzledPtrTy(self: *Builder, dt: DType, space: MemorySpace, alignment: u64, swizzle: Swizzle) !*const mlir.Type {
@@ -1197,7 +1196,7 @@ pub const Builder = struct {
         const p = self.asValue(pointer);
         const l = self.asValue(layout);
         const result_ty = (cute.MemRefType.get(self.ctx, .{ .ptr = p.type_(), .layout = l.type_() }) catch @panic("invalid CuTe tensor view")).type_();
-        const result = self.emit(cute.make_view(self.ctx, p.inner, l.inner, result_ty, self.loc()));
+        const result = self.emit(cute.make_view(self.ctx, p.inner, result_ty, .{ .layout = l.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1291,7 +1290,7 @@ pub const Builder = struct {
         const pt = ptr.type_().isA(cute.PtrType) orelse std.debug.panic("makeTensor: {f} is not a !cute.ptr", .{ptr.type_()});
         const elem = pt.getValueType() orelse @panic("makeTensor: untyped pointer");
         const memref_ty = (cute.MemRefType.get(self.ctx, .{ .ptr = ptr.type_(), .layout = layout.inner.type_() }) catch @panic("bad memref")).type_();
-        const v = self.emit(cute.make_view(self.ctx, ptr.inner, layout.inner, memref_ty, self.loc()));
+        const v = self.emit(cute.make_view(self.ctx, ptr.inner, memref_ty, .{ .layout = layout.inner }, self.loc()));
         return .{ .inner = v.inner, .kernel = self, .layout = layout, .dtype = dtypes.mlirToDType(self.ctx, elem), .space = pt.getAddressSpace() };
     }
 
@@ -1373,10 +1372,10 @@ pub const Builder = struct {
         const tuple_type = self.parseType(tuple_text);
         const tuple = self.emit(cute.make_int_tuple(self.ctx, self.innerSlice(values), tuple_type, self.loc()));
         const iterator_type = (cute.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = tuple_type }) catch @panic("invalid arithmetic tuple iterator")).type_();
-        const iterator = self.emit(cute.make_arith_tuple_iter(self.ctx, tuple.inner, iterator_type, self.loc()));
+        const iterator = self.emit(cute.make_arith_tuple_iter(self.ctx, iterator_type, .{ .value_ = tuple.inner }, self.loc()));
         const layout_value = self.asValue(layout);
         const result_type = (cute.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple_type, .layout = layout_value.type_() }) catch @panic("invalid coordinate tensor")).type_();
-        const result = self.emit(cute.make_view(self.ctx, iterator.inner, layout_value.inner, result_type, self.loc()));
+        const result = self.emit(cute.make_view(self.ctx, iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1388,9 +1387,9 @@ pub const Builder = struct {
         const tuple = self.makeIntTuple(origin);
         const layout_value = self.asValue(layout);
         const iterator_type = (cute.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = tuple.type_() }) catch @panic("invalid arithmetic tuple iterator")).type_();
-        const iterator = self.emit(cute.make_arith_tuple_iter(self.ctx, tuple.inner, iterator_type, self.loc()));
+        const iterator = self.emit(cute.make_arith_tuple_iter(self.ctx, iterator_type, .{ .value_ = tuple.inner }, self.loc()));
         const result_type = (cute.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple.type_(), .layout = layout_value.type_() }) catch @panic("invalid coordinate tensor")).type_();
-        const result = self.emit(cute.make_view(self.ctx, iterator.inner, layout_value.inner, result_type, self.loc()));
+        const result = self.emit(cute.make_view(self.ctx, iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1457,24 +1456,13 @@ pub const Builder = struct {
         ));
         const rebuilt_iterator_type = (cute.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = rebuilt_tuple_type }) catch
             @panic("invalid rebuilt arithmetic tuple iterator")).type_();
-        const rebuilt_iterator = self.emit(cute.make_arith_tuple_iter(
-            self.ctx,
-            rebuilt_tuple.inner,
-            rebuilt_iterator_type,
-            self.loc(),
-        ));
+        const rebuilt_iterator = self.emit(cute.make_arith_tuple_iter(self.ctx, rebuilt_iterator_type, .{ .value_ = rebuilt_tuple.inner }, self.loc()));
         const layout_value = self.asValue(layout);
         const result_type = (cute.CoordTensorType.get(self.ctx, .{
             .arithTuple = rebuilt_tuple_type,
             .layout = layout_value.type_(),
         }) catch @panic("invalid rebuilt coordinate tensor")).type_();
-        const result = self.emit(cute.make_view(
-            self.ctx,
-            rebuilt_iterator.inner,
-            layout_value.inner,
-            result_type,
-            self.loc(),
-        ));
+        const result = self.emit(cute.make_view(self.ctx, rebuilt_iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1589,7 +1577,7 @@ pub const Builder = struct {
     pub fn allocRmemTyped(self: *Builder, dtype: DType, alignment: u64, layout: anytype) View {
         const layout_value = self.asValue(layout);
         const memref_type = self.memrefType(dtype, .rmem, alignment, layout_value.type_());
-        const result = self.emit(cute.memref_alloca(self.ctx, layout_value.inner, memref_type, self.loc()));
+        const result = self.emit(cute.memref_alloca(self.ctx, memref_type, .{ .layout = layout_value.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1597,26 +1585,20 @@ pub const Builder = struct {
         const result = self.emit(cute.make_view(
             self.ctx,
             self.asValue(pointer).inner,
-            self.asValue(layout).inner,
             self.parseType(result_type),
+            .{ .layout = self.asValue(layout).inner },
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn makeViewTyped(self: *Builder, pointer: anytype, layout: anytype, result_type: *const mlir.Type) View {
-        const result = self.emit(cute.make_view(
-            self.ctx,
-            self.asValue(pointer).inner,
-            self.asValue(layout).inner,
-            result_type,
-            self.loc(),
-        ));
+        const result = self.emit(cute.make_view(self.ctx, self.asValue(pointer).inner, result_type, .{ .layout = self.asValue(layout).inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn makeViewNoLayout(self: *Builder, pointer: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.make_view(self.ctx, self.asValue(pointer).inner, null, self.parseType(result_type), self.loc()));
+        const result = self.emit(cute.make_view(self.ctx, self.asValue(pointer).inner, self.parseType(result_type), .{}, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1628,7 +1610,7 @@ pub const Builder = struct {
             self.asValue(tile).inner,
             coord_value,
             self.parseType(result_type),
-            if (projection) |p| p.get(self.ctx) else null,
+            .{ .proj = if (projection) |p| p.get(self.ctx) else null },
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -1642,7 +1624,7 @@ pub const Builder = struct {
             self.asValue(tile).inner,
             coord_value,
             result_type,
-            if (projection) |p| p.get(self.ctx) else null,
+            .{ .proj = if (projection) |p| p.get(self.ctx) else null },
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -1708,7 +1690,7 @@ pub const Builder = struct {
         else
             unreachable;
         const iterator = self.emit(cute.get_iter(self.ctx, value.inner, iterator_type, self.loc()));
-        const result = self.emit(cute.make_view(self.ctx, iterator.inner, layout_value.inner, result_type, self.loc()));
+        const result = self.emit(cute.make_view(self.ctx, iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1750,8 +1732,8 @@ pub const Builder = struct {
         const result = self.emit(cute.coalesce(
             self.ctx,
             self.asValue(input).inner,
-            if (target_profile) |target| target.inner else null,
             self.parseType(result_type),
+            .{ .target_profile = if (target_profile) |target| target.inner else null },
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -1761,8 +1743,8 @@ pub const Builder = struct {
         const result = self.emit(cute.filter_zeros(
             self.ctx,
             self.asValue(input).inner,
-            if (target_profile) |target| target.inner else null,
             self.parseType(result_type),
+            .{ .target_profile = if (target_profile) |target| target.inner else null },
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -1893,14 +1875,7 @@ pub const Builder = struct {
     }
 
     pub fn copy(self: *Builder, atom: Atom, src: anytype, dst: anytype, pred: ?Value) void {
-        self.emitVoid(cute.copy(
-            self.ctx,
-            atom.inner,
-            self.innerSlice(src),
-            self.innerSlice(dst),
-            if (pred) |p| p.inner else null,
-            self.loc(),
-        ));
+        self.emitVoid(cute.copy(self.ctx, atom.inner, self.innerSlice(src), self.innerSlice(dst), .{ .pred = if (pred) |p| p.inner else null }, self.loc()));
     }
 
     pub fn gemm(self: *Builder, tiled: Atom, d: anytype, a: anytype, rhs: anytype, c: anytype) void {
@@ -1926,7 +1901,7 @@ pub const Builder = struct {
         ));
     }
 
-    // ==================== cute.nvgpu.cpasync: TMA (SM90+) ====================
+    // ==================== cute_nvgpu.cpasync: TMA (SM90+) ====================
     // The host function builds tiled TMA atoms (Python `make_tiled_tma_atom`);
     // the kernel receives them as grid-constant arguments and makes them
     // executable before issuing copies.
@@ -1943,7 +1918,7 @@ pub const Builder = struct {
     /// result types are supplied explicitly because they depend on CuTe's
     /// layout algebra and may contain divisibility constraints.
     pub fn makeTiledTmaLoadAtom(self: *Builder, gmem: anytype, smem_layout: anytype, cta_map: anytype, opts: TmaLoadOptions) TmaDescriptor {
-        const results = self.emitResults(2, cute.nvgpu.atom_make_non_exec_tiled_tma_load(
+        const results = self.emitResults(2, cute_nvgpu.atom_make_non_exec_tiled_tma_load(
             self.ctx,
             self.asValue(gmem).inner,
             self.asValue(smem_layout).inner,
@@ -1951,8 +1926,7 @@ pub const Builder = struct {
             self.parseType(opts.atom_type),
             self.parseType(opts.tensor_type),
             opts.kind.get(self.ctx),
-            .int(self.ctx, .i32, opts.num_multicast),
-            if (opts.tma_format) |format| format.get(self.ctx) else null,
+            .{ .num_multicast = .int(self.ctx, .i32, opts.num_multicast), .tma_format = if (opts.tma_format) |format| format.get(self.ctx) else null },
             self.loc(),
         ));
         return .{
@@ -1964,7 +1938,7 @@ pub const Builder = struct {
     /// Typed counterpart of `makeTiledTmaLoadAtom`: the atom and coordinate
     /// tensor types are assembled from `config`.
     pub fn makeTiledTmaLoadAtomTyped(self: *Builder, gmem: anytype, smem_layout: anytype, cta_map: anytype, config: TmaConfig) TmaDescriptor {
-        const results = self.emitResults(2, cute.nvgpu.atom_make_non_exec_tiled_tma_load(
+        const results = self.emitResults(2, cute_nvgpu.atom_make_non_exec_tiled_tma_load(
             self.ctx,
             self.asValue(gmem).inner,
             self.asValue(smem_layout).inner,
@@ -1972,8 +1946,7 @@ pub const Builder = struct {
             self.tmaLoadAtomType(config),
             self.coordTensorType(config.coordinate_rank, config.coordinate_layout),
             self.parseAttribute("#cute_nvgpu.tiled_tma_load<sm_90>"),
-            .int(self.ctx, .i32, config.num_multicast),
-            tmaFormatAttribute(self, config.format),
+            .{ .num_multicast = .int(self.ctx, .i32, config.num_multicast), .tma_format = tmaFormatAttribute(self, config.format) },
             self.loc(),
         ));
         return .{
@@ -1990,14 +1963,14 @@ pub const Builder = struct {
 
     /// Host-visible tiled TMA store atom and its coordinate tensor.
     pub fn makeTiledTmaStoreAtom(self: *Builder, gmem: anytype, smem_layout: anytype, cta_map: anytype, opts: TmaStoreOptions) TmaDescriptor {
-        const results = self.emitResults(2, cute.nvgpu.atom_make_non_exec_tiled_tma_store(
+        const results = self.emitResults(2, cute_nvgpu.atom_make_non_exec_tiled_tma_store(
             self.ctx,
             self.asValue(gmem).inner,
             self.asValue(smem_layout).inner,
             self.asValue(cta_map).inner,
             self.parseType(opts.atom_type),
             self.parseType(opts.tensor_type),
-            if (opts.tma_format) |format| format.get(self.ctx) else null,
+            .{ .tma_format = if (opts.tma_format) |format| format.get(self.ctx) else null },
             self.loc(),
         ));
         return .{
@@ -2008,14 +1981,14 @@ pub const Builder = struct {
 
     /// Typed counterpart of `makeTiledTmaStoreAtom`.
     pub fn makeTiledTmaStoreAtomTyped(self: *Builder, gmem: anytype, smem_layout: anytype, cta_map: anytype, config: TmaConfig) TmaDescriptor {
-        const results = self.emitResults(2, cute.nvgpu.atom_make_non_exec_tiled_tma_store(
+        const results = self.emitResults(2, cute_nvgpu.atom_make_non_exec_tiled_tma_store(
             self.ctx,
             self.asValue(gmem).inner,
             self.asValue(smem_layout).inner,
             self.asValue(cta_map).inner,
             self.tmaStoreAtomType(config),
             self.coordTensorType(config.coordinate_rank, config.coordinate_layout),
-            tmaFormatAttribute(self, config.format),
+            .{ .tma_format = tmaFormatAttribute(self, config.format) },
             self.loc(),
         ));
         return .{
@@ -2063,22 +2036,22 @@ pub const Builder = struct {
     }
 
     pub fn prefetchTmaDesc(self: *Builder, descriptor: Atom) void {
-        self.emitVoid(cute.nvgpu.prefetch_tma_desc(self.ctx, descriptor.inner, self.loc()));
+        self.emitVoid(cute_nvgpu.prefetch_tma_desc(self.ctx, descriptor.inner, self.loc()));
     }
 
     pub fn makeExecTma(self: *Builder, descriptor: Atom, result_type: []const u8) Atom {
-        const result = self.emit(cute.nvgpu.atom_make_exec_tma(self.ctx, descriptor.inner, self.parseType(result_type), null, null, self.loc()));
+        const result = self.emit(cute_nvgpu.atom_make_exec_tma(self.ctx, descriptor.inner, self.parseType(result_type), .{}, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn makeExecTmaTyped(self: *Builder, descriptor: Atom, result_type: *const mlir.Type) Atom {
-        const result = self.emit(cute.nvgpu.atom_make_exec_tma(self.ctx, descriptor.inner, result_type, null, null, self.loc()));
+        const result = self.emit(cute_nvgpu.atom_make_exec_tma(self.ctx, descriptor.inner, result_type, .{}, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     /// Attach the mbarrier that an executable TMA load atom completes.
     pub fn setTmaBarrier(self: *Builder, atom: Atom, barrier: Value) Atom {
-        const result = self.emit(cute.nvgpu.atom_set_value(
+        const result = self.emit(cute_nvgpu.atom_set_value(
             self.ctx,
             atom.inner,
             barrier.inner,
@@ -2103,7 +2076,7 @@ pub const Builder = struct {
         const result_types = self.arena.allocator().alloc(*const mlir.Type, target_types.len) catch @panic("OOM");
         const views = self.arena.allocator().alloc(View, target_types.len) catch @panic("OOM");
         for (target_types, result_types) |type_text, *ty| ty.* = self.parseType(type_text);
-        const op = cute.nvgpu.atom_tma_partition(
+        const op = cute_nvgpu.atom_tma_partition(
             self.ctx,
             descriptor.inner,
             self.makeCoord(cta_coord),
@@ -2133,7 +2106,7 @@ pub const Builder = struct {
     ) TmaPartition {
         if (targets.len != target_types.len) @panic("tmaPartitionTyped: target count does not match result type count");
         const views = self.arena.allocator().alloc(View, target_types.len) catch @panic("OOM");
-        const op = cute.nvgpu.atom_tma_partition(
+        const op = cute_nvgpu.atom_tma_partition(
             self.ctx,
             descriptor.inner,
             self.makeCoord(cta_coord),
@@ -2149,7 +2122,7 @@ pub const Builder = struct {
         return .{ .smem = .{ .inner = op.result(0), .kernel = self }, .targets = views };
     }
 
-    // ==================== cute.nvgpu.tcgen05 (SM100) ====================
+    // ==================== cute_nvgpu.tcgen05 (SM100) ====================
 
     /// Tiled MMA type of the SM100 block-scaled MXFP4 x MXFP8 atom.
     pub fn blockScaledMmaType(self: *Builder, cfg: BlockScaledMmaConfig) *const mlir.Type {
@@ -2176,7 +2149,7 @@ pub const Builder = struct {
 
     /// Enable (or disable) accumulation into C for the next block-scaled MMA.
     pub fn setMmaAccumulate(self: *Builder, mma: Atom, enabled: Value) Atom {
-        const result = self.emit(cute.nvgpu.atom_set_value(
+        const result = self.emit(cute_nvgpu.atom_set_value(
             self.ctx,
             mma.inner,
             enabled.inner,
@@ -2201,32 +2174,30 @@ pub const Builder = struct {
     pub const TmemOptions = struct { two_cta: bool = false, exclusive: bool = false };
 
     pub fn allocTmem(self: *Builder, columns: u16, holding_ptr: anytype, opts: TmemOptions) void {
-        self.emitVoid(cute.nvgpu.arch_sm100_alloc_tmem(
+        self.emitVoid(cute_nvgpu.arch_sm100_alloc_tmem(
             self.ctx,
             self.cst(.i32, columns).inner,
             self.asValue(holding_ptr).inner,
-            if (opts.two_cta) .unit(self.ctx) else null,
-            if (opts.exclusive) .unit(self.ctx) else null,
+            .{ .is_two_cta = if (opts.two_cta) .unit(self.ctx) else null, .exclusive = if (opts.exclusive) .unit(self.ctx) else null },
             self.loc(),
         ));
     }
 
     pub fn retrieveTmemPtr(self: *Builder, holding_ptr: anytype, dtype: DType, alignment: u64) Value {
         const ptr_type = self.ptrTy(dtype, .tmem, alignment) catch @panic("invalid tensor-memory pointer type");
-        return self.emit(cute.nvgpu.arch_sm100_retrieve_tmem_ptr(self.ctx, self.asValue(holding_ptr).inner, ptr_type, self.loc()));
+        return self.emit(cute_nvgpu.arch_sm100_retrieve_tmem_ptr(self.ctx, self.asValue(holding_ptr).inner, ptr_type, self.loc()));
     }
 
     pub fn relinquishTmemAllocPermit(self: *Builder, opts: TmemOptions) void {
-        self.emitVoid(cute.nvgpu.arch_sm100_relinquish_tmem_alloc_permit(self.ctx, if (opts.two_cta) .unit(self.ctx) else null, self.loc()));
+        self.emitVoid(cute_nvgpu.arch_sm100_relinquish_tmem_alloc_permit(self.ctx, .{ .is_two_cta = if (opts.two_cta) .unit(self.ctx) else null }, self.loc()));
     }
 
     pub fn deallocTmem(self: *Builder, pointer: anytype, columns: u16, opts: TmemOptions) void {
-        self.emitVoid(cute.nvgpu.arch_sm100_dealloc_tmem(
+        self.emitVoid(cute_nvgpu.arch_sm100_dealloc_tmem(
             self.ctx,
             self.asValue(pointer).inner,
             self.cst(.i32, columns).inner,
-            if (opts.two_cta) .unit(self.ctx) else null,
-            if (opts.exclusive) .unit(self.ctx) else null,
+            .{ .is_two_cta = if (opts.two_cta) .unit(self.ctx) else null, .exclusive = if (opts.exclusive) .unit(self.ctx) else null },
             self.loc(),
         ));
     }
@@ -2239,14 +2210,14 @@ pub const Builder = struct {
     };
 
     pub fn tmemLoad(self: *Builder, src: anytype, result_type: []const u8, opts: TmemLoadOptions) View {
-        const result = self.emit(cute.nvgpu.arch_copy_SM100_tmem_load(
+        const result = self.emit(cute_nvgpu.arch_copy_SM100_tmem_load(
             self.ctx,
             self.asValue(src).inner,
             self.parseType(result_type),
             .int(self.ctx, .i32, opts.num_dp),
             .int(self.ctx, .i32, opts.num_b),
             .int(self.ctx, .i32, opts.num_rep),
-            if (opts.pack_16) .boolean(self.ctx, true) else null,
+            .{ .pack_16 = if (opts.pack_16) .boolean(self.ctx, true) else null },
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -2258,20 +2229,20 @@ pub const Builder = struct {
         // The NVVM-facing operation transports raw 32-bit register words.
         // Callers reinterpret each lane as the accumulator element type.
         const result_type = mlir.Type.vector(&.{lanes}, DType.i32.toMlir(self.ctx));
-        return self.emit(cute.nvgpu.arch_copy_SM100_tmem_load(
+        return self.emit(cute_nvgpu.arch_copy_SM100_tmem_load(
             self.ctx,
             self.asValue(src).inner,
             result_type,
             .int(self.ctx, .i32, opts.num_dp),
             .int(self.ctx, .i32, opts.num_b),
             .int(self.ctx, .i32, opts.num_rep),
-            if (opts.pack_16) .boolean(self.ctx, true) else null,
+            .{ .pack_16 = if (opts.pack_16) .boolean(self.ctx, true) else null },
             self.loc(),
         ));
     }
 
     pub fn makeS2tCopy(self: *Builder, atom: Atom, tmem: anytype, result_type: []const u8) Atom {
-        const result = self.emit(cute.nvgpu.atom_make_s2t_copy(
+        const result = self.emit(cute_nvgpu.atom_make_s2t_copy(
             self.ctx,
             atom.inner,
             self.asValue(tmem).inner,
@@ -2282,7 +2253,7 @@ pub const Builder = struct {
     }
 
     pub fn makeTmemCopy(self: *Builder, atom: Atom, tmem: anytype, result_type: []const u8) Atom {
-        const result = self.emit(cute.nvgpu.atom_make_tmem_copy(
+        const result = self.emit(cute_nvgpu.atom_make_tmem_copy(
             self.ctx,
             atom.inner,
             self.asValue(tmem).inner,
@@ -2293,7 +2264,7 @@ pub const Builder = struct {
     }
 
     pub fn s2tSmemDescriptor(self: *Builder, atom: Atom, input: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.nvgpu.atom_get_copy_s2t_smem_desc_view(
+        const result = self.emit(cute_nvgpu.atom_get_copy_s2t_smem_desc_view(
             self.ctx,
             atom.inner,
             self.asValue(input).inner,
@@ -2317,17 +2288,16 @@ pub const Builder = struct {
         mode: *const mlir.Attribute,
         num_cta: u8,
     ) void {
-        self.emitVoid(cute.nvgpu.arch_copy_SM100_tma_load(
+        self.emitVoid(cute_nvgpu.arch_copy_SM100_tma_load(
             self.ctx,
             descriptor_addr.inner,
             data_addr.inner,
             barrier_addr.inner,
             self.innerSlice(coords),
-            if (multicast_mask) |v| v.inner else null,
             self.innerSlice(offsets),
-            if (cache_policy) |v| v.inner else null,
             mode,
             .int(self.ctx, .i32, num_cta),
+            .{ .multicast_mask = if (multicast_mask) |v| v.inner else null, .cache_policy = if (cache_policy) |v| v.inner else null },
             self.loc(),
         ));
     }
@@ -2341,13 +2311,13 @@ pub const Builder = struct {
         cache_policy: ?Value,
         mode: *const mlir.Attribute,
     ) void {
-        self.emitVoid(cute.nvgpu.arch_copy_SM100_tma_store(
+        self.emitVoid(cute_nvgpu.arch_copy_SM100_tma_store(
             self.ctx,
             descriptor_addr.inner,
             data_addr.inner,
             self.innerSlice(coords),
-            if (cache_policy) |v| v.inner else null,
             mode,
+            .{ .cache_policy = if (cache_policy) |v| v.inner else null },
             self.loc(),
         ));
     }
@@ -2388,7 +2358,7 @@ pub const Builder = struct {
         // `arch.make_warp_uniform` on i1 parses, but the native SM100
         // pipeline does not lower it all the way to NVVM.
         const uniform_input = if (scalar.dtype() == .i1) scalar.to(.i32) else scalar;
-        const uniform = self.emit(cute.nvgpu.arch_make_warp_uniform(
+        const uniform = self.emit(cute_nvgpu.arch_make_warp_uniform(
             self.ctx,
             uniform_input.inner,
             uniform_input.type_(),
@@ -2417,7 +2387,7 @@ pub const Builder = struct {
             "bar.sync {d}, {d};",
             .{ id, participants },
         ) catch @panic("namedBarrier OOM");
-        _ = llvm.inline_asm(self.ctx, assembly, &.{}, null, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
+        _ = llvm.inline_asm(self.ctx, assembly, &.{}, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
     }
 
     /// Build the CuTe first-class divisor used by CUTLASS's persistent tile
@@ -2461,7 +2431,13 @@ pub const Builder = struct {
         const dtype = value.dtype();
         if (dtypeBitwidth(dtype) != 32) @panic("warpMaxNonNegative requires a 32-bit scalar");
         const bits = if (dtype == .i32) value else value.bitCast(.i32);
-        const reduced = self.emit(llvm.inline_asm(self.ctx, "redux.sync.max.u32 $0, $1, 0xffffffff;", &.{bits.inner}, .int(self.ctx, .i32), .{ .constraints = "=r,r" }, self.loc()));
+        const reduced = self.emit(llvm.inline_asm(
+            self.ctx,
+            "redux.sync.max.u32 $0, $1, 0xffffffff;",
+            &.{bits.inner},
+            .{ .constraints = "=r,r", .result_type = .int(self.ctx, .i32) },
+            self.loc(),
+        ));
         return if (dtype == .i32) reduced else reduced.bitCast(dtype);
     }
 
@@ -2469,7 +2445,13 @@ pub const Builder = struct {
         const dtype = value.dtype();
         if (dtypeBitwidth(dtype) != 32) @panic("shuffleXor currently requires a 32-bit scalar");
         const bits = if (dtype == .i32) value else value.bitCast(.i32);
-        const shuffled = self.emit(llvm.inline_asm(self.ctx, "shfl.sync.bfly.b32 $0, $1, $2, 31, 0xffffffff;", &.{ bits.inner, self.cst(.i32, offset).inner }, .int(self.ctx, .i32), .{ .constraints = "=r,r,r" }, self.loc()));
+        const shuffled = self.emit(llvm.inline_asm(
+            self.ctx,
+            "shfl.sync.bfly.b32 $0, $1, $2, 31, 0xffffffff;",
+            &.{ bits.inner, self.cst(.i32, offset).inner },
+            .{ .constraints = "=r,r,r", .result_type = .int(self.ctx, .i32) },
+            self.loc(),
+        ));
         return if (dtype == .i32) shuffled else shuffled.bitCast(dtype);
     }
 
@@ -2479,7 +2461,13 @@ pub const Builder = struct {
         const dtype = value.dtype();
         if (dtypeBitwidth(dtype) != 32) @panic("shuffleIdx currently requires a 32-bit scalar");
         const bits = if (dtype == .i32) value else value.bitCast(.i32);
-        const shuffled = self.emit(llvm.inline_asm(self.ctx, "shfl.sync.idx.b32 $0, $1, $2, 31, 0xffffffff;", &.{ bits.inner, self.liftAs(lane, .i32).inner }, .int(self.ctx, .i32), .{ .constraints = "=r,r,r" }, self.loc()));
+        const shuffled = self.emit(llvm.inline_asm(
+            self.ctx,
+            "shfl.sync.idx.b32 $0, $1, $2, 31, 0xffffffff;",
+            &.{ bits.inner, self.liftAs(lane, .i32).inner },
+            .{ .constraints = "=r,r,r", .result_type = .int(self.ctx, .i32) },
+            self.loc(),
+        ));
         return if (dtype == .i32) shuffled else shuffled.bitCast(dtype);
     }
 
@@ -2490,28 +2478,33 @@ pub const Builder = struct {
             self.ctx,
             "{ .reg .b16 lo, hi; cvt.rn.satfinite.e4m3x2.f32 lo, $2, $1; cvt.rn.satfinite.e4m3x2.f32 hi, $4, $3; mov.b32 $0, {lo, hi}; }",
             &.{ a.to(.f32).inner, b.to(.f32).inner, c.to(.f32).inner, d.to(.f32).inner },
-            .int(self.ctx, .i32),
-            .{ .constraints = "=r,f,f,f,f" },
+            .{ .constraints = "=r,f,f,f,f", .result_type = .int(self.ctx, .i32) },
             self.loc(),
         ));
     }
 
     /// One-operand FP32 PTX instruction, e.g. `ex2.approx.ftz.f32`.
     pub fn unaryF32(self: *Builder, comptime instruction: []const u8, value: Value) Value {
-        return self.emit(llvm.inline_asm(self.ctx, instruction ++ " $0, $1;", &.{value.to(.f32).inner}, DType.f32.toMlir(self.ctx), .{ .constraints = "=f,f" }, self.loc()));
+        return self.emit(llvm.inline_asm(
+            self.ctx,
+            instruction ++ " $0, $1;",
+            &.{value.to(.f32).inner},
+            .{ .constraints = "=f,f", .result_type = DType.f32.toMlir(self.ctx) },
+            self.loc(),
+        ));
     }
 
     /// Signal programmatic dependent launches after this grid has consumed
     /// its inputs. The caller must also launch the producer/consumer chain
     /// with PDL enabled.
     pub fn launchDependents(self: *Builder) void {
-        _ = llvm.inline_asm(self.ctx, "griddepcontrol.launch_dependents;", &.{}, null, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
+        _ = llvm.inline_asm(self.ctx, "griddepcontrol.launch_dependents;", &.{}, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
     }
 
     /// Wait until the preceding grid has made its programmatic dependency
     /// available. This is the consumer-side half of a PDL launch chain.
     pub fn waitForDependency(self: *Builder) void {
-        _ = llvm.inline_asm(self.ctx, "griddepcontrol.wait;", &.{}, null, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
+        _ = llvm.inline_asm(self.ctx, "griddepcontrol.wait;", &.{}, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
     }
 
     /// `cute.arch.alloc_smem(dtype, size_in_elems, alignment)`: a static
@@ -2519,7 +2512,7 @@ pub const Builder = struct {
     pub fn allocSmem(self: *Builder, dt: DType, size_in_elems: i64, alignment: ?u64) Value {
         const al = alignment orelse @max(1, dtypeBitwidth(dt) / 8);
         const ty = self.ptrTy(dt, .smem, al) catch @panic("bad smem pointer");
-        return self.emit(cute.nvgpu.arch_alloc_smem(self.ctx, ty, .int(self.ctx, .i32, size_in_elems), self.loc()));
+        return self.emit(cute_nvgpu.arch_alloc_smem(self.ctx, ty, .int(self.ctx, .i32, size_in_elems), self.loc()));
     }
 
     // mbarriers, async-proxy fences and bulk-copy groups.
@@ -2687,7 +2680,7 @@ pub const Builder = struct {
         const alloc = self.arena.allocator();
         const inner = alloc.alloc(*const mlir.Value, operands.len) catch @panic("OOM");
         for (operands, inner) |o, *x| x.* = o.inner;
-        const op = llvm.call_intrinsic(self.ctx, name, inner, result, self.loc());
+        const op = llvm.call_intrinsic(self.ctx, name, inner, .{ .result_type = result }, self.loc());
         if (result == null) {
             self.emitVoid(op);
             return null;
@@ -3086,7 +3079,7 @@ fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
     inline for (dialects_needed) |d| mlir.DialectHandle.fromString(d).insertDialect(registry);
-    mlir.registerFuncExtensions(registry);
+    func.registerExtensions(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;
@@ -3296,7 +3289,7 @@ test "SM100 block-scaled MMA atoms use the CuTe DSL instruction shapes" {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
     inline for (dialects_needed) |dialect| mlir.DialectHandle.fromString(dialect).insertDialect(registry);
-    mlir.registerFuncExtensions(registry);
+    func.registerExtensions(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
