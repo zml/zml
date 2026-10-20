@@ -2,17 +2,22 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "triton_builder",
-    tags = ["manual"],
     srcs = [
         "dtype.zig",
     ],
     import_name = "kernels/triton/builder",
     main = "builder.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         "//kernels/common",
         "//mlir",
-        "//mlir/dialects",
+        "//mlir/dialects/arith",
+        "//mlir/dialects/cf",
+        "//mlir/dialects/func",
+        "//mlir/dialects/llvm",
+        "//mlir/dialects/math",
+        "//mlir/dialects/scf",
         "//mlir/dialects/ttir",
         "//stdx",
     ],

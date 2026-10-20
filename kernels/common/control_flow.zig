@@ -5,9 +5,7 @@
 
 const std = @import("std");
 const mlir = @import("mlir");
-const dialects = @import("mlir/dialects");
-
-const scf = dialects.scf;
+const scf = @import("mlir/dialects/scf");
 
 pub fn tupleArity(comptime T: type, comptime what: []const u8) comptime_int {
     const info = @typeInfo(T);
@@ -85,14 +83,7 @@ pub fn IfOnlyScope(comptime BuilderT: type, comptime ValueT: type) type {
             const k = self.kernel;
             emitScfYield(ValueT, k, self.then_block, 0, values, "IfOnlyScope.yieldThen");
             k.popBlock();
-            const if_op = scf.if_(
-                k.ctx,
-                self.cond_inner,
-                &.{},
-                self.then_block,
-                null,
-                k.loc(),
-            );
+            const if_op = scf.if_(k.ctx, self.cond_inner, &.{}, self.then_block, .{}, k.loc());
             _ = if_op.appendTo(k.currentBlock());
         }
     };
@@ -120,14 +111,7 @@ pub fn IfScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usize
             const k = self.kernel;
             emitScfYield(ValueT, k, self.else_block, N, values, "IfScope.yieldElse");
             k.popBlock();
-            const if_op = scf.if_(
-                k.ctx,
-                self.cond_inner,
-                &self.result_types,
-                self.then_block,
-                self.else_block,
-                k.loc(),
-            );
+            const if_op = scf.if_(k.ctx, self.cond_inner, &self.result_types, self.then_block, .{ .else_block = self.else_block }, k.loc());
             _ = if_op.appendTo(k.currentBlock());
             for (0..N) |i| self.results[i] = .{ .inner = if_op.result(i), .kernel = k };
         }

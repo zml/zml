@@ -170,7 +170,7 @@ awk '/^pub const Tensor = struct/,/^};/' kernels/cute/builder.zig | grep 'pub fn
 awk '/^pub const Builder = struct/,0' kernels/cute/builder.zig | grep '    pub fn '
 
 # every bound op of the dialect
-grep -n '^pub fn ' mlir/dialects/cute_ir/cute_ir.zig mlir/dialects/cute_ir/cute_nvgpu.zig
+grep -n '^pub fn ' mlir/dialects/cute_ir/cute_ir.zig mlir/dialects/cute_nvgpu/cute_nvgpu.zig
 ```
 
 `grep -n '^test "' kernels/cute/builder.zig` lists the tests; each prints a

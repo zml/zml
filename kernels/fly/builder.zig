@@ -1,9 +1,12 @@
 const std = @import("std");
 
-const dialects = @import("mlir/dialects");
-const arith = dialects.arith;
-const gpu = dialects.gpu;
-const scf = dialects.scf;
+const arith = @import("mlir/dialects/arith");
+const gpu = @import("mlir/dialects/gpu");
+const llvm = @import("mlir/dialects/llvm");
+const math = @import("mlir/dialects/math");
+const llvmRocdl = @import("mlir/dialects/rocdl");
+const scf = @import("mlir/dialects/scf");
+const vectorDialect = @import("mlir/dialects/vector");
 const fly = @import("mlir/dialects/fly");
 const dsl = @import("kernels/common");
 const tupleArity = dsl.tupleArity;
@@ -14,7 +17,7 @@ pub const layout = @import("layout.zig");
 pub const dtypes = @import("dtype.zig");
 
 pub const DType = dtypes.DType;
-pub const rocdl = fly.rocdl;
+pub const rocdl = @import("mlir/dialects/fly_rocdl");
 pub const IntTuple = layout.IntTuple;
 pub const Layout = layout.Layout;
 pub const Tile = layout.Tile;
@@ -25,7 +28,7 @@ pub const colMajor = layout.colMajor;
 pub const ordered = layout.ordered;
 pub const tile = layout.tile;
 
-pub const dialects_needed = fly.dialects_needed;
+pub const dialects_needed = [_][]const u8{ "func", "arith", "scf", "math", "vector", "memref", "llvm", "gpu", "rocdl", "ub", "fly", "fly_rocdl" };
 
 pub const FinishError = error{ InvalidMlir, OutOfMemory } || std.Io.Writer.Error;
 
@@ -159,11 +162,11 @@ pub const Value = struct {
     }
     pub fn coalesce(self: Value) Value {
         const k = self.kern();
-        return k.emit(fly.ops.coalesce(k.ctx, self.inner, null, k.loc()));
+        return k.emit(fly.ops.coalesce(k.ctx, self.inner, .{}, k.loc()));
     }
     pub fn complement(self: Value) Value {
         const k = self.kern();
-        return k.emit(fly.ops.complement(k.ctx, self.inner, null, k.loc()));
+        return k.emit(fly.ops.complement(k.ctx, self.inner, .{}, k.loc()));
     }
 
     /// `t[coord]` with a `null` somewhere; `coord` is a tuple literal
@@ -224,7 +227,7 @@ pub const Value = struct {
     pub fn makeFragmentLike(self: Value, dtype: ?DType) Value {
         const k = self.kern();
         const dtype_attr: ?*const mlir.Attribute = if (dtype) |d| .typeAttr(d.toMlir(k.ctx)) else null;
-        return k.emit(fly.ops.make_fragment_like(k.ctx, self.inner, dtype_attr, k.loc()));
+        return k.emit(fly.ops.make_fragment_like(k.ctx, self.inner, .{ .dtype = dtype_attr }, k.loc()));
     }
 
     pub fn elemLess(self: Value, rhs: anytype) Value {
@@ -265,7 +268,7 @@ pub const Value = struct {
         const dt = self.elemDType();
         const cst = k.constant(dt, value);
         const vec_ty = mlir.Type.vector(&.{n}, dt.toMlir(k.ctx));
-        const vec = k.emit(dialects.vector.broadcast(k.ctx, cst.inner, vec_ty, k.loc()));
+        const vec = k.emit(vectorDialect.broadcast(k.ctx, cst.inner, vec_ty, k.loc()));
         self.store(vec);
     }
 
@@ -302,9 +305,9 @@ pub const Value = struct {
         const r: Value = if (@TypeOf(rhs) == Value) rhs else k.constLike(rhs, self);
         if (self.type_().eql(r.type_())) return .{ self, r };
         if (self.type_().isA(mlir.VectorType) != null and r.type_().isA(mlir.VectorType) == null)
-            return .{ self, k.emit(dialects.vector.broadcast(k.ctx, r.inner, self.type_(), k.loc())) };
+            return .{ self, k.emit(vectorDialect.broadcast(k.ctx, r.inner, self.type_(), k.loc())) };
         if (self.type_().isA(mlir.VectorType) == null and r.type_().isA(mlir.VectorType) != null)
-            return .{ k.emit(dialects.vector.broadcast(k.ctx, self.inner, r.type_(), k.loc())), r };
+            return .{ k.emit(vectorDialect.broadcast(k.ctx, self.inner, r.type_(), k.loc())), r };
         std.debug.panic("fly: cannot combine {f} with {f}", .{ self.type_(), r.type_() });
     }
 
@@ -421,7 +424,7 @@ pub const Value = struct {
     pub fn splat(self: Value, n: i64) Value {
         const k = self.kern();
         std.debug.assert(self.type_().isA(mlir.VectorType) == null and n > 0);
-        return k.emit(dialects.vector.broadcast(k.ctx, self.inner, .vector(&.{n}, self.type_()), k.loc()));
+        return k.emit(vectorDialect.broadcast(k.ctx, self.inner, .vector(&.{n}, self.type_()), k.loc()));
     }
 
     /// Preserve total bits, adjusting vector length to the destination element.
@@ -430,7 +433,7 @@ pub const Value = struct {
         const src = self.scalarDType();
         if (self.type_().isA(mlir.VectorType)) |vec| {
             const n = @divExact(vec.dimension(0) * @as(i64, src.bitWidth()), dtype.bitWidth());
-            return k.emit(dialects.vector.bitcast(k.ctx, self.inner, .vector(&.{n}, dtype.toMlir(k.ctx)), k.loc()));
+            return k.emit(vectorDialect.bitcast(k.ctx, self.inner, .vector(&.{n}, dtype.toMlir(k.ctx)), k.loc()));
         }
         std.debug.assert(src.bitWidth() == dtype.bitWidth());
         return k.emit(arith.bitcast(k.ctx, self.inner, dtype.toMlir(k.ctx), k.loc()));
@@ -438,12 +441,12 @@ pub const Value = struct {
 
     pub fn insert(self: Value, index: i64, value: Value) Value {
         const k = self.kern();
-        return k.emit(dialects.vector.insert(k.ctx, value.inner, self.inner, &.{index}, &.{}, k.loc()));
+        return k.emit(vectorDialect.insert(k.ctx, value.inner, self.inner, &.{index}, &.{}, k.loc()));
     }
 
     pub fn shuffleVector(self: Value, rhs: Value, indices: []const i64) Value {
         const k = self.kern();
-        return k.emit(dialects.vector.shuffle(k.ctx, self.inner, rhs.inner, indices, .vector(&.{@intCast(indices.len)}, self.scalarElemType()), k.loc()));
+        return k.emit(vectorDialect.shuffle(k.ctx, self.inner, rhs.inner, indices, .vector(&.{@intCast(indices.len)}, self.scalarElemType()), k.loc()));
     }
 
     fn withElemType(self: Value, elem: *const mlir.Type) *const mlir.Type {
@@ -546,7 +549,7 @@ pub const Value = struct {
     pub fn reduce(self: Value, reduce_kind: ReduceKind) Value {
         const k = self.kern();
         const result = self.scalarElemType();
-        const ck: dialects.vector.CombiningKind = switch (reduce_kind) {
+        const ck: vectorDialect.CombiningKind = switch (reduce_kind) {
             .add => .add,
             .mul => .mul,
             .minf => .minnumf,
@@ -557,14 +560,14 @@ pub const Value = struct {
             .or_ => .@"or",
             .xor => .xor,
         };
-        const op = dialects.vector.reduction(k.ctx, ck, self.inner, result, .{}, k.loc());
+        const op = vectorDialect.reduction(k.ctx, ck, self.inner, result, .{}, k.loc());
         return k.emitFast(op);
     }
 
     /// Static position.
     pub fn extract(self: Value, i: i64) Value {
         const k = self.kern();
-        return k.emit(dialects.vector.extract(k.ctx, self.inner, &.{i}, &.{}, self.scalarElemType(), k.loc()));
+        return k.emit(vectorDialect.extract(k.ctx, self.inner, &.{i}, &.{}, self.scalarElemType(), k.loc()));
     }
 };
 
@@ -622,7 +625,7 @@ pub const TiledMma = struct {
         const k = self.value.kern();
         const operand_id = Builder.must(fly.attributes.mmaOperandAttr(k.ctx, operand));
         const stages: ?*const mlir.Attribute = if (opts.stages) |st| .int(k.ctx, .i32, st) else null;
-        return k.emit(fly.ops.mma_make_fragment(k.ctx, self.value.inner, input.inner, operand_id, stages, k.loc()));
+        return k.emit(fly.ops.mma_make_fragment(k.ctx, self.value.inner, input.inner, operand_id, .{ .stages = stages }, k.loc()));
     }
 
     /// Per-thread register fragment for the A operand.
@@ -1036,43 +1039,42 @@ pub const Builder = struct {
     }
 
     pub fn rsqrt(self: *Builder, x: Value) Value {
-        return self.emitFast(dialects.math.rsqrt(self.ctx, x.inner, self.loc()));
+        return self.emitFast(math.rsqrt(self.ctx, x.inner, self.loc()));
     }
     pub fn sqrt(self: *Builder, x: Value) Value {
-        return self.emitFast(dialects.math.sqrt(self.ctx, x.inner, self.loc()));
+        return self.emitFast(math.sqrt(self.ctx, x.inner, self.loc()));
     }
     pub fn exp(self: *Builder, x: Value) Value {
-        return self.emitFast(dialects.math.exp(self.ctx, x.inner, self.loc()));
+        return self.emitFast(math.exp(self.ctx, x.inner, self.loc()));
     }
 
     pub fn log(self: *Builder, x: Value) Value {
-        return self.emitFast(dialects.math.log(self.ctx, x.inner, self.loc()));
+        return self.emitFast(math.log(self.ctx, x.inner, self.loc()));
     }
     pub fn fma(self: *Builder, a: Value, b: Value, c: Value) Value {
-        return self.emitFast(dialects.math.fma(self.ctx, a.inner, b.inner, c.inner, self.loc()));
+        return self.emitFast(math.fma(self.ctx, a.inner, b.inner, c.inner, self.loc()));
     }
 
     /// A matrix atom with SSA operands; unlike `gemm`, this needs no register
     /// allocas and can carry its accumulator through control flow.
     pub fn mmaAtomCall(self: *Builder, atom: Value, a: Value, b: Value, c: Value) Value {
-        return self.emit(fly.ops.mma_atom_call_ssa(self.ctx, atom.inner, null, &.{a.inner}, &.{b.inner}, c.inner, &.{c.type_()}, self.loc()));
+        return self.emit(fly.ops.mma_atom_call_ssa(self.ctx, atom.inner, &.{a.inner}, &.{b.inner}, c.inner, &.{c.type_()}, .{}, self.loc()));
     }
 
     /// AMD byte permutation. ROCDL has no corresponding operation at our pin.
     pub fn perm(self: *Builder, hi: Value, lo: Value, selector: Value) Value {
-        return self.emit(dialects.llvm.inline_asm(self.ctx, "v_perm_b32 $0, $1, $2, $3", &.{ hi.inner, lo.inner, selector.inner }, .int(self.ctx, .i32), .{
-            .constraints = "=v,v,v,v",
-        }, self.loc()));
+        return self.emit(llvm.inline_asm(
+            self.ctx,
+            "v_perm_b32 $0, $1, $2, $3",
+            &.{ hi.inner, lo.inner, selector.inner },
+            .{ .constraints = "=v,v,v,v", .result_type = .int(self.ctx, .i32) },
+            self.loc(),
+        ));
     }
 
     /// CDNA3 packed FP8 conversion, selecting two bytes from the low/high word.
     pub fn cvtPkF32Fp8(self: *Builder, bits: Value, high: bool) Value {
-        return self.emit(fly.make(self.ctx, "rocdl.cvt.pk.f32.fp8", .{
-            .operands = .{ .flat = &.{bits.inner} },
-            .results = .{ .flat = &.{.vector(&.{2}, .float(self.ctx, .f32))} },
-            .attributes = &.{.named(self.ctx, "wordSel", .boolean(self.ctx, high))},
-            .location = self.loc(),
-        }));
+        return self.emit(llvmRocdl.cvtPkF32Fp8(self.ctx, bits.inner, high, self.loc()));
     }
 
     pub const AtomicScope = enum { workgroup, agent };
@@ -1113,14 +1115,14 @@ pub const Builder = struct {
             .named(self.ctx, "allocBytes", .int(self.ctx, .i64, bytes)),
             .named(self.ctx, "allocAlign", .int(self.ctx, .i64, alignment)),
         });
-        const raw = self.emit(fly.ops.make_ptr(self.ctx, &.{}, raw_ty, dict, self.loc()));
+        const raw = self.emit(fly.ops.make_ptr(self.ctx, &.{}, raw_ty, .{ .dict_attrs = dict }, self.loc()));
         const typed = self.recast(raw, dtype);
         return typed.view(self.static(Layout{ .shape = .static(n), .stride = .static(1) }));
     }
 
     /// A single atom-sized copy.
     pub fn copyAtomCall(self: *Builder, atom: Value, src: Value, dst: Value) void {
-        self.emitNone(fly.ops.copy_atom_call(self.ctx, atom.inner, src.inner, dst.inner, null, self.loc()));
+        self.emitNone(fly.ops.copy_atom_call(self.ctx, atom.inner, src.inner, dst.inner, .{}, self.loc()));
     }
 
     /// One atom-sized load straight into a `vector<NxT>`.
@@ -1132,12 +1134,12 @@ pub const Builder = struct {
         const n = src.sizeStatic();
         const dt = src.elemDType();
         const vec_ty = mlir.Type.vector(&.{n}, dt.toMlir(self.ctx));
-        return self.emit(fly.ops.copy_atom_call_ssa(self.ctx, atom.inner, src.inner, null, null, &.{vec_ty}, self.loc()));
+        return self.emit(fly.ops.copy_atom_call_ssa(self.ctx, atom.inner, src.inner, &.{vec_ty}, .{}, self.loc()));
     }
 
     /// One atom-sized store of a `vector<NxT>`; see `copyAtomLoad`.
     pub fn copyAtomStore(self: *Builder, atom: Value, vec: Value, dst: Value) void {
-        self.emitNone(fly.ops.copy_atom_call_ssa(self.ctx, atom.inner, vec.inner, dst.inner, null, &.{}, self.loc()));
+        self.emitNone(fly.ops.copy_atom_call_ssa(self.ctx, atom.inner, vec.inner, &.{}, .{ .dst = dst.inner }, self.loc()));
     }
 
     // ---------------------------------------------------------------- tensors
@@ -1195,8 +1197,8 @@ pub const Builder = struct {
         fn type_(self: CopyOp, ctx: *mlir.Context) *const mlir.Type {
             return switch (self) {
                 .universal => |b| must(fly.types.CopyOpUniversalCopyType.get(ctx, .{ .bitSize = b })).type_(),
-                .buffer_copy => |b| must(fly.rocdl.CopyOpCDNA3BufferCopyType.get(ctx, .{ .bitSize = b })).type_(),
-                .buffer_copy_lds => |b| must(fly.rocdl.CopyOpCDNA3BufferCopyLDSType.get(ctx, .{ .bitSize = b })).type_(),
+                .buffer_copy => |b| must(rocdl.CopyOpCDNA3BufferCopyType.get(ctx, .{ .bitSize = b })).type_(),
+                .buffer_copy_lds => |b| must(rocdl.CopyOpCDNA3BufferCopyLDSType.get(ctx, .{ .bitSize = b })).type_(),
             };
         }
     };
@@ -1207,7 +1209,7 @@ pub const Builder = struct {
         return self.emit(fly.ops.make_copy_atom(self.ctx, &.{}, t, .int(self.ctx, .i32, bits), self.loc()));
     }
 
-    /// `op` is an MMA op type, such as a `fly.rocdl.MmaOpCDNA3MFMAType`.
+    /// `op` is an MMA op type, such as a `rocdl.MmaOpCDNA3MFMAType`.
     pub fn mmaAtom(self: *Builder, op: *const mlir.Type) Value {
         const t = must(fly.types.MmaAtomType.get(self.ctx, .{ .mmaOp = op })).type_();
         return self.emit(fly.ops.make_mma_atom(self.ctx, t, self.loc()));
@@ -1289,14 +1291,14 @@ pub const Builder = struct {
         // (7 << 12) | (4 << 15): the CDNA descriptor flags FlyDSL and XLA use.
         const flags = self.constant(.i32, 0x27000);
         const elem = t.elemDType();
-        const buf_ty = self.ptrType(elem, (must(fly.rocdl.BufferDescAddressAttr.get(self.ctx))).attribute());
-        const buf_ptr = self.emit(fly.ops.make_ptr(self.ctx, &.{ ptr.inner, c0.inner, nrec.inner, flags.inner }, buf_ty, null, self.loc()));
+        const buf_ty = self.ptrType(elem, (must(rocdl.BufferDescAddressAttr.get(self.ctx))).attribute());
+        const buf_ptr = self.emit(fly.ops.make_ptr(self.ctx, &.{ ptr.inner, c0.inner, nrec.inner, flags.inner }, buf_ty, .{}, self.loc()));
         return buf_ptr.view(lay);
     }
 
     pub fn tiledMma(self: *Builder, atom: Value, atom_layout: anytype, permutation: ?Value) TiledMma {
         const al = self.lift(atom_layout);
-        const v = self.emit(fly.ops.make_tiled_mma(self.ctx, atom.inner, al.inner, if (permutation) |p| p.inner else null, self.loc()));
+        const v = self.emit(fly.ops.make_tiled_mma(self.ctx, atom.inner, al.inner, .{ .permutation = if (permutation) |p| p.inner else null }, self.loc()));
         return .{ .value = v };
     }
 
@@ -1305,11 +1307,11 @@ pub const Builder = struct {
     };
 
     pub fn copy(self: *Builder, atom: Value, src: Value, dst: Value, opts: CopyOpts) void {
-        self.emitNone(fly.ops.copy(self.ctx, atom.inner, src.inner, dst.inner, if (opts.pred) |p| p.inner else null, self.loc()));
+        self.emitNone(fly.ops.copy(self.ctx, atom.inner, src.inner, dst.inner, .{ .pred = if (opts.pred) |p| p.inner else null }, self.loc()));
     }
 
     pub fn gemm(self: *Builder, atom: Value, d: Value, a: Value, b: Value, c: Value) void {
-        self.emitNone(fly.ops.gemm(self.ctx, atom.inner, d.inner, &.{a.inner}, &.{b.inner}, c.inner, null, null, self.loc()));
+        self.emitNone(fly.ops.gemm(self.ctx, atom.inner, d.inner, &.{a.inner}, &.{b.inner}, c.inner, .{}, self.loc()));
     }
 
     // ---------------------------------------------------------------- control flow
@@ -1479,7 +1481,7 @@ pub const Builder = struct {
 fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    fly.insertDialects(registry);
+    inline for (dialects_needed) |name| registry.registerDialect(name);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;
@@ -1588,7 +1590,7 @@ pub const MmaFlavor = enum {
         const operand = self.operandDType().toMlir(ctx);
         const acc: *const mlir.Type = .float(ctx, .f32);
         return switch (self) {
-            .cdna3_mfma => (fly.rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
+            .cdna3_mfma => (rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
                 .m = 16,
                 .n = 16,
                 .k = 4,
@@ -1597,7 +1599,7 @@ pub const MmaFlavor = enum {
                 .elemTyAcc = acc,
             }) catch unreachable).type_(),
             inline .gfx11_wmma, .gfx120x_wmma => |f| blk: {
-                const T = if (f == .gfx11_wmma) fly.rocdl.MmaOpGFX11WMMAType else fly.rocdl.MmaOpGFX120XWMMAType;
+                const T = if (f == .gfx11_wmma) rocdl.MmaOpGFX11WMMAType else rocdl.MmaOpGFX120XWMMAType;
                 break :blk (T.get(ctx, .{
                     .m = 16,
                     .n = 16,
@@ -1924,7 +1926,7 @@ test "SSA matrix atom builds, verifies and re-parses" {
     var b = try Builder.open(std.testing.allocator, ctx, "mma_atom_ssa");
     defer b.deinit();
     _ = try b.declareArgs(.{});
-    const atom_type = try fly.rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
+    const atom_type = try rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
         .m = 16,
         .n = 16,
         .k = 16,

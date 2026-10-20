@@ -7,14 +7,13 @@
 
 const std = @import("std");
 
-const dialects = @import("mlir/dialects");
-const arith = dialects.arith;
-const cf = dialects.cf;
-const func = dialects.func;
-const math = dialects.math;
-const memref = dialects.memref;
-const scf = dialects.scf;
-const vector = dialects.vector;
+const arith = @import("mlir/dialects/arith");
+const cf = @import("mlir/dialects/cf");
+const func = @import("mlir/dialects/func");
+const math = @import("mlir/dialects/math");
+const memref = @import("mlir/dialects/memref");
+const scf = @import("mlir/dialects/scf");
+const vector = @import("mlir/dialects/vector");
 /// `vector`-dialect enums re-exported for convenience.
 /// Used by `vectorReduction` / `multiReduction`.
 pub const CombiningKind = vector.CombiningKind;
@@ -1462,15 +1461,7 @@ pub const Builder = struct {
         const result_ty = self.refVectorType(ref);
         const idx_inner = self.indicesOrZero(ref, indices);
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
-        return self.emit(tpu.vector_load(
-            ctx,
-            ref.inner,
-            idx_inner,
-            mask_inner,
-            .{ .strides = opts.strides },
-            result_ty,
-            self.loc(),
-        ));
+        return self.emit(tpu.vector_load(ctx, ref.inner, idx_inner, .{ .strides = opts.strides, .mask = mask_inner }, result_ty, self.loc()));
     }
 
     /// `tpu.vector_load` with an explicit result vector shape.
@@ -1479,15 +1470,7 @@ pub const Builder = struct {
         const result_ty = mlir.Type.vector(shape, ref.elemType());
         const idx_inner = self.indicesOrZero(ref, indices);
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
-        return self.emit(tpu.vector_load(
-            ctx,
-            ref.inner,
-            idx_inner,
-            mask_inner,
-            .{ .strides = opts.strides },
-            result_ty,
-            self.loc(),
-        ));
+        return self.emit(tpu.vector_load(ctx, ref.inner, idx_inner, .{ .strides = opts.strides, .mask = mask_inner }, result_ty, self.loc()));
     }
 
     /// `tpu.vector_store(value, ref)` — full-shape vector store.
@@ -1502,15 +1485,7 @@ pub const Builder = struct {
     pub fn refStoreOpts(self: *Builder, ref: Value, value: Value, indices: []const Value, opts: VectorStoreOpts) void {
         const idx_inner = self.indicesOrZero(ref, indices);
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
-        _ = tpu.vector_store(
-            self.ctx,
-            value.inner,
-            ref.inner,
-            idx_inner,
-            mask_inner,
-            .{ .strides = opts.strides, .add = opts.add },
-            self.loc(),
-        ).appendTo(self.currentBlock());
+        _ = tpu.vector_store(self.ctx, value.inner, ref.inner, idx_inner, .{ .strides = opts.strides, .add = opts.add, .mask = mask_inner }, self.loc()).appendTo(self.currentBlock());
     }
 
     /// `memref.load` — scalar load. Indices must be `index`-typed.
@@ -1610,7 +1585,7 @@ pub const Builder = struct {
     /// `dimensions` to use the default.
     pub fn iota(self: *Builder, shape: []const i64, dtype: DType, dimensions: ?[]const i32) Value {
         const ty = mlir.Type.vector(shape, dtype.toMlir(self.ctx));
-        return self.emit(tpu.iota(self.ctx, dimensions, ty, self.loc()));
+        return self.emit(tpu.iota(self.ctx, ty, .{ .dimensions = dimensions }, self.loc()));
     }
 
     /// 1-D `arange(0, n)`. TPU layout pass requires rank ≥ 2 with the lane dim
@@ -1618,7 +1593,7 @@ pub const Builder = struct {
     pub fn arange(self: *Builder, n: i64, dtype: DType) Value {
         const elem = dtype.toMlir(self.ctx);
         const ty_2d = .vector(&.{ 1, n }, elem);
-        const iota_2d = self.emit(tpu.iota(self.ctx, &.{1}, ty_2d, self.loc()));
+        const iota_2d = self.emit(tpu.iota(self.ctx, ty_2d, .{ .dimensions = &.{1} }, self.loc()));
         return self.shapeCast(iota_2d, &.{n});
     }
 
@@ -1802,7 +1777,7 @@ pub const Builder = struct {
     /// as its length. The result has the same shape as the input.
     pub fn scan(self: *Builder, input: Value, kind: ReductionKind, mask: ?Value) Value {
         const m_inner: ?*const mlir.Value = if (mask) |m| m.inner else null;
-        return self.emit(tpu.scan(self.ctx, input.inner, kind, m_inner, input.type_(), self.loc()));
+        return self.emit(tpu.scan(self.ctx, input.inner, kind, input.type_(), .{ .mask = m_inner }, self.loc()));
     }
 
     /// `tpu.sort(keys, values, mask?)` — returns (output_mask, sorted_keys, sorted_values).
@@ -1816,8 +1791,7 @@ pub const Builder = struct {
             self.ctx,
             keys.inner,
             values.inner,
-            m_inner,
-            .{ .descending = opts.descending },
+            .{ .descending = opts.descending, .mask = m_inner },
             out_mask_ty,
             keys.type_(),
             values.type_(),
@@ -2344,7 +2318,7 @@ test "static rotate uses the current dynamic rotate operation" {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
     inline for (dialects_needed) |dialect| registry.registerDialect(dialect);
-    mlir.registerFuncExtensions(registry);
+    func.registerExtensions(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();

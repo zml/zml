@@ -500,7 +500,7 @@ test "static queries" {
 fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    fly.insertDialects(registry);
+    inline for (@import("builder.zig").dialects_needed) |name| registry.registerDialect(name);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;

@@ -1,11 +1,10 @@
 const std = @import("std");
 
-const dialects = @import("mlir/dialects");
-const arith = dialects.arith;
-const cf = dialects.cf;
-const math = dialects.math;
-const scf = dialects.scf;
-const ttir = dialects.ttir;
+const arith = @import("mlir/dialects/arith");
+const cf = @import("mlir/dialects/cf");
+const math = @import("mlir/dialects/math");
+const scf = @import("mlir/dialects/scf");
+const ttir = @import("mlir/dialects/ttir");
 const dsl = @import("kernels/common");
 const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
@@ -1097,7 +1096,16 @@ pub const Builder = struct {
         }
         const mask_inner: ?*const mlir.Value = if (mask_v) |m| m.inner else null;
         const other_inner: ?*const mlir.Value = if (other_v) |o| o.inner else null;
-        return self.emit(ttir.load(self.ctx, ptr.inner, self.loadResultType(ptr), mask_inner, other_inner, opts.cache_modifier, opts.eviction_policy, opts.@"volatile", self.loc()));
+        return self.emit(ttir.load(
+            self.ctx,
+            ptr.inner,
+            self.loadResultType(ptr),
+            opts.cache_modifier,
+            opts.eviction_policy,
+            opts.@"volatile",
+            .{ .mask = mask_inner, .other = other_inner },
+            self.loc(),
+        ));
     }
 
     pub fn store(self: *Builder, ptr: Value, value: Value) void {
@@ -1112,7 +1120,7 @@ pub const Builder = struct {
             }
         }
         const mask_inner: ?*const mlir.Value = if (mask_v) |m| m.inner else null;
-        _ = ttir.store(self.ctx, ptr.inner, value.inner, mask_inner, opts.cache_modifier, opts.eviction_policy, self.loc()).appendTo(self.currentBlock());
+        _ = ttir.store(self.ctx, ptr.inner, value.inner, opts.cache_modifier, opts.eviction_policy, .{ .mask = mask_inner }, self.loc()).appendTo(self.currentBlock());
     }
 
     // ==================== arith: binary ====================
@@ -1367,7 +1375,7 @@ pub const Builder = struct {
     }
     /// tt.fp_to_fp with rounding option.
     pub fn fpToFpOpts(self: *Builder, src: Value, out_dtype: DType, opts: FpToFpOpts) Value {
-        return self.emit(ttir.fp_to_fp(self.ctx, src.inner, self.swapElem(src, out_dtype), opts.rounding, self.loc()));
+        return self.emit(ttir.fp_to_fp(self.ctx, src.inner, self.swapElem(src, out_dtype), .{ .rounding = opts.rounding }, self.loc()));
     }
     /// tt.clampf with propagate_nan=.none. Use `clampfOpts` to override.
     pub fn clampf(self: *Builder, x: Value, lo: Value, hi: Value) Value {
@@ -1491,7 +1499,7 @@ pub const Builder = struct {
     pub fn histogramOpts(self: *Builder, src: Value, num_bins: i64, opts: HistogramOpts) Value {
         const result_ty = mlir.Type.rankedTensor(&.{num_bins}, DType.i32.toMlir(self.ctx));
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
-        return self.emit(ttir.histogram(self.ctx, src.inner, mask_inner, result_ty, self.loc()));
+        return self.emit(ttir.histogram(self.ctx, src.inner, result_ty, .{ .mask = mask_inner }, self.loc()));
     }
 
     /// tt.assert — device-side assert (i1 or tensor<...xi1>). Use `deviceAssertOpts` for mask.
@@ -1514,7 +1522,7 @@ pub const Builder = struct {
     /// tt.atomic_rmw with full options.
     pub fn atomicRmwOpts(self: *Builder, rmw: ttir.RMWOp, ptr: Value, val: Value, opts: AtomicRMWOpts) Value {
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
-        return self.emit(ttir.atomic_rmw(self.ctx, rmw, ptr.inner, val.inner, mask_inner, opts.sem, opts.scope, self.loc()));
+        return self.emit(ttir.atomic_rmw(self.ctx, rmw, ptr.inner, val.inner, opts.sem, opts.scope, .{ .mask = mask_inner }, self.loc()));
     }
 
     /// tt.atomic_cas — returns old value. Use `atomicCasOpts` for sem / scope.
@@ -1529,7 +1537,7 @@ pub const Builder = struct {
 
     /// `tt.call` — call another tt.func in this module by symbol name.
     pub fn call(self: *Builder, callee: []const u8, operands: []const Value, result_types: []const *const mlir.Type) []Value {
-        const op = ttir.call(self.ctx, callee, self.innerSlice(operands), result_types, null, null, self.loc());
+        const op = ttir.call(self.ctx, callee, self.innerSlice(operands), result_types, .{}, self.loc());
         return self.emitMulti(op, result_types.len);
     }
 
@@ -1566,14 +1574,13 @@ pub const Builder = struct {
             a.inner,
             b.inner,
             c_acc.inner,
-            a_s,
-            b_s,
             a_elem_type,
             b_elem_type,
             c_acc.type_(),
             opts.fast_math,
             opts.lhs_k_pack,
             opts.rhs_k_pack,
+            .{ .a_scale = a_s, .b_scale = b_s },
             self.loc(),
         ));
     }
@@ -1652,7 +1659,7 @@ pub const Builder = struct {
         block_shape: []const i64,
         dtype: DType,
     ) Value {
-        const result_type = ttir.tensorDescType(block_shape, dtype.toMlir(self.ctx), null);
+        const result_type = ttir.tensorDescType(block_shape, dtype.toMlir(self.ctx), .{});
         return self.emit(ttir.make_tensor_descriptor(
             self.ctx,
             base.inner,
@@ -2081,16 +2088,7 @@ pub const Builder = struct {
 
         region.appendOwnedBlock(cont_block);
 
-        _ = cf.cond_br(
-            self.ctx,
-            cond.inner,
-            ret_target,
-            &.{},
-            cont_block,
-            &.{},
-            null,
-            self.loc(),
-        ).appendTo(current);
+        _ = cf.cond_br(self.ctx, cond.inner, ret_target, &.{}, cont_block, &.{}, .{}, self.loc()).appendTo(current);
 
         if (self.block_stack.items.len == 0) {
             self.pushBlock(cont_block);
@@ -2108,16 +2106,7 @@ pub const Builder = struct {
         region.appendOwnedBlock(ret_block);
         region.appendOwnedBlock(cont_block);
 
-        _ = cf.cond_br(
-            self.ctx,
-            cond.inner,
-            ret_block,
-            &.{},
-            cont_block,
-            &.{},
-            null,
-            self.loc(),
-        ).appendTo(current);
+        _ = cf.cond_br(self.ctx, cond.inner, ret_block, &.{}, cont_block, &.{}, .{}, self.loc()).appendTo(current);
 
         self.pushBlock(ret_block);
 

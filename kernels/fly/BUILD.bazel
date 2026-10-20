@@ -2,19 +2,29 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "fly_builder",
-    tags = ["manual"],
     srcs = [
         "dtype.zig",
         "layout.zig",
     ],
     import_name = "kernels/fly/builder",
     main = "builder.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         "//kernels/common",
         "//mlir",
-        "//mlir/dialects",
+        "//mlir/dialects/arith",
         "//mlir/dialects/fly",
+        "//mlir/dialects/fly_rocdl",
+        "//mlir/dialects/func",
+        "//mlir/dialects/gpu",
+        "//mlir/dialects/llvm",
+        "//mlir/dialects/math",
+        "//mlir/dialects/memref",
+        "//mlir/dialects/rocdl",
+        "//mlir/dialects/scf",
+        "//mlir/dialects/ub",
+        "//mlir/dialects/vector",
         "//stdx",
     ],
 )
