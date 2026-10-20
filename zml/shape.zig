@@ -963,6 +963,26 @@ pub const Shape = struct {
         try testing.expect(!shape.isFullyPartitioned());
     }
 
+    /// Whether the shape declares a layout, including replication.
+    /// A declared layout may still contain open dimensions.
+    pub fn hasSharding(self: Shape) bool {
+        return self._sharding.isSpecified();
+    }
+
+    test hasSharding {
+        const replicated: Shape = .init(.{ .a = 10, .b = 20 }, .f32);
+        try testing.expect(replicated.hasSharding());
+
+        var unspecified = replicated;
+        unspecified._sharding = .open;
+        try testing.expect(!unspecified.hasSharding());
+
+        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .batch, .b = .feature }).hasSharding());
+        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .replicated, .b = .replicated }).hasSharding());
+        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .batch, .b = .open }).hasSharding());
+        try testing.expect(replicated.withPartitioning(&test_mesh, .{ .a = .open, .b = .open }).hasSharding());
+    }
+
     pub fn isFullyReplicated(self: Shape) bool {
         return self._sharding.isFullyReplicated();
     }

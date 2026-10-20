@@ -22,9 +22,10 @@ partition: Partitioning,
 
 pub const MAX_MESH_RANK = 4;
 pub const replicated: Sharding = .{ .mesh = null, .partition = .replicated(Shape.MAX_RANK) };
+pub const open: Sharding = .{ .mesh = null, .partition = .open(Shape.MAX_RANK) };
 
 pub fn get(sharding: Sharding, ax: usize) PartitionSpec {
-    return if (sharding.mesh == null) .replicated else sharding.partition.get(ax);
+    return sharding.partition.get(ax);
 }
 
 pub fn set(self: Sharding, ax: usize, spec: PartitionSpec) Sharding {
@@ -51,8 +52,13 @@ pub fn toArray(self: Sharding) [Shape.MAX_RANK]PartitionSpec {
     return result;
 }
 
+/// Replication is specified without a mesh. A declaration with a mesh may still
+/// contain open dimensions.
+pub fn isSpecified(self: Sharding) bool {
+    return self.mesh != null or self.isFullyReplicated();
+}
+
 pub fn isFullyReplicated(self: Sharding) bool {
-    if (self.mesh == null) return true;
     for (self.partition.toArray()) |spec| {
         if (spec != .replicated and spec != .out_of_bound) return false;
     }
@@ -99,7 +105,7 @@ test isCompatible {
 }
 
 pub fn format(self: Sharding, writer: *std.Io.Writer) !void {
-    const mesh = self.mesh orelse return writer.writeAll("{replicated}");
+    const mesh = self.mesh orelse return writer.writeAll(if (self.isFullyReplicated()) "{replicated}" else "{open}");
     const specs = self.partition.toArray();
     var rank = specs.len;
     while (rank > 0 and specs[rank - 1] == .out_of_bound) rank -= 1;
@@ -1687,6 +1693,7 @@ pub const Mesh = struct {
         const allocator = arena.allocator();
         const dimensions = try allocator.alloc(*const shardy.DimensionShardingAttr, shape.rank());
         var used: [MAX_MESH_RANK]bool = @splat(false);
+        const has_open_dimension = shape.containsPartitionSpec(.open);
         for (0.., dimensions) |ax, *d| {
             d.* = switch (shape.partition(ax)) {
                 .out_of_bound => @panic("undefined"),
@@ -1704,7 +1711,8 @@ pub const Mesh = struct {
         var tile_count: usize = 1;
         for (data.logical.axes.slice(), 0..) |axis, i| {
             tile_count *= data.grid.axis_sizes[i];
-            if (!used[i]) replicated_axes.appendAssumeCapacity(.named(ctx, std.mem.span(axis)));
+            // Open dimensions must be allowed to acquire unused logical axes.
+            if (!has_open_dimension and !used[i]) replicated_axes.appendAssumeCapacity(.named(ctx, std.mem.span(axis)));
         }
         if (tile_count < data.grid.device_count) {
             replicated_axes.appendAssumeCapacity(.named(ctx, data.sdyReplicaAxis()));
@@ -2741,7 +2749,7 @@ test "mesh: open and replicated dimension mix" {
         .expected_num_replicas = 1,
         .mesh = &mesh,
         .shape = Shape.init(.{ .batch = 8, .model = 8 }, .f32).withPartitioning(&mesh, .{ .batch = .open, .model = .replicated }),
-        .expected_sdy = "#sdy.sharding<@mix_mesh, [{?}, {}], replicated={\"batch\", \"model\"}>",
+        .expected_sdy = "#sdy.sharding<@mix_mesh, [{?}, {}]>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 8 }, .{ 0, 8 } } },
             .{ .device_id = 1, .slices = &.{ .{ 0, 8 }, .{ 0, 8 } } },

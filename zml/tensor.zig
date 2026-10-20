@@ -78,11 +78,10 @@ pub const Tensor = struct {
     /// Internal use
     ///
     /// Creates a tensor from a Shape and an mlir.Value.
-    /// Note: sharding information is discarded, the output tensor is considered open for replication.
-    /// Use _resultPropagateSharding when the shape sharding should be propagated.
+    /// Ordinary results have no sharding declaration. Shardy infers their layout.
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
         var res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
-        res._shape._sharding.partition = .open(sh.rank());
+        res._shape._sharding = .open;
 
         if (builtin.mode == .debug) {
             // Check that the MLIR value actually have the same shape.
@@ -95,16 +94,10 @@ pub const Tensor = struct {
         return res;
     }
 
-    pub fn _resultPropagateSharding(sh: Shape, val: *const mlir.Value) Tensor {
-        var res = _result(sh, val);
-        res._shape._sharding = sh._sharding;
-        return res;
-    }
-
     /// Creates a Tensor from a mlir.Value
     ///
     /// The shape is derived from the type of the mlir.Value.
-    /// mesh is `unknown`
+    /// Sharding is unspecified.
     pub fn fromMlirValue(val: *const mlir.Value) Tensor {
         const ctx = Compiler.current();
         const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
@@ -116,7 +109,7 @@ pub const Tensor = struct {
             ._dtype = ctx.dtype(ranked_tensor.elementType()),
             ._dims = .empty,
             ._tags = .{ .buffer = @splat(Shape.TagUnknown), .len = n },
-            ._sharding = .replicated,
+            ._sharding = .open,
         };
         for (0..n) |i| {
             sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
@@ -172,6 +165,10 @@ pub const Tensor = struct {
     /// * partition spec: a struct where the field names match the axis of the given mesh
     ///
     /// eg `x.withPartitioning(tp, .{ .h = .model }))` or `x.withPartitioning(.tp, .{ .h = .model }))`
+    ///
+    /// During compilation, omitted dimensions are open for Shardy to infer.
+    /// Outside compilation, this describes an input buffer and omitted dimensions
+    /// are replicated. Explicit output layouts must have no open dimensions.
     pub fn withPartitioning(self: Tensor, mesh_: anytype, partitioning: anytype) Tensor {
         if (@TypeOf(mesh_) == @EnumLiteral()) {
             const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit *const zml.Mesh object as input");
@@ -179,7 +176,8 @@ pub const Tensor = struct {
         }
 
         if (@TypeOf(partitioning) != Sharding.Partitioning) {
-            const parsed = Sharding.Partitioning.parse(self._shape.tags(), mesh_, .open, partitioning);
+            const default: Sharding.PartitionSpec = if (Compiler.currentOrNull() == null) .replicated else .open;
+            const parsed = Sharding.Partitioning.parse(self._shape.tags(), mesh_, default, partitioning);
             return self.withPartitioning(mesh_, parsed);
         }
 
@@ -222,7 +220,9 @@ pub const Tensor = struct {
             },
         };
 
-        return _resultPropagateSharding(partitioned_shape, op_result);
+        var res = _result(partitioned_shape, op_result);
+        res._shape = partitioned_shape;
+        return res;
     }
 
     /// Force the input tensor to be fully replicated.
@@ -840,12 +840,12 @@ pub const Tensor = struct {
                 mlirx.Type.rankedTensor(mlirCtx(), sh),
                 currentLoc(),
             ).appendTo(currentBlock());
-            return .{ self.update(op.result(0)), _resultPropagateSharding(sh, op.result(1)) };
+            return .{ self.update(op.result(0)), _result(sh, op.result(1)) };
         }
 
         fn update(self: Rng, new_state: *const mlir.Value) Rng {
             return .{
-                ._state = _resultPropagateSharding(self._state._shape, new_state).reuseBuffer(self._state),
+                ._state = _result(self._state._shape, new_state).reuseBuffer(self._state),
                 .algorithm = self.algorithm,
             };
         }
@@ -886,7 +886,7 @@ pub const Tensor = struct {
             floats = floats.mul(scalar(opts.max - opts.min, dt)).addConstant(opts.min);
 
             // Convert back to integer if needed.
-            return .{ rng, _resultPropagateSharding(shape_, floats.convert(shape_.dtype()).value()) };
+            return .{ rng, floats.convert(shape_.dtype()) };
         }
 
         test uniform {
@@ -965,7 +965,7 @@ pub const Tensor = struct {
             const b = Tensor.constant(DataType.Value.init(sh.dtype(), opts.stddev));
             const res_tensor_shape = Tensor.constantTensor(Shape.init(.{sh.rank()}, .i64), std.mem.sliceAsBytes(sh.dims()));
             const op = stablehlo.rng(mlirCtx(), a.value(), b.value(), res_tensor_shape.value(), .NORMAL, currentLoc()).appendTo(currentBlock());
-            return _resultPropagateSharding(sh, op.result(0));
+            return _result(sh, op.result(0));
         }
 
         /// Returns a Tensor of the given shape, filled with floating point numbers sampled from a Gumbel distribution, and a new Rng state.
@@ -984,7 +984,7 @@ pub const Tensor = struct {
                 .{ .min = std.math.floatEps(f32), .max = 1 },
             );
             const result = u.log().scale(-1).log().scale(-1).convert(shape_.dtype());
-            return .{ rand, _resultPropagateSharding(shape_, result.value()) };
+            return .{ rand, result };
         }
 
         test gumbel {

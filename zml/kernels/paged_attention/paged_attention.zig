@@ -336,25 +336,31 @@ test pagedAttention {
     const query_token_count = prefill_token_count + num_decode;
     const dt: zml.DataType = .bf16;
     const model_meshe = platform.meshes.get("model").?;
+    const num_kv_heads = model_meshe.numPartitionsForLogicalAxis(.model);
     const partition = .{ .hkv = .model };
     const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache } = .{
-        .q = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hg = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
-        .k = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
-        .v = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
+        .q = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = num_kv_heads, .hg = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
+        .k = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = num_kv_heads, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
+        .v = zml.Tensor.fromShape(.init(.{ .b = query_token_count, .hkv = num_kv_heads, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
         .kv_cache = .{
             .split = .{
-                .k = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
-                .v = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 4, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
+                .k = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = num_kv_heads, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
+                .v = zml.Tensor.fromShape(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = num_kv_heads, .hd = 32 }, dt)).withPartitioning(model_meshe, partition),
             },
         },
     };
 
+    const random = struct {
+        fn normal(shape: zml.Shape) zml.Tensor {
+            return zml.Tensor.Rng.normal(shape, .{}).withPartitioning(shape._sharding.mesh.?, shape._sharding.partition);
+        }
+    };
     const meshes: []const *const zml.Mesh = &.{ platform.replicated_mesh, platform.meshes.get("model").? };
-    const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{} }, .{ .meshes = meshes });
+    const rng_q = try platform.compileFn(allocator, io, random.normal, .{tensors.q.shape()}, .{ .meshes = meshes });
     defer rng_q.deinit();
-    const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{} }, .{ .meshes = meshes });
+    const rng_k = try platform.compileFn(allocator, io, random.normal, .{tensors.k.shape()}, .{ .meshes = meshes });
     defer rng_k.deinit();
-    const rng_kv_cache = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.kv_cache.split.k.shape(), .{} }, .{ .meshes = meshes });
+    const rng_kv_cache = try platform.compileFn(allocator, io, random.normal, .{tensors.kv_cache.split.k.shape()}, .{ .meshes = meshes });
     defer rng_kv_cache.deinit();
 
     const triton_options_args: Options.Args = .{
