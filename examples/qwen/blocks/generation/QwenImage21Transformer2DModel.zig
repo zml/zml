@@ -90,7 +90,7 @@ pub fn load(
     });
     defer loader.deinit();
 
-    try loader.load(io, QwenImage21Transformer2DModel, self, &buffers, store, &.{}, .{});
+    try loader.load(io, QwenImage21Transformer2DModel, self, &buffers, store, platform.shardings.values(), .{});
     try loader.await(io);
 
     return buffers;
