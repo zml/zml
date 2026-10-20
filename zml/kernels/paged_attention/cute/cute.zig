@@ -2,16 +2,59 @@ const stdx = @import("stdx");
 
 const zml = @import("../../../zml.zig");
 const paged = @import("../paged_attention.zig");
-const sm100 = @import("sm100/sm100.zig");
+const sm10x = @import("sm10x/sm10x.zig");
 const sm120 = @import("sm120/sm120.zig");
 const kernel = @import("attention.zig");
 
-pub const Options = sm100.Options;
-pub const Parameters = sm100.Parameters;
+pub const Options = struct {
+    batch_size: usize,
+    max_num_pages: usize,
+    max_seqlen_q: usize,
+    is_prefill: bool,
+
+    pub fn isPrefill(self: Options) bool {
+        return self.is_prefill;
+    }
+
+    pub fn maxNumPages(self: Options) usize {
+        return self.max_num_pages;
+    }
+};
+
+pub const Parameters = struct {
+    block_table: zml.Tensor,
+    seq_lens: zml.Tensor,
+    query_start_len: zml.Tensor,
+    options_: Options,
+
+    pub fn init(options_: Options) Parameters {
+        return .{
+            .block_table = .init(.{ .b = options_.batch_size, .p = options_.max_num_pages }, .i32),
+            .seq_lens = .init(.{ .b = options_.batch_size }, .i32),
+            .query_start_len = .init(.{ .b = options_.batch_size + 1 }, .i32),
+            .options_ = options_,
+        };
+    }
+
+    pub fn allocationSize(self: Parameters) usize {
+        return self.block_table.byteSize() + self.seq_lens.byteSize() + self.query_start_len.byteSize();
+    }
+
+    pub fn options(self: Parameters) Options {
+        return self.options_;
+    }
+};
+
+// TODO(Corentin): This should be moved in the platform probably
+pub fn multiprocessorCount(platform: *const zml.Platform) usize {
+    const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 1;
+    if (attribute.int64 <= 0) return 1;
+    return @intCast(attribute.int64);
+}
 
 test {
     _ = kernel;
-    _ = sm100;
+    _ = sm10x;
     _ = sm120;
 }
 
@@ -25,8 +68,8 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
     stdx.debug.assert(isAvailable(zml.Compiler.current().platform), "CuTe paged attention requires SM89 or newer", .{});
     stdx.debug.assert(q.dtype() == k.dtype() and q.dtype() == v.dtype() and (q.dtype() == .bf16 or q.dtype() == .f16), "CuTe paged attention requires matching BF16 or FP16 Q/K/V", .{});
     stdx.debug.assert(q.dim(.hd) == 32 or q.dim(.hd) == 64 or q.dim(.hd) == 128 or q.dim(.hd) == 256 or q.dim(.hd) == 512, "CuTe paged attention supports head dimensions 32, 64, 128, 256 and 512", .{});
-    if (sm100.isAvailable(zml.Compiler.current().platform) and (q.dim(.hd) == 256 or q.dim(.hd) == 512) and opts.mask != .indices)
-        return sm100.pagedAttention(parameters, q, k, v, opts);
+    if (sm10x.isAvailable(zml.Compiler.current().platform) and opts.mask != .indices)
+        return sm10x.pagedAttention(parameters, q, k, v, opts);
     if (sm120.isAvailable(zml.Compiler.current().platform) and opts.mask != .indices)
         return sm120.pagedAttention(parameters, q, k, v, opts);
     return zml.ops.manualComputation(Context.body, Context{ .q = q, .k = k, .v = v, .parameters = parameters, .opts = opts }, q.shape());

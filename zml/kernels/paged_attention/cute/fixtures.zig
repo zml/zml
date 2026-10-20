@@ -108,9 +108,9 @@ pub const Inputs = struct {
     }
 };
 
-pub fn forward(i: Inputs, c: cases.Case, backend: zml.paged_attention.Backend) zml.Tensor {
-    const parameters: zml.paged_attention.Parameters = switch (backend) {
-        inline .cute, .triton => |b| @unionInit(zml.paged_attention.Parameters, @tagName(b), .{
+pub fn forward(i: Inputs, c: cases.Case) zml.Tensor {
+    const parameters: zml.paged_attention.Parameters = .{
+        .cute = .{
             .block_table = i.table,
             .seq_lens = i.lengths,
             .query_start_len = i.starts,
@@ -120,8 +120,7 @@ pub fn forward(i: Inputs, c: cases.Case, backend: zml.paged_attention.Backend) z
                 .max_seqlen_q = if (c.prefill > 0) c.chunk else 1,
                 .is_prefill = c.prefill > 0,
             },
-        }),
-        else => unreachable,
+        },
     };
     return zml.paged_attention.pagedAttention(parameters, i.q, i.k, i.v, .{ .split = .{ .k = i.k, .v = i.v } }, i.options(c));
 }
