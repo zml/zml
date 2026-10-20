@@ -43,21 +43,23 @@ pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21TransformerBlock)) void {
 
 pub fn forward(
     self: QwenImage21TransformerBlock,
-    x_: zml.Tensor,
-    modulation: zml.Tensor,
-    rotary_emb: zml.Tensor,
-    target_token_mask: zml.Tensor,
+    x_: zml.Tensor, // {bs, seq_len, d}
+    modulation: zml.Tensor, // {bs + 1, 4 * d}: [mod1.scale, mod1.gate, mod2.scale, mod2.gate]
+    rotary_emb: zml.Tensor, // c64 {seq_len, hd / 2}
+    target_token_mask: zml.Tensor, // {seq_len} bool
+    text_len: i64,
     args: CompileArgs,
 ) zml.Tensor {
-    var x = x_;
+    var x = x_.withTags(.{ .bs, .seq_len, .d });
     const mod1, const mod2 = modulation.chunkExact(-1, 2);
     const img_modulated1, const img_gate1 = modulate(self.img_norm1.forward(x), mod1, target_token_mask);
 
-    const attn = self.attn.forward(img_modulated1, rotary_emb, args);
+    const attn = self.attn.forward(img_modulated1, rotary_emb, text_len, args);
     x = x.add(img_gate1.tanh().mul(attn));
 
     const img_modulated2, const img_gate2 = modulate(self.img_norm2.forward(x), mod2, target_token_mask);
-    x = x.add(img_gate2.tanh().mul(self.img_mlp.forward(img_modulated2)));
+    const mlp = self.img_mlp.forward(img_modulated2).withTags(.{ .bs, .seq_len, .d });
+    x = x.add(img_gate2.tanh().mul(mlp));
 
     return x;
 }
