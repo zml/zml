@@ -368,10 +368,14 @@ pub const paged = struct {
 
     pub fn pagedAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
         const config = select2dConfig(paged_attention_opts);
+        const k_strides = k_cache.shape().computeElementStrides().constSlice();
+        const v_strides = v_cache.shape().computeElementStrides().constSlice();
 
         const kernel_config: kernels.KernelUnifiedAttention2dPtr.Config = .{
             .q_dtype = triton.from(q.dtype()),
             .kv_dtype = triton.from(k_cache.dtype()),
+            .k_strides = .{ k_strides[0], k_strides[1], k_strides[2] },
+            .v_strides = .{ v_strides[0], v_strides[1], v_strides[2] },
             .o_dtype = triton.from(q.dtype()),
             .num_query_heads = @intCast(paged_attention_opts.num_heads),
             .num_queries_per_kv = @intCast(paged_attention_opts.numQueriesPerKv()),
@@ -398,8 +402,6 @@ pub const paged = struct {
 
         const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
         const q_strides = q_shape.computeElementStrides().constSlice();
-        const k_strides = k_cache.shape().computeElementStrides().constSlice();
-        const v_strides = v_cache.shape().computeElementStrides().constSlice();
 
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const num_seqs = parameters.block_table.dim(0);
@@ -431,12 +433,6 @@ pub const paged = struct {
                 .output_stride_0_ptr = .scalar(q_strides[0], .i64),
                 .output_stride_1_ptr = .scalar(q_strides[1], .i64),
                 .qq_bias_stride_0_ptr = dummy,
-                .stride_k_cache_0_ptr = .scalar(k_strides[0], .i64),
-                .stride_k_cache_1_ptr = .scalar(k_strides[1], .i64),
-                .stride_k_cache_2_ptr = .scalar(k_strides[2], .i64),
-                .stride_v_cache_0_ptr = .scalar(v_strides[0], .i64),
-                .stride_v_cache_1_ptr = .scalar(v_strides[1], .i64),
-                .stride_v_cache_2_ptr = .scalar(v_strides[2], .i64),
                 .query_start_len_ptr = parameters.query_start_len,
                 .num_seqs_ptr = .scalar(num_seqs, .i32),
             },
@@ -453,11 +449,15 @@ pub const paged = struct {
 
     pub fn pagedAttention3d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
         const config = select3dConfig(paged_attention_opts);
+        const k_strides = k_cache.shape().computeElementStrides().constSlice();
+        const v_strides = v_cache.shape().computeElementStrides().constSlice();
 
         const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim));
         const attn_kernel_config: kernels.KernelUnifiedAttention3dPtr.Config = .{
             .q_dtype = triton.from(q.dtype()),
             .kv_dtype = triton.from(k_cache.dtype()),
+            .k_strides = .{ k_strides[0], k_strides[1], k_strides[2] },
+            .v_strides = .{ v_strides[0], v_strides[1], v_strides[2] },
             .num_query_heads = @intCast(paged_attention_opts.num_heads),
             .num_queries_per_kv = @intCast(paged_attention_opts.numQueriesPerKv()),
             .block_size = @intCast(paged_attention_opts.block_size),
@@ -496,8 +496,6 @@ pub const paged = struct {
 
         const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
         const q_strides = q_shape.computeElementStrides().constSlice();
-        const k_strides = k_cache.shape().computeElementStrides().constSlice();
-        const v_strides = v_cache.shape().computeElementStrides().constSlice();
 
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const num_seqs = parameters.block_table.dim(0);
@@ -532,12 +530,6 @@ pub const paged = struct {
                 .query_stride_0_ptr = .scalar(q_strides[0], .i64),
                 .query_stride_1_ptr = .scalar(q_strides[1], .i64),
                 .qq_bias_stride_0_ptr = dummy,
-                .stride_k_cache_0_ptr = .scalar(k_strides[0], .i64),
-                .stride_k_cache_1_ptr = .scalar(k_strides[1], .i64),
-                .stride_k_cache_2_ptr = .scalar(k_strides[2], .i64),
-                .stride_v_cache_0_ptr = .scalar(v_strides[0], .i64),
-                .stride_v_cache_1_ptr = .scalar(v_strides[1], .i64),
-                .stride_v_cache_2_ptr = .scalar(v_strides[2], .i64),
                 .query_start_len_ptr = parameters.query_start_len,
                 .num_seqs_ptr = .scalar(num_seqs, .i32),
             },
