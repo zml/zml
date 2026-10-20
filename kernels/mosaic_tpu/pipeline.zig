@@ -12,7 +12,7 @@ const memref = @import("mlir/dialects/memref");
 const scf = @import("mlir/dialects/scf");
 const builder = @import("builder.zig");
 
-const tpu = @import("mlir/dialects/mosaic_tpu");
+const mosaic_tpu = @import("mlir/dialects/mosaic_tpu");
 
 const Builder = builder.Builder;
 const Value = builder.Value;
@@ -257,9 +257,9 @@ pub fn emitPipeline(
         }
     }
 
-    _ = tpu.yield(b.ctx, &.{}, b.loc()).appendTo(region_block);
+    _ = mosaic_tpu.yield(b.ctx, &.{}, b.loc()).appendTo(region_block);
     b.popBlock();
-    _ = tpu.region(b.ctx, region_block, &.{}, b.loc()).appendTo(b.currentBlock());
+    _ = mosaic_tpu.region(b.ctx, region_block, &.{}, b.loc()).appendTo(b.currentBlock());
 }
 
 pub const BufferType = enum { input, output, input_output };
@@ -512,7 +512,7 @@ pub const BufferedRef = struct {
                         const tiling: i64 = if (d == bs.len - 1) 128 else if (bs.len >= 2 and d == bs.len - 2) 8 else 1;
                         const clamped = @min(n, dim_size);
                         const sz_const = @divFloor(clamped + tiling - 1, tiling) * tiling;
-                        size[d] = b.emit(tpu.assume_multiple(b.ctx, b.lift(@as(i32, @intCast(sz_const))).inner, @as(i32, @intCast(tiling)), b.loc()));
+                        size[d] = b.emit(mosaic_tpu.assume_multiple(b.ctx, b.lift(@as(i32, @intCast(sz_const))).inner, @as(i32, @intCast(tiling)), b.loc()));
                     }
                 },
                 .bounded_slice => {
@@ -524,14 +524,14 @@ pub const BufferedRef = struct {
                     const dim_size = self.spec.full_shape[d];
                     base[d] = sl.start;
                     if (self.spec.bounded_slice_skip_clamp) {
-                        size[d] = b.emit(tpu.assume_multiple(b.ctx, sl.size.inner, tiling, b.loc()));
+                        size[d] = b.emit(mosaic_tpu.assume_multiple(b.ctx, sl.size.inner, tiling, b.loc()));
                         continue;
                     }
                     // Prologue shortcut: Python-int 0 start ⇒ `_round_up_to_nearest_multiple` folds.
                     if (static_zero_start and sl.start.asConstantInt() == @as(?i64, 0)) {
                         const is_oob = b.cmpi(.sgt, sl.size, b.lift(@as(i32, @intCast(dim_size))));
                         const sz = b.select(is_oob, b.lift(@as(i32, @intCast(dim_size))), sl.size);
-                        size[d] = b.emit(tpu.assume_multiple(b.ctx, sz.inner, tiling, b.loc()));
+                        size[d] = b.emit(mosaic_tpu.assume_multiple(b.ctx, sz.inner, tiling, b.loc()));
                         continue;
                     }
                     const is_oob = b.cmpi(.sgt, b.addi(sl.start, sl.size), b.lift(@as(i32, @intCast(dim_size))));
@@ -551,7 +551,7 @@ pub const BufferedRef = struct {
                         break :blk b.addi(round_down, m);
                     };
                     const sz = b.select(is_oob, rounded, sl.size);
-                    size[d] = b.emit(tpu.assume_multiple(b.ctx, sz.inner, tiling, b.loc()));
+                    size[d] = b.emit(mosaic_tpu.assume_multiple(b.ctx, sz.inner, tiling, b.loc()));
                 },
             }
         }
@@ -647,9 +647,9 @@ pub const BufferedRef = struct {
         const sem = semAllocOp(b, dmaSemRefTy(b, null));
         b.enqueueDma(self.src, self.window_ref, sem, .{});
         b.waitDma2(sem, self.src, self.window_ref, .{});
-        _ = tpu.yield(b.ctx, &.{}, b.loc()).appendTo(blk);
+        _ = mosaic_tpu.yield(b.ctx, &.{}, b.loc()).appendTo(blk);
         b.popBlock();
-        _ = tpu.region(b.ctx, blk, &.{}, b.loc()).appendTo(b.currentBlock());
+        _ = mosaic_tpu.region(b.ctx, blk, &.{}, b.loc()).appendTo(b.currentBlock());
     }
 
     fn syncCopyOut(self: *BufferedRef, b: *Builder) void {
@@ -658,9 +658,9 @@ pub const BufferedRef = struct {
         const sem = semAllocOp(b, dmaSemRefTy(b, null));
         b.enqueueDma(self.window_ref, self.src, sem, .{});
         b.waitDma2(sem, self.window_ref, self.src, .{});
-        _ = tpu.yield(b.ctx, &.{}, b.loc()).appendTo(blk);
+        _ = mosaic_tpu.yield(b.ctx, &.{}, b.loc()).appendTo(blk);
         b.popBlock();
-        _ = tpu.region(b.ctx, blk, &.{}, b.loc()).appendTo(b.currentBlock());
+        _ = mosaic_tpu.region(b.ctx, blk, &.{}, b.loc()).appendTo(b.currentBlock());
     }
 
     // Op order mirrors pipeline.py: copy_in/copy_out/wait_out take slot rem
@@ -1038,7 +1038,7 @@ pub fn semAllocOp(b: *Builder, ty: *const mlir.Type) Value {
 /// `pl.SemaphoreType.DMA((n,))`, or rank-0 for `n == null`.
 pub fn dmaSemRefTy(b: *Builder, n: ?usize) *const mlir.Type {
     const shape: []const i64 = if (n) |m| &.{@intCast(m)} else &.{};
-    return mlir.Type.memRef(tpu.dmaSemaphoreType(b.ctx), shape, null, MemorySpace.semaphore_mem.attribute(b.ctx));
+    return mlir.Type.memRef(mosaic_tpu.dmaSemaphoreType(b.ctx), shape, null, MemorySpace.semaphore_mem.attribute(b.ctx));
 }
 
 fn gridSize(b: *Builder, grid: []const Value) Value {

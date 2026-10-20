@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const ct = @import("mlir/dialects/cuda_tile");
+const cuda_tile = @import("mlir/dialects/cuda_tile");
 const dsl = @import("kernels/common");
 const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
@@ -13,19 +13,19 @@ const isFloatDtype = dtypes.isFloatDtype;
 const dtypeBitwidth = dtypes.dtypeBitwidth;
 const intBitwidth = dtypes.intBitwidth;
 
-pub const RoundingMode = ct.RoundingMode;
-pub const Signedness = ct.Signedness;
-pub const IntegerOverflow = ct.IntegerOverflow;
-pub const ComparisonPredicate = ct.ComparisonPredicate;
-pub const ComparisonOrdering = ct.ComparisonOrdering;
-pub const AtomicRMWMode = ct.AtomicRMWMode;
-pub const MemoryScope = ct.MemoryScope;
-pub const MemoryOrdering = ct.MemoryOrdering;
-pub const PaddingValue = ct.PaddingValue;
-pub const Arch = ct.Arch;
-pub const EntryHint = ct.EntryHint;
-pub const LoadStoreHint = ct.LoadStoreHint;
-pub const PtrLoadStoreHint = ct.PtrLoadStoreHint;
+pub const RoundingMode = cuda_tile.RoundingMode;
+pub const Signedness = cuda_tile.Signedness;
+pub const IntegerOverflow = cuda_tile.IntegerOverflow;
+pub const ComparisonPredicate = cuda_tile.ComparisonPredicate;
+pub const ComparisonOrdering = cuda_tile.ComparisonOrdering;
+pub const AtomicRMWMode = cuda_tile.AtomicRMWMode;
+pub const MemoryScope = cuda_tile.MemoryScope;
+pub const MemoryOrdering = cuda_tile.MemoryOrdering;
+pub const PaddingValue = cuda_tile.PaddingValue;
+pub const Arch = cuda_tile.Arch;
+pub const EntryHint = cuda_tile.EntryHint;
+pub const LoadStoreHint = cuda_tile.LoadStoreHint;
+pub const PtrLoadStoreHint = cuda_tile.PtrLoadStoreHint;
 
 test {
     std.testing.refAllDecls(@This());
@@ -51,12 +51,12 @@ pub const Value = struct {
         return self.kernel orelse @panic("Value has no owning kernel; use Builder.* helpers instead");
     }
 
-    pub fn tile(self: Value) *const ct.TileType {
-        return self.type_().isA(ct.TileType) orelse std.debug.panic("Value {f} is not a tile", .{self.type_()});
+    pub fn tile(self: Value) *const cuda_tile.TileType {
+        return self.type_().isA(cuda_tile.TileType) orelse std.debug.panic("Value {f} is not a tile", .{self.type_()});
     }
 
     pub fn isTile(self: Value) bool {
-        return self.type_().isA(ct.TileType) != null;
+        return self.type_().isA(cuda_tile.TileType) != null;
     }
 
     pub fn elemType(self: Value) *const mlir.Type {
@@ -95,7 +95,7 @@ pub const Value = struct {
     }
 
     pub fn isPtrElem(self: Value) bool {
-        return self.elemType().isA(ct.PointerType) != null;
+        return self.elemType().isA(cuda_tile.PointerType) != null;
     }
 
     pub fn add(self: Value, rhs: anytype) Value {
@@ -377,7 +377,7 @@ pub const AllocaOpts = struct {
 pub const GlobalOpts = struct {
     alignment: ?i64 = null,
     constant: bool = false,
-    visibility: ?ct.SymbolVisibility = null,
+    visibility: ?cuda_tile.SymbolVisibility = null,
 };
 
 pub const ScanOpts = struct {
@@ -556,13 +556,13 @@ pub const Builder = struct {
 
         const entry = mlir.Block.init(arg_types, arg_locs);
         const ct_body = mlir.Block.init(&.{}, &.{});
-        const ct_module = ct.module(ctx, self.name, ct_body, unknown_loc);
+        const ct_module = cuda_tile.module(ctx, self.name, ct_body, unknown_loc);
         _ = ct_module.appendTo(self.module.body());
 
-        const func_op = ct.entry(ctx, .{
+        const func_op = cuda_tile.entry(ctx, .{
             .name = self.name,
             .block = entry,
-            .optimization_hints = if (opts.hints.len > 0) ct.optimizationHints(ctx, opts.hints) else null,
+            .optimization_hints = if (opts.hints.len > 0) cuda_tile.optimizationHints(ctx, opts.hints) else null,
             .location = unknown_loc,
         });
         _ = func_op.appendTo(ct_body);
@@ -662,7 +662,7 @@ pub const Builder = struct {
         if (!dtypes.tileLegal(shape)) {
             std.debug.panic("Builder.tileTy: {any} is not a legal tile shape (power-of-two dims, at most 2^24 elements)", .{shape});
         }
-        return ct.tileType(self.ctx, shape, dtype.toMlir(self.ctx));
+        return cuda_tile.tileType(self.ctx, shape, dtype.toMlir(self.ctx));
     }
 
     pub fn scalarTy(self: *const Builder, dtype: DType) *const mlir.Type {
@@ -679,15 +679,15 @@ pub const Builder = struct {
     /// declared as `.i8` and `unpack`ed in the kernel.
     pub fn ptrTileTy(self: *const Builder, shape: []const i64, dtype: DType) *const mlir.Type {
         if (dtype == .i4) @panic("Builder: i4 is a tile element type only, never a pointee; declare the buffer as .i8 and unpack in-kernel");
-        return ct.tileType(self.ctx, shape, ct.pointerType(self.ctx, dtype.toMlir(self.ctx)));
+        return cuda_tile.tileType(self.ctx, shape, cuda_tile.pointerType(self.ctx, dtype.toMlir(self.ctx)));
     }
 
     pub fn tokenTy(self: *const Builder) *const mlir.Type {
-        return ct.tokenType(self.ctx);
+        return cuda_tile.tokenType(self.ctx);
     }
 
     fn tileLike(self: *const Builder, v: Value, elem: *const mlir.Type) *const mlir.Type {
-        return ct.tileType(self.ctx, v.shape().constSlice(), elem);
+        return cuda_tile.tileType(self.ctx, v.shape().constSlice(), elem);
     }
 
     fn mlirElemToDType(self: *const Builder, elem: *const mlir.Type) DType {
@@ -695,7 +695,7 @@ pub const Builder = struct {
     }
 
     fn pointee(v: Value) *const mlir.Type {
-        const p = v.elemType().isA(ct.PointerType) orelse std.debug.panic("expected a pointer tile, got {f}", .{v.type_()});
+        const p = v.elemType().isA(cuda_tile.PointerType) orelse std.debug.panic("expected a pointer tile, got {f}", .{v.type_()});
         return p.pointee();
     }
 
@@ -708,7 +708,7 @@ pub const Builder = struct {
                 .comptime_float, .float => @floatCast(value),
                 else => @compileError("Builder: unsupported scalar " ++ @typeName(T)),
             };
-            return ct.floatElem(self.ctx, elem, v);
+            return cuda_tile.floatElem(self.ctx, elem, v);
         }
         const v: i64 = switch (@typeInfo(T)) {
             .comptime_int => blk: {
@@ -723,11 +723,11 @@ pub const Builder = struct {
             .comptime_float, .float => @intFromFloat(value),
             else => @compileError("Builder: unsupported scalar " ++ @typeName(T)),
         };
-        return ct.intElem(elem, v);
+        return cuda_tile.intElem(elem, v);
     }
 
     fn splat(self: *Builder, tile_ty: *const mlir.Type, dtype: DType, value: anytype) Value {
-        return self.emit(ct.constant(self.ctx, ct.splatAttr(tile_ty, self.elemAttr(dtype, value)), tile_ty, self.loc()));
+        return self.emit(cuda_tile.constant(self.ctx, cuda_tile.splatAttr(tile_ty, self.elemAttr(dtype, value)), tile_ty, self.loc()));
     }
 
     pub fn cst(self: *Builder, dtype: DType, value: anytype) Value {
@@ -752,7 +752,7 @@ pub const Builder = struct {
     pub fn dense(self: *Builder, shape: []const i64, dtype: DType, values: anytype) Value {
         checkDenseBytes("Builder.dense", shape, dtype, values);
         const ty = self.tileTy(shape, dtype);
-        return self.emit(ct.constant(self.ctx, ct.denseAttr(ty, values), ty, self.loc()));
+        return self.emit(cuda_tile.constant(self.ctx, cuda_tile.denseAttr(ty, values), ty, self.loc()));
     }
 
     fn checkDenseBytes(comptime who: []const u8, shape: []const i64, dtype: DType, values: anytype) void {
@@ -767,7 +767,7 @@ pub const Builder = struct {
     }
 
     pub fn iota(self: *Builder, n: i64, dtype: DType) Value {
-        return self.emit(ct.iota(self.ctx, self.tileTy(&.{n}, dtype), self.loc()));
+        return self.emit(cuda_tile.iota(self.ctx, self.tileTy(&.{n}, dtype), self.loc()));
     }
 
     /// The element attribute `reduce`/`scan` need as an identity.
@@ -814,7 +814,7 @@ pub const Builder = struct {
     }
 
     fn constMatching(self: *Builder, value: anytype, ref: *const mlir.Type) Value {
-        const elem = if (ref.isA(ct.TileType)) |t| t.elementType() else ref;
+        const elem = if (ref.isA(cuda_tile.TileType)) |t| t.elementType() else ref;
         return self.liftAs(value, self.mlirElemToDType(elem));
     }
 
@@ -877,34 +877,34 @@ pub const Builder = struct {
     }
 
     pub fn tileBlockId(self: *Builder) BlockId {
-        const r = self.emitMulti(ct.get_tile_block_id(self.ctx, self.loc()), 3);
+        const r = self.emitMulti(cuda_tile.get_tile_block_id(self.ctx, self.loc()), 3);
         return .{ .x = r[0], .y = r[1], .z = r[2] };
     }
 
     pub fn numTileBlocks(self: *Builder) BlockId {
-        const r = self.emitMulti(ct.get_num_tile_blocks(self.ctx, self.loc()), 3);
+        const r = self.emitMulti(cuda_tile.get_num_tile_blocks(self.ctx, self.loc()), 3);
         return .{ .x = r[0], .y = r[1], .z = r[2] };
     }
 
     pub fn assumeDivBy(self: *Builder, v: Value, n: u64) Value {
-        return self.emit(ct.assume(self.ctx, v.inner, ct.divBy(self.ctx, n, .{}), self.loc()));
+        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.divBy(self.ctx, n, .{}), self.loc()));
     }
 
     pub fn assumeDivByEvery(self: *Builder, v: Value, n: u64, every: i64, along: i64) Value {
-        return self.emit(ct.assume(self.ctx, v.inner, ct.divBy(self.ctx, n, .{ .every = every, .along = along }), self.loc()));
+        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.divBy(self.ctx, n, .{ .every = every, .along = along }), self.loc()));
     }
 
     pub fn assumeSameElements(self: *Builder, v: Value, values: []const i64) Value {
-        return self.emit(ct.assume(self.ctx, v.inner, ct.sameElements(self.ctx, values), self.loc()));
+        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.sameElements(self.ctx, values), self.loc()));
     }
 
     pub fn assumeBounded(self: *Builder, v: Value, lb: ?i64, ub: ?i64) Value {
-        return self.emit(ct.assume(self.ctx, v.inner, ct.bounded(self.ctx, .{ .lb = lb, .ub = ub }), self.loc()));
+        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.bounded(self.ctx, .{ .lb = lb, .ub = ub }), self.loc()));
     }
 
     pub fn tensorView(self: *Builder, base: Value, shape: []const i64, strides: []const i64) Value {
-        const ty = ct.tensorViewType(self.ctx, pointee(base), shape, strides);
-        return self.emit(ct.make_tensor_view(self.ctx, base.inner, &.{}, &.{}, ty, self.loc()));
+        const ty = cuda_tile.tensorViewType(self.ctx, pointee(base), shape, strides);
+        return self.emit(cuda_tile.make_tensor_view(self.ctx, base.inner, &.{}, &.{}, ty, self.loc()));
     }
 
     pub const Dim = union(enum) {
@@ -921,19 +921,19 @@ pub const Builder = struct {
         for (shape) |d| switch (d) {
             .static => |s| static_shape.appendAssumeCapacity(s),
             .dynamic => |v| {
-                static_shape.appendAssumeCapacity(ct.TensorViewType.dynamic());
+                static_shape.appendAssumeCapacity(cuda_tile.TensorViewType.dynamic());
                 dyn_shape.append(scratch, v.inner) catch @panic("OOM");
             },
         };
         for (strides) |d| switch (d) {
             .static => |s| static_strides.appendAssumeCapacity(s),
             .dynamic => |v| {
-                static_strides.appendAssumeCapacity(ct.TensorViewType.dynamic());
+                static_strides.appendAssumeCapacity(cuda_tile.TensorViewType.dynamic());
                 dyn_strides.append(scratch, v.inner) catch @panic("OOM");
             },
         };
-        const ty = ct.tensorViewType(self.ctx, pointee(base), static_shape.constSlice(), static_strides.constSlice());
-        return self.emit(ct.make_tensor_view(self.ctx, base.inner, dyn_shape.items, dyn_strides.items, ty, self.loc()));
+        const ty = cuda_tile.tensorViewType(self.ctx, pointee(base), static_shape.constSlice(), static_strides.constSlice());
+        return self.emit(cuda_tile.make_tensor_view(self.ctx, base.inner, dyn_shape.items, dyn_strides.items, ty, self.loc()));
     }
 
     fn i32Slice(self: *Builder, values: []const i64) []const i32 {
@@ -947,15 +947,15 @@ pub const Builder = struct {
     /// masked. That is why this DSL has no mask tile.
     pub fn partitionView(self: *Builder, tv: Value, tile: []const i64, opts: PartitionOpts) Value {
         if (!dtypes.tileLegal(tile)) std.debug.panic("Builder.partitionView: {any} is not a legal tile shape", .{tile});
-        const ty: *const mlir.Type = @ptrCast(ct.PartitionViewType.get(self.ctx, self.i32Slice(tile), tv.type_(), opts.dim_map, .{ .padding = opts.padding }));
-        return self.emit(ct.make_partition_view(self.ctx, tv.inner, ty, self.loc()));
+        const ty: *const mlir.Type = @ptrCast(cuda_tile.PartitionViewType.get(self.ctx, self.i32Slice(tile), tv.type_(), opts.dim_map, .{ .padding = opts.padding }));
+        return self.emit(cuda_tile.make_partition_view(self.ctx, tv.inner, ty, self.loc()));
     }
 
     /// 13.3: like `partitionView`, stepping by `traversal_strides` elements
     /// per index instead of a whole tile.
     pub fn stridedView(self: *Builder, tv: Value, tile: []const i64, traversal_strides: []const i64, opts: PartitionOpts) Value {
         if (!dtypes.tileLegal(tile)) std.debug.panic("Builder.stridedView: {any} is not a legal tile shape", .{tile});
-        const ty: *const mlir.Type = @ptrCast(ct.StridedViewType.get(
+        const ty: *const mlir.Type = @ptrCast(cuda_tile.StridedViewType.get(
             self.ctx,
             self.i32Slice(tile),
             self.i32Slice(traversal_strides),
@@ -963,15 +963,15 @@ pub const Builder = struct {
             opts.dim_map,
             .{ .padding = opts.padding },
         ));
-        return self.emit(ct.make_strided_view(self.ctx, tv.inner, ty, self.loc()));
+        return self.emit(cuda_tile.make_strided_view(self.ctx, tv.inner, ty, self.loc()));
     }
 
     /// 13.3: a view whose `sparse_dim` is indexed by a rank-1 tile of
     /// `tile[sparse_dim]` indices (every other index stays rank 0).
     pub fn gatherScatterView(self: *Builder, tv: Value, tile: []const i64, sparse_dim: u32, padding: ?PaddingValue) Value {
         if (!dtypes.tileLegal(tile)) std.debug.panic("Builder.gatherScatterView: {any} is not a legal tile shape", .{tile});
-        const ty = ct.gatherScatterViewType(self.ctx, tile, tv.type_(), sparse_dim, .{ .padding = padding });
-        return self.emit(ct.make_gather_scatter_view(self.ctx, tv.inner, ty, self.loc()));
+        const ty = cuda_tile.gatherScatterViewType(self.ctx, tile, tv.type_(), sparse_dim, .{ .padding = padding });
+        return self.emit(cuda_tile.make_gather_scatter_view(self.ctx, tv.inner, ty, self.loc()));
     }
 
     fn i32Scalars(self: *Builder, n: usize) []const *const mlir.Type {
@@ -981,22 +981,22 @@ pub const Builder = struct {
     }
 
     pub fn indexSpaceShape(self: *Builder, view: Value) []Value {
-        const n = ct.indexRankOfView(view.type_());
-        return self.emitMulti(ct.get_index_space_shape(self.ctx, view.inner, self.i32Scalars(n), self.loc()), n);
+        const n = cuda_tile.indexRankOfView(view.type_());
+        return self.emitMulti(cuda_tile.get_index_space_shape(self.ctx, view.inner, self.i32Scalars(n), self.loc()), n);
     }
 
     pub fn tensorShape(self: *Builder, tv: Value) []Value {
-        const t = tv.type_().isA(ct.TensorViewType) orelse std.debug.panic("expected a tensor_view, got {f}", .{tv.type_()});
+        const t = tv.type_().isA(cuda_tile.TensorViewType) orelse std.debug.panic("expected a tensor_view, got {f}", .{tv.type_()});
         const n = t.rank();
-        return self.emitMulti(ct.get_tensor_shape(self.ctx, tv.inner, self.i32Scalars(n), self.loc()), n);
+        return self.emitMulti(cuda_tile.get_tensor_shape(self.ctx, tv.inner, self.i32Scalars(n), self.loc()), n);
     }
 
-    fn memOpts(self: *Builder, ordering: MemoryOrdering, scope: ?MemoryScope, token: ?Value, hints: anytype) ct.MemOpts {
+    fn memOpts(self: *Builder, ordering: MemoryOrdering, scope: ?MemoryScope, token: ?Value, hints: anytype) cuda_tile.MemOpts {
         return .{
             .ordering = ordering,
             .scope = scope,
             .token = innerOpt(token),
-            .optimization_hints = if (hints.len > 0) ct.optimizationHints(self.ctx, hints) else null,
+            .optimization_hints = if (hints.len > 0) cuda_tile.optimizationHints(self.ctx, hints) else null,
         };
     }
 
@@ -1005,9 +1005,9 @@ pub const Builder = struct {
     }
 
     pub fn loadOpts(self: *Builder, view: Value, index: []const Value, opts: LoadOpts) Loaded {
-        const expected = ct.indexRankOfView(view.type_());
+        const expected = cuda_tile.indexRankOfView(view.type_());
         if (index.len != expected) std.debug.panic("Builder.load: view takes {d} indices, got {d}", .{ expected, index.len });
-        const r = self.emitMulti(ct.load_view_tko(self.ctx, view.inner, self.innerSlice(index), self.memOpts(opts.ordering, opts.scope, opts.token, opts.hints), self.loc()), 2);
+        const r = self.emitMulti(cuda_tile.load_view_tko(self.ctx, view.inner, self.innerSlice(index), self.memOpts(opts.ordering, opts.scope, opts.token, opts.hints), self.loc()), 2);
         return .{ .tile = r[0], .token = r[1] };
     }
 
@@ -1016,9 +1016,9 @@ pub const Builder = struct {
     }
 
     pub fn storeOpts(self: *Builder, tile: Value, view: Value, index: []const Value, opts: StoreOpts) Value {
-        const expected = ct.indexRankOfView(view.type_());
+        const expected = cuda_tile.indexRankOfView(view.type_());
         if (index.len != expected) std.debug.panic("Builder.store: view takes {d} indices, got {d}", .{ expected, index.len });
-        return self.emit(ct.store_view_tko(self.ctx, tile.inner, view.inner, self.innerSlice(index), self.memOpts(opts.ordering, opts.scope, opts.token, opts.hints), self.loc()));
+        return self.emit(cuda_tile.store_view_tko(self.ctx, tile.inner, view.inner, self.innerSlice(index), self.memOpts(opts.ordering, opts.scope, opts.token, opts.hints), self.loc()));
     }
 
     /// Gather through a tile of pointers, dropping the token. This arm cannot
@@ -1030,7 +1030,7 @@ pub const Builder = struct {
     pub fn loadPtrOpts(self: *Builder, ptrs: Value, opts: LoadPtrOpts) Loaded {
         const result_ty = self.tileLike(ptrs, pointee(ptrs));
         const mask: ?Value = if (opts.mask) |m| self.expandTo(m, ptrs.shape().constSlice()) else null;
-        const r = self.emitMulti(ct.load_ptr_tko(self.ctx, ptrs.inner, result_ty, .{
+        const r = self.emitMulti(cuda_tile.load_ptr_tko(self.ctx, ptrs.inner, result_ty, .{
             .mask = innerOpt(mask),
             .padding = innerOpt(opts.padding),
             .mem = self.memOpts(opts.ordering, opts.scope, opts.token, opts.hints),
@@ -1044,18 +1044,18 @@ pub const Builder = struct {
 
     pub fn storePtrOpts(self: *Builder, ptrs: Value, value: Value, opts: StorePtrOpts) Value {
         const mask: ?Value = if (opts.mask) |m| self.expandTo(m, ptrs.shape().constSlice()) else null;
-        return self.emit(ct.store_ptr_tko(self.ctx, ptrs.inner, value.inner, .{
+        return self.emit(cuda_tile.store_ptr_tko(self.ctx, ptrs.inner, value.inner, .{
             .mask = innerOpt(mask),
             .mem = self.memOpts(opts.ordering, opts.scope, opts.token, opts.hints),
         }, self.loc()));
     }
 
     pub fn makeToken(self: *Builder) Value {
-        return self.emit(ct.make_token(self.ctx, self.loc()));
+        return self.emit(cuda_tile.make_token(self.ctx, self.loc()));
     }
 
     pub fn joinTokens(self: *Builder, tokens: []const Value) Value {
-        return self.emit(ct.join_tokens(self.ctx, self.innerSlice(tokens), self.loc()));
+        return self.emit(cuda_tile.join_tokens(self.ctx, self.innerSlice(tokens), self.loc()));
     }
 
     pub fn print(self: *Builder, str: []const u8, args: []const Value) Value {
@@ -1063,27 +1063,27 @@ pub const Builder = struct {
     }
 
     pub fn printOpts(self: *Builder, str: []const u8, args: []const Value, token: ?Value) Value {
-        return self.emit(ct.print_tko(self.ctx, str, self.innerSlice(args), .{ .token = innerOpt(token) }, self.loc()));
+        return self.emit(cuda_tile.print_tko(self.ctx, str, self.innerSlice(args), .{ .token = innerOpt(token) }, self.loc()));
     }
 
-    fn atomicOpts(opts: AtomicOpts) ct.AtomicOpts {
+    fn atomicOpts(opts: AtomicOpts) cuda_tile.AtomicOpts {
         return .{ .ordering = opts.ordering, .scope = opts.scope, .mask = innerOpt(opts.mask), .token = innerOpt(opts.token) };
     }
 
     pub fn atomicCas(self: *Builder, ptrs: Value, cmp: Value, val: Value, opts: AtomicOpts) Loaded {
-        const r = self.emitMulti(ct.atomic_cas_tko(self.ctx, ptrs.inner, cmp.inner, val.inner, atomicOpts(opts), self.loc()), 2);
+        const r = self.emitMulti(cuda_tile.atomic_cas_tko(self.ctx, ptrs.inner, cmp.inner, val.inner, atomicOpts(opts), self.loc()), 2);
         return .{ .tile = r[0], .token = r[1] };
     }
 
     pub fn atomicRmw(self: *Builder, mode: AtomicRMWMode, ptrs: Value, operand: Value, opts: AtomicOpts) Loaded {
-        const r = self.emitMulti(ct.atomic_rmw_tko(self.ctx, ptrs.inner, mode, operand.inner, atomicOpts(opts), self.loc()), 2);
+        const r = self.emitMulti(cuda_tile.atomic_rmw_tko(self.ctx, ptrs.inner, mode, operand.inner, atomicOpts(opts), self.loc()), 2);
         return .{ .tile = r[0], .token = r[1] };
     }
 
     /// 13.3: an atomic reduction into an unpadded tiled view; returns the
     /// token. `xchg` is not a reduction and the dialect rejects it.
     pub fn atomicRedView(self: *Builder, mode: AtomicRMWMode, view: Value, index: []const Value, value: Value, opts: RedViewOpts) Value {
-        return self.emit(ct.atomic_red_view_tko(self.ctx, view.inner, self.innerSlice(index), mode, value.inner, .{
+        return self.emit(cuda_tile.atomic_red_view_tko(self.ctx, view.inner, self.innerSlice(index), mode, value.inner, .{
             .scope = opts.scope,
             .token = innerOpt(opts.token),
         }, self.loc()));
@@ -1091,13 +1091,13 @@ pub const Builder = struct {
 
     /// 13.3: `num_elem` elements of `dtype`, as a rank-0 pointer tile.
     pub fn alloca(self: *Builder, dtype: DType, num_elem: i64, opts: AllocaOpts) Value {
-        return self.emit(ct.alloca(self.ctx, num_elem, opts.alignment, opts.global, self.ptrTy(dtype), self.loc()));
+        return self.emit(cuda_tile.alloca(self.ctx, num_elem, opts.alignment, opts.global, self.ptrTy(dtype), self.loc()));
     }
 
     pub fn global(self: *Builder, name: []const u8, shape: []const i64, dtype: DType, value: anytype, opts: GlobalOpts) void {
         const ty = self.tileTy(shape, dtype);
-        const attr = ct.splatAttr(ty, self.elemAttr(dtype, value));
-        self.appendGlobal(ct.global(self.ctx, name, attr, .{ .alignment = opts.alignment, .constant = opts.constant, .visibility = opts.visibility }, self.loc()));
+        const attr = cuda_tile.splatAttr(ty, self.elemAttr(dtype, value));
+        self.appendGlobal(cuda_tile.global(self.ctx, name, attr, .{ .alignment = opts.alignment, .constant = opts.constant, .visibility = opts.visibility }, self.loc()));
     }
 
     /// A module-level dense buffer from a slice of Zig scalars (see `dense`
@@ -1105,7 +1105,7 @@ pub const Builder = struct {
     pub fn globalDense(self: *Builder, name: []const u8, shape: []const i64, dtype: DType, values: anytype, opts: GlobalOpts) void {
         checkDenseBytes("Builder.globalDense", shape, dtype, values);
         const ty = self.tileTy(shape, dtype);
-        self.appendGlobal(ct.global(self.ctx, name, ct.denseAttr(ty, values), .{ .alignment = opts.alignment, .constant = opts.constant, .visibility = opts.visibility }, self.loc()));
+        self.appendGlobal(cuda_tile.global(self.ctx, name, cuda_tile.denseAttr(ty, values), .{ .alignment = opts.alignment, .constant = opts.constant, .visibility = opts.visibility }, self.loc()));
     }
 
     fn appendGlobal(self: *Builder, op: *mlir.Operation) void {
@@ -1118,207 +1118,207 @@ pub const Builder = struct {
     }
 
     pub fn getGlobal(self: *Builder, name: []const u8, dtype: DType) Value {
-        return self.emit(ct.get_global(self.ctx, name, self.ptrTy(dtype), self.loc()));
+        return self.emit(cuda_tile.get_global(self.ctx, name, self.ptrTy(dtype), self.loc()));
     }
 
     pub fn addf(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.addfOpts(lhs, rhs, .{});
     }
     pub fn addfOpts(self: *Builder, lhs: Value, rhs: Value, opts: FloatOpts) Value {
-        return self.emit(ct.addf(self.ctx, lhs.inner, rhs.inner, opts.rounding, opts.flush_to_zero, self.loc()));
+        return self.emit(cuda_tile.addf(self.ctx, lhs.inner, rhs.inner, opts.rounding, opts.flush_to_zero, self.loc()));
     }
     pub fn subf(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.subfOpts(lhs, rhs, .{});
     }
     pub fn subfOpts(self: *Builder, lhs: Value, rhs: Value, opts: FloatOpts) Value {
-        return self.emit(ct.subf(self.ctx, lhs.inner, rhs.inner, opts.rounding, opts.flush_to_zero, self.loc()));
+        return self.emit(cuda_tile.subf(self.ctx, lhs.inner, rhs.inner, opts.rounding, opts.flush_to_zero, self.loc()));
     }
     pub fn mulf(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.mulfOpts(lhs, rhs, .{});
     }
     pub fn mulfOpts(self: *Builder, lhs: Value, rhs: Value, opts: FloatOpts) Value {
-        return self.emit(ct.mulf(self.ctx, lhs.inner, rhs.inner, opts.rounding, opts.flush_to_zero, self.loc()));
+        return self.emit(cuda_tile.mulf(self.ctx, lhs.inner, rhs.inner, opts.rounding, opts.flush_to_zero, self.loc()));
     }
     pub fn divf(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.divfOpts(lhs, rhs, .{});
     }
     pub fn divfOpts(self: *Builder, lhs: Value, rhs: Value, opts: FloatOpts) Value {
-        return self.emit(ct.divf(self.ctx, lhs.inner, rhs.inner, opts.rounding, opts.flush_to_zero, self.loc()));
+        return self.emit(cuda_tile.divf(self.ctx, lhs.inner, rhs.inner, opts.rounding, opts.flush_to_zero, self.loc()));
     }
     pub fn remf(self: *Builder, lhs: Value, rhs: Value) Value {
-        return self.emit(ct.remf(self.ctx, lhs.inner, rhs.inner, self.loc()));
+        return self.emit(cuda_tile.remf(self.ctx, lhs.inner, rhs.inner, self.loc()));
     }
     pub fn negf(self: *Builder, x: Value) Value {
-        return self.emit(ct.negf(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.negf(self.ctx, x.inner, self.loc()));
     }
     pub fn absf(self: *Builder, x: Value) Value {
-        return self.emit(ct.absf(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.absf(self.ctx, x.inner, self.loc()));
     }
     pub fn fma(self: *Builder, a: Value, b: Value, acc: Value) Value {
         return self.fmaOpts(a, b, acc, .{});
     }
     pub fn fmaOpts(self: *Builder, a: Value, b: Value, acc: Value, opts: FloatOpts) Value {
-        return self.emit(ct.fma(self.ctx, a.inner, b.inner, acc.inner, opts.rounding, opts.flush_to_zero, self.loc()));
+        return self.emit(cuda_tile.fma(self.ctx, a.inner, b.inner, acc.inner, opts.rounding, opts.flush_to_zero, self.loc()));
     }
     pub fn maxf(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.maxfOpts(lhs, rhs, .{});
     }
     pub fn maxfOpts(self: *Builder, lhs: Value, rhs: Value, opts: MinMaxOpts) Value {
-        return self.emit(ct.maxf(self.ctx, lhs.inner, rhs.inner, opts.propagate_nan, opts.flush_to_zero, self.loc()));
+        return self.emit(cuda_tile.maxf(self.ctx, lhs.inner, rhs.inner, opts.propagate_nan, opts.flush_to_zero, self.loc()));
     }
     pub fn minf(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.minfOpts(lhs, rhs, .{});
     }
     pub fn minfOpts(self: *Builder, lhs: Value, rhs: Value, opts: MinMaxOpts) Value {
-        return self.emit(ct.minf(self.ctx, lhs.inner, rhs.inner, opts.propagate_nan, opts.flush_to_zero, self.loc()));
+        return self.emit(cuda_tile.minf(self.ctx, lhs.inner, rhs.inner, opts.propagate_nan, opts.flush_to_zero, self.loc()));
     }
     pub fn pow(self: *Builder, x: Value, exponent: Value) Value {
-        return self.emit(ct.pow(self.ctx, x.inner, exponent.inner, self.loc()));
+        return self.emit(cuda_tile.pow(self.ctx, x.inner, exponent.inner, self.loc()));
     }
     pub fn atan2(self: *Builder, x: Value, y: Value) Value {
-        return self.emit(ct.atan2(self.ctx, x.inner, y.inner, self.loc()));
+        return self.emit(cuda_tile.atan2(self.ctx, x.inner, y.inner, self.loc()));
     }
     pub fn exp(self: *Builder, x: Value) Value {
-        return self.emit(ct.exp(self.ctx, x.inner, .{}, self.loc()));
+        return self.emit(cuda_tile.exp(self.ctx, x.inner, .{}, self.loc()));
     }
     /// 13.3: `exp` with an explicit rounding mode.
     pub fn expRound(self: *Builder, x: Value, rounding: RoundingMode) Value {
-        return self.emit(ct.exp(self.ctx, x.inner, .{ .rounding = rounding }, self.loc()));
+        return self.emit(cuda_tile.exp(self.ctx, x.inner, .{ .rounding = rounding }, self.loc()));
     }
     pub fn exp2(self: *Builder, x: Value) Value {
         return self.exp2Opts(x, false);
     }
     pub fn exp2Opts(self: *Builder, x: Value, flush_to_zero: bool) Value {
-        return self.emit(ct.exp2(self.ctx, x.inner, flush_to_zero, self.loc()));
+        return self.emit(cuda_tile.exp2(self.ctx, x.inner, flush_to_zero, self.loc()));
     }
     pub fn log(self: *Builder, x: Value) Value {
-        return self.emit(ct.log(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.log(self.ctx, x.inner, self.loc()));
     }
     pub fn log2(self: *Builder, x: Value) Value {
-        return self.emit(ct.log2(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.log2(self.ctx, x.inner, self.loc()));
     }
     pub fn sqrt(self: *Builder, x: Value) Value {
         return self.sqrtOpts(x, .{});
     }
     pub fn sqrtOpts(self: *Builder, x: Value, opts: FloatOpts) Value {
-        return self.emit(ct.sqrt(self.ctx, x.inner, opts.rounding, opts.flush_to_zero, self.loc()));
+        return self.emit(cuda_tile.sqrt(self.ctx, x.inner, opts.rounding, opts.flush_to_zero, self.loc()));
     }
     pub fn rsqrt(self: *Builder, x: Value) Value {
         return self.rsqrtOpts(x, false);
     }
     pub fn rsqrtOpts(self: *Builder, x: Value, flush_to_zero: bool) Value {
-        return self.emit(ct.rsqrt(self.ctx, x.inner, flush_to_zero, self.loc()));
+        return self.emit(cuda_tile.rsqrt(self.ctx, x.inner, flush_to_zero, self.loc()));
     }
     pub fn sin(self: *Builder, x: Value) Value {
-        return self.emit(ct.sin(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.sin(self.ctx, x.inner, self.loc()));
     }
     pub fn cos(self: *Builder, x: Value) Value {
-        return self.emit(ct.cos(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.cos(self.ctx, x.inner, self.loc()));
     }
     pub fn tan(self: *Builder, x: Value) Value {
-        return self.emit(ct.tan(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.tan(self.ctx, x.inner, self.loc()));
     }
     pub fn sinh(self: *Builder, x: Value) Value {
-        return self.emit(ct.sinh(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.sinh(self.ctx, x.inner, self.loc()));
     }
     pub fn cosh(self: *Builder, x: Value) Value {
-        return self.emit(ct.cosh(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.cosh(self.ctx, x.inner, self.loc()));
     }
     pub fn tanh(self: *Builder, x: Value) Value {
-        return self.emit(ct.tanh(self.ctx, x.inner, .{}, self.loc()));
+        return self.emit(cuda_tile.tanh(self.ctx, x.inner, .{}, self.loc()));
     }
     /// 13.2: `tanh` with an explicit rounding mode.
     pub fn tanhRound(self: *Builder, x: Value, rounding: RoundingMode) Value {
-        return self.emit(ct.tanh(self.ctx, x.inner, .{ .rounding = rounding }, self.loc()));
+        return self.emit(cuda_tile.tanh(self.ctx, x.inner, .{ .rounding = rounding }, self.loc()));
     }
     pub fn ceil(self: *Builder, x: Value) Value {
-        return self.emit(ct.ceil(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.ceil(self.ctx, x.inner, self.loc()));
     }
     pub fn floor(self: *Builder, x: Value) Value {
-        return self.emit(ct.floor(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.floor(self.ctx, x.inner, self.loc()));
     }
 
     pub fn cmpf(self: *Builder, predicate: ComparisonPredicate, lhs: Value, rhs: Value) Value {
         return self.cmpfOpts(predicate, lhs, rhs, .ordered);
     }
     pub fn cmpfOpts(self: *Builder, predicate: ComparisonPredicate, lhs: Value, rhs: Value, ordering: ComparisonOrdering) Value {
-        return self.emit(ct.cmpf(self.ctx, predicate, ordering, lhs.inner, rhs.inner, self.loc()));
+        return self.emit(cuda_tile.cmpf(self.ctx, predicate, ordering, lhs.inner, rhs.inner, self.loc()));
     }
 
     pub fn mmaf(self: *Builder, a: Value, b: Value, acc: Value) Value {
         return self.mmafOpts(a, b, acc, .{});
     }
     pub fn mmafOpts(self: *Builder, a: Value, b: Value, acc: Value, opts: MmaOpts) Value {
-        return self.emit(ct.mmaf(self.ctx, a.inner, b.inner, acc.inner, opts.fast_acc, self.loc()));
+        return self.emit(cuda_tile.mmaf(self.ctx, a.inner, b.inner, acc.inner, opts.fast_acc, self.loc()));
     }
     /// 13.3: block-scaled MMA. Scales are plain tiles in logical layout —
     /// `a_scale` is `[M, K/V]`, `b_scale` is `[K/V, N]` — never pre-swizzled.
     pub fn mmafScaled(self: *Builder, a: Value, b: Value, acc: Value, a_scale: Value, b_scale: Value) Value {
-        return self.emit(ct.mmaf_scaled(self.ctx, a.inner, b.inner, acc.inner, a_scale.inner, b_scale.inner, self.loc()));
+        return self.emit(cuda_tile.mmaf_scaled(self.ctx, a.inner, b.inner, acc.inner, a_scale.inner, b_scale.inner, self.loc()));
     }
     pub fn mmai(self: *Builder, a: Value, b: Value, acc: Value, a_signedness: Signedness, b_signedness: Signedness) Value {
-        return self.emit(ct.mmai(self.ctx, a.inner, b.inner, acc.inner, a_signedness, b_signedness, self.loc()));
+        return self.emit(cuda_tile.mmai(self.ctx, a.inner, b.inner, acc.inner, a_signedness, b_signedness, self.loc()));
     }
 
     pub fn addi(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.addiOpts(lhs, rhs, .{});
     }
     pub fn addiOpts(self: *Builder, lhs: Value, rhs: Value, opts: IntOpts) Value {
-        return self.emit(ct.addi(self.ctx, lhs.inner, rhs.inner, opts.overflow, self.loc()));
+        return self.emit(cuda_tile.addi(self.ctx, lhs.inner, rhs.inner, opts.overflow, self.loc()));
     }
     pub fn subi(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.subiOpts(lhs, rhs, .{});
     }
     pub fn subiOpts(self: *Builder, lhs: Value, rhs: Value, opts: IntOpts) Value {
-        return self.emit(ct.subi(self.ctx, lhs.inner, rhs.inner, opts.overflow, self.loc()));
+        return self.emit(cuda_tile.subi(self.ctx, lhs.inner, rhs.inner, opts.overflow, self.loc()));
     }
     pub fn muli(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.muliOpts(lhs, rhs, .{});
     }
     pub fn muliOpts(self: *Builder, lhs: Value, rhs: Value, opts: IntOpts) Value {
-        return self.emit(ct.muli(self.ctx, lhs.inner, rhs.inner, opts.overflow, self.loc()));
+        return self.emit(cuda_tile.muli(self.ctx, lhs.inner, rhs.inner, opts.overflow, self.loc()));
     }
     pub fn mulhii(self: *Builder, x: Value, y: Value) Value {
-        return self.emit(ct.mulhii(self.ctx, x.inner, y.inner, self.loc()));
+        return self.emit(cuda_tile.mulhii(self.ctx, x.inner, y.inner, self.loc()));
     }
     pub fn divi(self: *Builder, lhs: Value, rhs: Value, signedness: Signedness) Value {
         return self.diviOpts(lhs, rhs, .{ .signedness = signedness });
     }
     pub fn diviOpts(self: *Builder, lhs: Value, rhs: Value, opts: DivIOpts) Value {
-        return self.emit(ct.divi(self.ctx, lhs.inner, rhs.inner, opts.signedness, .{ .rounding = opts.rounding }, self.loc()));
+        return self.emit(cuda_tile.divi(self.ctx, lhs.inner, rhs.inner, opts.signedness, .{ .rounding = opts.rounding }, self.loc()));
     }
     pub fn remi(self: *Builder, lhs: Value, rhs: Value, signedness: Signedness) Value {
-        return self.emit(ct.remi(self.ctx, lhs.inner, rhs.inner, signedness, self.loc()));
+        return self.emit(cuda_tile.remi(self.ctx, lhs.inner, rhs.inner, signedness, self.loc()));
     }
     pub fn maxi(self: *Builder, lhs: Value, rhs: Value, signedness: Signedness) Value {
-        return self.emit(ct.maxi(self.ctx, lhs.inner, rhs.inner, signedness, self.loc()));
+        return self.emit(cuda_tile.maxi(self.ctx, lhs.inner, rhs.inner, signedness, self.loc()));
     }
     pub fn mini(self: *Builder, lhs: Value, rhs: Value, signedness: Signedness) Value {
-        return self.emit(ct.mini(self.ctx, lhs.inner, rhs.inner, signedness, self.loc()));
+        return self.emit(cuda_tile.mini(self.ctx, lhs.inner, rhs.inner, signedness, self.loc()));
     }
     pub fn negi(self: *Builder, x: Value) Value {
-        return self.emit(ct.negi(self.ctx, x.inner, .none, self.loc()));
+        return self.emit(cuda_tile.negi(self.ctx, x.inner, .none, self.loc()));
     }
     pub fn absi(self: *Builder, x: Value) Value {
-        return self.emit(ct.absi(self.ctx, x.inner, self.loc()));
+        return self.emit(cuda_tile.absi(self.ctx, x.inner, self.loc()));
     }
     pub fn shli(self: *Builder, lhs: Value, rhs: Value) Value {
-        return self.emit(ct.shli(self.ctx, lhs.inner, rhs.inner, .none, self.loc()));
+        return self.emit(cuda_tile.shli(self.ctx, lhs.inner, rhs.inner, .none, self.loc()));
     }
     pub fn shri(self: *Builder, lhs: Value, rhs: Value, signedness: Signedness) Value {
-        return self.emit(ct.shri(self.ctx, lhs.inner, rhs.inner, signedness, self.loc()));
+        return self.emit(cuda_tile.shri(self.ctx, lhs.inner, rhs.inner, signedness, self.loc()));
     }
     pub fn andi(self: *Builder, lhs: Value, rhs: Value) Value {
-        return self.emit(ct.andi(self.ctx, lhs.inner, rhs.inner, self.loc()));
+        return self.emit(cuda_tile.andi(self.ctx, lhs.inner, rhs.inner, self.loc()));
     }
     pub fn ori(self: *Builder, lhs: Value, rhs: Value) Value {
-        return self.emit(ct.ori(self.ctx, lhs.inner, rhs.inner, self.loc()));
+        return self.emit(cuda_tile.ori(self.ctx, lhs.inner, rhs.inner, self.loc()));
     }
     pub fn xori(self: *Builder, lhs: Value, rhs: Value) Value {
-        return self.emit(ct.xori(self.ctx, lhs.inner, rhs.inner, self.loc()));
+        return self.emit(cuda_tile.xori(self.ctx, lhs.inner, rhs.inner, self.loc()));
     }
     pub fn cmpi(self: *Builder, predicate: ComparisonPredicate, lhs: Value, rhs: Value, signedness: Signedness) Value {
-        return self.emit(ct.cmpi(self.ctx, predicate, signedness, lhs.inner, rhs.inner, self.loc()));
+        return self.emit(cuda_tile.cmpi(self.ctx, predicate, signedness, lhs.inner, rhs.inner, self.loc()));
     }
 
     pub fn maximum(self: *Builder, a: anytype, b: anytype) Value {
@@ -1332,7 +1332,7 @@ pub const Builder = struct {
     }
 
     pub fn select(self: *Builder, cond: Value, t: Value, f: Value) Value {
-        return self.emit(ct.select(self.ctx, cond.inner, t.inner, f.inner, self.loc()));
+        return self.emit(cuda_tile.select(self.ctx, cond.inner, t.inner, f.inner, self.loc()));
     }
 
     pub fn where(self: *Builder, cond: Value, x: anytype, y: anytype) Value {
@@ -1345,20 +1345,20 @@ pub const Builder = struct {
     }
 
     pub fn bitcast(self: *Builder, src: Value, dtype: DType) Value {
-        return self.emit(ct.bitcast(self.ctx, src.inner, self.tileLike(src, dtype.toMlir(self.ctx)), self.loc()));
+        return self.emit(cuda_tile.bitcast(self.ctx, src.inner, self.tileLike(src, dtype.toMlir(self.ctx)), self.loc()));
     }
     pub fn exti(self: *Builder, src: Value, dtype: DType, signedness: Signedness) Value {
-        return self.emit(ct.exti(self.ctx, src.inner, signedness, self.tileLike(src, dtype.toMlir(self.ctx)), self.loc()));
+        return self.emit(cuda_tile.exti(self.ctx, src.inner, signedness, self.tileLike(src, dtype.toMlir(self.ctx)), self.loc()));
     }
     pub fn trunci(self: *Builder, src: Value, dtype: DType) Value {
-        return self.emit(ct.trunci(self.ctx, src.inner, self.tileLike(src, dtype.toMlir(self.ctx)), .none, self.loc()));
+        return self.emit(cuda_tile.trunci(self.ctx, src.inner, self.tileLike(src, dtype.toMlir(self.ctx)), .none, self.loc()));
     }
     pub fn ftof(self: *Builder, src: Value, dtype: DType) Value {
         return self.ftofOpts(src, dtype, .{});
     }
     pub fn ftofOpts(self: *Builder, src: Value, dtype: DType, opts: CastOpts) Value {
         const rounding: RoundingMode = opts.rounding orelse (if (dtype == .f8e8m0fnu) .zero else .nearest_even);
-        return self.emit(ct.ftof(self.ctx, src.inner, self.tileLike(src, dtype.toMlir(self.ctx)), .{ .rounding = rounding }, self.loc()));
+        return self.emit(cuda_tile.ftof(self.ctx, src.inner, self.tileLike(src, dtype.toMlir(self.ctx)), .{ .rounding = rounding }, self.loc()));
     }
     /// Float -> integer, truncating toward zero (the only rounding `ftoi`
     /// admits).
@@ -1366,7 +1366,7 @@ pub const Builder = struct {
         return self.ftoiOpts(src, dtype, .{});
     }
     pub fn ftoiOpts(self: *Builder, src: Value, dtype: DType, opts: FToIOpts) Value {
-        return self.emit(ct.ftoi(self.ctx, src.inner, opts.signedness, .nearest_int_to_zero, self.tileLike(src, dtype.toMlir(self.ctx)), self.loc()));
+        return self.emit(cuda_tile.ftoi(self.ctx, src.inner, opts.signedness, .nearest_int_to_zero, self.tileLike(src, dtype.toMlir(self.ctx)), self.loc()));
     }
     /// Integer -> float. `f8e8m0fnu` is not a legal target; go through `f32`.
     pub fn itof(self: *Builder, src: Value, dtype: DType) Value {
@@ -1374,24 +1374,24 @@ pub const Builder = struct {
     }
     pub fn itofOpts(self: *Builder, src: Value, dtype: DType, opts: CastOpts) Value {
         if (dtype == .f8e8m0fnu) @panic("Builder.itof: the dialect refuses integer -> f8e8m0fnu; convert to .f32 first (Builder.cast does)");
-        return self.emit(ct.itof(self.ctx, src.inner, opts.signedness, opts.rounding orelse .nearest_even, self.tileLike(src, dtype.toMlir(self.ctx)), self.loc()));
+        return self.emit(cuda_tile.itof(self.ctx, src.inner, opts.signedness, opts.rounding orelse .nearest_even, self.tileLike(src, dtype.toMlir(self.ctx)), self.loc()));
     }
     pub fn intToPtr(self: *Builder, src: Value, pointee_dtype: DType) Value {
-        return self.emit(ct.int_to_ptr(self.ctx, src.inner, self.ptrTileTy(src.shape().constSlice(), pointee_dtype), self.loc()));
+        return self.emit(cuda_tile.int_to_ptr(self.ctx, src.inner, self.ptrTileTy(src.shape().constSlice(), pointee_dtype), self.loc()));
     }
     pub fn ptrToInt(self: *Builder, src: Value) Value {
-        return self.emit(ct.ptr_to_int(self.ctx, src.inner, self.tileLike(src, DType.i64.toMlir(self.ctx)), self.loc()));
+        return self.emit(cuda_tile.ptr_to_int(self.ctx, src.inner, self.tileLike(src, DType.i64.toMlir(self.ctx)), self.loc()));
     }
     pub fn ptrToPtr(self: *Builder, src: Value, pointee_dtype: DType) Value {
-        return self.emit(ct.ptr_to_ptr(self.ctx, src.inner, self.ptrTileTy(src.shape().constSlice(), pointee_dtype), self.loc()));
+        return self.emit(cuda_tile.ptr_to_ptr(self.ctx, src.inner, self.ptrTileTy(src.shape().constSlice(), pointee_dtype), self.loc()));
     }
     /// 13.3: a sub-byte tile packed into `tile<SHAPExi8>`.
     pub fn pack(self: *Builder, src: Value, shape: []const i64) Value {
-        return self.emit(ct.pack(self.ctx, src.inner, self.tileTy(shape, .i8), self.loc()));
+        return self.emit(cuda_tile.pack(self.ctx, src.inner, self.tileTy(shape, .i8), self.loc()));
     }
     /// 13.3: an i8 tile unpacked into `tile<SHAPExT>` of a sub-byte `dtype`.
     pub fn unpack(self: *Builder, src: Value, shape: []const i64, dtype: DType) Value {
-        return self.emit(ct.unpack(self.ctx, src.inner, self.tileTy(shape, dtype), self.loc()));
+        return self.emit(cuda_tile.unpack(self.ctx, src.inner, self.tileTy(shape, dtype), self.loc()));
     }
 
     /// Numeric cast with auto-dispatch: ftof / ftoi / itof / exti / trunci /
@@ -1418,16 +1418,16 @@ pub const Builder = struct {
     }
 
     pub fn reshape(self: *Builder, src: Value, shape: []const i64) Value {
-        return self.emit(ct.reshape(self.ctx, src.inner, self.tileTyOf(shape, src.elemType()), self.loc()));
+        return self.emit(cuda_tile.reshape(self.ctx, src.inner, self.tileTyOf(shape, src.elemType()), self.loc()));
     }
 
     fn tileTyOf(self: *const Builder, shape: []const i64, elem: *const mlir.Type) *const mlir.Type {
         if (!dtypes.tileLegal(shape)) std.debug.panic("Builder: {any} is not a legal tile shape", .{shape});
-        return ct.tileType(self.ctx, shape, elem);
+        return cuda_tile.tileType(self.ctx, shape, elem);
     }
 
     pub fn broadcastTo(self: *Builder, src: Value, shape: []const i64) Value {
-        return self.emit(ct.broadcast(self.ctx, src.inner, self.tileTyOf(shape, src.elemType()), self.loc()));
+        return self.emit(cuda_tile.broadcast(self.ctx, src.inner, self.tileTyOf(shape, src.elemType()), self.loc()));
     }
 
     pub fn expandDims(self: *Builder, src: Value, axis: usize) Value {
@@ -1442,11 +1442,11 @@ pub const Builder = struct {
     pub fn cat(self: *Builder, lhs: Value, rhs: Value, dim: usize) Value {
         var out = lhs.shape();
         out.set(dim, out.get(dim) + rhs.dim(dim));
-        return self.emit(ct.cat(self.ctx, lhs.inner, rhs.inner, @intCast(dim), self.tileTyOf(out.constSlice(), lhs.elemType()), self.loc()));
+        return self.emit(cuda_tile.cat(self.ctx, lhs.inner, rhs.inner, @intCast(dim), self.tileTyOf(out.constSlice(), lhs.elemType()), self.loc()));
     }
 
     pub fn extract(self: *Builder, src: Value, indices: []const Value, shape: []const i64) Value {
-        return self.emit(ct.extract(self.ctx, src.inner, self.innerSlice(indices), self.tileTyOf(shape, src.elemType()), self.loc()));
+        return self.emit(cuda_tile.extract(self.ctx, src.inner, self.innerSlice(indices), self.tileTyOf(shape, src.elemType()), self.loc()));
     }
 
     pub fn permute(self: *Builder, src: Value, order: []const i32) Value {
@@ -1454,7 +1454,7 @@ pub const Builder = struct {
         std.debug.assert(order.len == src_shape.len);
         var out: Value.Shape = .empty;
         for (order) |i| out.appendAssumeCapacity(src_shape.get(@intCast(i)));
-        return self.emit(ct.permute(self.ctx, src.inner, order, self.tileTyOf(out.constSlice(), src.elemType()), self.loc()));
+        return self.emit(cuda_tile.permute(self.ctx, src.inner, order, self.tileTyOf(out.constSlice(), src.elemType()), self.loc()));
     }
 
     pub fn transpose(self: *Builder, src: Value) Value {
@@ -1463,7 +1463,7 @@ pub const Builder = struct {
     }
 
     pub fn offset(self: *Builder, ptrs: Value, off: Value) Value {
-        return self.emit(ct.offset(self.ctx, ptrs.inner, off.inner, self.loc()));
+        return self.emit(cuda_tile.offset(self.ctx, ptrs.inner, off.inner, self.loc()));
     }
 
     fn reducedShape(src: Value, axis: usize) Value.Shape {
@@ -1479,13 +1479,13 @@ pub const Builder = struct {
     }
 
     fn combineBody(self: *Builder, ctx: anytype, elem: *const mlir.Type, combine: anytype) *mlir.Block {
-        const scalar = ct.tileType(self.ctx, &.{}, elem);
+        const scalar = cuda_tile.tileType(self.ctx, &.{}, elem);
         const body = mlir.Block.init(&.{ scalar, scalar }, &.{ self.loc(), self.loc() });
         self.pushBlock(body);
         const element: Value = .{ .inner = body.argument(0), .kernel = self };
         const acc: Value = .{ .inner = body.argument(1), .kernel = self };
         const combined: Value = combine(self, element, acc, ctx);
-        _ = ct.yield(self.ctx, &.{combined.inner}, self.loc()).appendTo(body);
+        _ = cuda_tile.yield(self.ctx, &.{combined.inner}, self.loc()).appendTo(body);
         self.popBlock();
         return body;
     }
@@ -1493,13 +1493,13 @@ pub const Builder = struct {
     pub fn reduce(self: *Builder, ctx: anytype, args: ReduceArgs(@TypeOf(ctx))) Value {
         const result_ty = self.tileTyOf(reducedShape(args.src, args.axis).constSlice(), args.src.elemType());
         const body = self.combineBody(ctx, args.src.elemType(), args.combine);
-        return self.emit(ct.reduce(self.ctx, &.{args.src.inner}, @intCast(args.axis), &.{args.identity}, body, &.{result_ty}, self.loc()));
+        return self.emit(cuda_tile.reduce(self.ctx, &.{args.src.inner}, @intCast(args.axis), &.{args.identity}, body, &.{result_ty}, self.loc()));
     }
 
     pub fn scan(self: *Builder, ctx: anytype, args: ScanArgs(@TypeOf(ctx))) Value {
         checkAxis(args.src, args.axis);
         const body = self.combineBody(ctx, args.src.elemType(), args.combine);
-        return self.emit(ct.scan(self.ctx, &.{args.src.inner}, @intCast(args.axis), args.reverse, &.{args.identity}, body, &.{args.src.type_()}, self.loc()));
+        return self.emit(cuda_tile.scan(self.ctx, &.{args.src.inner}, @intCast(args.axis), args.reverse, &.{args.identity}, body, &.{args.src.type_()}, self.loc()));
     }
 
     /// The `2N`-argument body of a variadic `reduce`/`scan`: arguments come in
@@ -1510,7 +1510,7 @@ pub const Builder = struct {
         const types = scratch.alloc(*const mlir.Type, 2 * n) catch @panic("OOM");
         const locs = scratch.alloc(*const mlir.Location, 2 * n) catch @panic("OOM");
         for (srcs, 0..) |s, i| {
-            const scalar = ct.tileType(self.ctx, &.{}, s.elemType());
+            const scalar = cuda_tile.tileType(self.ctx, &.{}, s.elemType());
             types[2 * i] = scalar;
             types[2 * i + 1] = scalar;
             locs[2 * i] = self.loc();
@@ -1526,7 +1526,7 @@ pub const Builder = struct {
         }
         const out: []const Value = combine(self, elements, accs, ctx);
         if (out.len != n) std.debug.panic("Builder.reduceMulti: combine returned {d} values for {d} sources", .{ out.len, n });
-        _ = ct.yield(self.ctx, self.innerSlice(out), self.loc()).appendTo(body);
+        _ = cuda_tile.yield(self.ctx, self.innerSlice(out), self.loc()).appendTo(body);
         self.popBlock();
         return body;
     }
@@ -1536,7 +1536,7 @@ pub const Builder = struct {
         const result_types = self.arena.allocator().alloc(*const mlir.Type, args.srcs.len) catch @panic("OOM");
         for (args.srcs, 0..) |s, i| result_types[i] = self.tileTyOf(reducedShape(s, args.axis).constSlice(), s.elemType());
         const body = self.combineBodyMulti(ctx, args.srcs, args.combine);
-        return self.emitMulti(ct.reduce(self.ctx, self.innerSlice(args.srcs), @intCast(args.axis), args.identities, body, result_types, self.loc()), args.srcs.len);
+        return self.emitMulti(cuda_tile.reduce(self.ctx, self.innerSlice(args.srcs), @intCast(args.axis), args.identities, body, result_types, self.loc()), args.srcs.len);
     }
 
     pub fn scanMulti(self: *Builder, ctx: anytype, args: ScanMultiArgs(@TypeOf(ctx))) []Value {
@@ -1547,7 +1547,7 @@ pub const Builder = struct {
             result_types[i] = s.type_();
         }
         const body = self.combineBodyMulti(ctx, args.srcs, args.combine);
-        return self.emitMulti(ct.scan(self.ctx, self.innerSlice(args.srcs), @intCast(args.axis), args.reverse, args.identities, body, result_types, self.loc()), args.srcs.len);
+        return self.emitMulti(cuda_tile.scan(self.ctx, self.innerSlice(args.srcs), @intCast(args.axis), args.reverse, args.identities, body, result_types, self.loc()), args.srcs.len);
     }
 
     const ReduceKind = enum { sum, max, min, prod };
@@ -1754,7 +1754,7 @@ pub const Builder = struct {
     }
 
     pub fn deviceAssert(self: *Builder, condition: Value, message: []const u8) void {
-        _ = ct.assert_(self.ctx, condition.inner, message, self.loc()).appendTo(self.currentBlock());
+        _ = cuda_tile.assert_(self.ctx, condition.inner, message, self.loc()).appendTo(self.currentBlock());
     }
 
     /// Append `return`, verify the module, and serialize it to a NUL-terminated
@@ -1764,7 +1764,7 @@ pub const Builder = struct {
         std.debug.assert(results.len == 0);
         const current = self.currentBlock();
         if (current.terminator() == null) {
-            _ = ct.return_(self.ctx, &.{}, self.loc()).appendTo(current);
+            _ = cuda_tile.return_(self.ctx, &.{}, self.loc()).appendTo(current);
         }
 
         if (!self.module.operation().verify()) {

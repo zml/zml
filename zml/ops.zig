@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const funcDialect = @import("mlir/dialects/func");
+const func = @import("mlir/dialects/func");
 const stablehlo = @import("mlir/dialects/stablehlo");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
@@ -31,7 +31,7 @@ const Tensor = @import("tensor.zig").Tensor;
 const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 const log = std.log.scoped(.@"zml/Compiler");
 
-pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@TypeOf(inputs)) {
+pub fn allReduce(inputs: anytype, comptime func_: anytype) AllReduceReturnType(@TypeOf(inputs)) {
     const ctx = Compiler.current();
     const mlir_ctx = ctx.mlir_ctx;
 
@@ -99,7 +99,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         const reducer_scope = ctx.pushBlock(block);
         defer reducer_scope.pop();
 
-        ctx.pushLocation(@src(), stdx.meta.fnName(func));
+        ctx.pushLocation(@src(), stdx.meta.fnName(func_));
         defer ctx.popLocation();
 
         inline for (0..input_tensors.len) |i| {
@@ -109,10 +109,10 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
 
         var reduced_values: [input_tensors.len]*const mlir.Value = undefined;
         if (input_tensors.len == 1) {
-            const reduced = @call(.auto, func, .{ args[0].left, args[0].right });
+            const reduced = @call(.auto, func_, .{ args[0].left, args[0].right });
             reduced_values[0] = reduced.value();
         } else {
-            var reduced = @call(.auto, func, args);
+            var reduced = @call(.auto, func_, args);
             var reduced_tensors: [input_tensors.len]Tensor = undefined;
             meta.collectBuf(stdx.meta.identity, {}, &reduced, &reduced_tensors);
 
@@ -216,7 +216,7 @@ pub const ReduceArgs = struct {
     right: Tensor,
 };
 
-pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func: anytype, context: anytype) stdx.meta.FnReturn(func) {
+pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func_: anytype, context: anytype) stdx.meta.FnReturn(func_) {
     const compiler = Compiler.current();
     const caller_scope = compiler.currentScope();
     const mlir_ctx = compiler.mlir_ctx;
@@ -243,7 +243,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
         const reduce_scope = compiler.pushBlock(reduce_block);
         defer reduce_scope.pop();
 
-        compiler.pushLocation(@src(), stdx.meta.fnName(func));
+        compiler.pushLocation(@src(), stdx.meta.fnName(func_));
         defer compiler.popLocation();
 
         inline for (0..inits.len) |i| {
@@ -251,7 +251,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             reduce_scope.registerTensorAsBlockArgument(args[i].right.id, i + inits.len);
         }
 
-        var result = @call(.auto, func, args ++ context);
+        var result = @call(.auto, func_, args ++ context);
 
         var result_values: [inits.len]*const mlir.Value = undefined;
         inline for (0..inits.len) |i| {
@@ -329,7 +329,7 @@ pub fn ReduceWindowFn(N: comptime_int) type {
     );
 }
 
-pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: ReduceWindowOpts, func: *const ReduceWindowFn(N)) [N]Tensor {
+pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: ReduceWindowOpts, func_: *const ReduceWindowFn(N)) [N]Tensor {
     const compiler = Compiler.current();
     const mlir_ctx = compiler.mlir_ctx;
 
@@ -358,7 +358,7 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
             reduce_scope.registerTensorAsBlockArgument(args[i].right.id, i + N);
         }
 
-        var result = @call(.auto, func, args);
+        var result = @call(.auto, func_, args);
 
         var result_values: [N]*const mlir.Value = undefined;
         inline for (0..N) |i| {
@@ -407,7 +407,7 @@ pub const SortArgs = struct {
     right: Tensor,
 };
 
-pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytype, is_stable: bool) [inputs.len]Tensor {
+pub fn sort(inputs: anytype, axis_: i64, comptime func_: anytype, context: anytype, is_stable: bool) [inputs.len]Tensor {
     const compiler = Compiler.current();
     const mlir_ctx = compiler.mlir_ctx;
 
@@ -437,7 +437,7 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
             scope.registerTensorAsBlockArgument(args[i].right.id, 2 * i + 1);
         }
 
-        var result = @call(.auto, func, args ++ context);
+        var result = @call(.auto, func_, args ++ context);
 
         _ = stablehlo.return_(mlir_ctx, result.value(), compiler.location).appendTo(sort_block);
         break :b sort_block;
@@ -1725,10 +1725,10 @@ pub fn scatter(
     inputs: anytype,
     index_tensors: anytype,
     updates: anytype,
-    comptime func: anytype,
+    comptime func_: anytype,
     context: anytype,
     opts: Tensor.ScatterOpts,
-) stdx.meta.FnReturn(func) {
+) stdx.meta.FnReturn(func_) {
     const compiler = Compiler.current();
     var arena = std.heap.ArenaAllocator.init(compiler.allocator);
     defer arena.deinit();
@@ -1761,7 +1761,7 @@ pub fn scatter(
             scope.registerTensorAsBlockArgument(args[i].update.id, i + inputs.len);
         }
 
-        var result = @call(.auto, func, args ++ context);
+        var result = @call(.auto, func_, args ++ context);
 
         var result_values: [inputs.len]*const mlir.Value = undefined;
         inline for (0..inputs.len) |i| {
@@ -2393,21 +2393,21 @@ pub fn composite(
             var result = @call(.auto, decomposition, .{ arg_tensors, context });
             const rtensors = ctx.alloc(Tensor, outputs.len);
             meta.collectBuf((struct {
-                pub fn func(t: Tensor) Tensor {
+                pub fn func_(t: Tensor) Tensor {
                     return t;
                 }
-            }).func, {}, &result, rtensors);
+            }).func_, {}, &result, rtensors);
 
             const rvals = ctx.alloc(*const mlir.Value, outputs.len);
             for (rtensors, 0..) |t, i| {
                 rvals[i] = t.value();
             }
 
-            _ = funcDialect.returns(mlir_ctx, rvals, ctx.location).appendTo(block);
+            _ = func.returns(mlir_ctx, rvals, ctx.location).appendTo(block);
         }
         scope.pop();
 
-        _ = funcDialect.func(mlir_ctx, .{
+        _ = func.func(mlir_ctx, .{
             .name = decomp_name,
             .block = block,
             .location = ctx.location,
@@ -2457,10 +2457,10 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
             if (!struct_info.is_tuple) @compileError("Expected tuple");
             var inputs_: [struct_info.field_names.len]Tensor = undefined;
             meta.collectBuf((struct {
-                pub fn func(t: Tensor) Tensor {
+                pub fn func_(t: Tensor) Tensor {
                     return t;
                 }
-            }).func, {}, &inputs, &inputs_);
+            }).func_, {}, &inputs, &inputs_);
             break :b &inputs_;
         },
         .array => &inputs,
@@ -2481,10 +2481,10 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
             if (!struct_info.is_tuple) @compileError("Expected tuple");
             var output_shapes: [struct_info.field_names.len]Shape = undefined;
             meta.collectBuf((struct {
-                pub fn func(t: Shape) Shape {
+                pub fn func_(t: Shape) Shape {
                     return t;
                 }
-            }).func, {}, &outputs, &output_shapes);
+            }).func_, {}, &outputs, &output_shapes);
             break :b &output_shapes;
         },
         .array => &outputs,
@@ -2595,7 +2595,7 @@ pub fn CustomCall(
     // Receives the custom call buffers for the input and outputs a struct with the same fields as I and O
     // and the provided attributes. So if I is `{a: zml.Tensor}`, the first argument is `{a: CustomCallBuffer}`
     // (TensorToCustomCallBuffer(i), ShapeToCustomCallBuffer(O), A) -> !?*pjrt.ffi.Error
-    comptime func: anytype,
+    comptime func_: anytype,
     comptime params: struct {
         /// Name of the custom call, must be unique.
         name: [:0]const u8,
@@ -2660,7 +2660,7 @@ pub fn CustomCall(
             if (call_frame.registeringHook()) return null;
 
             const input_buffers: TensorToCustomCallBuffer(I), const output_buffers: ShapeToCustomCallBuffer(O), const attributes: A = customCallArgsFromPjrtCallFrame(I, O, A, call_frame);
-            return func(call_frame, input_buffers, output_buffers, attributes) catch |err|
+            return func_(call_frame, input_buffers, output_buffers, attributes) catch |err|
                 pjrt.ffi.Error.create(call_frame.api, .unknown, @errorName(err));
         }
     };

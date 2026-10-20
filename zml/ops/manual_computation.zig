@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const shardyDialect = @import("mlir/dialects/shardy");
+const shardy = @import("mlir/dialects/shardy");
 const stablehlo = @import("mlir/dialects/stablehlo");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
@@ -182,7 +182,7 @@ noinline fn manualComputationInternal(
                 .location = compiler.location,
             }).appendTo(manual_block);
 
-            const out_mesh_attrs = try arena.alloc(*const shardyDialect.TensorShardingAttribute, global_output_shapes.len);
+            const out_mesh_attrs = try arena.alloc(*const shardy.TensorShardingAttribute, global_output_shapes.len);
             for (out_mesh_attrs, global_output_shapes) |*attr, shape| {
                 attr.* = try mesh.sdyShardingAttrForShape(arena, mlir_ctx, shape);
             }
@@ -193,7 +193,7 @@ noinline fn manualComputationInternal(
                 .blocks = &.{manual_block},
                 .attributes = &.{
                     .named(mlir_ctx, "in_shardings", try Sharding.sdyPerValueShardingAttr(arena, mlir_ctx, global_input_shapes, mesh)),
-                    .named(mlir_ctx, "out_shardings", shardyDialect.attr.shardingsPerValue(mlir_ctx, out_mesh_attrs)),
+                    .named(mlir_ctx, "out_shardings", shardy.attr.shardingsPerValue(mlir_ctx, out_mesh_attrs)),
                     .named(mlir_ctx, "manual_axes", try Sharding.sdyManualAxesAttr(arena, mlir_ctx, global_input_shapes, global_output_shapes, mesh)),
                 },
                 .verify = true,
@@ -304,11 +304,11 @@ test collectManualAxes {
     const ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
-    const expected = shardyDialect.ManualAxesAttribute.init(ctx, &.{
+    const expected = shardy.ManualAxesAttribute.init(ctx, &.{
         .init(ctx, "data"),
         .init(ctx, "model"),
     }).asAttr();
-    try std.testing.expect(shardy.manualAxesAttr(ctx, axes.constSlice()).eql(expected));
+    try std.testing.expect(shardy_.manualAxesAttr(ctx, axes.constSlice()).eql(expected));
 }
 
 const gspmd = struct {
@@ -353,11 +353,11 @@ const gspmd = struct {
     }
 };
 
-const shardy = struct {
+const shardy_ = struct {
     pub fn manualAxesAttr(mlir_ctx: *mlir.Context, axes: []const Shape.Tag) *const mlir.Attribute {
         var attrs: stdx.BoundedArray(*const mlir.StringAttribute, Sharding.MAX_MESH_RANK) = .empty;
         for (axes) |axis| attrs.appendAssumeCapacity(.init(mlir_ctx, std.mem.span(axis)));
-        return shardyDialect.ManualAxesAttribute.init(mlir_ctx, attrs.constSlice()).asAttr();
+        return shardy.ManualAxesAttribute.init(mlir_ctx, attrs.constSlice()).asAttr();
     }
 };
 

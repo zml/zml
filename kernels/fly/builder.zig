@@ -4,9 +4,9 @@ const arith = @import("mlir/dialects/arith");
 const gpu = @import("mlir/dialects/gpu");
 const llvm = @import("mlir/dialects/llvm");
 const math = @import("mlir/dialects/math");
-const llvmRocdl = @import("mlir/dialects/rocdl");
+const rocdl = @import("mlir/dialects/rocdl");
 const scf = @import("mlir/dialects/scf");
-const vectorDialect = @import("mlir/dialects/vector");
+const vector = @import("mlir/dialects/vector");
 const fly = @import("mlir/dialects/fly");
 const dsl = @import("kernels/common");
 const tupleArity = dsl.tupleArity;
@@ -17,7 +17,7 @@ pub const layout = @import("layout.zig");
 pub const dtypes = @import("dtype.zig");
 
 pub const DType = dtypes.DType;
-pub const rocdl = @import("mlir/dialects/fly_rocdl");
+pub const fly_rocdl = @import("mlir/dialects/fly_rocdl");
 pub const IntTuple = layout.IntTuple;
 pub const Layout = layout.Layout;
 pub const Tile = layout.Tile;
@@ -256,9 +256,9 @@ pub const Value = struct {
         return self.unary(fly.ops.memref_load_vec);
     }
 
-    pub fn store(self: Value, vector: Value) void {
+    pub fn store(self: Value, vector_: Value) void {
         const k = self.kern();
-        k.emitNone(fly.ops.memref_store_vec(k.ctx, vector.inner, self.inner, k.loc()));
+        k.emitNone(fly.ops.memref_store_vec(k.ctx, vector_.inner, self.inner, k.loc()));
     }
 
     /// Store a splat vector of the tensor's static size.
@@ -268,7 +268,7 @@ pub const Value = struct {
         const dt = self.elemDType();
         const cst = k.constant(dt, value);
         const vec_ty = mlir.Type.vector(&.{n}, dt.toMlir(k.ctx));
-        const vec = k.emit(vectorDialect.broadcast(k.ctx, cst.inner, vec_ty, k.loc()));
+        const vec = k.emit(vector.broadcast(k.ctx, cst.inner, vec_ty, k.loc()));
         self.store(vec);
     }
 
@@ -305,9 +305,9 @@ pub const Value = struct {
         const r: Value = if (@TypeOf(rhs) == Value) rhs else k.constLike(rhs, self);
         if (self.type_().eql(r.type_())) return .{ self, r };
         if (self.type_().isA(mlir.VectorType) != null and r.type_().isA(mlir.VectorType) == null)
-            return .{ self, k.emit(vectorDialect.broadcast(k.ctx, r.inner, self.type_(), k.loc())) };
+            return .{ self, k.emit(vector.broadcast(k.ctx, r.inner, self.type_(), k.loc())) };
         if (self.type_().isA(mlir.VectorType) == null and r.type_().isA(mlir.VectorType) != null)
-            return .{ k.emit(vectorDialect.broadcast(k.ctx, self.inner, r.type_(), k.loc())), r };
+            return .{ k.emit(vector.broadcast(k.ctx, self.inner, r.type_(), k.loc())), r };
         std.debug.panic("fly: cannot combine {f} with {f}", .{ self.type_(), r.type_() });
     }
 
@@ -424,7 +424,7 @@ pub const Value = struct {
     pub fn splat(self: Value, n: i64) Value {
         const k = self.kern();
         std.debug.assert(self.type_().isA(mlir.VectorType) == null and n > 0);
-        return k.emit(vectorDialect.broadcast(k.ctx, self.inner, .vector(&.{n}, self.type_()), k.loc()));
+        return k.emit(vector.broadcast(k.ctx, self.inner, .vector(&.{n}, self.type_()), k.loc()));
     }
 
     /// Preserve total bits, adjusting vector length to the destination element.
@@ -433,7 +433,7 @@ pub const Value = struct {
         const src = self.scalarDType();
         if (self.type_().isA(mlir.VectorType)) |vec| {
             const n = @divExact(vec.dimension(0) * @as(i64, src.bitWidth()), dtype.bitWidth());
-            return k.emit(vectorDialect.bitcast(k.ctx, self.inner, .vector(&.{n}, dtype.toMlir(k.ctx)), k.loc()));
+            return k.emit(vector.bitcast(k.ctx, self.inner, .vector(&.{n}, dtype.toMlir(k.ctx)), k.loc()));
         }
         std.debug.assert(src.bitWidth() == dtype.bitWidth());
         return k.emit(arith.bitcast(k.ctx, self.inner, dtype.toMlir(k.ctx), k.loc()));
@@ -441,12 +441,12 @@ pub const Value = struct {
 
     pub fn insert(self: Value, index: i64, value: Value) Value {
         const k = self.kern();
-        return k.emit(vectorDialect.insert(k.ctx, value.inner, self.inner, &.{index}, &.{}, k.loc()));
+        return k.emit(vector.insert(k.ctx, value.inner, self.inner, &.{index}, &.{}, k.loc()));
     }
 
     pub fn shuffleVector(self: Value, rhs: Value, indices: []const i64) Value {
         const k = self.kern();
-        return k.emit(vectorDialect.shuffle(k.ctx, self.inner, rhs.inner, indices, .vector(&.{@intCast(indices.len)}, self.scalarElemType()), k.loc()));
+        return k.emit(vector.shuffle(k.ctx, self.inner, rhs.inner, indices, .vector(&.{@intCast(indices.len)}, self.scalarElemType()), k.loc()));
     }
 
     fn withElemType(self: Value, elem: *const mlir.Type) *const mlir.Type {
@@ -549,7 +549,7 @@ pub const Value = struct {
     pub fn reduce(self: Value, reduce_kind: ReduceKind) Value {
         const k = self.kern();
         const result = self.scalarElemType();
-        const ck: vectorDialect.CombiningKind = switch (reduce_kind) {
+        const ck: vector.CombiningKind = switch (reduce_kind) {
             .add => .add,
             .mul => .mul,
             .minf => .minnumf,
@@ -560,14 +560,14 @@ pub const Value = struct {
             .or_ => .@"or",
             .xor => .xor,
         };
-        const op = vectorDialect.reduction(k.ctx, ck, self.inner, result, .{}, k.loc());
+        const op = vector.reduction(k.ctx, ck, self.inner, result, .{}, k.loc());
         return k.emitFast(op);
     }
 
     /// Static position.
     pub fn extract(self: Value, i: i64) Value {
         const k = self.kern();
-        return k.emit(vectorDialect.extract(k.ctx, self.inner, &.{i}, &.{}, self.scalarElemType(), k.loc()));
+        return k.emit(vector.extract(k.ctx, self.inner, &.{i}, &.{}, self.scalarElemType(), k.loc()));
     }
 };
 
@@ -1074,7 +1074,7 @@ pub const Builder = struct {
 
     /// CDNA3 packed FP8 conversion, selecting two bytes from the low/high word.
     pub fn cvtPkF32Fp8(self: *Builder, bits: Value, high: bool) Value {
-        return self.emit(llvmRocdl.cvtPkF32Fp8(self.ctx, bits.inner, high, self.loc()));
+        return self.emit(rocdl.cvtPkF32Fp8(self.ctx, bits.inner, high, self.loc()));
     }
 
     pub const AtomicScope = enum { workgroup, agent };
@@ -1197,8 +1197,8 @@ pub const Builder = struct {
         fn type_(self: CopyOp, ctx: *mlir.Context) *const mlir.Type {
             return switch (self) {
                 .universal => |b| must(fly.types.CopyOpUniversalCopyType.get(ctx, .{ .bitSize = b })).type_(),
-                .buffer_copy => |b| must(rocdl.CopyOpCDNA3BufferCopyType.get(ctx, .{ .bitSize = b })).type_(),
-                .buffer_copy_lds => |b| must(rocdl.CopyOpCDNA3BufferCopyLDSType.get(ctx, .{ .bitSize = b })).type_(),
+                .buffer_copy => |b| must(fly_rocdl.CopyOpCDNA3BufferCopyType.get(ctx, .{ .bitSize = b })).type_(),
+                .buffer_copy_lds => |b| must(fly_rocdl.CopyOpCDNA3BufferCopyLDSType.get(ctx, .{ .bitSize = b })).type_(),
             };
         }
     };
@@ -1291,7 +1291,7 @@ pub const Builder = struct {
         // (7 << 12) | (4 << 15): the CDNA descriptor flags FlyDSL and XLA use.
         const flags = self.constant(.i32, 0x27000);
         const elem = t.elemDType();
-        const buf_ty = self.ptrType(elem, (must(rocdl.BufferDescAddressAttr.get(self.ctx))).attribute());
+        const buf_ty = self.ptrType(elem, (must(fly_rocdl.BufferDescAddressAttr.get(self.ctx))).attribute());
         const buf_ptr = self.emit(fly.ops.make_ptr(self.ctx, &.{ ptr.inner, c0.inner, nrec.inner, flags.inner }, buf_ty, .{}, self.loc()));
         return buf_ptr.view(lay);
     }
@@ -1590,7 +1590,7 @@ pub const MmaFlavor = enum {
         const operand = self.operandDType().toMlir(ctx);
         const acc: *const mlir.Type = .float(ctx, .f32);
         return switch (self) {
-            .cdna3_mfma => (rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
+            .cdna3_mfma => (fly_rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
                 .m = 16,
                 .n = 16,
                 .k = 4,
@@ -1599,7 +1599,7 @@ pub const MmaFlavor = enum {
                 .elemTyAcc = acc,
             }) catch unreachable).type_(),
             inline .gfx11_wmma, .gfx120x_wmma => |f| blk: {
-                const T = if (f == .gfx11_wmma) rocdl.MmaOpGFX11WMMAType else rocdl.MmaOpGFX120XWMMAType;
+                const T = if (f == .gfx11_wmma) fly_rocdl.MmaOpGFX11WMMAType else fly_rocdl.MmaOpGFX120XWMMAType;
                 break :blk (T.get(ctx, .{
                     .m = 16,
                     .n = 16,
@@ -1926,7 +1926,7 @@ test "SSA matrix atom builds, verifies and re-parses" {
     var b = try Builder.open(std.testing.allocator, ctx, "mma_atom_ssa");
     defer b.deinit();
     _ = try b.declareArgs(.{});
-    const atom_type = try rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
+    const atom_type = try fly_rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
         .m = 16,
         .n = 16,
         .k = 16,
