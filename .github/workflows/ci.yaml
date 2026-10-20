@@ -20,7 +20,6 @@ jobs:
         include:
           - target: cpu
             bazel_opts: ""
-            self_hosted: false
             run_tests: true
             runner_labels:
               - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-cpu
@@ -29,9 +28,9 @@ jobs:
               - image=ubuntu24-amd64
               - volume=80gb
               - extras=s3-cache
+
           - target: neuron
             bazel_opts: "--@zml//platforms:neuron=true --@zml//platforms:cpu=false"
-            self_hosted: false
             run_tests: false
             runner_labels:
               - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-neuron
@@ -40,9 +39,9 @@ jobs:
               - image=ubuntu24-amd64
               - volume=80gb
               - extras=s3-cache
+
           - target: tpu
             bazel_opts: "--@zml//platforms:tpu=true --@zml//platforms:cpu=false"
-            self_hosted: false
             run_tests: false
             runner_labels:
               - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-tpu
@@ -51,16 +50,19 @@ jobs:
               - image=ubuntu24-amd64
               - volume=80gb
               - extras=s3-cache
+
           - target: cuda
             bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
-            self_hosted: true
             run_tests: true
             runner_labels: ["self-hosted", "platform=cuda"]
+
           - target: rocm
             bazel_opts: "--@zml//platforms:rocm=true --@zml//platforms:cpu=false"
-            self_hosted: true
             run_tests: true
             runner_labels: ["self-hosted", "platform=rocm"]
+
+          # Todo : add missing platforms like Metal / oneAPI / Furiosa ...
+
     runs-on: ${{ matrix.runner_labels }}
     steps:
       - uses: runs-on/action@v2.1.0
@@ -68,33 +70,24 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Ensure self hosted cache permissions
-        if: ${{ matrix.self_hosted }}
         run: mkdir -p /tmp/zig-cache && mkdir -p /tmp/zml && sudo chmod -R 777 /tmp/zig-cache && sudo chmod -R 777 /tmp/zml
 
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.19.0
         with:
-          bazelisk-version: 1.28.1
-          bazelisk-cache: ${{ !matrix.self_hosted }}
-          repository-cache: ${{ !matrix.self_hosted }}
-          external-cache: ${{ !matrix.self_hosted }}
+          bazelisk-version: 1.29.0
+          bazelisk-cache: true
+          cache-save: false
           bazelrc: |
+            startup --experimental_remote_repo_contents_cache
             common --verbose_failures
             common --keep_going
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
-            build --experimental_disk_cache_gc_max_size=100G
-            build --experimental_disk_cache_gc_max_age=14d
-            build --experimental_disk_cache_gc_idle_delay=1m
-            common --experimental_action_cache_gc_max_age=14d
-            common --experimental_action_cache_gc_idle_delay=1m
-            common --repo_contents_cache_gc_max_age=14d
-            common --repo_contents_cache_gc_idle_delay=1m
-            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common --config=remote' || '' }}
-            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
-            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common:remote --remote_download_outputs=minimal' || '' }}
-            ${{ matrix.self_hosted && 'common --disk_cache=/home/actions/.cache/bazel-disk' || '' }}
+            common --config=remote
+            common --strategy=TestRunner=local
+            ${{ format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
 
       - run: bazel mod graph
       - run: bazel query --output=graph ${{ matrix.bazel_opts }} //...

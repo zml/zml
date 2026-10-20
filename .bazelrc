@@ -120,8 +120,10 @@ common:remote   --remote_cache=grpcs://remote.buildbuddy.io
 common:remote   --experimental_remote_downloader=grpcs://remote.buildbuddy.io
 common:remote   --remote_executor=grpcs://remote.buildbuddy.io
 common:remote   --remote_download_toplevel
+common:remote   --remote_download_outputs=minimal
 common:remote   --nobuild_runfile_links
 common:remote   --remote_timeout=3600
+common:remote   --experimental_remote_cache_chunking
 common:remote   --noexperimental_throttle_remote_action_building
 common:remote   --remote_cache_compression
 # Re-runs actions instead of failing on transient lost remote/disk cache inputs.
