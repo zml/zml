@@ -1,5 +1,10 @@
 package(default_visibility = ["//zml:__pkg__"])
 
+exports_files(
+    ["gmm_ep.zig"],
+    visibility = ["//zml:__pkg__"],
+)
+
 filegroup(
     name = "mosaic_tpu",
     srcs = [

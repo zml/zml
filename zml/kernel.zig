@@ -2,8 +2,9 @@ const std = @import("std");
 
 const cuda_tile_builder = @import("kernels/cuda_tile/builder");
 const cute_builder = @import("kernels/cute/builder");
-const dialects = @import("mlir/dialects");
+const stablehlo = @import("mlir/dialects/stablehlo");
 const fly_builder = @import("kernels/fly/builder");
+const func = @import("mlir/dialects/func");
 const mlir = @import("mlir");
 const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
 const stdx = @import("stdx");
@@ -35,7 +36,7 @@ fn makeKernelContext(comptime dialects_needed: []const []const u8) std.mem.Alloc
         mlir.DialectHandle.fromString(d).insertDialect(registry);
     }
 
-    mlir.registerFuncExtensions(registry);
+    func.registerExtensions(registry);
 
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
@@ -46,8 +47,8 @@ fn makeKernelContext(comptime dialects_needed: []const []const u8) std.mem.Alloc
 fn resolveOutputOperandAliases(
     aliases_opt: anytype,
     operand_offset: i64,
-) stdx.BoundedArray(dialects.stablehlo.CustomCallOpts.OutputOperandAlias, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) {
-    var out: stdx.BoundedArray(dialects.stablehlo.CustomCallOpts.OutputOperandAlias, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
+) stdx.BoundedArray(stablehlo.CustomCallOpts.OutputOperandAlias, stablehlo.CustomCallOpts.MAX_RESULTS) {
+    var out: stdx.BoundedArray(stablehlo.CustomCallOpts.OutputOperandAlias, stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
 
     if (aliases_opt) |a| {
         inline for (@typeInfo(@TypeOf(a)).@"struct".field_names, 0..) |field_name, output_index| {
@@ -376,7 +377,7 @@ pub const mosaic_tpu = struct {
         inputs: []const *const mlir.Value,
         result_types: []const *const mlir.Type,
         backend_config: []const u8,
-        aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias,
+        aliases: []const stablehlo.CustomCallOpts.OutputOperandAlias,
         dynamic_grid_bounds: []const Tensor,
         additional_attributes: []const mlir.NamedAttribute,
     };
@@ -384,11 +385,11 @@ pub const mosaic_tpu = struct {
     fn callTpuCustomCall(args: TpuCustomCallArgs) *mlir.Operation {
         const cur = Compiler.current();
 
-        var all_inputs: stdx.BoundedArray(*const mlir.Value, dialects.stablehlo.CustomCallOpts.MAX_OPERANDS) = .empty;
+        var all_inputs: stdx.BoundedArray(*const mlir.Value, stablehlo.CustomCallOpts.MAX_OPERANDS) = .empty;
         for (args.dynamic_grid_bounds) |t| all_inputs.appendAssumeCapacity(t.value());
         all_inputs.appendSliceAssumeCapacity(args.inputs);
 
-        return dialects.stablehlo.custom_call(
+        return stablehlo.custom_call(
             cur.mlir_ctx,
             all_inputs.constSlice(),
             args.result_types,
