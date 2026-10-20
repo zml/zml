@@ -11,7 +11,8 @@ registry: zml.safetensors.TensorRegistry = undefined,
 model: block.Qwen3VLModel,
 model_buffer: zml.Bufferized(block.Qwen3VLModel),
 
-const LAYER_COUNT = block.Qwen3VLTextModel.TEXT_DECODE_LAYER_COUNT;
+// pub const TEXT_DECODE_LAYER_COUNT = 1;
+pub const TEXT_DECODE_LAYER_COUNT = 36;
 
 // From text_encoder/model-XXXXX-of-00002.safetensors
 //  model.language_model.embed_tokens.weight                             (151936, 4096)        BF16
@@ -28,11 +29,10 @@ const LAYER_COUNT = block.Qwen3VLTextModel.TEXT_DECODE_LAYER_COUNT;
 //  model.language_model.layers.0.self_attn.v_proj.weight                (1024, 4096)          BF16
 //  model.language_model.norm.weight                                     (4096,)               BF16
 
-pub fn load(
+pub fn load_tensors(
     self: *LanguageModelStore,
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *const zml.Platform,
     folder: []const u8,
 ) !void {
     var buffer: [256]u8 = undefined;
@@ -45,9 +45,9 @@ pub fn load(
 
     const embedding = zml.nn.TokenEmbedding{ .weight = language_model_view.createTensor("embed_tokens.weight", .{ .tokens, .d }, .replicated) };
     const layers: []block.Qwen3VLTextDecoderLayer =
-        try allocator.alloc(block.Qwen3VLTextDecoderLayer, LAYER_COUNT);
+        try allocator.alloc(block.Qwen3VLTextDecoderLayer, TEXT_DECODE_LAYER_COUNT);
 
-    for (0..LAYER_COUNT) |i| {
+    for (0..TEXT_DECODE_LAYER_COUNT) |i| {
         const layer_view = language_model_view.withPrefix("layers").withLayer(i);
 
         const attn_view = layer_view.withPrefix("self_attn");
@@ -83,6 +83,9 @@ pub fn load(
 
     const language_model = block.Qwen3VLTextModel{ .embedding = embedding, .layers = layers, .rotary_emb = rotary_emb };
     self.model = block.Qwen3VLModel{ .language_model = language_model };
+}
+
+pub fn load_buffers(self: *LanguageModelStore, allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform) !void {
     self.model_buffer = try self.model.load(allocator, io, platform, &self.store);
 }
 
