@@ -1,40 +1,40 @@
 const std = @import("std");
 const mlir = @import("mlir");
-const cute = @import("mlir/dialects/cute_ir");
-const nvgpu = @import("mlir/dialects/cute_nvgpu");
+const cute_ir = @import("mlir/dialects/cute_ir");
+const cute_nvgpu = @import("mlir/dialects/cute_nvgpu");
 const nvvm = @import("mlir/dialects/nvvm").ops;
 const cuda = @import("mlir/dialects/cuda").ops;
-const ArithTupleIteratorType = cute.ArithTupleIteratorType;
-const ComposedLayoutType = cute.ComposedLayoutType;
-const ConstrainedIntType = cute.ConstrainedIntType;
-const CoordTensorType = cute.CoordTensorType;
-const CoordType = cute.CoordType;
-const FastDivmodDivisorType = cute.FastDivmodDivisorType;
-const IntTupleType = cute.IntTupleType;
-const LayoutType = cute.LayoutType;
-const MemRefType = cute.MemRefType;
-const PtrType = cute.PtrType;
-const ShapeType = cute.ShapeType;
-const SparseElemType = cute.SparseElemType;
-const StrideType = cute.StrideType;
-const SwizzleType = cute.SwizzleType;
-const TileType = cute.TileType;
-const TiledCopyType = cute.TiledCopyType;
-const TiledCopyV2Type = cute.TiledCopyV2Type;
-const TiledMmaType = cute.TiledMmaType;
-const TupleType = cute.TupleType;
-const BitLayoutAttr = cute.BitLayoutAttr;
-const CopyAtomAttr = cute.CopyAtomAttr;
-const CopyAtomV2Attr = cute.CopyAtomV2Attr;
-const MmaAtomAttr = cute.MmaAtomAttr;
-const MxMmaAtomAttr = cute.MxMmaAtomAttr;
-const SparseMmaAtomAttr = cute.SparseMmaAtomAttr;
-const SparseMxMmaAtomAttr = cute.SparseMxMmaAtomAttr;
-const get = cute.get;
-const print = cute.print;
-const size = cute.size;
-const slice = cute.slice;
-const operation_names = cute.operation_names;
+const ArithTupleIteratorType = cute_ir.ArithTupleIteratorType;
+const ComposedLayoutType = cute_ir.ComposedLayoutType;
+const ConstrainedIntType = cute_ir.ConstrainedIntType;
+const CoordTensorType = cute_ir.CoordTensorType;
+const CoordType = cute_ir.CoordType;
+const FastDivmodDivisorType = cute_ir.FastDivmodDivisorType;
+const IntTupleType = cute_ir.IntTupleType;
+const LayoutType = cute_ir.LayoutType;
+const MemRefType = cute_ir.MemRefType;
+const PtrType = cute_ir.PtrType;
+const ShapeType = cute_ir.ShapeType;
+const SparseElemType = cute_ir.SparseElemType;
+const StrideType = cute_ir.StrideType;
+const SwizzleType = cute_ir.SwizzleType;
+const TileType = cute_ir.TileType;
+const TiledCopyType = cute_ir.TiledCopyType;
+const TiledCopyV2Type = cute_ir.TiledCopyV2Type;
+const TiledMmaType = cute_ir.TiledMmaType;
+const TupleType = cute_ir.TupleType;
+const BitLayoutAttr = cute_ir.BitLayoutAttr;
+const CopyAtomAttr = cute_ir.CopyAtomAttr;
+const CopyAtomV2Attr = cute_ir.CopyAtomV2Attr;
+const MmaAtomAttr = cute_ir.MmaAtomAttr;
+const MxMmaAtomAttr = cute_ir.MxMmaAtomAttr;
+const SparseMmaAtomAttr = cute_ir.SparseMmaAtomAttr;
+const SparseMxMmaAtomAttr = cute_ir.SparseMxMmaAtomAttr;
+const get = cute_ir.get;
+const print = cute_ir.print;
+const size = cute_ir.size;
+const slice = cute_ir.slice;
+const operation_names = cute_ir.operation_names;
 fn registerDialects(registry: *mlir.DialectRegistry) void {
     inline for (.{ "cute", "cute_nvgpu", nvvm.dialect_handle, cuda.dialect_handle }) |name| registry.registerDialect(name);
 }
@@ -50,8 +50,8 @@ fn testContext() !*mlir.Context {
 
 test {
     @setEvalBranchQuota(100_000);
-    std.testing.refAllDecls(cute);
-    std.testing.refAllDecls(nvgpu);
+    std.testing.refAllDecls(cute_ir);
+    std.testing.refAllDecls(cute_nvgpu);
     std.testing.refAllDecls(nvvm);
     std.testing.refAllDecls(cuda);
     inline for (.{ nvvm, cuda }) |namespace| {
@@ -60,12 +60,12 @@ test {
             if (@TypeOf(T) == type) std.testing.refAllDecls(T);
         }
     }
-    inline for (comptime std.meta.declarations(cute)) |decl| {
-        const T = @field(cute, decl);
+    inline for (comptime std.meta.declarations(cute_ir)) |decl| {
+        const T = @field(cute_ir, decl);
         if (@TypeOf(T) == type) std.testing.refAllDecls(T);
     }
-    inline for (comptime std.meta.declarations(nvgpu)) |decl| {
-        const T = @field(nvgpu, decl);
+    inline for (comptime std.meta.declarations(cute_nvgpu)) |decl| {
+        const T = @field(cute_nvgpu, decl);
         if (@TypeOf(T) == type) std.testing.refAllDecls(T);
     }
 }
@@ -73,8 +73,8 @@ test {
 test "every bound operation is registered" {
     const ctx = try testContext();
     defer ctx.deinit();
-    for (cute.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
-    for (nvgpu.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (cute_ir.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (cute_nvgpu.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     for (nvvm.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     for (cuda.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
@@ -111,70 +111,70 @@ test "generated types and attributes rebuild from their getters" {
         .{ MxMmaAtomAttr, "#cute.mx_mma_atom<<\"(16,8,16)\">, <\"32:1\">, layout_TV = (<\"1:0\">, <\"1:0\">, <\"1:0\">, <\"1:0\">, <\"1:0\">), shapes = (<\"(16,16)\">, <\"(8,16)\">, <\"(16,8)\">, <\"1\">, <\"2\">) frgs = (#cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>)>" },
         .{ SparseMmaAtomAttr, "#cute.sparse_mma_atom<<\"(16,8,16)\">, <\"32:1\">, layout_TV = (<\"1:0\">, <\"1:0\">, <\"1:0\">, <\"1:0\">), shapes = (<\"(16,16)\">, <\"(8,16)\">, <\"(16,8)\">, <\"1\">) frgs = (#cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>)>" },
         .{ SparseMxMmaAtomAttr, "#cute.sparse_mx_mma_atom<<\"(16,8,16)\">, <\"32:1\">, layout_TV = (<\"1:0\">, <\"2:0\">, <\"3:0\">, <\"4:0\">, <\"5:0\">, <\"6:0\">), shapes = (<\"1\">, <\"2\">, <\"3\">, <\"4\">, <\"5\">, <\"6\">) frgs = (#cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>, #cute_nvgpu.not_implemented_frg<>)>" },
-        .{ nvgpu.CopyAtomBulkCopyG2SType, "!cute_nvgpu.atom.bulk_copy_g2s<f32 copy_bits = 128 mcast = true>" },
-        .{ nvgpu.CopyAtomBulkCopyS2GType, "!cute_nvgpu.atom.bulk_copy_s2g<f32 copy_bits = 128 mask = true>" },
-        .{ nvgpu.CopyAtomBulkCopyS2SType, "!cute_nvgpu.atom.bulk_copy_s2s<f32 copy_bits = 128>" },
-        .{ nvgpu.CopyAtomDsmemStoreType, "!cute_nvgpu.atom.dsmem_store<f32, 64 b>" },
-        .{ nvgpu.CopyAtomG2RType, "!cute_nvgpu.atom.g2r<f32 copy_bits = 64 mem_order = relaxed mem_scope = gpu l2_prefetch_size = size_128b l1_cache_evict_priority = evict_last shared_space = cluster>" },
-        .{ nvgpu.CopyAtomIm2ColTmaLoadType, "!cute_nvgpu.atom.im2col_tma_load<f16, copy_bits = 131072, num_cta = 1, g_stride = <\"()\"> mcast = true tma_gbasis = <\"(64,128):(1@1,1@0)\">>" },
-        .{ nvgpu.CopyAtomIm2ColTmaStoreType, "!cute_nvgpu.atom.im2col_tma_store<f16, copy_bits = 65536, g_stride = <\"()\"> tma_gbasis = <\"(32,128):(1@1,1@0)\">>" },
-        .{ nvgpu.CopyAtomLdsmType, "!cute_nvgpu.atom.ldsm<val_type = f16, mode = <\"(8,8)\">, sz_pattern = u16, num_matrices = 4, t>" },
-        .{ nvgpu.CopyAtomNonExec2DGather4TmaLoadType, "!cute_nvgpu.atom.non_exec_2d_gather4_tma_load<sm_100, f16, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = F16_RN>" },
-        .{ nvgpu.CopyAtomNonExec2DScatter4TmaStoreType, "!cute_nvgpu.atom.non_exec_2d_scatter4_tma_store<f16, copy_bits = 1024, tma_gbasis = <\"(4,64):(1@0,1@1)\">, tma_format = F16_RN>" },
-        .{ nvgpu.CopyAtomNonExecIm2ColTmaLoadType, "!cute_nvgpu.atom.non_exec_im2col_tma_load<sm_90, f16, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = F16_RN>" },
-        .{ nvgpu.CopyAtomNonExecIm2ColTmaStoreType, "!cute_nvgpu.atom.non_exec_im2col_tma_store<f16, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = F16_RN>" },
-        .{ nvgpu.CopyAtomNonExecTiledTmaLoadType, "!cute_nvgpu.atom.non_exec_tiled_tma_load<sm_90, bf16, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = BF16_RN>" },
-        .{ nvgpu.CopyAtomNonExecTiledTmaReduceType, "!cute_nvgpu.atom.non_exec_tiled_tma_reduce<ADD, f32, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = F32_RN>" },
-        .{ nvgpu.CopyAtomNonExecTiledTmaStoreType, "!cute_nvgpu.atom.non_exec_tiled_tma_store<bf16, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = BF16_RN>" },
-        .{ nvgpu.CopyAtomR2GType, "!cute_nvgpu.atom.r2g<f16 copy_bits = 128 l1_cache_evict_priority = no_allocate>" },
-        .{ nvgpu.CopyAtomR2SType, "!cute_nvgpu.atom.r2s<f32 copy_bits = 64 mem_order = relaxed mem_scope = gpu shared_space = cluster>" },
-        .{ nvgpu.CopyAtomS2RType, "!cute_nvgpu.atom.s2r<f32 copy_bits = 64 mem_order = relaxed mem_scope = gpu shared_space = cluster>" },
-        .{ nvgpu.CopyAtomSIMTAsyncCopyType, "!cute_nvgpu.atom.simt_async_copy<bf16, cache = global, 128 b>" },
-        .{ nvgpu.CopyAtomSIMTMultimemLdReduceType, "!cute_nvgpu.atom.simt_multimem_ld_reduce<bf16, 64 b, MIN, <F32>, acquire, gpu>" },
-        .{ nvgpu.CopyAtomSIMTMultimemRedType, "!cute_nvgpu.atom.simt_multimem_red<f16, 64 b, MAX, release, gpu>" },
-        .{ nvgpu.CopyAtomSIMTMultimemStType, "!cute_nvgpu.atom.simt_multimem_st<f16, 64 b, release, gpu>" },
-        .{ nvgpu.CopyAtomSIMTSyncCopyType, "!cute_nvgpu.atom.universal_copy<f32, 128 b, src_space = gmem, dst_space = smem>" },
-        .{ nvgpu.CopyAtomSM100CopyS2TType, "!cute_nvgpu.atom.s2t_copy<f8E4M3FN, 32 DP, 128 bit, 1 cta, x4>" },
-        .{ nvgpu.CopyAtomSM100S2TCopyV2Type, "!cute_nvgpu.atom.sm100_s2t_copy_v2<f8E4M3FN, num_dp = 32, num_bit = 128, num_cta = 1, smem_major = k, broadcast = x4>" },
-        .{ nvgpu.CopyAtomSM100TmemLoadType, "!cute_nvgpu.atom.tmem_load<f32, 32 DP, 32 bit, x4, pack16b>" },
-        .{ nvgpu.CopyAtomSM100TmemStoreType, "!cute_nvgpu.atom.tmem_store<f32, 32 DP, 32 bit, x4, expand16b>" },
-        .{ nvgpu.CopyAtomSM107TmemLoadSPCompressType, "!cute_nvgpu.atom.tmem_load_spcompress<f32, 32 DP, 32 bit, x4, maxabs, red, nan>" },
-        .{ nvgpu.CopyAtomSM10xTmemLoadRedType, "!cute_nvgpu.atom.tmem_load_red<f32, 16 DP, 32 bit, x4, maxabs, nan, half_split_off=3 : i64>" },
-        .{ nvgpu.CopyAtomStsmType, "!cute_nvgpu.atom.stsm<f16, mode = <\"(8,8)\">, num_matrices = 4, n>" },
-        .{ nvgpu.CopyAtomTmaLoadType, "!cute_nvgpu.atom.tma_load<bf16, copy_bits = 1024, mode = tiled, num_cta = 2, g_stride = <\"()\"> mcast = true tma_gbasis = <\"(64,1):(1@0,1@1)\">>" },
-        .{ nvgpu.CopyAtomTmaReduceType, "!cute_nvgpu.atom.tma_reduce<f32, copy_bits = 131072, mode = tiled, kind = ADD, g_stride = <\"()\"> tma_gbasis = <\"(32,128):(1@1,1@0)\">>" },
-        .{ nvgpu.CopyAtomTmaStoreType, "!cute_nvgpu.atom.tma_store<bf16, copy_bits = 16384, mode = tiled, g_stride = <\"()\"> tma_gbasis = <\"(64,16):(1@0,1@1)\">>" },
-        .{ nvgpu.MmaAtomSM100UMMABlockScaledSparseType, "!cute_nvgpu.sm100.mma_bs_sp<128x128x64, num_cta = 1, ab_major = (k, k), elem_type = (f8E4M3FN, f8E4M3FN, f32), sf_type = f8E8M0FNU, sparse_metadata_format = tid, frag_kind = ss, vec_size = 32>" },
-        .{ nvgpu.MmaAtomSM100UMMABlockScaledType, "!cute_nvgpu.sm100.mma_bs<128x128x96, num_cta = 1, ab_major = (k, k), elem_type = (f4E2M1FN, f4E2M1FN, f32), sf_type = f8E8M0FNU, frag_kind = ss, vec_size = 16, arch_promote = sm_103>" },
-        .{ nvgpu.MmaAtomSM100UMMASparseType, "!cute_nvgpu.sm100.mma_sp<128x128x32, num_cta = 1, ab_major = (k, k), elem_type = (f16, f16, f32), e_type = i8, sparse_metadata_format = tid, frag_kind = ss, c_scale_exp = 0>" },
-        .{ nvgpu.MmaAtomSM100UMMAType, "!cute_nvgpu.sm100.mma<128x128x16, num_cta = 1, ab_major = (k, mn), elem_type = (f16, f16, f32), frag_kind = ss, c_scale_exp = 0>" },
-        .{ nvgpu.MmaAtomSM107UMMABlockScaledSparseType, "!cute_nvgpu.sm107.mma_bs_sp<128x128x64, num_cta = 1, ab_major = (k, k), elem_type = (f8E4M3FN, f8E4M3FN, f32), sf_type = f8E8M0FNU, sparse_metadata_format = tid, frag_kind = ss, vec_size = 32, ab_collector_op = (discard, discard)>" },
-        .{ nvgpu.MmaAtomSM107UMMABlockScaledType, "!cute_nvgpu.sm107.mma_bs<128x128x32, num_cta = 1, ab_major = (k, k), elem_type = (f8E4M3FN, f8E4M3FN, f32), sf_type = f8E8M0FNU, frag_kind = ss, vec_size = 32, ab_collector_op = (discard, use), int_overflow = <satfinite>>" },
-        .{ nvgpu.MmaAtomSM107UMMASparseType, "!cute_nvgpu.sm107.mma_sp<128x128x32, num_cta = 1, ab_major = (k, k), elem_type = (f16, f16, f32), e_type = i8, sparse_metadata_format = tid, frag_kind = ss, c_scale_exp = 0, ab_collector_op = (discard, discard)>" },
-        .{ nvgpu.MmaAtomSM107UMMAType, "!cute_nvgpu.sm107.mma<128x128x16, num_cta = 1, ab_major = (k, mn), elem_type = (f16, f16, f32), frag_kind = ss, c_scale_exp = 0, ab_collector_op = (lastuse, fill)>" },
-        .{ nvgpu.MmaAtomSM120BlockScaledType, "!cute_nvgpu.SM120.mma_bs<16x8x64, vec_size = 32, elem_type = (f4E2M1FN, f4E2M1FN, f32), sf_type = f8E8M0FNU, use_sf_layout_TV = true>" },
-        .{ nvgpu.MmaAtomSM80SparseType, "!cute_nvgpu.sm80.sparse_mma<16x8x64, elem_type = (i8, i8, i32), md_format = tid, int_overflow = <satfinite> >" },
-        .{ nvgpu.MmaAtomSM80Type, "!cute_nvgpu.sm80.mma<16x8x32, elem_type = (i8, i8, i32), int_overflow = <wrapped>, binary_op = <none> >" },
-        .{ nvgpu.MmaAtomSM89Type, "!cute_nvgpu.sm89.mma<16x8x32, elem_type = (f8E4M3FN, f8E4M3FN, f32) >" },
-        .{ nvgpu.MmaAtomSM90Type, "!cute_nvgpu.sm90.mma<64x128x32, ab_major = (k, k), elem_type = (i8, i8, i32), frag_kind = ss, int_overflow = <satfinite>, a_neg, b_neg>" },
-        .{ nvgpu.SmemDescCircularSM103Type, "!cute_nvgpu.sm103.smem_desc_circular<<\"(8,128,2):(128,1,1024)\">>" },
-        .{ nvgpu.SmemDescCircularSM107Type, "!cute_nvgpu.sm107.smem_desc_circular<<\"(8,128,2):(128,1,1024)\">>" },
-        .{ nvgpu.SmemDescSM107Type, "!cute_nvgpu.sm107.smem_desc" },
-        .{ nvgpu.SmemDescType, "!cute_nvgpu.smem_desc" },
-        .{ nvgpu.SmemDescViewType, "!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, \"(2,3):(1,2)\">" },
-        .{ nvgpu.TmaDescriptorIm2ColType, "!cute_nvgpu.tma_descriptor_im2col" },
-        .{ nvgpu.TmaDescriptorTiledType, "!cute_nvgpu.tma_descriptor_tiled" },
-        .{ nvgpu.UniversalFmaAtomType, "!cute_nvgpu.atom.universal_fma<1x1x1, (f32, f32) -> f32 >" },
-        .{ nvgpu.WorkIdResponseType, "!cute_nvgpu.workid_response" },
-        .{ nvgpu.NotImplementedFrgAttr, "#cute_nvgpu.not_implemented_frg<>" },
-        .{ nvgpu.RmemFrgAttr, "#cute_nvgpu.rmem_frg<value_type = f32, operand = A, derive_elem_type = true>" },
-        .{ nvgpu.SM100CircularSmemFrgAttr, "#cute_nvgpu.arch.sm100.circular_smem_frg<major = k>" },
-        .{ nvgpu.SM100SmemFrgAttr, "#cute_nvgpu.arch.sm100.smem_frg<major = k>" },
-        .{ nvgpu.SM100TmemEFrgAttr, "#cute_nvgpu.arch.sm100.tmem_e_frg<a_type = f16, e_type = i8>" },
-        .{ nvgpu.SM100TmemFrgAttr, "#cute_nvgpu.arch.sm100.tmem_frg<data_type = f32, storage_type = f32, cta_group = 1, tmem_alloc_mode = Interleaved>" },
-        .{ nvgpu.SM100TmemSfFrgAttr, "#cute_nvgpu.arch.sm100.tmem_sf_frg<sf_type = f8E8M0FNU, sf_vec_size = 32, cta_group = 1, is_sfa = true, tmem_alloc_mode = Interleaved>" },
-        .{ nvgpu.SM107SmemFrgAttr, "#cute_nvgpu.arch.sm107.smem_frg<major = k>" },
-        .{ nvgpu.SM90SmemFrgAttr, "#cute_nvgpu.arch.sm90.smem_frg<major = k>" },
+        .{ cute_nvgpu.CopyAtomBulkCopyG2SType, "!cute_nvgpu.atom.bulk_copy_g2s<f32 copy_bits = 128 mcast = true>" },
+        .{ cute_nvgpu.CopyAtomBulkCopyS2GType, "!cute_nvgpu.atom.bulk_copy_s2g<f32 copy_bits = 128 mask = true>" },
+        .{ cute_nvgpu.CopyAtomBulkCopyS2SType, "!cute_nvgpu.atom.bulk_copy_s2s<f32 copy_bits = 128>" },
+        .{ cute_nvgpu.CopyAtomDsmemStoreType, "!cute_nvgpu.atom.dsmem_store<f32, 64 b>" },
+        .{ cute_nvgpu.CopyAtomG2RType, "!cute_nvgpu.atom.g2r<f32 copy_bits = 64 mem_order = relaxed mem_scope = gpu l2_prefetch_size = size_128b l1_cache_evict_priority = evict_last shared_space = cluster>" },
+        .{ cute_nvgpu.CopyAtomIm2ColTmaLoadType, "!cute_nvgpu.atom.im2col_tma_load<f16, copy_bits = 131072, num_cta = 1, g_stride = <\"()\"> mcast = true tma_gbasis = <\"(64,128):(1@1,1@0)\">>" },
+        .{ cute_nvgpu.CopyAtomIm2ColTmaStoreType, "!cute_nvgpu.atom.im2col_tma_store<f16, copy_bits = 65536, g_stride = <\"()\"> tma_gbasis = <\"(32,128):(1@1,1@0)\">>" },
+        .{ cute_nvgpu.CopyAtomLdsmType, "!cute_nvgpu.atom.ldsm<val_type = f16, mode = <\"(8,8)\">, sz_pattern = u16, num_matrices = 4, t>" },
+        .{ cute_nvgpu.CopyAtomNonExec2DGather4TmaLoadType, "!cute_nvgpu.atom.non_exec_2d_gather4_tma_load<sm_100, f16, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = F16_RN>" },
+        .{ cute_nvgpu.CopyAtomNonExec2DScatter4TmaStoreType, "!cute_nvgpu.atom.non_exec_2d_scatter4_tma_store<f16, copy_bits = 1024, tma_gbasis = <\"(4,64):(1@0,1@1)\">, tma_format = F16_RN>" },
+        .{ cute_nvgpu.CopyAtomNonExecIm2ColTmaLoadType, "!cute_nvgpu.atom.non_exec_im2col_tma_load<sm_90, f16, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = F16_RN>" },
+        .{ cute_nvgpu.CopyAtomNonExecIm2ColTmaStoreType, "!cute_nvgpu.atom.non_exec_im2col_tma_store<f16, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = F16_RN>" },
+        .{ cute_nvgpu.CopyAtomNonExecTiledTmaLoadType, "!cute_nvgpu.atom.non_exec_tiled_tma_load<sm_90, bf16, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = BF16_RN>" },
+        .{ cute_nvgpu.CopyAtomNonExecTiledTmaReduceType, "!cute_nvgpu.atom.non_exec_tiled_tma_reduce<ADD, f32, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = F32_RN>" },
+        .{ cute_nvgpu.CopyAtomNonExecTiledTmaStoreType, "!cute_nvgpu.atom.non_exec_tiled_tma_store<bf16, copy_bits = 1024, tma_gbasis = <\"(64,1):(1@0,1@1)\">, tma_format = BF16_RN>" },
+        .{ cute_nvgpu.CopyAtomR2GType, "!cute_nvgpu.atom.r2g<f16 copy_bits = 128 l1_cache_evict_priority = no_allocate>" },
+        .{ cute_nvgpu.CopyAtomR2SType, "!cute_nvgpu.atom.r2s<f32 copy_bits = 64 mem_order = relaxed mem_scope = gpu shared_space = cluster>" },
+        .{ cute_nvgpu.CopyAtomS2RType, "!cute_nvgpu.atom.s2r<f32 copy_bits = 64 mem_order = relaxed mem_scope = gpu shared_space = cluster>" },
+        .{ cute_nvgpu.CopyAtomSIMTAsyncCopyType, "!cute_nvgpu.atom.simt_async_copy<bf16, cache = global, 128 b>" },
+        .{ cute_nvgpu.CopyAtomSIMTMultimemLdReduceType, "!cute_nvgpu.atom.simt_multimem_ld_reduce<bf16, 64 b, MIN, <F32>, acquire, gpu>" },
+        .{ cute_nvgpu.CopyAtomSIMTMultimemRedType, "!cute_nvgpu.atom.simt_multimem_red<f16, 64 b, MAX, release, gpu>" },
+        .{ cute_nvgpu.CopyAtomSIMTMultimemStType, "!cute_nvgpu.atom.simt_multimem_st<f16, 64 b, release, gpu>" },
+        .{ cute_nvgpu.CopyAtomSIMTSyncCopyType, "!cute_nvgpu.atom.universal_copy<f32, 128 b, src_space = gmem, dst_space = smem>" },
+        .{ cute_nvgpu.CopyAtomSM100CopyS2TType, "!cute_nvgpu.atom.s2t_copy<f8E4M3FN, 32 DP, 128 bit, 1 cta, x4>" },
+        .{ cute_nvgpu.CopyAtomSM100S2TCopyV2Type, "!cute_nvgpu.atom.sm100_s2t_copy_v2<f8E4M3FN, num_dp = 32, num_bit = 128, num_cta = 1, smem_major = k, broadcast = x4>" },
+        .{ cute_nvgpu.CopyAtomSM100TmemLoadType, "!cute_nvgpu.atom.tmem_load<f32, 32 DP, 32 bit, x4, pack16b>" },
+        .{ cute_nvgpu.CopyAtomSM100TmemStoreType, "!cute_nvgpu.atom.tmem_store<f32, 32 DP, 32 bit, x4, expand16b>" },
+        .{ cute_nvgpu.CopyAtomSM107TmemLoadSPCompressType, "!cute_nvgpu.atom.tmem_load_spcompress<f32, 32 DP, 32 bit, x4, maxabs, red, nan>" },
+        .{ cute_nvgpu.CopyAtomSM10xTmemLoadRedType, "!cute_nvgpu.atom.tmem_load_red<f32, 16 DP, 32 bit, x4, maxabs, nan, half_split_off=3 : i64>" },
+        .{ cute_nvgpu.CopyAtomStsmType, "!cute_nvgpu.atom.stsm<f16, mode = <\"(8,8)\">, num_matrices = 4, n>" },
+        .{ cute_nvgpu.CopyAtomTmaLoadType, "!cute_nvgpu.atom.tma_load<bf16, copy_bits = 1024, mode = tiled, num_cta = 2, g_stride = <\"()\"> mcast = true tma_gbasis = <\"(64,1):(1@0,1@1)\">>" },
+        .{ cute_nvgpu.CopyAtomTmaReduceType, "!cute_nvgpu.atom.tma_reduce<f32, copy_bits = 131072, mode = tiled, kind = ADD, g_stride = <\"()\"> tma_gbasis = <\"(32,128):(1@1,1@0)\">>" },
+        .{ cute_nvgpu.CopyAtomTmaStoreType, "!cute_nvgpu.atom.tma_store<bf16, copy_bits = 16384, mode = tiled, g_stride = <\"()\"> tma_gbasis = <\"(64,16):(1@0,1@1)\">>" },
+        .{ cute_nvgpu.MmaAtomSM100UMMABlockScaledSparseType, "!cute_nvgpu.sm100.mma_bs_sp<128x128x64, num_cta = 1, ab_major = (k, k), elem_type = (f8E4M3FN, f8E4M3FN, f32), sf_type = f8E8M0FNU, sparse_metadata_format = tid, frag_kind = ss, vec_size = 32>" },
+        .{ cute_nvgpu.MmaAtomSM100UMMABlockScaledType, "!cute_nvgpu.sm100.mma_bs<128x128x96, num_cta = 1, ab_major = (k, k), elem_type = (f4E2M1FN, f4E2M1FN, f32), sf_type = f8E8M0FNU, frag_kind = ss, vec_size = 16, arch_promote = sm_103>" },
+        .{ cute_nvgpu.MmaAtomSM100UMMASparseType, "!cute_nvgpu.sm100.mma_sp<128x128x32, num_cta = 1, ab_major = (k, k), elem_type = (f16, f16, f32), e_type = i8, sparse_metadata_format = tid, frag_kind = ss, c_scale_exp = 0>" },
+        .{ cute_nvgpu.MmaAtomSM100UMMAType, "!cute_nvgpu.sm100.mma<128x128x16, num_cta = 1, ab_major = (k, mn), elem_type = (f16, f16, f32), frag_kind = ss, c_scale_exp = 0>" },
+        .{ cute_nvgpu.MmaAtomSM107UMMABlockScaledSparseType, "!cute_nvgpu.sm107.mma_bs_sp<128x128x64, num_cta = 1, ab_major = (k, k), elem_type = (f8E4M3FN, f8E4M3FN, f32), sf_type = f8E8M0FNU, sparse_metadata_format = tid, frag_kind = ss, vec_size = 32, ab_collector_op = (discard, discard)>" },
+        .{ cute_nvgpu.MmaAtomSM107UMMABlockScaledType, "!cute_nvgpu.sm107.mma_bs<128x128x32, num_cta = 1, ab_major = (k, k), elem_type = (f8E4M3FN, f8E4M3FN, f32), sf_type = f8E8M0FNU, frag_kind = ss, vec_size = 32, ab_collector_op = (discard, use), int_overflow = <satfinite>>" },
+        .{ cute_nvgpu.MmaAtomSM107UMMASparseType, "!cute_nvgpu.sm107.mma_sp<128x128x32, num_cta = 1, ab_major = (k, k), elem_type = (f16, f16, f32), e_type = i8, sparse_metadata_format = tid, frag_kind = ss, c_scale_exp = 0, ab_collector_op = (discard, discard)>" },
+        .{ cute_nvgpu.MmaAtomSM107UMMAType, "!cute_nvgpu.sm107.mma<128x128x16, num_cta = 1, ab_major = (k, mn), elem_type = (f16, f16, f32), frag_kind = ss, c_scale_exp = 0, ab_collector_op = (lastuse, fill)>" },
+        .{ cute_nvgpu.MmaAtomSM120BlockScaledType, "!cute_nvgpu.SM120.mma_bs<16x8x64, vec_size = 32, elem_type = (f4E2M1FN, f4E2M1FN, f32), sf_type = f8E8M0FNU, use_sf_layout_TV = true>" },
+        .{ cute_nvgpu.MmaAtomSM80SparseType, "!cute_nvgpu.sm80.sparse_mma<16x8x64, elem_type = (i8, i8, i32), md_format = tid, int_overflow = <satfinite> >" },
+        .{ cute_nvgpu.MmaAtomSM80Type, "!cute_nvgpu.sm80.mma<16x8x32, elem_type = (i8, i8, i32), int_overflow = <wrapped>, binary_op = <none> >" },
+        .{ cute_nvgpu.MmaAtomSM89Type, "!cute_nvgpu.sm89.mma<16x8x32, elem_type = (f8E4M3FN, f8E4M3FN, f32) >" },
+        .{ cute_nvgpu.MmaAtomSM90Type, "!cute_nvgpu.sm90.mma<64x128x32, ab_major = (k, k), elem_type = (i8, i8, i32), frag_kind = ss, int_overflow = <satfinite>, a_neg, b_neg>" },
+        .{ cute_nvgpu.SmemDescCircularSM103Type, "!cute_nvgpu.sm103.smem_desc_circular<<\"(8,128,2):(128,1,1024)\">>" },
+        .{ cute_nvgpu.SmemDescCircularSM107Type, "!cute_nvgpu.sm107.smem_desc_circular<<\"(8,128,2):(128,1,1024)\">>" },
+        .{ cute_nvgpu.SmemDescSM107Type, "!cute_nvgpu.sm107.smem_desc" },
+        .{ cute_nvgpu.SmemDescType, "!cute_nvgpu.smem_desc" },
+        .{ cute_nvgpu.SmemDescViewType, "!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, \"(2,3):(1,2)\">" },
+        .{ cute_nvgpu.TmaDescriptorIm2ColType, "!cute_nvgpu.tma_descriptor_im2col" },
+        .{ cute_nvgpu.TmaDescriptorTiledType, "!cute_nvgpu.tma_descriptor_tiled" },
+        .{ cute_nvgpu.UniversalFmaAtomType, "!cute_nvgpu.atom.universal_fma<1x1x1, (f32, f32) -> f32 >" },
+        .{ cute_nvgpu.WorkIdResponseType, "!cute_nvgpu.workid_response" },
+        .{ cute_nvgpu.NotImplementedFrgAttr, "#cute_nvgpu.not_implemented_frg<>" },
+        .{ cute_nvgpu.RmemFrgAttr, "#cute_nvgpu.rmem_frg<value_type = f32, operand = A, derive_elem_type = true>" },
+        .{ cute_nvgpu.SM100CircularSmemFrgAttr, "#cute_nvgpu.arch.sm100.circular_smem_frg<major = k>" },
+        .{ cute_nvgpu.SM100SmemFrgAttr, "#cute_nvgpu.arch.sm100.smem_frg<major = k>" },
+        .{ cute_nvgpu.SM100TmemEFrgAttr, "#cute_nvgpu.arch.sm100.tmem_e_frg<a_type = f16, e_type = i8>" },
+        .{ cute_nvgpu.SM100TmemFrgAttr, "#cute_nvgpu.arch.sm100.tmem_frg<data_type = f32, storage_type = f32, cta_group = 1, tmem_alloc_mode = Interleaved>" },
+        .{ cute_nvgpu.SM100TmemSfFrgAttr, "#cute_nvgpu.arch.sm100.tmem_sf_frg<sf_type = f8E8M0FNU, sf_vec_size = 32, cta_group = 1, is_sfa = true, tmem_alloc_mode = Interleaved>" },
+        .{ cute_nvgpu.SM107SmemFrgAttr, "#cute_nvgpu.arch.sm107.smem_frg<major = k>" },
+        .{ cute_nvgpu.SM90SmemFrgAttr, "#cute_nvgpu.arch.sm90.smem_frg<major = k>" },
     }) |example| {
         const T = example[0];
         const is_type = @hasDecl(T, "type_");
@@ -187,7 +187,7 @@ test "generated types and attributes rebuild from their getters" {
         try std.testing.expect(parsed.eql(if (is_type) try mlir.Type.parse(ctx, text.written()) else try mlir.Attribute.parse(ctx, text.written())));
     }
     // Every case of every enum attribute.
-    inline for (.{ cute, nvgpu }) |namespace| {
+    inline for (.{ cute_ir, cute_nvgpu }) |namespace| {
         inline for (comptime std.meta.declarations(namespace)) |decl| {
             const T = @field(namespace, decl);
             if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque" and @hasDecl(T, "InitArgs")) {
@@ -203,7 +203,7 @@ test "generated types and attributes rebuild from their getters" {
             }
         }
     }
-    try std.testing.expect((try nvgpu.SmemDescType.get(ctx, .{})).type_().isA(nvgpu.NVGPUType) != null);
+    try std.testing.expect((try cute_nvgpu.SmemDescType.get(ctx, .{})).type_().isA(cute_nvgpu.NVGPUType) != null);
 }
 
 test "nvvm and cuda types and attributes print as the compiler does" {

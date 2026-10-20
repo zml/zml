@@ -8,7 +8,6 @@ const func = @import("mlir/dialects/func");
 const mlir = @import("mlir");
 const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
 const stdx = @import("stdx");
-const tpu_dialect = @import("mlir/dialects/mosaic_tpu");
 const triton_builder = @import("kernels/triton/builder");
 
 const Compiler = @import("Compiler.zig");
@@ -333,7 +332,7 @@ pub const mosaic_tpu = struct {
         const module = try mlir.Module.parse(ctx, ir);
         defer module.deinit();
 
-        tpu_dialect.registerMosaicSerdePass();
+        @import("mlir/dialects/mosaic_tpu").registerMosaicSerdePass();
         const prev_allow_unregistered = ctx.allowUnregisteredDialects();
         ctx.setAllowUnregisteredDialects(true);
         defer ctx.setAllowUnregisteredDialects(prev_allow_unregistered);
@@ -736,7 +735,7 @@ pub const fly = struct {
     pub const TiledMma = fly_builder.TiledMma;
     pub const Arch = fly_builder.Arch;
     pub const MmaFlavor = fly_builder.MmaFlavor;
-    pub const rocdl = fly_builder.rocdl;
+    pub const rocdl = fly_builder.fly_rocdl;
 
     /// The matrix atom this device provides, or null when it has none: WMMA
     /// arrived with RDNA3, so gfx1030 has no matrix instruction at all.

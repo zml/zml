@@ -1,7 +1,7 @@
 const cute_nvgpu = @import("mlir/dialects/cute_nvgpu");
 const std = @import("std");
 
-const cute = @import("mlir/dialects/cute_ir");
+const cute_ir = @import("mlir/dialects/cute_ir");
 const arith = @import("mlir/dialects/arith");
 const cuda = @import("mlir/dialects/cuda");
 const func = @import("mlir/dialects/func");
@@ -39,7 +39,7 @@ pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.
 pub const MAX_RANK = 8;
 pub const Dims = stdx.BoundedArray(i64, MAX_RANK);
 
-pub const MemorySpace = cute.MemorySpace;
+pub const MemorySpace = cute_ir.MemorySpace;
 
 /// A CuTe algebra expression assembled from Zig values. Kernel authors use
 /// `Builder.expr`, `Builder.basis`, and `Builder.layoutSpec`; only this DSL
@@ -108,7 +108,7 @@ pub const Value = struct {
     }
 
     pub fn isPtr(self: Value) bool {
-        return self.type_().isA(cute.PtrType) != null;
+        return self.type_().isA(cute_ir.PtrType) != null;
     }
 
     pub fn add(self: Value, rhs: anytype) Value {
@@ -361,7 +361,7 @@ pub const Tensor = struct {
     pub fn get(self: Tensor, coord: anytype) Value {
         const k = self.kernel;
         const c = k.makeCoord(coord);
-        return k.emit(cute.memref_load(k.ctx, self.inner, c, self.dtype.toMlir(k.ctx), k.loc()));
+        return k.emit(cute_ir.memref_load(k.ctx, self.inner, c, self.dtype.toMlir(k.ctx), k.loc()));
     }
 
     /// `t[coord] = value`; the value is converted to the element type.
@@ -369,7 +369,7 @@ pub const Tensor = struct {
         const k = self.kernel;
         const c = k.makeCoord(coord);
         const v = k.liftAs(value_, self.dtype).to(self.dtype);
-        _ = cute.memref_store(k.ctx, self.inner, c, v.inner, k.loc()).appendTo(k.currentBlock());
+        _ = cute_ir.memref_store(k.ctx, self.inner, c, v.inner, k.loc()).appendTo(k.currentBlock());
     }
 
     /// Erase Zig's tracked layout while retaining the MLIR memref. CuTe
@@ -400,11 +400,11 @@ pub const View = struct {
 
     pub fn get(self: View, coord: anytype, result_dtype: DType) Value {
         const c = self.kernel.makeCoord(coord);
-        return self.kernel.emit(cute.memref_load(self.kernel.ctx, self.inner, c, result_dtype.toMlir(self.kernel.ctx), self.kernel.loc()));
+        return self.kernel.emit(cute_ir.memref_load(self.kernel.ctx, self.inner, c, result_dtype.toMlir(self.kernel.ctx), self.kernel.loc()));
     }
 
     pub fn set(self: View, coord: anytype, value_: Value) void {
-        self.kernel.emitVoid(cute.memref_store(self.kernel.ctx, self.inner, self.kernel.makeCoord(coord), value_.inner, self.kernel.loc()));
+        self.kernel.emitVoid(cute_ir.memref_store(self.kernel.ctx, self.inner, self.kernel.makeCoord(coord), value_.inner, self.kernel.loc()));
     }
 };
 
@@ -895,7 +895,7 @@ pub const Builder = struct {
 
     pub fn kernelSmemSize(self: *Builder, kernel_name: []const u8) Value {
         const symbol = std.fmt.allocPrint(self.arena.allocator(), "@kernels::@{s}", .{kernel_name}) catch @panic("OOM");
-        return self.emit(cute.kernel_smem_size(
+        return self.emit(cute_ir.kernel_smem_size(
             self.ctx,
             .int(self.ctx, .i64),
             self.parseAttribute(symbol),
@@ -1003,13 +1003,13 @@ pub const Builder = struct {
     // ==================== types ====================
 
     pub fn ptrTy(self: *Builder, dt: DType, space: MemorySpace, alignment: u64) !*const mlir.Type {
-        return cute.pointerType(self.ctx, space, alignment, .{ .element_type = dt.toMlir(self.ctx) });
+        return cute_ir.pointerType(self.ctx, space, alignment, .{ .element_type = dt.toMlir(self.ctx) });
     }
 
     pub fn swizzledPtrTy(self: *Builder, dt: DType, space: MemorySpace, alignment: u64, swizzle: Swizzle) !*const mlir.Type {
         const text = std.fmt.allocPrint(self.arena.allocator(), "S<{d},{d},{d}>", .{ swizzle.bits, swizzle.base, swizzle.shift }) catch @panic("OOM");
-        const attr = try cute.SwizzleAttr.get(self.ctx, text);
-        return (try cute.PtrType.get(self.ctx, .{
+        const attr = try cute_ir.SwizzleAttr.get(self.ctx, text);
+        return (try cute_ir.PtrType.get(self.ctx, .{
             .valueType = dt.toMlir(self.ctx),
             .addressSpace = space,
             .alignment = alignment,
@@ -1019,13 +1019,13 @@ pub const Builder = struct {
 
     pub fn intToPtr(self: *Builder, address: anytype, dt: DType, space: MemorySpace, alignment: u64) Value {
         const ptr_type = self.ptrTy(dt, space, alignment) catch @panic("invalid CuTe pointer type");
-        return self.emit(cute.inttoptr(self.ctx, self.lift(address).inner, ptr_type, self.loc()));
+        return self.emit(cute_ir.inttoptr(self.ctx, self.lift(address).inner, ptr_type, self.loc()));
     }
 
     /// `cute.ptrtoint`: the integer address of a pointer (`i32` for shared
     /// memory, `i64` for global memory), for hand-written PTX operands.
     pub fn ptrToInt(self: *Builder, pointer: anytype, dt: DType) Value {
-        return self.emit(cute.ptrtoint(self.ctx, self.asValue(pointer).inner, dt.toMlir(self.ctx), self.loc()));
+        return self.emit(cute_ir.ptrtoint(self.ctx, self.asValue(pointer).inner, dt.toMlir(self.ctx), self.loc()));
     }
 
     /// Reinterpret a pointer without changing its address. This is the typed
@@ -1033,12 +1033,12 @@ pub const Builder = struct {
     /// to expose their byte storage to a scalar correctness implementation.
     pub fn recastPointer(self: *Builder, pointer: anytype, dt: DType, space: MemorySpace, alignment: u64) Value {
         const result_type = self.ptrTy(dt, space, alignment) catch @panic("invalid recast pointer type");
-        return self.emit(cute.recast_iter(self.ctx, self.asValue(pointer).inner, result_type, self.loc()));
+        return self.emit(cute_ir.recast_iter(self.ctx, self.asValue(pointer).inner, result_type, self.loc()));
     }
 
     pub fn recastSwizzledPointer(self: *Builder, pointer: anytype, dt: DType, space: MemorySpace, alignment: u64, swizzle: Swizzle) Value {
         const result_type = self.swizzledPtrTy(dt, space, alignment, swizzle) catch @panic("invalid swizzled pointer type");
-        return self.emit(cute.recast_iter(self.ctx, self.asValue(pointer).inner, result_type, self.loc()));
+        return self.emit(cute_ir.recast_iter(self.ctx, self.asValue(pointer).inner, result_type, self.loc()));
     }
 
     /// Parse a CuTe/CuTe-NVGPU type that has no compact C-API constructor.
@@ -1131,7 +1131,7 @@ pub const Builder = struct {
     }
 
     pub fn layoutType(self: *Builder, spec: LayoutSpec) *const mlir.Type {
-        return cute.algebraType(self.ctx, .layout, spec.payload(self)) catch @panic("invalid CuTe layout");
+        return cute_ir.algebraType(self.ctx, .layout, spec.payload(self)) catch @panic("invalid CuTe layout");
     }
 
     pub fn composedLayoutType(self: *Builder, swizzle: Swizzle, offset: anytype, outer: LayoutSpec) *const mlir.Type {
@@ -1140,20 +1140,20 @@ pub const Builder = struct {
             "S<{d},{d},{d}> o {s} o {s}",
             .{ swizzle.bits, swizzle.base, swizzle.shift, self.expr(offset).text, outer.payload(self) },
         ) catch @panic("OOM");
-        return cute.algebraType(self.ctx, .composed_layout, payload) catch @panic("invalid CuTe composed layout");
+        return cute_ir.algebraType(self.ctx, .composed_layout, payload) catch @panic("invalid CuTe composed layout");
     }
 
     pub fn memrefType(self: *Builder, dtype: DType, space: MemorySpace, alignment: u64, layout_type: *const mlir.Type) *const mlir.Type {
         const pointer = self.ptrTy(dtype, space, alignment) catch @panic("invalid CuTe pointer type");
-        return (cute.MemRefType.get(self.ctx, .{ .ptr = pointer, .layout = layout_type }) catch @panic("invalid CuTe memref type")).type_();
+        return (cute_ir.MemRefType.get(self.ctx, .{ .ptr = pointer, .layout = layout_type }) catch @panic("invalid CuTe memref type")).type_();
     }
 
     pub fn memrefTypeFromPointer(self: *Builder, pointer_type: *const mlir.Type, layout_type: *const mlir.Type) *const mlir.Type {
-        return (cute.MemRefType.get(self.ctx, .{ .ptr = pointer_type, .layout = layout_type }) catch @panic("invalid CuTe memref type")).type_();
+        return (cute_ir.MemRefType.get(self.ctx, .{ .ptr = pointer_type, .layout = layout_type }) catch @panic("invalid CuTe memref type")).type_();
     }
 
     pub fn staticLayout(self: *Builder, spec: LayoutSpec) View {
-        const result = self.emit(cute.static(self.ctx, self.layoutType(spec), self.loc()));
+        const result = self.emit(cute_ir.static(self.ctx, self.layoutType(spec), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1164,8 +1164,8 @@ pub const Builder = struct {
     /// that parser distinction to kernel code.
     pub fn staticCoordinateLayout(self: *Builder, rank: usize, spec: LayoutSpec) View {
         const tensor_type = self.coordTensorType(rank, spec);
-        const coords = tensor_type.isA(cute.CoordTensorType) orelse @panic("invalid coordinate tensor type");
-        const result = self.emit(cute.static(self.ctx, coords.getLayout(), self.loc()));
+        const coords = tensor_type.isA(cute_ir.CoordTensorType) orelse @panic("invalid coordinate tensor type");
+        const result = self.emit(cute_ir.static(self.ctx, coords.getLayout(), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1173,8 +1173,8 @@ pub const Builder = struct {
 
     pub fn staticSwizzle(self: *Builder, spec: Swizzle) View {
         const payload = std.fmt.allocPrint(self.arena.allocator(), "S<{d},{d},{d}>", .{ spec.bits, spec.base, spec.shift }) catch @panic("OOM");
-        const ty = cute.algebraType(self.ctx, .swizzle, payload) catch @panic("invalid CuTe swizzle");
-        const result = self.emit(cute.static(self.ctx, ty, self.loc()));
+        const ty = cute_ir.algebraType(self.ctx, .swizzle, payload) catch @panic("invalid CuTe swizzle");
+        const result = self.emit(cute_ir.static(self.ctx, ty, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1182,11 +1182,11 @@ pub const Builder = struct {
     pub fn makeComposedLayout(self: *Builder, swizzle: Swizzle, offset: anytype, outer: LayoutSpec) View {
         const inner = self.staticSwizzle(swizzle);
         const offset_expr = self.expr(offset);
-        const offset_ty = cute.algebraType(self.ctx, .int_tuple, offset_expr.text) catch @panic("invalid CuTe composed-layout offset");
-        const offset_value = self.emit(cute.make_int_tuple(self.ctx, &.{}, offset_ty, self.loc()));
+        const offset_ty = cute_ir.algebraType(self.ctx, .int_tuple, offset_expr.text) catch @panic("invalid CuTe composed-layout offset");
+        const offset_value = self.emit(cute_ir.make_int_tuple(self.ctx, &.{}, offset_ty, self.loc()));
         const outer_value = self.staticLayout(outer);
         const result_ty = self.composedLayoutType(swizzle, offset, outer);
-        const result = self.emit(cute.make_composed_layout(self.ctx, inner.inner, offset_value.inner, outer_value.inner, result_ty, self.loc()));
+        const result = self.emit(cute_ir.make_composed_layout(self.ctx, inner.inner, offset_value.inner, outer_value.inner, result_ty, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1195,8 +1195,8 @@ pub const Builder = struct {
     pub fn makeTensorView(self: *Builder, pointer: anytype, layout: anytype) View {
         const p = self.asValue(pointer);
         const l = self.asValue(layout);
-        const result_ty = (cute.MemRefType.get(self.ctx, .{ .ptr = p.type_(), .layout = l.type_() }) catch @panic("invalid CuTe tensor view")).type_();
-        const result = self.emit(cute.make_view(self.ctx, p.inner, result_ty, .{ .layout = l.inner }, self.loc()));
+        const result_ty = (cute_ir.MemRefType.get(self.ctx, .{ .ptr = p.type_(), .layout = l.type_() }) catch @panic("invalid CuTe tensor view")).type_();
+        const result = self.emit(cute_ir.make_view(self.ctx, p.inner, result_ty, .{ .layout = l.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1209,7 +1209,7 @@ pub const Builder = struct {
             zeros.writer.writeByte('0') catch @panic("OOM");
         }
         if (rank > 1) zeros.writer.writeByte(')') catch @panic("OOM");
-        const tuple = cute.algebraType(self.ctx, .int_tuple, zeros.written()) catch @panic("invalid coordinate tuple");
+        const tuple = cute_ir.algebraType(self.ctx, .int_tuple, zeros.written()) catch @panic("invalid coordinate tuple");
         const payload = layout.payload(self);
         // The standalone LayoutAttr C API intentionally restricts scaled
         // basis coefficients to integers. CoordTensorType additionally
@@ -1219,16 +1219,16 @@ pub const Builder = struct {
             const type_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.coord_tensor<\"{s}\", \"{s}\">", .{ zeros.written(), payload }) catch @panic("OOM");
             return self.parseType(type_text);
         }
-        return (cute.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple, .layout = self.layoutType(layout) }) catch @panic("invalid coordinate tensor")).type_();
+        return (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple, .layout = self.layoutType(layout) }) catch @panic("invalid coordinate tensor")).type_();
     }
 
     /// Coordinate-tensor type whose coordinate tuple contains dynamic and
     /// static leaves. `tuple_payload` is CuTe algebra such as `(0,?,?)`;
     /// layouts remain structured `LayoutSpec` values in Zig.
     pub fn coordTensorTypePayload(self: *Builder, tuple_payload: []const u8, layout: LayoutSpec) *const mlir.Type {
-        const attr = cute.IntTupleAttr.get(self.ctx, tuple_payload) catch std.debug.panic("invalid coordinate tuple {s}", .{tuple_payload});
-        const tuple = (cute.IntTupleType.get(self.ctx, .{ .attr = attr.attribute() }) catch @panic("invalid coordinate tuple type")).type_();
-        return (cute.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple, .layout = self.layoutType(layout) }) catch @panic("invalid coordinate tensor")).type_();
+        const attr = cute_ir.IntTupleAttr.get(self.ctx, tuple_payload) catch std.debug.panic("invalid coordinate tuple {s}", .{tuple_payload});
+        const tuple = (cute_ir.IntTupleType.get(self.ctx, .{ .attr = attr.attribute() }) catch @panic("invalid coordinate tuple type")).type_();
+        return (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple, .layout = self.layoutType(layout) }) catch @panic("invalid coordinate tensor")).type_();
     }
 
     /// Coordinate-tensor type with an explicit arithmetic-tuple expression.
@@ -1236,8 +1236,8 @@ pub const Builder = struct {
     /// without requiring kernel code to spell textual MLIR types.
     pub fn coordTensorTypeWithTuple(self: *Builder, tuple: anytype, layout: LayoutSpec) *const mlir.Type {
         const tuple_text = self.expr(tuple).text;
-        const tuple_type = cute.algebraType(self.ctx, .int_tuple, tuple_text) catch std.debug.panic("invalid coordinate tuple {s}", .{tuple_text});
-        return (cute.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple_type, .layout = self.layoutType(layout) }) catch @panic("invalid coordinate tensor")).type_();
+        const tuple_type = cute_ir.algebraType(self.ctx, .int_tuple, tuple_text) catch std.debug.panic("invalid coordinate tuple {s}", .{tuple_text});
+        return (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple_type, .layout = self.layoutType(layout) }) catch @panic("invalid coordinate tensor")).type_();
     }
 
     fn rowMajor(self: *Builder, shape: []const i64) []const i64 {
@@ -1269,7 +1269,7 @@ pub const Builder = struct {
     /// cannot be represented by the flat `Layout` helper.  Keeping this
     /// escape hatch typed still lets MLIR verify every consumer.
     pub fn staticValue(self: *Builder, type_text: []const u8) View {
-        const result = self.emit(cute.static(self.ctx, self.parseType(type_text), self.loc()));
+        const result = self.emit(cute_ir.static(self.ctx, self.parseType(type_text), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1280,17 +1280,17 @@ pub const Builder = struct {
         if (stride.len != shape.len) std.debug.panic("makeLayout: stride rank {d} != shape rank {d}", .{ stride.len, shape.len });
         const ctx = self.ctx;
         const text = std.fmt.allocPrint(self.arena.allocator(), "{s}:{s}", .{ self.algebra(shape), self.algebra(stride) }) catch @panic("OOM");
-        const layout_ty = cute.algebraType(ctx, .layout, text) catch @panic("bad layout");
-        const l = self.emit(cute.static(ctx, layout_ty, self.loc()));
+        const layout_ty = cute_ir.algebraType(ctx, .layout, text) catch @panic("bad layout");
+        const l = self.emit(cute_ir.static(ctx, layout_ty, self.loc()));
         return .{ .inner = l.inner, .shape = Dims.fromSlice(shape) catch unreachable, .stride = Dims.fromSlice(stride) catch unreachable };
     }
 
     /// `cute.make_tensor(ptr, layout)`.
     pub fn makeTensor(self: *Builder, ptr: Value, layout: Layout) Tensor {
-        const pt = ptr.type_().isA(cute.PtrType) orelse std.debug.panic("makeTensor: {f} is not a !cute.ptr", .{ptr.type_()});
+        const pt = ptr.type_().isA(cute_ir.PtrType) orelse std.debug.panic("makeTensor: {f} is not a !cute.ptr", .{ptr.type_()});
         const elem = pt.getValueType() orelse @panic("makeTensor: untyped pointer");
-        const memref_ty = (cute.MemRefType.get(self.ctx, .{ .ptr = ptr.type_(), .layout = layout.inner.type_() }) catch @panic("bad memref")).type_();
-        const v = self.emit(cute.make_view(self.ctx, ptr.inner, memref_ty, .{ .layout = layout.inner }, self.loc()));
+        const memref_ty = (cute_ir.MemRefType.get(self.ctx, .{ .ptr = ptr.type_(), .layout = layout.inner.type_() }) catch @panic("bad memref")).type_();
+        const v = self.emit(cute_ir.make_view(self.ctx, ptr.inner, memref_ty, .{ .layout = layout.inner }, self.loc()));
         return .{ .inner = v.inner, .kernel = self, .layout = layout, .dtype = dtypes.mlirToDType(self.ctx, elem), .space = pt.getAddressSpace() };
     }
 
@@ -1330,8 +1330,8 @@ pub const Builder = struct {
         var text: std.Io.Writer.Allocating = .init(self.arena.allocator());
         var dyn: stdx.BoundedArray(*const mlir.Value, MAX_RANK) = .empty;
         self.writeCoord(&text.writer, &dyn, coord);
-        const ty = cute.algebraType(self.ctx, .coord, text.written()) catch @panic("bad coord");
-        return self.emit(cute.make_coord(self.ctx, dyn.constSlice(), ty, self.loc())).inner;
+        const ty = cute_ir.algebraType(self.ctx, .coord, text.written()) catch @panic("bad coord");
+        return self.emit(cute_ir.make_coord(self.ctx, dyn.constSlice(), ty, self.loc())).inner;
     }
 
     /// A dynamic/static CuTe integer tuple, used for pointer arithmetic in
@@ -1341,8 +1341,8 @@ pub const Builder = struct {
         var text: std.Io.Writer.Allocating = .init(self.arena.allocator());
         var dyn: stdx.BoundedArray(*const mlir.Value, MAX_RANK) = .empty;
         self.writeCoord(&text.writer, &dyn, values);
-        const ty = cute.algebraType(self.ctx, .int_tuple, text.written()) catch @panic("bad integer tuple");
-        const value = self.emit(cute.make_int_tuple(self.ctx, dyn.constSlice(), ty, self.loc()));
+        const ty = cute_ir.algebraType(self.ctx, .int_tuple, text.written()) catch @panic("bad integer tuple");
+        const value = self.emit(cute_ir.make_int_tuple(self.ctx, dyn.constSlice(), ty, self.loc()));
         return .{ .inner = value.inner, .kernel = self };
     }
 
@@ -1352,7 +1352,7 @@ pub const Builder = struct {
     pub fn makeIntTupleDivBy(self: *Builder, value: anytype, comptime divisor: u32) View {
         const constrained = self.assumeDivBy(value, divisor);
         const payload = std.fmt.allocPrint(self.arena.allocator(), "!cute.int_tuple<\"?{{div={d}}}\">", .{divisor}) catch @panic("OOM");
-        const tuple = self.emit(cute.make_int_tuple(self.ctx, &.{constrained.inner}, self.parseType(payload), self.loc()));
+        const tuple = self.emit(cute_ir.make_int_tuple(self.ctx, &.{constrained.inner}, self.parseType(payload), self.loc()));
         return .{ .inner = tuple.inner, .kernel = self };
     }
 
@@ -1361,7 +1361,7 @@ pub const Builder = struct {
     pub fn assumeDivBy(self: *Builder, value: anytype, comptime divisor: u32) Value {
         if (divisor == 0) @compileError("assumeDivBy divisor must be non-zero");
         const type_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.i32<divby {d}>", .{divisor}) catch @panic("OOM");
-        return self.emit(cute.assume(self.ctx, self.lift(value).to(.i32).inner, self.parseType(type_text), self.loc()));
+        return self.emit(cute_ir.assume(self.ctx, self.lift(value).to(.i32).inner, self.parseType(type_text), self.loc()));
     }
 
     /// Build a coordinate tensor with an explicit dependent arithmetic-tuple
@@ -1370,12 +1370,12 @@ pub const Builder = struct {
     pub fn makeCoordTensorWithTuple(self: *Builder, values: anytype, tuple_payload: []const u8, layout: anytype) View {
         const tuple_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.int_tuple<\"{s}\">", .{tuple_payload}) catch @panic("OOM");
         const tuple_type = self.parseType(tuple_text);
-        const tuple = self.emit(cute.make_int_tuple(self.ctx, self.innerSlice(values), tuple_type, self.loc()));
-        const iterator_type = (cute.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = tuple_type }) catch @panic("invalid arithmetic tuple iterator")).type_();
-        const iterator = self.emit(cute.make_arith_tuple_iter(self.ctx, iterator_type, .{ .value_ = tuple.inner }, self.loc()));
+        const tuple = self.emit(cute_ir.make_int_tuple(self.ctx, self.innerSlice(values), tuple_type, self.loc()));
+        const iterator_type = (cute_ir.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = tuple_type }) catch @panic("invalid arithmetic tuple iterator")).type_();
+        const iterator = self.emit(cute_ir.make_arith_tuple_iter(self.ctx, iterator_type, .{ .value_ = tuple.inner }, self.loc()));
         const layout_value = self.asValue(layout);
-        const result_type = (cute.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple_type, .layout = layout_value.type_() }) catch @panic("invalid coordinate tensor")).type_();
-        const result = self.emit(cute.make_view(self.ctx, iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
+        const result_type = (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple_type, .layout = layout_value.type_() }) catch @panic("invalid coordinate tensor")).type_();
+        const result = self.emit(cute_ir.make_view(self.ctx, iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1386,10 +1386,10 @@ pub const Builder = struct {
     pub fn makeCoordTensor(self: *Builder, origin: anytype, layout: anytype) View {
         const tuple = self.makeIntTuple(origin);
         const layout_value = self.asValue(layout);
-        const iterator_type = (cute.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = tuple.type_() }) catch @panic("invalid arithmetic tuple iterator")).type_();
-        const iterator = self.emit(cute.make_arith_tuple_iter(self.ctx, iterator_type, .{ .value_ = tuple.inner }, self.loc()));
-        const result_type = (cute.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple.type_(), .layout = layout_value.type_() }) catch @panic("invalid coordinate tensor")).type_();
-        const result = self.emit(cute.make_view(self.ctx, iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
+        const iterator_type = (cute_ir.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = tuple.type_() }) catch @panic("invalid arithmetic tuple iterator")).type_();
+        const iterator = self.emit(cute_ir.make_arith_tuple_iter(self.ctx, iterator_type, .{ .value_ = tuple.inner }, self.loc()));
+        const result_type = (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple.type_(), .layout = layout_value.type_() }) catch @panic("invalid coordinate tensor")).type_();
+        const result = self.emit(cute_ir.make_view(self.ctx, iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1413,13 +1413,13 @@ pub const Builder = struct {
     ) View {
         if (leaf_count == 0 or leaf_count > MAX_RANK) @panic("invalid coordinate tuple leaf count");
         const source = self.asValue(input);
-        const source_type = source.type_().isA(cute.CoordTensorType) orelse
+        const source_type = source.type_().isA(cute_ir.CoordTensorType) orelse
             std.debug.panic("rebuildCoordTensorIterator: expected coordinate tensor, got {f}", .{source.type_()});
         const source_tuple_type = source_type.getArithTuple();
-        const source_iterator_type = (cute.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = source_tuple_type }) catch
+        const source_iterator_type = (cute_ir.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = source_tuple_type }) catch
             @panic("invalid source arithmetic tuple iterator")).type_();
-        const source_iterator = self.emit(cute.get_iter(self.ctx, source.inner, source_iterator_type, self.loc()));
-        const source_tuple = self.emit(cute.deref_arith_tuple_iter(
+        const source_iterator = self.emit(cute_ir.get_iter(self.ctx, source.inner, source_iterator_type, self.loc()));
+        const source_tuple = self.emit(cute_ir.deref_arith_tuple_iter(
             self.ctx,
             source_iterator.inner,
             source_tuple_type,
@@ -1436,33 +1436,33 @@ pub const Builder = struct {
                 "?"
             else
                 std.fmt.allocPrint(self.arena.allocator(), "?{{div={d}}}", .{divisor}) catch @panic("OOM");
-            leaf_types[i] = cute.algebraType(self.ctx, .int_tuple, leaf_payload) catch
+            leaf_types[i] = cute_ir.algebraType(self.ctx, .int_tuple, leaf_payload) catch
                 std.debug.panic("invalid dynamic integer tuple leaf {s}", .{leaf_payload});
         }
-        const leaves = self.emitResults(leaf_count, cute.get_leaves(
+        const leaves = self.emitResults(leaf_count, cute_ir.get_leaves(
             self.ctx,
             source_tuple.inner,
             leaf_types,
             self.loc(),
         ));
 
-        const rebuilt_tuple_type = cute.algebraType(self.ctx, .int_tuple, tuple_payload) catch
+        const rebuilt_tuple_type = cute_ir.algebraType(self.ctx, .int_tuple, tuple_payload) catch
             std.debug.panic("invalid rebuilt coordinate tuple {s}", .{tuple_payload});
-        const rebuilt_tuple = self.emit(cute.make_int_tuple(
+        const rebuilt_tuple = self.emit(cute_ir.make_int_tuple(
             self.ctx,
             self.innerSlice(leaves[0..]),
             rebuilt_tuple_type,
             self.loc(),
         ));
-        const rebuilt_iterator_type = (cute.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = rebuilt_tuple_type }) catch
+        const rebuilt_iterator_type = (cute_ir.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = rebuilt_tuple_type }) catch
             @panic("invalid rebuilt arithmetic tuple iterator")).type_();
-        const rebuilt_iterator = self.emit(cute.make_arith_tuple_iter(self.ctx, rebuilt_iterator_type, .{ .value_ = rebuilt_tuple.inner }, self.loc()));
+        const rebuilt_iterator = self.emit(cute_ir.make_arith_tuple_iter(self.ctx, rebuilt_iterator_type, .{ .value_ = rebuilt_tuple.inner }, self.loc()));
         const layout_value = self.asValue(layout);
-        const result_type = (cute.CoordTensorType.get(self.ctx, .{
+        const result_type = (cute_ir.CoordTensorType.get(self.ctx, .{
             .arithTuple = rebuilt_tuple_type,
             .layout = layout_value.type_(),
         }) catch @panic("invalid rebuilt coordinate tensor")).type_();
-        const result = self.emit(cute.make_view(self.ctx, rebuilt_iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
+        const result = self.emit(cute_ir.make_view(self.ctx, rebuilt_iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1471,7 +1471,7 @@ pub const Builder = struct {
     /// represented by Zig integer values passed to `makeCoord`.
     pub fn staticCoord(self: *Builder, payload: []const u8) View {
         const type_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.coord<\"{s}\">", .{payload}) catch @panic("OOM");
-        const result = self.emit(cute.make_coord(self.ctx, &.{}, self.parseType(type_text), self.loc()));
+        const result = self.emit(cute_ir.make_coord(self.ctx, &.{}, self.parseType(type_text), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1480,7 +1480,7 @@ pub const Builder = struct {
     /// them, but all current SM100 instruction tiles are static.
     pub fn makeShape(self: *Builder, payload: []const u8) View {
         const ty_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.shape<\"{s}\">", .{payload}) catch @panic("OOM");
-        const value = self.emit(cute.make_shape(self.ctx, &.{}, self.parseType(ty_text), self.loc()));
+        const value = self.emit(cute_ir.make_shape(self.ctx, &.{}, self.parseType(ty_text), self.loc()));
         return .{ .inner = value.inner, .kernel = self };
     }
 
@@ -1489,12 +1489,12 @@ pub const Builder = struct {
     /// leaves dynamic is significant to CuTe's TMA layout algebra when a
     /// runtime extent happens to be one.
     pub fn makeShapeValues(self: *Builder, values: anytype, result_type: *const mlir.Type) View {
-        const value = self.emit(cute.make_shape(self.ctx, self.innerSlice(values), result_type, self.loc()));
+        const value = self.emit(cute_ir.make_shape(self.ctx, self.innerSlice(values), result_type, self.loc()));
         return .{ .inner = value.inner, .kernel = self };
     }
 
     pub fn tileToShapeTyped(self: *Builder, input: anytype, shape: anytype, order: View, result_type: *const mlir.Type) View {
-        const result = self.emit(cute.tile_to_shape(
+        const result = self.emit(cute_ir.tile_to_shape(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(shape).inner,
@@ -1515,26 +1515,26 @@ pub const Builder = struct {
         }
         payload.writer.writeByte(']') catch @panic("OOM");
         const ty_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.tile<\"{s}\">", .{payload.written()}) catch @panic("OOM");
-        const value = self.emit(cute.make_tile(self.ctx, &.{}, self.parseType(ty_text), self.loc()));
+        const value = self.emit(cute_ir.make_tile(self.ctx, &.{}, self.parseType(ty_text), self.loc()));
         return .{ .inner = value.inner, .kernel = self };
     }
 
     /// Construct a target atom whose complete architecture payload is
     /// encoded in `atom_type` (for example `!cute_nvgpu.sm100.mma_bs<...>`).
     pub fn makeAtom(self: *Builder, atom_type: []const u8, values: anytype) Atom {
-        const result = self.emit(cute.make_atom(self.ctx, self.innerSlice(values), self.parseType(atom_type), self.loc()));
+        const result = self.emit(cute_ir.make_atom(self.ctx, self.innerSlice(values), self.parseType(atom_type), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn makeTiledMma(self: *Builder, atom: Atom, result_type: []const u8) Atom {
-        const result = self.emit(cute.make_tiled_mma(self.ctx, atom.inner, self.parseType(result_type), self.loc()));
+        const result = self.emit(cute_ir.make_tiled_mma(self.ctx, atom.inner, self.parseType(result_type), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     /// Allocate a statically typed shared-memory tensor. This is used for
     /// swizzled layouts which cannot be represented by `Layout` alone.
     pub fn allocSmemView(self: *Builder, memref_type: []const u8) View {
-        const result = self.emit(cute.memref_alloc_smem(self.ctx, self.parseType(memref_type), self.loc()));
+        const result = self.emit(cute_ir.memref_alloc_smem(self.ctx, self.parseType(memref_type), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1542,7 +1542,7 @@ pub const Builder = struct {
     /// the non-string counterpart of `allocSmemView` used by source kernels.
     pub fn allocSmemTyped(self: *Builder, dtype: DType, alignment: u64, layout_type: *const mlir.Type) View {
         const memref_type = self.memrefType(dtype, .smem, alignment, layout_type);
-        const result = self.emit(cute.memref_alloc_smem(self.ctx, memref_type, self.loc()));
+        const result = self.emit(cute_ir.memref_alloc_smem(self.ctx, memref_type, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1577,12 +1577,12 @@ pub const Builder = struct {
     pub fn allocRmemTyped(self: *Builder, dtype: DType, alignment: u64, layout: anytype) View {
         const layout_value = self.asValue(layout);
         const memref_type = self.memrefType(dtype, .rmem, alignment, layout_value.type_());
-        const result = self.emit(cute.memref_alloca(self.ctx, memref_type, .{ .layout = layout_value.inner }, self.loc()));
+        const result = self.emit(cute_ir.memref_alloca(self.ctx, memref_type, .{ .layout = layout_value.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn makeView(self: *Builder, pointer: anytype, layout: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.make_view(
+        const result = self.emit(cute_ir.make_view(
             self.ctx,
             self.asValue(pointer).inner,
             self.parseType(result_type),
@@ -1593,18 +1593,18 @@ pub const Builder = struct {
     }
 
     pub fn makeViewTyped(self: *Builder, pointer: anytype, layout: anytype, result_type: *const mlir.Type) View {
-        const result = self.emit(cute.make_view(self.ctx, self.asValue(pointer).inner, result_type, .{ .layout = self.asValue(layout).inner }, self.loc()));
+        const result = self.emit(cute_ir.make_view(self.ctx, self.asValue(pointer).inner, result_type, .{ .layout = self.asValue(layout).inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn makeViewNoLayout(self: *Builder, pointer: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.make_view(self.ctx, self.asValue(pointer).inner, self.parseType(result_type), .{}, self.loc()));
+        const result = self.emit(cute_ir.make_view(self.ctx, self.asValue(pointer).inner, self.parseType(result_type), .{}, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn localTile(self: *Builder, input: anytype, tile: anytype, coord: anytype, result_type: []const u8, projection: ?Attr) View {
         const coord_value = if (@TypeOf(coord) == View) coord.inner else self.makeCoord(coord);
-        const result = self.emit(cute.local_tile(
+        const result = self.emit(cute_ir.local_tile(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(tile).inner,
@@ -1618,7 +1618,7 @@ pub const Builder = struct {
 
     pub fn localTileTyped(self: *Builder, input: anytype, tile: anytype, coord: anytype, result_type: *const mlir.Type, projection: ?Attr) View {
         const coord_value = if (@TypeOf(coord) == View) coord.inner else self.makeCoord(coord);
-        const result = self.emit(cute.local_tile(
+        const result = self.emit(cute_ir.local_tile(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(tile).inner,
@@ -1631,7 +1631,7 @@ pub const Builder = struct {
     }
 
     pub fn localPartition(self: *Builder, input: anytype, tiler: anytype, index: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.local_partition(
+        const result = self.emit(cute_ir.local_partition(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(tiler).inner,
@@ -1646,7 +1646,7 @@ pub const Builder = struct {
     /// type explicit.  These operations are the building blocks used between
     /// TMA partitioning and the block-scaled MMA fragments.
     pub fn slice(self: *Builder, input: anytype, coord: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.slice(
+        const result = self.emit(cute_ir.slice(
             self.ctx,
             self.asValue(input).inner,
             self.makeCoord(coord),
@@ -1657,7 +1657,7 @@ pub const Builder = struct {
     }
 
     pub fn sliceTyped(self: *Builder, input: anytype, coord: anytype, result_type: *const mlir.Type) View {
-        const result = self.emit(cute.slice(
+        const result = self.emit(cute_ir.slice(
             self.ctx,
             self.asValue(input).inner,
             self.makeCoord(coord),
@@ -1676,26 +1676,26 @@ pub const Builder = struct {
         const value = self.asValue(input);
         const layout_value = self.asValue(layout);
         const input_type = value.type_();
-        const result_type: *const mlir.Type = if (input_type.isA(cute.MemRefType)) |memref|
-            (cute.MemRefType.get(self.ctx, .{ .ptr = memref.getPtr(), .layout = layout_value.type_() }) catch @panic("invalid regrouped memref")).type_()
-        else if (input_type.isA(cute.CoordTensorType)) |coords|
-            (cute.CoordTensorType.get(self.ctx, .{ .arithTuple = coords.getArithTuple(), .layout = layout_value.type_() }) catch @panic("invalid regrouped coordinate tensor")).type_()
+        const result_type: *const mlir.Type = if (input_type.isA(cute_ir.MemRefType)) |memref|
+            (cute_ir.MemRefType.get(self.ctx, .{ .ptr = memref.getPtr(), .layout = layout_value.type_() }) catch @panic("invalid regrouped memref")).type_()
+        else if (input_type.isA(cute_ir.CoordTensorType)) |coords|
+            (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = coords.getArithTuple(), .layout = layout_value.type_() }) catch @panic("invalid regrouped coordinate tensor")).type_()
         else
             std.debug.panic("withLayout: expected memref or coordinate tensor, got {f}", .{input_type});
 
-        const iterator_type: *const mlir.Type = if (input_type.isA(cute.MemRefType)) |memref|
+        const iterator_type: *const mlir.Type = if (input_type.isA(cute_ir.MemRefType)) |memref|
             memref.getPtr()
-        else if (input_type.isA(cute.CoordTensorType)) |coords|
-            (cute.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = coords.getArithTuple() }) catch @panic("invalid arithmetic tuple iterator")).type_()
+        else if (input_type.isA(cute_ir.CoordTensorType)) |coords|
+            (cute_ir.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = coords.getArithTuple() }) catch @panic("invalid arithmetic tuple iterator")).type_()
         else
             unreachable;
-        const iterator = self.emit(cute.get_iter(self.ctx, value.inner, iterator_type, self.loc()));
-        const result = self.emit(cute.make_view(self.ctx, iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
+        const iterator = self.emit(cute_ir.get_iter(self.ctx, value.inner, iterator_type, self.loc()));
+        const result = self.emit(cute_ir.make_view(self.ctx, iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn groupModes(self: *Builder, input: anytype, begin: u32, end: u32, result_type: []const u8) View {
-        const result = self.emit(cute.group_modes(
+        const result = self.emit(cute_ir.group_modes(
             self.ctx,
             self.asValue(input).inner,
             self.parseType(result_type),
@@ -1707,7 +1707,7 @@ pub const Builder = struct {
     }
 
     pub fn tiledDivide(self: *Builder, input: anytype, tiler: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.tiled_divide(
+        const result = self.emit(cute_ir.tiled_divide(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(tiler).inner,
@@ -1718,7 +1718,7 @@ pub const Builder = struct {
     }
 
     pub fn flatDivide(self: *Builder, input: anytype, tiler: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.flat_divide(
+        const result = self.emit(cute_ir.flat_divide(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(tiler).inner,
@@ -1729,7 +1729,7 @@ pub const Builder = struct {
     }
 
     pub fn coalesce(self: *Builder, input: anytype, target_profile: ?View, result_type: []const u8) View {
-        const result = self.emit(cute.coalesce(
+        const result = self.emit(cute_ir.coalesce(
             self.ctx,
             self.asValue(input).inner,
             self.parseType(result_type),
@@ -1740,7 +1740,7 @@ pub const Builder = struct {
     }
 
     pub fn filterZeros(self: *Builder, input: anytype, target_profile: ?View, result_type: []const u8) View {
-        const result = self.emit(cute.filter_zeros(
+        const result = self.emit(cute_ir.filter_zeros(
             self.ctx,
             self.asValue(input).inner,
             self.parseType(result_type),
@@ -1751,29 +1751,29 @@ pub const Builder = struct {
     }
 
     pub fn getLayout(self: *Builder, input: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.get_layout(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
+        const result = self.emit(cute_ir.get_layout(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn getIter(self: *Builder, input: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.get_iter(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
+        const result = self.emit(cute_ir.get_iter(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     /// Typed form of `cute.get_iter`, used when the pointer type is already
     /// available through the CuTe C API and no textual type is necessary.
     pub fn getIterTyped(self: *Builder, input: anytype, result_type: *const mlir.Type) View {
-        const result = self.emit(cute.get_iter(self.ctx, self.asValue(input).inner, result_type, self.loc()));
+        const result = self.emit(cute_ir.get_iter(self.ctx, self.asValue(input).inner, result_type, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn getShape(self: *Builder, input: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.get_shape(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
+        const result = self.emit(cute_ir.get_shape(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn addOffset(self: *Builder, input: anytype, offset: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.add_offset(
+        const result = self.emit(cute_ir.add_offset(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(offset).inner,
@@ -1784,7 +1784,7 @@ pub const Builder = struct {
     }
 
     pub fn addOffsetTyped(self: *Builder, input: anytype, offset: anytype, result_type: *const mlir.Type) View {
-        const result = self.emit(cute.add_offset(
+        const result = self.emit(cute_ir.add_offset(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(offset).inner,
@@ -1795,12 +1795,12 @@ pub const Builder = struct {
     }
 
     pub fn recastIter(self: *Builder, input: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.recast_iter(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
+        const result = self.emit(cute_ir.recast_iter(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn appendToRank(self: *Builder, input: anytype, element: anytype, rank: u32, result_type: []const u8) View {
-        const result = self.emit(cute.append_to_rank(
+        const result = self.emit(cute_ir.append_to_rank(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(element).inner,
@@ -1812,21 +1812,21 @@ pub const Builder = struct {
     }
 
     pub fn makeTiledCopy(self: *Builder, atom: Atom, result_type: []const u8) Atom {
-        const result = self.emit(cute.make_tiled_copy(self.ctx, atom.inner, self.parseType(result_type), self.loc()));
+        const result = self.emit(cute_ir.make_tiled_copy(self.ctx, atom.inner, self.parseType(result_type), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn tiledCopyPartition(self: *Builder, tiled: Atom, input: anytype, coord: anytype, destination: bool, result_type: []const u8) View {
         const op = if (destination)
-            cute.tiled_copy_partition_D(self.ctx, tiled.inner, self.asValue(input).inner, self.makeCoord(coord), self.parseType(result_type), self.loc())
+            cute_ir.tiled_copy_partition_D(self.ctx, tiled.inner, self.asValue(input).inner, self.makeCoord(coord), self.parseType(result_type), self.loc())
         else
-            cute.tiled_copy_partition_S(self.ctx, tiled.inner, self.asValue(input).inner, self.makeCoord(coord), self.parseType(result_type), self.loc());
+            cute_ir.tiled_copy_partition_S(self.ctx, tiled.inner, self.asValue(input).inner, self.makeCoord(coord), self.parseType(result_type), self.loc());
         const result = self.emit(op);
         return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn tiledCopyRetile(self: *Builder, tiled: Atom, input: anytype, result_type: []const u8) View {
-        const result = self.emit(cute.tiled_copy_retile(
+        const result = self.emit(cute_ir.tiled_copy_retile(
             self.ctx,
             tiled.inner,
             self.asValue(input).inner,
@@ -1837,7 +1837,7 @@ pub const Builder = struct {
     }
 
     pub fn tiledMmaPartition(self: *Builder, tiled: Atom, input: anytype, coord: anytype, operand_id: u2, result_type: []const u8) View {
-        const result = self.emit(cute.tiled_mma_partition(
+        const result = self.emit(cute_ir.tiled_mma_partition(
             self.ctx,
             tiled.inner,
             self.asValue(input).inner,
@@ -1850,7 +1850,7 @@ pub const Builder = struct {
     }
 
     pub fn tiledMmaPartitionTyped(self: *Builder, tiled: Atom, input: anytype, coord: anytype, operand_id: u2, result_type: *const mlir.Type) View {
-        const result = self.emit(cute.tiled_mma_partition(
+        const result = self.emit(cute_ir.tiled_mma_partition(
             self.ctx,
             tiled.inner,
             self.asValue(input).inner,
@@ -1863,7 +1863,7 @@ pub const Builder = struct {
     }
 
     pub fn mmaMakeFragment(self: *Builder, tiled: Atom, input: anytype, operand_id: u2, result_type: []const u8) View {
-        const result = self.emit(cute.mma_make_fragment(
+        const result = self.emit(cute_ir.mma_make_fragment(
             self.ctx,
             tiled.inner,
             self.asValue(input).inner,
@@ -1875,11 +1875,11 @@ pub const Builder = struct {
     }
 
     pub fn copy(self: *Builder, atom: Atom, src: anytype, dst: anytype, pred: ?Value) void {
-        self.emitVoid(cute.copy(self.ctx, atom.inner, self.innerSlice(src), self.innerSlice(dst), .{ .pred = if (pred) |p| p.inner else null }, self.loc()));
+        self.emitVoid(cute_ir.copy(self.ctx, atom.inner, self.innerSlice(src), self.innerSlice(dst), .{ .pred = if (pred) |p| p.inner else null }, self.loc()));
     }
 
     pub fn gemm(self: *Builder, tiled: Atom, d: anytype, a: anytype, rhs: anytype, c: anytype) void {
-        self.emitVoid(cute.gemm(
+        self.emitVoid(cute_ir.gemm(
             self.ctx,
             tiled.inner,
             self.asValue(d).inner,
@@ -2143,7 +2143,7 @@ pub const Builder = struct {
         const disabled = self.cst(.i1, false);
         const atom_type = std.fmt.allocPrint(self.arena.allocator(), "!cute_nvgpu.sm100.mma_bs{s}", .{blockScaledPayload(self, cfg)}) catch @panic("OOM");
         const atom = self.makeAtom(atom_type, .{ disabled, disabled, disabled, scale_ptr, scale_ptr });
-        const tiled = self.emit(cute.make_tiled_mma(self.ctx, atom.inner, self.blockScaledMmaType(cfg), self.loc()));
+        const tiled = self.emit(cute_ir.make_tiled_mma(self.ctx, atom.inner, self.blockScaledMmaType(cfg), self.loc()));
         return .{ .atom = atom, .tiled = .{ .inner = tiled.inner, .kernel = self } };
     }
 
@@ -2395,7 +2395,7 @@ pub const Builder = struct {
     /// sequence as Python CuTe DSL rather than an integer div/rem pair.
     pub fn fastDivmodCreate(self: *Builder, divisor_: anytype) Value {
         const divisor = self.lift(divisor_).to(.i32);
-        return self.emit(cute.fast_divmod_create_divisor(
+        return self.emit(cute_ir.fast_divmod_create_divisor(
             self.ctx,
             divisor.inner,
             self.parseType("!cute.fast_divmod_divisor<32>"),
@@ -2406,7 +2406,7 @@ pub const Builder = struct {
     /// Return `{ quotient, remainder }` for a CUTLASS FastDivmod divisor.
     pub fn fastDivmod(self: *Builder, dividend_: anytype, divisor: Value) [2]Value {
         const dividend = self.lift(dividend_).to(.i32);
-        return self.emitResults(2, cute.fast_divmod_compute(
+        return self.emitResults(2, cute_ir.fast_divmod_compute(
             self.ctx,
             dividend.inner,
             divisor.inner,

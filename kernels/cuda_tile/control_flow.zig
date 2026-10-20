@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const mlir = @import("mlir");
-const ct = @import("mlir/dialects/cuda_tile");
+const cuda_tile = @import("mlir/dialects/cuda_tile");
 const dsl = @import("kernels/common");
 
 pub const tupleArity = dsl.tupleArity;
@@ -28,9 +28,9 @@ fn terminate(comptime ValueT: type, comptime N: usize, kernel: anytype, block: *
     if (block.terminator() != null) return;
     const buf = collect(ValueT, N, values, what);
     const op = switch (mnemonic) {
-        .yield => ct.yield(kernel.ctx, &buf, kernel.loc()),
-        .continue_ => ct.continue_(kernel.ctx, &buf, kernel.loc()),
-        .break_ => ct.break_(kernel.ctx, &buf, kernel.loc()),
+        .yield => cuda_tile.yield(kernel.ctx, &buf, kernel.loc()),
+        .continue_ => cuda_tile.continue_(kernel.ctx, &buf, kernel.loc()),
+        .break_ => cuda_tile.break_(kernel.ctx, &buf, kernel.loc()),
     };
     _ = op.appendTo(block);
 }
@@ -62,7 +62,7 @@ pub fn ForScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usiz
             const k = self.kernel;
             terminate(ValueT, N, k, self.body, .continue_, values, "ForScope.yield");
             k.popBlock();
-            const for_op = ct.for_(k.ctx, self.lb_inner, self.ub_inner, self.step_inner, &self.inits_inner, self.body, self.unsigned_cmp, k.loc());
+            const for_op = cuda_tile.for_(k.ctx, self.lb_inner, self.ub_inner, self.step_inner, &self.inits_inner, self.body, self.unsigned_cmp, k.loc());
             _ = for_op.appendTo(k.currentBlock());
             for (0..N) |i| self.results[i] = .{ .inner = for_op.result(i), .kernel = k };
         }
@@ -81,7 +81,7 @@ pub fn IfOnlyScope(comptime BuilderT: type, comptime ValueT: type) type {
             const k = self.kernel;
             terminate(ValueT, 0, k, self.then_block, .yield, values, "IfOnlyScope.yieldThen");
             k.popBlock();
-            _ = ct.if_(k.ctx, self.cond_inner, &.{}, self.then_block, .{}, k.loc()).appendTo(k.currentBlock());
+            _ = cuda_tile.if_(k.ctx, self.cond_inner, &.{}, self.then_block, .{}, k.loc()).appendTo(k.currentBlock());
         }
     };
 }
@@ -108,7 +108,7 @@ pub fn IfScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usize
             const k = self.kernel;
             terminate(ValueT, N, k, self.else_block, .yield, values, "IfScope.yieldElse");
             k.popBlock();
-            const if_op = ct.if_(k.ctx, self.cond_inner, &self.result_types, self.then_block, .{ .else_block = self.else_block }, k.loc());
+            const if_op = cuda_tile.if_(k.ctx, self.cond_inner, &self.result_types, self.then_block, .{ .else_block = self.else_block }, k.loc());
             _ = if_op.appendTo(k.currentBlock());
             for (0..N) |i| self.results[i] = .{ .inner = if_op.result(i), .kernel = k };
         }
@@ -143,7 +143,7 @@ pub fn LoopScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usi
             const k = self.kernel;
             terminate(ValueT, N, k, self.body, .continue_, values, "LoopScope.yield");
             k.popBlock();
-            const loop_op = ct.loop(k.ctx, &self.inits_inner, &self.result_types, self.body, k.loc());
+            const loop_op = cuda_tile.loop(k.ctx, &self.inits_inner, &self.result_types, self.body, k.loc());
             _ = loop_op.appendTo(k.currentBlock());
             for (0..N) |i| self.results[i] = .{ .inner = loop_op.result(i), .kernel = k };
         }

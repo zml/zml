@@ -21,16 +21,16 @@ const dsl = @import("kernels/common");
 const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
 const stdx = @import("stdx");
-const tpu = @import("mlir/dialects/mosaic_tpu");
+const mosaic_tpu = @import("mlir/dialects/mosaic_tpu");
 /// `tpu`-dialect enums re-exported for convenience.
-pub const MemorySpace = tpu.MemorySpace;
-pub const ReductionKind = tpu.ReductionKind;
-pub const ContractPrecision = tpu.ContractPrecision;
-pub const RoundingMode = tpu.RoundingMode;
-pub const DimensionSemantics = tpu.DimensionSemantics;
-pub const CoreType = tpu.CoreType;
-pub const PipelineMode = tpu.PipelineMode;
-pub const RevisitMode = tpu.RevisitMode;
+pub const MemorySpace = mosaic_tpu.MemorySpace;
+pub const ReductionKind = mosaic_tpu.ReductionKind;
+pub const ContractPrecision = mosaic_tpu.ContractPrecision;
+pub const RoundingMode = mosaic_tpu.RoundingMode;
+pub const DimensionSemantics = mosaic_tpu.DimensionSemantics;
+pub const CoreType = mosaic_tpu.CoreType;
+pub const PipelineMode = mosaic_tpu.PipelineMode;
+pub const RevisitMode = mosaic_tpu.RevisitMode;
 
 const dtypes = @import("dtype.zig");
 pub const DType = dtypes.DType;
@@ -667,13 +667,13 @@ pub const Builder = struct {
                     r.memory_space.attribute(ctx),
                 ),
                 .sem => |s| switch (s) {
-                    .regular => tpu.semaphoreType(ctx),
-                    .dma => tpu.dmaSemaphoreType(ctx),
+                    .regular => mosaic_tpu.semaphoreType(ctx),
+                    .dma => mosaic_tpu.dmaSemaphoreType(ctx),
                 },
                 .sem_array => |sa| .memRef(
                     switch (sa.kind) {
-                        .regular => tpu.semaphoreType(ctx),
-                        .dma => tpu.dmaSemaphoreType(ctx),
+                        .regular => mosaic_tpu.semaphoreType(ctx),
+                        .dma => mosaic_tpu.dmaSemaphoreType(ctx),
                     },
                     sa.shape,
                     null,
@@ -816,7 +816,7 @@ pub const Builder = struct {
                     inner.appendAssumeCapacity(.named(ctx, "transform_indices", .flatSymbolRef(ctx, sym_name)));
                     inner.appendAssumeCapacity(.named(ctx, "window_bounds", .denseArray(ctx, .i64, block_shape)));
                     if (w.element_window) |ew| {
-                        inner.appendAssumeCapacity(.named(ctx, "window_kind", tpu.elementWindowAttribute(ctx, ew.pad_low, ew.pad_high)));
+                        inner.appendAssumeCapacity(.named(ctx, "window_kind", mosaic_tpu.elementWindowAttribute(ctx, ew.pad_low, ew.pad_high)));
                     }
                     wp_buf[idx] = .dict(ctx, inner.constSlice());
                     idx += 1;
@@ -1305,25 +1305,25 @@ pub const Builder = struct {
 
     /// `tpu.bitcast` — same-bitwidth element-type swap. Shape preserved.
     pub fn bitcastTo(self: *Builder, src: Value, dt: DType) Value {
-        return self.emit(tpu.bitcast(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
+        return self.emit(mosaic_tpu.bitcast(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
     }
     pub fn extf(self: *Builder, src: Value, dt: DType) Value {
-        return self.emit(tpu.extf(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
+        return self.emit(mosaic_tpu.extf(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
     }
     pub fn truncf(self: *Builder, src: Value, dt: DType) Value {
-        return self.emit(tpu.truncf(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
+        return self.emit(mosaic_tpu.truncf(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
     }
     pub fn sitofp(self: *Builder, src: Value, dt: DType) Value {
-        return self.emit(tpu.sitofp(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
+        return self.emit(mosaic_tpu.sitofp(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
     }
     pub fn uitofp(self: *Builder, src: Value, dt: DType) Value {
-        return self.emit(tpu.uitofp(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
+        return self.emit(mosaic_tpu.uitofp(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
     }
     pub fn fptosi(self: *Builder, src: Value, dt: DType) Value {
-        return self.emit(tpu.fptosi(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
+        return self.emit(mosaic_tpu.fptosi(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
     }
     pub fn fptoui(self: *Builder, src: Value, dt: DType) Value {
-        return self.emit(tpu.fptoui(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
+        return self.emit(mosaic_tpu.fptoui(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
     }
 
     /// Numeric cast with auto-dispatch. Routes through `arith.*` ops for the
@@ -1461,7 +1461,7 @@ pub const Builder = struct {
         const result_ty = self.refVectorType(ref);
         const idx_inner = self.indicesOrZero(ref, indices);
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
-        return self.emit(tpu.vector_load(ctx, ref.inner, idx_inner, .{ .strides = opts.strides, .mask = mask_inner }, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.vector_load(ctx, ref.inner, idx_inner, .{ .strides = opts.strides, .mask = mask_inner }, result_ty, self.loc()));
     }
 
     /// `tpu.vector_load` with an explicit result vector shape.
@@ -1470,7 +1470,7 @@ pub const Builder = struct {
         const result_ty = mlir.Type.vector(shape, ref.elemType());
         const idx_inner = self.indicesOrZero(ref, indices);
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
-        return self.emit(tpu.vector_load(ctx, ref.inner, idx_inner, .{ .strides = opts.strides, .mask = mask_inner }, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.vector_load(ctx, ref.inner, idx_inner, .{ .strides = opts.strides, .mask = mask_inner }, result_ty, self.loc()));
     }
 
     /// `tpu.vector_store(value, ref)` — full-shape vector store.
@@ -1485,7 +1485,7 @@ pub const Builder = struct {
     pub fn refStoreOpts(self: *Builder, ref: Value, value: Value, indices: []const Value, opts: VectorStoreOpts) void {
         const idx_inner = self.indicesOrZero(ref, indices);
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
-        _ = tpu.vector_store(self.ctx, value.inner, ref.inner, idx_inner, .{ .strides = opts.strides, .add = opts.add, .mask = mask_inner }, self.loc()).appendTo(self.currentBlock());
+        _ = mosaic_tpu.vector_store(self.ctx, value.inner, ref.inner, idx_inner, .{ .strides = opts.strides, .add = opts.add, .mask = mask_inner }, self.loc()).appendTo(self.currentBlock());
     }
 
     /// `memref.load` — scalar load. Indices must be `index`-typed.
@@ -1538,7 +1538,7 @@ pub const Builder = struct {
             s.appendAssumeCapacity(@divTrunc(dim + stride - 1, stride));
         }
         const result_ty = mlir.Type.vector(s.constSlice(), mr.elementType());
-        return self.emit(tpu.strided_load(self.ctx, ref.inner, self.innerSlice(indices), strides, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.strided_load(self.ctx, ref.inner, self.innerSlice(indices), strides, result_ty, self.loc()));
     }
 
     /// `tpu.strided_load` with an explicit result shape — when you know the
@@ -1547,12 +1547,12 @@ pub const Builder = struct {
     pub fn stridedLoadShape(self: *Builder, ref: Value, indices: []const Value, strides: []const i32, result_shape: []const i64) Value {
         const mr = ref.type_().isA(mlir.MemRefType) orelse @panic("stridedLoadShape: not a memref");
         const result_ty = mlir.Type.vector(result_shape, mr.elementType());
-        return self.emit(tpu.strided_load(self.ctx, ref.inner, self.innerSlice(indices), strides, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.strided_load(self.ctx, ref.inner, self.innerSlice(indices), strides, result_ty, self.loc()));
     }
 
     /// `tpu.strided_store` — multi-dim strided store.
     pub fn stridedStore(self: *Builder, ref: Value, value: Value, indices: []const Value, strides: []const i32) void {
-        _ = tpu.strided_store(self.ctx, value.inner, ref.inner, self.innerSlice(indices), strides, self.loc()).appendTo(self.currentBlock());
+        _ = mosaic_tpu.strided_store(self.ctx, value.inner, ref.inner, self.innerSlice(indices), strides, self.loc()).appendTo(self.currentBlock());
     }
 
     // ==================== TPU compute: matmul / iota / reciprocal ====================
@@ -1564,7 +1564,7 @@ pub const Builder = struct {
     }
 
     pub fn matmulOpts(self: *Builder, lhs: Value, rhs: Value, acc: Value, opts: MatmulOpts) Value {
-        return self.emit(tpu.matmul(
+        return self.emit(mosaic_tpu.matmul(
             self.ctx,
             lhs.inner,
             rhs.inner,
@@ -1585,7 +1585,7 @@ pub const Builder = struct {
     /// `dimensions` to use the default.
     pub fn iota(self: *Builder, shape: []const i64, dtype: DType, dimensions: ?[]const i32) Value {
         const ty = mlir.Type.vector(shape, dtype.toMlir(self.ctx));
-        return self.emit(tpu.iota(self.ctx, ty, .{ .dimensions = dimensions }, self.loc()));
+        return self.emit(mosaic_tpu.iota(self.ctx, ty, .{ .dimensions = dimensions }, self.loc()));
     }
 
     /// 1-D `arange(0, n)`. TPU layout pass requires rank ≥ 2 with the lane dim
@@ -1593,7 +1593,7 @@ pub const Builder = struct {
     pub fn arange(self: *Builder, n: i64, dtype: DType) Value {
         const elem = dtype.toMlir(self.ctx);
         const ty_2d = .vector(&.{ 1, n }, elem);
-        const iota_2d = self.emit(tpu.iota(self.ctx, ty_2d, .{ .dimensions = &.{1} }, self.loc()));
+        const iota_2d = self.emit(mosaic_tpu.iota(self.ctx, ty_2d, .{ .dimensions = &.{1} }, self.loc()));
         return self.shapeCast(iota_2d, &.{n});
     }
 
@@ -1603,7 +1603,7 @@ pub const Builder = struct {
     }
 
     pub fn reciprocalOpts(self: *Builder, x: Value, opts: ReciprocalOpts) Value {
-        return self.emit(tpu.reciprocal(self.ctx, x.inner, .{
+        return self.emit(mosaic_tpu.reciprocal(self.ctx, x.inner, .{
             .approx = opts.approx,
             .full_range = opts.full_range,
         }, self.loc()));
@@ -1701,7 +1701,7 @@ pub const Builder = struct {
 
     pub fn reshape(self: *Builder, src: Value, new_shape: []const i64) Value {
         const ty = mlir.Type.vector(new_shape, src.elemType());
-        return self.emit(tpu.reshape(self.ctx, src.inner, ty, self.loc()));
+        return self.emit(mosaic_tpu.reshape(self.ctx, src.inner, ty, self.loc()));
     }
 
     pub fn repeat(self: *Builder, src: Value, dimension: i32, times: i32) Value {
@@ -1712,7 +1712,7 @@ pub const Builder = struct {
             out.appendAssumeCapacity(if (i == @as(usize, @intCast(dimension))) d * times else d);
         }
         const ty = mlir.Type.vector(out.constSlice(), src.elemType());
-        return self.emit(tpu.repeat(self.ctx, src.inner, dimension, times, ty, self.loc()));
+        return self.emit(mosaic_tpu.repeat(self.ctx, src.inner, dimension, times, ty, self.loc()));
     }
 
     pub fn concatenate(self: *Builder, sources: []const Value, dimension: i32) Value {
@@ -1724,7 +1724,7 @@ pub const Builder = struct {
         var out: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
         for (0..head.len) |i| out.appendAssumeCapacity(if (i == ax) sum else head.get(i));
         const ty = mlir.Type.vector(out.constSlice(), sources[0].elemType());
-        return self.emit(tpu.concatenate(self.ctx, self.innerSlice(sources), dimension, ty, self.loc()));
+        return self.emit(mosaic_tpu.concatenate(self.ctx, self.innerSlice(sources), dimension, ty, self.loc()));
     }
 
     pub fn transpose(self: *Builder, src: Value, permutation: []const i64) Value {
@@ -1733,17 +1733,17 @@ pub const Builder = struct {
         var out: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
         for (permutation) |p| out.appendAssumeCapacity(in_shape.get(@intCast(p)));
         const ty = mlir.Type.vector(out.constSlice(), src.elemType());
-        return self.emit(tpu.transpose(self.ctx, src.inner, permutation, ty, self.loc()));
+        return self.emit(mosaic_tpu.transpose(self.ctx, src.inner, permutation, ty, self.loc()));
     }
 
     pub fn broadcastInSublanes(self: *Builder, src: Value, lane: i32) Value {
         // Result shape = src shape (the op replicates within sublanes).
-        return self.emit(tpu.broadcast_in_sublanes(self.ctx, src.inner, lane, src.type_(), self.loc()));
+        return self.emit(mosaic_tpu.broadcast_in_sublanes(self.ctx, src.inner, lane, src.type_(), self.loc()));
     }
 
     pub fn rotate(self: *Builder, value: Value, opts: RotateOpts) Value {
         const amount = self.lift(@as(i32, opts.amount));
-        return self.emit(tpu.dynamic_rotate(self.ctx, value.inner, amount.inner, .{
+        return self.emit(mosaic_tpu.dynamic_rotate(self.ctx, value.inner, amount.inner, .{
             .dimension = opts.dimension,
             .stride = opts.stride,
             .stride_dimension = opts.stride_dimension,
@@ -1758,7 +1758,7 @@ pub const Builder = struct {
         var out: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
         for (0..in_shape.len) |i| out.appendAssumeCapacity(if (i == @as(usize, @intCast(dim))) 1 else in_shape.get(i));
         const ty = mlir.Type.vector(out.constSlice(), input.elemType());
-        return self.emit(tpu.all_reduce(self.ctx, input.inner, dim, kind, ty, self.loc()));
+        return self.emit(mosaic_tpu.all_reduce(self.ctx, input.inner, dim, kind, ty, self.loc()));
     }
 
     /// `tpu.reduce_index(input, kind, axis)` — drop axis, replace with
@@ -1770,14 +1770,14 @@ pub const Builder = struct {
             if (@as(i32, @intCast(i)) != axis) out.appendAssumeCapacity(d);
         }
         const ty = mlir.Type.vector(out.constSlice(), .int(self.ctx, .i32));
-        return self.emit(tpu.reduce_index(self.ctx, input.inner, axis, kind, ty, self.loc()));
+        return self.emit(mosaic_tpu.reduce_index(self.ctx, input.inner, axis, kind, ty, self.loc()));
     }
 
     /// Scan the last dimension; a mask must be rank one with that dimension
     /// as its length. The result has the same shape as the input.
     pub fn scan(self: *Builder, input: Value, kind: ReductionKind, mask: ?Value) Value {
         const m_inner: ?*const mlir.Value = if (mask) |m| m.inner else null;
-        return self.emit(tpu.scan(self.ctx, input.inner, kind, input.type_(), .{ .mask = m_inner }, self.loc()));
+        return self.emit(mosaic_tpu.scan(self.ctx, input.inner, kind, input.type_(), .{ .mask = m_inner }, self.loc()));
     }
 
     /// `tpu.sort(keys, values, mask?)` — returns (output_mask, sorted_keys, sorted_values).
@@ -1787,7 +1787,7 @@ pub const Builder = struct {
             // Default: vector<keys.shape x i1>.
             break :blk .vector(keys.shape().constSlice(), .integer(self.ctx, .i1));
         };
-        const op = tpu.sort(
+        const op = mosaic_tpu.sort(
             self.ctx,
             keys.inner,
             values.inner,
@@ -1816,7 +1816,7 @@ pub const Builder = struct {
     ) Value {
         const mr = mem_ref.type_().isA(mlir.MemRefType) orelse @panic("memRefSlice: not a memref");
         const result_ty = mlir.Type.memRef(mr.elementType(), result_shape, null, mr.memorySpace());
-        return self.emit(tpu.memref_slice(self.ctx, mem_ref.inner, .{
+        return self.emit(mosaic_tpu.memref_slice(self.ctx, mem_ref.inner, .{
             .base_idx = self.innerSlice(base_idx),
             .dynamic_sizes = self.innerSlice(dynamic_sizes),
         }, result_ty, self.loc()));
@@ -1825,13 +1825,13 @@ pub const Builder = struct {
     pub fn memRefSqueeze(self: *Builder, mem_ref: Value, result_shape: []const i64) Value {
         const mr = mem_ref.type_().isA(mlir.MemRefType) orelse @panic("memRefSqueeze: not a memref");
         const result_ty = mlir.Type.memRef(mr.elementType(), result_shape, null, mr.memorySpace());
-        return self.emit(tpu.memref_squeeze(self.ctx, mem_ref.inner, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.memref_squeeze(self.ctx, mem_ref.inner, result_ty, self.loc()));
     }
 
     pub fn memRefReshape(self: *Builder, mem_ref: Value, result_shape: []const i64) Value {
         const mr = mem_ref.type_().isA(mlir.MemRefType) orelse @panic("memRefReshape: not a memref");
         const result_ty = mlir.Type.memRef(mr.elementType(), result_shape, null, mr.memorySpace());
-        return self.emit(tpu.memref_reshape(self.ctx, mem_ref.inner, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.memref_reshape(self.ctx, mem_ref.inner, result_ty, self.loc()));
     }
 
     pub fn memRefAlloca(self: *Builder, shape: []const i64, dtype: DType, memory_space: MemorySpace) Value {
@@ -1843,7 +1843,7 @@ pub const Builder = struct {
         var s: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
         for (0..mr.rank()) |i| s.appendAssumeCapacity(mr.dimension(i));
         const result_ty = .memRef(dt.toMlir(self.ctx), s.constSlice(), null, mr.memorySpace());
-        return self.emit(tpu.memref_bitcast(self.ctx, mem_ref.inner, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.memref_bitcast(self.ctx, mem_ref.inner, result_ty, self.loc()));
     }
 
     /// `tpu.memref_bitcast` with an explicit result shape — needed for the
@@ -1852,17 +1852,17 @@ pub const Builder = struct {
     pub fn memRefBitcastShape(self: *Builder, mem_ref: Value, result_shape: []const i64, dt: DType) Value {
         const mr = mem_ref.type_().isA(mlir.MemRefType) orelse @panic("memRefBitcastShape: not a memref");
         const result_ty = mlir.Type.memRef(dt.toMlir(self.ctx), result_shape, null, mr.memorySpace());
-        return self.emit(tpu.memref_bitcast(self.ctx, mem_ref.inner, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.memref_bitcast(self.ctx, mem_ref.inner, result_ty, self.loc()));
     }
 
     pub fn reinterpretCast(self: *Builder, mem_ref: Value, result_shape: []const i64, dt: DType) Value {
         const mr = mem_ref.type_().isA(mlir.MemRefType) orelse @panic("reinterpretCast: not a memref");
         const result_ty = mlir.Type.memRef(dt.toMlir(self.ctx), result_shape, null, mr.memorySpace());
-        return self.emit(tpu.reinterpret_cast(self.ctx, mem_ref.inner, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.reinterpret_cast(self.ctx, mem_ref.inner, result_ty, self.loc()));
     }
 
     pub fn assumeLayout(self: *Builder, src: Value) Value {
-        return self.emit(tpu.assume_layout(self.ctx, src.inner, src.type_(), self.loc()));
+        return self.emit(mosaic_tpu.assume_layout(self.ctx, src.inner, src.type_(), self.loc()));
     }
 
     pub fn eraseMemRefLayout(self: *Builder, mem_ref: Value) Value {
@@ -1871,7 +1871,7 @@ pub const Builder = struct {
         for (0..mr.rank()) |i| s.appendAssumeCapacity(mr.dimension(i));
         // Result drops the layout but keeps shape, element type, memory space.
         const result_ty = .memRef(mr.elementType(), s.constSlice(), null, mr.memorySpace());
-        return self.emit(tpu.erase_memref_layout(self.ctx, mem_ref.inner, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.erase_memref_layout(self.ctx, mem_ref.inner, result_ty, self.loc()));
     }
 
     // ==================== Mask building ====================
@@ -1879,7 +1879,7 @@ pub const Builder = struct {
     /// `tpu.create_mask` — 2-sided mask `[low, high)` per dim.
     pub fn createMask(self: *Builder, low_bounds: []const Value, high_bounds: []const Value, shape: []const i64) Value {
         const ty = mlir.Type.vector(shape, .integer(self.ctx, .i1));
-        return self.emit(tpu.create_mask(self.ctx, self.innerSlice(low_bounds), self.innerSlice(high_bounds), ty, self.loc()));
+        return self.emit(mosaic_tpu.create_mask(self.ctx, self.innerSlice(low_bounds), self.innerSlice(high_bounds), ty, self.loc()));
     }
 
     /// Convenience: 1-sided range mask `(0 <= idx < limit)` — emits two
@@ -1895,25 +1895,25 @@ pub const Builder = struct {
 
     pub fn semAlloc(self: *Builder, kind: ArgSpec.SemKind) Value {
         const elem = switch (kind) {
-            .regular => tpu.semaphoreType(self.ctx),
-            .dma => tpu.dmaSemaphoreType(self.ctx),
+            .regular => mosaic_tpu.semaphoreType(self.ctx),
+            .dma => mosaic_tpu.dmaSemaphoreType(self.ctx),
         };
         const ty = mlir.Type.memRef(elem, &.{}, null, MemorySpace.semaphore_mem.attribute(self.ctx));
-        return self.emit(tpu.sem_alloc(self.ctx, ty, self.loc()));
+        return self.emit(mosaic_tpu.sem_alloc(self.ctx, ty, self.loc()));
     }
 
     pub fn semBarrier(self: *Builder) Value {
-        const ty = mlir.Type.memRef(tpu.semaphoreType(self.ctx), &.{}, null, MemorySpace.semaphore_mem.attribute(self.ctx));
-        return self.emit(tpu.sem_barrier(self.ctx, ty, self.loc()));
+        const ty = mlir.Type.memRef(mosaic_tpu.semaphoreType(self.ctx), &.{}, null, MemorySpace.semaphore_mem.attribute(self.ctx));
+        return self.emit(mosaic_tpu.sem_barrier(self.ctx, ty, self.loc()));
     }
 
     pub fn semRead(self: *Builder, semaphore: Value) Value {
-        return self.emit(tpu.sem_read(self.ctx, semaphore.inner, self.loc()));
+        return self.emit(mosaic_tpu.sem_read(self.ctx, semaphore.inner, self.loc()));
     }
 
     pub fn semWait(self: *Builder, semaphore: Value, amount: anytype) void {
         const a = if (@TypeOf(amount) == Value) amount else self.lift(amount);
-        _ = tpu.sem_wait(self.ctx, semaphore.inner, a.inner, self.loc()).appendTo(self.currentBlock());
+        _ = mosaic_tpu.sem_wait(self.ctx, semaphore.inner, a.inner, self.loc()).appendTo(self.currentBlock());
     }
 
     pub fn semSignal(self: *Builder, semaphore: Value, amount: anytype) void {
@@ -1925,7 +1925,7 @@ pub const Builder = struct {
         const dev: ?*const mlir.Value = if (opts.device_id) |d| d.inner else null;
         const core: ?*const mlir.Value = if (opts.core_id) |c_| c_.inner else null;
         const subcore: ?*const mlir.Value = if (opts.subcore_id) |sc| sc.inner else null;
-        _ = tpu.sem_signal(self.ctx, semaphore.inner, a.inner, .{
+        _ = mosaic_tpu.sem_signal(self.ctx, semaphore.inner, a.inner, .{
             .device_id = dev,
             .core_id = core,
             .subcore_id = subcore,
@@ -1933,7 +1933,7 @@ pub const Builder = struct {
     }
 
     pub fn barrier(self: *Builder, barrier_id: Value) void {
-        _ = tpu.barrier(self.ctx, barrier_id.inner, self.loc()).appendTo(self.currentBlock());
+        _ = mosaic_tpu.barrier(self.ctx, barrier_id.inner, self.loc()).appendTo(self.currentBlock());
     }
 
     pub fn enqueueDma(self: *Builder, source: Value, target: Value, target_semaphore: Value, opts: EnqueueDmaOpts) void {
@@ -1941,7 +1941,7 @@ pub const Builder = struct {
         const dev: ?*const mlir.Value = if (opts.device_id) |d| d.inner else null;
         const core: ?*const mlir.Value = if (opts.core_id) |c_| c_.inner else null;
         const subcore: ?*const mlir.Value = if (opts.subcore_id) |sc| sc.inner else null;
-        _ = tpu.enqueue_dma(self.ctx, source.inner, target.inner, target_semaphore.inner, .{
+        _ = mosaic_tpu.enqueue_dma(self.ctx, source.inner, target.inner, target_semaphore.inner, .{
             .source_semaphore = src_sem,
             .device_id = dev,
             .core_id = core,
@@ -1954,7 +1954,7 @@ pub const Builder = struct {
     pub fn waitDma2(self: *Builder, semaphore: Value, src: Value, dst: Value, opts: WaitDma2Opts) void {
         const dev: ?*const mlir.Value = if (opts.device_id) |d| d.inner else null;
         const core: ?*const mlir.Value = if (opts.core_id) |c_| c_.inner else null;
-        _ = tpu.wait_dma2(self.ctx, semaphore.inner, src.inner, dst.inner, .{
+        _ = mosaic_tpu.wait_dma2(self.ctx, semaphore.inner, src.inner, dst.inner, .{
             .device_id = dev,
             .core_id = core,
             .strict_ordering = opts.strict_ordering,
@@ -1962,17 +1962,17 @@ pub const Builder = struct {
     }
 
     pub fn deviceId(self: *Builder) Value {
-        return self.emit(tpu.device_id(self.ctx, self.loc()));
+        return self.emit(mosaic_tpu.device_id(self.ctx, self.loc()));
     }
 
     /// `tpu.trace_start` — pair with `traceStop`. Used by Pallas to mark
     /// einsum boundaries (e.g. `"nd,md->nm"`).
     pub fn traceStart(self: *Builder, level: i32, message: []const u8) void {
-        _ = tpu.trace_start(self.ctx, level, message, self.loc()).appendTo(self.currentBlock());
+        _ = mosaic_tpu.trace_start(self.ctx, level, message, self.loc()).appendTo(self.currentBlock());
     }
 
     pub fn traceStop(self: *Builder) void {
-        _ = tpu.trace_stop(self.ctx, self.loc()).appendTo(self.currentBlock());
+        _ = mosaic_tpu.trace_stop(self.ctx, self.loc()).appendTo(self.currentBlock());
     }
 
     /// Build a `#tpu.dot_dimension_numbers<...>` attribute for `matmulOpts`.
@@ -1986,7 +1986,7 @@ pub const Builder = struct {
         lhs_batch: []const i64,
         rhs_batch: []const i64,
     ) *const mlir.Attribute {
-        return tpu.dotDimensionNumbers(
+        return mosaic_tpu.dotDimensionNumbers(
             self.ctx,
             lhs_contracting,
             rhs_contracting,
@@ -2000,11 +2000,11 @@ pub const Builder = struct {
 
     pub fn delay(self: *Builder, cycles: anytype) void {
         const c_ = if (@TypeOf(cycles) == Value) cycles else self.lift(cycles);
-        _ = tpu.delay(self.ctx, c_.inner, self.loc()).appendTo(self.currentBlock());
+        _ = mosaic_tpu.delay(self.ctx, c_.inner, self.loc()).appendTo(self.currentBlock());
     }
 
     pub fn assumeMultiple(self: *Builder, src: Value, multiple: i32) Value {
-        return self.emit(tpu.assume_multiple(self.ctx, src.inner, multiple, self.loc()));
+        return self.emit(mosaic_tpu.assume_multiple(self.ctx, src.inner, multiple, self.loc()));
     }
 
     pub fn openRegion(self: *Builder) *mlir.Block {
@@ -2014,9 +2014,9 @@ pub const Builder = struct {
     }
 
     pub fn closeRegion(self: *Builder, block: *mlir.Block) void {
-        _ = tpu.yield(self.ctx, &.{}, self.loc()).appendTo(block);
+        _ = mosaic_tpu.yield(self.ctx, &.{}, self.loc()).appendTo(block);
         self.popBlock();
-        _ = tpu.region(self.ctx, block, &.{}, self.loc()).appendTo(self.currentBlock());
+        _ = mosaic_tpu.region(self.ctx, block, &.{}, self.loc()).appendTo(self.currentBlock());
     }
 
     // ==================== SCF regions ====================

@@ -1,7 +1,7 @@
 const std = @import("std");
 const mlir = @import("mlir");
 const fly = @import("mlir/dialects/fly");
-const rocdl = @import("mlir/dialects/fly_rocdl");
+const fly_rocdl = @import("mlir/dialects/fly_rocdl");
 const attributes = fly.attributes;
 const ops = fly.ops;
 const types = fly.types;
@@ -19,7 +19,7 @@ fn insertDialects(registry: *mlir.DialectRegistry) void {
 
 test {
     std.testing.refAllDecls(fly);
-    inline for (.{ types, attributes, ops, rocdl, rocdl.ops }) |module| {
+    inline for (.{ types, attributes, ops, fly_rocdl, fly_rocdl.ops }) |module| {
         std.testing.refAllDecls(module);
         inline for (comptime std.meta.declarations(module)) |decl| {
             const value = @field(module, decl);
@@ -61,7 +61,7 @@ test "every generated operation builder names a registered operation" {
     const ctx = try testContext();
     defer ctx.deinit();
 
-    for (ops.names ++ rocdl.ops.names) |name| {
+    for (ops.names ++ fly_rocdl.ops.names) |name| {
         if (!ctx.isRegisteredOperation(name)) {
             std.debug.print("`{s}` is not registered\n", .{name});
             return error.TestUnexpectedResult;
@@ -148,7 +148,7 @@ test "types and attributes are built through the C API" {
     });
     try expectPrints("!fly.copy_atom<!fly.universal_copy<128>, 32>", copy_atom);
 
-    const buffer_desc = try rocdl.BufferDescAddressAttr.get(ctx);
+    const buffer_desc = try fly_rocdl.BufferDescAddressAttr.get(ctx);
     try expectPrints("!fly.ptr<f16, #fly_rocdl.buffer_desc>", try types.PointerType.get(ctx, .{
         .elemTy = .float(ctx, .f16),
         .addressSpace = buffer_desc.attribute(),
@@ -191,7 +191,7 @@ test "atom traits" {
     _ = tm.getTiledThrValLayoutA();
     _ = tm.getThrLayoutVMNK();
 
-    const atom = try types.MmaAtomType.get(ctx, .{ .mmaOp = (try rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
+    const atom = try types.MmaAtomType.get(ctx, .{ .mmaOp = (try fly_rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
         .m = 16,
         .n = 16,
         .k = 4,
@@ -203,7 +203,7 @@ test "atom traits" {
     try expectPrints("!fly.int_tuple<(16,16,4)>", atom.getShapeMNK());
     try expectPrints("!fly.layout<64:1>", atom.getThrLayout());
 
-    const wmma = try types.MmaAtomType.get(ctx, .{ .mmaOp = (try rocdl.MmaOpGFX11WMMAType.get(ctx, .{
+    const wmma = try types.MmaAtomType.get(ctx, .{ .mmaOp = (try fly_rocdl.MmaOpGFX11WMMAType.get(ctx, .{
         .m = 16,
         .n = 16,
         .k = 16,

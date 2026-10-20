@@ -4,7 +4,7 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-const cute = @import("mlir/dialects/cute_ir");
+const cute_ir = @import("mlir/dialects/cute_ir");
 
 pub const dialect_namespace = "cute_nvgpu";
 
@@ -1340,8 +1340,8 @@ pub const CopyAtomSIMTSyncCopyType = opaque {
     pub const InitArgs = struct {
         valType: *const mlir.Type,
         copyBits: c_int = 0,
-        srcSpace: cute.AddressSpace = .generic,
-        dstSpace: cute.AddressSpace = .generic,
+        srcSpace: cute_ir.AddressSpace = .generic,
+        dstSpace: cute_ir.AddressSpace = .generic,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
         const result = c.mlirCuteNVGPUCopyAtomSIMTSyncCopyTypeGet(ctx.ptr(), args.valType.ptr(), args.copyBits, @backingInt(args.srcSpace), @backingInt(args.dstSpace));
@@ -1353,10 +1353,10 @@ pub const CopyAtomSIMTSyncCopyType = opaque {
     pub fn getCopyBits(self: *const Self) c_int {
         return c.mlirCuteNVGPUCopyAtomSIMTSyncCopyTypeGetCopyBits(self.ptr());
     }
-    pub fn getSrcSpace(self: *const Self) cute.AddressSpace {
+    pub fn getSrcSpace(self: *const Self) cute_ir.AddressSpace {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTSyncCopyTypeGetSrcSpace(self.ptr())));
     }
-    pub fn getDstSpace(self: *const Self) cute.AddressSpace {
+    pub fn getDstSpace(self: *const Self) cute_ir.AddressSpace {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSIMTSyncCopyTypeGetDstSpace(self.ptr())));
     }
 };
@@ -1424,7 +1424,7 @@ pub const CopyAtomSM100S2TCopyV2Type = opaque {
         numDp: c_int,
         numBit: c_int,
         numCta: c_int,
-        smemMajor: cute.MajorMode,
+        smemMajor: cute_ir.MajorMode,
         broadcast: CopyS2TBroadcast = .none,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
@@ -1443,7 +1443,7 @@ pub const CopyAtomSM100S2TCopyV2Type = opaque {
     pub fn getNumCta(self: *const Self) c_int {
         return c.mlirCuteNVGPUCopyAtomSM100S2TCopyV2TypeGetNumCta(self.ptr());
     }
-    pub fn getSmemMajor(self: *const Self) cute.MajorMode {
+    pub fn getSmemMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUCopyAtomSM100S2TCopyV2TypeGetSmemMajor(self.ptr())));
     }
     pub fn getBroadcast(self: *const Self) CopyS2TBroadcast {
@@ -1861,8 +1861,8 @@ pub const MmaAtomSM100UMMABlockScaledSparseType = opaque {
     pub const InitArgs = struct {
         shapeMnk: *const mlir.Attribute,
         numCta: c_int,
-        aMajor: cute.MajorMode,
-        bMajor: cute.MajorMode,
+        aMajor: cute_ir.MajorMode,
+        bMajor: cute_ir.MajorMode,
         aType: *const mlir.Type,
         bType: *const mlir.Type,
         cType: *const mlir.Type,
@@ -1883,10 +1883,10 @@ pub const MmaAtomSM100UMMABlockScaledSparseType = opaque {
     pub fn getNumCta(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetNumCta(self.ptr());
     }
-    pub fn getAMajor(self: *const Self) cute.MajorMode {
+    pub fn getAMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetAMajor(self.ptr())));
     }
-    pub fn getBMajor(self: *const Self) cute.MajorMode {
+    pub fn getBMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledSparseTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
@@ -1936,8 +1936,8 @@ pub const MmaAtomSM100UMMABlockScaledType = opaque {
     pub const InitArgs = struct {
         shapeMnk: *const mlir.Attribute,
         numCta: c_int,
-        aMajor: cute.MajorMode,
-        bMajor: cute.MajorMode,
+        aMajor: cute_ir.MajorMode,
+        bMajor: cute_ir.MajorMode,
         aType: *const mlir.Type,
         bType: *const mlir.Type,
         cType: *const mlir.Type,
@@ -1957,10 +1957,10 @@ pub const MmaAtomSM100UMMABlockScaledType = opaque {
     pub fn getNumCta(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetNumCta(self.ptr());
     }
-    pub fn getAMajor(self: *const Self) cute.MajorMode {
+    pub fn getAMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetAMajor(self.ptr())));
     }
-    pub fn getBMajor(self: *const Self) cute.MajorMode {
+    pub fn getBMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMABlockScaledTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
@@ -2007,8 +2007,8 @@ pub const MmaAtomSM100UMMASparseType = opaque {
     pub const InitArgs = struct {
         shapeMnk: *const mlir.Attribute,
         numCta: c_int,
-        aMajor: cute.MajorMode,
-        bMajor: cute.MajorMode,
+        aMajor: cute_ir.MajorMode,
+        bMajor: cute_ir.MajorMode,
         aType: *const mlir.Type,
         bType: *const mlir.Type,
         cType: *const mlir.Type,
@@ -2028,10 +2028,10 @@ pub const MmaAtomSM100UMMASparseType = opaque {
     pub fn getNumCta(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetNumCta(self.ptr());
     }
-    pub fn getAMajor(self: *const Self) cute.MajorMode {
+    pub fn getAMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetAMajor(self.ptr())));
     }
-    pub fn getBMajor(self: *const Self) cute.MajorMode {
+    pub fn getBMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMASparseTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
@@ -2078,8 +2078,8 @@ pub const MmaAtomSM100UMMAType = opaque {
     pub const InitArgs = struct {
         shapeMnk: *const mlir.Attribute,
         numCta: c_int,
-        aMajor: cute.MajorMode,
-        bMajor: cute.MajorMode,
+        aMajor: cute_ir.MajorMode,
+        bMajor: cute_ir.MajorMode,
         aType: *const mlir.Type,
         bType: *const mlir.Type,
         cType: *const mlir.Type,
@@ -2097,10 +2097,10 @@ pub const MmaAtomSM100UMMAType = opaque {
     pub fn getNumCta(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetNumCta(self.ptr());
     }
-    pub fn getAMajor(self: *const Self) cute.MajorMode {
+    pub fn getAMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetAMajor(self.ptr())));
     }
-    pub fn getBMajor(self: *const Self) cute.MajorMode {
+    pub fn getBMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM100UMMATypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
@@ -2141,8 +2141,8 @@ pub const MmaAtomSM107UMMABlockScaledSparseType = opaque {
     pub const InitArgs = struct {
         shapeMnk: *const mlir.Attribute,
         numCta: c_int,
-        aMajor: cute.MajorMode,
-        bMajor: cute.MajorMode,
+        aMajor: cute_ir.MajorMode,
+        bMajor: cute_ir.MajorMode,
         aType: *const mlir.Type,
         bType: *const mlir.Type,
         cType: *const mlir.Type,
@@ -2164,10 +2164,10 @@ pub const MmaAtomSM107UMMABlockScaledSparseType = opaque {
     pub fn getNumCta(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetNumCta(self.ptr());
     }
-    pub fn getAMajor(self: *const Self) cute.MajorMode {
+    pub fn getAMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetAMajor(self.ptr())));
     }
-    pub fn getBMajor(self: *const Self) cute.MajorMode {
+    pub fn getBMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledSparseTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
@@ -2220,8 +2220,8 @@ pub const MmaAtomSM107UMMABlockScaledType = opaque {
     pub const InitArgs = struct {
         shapeMnk: *const mlir.Attribute,
         numCta: c_int,
-        aMajor: cute.MajorMode,
-        bMajor: cute.MajorMode,
+        aMajor: cute_ir.MajorMode,
+        bMajor: cute_ir.MajorMode,
         aType: *const mlir.Type,
         bType: *const mlir.Type,
         cType: *const mlir.Type,
@@ -2242,10 +2242,10 @@ pub const MmaAtomSM107UMMABlockScaledType = opaque {
     pub fn getNumCta(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetNumCta(self.ptr());
     }
-    pub fn getAMajor(self: *const Self) cute.MajorMode {
+    pub fn getAMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetAMajor(self.ptr())));
     }
-    pub fn getBMajor(self: *const Self) cute.MajorMode {
+    pub fn getBMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMABlockScaledTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
@@ -2295,8 +2295,8 @@ pub const MmaAtomSM107UMMASparseType = opaque {
     pub const InitArgs = struct {
         shapeMnk: *const mlir.Attribute,
         numCta: c_int,
-        aMajor: cute.MajorMode,
-        bMajor: cute.MajorMode,
+        aMajor: cute_ir.MajorMode,
+        bMajor: cute_ir.MajorMode,
         aType: *const mlir.Type,
         bType: *const mlir.Type,
         cType: *const mlir.Type,
@@ -2318,10 +2318,10 @@ pub const MmaAtomSM107UMMASparseType = opaque {
     pub fn getNumCta(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetNumCta(self.ptr());
     }
-    pub fn getAMajor(self: *const Self) cute.MajorMode {
+    pub fn getAMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetAMajor(self.ptr())));
     }
-    pub fn getBMajor(self: *const Self) cute.MajorMode {
+    pub fn getBMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMASparseTypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
@@ -2374,8 +2374,8 @@ pub const MmaAtomSM107UMMAType = opaque {
     pub const InitArgs = struct {
         shapeMnk: *const mlir.Attribute,
         numCta: c_int,
-        aMajor: cute.MajorMode,
-        bMajor: cute.MajorMode,
+        aMajor: cute_ir.MajorMode,
+        bMajor: cute_ir.MajorMode,
         aType: *const mlir.Type,
         bType: *const mlir.Type,
         cType: *const mlir.Type,
@@ -2395,10 +2395,10 @@ pub const MmaAtomSM107UMMAType = opaque {
     pub fn getNumCta(self: *const Self) c_int {
         return c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetNumCta(self.ptr());
     }
-    pub fn getAMajor(self: *const Self) cute.MajorMode {
+    pub fn getAMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetAMajor(self.ptr())));
     }
-    pub fn getBMajor(self: *const Self) cute.MajorMode {
+    pub fn getBMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM107UMMATypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
@@ -2628,8 +2628,8 @@ pub const MmaAtomSM90Type = opaque {
     }
     pub const InitArgs = struct {
         shapeMnk: *const mlir.Attribute,
-        aMajor: cute.MajorMode,
-        bMajor: cute.MajorMode,
+        aMajor: cute_ir.MajorMode,
+        bMajor: cute_ir.MajorMode,
         aType: *const mlir.Type,
         bType: *const mlir.Type,
         cType: *const mlir.Type,
@@ -2645,10 +2645,10 @@ pub const MmaAtomSM90Type = opaque {
     pub fn getShapeMnk(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVGPUMmaAtomSM90TypeGetShapeMnk(self.ptr()).ptr.?);
     }
-    pub fn getAMajor(self: *const Self) cute.MajorMode {
+    pub fn getAMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM90TypeGetAMajor(self.ptr())));
     }
-    pub fn getBMajor(self: *const Self) cute.MajorMode {
+    pub fn getBMajor(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMmaAtomSM90TypeGetBMajor(self.ptr())));
     }
     pub fn getAType(self: *const Self) *const mlir.Type {
@@ -3766,13 +3766,13 @@ pub const MajorModeAttr = opaque {
         return @ptrCast(self);
     }
     pub const InitArgs = struct {
-        value: cute.MajorMode,
+        value: cute_ir.MajorMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
         const result = c.mlirCuteNVGPUMajorModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) cute.MajorMode {
+    pub fn getValue(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUMajorModeAttrGetValue(self.ptr())));
     }
 };
@@ -3898,7 +3898,7 @@ pub const RmemFrgAttr = opaque {
     }
     pub const InitArgs = struct {
         valueType: *const mlir.Type,
-        operand: cute.MmaOperand,
+        operand: cute_ir.MmaOperand,
         deriveElemType: bool = false,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
@@ -3908,7 +3908,7 @@ pub const RmemFrgAttr = opaque {
     pub fn getValueType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteNVGPURmemFrgAttrGetValueType(self.ptr()).ptr.?);
     }
-    pub fn getOperand(self: *const Self) cute.MmaOperand {
+    pub fn getOperand(self: *const Self) cute_ir.MmaOperand {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPURmemFrgAttrGetOperand(self.ptr())));
     }
     pub fn getDeriveElemType(self: *const Self) bool {
@@ -3932,13 +3932,13 @@ pub const SM100CircularSmemFrgAttr = opaque {
         return @ptrCast(self);
     }
     pub const InitArgs = struct {
-        majorMode: cute.MajorMode,
+        majorMode: cute_ir.MajorMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
         const result = c.mlirCuteNVGPUSM100CircularSmemFrgAttrGet(ctx.ptr(), @backingInt(args.majorMode));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getMajorMode(self: *const Self) cute.MajorMode {
+    pub fn getMajorMode(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUSM100CircularSmemFrgAttrGetMajorMode(self.ptr())));
     }
 };
@@ -3959,13 +3959,13 @@ pub const SM100SmemFrgAttr = opaque {
         return @ptrCast(self);
     }
     pub const InitArgs = struct {
-        majorMode: cute.MajorMode,
+        majorMode: cute_ir.MajorMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
         const result = c.mlirCuteNVGPUSM100SmemFrgAttrGet(ctx.ptr(), @backingInt(args.majorMode));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getMajorMode(self: *const Self) cute.MajorMode {
+    pub fn getMajorMode(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUSM100SmemFrgAttrGetMajorMode(self.ptr())));
     }
 };
@@ -4099,13 +4099,13 @@ pub const SM107SmemFrgAttr = opaque {
         return @ptrCast(self);
     }
     pub const InitArgs = struct {
-        majorMode: cute.MajorMode,
+        majorMode: cute_ir.MajorMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
         const result = c.mlirCuteNVGPUSM107SmemFrgAttrGet(ctx.ptr(), @backingInt(args.majorMode));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getMajorMode(self: *const Self) cute.MajorMode {
+    pub fn getMajorMode(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUSM107SmemFrgAttrGetMajorMode(self.ptr())));
     }
 };
@@ -4126,13 +4126,13 @@ pub const SM90SmemFrgAttr = opaque {
         return @ptrCast(self);
     }
     pub const InitArgs = struct {
-        majorMode: cute.MajorMode,
+        majorMode: cute_ir.MajorMode,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
         const result = c.mlirCuteNVGPUSM90SmemFrgAttrGet(ctx.ptr(), @backingInt(args.majorMode));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getMajorMode(self: *const Self) cute.MajorMode {
+    pub fn getMajorMode(self: *const Self) cute_ir.MajorMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVGPUSM90SmemFrgAttrGetMajorMode(self.ptr())));
     }
 };

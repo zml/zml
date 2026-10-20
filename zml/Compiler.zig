@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const c = @import("c");
-const funcDialect = @import("mlir/dialects/func");
+const func = @import("mlir/dialects/func");
 const stablehlo = @import("mlir/dialects/stablehlo");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
@@ -64,7 +64,7 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
         inline for (.{ "func", "stablehlo", "sdy" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
         }
-        funcDialect.registerExtensions(mlir_registry);
+        func.registerExtensions(mlir_registry);
 
         mlir_global_registry = mlir_registry;
     }
@@ -398,16 +398,16 @@ pub fn resolveMesh(compiler: *const Compiler, logical_axes: anytype) *const Shar
     , .{ logical_axes, stdx.fmt.slice(compiler.meshes) });
 }
 
-pub fn Typed(comptime func: anytype) type {
+pub fn Typed(comptime func_: anytype) type {
     return struct {
         pub fn compile(
             allocator: std.mem.Allocator,
             io: std.Io,
             platform: *const Platform,
             opts: Options,
-            args: std.meta.ArgsTuple(@TypeOf(func)),
+            args: std.meta.ArgsTuple(@TypeOf(func_)),
         ) Error!Exe {
-            return Compiler.compile(allocator, io, platform, func, args, opts);
+            return Compiler.compile(allocator, io, platform, func_, args, opts);
         }
     };
 }
@@ -416,15 +416,15 @@ pub fn compile(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    comptime func: anytype,
-    args: std.meta.ArgsTuple(@TypeOf(func)),
+    comptime func_: anytype,
+    args: std.meta.ArgsTuple(@TypeOf(func_)),
     opts: Options,
 ) Error!Exe {
     return switch (platform.io_impl) {
-        .threaded => compileInternal(allocator, io, platform, func, args, opts),
+        .threaded => compileInternal(allocator, io, platform, func_, args, opts),
         .zio => try zio.blockInPlace(struct {
             fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const Platform, args_: @TypeOf(args), opts_: Options) Error!Exe {
-                return try compileInternal(allocator_, io_, platform_, func, args_, opts_);
+                return try compileInternal(allocator_, io_, platform_, func_, args_, opts_);
             }
         }.call, .{ allocator, io, platform, args, opts }),
     };
@@ -434,8 +434,8 @@ pub fn compileInternal(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    comptime func: anytype,
-    args: std.meta.ArgsTuple(@TypeOf(func)),
+    comptime func_: anytype,
+    args: std.meta.ArgsTuple(@TypeOf(func_)),
     opts: Options,
 ) Error!Exe {
     // TODO: Here we have somewhat of a requirement
@@ -461,7 +461,7 @@ pub fn compileInternal(
     var compiler: Compiler = .init(allocator, io, platform, opts);
     defer compiler.deinit();
 
-    var result = compiler.emitMlir(func, args) catch |err| switch (err) {
+    var result = compiler.emitMlir(func_, args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -596,7 +596,7 @@ pub const TensorInfo = struct {
 
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
-fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !EmitMlirResult {
+fn emitMlir(compiler: *Compiler, comptime func_: anytype, args: std.meta.ArgsTuple(@TypeOf(func_))) !EmitMlirResult {
     const module = mlir.Module.init(.unknown(compiler.mlir_ctx));
     errdefer module.deinit();
 
@@ -612,7 +612,7 @@ fn emitMlir(compiler: *Compiler, comptime func: anytype, args: std.meta.ArgsTupl
     var result = blk: {
         compiler.activate();
         defer compiler.deactivate();
-        break :blk @call(.auto, func, args);
+        break :blk @call(.auto, func_, args);
     };
 
     var output_info = try collectOutputInfo(compiler, fn_scope, &result);
@@ -706,7 +706,7 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
     const arena = arena_state.allocator();
     const mlir_ctx = compiler.mlir_ctx;
 
-    const fn_return = funcDialect.returns(mlir_ctx, output_info.items(.value), .unknown(mlir_ctx));
+    const fn_return = func.returns(mlir_ctx, output_info.items(.value), .unknown(mlir_ctx));
     _ = fn_return.appendTo(fn_scope.block);
 
     // Resolve donations
@@ -745,7 +745,7 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
     const output_types = try arena.alloc(*const mlir.Type, output_info.len);
     for (output_types, output_info.items(.value)) |*output_type, value| output_type.* = value.type_();
 
-    const mlir_func = funcDialect.func(mlir_ctx, .{
+    const mlir_func = func.func(mlir_ctx, .{
         .name = "main",
         .args = input_types,
         .results = output_types,
