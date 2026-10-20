@@ -5,18 +5,19 @@ const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-const zml = struct {
-    // Nested to disambiguate from stdx.meta
-    const meta = @import("../meta.zig");
-    const testing = @import("../testing.zig");
-};
-
 const Compiler = @import("../Compiler.zig");
 const DataType = @import("../dtype.zig").DataType;
 const mlirx = @import("../mlirx.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const Tensor = @import("../tensor.zig").Tensor;
+
+const zml = struct {
+    // Nested to disambiguate from stdx.meta
+    const meta = @import("../meta.zig");
+    const testing = @import("../testing.zig");
+};
+
 const log = std.log.scoped(.@"zml/Compiler");
 
 /// ZML operator describes computation across several devices,
@@ -220,8 +221,9 @@ noinline fn manualComputationInternal(
     };
 
     // reuse local_outputs buffer to store the final result.
-    for (0.., local_outputs, global_output_shapes) |o, output_tensor_ptr, output_shape| {
-        output_tensor_ptr.* = Tensor._resultPropagateSharding(output_shape, op.result(o));
+    for (0.., local_outputs, output_shapes) |o, output_tensor_ptr, output_shape| {
+        output_tensor_ptr.* = Tensor._result(output_shape, op.result(o));
+        output_tensor_ptr._shape = output_shape;
     }
     return local_outputs;
 }
@@ -233,9 +235,14 @@ const ChosenMesh = union(enum) {
 
 fn chooseCommonMesh(inputs: []const *const Tensor, fallback: *const Sharding.Mesh) ChosenMesh {
     var mesh: ?*const Sharding.Mesh = null;
+    var replicated_mesh: ?*const Sharding.Mesh = null;
     var mesh_source_id: u32 = @intCast(inputs.len);
     for (0.., inputs) |i, input| {
         if (input.shape()._sharding.mesh) |shape_mesh| {
+            if (input.shape().isFullyReplicated()) {
+                replicated_mesh = replicated_mesh orelse shape_mesh;
+                continue;
+            }
             if (mesh) |m| {
                 if (m != shape_mesh)
                     return .{ .incompatible = .{ mesh_source_id, @intCast(i) } };
@@ -245,7 +252,7 @@ fn chooseCommonMesh(inputs: []const *const Tensor, fallback: *const Sharding.Mes
             }
         }
     }
-    return .{ .mesh = mesh orelse fallback };
+    return .{ .mesh = mesh orelse replicated_mesh orelse fallback };
 }
 
 test chooseCommonMesh {
@@ -255,11 +262,14 @@ test chooseCommonMesh {
     const replicated = Tensor.init(.{ .a = 8 }, .f32);
     const sharded = Tensor.init(.{ .a = 8 }, .f32).withPartitioning(&first, .{ .a = .data });
     const other = Tensor.init(.{ .a = 8 }, .f32).withPartitioning(&second, .{ .a = .experts });
+    const explicit_replicated = replicated.withPartitioning(&second, .{ .a = .replicated });
 
     try std.testing.expectEqual(ChosenMesh{ .mesh = &fallback }, chooseCommonMesh(&.{}, &fallback));
     try std.testing.expectEqual(ChosenMesh{ .mesh = &fallback }, chooseCommonMesh(&.{&replicated}, &fallback));
     try std.testing.expectEqual(ChosenMesh{ .mesh = &first }, chooseCommonMesh(&.{&sharded}, &fallback));
     try std.testing.expectEqual(ChosenMesh{ .mesh = &first }, chooseCommonMesh(&.{ &replicated, &sharded, &sharded }, &fallback));
+    try std.testing.expectEqual(ChosenMesh{ .mesh = &first }, chooseCommonMesh(&.{ &explicit_replicated, &sharded }, &fallback));
+    try std.testing.expectEqual(ChosenMesh{ .mesh = &second }, chooseCommonMesh(&.{&explicit_replicated}, &fallback));
     try std.testing.expectEqual(ChosenMesh{ .incompatible = .{ 0, 1 } }, chooseCommonMesh(&.{ &sharded, &other }, &fallback));
 }
 
@@ -267,7 +277,7 @@ fn collectManualAxes(mesh: *const Sharding.Mesh, inputs: []const *const Tensor) 
     var used: [Sharding.MAX_MESH_RANK]bool = @splat(false);
     for (inputs) |input| {
         const sharding = input.shape()._sharding;
-        if (sharding.mesh == null) continue;
+        if (sharding.mesh == null or sharding.isFullyReplicated()) continue;
         std.debug.assert(sharding.mesh.? == mesh);
         for (0..input.rank()) |dim| {
             if (sharding.partition.get(dim).meshAxis()) |axis| used[axis] = true;

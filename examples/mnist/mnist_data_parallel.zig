@@ -60,7 +60,7 @@ const Mnist = struct {
             defer compiler.popLocation();
             x = layer.forward(x);
         }
-        return x.argMax(.d).indices.convert(.u8).withPartitioning(input.shape()._sharding.mesh.?, .{ .b = .data }).toMemory(.host_pinned);
+        return x.argMax(.d).indices.convert(.u8).withPartitioning(input.shape()._sharding.mesh.?, .{ .b = .data, .d = .replicated }).toMemory(.host_pinned);
     }
 
     const Layer = struct {

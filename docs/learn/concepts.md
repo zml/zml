@@ -72,7 +72,6 @@ Let's explain all that.
   computation or an input to an executable (including weights).
   - is basically a `Shape` with an attached MLIR value when in the context of a compilation.
 
-
 ## The model struct
 
 The model struct is the Zig code that describes your Neural Network (NN).

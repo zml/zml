@@ -873,10 +873,9 @@ fn fromMlirOperationWithTags(op: *const mlir.Operation, base: anytype) @TypeOf(b
         fn cb(inner_ctx: *LocalContext, tensor: *Tensor) void {
             var new = Tensor.fromMlirValue(inner_ctx.op.result(inner_ctx.index));
             stdx.debug.internalAssert(new.rank() == tensor.rank(), "expected operand result to have rank {} but got {f}", .{ tensor.rank(), new });
-            // copy tags and mesh info over
+            // Copy tags; the partitioner infers result sharding.
             // some ops can change dims eg reduceWindow, so we trust mlir here.
             new._shape._tags = tensor._shape._tags;
-            new._shape._sharding = tensor._shape._sharding;
             tensor.* = new;
             inner_ctx.index += 1;
         }
