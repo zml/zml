@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
         // Run the pipeline then
         std.debug.print("\n\nStarting testing > Pipeline\n\n", .{});
 
-        const pipeline = try block.Pipeline.init(allocator, io, platform, cli_args.folder);
+        var pipeline = try block.Pipeline.init(allocator, io, platform, cli_args.folder);
         const prompt = "A neon shop sign that reads \"QWEN IMAGE 2.1\", rainy night, reflections on wet pavement";
         try pipeline.run_once(prompt, .{ .seq_len = 16415, .compile_args = compile_args, .compile_args_buffers = compile_args_buffers });
         return;
@@ -76,7 +76,8 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("\n\nStarting testing > TransformerBlock\n\n", .{});
 
         var transformer_store: store.TransformerStore = undefined;
-        try transformer_store.load(allocator, io, platform, cli_args.folder);
+        try transformer_store.load_tensors(allocator, io, cli_args.folder);
+        try transformer_store.load_buffers(allocator, io, platform);
         defer transformer_store.deinit(allocator);
 
         try testing.testLayer(
@@ -92,7 +93,8 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("\n\nStarting testing > LanguageModel\n\n", .{});
 
         var language_model_store: store.LanguageModelStore = undefined;
-        try language_model_store.load(allocator, io, platform, cli_args.folder);
+        try language_model_store.load_tensors(allocator, io, cli_args.folder);
+        try language_model_store.load_buffers(allocator, io, platform);
         defer language_model_store.deinit(allocator);
 
         try testing.testLayer(

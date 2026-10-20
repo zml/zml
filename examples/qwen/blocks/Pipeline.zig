@@ -25,7 +25,7 @@ pub fn init(
     model_dir: [:0]const u8,
 ) !Pipeline {
     var language_model_store: store.LanguageModelStore = undefined;
-    try language_model_store.load(allocator, io, platform, model_dir);
+    try language_model_store.load_tensors(allocator, io, model_dir);
 
     return .{
         .allocator = allocator,
@@ -47,7 +47,7 @@ const Params = struct {
 };
 
 pub fn run_once(
-    self: Pipeline,
+    self: *Pipeline,
     prompt: []const u8,
     params: Params,
 ) !void {
@@ -88,6 +88,8 @@ pub fn run_once(
     );
     defer exe.deinit();
 
+    try self.language_model_store.load_buffers(self.allocator, self.io, self.platform);
+
     // Create the buffers
     var bufferized = try tokenizer.bufferize(self.allocator, self.io, self.platform, tokenized);
     defer bufferized.deinit();
@@ -101,7 +103,7 @@ pub fn run_once(
 
     exe_args.set(.{
         .{
-            .model = self.language_model_store.model_buffer,
+            .lang_model = self.language_model_store.model_buffer,
             .args = params.compile_args_buffers,
             .rng = rng,
             .timesteps = timesteps,

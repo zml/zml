@@ -6,7 +6,7 @@ const block = @import("../blocks.zig");
 
 const TransformerStore = @This();
 
-// const TRANSFORMER_BLOCK_COUNT: usize = 32;
+// const TRANSFORMER_BLOCK_COUNT: usize = 1;
 const TRANSFORMER_BLOCK_COUNT: usize = 32;
 
 store: zml.io.TensorStore = undefined,
@@ -34,11 +34,10 @@ model_buffer: zml.Bufferized(block.QwenImage21Transformer2DModel),
 //  norm_out.linear.weight                                               (4096, 4096)          BF16
 //  proj_out.weight                                                      (64, 4096)            BF16
 
-pub fn load(
+pub fn load_tensors(
     self: *TransformerStore,
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *zml.Platform,
     folder: []const u8,
 ) !void {
     var transformer_buffer: [256]u8 = undefined;
@@ -126,7 +125,9 @@ pub fn load(
         .norm_out = norm_out,
         .proj_out = proj_out,
     };
+}
 
+pub fn load_buffers(self: *TransformerStore, allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform) !void {
     self.model_buffer = try self.model.load(allocator, io, platform, &self.store);
 }
 
