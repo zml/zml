@@ -8,33 +8,30 @@ pinned in `third_party/cute_ir`, one patch giving cutegen the
 the compiler's remaining types, attributes and enums and ratio strides
 allowed, the compiler's attributes, types and enums beyond the release
 (`CuteAttrsCompiler.td`, `CuteTypesCompiler.td`, `CuteEnums.td` and the
-`CuteNVGPU*.td` files), and every operation of the compiler's registry in
-`CuteOps.td` and `CuteNVGPUOps.td`.
+`../cute_nvgpu` definitions), and every operation of the compiler's registry in
+`CuteOps.td` and the companion `CuteNVGPUOps.td`.
 
-It also carries NVIDIA's `nvvm` and `cuda` dialects as the same compiler
-registers them (`include/cute_ir/Dialect/{NVVM,Cuda}`): every operation,
-attribute, type and enum, rebuilt from the release's bindings and the live
-compiler, since no `.td` ships for them and the compiler's `nvvm` is not
-upstream's. The CuTe builder registers them, with the upstream `llvm`
-dialect, so its kernels are built without parsing any of their text.
+The companion dialects live in `../cute_nvgpu`, `../nvvm`, and `../cuda`,
+with separate Bazel targets and Zig modules. NVIDIA's `nvvm` differs from
+upstream's. The CuTe builder registers these dialects together with upstream
+`llvm`.
 
 Updating to a new DSL release means refreshing the compiler entry-point
 offsets and regenerating the `.td` files from the release's Python bindings
-and compiler. The C API (except the algebra attributes, `CuteAttributes.*`)
+and compiler. The C API (except the algebra attribute functions in `capi.cc`)
 and the Zig types, attributes, enums and operation builders are generated
 from those `.td` files and follow them.
 
 ## Zig
 
-Depend on `//mlir/dialects/cute_ir` and import `mlir/dialects/cute_ir`, or use
-`@import("mlir/dialects").cute` through the dialect aggregator.
+Depend on `//mlir/dialects/cute_ir` and import `mlir/dialects/cute_ir`.
+`cute.registerDialect(registry)` registers `cute`.
 
-`cute.registerDialects(registry)` registers `cute`, `cute_nvgpu`, and NVIDIA's
-`nvvm` and `cuda` (handles `cute_nvvm` and `cuda`: this `nvvm` and upstream's
-cannot share a registry). Cute builders, types, and attributes live directly in
-`cute`; CuteNVGPU builders and types live in `cute.nvgpu`, NVVM's in
-`cute.nvvm` and CUDA's in `cute.cuda`. `mlir/dialects/nvvm.zig` and
-`mlir/dialects/cuda.zig` are convenience builders over the last two.
+Import each companion dialect explicitly and add its Bazel dependency:
+`mlir/dialects/cute_nvgpu`, `mlir/dialects/nvvm`, and `mlir/dialects/cuda`.
+CUDA and NVVM expose generated bindings in `.ops` and convenience builders
+at the module root. NVIDIA's NVVM handle is `cute_nvvm`; its dialect cannot
+share a registry with upstream NVVM.
 
 ```zig
 const cute = @import("mlir/dialects/cute_ir");
@@ -80,11 +77,16 @@ Builders of operations with regions (`cuda.kernel`) and of terminators
 (`cuda.return`) do not verify on creation, since their blocks are completed
 afterwards; the module is verified instead.
 
-The C API is also available independently of Zig from `lib/CAPI:cute`,
-`lib/CAPI:cute_nvgpu`, `lib/CAPI:nvvm` and `lib/CAPI:cuda`, via
-`cute_ir-c/Dialect/Cute.h`, `CuteNVGPU.h`, `NVVM.h` (names prefixed
-`CuteNVVM`) and `Cuda.h`; constructors return a null handle for invalid
-parameters.
+Each dialect exposes a `:capi` target and a package-local `capi.h`, independently
+of Zig: `//mlir/dialects/cute_ir:capi`, `//mlir/dialects/cute_nvgpu:capi`,
+`//mlir/dialects/nvvm:capi`, and `//mlir/dialects/cuda:capi`. C API declarations
+and definitions are grouped by registration, attributes, and types in
+`capi.h` and `capi.cc`. Constructors return a null handle for invalid parameters.
+
+C++ implementations, headers, and TableGen sources live directly in each
+dialect package. Generated `.inc` files are emitted into the same package
+under Bazel's output tree. Virtual headers preserve upstream CuTe include
+paths required by the release sources.
 
 ```sh
 bazel test //mlir/dialects/cute_ir:test

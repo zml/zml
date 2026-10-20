@@ -1,36 +1,208 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "capi",
+    srcs = ["capi.cc"],
+    hdrs = ["capi.h"],
+    tags = ["manual"],
+    deps = [
+        ":dialect",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+    alwayslink = True,
+)
 
 zig_library(
     name = "cute_ir",
-    srcs = [
-        "cuda.zig",
-        "cute_nvgpu.zig",
-        "nvvm.zig",
-    ],
     import_name = "mlir/dialects/cute_ir",
     main = "cute_ir.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
+        ":capi",
         "//mlir",
-        "//mlir:c",
-        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cuda",
-        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cute",
-        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:cute_nvgpu",
-        "//mlir/dialects/cute_ir/include/cute_ir-c/Dialect:nvvm",
-        "//mlir/dialects/cute_ir/lib/CAPI:cuda",
-        "//mlir/dialects/cute_ir/lib/CAPI:cute",
-        "//mlir/dialects/cute_ir/lib/CAPI:cute_nvgpu",
-        "//mlir/dialects/cute_ir/lib/CAPI:nvvm",
         "//stdx",
     ],
 )
 
 zig_test(
-    name = "zig_test",
-    deps = [":cute_ir"],
+    name = "test",
+    main = "test.zig",
+    deps = [
+        ":cute_ir",
+        "//mlir",
+        "//mlir/dialects/cuda",
+        "//mlir/dialects/cute_nvgpu",
+        "//mlir/dialects/nvvm",
+    ],
 )
 
-test_suite(
-    name = "test",
-    tests = [":zig_test"],
+td_library(
+    name = "tabledefs",
+    srcs = [
+        "CuteAttrsAll.td",
+        "CuteAttrsCompiler.td",
+        "CuteEnums.td",
+        "CuteOps.td",
+        "CuteTypesAll.td",
+        "CuteTypesCompiler.td",
+    ],
+    includes = ["/"],
+    deps = ["@cute_ir//:cute_ir_dialect_td"],
+)
+
+gentbl_cc_library(
+    name = "enums_inc_gen",
+    tbl_outs = [
+        (
+            ["-gen-enum-decls"],
+            "CuteEnums.h.inc",
+        ),
+        (
+            ["-gen-enum-defs"],
+            "CuteEnums.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteEnums.td",
+    deps = [":tabledefs"],
+)
+
+gentbl_cc_library(
+    name = "attrs_inc_gen",
+    tbl_outs = [
+        (
+            [
+                "-gen-attrdef-decls",
+                "-attrdefs-dialect=cute",
+            ],
+            "CuteAttrDecls.h.inc",
+        ),
+        (
+            [
+                "-gen-attrdef-defs",
+                "-attrdefs-dialect=cute",
+            ],
+            "CuteAttrs.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteAttrsAll.td",
+    deps = [":tabledefs"],
+)
+
+genrule(
+    name = "attrs_h_inc",
+    srcs = ["CuteAttrDecls.h.inc"],
+    outs = ["CuteAttrs.h.inc"],
+    cmd = "(echo '#ifdef GET_ATTRDEF_CLASSES'; " +
+          "echo '#include \"cute_ir/Dialect/Cute/IR/CuteEnums.h.inc\"'; " +
+          "echo '#endif'; cat $<) > $@",
+)
+
+gentbl_cc_library(
+    name = "types_inc_gen",
+    tbl_outs = [
+        (
+            [
+                "-gen-typedef-decls",
+                "-typedefs-dialect=cute",
+            ],
+            "CuteTypes.h.inc",
+        ),
+        (
+            [
+                "-gen-typedef-defs",
+                "-typedefs-dialect=cute",
+            ],
+            "CuteTypes.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteTypesAll.td",
+    deps = [":tabledefs"],
+)
+
+gentbl_cc_library(
+    name = "ops_inc_gen",
+    tbl_outs = [
+        (
+            ["-gen-op-decls"],
+            "CuteOps.h.inc",
+        ),
+        (
+            ["-gen-op-defs"],
+            "CuteOps.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteOps.td",
+    deps = [":tabledefs"],
+)
+
+cc_library(
+    name = "headers",
+    hdrs = [
+        "CuteAttrs.h.inc",
+        "CuteInference.h",
+    ],
+    deps = [
+        ":attrs_inc_gen",
+        ":enums_inc_gen",
+        ":ops_inc_gen",
+        ":types_inc_gen",
+        ":upstream_generated_headers",
+        "@cute_ir//:cute_ir_dialect_header",
+        "@cute_ir//:cutegen",
+        "@llvm-project//mlir:DataLayoutInterfaces",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:SideEffectInterfaces",
+    ],
+)
+
+cc_library(
+    name = "dialect",
+    srcs = [
+        "CuteInference.cpp",
+        "CuteOps.cpp",
+        "CuteTypes.cpp",
+        "@cute_ir//:cute_ir/lib/Dialect/IR/CuteAttributes.cpp",
+        "@cute_ir//:cute_ir/lib/Dialect/IR/CuteDialect.cpp",
+    ],
+    deps = [
+        ":headers",
+        "//mlir/dialects/cute_nvgpu:headers",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:MathDialect",
+        "@llvm-project//mlir:NVVMDialect",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:UBDialect",
+    ],
+)
+
+# Upstream CuTe sources retain their generated-header include paths.
+cc_library(
+    name = "upstream_generated_headers",
+    hdrs = [
+        "CuteAttrDecls.h.inc",
+        "CuteAttrs.cpp.inc",
+        "CuteAttrs.h.inc",
+        "CuteEnums.cpp.inc",
+        "CuteEnums.h.inc",
+        "CuteOps.cpp.inc",
+        "CuteOps.h.inc",
+        "CuteTypes.cpp.inc",
+        "CuteTypes.h.inc",
+    ],
+    include_prefix = "cute_ir/Dialect/Cute/IR",
+    strip_include_prefix = ".",
 )

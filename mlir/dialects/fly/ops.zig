@@ -135,9 +135,17 @@ pub fn add_offset(ctx: *mlir.Context, ptr: *const mlir.Value, offset: *const mli
 }
 
 /// `fly.append`. Result types are inferred.
-pub fn append(ctx: *mlir.Context, tuple: *const mlir.Value, elem: *const mlir.Value, n: ?*const mlir.Attribute, location: *const mlir.Location) *mlir.Operation {
+pub fn append(
+    ctx: *mlir.Context,
+    tuple: *const mlir.Value,
+    elem: *const mlir.Value,
+    opts: struct {
+        n: ?*const mlir.Attribute = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attributes: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
-    if (n) |present| attributes.appendAssumeCapacity(.named(ctx, "n", present));
+    if (opts.n) |present| attributes.appendAssumeCapacity(.named(ctx, "n", present));
     return make(ctx, "fly.append", .{
         .operands = .{ .flat = &.{ tuple, elem } },
         .attributes = attributes.constSlice(),
@@ -195,18 +203,32 @@ pub fn ceil_div(ctx: *mlir.Context, lhs: *const mlir.Value, rhs: *const mlir.Val
 }
 
 /// `fly.coalesce`. Result types are inferred.
-pub fn coalesce(ctx: *mlir.Context, layout: *const mlir.Value, pattern: ?*const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+pub fn coalesce(
+    ctx: *mlir.Context,
+    layout: *const mlir.Value,
+    opts: struct {
+        pattern: ?*const mlir.Value = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     return make(ctx, "fly.coalesce", .{
-        .operands = .{ .flat = if (pattern) |present| &.{ layout, present } else &.{layout} },
+        .operands = .{ .flat = if (opts.pattern) |present| &.{ layout, present } else &.{layout} },
         .result_type_inference = true,
         .location = location,
     });
 }
 
 /// `fly.complement`. Result types are inferred.
-pub fn complement(ctx: *mlir.Context, layout: *const mlir.Value, codomain_size: ?*const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+pub fn complement(
+    ctx: *mlir.Context,
+    layout: *const mlir.Value,
+    opts: struct {
+        codomain_size: ?*const mlir.Value = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     return make(ctx, "fly.complement", .{
-        .operands = .{ .flat = if (codomain_size) |present| &.{ layout, present } else &.{layout} },
+        .operands = .{ .flat = if (opts.codomain_size) |present| &.{ layout, present } else &.{layout} },
         .result_type_inference = true,
         .location = location,
     });
@@ -258,29 +280,57 @@ pub fn coprofile(ctx: *mlir.Context, layout: *const mlir.Value, location: *const
 }
 
 /// `fly.copy`. No results.
-pub fn copy(ctx: *mlir.Context, copy_atom: *const mlir.Value, src: *const mlir.Value, dst: *const mlir.Value, pred: ?*const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+pub fn copy(
+    ctx: *mlir.Context,
+    copy_atom: *const mlir.Value,
+    src: *const mlir.Value,
+    dst: *const mlir.Value,
+    opts: struct {
+        pred: ?*const mlir.Value = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     return make(ctx, "fly.copy", .{
-        .operands = .{ .flat = if (pred) |present| &.{ copy_atom, src, dst, present } else &.{ copy_atom, src, dst } },
+        .operands = .{ .flat = if (opts.pred) |present| &.{ copy_atom, src, dst, present } else &.{ copy_atom, src, dst } },
         .location = location,
     });
 }
 
 /// `fly.copy_atom_call`. No results.
-pub fn copy_atom_call(ctx: *mlir.Context, copy_atom: *const mlir.Value, src: *const mlir.Value, dst: *const mlir.Value, pred: ?*const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+pub fn copy_atom_call(
+    ctx: *mlir.Context,
+    copy_atom: *const mlir.Value,
+    src: *const mlir.Value,
+    dst: *const mlir.Value,
+    opts: struct {
+        pred: ?*const mlir.Value = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     return make(ctx, "fly.copy_atom_call", .{
-        .operands = .{ .flat = if (pred) |present| &.{ copy_atom, src, dst, present } else &.{ copy_atom, src, dst } },
+        .operands = .{ .flat = if (opts.pred) |present| &.{ copy_atom, src, dst, present } else &.{ copy_atom, src, dst } },
         .location = location,
     });
 }
 
 /// `fly.copy_atom_call_ssa`. Result types are explicit.
-pub fn copy_atom_call_ssa(ctx: *mlir.Context, copy_atom: *const mlir.Value, src: *const mlir.Value, dst: ?*const mlir.Value, pred: ?*const mlir.Value, results_types: []const *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+pub fn copy_atom_call_ssa(
+    ctx: *mlir.Context,
+    copy_atom: *const mlir.Value,
+    src: *const mlir.Value,
+    results_types: []const *const mlir.Type,
+    opts: struct {
+        dst: ?*const mlir.Value = null,
+        pred: ?*const mlir.Value = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     return make(ctx, "fly.copy_atom_call_ssa", .{
         .operands = .{ .variadic = &.{
             &.{copy_atom},
             &.{src},
-            if (dst) |present| &.{present} else &.{},
-            if (pred) |present| &.{present} else &.{},
+            if (opts.dst) |present| &.{present} else &.{},
+            if (opts.pred) |present| &.{present} else &.{},
         } },
         .results = .{ .flat = results_types },
         .location = location,
@@ -378,9 +428,21 @@ pub fn flat_product(ctx: *mlir.Context, layout: *const mlir.Value, tile: *const 
 }
 
 /// `fly.gemm`. Fully expand tiled GEMM with variadic A and B operand groups. No results.
-pub fn gemm(ctx: *mlir.Context, mma_atom: *const mlir.Value, d: *const mlir.Value, a: []const *const mlir.Value, b: []const *const mlir.Value, c: *const mlir.Value, traversal_layout: ?*const mlir.Value, traversal_order: ?*const mlir.Attribute, location: *const mlir.Location) *mlir.Operation {
+pub fn gemm(
+    ctx: *mlir.Context,
+    mma_atom: *const mlir.Value,
+    d: *const mlir.Value,
+    a: []const *const mlir.Value,
+    b: []const *const mlir.Value,
+    c: *const mlir.Value,
+    opts: struct {
+        traversal_layout: ?*const mlir.Value = null,
+        traversal_order: ?*const mlir.Attribute = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attributes: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
-    if (traversal_order) |present| attributes.appendAssumeCapacity(.named(ctx, "traversalOrder", present));
+    if (opts.traversal_order) |present| attributes.appendAssumeCapacity(.named(ctx, "traversalOrder", present));
     return make(ctx, "fly.gemm", .{
         .operands = .{ .variadic = &.{
             &.{mma_atom},
@@ -388,7 +450,7 @@ pub fn gemm(ctx: *mlir.Context, mma_atom: *const mlir.Value, d: *const mlir.Valu
             a,
             b,
             &.{c},
-            if (traversal_layout) |present| &.{present} else &.{},
+            if (opts.traversal_layout) |present| &.{present} else &.{},
         } },
         .attributes = attributes.constSlice(),
         .location = location,
@@ -461,9 +523,16 @@ pub fn get_layout(ctx: *mlir.Context, memref: *const mlir.Value, location: *cons
 }
 
 /// `fly.get_leaves`. Result types are inferred.
-pub fn get_leaves(ctx: *mlir.Context, input: *const mlir.Value, dynamic_only: ?*const mlir.Attribute, location: *const mlir.Location) *mlir.Operation {
+pub fn get_leaves(
+    ctx: *mlir.Context,
+    input: *const mlir.Value,
+    opts: struct {
+        dynamic_only: ?*const mlir.Attribute = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attributes: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
-    if (dynamic_only) |present| attributes.appendAssumeCapacity(.named(ctx, "dynamicOnly", present));
+    if (opts.dynamic_only) |present| attributes.appendAssumeCapacity(.named(ctx, "dynamicOnly", present));
     return make(ctx, "fly.get_leaves", .{
         .operands = .{ .flat = &.{input} },
         .attributes = attributes.constSlice(),
@@ -678,9 +747,16 @@ pub fn make_fragment_layout_like(ctx: *mlir.Context, src: *const mlir.Value, loc
 }
 
 /// `fly.make_fragment_like`. Result types are inferred.
-pub fn make_fragment_like(ctx: *mlir.Context, src: *const mlir.Value, dtype: ?*const mlir.Attribute, location: *const mlir.Location) *mlir.Operation {
+pub fn make_fragment_like(
+    ctx: *mlir.Context,
+    src: *const mlir.Value,
+    opts: struct {
+        dtype: ?*const mlir.Attribute = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attributes: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
-    if (dtype) |present| attributes.appendAssumeCapacity(.named(ctx, "dtype", present));
+    if (opts.dtype) |present| attributes.appendAssumeCapacity(.named(ctx, "dtype", present));
     return make(ctx, "fly.make_fragment_like", .{
         .operands = .{ .flat = &.{src} },
         .attributes = attributes.constSlice(),
@@ -743,9 +819,17 @@ pub fn make_ordered_layout(ctx: *mlir.Context, shape: *const mlir.Value, order: 
 }
 
 /// `fly.make_ptr`. Result types are explicit.
-pub fn make_ptr(ctx: *mlir.Context, args: []const *const mlir.Value, result_type: *const mlir.Type, dict_attrs: ?*const mlir.Attribute, location: *const mlir.Location) *mlir.Operation {
+pub fn make_ptr(
+    ctx: *mlir.Context,
+    args: []const *const mlir.Value,
+    result_type: *const mlir.Type,
+    opts: struct {
+        dict_attrs: ?*const mlir.Attribute = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attributes: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
-    if (dict_attrs) |present| attributes.appendAssumeCapacity(.named(ctx, "dictAttrs", present));
+    if (opts.dict_attrs) |present| attributes.appendAssumeCapacity(.named(ctx, "dictAttrs", present));
     return make(ctx, "fly.make_ptr", .{
         .operands = .{ .flat = args },
         .results = .{ .flat = &.{result_type} },
@@ -782,9 +866,17 @@ pub fn make_tiled_copy(ctx: *mlir.Context, copy_atom: *const mlir.Value, layout_
 }
 
 /// `fly.make_tiled_mma`. Result types are inferred.
-pub fn make_tiled_mma(ctx: *mlir.Context, mma_atom: *const mlir.Value, atom_layout: *const mlir.Value, permutation: ?*const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+pub fn make_tiled_mma(
+    ctx: *mlir.Context,
+    mma_atom: *const mlir.Value,
+    atom_layout: *const mlir.Value,
+    opts: struct {
+        permutation: ?*const mlir.Value = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     return make(ctx, "fly.make_tiled_mma", .{
-        .operands = .{ .flat = if (permutation) |present| &.{ mma_atom, atom_layout, present } else &.{ mma_atom, atom_layout } },
+        .operands = .{ .flat = if (opts.permutation) |present| &.{ mma_atom, atom_layout, present } else &.{ mma_atom, atom_layout } },
         .result_type_inference = true,
         .location = location,
     });
@@ -843,10 +935,19 @@ pub fn memref_store_vec(ctx: *mlir.Context, vector: *const mlir.Value, memref: *
 }
 
 /// `fly.mma.make_fragment`. Result types are inferred.
-pub fn mma_make_fragment(ctx: *mlir.Context, tiled_mma: *const mlir.Value, input: *const mlir.Value, operand_id: *const mlir.Attribute, stages: ?*const mlir.Attribute, location: *const mlir.Location) *mlir.Operation {
+pub fn mma_make_fragment(
+    ctx: *mlir.Context,
+    tiled_mma: *const mlir.Value,
+    input: *const mlir.Value,
+    operand_id: *const mlir.Attribute,
+    opts: struct {
+        stages: ?*const mlir.Attribute = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attributes: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
     attributes.appendAssumeCapacity(.named(ctx, "operand_id", operand_id));
-    if (stages) |present| attributes.appendAssumeCapacity(.named(ctx, "stages", present));
+    if (opts.stages) |present| attributes.appendAssumeCapacity(.named(ctx, "stages", present));
     return make(ctx, "fly.mma.make_fragment", .{
         .operands = .{ .flat = &.{ tiled_mma, input } },
         .attributes = attributes.constSlice(),
@@ -870,11 +971,22 @@ pub fn mma_atom_call(ctx: *mlir.Context, mma_atom: *const mlir.Value, d: *const 
 }
 
 /// `fly.mma_atom_call_ssa`. Result types are explicit.
-pub fn mma_atom_call_ssa(ctx: *mlir.Context, mma_atom: *const mlir.Value, d: ?*const mlir.Value, a: []const *const mlir.Value, b: []const *const mlir.Value, c: *const mlir.Value, results_types: []const *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+pub fn mma_atom_call_ssa(
+    ctx: *mlir.Context,
+    mma_atom: *const mlir.Value,
+    a: []const *const mlir.Value,
+    b: []const *const mlir.Value,
+    c: *const mlir.Value,
+    results_types: []const *const mlir.Type,
+    opts: struct {
+        d: ?*const mlir.Value = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     return make(ctx, "fly.mma_atom_call_ssa", .{
         .operands = .{ .variadic = &.{
             &.{mma_atom},
-            if (d) |present| &.{present} else &.{},
+            if (opts.d) |present| &.{present} else &.{},
             a,
             b,
             &.{c},
@@ -885,9 +997,17 @@ pub fn mma_atom_call_ssa(ctx: *mlir.Context, mma_atom: *const mlir.Value, d: ?*c
 }
 
 /// `fly.prepend`. Result types are inferred.
-pub fn prepend(ctx: *mlir.Context, tuple: *const mlir.Value, elem: *const mlir.Value, n: ?*const mlir.Attribute, location: *const mlir.Location) *mlir.Operation {
+pub fn prepend(
+    ctx: *mlir.Context,
+    tuple: *const mlir.Value,
+    elem: *const mlir.Value,
+    opts: struct {
+        n: ?*const mlir.Attribute = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attributes: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
-    if (n) |present| attributes.appendAssumeCapacity(.named(ctx, "n", present));
+    if (opts.n) |present| attributes.appendAssumeCapacity(.named(ctx, "n", present));
     return make(ctx, "fly.prepend", .{
         .operands = .{ .flat = &.{ tuple, elem } },
         .attributes = attributes.constSlice(),

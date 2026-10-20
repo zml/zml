@@ -1,0 +1,32 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "ub",
+    import_name = "mlir/dialects/ub",
+    main = "ub.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":capi",
+        "//mlir",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [
+        ":ub",
+    ],
+)
+
+cc_library(
+    name = "capi",
+    srcs = ["capi.cc"],
+    hdrs = ["capi.h"],
+    deps = [
+        "@llvm-project//mlir:CAPIIR",
+        "@llvm-project//mlir:UBDialect",
+    ],
+    alwayslink = True,
+)

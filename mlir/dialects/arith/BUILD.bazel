@@ -1,0 +1,33 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+cc_library(
+    name = "capi",
+    srcs = ["capi.cc"],
+    hdrs = ["capi.h"],
+    tags = ["manual"],
+    deps = [
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+    alwayslink = True,
+)
+
+zig_library(
+    name = "arith",
+    import_name = "mlir/dialects/arith",
+    main = "arith.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":capi",
+        "//mlir",
+        "//stdx",
+        "@llvm-project//mlir:CAPIArith",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":arith"],
+)
