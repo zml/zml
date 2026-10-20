@@ -114,12 +114,33 @@ jobs:
             common --strategy=TestRunner=local
             ${{ format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
 
+      - name: Report self hosted storage before
+        if: ${{ contains(matrix.runner_labels, 'self-hosted') }}
+        continue-on-error: true
+        env:
+          STORAGE_PHASE: before
+        run: &report-self-hosted-storage |
+          output_base=$(bazel info output_base) || output_base="unavailable"
+          disk_usage=$(df -H)
+          message=$(printf 'Bazel output base: %s\n\n%s' "$output_base" "$disk_usage")
+          message=${message//'%'/'%25'}
+          message=${message//$'\r'/'%0D'}
+          message=${message//$'\n'/'%0A'}
+          printf '::notice title=Self hosted storage (%s)::%s\n' "$STORAGE_PHASE" "$message"
+
       - run: bazel mod graph
       - run: bazel query ${{ matrix.bazel_common_opts }} --output=graph //...
       - run: bazel cquery ${{ matrix.bazel_common_opts }} ${{ matrix.bazel_build_opts }} //...
       - run: bazel build ${{ matrix.bazel_common_opts }} ${{ matrix.bazel_build_opts }} //...
       - if: ${{ matrix.run_tests }}
         run: bazel test ${{ matrix.bazel_common_opts }} ${{ matrix.bazel_build_opts }} //...
+
+      - name: Report self hosted storage after
+        if: ${{ always() && contains(matrix.runner_labels, 'self-hosted') }}
+        continue-on-error: true
+        env:
+          STORAGE_PHASE: after
+        run: *report-self-hosted-storage
 
   lint:
     runs-on:
