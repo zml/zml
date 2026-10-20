@@ -13,67 +13,91 @@ concurrency:
 
 jobs:
   ci:
-    name: ci-${{ matrix.target }}
+    name: ci-${{ matrix.target }}-${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: cpu
+            arch: amd64
             bazel_opts: ""
             run_tests: true
             runner_labels:
-              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-cpu
-              - runner=16cpu-linux-x64
-              - family=c8+c7
-              - image=ubuntu24-amd64
-              - volume=80gb
-              - extras=s3-cache
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-cpu-amd64
+              - runner=large-runner-amd64
 
           - target: neuron
+            arch: amd64
             bazel_opts: "--@zml//platforms:neuron=true --@zml//platforms:cpu=false"
             run_tests: false
             runner_labels:
-              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-neuron
-              - runner=16cpu-linux-x64
-              - family=c8+c7
-              - image=ubuntu24-amd64
-              - volume=80gb
-              - extras=s3-cache
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-neuron-amd64
+              - runner=large-runner-amd64
 
           - target: tpu
+            arch: amd64
             bazel_opts: "--@zml//platforms:tpu=true --@zml//platforms:cpu=false"
             run_tests: false
             runner_labels:
-              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-tpu
-              - runner=16cpu-linux-x64
-              - family=c8+c7
-              - image=ubuntu24-amd64
-              - volume=80gb
-              - extras=s3-cache
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-tpu-amd64
+              - runner=large-runner-amd64
 
           - target: cuda
+            arch: amd64
             bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
             run_tests: true
-            runner_labels: ["self-hosted", "platform=cuda"]
+            runner_labels: ["self-hosted", "linux", "x64", "platform=cuda"]
+
+          - target: cuda
+            arch: arm64
+            bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
+            run_tests: false
+            runner_labels:
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-cuda-arm64
+              - runner=large-runner-arm64
 
           - target: rocm
+            arch: amd64
             bazel_opts: "--@zml//platforms:rocm=true --@zml//platforms:cpu=false"
             run_tests: true
-            runner_labels: ["self-hosted", "platform=rocm"]
+            runner_labels: ["self-hosted", "linux", "x64", "platform=rocm"]
 
-          # Todo : add missing platforms like Metal / oneAPI / Furiosa ...
+          - target: oneapi
+            arch: amd64
+            bazel_opts: "--@zml//platforms:oneapi=true --@zml//platforms:cpu=false"
+            run_tests: false
+            runner_labels:
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-oneapi-amd64
+              - runner=large-runner-amd64
+
+          - target: metal
+            arch: arm64
+            bazel_opts: "--@zml//platforms:metal=true --@zml//platforms:cpu=false --platforms=@zml//platforms:macos_arm64"
+            run_tests: false
+            runner_labels:
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-metal-arm64
+              - runner=large-runner-amd64
+
+          - target: furiosa
+            arch: amd64
+            bazel_opts: "--@zml//platforms:furiosa=true --@zml//platforms:cpu=false"
+            run_tests: false
+            runner_labels:
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-furiosa-amd64
+              - runner=large-runner-amd64
 
     runs-on: ${{ matrix.runner_labels }}
     steps:
-      - uses: runs-on/action@v2.1.0
+      - uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Ensure self hosted cache permissions
+        if: ${{ contains(matrix.runner_labels, 'self-hosted') }}
         run: mkdir -p /tmp/zig-cache && mkdir -p /tmp/zml && sudo chmod -R 777 /tmp/zig-cache && sudo chmod -R 777 /tmp/zml
 
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.19.0
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
           bazelisk-version: 1.29.0
           bazelisk-cache: true
@@ -90,7 +114,7 @@ jobs:
             ${{ format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
 
       - run: bazel mod graph
-      - run: bazel query --output=graph ${{ matrix.bazel_opts }} //...
+      - run: bazel query ${{ matrix.bazel_opts }} --output=graph //...
       - run: bazel cquery ${{ matrix.bazel_opts }} //...
       - run: bazel build ${{ matrix.bazel_opts }} //...
       - if: ${{ matrix.run_tests }}
@@ -99,17 +123,16 @@ jobs:
   lint:
     runs-on:
       - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-lint
-      - runner=4cpu-linux-x64
-      - image=ubuntu24-amd64
-      - volume=80gb
-      - extras=s3-cache
+      - runner=small-runner-amd64
     steps:
-      - uses: runs-on/action@v2.1.0
+      - uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2.2.1
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
         with:
           version: 0.17.0
           mirror: https://mirror.zml.ai/zig
