@@ -639,6 +639,9 @@ test "FusedMoe emits each FP8 and MXFP4 scaling path" {
 /// Direct port of Python `moe_align_block_size_kernel`. pid==0 runs the
 /// histogram + cumsum + block-to-expert assignment pass; pid==1 fills
 /// sorted_token_ids with NUMEL.
+///
+/// Block assignment are set up to `num_tokens_post_padded` and the remaining blocks of
+/// `expert_ids` are not set to a sentinel value.
 pub const MoeAlignBlockSize = struct {
     pub const Cfg = struct {
         numel: usize,
