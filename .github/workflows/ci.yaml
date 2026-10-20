@@ -114,19 +114,27 @@ jobs:
             common --strategy=TestRunner=local
             ${{ format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
 
-      - name: Report self hosted storage before
+      - name: Self hosted storage before
+        id: storage_before
         if: ${{ contains(matrix.runner_labels, 'self-hosted') }}
         continue-on-error: true
-        env:
-          STORAGE_PHASE: before
-        run: &report-self-hosted-storage |
-          output_base=$(bazel info output_base) || output_base="unavailable"
-          disk_usage=$(df -H)
-          message=$(printf 'Bazel output base: %s\n\n%s' "$output_base" "$disk_usage")
-          message=${message//'%'/'%25'}
-          message=${message//$'\r'/'%0D'}
-          message=${message//$'\n'/'%0A'}
-          printf '::notice title=Self hosted storage (%s)::%s\n' "$STORAGE_PHASE" "$message"
+        shell: bash
+        run: &measure-self-hosted-storage |
+          output_base=$(bazel info output_base) || output_base=""
+          bazel_size="unavailable"
+          if [[ -n "$output_base" ]]; then
+            bazel_size=$(du -sh --si -- "$output_base" | cut -f1) || bazel_size="unavailable"
+          fi
+          disks=$(df -H --local --output=source,size,used,avail,pcent,target |
+            awk '$1 ~ /^\/dev\// && $1 !~ /^\/dev\/loop/ && !seen[$1]++ {
+              printf "%s%s: %s / %s used (%s), %s free", separator, $6, $3, $2, $5, $4
+              separator = "; "
+            } END {if (separator == "") printf "none"}') || disks="unavailable"
+          {
+            printf 'output_base=%s\n' "$output_base"
+            printf 'bazel_size=%s\n' "$bazel_size"
+            printf 'disks=%s\n' "$disks"
+          } >> "$GITHUB_OUTPUT"
 
       - run: bazel mod graph
       - run: bazel query ${{ matrix.bazel_common_opts }} --output=graph //...
@@ -135,12 +143,29 @@ jobs:
       - if: ${{ matrix.run_tests }}
         run: bazel test ${{ matrix.bazel_common_opts }} ${{ matrix.bazel_build_opts }} //...
 
-      - name: Report self hosted storage after
+      - name: Self hosted storage after
+        id: storage_after
         if: ${{ always() && contains(matrix.runner_labels, 'self-hosted') }}
         continue-on-error: true
+        shell: bash
+        run: *measure-self-hosted-storage
+
+      - name: Report self hosted storage
+        if: ${{ always() && contains(matrix.runner_labels, 'self-hosted') }}
         env:
-          STORAGE_PHASE: after
-        run: *report-self-hosted-storage
+          STORAGE_JOB: ${{ github.job }}-${{ matrix.target }}-${{ matrix.arch }}
+          OUTPUT_BASE: ${{ steps.storage_after.outputs.output_base || steps.storage_before.outputs.output_base || 'unavailable' }}
+          SIZE_BEFORE: ${{ steps.storage_before.outputs.bazel_size || 'unavailable' }}
+          SIZE_AFTER: ${{ steps.storage_after.outputs.bazel_size || 'unavailable' }}
+          DISKS_BEFORE: ${{ steps.storage_before.outputs.disks || 'unavailable' }}
+          DISKS_AFTER: ${{ steps.storage_after.outputs.disks || 'unavailable' }}
+        run: |
+          message=$(printf 'Runner: %s\nBazel output base: %s\nBazel directory size: %s -> %s\nDisks before: %s\nDisks after: %s' \
+            "$RUNNER_NAME" "$OUTPUT_BASE" "$SIZE_BEFORE" "$SIZE_AFTER" "$DISKS_BEFORE" "$DISKS_AFTER")
+          message=${message//'%'/'%25'}
+          message=${message//$'\r'/'%0D'}
+          message=${message//$'\n'/'%0A'}
+          printf '::notice title=%s: storage ::%s\n' "$STORAGE_JOB" "$message"
 
   lint:
     runs-on:
