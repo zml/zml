@@ -22,7 +22,6 @@ pub const KernelUnifiedAttention2dPtr = struct {
     pub const Config = struct {
         q_dtype: DType,
         kv_dtype: DType,
-        kv_stride_align: [6]i32 = @splat(1),
         o_dtype: DType,
         scale_dtype: DType = .f32,
 
@@ -160,7 +159,6 @@ pub const KernelUnifiedAttention3dPtr = struct {
     pub const Config = struct {
         q_dtype: DType,
         kv_dtype: DType,
-        kv_stride_align: [6]i32 = @splat(1),
         scale_dtype: DType = .f32,
 
         num_query_heads: i64,
@@ -428,25 +426,6 @@ fn dequantKv(loaded: Value, scale: Value, kv_is_fp8: bool, q_dtype: DType) Value
     return loaded.to(.f32).mul(scale).to(q_dtype);
 }
 
-pub fn kvStrideAlign(k_strides: []const i64, v_strides: []const i64) [6]i32 {
-    var result: [6]i32 = undefined;
-    for (k_strides[0..3], v_strides[0..3], 0..) |k_stride, v_stride, i| {
-        result[i] = @intCast(@min(16, k_stride & -k_stride));
-        result[3 + i] = @intCast(@min(16, v_stride & -v_stride));
-    }
-    return result;
-}
-
-/// Triton can't prove KV strides are aligned: the hint sets tt.divisibility so triton can SIMD the strides
-fn hintKvStrideAlignment(k: *Builder, alignment: [6]i32, strides: []const Value) void {
-    for (alignment, strides) |elems, stride| {
-        if (elems <= 1) continue;
-        const shaped: *const mlir.ShapedType = @ptrCast(mlir.Type.rankedTensor(&.{1}, DType.i32.toMlir(k.ctx)));
-        const attr: *const mlir.Attribute = .denseElements(shaped, &[_]i32{elems});
-        stride.inner.owner().setAttributeByName("tt.divisibility", attr);
-    }
-}
-
 fn kernelUnifiedAttention2d(
     k: *Builder,
     output_ptr: Value,
@@ -489,8 +468,6 @@ fn kernelUnifiedAttention2d(
     const NUM_QUERIES_PER_KV: i64 = config.num_queries_per_kv;
     const NUM_QUERY_HEADS: i64 = config.num_query_heads;
     const SLIDING_WINDOW: i64 = config.sliding_window;
-
-    hintKvStrideAlignment(k, config.kv_stride_align, &.{ stride_k_cache_0, stride_k_cache_1, stride_k_cache_2, stride_v_cache_0, stride_v_cache_1, stride_v_cache_2 });
 
     const kv_head_idx = k.programId(.x);
     const q_block_global_idx = k.programId(.y);
@@ -820,8 +797,6 @@ fn kernelUnifiedAttention3d(
     const NUM_QUERY_HEADS: i64 = config.num_query_heads;
     const NUM_SEGMENTS_PER_SEQ: i64 = config.num_segments_per_seq;
     const SLIDING_WINDOW: i64 = config.sliding_window;
-
-    hintKvStrideAlignment(k, config.kv_stride_align, &.{ stride_k_cache_0, stride_k_cache_1, stride_k_cache_2, stride_v_cache_0, stride_v_cache_1, stride_v_cache_2 });
 
     const q_block_global_idx = k.programId(.x);
     const kv_head_idx = k.programId(.y);
