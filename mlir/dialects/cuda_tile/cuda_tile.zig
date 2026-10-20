@@ -1,6 +1,6 @@
 //! Zig bindings for NVIDIA's `cuda_tile` MLIR dialect (CUDA Tile IR): one
 //! function per op in `Ops.td` order. Types and attributes go through the
-//! dialect's C API, completed by `cuda_tile_capi.h` where it has no getter.
+//! dialect's C API, completed by `capi.h` where it has no getter.
 
 const std = @import("std");
 
@@ -176,7 +176,9 @@ pub const PartitionViewType = opaque {
         tile_shape: []const i32,
         tensor_view: *const mlir.Type,
         dim_map: []const i32,
-        padding: ?PaddingValue,
+        opts: struct {
+            padding: ?PaddingValue = null,
+        },
     ) *const PartitionViewType {
         const tile_attr: *const mlir.Attribute = .denseArray(ctx, .i32, tile_shape);
         const map = identityDimMap(dim_map, tile_shape.len);
@@ -186,7 +188,7 @@ pub const PartitionViewType = opaque {
             tensor_view.ptr(),
             @intCast(map.len),
             map.constSlice().ptr,
-            if (padding) |p| p.attribute(ctx).ptr() else null_attr,
+            if (opts.padding) |p| p.attribute(ctx).ptr() else null_attr,
         )));
     }
 
@@ -219,7 +221,9 @@ pub const StridedViewType = opaque {
         traversal_strides: []const i32,
         tensor_view: *const mlir.Type,
         dim_map: []const i32,
-        padding: ?PaddingValue,
+        opts: struct {
+            padding: ?PaddingValue = null,
+        },
     ) *const StridedViewType {
         const tile_attr: *const mlir.Attribute = .denseArray(ctx, .i32, tile_shape);
         const strides_attr: *const mlir.Attribute = .denseArray(ctx, .i32, traversal_strides);
@@ -231,7 +235,7 @@ pub const StridedViewType = opaque {
             tensor_view.ptr(),
             @intCast(map.len),
             map.constSlice().ptr,
-            if (padding) |p| p.attribute(ctx).ptr() else null_attr,
+            if (opts.padding) |p| p.attribute(ctx).ptr() else null_attr,
         )));
     }
 
@@ -299,7 +303,9 @@ pub fn gatherScatterViewType(
     tile_shape: []const i64,
     tensor_view: *const mlir.Type,
     sparse_dim: u32,
-    padding: ?PaddingValue,
+    opts: struct {
+        padding: ?PaddingValue = null,
+    },
 ) *const mlir.Type {
     var shape: stdx.BoundedArray(i32, mlir.ShapedType.MAX_RANK) = .empty;
     for (tile_shape) |d| shape.appendAssumeCapacity(@intCast(d));
@@ -307,13 +313,13 @@ pub fn gatherScatterViewType(
         .tileShape = shape.constSlice(),
         .tensorView = tensor_view.isA(TensorViewType) orelse std.debug.panic("cuda_tile: {f} is not a tensor_view", .{tensor_view}),
         .sparseDim = sparse_dim,
-        .paddingValue = padding,
+        .paddingValue = opts.padding,
     }) catch std.debug.panic("cuda_tile: invalid gather_scatter_view over {f}", .{tensor_view});
     return view.type_();
 }
 
 /// The `tile<...>` type a load through `view` yields, for any view kind —
-/// through the dialect's `TileView` type interface (`cuda_tile_capi.cc`), so
+/// through the dialect's `TileView` type interface (`capi.cc`), so
 /// the gather/scatter view, which has no getters in NVIDIA's C API, works too.
 pub fn tileTypeOfView(view: *const mlir.Type) *const mlir.Type {
     if (!c.mlirTypeIsACudaTileTileView(view.ptr())) std.debug.panic("cuda_tile: {f} is not a tiled view", .{view});
@@ -578,11 +584,18 @@ pub const DivByAttr = opaque {
 };
 
 /// `along` defaults to 0 when only `every` is given.
-pub fn divBy(ctx: *mlir.Context, divisor: u64, every: ?i64, along: ?i64) *const mlir.Attribute {
+pub fn divBy(
+    ctx: *mlir.Context,
+    divisor: u64,
+    opts: struct {
+        every: ?i64 = null,
+        along: ?i64 = null,
+    },
+) *const mlir.Attribute {
     const attr = DivByAttr.get(ctx, .{
         .divisor = divisor,
-        .every = every,
-        .along = if (every != null) along orelse 0 else null,
+        .every = opts.every,
+        .along = if (opts.every != null) opts.along orelse 0 else null,
     }) catch unreachable;
     return attr.attribute();
 }
@@ -651,8 +664,14 @@ pub const BoundedAttr = opaque {
     }
 };
 
-pub fn bounded(ctx: *mlir.Context, lb: ?i64, ub: ?i64) *const mlir.Attribute {
-    const attr = BoundedAttr.get(ctx, .{ .lb = lb, .ub = ub }) catch unreachable;
+pub fn bounded(
+    ctx: *mlir.Context,
+    opts: struct {
+        lb: ?i64 = null,
+        ub: ?i64 = null,
+    },
+) *const mlir.Attribute {
+    const attr = BoundedAttr.get(ctx, .{ .lb = opts.lb, .ub = opts.ub }) catch unreachable;
     return attr.attribute();
 }
 
@@ -806,9 +825,16 @@ pub fn atan2(ctx: *mlir.Context, x: *const mlir.Value, y: *const mlir.Value, loc
 }
 
 /// `rounding` null keeps the op's default (13.3 attribute).
-pub fn exp(ctx: *mlir.Context, source: *const mlir.Value, rounding: ?RoundingMode, location: *const mlir.Location) *mlir.Operation {
+pub fn exp(
+    ctx: *mlir.Context,
+    source: *const mlir.Value,
+    opts: struct {
+        rounding: ?RoundingMode = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attrs: Attrs = .empty;
-    if (rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding_mode", r.attribute(ctx)));
+    if (opts.rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding_mode", r.attribute(ctx)));
     return unary(ctx, "exp", source, attrs, location);
 }
 
@@ -855,9 +881,16 @@ pub fn cosh(ctx: *mlir.Context, source: *const mlir.Value, location: *const mlir
 /// `rounding` null keeps the op's default (13.2 attribute). Only `approx`
 /// and `full` are legal; the upstream verifier reports the others without
 /// failing, so they are refused here.
-pub fn tanh(ctx: *mlir.Context, source: *const mlir.Value, rounding: ?RoundingMode, location: *const mlir.Location) *mlir.Operation {
+pub fn tanh(
+    ctx: *mlir.Context,
+    source: *const mlir.Value,
+    opts: struct {
+        rounding: ?RoundingMode = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attrs: Attrs = .empty;
-    if (rounding) |r| {
+    if (opts.rounding) |r| {
         switch (r) {
             .approx, .full => {},
             else => std.debug.panic("cuda_tile.tanh: rounding mode {s} is not allowed (only approx or full)", .{@tagName(r)}),
@@ -928,10 +961,19 @@ pub fn mulhii(ctx: *mlir.Context, x: *const mlir.Value, y: *const mlir.Value, lo
 }
 
 /// `rounding` null keeps the op's default (truncation).
-pub fn divi(ctx: *mlir.Context, lhs: *const mlir.Value, rhs: *const mlir.Value, signedness: Signedness, rounding: ?RoundingMode, location: *const mlir.Location) *mlir.Operation {
+pub fn divi(
+    ctx: *mlir.Context,
+    lhs: *const mlir.Value,
+    rhs: *const mlir.Value,
+    signedness: Signedness,
+    opts: struct {
+        rounding: ?RoundingMode = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attrs: Attrs = .empty;
     attrs.appendAssumeCapacity(.named(ctx, "signedness", signedness.attribute(ctx)));
-    if (rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding", r.attribute(ctx)));
+    if (opts.rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding", r.attribute(ctx)));
     return binary(ctx, "divi", lhs, rhs, attrs, location);
 }
 
@@ -1012,9 +1054,17 @@ pub fn trunci(ctx: *mlir.Context, from: *const mlir.Value, to: *const mlir.Type,
 }
 
 /// `rounding` null keeps the op's default (nearest_even).
-pub fn ftof(ctx: *mlir.Context, from: *const mlir.Value, to: *const mlir.Type, rounding: ?RoundingMode, location: *const mlir.Location) *mlir.Operation {
+pub fn ftof(
+    ctx: *mlir.Context,
+    from: *const mlir.Value,
+    to: *const mlir.Type,
+    opts: struct {
+        rounding: ?RoundingMode = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attrs: Attrs = .empty;
-    if (rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding_mode", r.attribute(ctx)));
+    if (opts.rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding_mode", r.attribute(ctx)));
     return convert(ctx, "ftof", from, to, attrs, location);
 }
 
@@ -1243,7 +1293,16 @@ pub fn for_(ctx: *mlir.Context, lower: *const mlir.Value, upper: *const mlir.Val
 
 /// `if %cond -> (types) { ... } else { ... }`. Branches end with `yield`
 /// (or `continue`/`break`/`return` when they leave the enclosing scope).
-pub fn if_(ctx: *mlir.Context, cond: *const mlir.Value, result_types: []const *const mlir.Type, then_block: *mlir.Block, else_block: ?*mlir.Block, location: *const mlir.Location) *mlir.Operation {
+pub fn if_(
+    ctx: *mlir.Context,
+    cond: *const mlir.Value,
+    result_types: []const *const mlir.Type,
+    then_block: *mlir.Block,
+    opts: struct {
+        else_block: ?*mlir.Block = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     _ = ctx;
     var state: mlir.OperationState = .init(opName("if"), location);
     state.addOperands(&.{cond});
@@ -1251,7 +1310,7 @@ pub fn if_(ctx: *mlir.Context, cond: *const mlir.Value, result_types: []const *c
     const then_region = mlir.Region.init();
     then_region.appendOwnedBlock(then_block);
     const else_region = mlir.Region.init();
-    if (else_block) |b| else_region.appendOwnedBlock(b);
+    if (opts.else_block) |b| else_region.appendOwnedBlock(b);
     state.addOwnedRegions(&.{ then_region, else_region });
     return mlir.Operation.init(&state) catch @panic("Failed to create cuda_tile.if");
 }
@@ -1626,8 +1685,16 @@ pub fn join_tokens(ctx: *mlir.Context, tokens: []const *const mlir.Value, locati
 }
 
 /// Device-side printf. One result: the token.
-pub fn print_tko(ctx: *mlir.Context, str: []const u8, args: []const *const mlir.Value, token: ?*const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-    const tok = optional(token);
+pub fn print_tko(
+    ctx: *mlir.Context,
+    str: []const u8,
+    args: []const *const mlir.Value,
+    opts: struct {
+        token: ?*const mlir.Value = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
+    const tok = optional(opts.token);
     var segs: Segments = .{};
     segs.add(args);
     segs.add(tok.slice());
@@ -1679,7 +1746,7 @@ test "dialect registers and types round-trip" {
     try std.testing.expect(tv.eql(try mlir.Type.parse(ctx, "!cuda_tile.tensor_view<?x32xf32, strides=[?,1]>")));
 
     const static_tv = tensorViewType(ctx, f32_ty, &.{16}, &.{1});
-    const pv: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{2}, static_tv, &.{}, .zero));
+    const pv: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{2}, static_tv, &.{}, .{ .padding = .zero }));
     try std.testing.expect(pv.eql(try mlir.Type.parse(ctx, "!cuda_tile.partition_view<tile=(2), padding_value = zero, tensor_view<16xf32, strides=[1]>>")));
     try std.testing.expect(tileTypeOfView(pv).eql(tileType(ctx, &.{2}, f32_ty)));
     try std.testing.expectEqual(@as(usize, 1), indexRankOfView(pv));
@@ -1687,7 +1754,7 @@ test "dialect registers and types round-trip" {
     try std.testing.expect(tokenType(ctx).eql(try mlir.Type.parse(ctx, "!cuda_tile.token")));
 
     const gather_tv = tensorViewType(ctx, f32_ty, &.{ 64, 32 }, &.{ 32, 1 });
-    const gsv = gatherScatterViewType(ctx, &.{ 8, 16 }, gather_tv, 0, .zero);
+    const gsv = gatherScatterViewType(ctx, &.{ 8, 16 }, gather_tv, 0, .{ .padding = .zero });
     try std.testing.expect(gsv.eql(try mlir.Type.parse(ctx, "!cuda_tile.gather_scatter_view<tile=(8x16), padding_value = zero, tensor_view<64x32xf32, strides=[32,1]>, sparse_dim=0>")));
     const typed_gsv = gsv.isA(GatherScatterViewType).?;
     const gsv_tile = typed_gsv.getTileShape();
@@ -1735,11 +1802,11 @@ test "enum and hint attributes" {
     const not_a_dict: *const mlir.DictionaryAttribute = @ptrCast(mlir.Attribute.dict(ctx, &.{.named(ctx, "sm_100", .int(ctx, .i64, 1))}));
     try std.testing.expectError(error.InvalidMlir, OptimizationHintsAttr.get(ctx, .{ .value = not_a_dict }));
 
-    const div = divBy(ctx, 16, null, null);
+    const div = divBy(ctx, 16, .{});
     try std.testing.expect(div.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.div_by<16>")));
-    const div_every = divBy(ctx, 4, 4, 1);
+    const div_every = divBy(ctx, 4, .{ .every = 4, .along = 1 });
     try std.testing.expect(div_every.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.div_by<4, every 4 along 1>")));
-    try std.testing.expect(divBy(ctx, 32, 4, null).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.div_by<32, every 4 along 0>")));
+    try std.testing.expect(divBy(ctx, 32, .{ .every = 4 }).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.div_by<32, every 4 along 0>")));
     const typed_div = div_every.isA(DivByAttr).?;
     try std.testing.expect((try DivByAttr.get(ctx, .{
         .divisor = typed_div.getDivisor(),
@@ -1755,10 +1822,10 @@ test "enum and hint attributes" {
     try std.testing.expectEqual(@as(usize, 2), same_values.numElements());
     try std.testing.expectEqual(@as(i64, 4), same_values.element(1));
 
-    const lower = bounded(ctx, 0, null);
+    const lower = bounded(ctx, .{ .lb = 0 });
     try std.testing.expect(lower.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<0, ?>")));
-    try std.testing.expect(bounded(ctx, null, 7).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<?, 7>")));
-    try std.testing.expect(bounded(ctx, -3, 7).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<-3, 7>")));
+    try std.testing.expect(bounded(ctx, .{ .ub = 7 }).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<?, 7>")));
+    try std.testing.expect(bounded(ctx, .{ .lb = -3, .ub = 7 }).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<-3, 7>")));
     const typed_lower = lower.isA(BoundedAttr).?;
     try std.testing.expectEqual(@as(?i64, 0), typed_lower.getLb());
     try std.testing.expect(typed_lower.getUb() == null);
@@ -1833,9 +1900,9 @@ test "views, control flow and mma verify" {
     const tv_a = make_tensor_view(ctx, block.argument(0), &.{}, &.{}, tensorViewType(ctx, bf16_ty, &.{ 128, 64 }, &.{ 64, 1 }), loc).appendTo(block);
     const tv_b = make_tensor_view(ctx, block.argument(1), &.{}, &.{}, tensorViewType(ctx, bf16_ty, &.{ 64, 128 }, &.{ 128, 1 }), loc).appendTo(block);
     const tv_c = make_tensor_view(ctx, block.argument(2), &.{}, &.{}, tensorViewType(ctx, f32_ty, &.{ 128, 128 }, &.{ 128, 1 }), loc).appendTo(block);
-    const pv_a: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{ 64, 64 }, tv_a.result(0).type_(), &.{}, .zero));
-    const pv_b: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{ 64, 64 }, tv_b.result(0).type_(), &.{}, .zero));
-    const pv_c: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{ 64, 64 }, tv_c.result(0).type_(), &.{}, null));
+    const pv_a: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{ 64, 64 }, tv_a.result(0).type_(), &.{}, .{ .padding = .zero }));
+    const pv_b: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{ 64, 64 }, tv_b.result(0).type_(), &.{}, .{ .padding = .zero }));
+    const pv_c: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{ 64, 64 }, tv_c.result(0).type_(), &.{}, .{}));
     const va = make_partition_view(ctx, tv_a.result(0), pv_a, loc).appendTo(block);
     const vb = make_partition_view(ctx, tv_b.result(0), pv_b, loc).appendTo(block);
     const vc = make_partition_view(ctx, tv_c.result(0), pv_c, loc).appendTo(block);
@@ -1861,7 +1928,7 @@ test "views, control flow and mma verify" {
     _ = yield(ctx, &.{loop_op.result(0)}, loc).appendTo(then_block);
     const else_block = mlir.Block.init(&.{}, &.{});
     _ = yield(ctx, &.{acc0.result(0)}, loc).appendTo(else_block);
-    const if_op = if_(ctx, cond.result(0), &.{acc_ty}, then_block, else_block, loc).appendTo(block);
+    const if_op = if_(ctx, cond.result(0), &.{acc_ty}, then_block, .{ .else_block = else_block }, loc).appendTo(block);
 
     const store = store_view_tko(ctx, if_op.result(0), vc.result(0), &.{ bid.result(0), bid.result(1) }, .{}, loc).appendTo(block);
     try std.testing.expect(store.attributeByName("inbounds").?.eql(.denseArray(ctx, .bool, &.{ 0, 0 })));

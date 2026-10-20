@@ -638,13 +638,15 @@ pub fn scan(
     ctx: *mlir.Context,
     input: *const mlir.Value,
     kind: ReductionKind,
-    mask: ?*const mlir.Value,
     result_type: *const mlir.Type,
+    opts: struct {
+        mask: ?*const mlir.Value = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 2) = .empty;
     operands_buf.appendAssumeCapacity(input);
-    if (mask) |m| operands_buf.appendAssumeCapacity(m);
+    if (opts.mask) |m| operands_buf.appendAssumeCapacity(m);
 
     return mlir.Operation.make(ctx, "tpu.scan", .{
         .operands = .{ .flat = operands_buf.constSlice() },
@@ -658,6 +660,8 @@ pub fn scan(
 }
 
 pub const SortOpts = struct {
+    mask: ?*const mlir.Value = null,
+
     descending: bool = false,
 };
 
@@ -665,7 +669,6 @@ pub fn sort(
     ctx: *mlir.Context,
     keys: *const mlir.Value,
     values: *const mlir.Value,
-    mask: ?*const mlir.Value,
     opts: SortOpts,
     output_mask_type: *const mlir.Type,
     sorted_keys_type: *const mlir.Type,
@@ -674,7 +677,7 @@ pub fn sort(
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     operands_buf.appendSliceAssumeCapacity(&.{ keys, values });
-    if (mask) |m| operands_buf.appendAssumeCapacity(m);
+    if (opts.mask) |m| operands_buf.appendAssumeCapacity(m);
 
     return mlir.Operation.make(ctx, "tpu.sort", .{
         .operands = .{ .flat = operands_buf.constSlice() },
@@ -720,6 +723,8 @@ pub fn load(
 }
 
 pub const StoreOpts = struct {
+    mask: ?*const mlir.Value = null,
+
     sublane_mask: []const bool,
     sublane_stride: i32 = 1,
     add: bool = false,
@@ -731,14 +736,13 @@ pub fn store(
     value: *const mlir.Value,
     base: *const mlir.Value,
     indices: []const *const mlir.Value,
-    mask: ?*const mlir.Value,
     opts: StoreOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 18) = .empty;
     operands_buf.appendSliceAssumeCapacity(&.{ value, base });
     operands_buf.appendSliceAssumeCapacity(indices);
-    const mask_len: i32 = if (mask) |m| blk: {
+    const mask_len: i32 = if (opts.mask) |m| blk: {
         operands_buf.appendAssumeCapacity(m);
         break :blk 1;
     } else 0;
@@ -757,6 +761,8 @@ pub fn store(
 }
 
 pub const VectorLoadOpts = struct {
+    mask: ?*const mlir.Value = null,
+
     /// Per-dim load stride. Pass `&.{}` for unit-strided.
     strides: []const i32 = &.{},
 };
@@ -766,7 +772,6 @@ pub fn vector_load(
     ctx: *mlir.Context,
     base: *const mlir.Value,
     indices: []const *const mlir.Value,
-    mask: ?*const mlir.Value,
     opts: VectorLoadOpts,
     result_type: *const mlir.Type,
     location: *const mlir.Location,
@@ -774,7 +779,7 @@ pub fn vector_load(
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 17) = .empty;
     operands_buf.appendAssumeCapacity(base);
     operands_buf.appendSliceAssumeCapacity(indices);
-    const mask_len: i32 = if (mask) |m| blk: {
+    const mask_len: i32 = if (opts.mask) |m| blk: {
         operands_buf.appendAssumeCapacity(m);
         break :blk 1;
     } else 0;
@@ -792,6 +797,8 @@ pub fn vector_load(
 }
 
 pub const VectorStoreOpts = struct {
+    mask: ?*const mlir.Value = null,
+
     strides: []const i32 = &.{},
     add: bool = false,
 };
@@ -801,14 +808,13 @@ pub fn vector_store(
     value: *const mlir.Value,
     base: *const mlir.Value,
     indices: []const *const mlir.Value,
-    mask: ?*const mlir.Value,
     opts: VectorStoreOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 18) = .empty;
     operands_buf.appendSliceAssumeCapacity(&.{ value, base });
     operands_buf.appendSliceAssumeCapacity(indices);
-    const mask_len: i32 = if (mask) |m| blk: {
+    const mask_len: i32 = if (opts.mask) |m| blk: {
         operands_buf.appendAssumeCapacity(m);
         break :blk 1;
     } else 0;
@@ -917,12 +923,14 @@ pub fn matmul(
 
 pub fn iota(
     ctx: *mlir.Context,
-    dimensions: ?[]const i32,
     result_type: *const mlir.Type,
+    opts: struct {
+        dimensions: ?[]const i32 = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
-    if (dimensions) |d| {
+    if (opts.dimensions) |d| {
         attrs.appendAssumeCapacity(.named(ctx, "dimensions", .denseArray(ctx, .i32, d)));
     }
     return mlir.Operation.make(ctx, "tpu.iota", .{
@@ -1663,12 +1671,12 @@ test "legacy reduction extrema and scan axis preserve their semantics" {
     try std.testing.expect(float_min.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<minf>")));
     try std.testing.expect(int_max.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<maxsi>")));
 
-    const int_scan = scan(ctx, integers, .max, mask, int_type, loc);
+    const int_scan = scan(ctx, integers, .max, int_type, .{ .mask = mask }, loc);
     defer int_scan.deinit();
     try std.testing.expect(int_scan.verify());
     try std.testing.expect(int_scan.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<maxui>")));
     try std.testing.expectEqual(@as(i64, 1), int_scan.attributeByName("dimension").?.isA(mlir.IntegerAttribute).?.value(i64));
-    const float_scan = scan(ctx, floats, .min, null, float_type, loc);
+    const float_scan = scan(ctx, floats, .min, float_type, .{}, loc);
     defer float_scan.deinit();
     try std.testing.expect(float_scan.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<minf>")));
 }

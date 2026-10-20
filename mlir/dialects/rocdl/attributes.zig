@@ -1,0 +1,390 @@
+// Generated from LLVM ROCDL TableGen records; see REGENERATING.md.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+const std = @import("std");
+const c = @import("c");
+const mlir = @import("mlir");
+const enums = @import("enums.zig");
+
+pub const TargetAttr = @import("target.zig").TargetAttr;
+
+/// `#rocdl.buffer_oob_mode`.
+pub const BufferOOBModeAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.BufferOOBMode;
+    pub const isAFn = c.mlirAttributeIsAROCDLBufferOOBModeAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLBufferOOBModeAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLBufferOOBModeAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.buffer_oob_mode_flag`.
+pub const BufferOOBModeModuleFlagAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.BufferOOBMode;
+    pub const isAFn = c.mlirAttributeIsAROCDLBufferOOBModeModuleFlagAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLBufferOOBModeModuleFlagAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.gfx12_atomic_cache_policy`.
+pub const Gfx12AtomicCachePolicyAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.Gfx12AtomicCachePolicy;
+    pub const isAFn = c.mlirAttributeIsAROCDLGfx12AtomicCachePolicyAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLGfx12AtomicCachePolicyAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLGfx12AtomicCachePolicyAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.gfx12_cache_policy`.
+pub const Gfx12CachePolicyAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.Gfx12CachePolicy;
+    pub const isAFn = c.mlirAttributeIsAROCDLGfx12CachePolicyAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLGfx12CachePolicyAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLGfx12CachePolicyAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.gfx942_cache_policy`.
+pub const Gfx942CachePolicyAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.Gfx942CachePolicy;
+    pub const isAFn = c.mlirAttributeIsAROCDLGfx942CachePolicyAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLGfx942CachePolicyAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLGfx942CachePolicyAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.mfma_neg_modifier`.
+pub const MFMANegModifierAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.MFMANegModifier;
+    pub const isAFn = c.mlirAttributeIsAROCDLMFMANegModifierAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLMFMANegModifierAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLMFMANegModifierAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.mfma_perm_b`.
+pub const MFMAPermBAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.MFMAPermB;
+    pub const isAFn = c.mlirAttributeIsAROCDLMFMAPermBAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLMFMAPermBAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLMFMAPermBAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.matrix_format`.
+pub const MatrixFormatAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.MatrixFormat;
+    pub const isAFn = c.mlirAttributeIsAROCDLMatrixFormatAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLMatrixFormatAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLMatrixFormatAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.pre_gfx12_cache_policy`.
+pub const PreGfx12CachePolicyAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.PreGfx12CachePolicy;
+    pub const isAFn = c.mlirAttributeIsAROCDLPreGfx12CachePolicyAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLPreGfx12CachePolicyAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLPreGfx12CachePolicyAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.sched_group_mask`.
+pub const SchedGroupMaskAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.SchedGroupMask;
+    pub const isAFn = c.mlirAttributeIsAROCDLSchedGroupMaskAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLSchedGroupMaskAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLSchedGroupMaskAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.tbuffer_oob_mode_flag`.
+pub const TBufferOOBModeModuleFlagAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.BufferOOBMode;
+    pub const isAFn = c.mlirAttributeIsAROCDLTBufferOOBModeModuleFlagAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLTBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLTBufferOOBModeModuleFlagAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.wmma_c_modifier`.
+pub const WMMACModifierAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.WMMACModifier;
+    pub const isAFn = c.mlirAttributeIsAROCDLWMMACModifierAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLWMMACModifierAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLWMMACModifierAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.wmma_matrix_scale`.
+pub const WMMAMatrixScaleAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.WMMAMatrixScale;
+    pub const isAFn = c.mlirAttributeIsAROCDLWMMAMatrixScaleAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLWMMAMatrixScaleAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLWMMAMatrixScaleAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+/// `#rocdl.wmma_matrix_scale_format`.
+pub const WMMAMatrixScaleFormatAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const Value = enums.WMMAMatrixScaleFormat;
+    pub const isAFn = c.mlirAttributeIsAROCDLWMMAMatrixScaleFormatAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.attribute().format(writer);
+    }
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLWMMAMatrixScaleFormatAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn value(self: *const Self) Value {
+        return @enumFromInt(c.mlirROCDLWMMAMatrixScaleFormatAttrGetValue(self.ptr()));
+    }
+
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+pub const enum_attributes = .{
+    BufferOOBModeAttr,
+    BufferOOBModeModuleFlagAttr,
+    Gfx12AtomicCachePolicyAttr,
+    Gfx12CachePolicyAttr,
+    Gfx942CachePolicyAttr,
+    MFMANegModifierAttr,
+    MFMAPermBAttr,
+    MatrixFormatAttr,
+    PreGfx12CachePolicyAttr,
+    SchedGroupMaskAttr,
+    TBufferOOBModeModuleFlagAttr,
+    WMMACModifierAttr,
+    WMMAMatrixScaleAttr,
+    WMMAMatrixScaleFormatAttr,
+};

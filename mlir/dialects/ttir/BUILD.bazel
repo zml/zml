@@ -2,10 +2,9 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 cc_library(
-    name = "ttir_capi",
-    srcs = ["ttir_capi.cc"],
-    hdrs = ["ttir_capi.h"],
-    strip_include_prefix = ".",
+    name = "capi",
+    srcs = ["capi.cc"],
+    hdrs = ["capi.h"],
     tags = ["manual"],
     visibility = ["//visibility:private"],
     deps = [
@@ -19,19 +18,25 @@ cc_library(
 
 zig_library(
     name = "ttir",
-    tags = ["manual"],
     import_name = "mlir/dialects/ttir",
     main = "ttir.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
-        ":ttir_capi",
+        ":capi",
         "//mlir",
-        "//mlir:c",
         "//stdx",
     ],
 )
 
 zig_test(
     name = "test",
-    deps = [":ttir"],
+    main = "test.zig",
+    deps = [
+        ":ttir",
+        "//mlir/dialects/arith",
+        "//mlir/dialects/func",
+        "//mlir/dialects/math",
+        "//mlir/dialects/scf",
+    ],
 )

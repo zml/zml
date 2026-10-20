@@ -10,8 +10,8 @@ Paths below are relative to this directory (the one holding this file).
 
 ## Goal
 
-Every dialect this directory carries (`cute`, `cute_nvgpu`, and NVIDIA's
-`nvvm` and `cuda`, see below) must describe the DSL compiler's
+The `cute` dialect in this directory and its companions in `../cute_nvgpu`,
+`../nvvm`, and `../cuda` must describe the DSL compiler's
 registry as completely and as precisely as the release allows: every
 operation, type, attribute and enum the compiler registers, with every fact
 that can be established about each of them. Nothing is opaque unless it cannot
@@ -38,8 +38,8 @@ without it, and so that anything built here is accepted by it unchanged.
   result type inference; the other dialect `.cpp` files and the `BUILD.bazel`
   files complete them. Edit them as the new definitions require. For `nvvm`
   and `cuda` these are `NVVMDialect.{h,cpp}` (with the `#nvvm.target`
-  verifier) and `CudaDialect.{h,cpp}` under `include/` and `lib/Dialect/`.
-- **Generated: what you produce.** Every `.td` file under `include/` that is not
+  verifier) and `CudaDialect.{h,cpp}` in their dialect package roots.
+- **Generated: what you produce.** Every package-local `.td` file that is not
   a dialect declaration: the operations (`CuteOps.td`, `CuteNVGPUOps.td`,
   `NVVMOps.td`, `CudaOps.td`), the compiler's types, attributes and enums
   beyond the release (`CuteTypesCompiler.td`, `CuteAttrsCompiler.td`,
@@ -50,19 +50,23 @@ without it, and so that anything built here is accepted by it unchanged.
   any new `.td` you need to split them sensibly. The dialect declarations (`*Dialect.td`) change only as far as the
   generated files need.
 - **Language bindings, if present.** When the tree carries bindings derived
-  from these definitions (a C API under `lib/CAPI`, builder files next to this
+  from these definitions (a `capi.cc`/`capi.h` C API in each dialect package, builder files in each
   directory), regenerate them from the records of the new definitions
   (`llvm-tblgen --dump-json` gives them all; do not regex the `.td` files).
   When a class changes shape (opaque to parametric, merged, split, renamed
   accessors), change the bindings to match, and keep the existing
   convenience helpers working where it costs little.
+  Keep required arguments positional and group nullable operands, result types,
+  and attributes in an `opts` struct immediately before `location`. Each
+  optional field defaults to `null`, so callers can pass `.{}` to omit all of
+  them. Extend an existing options struct when one is already present.
 
 Consumers outside this directory use the dialect classes and must keep
 compiling: search the repository for the dialect namespaces
 (`cutlass_compiler::cute`, `cute_nvgpu`, `nvvm`, `cuda`), for the Zig modules
-(`cute.nvgpu`, `cute.nvvm`, `cute.cuda`, and the convenience layers over them
-in `mlir/dialects/nvvm.zig` and `mlir/dialects/cuda.zig`) and for the headers
-under `include/cute_ir`. When a definition changes shape, update those users in the
+(`mlir/dialects/cute_nvgpu`, `mlir/dialects/nvvm`, and
+`mlir/dialects/cuda`) and for the headers
+in the dialect packages. When a definition changes shape, update those users in the
 same change. Tighter operand constraints also break consumers that built IR
 with loose types, and so does an operation that stops inferring its results:
 fix the consumer, not the constraint.
@@ -71,7 +75,7 @@ fix the consumer, not the constraint.
 
 The kernels the CuTe builder emits (`kernels/cute`) use two more dialects of
 the compiler: `nvvm` (special registers, mbarriers, tcgen05, ...) and `cuda`
-(kernels, launch configurations, host runtime calls). Both are carried here
+(kernels, launch configurations, host runtime calls). Both have sibling packages
 and must be regenerated with every release, like `cute` and `cute_nvgpu`.
 
 - **Neither is upstream's.** The compiler is built on NVIDIA's own LLVM
@@ -82,11 +86,11 @@ and must be regenerated with every release, like `cute` and `cute_nvgpu`.
   compiler. No `.td` ships with the release for either: rebuild both from the
   bindings and the live compiler, as for the cute dialects. Upstream's NVVM
   `.td` is neither a source nor a substitute.
-- **Where they live.** `include/cute_ir/Dialect/{NVVM,Cuda}/IR` (declarations
-  and generated `.td`), `lib/Dialect/{NVVM,Cuda}/IR` (dialect and inference
-  `.cpp`), `include/cute_ir-c/Dialect/{NVVM,Cuda}*.h` and
-  `lib/CAPI/{NVVM,Cuda}*.cpp` (C API), and `nvvm.zig`, `cuda.zig` (Zig,
-  `cute.nvvm` and `cute.cuda`).
+- **Where they live.** `../nvvm` and `../cuda` contain the declarations,
+  generated `.td` files, dialect and inference `.cpp` files, and consolidated
+  `capi.h`/`capi.cc` C APIs. Each package's `ops.zig` contains the generated
+  bindings; `nvvm.zig` and `cuda.zig` provide the convenience builders.
+
 - **Names.** The C++ namespaces are `mlir::cutlass_compiler::nvvm` and
   `mlir::cutlass_compiler::cuda`. The dialects are named `nvvm` and `cuda` as
   in the compiler, so a registry holds this `nvvm` or upstream's, never both;
@@ -98,7 +102,7 @@ and must be regenerated with every release, like `cute` and `cute_nvgpu`.
   prefixed `Cuda`.
 - **`llvm` is upstream's.** NVVM operands are `!llvm.ptr<N>` and LLVM
   structs, and the builder emits `llvm.*` operations. The CuTe context
-  registers the upstream LLVM dialect, bound by `mlir/dialects/llvm_dialect.zig`
+  registers the upstream LLVM dialect, bound by `mlir/dialects/llvm/llvm.zig`
   (its builders, and `mlirLLVMPointerTypeGet` for `!llvm.ptr<N>`); the nvvm
   and cuda constraints name `::mlir::LLVM` types. NVIDIA's `llvm` is not
   vendored: its types print and parse the same, and the compiler reads the
@@ -147,7 +151,7 @@ attribute and type wrappers and operation builders are generated from
 `llvm-tblgen --dump-json` of the generated `.td` files, then formatted with
 `zig fmt`. Builders of operations with regions, and of terminators, do not
 verify on creation (their blocks are filled, or their block is completed,
-afterwards). `mlir/dialects/nvvm.zig` and `mlir/dialects/cuda.zig` are the
+afterwards). `mlir/dialects/nvvm/nvvm.zig` and `mlir/dialects/cuda/cuda.zig` are the
 hand-written convenience layer the builder calls; they fix the attributes the
 kernels do not choose and must keep building no text.
 

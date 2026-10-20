@@ -1,0 +1,19 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "cf",
+    import_name = "mlir/dialects/cf",
+    main = "cf.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//stdx",
+        "@llvm-project//mlir:CAPICF",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":cf"],
+)

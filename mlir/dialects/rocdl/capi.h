@@ -1,0 +1,98 @@
+#ifndef ZML_MLIR_DIALECTS_ROCDL_CAPI_H
+#define ZML_MLIR_DIALECTS_ROCDL_CAPI_H
+
+#include "mlir-c/Dialect/ROCDL.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Registration
+
+MLIR_CAPI_EXPORTED intptr_t mlirROCDLGetOperationCount(MlirContext context);
+
+// Attributes
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLBufferOOBModeAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLBufferOOBModeAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLBufferOOBModeAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLBufferOOBModeModuleFlagAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLBufferOOBModeModuleFlagAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLBufferOOBModeModuleFlagAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLGfx12AtomicCachePolicyAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLGfx12AtomicCachePolicyAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLGfx12AtomicCachePolicyAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLGfx12CachePolicyAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLGfx12CachePolicyAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLGfx12CachePolicyAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLGfx942CachePolicyAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLGfx942CachePolicyAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLGfx942CachePolicyAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLMFMANegModifierAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLMFMANegModifierAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLMFMANegModifierAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLMFMAPermBAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLMFMAPermBAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLMFMAPermBAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLMatrixFormatAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLMatrixFormatAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLMatrixFormatAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLPreGfx12CachePolicyAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLPreGfx12CachePolicyAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLPreGfx12CachePolicyAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLSchedGroupMaskAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLSchedGroupMaskAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLSchedGroupMaskAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLTBufferOOBModeModuleFlagAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLTBufferOOBModeModuleFlagAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLTBufferOOBModeModuleFlagAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLWMMACModifierAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLWMMACModifierAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLWMMACModifierAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLWMMAMatrixScaleAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLWMMAMatrixScaleAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLWMMAMatrixScaleAttrGetValue(MlirAttribute attribute);
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLWMMAMatrixScaleFormatAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLWMMAMatrixScaleFormatAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t mlirROCDLWMMAMatrixScaleFormatAttrGetValue(MlirAttribute attribute);
+
+// Target
+
+MLIR_CAPI_EXPORTED bool mlirAttributeIsAROCDLTargetAttr(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLTargetAttrGet(
+    MlirContext context, int optLevel, MlirStringRef triple, MlirStringRef chip,
+    MlirStringRef features, MlirStringRef abi, MlirAttribute flags,
+    MlirAttribute link);
+MLIR_CAPI_EXPORTED int mlirROCDLTargetAttrGetOptLevel(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirStringRef mlirROCDLTargetAttrGetTriple(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirStringRef mlirROCDLTargetAttrGetChip(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirStringRef mlirROCDLTargetAttrGetFeatures(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirStringRef mlirROCDLTargetAttrGetAbi(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLTargetAttrGetFlags(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED MlirAttribute mlirROCDLTargetAttrGetLink(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED bool mlirROCDLTargetAttrHasFlag(MlirAttribute attribute, MlirStringRef flag);
+MLIR_CAPI_EXPORTED bool mlirROCDLTargetAttrHasWave64(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED bool mlirROCDLTargetAttrHasFastMath(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED bool mlirROCDLTargetAttrHasDaz(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED bool mlirROCDLTargetAttrHasFiniteOnly(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED bool mlirROCDLTargetAttrHasUnsafeMath(MlirAttribute attribute);
+MLIR_CAPI_EXPORTED bool mlirROCDLTargetAttrHasCorrectSqrt(MlirAttribute attribute);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

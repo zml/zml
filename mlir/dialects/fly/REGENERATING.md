@@ -1,7 +1,7 @@
 # Regenerating the operation builders
 
 These are instructions for an agent. They describe what `ops.zig` and
-`rocdl_ops.zig` must contain after a FlyDSL bump, where to derive them from,
+`../fly_rocdl/ops.zig` must contain after a FlyDSL bump, where to derive them from,
 and how to check the result. Scripts and intermediate files are not
 committed; only the generated builders are.
 
@@ -9,10 +9,10 @@ Paths below are relative to this directory.
 
 ## Goal
 
-`ops.zig` binds every operation of the `fly` dialect and `rocdl_ops.zig` every
+`ops.zig` binds every operation of the `fly` dialect and `../fly_rocdl/ops.zig` every
 operation of the `fly_rocdl` dialect, one builder per operation, so that no
 code builds a FlyDSL operation from its name. The attributes and types
-(`attributes.zig`, `types.zig`, `rocdl.zig`, `fly_capi.*`) are maintained by
+(`attributes.zig`, `types.zig`, `../fly_rocdl/fly_rocdl.zig`, `capi.*`, `../fly_rocdl/capi.*`) are maintained by
 hand and are not covered here.
 
 ## Sources
@@ -23,7 +23,7 @@ patches applied: read the `.td` files from the fetched repository
 unpatched checkout.
 
 - `include/flydsl/Dialect/Fly/IR/FlyOps.td` for `ops.zig`.
-- `include/flydsl/Dialect/FlyROCDL/IR/Ops.td` for `rocdl_ops.zig`.
+- `include/flydsl/Dialect/FlyROCDL/IR/Ops.td` for `../fly_rocdl/ops.zig`.
 
 Dump their records with the LLVM the workspace builds:
 
@@ -44,10 +44,12 @@ operation. Do not regex the `.td` files.
   sorted by mnemonic, with a doc comment naming the operation, its `summary`,
   and whether result types are inferred, explicit, or absent.
 - Parameters, in order: `ctx`, the operands, the result types (only when the
-  operation does not implement `InferTypeOpInterface`), the attributes, then
-  `location`. Names are the ODS names in snake case, with a trailing
+  operation does not implement `InferTypeOpInterface`), the required attributes,
+  an `opts` struct when there are optional arguments, then `location`.
+  Put all nullable operands and attributes in `opts`, each with `= null`.
+  Callers use `.{}` to omit them. Names are the ODS names in snake case, with a trailing
   underscore when they collide with a Zig keyword, a builder name or a
-  reserved local (`ctx`, `location`, `make`, `operands`, `attributes`,
+  reserved local (`ctx`, `opts`, `location`, `make`, `operands`, `attributes`,
   `present`).
 - Operands: single → `*const mlir.Value`, `Optional` → `?*const mlir.Value`,
   `Variadic` → `[]const *const mlir.Value`. Operations with

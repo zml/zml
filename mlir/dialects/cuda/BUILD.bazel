@@ -1,0 +1,186 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "capi",
+    srcs = ["capi.cc"],
+    hdrs = ["capi.h"],
+    tags = ["manual"],
+    deps = [
+        ":dialect",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+    alwayslink = True,
+)
+
+zig_library(
+    name = "cuda",
+    srcs = [
+        "ops.zig",
+    ],
+    import_name = "mlir/dialects/cuda",
+    main = "cuda.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":capi",
+        "//mlir",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [
+        ":cuda",
+    ],
+)
+
+td_library(
+    name = "td_files",
+    srcs = glob(["*.td"]),
+    includes = ["/"],
+    deps = [
+        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "dialect_inc_gen",
+    tbl_outs = [
+        (
+            [
+                "-gen-dialect-decls",
+                "-dialect=cuda",
+            ],
+            "CudaDialect.h.inc",
+        ),
+        (
+            [
+                "-gen-dialect-defs",
+                "-dialect=cuda",
+            ],
+            "CudaDialect.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CudaDialect.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "enums_inc_gen",
+    tbl_outs = [
+        (
+            ["-gen-enum-decls"],
+            "CudaEnums.h.inc",
+        ),
+        (
+            ["-gen-enum-defs"],
+            "CudaEnums.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CudaEnums.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "attrs_inc_gen",
+    tbl_outs = [
+        (
+            [
+                "-gen-attrdef-decls",
+                "-attrdefs-dialect=cuda",
+            ],
+            "CudaAttrs.h.inc",
+        ),
+        (
+            [
+                "-gen-attrdef-defs",
+                "-attrdefs-dialect=cuda",
+            ],
+            "CudaAttrs.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CudaAttrs.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "types_inc_gen",
+    tbl_outs = [
+        (
+            [
+                "-gen-typedef-decls",
+                "-typedefs-dialect=cuda",
+            ],
+            "CudaTypes.h.inc",
+        ),
+        (
+            [
+                "-gen-typedef-defs",
+                "-typedefs-dialect=cuda",
+            ],
+            "CudaTypes.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CudaTypes.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ops_inc_gen",
+    tbl_outs = [
+        (
+            ["-gen-op-decls"],
+            "CudaOps.h.inc",
+        ),
+        (
+            ["-gen-op-defs"],
+            "CudaOps.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CudaOps.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "headers",
+    hdrs = ["CudaDialect.h"],
+    deps = [
+        ":attrs_inc_gen",
+        ":dialect_inc_gen",
+        ":enums_inc_gen",
+        ":ops_inc_gen",
+        ":types_inc_gen",
+        "@llvm-project//mlir:BytecodeOpInterface",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:SideEffectInterfaces",
+    ],
+)
+
+cc_library(
+    name = "dialect",
+    srcs = [
+        "CudaDialect.cpp",
+        "CudaInference.cpp",
+    ],
+    deps = [
+        ":headers",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:LLVMDialect",
+    ],
+)

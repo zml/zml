@@ -52,9 +52,11 @@ pub const TensorDescType = opaque {
     pub fn get(
         shape: []const i64,
         element_type: *const mlir.Type,
-        shared_layout: ?*const mlir.Attribute,
+        opts: struct {
+            shared_layout: ?*const mlir.Attribute = null,
+        },
     ) *const TensorDescType {
-        const attr_ptr = if (shared_layout) |a| a.ptr() else c.MlirAttribute{ .ptr = null };
+        const attr_ptr = if (opts.shared_layout) |a| a.ptr() else c.MlirAttribute{ .ptr = null };
         return @ptrCast(c.mlirTritonTensorDescTypeGet(
             @intCast(shape.len),
             shape.ptr,
@@ -67,9 +69,11 @@ pub const TensorDescType = opaque {
 pub fn tensorDescType(
     shape: []const i64,
     element_type: *const mlir.Type,
-    shared_layout: ?*const mlir.Attribute,
+    opts: struct {
+        shared_layout: ?*const mlir.Attribute = null,
+    },
 ) *const mlir.Type {
-    return @ptrCast(TensorDescType.get(shape, element_type, shared_layout));
+    return @ptrCast(TensorDescType.get(shape, element_type, .{ .shared_layout = opts.shared_layout }));
 }
 
 // =============================================================================
@@ -420,20 +424,22 @@ pub fn load(
     ctx: *mlir.Context,
     ptr_val: *const mlir.Value,
     result_type: *const mlir.Type,
-    mask: ?*const mlir.Value,
-    other: ?*const mlir.Value,
     cache: CacheModifier,
     evict: EvictionPolicy,
     is_volatile: bool,
+    opts: struct {
+        mask: ?*const mlir.Value = null,
+        other: ?*const mlir.Value = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     operands_buf.appendAssumeCapacity(ptr_val);
-    const mask_len: i32 = if (mask) |m| blk: {
+    const mask_len: i32 = if (opts.mask) |m| blk: {
         operands_buf.appendAssumeCapacity(m);
         break :blk 1;
     } else 0;
-    const other_len: i32 = if (other) |o| blk: {
+    const other_len: i32 = if (opts.other) |o| blk: {
         operands_buf.appendAssumeCapacity(o);
         break :blk 1;
     } else 0;
@@ -457,14 +463,16 @@ pub fn store(
     ctx: *mlir.Context,
     ptr_val: *const mlir.Value,
     value: *const mlir.Value,
-    mask: ?*const mlir.Value,
     cache: CacheModifier,
     evict: EvictionPolicy,
+    opts: struct {
+        mask: ?*const mlir.Value = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     buf.appendSliceAssumeCapacity(&.{ ptr_val, value });
-    if (mask) |m| buf.appendAssumeCapacity(m);
+    if (opts.mask) |m| buf.appendAssumeCapacity(m);
     return .make(ctx, "tt.store", .{
         .operands = .{ .flat = buf.constSlice() },
         .attributes = &.{
@@ -587,11 +595,13 @@ pub fn fp_to_fp(
     ctx: *mlir.Context,
     src: *const mlir.Value,
     result_type: *const mlir.Type,
-    rounding: ?RoundingMode,
+    opts: struct {
+        rounding: ?RoundingMode = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
-    if (rounding) |rm| {
+    if (opts.rounding) |rm| {
         attrs.appendAssumeCapacity(.named(ctx, "rounding", roundingMode(ctx, rm)));
     }
     return .make(ctx, "tt.fp_to_fp", .{
@@ -760,13 +770,15 @@ pub fn gather(
 pub fn histogram(
     ctx: *mlir.Context,
     src: *const mlir.Value,
-    mask: ?*const mlir.Value,
     result_type: *const mlir.Type,
+    opts: struct {
+        mask: ?*const mlir.Value = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var buf: stdx.BoundedArray(*const mlir.Value, 2) = .empty;
     buf.appendAssumeCapacity(src);
-    if (mask) |m| buf.appendAssumeCapacity(m);
+    if (opts.mask) |m| buf.appendAssumeCapacity(m);
     return .make(ctx, "tt.histogram", .{
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
@@ -823,14 +835,16 @@ pub fn atomic_rmw(
     rmw: RMWOp,
     ptr_val: *const mlir.Value,
     val: *const mlir.Value,
-    mask: ?*const mlir.Value,
     sem: MemSemantic,
     scope: MemSyncScope,
+    opts: struct {
+        mask: ?*const mlir.Value = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     operands_buf.appendSliceAssumeCapacity(&.{ ptr_val, val });
-    if (mask) |m| operands_buf.appendAssumeCapacity(m);
+    if (opts.mask) |m| operands_buf.appendAssumeCapacity(m);
 
     return .make(ctx, "tt.atomic_rmw", .{
         .operands = .{ .flat = operands_buf.constSlice() },
@@ -896,16 +910,18 @@ pub fn call(
     callee: []const u8,
     operands: []const *const mlir.Value,
     result_types: []const *const mlir.Type,
-    arg_attrs: ?[]const *const mlir.Attribute,
-    res_attrs: ?[]const *const mlir.Attribute,
+    opts: struct {
+        arg_attrs: ?[]const *const mlir.Attribute = null,
+        res_attrs: ?[]const *const mlir.Attribute = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 3) = .empty;
     attrs.appendAssumeCapacity(.named(ctx, "callee", .flatSymbolRef(ctx, callee)));
-    if (arg_attrs) |aa| {
+    if (opts.arg_attrs) |aa| {
         attrs.appendAssumeCapacity(.named(ctx, "arg_attrs", .array(ctx, aa)));
     }
-    if (res_attrs) |ra| {
+    if (opts.res_attrs) |ra| {
         attrs.appendAssumeCapacity(.named(ctx, "res_attrs", .array(ctx, ra)));
     }
     return .make(ctx, "tt.call", .{
@@ -927,23 +943,25 @@ pub fn dot_scaled(
     a: *const mlir.Value,
     b: *const mlir.Value,
     c_acc: *const mlir.Value,
-    a_scale: ?*const mlir.Value,
-    b_scale: ?*const mlir.Value,
     a_elem_type: ScaleDotElemType,
     b_elem_type: ScaleDotElemType,
     result_type: *const mlir.Type,
     fast_math: bool,
     lhs_k_pack: bool,
     rhs_k_pack: bool,
+    opts: struct {
+        a_scale: ?*const mlir.Value = null,
+        b_scale: ?*const mlir.Value = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var buf: stdx.BoundedArray(*const mlir.Value, 5) = .empty;
     buf.appendSliceAssumeCapacity(&.{ a, b, c_acc });
-    const a_scale_len: i32 = if (a_scale) |s| blk: {
+    const a_scale_len: i32 = if (opts.a_scale) |s| blk: {
         buf.appendAssumeCapacity(s);
         break :blk 1;
     } else 0;
-    const b_scale_len: i32 = if (b_scale) |s| blk: {
+    const b_scale_len: i32 = if (opts.b_scale) |s| blk: {
         buf.appendAssumeCapacity(s);
         break :blk 1;
     } else 0;
@@ -1244,7 +1262,7 @@ test "tt.func round-trip" {
     const arg1 = entry.argument(1);
 
     // %0 = tt.load %arg0 : !tt.ptr<f32>
-    const loaded = load(ctx, arg0, f32_ty, null, null, .none, .normal, false, loc);
+    const loaded = load(ctx, arg0, f32_ty, .none, .normal, false, .{}, loc);
     _ = loaded.appendTo(entry);
 
     // %1 = arith.constant 1.0 : f32 — built with Operation.make to avoid cross-dialect import
@@ -1265,7 +1283,7 @@ test "tt.func round-trip" {
     _ = summed.appendTo(entry);
 
     // tt.store %arg1, %2
-    _ = store(ctx, arg1, summed.result(0), null, .none, .normal, loc).appendTo(entry);
+    _ = store(ctx, arg1, summed.result(0), .none, .normal, .{}, loc).appendTo(entry);
 
     // tt.return
     _ = return_(ctx, &.{}, loc).appendTo(entry);
