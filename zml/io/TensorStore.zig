@@ -16,22 +16,36 @@ const TensorStore = @This();
 
 pub const Binding = struct {
     tensors: []*safetensors.Tensor,
-    transformed: bool,
     /// Memory space the loader must deliver this tensor into, on every device of its mesh.
     memory: Memory.Kind = .default,
     /// How `tensors` fill the tensor's logical bytes. Null is the identity:
-    /// one source that is the whole tensor. A transformed binding with a
-    /// layout feeds the assembled tensor to its executable as the one input.
+    /// one source that is the whole tensor.
     layout: ?*const Layout = null,
+    /// Set when a program computes the tensor while loading
+    /// (`Loader.loadExecute`, `Source.bindProgram`): the program's inputs in
+    /// order, each filled from `tensors` and placed by its shape. The loader
+    /// never fills such a tensor itself, so `layout` is unused.
+    inputs: ?[]const Layout = null,
 };
 
 /// A composite tensor: byte parts of checkpoint tensors placed in the
 /// logical (row-major, packed) bytes of `shape`, every byte no part covers
 /// zero. `Source.bind` makes them; the loader assembles them.
 pub const Layout = struct {
-    /// The logical shape the parts fill, unsharded.
+    /// The logical shape the parts fill, placed like the tensor or program
+    /// input they fill.
     shape: Shape,
     parts: []const Part,
+
+    /// The checkpoint tensor of `tensors` that the parts copy whole and
+    /// alone, if they do.
+    pub fn whole(self: Layout, tensors: []const *safetensors.Tensor) ?*safetensors.Tensor {
+        if (self.parts.len != 1) return null;
+        const part = self.parts[0];
+        if (part.dims.len != 0 or part.src_offset != 0 or part.dst_offset != 0 or part.width != self.shape.byteSize()) return null;
+        const tensor = tensors[part.source];
+        return if (tensor.byteSize() == part.width) tensor else null;
+    }
 };
 
 /// `width` bytes from `src_offset` of `Binding.tensors[source]` land at
@@ -96,12 +110,21 @@ pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
 }
 
 /// The source `tensor`'s binding loads, in `tensor`'s shape: to rework a
-/// tensor bound elsewhere with `Source` ops, then `Source.rebind` it. Null
-/// when `tensor` is unbound, or transformed by a program.
+/// tensor bound elsewhere with `Source` ops, then `Source.rebind` it or
+/// feed it to a program (`Source.bindProgram`). Null when `tensor` is
+/// unbound, or computed by a program.
 pub fn sourceOf(self: *TensorStore, tensor: Tensor) ?Source {
     const binding = self.id_to_sources.get(tensor.id) orelse return null;
-    if (binding.transformed) return null;
+    if (binding.inputs != null) return null;
     return .ofBinding(self, binding, tensor.shape());
+}
+
+/// Removes `tensor`'s binding and returns it, for a tensor the model no
+/// longer holds: one replaced by a source made from it (`sourceOf`).
+pub fn unbind(self: *TensorStore, tensor: Tensor) Binding {
+    const removed = self.id_to_sources.fetchRemove(tensor.id) orelse
+        stdx.debug.panic("Tensor {} {f} has no binding in this store", .{ tensor.id, tensor.shape() });
+    return removed.value;
 }
 
 pub fn getShape(self: *const TensorStore, key: []const u8) ?Shape {
@@ -255,7 +278,7 @@ pub const View = struct {
         sources[0] = entry;
 
         const tensor: Tensor = .fromShape(placeShape(entry.shape, tags, sharding, key));
-        self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .transformed = false, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
+        self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
         return tensor;
     }
@@ -272,26 +295,17 @@ pub const View = struct {
         return placed;
     }
 
+    /// A tensor of `shape` that a program computes while loading
+    /// (`Source.bindProgram`) from the checkpoint tensors `sources`, each
+    /// whole and replicated, in this order. Null when one is missing.
     pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape) ?Tensor {
-        const arena = self.store.arena.allocator();
-
-        var tensor_list = std.ArrayList(*safetensors.Tensor).initCapacity(arena, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
-        defer tensor_list.deinit(arena);
-
-        var buffer: [256]u8 = undefined;
-        for (sources) |subkey| {
-            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            const tensor = self.store.dupeSource(key) orelse return null;
-            tensor_list.appendAssumeCapacity(tensor);
+        const inputs = self.store.allocator.alloc(Source.Input, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
+        defer self.store.allocator.free(inputs);
+        for (sources, inputs) |subkey, *input| {
+            const source_ = self.maybeSource(subkey, null) orelse return null;
+            input.* = source_.place(.replicated, .{});
         }
-
-        const tensors = tensor_list.toOwnedSlice(arena) catch unreachable;
-        errdefer arena.free(tensors);
-
-        const tensor: Tensor = .fromShape(shape);
-        self.store.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .transformed = true }) catch |e| std.debug.panic("Not handling {} errors", .{e});
-
-        return tensor;
+        return Source.bindProgram(inputs, shape);
     }
 
     pub fn getShape(self: View, subkey: []const u8) ?Shape {

@@ -83,7 +83,7 @@ pub fn init(store: *TensorStore, tensor: *const safetensors.Tensor, tags: ?[]con
 /// parts as pieces. `shape_` must fill the bytes the binding fills, its
 /// elements whole bytes or packed within the parts' runs.
 pub fn ofBinding(store: *TensorStore, binding: TensorStore.Binding, shape_: Shape) Source {
-    stdx.debug.assert(!binding.transformed, "Source.ofBinding: a transformed binding is a program's input, not a source of {f}", .{shape_});
+    stdx.debug.assert(binding.inputs == null, "Source.ofBinding: a program computes {f}, which has no source", .{shape_});
     var res_shape = shape_;
     res_shape._sharding = .replicated;
     const ebits: u64 = res_shape.dtype().bitSizeOf();
@@ -496,6 +496,47 @@ pub fn stack(sources: []const Source, axis_: anytype, tag: anytype) Source {
 /// checkpoint tensor binds it like `View.createTensor`; any other source
 /// binds a composite (`TensorStore.Layout`).
 pub fn bind(self: Source, mesh_: @EnumLiteral(), partitioning: anytype, opts: BindOptions) Tensor {
+    return self.bindAs(self.place(mesh_, partitioning).shape, opts);
+}
+
+/// Like `bind`, with the tags and sharding of `placed`, a shape built
+/// elsewhere; its dimensions and dtype must be the source's.
+pub fn bindAs(self: Source, placed: Shape, opts: BindOptions) Tensor {
+    const input = self.placeAs(placed);
+    var lowering: Lowering = .init(self.store);
+    defer lowering.deinit();
+    const layout = lowering.layout(input);
+    const tensors = lowering.tensors.toOwnedSlice(lowering.arena) catch oom();
+    var binding: TensorStore.Binding = .{ .tensors = tensors, .memory = opts.memory };
+    // One whole checkpoint tensor is a plain binding.
+    if (layout.whole(tensors) == null) {
+        const owned = lowering.arena.create(TensorStore.Layout) catch oom();
+        owned.* = layout;
+        binding.layout = owned;
+    }
+    const tensor: Tensor = .fromShape(placed);
+    self.store.putSourcesNoClobber(tensor.id, binding) catch oom();
+    return tensor;
+}
+
+/// Like `bindAs`, in place of `tensor`'s binding, in the memory it named:
+/// for a source made from that binding (`TensorStore.sourceOf`), whose
+/// result the model then holds instead of `tensor`.
+pub fn rebind(self: Source, tensor: Tensor, placed: Shape) Tensor {
+    return self.bindAs(placed, .{ .memory = self.store.unbind(tensor).memory });
+}
+
+/// A program's input (`bindProgram`): a source and where the loader
+/// places it.
+pub const Input = struct {
+    source: Source,
+    /// The source's shape, placed.
+    shape: Shape,
+};
+
+/// This source as a program input, placed on `mesh_` by `partitioning` as
+/// `bind` places a tensor.
+pub fn place(self: Source, mesh_: @EnumLiteral(), partitioning: anytype) Input {
     const sharding: Sharding = if (mesh_ == .replicated) .replicated else blk: {
         const mesh = self.store.mesh(mesh_);
         const partition: Sharding.Partitioning = if (@TypeOf(partitioning) == Sharding.Partitioning)
@@ -507,64 +548,76 @@ pub fn bind(self: Source, mesh_: @EnumLiteral(), partitioning: anytype, opts: Bi
     var placed = self._shape;
     placed._sharding = sharding;
     if (sharding.mesh) |mesh| placed = placed.withPartitioning(mesh, sharding.partition);
-
-    const tensor: Tensor = .fromShape(placed);
-    self.store.putSourcesNoClobber(tensor.id, self.lower(opts.memory)) catch oom();
-    return tensor;
+    return .{ .source = self, .shape = placed };
 }
 
-/// Like `bind`, with the tags and sharding of `placed`, a shape built
+/// Like `place`, with the tags and sharding of `placed`, a shape built
 /// elsewhere; its dimensions and dtype must be the source's.
-pub fn bindAs(self: Source, placed: Shape, opts: BindOptions) Tensor {
-    stdx.debug.assert(placed.eql(self._shape), "Source {f} cannot bind as {f}", .{ self._shape, placed });
-    const tensor: Tensor = .fromShape(placed);
-    self.store.putSourcesNoClobber(tensor.id, self.lower(opts.memory)) catch oom();
+pub fn placeAs(self: Source, placed: Shape) Input {
+    stdx.debug.assert(placed.eql(self._shape), "Source {f} cannot be placed as {f}", .{ self._shape, placed });
+    return .{ .source = self, .shape = placed };
+}
+
+/// Makes a model tensor of `output` that a program computes while loading
+/// (`Loader.loadExecute`), from `inputs` in this order: the loader lands
+/// each input as it lands a bound source, placed by its shape, in default
+/// device memory, runs the program over them, then frees them. The
+/// program's input shapes are the inputs' (`TensorStore.Binding.inputs`).
+pub fn bindProgram(inputs: []const Input, output: Shape) Tensor {
+    stdx.debug.assert(inputs.len != 0, "Source.bindProgram: a program computing {f} needs an input", .{output});
+    const store = inputs[0].source.store;
+    var lowering: Lowering = .init(store);
+    defer lowering.deinit();
+    const layouts = lowering.arena.alloc(TensorStore.Layout, inputs.len) catch oom();
+    for (inputs, layouts) |input, *layout| {
+        stdx.debug.assert(input.source.store == store, "Source.bindProgram: the inputs of {f} come from different stores", .{output});
+        layout.* = lowering.layout(input);
+    }
+    const tensors = lowering.tensors.toOwnedSlice(lowering.arena) catch oom();
+    const tensor: Tensor = .fromShape(output);
+    store.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .inputs = layouts }) catch oom();
     return tensor;
 }
 
-/// Like `bindAs`, in place of `tensor`'s binding, in the memory it named:
-/// for a source made from that binding (`TensorStore.sourceOf`), whose
-/// result the model then holds instead of `tensor`.
-pub fn rebind(self: Source, tensor: Tensor, placed: Shape) Tensor {
-    const replaced = self.store.id_to_sources.fetchRemove(tensor.id) orelse std.debug.panic("Source.rebind: {f} has no binding", .{tensor});
-    return self.bindAs(placed, .{ .memory = replaced.value.memory });
-}
+/// Lowers sources to byte parts of the checkpoint tensors they read, each
+/// tensor deduplicated and copied once for the binding to own.
+const Lowering = struct {
+    store: *TensorStore,
+    arena: std.mem.Allocator,
+    tensors: std.ArrayList(*safetensors.Tensor) = .empty,
+    /// Each `View.source` copies its registry entry, and the copies share
+    /// the entry's name: the key identifies the entry, not the copy.
+    indices: std.AutoHashMapUnmanaged(Entry, u32) = .empty,
 
-/// The binding: the checkpoint tensors the pieces read, deduplicated and
-/// copied for the binding to own, and the pieces as byte parts.
-fn lower(self: Source, memory: Memory.Kind) TensorStore.Binding {
-    const arena = self.store.arena.allocator();
-    var tensors: std.ArrayList(*safetensors.Tensor) = .empty;
-    // Each `View.source` copies its registry entry, and the copies share the entry's name:
-    // the key identifies the entry, not the copy.
     const Entry = struct { name: [*]const u8, len: usize, offset: u64 };
-    var indices: std.AutoHashMapUnmanaged(Entry, u32) = .empty;
-    defer indices.deinit(self.store.allocator);
-    const parts = arena.alloc(TensorStore.Part, self.pieces.len) catch oom();
-    for (self.pieces, parts) |piece, *part| {
-        const entry: Entry = .{ .name = piece.tensor.name.ptr, .len = piece.tensor.name.len, .offset = piece.tensor.offset };
-        const found = indices.getOrPut(self.store.allocator, entry) catch oom();
-        if (!found.found_existing) {
-            const copy = arena.create(safetensors.Tensor) catch oom();
-            copy.* = piece.tensor.*;
-            tensors.append(arena, copy) catch oom();
-            found.value_ptr.* = @intCast(tensors.items.len - 1);
-        }
-        part.* = lowerPiece(arena, self._shape, piece);
-        part.source = found.value_ptr.*;
-    }
-    const owned = tensors.toOwnedSlice(arena) catch oom();
 
-    // One whole checkpoint tensor is a plain binding.
-    if (parts.len == 1 and parts[0].dims.len == 0 and parts[0].src_offset == 0 and parts[0].dst_offset == 0 and
-        parts[0].width == self._shape.byteSize() and owned[0].byteSize() == parts[0].width)
-    {
-        return .{ .tensors = owned, .transformed = false, .memory = memory };
+    fn init(store: *TensorStore) Lowering {
+        return .{ .store = store, .arena = store.arena.allocator() };
     }
-    const layout = arena.create(TensorStore.Layout) catch oom();
-    layout.* = .{ .shape = self._shape, .parts = parts };
-    return .{ .tensors = owned, .transformed = false, .memory = memory, .layout = layout };
-}
+
+    fn deinit(self: *Lowering) void {
+        self.indices.deinit(self.store.allocator);
+    }
+
+    /// `input`'s pieces as byte parts, filling its placed shape.
+    fn layout(self: *Lowering, input: Input) TensorStore.Layout {
+        const source = input.source;
+        const parts = self.arena.alloc(TensorStore.Part, source.pieces.len) catch oom();
+        for (source.pieces, parts) |piece, *part| {
+            const entry: Entry = .{ .name = piece.tensor.name.ptr, .len = piece.tensor.name.len, .offset = piece.tensor.offset };
+            const found = self.indices.getOrPut(self.store.allocator, entry) catch oom();
+            if (!found.found_existing) {
+                const copy = self.arena.create(safetensors.Tensor) catch oom();
+                copy.* = piece.tensor.*;
+                self.tensors.append(self.arena, copy) catch oom();
+                found.value_ptr.* = @intCast(self.tensors.items.len - 1);
+            }
+            part.* = lowerPiece(self.arena, source._shape, piece);
+            part.source = found.value_ptr.*;
+        }
+        return .{ .shape = input.shape, .parts = parts };
+    }
+};
 
 /// A piece in bytes: its dimensions outermost first, the innermost run that
 /// is contiguous on both sides as the width.
@@ -682,7 +735,7 @@ const Rewrite = struct {
         self.work.append(scratch, .fromPiece(piece)) catch oom();
         const strides = elementStrides(shape_);
         while (self.work.pop()) |flat| {
-            switch (place(shape_, strides, flat)) {
+            switch (placeFlat(shape_, strides, flat)) {
                 .placed => |placed| self.placed.append(scratch, placed) catch oom(),
                 .overflow => |overflowing| self.cut(shape_, strides, flat, overflowing),
             }
@@ -841,7 +894,7 @@ const Placement = union(enum) {
 
 /// `flat` in coordinates of `shape_`, if no dimension carries into the next
 /// axis: each dimension moves the outermost axis its step is a multiple of.
-fn place(shape_: Shape, strides: [constants.MAX_RANK]u64, flat: Flat) Placement {
+fn placeFlat(shape_: Shape, strides: [constants.MAX_RANK]u64, flat: Flat) Placement {
     const r = shape_.rank();
     var placed: Placed = .{ .tensor = flat.tensor, .offset = flat.offset };
     for (0..r) |b| placed.origin[b] = (flat.origin / strides[b]) % @as(u64, @intCast(shape_.dim(b)));

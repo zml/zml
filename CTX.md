@@ -5699,11 +5699,102 @@ DeepSeek-V4.1-Flash, `CUDA_VISIBLE_DEVICES=0,1`, `--token-batch-size=256
 - Not run: NVFP4 (FlashInfer) checkpoints, Blackwell FP8 models other than
   DeepSeek, TP=4.
 
+## Twenty-eighth pass: programs over Sources, expert layouts on the device (2026-10-20)
+
+Phase 4 of `TensorStore.Source`: a program's inputs are Sources, each placed
+by its own shape. The user, skeptical of swizzling on the host, asked to
+compare the loader's small-run copies with programs doing the same layouts
+from an intermediate buffer.
+
+### zml
+
+- `TensorStore.Binding.transformed` is gone. A program's binding has
+  `inputs: ?[]const Layout`, one per program input, each placed by its
+  shape; `Layout.whole` spots an input that is one whole checkpoint tensor.
+- `Source.place(mesh, partitioning)` / `placeAs(shape)` make a
+  `Source.Input`; `Source.bindProgram(inputs, output)` binds the tensor a
+  program computes (checkpoint tensors deduplicated across inputs).
+  `bind`, `bindAs` and `bindProgram` share one lowering. A bound layout's
+  shape is now placed like its tensor.
+- `TensorStore.unbind(tensor)` returns and removes a binding (`rebind` uses
+  it). `sourceOf` is null for a program's tensor.
+- `View.maybeCreateBinding(keys, shape)` is now `bindProgram` over whole
+  checkpoint tensors, replicated.
+- `loadExecute` lands each input from its layout (whole tensors as before,
+  composites gathered and zero-filled); a non-program binding is one input,
+  the tensor as `load` fills it. Inputs are checked against the executable
+  for count, dims and placement (`validateSamePlacement`, formerly
+  `validateOutputPlacement`).
+- Test: a program over a concatenated composite and a whole tensor, its
+  result checked, and executables of another input count or shape refused.
+
+### llmd (`weights.zig`)
+
+- `normalizeBlockFp8`: `sourceOf` + `bindProgram` placed like the tensor
+  (each device converts its slice; the old composite input was
+  replicated), then `unbind`. `normalized` maps a replaced id to its
+  conversion for copies of a Linear.
+- `bf16Linear` (`wo_a`): weight and scale grid as Sources placed like the
+  result, the old bindings unbound (it used to rewrite the binding's
+  tensor shapes in place).
+- NVFP4 globals: two stacked inputs (`stackExpertScalars`) instead of one
+  input per expert and projection (768 for 384 experts).
+- `Packer.expert_layout`: `.device` (default) binds each expert stack with
+  its projections concatenated (whole per-expert tensors, large runs) and
+  records `Recipe.lay_out_experts`, whose program runs
+  `layOutExperts(Tensor, ...)`: the row interleave (split, transpose,
+  merge) and `swizzleBlockScales`. `.loader` keeps the phase 3 Sources.
+- Tests: interleaved and swizzled expert stacks on 1, 2 and 4 devices in
+  both layouts; NVFP4 globals on 1 and 2 devices. Mutations (no interleave
+  in the program, `min` for `max` in the weight global) fail them.
+  `bazel test //zml:test`, `//llmd:weights_test` (20) pass.
+
+### Results
+
+DeepSeek-V4.1-Flash on gb300-1, GPUs 0 and 1, forward stubbed (compile
+2.3 s), width 16, runs alternated. Temporary instrumentation: bounce-copy
+counters, program execute time, `TMP_DIRECT_IO`, GPU memory sampled every
+250 ms (the larger GPU per run, KV cache included).
+
+| direct_io | layout | load | bounce copies | worker copy time | executes | peak GPU memory |
+| --- | --- | --- | --- | --- | --- | --- |
+| auto | loader | 14.43 s, 13.71 s | 76.8, 77.1 GiB | 17.7, 17.5 s | 40: 3.1, 2.4 s | 243.6, 246.5 GiB |
+| auto | device | 13.36 s, 12.86 s | 1.2 GiB | 0.7 s | 160: 4.2, 4.3 s | 249.4, 252.2 GiB |
+| on | loader | 12.98 s, 13.11 s | 188.6 GiB | 36 s | 40: 2.5, 2.7 s | 246.5, 246.7 GiB |
+| on | device | 12.88 s, 12.69 s | 3.1 GiB | 1.0 s | 160: 3.5 s | 252.5, 251.4 GiB |
+
+- Device layout: 41 submissions (40 pack groups of 4.65 GiB, 2.3 GiB in and
+  out per device), 19-22 admission retires, minimum room 45 GiB. 4
+  programs, compiled before their groups are submitted: 1.8-2.4 s, which
+  the reads of earlier groups only partly hide. The 120 layout executes
+  cost about 1.1 s in all (9 ms each).
+- The 40 `wo_a` dequantizations take 60-77 ms each (2.4-3.1 s) while the
+  bulk load runs. Not attributed.
+- Full model, device layout: compiled in 69.4 s, loaded in 13.2 s
+  (35.4 GiB/s; the loader layout took 14.9-15.4 s in the twenty-seventh
+  pass), answers "Paris" and "391". Another user's job took all four
+  GPUs from 20:17:51, possibly during this load; the eight runs above
+  (20:00-20:05) had the GPUs to themselves.
+- Host copies are not this host's bottleneck: with 217 threads the loader
+  layout still loads at 35 GiB/s while copying 189 GiB. A host with fewer
+  cores would show more of the difference.
+
+### Left open
+
+- Compile the pack programs during model compilation, so the device
+  layout's first groups do not wait 2 s for them.
+- Not run: NVFP4 (FlashInfer) checkpoints, TP=4, MI300 (FP8 normalization
+  now converts per device slice).
+
 ## Open work
 
+- 2026-10-20 programs over Sources (twenty-eighth pass, zml and llmd):
+  `Source.bindProgram`; llmd's programs take placed Sources; expert stacks
+  laid out by programs by default, faster than the loader's host copies on
+  GB300. Next: compile pack programs alongside the model.
 - 2026-10-20 swizzles as Sources (twenty-seventh pass, zml and llmd):
   DeepSeek-V4.1-Flash loads in 15 s on two GB300 (was 66.5 s) and answers
-  correctly. Next: phase 4, programs that take Sources as inputs.
+  correctly.
 - 2026-10-18 strided parts in the loader and placement without rows
   (twenty-sixth pass, committed with the 24th and 25th as zml omuqxqpu and
   monorepo rwqvkpqy): Llama TP=4 plans in 1-4 ms

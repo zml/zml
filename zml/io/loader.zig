@@ -224,16 +224,18 @@ pub const Loader = struct {
         try self.submit(prepared.specs, &.{}, &.{}, progress);
     }
 
-    /// Submits the sources of every binding as one planned submission, so
+    /// Submits the inputs of every binding as one planned submission, so
     /// adjacent sources of different bindings coalesce into shared reads.
-    /// Before publishing, retires the oldest pending submissions (running
-    /// their executables on this task) until this one fits the room the
-    /// devices report; one submission is always admitted. Retiring the
-    /// submission runs the executables in binding order, writes each
-    /// output and frees the inputs. Input and output placement come from
-    /// each executable's shapes; inputs land in default device memory.
-    /// Progress counts input sources across all bindings, before execution.
-    /// The caller owns the estimated total.
+    /// A program's binding (`TensorStore.Binding.inputs`) lands each of its
+    /// inputs; any other binding is one input, the tensor as `load` fills
+    /// it. Before publishing, retires the oldest pending submissions
+    /// (running their executables on this task) until this one fits the
+    /// room the devices report; one submission is always admitted.
+    /// Retiring the submission runs the executables in binding order,
+    /// writes each output and frees the inputs. Input and output placement
+    /// come from each executable's shapes; inputs land in default device
+    /// memory. Progress counts inputs across all bindings, before
+    /// execution. The caller owns the estimated total.
     pub fn loadExecute(self: *Loader, store: *const TensorStore, bindings: []const Binding, progress: ?*std.Progress.Node) LoadExecuteError!void {
         if (self.failure) |err| return err;
         const executables = try self.allocator.alloc(BoundExecutable, bindings.len);
@@ -248,7 +250,9 @@ pub const Loader = struct {
             executable.* = try BoundExecutable.init(self.allocator, self.platform, store, binding);
             prepared += 1;
             spec_count += executable.inputs.len;
-            part_count += loadPartCount(executable.binding);
+            if (executable.binding.inputs) |inputs| {
+                for (inputs) |*layout| part_count += layoutPartCount(layout);
+            } else part_count += loadPartCount(executable.binding);
         }
         const execution = try self.allocator.alloc(u64, self.platform.devices.len);
         errdefer self.allocator.free(execution);
@@ -262,35 +266,24 @@ pub const Loader = struct {
         try parts.ensureTotalCapacityPrecise(self.allocator, part_count);
         var next: usize = 0;
         for (bindings, executables) |binding, executable| {
-            if (executable.binding.layout) |layout| {
+            const sources = executable.binding;
+            for (executable.exe.input_shapes, executable.inputs, 0..) |shape, *input, i| {
+                const layout: ?*const TensorStore.Layout = if (sources.inputs) |inputs| &inputs[i] else sources.layout;
+                const whole: ?*safetensors.Tensor = if (layout) |l| l.whole(sources.tensors) else sources.tensors[0];
                 const first = parts.items.len;
-                try appendCompositeParts(self.allocator, &parts, binding.tensor.id, executable.exe.input_shapes[0], executable.binding, layout);
-                specs[next] = .{
-                    .shape = executable.exe.input_shapes[0],
-                    .memory = .default,
-                    .output = &executable.inputs[0],
-                    .parts = parts.items[first..],
-                    .zero_fill = true,
-                };
-                next += 1;
-                continue;
-            }
-            for (
-                executable.binding.tensors,
-                executable.exe.input_shapes,
-                executable.inputs,
-            ) |source, shape, *input| {
-                if (source.byteSize() == 0) {
-                    load_log.debug("executable input {s} in {s} is empty", .{ source.name, source.file_uri });
-                    return error.EmptyTensor;
-                }
-                const first = parts.items.len;
-                parts.appendAssumeCapacity(.whole(source));
+                if (whole) |source| {
+                    if (source.byteSize() == 0) {
+                        load_log.debug("executable input {s} in {s} is empty", .{ source.name, source.file_uri });
+                        return error.EmptyTensor;
+                    }
+                    parts.appendAssumeCapacity(.whole(source));
+                } else try appendCompositeParts(self.allocator, &parts, binding.tensor.id, shape, sources.tensors, .default, layout.?);
                 specs[next] = .{
                     .shape = shape,
                     .memory = .default,
                     .output = input,
                     .parts = parts.items[first..],
+                    .zero_fill = whole == null,
                 };
                 next += 1;
             }
@@ -554,7 +547,7 @@ fn prepareModelLoad(
     meta.forEachVisit(model, *const Tensor, struct {
         fn call(_: usize, tensor: *const Tensor, store_: *const TensorStore, count: *usize) void {
             const sources = store_.getSourcesById(tensor.id) orelse return;
-            if (!sources.transformed) count.* += loadPartCount(sources);
+            if (sources.inputs == null) count.* += loadPartCount(sources);
         }
     }.call, .{ store, &part_count });
 
@@ -591,7 +584,7 @@ fn prepareModelLoad(
                 context.err = error.TensorNotFound;
                 return;
             };
-            if (sources.transformed) {
+            if (sources.inputs != null) {
                 if (!context.delivered.contains(tensor.id)) {
                     logNotDelivered(context.allocator, tensor, sources.tensors);
                     context.err = error.TransformedTensorNotDelivered;
@@ -600,7 +593,7 @@ fn prepareModelLoad(
             }
             const first_part = context.parts.items.len;
             if (sources.layout) |layout| {
-                appendCompositeParts(context.allocator, context.parts, tensor.id, tensor.shape(), sources, layout) catch |err| {
+                appendCompositeParts(context.allocator, context.parts, tensor.id, tensor.shape(), sources.tensors, sources.memory, layout) catch |err| {
                     context.err = err;
                     return;
                 };
@@ -657,28 +650,34 @@ fn expandsAll(layout: *const TensorStore.Layout) bool {
     return true;
 }
 
-/// The load parts `binding` takes: its chunks when every part expands,
-/// else one per part.
+/// The load parts a bound tensor takes, one for a plain binding.
 fn loadPartCount(binding: TensorStore.Binding) usize {
-    const layout = binding.layout orelse return binding.tensors.len;
+    const layout = binding.layout orelse return 1;
+    return layoutPartCount(layout);
+}
+
+/// The load parts `layout` takes: its chunks when every part expands, else
+/// one per part.
+fn layoutPartCount(layout: *const TensorStore.Layout) usize {
     if (!expandsAll(layout)) return layout.parts.len;
     var n: usize = 0;
     for (layout.parts) |part| n += part.chunks();
     return n;
 }
 
-/// Appends a composite binding's parts in destination order, each expanded
+/// Appends a composite layout's parts in destination order, each expanded
 /// into its contiguous chunks or, when one of them does not expand, all as
 /// strided parts. They are checked against the `shape` they fill: the
-/// layout's size and sources, then what the backends check themselves
-/// (`checkParts`: inside each source and the tensor, disjoint). Strided
-/// parts must not go to a host memory space.
+/// layout's size and sources (`tensors`), then what the backends check
+/// themselves (`checkParts`: inside each source and the tensor, disjoint).
+/// Strided parts must not go to a host `memory` space.
 fn appendCompositeParts(
     allocator: std.mem.Allocator,
     parts: *std.ArrayList(LoadPart),
     id: Tensor.Id,
     shape: Shape,
-    binding: TensorStore.Binding,
+    tensors: []const *safetensors.Tensor,
+    memory: Memory.Kind,
     layout: *const TensorStore.Layout,
 ) (LayoutError || error{EmptyTensor})!void {
     if (layout.shape.byteSize() != shape.byteSize()) {
@@ -690,17 +689,17 @@ fn appendCompositeParts(
         return error.InvalidLayout;
     }
     const strided = !expandsAll(layout);
-    if (strided and !backend.countsAgainstDevice(binding.memory)) {
-        load_log.debug("composite tensor {} {f}: strided parts into {t} memory, which this loader does not assemble", .{ id, shape, binding.memory });
+    if (strided and !backend.countsAgainstDevice(memory)) {
+        load_log.debug("composite tensor {} {f}: strided parts into {t} memory, which this loader does not assemble", .{ id, shape, memory });
         return error.UnsupportedLayout;
     }
     const first = parts.items.len;
     for (layout.parts) |part| {
-        if (part.source >= binding.tensors.len) {
-            load_log.debug("composite tensor {} {f}: a part reads source {d} of {d}", .{ id, shape, part.source, binding.tensors.len });
+        if (part.source >= tensors.len) {
+            load_log.debug("composite tensor {} {f}: a part reads source {d} of {d}", .{ id, shape, part.source, tensors.len });
             return error.InvalidLayout;
         }
-        const source = binding.tensors[part.source];
+        const source = tensors[part.source];
         if (source.byteSize() == 0) {
             load_log.debug("composite tensor {} has empty source {s} in {s}", .{ id, source.name, source.file_uri });
             return error.EmptyTensor;
@@ -847,8 +846,9 @@ fn validateExecutableBinding(
 }
 
 /// The executable's inputs and output carry their placement in their
-/// shapes' shardings, as compiled. A composite binding is one input of its
-/// layout's shape; any other binding is one input per source, of its shape.
+/// shapes' shardings, as compiled. A program's binding is one input per
+/// layout, of its shape and placed like it; any other binding is one input,
+/// the tensor as its binding fills it.
 fn checkExecutableBinding(
     platform: *const Platform,
     tensor: Tensor,
@@ -862,34 +862,37 @@ fn checkExecutableBinding(
         load_log.debug("executable output shape: expected {f}, actual {f}", .{ tensor.shape(), exe.output_shapes[0] });
         return error.ExecutableOutputShapeMismatch;
     }
-    if (binding.layout) |layout| {
-        if (exe.input_shapes.len != 1)
+    if (binding.inputs) |inputs| {
+        if (exe.input_shapes.len != inputs.len)
             return error.ExecutableInputCountMismatch;
-        if (!layout.shape.eql(exe.input_shapes[0])) {
-            load_log.debug("executable input: composite shape {f}, executable shape {f}", .{ layout.shape, exe.input_shapes[0] });
-            return error.ExecutableInputShapeMismatch;
-        }
-        try validateExecutablePlacement(platform, exe.input_shapes[0], exe.num_devices);
-    } else {
-        if (exe.input_shapes.len != binding.tensors.len)
-            return error.ExecutableInputCountMismatch;
-        for (binding.tensors, exe.input_shapes) |source, shape| {
-            if (!source.shape.eql(shape)) {
-                load_log.debug("executable input {s}: source shape {f}, executable shape {f}", .{ source.name, source.shape, shape });
+        for (inputs, exe.input_shapes, 0..) |layout, shape, i| {
+            if (!layout.shape.eql(shape)) {
+                load_log.debug("executable input {d}: bound shape {f}, executable shape {f}", .{ i, layout.shape, shape });
                 return error.ExecutableInputShapeMismatch;
             }
             try validateExecutablePlacement(platform, shape, exe.num_devices);
+            try validateSamePlacement(platform, layout.shape, shape);
         }
+    } else {
+        if (exe.input_shapes.len != 1)
+            return error.ExecutableInputCountMismatch;
+        const filled = if (binding.layout) |layout| layout.shape else binding.tensors[0].shape;
+        if (!filled.eql(exe.input_shapes[0])) {
+            load_log.debug("executable input: bound shape {f}, executable shape {f}", .{ filled, exe.input_shapes[0] });
+            return error.ExecutableInputShapeMismatch;
+        }
+        try validateExecutablePlacement(platform, exe.input_shapes[0], exe.num_devices);
     }
     try validateExecutablePlacement(platform, exe.output_shapes[0], exe.num_devices);
-    try validateOutputPlacement(platform, tensor.shape(), exe.output_shapes[0]);
+    try validateSamePlacement(platform, tensor.shape(), exe.output_shapes[0]);
 }
 
 /// The executable must place its output where the model expects the bound
-/// tensor: the same devices, each holding the same slice. The comparison is
+/// tensor, and its inputs where their bindings place them: the same
+/// devices, each holding the same slice. The comparison is
 /// per device, not by mesh pointer and partition, so `.open` and `.replicated`,
 /// or a null mesh and the replicated mesh, agree when they place alike.
-fn validateOutputPlacement(platform: *const Platform, expected: Shape, actual: Shape) error{ExecutablePlacementMismatch}!void {
+fn validateSamePlacement(platform: *const Platform, expected: Shape, actual: Shape) error{ExecutablePlacementMismatch}!void {
     const want = Sharding.Placement.init(backend.placedShape(platform, expected).packedShape()) catch |err| {
         load_log.debug("binding tensor placement of {f}: {s}", .{ expected, @errorName(err) });
         return error.ExecutablePlacementMismatch;
@@ -899,7 +902,7 @@ fn validateOutputPlacement(platform: *const Platform, expected: Shape, actual: S
     const want_devices = want.mesh().?.devicesInCanonicalOrder();
     const got_devices = got.mesh().?.devicesInCanonicalOrder();
     if (want_devices.len != got_devices.len) {
-        load_log.debug("executable output {f} spans {d} devices, binding tensor {f} spans {d}", .{ actual, got_devices.len, expected, want_devices.len });
+        load_log.debug("executable shape {f} spans {d} devices, binding {f} spans {d}", .{ actual, got_devices.len, expected, want_devices.len });
         return error.ExecutablePlacementMismatch;
     }
     for (want_devices, got_devices) |w, g| {
@@ -909,7 +912,7 @@ fn validateOutputPlacement(platform: *const Platform, expected: Shape, actual: S
             if (a.start != b.start or a.size != b.size) break false;
         } else true;
         if (w.id != g.id or !same_slices) {
-            load_log.debug("executable output placement {f} differs from binding tensor {f} on device {d}", .{ actual, expected, w.id });
+            load_log.debug("executable placement {f} differs from binding {f} on device {d}", .{ actual, expected, w.id });
             return error.ExecutablePlacementMismatch;
         }
     }
@@ -1116,8 +1119,8 @@ test "bulk loading queues behind a submitted loadExecute of a transformed tensor
     try fixture.init(allocator, io);
     defer fixture.deinit();
     const transformed = fixture.store.view().maybeCreateBinding(&.{"value"}, fixture.value.shape()).?;
-    try std.testing.expect(fixture.store.getSourcesById(transformed.id).?.transformed);
-    try std.testing.expect(!fixture.store.getSourcesById(fixture.value.id).?.transformed);
+    try std.testing.expect(fixture.store.getSourcesById(transformed.id).?.inputs != null);
+    try std.testing.expect(fixture.store.getSourcesById(fixture.value.id).?.inputs == null);
 
     var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2 });
     defer loader.deinit();
@@ -1934,7 +1937,7 @@ test "composite layouts that do not fit their tensor fail before submission" {
             const layout = arena.create(TensorStore.Layout) catch unreachable;
             layout.* = .{ .shape = filled, .parts = parts };
             const tensor: Tensor = .fromShape(shape);
-            store_.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .transformed = false, .layout = layout }) catch unreachable;
+            store_.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .layout = layout }) catch unreachable;
             return tensor;
         }
     };
@@ -2036,7 +2039,7 @@ test "composite layouts that do not fit their tensor fail before submission" {
     try load_testing.expectShards(allocator, io, &buffers.transposed, &transposed_bytes);
 }
 
-test "a composite binding feeds its executable the assembled tensor" {
+test "a program takes its inputs from sources, in order" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var fixture: CompositeFixture = undefined;
@@ -2048,17 +2051,24 @@ test "a composite binding feeds its executable the assembled tensor" {
     const Source = TensorStore.Source;
     const view = store.view();
 
-    // a then b, assembled by the loader, then incremented by the executable:
-    // the way an FP8 conversion composes with a fused projection.
+    // a then b, assembled by the loader, and c as it is: the program adds
+    // c to the first four rows, the way an FP8 dequantization takes a
+    // fused weight and its scales.
     const assembled = Source.concatenate(&.{ CompositeFixture.rows(view, "a"), CompositeFixture.rows(view, "b") }, .row);
-    const tensor = assembled.bind(.replicated, .{}, .{});
-    store.id_to_sources.getPtr(tensor.id).?.transformed = true;
-    const Increment = struct {
-        fn call(input: Tensor) Tensor {
-            return input.addConstant(1);
+    const c = CompositeFixture.rows(view, "c");
+    const inputs = [_]Source.Input{ assembled.place(.replicated, .{}), c.place(.replicated, .{}) };
+    const tensor = Source.bindProgram(&inputs, c.shape());
+    const binding = store.getSourcesById(tensor.id).?;
+    try std.testing.expectEqual(2, binding.inputs.?.len);
+    try std.testing.expect(binding.inputs.?[0].whole(binding.tensors) == null);
+    try std.testing.expect(binding.inputs.?[1].whole(binding.tensors) != null);
+    try std.testing.expect(store.sourceOf(tensor) == null);
+    const AddRows = struct {
+        fn call(rows: Tensor, other: Tensor) Tensor {
+            return rows.slice(0, .{ .end = 4 }).add(other);
         }
     };
-    var exe = try platform.compileFn(allocator, io, Increment.call, .{Tensor.fromShape(tensor.shape())}, .{});
+    var exe = try platform.compileFn(allocator, io, AddRows.call, .{ Tensor.fromShape(inputs[0].shape), Tensor.fromShape(inputs[1].shape) }, .{});
     defer exe.deinit();
     var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
     defer loader.deinit();
@@ -2066,27 +2076,32 @@ test "a composite binding feeds its executable the assembled tensor" {
     try loader.loadExecute(&store, &.{.{ .tensor = tensor, .output = &output, .exe = &exe }}, null);
     try loader.awaitAll();
     defer output.deinit();
-    var expected: [80]u8 = undefined;
-    @memcpy(expected[0..48], &fixture.a);
-    @memcpy(expected[48..], &fixture.b);
-    for (0..40) |i| {
-        const value = std.mem.readInt(u16, expected[i * 2 ..][0..2], .little);
-        std.mem.writeInt(u16, expected[i * 2 ..][0..2], value +% 1, .little);
+    var expected: [64]u8 = undefined;
+    for (0..32) |i| {
+        const row = if (i < 24) fixture.a[i * 2 ..][0..2] else fixture.b[(i - 24) * 2 ..][0..2];
+        const value = std.mem.readInt(u16, row, .little) +% std.mem.readInt(u16, fixture.c[i * 2 ..][0..2], .little);
+        std.mem.writeInt(u16, expected[i * 2 ..][0..2], value, .little);
     }
     try load_testing.expectShards(allocator, io, &output, &expected);
 
-    // An executable of another input shape does not take it.
-    const Reshape = struct {
-        fn call(input: Tensor) Tensor {
-            return input.reshape(.{ 5, 8 });
+    // An executable of other inputs does not take them.
+    const Single = struct {
+        fn call(rows: Tensor) Tensor {
+            return rows.slice(0, .{ .end = 4 });
         }
     };
-    var other = try platform.compileFn(allocator, io, Reshape.call, .{Tensor.fromShape(.init(.{ 4, 10 }, .u16))}, .{});
-    defer other.deinit();
+    var single = try platform.compileFn(allocator, io, Single.call, .{Tensor.fromShape(inputs[0].shape)}, .{});
+    defer single.deinit();
+    var swapped = try platform.compileFn(allocator, io, AddRows.call, .{ Tensor.fromShape(.init(.{ 6, 8 }, .u16)), Tensor.fromShape(inputs[1].shape) }, .{});
+    defer swapped.deinit();
     var unused: Buffer = undefined;
     try std.testing.expectError(
+        error.ExecutableInputCountMismatch,
+        loader.loadExecute(&store, &.{.{ .tensor = tensor, .output = &unused, .exe = &single }}, null),
+    );
+    try std.testing.expectError(
         error.ExecutableInputShapeMismatch,
-        loader.loadExecute(&store, &.{.{ .tensor = tensor, .output = &unused, .exe = &other }}, null),
+        loader.loadExecute(&store, &.{.{ .tensor = tensor, .output = &unused, .exe = &swapped }}, null),
     );
 }
 

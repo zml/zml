@@ -3,7 +3,7 @@
 `zml.io.Loader` turns checkpoint sources into device buffers. `load` submits
 the tensors of a model, each from one source or, for a composite tensor, from
 several sources assembled in its destination; `loadExecute` submits the
-sources of executable bindings. Reads and transfers may start before submission returns.
+inputs of executable bindings. Reads and transfers may start before submission returns.
 Submissions are retired in submission order: the loader waits for the reads,
 then for `loadExecute` runs each executable in binding order on the calling
 task, writes its output and frees its inputs.
@@ -48,8 +48,8 @@ alive until `awaitAll` or `deinit` returns.
 The caller owns the estimated total. For a whole checkpoint loaded once,
 `store.view().count()` estimates the number of source tensors. Each loaded
 tensor completes one item, a composite tensor once for all its sources; bulk
-loads skip already delivered transformed tensors, and executable loads count
-their input sources, not their outputs. Unused, repeatedly loaded or
+loads skip the tensors programs compute, once delivered, and executable loads
+count their inputs, not their outputs. Unused, repeatedly loaded or
 concatenated sources can make the checkpoint estimate inexact.
 Source progress completes before the executable runs; keep the enclosing node
 alive until `awaitAll` returns to cover the full loading lifecycle.
@@ -67,7 +67,7 @@ weights), at a cost of inputs, temporaries and output per device; it always
 admits when nothing is pending. Where a device reports no memory limit (CPU)
 or the backend cannot account its allocations, every pending submission is
 retired first. `load` is never gated: submitted after `loadExecute`, it queues
-behind the packs, and a transformed tensor counts as delivered once a
+behind the packs, and a tensor a program computes counts as delivered once a
 `loadExecute` naming it was submitted. Outputs of earlier bindings may
 therefore be written by a later `loadExecute` or by `awaitAll`.
 
@@ -138,9 +138,7 @@ of them has at most 1024 runs (each looked for among the other's), or when
 they repeat with the same strides, before or after merging the runs that
 touch (a search over the differences of their indices); any other pair is
 `UnsupportedLayout`. Strided
-parts into a host memory space are `UnsupportedLayout` too. A transformed
-binding with a layout feeds the assembled tensor to its executable as the
-one input (`loadExecute`).
+parts into a host memory space are `UnsupportedLayout` too.
 
 The front end turns a composite binding into one `LoadSpec` whose parts all
 share the destination. The direct backend plans each part like a tensor: the
@@ -176,16 +174,41 @@ one load and one store (`Lattice.copyRuns`); only the runs a stretch's ends
 cut, and items with few runs per stretch, go one run at a time. Bytes no part
 covers land as zeros.
 
-The block-scale swizzles are sources too: llmd lays MXFP4 and NVFP4 expert
-scales, and Blackwell's block-FP8 scales, out in the 128x4 blocks the
-block-scaled MMA reads with pads, splits, transposes and broadcasts, so the
-loader gathers them from the checkpoint in their final layout: runs of four
-bytes, from a source read once per job. A transpose that only moves axes of
-one element is a reshape and leaves the pieces alone.
+The block-scale swizzles can be sources too: the 128x4 blocks the
+block-scaled MMA reads are pads, splits, transposes and broadcasts, so the
+loader can gather them from the checkpoint in their final layout, as runs of
+four bytes from a source read once per job. A transpose that only moves axes
+of one element is a reshape and leaves the pieces alone.
 
-What stays a program: anything that computes rather than moves bytes, such
-as a dtype conversion or dequantization. These remain transformed bindings
-delivered by `loadExecute`.
+Source ops are Tensor ops, so the same layout code can run in the loader or
+as a program over a source that lands in large runs (below). Runs under
+4 KiB cost host copies; a program costs a compile and staging memory for its
+input. On DeepSeek-V4.1 over two GB300, laying the MXFP4 experts out in the
+loader (gate and up rows interleaved, scales swizzled) copied 77 to 189 GiB
+through bounce buffers, 17 to 36 s of worker time; as programs it copied
+1 to 3 GiB and loaded 0.1 to 1.1 s faster, for 4 to 6 GiB more device memory
+at the peak. llmd lays expert stacks out with programs, and Blackwell's
+block-FP8 scales (a few MiB) in the loader.
+
+## Programs over sources
+
+What stays a program is what computes rather than moves bytes: a dtype
+conversion, a dequantization, a global scale's maximum. `Source.bindProgram(inputs,
+output)` binds a tensor that a program computes while loading, from sources:
+each input is placed by its own shape, as `bind` places a tensor
+(`source.place(mesh, partitioning)`, or `placeAs(shape)`), so a program can
+take a fused weight and its scale grid with every device landing only its
+slice. The binding keeps one `Layout` per input (`Binding.inputs`).
+`loadExecute` lands each input as `load` lands a bound source, in default
+device memory, runs the executable over them in order, then frees them; the
+executable's input shapes must have the inputs' dimensions and placement,
+and its output the tensor's. A tensor bound to a source can go through
+`loadExecute` too, as its one input. `View.maybeCreateBinding(keys, shape)`
+is the shorthand for whole checkpoint tensors, replicated.
+
+A tensor a program computes has no source (`sourceOf` is null). To convert a
+bound tensor, take its source with `sourceOf`, bind the program over it
+placed like the tensor, and `TensorStore.unbind` the old tensor.
 
 ## Errors and diagnostics
 
