@@ -5,7 +5,7 @@ def repo():
     git_repository(
         name = "zls",
         remote = "https://github.com/zigtools/zls.git",
-        commit = "eab2be0fd74443a27662da809b771c4ad0d2afcf",
+        commit = "542462c4ddf045493fa9ca028ee6bc3f38b2754a",
         build_file = Label("//third_party/zls:zls.bazel"),
     )
     git_repository(
