@@ -5786,8 +5786,121 @@ counters, program execute time, `TMP_DIRECT_IO`, GPU memory sampled every
 - Not run: NVFP4 (FlashInfer) checkpoints, TP=4, MI300 (FP8 normalization
   now converts per device slice).
 
+## Twenty-ninth pass: profile of DeepSeek's load (2026-10-20)
+
+Where DeepSeek-V4.1-Flash's load time goes, compilation overlap aside. Same
+setup as the twenty-eighth pass (gb300-1, GPUs 0 and 1, forward stubbed,
+device layout, width 16), the committed code plus temporary
+instrumentation: a 100 ms sampler (md127 bytes, every thread's CPU ticks and
+state), log lines stamped with the monotonic clock, `zml/vfs` debug logs,
+and one run under `sudo nsys profile --run-as=benjamin` (CUDA and OS runtime
+trace, CPU sampling with DWARF backtraces). Scripts in gb300-1
+`~/phase5/` (`setup5.sh` applies the code, `run5.sh` runs, `nsysan.py`,
+`window.py`, `stacks.py`, `apis.py`, `timeline.py` read the report). The
+GPUs were taken by another job after these two runs, so nothing below is
+validated by a fix.
+
+Baseline: 467 GiB in 11.9 s (39 GiB/s); under nsys 14.8 s.
+
+### Findings
+
+1. **A 2.4 s stall when the engram tables are allocated** (4.6 s under
+   nsys). DeepSeek binds `layers.{1,14}.engram.embed.{weight,scale}`
+   (2 x 91.6 GiB FP8 plus 2 x 2.9 GiB) to `.host_pinned`, row-split over the
+   two devices: 4 host destinations, 8 shards. The main batch's allocation
+   task creates them (`createUninitializedBuffer` on the pinned host
+   space), and the plugin registers each shard with `cuMemHostRegister`:
+   0.56, 0.57, 0.62 and 2.5 s for the 46 GiB shards, one at a time. Each
+   call holds the driver lock. Meanwhile `cuMemSetAccess` (up to 2.5 s),
+   `cuEventRecord` (3.5 ms each) and the uploads wait, so the pumps stop,
+   the 33 credits stay held and every worker waits: no H2D and no disk
+   reads for the whole window, about 2 cores busy. The batch log shows it
+   too: groups 21-39 complete within 5 ms of `batch allocations ... done`.
+   Nearly all of the run's credit waits fall in this window
+   (`credit_wait_ms_per_read=0.696` x 60,667 reads = 42 s of worker time,
+   17 workers x 2.4 s = 41 s). The main batch is published only after the
+   pack groups (+1.9 s, waiting on the pack-program compiles), so the stall
+   lands mid-load.
+   CPU-only measurements on gb300-1 (46 GiB anonymous, 64 KiB pages):
+   `mlock` of unfaulted memory 0.48 s (the driver's 0.56 s is mostly this
+   fault-in under its lock); faulting first takes 0.17 s on 16 threads
+   (0.8 s on one), after which `mlock` takes 0.2 s. `MADV_HUGEPAGE` got no
+   huge pages: THP is 512 MiB on this 64 KiB-page kernel, mTHP sizes are
+   disabled (the loader's own arena aligns to 2 MiB, so it gets none
+   either). The fault-in is not zeroing: gb300-1 boots with
+   `init_on_free=1`, so pages are cleared when freed and allocations take
+   them already clear; one thread clears 56 GiB/s, slower than the 90-100
+   GiB/s of `mlock`, `MADV_POPULATE_WRITE` and `MAP_POPULATE`, which all
+   take ~0.5 s per 46 GiB whatever the thread count (only user faults on
+   16 threads reach 0.18 s). The cost is per page (~750K pages of 64 KiB
+   per shard); 2 MiB mTHP is disabled and the hugetlb pools are empty (both
+   need root). Clearing would come back on an allocation that has to
+   reclaim (the freed pages are cleared on that thread), possibly the one
+   46 GiB `mlock` run that took 9 s; not verified. A read-only mapping of a
+   cached checkpoint file is per-page work too: 0.16 s per 46 GiB on 16
+   threads.
+2. **Otherwise the load is read-bound.** Workers spend ~70% reading,
+   22% in credit waits (the stall) and 7% creating destinations
+   (`tensor_init_ms_per_read=0.229`). Outside the stall: pack groups at
+   ~52 GiB/s, the rest ~50 GiB/s; the copy engines are ~40% busy and the
+   pumps mostly stop empty. A read averages 7.9 MiB in 2.2 ms (3.5 GiB/s per
+   worker). Buffered reads of cached data into private buffers measured
+   7.6-7.9 GiB/s on one thread, 85 GiB/s on 16, 96 GiB/s on 32; the RAID
+   reads 57 GB/s with O_DIRECT.
+3. **O_DIRECT re-reads cached data.** At load time 311 of 467 GiB were in
+   the page cache, but 205 GiB came from disk. `direct_io=auto` reads a file
+   direct when it is at most 50% cached: 16 files at 38-50% (99 GiB) were
+   read direct, re-reading their cached 44 GiB from disk. A per-range
+   choice would have read 156 GiB.
+4. **Destination creation uses the VMM allocator** (llmd configures
+   `.vmm`): each device buffer is `cuMemCreate` + `cuMemAddressReserve` +
+   `cuMemMap` + `cuMemSetAccess` (4,748 `cuMemSetAccess` in the load, p50
+   142 us, p90 706 us under nsys), on the workers' path: ~14 s of worker
+   time, ~0.8 s of wall time.
+5. **The engram host jobs form the tail.** The last ~2.5 s have no H2D:
+   11-13 workers copy the engram files (buffered, 66-78% cached) into the
+   pinned tables, 10-28 GiB/s from disk. nsys sampled no kernel stacks, so
+   the split between page-cache copies and readahead is unmeasured.
+6. **NCCL init holds one CPU for ~35 s.** `preloadLibraries` →
+   `ncclCommInitAll` → `ncclInitKernelsForDevice` → `cudaFuncGetAttributes`
+   → `cuLibraryLoadData`, in libcuda the whole time. NCCL 2.30.4 ships
+   cubins for sm_75/80/90/100/110/120 and PTX for sm_120, none built for
+   sm_103 (GB300); `~/.nv/ComputeCache` holds 96 KiB. Hidden by the full
+   model's 67 s compile; with the stub llmd waits on it after the load
+   (9.7 s under nsys, ~16 s in the baseline), so any short compile (cached
+   executables) puts it on the critical path. It also competes for the
+   driver lock while it runs.
+7. **Device 1's uploads are slower per copy.** CUPTI reports them as
+   peer-to-peer from pinned memory (the arena is registered through one
+   client call); for copies of 8 MiB and more, median 67 GB/s against
+   84 GB/s on device 0 (p90 112 against 208). Not a limit today (copy
+   engines ~40% busy).
+8. Smaller: the front end publishes the first group 0.17 s after the load
+   starts; tokenizer, platform and loader creation take ~2 s before
+   compilation.
+
+### Suggested next steps (need GPUs)
+
+- Engram stall: let the loader allocate host destinations itself (the
+  arena's allocator: placed pages, `DmaMap`, a PJRT view freed by its
+  delete callback), fault them in on several threads (or let the workers'
+  copies fault them) and `DmaMap` afterwards, so the driver holds its lock
+  ~0.2 s per 46 GiB instead of ~0.56 s, ideally after the device DMA.
+  First check that a view of `DmaMap`ped memory in the pinned host space
+  works for the executables' device-kind views.
+- Width sweep again once the stall is gone; the 16-48 sweep of the
+  twenty-seventh pass ran with the stall in it.
+- Per-range direct or buffered reads (residency of each job's range, e.g.
+  `cachestat`), with a second descriptor per file for the direct reads.
+- NCCL: time `preload` alone, with a larger `CUDA_CACHE_MAXSIZE`, and with
+  an NCCL build carrying sm_103 (or sm_100f) code.
+
 ## Open work
 
+- 2026-10-20 profile of DeepSeek's load (twenty-ninth pass, measurements
+  only): a 2.4 s mid-load stall while the plugin pins the 189 GiB engram
+  tables; otherwise read-bound at ~50 GiB/s; O_DIRECT re-read 44 GiB of
+  cached data; NCCL init holds a CPU for ~35 s. Next steps listed there.
 - 2026-10-20 programs over Sources (twenty-eighth pass, zml and llmd):
   `Source.bindProgram`; llmd's programs take placed Sources; expert stacks
   laid out by programs by default, faster than the loader's host copies on
