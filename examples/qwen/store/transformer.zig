@@ -53,8 +53,8 @@ pub fn load_tensors(
     const time_text_embed = time_text_embed: {
         const time_proj = block.QwenImage21TemporalTimesteps.init();
         const timestep_embedder = block.TimestepEmbedding{
-            .linear_1 = .init(time_text_embed_view.createTensor("linear_1.weight", .{ .dout, .d }, .replicated), null, .d),
-            .linear_2 = .init(time_text_embed_view.createTensor("linear_2.weight", .{ .dout, .d }, .replicated), null, .d),
+            .linear_1 = .init(time_text_embed_view.createTensor("linear_1.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .linear_2 = .init(time_text_embed_view.createTensor("linear_2.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
         };
         break :time_text_embed block.QwenImage21TimestepProjEmbeddings{
             .time_proj = time_proj,
@@ -65,13 +65,13 @@ pub fn load_tensors(
     const text_in_view = self.store.view().withPrefix("txt_in");
     const txt_in = block.QwenImage21TextProjection{
         .text_norm = .{ .weight = text_in_view.createTensor("text_norm.weight", .{.d}, .replicated), .eps = 1e-6 },
-        .in_layer = .init(text_in_view.createTensor("in_layer.weight", .{ .dout, .d }, .replicated), null, .d),
-        .out_layer = .init(text_in_view.createTensor("out_layer.weight", .{ .dout, .d }, .replicated), null, .d),
+        .in_layer = .init(text_in_view.createTensor("in_layer.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+        .out_layer = .init(text_in_view.createTensor("out_layer.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
     };
 
     const img_in = zml.nn.Linear.init(self.store.view().createTensor("img_in.weight", .{ .dout, .d }, .replicated), null, .d);
 
-    const modulation = zml.nn.Linear.init(self.store.view().createTensor("modulation.1.weight", .{ .img, .d }, .replicated), null, .d);
+    const modulation = zml.nn.Linear.init(self.store.view().createTensor("modulation.1.weight", .{ .img, .d }, .{ .img = .model }), null, .d);
 
     const transformer_blocks: []block.QwenImage21TransformerBlock =
         try allocator.alloc(block.QwenImage21TransformerBlock, TRANSFORMER_BLOCK_COUNT);
@@ -85,17 +85,17 @@ pub fn load_tensors(
             .num_attention_heads = 32,
             .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dim}, .replicated), null, .hd),
             .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dim}, .replicated), null, .hd),
-            .to_k = .init(attn_view.createTensor("to_k.weight", .{ .dup, .d }, .replicated), null, .d),
-            .to_out = .init(attn_view.createTensor("to_out.0.weight", .{ .dup, .d }, .replicated), null, .d),
-            .to_q = .init(attn_view.createTensor("to_q.weight", .{ .dup, .d }, .replicated), null, .d),
-            .to_v = .init(attn_view.createTensor("to_v.weight", .{ .dup, .d }, .replicated), null, .d),
+            .to_k = .init(attn_view.createTensor("to_k.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
+            .to_out = .init(attn_view.createTensor("to_out.0.weight", .{ .dup, .d }, .{ .d = .model }), null, .d),
+            .to_q = .init(attn_view.createTensor("to_q.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
+            .to_v = .init(attn_view.createTensor("to_v.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
         };
 
         const img_mlp_view = tb_layer_view.withPrefix("img_mlp");
         const img_mlp: block.QwenImage21SwiGLUFeedForward = .{
-            .proj = .init(img_mlp_view.createTensor("proj.weight", .{ .dup, .d }, .replicated), null, .d),
-            .out = .init(img_mlp_view.createTensor("out.weight", .{ .dout, .d }, .replicated), null, .d),
-            .gate_layer = .init(img_mlp_view.createTensor("gate_layer.weight", .{ .dup, .d }, .replicated), null, .d),
+            .proj = .init(img_mlp_view.createTensor("proj.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
+            .out = .init(img_mlp_view.createTensor("out.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
+            .gate_layer = .init(img_mlp_view.createTensor("gate_layer.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
         };
 
         transformer_blocks[i] = .{
@@ -108,12 +108,12 @@ pub fn load_tensors(
 
     const norm_out_view = self.store.view().withPrefix("norm_out");
     const norm_out = block.QwenImage21AdaLayerNormContinuous{
-        .linear = .init(norm_out_view.createTensor("linear.weight", .{ .dup, .d }, .replicated), null, .d),
+        .linear = .init(norm_out_view.createTensor("linear.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
         .norm = .{ .eps = 1e-6 },
     };
 
     const proj_out_view = self.store.view();
-    const proj_out = zml.nn.Linear.init(proj_out_view.createTensor("proj_out.weight", .{ .dout, .d }, .replicated), null, .d);
+    const proj_out = zml.nn.Linear.init(proj_out_view.createTensor("proj_out.weight", .{ .dout, .d }, .{ .d = .model }), null, .d);
 
     self.model = block.QwenImage21Transformer2DModel{
         .pos_embed = pos_embed,

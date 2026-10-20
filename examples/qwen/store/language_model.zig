@@ -43,7 +43,7 @@ pub fn load_tensors(
     self.store = .fromRegistry(allocator, &self.registry);
     const language_model_view = self.store.view().withPrefix("model.language_model");
 
-    const embedding = zml.nn.TokenEmbedding{ .weight = language_model_view.createTensor("embed_tokens.weight", .{ .tokens, .d }, .replicated) };
+    const embedding = zml.nn.TokenEmbedding{ .weight = language_model_view.createTensor("embed_tokens.weight", .{ .tokens, .d }, .{ .d = .model }) };
     const layers: []block.Qwen3VLTextDecoderLayer =
         try allocator.alloc(block.Qwen3VLTextDecoderLayer, TEXT_DECODE_LAYER_COUNT);
 
@@ -54,18 +54,18 @@ pub fn load_tensors(
         const self_attn: block.Qwen3VLTextAttention = .{
             .head_dim = 128,
             .k_norm = .init(attn_view.createTensor("k_norm.weight", .{.dim}, .replicated), .d),
-            .k_proj = .init(attn_view.createTensor("k_proj.weight", .{ .dup, .d }, .replicated), null, .d),
-            .o_proj = .init(attn_view.createTensor("o_proj.weight", .{ .dup, .d }, .replicated), null, .d),
+            .k_proj = .init(attn_view.createTensor("k_proj.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
+            .o_proj = .init(attn_view.createTensor("o_proj.weight", .{ .dup, .d }, .{ .d = .model }), null, .d),
             .q_norm = .init(attn_view.createTensor("q_norm.weight", .{.dim}, .replicated), .d),
-            .q_proj = .init(attn_view.createTensor("q_proj.weight", .{ .dup, .d }, .replicated), null, .d),
-            .v_proj = .init(attn_view.createTensor("v_proj.weight", .{ .dup, .d }, .replicated), null, .d),
+            .q_proj = .init(attn_view.createTensor("q_proj.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
+            .v_proj = .init(attn_view.createTensor("v_proj.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
         };
 
         const mlp_view = layer_view.withPrefix("mlp");
         const mlp = block.Qwen3VLTextMLP{
-            .down_proj = .init(mlp_view.createTensor("down_proj.weight", .{ .dout, .d }, .replicated), null, .d),
-            .gate_proj = .init(mlp_view.createTensor("gate_proj.weight", .{ .dup, .d }, .replicated), null, .d),
-            .up_proj = .init(mlp_view.createTensor("up_proj.weight", .{ .dup, .d }, .replicated), null, .d),
+            .down_proj = .init(mlp_view.createTensor("down_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
+            .gate_proj = .init(mlp_view.createTensor("gate_proj.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
+            .up_proj = .init(mlp_view.createTensor("up_proj.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
         };
 
         const input_layernorm = block.Qwen3VLTextRMSNorm.init(layer_view.createTensor("input_layernorm.weight", .{.dim}, .replicated), .d);

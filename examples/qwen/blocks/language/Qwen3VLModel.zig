@@ -89,7 +89,7 @@ pub fn load(
     });
     defer loader.deinit();
 
-    try loader.load(io, Qwen3VLModel, self, &buffers, store, &.{}, .{});
+    try loader.load(io, Qwen3VLModel, self, &buffers, store, platform.shardings.values(), .{});
     try loader.await(io);
 
     return buffers;
