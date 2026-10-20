@@ -20,7 +20,7 @@ jobs:
         include:
           - target: cpu
             arch: amd64
-            bazel_opts: ""
+            bazel_common_opts: ""
             run_tests: true
             runner_labels:
               - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-cpu-amd64
@@ -28,7 +28,7 @@ jobs:
 
           - target: neuron
             arch: amd64
-            bazel_opts: "--@zml//platforms:neuron=true --@zml//platforms:cpu=false"
+            bazel_common_opts: "--@zml//platforms:neuron=true --@zml//platforms:cpu=false"
             run_tests: false
             runner_labels:
               - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-neuron-amd64
@@ -36,7 +36,7 @@ jobs:
 
           - target: tpu
             arch: amd64
-            bazel_opts: "--@zml//platforms:tpu=true --@zml//platforms:cpu=false"
+            bazel_common_opts: "--@zml//platforms:tpu=true --@zml//platforms:cpu=false"
             run_tests: false
             runner_labels:
               - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-tpu-amd64
@@ -44,13 +44,13 @@ jobs:
 
           - target: cuda
             arch: amd64
-            bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
+            bazel_common_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
             run_tests: true
             runner_labels: ["self-hosted", "linux", "x64", "platform=cuda"]
 
           - target: cuda
             arch: arm64
-            bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
+            bazel_common_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
             run_tests: false
             runner_labels:
               - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-cuda-arm64
@@ -58,13 +58,13 @@ jobs:
 
           - target: rocm
             arch: amd64
-            bazel_opts: "--@zml//platforms:rocm=true --@zml//platforms:cpu=false"
+            bazel_common_opts: "--@zml//platforms:rocm=true --@zml//platforms:cpu=false"
             run_tests: true
             runner_labels: ["self-hosted", "linux", "x64", "platform=rocm"]
 
           - target: oneapi
             arch: amd64
-            bazel_opts: "--@zml//platforms:oneapi=true --@zml//platforms:cpu=false"
+            bazel_common_opts: "--@zml//platforms:oneapi=true --@zml//platforms:cpu=false"
             run_tests: false
             runner_labels:
               - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-oneapi-amd64
@@ -72,7 +72,8 @@ jobs:
 
           - target: metal
             arch: arm64
-            bazel_opts: "--@zml//platforms:metal=true --@zml//platforms:cpu=false --platforms=@zml//platforms:macos_arm64"
+            bazel_common_opts: "--@zml//platforms:metal=true --@zml//platforms:cpu=false"
+            bazel_build_opts: "--platforms=@zml//platforms:macos_arm64"
             run_tests: false
             runner_labels:
               - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-metal-arm64
@@ -80,7 +81,7 @@ jobs:
 
           - target: furiosa
             arch: amd64
-            bazel_opts: "--@zml//platforms:furiosa=true --@zml//platforms:cpu=false"
+            bazel_common_opts: "--@zml//platforms:furiosa=true --@zml//platforms:cpu=false"
             run_tests: false
             runner_labels:
               - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-furiosa-amd64
@@ -114,11 +115,11 @@ jobs:
             ${{ format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
 
       - run: bazel mod graph
-      - run: bazel query ${{ matrix.bazel_opts }} --output=graph //...
-      - run: bazel cquery ${{ matrix.bazel_opts }} //...
-      - run: bazel build ${{ matrix.bazel_opts }} //...
+      - run: bazel query ${{ matrix.bazel_common_opts }} --output=graph //...
+      - run: bazel cquery ${{ matrix.bazel_common_opts }} ${{ matrix.bazel_build_opts }} //...
+      - run: bazel build ${{ matrix.bazel_common_opts }} ${{ matrix.bazel_build_opts }} //...
       - if: ${{ matrix.run_tests }}
-        run: bazel test ${{ matrix.bazel_opts }} //...
+        run: bazel test ${{ matrix.bazel_common_opts }} ${{ matrix.bazel_build_opts }} //...
 
   lint:
     runs-on:
