@@ -217,6 +217,8 @@ pub const fa2 = struct {
 
     pub const Parameters = struct {
         sliding_window: i32 = -1,
+        /// When false, every query attends to all `token_index + q` used keys.
+        is_causal: bool = true,
 
         pub const InitOptions = struct {};
 
@@ -332,7 +334,7 @@ pub const fa2 = struct {
             },
             .{
                 .softmax_scale = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim))),
-                .is_causal = true,
+                .is_causal = parameters.is_causal,
                 .window_size_left = parameters.sliding_window,
                 .window_size_right = -1,
                 .max_seqlen_q = max_seqlen_q,

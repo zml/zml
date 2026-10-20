@@ -1,3 +1,4 @@
+const std = @import("std");
 const zml = @import("zml");
 
 const RMSNorm = @import("./RMSNorm.zig");
@@ -40,49 +41,72 @@ pub fn forward(
     self: QwenImage21Attention,
     x: zml.Tensor,
     rotary_emb: zml.Tensor,
+    text_len: i64,
     args: CompileArgs,
 ) zml.Tensor {
     const prepared = self.prepare(x, rotary_emb);
-    const query = prepared.q;
-    const key = prepared.k;
-    const value = prepared.v;
+    const q = prepared.q.rename(.{ .bs = .b, .seq_len = .q });
+    const k = prepared.k.rename(.{ .bs = .b, .seq_len = .k });
+    const v = prepared.v.rename(.{ .bs = .b, .seq_len = .k });
 
-    const pos_idx = zml.Tensor.scalar(0, .i32);
-    const att = zml.attention.attention(
-        query.rename(.{ .bs = .b, .seq_len = .q, .d = .h }),
-        key.rename(.{ .bs = .b, .seq_len = .k, .d = .h }),
-        value.rename(.{ .bs = .b, .seq_len = .k, .d = .h }),
-        pos_idx.broad(.init(.{ .b = x.dim(.bs) }, .i32)),
-        args.attention_metadata,
-        args.attention_parameters,
-    );
-    return att.merge(.{ .d = .{ .h, .hd } });
+    const text_k = k.slice(.k, .{ .end = text_len });
+    const text_v = v.slice(.k, .{ .end = text_len });
+    const causal_mask = zml.nn.causalAttnMask(.{ .q = text_len, .k = text_len }, q.dtype(), null);
+    const text_out = zml.nn.sdpa(q.slice(.q, .{ .end = text_len }), text_k, text_v, .{ .attn_mask = causal_mask });
+
+    const image_out = full_attention(q.slice(.q, .{ .start = text_len }), k, v, args);
+
+    const out = zml.Tensor.concatenate(&.{
+        text_out.transpose(.{ .b, .q, .h, .hd }),
+        image_out.transpose(.{ .b, .q, .h, .hd }),
+    }, .q).merge(.{ .d = .{ .h, .hd } }).rename(.{ .b = .bs, .q = .seq_len });
+
+    return self.to_out.forward(out, x.dtype()).withTags(.{ .bs, .seq_len, .d });
 }
 
-// apply_rotary_emb_qwen from diffusers/models/transformers/transformer_qwenimage21.py in the use_real=False path
-fn apply_rotary_emb_qwen(x: zml.Tensor, freqs_cis: zml.Tensor) zml.Tensor {
-    return zml.nn.rope(x, .{ .inv_freq_pos = freqs_cis.rename(.{ .d = .hd }) });
+fn full_attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, args: CompileArgs) zml.Tensor {
+    return switch (args.attention_parameters) {
+        .vanilla => zml.nn.sdpa(q, k, v, .{}),
+        .cuda_fa2 => |parameters| b: {
+            var non_causal = parameters;
+            non_causal.is_causal = false;
+            // fa2 uses `token_index + q` keys per sequence, which must be all of them.
+            const token_index = zml.Tensor.scalar(k.dim(.k) - q.dim(.q), .i32).broad(.init(.{ .b = q.dim(.b) }, .i32));
+            break :b zml.attention.flashattn.fa2.attention(q, k, v, token_index, args.attention_metadata.cuda_fa2, non_causal);
+        },
+        else => |backend| std.debug.panic("QwenImage21Attention: unsupported attention backend {t}", .{backend}),
+    };
 }
 
-const PreparedQKV = struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, seq_len_q: i64 };
+fn apply_rotary_emb(x: zml.Tensor, freqs_cis: zml.Tensor) zml.Tensor {
+    const x_real, const x_imag = zml.nn.splitRealImg(x.convert(.f32), .interleaved);
+    const freqs = freqs_cis.withTags(.{ .seq_len, .hd });
+    const cos = freqs.real().broad(x_real.shape());
+    const sin = freqs.imag().broad(x_real.shape());
+
+    const y_real = x_real.mul(cos).sub(x_imag.mul(sin));
+    const y_imag = x_real.mul(sin).add(x_imag.mul(cos));
+    return zml.nn.mergeRealImg(y_real, y_imag, .interleaved).convert(x.dtype());
+}
+
+const PreparedQKV = struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor };
+
 // _qwenimage21_prepare_qkv from diffusers/models/transformers/transformer_qwenimage21.py
 fn prepare(self: QwenImage21Attention, x: zml.Tensor, rotary_emb: zml.Tensor) PreparedQKV {
-    const num_attention_heads: usize = 32;
+    const query = self.split_heads(self.to_q.forward(x, x.dtype()));
+    const key = self.split_heads(self.to_k.forward(x, x.dtype()));
+    const value = self.split_heads(self.to_v.forward(x, x.dtype()));
 
-    const query_flat = self.to_q.forward(x, x.dtype());
-    const key_flat = self.to_k.forward(x, x.dtype());
-    const value_flat = self.to_v.forward(x, x.dtype());
+    const normed_query = self.norm_q.forward(query).convert(value.dtype());
+    const normed_key = self.norm_k.forward(key).convert(value.dtype());
 
-    const query_unflat = query_flat.unflatten(2, num_attention_heads).withTags(.{ .bs, .seq_len, .d, .hd });
-    const key_unflat = key_flat.unflatten(2, num_attention_heads).withTags(.{ .bs, .seq_len, .d, .hd });
-    const value_unflat = value_flat.unflatten(2, num_attention_heads).withTags(.{ .bs, .seq_len, .d, .hd });
+    return .{
+        .q = apply_rotary_emb(normed_query, rotary_emb),
+        .k = apply_rotary_emb(normed_key, rotary_emb),
+        .v = value,
+    };
+}
 
-    const query = self.norm_q.forward(query_unflat).convert(value_unflat.dtype());
-    const key = self.norm_k.forward(key_unflat).convert(value_unflat.dtype());
-
-    const rotated_query = apply_rotary_emb_qwen(query, rotary_emb);
-    const rotated_key = apply_rotary_emb_qwen(key, rotary_emb);
-
-    const seq_len_q = query.shape().dim(2); // Check this 2
-    return PreparedQKV{ .q = rotated_query, .k = rotated_key, .v = value_unflat, .seq_len_q = seq_len_q };
+fn split_heads(self: QwenImage21Attention, x: zml.Tensor) zml.Tensor {
+    return x.withTags(.{ .bs, .seq_len, .d }).splitAxis(.d, .{ .h = self.num_attention_heads, .hd = .auto });
 }

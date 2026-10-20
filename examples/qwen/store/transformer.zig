@@ -7,7 +7,7 @@ const block = @import("../blocks.zig");
 const TransformerStore = @This();
 
 // const TRANSFORMER_BLOCK_COUNT: usize = 32;
-const TRANSFORMER_BLOCK_COUNT: usize = 1;
+const TRANSFORMER_BLOCK_COUNT: usize = 32;
 
 store: zml.io.TensorStore = undefined,
 registry: zml.safetensors.TensorRegistry = undefined,
@@ -84,8 +84,8 @@ pub fn load(
         const attn_view = tb_layer_view.withPrefix("attn");
         const attn: block.QwenImage21Attention = .{
             .num_attention_heads = 32,
-            .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dim}, .replicated), null, .d),
-            .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dim}, .replicated), null, .d),
+            .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dim}, .replicated), null, .hd),
+            .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dim}, .replicated), null, .hd),
             .to_k = .init(attn_view.createTensor("to_k.weight", .{ .dup, .d }, .replicated), null, .d),
             .to_out = .init(attn_view.createTensor("to_out.0.weight", .{ .dup, .d }, .replicated), null, .d),
             .to_q = .init(attn_view.createTensor("to_q.weight", .{ .dup, .d }, .replicated), null, .d),

@@ -1,47 +1,42 @@
-const std = @import("std");
 const zml = @import("zml");
-
-const CompileArgs = @import("../../compiler.zig").CompileArgs;
 
 const QwenImage21Rope = @This();
 
-// Without this field, the LSP doesn't understand that the struct is a struct
-_phantom: struct {},
+theta: f32 = 10000,
+axes_dim: [3]i64 = .{ 16, 56, 56 },
 
 pub fn init() QwenImage21Rope {
-    return QwenImage21Rope{ ._phantom = .{} };
+    return QwenImage21Rope{};
 }
 
-pub fn forward(
-    _: QwenImage21Rope,
-    x: zml.Tensor, // [BS, S, D]
-    position_ids: zml.Tensor,
-    args: CompileArgs,
-) [2]zml.Tensor {
-    const inv_freq = compute_inv_freq(args);
-    const inv_freq_expanded = inv_freq.broad(.init(.{ .rope = 3, .bs = x.dim(.bs), .seq_len = 1, .h = args.head_dim / 2 }, .f32));
-    const position_ids_expanded = position_ids
-        .withTags(.{ .rope, .bs, .seq_len })
-        .appendAxes(.{.h});
+pub fn forward(self: QwenImage21Rope, text_len: i64, height: i64, width: i64) zml.Tensor {
+    const text_pos = zml.Tensor.arange(.{ .end = text_len }, .f32).withTags(.{.seq_len});
 
-    const target_shape = zml.Shape.init(.{ .rope = 3, .bs = x.dim(.bs), .seq_len = x.dim(.seq_len), .h = args.head_dim / 2 }, .f32);
-    const freqs = inv_freq_expanded
-        .convert(.f32).broad(target_shape).mul(position_ids_expanded.convert(.f32).broad(target_shape));
+    const grid: zml.Shape = .init(.{ .h = height, .w = width }, .f32);
+    const image_frame = zml.Tensor.scalar(text_len, .f32).broad(.init(.{ .seq_len = height * width }, .f32));
+    const image_h = zml.Tensor.iota(grid, .h).convert(.f32)
+        .addConstant(-(height - @divFloor(height, 2)))
+        .merge(.{ .seq_len = .{ .h, .w } });
+    const image_w = zml.Tensor.iota(grid, .w).convert(.f32)
+        .addConstant(-(width - @divFloor(width, 2)))
+        .merge(.{ .seq_len = .{ .h, .w } });
 
-    return [2]zml.Tensor{
-        recomposition_frequencies(freqs.cos()).convert(x.dtype()),
-        recomposition_frequencies(freqs.sin()).convert(x.dtype()),
+    const positions = [3]zml.Tensor{
+        zml.Tensor.concatenate(&.{ text_pos, image_frame }, .seq_len),
+        zml.Tensor.concatenate(&.{ text_pos, image_h }, .seq_len),
+        zml.Tensor.concatenate(&.{ text_pos, image_w }, .seq_len),
     };
+
+    var angles: [3]zml.Tensor = undefined;
+    for (positions, self.axes_dim, 0..) |pos, dim, i| {
+        angles[i] = pos.outer(self.compute_inv_freq(dim));
+    }
+    const angle = zml.Tensor.concatenate(&angles, .hd);
+    return zml.Tensor.complex(angle.cos(), angle.sin());
 }
 
-// Could be lazyonce
-fn compute_inv_freq(args: CompileArgs) zml.Tensor {
-    const ar = zml.Tensor.arange(.{ .end = @intCast(args.head_dim), .step = 2 }, .f32).div(zml.Tensor.scalar(args.head_dim, .f32));
-    const freq = zml.Tensor.scalar(args.rope_theta, .f32).pow(ar);
-    return zml.Tensor.scalar(1, .f32).div(freq).withTags(.{.h});
-}
-
-fn recomposition_frequencies(x: zml.Tensor) zml.Tensor {
-    const x0 = x.slice(0, .single(0)).squeeze(0);
-    return zml.Tensor.concatenate(&.{ x0, x0 }, .h).insertAxes(.seq_len, .{.bs});
+fn compute_inv_freq(self: QwenImage21Rope, dim: i64) zml.Tensor {
+    const exponent = zml.Tensor.arange(.{ .end = dim, .step = 2 }, .f32).scale(1.0 / @as(f32, @floatFromInt(dim)));
+    const freq = zml.Tensor.scalar(self.theta, .f32).pow(exponent);
+    return zml.Tensor.scalar(1, .f32).div(freq).withTags(.{.hd});
 }

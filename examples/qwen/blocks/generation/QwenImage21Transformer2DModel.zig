@@ -1,11 +1,14 @@
 const zml = @import("zml");
 const std = @import("std");
+const stdx = @import("stdx");
 
 const QwenImage21Rope = @import("./QwenImage21Rope.zig");
 const QwenImage21TimestepProjEmbeddings = @import("./QwenImage21TimestepProjEmbeddings.zig");
 const QwenImage21TextProjection = @import("./QwenImage21TextProjection.zig");
 const QwenImage21TransformerBlock = @import("./QwenImage21TransformerBlock.zig");
 const QwenImage21AdaLayerNormContinuous = @import("./QwenImage21AdaLayerNormContinuous.zig");
+
+const CompileArgs = @import("../../compiler.zig").CompileArgs;
 
 // QwenImage21Transformer2DModel(
 //   (pos_embed): QwenImage21Rope()
@@ -99,4 +102,41 @@ pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21Transformer2DModel)) void 
     }
     QwenImage21AdaLayerNormContinuous.unloadBuffers(&self.norm_out);
     zml.nn.Linear.unloadBuffers(&self.proj_out);
+}
+
+pub fn forward(
+    self: QwenImage21Transformer2DModel,
+    x_: zml.Tensor,
+    encoder_hidden_states_: zml.Tensor,
+    timestep_: zml.Tensor,
+    _: zml.Tensor,
+    args: CompileArgs,
+) zml.Tensor {
+    const x = self.img_in.forward(x_, x_.dtype()).withTags(.{ .bs, .seq_len, .d });
+    const encoder_hidden_states = self.txt_in.forward(encoder_hidden_states_).withTags(.{ .bs, .seq_len, .d });
+
+    const text_len = encoder_hidden_states.dim(.seq_len);
+    const image_len = x.dim(.seq_len);
+    const height: i64 = @intCast(@divExact(args.height, args.vae_scale_factor));
+    const width: i64 = @intCast(@divExact(args.width, args.vae_scale_factor));
+
+    const joint_hidden_states = zml.Tensor.concatenate(&.{ encoder_hidden_states, x }, .seq_len);
+    const target_token_mask = zml.Tensor.concatenate(&.{
+        zml.Tensor.scalar(false, .bool).broad(.init(.{ .seq_len = text_len }, .bool)),
+        zml.Tensor.scalar(true, .bool).broad(.init(.{ .seq_len = image_len }, .bool)),
+    }, .seq_len);
+    const rotary_emb = self.pos_embed.forward(text_len, height, width);
+
+    const timestep = timestep_.convert(x.dtype()).withTags(.{.bs});
+    const timesteps = zml.Tensor.concatenate(&.{ timestep, zml.Tensor.zeroes(.init(.{ .bs = 1 }, timestep.dtype())) }, .bs);
+    const temb = self.time_text_embed.forward(timesteps, x).withTags(.{ .bs, .d });
+    const modulation = self.modulation.forward(temb.silu(), temb.dtype());
+
+    var hidden_states = joint_hidden_states;
+    for (self.transformer_blocks) |block| {
+        hidden_states = block.forward(hidden_states, modulation, rotary_emb, target_token_mask, text_len, args);
+    }
+
+    const normed = self.norm_out.forward(hidden_states, temb, target_token_mask);
+    return self.proj_out.forward(normed, normed.dtype());
 }
