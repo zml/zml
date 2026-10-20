@@ -62,6 +62,15 @@ const c = NaiveElementwiseAdd.call(.{ .gA = a, .gB = b }, .{ .gC = a.shape() }, 
 
 ## Python to Zig
 
+Put each control-flow region in a Zig `{ ... }` block immediately after
+`openFor`, `openIf`, or `openWhile`, with its corresponding `yield` call inside
+the block. For `openIfElse`, use separate blocks ending in `yieldThen` and
+`yieldElse`; likewise, give `openWhile` separate `yieldBefore` and `yieldAfter`
+blocks. Keep the scope variable outside these blocks so its `.results` remain
+accessible afterward. The braces make the generated control flow visible and
+keep region-local values from escaping their scope; the builder's `open` and
+`yield` calls still create and close the actual IR regions.
+
 | `cutlass.cute`                             | `kernels/cute`                                  |
 |--------------------------------------------|-------------------------------------------------|
 | `gA: cute.Tensor` kernel argument          | `.gA = .{ .tensor = .{ .dtype, .shape } }`      |

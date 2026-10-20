@@ -1,0 +1,45 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
+package(default_visibility = ["//zml:__pkg__"])
+
+filegroup(
+    name = "cute",
+    srcs = [
+        "attention.zig",
+        "cute.zig",
+    ],
+)
+
+zig_test(
+    name = "correctness_test",
+    srcs = [
+        "cases.zig",
+        "fixtures.zig",
+        "reference.zig",
+    ],
+    main = "correctness_test.zig",
+    tags = [
+        "exclusive",
+        "requires-gpu",
+    ],
+    target_compatible_with = select({
+        "//platforms:cuda.enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "benchmark",
+    srcs = [
+        "cases.zig",
+        "fixtures.zig",
+    ],
+    main = "benchmark.zig",
+    tags = ["manual"],
+    target_compatible_with = select({
+        "//platforms:cuda.enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//zml"],
+)
