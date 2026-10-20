@@ -17,6 +17,7 @@ platform: *zml.Platform,
 model_dir: []const u8,
 
 language_model_store: store.LanguageModelStore,
+transformer_model_store: store.TransformerStore,
 
 pub fn init(
     allocator: std.mem.Allocator,
@@ -27,12 +28,16 @@ pub fn init(
     var language_model_store: store.LanguageModelStore = undefined;
     try language_model_store.load_tensors(allocator, io, model_dir);
 
+    var transformer_model_store: store.TransformerStore = undefined;
+    try transformer_model_store.load_tensors(allocator, io, model_dir);
+
     return .{
         .allocator = allocator,
         .io = io,
         .platform = platform,
         .model_dir = model_dir,
         .language_model_store = language_model_store,
+        .transformer_model_store = transformer_model_store,
     };
 }
 
@@ -72,9 +77,11 @@ pub fn run_once(
     const rng = zml.Tensor.Rng.init();
     const wrapper = PipelineWrapper{
         .lang_model = self.language_model_store.model,
+        .transformer_model = self.transformer_model_store.model,
         .args = params.compile_args,
         .rng = rng,
         .timesteps = timesteps,
+        .scheduler = &scheduler,
     };
 
     const input_tensor = zml.Tensor.init(.{ .bs = 1, .seq_len = tokenized.tokens.len }, .u32);
@@ -89,6 +96,7 @@ pub fn run_once(
     defer exe.deinit();
 
     try self.language_model_store.load_buffers(self.allocator, self.io, self.platform);
+    try self.transformer_model_store.load_buffers(self.allocator, self.io, self.platform);
 
     // Create the buffers
     var bufferized = try tokenizer.bufferize(self.allocator, self.io, self.platform, tokenized);
@@ -101,11 +109,15 @@ pub fn run_once(
     var exe_results = try exe.results(self.allocator);
     defer exe_results.deinit(self.allocator);
 
+    var rng_buffer = try zml.Tensor.Rng.initBuffer(self.io, self.platform, .replicated, 43);
+    defer zml.Tensor.Rng.deinitBuffer(&rng_buffer);
+
     exe_args.set(.{
         .{
             .lang_model = self.language_model_store.model_buffer,
+            .transformer_model = self.transformer_model_store.model_buffer,
             .args = params.compile_args_buffers,
-            .rng = rng,
+            .rng = rng_buffer,
             .timesteps = timesteps,
         },
         bufferized.input_ids,
@@ -127,30 +139,33 @@ const DROP_IDX = 14;
 
 const PipelineWrapper = struct {
     lang_model: blocks.Qwen3VLModel,
+    transformer_model: blocks.QwenImage21Transformer2DModel,
     args: CompileArgs,
     rng: zml.Tensor.Rng,
     timesteps: []f32,
+    scheduler: *Scheduler,
 
     pub fn forward(self: PipelineWrapper, input_ids: zml.Tensor) zml.Tensor {
         const prompt_embeds = self.encode_prompt(input_ids);
-        // std.debug.print("prompt_embeds: {f}\n", .{prompt_embeds.shape()}); // prompt_embeds: {bs=1,seq_len=31,d=4096,bf16}
 
         const latent_w = 2 * self.args.width / (self.args.vae_scale_factor * 2);
         const latent_h = 2 * self.args.height / (self.args.vae_scale_factor * 2);
-        const latents = self.rng.bitGenerator(.init(.{ .bs = 1, .d = latent_w * latent_h, .latents = self.args.in_channels }, .f32))[1];
-        // std.debug.print("latents: {f}\n", .{latents.shape()}); // latents: {bs=1,d=16384,latents=64,f32}
-
-        const image_pad_mask = zml.Tensor.concatenate(&.{
-            zml.Tensor.constant(.init(.bool, false)).broad(.init(.{ .seq_len = prompt_embeds.dim(.seq_len) }, .bool)),
-            zml.Tensor.constant(.init(.bool, true)).broad(.init(.{ .seq_len = @divExact(latents.dim(.d), 4) }, .bool)),
-        }, .seq_len);
-        _ = image_pad_mask; // autofix
-        // std.debug.print("image_pad_mask: {f}\n", .{image_pad_mask.shape()}); // image_pad_mask: {seq_len=4127,bool}
+        var latents = self.rng.bitGenerator(.init(.{ .bs = 1, .seq_len = latent_w * latent_h, .d = self.args.in_channels }, .bf16))[1];
 
         for (self.timesteps, 0..) |t, i| {
-            _ = t; // autofix
             _ = i; // autofix
-            // self.lang_model
+            const timestep = zml.Tensor.scalar(t, .bf16).broad(.init(.{ .bs = latents.dim(0) }, .bf16));
+            const noise_pred = self.transformer_model.forward(
+                latents,
+                prompt_embeds,
+                timestep,
+                zml.Tensor.zeroes(.init(.{ .bs = 1 }, .f32)), // unused
+                self.args,
+            )
+                // The size after the forward is [1, TextSeqLen + ImgSeqLen, 64] we only care about [1, ImgSeqLen, 64] so we skip TextSeqLen
+                .slice(1, .{ .start = prompt_embeds.dim(.seq_len) });
+
+            latents = self.scheduler.step(noise_pred, latents);
         }
 
         return latents;

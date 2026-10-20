@@ -14,7 +14,7 @@ const line3 = "<|im_start|>assistant\n";
 
 // <|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\nA neon shop sign that reads "QWEN IMAGE 2.1", rainy night, reflections on wet pavement<|im_end|>\n<|im_start|>assistant\n
 
-const TokenizedPrompt = struct {
+pub const TokenizedPrompt = struct {
     tokenizer: zml.tokenizer.Tokenizer,
     encoder: zml.tokenizer.Tokenizer.Encoder,
     tokens: []u32,
