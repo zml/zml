@@ -83,7 +83,11 @@ pub fn load(
     var buffers = try zml.mem.bufferize(allocator, QwenImage21Transformer2DModel, self);
     errdefer unloadBuffers(&buffers);
 
-    var loader: zml.io.Loader = try .init(allocator, platform, .default);
+    var loader: zml.io.Loader = try .init(allocator, platform, .{
+        .dma_chunks = 32,
+        .dma_chunk_size = 256 * zml.MiB,
+        .parallelism = 16,
+    });
     defer loader.deinit();
 
     try loader.load(io, QwenImage21Transformer2DModel, self, &buffers, store, &.{}, .{});
