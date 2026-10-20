@@ -15,13 +15,9 @@ const line3 = "<|im_start|>assistant\n";
 // <|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n<|im_start|>user\nA neon shop sign that reads "QWEN IMAGE 2.1", rainy night, reflections on wet pavement<|im_end|>\n<|im_start|>assistant\n
 
 pub const TokenizedPrompt = struct {
-    tokenizer: zml.tokenizer.Tokenizer,
-    encoder: zml.tokenizer.Tokenizer.Encoder,
     tokens: []u32,
 
     pub fn deinit(self: *TokenizedPrompt, allocator: std.mem.Allocator) void {
-        self.encoder.deinit();
-        self.tokenizer.deinit();
         allocator.free(self.tokens);
     }
 };
@@ -36,9 +32,11 @@ pub fn tokenize(
 ) !TokenizedPrompt {
     var buffer: [256]u8 = undefined;
     const tokenizer_path = try std.fmt.bufPrint(&buffer, "{s}/{s}", .{ model_dir, "processor/tokenizer.json" });
-    const tokenizer: zml.tokenizer.Tokenizer = try .fromFile(allocator, io, tokenizer_path);
+    var tokenizer: zml.tokenizer.Tokenizer = try .fromFile(allocator, io, tokenizer_path);
+    defer tokenizer.deinit();
 
     var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
 
     var tokens: []u32 = undefined;
     if (opts.templated) {
@@ -49,7 +47,7 @@ pub fn tokenize(
         tokens = try encoder.encodeAlloc(allocator, prompt);
     }
 
-    return TokenizedPrompt{ .tokenizer = tokenizer, .encoder = encoder, .tokens = tokens };
+    return TokenizedPrompt{ .tokens = tokens };
 }
 
 // It should not be hardcoded but actually the value is always the same (length of the tokenized system prompt)

@@ -72,6 +72,7 @@ pub fn run_once(
         @intCast(params.compile_args.num_inference_steps),
         @floatFromInt(params.compile_args.head_dim * params.compile_args.head_dim),
     );
+    defer scheduler.deinit(self.allocator);
 
     // Compile the model
     const rng = zml.Tensor.Rng.init();
@@ -96,7 +97,9 @@ pub fn run_once(
     defer exe.deinit();
 
     try self.language_model_store.load_buffers(self.allocator, self.io, self.platform);
+    defer self.language_model_store.deinit(self.allocator);
     try self.transformer_model_store.load_buffers(self.allocator, self.io, self.platform);
+    defer self.transformer_model_store.deinit(self.allocator);
 
     // Create the buffers
     var bufferized = try tokenizer.bufferize(self.allocator, self.io, self.platform, tokenized);
