@@ -39,9 +39,15 @@ pub const Fixture = struct {
             for (0..c.pages()) |p| {
                 f.table[s * c.pages() + p] = if (p * cases.page_size < len) @intCast(s * c.pages() + p) else -1;
             }
+            const live_pages = std.math.divCeil(usize, len, cases.page_size) catch unreachable;
+            if (c.shuffle_pages) random.shuffle(i32, f.table[s * c.pages() ..][0..live_pages]);
             // Unused physical slots must not contribute to PV, even via zero * NaN.
             for (len..c.pages() * cases.page_size) |j| {
-                const offset = (s * c.pages() * cases.page_size + j) * c.kv_heads * c.head_dim;
+                const page = if (j / cases.page_size < live_pages)
+                    @as(usize, @intCast(f.table[s * c.pages() + j / cases.page_size]))
+                else
+                    s * c.pages() + j / cases.page_size;
+                const offset = (page * cases.page_size + j % cases.page_size) * c.kv_heads * c.head_dim;
                 @memset(f.k[offset..][0 .. c.kv_heads * c.head_dim], .fromF32(std.math.nan(f32)));
                 @memset(f.v[offset..][0 .. c.kv_heads * c.head_dim], .fromF32(std.math.nan(f32)));
             }
@@ -93,6 +99,7 @@ pub const Inputs = struct {
                 .causal => .{ .standard = .{} },
                 .non_causal => .none,
                 .window => .{ .standard = .{ .sliding_window = c.window } },
+                .non_causal_window => .{ .standard = .{ .causal = false, .sliding_window = c.window } },
                 .indices => .{ .indices = i.indices },
             },
             .sink = if (c.sink) i.sinks else null,

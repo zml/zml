@@ -27,7 +27,7 @@ test "paged attention correctness" {
             c.name, c.head_dim, c.batch, c.kv_heads, c.group, c.prefill, if (c.prefill > 0) c.chunk else 1, c.kv_len, @tagName(c.mask),
         });
 
-        runCorrectness(a, io, platform, c) catch |err| {
+        runCorrectness(a, io, platform, c, false) catch |err| {
             failures += 1;
             std.debug.print("FAIL error={s}\n", .{@errorName(err)});
         };
@@ -36,8 +36,27 @@ test "paged attention correctness" {
     try std.testing.expectEqual(@as(usize, 0), failures);
 }
 
-fn runCorrectness(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, c: cases.Case) !void {
-    const exe = try platform.compileFn(a, io, fixtures.forward, .{ Inputs.init(c), c, zml.paged_attention.Backend.cute }, .{ .program_name = "paged_attention_harness" });
+test "FP16 paged attention" {
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.CudaRequired;
+    for ([_]cases.Case{
+        .{ .name = "fp16_decode", .head_dim = 64, .kv_len = 257 },
+        .{ .name = "fp16_mixed", .prefill = 1, .mask = .non_causal },
+        .{ .name = "fp16_window_sink", .head_dim = 256, .prefill = 1, .mask = .window, .sink = true },
+        .{ .name = "fp16_split_sink", .head_dim = 512, .batch = 1, .kv_len = 2049, .sink = true, .shuffle_pages = true },
+    }) |c| try runCorrectness(std.testing.allocator, std.testing.io, platform, c, true);
+}
+
+fn forwardF16(i: Inputs, c: cases.Case, backend: zml.paged_attention.Backend) zml.Tensor {
+    var inputs = i;
+    inputs.q = i.q.convert(.f16);
+    inputs.k = i.k.convert(.f16);
+    inputs.v = i.v.convert(.f16);
+    return fixtures.forward(inputs, c, backend).convert(.bf16);
+}
+
+fn runCorrectness(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, c: cases.Case, comptime compute_f16: bool) !void {
+    const exe = try platform.compileFn(a, io, if (compute_f16) forwardF16 else fixtures.forward, .{ Inputs.init(c), c, zml.paged_attention.Backend.cute }, .{ .program_name = "paged_attention_harness" });
     defer exe.deinit();
 
     var runner = try exe.runner(a);
@@ -47,6 +66,15 @@ fn runCorrectness(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platfor
     defer arena.deinit();
 
     const fixture = try fixtures.Fixture.init(arena.allocator(), c);
+    if (compute_f16) {
+        // Exactly representable in both formats, so the existing CPU reference
+        // receives precisely the values used by the FP16 tensor-core path.
+        for ([_][]zml.floats.BFloat16{ fixture.q, fixture.k, fixture.v }) |values| {
+            for (values) |*v| if (std.math.isFinite(v.toF32())) {
+                v.* = .fromF32(@round(v.toF32() * 64) / 64);
+            };
+        }
+    }
 
     var buffers = try fixtures.upload(io, platform, Inputs.init(c), fixture);
     defer zml.Buffer.deinitAll(Inputs, &buffers);
@@ -59,7 +87,7 @@ fn runCorrectness(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platfor
     defer host.free(a);
 
     const max_error = try reference.check(a, c, fixture, host.items(zml.floats.BFloat16));
-    std.debug.print("RESULT name={s} d={d} b={d} hkv={d} g={d} prefill={d} chunk={d} kv={d} backend=cute check=all_outputs max_abs={d:.6}\n", .{
-        c.name, c.head_dim, c.batch, c.kv_heads, c.group, c.prefill, if (c.prefill > 0) c.chunk else 1, c.kv_len, max_error,
+    std.debug.print("RESULT name={s} d={d} b={d} hkv={d} g={d} prefill={d} chunk={d} kv={d} backend=cute compute_dtype={s} check=all_outputs max_abs={d:.6}\n", .{
+        c.name, c.head_dim, c.batch, c.kv_heads, c.group, c.prefill, if (c.prefill > 0) c.chunk else 1, c.kv_len, if (compute_f16) "f16" else "bf16", max_error,
     });
 }

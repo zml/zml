@@ -1,9 +1,9 @@
 const stdx = @import("stdx");
 
-const zml = @import("../../../zml.zig");
-const paged = @import("../paged_attention.zig");
-const triton = @import("../triton/triton.zig");
-const kernel = @import("sm100_attention.zig");
+const zml = @import("../../../../zml.zig");
+const paged = @import("../../paged_attention.zig");
+const triton = @import("../../triton/triton.zig");
+const kernel = @import("attention.zig");
 
 pub const Options = triton.paged.Options;
 pub const Parameters = triton.paged.Parameters;
