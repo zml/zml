@@ -1,7 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const dialects = @import("mlir/dialects");
+const funcDialect = @import("mlir/dialects/func");
+const stablehlo = @import("mlir/dialects/stablehlo");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const platforms = @import("platforms");
@@ -120,7 +121,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
             }
         }
 
-        _ = dialects.stablehlo.returns(mlir_ctx, &reduced_values, ctx.location).appendTo(block);
+        _ = stablehlo.returns(mlir_ctx, &reduced_values, ctx.location).appendTo(block);
         break :b block;
     };
 
@@ -135,7 +136,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
     );
 
     const handle = ctx.nextChannelId();
-    const channel_handle_attr = dialects.stablehlo.channelHandle(
+    const channel_handle_attr = stablehlo.channelHandle(
         mlir_ctx,
         handle,
         .collective,
@@ -148,7 +149,7 @@ pub fn allReduce(inputs: anytype, comptime func: anytype) AllReduceReturnType(@T
         result_types[i] = input_values[i].type_();
     }
 
-    const op = dialects.stablehlo.allReduce(
+    const op = stablehlo.allReduce(
         mlir_ctx,
         &input_values,
         &result_types,
@@ -257,7 +258,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             result_values[i] = result[i].value();
         }
 
-        const block_result = dialects.stablehlo.returns(mlir_ctx, &result_values, compiler.location);
+        const block_result = stablehlo.returns(mlir_ctx, &result_values, compiler.location);
         _ = block_result.appendTo(reduce_block);
         break :b .{ reduce_block, result };
     };
@@ -296,7 +297,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             reduced_shape = reduced_shape.setDim(a, 1);
         }
 
-        const broad_op = dialects.stablehlo.broadcast_in_dim(
+        const broad_op = stablehlo.broadcast_in_dim(
             mlir_ctx,
             reduce_op.result(i),
             broadcasting_axes.slice()[0 .. reduced_shape.rank() - axes_.len],
@@ -364,7 +365,7 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
             result_values[i] = result[i].value();
         }
 
-        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, compiler.location).appendTo(reduce_block);
+        _ = stablehlo.returns(mlir_ctx, &result_values, compiler.location).appendTo(reduce_block);
         break :b .{ reduce_block, result };
     };
     var input_values: [inputs.len]*const mlir.Value = undefined;
@@ -438,7 +439,7 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
 
         var result = @call(.auto, func, args ++ context);
 
-        _ = dialects.stablehlo.return_(mlir_ctx, result.value(), compiler.location).appendTo(sort_block);
+        _ = stablehlo.return_(mlir_ctx, result.value(), compiler.location).appendTo(sort_block);
         break :b sort_block;
     };
 
@@ -532,7 +533,7 @@ pub fn @"while"(
         const cond: Tensor = captured_context.cond(initial_state);
         stdx.debug.assert(cond.rank() == 0 and cond.dtype() == .bool, "zml.ops.while expects cond to return a scalar bool Tensor, got {f}", .{cond});
 
-        _ = dialects.stablehlo.return_(mlir_ctx, cond.value(), comp.location).appendTo(block);
+        _ = stablehlo.return_(mlir_ctx, cond.value(), comp.location).appendTo(block);
         break :b block;
     };
 
@@ -563,11 +564,11 @@ pub fn @"while"(
         }
 
         const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
-        _ = dialects.stablehlo.returns(mlir_ctx, result_values, comp.location).appendTo(block);
+        _ = stablehlo.returns(mlir_ctx, result_values, comp.location).appendTo(block);
         break :b .{ block, result };
     };
 
-    const op = dialects.stablehlo.while_(
+    const op = stablehlo.while_(
         mlir_ctx,
         operands_info.items(.value),
         operands_info.items(.type),
@@ -716,7 +717,7 @@ pub fn @"if"(
         const result = blkctx.onTrue();
         const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
         defer allocator.free(result_values);
-        _ = dialects.stablehlo.returns(mlir_ctx, result_values, loc).appendTo(block);
+        _ = stablehlo.returns(mlir_ctx, result_values, loc).appendTo(block);
         break :b .{ result, block };
     };
 
@@ -730,7 +731,7 @@ pub fn @"if"(
         const result = blkctx.onFalse();
         const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
         defer allocator.free(result_values);
-        _ = dialects.stablehlo.returns(mlir_ctx, result_values, loc).appendTo(block);
+        _ = stablehlo.returns(mlir_ctx, result_values, loc).appendTo(block);
         break :b .{ result, block };
     };
     // TODO check that false branch values matches right branch
@@ -807,7 +808,7 @@ pub fn if2(
 
         const scope = compiler.pushBlock(block);
         defer scope.pop();
-        _ = dialects.stablehlo.returns(mlir_ctx, true_values, loc).appendTo(block);
+        _ = stablehlo.returns(mlir_ctx, true_values, loc).appendTo(block);
         break :b block;
     };
 
@@ -820,7 +821,7 @@ pub fn if2(
         const scope = compiler.pushBlock(block);
         defer scope.pop();
 
-        _ = dialects.stablehlo.returns(mlir_ctx, false_values, loc).appendTo(block);
+        _ = stablehlo.returns(mlir_ctx, false_values, loc).appendTo(block);
         break :b block;
     };
 
@@ -894,7 +895,7 @@ pub const TritonOps = struct {
     num_warps: i32,
     is_tma_allowed: bool = false,
     global_scratch_memory_size: i32 = 0,
-    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+    output_operand_aliases: []const stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
 /// Generate an MLIR call to the given member function with the given tensors.
@@ -936,7 +937,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
         results_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
     }
 
-    const op = dialects.stablehlo.custom_call(
+    const op = stablehlo.custom_call(
         mlir_ctx,
         &values,
         &res_types,
@@ -975,7 +976,7 @@ pub const FlyOps = struct {
     /// `inputs.len + i`. A no-op inside HIP graphs: a kernel that must see
     /// zeroed outputs should zero them itself.
     zeroed_args: []const i32 = &.{},
-    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+    output_operand_aliases: []const stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
 pub fn fly(inputs: anytype, outputs: anytype, opts: FlyOps) [outputs.len]Tensor {
@@ -1008,7 +1009,7 @@ pub fn fly(inputs: anytype, outputs: anytype, opts: FlyOps) [outputs.len]Tensor 
     if (opts.waves_per_eu > 0) attrs.appendAssumeCapacity(.named(mlir_ctx, "waves_per_eu", .int(mlir_ctx, .i32, opts.waves_per_eu)));
     if (opts.shared_mem_bytes > 0) attrs.appendAssumeCapacity(.named(mlir_ctx, "shared_mem_bytes", .int(mlir_ctx, .i64, opts.shared_mem_bytes)));
     if (opts.zeroed_args.len > 0) {
-        const Opts = dialects.stablehlo.CustomCallOpts;
+        const Opts = stablehlo.CustomCallOpts;
         var zeroed: stdx.BoundedArray(*const mlir.Attribute, Opts.MAX_OPERANDS + Opts.MAX_RESULTS) = .empty;
         for (opts.zeroed_args) |i| {
             std.debug.assert(i >= 0 and i < inputs.len + outputs.len);
@@ -1028,7 +1029,7 @@ pub fn fly(inputs: anytype, outputs: anytype, opts: FlyOps) [outputs.len]Tensor 
         results_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
     }
 
-    const op = dialects.stablehlo.custom_call(
+    const op = stablehlo.custom_call(
         mlir_ctx,
         &values,
         &res_types,
@@ -1146,7 +1147,7 @@ pub const NeuronNkiOps = struct {
     source_path: []const u8,
     compiler_target: []const u8,
     has_side_effect: bool = false,
-    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+    output_operand_aliases: []const stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
 /// Generate an MLIR call for a Neuron NKI kernel.
@@ -1217,7 +1218,7 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
     };
     defer ctx.allocator.free(compiled_backend_config);
 
-    const op = dialects.stablehlo.custom_call(
+    const op = stablehlo.custom_call(
         mlir_ctx,
         &values,
         &res_types,
@@ -1316,7 +1317,7 @@ pub const CudaTileOps = struct {
     /// Result indices XLA zeroes before the launch, ascending. For a kernel
     /// that accumulates, or writes less than the whole output.
     zeroed_outputs: []const i32 = &.{},
-    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+    output_operand_aliases: []const stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
 /// A `__gpu$xla.gpu.cuda_tile` custom call: XLA assembles `ir` with tileiras
@@ -1347,13 +1348,13 @@ pub fn cudaTile(inputs: anytype, outputs: anytype, opts: CudaTileOps) [outputs.l
     });
     if (opts.ir_version) |v| attrs.appendAssumeCapacity(.named(mlir_ctx, "ir_version", .string(mlir_ctx, v)));
     if (opts.zeroed_outputs.len > 0) {
-        var zeroed: stdx.BoundedArray(*const mlir.Attribute, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
+        var zeroed: stdx.BoundedArray(*const mlir.Attribute, stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
         for (opts.zeroed_outputs) |i| zeroed.appendAssumeCapacity(.int(mlir_ctx, .i32, i));
         attrs.appendAssumeCapacity(.named(mlir_ctx, "zeroed_outputs", .array(mlir_ctx, zeroed.constSlice())));
     }
     const backend_config: *const mlir.Attribute = .dict(mlir_ctx, attrs.constSlice());
 
-    const op = dialects.stablehlo.custom_call(
+    const op = stablehlo.custom_call(
         mlir_ctx,
         &values,
         &res_types,
@@ -1385,7 +1386,7 @@ pub const CuteOps = struct {
     block: ?[3]i32 = null,
     zeroed_outputs: []const i32 = &.{},
     scalars: []const i64 = &.{},
-    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+    output_operand_aliases: []const stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
 /// A `__gpu$xla.gpu.cute` custom call: XLA compiles `ir` with the CuTe compiler
@@ -1420,7 +1421,7 @@ pub fn cute(inputs: anytype, outputs: anytype, opts: CuteOps) [outputs.len]Tenso
         }
     }
     if (opts.zeroed_outputs.len > 0) {
-        var zeroed: stdx.BoundedArray(*const mlir.Attribute, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
+        var zeroed: stdx.BoundedArray(*const mlir.Attribute, stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
         for (opts.zeroed_outputs) |i| zeroed.appendAssumeCapacity(.int(mlir_ctx, .i32, i));
         attrs.appendAssumeCapacity(.named(mlir_ctx, "zeroed_outputs", .array(mlir_ctx, zeroed.constSlice())));
     }
@@ -1433,7 +1434,7 @@ pub fn cute(inputs: anytype, outputs: anytype, opts: CuteOps) [outputs.len]Tenso
     }
     const backend_config: *const mlir.Attribute = .dict(mlir_ctx, attrs.constSlice());
 
-    const op = dialects.stablehlo.custom_call(
+    const op = stablehlo.custom_call(
         mlir_ctx,
         &values,
         &res_types,
@@ -1767,7 +1768,7 @@ pub fn scatter(
             result_values[i] = result[i].value();
         }
 
-        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, compiler.location).appendTo(update_block);
+        _ = stablehlo.returns(mlir_ctx, &result_values, compiler.location).appendTo(update_block);
         break :b .{ update_block, result };
     };
 
@@ -1819,7 +1820,7 @@ pub fn scatter(
         input_values[i] = inputs[i].value();
     }
 
-    const op = dialects.stablehlo.scatter(
+    const op = stablehlo.scatter(
         mlir_ctx,
         &input_values,
         &.{indices.value()},
@@ -2135,7 +2136,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
     // TODO: try changing .last by other axis and see the perf impact.
     const indices = Tensor.stack(indices_per_axis.constSlice(), .last, .coord);
     // scoped_log.debug("gather --> {} {any}", .{ res_shape, res_kind.constSlice() });
-    const gather_op = dialects.stablehlo.gather(
+    const gather_op = stablehlo.gather(
         mlir_ctx,
         self.value(),
         indices.value(),
@@ -2306,7 +2307,7 @@ fn CustomCallResultTypeFromOutputSpec(comptime OutputSpecT: type) type {
 
 pub const CustomCallOptions = struct {
     has_side_effect: bool,
-    output_operand_aliases: ?[]const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = null,
+    output_operand_aliases: ?[]const stablehlo.CustomCallOpts.OutputOperandAlias = null,
     compute_on_host: bool = false,
 };
 
@@ -2326,7 +2327,7 @@ pub fn customCallOutputOperandAliases(
     comptime I: type,
     comptime O: type,
     comptime aliases: ?CustomCallOutputOperandAliases(I, O),
-) ?[]const dialects.stablehlo.CustomCallOpts.OutputOperandAlias {
+) ?[]const stablehlo.CustomCallOpts.OutputOperandAlias {
     const aliases_ = aliases orelse return null;
 
     const output_field_names = @typeInfo(O).@"struct".field_names;
@@ -2336,7 +2337,7 @@ pub fn customCallOutputOperandAliases(
     }
 
     const output_operand_aliases = comptime blk: {
-        var aliases_buffer: [num_aliases]dialects.stablehlo.CustomCallOpts.OutputOperandAlias = undefined;
+        var aliases_buffer: [num_aliases]stablehlo.CustomCallOpts.OutputOperandAlias = undefined;
         var i = 0;
         for (output_field_names, 0..) |field_name, output_index| {
             if (@field(aliases_, field_name)) |operand| {
@@ -2402,11 +2403,11 @@ pub fn composite(
                 rvals[i] = t.value();
             }
 
-            _ = dialects.func.returns(mlir_ctx, rvals, ctx.location).appendTo(block);
+            _ = funcDialect.returns(mlir_ctx, rvals, ctx.location).appendTo(block);
         }
         scope.pop();
 
-        _ = dialects.func.func(mlir_ctx, .{
+        _ = funcDialect.func(mlir_ctx, .{
             .name = decomp_name,
             .block = block,
             .location = ctx.location,
@@ -2425,7 +2426,7 @@ pub fn composite(
         result_types[i] = mlirx.Type.rankedTensor(mlir_ctx, s);
     }
 
-    const op = dialects.stablehlo.composite(
+    const op = stablehlo.composite(
         mlir_ctx,
         operand_values,
         result_types,
@@ -2807,7 +2808,7 @@ pub fn typedCustomCall(
         result_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(shape.rank())).constSlice()) catch unreachable;
     }
 
-    const op = dialects.stablehlo.custom_call(
+    const op = stablehlo.custom_call(
         ctx.mlir_ctx,
         values,
         result_types,
@@ -2925,11 +2926,11 @@ test "CustomCallOutputOperandAliases maps named fields to indices" {
 
     try std.testing.expectEqual(@as(usize, 2), aliases.len);
     try std.testing.expectEqualDeep(
-        dialects.stablehlo.CustomCallOpts.OutputOperandAlias{ .output_index = 0, .operand_index = 0 },
+        stablehlo.CustomCallOpts.OutputOperandAlias{ .output_index = 0, .operand_index = 0 },
         aliases[0],
     );
     try std.testing.expectEqualDeep(
-        dialects.stablehlo.CustomCallOpts.OutputOperandAlias{ .output_index = 1, .operand_index = 2 },
+        stablehlo.CustomCallOpts.OutputOperandAlias{ .output_index = 1, .operand_index = 2 },
         aliases[1],
     );
 }

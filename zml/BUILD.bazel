@@ -152,10 +152,11 @@ zig_library(
         "//kernels/mosaic_tpu:mosaic_tpu_builder",
         "//kernels/triton:triton_builder",
         "//mlir",
-        "//mlir/dialects",
-        "//mlir/dialects/cuda_tile",
-        "//mlir/dialects/fly",
+        "//mlir/dialects/func",
         "//mlir/dialects/mosaic_tpu",
+        "//mlir/dialects/shardy",
+        "//mlir/dialects/stablehlo",
+        "//mlir/dialects/ttir",
         "//pjrt",
         "//platforms",
         "//platforms/tpu:ragged_paged",
@@ -183,7 +184,7 @@ zig_library(
 zig_library(
     name = "moe_mosaic_tpu_gmm_ep",
     import_name = "zml/moe/mosaic_tpu_kernels/gmm_ep",
-    main = "moe/mosaic_tpu_kernels/gmm_ep.zig",
+    main = "//zml/kernels/moe/mosaic_tpu:gmm_ep.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [

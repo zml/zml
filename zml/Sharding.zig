@@ -2,7 +2,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const dialects = @import("mlir/dialects");
+const shardy = @import("mlir/dialects/shardy");
+const func = @import("mlir/dialects/func");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const platforms = @import("platforms");
@@ -194,11 +195,11 @@ pub fn sdyPerValueShardingAttr(
     shapes: []const Shape,
     mesh: *const Mesh,
 ) error{OutOfMemory}!*const mlir.Attribute {
-    const meshe_attrs = try allocator.alloc(*const dialects.shardy.TensorShardingAttribute, shapes.len);
+    const meshe_attrs = try allocator.alloc(*const shardy.TensorShardingAttribute, shapes.len);
     for (meshe_attrs, shapes) |*attr, shape| {
         attr.* = try mesh.sdyShardingAttrForShape(allocator, ctx, shape);
     }
-    return dialects.shardy.TensorShardingPerValueAttribute.init(ctx, meshe_attrs).asAttr();
+    return shardy.TensorShardingPerValueAttribute.init(ctx, meshe_attrs).asAttr();
 }
 
 pub fn sdyManualAxesAttr(
@@ -250,7 +251,7 @@ pub fn sdyManualAxesAttr(
         axes[i] = mlir.StringAttribute.init(ctx, axis_name);
     }
 
-    return dialects.shardy.ManualAxesAttribute.init(ctx, axes).asAttr();
+    return shardy.ManualAxesAttribute.init(ctx, axes).asAttr();
 }
 
 pub const Partitioning = packed struct {
@@ -1690,11 +1691,11 @@ pub const Mesh = struct {
         parent_allocator: std.mem.Allocator,
         ctx: *mlir.Context,
         shape: Shape,
-    ) error{OutOfMemory}!*const dialects.shardy.TensorShardingAttribute {
+    ) error{OutOfMemory}!*const shardy.TensorShardingAttribute {
         var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
         defer arena.deinit();
         const allocator = arena.allocator();
-        const dimensions = try allocator.alloc(*const dialects.shardy.DimensionShardingAttribute, shape.rank());
+        const dimensions = try allocator.alloc(*const shardy.DimensionShardingAttribute, shape.rank());
         var used: [MAX_MESH_RANK]bool = @splat(false);
         for (0.., dimensions) |ax, *d| {
             d.* = switch (shape.partition(ax)) {
@@ -1709,7 +1710,7 @@ pub const Mesh = struct {
             };
         }
 
-        var replicated_axes: stdx.BoundedArray(*const dialects.shardy.AxisRefAttribute, MAX_MESH_RANK + 1) = .empty;
+        var replicated_axes: stdx.BoundedArray(*const shardy.AxisRefAttribute, MAX_MESH_RANK + 1) = .empty;
         var tile_count: usize = 1;
         for (data.logical.axes.slice(), 0..) |axis, i| {
             tile_count *= data.grid.axis_sizes[i];
@@ -2448,7 +2449,7 @@ const ShardingTest = struct {
             const registry: *mlir.DialectRegistry = try .init();
             defer registry.deinit();
             registry.registerDialect("sdy");
-            mlir.registerFuncExtensions(registry);
+            func.registerExtensions(registry);
 
             var ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
             defer ctx.deinit();

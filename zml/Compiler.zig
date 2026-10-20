@@ -1,7 +1,8 @@
 const std = @import("std");
 
 const c = @import("c");
-const dialects = @import("mlir/dialects");
+const funcDialect = @import("mlir/dialects/func");
+const stablehlo = @import("mlir/dialects/stablehlo");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
@@ -63,7 +64,7 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
         inline for (.{ "func", "stablehlo", "sdy" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
         }
-        mlir.registerFuncExtensions(mlir_registry);
+        funcDialect.registerExtensions(mlir_registry);
 
         mlir_global_registry = mlir_registry;
     }
@@ -705,7 +706,7 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
     const arena = arena_state.allocator();
     const mlir_ctx = compiler.mlir_ctx;
 
-    const fn_return = dialects.func.returns(mlir_ctx, output_info.items(.value), .unknown(mlir_ctx));
+    const fn_return = funcDialect.returns(mlir_ctx, output_info.items(.value), .unknown(mlir_ctx));
     _ = fn_return.appendTo(fn_scope.block);
 
     // Resolve donations
@@ -744,7 +745,7 @@ fn finalizeMlirFunc(compiler: *Compiler, fn_scope: *Scope, input_info: std.Multi
     const output_types = try arena.alloc(*const mlir.Type, output_info.len);
     for (output_types, output_info.items(.value)) |*output_type, value| output_type.* = value.type_();
 
-    const mlir_func = dialects.func.func(mlir_ctx, .{
+    const mlir_func = funcDialect.func(mlir_ctx, .{
         .name = "main",
         .args = input_types,
         .results = output_types,
@@ -767,14 +768,14 @@ fn unpack(compiler: *Compiler, scope: *Scope, og_shape: Shape, tensor_value: *co
     const elem_per_bytes = @divExact(8, og_shape.dtype().bitSizeOf());
     const intermediary_type = mlirx.Type.rankedTensor(compiler.mlir_ctx, og_shape.splitAxis(-1, .{ -1, elem_per_bytes }));
 
-    const bit_cast_op = dialects.stablehlo.bitcast_convert(
+    const bit_cast_op = stablehlo.bitcast_convert(
         compiler.mlir_ctx,
         tensor_value,
         intermediary_type,
         .unknown(compiler.mlir_ctx),
     ).appendTo(scope.block);
 
-    const reshape_op = dialects.stablehlo.reshape(
+    const reshape_op = stablehlo.reshape(
         compiler.mlir_ctx,
         bit_cast_op.result(0),
         true_type,
@@ -789,14 +790,14 @@ fn repack(compiler: *Compiler, scope: *Scope, og_shape: Shape, value: *const mli
     const elem_per_bytes = @divExact(8, og_shape.dtype().bitSizeOf());
     const intermediary_type = mlirx.Type.rankedTensor(compiler.mlir_ctx, og_shape.splitAxis(-1, .{ -1, elem_per_bytes }));
 
-    const reshape_op = dialects.stablehlo.reshape(
+    const reshape_op = stablehlo.reshape(
         compiler.mlir_ctx,
         value,
         intermediary_type,
         .unknown(compiler.mlir_ctx),
     ).appendTo(scope.block);
 
-    const bit_cast_op = dialects.stablehlo.bitcast_convert(
+    const bit_cast_op = stablehlo.bitcast_convert(
         compiler.mlir_ctx,
         reshape_op.result(0),
         packed_type,
