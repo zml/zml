@@ -27,11 +27,11 @@ const QwenImage21ResidualBlock = @import("./QwenImage21ResidualBlock.zig");
 
 pub const QwenImage21MidBlock = @This();
 
-attensions: QwenImage21AttentionBlock, // Only one
+attentions: QwenImage21AttentionBlock, // Only one
 resnets: []QwenImage21ResidualBlock,
 
 pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21MidBlock)) void {
-    QwenImage21AttentionBlock.unloadBuffers(&self.attensions);
+    QwenImage21AttentionBlock.unloadBuffers(&self.attentions);
     for (self.resnets) |*resnet| {
         QwenImage21ResidualBlock.unloadBuffers(resnet);
     }
