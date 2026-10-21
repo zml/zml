@@ -6054,6 +6054,61 @@ The review's other Part 1 items are open, for example:
 - safetensors header validation (#20);
 - the `loadExecute` plain branch (#21).
 
+## Thirty-second pass: API review of the loader (2026-10-21)
+
+A read-only review of the loader's APIs, from llmd's and the examples' call
+sites down to the backends' seams, against the same brief plus "focus on the
+APIs". The report is `LOADER_API_REVIEW.md`:
+- "Read this first" lists the bugs found through the APIs.
+- Part 1 is the recommended API, Part 2 its sixteen moves (R1-R16), and
+  Part 3 the decisions it needs from the user.
+- Appendix A lists every finding.
+
+Method:
+- Twelve reviewers plus four gap reviewers reported 123 findings.
+- 36 duplicates were folded and 3 restatements dropped.
+- Each of the 78 remaining findings was attacked by one or two verifiers:
+  77 survived, almost all with corrections, and 1 was refuted.
+- Three designers (caller-first, seams-first, incremental) and a judge
+  produced the design. Nothing was built or run.
+
+Bugs, each checked against the code:
+- examples/llm deinitializes the stale init-time copy of its Loader
+  (`main.zig:86-92` vs `:145`): `Future.cancel` after `await` returns the
+  stored result. The live loader leaks its deque and keeps the pinned
+  memory for the whole session. AGENTS.md's future idiom produces exactly
+  this for a by-value handle.
+- Direct `submit` still returns `Closed` instead of the cause (#29).
+- The front end's `failure` is not set when `backend.submit` fails after a
+  partial publish, so a later `awaitAll` returns success. Latent.
+- DeepSeek's DSpark projections and `main_proj` miss the sm_10x swizzle
+  opt-in (`deepseek41.zig:1001` vs `:3779-3923`, `:4014`); their scales are
+  e8m0 block-32.
+- qwen4 frees `ngram_host_buffers` with the arena after `arena.deinit()`
+  (`qwen4/spec.zig:432`, `:485-487`).
+- `resolveModelRepo`'s directories are never closed.
+- #30, #35 and #36 are still open.
+
+Recommended API:
+- one `load(allocator, model, store, progress)` that returns the
+  `Bufferized` tree and borrows nothing after it returns;
+- programs recorded in the binding (`Source.bindProgram(inputs, output,
+  func, args)`), so `loadExecute`, `Loader.Binding`, the `delivered` rule and
+  llmd's recipes and Packer go;
+- `Loader.init` returns at once and runs calibration on its own task;
+- the store owns the registry;
+- `VFS.Remotes` bundles the remote backends under one error contract;
+- block-FP8 for the platform is decided at bind time;
+- placement is a Source property set last.
+
+Decisions it reverses or needs:
+- reversals: CTX:3082 (load/awaitAll split), CTX:62-69 (caller-owned
+  totals), CTX:3829-3838 (asserts on options), CTX:4973-4974 (memory as a
+  bind option), CTX:5024-5026 (via Move 3);
+- the user's call: dropping the block-FP8 scale-overflow guard;
+- needs a GPU first: `host_mapped` (a device view of loader-owned pinned
+  memory) is unverified on CUDA.
+
 ## Open work
 
 - 2026-10-21 fixes from the loader review (thirty-first pass): headline
