@@ -22,6 +22,8 @@ pub const KernelUnifiedAttention2dPtr = struct {
     pub const Config = struct {
         q_dtype: DType,
         kv_dtype: DType,
+        k_strides: [3]i64,
+        v_strides: [3]i64,
         o_dtype: DType,
         scale_dtype: DType = .f32,
 
@@ -55,13 +57,12 @@ pub const KernelUnifiedAttention2dPtr = struct {
     pub const Kernel = tri.Kernel(Config, .{
         .name = "kernel_unified_attention_2d_ptr",
         .inputs = &.{
-            "query_ptr",            "key_cache_ptr",          "value_cache_ptr",      "sink_ptr",
-            "block_tables_ptr",     "seq_lens_ptr",           "alibi_slopes_ptr",     "qq_bias_ptr",
-            "scale_ptr",            "k_scale_ptr",            "v_scale_ptr",          "out_scale_ptr",
-            "softcap_ptr",          "block_table_stride_ptr", "query_stride_0_ptr",   "query_stride_1_ptr",
-            "output_stride_0_ptr",  "output_stride_1_ptr",    "qq_bias_stride_0_ptr", "stride_k_cache_0_ptr",
-            "stride_k_cache_1_ptr", "stride_k_cache_2_ptr",   "stride_v_cache_0_ptr", "stride_v_cache_1_ptr",
-            "stride_v_cache_2_ptr", "query_start_len_ptr",    "num_seqs_ptr",         "indices_ptr",
+            "query_ptr",           "key_cache_ptr",          "value_cache_ptr",      "sink_ptr",
+            "block_tables_ptr",    "seq_lens_ptr",           "alibi_slopes_ptr",     "qq_bias_ptr",
+            "scale_ptr",           "k_scale_ptr",            "v_scale_ptr",          "out_scale_ptr",
+            "softcap_ptr",         "block_table_stride_ptr", "query_stride_0_ptr",   "query_stride_1_ptr",
+            "output_stride_0_ptr", "output_stride_1_ptr",    "qq_bias_stride_0_ptr", "query_start_len_ptr",
+            "num_seqs_ptr",        "indices_ptr",
         },
         .outputs = &.{"output"},
         .run = run,
@@ -87,12 +88,6 @@ pub const KernelUnifiedAttention2dPtr = struct {
             .output_stride_0_ptr = .{ .ptr = .i64 },
             .output_stride_1_ptr = .{ .ptr = .i64 },
             .qq_bias_stride_0_ptr = .{ .ptr = .i64 },
-            .stride_k_cache_0_ptr = .{ .ptr = .i64 },
-            .stride_k_cache_1_ptr = .{ .ptr = .i64 },
-            .stride_k_cache_2_ptr = .{ .ptr = .i64 },
-            .stride_v_cache_0_ptr = .{ .ptr = .i64 },
-            .stride_v_cache_1_ptr = .{ .ptr = .i64 },
-            .stride_v_cache_2_ptr = .{ .ptr = .i64 },
             .query_start_len_ptr = .{ .ptr = .i32 },
             .num_seqs_ptr = .{ .ptr = .i32 },
             .indices_ptr = .{ .ptr = .i32 },
@@ -110,12 +105,6 @@ pub const KernelUnifiedAttention2dPtr = struct {
         const output_stride_0 = b.load(a.output_stride_0_ptr);
         const output_stride_1 = b.load(a.output_stride_1_ptr);
         const qq_bias_stride_0 = b.load(a.qq_bias_stride_0_ptr);
-        const stride_k_cache_0 = b.load(a.stride_k_cache_0_ptr);
-        const stride_k_cache_1 = b.load(a.stride_k_cache_1_ptr);
-        const stride_k_cache_2 = b.load(a.stride_k_cache_2_ptr);
-        const stride_v_cache_0 = b.load(a.stride_v_cache_0_ptr);
-        const stride_v_cache_1 = b.load(a.stride_v_cache_1_ptr);
-        const stride_v_cache_2 = b.load(a.stride_v_cache_2_ptr);
         const num_seqs = b.load(a.num_seqs_ptr);
 
         kernelUnifiedAttention2d(
@@ -141,12 +130,6 @@ pub const KernelUnifiedAttention2dPtr = struct {
             output_stride_0,
             output_stride_1,
             qq_bias_stride_0,
-            stride_k_cache_0,
-            stride_k_cache_1,
-            stride_k_cache_2,
-            stride_v_cache_0,
-            stride_v_cache_1,
-            stride_v_cache_2,
             a.query_start_len_ptr,
             num_seqs,
             cfg,
@@ -159,6 +142,8 @@ pub const KernelUnifiedAttention3dPtr = struct {
     pub const Config = struct {
         q_dtype: DType,
         kv_dtype: DType,
+        k_strides: [3]i64,
+        v_strides: [3]i64,
         scale_dtype: DType = .f32,
 
         num_query_heads: i64,
@@ -189,13 +174,11 @@ pub const KernelUnifiedAttention3dPtr = struct {
     pub const Kernel = tri.Kernel(Config, .{
         .name = "kernel_unified_attention_3d_ptr",
         .inputs = &.{
-            "query_ptr",              "key_cache_ptr",        "value_cache_ptr",      "sink_ptr",
-            "block_tables_ptr",       "seq_lens_ptr",         "alibi_slopes_ptr",     "qq_bias_ptr",
-            "scale_ptr",              "k_scale_ptr",          "v_scale_ptr",          "softcap_ptr",
-            "block_table_stride_ptr", "query_stride_0_ptr",   "query_stride_1_ptr",   "qq_bias_stride_0_ptr",
-            "stride_k_cache_0_ptr",   "stride_k_cache_1_ptr", "stride_k_cache_2_ptr", "stride_v_cache_0_ptr",
-            "stride_v_cache_1_ptr",   "stride_v_cache_2_ptr", "query_start_len_ptr",  "num_seqs_ptr",
-            "indices_ptr",
+            "query_ptr",              "key_cache_ptr",      "value_cache_ptr",    "sink_ptr",
+            "block_tables_ptr",       "seq_lens_ptr",       "alibi_slopes_ptr",   "qq_bias_ptr",
+            "scale_ptr",              "k_scale_ptr",        "v_scale_ptr",        "softcap_ptr",
+            "block_table_stride_ptr", "query_stride_0_ptr", "query_stride_1_ptr", "qq_bias_stride_0_ptr",
+            "query_start_len_ptr",    "num_seqs_ptr",       "indices_ptr",
         },
         .outputs = &.{ "segm_output", "segm_max", "segm_expsum" },
         .run = run,
@@ -218,12 +201,6 @@ pub const KernelUnifiedAttention3dPtr = struct {
             .query_stride_0_ptr = .{ .ptr = .i64 },
             .query_stride_1_ptr = .{ .ptr = .i64 },
             .qq_bias_stride_0_ptr = .{ .ptr = .i64 },
-            .stride_k_cache_0_ptr = .{ .ptr = .i64 },
-            .stride_k_cache_1_ptr = .{ .ptr = .i64 },
-            .stride_k_cache_2_ptr = .{ .ptr = .i64 },
-            .stride_v_cache_0_ptr = .{ .ptr = .i64 },
-            .stride_v_cache_1_ptr = .{ .ptr = .i64 },
-            .stride_v_cache_2_ptr = .{ .ptr = .i64 },
             .query_start_len_ptr = .{ .ptr = .i32 },
             .num_seqs_ptr = .{ .ptr = .i32 },
             .indices_ptr = .{ .ptr = .i32 },
@@ -240,12 +217,6 @@ pub const KernelUnifiedAttention3dPtr = struct {
         const query_stride_0 = b.load(a.query_stride_0_ptr);
         const query_stride_1 = b.load(a.query_stride_1_ptr);
         const qq_bias_stride_0 = b.load(a.qq_bias_stride_0_ptr);
-        const stride_k_cache_0 = b.load(a.stride_k_cache_0_ptr);
-        const stride_k_cache_1 = b.load(a.stride_k_cache_1_ptr);
-        const stride_k_cache_2 = b.load(a.stride_k_cache_2_ptr);
-        const stride_v_cache_0 = b.load(a.stride_v_cache_0_ptr);
-        const stride_v_cache_1 = b.load(a.stride_v_cache_1_ptr);
-        const stride_v_cache_2 = b.load(a.stride_v_cache_2_ptr);
         const num_seqs = b.load(a.num_seqs_ptr);
 
         kernelUnifiedAttention3d(
@@ -270,12 +241,6 @@ pub const KernelUnifiedAttention3dPtr = struct {
             query_stride_0,
             query_stride_1,
             qq_bias_stride_0,
-            stride_k_cache_0,
-            stride_k_cache_1,
-            stride_k_cache_2,
-            stride_v_cache_0,
-            stride_v_cache_1,
-            stride_v_cache_2,
             a.query_start_len_ptr,
             num_seqs,
             cfg,
@@ -449,12 +414,6 @@ fn kernelUnifiedAttention2d(
     output_stride_0: Value,
     output_stride_1: Value,
     qq_bias_stride_0: Value,
-    stride_k_cache_0: Value,
-    stride_k_cache_1: Value,
-    stride_k_cache_2: Value,
-    stride_v_cache_0: Value,
-    stride_v_cache_1: Value,
-    stride_v_cache_2: Value,
     query_start_len_ptr: Value,
     num_seqs: Value,
     config: KernelUnifiedAttention2dPtr.Config,
@@ -468,6 +427,12 @@ fn kernelUnifiedAttention2d(
     const NUM_QUERIES_PER_KV: i64 = config.num_queries_per_kv;
     const NUM_QUERY_HEADS: i64 = config.num_query_heads;
     const SLIDING_WINDOW: i64 = config.sliding_window;
+    const stride_k_cache_0 = k.liftAs(config.k_strides[0], .i64);
+    const stride_k_cache_1 = k.liftAs(config.k_strides[1], .i64);
+    const stride_k_cache_2 = k.liftAs(config.k_strides[2], .i64);
+    const stride_v_cache_0 = k.liftAs(config.v_strides[0], .i64);
+    const stride_v_cache_1 = k.liftAs(config.v_strides[1], .i64);
+    const stride_v_cache_2 = k.liftAs(config.v_strides[2], .i64);
 
     const kv_head_idx = k.programId(.x);
     const q_block_global_idx = k.programId(.y);
@@ -777,12 +742,6 @@ fn kernelUnifiedAttention3d(
     query_stride_0: Value,
     query_stride_1: Value,
     qq_bias_stride_0: Value,
-    stride_k_cache_0: Value,
-    stride_k_cache_1: Value,
-    stride_k_cache_2: Value,
-    stride_v_cache_0: Value,
-    stride_v_cache_1: Value,
-    stride_v_cache_2: Value,
     query_start_len_ptr: Value,
     num_seqs: Value,
     config: KernelUnifiedAttention3dPtr.Config,
@@ -797,6 +756,12 @@ fn kernelUnifiedAttention3d(
     const NUM_QUERY_HEADS: i64 = config.num_query_heads;
     const NUM_SEGMENTS_PER_SEQ: i64 = config.num_segments_per_seq;
     const SLIDING_WINDOW: i64 = config.sliding_window;
+    const stride_k_cache_0 = k.liftAs(config.k_strides[0], .i64);
+    const stride_k_cache_1 = k.liftAs(config.k_strides[1], .i64);
+    const stride_k_cache_2 = k.liftAs(config.k_strides[2], .i64);
+    const stride_v_cache_0 = k.liftAs(config.v_strides[0], .i64);
+    const stride_v_cache_1 = k.liftAs(config.v_strides[1], .i64);
+    const stride_v_cache_2 = k.liftAs(config.v_strides[2], .i64);
 
     const q_block_global_idx = k.programId(.x);
     const kv_head_idx = k.programId(.y);
