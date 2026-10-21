@@ -256,6 +256,18 @@ pub fn graph(ctx: *mlir.Context, comptime op: GraphOp, inputs: []const *const ml
     });
 }
 
+/// `tcl.graph.copy`, `copy(src=value, dst=input)`: writes `src` into the
+/// kernel input `dst` in place.
+pub fn copy(ctx: *mlir.Context, src: *const mlir.Value, dst: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "tcl.graph.copy", .{
+        .operands = .{ .flat = &.{ src, dst } },
+        .results = .{ .flat = &.{} },
+        .attributes = &.{.named(ctx, "options", .dict(ctx, &.{}))},
+        .verify = false,
+        .location = location,
+    });
+}
+
 /// `tcl.graph.for`: runs `body` up to `limit` (a scalar i32 tensor) or `bound`
 /// (an integer or axis attribute) times. The body's arguments are the index,
 /// then one accumulator per `inits`; it ends with `tcl.graph.yield`.

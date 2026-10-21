@@ -35,6 +35,9 @@ def Tcl_GraphVectorOp : Tcl_GraphOp<"vector">;
 
 def Tcl_GraphAsLogicalOp : Tcl_GraphOp<"as_logical">;
 def Tcl_GraphAsDramOp : Tcl_GraphOp<"as_dram">;
+// `copy(src=value, dst=input)` writes a value into a kernel input in place.
+def Tcl_GraphCopyOp
+    : Tcl_GraphOp<"copy", [MemoryEffects<[MemRead, MemWrite]>]>;
 
 // Loop-level graph constructs. `x[i]` reads and `acc[i] = v` writes the slice
 // of the outermost axis at the loop index; `sym_expr` evaluates an integer

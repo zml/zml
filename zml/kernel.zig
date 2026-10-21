@@ -776,10 +776,12 @@ pub const tcl = struct {
             };
 
             pub fn emit(allocator: std.mem.Allocator, cfg: ConfigT) ![:0]const u8 {
-                return build(allocator, cfg, null, null);
+                return build(allocator, cfg, null, null, null);
             }
 
-            fn build(allocator: std.mem.Allocator, cfg: ConfigT, inputs: ?[]const Shape, outputs: ?[]const Shape) ![:0]const u8 {
+            /// `updated`, when given, receives the input each output updates
+            /// in place (`Builder.update`), or null.
+            fn build(allocator: std.mem.Allocator, cfg: ConfigT, inputs: ?[]const Shape, outputs: ?[]const Shape, updated: ?*[spec.outputs.len]?usize) ![:0]const u8 {
                 const ctx = try newContext();
                 defer ctx.deinit();
 
@@ -794,6 +796,9 @@ pub const tcl = struct {
 
                 if (inputs) |shapes| for (b.args, shapes, spec.inputs) |t, s, n| check(t, s, n);
                 if (outputs) |shapes| for (results, shapes, spec.outputs) |t, s, n| check(t, s, n);
+                if (updated) |u| for (u, results) |*dst, r| {
+                    dst.* = b.updatedArgument(r);
+                };
 
                 return b.finish();
             }
@@ -828,11 +833,17 @@ pub const tcl = struct {
                 var outputs_arr: [spec.outputs.len]Shape = undefined;
                 inline for (spec.outputs, 0..) |fname, i| outputs_arr[i] = @field(outputs, fname);
 
-                const ir = build(cur.allocator, opts.cfg, &input_shapes, &outputs_arr) catch |err|
+                var updated: [spec.outputs.len]?usize = undefined;
+                const ir = build(cur.allocator, opts.cfg, &input_shapes, &outputs_arr, &updated) catch |err|
                     std.debug.panic("zml.kernel.tcl.Kernel({s}).call: emit failed: {}", .{ name, err });
                 defer cur.allocator.free(ir);
 
-                const tensor_results = ops.tcl(inputs_arr, outputs_arr, .{ .ir = ir });
+                var aliases: stdx.BoundedArray(dialects.stablehlo.CustomCallOpts.OutputOperandAlias, spec.outputs.len) = .empty;
+                for (updated, 0..) |input, output| if (input) |i| aliases.appendAssumeCapacity(.{
+                    .output_index = @intCast(output),
+                    .operand_index = @intCast(i),
+                });
+                const tensor_results = ops.tcl(inputs_arr, outputs_arr, .{ .ir = ir, .output_operand_aliases = aliases.constSlice() });
                 var results: Results = undefined;
                 inline for (spec.outputs, 0..) |fname, i| {
                     @field(results, fname) = tensor_results[i];

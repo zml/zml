@@ -597,10 +597,13 @@ pub const Builder = struct {
     axes: std.ArrayList(Declared) = .empty,
     compiler_config: ?*const mlir.Attribute = null,
     auto_config: ?*const mlir.Attribute = null,
+    fusible: bool = false,
     func_op: ?*mlir.Operation = null,
     entry: ?*mlir.Block = null,
     args: []const Tensor = &.{},
     results: ?[]const Tensor = null,
+    /// Arguments `update` writes back into, by argument number.
+    updated: std.ArrayList(usize) = .empty,
     /// Blocks being built inside the entry block (loop bodies), innermost last.
     block_stack: std.ArrayList(*mlir.Block) = .empty,
 
@@ -666,6 +669,12 @@ pub const Builder = struct {
     pub fn compilerConfig(self: *Builder, config: anytype) void {
         self.compiler_config = tcl.config(self.ctx, self.jsonFields(config)) catch
             std.debug.panic("tcl: {s}: invalid compiler config", .{self.name});
+    }
+
+    /// Lets the plugin compile the function into the unit of the work around
+    /// it instead of a unit of its own; the unit's compiler config applies.
+    pub fn fuse(self: *Builder) void {
+        self.fusible = true;
     }
 
     /// `@auto_config({...})`, Python's `@tcl.kernel(auto_config=...)`.
@@ -966,6 +975,24 @@ pub const Builder = struct {
         return tcl.expr(self.ctx, "arg", &.{.int(self.ctx, .i64, @as(i64, @intCast(n.* - 1)))}) catch unreachable;
     }
 
+    /// `copy(src=value, dst=argument)`: `value` written back into the
+    /// DRAM-mapped argument `index` in place. Return the result like any
+    /// other: the caller sees it as an output aliasing that argument.
+    pub fn update(self: *Builder, index: usize, value: Tensor) FinishError!Tensor {
+        const arg = self.entryBlock().argument(index);
+        const back = try self.graphOp(.as_dram, &.{value.inner}, arg.type_(), &.{}, null);
+        try self.append(tcl.copy(self.ctx, back, arg, self.loc()));
+        self.updated.append(self.arena.allocator(), index) catch @panic("OOM");
+        return .{ .inner = arg, .dtype = value.dtype, .axes = value.axes, .shards = self.args[index].shards };
+    }
+
+    /// The argument each result updates in place, or null for results the
+    /// function returns.
+    pub fn updatedArgument(self: *const Builder, result: Tensor) ?usize {
+        for (self.updated.items) |i| if (self.entryBlock().argument(i) == result.inner) return i;
+        return null;
+    }
+
     /// `return results...`.
     pub fn ret(self: *Builder, results: []const Tensor) void {
         self.results = self.arena.allocator().dupe(Tensor, results) catch @panic("OOM");
@@ -977,18 +1004,25 @@ pub const Builder = struct {
         const f = self.func_op orelse return error.InvalidMlir;
         const results = self.results orelse return error.InvalidMlir;
         const scratch = self.arena.allocator();
-        const values = try scratch.alloc(*const mlir.Value, results.len);
-        const result_types = try scratch.alloc(*const mlir.Type, results.len);
-        for (values, result_types, results) |*v, *t, r| {
-            v.* = r.inner;
-            t.* = r.inner.type_();
+        var values: std.ArrayList(*const mlir.Value) = .empty;
+        var result_types: std.ArrayList(*const mlir.Type) = .empty;
+        const updated_inputs = try scratch.alloc(i64, results.len);
+        for (updated_inputs, results) |*u, r| {
+            if (self.updatedArgument(r)) |i| {
+                u.* = @intCast(i);
+                continue;
+            }
+            u.* = -1;
+            try values.append(scratch, r.inner);
+            try result_types.append(scratch, r.inner.type_());
         }
-        _ = func.returns(ctx, values, self.loc()).appendTo(self.entry.?);
+        _ = func.returns(ctx, values.items, self.loc()).appendTo(self.entry.?);
 
         const entry = self.entry.?;
         const arg_types = try scratch.alloc(*const mlir.Type, entry.numArguments());
         for (arg_types, 0..) |*t, i| t.* = entry.argument(i).type_();
-        f.setAttributeByName("function_type", .typeAttr(.function(ctx, arg_types, result_types)));
+        f.setAttributeByName("function_type", .typeAttr(.function(ctx, arg_types, result_types.items)));
+        if (self.updated.items.len > 0) f.setAttributeByName("tcl.updated_inputs", .denseArray(ctx, .i64, updated_inputs));
 
         const axes = try scratch.alloc(mlir.NamedAttribute, self.axes.items.len);
         for (axes, self.axes.items) |*dst, d| {
@@ -997,6 +1031,7 @@ pub const Builder = struct {
         f.setAttributeByName("tcl.axes", .dict(ctx, axes));
         if (self.compiler_config) |c| f.setAttributeByName("tcl.compiler_config", c);
         if (self.auto_config) |c| f.setAttributeByName("tcl.auto_config", c);
+        if (self.fusible) f.setAttributeByName("tcl.fusible", .unit(ctx));
         if (!self.module.operation().verify()) return error.InvalidMlir;
 
         var printed: std.Io.Writer.Allocating = .init(self.allocator);
@@ -1308,6 +1343,30 @@ test "composite axes, DRAM, fixed point, context, config and graph ops" {
     try expectContains(ir, "operator = {Chip = #tcl.expr<\"broadcast\", []>, Split = [#tcl.symbol<\"M\">]}");
     inline for (.{ "gather", "scatter", "arange", "vector", "transmute", "reshape", "as_dram" }) |g|
         try expectContains(ir, "\"tcl.graph." ++ g ++ "\"");
+}
+
+test "scatter written back into its DRAM argument in place" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = try Builder.open(std.testing.allocator, ctx, "write_rows");
+    defer b.deinit();
+
+    const M = b.axis("M", 64);
+    const N = b.axis("N", 128);
+    const G = b.axis("G", 8);
+    const t = try b.declareArgs(.{
+        .cache = .{ .dtype = .bf16, .axes = &.{ M, N }, .dram = .{} },
+        .rows = .{ .dtype = .bf16, .axes = &.{ G, N } },
+        .idx = .{ .dtype = .i32, .axes = &.{G} },
+    });
+    const written = try b.update(0, try b.scatter(t.rows, t.idx, M, &.{ M, N }, .{ .init = t.cache }));
+    try std.testing.expectEqual(@as(?usize, 0), b.updatedArgument(written));
+    b.ret(&.{written});
+
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "\"tcl.graph.copy\"");
+    try expectContains(ir, "tcl.updated_inputs = array<i64: 0>");
 }
 
 test "loop over a device-computed trip count with index reads and writes" {
