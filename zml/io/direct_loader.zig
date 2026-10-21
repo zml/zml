@@ -299,10 +299,13 @@ pub const Loader = struct {
     /// PJRT already closed (its last call went out, accepted or not) is left
     /// to PJRT, whose shared transfer manager has dropped the definition
     /// event and aborts on a further call. The same manager drops the event
-    /// when a transfer fails asynchronously, which the loader cannot see
-    /// (the done event carries no error), so a buffer that failed that way
-    /// and is then marked here aborts too: two failures in one load. The
-    /// outputs of a failed submission are undefined either way. A batch that
+    /// when a transfer fails asynchronously, which the loader does not check
+    /// (the done event carries no error, only the buffer's definition event
+    /// does), so a buffer that failed that way and is then marked here
+    /// aborts too: two failures in one load. A program reading such a
+    /// buffer fails its execution, which the front end returns; a bulk
+    /// buffer shows the error at its first use. The outputs of a failed
+    /// submission are undefined either way. A batch that
     /// completed without an error must have closed every target (the pump
     /// flagged the submission that completed its bytes); one that did not
     /// would leave a buffer that never becomes ready, so it fails the

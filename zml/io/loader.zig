@@ -457,7 +457,7 @@ pub const Loader = struct {
         if (!execute) return;
         for (oldest.executables) |*executable| {
             executable.execute(self.allocator, self.io) catch |err| {
-                if (self.failure == null) load_log.err("prepare executable arguments/results: inputs={d}, output={f}: {s}", .{ executable.inputs.len, executable.exe.output_shapes[0], @errorName(err) });
+                if (self.failure == null) load_log.err("run executable: inputs={d}, output={f}: {s}", .{ executable.inputs.len, executable.exe.output_shapes[0], @errorName(err) });
                 return err;
             };
         }
@@ -816,13 +816,15 @@ const BoundExecutable = struct {
     /// `Exe.call` leaves every input handle to the caller, donated ones
     /// included (their contents are gone), so `deinit` frees them all,
     /// exactly once; a runner would destroy the donated handles itself.
+    /// A failed execution, an input whose transfer failed included, is
+    /// returned and leaves `output` unwritten.
     fn execute(self: *const BoundExecutable, allocator: std.mem.Allocator, io: std.Io) !void {
         var args = try self.exe.args(allocator);
         defer args.deinit(allocator);
         var results = try self.exe.results(allocator);
         defer results.deinit(allocator);
         args.set(.{self.inputs});
-        self.exe.call(io, args, &results, .{ .wait = true });
+        try self.exe.call(io, args, &results, .{ .wait = true });
         self.output.* = results.get(Buffer);
     }
 
@@ -2263,7 +2265,7 @@ fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
     var results = try exe.results(allocator);
     defer results.deinit(allocator);
     args.set(.{ device_table, indices_buffer });
-    exe.call(io, args, &results, .{ .wait = true });
+    try exe.call(io, args, &results, .{ .wait = true });
     var output = results.get(Buffer);
     defer output.deinit();
 

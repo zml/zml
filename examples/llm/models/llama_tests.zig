@@ -131,7 +131,7 @@ fn testLayer(
     var res = try exe.results(allocator);
     defer res.deinit(allocator);
 
-    exe.call(io, args, &res, .{});
+    try exe.call(io, args, &res, .{});
 
     var out_result = res.get(zml.Buffer);
     defer out_result.deinit();

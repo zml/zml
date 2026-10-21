@@ -1243,7 +1243,7 @@ fn expectCase(comptime Case: type, name: []const u8) !void {
     var results = try exe.results(allocator);
     defer results.deinit(allocator);
     args.set(.{buffers[0..]});
-    exe.call(io, args, &results, .{ .wait = true });
+    try exe.call(io, args, &results, .{ .wait = true });
     var output = results.get(Buffer);
     defer output.deinit();
     const expected = try output.toSliceAlloc(allocator, io);

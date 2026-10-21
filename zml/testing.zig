@@ -460,7 +460,7 @@ pub fn testLayer(
     var results = try allocator.alloc(zml.Buffer, output_count);
     defer allocator.free(results);
 
-    exe.call(io, exe_args, &exe_results, .{ .wait = true });
+    try exe.call(io, exe_args, &exe_results, .{ .wait = true });
     exe_results.fill(.{results});
     defer for (results) |*result| result.deinit();
 
