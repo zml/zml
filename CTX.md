@@ -6210,6 +6210,36 @@ one 2.38 s. Both outliers are slow destination creations.
     12.62 s).
   - The calibration measures DMA only, so its choice between two rates
     within noise decides a cost it does not see.
+- **Request sizes measured (2026-10-21).** Step 2's binary. The block
+  sizes are forced with `ZML_DMA_BENCH_BLOCK_MIB`, so request = block.
+  Three interleaved repeats:
+
+  | | 8 MiB | 16 MiB | 32 MiB |
+  | --- | --- | --- | --- |
+  | GB300 x2, Qwen3.8-27B replicated, direct | 3.09 / 2.84 / 2.85 s | 2.51 / 2.59 / 2.07 | 2.47 / 2.76 / 2.77 |
+  | the same, buffered, warm | 3.64 (cold) / 3.07 / 2.95 | 2.67 / 2.78 / 2.29 | 2.64 / 2.63 / 2.56 |
+  | B70 x4, Llama-3.1-8B tp, direct | 2.66 / 1.72 / 1.70 | 3.26 / 2.42 / 2.34 | - |
+  | the same, buffered, warm | 2.17 / 1.35 / 1.03 | 2.96 / 1.65 / 1.97 | - |
+  | B70 x4, Llama-3.1-8B replicated, direct | 2.09 / 2.00 / 1.99 | 3.08 / 2.62 / 2.11 | - |
+  | the same, buffered, warm | 1.98 / 1.68 / 1.88 | 3.39 / 2.07 / 2.02 | - |
+
+  - GB300 loses 10-25% at 8 MiB, direct or buffered; 16 and 32 MiB tie.
+    Buffered 8 MiB reads take the same total worker time as 16 MiB (6.0
+    against 6.1 s), so the cost is per request, not in the disk. These
+    Qwen loads spend ~33 of their ~40 s of worker time creating
+    destinations, at every size.
+  - The B70 is the opposite: 8 MiB wins by 10-30%. No fixed size suits
+    both hosts.
+- **The DMA screen** (`examples/io dma-bench`, repeated):
+  - GB300 x2: at the default 8% tolerance it picks 16 MiB 7 times in 8
+    and 8 MiB once; at 2% it picks 32 MiB 8 times in 8. So 32 MiB is the
+    DMA peak, 16 MiB lies 2-8% below it, and 8 MiB sits on the 8% line,
+    which is the coin flip.
+  - B70 x4: 2 MiB 6/6 at 8%, 8 MiB 6/6 at 2%. Its reads are 8 MiB
+    because request = max(the local profile's 8 MiB chunk, block), not
+    because of the block.
+  - So only GB300's choice is unstable, at the tolerance edge, and there
+    the block also sets the read size.
 - `examples/io load ... sharded` fails on DeepSeek-V4.1-Flash with
   `IncompatibleSharding`: some leading dimensions do not split four ways.
 - The first DeepSeek load after the host's memory filled took 30.9 s, 20 s
@@ -6224,7 +6254,9 @@ one 2.38 s. Both outliers are slow destination creations.
 
 - 2026-10-21 benchmark of move 2 step 2 (thirty-third pass): no load-time
   change detected at about ±2.5% on two GB300. The calibration's 8 MiB
-  choice costs Qwen3.8-27B 25-30%.
+  choice costs Qwen3.8-27B 25-30%. 8 MiB sits on the screen's 8%
+  tolerance line there, so the choice flips (~1 load in 5). The B70s
+  want 8 MiB.
 - 2026-10-21 fixes from the loader review (thirty-first pass): headline
   bugs fixed and move 2 done in two commits. The Laguna-under-zio run is
   still to do. The other review items are listed in that pass.
