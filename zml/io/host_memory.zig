@@ -1,4 +1,4 @@
-//! Loader-owned host arenas and per-load block leases.
+//! Loader-owned host arenas, cut into blocks once.
 
 const std = @import("std");
 const Alignment = std.mem.Alignment;
@@ -77,7 +77,7 @@ const Backend = union(enum) {
             .rocm => {
                 // PJRT-pinned allocations choose placement through the device's
                 // host memory space, not our mbind policy. Retain one allocation
-                // path per reported node; the common block pool stays unpartitioned.
+                // path per reported node; the blocks stay unpartitioned.
                 var discovered_nodes: std.ArrayList(struct {
                     device_index: usize,
                     node: usize,
@@ -396,145 +396,30 @@ pub const Workspace = struct {
     }
 };
 
-/// Owns a workspace and leases fixed-size blocks carved from its arenas.
-/// One free list shares retained capacity across every destination. Strict
-/// per-node pools duplicated source reserves and constrained leases to the
-/// smallest node; placement belongs to arena allocation, not block matching.
-/// Replicas share a source block until every child transfer releases it.
-/// Copying replicas to another CPU socket first was rejected on MI300X:
-/// raw local/remote H2D both reached ~49-50 GiB/s per GPU, while a single
-/// CPU thread copied across sockets at only 5-10 GiB/s.
-pub const BlockPool = struct {
-    pub const Block = []u8;
+pub const Block = []u8;
 
-    pub const Lease = struct {
-        /// Where the block returns on its last completion; null for a block
-        /// no pool leases (the direct loader's zero block).
-        pool: ?*BlockPool,
-        io: std.Io,
-        data: []u8,
-        remaining: std.atomic.Value(usize),
-
-        pub fn init(pool: ?*BlockPool, io: std.Io, block: Block, references: usize) Lease {
-            std.debug.assert(references > 0);
-            return .{
-                .pool = pool,
-                .io = io,
-                .data = block,
-                .remaining = .init(references),
-            };
+/// Every retained arena cut into blocks of `block_size`, once: the caller has
+/// already grown the workspace to the whole set the load may use, so nothing
+/// maps inside a load (a slab mapped there cost 146 to 230 ms of
+/// hipHostMalloc on MI300X). Arena tails smaller than one block stay mapped
+/// and unused. Blocks are not split per NUMA node: strict per-node pools
+/// duplicated source reserves and constrained reads to the smallest node;
+/// placement belongs to arena allocation. The caller owns the list, the
+/// workspace the memory.
+pub fn carveBlocks(allocator: Allocator, workspace: *const Workspace, block_size: usize) Allocator.Error![]Block {
+    std.debug.assert(block_size != 0);
+    const blocks = try allocator.alloc(Block, workspace.usableBlocks(block_size));
+    var next: usize = 0;
+    for (0..workspace.backend.arenaCount()) |i| {
+        const arena = workspace.backend.arenaAt(i);
+        for (0..arena.len / block_size) |j| {
+            blocks[next] = arena[j * block_size ..][0..block_size];
+            next += 1;
         }
-
-        /// Completes one reference and returns whether this was the final one.
-        pub fn complete(self: *Lease) bool {
-            const previous = self.remaining.fetchSub(1, .acq_rel);
-            std.debug.assert(previous > 0);
-            if (previous == 1) {
-                if (self.pool) |pool| pool.release(self.io, self.data);
-            }
-            return previous == 1;
-        }
-    };
-
-    allocator: Allocator,
-    workspace: Workspace,
-    free_blocks: std.ArrayList(Block),
-    block_size: usize,
-    /// Blocks carved from the arenas, fixed for the pool's life.
-    capacity: usize,
-    in_use: usize = 0,
-    high_water: usize = 0,
-    mutex: std.Io.Mutex = .init,
-
-    /// Builds the free list from every retained arena, once: the caller has
-    /// already grown the workspace to the whole set the load may use, so the
-    /// pool never maps anything again (a slab mapped inside a load cost 146
-    /// to 230 ms of hipHostMalloc on MI300X). Arena tails smaller than one
-    /// selected block remain mapped and unused.
-    /// Consumes and invalidates workspace on success; on failure the caller
-    /// retains ownership. Calibration borrows must have ended before this call.
-    pub fn init(
-        allocator: Allocator,
-        workspace: Workspace,
-        block_size: usize,
-    ) Allocator.Error!BlockPool {
-        std.debug.assert(block_size != 0);
-
-        var capacity: usize = 0;
-        var free_blocks: std.ArrayList(Block) = .empty;
-        errdefer free_blocks.deinit(allocator);
-
-        for (0..workspace.backend.arenaCount()) |i| {
-            const arena = workspace.backend.arenaAt(i);
-            const block_count = arena.len / block_size;
-            // Leased blocks are absent from `free_blocks`, so the storage is
-            // sized for the total capacity, not for what is free.
-            try free_blocks.ensureTotalCapacity(allocator, capacity + block_count);
-            for (0..block_count) |j| {
-                free_blocks.appendAssumeCapacity(arena[j * block_size ..][0..block_size]);
-            }
-            capacity += block_count;
-        }
-
-        return .{
-            .allocator = allocator,
-            .workspace = workspace,
-            .block_size = block_size,
-            .free_blocks = free_blocks,
-            .capacity = capacity,
-        };
     }
-
-    pub fn deinit(self: *BlockPool) void {
-        std.debug.assert(self.in_use == 0 and self.free_blocks.items.len == self.capacity);
-        self.free_blocks.deinit(self.allocator);
-        self.workspace.deinit();
-        self.* = undefined;
-    }
-
-    /// Leases `output.len` blocks, which the caller guarantees are free: the
-    /// direct loader leases only under a lifecycle credit, and its credits
-    /// never cover more blocks than the pool holds (`Loader.Sizing`).
-    /// Never waits; allocates nothing, ever.
-    pub fn acquireMany(self: *BlockPool, io: std.Io, output: []Block) void {
-        if (output.len == 0) return;
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        if (output.len > self.free_blocks.items.len) {
-            std.debug.panic("BlockPool: {d} blocks leased with {d} free; a lease outside the lifecycle credits", .{ output.len, self.free_blocks.items.len });
-        }
-        for (output) |*block| block.* = self.free_blocks.pop().?;
-        self.in_use += output.len;
-        self.high_water = @max(self.high_water, self.in_use);
-    }
-
-    pub fn releaseMany(self: *BlockPool, io: std.Io, blocks: []const Block) void {
-        if (blocks.len == 0) return;
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        std.debug.assert(blocks.len <= self.in_use);
-        for (blocks) |block| {
-            std.debug.assert(block.len == self.block_size);
-            self.free_blocks.appendAssumeCapacity(block);
-        }
-        self.in_use -= blocks.len;
-    }
-
-    pub fn release(self: *BlockPool, io: std.Io, block: Block) void {
-        self.releaseMany(io, &.{block});
-    }
-
-    /// Takes one free block out of the pool for good, for a caller that
-    /// keeps it as long as the pool: it no longer counts in `capacity`, so
-    /// `deinit`'s accounting holds without it. Only before any lease. Null
-    /// when the pool has no block.
-    pub fn detachBlock(self: *BlockPool) ?Block {
-        std.debug.assert(self.in_use == 0 and self.free_blocks.items.len == self.capacity);
-        const block = self.free_blocks.pop() orelse return null;
-        self.capacity -= 1;
-        return block;
-    }
-};
+    std.debug.assert(next == blocks.len);
+    return blocks;
+}
 
 /// PJRT is the sole owner of these hipHostMalloc-backed bytes. Never DmaMap
 /// or DmaUnmap the borrowed pointer: unregistering allocation-owned memory
@@ -722,153 +607,24 @@ test "Workspace growth maps missing blocks as one arena" {
     try std.testing.expectEqual(@as(usize, 3), workspace.backend.arenaCount());
 }
 
-test "BlockPool ownership transfer cleans up allocation failures" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-        fn run(allocator: Allocator) !void {
-            var arena: []u8 = undefined;
-            var pool = pool_init: {
-                var workspace = try Workspace.initForTesting(allocator, std.testing.io, 256);
-                errdefer workspace.deinit();
-                arena = try workspace.allocate(64);
-                break :pool_init BlockPool.init(allocator, workspace, 64) catch |err| {
-                    try std.testing.expectEqual(@as(usize, 64), workspace.mapped_bytes);
-                    try std.testing.expectEqual(arena.ptr, workspace.findArena(64).?.ptr);
-                    return err;
-                };
-            };
-            defer pool.deinit();
-            try std.testing.expectEqual(arena.ptr, pool.workspace.findArena(64).?.ptr);
-            try std.testing.expectEqual(@as(usize, 1), pool.capacity);
-            var blocks: [1]BlockPool.Block = undefined;
-            pool.acquireMany(std.testing.io, &blocks);
-            pool.releaseMany(std.testing.io, &blocks);
-        }
-    }.run, .{});
-}
-
-test "BlockPool leases blocks atomically and takes them back" {
+test "blocks are carved from retained arenas of unequal size, tails left out" {
     const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var pool = pool_init: {
-        var workspace = try Workspace.initForTesting(allocator, std.testing.io, 4 * 64);
-        errdefer workspace.deinit();
+    var workspace = try Workspace.initForTesting(allocator, std.testing.io, 349 + 254);
+    defer workspace.deinit();
+    const first = try workspace.allocate(150);
+    _ = try workspace.allocate(70);
+    _ = try workspace.allocate(65);
+    // Tails stay mapped without contributing a block: 127 bytes hold one.
+    _ = try workspace.allocate(127);
+    _ = try workspace.allocate(127);
 
-        _ = try workspace.allocate(4 * 64);
-        break :pool_init try BlockPool.init(allocator, workspace, 64);
-    };
-    defer pool.deinit();
-
-    var first: [3]BlockPool.Block = undefined;
-    pool.acquireMany(io, &first);
-    try std.testing.expectEqual(@as(usize, 3 * 64), pool.high_water * pool.block_size);
-    try std.testing.expectEqual(@as(usize, 4 * 64), pool.workspace.mapped_bytes);
-    var last: [1]BlockPool.Block = undefined;
-    pool.acquireMany(io, &last);
-    for (first) |block| try std.testing.expect(block.ptr != last[0].ptr);
-    pool.releaseMany(io, &first);
-    pool.release(io, last[0]);
-    var all: [4]BlockPool.Block = undefined;
-    pool.acquireMany(io, &all);
-    try std.testing.expectEqual(@as(usize, 4 * 64), pool.high_water * pool.block_size);
-    pool.releaseMany(io, &all);
-}
-
-test "BlockPool acquisition allocates nothing once its arenas are attached" {
-    const io = std.testing.io;
-    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{});
-    var pool = pool_init: {
-        var workspace = try Workspace.initForTesting(std.testing.allocator, io, 4 * 64);
-        errdefer workspace.deinit();
-
-        _ = try workspace.allocate(4 * 64);
-        break :pool_init try BlockPool.init(failing.allocator(), workspace, 64);
-    };
-    defer pool.deinit();
-
-    var blocks: [3]BlockPool.Block = undefined;
-    pool.acquireMany(io, &blocks);
-    pool.releaseMany(io, &blocks);
-
-    failing.fail_index = failing.alloc_index;
-    pool.acquireMany(io, &blocks);
-    try std.testing.expect(!failing.has_induced_failure);
-    pool.releaseMany(io, &blocks);
-}
-
-test "BlockPool lease returns a block after out-of-order callbacks" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var pool = pool_init: {
-        var workspace = try Workspace.initForTesting(allocator, std.testing.io, 64);
-        errdefer workspace.deinit();
-
-        _ = try workspace.allocate(64);
-        break :pool_init try BlockPool.init(allocator, workspace, 64);
-    };
-    defer pool.deinit();
-
-    var blocks: [1]BlockPool.Block = undefined;
-    pool.acquireMany(io, &blocks);
-    var lease: BlockPool.Lease = .init(&pool, io, blocks[0], 4);
-    var group: std.Io.Group = .init;
-    for ([_]i64{ 4, 1, 3, 2 }) |delay_ms| {
-        try group.concurrent(io, struct {
-            fn run(lease_: *BlockPool.Lease, io_: std.Io, delay_ms_: i64) void {
-                io_.sleep(.fromMilliseconds(delay_ms_), .awake) catch unreachable;
-                _ = lease_.complete();
-            }
-        }.run, .{ &lease, io, delay_ms });
-    }
-    try group.await(io);
-    try std.testing.expect(lease.remaining.load(.acquire) == 0);
-
-    var reacquired: [1]BlockPool.Block = undefined;
-    pool.acquireMany(io, &reacquired);
-    try std.testing.expectEqual(@intFromPtr(blocks[0].ptr), @intFromPtr(reacquired[0].ptr));
-    pool.releaseMany(io, &reacquired);
-}
-
-test "BlockPool reblocks retained arenas of unequal size" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var pool = pool_init: {
-        var workspace = try Workspace.initForTesting(allocator, std.testing.io, 349);
-        errdefer workspace.deinit();
-
-        _ = try workspace.allocate(150);
-        _ = try workspace.allocate(70);
-        _ = try workspace.allocate(65);
-
-        break :pool_init try BlockPool.init(allocator, workspace, 64);
-    };
-    defer pool.deinit();
-    try std.testing.expectEqual(@as(usize, 285), pool.workspace.mapped_bytes);
+    const blocks = try carveBlocks(allocator, &workspace, 64);
+    defer allocator.free(blocks);
     // Two blocks from the first arena, one from each of the others.
-    try std.testing.expectEqual(@as(usize, 4), pool.capacity);
-
-    var blocks: [4]BlockPool.Block = undefined;
-    pool.acquireMany(io, &blocks);
-    try std.testing.expectEqual(@as(usize, 3), pool.workspace.backend.arenaCount());
-    try std.testing.expectEqual(@as(usize, 285), pool.workspace.mapped_bytes);
-    try std.testing.expectEqual(@as(usize, 4 * 64), pool.high_water * pool.block_size);
-    pool.releaseMany(io, &blocks);
-}
-
-test "BlockPool counts retained requests over arena tails" {
-    const allocator = std.testing.allocator;
-    var pool = pool_init: {
-        var workspace = try Workspace.initForTesting(allocator, std.testing.io, 574);
-        errdefer workspace.deinit();
-
-        _ = try workspace.allocate(127);
-        _ = try workspace.allocate(127);
-
-        break :pool_init try BlockPool.init(allocator, workspace, 64);
-    };
-    defer pool.deinit();
-
-    // Arena tails stay mapped without contributing a block: two 127-byte
-    // arenas retain one 64-byte block each.
-    try std.testing.expectEqual(@as(usize, 2), pool.capacity);
+    try std.testing.expectEqual(@as(usize, 6), blocks.len);
+    try std.testing.expectEqual(@as(usize, 539), workspace.mapped_bytes);
+    for (blocks) |block| try std.testing.expectEqual(@as(usize, 64), block.len);
+    try std.testing.expectEqual(first.ptr, blocks[0].ptr);
+    try std.testing.expectEqual(first.ptr + 64, blocks[1].ptr);
 }
 

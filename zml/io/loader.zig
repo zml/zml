@@ -1483,12 +1483,10 @@ test "a rate-limited HTTP source loads through the VFS hold" {
     try std.testing.expectEqual(@as(u64, 0), snapshot.retries);
     try std.testing.expectEqual(@as(u64, tensors * tensor_bytes), snapshot.physical_bytes);
 
-    // Holding costs time, not pinned memory or credits: the pool never grew
-    // beyond the width and every lifecycle credit came back.
-    const direct = loader.backend.direct;
-    try std.testing.expect(direct.pool.high_water <= 4);
-    try std.testing.expectEqual(@as(usize, 0), direct.request_gate.in_use);
-    try std.testing.expectEqual(@as(usize, direct.pool.capacity), direct.pool.free_blocks.items.len);
+    // Holding costs time, not credits: every lifecycle credit, with its
+    // pinned blocks, came back.
+    const credits = &loader.backend.direct.credits;
+    try std.testing.expectEqual(credits.free.len, credits.free_len);
 }
 
 test "validation rejections leave the loader usable" {

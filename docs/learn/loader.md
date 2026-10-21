@@ -155,8 +155,8 @@ contiguous. The parts of one destination may come from different files and
 plans; each device's target still closes on the submission that completes its
 placement bytes. The zero fill goes out with the plan of the destination's
 first part, as one last job of that plan. That job reads nothing; it submits
-pieces from one pinned zero block that the loader detaches from its block
-pool when it is created and keeps until it is destroyed. The buffered backend
+pieces from one pinned zero block, the first block of the pinned set, which no
+credit owns. The buffered backend
 zeroes the gaps of its staging buffer, reads each part at its offset, then
 places the whole tensor as usual; a strided part reads its source range once
 and copies each run where it lands.
@@ -277,7 +277,7 @@ builds because the Zig test runner counts logged errors as failures.
 | `zml/io/ShardGrid.zig` | Pure arithmetic placing logical byte ranges on the devices' boxes |
 | `zml/io/buffered_loader.zig` | Whole-tensor staging and bounded positional reads |
 | `zml/io/dma_calibration.zig` | Representative-device measurement and DMA block selection |
-| `zml/io/host_memory.zig` | Internal host arenas, block leases and placement |
+| `zml/io/host_memory.zig` | Internal host arenas, their blocks and placement |
 | `zml/io/log.zig` | The loader's log scopes: one log per failure, `err` demoted in test builds |
 | `zml/io/testing.zig` | Test support: device counts, safetensors files, per-shard read-back |
 | `zml/mem.zig` | Generic buffer conversion and public host-memory placement policy |
@@ -311,9 +311,12 @@ piece, where each box's bytes start in its blocks, and the worker walks the
 runs as it reads. Llama's plans take 1-4 ms, against 73-112 ms when every
 row and device was a span.
 
-One block may feed several outputs or devices. Its lease stays alive until
-every consuming transfer completes or is abandoned. A fill job's one block is
-the zero block, which nothing leases or releases. A batch owns its plans
+A worker takes a lifecycle credit before it claims a job: a fixed slot of
+pinned blocks that only its request reads into and transfers from. One block
+may feed several outputs or devices; the request holds its credit until every
+piece it queued completes or is abandoned, so the credits bound the pinned
+memory in use. A fill job's transfers read the zero block, which no credit
+owns. A batch owns its plans
 and callback contexts until every job completes. The last-transfer flag goes
 on the submission that completes a destination's byte count, allowing reads
 and DMA to complete out of source order. Failure retires unclaimed work and
@@ -332,10 +335,10 @@ describes validated loading behavior, independently of whether host memory is
 pinned or transfers use DMA.
 
 The direct backend owns its workspace for its entire lifetime. Initialization
-allocates that workspace, calibrates transfer sizing, and prepares the block
-pool before returning. Calibration arenas become the load's initial capacity;
-all arenas are released by `Loader.deinit`. Workspace and block-pool types
-are internal to `io/host_memory.zig`.
+allocates that workspace, calibrates transfer sizing, and cuts the arenas into
+blocks and the credits' slots before returning. Calibration arenas become the
+load's initial capacity; all arenas are released by `Loader.deinit`. The
+workspace type is internal to `io/host_memory.zig`.
 
 Callers configure calibration through `Loader.Options.dma`. Calibration options
 are checked with assertions; every candidate block size at the configured

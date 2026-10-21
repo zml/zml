@@ -47,22 +47,22 @@ const max_dma_pieces_per_device: usize = 64;
 
 /// How a job's bytes reach their destinations. A destination in a host
 /// memory space (`Destination.hostResident`) is written by the worker that
-/// reads it: going through pool blocks and a host-to-host PJRT transfer
+/// reads it: going through pinned blocks and a host-to-host PJRT transfer
 /// copied every byte twice and held the DMA pumps, which on four B70 made
 /// Llama-3.1-8B take 2.0 s into pinned_host against 0.67 s into device
 /// memory.
 const Delivery = enum {
-    /// Read into pool blocks, then copied by the devices through PJRT
-    /// transfer managers (`Pipeline`).
+    /// Read into the request's slot of pinned blocks (`Credits`), then
+    /// copied by the devices through PJRT transfer managers (`Pipeline`).
     dma,
     /// Read straight into host-resident destinations: the read's iovecs
     /// are the destination ranges, so the read is the only copy. Needs a
     /// read without alignment padding whose transfers address each of its
     /// bytes once, in order (`Planner.JobCut.coversReadInOrder`).
     host_direct,
-    /// Read into pool blocks, then copied into host-resident destinations
-    /// by the worker, which releases the blocks at once: reads widened for
-    /// direct I/O, whose buffers must be aligned, and overlapping parts.
+    /// Read into the request's slot of blocks, then copied into
+    /// host-resident destinations by the worker: reads widened for direct
+    /// I/O, whose buffers must be aligned, and overlapping parts.
     host_bounce,
 };
 
@@ -77,24 +77,27 @@ pub const Loader = struct {
     platform: *const Platform,
     load_profile: VFS.LoadProfile,
     calibration: dma_calibration.Result,
-    pool: host_memory.BlockPool,
+    /// The pinned arenas, pre-grown once at creation.
+    workspace: host_memory.Workspace,
+    /// The arenas cut into blocks: the zero block first, then the credits'
+    /// slots (`Credits`).
+    blocks: []host_memory.Block,
     scheduler: Scheduler,
     metrics: Metrics = .{},
     /// Source reads in flight: the width, for the whole load.
     read_gate: RequestGate,
-    /// Lifecycle credits, the pre-grown pinned capacity in requests. A
-    /// request holds one from its claim to its last DMA callback, so the
-    /// credits beyond the read width are the requests the DMA stage may
-    /// hold and, with the pinned blocks each of them holds, bound the
-    /// pinned memory in use. The capacity is the source working set of
-    /// `width + 1` requests plus the calibrated DMA depth of every device,
-    /// which is at least the width plus that depth because a request is a
-    /// whole number of blocks. One credit beyond the width fed the DMA
-    /// engines one request at a time: on a GB300 loading DeepSeek-V4
+    /// Lifecycle credits, the pre-grown pinned capacity in requests, each a
+    /// slot of blocks (`Credits`). A request holds one from its claim to its
+    /// last DMA callback, so the credits beyond the read width are the
+    /// requests the DMA stage may hold. The capacity is the source working
+    /// set of `width + 1` requests plus the calibrated DMA depth of every
+    /// device, which is at least the width plus that depth because a
+    /// request is a whole number of blocks. One credit beyond the width fed
+    /// the DMA engines one request at a time: on a GB300 loading DeepSeek-V4
     /// (pieces of 4 MiB and 256 KiB) that was 24.3 GiB/s at width 16
     /// against 43.8 GiB/s with eight requests queued, and the workers spent
     /// 9 ms per request waiting for a credit against 3 ms reading.
-    request_gate: RequestGate,
+    credits: Credits,
     pipeline: Pipeline,
     worker_group: std.Io.Group = .init,
     source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
@@ -143,7 +146,7 @@ pub const Loader = struct {
         // takes every block the reads leave free and nothing maps inside a
         // load.
         const width = sizing.source_width;
-        const credits = sizing.retained_credits;
+        const credits = sizing.credits.count();
         const workers = width + 1;
         std.debug.assert(credits >= workers);
         self.* = .{
@@ -152,10 +155,11 @@ pub const Loader = struct {
             .platform = platform,
             .load_profile = opts.load_profile,
             .calibration = calibration,
-            .pool = sizing.pool,
+            .workspace = sizing.workspace,
+            .blocks = sizing.blocks,
             .scheduler = .init(allocator),
             .read_gate = .init(width),
-            .request_gate = .init(credits),
+            .credits = sizing.credits,
             .pipeline = undefined,
             .allocated_bytes = allocated_bytes,
             .created_at = .now(io, .awake),
@@ -172,7 +176,9 @@ pub const Loader = struct {
         };
         errdefer {
             self.scheduler.deinit();
-            self.pool.deinit();
+            self.credits.deinit(allocator);
+            allocator.free(self.blocks);
+            self.workspace.deinit();
         }
         _ = Planner.maximumJobLen(self.plan_config) catch |err| {
             load_log.err("invalid read alignment: alignment={d}, request_size={d}, block_size={d}: {s}", .{ self.plan_config.alignment, self.plan_config.request_size, self.plan_config.block_size, @errorName(err) });
@@ -183,14 +189,13 @@ pub const Loader = struct {
             allocator,
             io,
             platform,
-            &self.pool,
             &self.read_gate,
-            &self.request_gate,
+            &self.credits,
             calibration.block_size,
             &self.metrics,
             &self.scheduler,
             calibration.max_in_flight_per_device * calibration.block_size,
-            sizing.zero_block,
+            self.blocks[0],
         );
         errdefer self.pipeline.deinit();
         errdefer self.stopWorkers();
@@ -207,7 +212,7 @@ pub const Loader = struct {
             width,
             credits,
             workers,
-            self.pool.workspace.mapped_bytes,
+            self.workspace.mapped_bytes,
         });
         return self;
     }
@@ -362,7 +367,9 @@ pub const Loader = struct {
         self.source_slots.deinit(self.allocator);
         self.pipeline.deinit();
         self.scheduler.deinit();
-        self.pool.deinit();
+        self.credits.deinit(self.allocator);
+        self.allocator.free(self.blocks);
+        self.workspace.deinit();
 
         const allocator = self.allocator;
         allocator.free(self.allocated_bytes);
@@ -379,20 +386,20 @@ pub const Loader = struct {
         if (self.pipeline.errorValue()) |err| return err;
     }
 
-    /// The calibrated block pool and the request sizing derived from it.
+    /// The calibrated pinned set and the request sizing derived from it.
     const Sizing = struct {
         calibration: dma_calibration.Result,
-        pool: host_memory.BlockPool,
+        workspace: host_memory.Workspace,
+        /// The set cut into blocks: the zero block first, then `credits`'s.
+        blocks: []host_memory.Block,
+        /// Requests the pre-grown pinned set holds: the loader's lifecycle
+        /// credits, at least `source_width + 1`.
+        credits: Credits,
         request_size: usize,
         maximum_blocks_per_job: usize,
         /// The load's source width: the configured one, or what the mapped
         /// ceiling fits.
         source_width: usize,
-        /// Requests the pre-grown pinned set holds: the loader's lifecycle
-        /// credits, at least `source_width + 1`.
-        retained_credits: usize,
-        /// The pipeline's zero block, detached from the pool.
-        zero_block: []u8,
 
         fn init(
             allocator: std.mem.Allocator,
@@ -400,9 +407,9 @@ pub const Loader = struct {
             platform: *const Platform,
             opts: BackendOptions,
         ) !Sizing {
-            const calibration, const request_size, const maximum_blocks_per_job, const fitted_width, var pool = pool: {
-                var workspace = try host_memory.Workspace.init(allocator, io, platform);
-                errdefer workspace.deinit();
+            var workspace = try host_memory.Workspace.init(allocator, io, platform);
+            errdefer workspace.deinit();
+            const calibration, const request_size, const maximum_blocks_per_job, const fitted_width = sized: {
                 const calibration = dma_calibration.calibrate(&workspace, platform, opts.dma) catch |err| {
                     load_log.err("calibrate DMA: target={t}, mapped_ceiling={d}: {s}", .{
                         platform.target,
@@ -440,12 +447,12 @@ pub const Loader = struct {
                     calibration.max_in_flight_per_device * platform.devices.len,
                     try load_limits.maximumCoalescedJobBlocks(load_limits.max_read_request_size, block_size),
                 );
-                // The pool is sized once, here: the width is what the mapped
+                // The set is sized once, here: the width is what the mapped
                 // ceiling fits, and the whole set is mapped before the first
                 // read, so nothing maps inside a load (a slab mapped there
                 // cost 146 to 230 ms of hipHostMalloc on MI300X).
-                // One more block is mapped for the zero fill and detached
-                // from the pool below, so the credits do not pay for it.
+                // One more block is mapped for the zero fill, which the
+                // credits do not pay for.
                 const zero_blocks = 1;
                 const available = workspace.usableBlocks(block_size) +
                     (workspace.max_mapped_bytes - workspace.mapped_bytes) / block_size;
@@ -478,32 +485,27 @@ pub const Loader = struct {
                     pregrown_bytes,
                     @as(f64, @floatFromInt(pregrowth_ns)) / std.time.ns_per_ms,
                 });
-                const pool = host_memory.BlockPool.init(allocator, workspace, block_size) catch |err| {
-                    load_log.err("build DMA block pool: block_size={d}, mapped={d}: {s}", .{ block_size, workspace.mapped_bytes, @errorName(err) });
-                    return err;
-                };
-                break :pool .{ calibration, request_size, maximum_blocks_per_job, fitted_width, pool };
+                break :sized .{ calibration, request_size, maximum_blocks_per_job, fitted_width };
             };
-            errdefer pool.deinit();
-            // Before any lease: the pool's capacity, and with it the
-            // credits, no longer count it.
-            const zero_block = pool.detachBlock() orelse return error.OutOfMemory;
-            @memset(zero_block, 0);
-            // The one bound on pinned memory in use: a credit holder leases
-            // at most `maximum_blocks_per_job` blocks and returns them before
-            // its credit, so a lease always finds its blocks free and the
-            // pool never waits (`BlockPool.acquireMany`).
-            const retained_credits = pool.capacity / maximum_blocks_per_job;
-            std.debug.assert(retained_credits >= fitted_width + 1);
+            const blocks = host_memory.carveBlocks(allocator, &workspace, calibration.block_size) catch |err| {
+                load_log.err("cut the pinned set into blocks: block_size={d}, mapped={d}: {s}", .{ calibration.block_size, workspace.mapped_bytes, @errorName(err) });
+                return err;
+            };
+            errdefer allocator.free(blocks);
+            std.debug.assert(blocks.len != 0);
+            @memset(blocks[0], 0);
+            var credits: Credits = try .init(allocator, blocks[1..], maximum_blocks_per_job);
+            errdefer credits.deinit(allocator);
+            std.debug.assert(credits.count() >= fitted_width + 1);
 
             return .{
                 .calibration = calibration,
-                .pool = pool,
+                .workspace = workspace,
+                .blocks = blocks,
+                .credits = credits,
                 .request_size = request_size,
                 .maximum_blocks_per_job = maximum_blocks_per_job,
                 .source_width = fitted_width,
-                .retained_credits = retained_credits,
-                .zero_block = zero_block,
             };
         }
 
@@ -636,14 +638,14 @@ pub const Loader = struct {
         while (self.scheduler.waitForWork(self.io)) {
             if (self.pipeline.failed()) return;
             const credit_wait_started = awakeNs(self.io);
-            if (!self.request_gate.acquire(self.io)) return;
+            const slot = self.credits.acquire(self.io) orelse return;
             const credit_wait_ns = awakeNs(self.io) -| credit_wait_started;
             const claim = self.scheduler.claim(self.io) orelse {
-                self.request_gate.release(self.io);
+                self.credits.release(self.io, slot);
                 continue;
             };
             _ = self.metrics.lifecycle_wait_ns.fetchAdd(credit_wait_ns, .monotonic);
-            const request = ReadRequest.init(&self.pipeline, claim);
+            const request = ReadRequest.init(&self.pipeline, claim, slot);
             // The scheduling sentinel keeps the batch, and with it the
             // claim's plan, alive through `run` and error reporting.
             defer request.finishScheduling();
@@ -656,7 +658,7 @@ pub const Loader = struct {
     fn stopWorkers(self: *Loader) void {
         self.scheduler.stop(self.io);
         self.read_gate.close(self.io);
-        self.request_gate.close(self.io);
+        self.credits.close(self.io);
         self.worker_group.await(self.io) catch {};
     }
 
@@ -727,8 +729,8 @@ pub const Loader = struct {
             reads,
             self.width,
             self.plan_config.request_size,
-            self.pool.high_water * self.pool.block_size,
-            self.pool.workspace.mapped_bytes,
+            self.credits.high_water * self.maximum_blocks_per_job * self.plan_config.block_size,
+            self.workspace.mapped_bytes,
         });
         load_log.debug("loader waits: credit_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}, ahead_init_ms={d:.3}", .{
             millisecondsPer(self.metrics.lifecycle_wait_ns.load(.acquire), reads),
@@ -762,13 +764,12 @@ pub const Loader = struct {
 pub const Batch = struct {
     /// One file's jobs in claim order with their transfer records and every
     /// context the jobs can need, allocated by the planner: one request per
-    /// job, the blocks of the DMA jobs and one event per planned DMA
-    /// submission, handed out in submission order; a host job needs only its
-    /// request. Contexts hold the plan's address, so plans are heap objects
-    /// freed with the batch.
+    /// job and one event per planned DMA submission, handed out in
+    /// submission order; a host job needs only its request. Contexts hold the
+    /// plan's address, so plans are heap objects freed with the batch.
     const Plan = struct {
-        /// A claimable job: its source range and its slices of the plan's
-        /// transfers and block contexts. Its request slot is its index.
+        /// A claimable job: its source range and its slice of the plan's
+        /// transfers. Its request slot is its index.
         const Job = struct {
             /// The read: `len` bytes from `file_offset`, of which the first
             /// `minimum_len` hold tensor data and must exist. The rest is
@@ -778,15 +779,14 @@ pub const Batch = struct {
             minimum_len: usize,
             transfer_start: usize,
             transfer_len: usize,
-            /// The job's block contexts in the plan, a DMA job's only. A
-            /// host job leases `block_len` blocks only to read through them
-            /// (`.host_bounce`); a direct one has none.
-            block_start: usize,
+            /// The blocks of its credit's slot the job reads into: a DMA
+            /// job's, which its transfers address, or a host job's that reads
+            /// through blocks (`.host_bounce`); a direct host job uses none.
             block_len: usize,
             /// Writes from the loader's zero block instead of reading: no
-            /// read, no pool lease, one block context over the zero block
-            /// for every transfer of the job (`Planner.appendFillTransfers`).
-            /// A host fill job writes zeros in place instead.
+            /// read, every transfer of the job from the zero block, its one
+            /// block (`Planner.appendFillTransfers`). A host fill job writes
+            /// zeros in place instead.
             fill: bool = false,
             delivery: Delivery = .dma,
             /// A staged DMA job (`Planner.JobCut.stage`) reads as any
@@ -877,7 +877,6 @@ pub const Batch = struct {
         staged_jobs: usize = 0,
         gather_jobs: usize = 0,
         requests: []ReadRequest,
-        blocks: []Pipeline.BlockContext,
         events: []Pipeline.EventContext,
         /// Event slots handed out so far, one `fetchAdd` per submission from
         /// any device's pump.
@@ -894,13 +893,12 @@ pub const Batch = struct {
 
         /// Takes ownership of transfers on success. All callback storage is
         /// allocated here, before publication makes the plan visible to
-        /// workers: `block_count` contexts for the DMA jobs' blocks and
-        /// `dma_submissions` events, one per writer of a DMA transfer.
+        /// workers: `dma_submissions` events, one per writer of a DMA
+        /// transfer.
         fn create(
             allocator: std.mem.Allocator,
             source_slot: *SourceSlot,
             job_count: usize,
-            block_count: usize,
             transfers: []Transfer,
             dma_submissions: usize,
             source_bytes: u64,
@@ -910,8 +908,6 @@ pub const Batch = struct {
             const requests = try allocator.alloc(ReadRequest, job_count);
             errdefer allocator.free(requests);
             @memset(requests, ReadRequest.idle);
-            const blocks = try allocator.alloc(Pipeline.BlockContext, block_count);
-            errdefer allocator.free(blocks);
             const events = try allocator.alloc(Pipeline.EventContext, dma_submissions);
             errdefer allocator.free(events);
             const self = try allocator.create(Plan);
@@ -921,7 +917,6 @@ pub const Batch = struct {
                 .jobs = jobs,
                 .transfers = transfers,
                 .requests = requests,
-                .blocks = blocks,
                 .events = events,
                 .source_bytes = source_bytes,
             };
@@ -932,7 +927,6 @@ pub const Batch = struct {
         fn destroy(self: *Plan) void {
             const allocator = self.allocator;
             allocator.free(self.events);
-            allocator.free(self.blocks);
             allocator.free(self.requests);
             allocator.free(self.extents);
             allocator.free(self.landings);
@@ -1759,7 +1753,6 @@ const Planner = struct {
                 allocator,
                 source_slot,
                 cut.jobs.items.len,
-                cut.block_total,
                 transfers,
                 cut.dma_submissions,
                 cut.source_bytes,
@@ -1786,7 +1779,7 @@ const Planner = struct {
     /// The jobs and transfers of one plan as `preparePlan` cuts them.
     const JobCut = struct {
         /// Host-resident transfers are written by the worker, not cut by
-        /// pool blocks: one transfer per destination run of a job, its
+        /// blocks: one transfer per destination run of a job, its
         /// `block_offset` relative to the job's read start, `block_index`
         /// zero.
         const unblocked = std.math.maxInt(usize);
@@ -1822,8 +1815,6 @@ const Planner = struct {
         entries: std.ArrayList(Entry) = .empty,
         groups: std.AutoHashMapUnmanaged(Group, u32) = .empty,
         source_bytes: u64 = 0,
-        /// Block contexts of the DMA jobs; host jobs register none.
-        block_total: usize = 0,
         /// One event per writer of a DMA transfer.
         dma_submissions: usize = 0,
         fill_jobs: usize = 0,
@@ -1959,7 +1950,6 @@ const Planner = struct {
                         .minimum_len = @intCast(job_end - read_start),
                         .transfer_start = transfer_start,
                         .transfer_len = 0,
-                        .block_start = 0,
                         .block_len = 0,
                     };
                     if (host) {
@@ -1972,8 +1962,6 @@ const Planner = struct {
                         self.host_jobs += 1;
                     } else {
                         try self.placeDma(&job, read_start, job_start, job_len);
-                        job.block_start = self.block_total;
-                        self.block_total += job.block_len;
                     }
                     const job_transfers = self.transfers.items[transfer_start..];
                     job.transfer_len = job_transfers.len;
@@ -2224,7 +2212,6 @@ const Planner = struct {
                     .minimum_len = 0,
                     .transfer_start = transfer_start,
                     .transfer_len = self.transfers.items.len - transfer_start,
-                    .block_start = self.block_total,
                     .block_len = blockCount(job_len, block_size),
                     .item_start = item_start,
                     .item_len = self.items.items.len - item_start,
@@ -2233,7 +2220,6 @@ const Planner = struct {
                     .gather = true,
                     .zeroed = covered < end - start,
                 });
-                self.block_total += blockCount(job_len, block_size);
                 self.dma_submissions += submissionCount(self.transfers.items[transfer_start..]);
                 self.gather_jobs += 1;
                 start = end;
@@ -2353,7 +2339,6 @@ const Planner = struct {
                 .minimum_len = 0,
                 .transfer_start = fill_start,
                 .transfer_len = fill_transfers.len,
-                .block_start = if (host) 0 else self.block_total,
                 .block_len = @intFromBool(!host),
                 .fill = true,
                 .delivery = if (host) .host_direct else .dma,
@@ -2362,7 +2347,6 @@ const Planner = struct {
             if (host) {
                 self.host_jobs += 1;
             } else {
-                self.block_total += 1;
                 self.dma_submissions += submissionCount(fill_transfers);
             }
         }
@@ -2371,7 +2355,7 @@ const Planner = struct {
         /// to `read_len` in order, each source byte once: then the read
         /// can scatter straight into the destinations. Overlapping or
         /// duplicate parts address some source bytes twice and go through
-        /// pool blocks instead.
+        /// blocks instead.
         fn coversReadInOrder(transfers: []const Batch.Plan.Transfer, read_len: usize) bool {
             var next: usize = 0;
             for (transfers) |transfer| {
@@ -2452,7 +2436,7 @@ const Planner = struct {
     /// placed by its grid like read bytes, each piece read from the zero
     /// block at offset 0. Pieces count toward their targets' totals, so the
     /// fill completes each device's placement bytes alongside the parts. A
-    /// piece is at most the zero block, one block of the pool.
+    /// piece is at most the zero block, one block of the pinned set.
     fn appendFillTransfers(
         allocator: std.mem.Allocator,
         output: *std.ArrayList(Batch.Plan.Transfer),
@@ -2546,11 +2530,6 @@ const Scheduler = struct {
         fn transfers(self: Claim) []const Batch.Plan.Transfer {
             const claimed = self.job();
             return self.plan.transfers[claimed.transfer_start..][0..claimed.transfer_len];
-        }
-
-        fn blocks(self: Claim) []Pipeline.BlockContext {
-            const claimed = self.job();
-            return self.plan.blocks[claimed.block_start..][0..claimed.block_len];
         }
     };
 
@@ -2697,8 +2676,6 @@ const Scheduler = struct {
 const ReadRequest = struct {
     const Scratch = struct {
         allocator: std.mem.Allocator,
-        leased: []host_memory.BlockPool.Block,
-        references: []usize,
         iovecs: [][]u8,
         queue_counts: []usize,
         /// A direct host read's destination ranges and the replica copies
@@ -2718,10 +2695,6 @@ const ReadRequest = struct {
             block_size: usize,
             device_count: usize,
         ) !Scratch {
-            const leased = try allocator.alloc(host_memory.BlockPool.Block, maximum_blocks);
-            errdefer allocator.free(leased);
-            const references = try allocator.alloc(usize, maximum_blocks);
-            errdefer allocator.free(references);
             const iovecs = try allocator.alloc([]u8, maximum_blocks);
             errdefer allocator.free(iovecs);
             const queue_counts = try allocator.alloc(usize, device_count);
@@ -2732,8 +2705,6 @@ const ReadRequest = struct {
             const host_copies = try allocator.alloc(HostScatter.Copy, @max(load_limits.max_positional_iovecs, device_count));
             return .{
                 .allocator = allocator,
-                .leased = leased,
-                .references = references,
                 .iovecs = iovecs,
                 .queue_counts = queue_counts,
                 .host_iovecs = host_iovecs,
@@ -2754,18 +2725,18 @@ const ReadRequest = struct {
             self.allocator.free(self.host_iovecs);
             self.allocator.free(self.queue_counts);
             self.allocator.free(self.iovecs);
-            self.allocator.free(self.references);
-            self.allocator.free(self.leased);
             self.* = undefined;
         }
     };
 
     pipeline: *Pipeline,
     plan: *Batch.Plan,
-    /// The job's block contexts; its worker registers them in order.
-    blocks: []Pipeline.BlockContext,
-    blocks_registered: usize = 0,
-    pending: std.atomic.Value(usize) = .init(1), // scheduling sentinel
+    /// The request's lifecycle credit: its slot of blocks (`Credits`), which
+    /// only this request reads into and transfers from until it ends.
+    slot: u32,
+    /// The scheduling sentinel and one reference per DMA piece queued; the
+    /// last release gives the credit back and finishes the job.
+    pending: std.atomic.Value(usize) = .init(1),
     /// Awake-clock nanoseconds of the enqueue; 0 until then.
     enqueued_ns: u64 = 0,
 
@@ -2774,20 +2745,19 @@ const ReadRequest = struct {
     const idle: ReadRequest = .{
         .pipeline = undefined,
         .plan = undefined,
-        .blocks = &.{},
+        .slot = undefined,
         .pending = .init(0),
     };
 
-    /// Takes the claimed job's request context. The claim holds the batch's
-    /// completion unit; the request's final reference drop releases it.
-    fn init(pipeline: *Pipeline, claim: Scheduler.Claim) *ReadRequest {
+    /// Takes the claimed job's request context with the worker's credit.
+    /// The claim holds the batch's completion unit; the request's final
+    /// reference drop releases it.
+    fn init(pipeline: *Pipeline, claim: Scheduler.Claim, slot: u32) *ReadRequest {
         const self = claim.request();
         self.* = .{
             .pipeline = pipeline,
             .plan = claim.plan,
-            // A host job registers no block context: its worker is done
-            // with every block it leases before the job ends.
-            .blocks = if (claim.job().delivery == .dma) claim.blocks() else &.{},
+            .slot = slot,
         };
         return self;
     }
@@ -2803,15 +2773,13 @@ const ReadRequest = struct {
         const block_count = job.block_len;
         if (block_count == 0) return;
 
-        std.debug.assert(block_count <= scratch.leased.len);
-        std.debug.assert(block_count == self.blocks.len);
+        const blocks = pipeline.credits.slotBlocks(self.slot)[0..block_count];
         std.debug.assert(job.fill == (job.len == 0));
         std.debug.assert(job.fill or job.gather or job.item_len != 0 or block_count == job.len / pipeline.block_size +
             @intFromBool(job.len % pipeline.block_size != 0));
-        const references = scratch.references[0..block_count];
-        @memset(references, 0);
         const queue_counts = scratch.queue_counts;
         @memset(queue_counts, 0);
+        var pieces: usize = 0;
 
         // The planner cut the transfers to this job's blocks and the tensor's
         // writers are the devices it planned for (both come from the
@@ -2827,7 +2795,7 @@ const ReadRequest = struct {
             std.debug.assert(transfer.block_index < block_count and
                 transfer.block_offset < pipeline.block_size and
                 transfer.len <= pipeline.block_size - transfer.block_offset);
-            references[transfer.block_index] += @popCount(transfer.writer_mask);
+            pieces += @popCount(transfer.writer_mask);
             var mask = transfer.writer_mask;
             while (mask != 0) {
                 const writer_index: usize = @intCast(@ctz(mask));
@@ -2836,25 +2804,15 @@ const ReadRequest = struct {
                 queue_counts[tensor.targets[writer_index].device_index] += 1;
             }
         }
-        // Every block of a job is covered by a transfer: a block without a
-        // reference would never be released.
-        for (references) |refs| std.debug.assert(refs != 0);
-        if (job.fill) {
-            // The zero block is the loader's for its whole life: nothing to
-            // lease or read, and its context returns nothing to the pool.
-            if (pipeline.errorValue()) |err| return err;
-            _ = self.registerBlock(pipeline.zero_block, null, references[0]);
-        } else {
-            const leased = scratch.leased[0..block_count];
-            pipeline.pool.acquireMany(io, leased);
-            errdefer pipeline.pool.releaseMany(io, leased);
-            if (pipeline.errorValue()) |err| return err;
-
+        if (pipeline.errorValue()) |err| return err;
+        // A fill job's transfers read the zero block, nothing else.
+        const sources: []const host_memory.Block = if (job.fill) @as(*const [1]host_memory.Block, &pipeline.zero_block) else blocks;
+        if (!job.fill) {
             if (job.gather or job.item_len != 0) {
-                try landJob(FileReader{ .pipeline = pipeline }, claim.plan, job, leased, pipeline.block_size, scratch);
+                try landJob(FileReader{ .pipeline = pipeline }, claim.plan, job, blocks, pipeline.block_size, scratch);
             } else {
                 const iovecs = scratch.iovecs[0..block_count];
-                for (iovecs, leased, 0..) |*iovec, block, block_index| {
+                for (iovecs, blocks, 0..) |*iovec, block, block_index| {
                     const consumed = block_index * pipeline.block_size;
                     iovec.* = block[0..@min(pipeline.block_size, job.len - consumed)];
                 }
@@ -2862,24 +2820,23 @@ const ReadRequest = struct {
             }
             for (transfers) |transfer| transfer.destination.recordRead(transfer.len);
             if (pipeline.errorValue()) |err| return err;
-
-            // From here the request's block contexts release the leases.
-            for (leased, references) |lease, refs| _ = self.registerBlock(lease, pipeline.pool, refs);
         }
+        // Every piece holds the request, and with it the slot, until its
+        // callback.
+        _ = self.pending.fetchAdd(pieces, .acq_rel);
         self.enqueued_ns = awakeNs(io);
-        pipeline.enqueueBlocks(transfers, self.blocks, queue_counts) catch |err| {
+        pipeline.enqueueBlocks(transfers, self, sources, queue_counts) catch |err| {
             self.enqueued_ns = 0;
-            // Nothing was queued. The worker still holds the scheduling reference.
-            for (transfers) |transfer| {
-                Pipeline.abandonSubmissions(&self.blocks[transfer.block_index], @popCount(transfer.writer_mask));
-            }
+            // Nothing was queued. The worker still holds the scheduling
+            // reference, so this cannot end the request.
+            _ = self.pending.fetchSub(pieces, .acq_rel);
             return err;
         };
     }
 
     /// A host job: the worker writes its destinations itself, so the job
-    /// ends with the worker's scheduling reference and holds pool blocks,
-    /// if any, only while it copies out of them. Its read takes the read
+    /// ends with the worker's scheduling reference; its slot's blocks, if it
+    /// reads through them, are done when it returns. Its read takes the read
     /// gate like any other.
     fn runHost(self: *ReadRequest, loader: *Loader, claim: Scheduler.Claim, scratch: *Scratch) !void {
         const pipeline = self.pipeline;
@@ -2946,13 +2903,10 @@ const ReadRequest = struct {
             },
             .host_bounce => {
                 const block_size = pipeline.block_size;
-                const leased = scratch.leased[0..job.block_len];
+                const blocks = pipeline.credits.slotBlocks(self.slot)[0..job.block_len];
                 std.debug.assert(job.block_len == job.len / block_size + @intFromBool(job.len % block_size != 0));
-                pipeline.pool.acquireMany(io, leased);
-                defer pipeline.pool.releaseMany(io, leased);
-                if (pipeline.errorValue()) |err| return err;
                 const iovecs = scratch.iovecs[0..job.block_len];
-                for (iovecs, leased, 0..) |*iovec, block, block_index| {
+                for (iovecs, blocks, 0..) |*iovec, block, block_index| {
                     iovec.* = block[0..@min(block_size, job.len - block_index * block_size)];
                 }
                 try readGated(pipeline, file, iovecs, job.file_offset, job.minimum_len);
@@ -2961,7 +2915,7 @@ const ReadRequest = struct {
                     std.debug.assert(transfer.block_index == 0 and transfer.block_offset + transfer.len <= job.len);
                     var writers = tensor.hostWriters(transfer);
                     while (writers.next()) |writer| {
-                        copyFromBlocks(leased, block_size, transfer.block_offset, writer.data[0..transfer.len]);
+                        copyFromBlocks(blocks, block_size, transfer.block_offset, writer.data[0..transfer.len]);
                         written.add(tensor, transfer.len * writer.covers);
                     }
                 }
@@ -2971,28 +2925,14 @@ const ReadRequest = struct {
         for (transfers) |transfer| transfer.destination.recordRead(transfer.len);
     }
 
-    /// Takes the request's next block context for a block that `owner`
-    /// leased, or for the zero block (no owner: its last completion returns
-    /// nothing). Only the request's worker touches its slots, in order.
-    fn registerBlock(self: *ReadRequest, data: host_memory.BlockPool.Block, owner: ?*host_memory.BlockPool, references: usize) *Pipeline.BlockContext {
-        const block = &self.blocks[self.blocks_registered];
-        block.* = .{
-            .pipeline = self.pipeline,
-            .request = self,
-            .lease = .init(owner, self.pipeline.io, data, references),
-        };
-        self.blocks_registered += 1;
-        _ = self.pending.fetchAdd(1, .acq_rel);
-        return block;
-    }
-
     /// Final worker access, after any error was recorded on the pipeline.
     fn finishScheduling(self: *ReadRequest) void {
         self.release();
     }
 
-    /// Releases a block or the scheduling reference. The final release may
-    /// let the awaiting task free this request and everything its batch owns.
+    /// Releases a DMA piece or the scheduling reference. The final release
+    /// gives the credit back and may let the awaiting task free this request
+    /// and everything its batch owns.
     fn release(self: *ReadRequest) void {
         const previous = self.pending.fetchSub(1, .acq_rel);
         std.debug.assert(previous > 0);
@@ -3005,7 +2945,7 @@ const ReadRequest = struct {
         if (self.enqueued_ns != 0) {
             _ = pipeline.metrics.dma_stage_ns.fetchAdd(awakeNs(pipeline.io) -| self.enqueued_ns, .monotonic);
         }
-        pipeline.request_gate.release(pipeline.io);
+        pipeline.credits.release(pipeline.io, self.slot);
         batch.finishJobs(1);
     }
 };
@@ -3073,7 +3013,7 @@ fn landJob(
     reader: anytype,
     plan: *const Batch.Plan,
     job: Batch.Plan.Job,
-    blocks: []const host_memory.BlockPool.Block,
+    blocks: []const host_memory.Block,
     block_size: usize,
     scratch: *ReadRequest.Scratch,
 ) !void {
@@ -3108,7 +3048,7 @@ fn landExtent(
     extent: Batch.Plan.Extent,
     items: []const Batch.Plan.Item,
     landings: []const u64,
-    blocks: []const host_memory.BlockPool.Block,
+    blocks: []const host_memory.Block,
     block_size: usize,
     scratch: *ReadRequest.Scratch,
 ) !void {
@@ -3212,7 +3152,7 @@ fn ScatterSink(comptime Reader: type) type {
         pending: usize = 0,
         /// The file offset of the first byte not read yet.
         file_offset: u64,
-        blocks: []const host_memory.BlockPool.Block,
+        blocks: []const host_memory.Block,
         block_size: usize,
 
         fn place(self: *@This(), source: u64, landing: u64, len: u64) !void {
@@ -3252,7 +3192,7 @@ fn ScatterSink(comptime Reader: type) type {
 const CopySink = struct {
     bounce: []const u8,
     file_offset: u64,
-    blocks: []const host_memory.BlockPool.Block,
+    blocks: []const host_memory.Block,
     block_size: usize,
 
     fn place(self: *CopySink, source: u64, landing: u64, len: u64) !void {
@@ -3349,7 +3289,7 @@ const HostWritten = struct {
 
 /// Copies `source` to offset `offset` of `blocks` taken end to end,
 /// `block_size` bytes each.
-fn copyToBlocks(blocks: []const host_memory.BlockPool.Block, block_size: usize, offset: usize, source: []const u8) void {
+fn copyToBlocks(blocks: []const host_memory.Block, block_size: usize, offset: usize, source: []const u8) void {
     var destination = offset;
     var rest = source;
     while (rest.len != 0) {
@@ -3364,7 +3304,7 @@ fn copyToBlocks(blocks: []const host_memory.BlockPool.Block, block_size: usize, 
 
 /// Copies `destination.len` bytes from offset `offset` of the read that
 /// `blocks` hold, `block_size` bytes each.
-fn copyFromBlocks(blocks: []const host_memory.BlockPool.Block, block_size: usize, offset: usize, destination: []u8) void {
+fn copyFromBlocks(blocks: []const host_memory.Block, block_size: usize, offset: usize, destination: []u8) void {
     var source = offset;
     var rest = destination;
     while (rest.len != 0) {
@@ -3378,22 +3318,17 @@ fn copyFromBlocks(blocks: []const host_memory.BlockPool.Block, block_size: usize
 }
 
 const Pipeline = struct {
-    const BlockContext = struct {
-        pipeline: *Pipeline,
-        request: *ReadRequest,
-        lease: host_memory.BlockPool.Lease,
-
-        fn complete(self: *BlockContext) void {
-            if (self.lease.complete()) self.request.release();
-        }
-    };
-
+    /// One DMA piece: `data`, in its request's slot or the zero block, for
+    /// `target` at `destination_offset`. The piece holds one of its
+    /// request's references until its callback. Replicas share their
+    /// source bytes: copying them to another CPU socket first was rejected
+    /// on MI300X, where raw local and remote H2D both reached ~49-50 GiB/s
+    /// per GPU while one CPU thread copied across sockets at 5-10 GiB/s.
     const ReadyTransfer = struct {
         target: *TensorTransfer.Target,
-        block: *BlockContext,
-        source_offset: usize,
+        request: *ReadRequest,
+        data: []const u8,
         destination_offset: usize,
-        len: usize,
     };
 
     /// Transfers ready for one device, submitted in arrival order so the
@@ -3472,7 +3407,7 @@ const Pipeline = struct {
     };
 
     const EventContext = struct {
-        block: *BlockContext,
+        request: *ReadRequest,
         /// Null once destroyed, by a pump or by the batch's retirement.
         pjrt_event: ?*pjrt.Event,
         err: ?*pjrt.Error = null,
@@ -3484,13 +3419,13 @@ const Pipeline = struct {
         next_retired: ?*EventContext = null,
 
         /// Pump mutex. Destroys the event and its error, once.
-        /// The platform is reached through the block, and only when there
+        /// The platform is reached through the request, and only when there
         /// is something to destroy: a context whose event and error are both
         /// null never touches it.
         fn destroyEvent(self: *EventContext) void {
-            if (self.pjrt_event) |event| event.deinit(self.block.pipeline.platform.pjrt_api);
+            if (self.pjrt_event) |event| event.deinit(self.request.pipeline.platform.pjrt_api);
             self.pjrt_event = null;
-            if (self.err) |err| err.deinit(self.block.pipeline.platform.pjrt_api);
+            if (self.err) |err| err.deinit(self.request.pipeline.platform.pjrt_api);
             self.err = null;
         }
     };
@@ -3498,9 +3433,8 @@ const Pipeline = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    pool: *host_memory.BlockPool,
     read_gate: *RequestGate,
-    request_gate: *RequestGate,
+    credits: *Credits,
     block_size: usize,
     metrics: *Metrics,
     scheduler: *Scheduler,
@@ -3511,18 +3445,17 @@ const Pipeline = struct {
     pumps: []DevicePump,
     /// Per-device in-flight budget: the calibrated depth in blocks, in bytes.
     dma_budget_bytes: usize,
-    /// One pinned block of zeros, the source of every fill transfer: taken
-    /// out of the pool at creation (`BlockPool.detachBlock`), never leased,
-    /// never written again, mapped as long as the pool.
+    /// One pinned block of zeros, the source of every fill transfer: the
+    /// first block of the pinned set, in no credit's slot, never written
+    /// again.
     zero_block: []u8 = &.{},
 
     fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        pool: *host_memory.BlockPool,
         read_gate: *RequestGate,
-        request_gate: *RequestGate,
+        credits: *Credits,
         block_size: usize,
         metrics: *Metrics,
         scheduler: *Scheduler,
@@ -3538,9 +3471,8 @@ const Pipeline = struct {
             .allocator = allocator,
             .io = io,
             .platform = platform,
-            .pool = pool,
             .read_gate = read_gate,
-            .request_gate = request_gate,
+            .credits = credits,
             .block_size = block_size,
             .metrics = metrics,
             .scheduler = scheduler,
@@ -3553,7 +3485,7 @@ const Pipeline = struct {
     fn deinit(self: *Pipeline) void {
         // Every batch was retired: no DMA event, queued transfer or request
         // context may outlive its batch.
-        std.debug.assert(self.request_gate.inUse(self.io) == 0);
+        std.debug.assert(self.credits.inUse(self.io) == 0);
         for (self.pumps) |*device_pump| {
             std.debug.assert(device_pump.active_pieces == 0);
             std.debug.assert(device_pump.queue.len == 0);
@@ -3589,7 +3521,7 @@ const Pipeline = struct {
             load_log.failure(err, fmt, args);
             self.scheduler.fail(self.io);
             self.read_gate.close(self.io);
-            self.request_gate.close(self.io);
+            self.credits.close(self.io);
             self.abortReady();
         }
     }
@@ -3597,8 +3529,7 @@ const Pipeline = struct {
     /// Retires the contexts of a done batch: destroys the PJRT events a pump
     /// has not destroyed yet (from the awaiting task after their callbacks
     /// fired, exactly as `pjrt.Event.await` does), unlinks the batch's
-    /// contexts from `retired` and checks that every request and block
-    /// completed. Runs with every pump locked so an `abortReady` still
+    /// contexts from `retired` and checks that every request completed. Runs with every pump locked so an `abortReady` still
     /// iterating queued entries or a pump draining its `retired` cannot race
     /// the free that follows.
     fn retireBatch(self: *Pipeline, batch: *Batch) void {
@@ -3608,12 +3539,7 @@ const Pipeline = struct {
         if (builtin.mode == .debug) batch.freeing = true;
         for (batch.plans.items) |plan| {
             for (plan.events[0..plan.events_used.load(.acquire)]) |*ctx| ctx.destroyEvent();
-            for (plan.requests) |*request| {
-                std.debug.assert(request.pending.load(.acquire) == 0);
-                for (request.blocks[0..request.blocks_registered]) |*block| {
-                    std.debug.assert(block.lease.remaining.load(.acquire) == 0);
-                }
-            }
+            for (plan.requests) |*request| std.debug.assert(request.pending.load(.acquire) == 0);
         }
         // Only this batch's contexts have a destroyed event while still
         // linked: a pump unlinks what it destroys.
@@ -3639,18 +3565,20 @@ const Pipeline = struct {
     /// Queue the whole source job before pumping. The former per-piece path
     /// paid roughly 69k-79k mutex/pump trips per DeepSeek load; coalesced reads
     /// alone did not remove that cost. Reserve every destination first so
-    /// allocation failure cannot publish a subset of the block references.
+    /// allocation failure cannot publish a subset of the request's pieces.
+    /// A transfer reads `blocks[transfer.block_index]`.
     fn enqueueBlocks(
         self: *Pipeline,
         transfers: []const Batch.Plan.Transfer,
-        blocks: []BlockContext,
+        request: *ReadRequest,
+        blocks: []const host_memory.Block,
         queue_counts: []const usize,
     ) !void {
         std.debug.assert(queue_counts.len == self.pumps.len);
         // Every pump is held while the request's transfers land, and every
         // destination is reserved before any queue changes, so the request
-        // is either fully queued or not queued at all: the caller abandons
-        // all of its submissions on failure.
+        // is either fully queued or not queued at all: the caller drops all
+        // of its pieces on failure.
         self.lockAllPumps();
         errdefer self.unlockAllPumps();
         // A failure recorded before these locks may have drained the queues
@@ -3661,7 +3589,7 @@ const Pipeline = struct {
             try device_pump.queue.ensureUnusedCapacity(self.allocator, count);
         }
         for (transfers) |transfer| {
-            const block = &blocks[transfer.block_index];
+            const data = blocks[transfer.block_index][transfer.block_offset..][0..transfer.len];
             const tensor = &transfer.destination.state.value;
             var mask = transfer.writer_mask;
             while (mask != 0) {
@@ -3671,10 +3599,9 @@ const Pipeline = struct {
                 const device_pump = &self.pumps[target.device_index];
                 device_pump.queue.pushBackAssumeCapacity(.{
                     .target = target,
-                    .block = block,
-                    .source_offset = transfer.block_offset,
+                    .request = request,
+                    .data = data,
                     .destination_offset = transfer.destination_offset,
-                    .len = transfer.len,
                 });
             }
         }
@@ -3682,18 +3609,6 @@ const Pipeline = struct {
         for (queue_counts, 0..) |count, device_index| {
             if (count != 0) self.requestPump(device_index);
         }
-    }
-
-    /// Drops `count` never-submitted references of a registered block. Only
-    /// the worker that still holds the request's scheduling sentinel calls
-    /// this, so the request cannot reach zero here and the batch stays alive
-    /// until that worker's `finishScheduling`.
-    fn abandonSubmissions(
-        block: *BlockContext,
-        count: usize,
-    ) void {
-        if (count == 0) return;
-        for (0..count) |_| block.complete();
     }
 
     /// Runs the device's pump on this thread unless one is already running.
@@ -3723,7 +3638,7 @@ const Pipeline = struct {
                 if (!device_pump.hasRoom(self.dma_budget_bytes)) {
                     _ = self.metrics.pump_stops_full.fetchAdd(1, .monotonic);
                 } else if (device_pump.queue.popFront()) |transfer| {
-                    device_pump.active_bytes += transfer.len;
+                    device_pump.active_bytes += transfer.data.len;
                     device_pump.active_pieces += 1;
                     selected = transfer;
                 } else {
@@ -3736,64 +3651,64 @@ const Pipeline = struct {
         }
     }
 
-    /// MEMORY-ORDER RULE: `transfer.target` and `transfer.block` belong to a
-    /// batch, and the block's final completion may complete that batch, after
-    /// which the awaiting task frees it. Every path therefore copies what it
-    /// needs into locals, retires the DMA slot with `eventCompleted`, and
-    /// calls `block.complete()` last.
+    /// MEMORY-ORDER RULE: `transfer.target` and `transfer.request` belong to
+    /// a batch, and the request's final release may complete that batch,
+    /// after which the awaiting task frees it. Every path therefore copies
+    /// what it needs into locals, retires the DMA slot with
+    /// `eventCompleted`, and calls `request.release()` last.
     fn submitOne(self: *Pipeline, transfer: ReadyTransfer) void {
         const device_index = transfer.target.device_index;
-        const len = transfer.len;
-        const block = transfer.block;
+        const len = transfer.data.len;
+        const request = transfer.request;
         self.submitTransfer(transfer) catch |err| {
             self.recordError(err, "submit DMA transfer: device={d}, destination_offset={d}, bytes={d}", .{ device_index, transfer.destination_offset, len });
             self.eventCompleted(device_index, len);
-            block.complete();
+            request.release();
         };
     }
 
     fn submitTransfer(self: *Pipeline, transfer: ReadyTransfer) !void {
         const api = self.platform.pjrt_api;
         const target = transfer.target;
-        const is_last = target.nextIsLast(transfer.len);
+        const is_last = target.nextIsLast(transfer.data.len);
         // Even a rejected last call closes the buffer on PJRT's side.
         if (is_last) target.closed = true;
         const submit_started = awakeNs(self.io);
         const event = try target.manager.transferData(
             api,
             0,
-            transfer.block.lease.data[transfer.source_offset..][0..transfer.len],
+            transfer.data,
             @intCast(transfer.destination_offset),
             is_last,
         );
-        target.noteSubmitted(transfer.len);
+        target.noteSubmitted(transfer.data.len);
 
         // The plan holds one event slot per planned submission; the batch
         // owns it. A pump destroys the event once its callback has run, or
         // the batch's retirement does.
-        const plan = transfer.block.request.plan;
+        const plan = transfer.request.plan;
         const event_index = plan.events_used.fetchAdd(1, .monotonic);
         std.debug.assert(event_index < plan.events.len);
         const ctx = &plan.events[event_index];
         ctx.* = .{
-            .block = transfer.block,
+            .request = transfer.request,
             .pjrt_event = event,
             .device_index = target.device_index,
-            .len = transfer.len,
+            .len = transfer.data.len,
             .submitted_ns = submit_started,
         };
 
         _ = self.metrics.dma_submissions.fetchAdd(1, .monotonic);
         event.onReady(api, EventContext, struct {
             fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
-                // MEMORY-ORDER RULE: the batch owns `ctx_` and its block, and
-                // `block.complete()` may complete that batch, after which the
-                // awaiting task frees the context, the block and the batch.
-                // Load every field first, store the error, retire the DMA
-                // slot (which may pump on this thread), hand the context to
-                // the next pump, and complete the block last.
-                const block = ctx_.block;
-                const pipeline = block.pipeline;
+                // MEMORY-ORDER RULE: the batch owns `ctx_` and its request,
+                // and `request.release()` may complete that batch, after
+                // which the awaiting task frees the context, the request and
+                // the batch. Load every field first, store the error, retire
+                // the DMA slot (which may pump on this thread), hand the
+                // context to the next pump, and release the request last.
+                const request = ctx_.request;
+                const pipeline = request.pipeline;
                 const device_index = ctx_.device_index;
                 const len = ctx_.len;
                 _ = pipeline.metrics.dma_piece_ns.fetchAdd(awakeNs(pipeline.io) -| ctx_.submitted_ns, .monotonic);
@@ -3809,7 +3724,7 @@ const Pipeline = struct {
                 // destroyed by a later pump or by the batch's retirement,
                 // never inside its own callback.
                 pipeline.retireEvent(ctx_);
-                block.complete();
+                request.release();
             }
         }.call, ctx) catch |err| {
             // The batch owns `ctx` and destroys the event at retirement.
@@ -3840,12 +3755,12 @@ const Pipeline = struct {
     /// Force-completes every queued transfer, one device at a time. A
     /// completion here may finish its batch, but a batch still has an entry
     /// queued until its last one is popped, and it is retired with every
-    /// pump locked, so no queued entry is touched after its block completes.
+    /// pump locked, so no queued entry is touched after its request ends.
     fn abortReady(self: *Pipeline) void {
         for (self.pumps) |*device_pump| {
             device_pump.mutex.lockUncancelable(self.io);
             while (device_pump.queue.popFront()) |transfer| {
-                transfer.block.complete();
+                transfer.request.release();
             }
             device_pump.mutex.unlock(self.io);
         }
@@ -3893,6 +3808,88 @@ const RequestGate = struct {
     }
 
     fn close(self: *RequestGate, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.closed = true;
+        self.condition.broadcast(io);
+    }
+};
+
+/// The lifecycle credits: one per request the pre-grown pinned set holds,
+/// each a fixed slot of `blocks_per_slot` blocks. A worker takes a credit
+/// before claiming a job, and the request gives it back with its last
+/// reference: after its last DMA callback, or at the end of a host job. Only
+/// the holder reads into, lands in and transfers from its slot's blocks, so
+/// the credits are the one bound on pinned memory in use. A block whose
+/// pieces are done stays with its request until the request ends; nobody
+/// else could use it anyway, since every credit owns a whole slot.
+const Credits = struct {
+    /// Every slot's blocks, slot `s` at `blocks[s * blocks_per_slot ..]`;
+    /// a tail shorter than a slot is left unused.
+    blocks: []const host_memory.Block,
+    blocks_per_slot: usize,
+    /// Free slots, a stack of indices; owned by `mutex`.
+    free: []u32,
+    free_len: usize,
+    closed: bool = false,
+    /// The most slots held at once.
+    high_water: usize = 0,
+    mutex: std.Io.Mutex = .init,
+    /// Waiters for a slot; one release wakes one of them.
+    condition: std.Io.Condition = .init,
+
+    fn init(allocator: std.mem.Allocator, blocks: []const host_memory.Block, blocks_per_slot: usize) std.mem.Allocator.Error!Credits {
+        std.debug.assert(blocks_per_slot != 0);
+        const free = try allocator.alloc(u32, blocks.len / blocks_per_slot);
+        // Slot 0 first.
+        for (free, 0..) |*slot, index| slot.* = @intCast(free.len - 1 - index);
+        return .{ .blocks = blocks, .blocks_per_slot = blocks_per_slot, .free = free, .free_len = free.len };
+    }
+
+    fn deinit(self: *Credits, allocator: std.mem.Allocator) void {
+        std.debug.assert(self.free_len == self.free.len);
+        allocator.free(self.free);
+    }
+
+    fn count(self: *const Credits) usize {
+        return self.free.len;
+    }
+
+    /// Waits for a free slot; null once closed.
+    fn acquire(self: *Credits, io: std.Io) ?u32 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        while (!self.closed and self.free_len == 0) {
+            self.condition.waitUncancelable(io, &self.mutex);
+        }
+        if (self.closed) return null;
+        self.free_len -= 1;
+        self.high_water = @max(self.high_water, self.free.len - self.free_len);
+        return self.free[self.free_len];
+    }
+
+    fn release(self: *Credits, io: std.Io, slot: u32) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        std.debug.assert(self.free_len < self.free.len);
+        self.free[self.free_len] = slot;
+        self.free_len += 1;
+        // One release frees one slot: waking every waiter here would be a
+        // thundering herd.
+        self.condition.signal(io);
+    }
+
+    fn slotBlocks(self: *const Credits, slot: u32) []const host_memory.Block {
+        return self.blocks[slot * self.blocks_per_slot ..][0..self.blocks_per_slot];
+    }
+
+    fn inUse(self: *Credits, io: std.Io) usize {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.free.len - self.free_len;
+    }
+
+    fn close(self: *Credits, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         self.closed = true;
@@ -4011,12 +4008,11 @@ test "plan construction releases allocations and takes transfers only on success
                     .len = 64,
                 });
                 transfers[0].writer_mask = 0b11;
-                break :plan try Batch.Plan.create(allocator, undefined, 2, 3, transfers, 3, 128);
+                break :plan try Batch.Plan.create(allocator, undefined, 2, transfers, 3, 128);
             };
             defer plan.destroy();
             try std.testing.expectEqual(@as(usize, 2), plan.jobs.len);
             try std.testing.expectEqual(@as(usize, 2), plan.requests.len);
-            try std.testing.expectEqual(@as(usize, 3), plan.blocks.len);
             // The replicated piece needs two callbacks; the other needs one.
             try std.testing.expectEqual(@as(usize, 3), plan.events.len);
             for (plan.requests) |request| {
@@ -4120,14 +4116,11 @@ test "loader failures clean up before publication, after publication and during 
                 specs[0].shape = sources[0].shape;
                 const batch = try loader.submit(specs[0..1], .none);
                 try std.testing.expectError(error.UnexpectedEndOfFile, loader.awaitBatch(batch));
-                // A host job reads in place, without blocks.
-                try std.testing.expectEqual(memory == .default, loader.pool.high_water > 0);
             },
         }
         try std.testing.expectEqual(@as(usize, 0), loader.scheduler.remainingJobs(io));
-        try std.testing.expectEqual(@as(usize, 0), loader.request_gate.inUse(io));
+        try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
         try std.testing.expectEqual(@as(usize, 0), loader.read_gate.inUse(io));
-        try std.testing.expectEqual(@as(usize, 0), loader.pool.in_use);
 
         if (failure == .before_publication) {
             try std.testing.expectEqual(@as(usize, 0), loader.batch_count);
@@ -4180,15 +4173,13 @@ fn initPlainParts(
 }
 
 /// A plan of `job_count` unit jobs (`file_offset` = index), each with one
-/// block slot and one event slot, and no transfers.
+/// block and one event slot, and no transfers.
 fn testPlan(allocator: std.mem.Allocator, job_count: usize) !*Batch.Plan {
     const jobs = try allocator.alloc(Batch.Plan.Job, job_count);
     errdefer allocator.free(jobs);
     const requests = try allocator.alloc(ReadRequest, job_count);
     errdefer allocator.free(requests);
     @memset(requests, ReadRequest.idle);
-    const blocks = try allocator.alloc(Pipeline.BlockContext, job_count);
-    errdefer allocator.free(blocks);
     const events = try allocator.alloc(Pipeline.EventContext, job_count);
     errdefer allocator.free(events);
     for (jobs, 0..) |*job, index| job.* = .{
@@ -4197,7 +4188,6 @@ fn testPlan(allocator: std.mem.Allocator, job_count: usize) !*Batch.Plan {
         .minimum_len = 1,
         .transfer_start = 0,
         .transfer_len = 0,
-        .block_start = index,
         .block_len = 1,
     };
     const plan = try allocator.create(Batch.Plan);
@@ -4207,7 +4197,6 @@ fn testPlan(allocator: std.mem.Allocator, job_count: usize) !*Batch.Plan {
         .jobs = jobs,
         .transfers = &.{},
         .requests = requests,
-        .blocks = blocks,
         .events = events,
         .source_bytes = job_count,
     };
@@ -4310,21 +4299,15 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 4), batch.diagnostics.source_jobs);
     try std.testing.expectEqual(@as(u64, 24), batch.diagnostics.source_bytes);
     try std.testing.expectEqual(@as(usize, 7), batch.diagnostics.planned_transfers);
-    // One writer per transfer on one device: one event per transfer. Each
-    // job's contexts are ranges of its plan's arrays, blocks by 4-byte block.
+    // One writer per transfer on one device: one event per transfer. Jobs
+    // span their 4-byte blocks.
     try std.testing.expectEqual(@as(usize, 7), batch.diagnostics.planned_dma_submissions);
     try std.testing.expectEqual(@as(usize, 4), plans[0].events.len);
     try std.testing.expectEqual(@as(usize, 3), plans[1].events.len);
     try std.testing.expectEqual(@as(usize, 2), plans[0].requests.len);
-    try std.testing.expectEqual(@as(usize, 3), plans[0].blocks.len);
-    try std.testing.expectEqual(@as(usize, 0), plans[0].jobs[0].block_start);
     try std.testing.expectEqual(@as(usize, 2), plans[0].jobs[0].block_len);
-    try std.testing.expectEqual(@as(usize, 2), plans[0].jobs[1].block_start);
     try std.testing.expectEqual(@as(usize, 1), plans[0].jobs[1].block_len);
-    try std.testing.expectEqual(@as(usize, 3), plans[1].blocks.len);
-    try std.testing.expectEqual(@as(usize, 0), plans[1].jobs[0].block_start);
     try std.testing.expectEqual(@as(usize, 2), plans[1].jobs[0].block_len);
-    try std.testing.expectEqual(@as(usize, 2), plans[1].jobs[1].block_start);
     try std.testing.expectEqual(@as(usize, 1), plans[1].jobs[1].block_len);
     for (plans) |plan| {
         for (plan.requests) |*request| try std.testing.expectEqual(@as(usize, 0), request.pending.load(.acquire));
@@ -4820,28 +4803,32 @@ test "the submission that completes a target's bytes carries the last flag" {
     try std.testing.expect(target.fullySubmitted());
 }
 
-/// A single-device pipeline without PJRT: enough for request, block and
-/// batch lifecycle tests. Must not move after `init`.
+/// A single-device pipeline without PJRT: enough for request, credit and
+/// batch lifecycle tests, with `slots` credits of one 64-byte block. Must
+/// not move after `init`.
 const TestPipeline = struct {
     metrics: Metrics = .{},
-    gate: RequestGate,
+    read_gate: RequestGate = .init(1),
+    memory: []u8,
+    blocks: []host_memory.Block,
+    credits: Credits,
     pumps: [1]Pipeline.DevicePump = .{.{}},
     pipeline: Pipeline,
 
-    fn init(
-        self: *TestPipeline,
-        gate_limit: usize,
-        pool: ?*host_memory.BlockPool,
-        scheduler: *Scheduler,
-    ) void {
-        self.* = .{ .gate = .init(gate_limit), .pipeline = undefined };
+    fn init(self: *TestPipeline, slots: usize, scheduler: *Scheduler) !void {
+        const allocator = std.testing.allocator;
+        const memory = try allocator.alloc(u8, slots * 64);
+        errdefer allocator.free(memory);
+        const blocks = try allocator.alloc(host_memory.Block, slots);
+        errdefer allocator.free(blocks);
+        for (blocks, 0..) |*block, index| block.* = memory[index * 64 ..][0..64];
+        self.* = .{ .memory = memory, .blocks = blocks, .credits = try .init(allocator, blocks, 1), .pipeline = undefined };
         self.pipeline = .{
-            .allocator = std.testing.allocator,
+            .allocator = allocator,
             .io = std.testing.io,
             .platform = undefined,
-            .pool = if (pool) |value| value else undefined,
-            .read_gate = undefined,
-            .request_gate = &self.gate,
+            .read_gate = &self.read_gate,
+            .credits = &self.credits,
             .block_size = 64,
             .metrics = &self.metrics,
             .scheduler = scheduler,
@@ -4851,66 +4838,61 @@ const TestPipeline = struct {
     }
 
     fn deinit(self: *TestPipeline) void {
-        self.pumps[0].queue.deinit(std.testing.allocator);
+        const allocator = std.testing.allocator;
+        self.pumps[0].queue.deinit(allocator);
+        self.credits.deinit(allocator);
+        allocator.free(self.blocks);
+        allocator.free(self.memory);
     }
 
-    /// The worker's claim-to-request sequence.
+    /// The worker's credit-then-claim sequence.
     fn claimRequest(
         self: *TestPipeline,
         scheduler: *Scheduler,
     ) !*ReadRequest {
         const io = std.testing.io;
-        const claim = scheduler.claim(io) orelse return error.NoJob;
-        try std.testing.expect(self.gate.acquire(io));
-        return ReadRequest.init(&self.pipeline, claim);
+        const slot = self.credits.acquire(io) orelse return error.Closed;
+        const claim = scheduler.claim(io) orelse {
+            self.credits.release(io, slot);
+            return error.NoJob;
+        };
+        return ReadRequest.init(&self.pipeline, claim, slot);
     }
 };
 
 test "late vectored callback failure drains and signals completion" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    var pool = pool_init: {
-        var workspace = try host_memory.Workspace.initForTesting(allocator, io, 64);
-        errdefer workspace.deinit();
-
-        _ = try workspace.allocate(64);
-        break :pool_init try host_memory.BlockPool.init(allocator, workspace, 64);
-    };
-    defer pool.deinit();
     var scheduler: Scheduler = .init(allocator);
     defer scheduler.deinit();
     var fixture: TestPipeline = undefined;
-    fixture.init(1, &pool, &scheduler);
+    try fixture.init(1, &scheduler);
     defer fixture.deinit();
     const pipeline = &fixture.pipeline;
 
-    // One request whose only block is queued behind a DMA slot that a failed
+    // One request whose only piece is queued behind a DMA slot that a failed
     // callback is about to free.
     const batch = try publishTestBatch(&scheduler, 1);
     const request = try fixture.claimRequest(&scheduler);
-    var leased: [1]host_memory.BlockPool.Block = undefined;
-    pool.acquireMany(io, &leased);
-    const block = request.registerBlock(leased[0], &pool, 1);
-    try std.testing.expect(block == &batch.plans.items[0].blocks[0]);
     var target: TensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 64 };
+    _ = request.pending.fetchAdd(1, .acq_rel);
     try fixture.pumps[0].queue.pushBack(allocator, .{
         .target = &target,
-        .block = block,
-        .source_offset = 0,
+        .request = request,
+        .data = fixture.credits.slotBlocks(request.slot)[0],
         .destination_offset = 0,
-        .len = 64,
     });
     fixture.pumps[0].active_bytes = 64;
     fixture.pumps[0].active_pieces = 1;
     request.finishScheduling();
     try std.testing.expect(!batch.done.isSet());
+    try std.testing.expectEqual(@as(usize, 1), fixture.credits.inUse(io));
     pipeline.first_error.store(@intFromError(error.Unknown), .release);
 
     pipeline.eventCompleted(0, 64);
     try std.testing.expectEqual(@as(usize, 0), fixture.pumps[0].active_pieces);
-    try std.testing.expect(block.lease.remaining.load(.acquire) == 0);
     try std.testing.expectEqual(@as(usize, 0), request.pending.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 0), fixture.gate.inUse(io));
+    try std.testing.expectEqual(@as(usize, 0), fixture.credits.inUse(io));
     try std.testing.expect(batch.done.isSet());
 
     pipeline.retireBatch(batch);
@@ -4922,7 +4904,7 @@ test "batch completes when every claimed request completes" {
     var scheduler: Scheduler = .init(std.testing.allocator);
     defer scheduler.deinit();
     var fixture: TestPipeline = undefined;
-    fixture.init(3, null, &scheduler);
+    try fixture.init(3, &scheduler);
     defer fixture.deinit();
 
     const batch = try publishTestBatch(&scheduler, 3);
@@ -4930,7 +4912,7 @@ test "batch completes when every claimed request completes" {
     var requests: [3]*ReadRequest = undefined;
     for (&requests) |*request| request.* = try fixture.claimRequest(&scheduler);
     try std.testing.expect(scheduler.claim(io) == null);
-    try std.testing.expectEqual(@as(usize, 3), fixture.gate.inUse(io));
+    try std.testing.expectEqual(@as(usize, 3), fixture.credits.inUse(io));
 
     for (requests, 0..) |request, index| {
         try std.testing.expect(!batch.done.isSet());
@@ -4939,7 +4921,7 @@ test "batch completes when every claimed request completes" {
     }
     try std.testing.expect(batch.done.isSet());
     try std.testing.expectEqual(@as(usize, 0), batch.remaining.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 0), fixture.gate.inUse(io));
+    try std.testing.expectEqual(@as(usize, 0), fixture.credits.inUse(io));
     // Each claim took its job's slot of the plan's request array.
     for (requests, batch.plans.items[0].requests) |request, *slot| {
         try std.testing.expect(request == slot);
@@ -4954,7 +4936,7 @@ test "retirement accepts the idle slots of jobs a failure retired" {
     var scheduler: Scheduler = .init(std.testing.allocator);
     defer scheduler.deinit();
     var fixture: TestPipeline = undefined;
-    fixture.init(1, null, &scheduler);
+    try fixture.init(1, &scheduler);
     defer fixture.deinit();
 
     const batch = try publishTestBatch(&scheduler, 3);
@@ -4968,7 +4950,6 @@ test "retirement accepts the idle slots of jobs a failure retired" {
     try std.testing.expect(request == &plan.requests[0]);
     for (plan.requests[1..]) |*idle| {
         try std.testing.expectEqual(@as(usize, 0), idle.pending.load(.acquire));
-        try std.testing.expectEqual(@as(usize, 0), idle.blocks.len);
     }
     // Every slot passes the retirement checks, claimed or idle.
     fixture.pipeline.retireBatch(batch);
@@ -4982,7 +4963,7 @@ test "retired events are destroyed by the next pump or unlinked by the batch ret
     var scheduler: Scheduler = .init(std.testing.allocator);
     defer scheduler.deinit();
     var fixture: TestPipeline = undefined;
-    fixture.init(2, null, &scheduler);
+    try fixture.init(2, &scheduler);
     defer fixture.deinit();
     const pipeline = &fixture.pipeline;
 
@@ -4994,7 +4975,7 @@ test "retired events are destroyed by the next pump or unlinked by the batch ret
     const plan = batch.plans.items[0];
     plan.events_used.store(2, .release);
     for (plan.events, requests) |*ctx, request| ctx.* = .{
-        .block = &request.blocks[0],
+        .request = request,
         .pjrt_event = null,
         .device_index = 0,
         .len = 64,
@@ -5028,19 +5009,19 @@ test "overlapping batches complete under concurrent claims and retirement" {
     var scheduler: Scheduler = .init(std.testing.allocator);
     defer scheduler.deinit();
     var fixture: TestPipeline = undefined;
-    fixture.init(worker_count, null, &scheduler);
+    try fixture.init(worker_count, &scheduler);
     defer fixture.deinit();
 
     const Worker = struct {
         fn run(fixture_: *TestPipeline, scheduler_: *Scheduler) void {
             const io_ = std.testing.io;
             while (scheduler_.waitForWork(io_)) {
-                if (!fixture_.gate.acquire(io_)) return;
+                const slot = fixture_.credits.acquire(io_) orelse return;
                 const claim = scheduler_.claim(io_) orelse {
-                    fixture_.gate.release(io_);
+                    fixture_.credits.release(io_, slot);
                     continue;
                 };
-                const request = ReadRequest.init(&fixture_.pipeline, claim);
+                const request = ReadRequest.init(&fixture_.pipeline, claim, slot);
                 request.finishScheduling();
             }
         }
@@ -5048,7 +5029,7 @@ test "overlapping batches complete under concurrent claims and retirement" {
     var group: std.Io.Group = .init;
     defer {
         scheduler.stop(io);
-        fixture.gate.close(io);
+        fixture.credits.close(io);
         group.await(io) catch {};
     }
     for (0..worker_count) |_| try group.concurrent(io, Worker.run, .{ &fixture, &scheduler });
@@ -5075,9 +5056,9 @@ test "overlapping batches complete under concurrent claims and retirement" {
     // Every request released its credit before its batch completed; the
     // workers only hold one while a claim is in progress.
     scheduler.stop(io);
-    fixture.gate.close(io);
+    fixture.credits.close(io);
     try group.await(io);
-    try std.testing.expectEqual(@as(usize, 0), fixture.gate.inUse(io));
+    try std.testing.expectEqual(@as(usize, 0), fixture.credits.inUse(io));
 }
 
 /// Plans a composite destination fed by three parts from two files, with a
@@ -5154,7 +5135,6 @@ const CompositeTest = struct {
             }
             try std.testing.expectEqual(if (host) 0 else writers, plan.events.len);
             try std.testing.expectEqual(if (host) plan.jobs.len else 0, plan.host_jobs);
-            if (host) try std.testing.expectEqual(@as(usize, 0), plan.blocks.len);
         }
 
         const zeros = try allocator.alloc(u8, 256);
@@ -5227,7 +5207,7 @@ const CompositeTest = struct {
         }
         // Only a direct read has padding around its tensor bytes.
         if (!plan.direct_reads and !job.gather) try std.testing.expect(job.data_offset == 0 and job.len == job.minimum_len);
-        const blocks = try allocator.alloc(host_memory.BlockPool.Block, job.block_len);
+        const blocks = try allocator.alloc(host_memory.Block, job.block_len);
         defer allocator.free(blocks);
         for (blocks, 0..) |*block, index| block.* = bytes[index * block_size ..][0..block_size];
         // A bounce buffer as large as any of the job's reads.
@@ -5352,18 +5332,11 @@ test "composite destinations place each part and zero-fill the rest of every dev
 test "concurrent pipeline failures preserve the first error" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var workspace = try host_memory.Workspace.initForTesting(allocator, io, 64);
-    var pool = host_memory.BlockPool.init(allocator, workspace, 64) catch |err| {
-        workspace.deinit();
-        return err;
-    };
-    defer pool.deinit();
     var scheduler: Scheduler = .init(allocator);
     defer scheduler.deinit();
     var fixture: TestPipeline = undefined;
-    fixture.init(1, &pool, &scheduler);
+    try fixture.init(1, &scheduler);
     defer fixture.deinit();
-    fixture.pipeline.read_gate = &fixture.gate;
     var group: std.Io.Group = .init;
     defer group.await(io) catch {};
     const Worker = struct {
@@ -5455,7 +5428,6 @@ test "host-resident and DMA parts never share a job, and overlapping host parts 
     };
     try std.testing.expectEqual(expected.len, plan.jobs.len);
     var dma_writers: usize = 0;
-    var dma_blocks: usize = 0;
     for (plan.jobs, expected) |job, want| {
         try std.testing.expectEqual(want.offset, job.file_offset);
         try std.testing.expectEqual(want.delivery, job.delivery);
@@ -5463,12 +5435,10 @@ test "host-resident and DMA parts never share a job, and overlapping host parts 
             try std.testing.expectEqual(job.delivery != .dma, transfer.destination.hostResident());
             if (job.delivery == .dma) dma_writers += @popCount(transfer.writer_mask);
         }
-        if (job.delivery == .dma) dma_blocks += job.block_len;
     }
     try std.testing.expectEqual(@as(usize, 2), plan.jobs[0].transfer_len);
     try std.testing.expectEqual(@as(usize, 1), plan.jobs[0].block_len);
     try std.testing.expectEqual(dma_writers, plan.events.len);
-    try std.testing.expectEqual(dma_blocks, plan.blocks.len);
     try std.testing.expectEqual(@as(usize, 2), plan.host_jobs);
 }
 
@@ -5526,8 +5496,7 @@ test "column-sharded tensors load as one DMA piece per device and block, read ex
         for (&outputs, globals) |*output, global| try load_testing.expectShards(allocator, io, output, global);
         try std.testing.expect(staged_jobs >= 1);
         try std.testing.expect(submissions < row_pieces / 100);
-        try std.testing.expectEqual(@as(usize, 0), loader.pool.in_use);
-        try std.testing.expectEqual(@as(usize, 0), loader.request_gate.inUse(io));
+        try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
     }
 }
 
@@ -5640,9 +5609,8 @@ const HostResidentTest = struct {
             try loader.awaitBatch(batch);
             defer for (&outputs) |*output| output.deinit();
             for (&outputs, globals) |*output, global| try load_testing.expectShards(allocator, io, output, global);
-            // Every block went back to the pool, every credit to the gate.
-            try std.testing.expectEqual(@as(usize, 0), loader.pool.in_use);
-            try std.testing.expectEqual(@as(usize, 0), loader.request_gate.inUse(io));
+            // Every credit, with its blocks, came back.
+            try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
 
             // Host shards in each device's host memory; the replicated ones
             // one allocation when shared.
