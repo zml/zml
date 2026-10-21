@@ -30,3 +30,17 @@ pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21ResidualBlock)) void {
         QwenImage21CausalConv3d.unloadBuffers(conv_shortcut);
     }
 }
+
+pub fn forward(self: QwenImage21ResidualBlock, x: zml.Tensor) zml.Tensor {
+    const h = if (self.conv_shortcut) |conv_shortcut| conv_shortcut.forward(x) else x;
+
+    const normed1 = self.norm1.forward(x);
+    const silu1 = normed1.convert(.f32).silu().convert(x.dtype());
+    const conved1 = self.conv1.forward(silu1);
+
+    const normed2 = self.norm2.forward(conved1);
+    const silu2 = normed2.convert(.f32).silu().convert(x.dtype());
+    const conved2 = self.conv2.forward(silu2);
+
+    return conved2.add(h);
+}
