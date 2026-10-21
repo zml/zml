@@ -36,3 +36,14 @@ pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21MidBlock)) void {
         QwenImage21ResidualBlock.unloadBuffers(resnet);
     }
 }
+
+pub fn forward(self: QwenImage21MidBlock, x_: zml.Tensor) zml.Tensor {
+    var x = self.resnets[0].forward(x_);
+    x = self.attentions.forward(x);
+
+    for (1..self.resnets.len) |i| {
+        x = self.resnets[i].forward(x);
+    }
+
+    return x;
+}
