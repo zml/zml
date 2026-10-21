@@ -10,3 +10,10 @@ conv: Conv2d,
 pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21CausalConv3d)) void {
     Conv2d.unloadBuffers(&self.conv);
 }
+
+pub fn forward(self: QwenImage21CausalConv3d, x: zml.Tensor) zml.Tensor {
+    const no_temporal = x.squeeze(.t);
+    const padded = no_temporal.pad(0, .{ .kx = zml.Tensor.Pad{ .high = 2 }, .ky = zml.Tensor.Pad{ .high = 2 } });
+    const conved = self.conv.forward(padded.convert(.f32)).convert(x.dtype());
+    return conved.insertAxes(.kx, .{.t});
+}
