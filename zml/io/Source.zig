@@ -1015,7 +1015,8 @@ const TestCheckpoint = struct {
 };
 
 /// Each case builds a tensor from its inputs with shape ops only, the same
-/// code for `Tensor` and `Source`.
+/// code for `Tensor` and `Source`. Cases are public, which is what the test
+/// iterates.
 const cases = struct {
     fn interleave(comptime T: type, members: []const T, groups: i64) T {
         var parts: [4]T = undefined;
@@ -1023,45 +1024,45 @@ const cases = struct {
         return T.concatenate(parts[0..members.len], .r).merge(.{ .row = .{ .group, .r } });
     }
 
-    const ConcatenateRows = struct {
+    pub const ConcatenateRows = struct {
         const inputs = .{ .{ .row = 3, .col = 4 }, .{ .row = 2, .col = 4 }, .{ .row = 4, .col = 4 } };
         fn build(comptime T: type, x: []const T) T {
             return T.concatenate(x, .row);
         }
     };
-    const ConcatenateColumns = struct {
+    pub const ConcatenateColumns = struct {
         const inputs = .{ .{ .row = 3, .col = 4 }, .{ .row = 3, .col = 2 } };
         fn build(comptime T: type, x: []const T) T {
             return T.concatenate(x, .col);
         }
     };
-    const InterleaveByHeads = struct {
+    pub const InterleaveByHeads = struct {
         const inputs = .{ .{ .row = 4, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 } };
         fn build(comptime T: type, x: []const T) T {
             return interleave(T, x, 2);
         }
     };
-    const InterleaveRows = struct {
+    pub const InterleaveRows = struct {
         const inputs = .{ .{ .row = 4, .col = 3 }, .{ .row = 4, .col = 3 } };
         fn build(comptime T: type, x: []const T) T {
             return interleave(T, x, 4);
         }
     };
-    const StackExperts = struct {
+    pub const StackExperts = struct {
         const inputs = .{ .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 }, .{ .row = 2, .col = 3 } };
         fn build(comptime T: type, x: []const T) T {
             const members = [2]T{ T.stack(x[0..2], 0, .expert), T.stack(x[2..4], 0, .expert) };
             return T.concatenate(&members, .row);
         }
     };
-    const InterleaveExperts = struct {
+    pub const InterleaveExperts = struct {
         const inputs = StackExperts.inputs;
         fn build(comptime T: type, x: []const T) T {
             const members = [2]T{ T.stack(x[0..2], 0, .expert), T.stack(x[2..4], 0, .expert) };
             return T.stack(&members, 2, .proj).merge(.{ .rows = .{ .row, .proj } });
         }
     };
-    const InterleaveExpertVectors = struct {
+    pub const InterleaveExpertVectors = struct {
         // Per-expert vectors (biases): row r of projection p lands at r * 2 + p.
         const inputs = .{ .{ .row = 3 }, .{ .row = 3 }, .{ .row = 3 }, .{ .row = 3 } };
         fn build(comptime T: type, x: []const T) T {
@@ -1069,68 +1070,68 @@ const cases = struct {
             return T.stack(&members, .last, .proj).merge(.{ .rows = .{ .row, .proj } });
         }
     };
-    const Transpose = struct {
+    pub const Transpose = struct {
         const inputs = .{.{ .row = 3, .col = 4 }};
         fn build(comptime T: type, x: []const T) T {
             return x[0].transpose(.{ .col, .row });
         }
     };
-    const RowsOfThree = struct {
+    pub const RowsOfThree = struct {
         // lfm2's in_proj: rows [B; C; x] become b0 c0 x0 b1 c1 x1.
         const inputs = .{.{ .row = 6, .col = 4 }};
         fn build(comptime T: type, x: []const T) T {
             return x[0].splitAxis(.row, .{ .m = 3, .c = 2 }).transpose(.{ .c, .m, .col }).merge(.{ .row = .{ .c, .m } });
         }
     };
-    const SliceRows = struct {
+    pub const SliceRows = struct {
         const inputs = .{.{ .row = 5, .col = 4 }};
         fn build(comptime T: type, x: []const T) T {
             return x[0].slice(.row, .{ .start = 1, .end = 4 });
         }
     };
-    const SliceColumns = struct {
+    pub const SliceColumns = struct {
         const inputs = .{.{ .row = 3, .col = 4 }};
         fn build(comptime T: type, x: []const T) T {
             return x[0].slice(.col, .{ .start = 1, .end = 3 });
         }
     };
-    const SliceByLength = struct {
+    pub const SliceByLength = struct {
         const inputs = .{.{ .row = 6, .col = 4 }};
         fn build(comptime T: type, x: []const T) T {
             return x[0].slice(.row, .{ .start = 2, .len = 3 });
         }
     };
-    const SliceInterleaved = struct {
+    pub const SliceInterleaved = struct {
         const inputs = InterleaveByHeads.inputs;
         fn build(comptime T: type, x: []const T) T {
             return interleave(T, x, 2).slice(.row, .{ .start = 3, .end = 7 });
         }
     };
-    const SingleRow = struct {
+    pub const SingleRow = struct {
         const inputs = .{.{ .row = 5, .col = 4 }};
         fn build(comptime T: type, x: []const T) T {
             return x[0].slice(.row, .single(2));
         }
     };
-    const Pad = struct {
+    pub const Pad = struct {
         const inputs = .{.{ .row = 4, .col = 4 }};
         fn build(comptime T: type, x: []const T) T {
             return x[0].pad(0, .{ .row = Tensor.Pad{ .high = 4 }, .col = Tensor.Pad{ .low = 1, .interior = 1 } });
         }
     };
-    const PadRows = struct {
+    pub const PadRows = struct {
         const inputs = .{.{ .row = 5, .col = 4 }};
         fn build(comptime T: type, x: []const T) T {
             return x[0].pad(0, .{ .row = Tensor.Pad{ .high = 3 } });
         }
     };
-    const BroadcastScalar = struct {
+    pub const BroadcastScalar = struct {
         const inputs = .{.{}};
         fn build(comptime T: type, x: []const T) T {
             return x[0].broad(Shape.init(.{ .row = 3, .col = 2 }, .u16));
         }
     };
-    const BroadcastColumn = struct {
+    pub const BroadcastColumn = struct {
         // A per-tensor scale repeated over each member's rows.
         const inputs = .{ .{ .row = 1, .col = 1 }, .{ .row = 1, .col = 1 } };
         fn build(comptime T: type, x: []const T) T {
@@ -1138,19 +1139,19 @@ const cases = struct {
             return interleave(T, &members, 2);
         }
     };
-    const NarrowBits = struct {
+    pub const NarrowBits = struct {
         const inputs = .{.{ .row = 3, .col = 4 }};
         fn build(comptime T: type, x: []const T) T {
             return x[0].bitCast(.u8).merge(.{ .col = .{ .col, .bitcast } });
         }
     };
-    const WidenBits = struct {
+    pub const WidenBits = struct {
         const inputs = .{.{ .row = 2, .col = 6 }};
         fn build(comptime T: type, x: []const T) T {
-            return x[0].bitCast(.u8).splitAxis(.col, .{ .col = 3, .pair = 4 }).merge(.{ .pair = .{.pair} }).bitCast(.u32);
+            return x[0].bitCast(.u8).splitAxis(.col, .{ .col = 3, .pair = 2 }).merge(.{ .pair = .{ .pair, .bitcast } }).bitCast(.u32);
         }
     };
-    const Swizzle = struct {
+    pub const Swizzle = struct {
         // The 128x4 block-scale layout, at 8x4: rows padded to 8 and tiled
         // by 2x4, columns padded to 4.
         const inputs = .{.{ .e = 2, .m = 7, .k = 6 }};
@@ -1162,7 +1163,7 @@ const cases = struct {
                 .merge(.{ .flat = .{ .mo, .ko, .mi, .m4, .ki } });
         }
     };
-    const SplitThenInterleave = struct {
+    pub const SplitThenInterleave = struct {
         // qwen3_5's in_proj_qkv sliced into q, k and v, interleaved with z.
         const inputs = .{ .{ .row = 6, .col = 3 }, .{ .row = 2, .col = 3 } };
         fn build(comptime T: type, x: []const T) T {
@@ -1176,7 +1177,7 @@ const cases = struct {
             return interleave(T, &members, 2);
         }
     };
-    const ChunkThenStack = struct {
+    pub const ChunkThenStack = struct {
         const inputs = .{.{ .row = 6, .col = 4 }};
         fn build(comptime T: type, x: []const T) T {
             const chunks = x[0].chunkExact(.row, 3);
@@ -1210,6 +1211,15 @@ fn expectCase(comptime Case: type, name: []const u8) !void {
     const bound = Case.build(Source, &sources).bind(.replicated, .{}, .{});
     const assembled = try checkpoint.assemble(bound);
     defer allocator.free(assembled);
+    // The source a binding loads binds the same bytes again, in its place.
+    const again = checkpoint.store.sourceOf(bound).?.rebind(bound, bound.shape());
+    try std.testing.expect(checkpoint.store.getSourcesById(bound.id) == null);
+    const reassembled = try checkpoint.assemble(again);
+    defer allocator.free(reassembled);
+    std.testing.expectEqualSlices(u8, assembled, reassembled) catch |err| {
+        std.log.err("{s}: rebinding the binding's source moved bytes", .{name});
+        return err;
+    };
 
     const platform = testing.env();
     var tensors: [n]Tensor = undefined;
@@ -1250,11 +1260,16 @@ fn expectCase(comptime Case: type, name: []const u8) !void {
 }
 
 test "every Source op places the bytes the same Tensor ops compute" {
-    inline for (comptime std.meta.declarations(cases)) |decl| {
-        const Case = @field(cases, decl.name);
+    // `declarations` lists only public declarations: a private case would
+    // not run.
+    var ran: usize = 0;
+    inline for (comptime std.meta.declarations(cases)) |name| {
+        const Case = @field(cases, name);
         if (@TypeOf(Case) != type) continue;
-        try expectCase(Case, decl.name);
+        try expectCase(Case, name);
+        ran += 1;
     }
+    try std.testing.expect(ran > 0);
 }
 
 test "a whole checkpoint tensor binds plainly, any other source as byte parts" {
