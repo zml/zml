@@ -42,22 +42,22 @@ def _cpu_plugin_impl(mctx):
     http_archive(
         name = "libzml_cpu_linux_amd64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_LINUX,
-        sha256 = "ed12c7d89f2a9f914368ede117c6086ea36c557cb3f0ddfde20a92dbaa4192a1",
-        url = "https://mirror.zml.ai/plugins/202610191219.248.1.c2619532effe/zml-cpu-linux-amd64.tar.zst",
+        sha256 = "309b737f996024b98b1ee18a44e37df1b328e7c1502a98f5829c10120eb35d63",
+        url = "https://mirror.zml.ai/plugins/202610211135.268.1.993338b5431f/zml-cpu-linux-amd64.tar.zst",
     )
 
     http_archive(
         name = "libzml_cpu_darwin_amd64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_DARWIN,
-        sha256 = "c45347542e35a289e49bd4682436a041491a992f6ed26747f6885827c0f527f8",
-        url = "https://mirror.zml.ai/plugins/202610191219.248.1.c2619532effe/zml-cpu-darwin-amd64.tar.zst",
+        sha256 = "bd4a67d94401022b1d5ee0677e427d6ffe5140fa57cddfafb8189a5743565662",
+        url = "https://mirror.zml.ai/plugins/202610211135.268.1.993338b5431f/zml-cpu-darwin-amd64.tar.zst",
     )
 
     http_archive(
         name = "libzml_cpu_darwin_arm64",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + _BUILD_DARWIN,
-        sha256 = "b06e61dee9d796cccebb8f80abcd125d4ed39350820905400e8668e61590723b",
-        url = "https://mirror.zml.ai/plugins/202610191219.248.1.c2619532effe/zml-cpu-darwin-arm64.tar.zst",
+        sha256 = "6be93f4527ca7634904ca4eaa4c2a197f2d8f017f89c26cd59ffc8753ed5d248",
+        url = "https://mirror.zml.ai/plugins/202610211135.268.1.993338b5431f/zml-cpu-darwin-arm64.tar.zst",
     )
 
     return mctx.extension_metadata(
