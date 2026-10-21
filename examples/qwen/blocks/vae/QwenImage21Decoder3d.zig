@@ -176,6 +176,7 @@ pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21Decoder3d)) void {
     for (self.up_blocks) |*block| {
         QwenImage21ResidualUpBlock.unloadBuffers(block);
     }
+    QwenImage21RMS_norm.unloadBuffers(&self.norm_out);
     QwenImage21CausalConv3d.unloadBuffers(&self.conv_out);
 }
 
