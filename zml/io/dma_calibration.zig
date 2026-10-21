@@ -60,6 +60,8 @@ pub const Options = struct {
 
 /// Called only during direct-loader initialization. Measures one representative
 /// device into the loader-owned workspace; CPU returns defaults without measuring.
+/// On a platform mixing device kinds, device 0's sizing serves every device:
+/// it is a tuning choice, valid for all of them.
 pub fn calibrate(
     workspace: *host_memory.Workspace,
     platform: *const Platform,

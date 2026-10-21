@@ -125,6 +125,11 @@ pub const Loader = struct {
         platform: *const Platform,
         opts: BackendOptions,
     ) !*Loader {
+        // A transfer's writers are a u64 mask of devices.
+        if (platform.devices.len > 64) {
+            load_log.err("the direct loader supports up to 64 devices, got {d}: UnsupportedPlatform", .{platform.devices.len});
+            return error.UnsupportedPlatform;
+        }
         const self = try allocator.create(Loader);
         errdefer allocator.destroy(self);
         const allocated_bytes = try allocator.alloc(std.atomic.Value(u64), platform.devices.len);

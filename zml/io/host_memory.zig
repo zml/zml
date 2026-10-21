@@ -316,18 +316,6 @@ pub const Workspace = struct {
         io: std.Io,
         platform: *const Platform,
     ) Allocator.Error!Workspace {
-        if (platform.devices.len == 0 or platform.devices.len > 64) {
-            log.err("host workspace requires 1..64 devices, got {d}: UnsupportedPlatform", .{platform.devices.len});
-            unreachable;
-        }
-        const device_kind = platform.devices[0].kind();
-        for (platform.devices[1..]) |device| {
-            if (!std.mem.eql(u8, device_kind, device.kind())) {
-                log.err("host workspace requires homogeneous devices: {s} differs from {s}: UnsupportedPlatform", .{ device_kind, device.kind() });
-                unreachable;
-            }
-        }
-
         return .{
             .allocator = allocator,
             .io = io,

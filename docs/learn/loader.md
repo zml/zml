@@ -237,7 +237,7 @@ Loader-specific errors use these shared names:
 | Error | Meaning |
 | --- | --- |
 | `InvalidOptions` | Invalid profile, parallelism, or alignment |
-| `UnsupportedPlatform` | Unsupported host-memory target or device configuration |
+| `UnsupportedPlatform` | More devices than the direct loader addresses (64) |
 | `SourceSizeMismatch` | Source bytes differ from the destination shape in either backend |
 | `InvalidLayout` | A composite binding's parts do not fit its tensor |
 | `UnsupportedLayout` | A composite layout this loader does not assemble yet |
