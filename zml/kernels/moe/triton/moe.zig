@@ -639,6 +639,9 @@ test "FusedMoe emits each FP8 and MXFP4 scaling path" {
 /// Direct port of Python `moe_align_block_size_kernel`. pid==0 runs the
 /// histogram + cumsum + block-to-expert assignment pass; pid==1 fills
 /// sorted_token_ids with NUMEL.
+///
+/// Block assignment are set up to `num_tokens_post_padded` and the remaining blocks of
+/// `expert_ids` are not set to a sentinel value.
 pub const MoeAlignBlockSize = struct {
     pub const Cfg = struct {
         numel: usize,
@@ -673,7 +676,6 @@ pub const MoeAlignBlockSize = struct {
         const num_experts: i32 = @intCast(cfg.num_experts);
         const padded_num_experts: i64 = @intCast(cfg.padded_num_experts);
         const max_num_tokens_padded: i32 = @intCast(cfg.max_num_tokens_padded);
-        const max_num_m_blocks: i64 = @intCast(cfg.max_num_m_blocks);
         const hist_block: i64 = @intCast(cfg.hist_block);
 
         const pid = b.programId(.x);
@@ -731,32 +733,16 @@ pub const MoeAlignBlockSize = struct {
         b.store(a.cumsum_ptr.addPtr(num_experts), total_tokens_post_pad);
         b.store(a.num_tokens_post_pad_ptr, total_tokens_post_pad);
 
-        const block_offs = b.arange(0, hist_block, .i32);
-        var assign_loop = b.openFor(0, max_num_m_blocks, hist_block, .{});
+        // Each expert owns a disjoint padded range, including empty ranges.
+        // Scatter from register-resident prefixes; no cross-lane global reads.
+        const block_counts = padded_counts.div(block_size_m);
+        const max_blocks = b.maxOpts(block_counts, .{ .axis = 0 });
+        var scatter = b.openFor(0, max_blocks, 1, .{});
         {
-            const block_ids = assign_loop.iv.add(block_offs);
-            const block_mask = block_ids.lt(@as(i32, @intCast(max_num_m_blocks)));
-            const block_offsets = block_ids.mul(block_size_m);
-            const block_expert_init = b.full(&.{hist_block}, -1, .i32);
-
-            var exp_loop = b.openFor(0, num_experts, 1, .{block_expert_init});
-            {
-                const e_iv = exp_loop.iv;
-                const start_v = b.load(a.cumsum_ptr.addPtr(e_iv));
-                const end_v = b.load(a.cumsum_ptr.addPtr(e_iv.add(1)));
-                const in_range = block_mask
-                    .bitAnd(block_offsets.ge(start_v))
-                    .bitAnd(block_offsets.lt(end_v));
-                exp_loop.yield(.{
-                    b.select(in_range, e_iv.splatTo(&.{hist_block}), exp_loop.carried[0]),
-                });
-            }
-            b.storeOpts(
-                a.expert_ids_ptr.addPtr(block_ids),
-                exp_loop.results[0],
-                .{ .mask = block_mask },
-            );
-            assign_loop.yield(.{});
+            const block_ids = starts.div(block_size_m).add(scatter.iv);
+            const mask = expert_mask.bitAnd(block_counts.gt(scatter.iv));
+            b.storeOpts(a.expert_ids_ptr.addPtr(block_ids), expert_offs, .{ .mask = mask });
+            scatter.yield(.{});
         }
     }
 };
