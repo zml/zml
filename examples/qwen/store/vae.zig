@@ -97,7 +97,7 @@ pub fn load_tensors(
             const resnet_view = mid_block_view.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
@@ -108,7 +108,7 @@ pub fn load_tensors(
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
@@ -131,7 +131,7 @@ pub fn load_tensors(
     const up_blocks = try load_up_blocks(allocator, store_view);
 
     const norm_out = block.QwenImage21RMS_norm{
-        .gamma = store_view.createTensor("norm_out.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+        .gamma = store_view.createTensor("norm_out.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
         .tag = zml.Shape.toTag(.d),
     };
     const conv_out = block.QwenImage21CausalConv3d{
@@ -167,7 +167,7 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
@@ -178,7 +178,7 @@ fn load_up_blocks(
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
@@ -225,7 +225,7 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
@@ -236,7 +236,7 @@ fn load_up_blocks(
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
@@ -284,7 +284,7 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(0);
             resnets[0] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
@@ -295,7 +295,7 @@ fn load_up_blocks(
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
@@ -319,7 +319,7 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
@@ -330,7 +330,7 @@ fn load_up_blocks(
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
@@ -378,7 +378,7 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(0);
             resnets[0] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
@@ -389,7 +389,7 @@ fn load_up_blocks(
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
@@ -413,7 +413,7 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
@@ -424,7 +424,7 @@ fn load_up_blocks(
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
@@ -466,7 +466,7 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(0);
             resnets[0] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
@@ -477,7 +477,7 @@ fn load_up_blocks(
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
@@ -501,7 +501,7 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
@@ -512,7 +512,7 @@ fn load_up_blocks(
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .d, .dout, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .dout, .d, .kx, .ky }, .replicated),
                     .tag = zml.Shape.toTag(.d),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{

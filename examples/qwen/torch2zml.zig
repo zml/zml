@@ -118,10 +118,10 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             platform,
-            "vae.decoder.conv_in",
+            "vae.decoder.norm_out",
             &activations_store.store,
-            VaeWrapper{ .model = vae_model_store.model.conv_in, .args = compile_args },
-            .{ .model = vae_model_store.model_buffer.conv_in, .args = compile_args_buffers },
+            VaeWrapper{ .model = vae_model_store.model.norm_out, .args = compile_args },
+            .{ .model = vae_model_store.model_buffer.norm_out, .args = compile_args_buffers },
         );
     } else {
         std.debug.print("NOTHING IS BEING TESTED\n", .{});
@@ -167,7 +167,7 @@ const TextWrapper = struct {
 };
 
 const VaeWrapper = struct {
-    model: block.QwenImage21CausalConv3d,
+    model: block.QwenImage21RMS_norm,
     args: CompileArgs,
 
     pub fn forward(
@@ -175,7 +175,7 @@ const VaeWrapper = struct {
         x: zml.Tensor,
     ) zml.Tensor {
         const tagged = x.withTags(.{ .d, .dout, .t, .kx, .ky });
-        return self.model.forward(tagged);
+        return self.model.forward(tagged, tagged.dim(.dout));
     }
 };
 
