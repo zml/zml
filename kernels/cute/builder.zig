@@ -473,8 +473,20 @@ pub const TmaFormat = enum {
     u16,
 };
 
-/// Typed description of a tiled TMA atom: the element type, the bits moved
-/// per copy, the basis of one box, and the coordinate layout of the tensor.
+pub const CtaGroup = nvvm.CtaGroup;
+pub const MBarrierScope = nvvm.MBarrierScope;
+
+/// Number of CTAs cooperating on one instruction: 1 for `.cta_1`, 2 for `.cta_2`.
+/// This differs from NVVM's enum encoding, whose values are 0 and 1.
+pub fn ctaCount(group: CtaGroup) u8 {
+    return switch (group) {
+        .cta_1 => 1,
+        .cta_2 => 2,
+    };
+}
+
+/// Typed description of a non-multicast tiled TMA atom: the element type,
+/// bits moved per copy, basis of one box, and coordinate layout of the tensor.
 pub const TmaConfig = struct {
     dtype: DType,
     copy_bits: u32,
@@ -482,10 +494,9 @@ pub const TmaConfig = struct {
     coordinate_layout: LayoutSpec,
     coordinate_rank: u8,
     format: TmaFormat = .default,
-    num_multicast: u32 = 1,
-    /// CTAs of one `cta_group::2` MMA that the copies feed: with 2, each
-    /// CTA's load completes on the mbarrier of the pair's even CTA.
-    cta_group: u8 = 1,
+    /// Load completion group: with `.cta_2`, each CTA's load completes on
+    /// the mbarrier of the pair's even CTA. Ignored by TMA stores.
+    cta_group: CtaGroup = .cta_1,
 };
 
 pub const BlockScaledMma = struct {
@@ -493,13 +504,21 @@ pub const BlockScaledMma = struct {
     tiled: Atom,
 };
 
-/// Shape of the SM100 block-scaled MXFP4 x MXFP8 MMA instruction.
+/// Shape of the SS, K-major SM100 block-scaled MXFP4 x MXFP8 instruction.
+/// K and the scale-factor vector size are both fixed at 32.
 pub const BlockScaledMmaConfig = struct {
+    /// M is 128 for one CTA, or 128 or 256 for a CTA pair.
     m: u16 = 128,
     n: u16,
-    k: u16 = 32,
-    num_cta: u8 = 1,
-    vec_size: u8 = 32,
+    cta_group: CtaGroup = .cta_1,
+
+    fn validate(self: BlockScaledMmaConfig) void {
+        const m_ok = self.m == 128 or (self.cta_group == .cta_2 and self.m == 256);
+        const n_multiple: u16 = if (self.cta_group == .cta_2) 16 else 8;
+        if (!m_ok or self.n < n_multiple or self.n > 256 or self.n % n_multiple != 0) {
+            std.debug.panic("unsupported SM100 block-scaled MMA shape {d}x{d}x32 on {d} CTAs", .{ self.m, self.n, ctaCount(self.cta_group) });
+        }
+    }
 };
 
 fn dtypeName(dtype: DType) []const u8 {
@@ -534,9 +553,8 @@ fn formatName(format: TmaFormat, dtype: DType) []const u8 {
 
 fn tmaLoadKind(config: TmaConfig) cute.nvgpu.TiledTmaLoad {
     return switch (config.cta_group) {
-        1 => .sm_90,
-        2 => .sm_100_2sm,
-        else => @panic("TMA loads feed one or two CTAs"),
+        .cta_1 => .sm_90,
+        .cta_2 => .sm_100_2sm,
     };
 }
 
@@ -549,10 +567,11 @@ fn tmaFormatAttribute(b: *Builder, format: TmaFormat) ?*const mlir.Attribute {
 }
 
 fn blockScaledPayload(b: *Builder, cfg: BlockScaledMmaConfig) []const u8 {
+    cfg.validate();
     return std.fmt.allocPrint(
         b.arena.allocator(),
-        "<{d}x{d}x{d}, num_cta = {d}, ab_major = (k, k), elem_type = (f4E2M1FN, f8E4M3FN, f32), sf_type = f8E8M0FNU, frag_kind = ss, vec_size = {d}>",
-        .{ cfg.m, cfg.n, cfg.k, cfg.num_cta, cfg.vec_size },
+        "<{d}x{d}x32, num_cta = {d}, ab_major = (k, k), elem_type = (f4E2M1FN, f8E4M3FN, f32), sf_type = f8E8M0FNU, frag_kind = ss, vec_size = 32>",
+        .{ cfg.m, cfg.n, ctaCount(cfg.cta_group) },
     ) catch @panic("OOM");
 }
 
@@ -1517,6 +1536,8 @@ pub const Builder = struct {
     }
 
     /// Materialize a layout with dynamic shape leaves and static strides.
+    /// `values` supplies only the dynamic shape leaves, in depth-first,
+    /// left-to-right order. Every stride leaf in `spec` must be static.
     /// Keeping singleton extents dynamic preserves their TMA coordinates.
     pub fn makeLayoutShapeValues(self: *Builder, spec: LayoutSpec, values: anytype) View {
         const shape = self.makeShapeValues(values, cute.algebraType(self.ctx, .shape, spec.shape.text) catch @panic("invalid shape"));
@@ -1992,7 +2013,7 @@ pub const Builder = struct {
             self.tmaLoadAtomType(config),
             self.coordTensorType(config.coordinate_rank, config.coordinate_layout),
             (cute.nvgpu.TiledTmaLoadAttr.get(self.ctx, .{ .value = tmaLoadKind(config) }) catch unreachable).attribute(),
-            .int(self.ctx, .i32, config.num_multicast),
+            .int(self.ctx, .i32, 1),
             tmaFormatAttribute(self, config.format),
             self.loc(),
         ));
@@ -2060,7 +2081,7 @@ pub const Builder = struct {
         return self.parseType(std.fmt.allocPrint(
             self.arena.allocator(),
             "!cute_nvgpu.atom.tma_load<{s}, copy_bits = {d}, mode = tiled, num_cta = {d}, g_stride = <\"()\"> tma_gbasis = <\"{s}\">>",
-            .{ dtypeName(config.dtype), config.copy_bits, config.cta_group * config.num_multicast, config.global_basis.payload(self) },
+            .{ dtypeName(config.dtype), config.copy_bits, ctaCount(config.cta_group), config.global_basis.payload(self) },
         ) catch @panic("OOM"));
     }
 
@@ -2184,12 +2205,6 @@ pub const Builder = struct {
     /// CuTe DSL builds them. Both scale-factor pointers start at `scale_ptr`
     /// and are patched after tensor-memory allocation.
     pub fn makeBlockScaledMma(self: *Builder, cfg: BlockScaledMmaConfig, scale_ptr: Value) BlockScaledMma {
-        // `cta_group::2` runs M = 256 over a CTA pair, each holding 128 rows
-        // of A and half of B's N columns.
-        const m_ok = (cfg.num_cta == 1 and cfg.m == 128) or (cfg.num_cta == 2 and cfg.m == 256 and cfg.n % 16 == 0);
-        if (!m_ok or cfg.k != 32 or cfg.n < 8 or cfg.n > 256 or cfg.n % 8 != 0) {
-            std.debug.panic("unsupported SM100 block-scaled MMA shape {d}x{d}x{d} on {d} CTAs", .{ cfg.m, cfg.n, cfg.k, cfg.num_cta });
-        }
         const disabled = self.cst(.i1, false);
         const atom_type = std.fmt.allocPrint(self.arena.allocator(), "!cute_nvgpu.sm100.mma_bs{s}", .{blockScaledPayload(self, cfg)}) catch @panic("OOM");
         const atom = self.makeAtom(atom_type, .{ disabled, disabled, disabled, scale_ptr, scale_ptr });
@@ -2210,22 +2225,25 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    /// Commit the preceding tcgen05 MMA operations to an mbarrier. One elected
-    /// lane of the MMA warp issues this after each K-stage.
-    pub fn tcgen05Commit(self: *Builder, barrier: Value) void {
-        self.emitVoid(nvvm.tcgen05_commit(self.ctx, self.sharedBarrierPtr(barrier).inner, .cta_1, self.loc()));
-    }
+    pub const Tcgen05CommitOptions = struct {
+        /// Must match the group of the operations being tracked.
+        cta_group: CtaGroup = .cta_1,
+        /// Arrive at the same barrier offset in each CTA whose rank bit is set.
+        /// Without a mask, arrive only on the issuing CTA's barrier.
+        multicast_mask: ?u16 = null,
+    };
 
-    /// `tcgen05Commit` of `cta_group::2` MMAs, issued by the pair's even CTA:
-    /// arrive on the mbarrier at the same shared-memory offset in every CTA
-    /// of the cluster whose rank bit is set in `cta_mask`.
-    pub fn tcgen05CommitPair(self: *Builder, barrier: Value, cta_mask: u16) void {
-        self.emitVoid(nvvm.ops.tcgen05_commit(
+    /// Track this thread's preceding tcgen05 MMA/copy operations of the
+    /// selected group, signaling one arrival per destination on completion.
+    /// The same elected thread that issues those operations must commit them.
+    /// For `.cta_2`, either CTA in the pair can be the issuer. All tcgen05
+    /// operations in a kernel must use the same group.
+    pub fn tcgen05Commit(self: *Builder, barrier: Value, opts: Tcgen05CommitOptions) void {
+        self.emitVoid(nvvm.tcgen05_commit(
             self.ctx,
             self.sharedBarrierPtr(barrier).inner,
-            self.cst(.i16, @as(i16, @bitCast(cta_mask))).inner,
-            null,
-            (nvvm.ops.CTAGroupKindAttr.get(self.ctx, .{ .value = .cta_2 }) catch unreachable).attribute(),
+            opts.cta_group,
+            if (opts.multicast_mask) |mask| self.cst(.i16, @as(i16, @bitCast(mask))).inner else null,
             self.loc(),
         ));
     }
@@ -2235,14 +2253,14 @@ pub const Builder = struct {
         self.emitVoid(nvvm.tcgen05_wait(self.ctx, .load, self.loc()));
     }
 
-    pub const TmemOptions = struct { two_cta: bool = false, exclusive: bool = false };
+    pub const TmemOptions = struct { cta_group: CtaGroup = .cta_1, exclusive: bool = false };
 
     pub fn allocTmem(self: *Builder, columns: u16, holding_ptr: anytype, opts: TmemOptions) void {
         self.emitVoid(cute.nvgpu.arch_sm100_alloc_tmem(
             self.ctx,
             self.cst(.i32, columns).inner,
             self.asValue(holding_ptr).inner,
-            if (opts.two_cta) .unit(self.ctx) else null,
+            if (opts.cta_group == .cta_2) .unit(self.ctx) else null,
             if (opts.exclusive) .unit(self.ctx) else null,
             self.loc(),
         ));
@@ -2254,7 +2272,7 @@ pub const Builder = struct {
     }
 
     pub fn relinquishTmemAllocPermit(self: *Builder, opts: TmemOptions) void {
-        self.emitVoid(cute.nvgpu.arch_sm100_relinquish_tmem_alloc_permit(self.ctx, if (opts.two_cta) .unit(self.ctx) else null, self.loc()));
+        self.emitVoid(cute.nvgpu.arch_sm100_relinquish_tmem_alloc_permit(self.ctx, if (opts.cta_group == .cta_2) .unit(self.ctx) else null, self.loc()));
     }
 
     pub fn deallocTmem(self: *Builder, pointer: anytype, columns: u16, opts: TmemOptions) void {
@@ -2262,7 +2280,7 @@ pub const Builder = struct {
             self.ctx,
             self.asValue(pointer).inner,
             self.cst(.i32, columns).inner,
-            if (opts.two_cta) .unit(self.ctx) else null,
+            if (opts.cta_group == .cta_2) .unit(self.ctx) else null,
             if (opts.exclusive) .unit(self.ctx) else null,
             self.loc(),
         ));
@@ -2440,32 +2458,27 @@ pub const Builder = struct {
     }
 
     /// Synchronize a fixed subset of the CTA on a named hardware barrier.
-    /// `participants` must be a warp multiple and every participating thread
-    /// must execute the same barrier id.
-    pub fn namedBarrier(self: *Builder, id: i32, participants: i32) void {
+    /// `id` is an integer or an i32 Value in [0, 15]. `participants` must be
+    /// a positive warp multiple, and every participating thread must execute
+    /// the same barrier id.
+    pub fn namedBarrier(self: *Builder, id: anytype, participants: i32) void {
+        std.debug.assert(participants > 0 and @mod(participants, 32) == 0);
         // The embedded CuTe compiler currently reads NVVM through a different
         // MLIR revision.  A generic `nvvm.barrier` with optional operands is
         // accepted, but those operands are discarded and it lowers to
-        // `bar.sync 0`.  Constant inline PTX preserves the named barrier ABI
+        // `bar.sync 0`. Inline PTX preserves the named barrier ABI
         // used by CUTLASS (`2,160` for TMEM allocation and `1,128` for the
         // epilogue pipeline).
-        const assembly = std.fmt.allocPrint(
-            self.arena.allocator(),
-            "bar.sync {d}, {d};",
-            .{ id, participants },
-        ) catch @panic("namedBarrier OOM");
-        _ = llvm.inline_asm(self.ctx, assembly, &.{}, null, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
-    }
-
-    /// `namedBarrier` with a barrier id (i32) chosen at run time, e.g. one per
-    /// warpgroup running the same code.
-    pub fn namedBarrierDynamic(self: *Builder, id: Value, participants: i32) void {
-        const assembly = std.fmt.allocPrint(
-            self.arena.allocator(),
-            "bar.sync $0, {d};",
-            .{participants},
-        ) catch @panic("namedBarrier OOM");
-        _ = llvm.inline_asm(self.ctx, assembly, &.{self.liftAs(id, .i32).inner}, null, .{ .constraints = "r", .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
+        if (@TypeOf(id) == Value) {
+            std.debug.assert(id.dtype() == .i32);
+            const assembly = std.fmt.allocPrint(self.arena.allocator(), "bar.sync $0, {d};", .{participants}) catch @panic("namedBarrier OOM");
+            _ = llvm.inline_asm(self.ctx, assembly, &.{id.inner}, null, .{ .constraints = "r", .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
+        } else {
+            const immediate: i32 = id;
+            std.debug.assert(immediate >= 0 and immediate < 16);
+            const assembly = std.fmt.allocPrint(self.arena.allocator(), "bar.sync {d}, {d};", .{ immediate, participants }) catch @panic("namedBarrier OOM");
+            _ = llvm.inline_asm(self.ctx, assembly, &.{}, null, .{ .has_side_effects = true }, self.loc()).appendTo(self.currentBlock());
+        }
     }
 
     /// Build the CuTe first-class divisor used by CUTLASS's persistent tile
@@ -2598,26 +2611,38 @@ pub const Builder = struct {
         self.emitVoid(nvvm.mbarrier_arrive(self.ctx, self.sharedBarrierPtr(barrier).inner, self.cst(.i32, count).inner, .cta, self.loc()));
     }
 
-    /// Test whether phase `phase` has completed, without suspending (SM90+).
-    pub fn mbarrierWaitParity(self: *Builder, barrier: Value, phase: Value) Value {
-        return self.emit(nvvm.mbarrier_wait_parity(self.ctx, self.sharedBarrierPtr(barrier).inner, phase.inner, .@"try", .cta, self.loc()));
+    /// Try an acquire wait for phase `phase` (i32 parity, 0 or 1). May suspend
+    /// briefly and return false before completion. `scope` selects which
+    /// threads this wait can synchronize with; the barrier remains local.
+    pub fn mbarrierWaitParity(self: *Builder, barrier: Value, phase: Value, scope: MBarrierScope) Value {
+        return self.emit(nvvm.mbarrier_wait_parity(self.ctx, self.sharedBarrierPtr(barrier).inner, phase.inner, .@"try", scope, self.loc()));
     }
 
-    /// Wait for phase `phase`, letting the warp sleep for up to
-    /// `suspend_time` cycles per attempt (SM90+).
-    pub fn mbarrierTryWaitParity(self: *Builder, barrier: Value, phase: Value, suspend_time: u32) void {
-        self.emitVoid(nvvm.mbarrier_try_wait_parity(self.ctx, self.sharedBarrierPtr(barrier).inner, phase.inner, self.cst(.i32, suspend_time).inner, self.loc()));
+    /// Block until phase `phase` completes with acquire semantics at `scope`.
+    /// `suspend_time` is a hint in nanoseconds per attempt, not a total timeout.
+    pub fn mbarrierTryWaitParity(self: *Builder, barrier: Value, phase: Value, suspend_time: u32, scope: MBarrierScope) void {
+        const ptr = self.sharedBarrierPtr(barrier);
+        const ticks = self.cst(.i32, suspend_time);
+        switch (scope) {
+            // Preserve the operation recognized by CuTe's pipeline compiler.
+            .cta => self.emitVoid(nvvm.mbarrier_try_wait_parity(self.ctx, ptr.inner, phase.inner, ticks.inner, self.loc())),
+            .cluster => {
+                var pending = self.openWhile(.{}, .{});
+                const ready = self.emit(nvvm.mbarrier_try_wait_parity_timelimit(self.ctx, ptr.inner, phase.inner, ticks.inner, scope, self.loc()));
+                pending.yieldBefore(ready.eq(false), .{});
+                pending.yieldAfter(.{});
+            },
+        }
     }
 
-    /// Wait for a pipeline phase with the two-step sequence of CuTe's
-    /// `PipelineTmaUmma`: test the barrier without suspending, then suspend
-    /// only when the phase is still outstanding. The initial test matters when
+    /// Acquire a pipeline phase at `scope`: test without suspending, then
+    /// block only when the phase is still outstanding. The initial test matters when
     /// a producer reaches a full ring and must yield to the consumer that
     /// recycles its next stage.
-    pub fn mbarrierWait(self: *Builder, barrier: Value, phase: Value) void {
-        const ready = self.mbarrierWaitParity(barrier, phase);
+    pub fn mbarrierWait(self: *Builder, barrier: Value, phase: Value, scope: MBarrierScope) void {
+        const ready = self.mbarrierTestParity(barrier, phase, scope);
         var pending = self.openIf(ready.eq(false));
-        self.mbarrierTryWaitParity(barrier, phase, 10_000_000);
+        self.mbarrierTryWaitParity(barrier, phase, 10_000_000, scope);
         pending.yieldThen(.{});
     }
 
@@ -2724,9 +2749,9 @@ pub const Builder = struct {
         self.emitVoid(nvvm.bar_warp_sync(self.ctx, self.cst(.i32, -1).inner, self.loc()));
     }
 
-    /// Non-blocking test of mbarrier phase `parity` (i1).
-    pub fn mbarrierTestParity(self: *Builder, barrier: Value, parity: Value) Value {
-        return self.emit(nvvm.mbarrier_wait_parity(self.ctx, self.sharedBarrierPtr(barrier).inner, parity.inner, .@"test", .cta, self.loc()));
+    /// Non-blocking acquire test of mbarrier phase `parity` (i32, 0 or 1).
+    pub fn mbarrierTestParity(self: *Builder, barrier: Value, parity: Value, scope: MBarrierScope) Value {
+        return self.emit(nvvm.mbarrier_wait_parity(self.ctx, self.sharedBarrierPtr(barrier).inner, parity.inner, .@"test", scope, self.loc()));
     }
 
     /// Call an LLVM intrinsic by name (e.g. an `llvm.nvvm.*` intrinsic the NVVM dialect of
@@ -2823,11 +2848,16 @@ pub const Builder = struct {
         return self.emit(nvvm.mapa(self.ctx, self.addressPtr(address, .shared).inner, rank.inner, llvm.pointerType(self.ctx, NVPTXAddressSpace.shared_cluster), self.loc()));
     }
 
-    /// Arrive once on the mbarrier at the shared-memory location of
-    /// `barrier` in CTA `rank` of the cluster.
-    pub fn mbarrierArriveCluster(self: *Builder, barrier: Value, rank: Value) void {
+    /// Arrive `count` times on `barrier` at the same shared-memory offset in
+    /// CTA `rank`. Remote addressing does not imply cluster-scoped ordering:
+    /// `scope` explicitly selects the release scope. Use `.cluster` for data
+    /// handoff across CTAs, paired with a cluster-scoped acquire wait.
+    pub fn mbarrierArriveRemote(self: *Builder, barrier: Value, rank: Value, count: u32, scope: MBarrierScope) void {
         const remote = self.emit(nvvm.mapa(self.ctx, self.sharedBarrierPtr(barrier).inner, rank.inner, llvm.pointerType(self.ctx, NVPTXAddressSpace.shared_cluster), self.loc()));
-        self.emitVoid(nvvm.ops.mbarrier_arrive(self.ctx, remote.inner, self.cst(.i32, 1).inner, null, null, null, null, self.loc()));
+        self.emitVoid(nvvm.mbarrier_arrive(self.ctx, remote.inner, self.cst(.i32, count).inner, switch (scope) {
+            .cta => .cta,
+            .cluster => .cluster,
+        }, self.loc()));
     }
 
     /// Full cluster barrier (arrive.release + wait.acquire, aligned).
@@ -3358,23 +3388,121 @@ test "SM100 block-scaled MMA atoms use the CuTe DSL instruction shapes" {
 
     var b = try Builder.open(std.testing.allocator, ctx, "sm100_blockscaled_atoms");
     defer b.deinit();
-    _ = try b.declareArgs(.{ .descriptor = .{ .raw = .{
-        .type_text = "!cute_nvgpu.atom.non_exec_tiled_tma_load<sm_90, f8E4M3FN, copy_bits = 16384, tma_gbasis = <\"(128,16,1):(1@1,1@0,1@2)\">, tma_format = U8>",
-        .grid_constant = true,
-    } } });
+    const tma: TmaConfig = .{
+        .dtype = .f8e4m3fn,
+        .copy_bits = 16384,
+        .global_basis = b.layoutSpec(.{ 128, 16, 1 }, .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), b.basis(1, 1, .{2}) }),
+        .coordinate_layout = b.layoutSpec(.{ 16, 128, 8 }, .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}), b.basis(1, 1, .{2}) }),
+        .coordinate_rank = 3,
+    };
+    var pair_tma = tma;
+    pair_tma.cta_group = .cta_2;
+    const args = try b.declareArgs(.{
+        .single = .{ .mlir_type = .{ .type_ = b.tmaLoadAtomType(tma), .grid_constant = true } },
+        .pair = .{ .mlir_type = .{ .type_ = b.tmaLoadAtomType(pair_tma), .grid_constant = true } },
+    });
+    _ = b.makeExecTmaTyped(.{ .inner = args.single.inner, .kernel = &b }, b.tmaLoadExecAtomType(tma));
+    _ = b.makeExecTmaTyped(.{ .inner = args.pair.inner, .kernel = &b }, b.tmaLoadExecAtomType(pair_tma));
 
     const sf_ptr = b.intToPtr(0, .f8e8m0fnu, .tmem, 1);
-    _ = b.makeBlockScaledMma(.{ .n = 16 }, sf_ptr);
-    _ = b.makeBlockScaledMma(.{ .n = 128 }, sf_ptr);
+    for ([_]CtaGroup{ .cta_1, .cta_2 }) |group| {
+        _ = b.makeBlockScaledMma(.{ .n = 16, .cta_group = group }, sf_ptr);
+        _ = b.makeBlockScaledMma(.{ .n = 128, .cta_group = group }, sf_ptr);
+    }
+    _ = b.makeBlockScaledMma(.{ .m = 256, .n = 16, .cta_group = .cta_2 }, sf_ptr);
+    _ = b.makeBlockScaledMma(.{ .m = 256, .n = 128, .cta_group = .cta_2 }, sf_ptr);
 
     const ir = try b.finish(.{ 192, 1, 1 });
     defer std.testing.allocator.free(ir);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "sm100.mma_bs<128x16x32") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "sm100.mma_bs<128x128x32") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "cute.make_tiled_mma") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "cute_nvgpu.grid_constant") != null);
+    try expectContains(ir, "sm100.mma_bs<128x16x32, num_cta = 1");
+    try expectContains(ir, "sm100.mma_bs<128x128x32, num_cta = 1");
+    try expectContains(ir, "sm100.mma_bs<128x16x32, num_cta = 2");
+    try expectContains(ir, "sm100.mma_bs<128x128x32, num_cta = 2");
+    try expectContains(ir, "sm100.mma_bs<256x16x32, num_cta = 2");
+    try expectContains(ir, "sm100.mma_bs<256x128x32, num_cta = 2");
+    try expectContains(ir, "non_exec_tiled_tma_load<sm_90,");
+    try expectContains(ir, "non_exec_tiled_tma_load<sm_100_2sm,");
+    try expectContains(ir, "tma_load<f8E4M3FN, copy_bits = 16384, mode = tiled, num_cta = 1,");
+    try expectContains(ir, "tma_load<f8E4M3FN, copy_bits = 16384, mode = tiled, num_cta = 2,");
+    try expectContains(ir, "cute.make_tiled_mma");
+    try expectContains(ir, "cute_nvgpu.grid_constant");
 
     const parsed = try mlir.Module.parse(ctx, ir);
     defer parsed.deinit();
     try std.testing.expect(parsed.operation().verify());
+}
+
+test "barrier helpers preserve dynamic ids, CTA groups, masks and remote scopes" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = try Builder.open(std.testing.allocator, ctx, "barrier_operands");
+    defer b.deinit();
+    _ = try b.declareArgs(.{});
+
+    const barrier = b.allocSmem(.i64, 1, 8);
+    const peer = b.clusterCtaRank().bitXor(1);
+    b.namedBarrier(2, 128);
+    b.namedBarrier(b.threadIdx().x.div(128).mul(2).add(1), 128);
+    b.tcgen05Commit(barrier, .{ .cta_group = .cta_2 });
+    b.tcgen05Commit(barrier, .{ .cta_group = .cta_2, .multicast_mask = 3 });
+    b.mbarrierArriveRemote(barrier, peer, 1, .cta);
+    b.mbarrierArriveRemote(barrier, peer, 32, .cluster);
+
+    const ir = try b.finish(.{ 256, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "bar.sync 2, 128;");
+    try expectContains(ir, "bar.sync $0, 128;");
+    try expectContains(ir, "#nvvm.cta_group<cta_2>");
+    try expectContains(ir, "value = 3 : i16");
+    try expectContains(ir, "value = 32 : i32");
+    try expectContains(ir, "!llvm.ptr<7>");
+    try expectContains(ir, "#nvvm.mem_scope<cta>");
+    try expectContains(ir, "#nvvm.mem_scope<cluster>");
+
+    const parsed = try mlir.Module.parse(ctx, ir);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.operation().verify());
+}
+
+test "mbarrier waits preserve acquire scope through polling and blocking retries" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    for ([_]MBarrierScope{ .cta, .cluster }) |scope| {
+        var b = try Builder.open(std.testing.allocator, ctx, "barrier_waits");
+        defer b.deinit();
+        _ = try b.declareArgs(.{});
+
+        const barrier = b.allocSmem(.i64, 1, 8);
+        const phase = b.cst(.i32, 0);
+        _ = b.mbarrierTestParity(barrier, phase, scope);
+        _ = b.mbarrierWaitParity(barrier, phase, scope);
+        b.mbarrierTryWaitParity(barrier, phase, 1234, scope);
+        b.mbarrierWait(barrier, phase, scope);
+
+        const ir = try b.finish(.{ 32, 1, 1 });
+        defer std.testing.allocator.free(ir);
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "#nvvm.mbar_wait<test>"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "#nvvm.mbar_wait<try>"));
+        try expectContains(ir, "value = 1234 : i32");
+        try expectContains(ir, "\"scf.if\"");
+        switch (scope) {
+            .cta => {
+                try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, ir, "#nvvm.mbar_scope<cta>"));
+                try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "\"nvvm.mbarrier.try_wait.parity\""));
+                try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, ir, "\"scf.while\""));
+            },
+            .cluster => {
+                try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, ir, "#nvvm.mbar_scope<cluster>"));
+                try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "#nvvm.mem_order<acquire>"));
+                try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "\"nvvm.mbarrier.try_wait.parity.timelimit\""));
+                try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "\"scf.while\""));
+                try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "\"scf.condition\""));
+                try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, ir, "#nvvm.mbar_scope<cta>"));
+            },
+        }
+
+        const parsed = try mlir.Module.parse(ctx, ir);
+        defer parsed.deinit();
+        try std.testing.expect(parsed.operation().verify());
+    }
 }

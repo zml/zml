@@ -58,9 +58,9 @@ const EpilogueThread = struct {
 /// only use the start of `sC` as scratch.
 pub const Tile = struct {
     n: i64,
-    /// CTAs sharing each MMA: 1, or 2 for `tcgen05.mma.cta_group::2`, where
+    /// CTAs sharing each MMA: with `.cta_2`,
     /// each CTA of the pair holds 128 rows of A and `n / 2` rows of B.
-    ctas: i64 = 1,
+    cta_group: cute.CtaGroup = .cta_1,
     stages: usize,
     smem_bytes: i64,
     tmem_columns: u16,
@@ -79,13 +79,18 @@ pub const Tile = struct {
     /// stages.
     c_bytes: ?i64 = null,
 
-    pub fn of(comptime n: i64, comptime ctas: i64) Tile {
-        if (ctas == 2) return switch (n) {
+    /// Number of CTAs sharing this tile's MMA, as a layout dimension.
+    pub fn ctaCount(self: Tile) i64 {
+        return cute.ctaCount(self.cta_group);
+    }
+
+    pub fn of(comptime n: i64, comptime cta_group: cute.CtaGroup) Tile {
+        if (cta_group == .cta_2) return switch (n) {
             // CTA pairs keep only half of B's rows per CTA, so the same
             // shared memory holds two more stages (one for N = 64).
             64 => .{
                 .n = 64,
-                .ctas = 2,
+                .cta_group = .cta_2,
                 .stages = 9,
                 .smem_bytes = 212992,
                 .tmem_columns = 256,
@@ -103,7 +108,7 @@ pub const Tile = struct {
             },
             128 => .{
                 .n = 128,
-                .ctas = 2,
+                .cta_group = .cta_2,
                 .stages = 8,
                 .smem_bytes = 223232,
                 .tmem_columns = 512,
@@ -121,7 +126,6 @@ pub const Tile = struct {
             },
             else => @compileError("CTA pairs support MXFP4 tile N 64 and 128"),
         };
-        comptime std.debug.assert(ctas == 1);
         return switch (n) {
             8 => .{
                 .n = 8,
@@ -254,7 +258,7 @@ pub const Tile = struct {
 
     /// Rows of B one CTA loads and holds per stage.
     fn bRows(self: Tile) i64 {
-        return @divExact(self.n, self.ctas);
+        return @divExact(self.n, self.ctaCount());
     }
 
     fn bStageBytes(self: Tile) i64 {
@@ -269,7 +273,7 @@ pub const Tile = struct {
     /// 128x128 nibbles, then the FP8 B tile and both 512-byte scale atoms.
     /// The loads of both CTAs of a pair complete on the even CTA's barrier.
     fn transactionBytes(self: Tile) u32 {
-        return @intCast(self.ctas * (8192 + self.bStageBytes() + 2 * sf_stage_bytes));
+        return @intCast(self.ctaCount() * (8192 + self.bStageBytes() + 2 * sf_stage_bytes));
     }
 
     fn fields(self: Tile, b: *B) []const []const u8 {
@@ -455,7 +459,7 @@ pub fn downRows(cfg: Config, a: Inputs, route_inverse: zml.Tensor) zml.Tensor {
 
 /// The tile's MMA instruction: 128xN on one CTA, 256xN on a CTA pair.
 fn mmaShape(comptime tile: Tile) cute.BlockScaledMmaConfig {
-    return .{ .m = @intCast(128 * tile.ctas), .n = @intCast(tile.n), .num_cta = @intCast(tile.ctas) };
+    return .{ .m = @intCast(128 * tile.ctaCount()), .n = @intCast(tile.n), .cta_group = tile.cta_group };
 }
 
 fn typed(type_: *const mlir.Type) struct { mlir_type: cute.ArgSpec.MlirTypeSpec } {
@@ -479,13 +483,13 @@ fn buildProgram(b: *B, cfg: Config) cute.FinishError!void {
     if (cfg.two_cta and cfg.direct) std.debug.panic("direct routing runs on single CTAs", .{});
     if (cfg.two_cta) return switch (cfg.n) {
         inline 64, 128 => |n| switch (cfg.epilogue) {
-            inline else => |epilogue| buildTiledProgram(b, cfg, comptime Tile.of(n, 2), epilogue),
+            inline else => |epilogue| buildTiledProgram(b, cfg, comptime Tile.of(n, .cta_2), epilogue),
         },
         else => std.debug.panic("unsupported MXFP4 tile N {d} on CTA pairs", .{cfg.n}),
     };
     return switch (cfg.n) {
         inline 8, 16, 32, 64, 128 => |n| switch (cfg.epilogue) {
-            inline else => |epilogue| buildTiledProgram(b, cfg, comptime Tile.of(n, 1), epilogue),
+            inline else => |epilogue| buildTiledProgram(b, cfg, comptime Tile.of(n, .cta_1), epilogue),
         },
         else => std.debug.panic("unsupported MXFP4 tile N {d}", .{cfg.n}),
     };
@@ -539,13 +543,13 @@ fn Layouts(comptime tile: Tile) type {
             );
         }
         fn tmaA(b: *B, cfg: Config) cute.TmaConfig {
-            return .{ .dtype = .f4e2m1fn, .copy_bits = 65536, .global_basis = aBasis(b), .coordinate_layout = aCoord(b, cfg), .coordinate_rank = 3, .format = .u4_unpack_u8, .cta_group = @intCast(tile.ctas) };
+            return .{ .dtype = .f4e2m1fn, .copy_bits = 65536, .global_basis = aBasis(b), .coordinate_layout = aCoord(b, cfg), .coordinate_rank = 3, .format = .u4_unpack_u8, .cta_group = tile.cta_group };
         }
         fn tmaB(b: *B, cfg: Config) cute.TmaConfig {
-            return .{ .dtype = .f8e4m3fn, .copy_bits = @intCast(tile.bStageBytes() * 8), .global_basis = bBasis(b), .coordinate_layout = bCoord(b, cfg), .coordinate_rank = 3, .cta_group = @intCast(tile.ctas) };
+            return .{ .dtype = .f8e4m3fn, .copy_bits = @intCast(tile.bStageBytes() * 8), .global_basis = bBasis(b), .coordinate_layout = bCoord(b, cfg), .coordinate_rank = 3, .cta_group = tile.cta_group };
         }
         fn tmaSf(b: *B) cute.TmaConfig {
-            return .{ .dtype = .f8e8m0fnu, .copy_bits = 4096, .global_basis = sfBasis(b), .coordinate_layout = sfCoord(b), .coordinate_rank = 4, .format = .u16, .cta_group = @intCast(tile.ctas) };
+            return .{ .dtype = .f8e8m0fnu, .copy_bits = 4096, .global_basis = sfBasis(b), .coordinate_layout = sfCoord(b), .coordinate_rank = 4, .format = .u16, .cta_group = tile.cta_group };
         }
         // Shared-memory layouts, in the same element units as Python.
         fn aSmem(b: *B, comptime staged: bool) cute.LayoutSpec {
@@ -1042,7 +1046,7 @@ fn advancePipeline(b: *B, index: V, phase: V, comptime stages: usize) PipelinePo
 
 fn peekBarrierIfRemaining(b: *B, base: V, count: V, limit: usize, state: PipelinePosition) V {
     var peek = b.openIfElse(count.lt(limit), .{cute.DType.i1.toMlir(b.ctx)});
-    peek.yieldThen(.{b.mbarrierWaitParity(barrierAt(b, base, state.index), state.phase)});
+    peek.yieldThen(.{b.mbarrierWaitParity(barrierAt(b, base, state.index), state.phase, .cta)});
     peek.yieldElse(.{b.cst(.i1, true)});
     return peek.results[0];
 }
@@ -1143,6 +1147,7 @@ fn runTmaProducer(
     const first_ready = b.mbarrierWaitParity(
         barrierAt(b, storage.mma_barriers, first_state.index),
         first_state.phase,
+        .cta,
     );
     var stages = b.openFor(
         0,
@@ -1157,7 +1162,7 @@ fn runTmaProducer(
     };
     const buffers = stageBuffersAt(b, tile, storage, state.index);
     var pending = b.openIf(stages.carried[0].eq(false));
-    b.mbarrierTryWaitParity(buffers.mma_barrier, state.phase, 10_000_000);
+    b.mbarrierTryWaitParity(buffers.mma_barrier, state.phase, 10_000_000, .cta);
     pending.yieldThen(.{});
     const sf_tile_m = if (pair) |p| p.rowTile(tile_m) else tile_m;
     const leader = if (pair) |p| p.leader else null;
@@ -1208,6 +1213,7 @@ fn runTmaProducer(
             barrierAt(b, storage.mma_barriers, tail_state.index),
             tail_state.phase,
             10_000_000,
+            .cta,
         );
         if (stage + 1 < tile.stages) {
             tail_state = advancePipeline(b, tail_state.index, tail_state.phase, tile.stages);
@@ -1388,8 +1394,8 @@ fn makeMxfp4StagedMainloop(
 
     // A pair's leader copies the scales of both CTAs, each from its own
     // shared memory into its own tensor memory.
-    const copy_atom = b.makeAtom(fmt(b, "!cute_nvgpu.atom.s2t_copy<f8E8M0FNU, 32 DP, 128 bit, {d} cta, x4>", .{tile.ctas}), .{});
-    const copy_ty = fmt(b, "!cute.tiled_copy<!cute_nvgpu.atom.s2t_copy<f8E8M0FNU, 32 DP, 128 bit, {d} cta, x4>, layout_copy_tv = <\"({d},(32,(4,4),4)):(0,(1,(512,32),128))\">, tiler_mn = <\"[512:1;1:0;4:1]\">>", .{ tile.ctas, tile.ctas });
+    const copy_atom = b.makeAtom(fmt(b, "!cute_nvgpu.atom.s2t_copy<f8E8M0FNU, 32 DP, 128 bit, {d} cta, x4>", .{tile.ctaCount()}), .{});
+    const copy_ty = fmt(b, "!cute.tiled_copy<!cute_nvgpu.atom.s2t_copy<f8E8M0FNU, 32 DP, 128 bit, {d} cta, x4>, layout_copy_tv = <\"({d},(32,(4,4),4)):(0,(1,(512,32),128))\">, tiler_mn = <\"[512:1;1:0;4:1]\">>", .{ tile.ctaCount(), tile.ctaCount() });
     const sfa_copy = b.makeS2tCopy(copy_atom, sfa_tmem_filtered, copy_ty);
     const sfb_copy = b.makeS2tCopy(copy_atom, sfb_tmem_filtered, copy_ty);
 
@@ -1429,7 +1435,10 @@ fn fmt(b: *B, comptime format: []const u8, args: anytype) []const u8 {
 /// Arrive on `barrier` once the MMAs issued so far complete; a pair's MMAs
 /// read and write both CTAs, so both CTAs' barriers are signalled.
 fn commitMma(b: *B, comptime tile: Tile, barrier: V) void {
-    if (tile.ctas == 2) b.tcgen05CommitPair(barrier, pair_cta_mask) else b.tcgen05Commit(barrier);
+    b.tcgen05Commit(barrier, .{
+        .cta_group = tile.cta_group,
+        .multicast_mask = if (tile.cta_group == .cta_2) pair_cta_mask else null,
+    });
 }
 
 /// Warp 4 drains the A/B ring into one of two independent accumulator stages.
@@ -1484,6 +1493,7 @@ fn runMmaConsumer(
     const first_ready = b.mbarrierWaitParity(
         barrierAt(b, storage.load_barriers, first_state.index),
         first_state.phase,
+        .cta,
     );
     const accumulator_state: PipelinePosition = .{
         .index = tiles.after_carried[9],
@@ -1491,7 +1501,7 @@ fn runMmaConsumer(
     };
     const accumulator_stage = accumulator_state.index;
     const accumulator_empty = barrierAt(b, storage.accumulator_empty_barriers, accumulator_stage);
-    b.mbarrierTryWaitParity(accumulator_empty, accumulator_state.phase, 10_000_000);
+    b.mbarrierTryWaitParity(accumulator_empty, accumulator_state.phase, 10_000_000, .cta);
 
     const persistent_mma: cute.Atom = .{ .inner = tiles.after_carried[7].inner, .kernel = b };
     const initial_mma = b.setMmaAccumulate(persistent_mma, b.cst(.i1, false));
@@ -1507,7 +1517,7 @@ fn runMmaConsumer(
     const k = stages.carried[2];
     const state: PipelinePosition = .{ .index = stages.carried[3], .phase = stages.carried[4] };
     var pending = b.openIf(stages.carried[0].eq(false));
-    b.mbarrierTryWaitParity(barrierAt(b, storage.load_barriers, state.index), state.phase, 10_000_000);
+    b.mbarrierTryWaitParity(barrierAt(b, storage.load_barriers, state.index), state.phase, 10_000_000, .cta);
     pending.yieldThen(.{});
     const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, accumulator_stage);
     const mainloop = staged_mainloop.atStage(b, state.index, accumulator_tmem);
@@ -1583,6 +1593,7 @@ fn runMmaConsumer(
         barrierAt(b, storage.accumulator_empty_barriers, accumulator_tail.index),
         accumulator_tail.phase,
         10_000_000,
+        .cta,
     );
 }
 
@@ -1675,7 +1686,7 @@ fn runEpilogue(
     // the stores of every chunk.
     var routed: [tile_chunks]RoutedLanes = undefined;
     inline for (&routed, 0..) |*r, chunk| r.* = routedLanes(b, tile, operands, group, chunk);
-    b.mbarrierTryWaitParity(barrierAt(b, storage.accumulator_full_barriers, stage), accumulator_state.phase, 10_000_000);
+    b.mbarrierTryWaitParity(barrierAt(b, storage.accumulator_full_barriers, stage), accumulator_state.phase, 10_000_000, .cta);
 
     const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, stage);
     const warp_tmem = b.addOffsetTyped(
@@ -1699,7 +1710,7 @@ fn runEpilogue(
             // threads release this TMEM stage before the stores. A pair's
             // stage is free once both CTAs released it to the leader.
             const empty = barrierAt(b, storage.accumulator_empty_barriers, stage);
-            if (pair != null) b.mbarrierArriveCluster(empty, b.cst(.i32, CtaPair.leader_rank)) else b.mbarrierArrive(empty, 1);
+            if (pair != null) b.mbarrierArriveRemote(empty, b.cst(.i32, CtaPair.leader_rank), 1, .cta) else b.mbarrierArrive(empty, 1);
         }
         var columns: [@intCast(@min(n, 32))]V = undefined;
         inline for (&columns, 0..) |*column, i| column.* = b.vectorExtract(values, i, .i32).bitCast(.f32);
@@ -1728,7 +1739,7 @@ fn runEpilogue(
         next_work.executed,
     });
 
-    const tmem_options: B.TmemOptions = .{ .two_cta = pair != null };
+    const tmem_options: B.TmemOptions = .{ .cta_group = tile.cta_group };
     var release_warp = b.openIf(warp.eq(0));
     // Permit release and deallocation are warp collective as well.
     b.relinquishTmemAllocPermit(tmem_options);
@@ -1739,8 +1750,8 @@ fn runEpilogue(
     if (pair) |p| {
         // The pair frees its tensor memory together: wait until the other
         // CTA's epilogue is done with it too.
-        b.mbarrierArriveCluster(storage.tmem_dealloc_barrier, p.rank.bitXor(1));
-        b.mbarrierTryWaitParity(storage.tmem_dealloc_barrier, b.cst(.i32, 0), 10_000_000);
+        b.mbarrierArriveRemote(storage.tmem_dealloc_barrier, p.rank.bitXor(1), 1, .cta);
+        b.mbarrierTryWaitParity(storage.tmem_dealloc_barrier, b.cst(.i32, 0), 10_000_000, .cta);
     }
     b.deallocTmem(tmem, tile.tmem_columns, tmem_options);
     dealloc_warp.yieldThen(.{});
@@ -1858,7 +1869,7 @@ fn swigluStaged(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epi
         if (live) |*l| l.yieldThen(.{});
     }
     const barrier_id = thread.group.mul(2).add(1);
-    b.namedBarrierDynamic(barrier_id, 128);
+    b.namedBarrier(barrier_id, 128);
 
     // Four threads per routed row: MX block `(tid / 2) % 2`, half `tid % 2`.
     const row = tid.div(4);
@@ -1903,7 +1914,7 @@ fn swigluStaged(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epi
     live.yieldThen(.{});
     if (in_pass) |*p| p.yieldThen(.{});
     // The next pass overwrites the staged activations.
-    b.namedBarrierDynamic(barrier_id, 128);
+    b.namedBarrier(barrier_id, 128);
 }
 
 /// The first `live` rows of `storeTileSwiglu`; with `skip_padding`, chunks
@@ -1976,14 +1987,14 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
     var owner = b.openIf(lane.lt(@as(i32, @intCast(n))));
     scratch.set(.{ thread.group, warp, lane }, lane_maximum);
     owner.yieldThen(.{});
-    b.namedBarrierDynamic(barrier_id, 128);
+    b.namedBarrier(barrier_id, 128);
 
     // Lane `c` turns the two half-block maxima of column `c` into its scale.
     const pair = warp.bitAnd(~@as(i32, 1));
     const lane_column = b.select(lane.lt(@as(i32, @intCast(n))), lane, b.cst(.i32, 0));
     const scale = mxScale(b, scratch.get(.{ thread.group, pair, lane_column }, .f32).maximum(scratch.get(.{ thread.group, pair.add(1), lane_column }, .f32)));
     // The next tile reuses the scratch maxima.
-    b.namedBarrierDynamic(barrier_id, 128);
+    b.namedBarrier(barrier_id, 128);
 
     const activation_index = tile_m.mul(64).add(tid.div(2));
     for (0..row_chunks) |row_chunk| {
@@ -2033,7 +2044,7 @@ fn storeStagedRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: 
     const staging = b.makeViewTyped(staging_ptr, b.staticLayout(staging_layout), b.memrefType(.bf16, .smem, 1024, b.layoutType(staging_layout)));
     for (columns, 0..) |value, column| staging.set(.{ thread.group, b.cst(.i32, @as(i32, @intCast(column))), thread.row }, value.to(.bf16));
     const barrier_id = thread.group.mul(2).add(1);
-    b.namedBarrierDynamic(barrier_id, 128);
+    b.namedBarrier(barrier_id, 128);
 
     // 16 threads per routed row, eight BF16 columns (16 bytes) each.
     const segment = thread.row.rem(16);
@@ -2050,7 +2061,7 @@ fn storeStagedRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: 
         live.yieldThen(.{});
     }
     // The next pass overwrites the staged rows.
-    b.namedBarrierDynamic(barrier_id, 128);
+    b.namedBarrier(barrier_id, 128);
 }
 
 fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: Epilogue, d: anytype) void {
@@ -2100,8 +2111,8 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     // A CTA pair tiles A by the MMA's 256 rows and B by the whole group, and
     // the MMA partition of pair rank `v` is its 128 rows of A and rows
     // `v * n / 2` onward of B; the partitions' origins carry that offset.
-    const pair: ?CtaPair = if (tile.ctas == 2) CtaPair.current(b) else null;
-    const mma_m = 128 * tile.ctas;
+    const pair: ?CtaPair = if (tile.cta_group == .cta_2) CtaPair.current(b) else null;
+    const mma_m = 128 * tile.ctaCount();
     const b_rows = comptime tile.bRows();
     const m_tiles = @divExact(cfg.m, mma_m);
     const k_tiles = @divExact(cfg.k, 128);
@@ -2210,7 +2221,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         .{ storage.load_barriers, stages, 1 },
         .{ storage.mma_barriers, stages, 1 },
         .{ storage.accumulator_full_barriers, accumulator_stages, 1 },
-        .{ storage.accumulator_empty_barriers, accumulator_stages, 128 * tile.ctas },
+        .{ storage.accumulator_empty_barriers, accumulator_stages, @as(u32, @intCast(128 * tile.ctaCount())) },
     };
     inline for (barrier_arrays) |array| {
         var lane = b.openIf(b.electSync());
@@ -2258,7 +2269,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     // warp 0 of both CTAs.  The epilogue warps then meet the MMA warp at
     // named barrier 2.
     var alloc_warp = b.openIf(warp.eq(0));
-    b.allocTmem(tile.tmem_columns, tmem_holding, .{ .two_cta = pair != null });
+    b.allocTmem(tile.tmem_columns, tmem_holding, .{ .cta_group = tile.cta_group });
     alloc_warp.yieldThen(.{});
     b.namedBarrier(2, @intCast(32 + 128 * tile.epilogueGroups()));
     switch (epilogue) {
@@ -2348,10 +2359,10 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const one = b.cst(.i32, 1);
     // The persistent scheduler walks MMA tiles, 256 rows on a CTA pair, and
     // runs one cluster per pair of SMs.
-    const m_tiles = @divExact(cfg.m, 128 * tile.ctas);
+    const m_tiles = @divExact(cfg.m, 128 * tile.ctaCount());
     const tiles_m = b.cst(.i32, m_tiles);
-    const grid_z = b.cst(.i32, @min(m_tiles * cfg.groups, @divTrunc(cfg.persistent_ctas, tile.ctas)));
-    const ctas = if (tile.ctas == 1) one else b.cst(.i32, tile.ctas);
+    const grid_z = b.cst(.i32, @min(m_tiles * cfg.groups, @divTrunc(cfg.persistent_ctas, tile.ctaCount())));
+    const ctas = if (tile.cta_group == .cta_1) one else b.cst(.i32, tile.ctaCount());
     const config = b.makeLaunchConfig(.{
         .grid = .{ ctas, one, grid_z },
         .block = .{ b.cst(.i32, tile.threads()), one, one },

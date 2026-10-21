@@ -109,7 +109,8 @@ pub fn mbarrier_wait_parity(
 }
 
 /// nvvm.mbarrier.try_wait.parity — wait (looping in PTX) until phase `parity` (i32)
-/// of the mbarrier completes, suspending up to `suspend_time` (i32) cycles per try.
+/// of the mbarrier completes, with CTA acquire semantics. `suspend_time` (i32)
+/// is a suspend-time hint in nanoseconds per try.
 pub fn mbarrier_try_wait_parity(
     ctx: *mlir.Context,
     ptr: *const mlir.Value,
@@ -118,6 +119,28 @@ pub fn mbarrier_try_wait_parity(
     location: *const mlir.Location,
 ) *mlir.Operation {
     return ops.mbarrier_try_wait_parity(ctx, ptr, parity, suspend_time, .boolean(ctx, false), location);
+}
+
+/// One potentially suspending parity test with acquire semantics. A false
+/// result means the timeout expired; callers that need completion must retry.
+pub fn mbarrier_try_wait_parity_timelimit(
+    ctx: *mlir.Context,
+    ptr: *const mlir.Value,
+    parity: *const mlir.Value,
+    suspend_time: *const mlir.Value,
+    scope: MBarrierScope,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return ops.mbarrier_try_wait_parity_timelimit(
+        ctx,
+        ptr,
+        parity,
+        suspend_time,
+        .int(ctx, .i1),
+        enumAttribute(ops.MBarrierScopeKindAttr, ctx, scope),
+        enumAttribute(ops.MemOrderKindAttr, ctx, .acquire),
+        location,
+    );
 }
 
 /// nvvm.fence.mbarrier.init — make mbarrier initialization visible to the cluster.
@@ -181,10 +204,12 @@ pub fn tcgen05_wait(ctx: *mlir.Context, kind: Tcgen05WaitKind, location: *const 
     return ops.tcgen05_wait(ctx, enumAttribute(ops.Tcgen05WaitKindAttr, ctx, kind), location);
 }
 
-/// nvvm.tcgen05.commit — arrive on the mbarrier at `barrier_ptr` when the issued
-/// tcgen05 operations complete.
-pub fn tcgen05_commit(ctx: *mlir.Context, barrier_ptr: *const mlir.Value, group: CtaGroup, location: *const mlir.Location) *mlir.Operation {
-    return ops.tcgen05_commit(ctx, barrier_ptr, null, null, enumAttribute(ops.CTAGroupKindAttr, ctx, group), location);
+/// nvvm.tcgen05.commit — arrive on the mbarrier at `barrier_ptr` when the
+/// tcgen05 MMA/copy operations issued by the executing thread with `group`
+/// complete. An optional mask selects CTAs in the cluster whose barriers at
+/// the same shared-memory offset receive one arrival each.
+pub fn tcgen05_commit(ctx: *mlir.Context, barrier_ptr: *const mlir.Value, group: CtaGroup, multicast_mask: ?*const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return ops.tcgen05_commit(ctx, barrier_ptr, multicast_mask, null, enumAttribute(ops.CTAGroupKindAttr, ctx, group), location);
 }
 
 /// nvvm.tcgen05.mma — D (tensor memory, `!llvm.ptr<6>`) = A (shared-memory
