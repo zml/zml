@@ -13,110 +13,171 @@ concurrency:
 
 jobs:
   ci:
-    name: ci-${{ matrix.target }}
+    name: ci-${{ matrix.target }}-${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: cpu
-            bazel_opts: ""
-            self_hosted: false
+            arch: amd64
+            bazel_common_opts: ""
             run_tests: true
             runner_labels:
-              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-cpu
-              - runner=16cpu-linux-x64
-              - family=c8+c7
-              - image=ubuntu24-amd64
-              - volume=80gb
-              - extras=s3-cache
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-cpu-amd64
+              - runner=large-runner-amd64
+
           - target: neuron
-            bazel_opts: "--@zml//platforms:neuron=true --@zml//platforms:cpu=false"
-            self_hosted: false
+            arch: amd64
+            bazel_common_opts: "--@zml//platforms:neuron=true --@zml//platforms:cpu=false"
             run_tests: false
             runner_labels:
-              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-neuron
-              - runner=16cpu-linux-x64
-              - family=c8+c7
-              - image=ubuntu24-amd64
-              - volume=80gb
-              - extras=s3-cache
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-neuron-amd64
+              - runner=large-runner-amd64
+
           - target: tpu
-            bazel_opts: "--@zml//platforms:tpu=true --@zml//platforms:cpu=false"
-            self_hosted: false
+            arch: amd64
+            bazel_common_opts: "--@zml//platforms:tpu=true --@zml//platforms:cpu=false"
             run_tests: false
             runner_labels:
-              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-tpu
-              - runner=16cpu-linux-x64
-              - family=c8+c7
-              - image=ubuntu24-amd64
-              - volume=80gb
-              - extras=s3-cache
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-tpu-amd64
+              - runner=large-runner-amd64
+
           - target: cuda
-            bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
-            self_hosted: true
+            arch: amd64
+            bazel_common_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
             run_tests: true
-            runner_labels: ["self-hosted", "platform=cuda"]
+            runner_labels: ["self-hosted", "linux", "x64", "platform=cuda"]
+
+          - target: cuda
+            arch: arm64
+            bazel_common_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
+            run_tests: false
+            runner_labels:
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-cuda-arm64
+              - runner=large-runner-arm64
+
           - target: rocm
-            bazel_opts: "--@zml//platforms:rocm=true --@zml//platforms:cpu=false"
-            self_hosted: true
+            arch: amd64
+            bazel_common_opts: "--@zml//platforms:rocm=true --@zml//platforms:cpu=false"
             run_tests: true
-            runner_labels: ["self-hosted", "platform=rocm"]
+            runner_labels: ["self-hosted", "linux", "x64", "platform=rocm"]
+
+          - target: oneapi
+            arch: amd64
+            bazel_common_opts: "--@zml//platforms:oneapi=true --@zml//platforms:cpu=false"
+            run_tests: false
+            runner_labels:
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-oneapi-amd64
+              - runner=large-runner-amd64
+
+          - target: metal
+            arch: arm64
+            bazel_common_opts: "--@zml//platforms:metal=true --@zml//platforms:cpu=false"
+            bazel_build_opts: "--platforms=@zml//platforms:macos_arm64"
+            run_tests: false
+            runner_labels:
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-metal-arm64
+              - runner=large-runner-amd64
+
+          - target: furiosa
+            arch: amd64
+            bazel_common_opts: "--@zml//platforms:furiosa=true --@zml//platforms:cpu=false"
+            run_tests: false
+            runner_labels:
+              - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-ci-furiosa-amd64
+              - runner=large-runner-amd64
+
     runs-on: ${{ matrix.runner_labels }}
     steps:
-      - uses: runs-on/action@v2.1.0
+      - uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Ensure self hosted cache permissions
-        if: ${{ matrix.self_hosted }}
+        if: ${{ contains(matrix.runner_labels, 'self-hosted') }}
         run: mkdir -p /tmp/zig-cache && mkdir -p /tmp/zml && sudo chmod -R 777 /tmp/zig-cache && sudo chmod -R 777 /tmp/zml
 
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.19.0
+        uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
         with:
-          bazelisk-version: 1.28.1
-          bazelisk-cache: ${{ !matrix.self_hosted }}
-          repository-cache: ${{ !matrix.self_hosted }}
-          external-cache: ${{ !matrix.self_hosted }}
+          bazelisk-version: 1.29.0
+          bazelisk-cache: true
+          cache-save: false
           bazelrc: |
+            startup --experimental_remote_repo_contents_cache
             common --verbose_failures
             common --keep_going
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
-            build --experimental_disk_cache_gc_max_size=100G
-            build --experimental_disk_cache_gc_max_age=14d
-            build --experimental_disk_cache_gc_idle_delay=1m
-            common --experimental_action_cache_gc_max_age=14d
-            common --experimental_action_cache_gc_idle_delay=1m
-            common --repo_contents_cache_gc_max_age=14d
-            common --repo_contents_cache_gc_idle_delay=1m
-            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common --config=remote' || '' }}
-            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
-            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common:remote --remote_download_outputs=minimal' || '' }}
-            ${{ matrix.self_hosted && 'common --disk_cache=/home/actions/.cache/bazel-disk' || '' }}
+            common --config=remote
+            common --strategy=TestRunner=local
+            ${{ format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
+
+      - name: Capture self hosted storage usage before
+        id: storage_before
+        if: ${{ contains(matrix.runner_labels, 'self-hosted') }}
+        continue-on-error: true
+        shell: bash
+        run: &measure-self-hosted-storage |
+          output_base=$(bazel info output_base) || output_base=""
+          bazel_size="unavailable"
+          if [[ -n "$output_base" ]]; then
+            bazel_size=$(du -sh --si -- "$output_base" | cut -f1) || bazel_size="unavailable"
+          fi
+          disks=$(df -H --local --output=source,size,used,avail,pcent,target |
+            awk '$1 ~ /^\/dev\// && $1 !~ /^\/dev\/loop/ && !seen[$1]++ {
+              printf "%s%s: %s / %s used (%s), %s free", separator, $6, $3, $2, $5, $4
+              separator = "; "
+            } END {if (separator == "") printf "none"}') || disks="unavailable"
+          {
+            printf 'output_base=%s\n' "$output_base"
+            printf 'bazel_size=%s\n' "$bazel_size"
+            printf 'disks=%s\n' "$disks"
+          } >> "$GITHUB_OUTPUT"
 
       - run: bazel mod graph
-      - run: bazel query --output=graph ${{ matrix.bazel_opts }} //...
-      - run: bazel cquery ${{ matrix.bazel_opts }} //...
-      - run: bazel build ${{ matrix.bazel_opts }} //...
+      - run: bazel query ${{ matrix.bazel_common_opts }} --output=graph //...
+      - run: bazel cquery ${{ matrix.bazel_common_opts }} ${{ matrix.bazel_build_opts }} //...
+      - run: bazel build ${{ matrix.bazel_common_opts }} ${{ matrix.bazel_build_opts }} //...
       - if: ${{ matrix.run_tests }}
-        run: bazel test ${{ matrix.bazel_opts }} //...
+        run: bazel test ${{ matrix.bazel_common_opts }} ${{ matrix.bazel_build_opts }} //...
+
+      - name: Capture self hosted storage usage after
+        id: storage_after
+        if: ${{ always() && contains(matrix.runner_labels, 'self-hosted') }}
+        continue-on-error: true
+        shell: bash
+        run: *measure-self-hosted-storage
+
+      - name: Report self hosted storage usage
+        if: ${{ always() && contains(matrix.runner_labels, 'self-hosted') }}
+        env:
+          STORAGE_JOB: ${{ github.job }}-${{ matrix.target }}-${{ matrix.arch }}
+          OUTPUT_BASE: ${{ steps.storage_after.outputs.output_base || steps.storage_before.outputs.output_base || 'unavailable' }}
+          SIZE_BEFORE: ${{ steps.storage_before.outputs.bazel_size || 'unavailable' }}
+          SIZE_AFTER: ${{ steps.storage_after.outputs.bazel_size || 'unavailable' }}
+          DISKS_BEFORE: ${{ steps.storage_before.outputs.disks || 'unavailable' }}
+          DISKS_AFTER: ${{ steps.storage_after.outputs.disks || 'unavailable' }}
+        run: |
+          message=$(printf 'Runner: %s\nBazel output base: %s\nBazel directory size: %s -> %s\nDisks before: %s\nDisks after: %s' \
+            "$RUNNER_NAME" "$OUTPUT_BASE" "$SIZE_BEFORE" "$SIZE_AFTER" "$DISKS_BEFORE" "$DISKS_AFTER")
+          message=${message//'%'/'%25'}
+          message=${message//$'\r'/'%0D'}
+          message=${message//$'\n'/'%0A'}
+          printf '::notice title=Disk usage - %s::%s\n' "$STORAGE_JOB" "$message"
 
   lint:
     runs-on:
       - runs-on=${{ github.run_id }}-${{ github.run_attempt }}-lint
-      - runner=4cpu-linux-x64
-      - image=ubuntu24-amd64
-      - volume=80gb
-      - extras=s3-cache
+      - runner=small-runner-amd64
     steps:
-      - uses: runs-on/action@v2.1.0
+      - uses: runs-on/action@17b59092eb37ebfdbb034460892887c09100eaa3 # v2.5.0
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2.2.1
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
           mirror: https://mirror.zml.ai/zig

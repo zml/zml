@@ -769,9 +769,9 @@ pub const Moe = struct {
         const routing_scores, const topk_ids = self.router.forward(x);
 
         const moe_output = zml.moe.forwardMoe(
-            x,
-            topk_ids,
-            routing_scores,
+            x.merge(.{ .t = .{ .b, .s } }),
+            topk_ids.merge(.{ .t = .{ .b, .s } }),
+            routing_scores.merge(.{ .t = .{ .b, .s } }),
             self.gate_up_proj,
             self.down_proj,
             moe_backend,
@@ -780,7 +780,7 @@ pub const Moe = struct {
                 .quantize_input = false,
                 .routing_weight_placement = .after_down,
             },
-        );
+        ).reshape(x.shape());
 
         const shared_gate = self.shared_expert_gate.forward(x, x.dtype()).sigmoid().broad(x.shape());
         const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate).withPartitioning(.model, .{
@@ -1049,7 +1049,7 @@ pub const GatedDeltaNet = struct {
 
         const beta = b.sigmoid();
         const aLog_type = self.aLog.dtype();
-        const g = self.aLog.broad(a.shape()).exp().mul(softplus(a.convert(aLog_type).add(self.dt_bias.convert(aLog_type).broad(a.shape())))).negate();
+        const g = self.aLog.broad(a.shape()).exp().mul(zml.nn.softplus(a.convert(aLog_type).add(self.dt_bias.convert(aLog_type).broad(a.shape())), .{})).negate();
 
         const query_for_rule = if (self.qk_head_repetition == 1) query else query.stutter1d(query.axis(.kh), self.qk_head_repetition);
         const key_for_rule = if (self.qk_head_repetition == 1) key else key.stutter1d(key.axis(.kh), self.qk_head_repetition);
@@ -1407,9 +1407,3 @@ pub const KvCache = struct {
         };
     }
 };
-
-//========================Utils========================
-
-fn softplus(x: zml.Tensor) zml.Tensor {
-    return x.exp().addConstant(1).log();
-}

@@ -2,17 +2,14 @@
 
 const stdx = @import("stdx");
 
-const zml = @import("../zml.zig");
-const triton_mxfp4 = @import("triton_mxfp4.zig");
-pub const kernels = @import("cute_kernels/moe.zig");
+const zml = @import("../../../zml.zig");
+pub const kernels = @import("moe.zig");
 
 // `moe.zig`'s `refAllDecls` reaches this file but not its imports, so the
 // kernel emit tests are only collected if `kernels` is referenced here.
 test {
     _ = kernels;
 }
-
-pub const Parameters = triton_mxfp4.Parameters;
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
     if (platform.target != .cuda) return false;
@@ -21,10 +18,10 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
 }
 
 pub fn validateOptions(opts: zml.moe.Options) void {
-    stdx.debug.assert(opts.activation == .swiglu, "cute_mxfp4 backend only accepts swiglu activation, got {}", .{opts.activation});
-    stdx.debug.assert(opts.activation.swiglu.limit != null, "cute_mxfp4 backend requires swiglu limit to be set", .{});
-    stdx.debug.assert(opts.activation.swiglu.bias == null, "cute_mxfp4 backend requires swiglu bias to be null", .{});
-    stdx.debug.assert(opts.activation.swiglu.scale == null, "cute_mxfp4 backend requires swiglu scale to be null", .{});
+    stdx.debug.assert(opts.activation == .swiglu, "cute backend only accepts swiglu activation, got {}", .{opts.activation});
+    stdx.debug.assert(opts.activation.swiglu.limit != null, "cute backend requires swiglu limit to be set", .{});
+    stdx.debug.assert(opts.activation.swiglu.bias == null, "cute backend requires swiglu bias to be null", .{});
+    stdx.debug.assert(opts.activation.swiglu.scale == null, "cute backend requires swiglu scale to be null", .{});
 }
 
 pub fn fusedExperts(
@@ -36,16 +33,16 @@ pub fn fusedExperts(
     options: zml.moe.Options,
 ) zml.Tensor {
     validateOptions(options);
-    stdx.debug.assert(input.dtype() == .bf16, "cute_mxfp4 backend only supports bf16 inputs, got {}", .{input.dtype()});
-    stdx.debug.assert(gate_up.bias == null and down.bias == null, "cute_mxfp4 backend expects gate_up bias and down bias to be null", .{});
+    stdx.debug.assert(input.dtype() == .bf16, "cute backend only supports bf16 inputs, got {}", .{input.dtype()});
+    stdx.debug.assert(gate_up.bias == null and down.bias == null, "cute backend expects gate_up bias and down bias to be null", .{});
 
-    const gq = gate_up.quantization orelse @panic("cute_mxfp4 backend requires gate_up quantization to be set");
-    const dq = down.quantization orelse @panic("cute_mxfp4 backend requires down quantization to be set");
-    stdx.debug.assert(gq.scheme == .mxfp4 and dq.scheme == .mxfp4, "cute_mxfp4 expects gate_up and down quantization scheme to be mxfp4, got {} and {}", .{ gq.scheme, dq.scheme });
+    const gq = gate_up.quantization orelse @panic("cute backend requires gate_up quantization to be set");
+    const dq = down.quantization orelse @panic("cute backend requires down quantization to be set");
+    stdx.debug.assert(gq.scheme == .mxfp4 and dq.scheme == .mxfp4, "cute expects gate_up and down quantization scheme to be mxfp4, got {} and {}", .{ gq.scheme, dq.scheme });
 
     // Weight storage for mxfp4 in HF is expressed as u8 or i8
-    stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "cute_mxfp4 expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
-    stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "cute_mxfp4 expects down weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
+    stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "cute expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
+    stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "cute expects down weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
 
     const expert_parallelism = gate_up.weight.shape().partition(.expert).isSharded();
     const hidden = down.weight.dim(1);
@@ -57,7 +54,7 @@ pub fn fusedExperts(
     // The SwiGLU clamp is a kernel parameter, but the routing weight is
     // multiplied in the up epilogue, before the down projection: applying it
     // after would have to move into the down epilogue or the reduction.
-    stdx.debug.assert(options.routing_weight_placement == .before_down, "cute_mxfp4 backend only supports routing_weight_placement = .before_down, got {}", .{options.routing_weight_placement});
+    stdx.debug.assert(options.routing_weight_placement == .before_down, "cute backend only supports routing_weight_placement = .before_down, got {}", .{options.routing_weight_placement});
     const context: Context = .{
         .input = input,
         .ids = ids,

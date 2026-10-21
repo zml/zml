@@ -85,12 +85,20 @@ cc_import(
     name = "neuron_ncfw",
     shared_library = "@aws-neuronx-runtime-lib//:libncfw.patchelf",
     tags = ["manual"],
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
 )
 
 cc_import(
     name = "neuron_nrt",
     shared_library = "@aws-neuronx-runtime-lib//:libnrt.patchelf",
     tags = ["manual"],
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
     deps = [":neuron_ncfw"],
 )
 

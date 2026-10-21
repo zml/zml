@@ -6,10 +6,10 @@
 const std = @import("std");
 const stdx = @import("stdx");
 
-const zml = @import("../../zml.zig");
-const triton_mxfp4 = @import("../triton_mxfp4.zig");
+const zml = @import("../../../zml.zig");
 pub const boundary = @import("mxfp4.zig");
 pub const persistent = @import("persistent_mxfp4.zig");
+const triton_kernels = @import("../triton/moe.zig");
 
 pub const Inputs = struct {
     /// `[tokens, hidden]` BF16.
@@ -29,8 +29,8 @@ pub const Inputs = struct {
 /// The kernels are tuned for the DeepSeek V4.1 expert geometry, shared by the
 /// main MoE and the D-Spark drafter. Expert count and top-k are parameters.
 pub fn validateShapes(hidden: i64, intermediate: i64) void {
-    stdx.debug.assert(hidden == 5120, "cute_mxfp4 backend expects hidden dimension to be 5120, got {}", .{hidden});
-    stdx.debug.assert(intermediate == 2304, "cute_mxfp4 backend expects intermediate dimension to be 2304, got {}", .{intermediate});
+    stdx.debug.assert(hidden == 5120, "cute backend expects hidden dimension to be 5120, got {}", .{hidden});
+    stdx.debug.assert(intermediate == 2304, "cute backend expects intermediate dimension to be 2304, got {}", .{intermediate});
 }
 
 /// Route each token/top-k pair to its own one-row group instead of grouping
@@ -69,8 +69,10 @@ fn persistentCtas() i64 {
     return if (attribute.int64 > 0) attribute.int64 else 148;
 }
 
+// TODO(Corentin): settle on groups/capacity.
+
 /// Upper bound on the number of `group`-row expert groups for all routes.
-fn capacity(tokens: i64, topk: i64, experts: i64, group: i64) i64 {
+fn computeCapacity(tokens: i64, topk: i64, experts: i64, group: i64) i64 {
     return @divTrunc(tokens * topk + group - 1, group) + experts - 1;
 }
 
@@ -88,23 +90,72 @@ const Routing = struct {
     schedule: zml.Tensor,
 };
 
-fn route(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, n: i64, direct: bool, ids: zml.Tensor) Routing {
+const atomic_route_threshold = 6 * 2048;
+
+fn route(tokens: i64, experts: i64, topk: i64, n: i64, direct: bool, ids: zml.Tensor) Routing {
     const routes = tokens * topk;
     const flat_ids = ids.convert(.i32).reshape(.{routes});
     if (direct) return .{ .groups = routes, .route_map = null, .route_inverse = flat_ids, .schedule = flat_ids };
-    const groups = capacity(tokens, topk, experts, n);
-    const cfg: triton_mxfp4.kernels.Config = .{
-        .tokens = tokens,
-        .hidden = hidden,
-        .intermediate = intermediate,
-        .experts = experts,
-        .global_experts = experts,
-        .topk = topk,
-        // Unused: only the routing and scheduling kernels of that config run.
-        .swiglu_limit = 0,
+    const capacity = computeCapacity(tokens, topk, experts, n);
+
+    std.debug.assert(capacity > 0);
+    // `route` rescans every route once per expert: cheapest for decode, but
+    // quadratic. Past a few thousand tokens, count with atomics instead.
+    const r: struct { counts: zml.Tensor, pos: zml.Tensor } = if (routes >= atomic_route_threshold) blk: {
+        const counted = triton_kernels.RouteAtomic.Kernel.call(
+            .{ .ids = ids, .zeros = zml.Tensor.zeroes(.init(.{experts}, .i32)) },
+            .{ .counts = .init(.{experts}, .i32), .pos = .init(.{routes}, .i32) },
+            .{
+                .cfg = .{
+                    .tokens = tokens,
+                    .topk = topk,
+                    .expert_offset = 0,
+                    .experts = experts,
+                },
+                .grid = .{ @intCast(@divTrunc(routes + triton_kernels.RouteAtomic.route_block - 1, triton_kernels.RouteAtomic.route_block)), 1, 1 },
+                .num_warps = 4,
+                .num_stages = 1,
+                .output_operand_aliases = .{ .counts = .zeros },
+            },
+        );
+        break :blk .{ .counts = counted.counts, .pos = counted.pos };
+    } else blk: {
+        const scanned = triton_kernels.Route.Kernel.call(
+            .{ .ids = ids },
+            .{ .counts = .init(.{experts}, .i32), .pos = .init(.{routes}, .i32) },
+            .{
+                .cfg = .{ .tokens = tokens, .topk = topk, .expert_offset = 0 },
+                .grid = .{ @intCast(experts), 1, 1 },
+                .num_warps = 4,
+                .num_stages = 1,
+            },
+        );
+        break :blk .{ .counts = scanned.counts, .pos = scanned.pos };
     };
-    const schedule = triton_mxfp4.kernels.scheduleForCute(cfg, flat_ids.reshape(.{ tokens, topk }), groups, n);
-    return .{ .groups = groups, .route_map = schedule.route_map, .route_inverse = schedule.route_inverse, .schedule = schedule.schedule };
+
+    const s = triton_kernels.Schedule.Kernel.call(
+        .{ .ids = ids, .counts = r.counts, .pos = r.pos },
+        .{
+            .map = .init(.{capacity * n}, .i32),
+            .perm = .init(.{tokens * topk}, .i32),
+            .sched = .init(.{2 * capacity + 1}, .i32),
+        },
+        .{
+            .cfg = .{
+                .tokens = tokens,
+                .topk = topk,
+                .expert_offset = 0,
+                .experts = experts,
+                .capacity = capacity,
+                .group = n,
+            },
+            .grid = .{ @intCast(@divTrunc(tokens * topk + 127, 128)), 1, 1 },
+            .num_warps = 4,
+            .num_stages = 1,
+        },
+    );
+
+    return .{ .groups = capacity, .route_map = s.perm, .route_inverse = s.map, .schedule = s.sched };
 }
 
 /// `[tokens, hidden]` BF16 output of the MoE layer.
@@ -117,7 +168,7 @@ pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: 
 pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs, tile_n: ?i64) zml.Tensor {
     const n = tile_n orelse tileN(tokens, experts, topk);
     const direct = isDirect(tokens);
-    const routing = route(tokens, hidden, intermediate, experts, topk, n, direct, a.ids);
+    const routing = route(tokens, experts, topk, n, direct, a.ids);
     const routes = tokens * topk;
 
     const up_cfg: persistent.Config = .{

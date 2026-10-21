@@ -2343,3 +2343,51 @@ fn ShapeStruct(comptime dims: anytype) type {
 
     return @Struct(.@"extern", null, &struct_field_names, &struct_field_types, &struct_field_attrs);
 }
+
+/// Smooth approximation of ReLU function: log(1 + exp(x))
+/// For numerical stability, falls back to the linear function when `x > opts.threshold`.
+pub fn softplus(
+    x: Tensor,
+    opts: struct { threshold: f32 = 20.0 },
+) zml.Tensor {
+    // Compute log1p(z) as z * log(u) / (u - 1), where u = 1 + z.
+    // Using log(1 + exp(x)) directly loses precision for x < ~-16.6, causing strongly negative logits to produce zero scores.
+    const z = x.exp();
+    const u = z.addConstant(1);
+    const log1p = u.cmp(.EQ, .scalar(1, .f32)).select(z, z.mul(u.log()).div(u.subConstant(1)));
+    return x.cmp(.GT, .scalar(opts.threshold, .f32)).select(x, log1p);
+}
+
+test "softplus" {
+    const inputs = [_]f32{ -20.0, -1.0, 0.0, 1.0, 2.0, 2.1, 3.0 };
+    const expected = [_]f32{ 2.0611537e-9, 0.3132617, 0.6931472, 1.3132616, 2.126928, 2.1, 3.0 };
+
+    const platform = zml.testing.env();
+    const input: Tensor = .init(.{ .x = inputs.len }, .f32);
+    const Local = struct {
+        fn call(x: Tensor) Tensor {
+            return softplus(x, .{ .threshold = 2.0 });
+        }
+    };
+
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.call, .{input}, .{});
+    defer exe.deinit();
+
+    var input_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        input.shape(),
+        std.mem.sliceAsBytes(&inputs),
+    );
+    defer input_buffer.deinit();
+
+    var result = try exe.eval(std.testing.allocator, std.testing.io, .{input_buffer});
+    defer result.deinit();
+
+    try zml.testing.expectClose(
+        std.testing.io,
+        Slice.init(input.shape(), std.mem.sliceAsBytes(&expected)),
+        result,
+        .{},
+    );
+}

@@ -23,6 +23,25 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "mnist_dp",
+    args = [
+        "$(location @mnist//:mnist.safetensors)",
+        "$(location @mnist//:t10k-images.idx3-ubyte)",
+    ],
+    data = [
+        "@mnist//:mnist.safetensors",
+        "@mnist//:t10k-images.idx3-ubyte",
+    ],
+    main = "mnist_data_parallel.zig",
+    srcs = ["mnist.zig"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
+
 mtree_spec(
     name = "mtree",
     srcs = [":mnist"],

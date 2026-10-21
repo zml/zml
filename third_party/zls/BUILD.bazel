@@ -25,7 +25,7 @@ zig_library(
 zls_toolchain(
     name = "zls",
     bin = "@zls//:zls",
-    zls_version = "0.17.0-dev+eab2be0fd744",
+    zls_version = "0.17.0",
 )
 
 toolchain(
