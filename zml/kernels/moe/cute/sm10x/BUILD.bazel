@@ -1,0 +1,14 @@
+package(default_visibility = ["//zml/kernels/moe/cute:__pkg__"])
+
+filegroup(
+    name = "sm10x",
+    srcs = [
+        "common.zig",
+        "moe.zig",
+        "mxfp4.zig",
+        "nvfp4.zig",
+        "persistent_mxfp4.zig",
+        "persistent_nvfp4.zig",
+        "reduce.zig",
+    ],
+)

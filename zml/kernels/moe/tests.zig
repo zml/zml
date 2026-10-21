@@ -16,6 +16,7 @@ const Case = struct {
     quantize_input: bool = false,
     placement: Placement = .after_down,
     bias: bool = false,
+    non_unit_scales: bool = false,
     tokens: i64 = 1,
     topk: i64 = 1,
     width: i64 = 128,
@@ -55,8 +56,7 @@ const Case = struct {
         // BF16 intermediate rounding and different GEMM reduction orders. Every
         // element must pass; near-zero values use the absolute bound.
         try zml.testing.expectClose(io, output.expected, output.actual, .{
-            // The NVFP4 matrix observed a maximum absolute error of 0.07519531.
-            // Allow a small margin; this is an empirical comparison budget.
+            // Share the NVFP4 comparison budget across CUDA backends.
             .absolute_tolerance = if (c.scheme == .nvfp4) 0.078125 else 0.015625,
             .relative_tolerance = 0.02,
             .minimum_close_fraction = 1,
@@ -148,10 +148,24 @@ fn makeExpertFixture(c: Case) ExpertFixture {
         .silu, .gelu, .relu => c.intermediate,
         else => 2 * c.intermediate,
     };
-    return .{
+    var fixture: ExpertFixture = .{
         .gate_up = linear(.init(.{ .expert = c.experts, .dout = projection_width, .d = c.width }, c.activation_dtype), c.scheme, c.bias, 7),
         .down = linear(.init(.{ .expert = c.experts, .d = c.width, .dout = c.intermediate }, c.activation_dtype), c.scheme, c.bias, 11),
     };
+    if (c.non_unit_scales) {
+        for ([_]*zml.nn.Linear{ &fixture.gate_up, &fixture.down }, 0..) |projection, i| {
+            const q = &projection.quantization.?;
+            std.debug.assert(q.scheme == .nvfp4);
+            // Exercise both scale polarity and distinct per-expert multipliers.
+            q.input_scale = .{ .value = Tensor.scalar(@as(f32, if (i == 0) 2 else 0.5), .f32), .operation = .divide };
+            q.global_scale = .{
+                .value = Tensor.arange(.{ .end = @intCast(c.experts) }, .i32)
+                    .remainder(Tensor.scalar(2, .i32)).addConstant(1).convert(.f32).withTags(.{.expert}),
+                .operation = .divide,
+            };
+        }
+    }
+    return fixture;
 }
 
 /// Interleave the gate/up halves of the output axis: [E, 2, N/2, K] -> [E, N/2, 2, K].
@@ -176,16 +190,9 @@ fn packFp4Bytes(weight: Tensor) Tensor {
 }
 
 fn prepareGateUp(tensor: Tensor, layout: zml.moe.ExpertsLayout) Tensor {
-    const ordered = switch (layout.gate_up_order) {
-        .gate_up => tensor,
-        .up_gate => blk: {
-            const mid = @divExact(tensor.dim(1), 2);
-            break :blk Tensor.concatenate(&.{ tensor.slice(1, .{ .start = mid }), tensor.slice(1, .{ .end = mid }) }, 1);
-        },
-    };
     return switch (layout.gate_up) {
-        .concatenated => ordered,
-        .interleaved => interleave(ordered),
+        .concatenated => tensor,
+        .interleaved => interleave(tensor),
     };
 }
 
@@ -211,7 +218,15 @@ fn prepareForBackend(canonical: ExpertFixture, backend: zml.moe.Backend) ExpertF
         switch (backend) {
             .cute => {
                 projection.weight = packFp4Bytes(projection.weight);
-                projection.quantization.?.scales = projection.quantization.?.scales.bitCast(.u8);
+                const q = &projection.quantization.?;
+                q.scales = q.scales.bitCast(.u8);
+                if (scheme == .nvfp4) {
+                    // CuTe takes the input quantization multiplier and a GEMM
+                    // output multiplier that folds in its inverse.
+                    const input_scale = q.input_scale.?.asMultiplier();
+                    q.global_scale = .{ .value = q.global_scale.?.asMultiplier().mul(input_scale), .operation = .multiply };
+                    q.input_scale = .{ .value = Tensor.scalar(1, .f32).div(input_scale), .operation = .multiply };
+                }
             },
             .triton => if (scheme == .mxfp4) {
                 projection.weight = packFp4Bytes(projection.weight);
@@ -261,7 +276,7 @@ fn forward(input: Tensor, c: Case) Outputs {
         .routing_weight_placement = c.placement,
         .input_quantization = switch (c.backend) {
             .metal => .none,
-            .cute => .mxfp8_bf16,
+            .cute => if (c.scheme == .nvfp4) .automatic else .mxfp8_bf16,
             .triton => if (c.scheme == .mxfp4 and zml.Compiler.current().platform.target == .cuda) .mxfp8 else .automatic,
             else => .automatic,
         },
@@ -306,8 +321,13 @@ const specialized_shapes = [_]FixtureShape{
     .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 17, .topk = 2 },
     .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 34, .topk = 2 },
 };
+// Exercise direct decode routing with multiple experts; a single route is unsupported.
+const specialized_shapes_cute = [_]FixtureShape{
+    .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 1, .topk = 2 },
+} ++ specialized_shapes[1..].*;
 
 const Format = struct {
+    non_unit_scales: bool = false,
     scheme: ?zml.Quantization.Scheme = null,
     activation_dtype: zml.DataType = .bf16,
 };
@@ -345,6 +365,7 @@ const Matrix = struct {
             .activation = activation,
             .scheme = format.scheme,
             .activation_dtype = format.activation_dtype,
+            .non_unit_scales = format.non_unit_scales,
             .quantize_input = quantize_input,
             .placement = placement,
             .bias = bias,
@@ -588,7 +609,7 @@ test "FlashInfer compatibility matrix" {
 
     // Only default SwiGLU, no linear bias, and routing after the down projection.
     try pipeline.run(std.testing.io, std.testing.allocator, .flashinfer_cutlass, .{
-        .formats = &.{ .{}, .{ .scheme = .nvfp4 } },
+        .formats = &.{.{ .scheme = .nvfp4 }},
         .activations = &.{.{ .swiglu = .{} }},
     }, .{});
 }
@@ -603,7 +624,27 @@ test "specialized CuTe MXFP4 compatibility matrix" {
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
         .placements = &.{.before_down},
-        .shapes = &specialized_shapes,
+        .shapes = &specialized_shapes_cute,
+    }, .{});
+}
+
+test "CuTe NVFP4 compatibility matrix" {
+    const platform = zml.testing.env();
+    if (!zml.moe.cute.isNvfp4Supported(platform)) return error.SkipZigTest;
+
+    const pipeline: Pipeline = .{ .platform = platform };
+    try pipeline.run(std.testing.io, std.testing.allocator, .cute, .{
+        .formats = &.{
+            .{ .scheme = .nvfp4 },
+            .{ .scheme = .nvfp4, .non_unit_scales = true },
+        },
+        .activations = &.{ .{ .swiglu = .{} }, .{ .swiglu = .{ .limit = 0.25 } } },
+        .placements = &.{ .before_down, .after_down },
+        .shapes = &.{
+            .{ .width = 5120, .intermediate = 2304, .tokens = 1, .topk = 2 },
+            .{ .width = 5120, .intermediate = 2304, .tokens = 17, .topk = 2 },
+            .{ .width = 5120, .intermediate = 2304, .tokens = 34, .topk = 3 },
+        },
     }, .{});
 }
 

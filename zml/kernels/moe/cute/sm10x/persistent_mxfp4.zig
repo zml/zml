@@ -14,10 +14,27 @@ const std = @import("std");
 const mlir = @import("mlir");
 const nvvm = @import("mlir/dialects/nvvm");
 
-const zml = @import("../../../zml.zig");
+const zml = @import("../../../../zml.zig");
 const cute = zml.kernel.cute;
 const B = cute.Builder;
 const V = cute.Value;
+const common = @import("common.zig");
+const typed = common.typed;
+const gridTyped = common.gridTyped;
+const barrierAt = common.barrierAt;
+const PipelinePosition = common.PipelinePosition;
+const PersistentWork = common.PersistentWork;
+const DirectRoutes = common.DirectRoutes;
+const persistentWorkAt = common.persistentWorkAt;
+const advancePersistentWork = common.advancePersistentWork;
+const advancePipeline = common.advancePipeline;
+const peekBarrierIfRemaining = common.peekBarrierIfRemaining;
+const sharedPointerAt = common.sharedPointerAt;
+const offsetAlignment = common.offsetAlignment;
+const typesOf = common.typesOf;
+const tupleOf = common.tupleOf;
+const fmt = common.fmt;
+const view = common.view;
 
 const accumulator_stages = 2;
 
@@ -331,14 +348,6 @@ pub fn downRows(cfg: Config, a: Inputs, route_inverse: zml.Tensor) zml.Tensor {
         .input_scale = a.input_scale,
         .route_inverse = route_inverse,
     }, .{ .output = .init(.{ cfg.routes, cfg.m }, .bf16) }, .{ .cfg = cfg, .scalars = &.{ cfg.m, cfg.n, cfg.k, cfg.groups, cfg.experts } }).output;
-}
-
-fn typed(type_: *const mlir.Type) struct { mlir_type: cute.ArgSpec.MlirTypeSpec } {
-    return .{ .mlir_type = .{ .type_ = type_ } };
-}
-
-fn gridTyped(type_: *const mlir.Type) struct { mlir_type: cute.ArgSpec.MlirTypeSpec } {
-    return .{ .mlir_type = .{ .type_ = type_, .grid_constant = true } };
 }
 
 /// The two projections share this kernel but get distinct symbols, so a
@@ -759,135 +768,6 @@ fn issueTmaStage(
     b.copy(b.setTmaBarrier(exec_sfb, stage.load_barrier), .{sfb_source}, .{stage.sfb_destination}, null);
 }
 
-fn barrierAt(b: *B, base: V, stage: V) V {
-    return b.addOffset(
-        base,
-        b.makeIntTuple(.{stage}),
-        b.ptrTy(.i64, .smem, 8) catch @panic("bad pipeline barrier pointer"),
-    ).value();
-}
-
-const PipelinePosition = struct {
-    index: V,
-    phase: V,
-};
-
-/// Scalar form of CUTLASS's StaticPersistentTileScheduler state for the
-/// one-CTA DeepSeek specialization.  Python carries the decoded M/N/L
-/// coordinate, validity predicate, linear work index, and executed-tile
-/// count through every role's `scf.while`.  Keeping the same state shape is
-/// important to the CuTe software-pipeline passes, even though N is always
-/// zero for one tile per group.
-const PersistentWork = struct {
-    m: V,
-    n: V,
-    group: V,
-    valid: V,
-    linear: V,
-    executed: V,
-};
-
-/// Direct routing (one token) runs one single-row group per route. Routes
-/// owned by other expert-parallel ranks carry expert -1: the persistent tiles
-/// cover the valid routes only, in route order, so they do not occupy a wave.
-const DirectRoutes = struct {
-    expert_ids: cute.View,
-    routes: usize,
-
-    fn count(self: DirectRoutes, b: *B) V {
-        var valid = b.constant(.i32, 0);
-        for (0..self.routes) |r| valid = valid.add(self.expertAt(b, r).ge(0).to(.i32));
-        return valid;
-    }
-
-    /// Route of the `k`-th valid route.
-    fn nth(self: DirectRoutes, b: *B, k: V) V {
-        var seen = b.constant(.i32, 0);
-        var route = b.constant(.i32, 0);
-        for (0..self.routes) |r| {
-            const valid = self.expertAt(b, r).ge(0);
-            route = b.select(valid.bitAnd(seen.eq(k)), b.constant(.i32, r), route);
-            seen = seen.add(valid.to(.i32));
-        }
-        return route;
-    }
-
-    fn expertAt(self: DirectRoutes, b: *B, r: usize) V {
-        return self.expert_ids.get(.{b.constant(.i32, r)}, .i32);
-    }
-};
-
-fn persistentWorkAt(
-    b: *B,
-    linear: V,
-    executed: V,
-    active: V,
-    tiles_m: V,
-    div_m: V,
-    div_n: V,
-    direct: ?DirectRoutes,
-) PersistentWork {
-    // StaticPersistentTileScheduler uses two first-class FastDivmod objects
-    // to decode the column-major (M, N=1, L) problem layout.  Preserve those
-    // operations even though ordinary rem/div is mathematically equivalent;
-    // CuTe's scheduler reconstruction and loop canonicalization key off these
-    // values and carry them through every persistent loop.
-    const group_and_m = b.fastDivmod(linear, div_m);
-    const group_and_n = b.fastDivmod(group_and_m[0], div_n);
-    const group = if (direct) |routes| routes.nth(b, group_and_n[0]) else group_and_n[0];
-    return .{
-        .m = b.makeWarpUniform(group_and_m[1]),
-        .n = b.makeWarpUniform(group_and_n[1]),
-        .group = b.makeWarpUniform(group),
-        .valid = b.makeWarpUniform(linear.lt(active.mul(tiles_m))),
-        .linear = linear,
-        .executed = executed,
-    };
-}
-
-fn advancePersistentWork(
-    b: *B,
-    linear: V,
-    executed: V,
-    persistent_clusters: V,
-    active: V,
-    tiles_m: V,
-    div_m: V,
-    div_n: V,
-    direct: ?DirectRoutes,
-) PersistentWork {
-    return persistentWorkAt(b, linear.add(persistent_clusters), executed.add(1), active, tiles_m, div_m, div_n, direct);
-}
-
-/// Equivalent to CUTLASS PipelineState.advance().  Keep the index and phase
-/// as explicit loop-carried SSA values instead of recovering them with
-/// division/remainder; the generated CuTe program then has the same circular
-/// state transition as the Python DSL.
-fn advancePipeline(b: *B, index: V, phase: V, comptime stages: usize) PipelinePosition {
-    const advanced = index.add(1);
-    const wraps = advanced.eq(stages);
-    const next_index = b.select(wraps, 0, advanced);
-    var next_phase = b.openIfElse(wraps, .{phase});
-    {
-        next_phase.yieldThen(.{phase.bitXor(1)});
-    }
-    {
-        next_phase.yieldElse(.{phase});
-    }
-    return .{ .index = next_index, .phase = next_phase.results[0] };
-}
-
-fn peekBarrierIfRemaining(b: *B, base: V, count: V, limit: usize, state: PipelinePosition) V {
-    var peek = b.openIfElse(count.lt(limit), .{.i1});
-    {
-        peek.yieldThen(.{b.mbarrierWaitParity(barrierAt(b, base, state.index), state.phase)});
-    }
-    {
-        peek.yieldElse(.{b.constant(.i1, true)});
-    }
-    return peek.results[0];
-}
-
 fn accumulatorTmemAt(b: *B, comptime tile: Tile, tmem: V, stage: V) V {
     // The stage offset is a whole tile width, which `cute.add_offset` needs to
     // know: it derives the result alignment from what it knows of the offset.
@@ -896,40 +776,6 @@ fn accumulatorTmemAt(b: *B, comptime tile: Tile, tmem: V, stage: V) V {
         b.makeIntTupleDivBy(stage.mul(tile.n), @intCast(tile.n)),
         b.ptrTy(.f32, .tmem, 16) catch @panic("bad accumulator TMEM pointer"),
     ).value();
-}
-
-/// `cute.add_offset` infers the alignment a pointer keeps as the gcd of the
-/// base alignment and the offset, and `cute.recast_iter` may not change it, so
-/// the field's own alignment has to be what the offset leaves.
-fn sharedPointerAt(
-    b: *B,
-    base: V,
-    comptime byte_offset: i64,
-    comptime dtype: cute.DType,
-    comptime alignment: u64,
-) V {
-    const moved = comptime movedAlignment(byte_offset);
-    comptime std.debug.assert(moved >= alignment);
-    const byte_ptr = b.addOffset(
-        base,
-        b.makeIntTuple(.{byte_offset}),
-        b.ptrTy(.i8, .smem, moved) catch @panic("bad shared byte pointer"),
-    );
-    return b.recastPointer(byte_ptr, dtype, .smem, moved);
-}
-
-/// Alignment of `shared_base + byte_offset`, which the shared storage is
-/// allocated with.
-fn movedAlignment(comptime byte_offset: i64) u64 {
-    return offsetAlignment(1024, byte_offset, 1);
-}
-
-/// `cute.add_offset` keeps the gcd of the operand alignment and the offset,
-/// and the op's result type has to say so.
-fn offsetAlignment(base_bytes: u64, offset_elements: i64, element_bytes: u64) u64 {
-    if (offset_elements == 0) return base_bytes;
-    const moved = @as(u64, @intCast(@abs(offset_elements))) * element_bytes;
-    return @max(std.math.gcd(base_bytes, moved), element_bytes);
 }
 
 /// Warp 5 runs independently over every persistent output tile.  Keep the
@@ -1430,10 +1276,6 @@ fn runMmaConsumer(
         accumulator_tail.phase,
         10_000_000,
     );
-}
-
-fn view(b: *B, value: V) cute.View {
-    return .{ .inner = value.inner, .kernel = b };
 }
 
 /// Epilogue operands; which fields are set depends on the `Epilogue`.

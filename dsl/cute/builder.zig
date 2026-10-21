@@ -457,6 +457,11 @@ pub const TmaPartition = struct {
 /// Element encoding of a TMA transfer when it differs from the tensor dtype.
 pub const TmaFormat = enum {
     default,
+    /// Packed 4-bit elements, two per byte in shared memory (NVFP4 operands
+    /// of the `mxf4nvf4` MMA).
+    u4,
+    /// 4-bit elements expanded to one per byte in shared memory (FP4 operands
+    /// of the `mxf8f6f4` MMA).
     u4_unpack_u8,
     u16,
 };
@@ -477,17 +482,53 @@ pub const BlockScaledMma = struct {
     tiled: Atom,
 };
 
-/// Shape of the SM100 block-scaled MXFP4 x MXFP8 MMA instruction.
+/// SM100 block-scaled MMA instruction: one CTA computes a 128 x `n` tile,
+/// FP4 weights as A. The instruction `kind` fixes B, the scales and K.
 pub const BlockScaledMmaConfig = struct {
-    m: u16 = 128,
+    kind: Kind = .mxfp4_mxfp8,
     n: u16,
-    k: u16 = 32,
-    num_cta: u8 = 1,
-    vec_size: u8 = 32,
+
+    pub const Kind = enum {
+        /// MXFP4 weights x MXFP8 activations: E8M0 scales every 32
+        /// elements, K = 32 (PTX `kind::mxf8f6f4`).
+        mxfp4_mxfp8,
+        /// NVFP4 x NVFP4: E4M3 scales every 16 elements, K = 64 (PTX
+        /// `kind::mxf4nvf4.block16`).
+        nvfp4_nvfp4,
+    };
+
+    pub fn k(self: BlockScaledMmaConfig) u16 {
+        return switch (self.kind) {
+            .mxfp4_mxfp8 => 32,
+            .nvfp4_nvfp4 => 64,
+        };
+    }
+
+    fn bType(self: BlockScaledMmaConfig) DType {
+        return switch (self.kind) {
+            .mxfp4_mxfp8 => .f8e4m3fn,
+            .nvfp4_nvfp4 => .f4e2m1fn,
+        };
+    }
+
+    fn scaleType(self: BlockScaledMmaConfig) DType {
+        return switch (self.kind) {
+            .mxfp4_mxfp8 => .f8e8m0fnu,
+            .nvfp4_nvfp4 => .f8e4m3fn,
+        };
+    }
+
+    fn vecSize(self: BlockScaledMmaConfig) u8 {
+        return switch (self.kind) {
+            .mxfp4_mxfp8 => 32,
+            .nvfp4_nvfp4 => 16,
+        };
+    }
 };
 
 fn tmaDataFormat(format: TmaFormat, dtype: DType) cute_nvgpu.TmaDataFormat {
     return switch (format) {
+        .u4 => .U4,
         .u4_unpack_u8 => .U4_UNPACK_U8,
         .u16 => .U16,
         .default => switch (dtype) {
@@ -1864,7 +1905,7 @@ pub const Builder = struct {
 
     // ==================== cute_nvgpu.tcgen05 (SM100) ====================
 
-    /// Tiled MMA type of the SM100 block-scaled MXFP4 x MXFP8 atom.
+    /// Tiled MMA type of the block-scaled atom described by `cfg`.
     pub fn blockScaledMmaType(self: *Builder, cfg: BlockScaledMmaConfig) *const mlir.Type {
         return (cute_ir.TiledMmaType.get(self.ctx, .{
             .mmaAtom = self.blockScaledAtomType(cfg),
@@ -1874,27 +1915,24 @@ pub const Builder = struct {
     }
 
     fn blockScaledAtomType(self: *Builder, cfg: BlockScaledMmaConfig) *const mlir.Type {
+        if (cfg.n < 8 or cfg.n > 256 or cfg.n % 8 != 0) std.debug.panic("unsupported block-scaled MMA N {d}", .{cfg.n});
         return (cute_nvgpu.MmaAtomSM100UMMABlockScaledType.get(self.ctx, .{
-            .shapeMnk = self.algebraAttr(cute_ir.ShapeAttr, self.expr(.{ cfg.m, cfg.n, cfg.k })).attribute(),
-            .numCta = cfg.num_cta,
+            .shapeMnk = self.algebraAttr(cute_ir.ShapeAttr, self.expr(.{ 128, cfg.n, cfg.k() })).attribute(),
+            .numCta = 1,
             .aMajor = .k,
             .bMajor = .k,
             .aType = DType.f4e2m1fn.toMlir(self.ctx),
-            .bType = DType.f8e4m3fn.toMlir(self.ctx),
+            .bType = cfg.bType().toMlir(self.ctx),
             .cType = DType.f32.toMlir(self.ctx),
-            .sfType = DType.f8e8m0fnu.toMlir(self.ctx),
+            .sfType = cfg.scaleType().toMlir(self.ctx),
             .aFragKind = .smem_desc,
-            .vecSize = cfg.vec_size,
+            .vecSize = cfg.vecSize(),
         }) catch @panic("invalid block-scaled MMA atom")).type_();
     }
 
-    /// SS, K-major MXFP4 x MXFP8 block-scaled atom and its tiled MMA, as the
-    /// CuTe DSL builds them. Both scale-factor pointers start at `scale_ptr`
-    /// and are patched after tensor-memory allocation.
+    /// Block-scaled atom and its tiled MMA. Both scale-factor pointers start
+    /// at `scale_ptr` and are patched after tensor-memory allocation.
     pub fn makeBlockScaledMma(self: *Builder, cfg: BlockScaledMmaConfig, scale_ptr: Value) BlockScaledMma {
-        if (cfg.m != 128 or cfg.k != 32 or cfg.n < 8 or cfg.n > 256 or cfg.n % 8 != 0) {
-            std.debug.panic("unsupported SM100 block-scaled MMA shape {d}x{d}x{d}", .{ cfg.m, cfg.n, cfg.k });
-        }
         const disabled = self.constant(.i1, false);
         const atom = self.makeAtom(self.blockScaledAtomType(cfg), .{ disabled, disabled, disabled, scale_ptr, scale_ptr });
         const tiled = self.emit(cute_ir.make_tiled_mma(self.ctx, atom.inner, self.blockScaledMmaType(cfg), self.loc()));
@@ -2251,6 +2289,45 @@ pub const Builder = struct {
             "{ .reg .b16 lo, hi; cvt.rn.satfinite.e4m3x2.f32 lo, $2, $1; cvt.rn.satfinite.e4m3x2.f32 hi, $4, $3; mov.b32 $0, {lo, hi}; }",
             &.{ a.to(.f32).inner, b.to(.f32).inner, c.to(.f32).inner, d.to(.f32).inner },
             .{ .constraints = "=r,f,f,f,f", .result_type = .int(self.ctx, .i32) },
+            self.loc(),
+        ));
+    }
+
+    /// Eight FP32 values rounded to FP4 E2M1 (saturating, nearest-even) and
+    /// packed into one 32-bit word, `values[0]` in the lowest nibble: the
+    /// packed NVFP4 storage order.
+    pub fn packFp4x8(self: *Builder, values: [8]Value) Value {
+        var operands: [8]*const mlir.Value = undefined;
+        for (&operands, values) |*operand, value| operand.* = value.to(.f32).inner;
+        return self.emit(llvm.inline_asm(
+            self.ctx,
+            "{ .reg .b8 b0, b1, b2, b3; cvt.rn.satfinite.e2m1x2.f32 b0, $2, $1; cvt.rn.satfinite.e2m1x2.f32 b1, $4, $3; " ++
+                "cvt.rn.satfinite.e2m1x2.f32 b2, $6, $5; cvt.rn.satfinite.e2m1x2.f32 b3, $8, $7; mov.b32 $0, {b0, b1, b2, b3}; }",
+            &operands,
+            .{ .constraints = "=r,f,f,f,f,f,f,f,f", .result_type = .int(self.ctx, .i32) },
+            self.loc(),
+        ));
+    }
+
+    /// Two FP32 values rounded to FP4 E2M1 (saturating, nearest-even) in the
+    /// low byte of a 32-bit word, `a` in the low nibble.
+    pub fn packFp4x2(self: *Builder, a: Value, b: Value) Value {
+        return self.emit(llvm.inline_asm(
+            self.ctx,
+            "{ .reg .b8 lo; cvt.rn.satfinite.e2m1x2.f32 lo, $2, $1; cvt.u32.u8 $0, lo; }",
+            &.{ a.to(.f32).inner, b.to(.f32).inner },
+            .{ .constraints = "=r,f,f", .result_type = .int(self.ctx, .i32) },
+            self.loc(),
+        ));
+    }
+
+    /// The FP8 E4M3 byte at the low end of `bits` (an i32), decoded to FP32.
+    pub fn e4m3ToF32(self: *Builder, bits: Value) Value {
+        return self.emit(llvm.inline_asm(
+            self.ctx,
+            "{ .reg .b16 lo, hl, hh; .reg .b32 pair; cvt.u16.u32 lo, $1; cvt.rn.f16x2.e4m3x2 pair, lo; mov.b32 {hl, hh}, pair; cvt.f32.f16 $0, hl; }",
+            &.{bits.inner},
+            .{ .constraints = "=f,r", .result_type = DType.f32.toMlir(self.ctx) },
             self.loc(),
         ));
     }
@@ -3048,11 +3125,14 @@ test "SM100 block-scaled MMA atoms use the CuTe DSL instruction shapes" {
     const sf_ptr = b.intToPtr(0, .f8e8m0fnu, .tmem, 1);
     _ = b.makeBlockScaledMma(.{ .n = 16 }, sf_ptr);
     _ = b.makeBlockScaledMma(.{ .n = 128 }, sf_ptr);
+    const nvfp4_sf_ptr = b.intToPtr(0, .f8e4m3fn, .tmem, 1);
+    _ = b.makeBlockScaledMma(.{ .kind = .nvfp4_nvfp4, .n = 16 }, nvfp4_sf_ptr);
 
     const ir = try b.finish(.{ 192, 1, 1 });
     defer std.testing.allocator.free(ir);
     try std.testing.expect(std.mem.indexOf(u8, ir, "sm100.mma_bs<128x16x32") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "sm100.mma_bs<128x128x32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "sm100.mma_bs<128x16x64, num_cta = 1, ab_major = (k, k), elem_type = (f4E2M1FN, f4E2M1FN, f32), sf_type = f8E4M3FN, frag_kind = ss, vec_size = 16>") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "cute.make_tiled_mma") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "cute_nvgpu.grid_constant") != null);
 
