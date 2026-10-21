@@ -26,11 +26,20 @@ pub const Inputs = struct {
     ids: zml.Tensor,
 };
 
-/// The kernels are tuned for the DeepSeek V4.1 expert geometry, shared by the
-/// main MoE and the D-Spark drafter. Expert count and top-k are parameters.
+/// The boundary quantizer handles four 128-column tiles per CTA. The GEMMs
+/// support 128-column tiles and a fixed set of reduction tile counts.
 pub fn validateShapes(hidden: i64, intermediate: i64) void {
-    stdx.debug.assert(hidden == 5120, "cute backend expects hidden dimension to be 5120, got {}", .{hidden});
-    stdx.debug.assert(intermediate == 2304, "cute backend expects intermediate dimension to be 2304, got {}", .{intermediate});
+    stdx.debug.assert(hidden > 0 and @rem(hidden, 4 * 128) == 0, "cute backend requires hidden dimension to be a positive multiple of 512, got {}", .{hidden});
+    stdx.debug.assert(intermediate > 0 and @rem(intermediate, 128) == 0, "cute backend requires intermediate dimension to be a positive multiple of 128, got {}", .{intermediate});
+    stdx.debug.assert(supportedReductionTiles(@divTrunc(hidden, 128)), "cute backend does not support hidden reduction tile count {}, got hidden dimension {}", .{ @divTrunc(hidden, 128), hidden });
+    stdx.debug.assert(supportedReductionTiles(@divTrunc(intermediate, 128)), "cute backend does not support intermediate reduction tile count {}, got intermediate dimension {}", .{ @divTrunc(intermediate, 128), intermediate });
+}
+
+fn supportedReductionTiles(tiles: i64) bool {
+    return switch (tiles) {
+        16, 18, 32, 40 => true,
+        else => false,
+    };
 }
 
 /// Route each token/top-k pair to its own one-row group instead of grouping
@@ -159,13 +168,13 @@ fn route(tokens: i64, experts: i64, topk: i64, n: i64, direct: bool, ids: zml.Te
 }
 
 /// `[tokens, hidden]` BF16 output of the MoE layer.
-pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs) zml.Tensor {
+pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: ?f32, a: Inputs) zml.Tensor {
     return forwardWithTile(tokens, hidden, intermediate, experts, topk, swiglu_limit, a, null);
 }
 
 /// `forward` with an explicit GEMM tile N, for tuning. `null` selects it from
 /// the batch size.
-pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: f32, a: Inputs, tile_n: ?i64) zml.Tensor {
+pub fn forwardWithTile(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: i64, swiglu_limit: ?f32, a: Inputs, tile_n: ?i64) zml.Tensor {
     const n = tile_n orelse tileN(tokens, experts, topk);
     const direct = isDirect(tokens);
     const routing = route(tokens, experts, topk, n, direct, a.ids);
