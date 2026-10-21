@@ -23,6 +23,6 @@ pub fn unloadBuffers(self: *zml.Bufferized(RMSNorm)) void {
 
 // The basic nn.LayerNorm
 pub fn forward(self: RMSNorm, x: zml.Tensor) zml.Tensor {
-    var normalized = zml.nn.rmsNorm(x, self.tag, self.eps);
+    const normalized = zml.nn.rmsNorm(x, self.tag, self.eps);
     return normalized.mul(self.weight.withTags(.{.hd}).broad(normalized.shape()));
 }
