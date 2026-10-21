@@ -1376,6 +1376,8 @@ pub fn cudaTile(inputs: anytype, outputs: anytype, opts: CudaTileOps) [outputs.l
 
 pub const TclOps = struct {
     ir: []const u8,
+    /// Outputs the function updates in place in an input's buffer.
+    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
 /// A TCL function the Furiosa plugin compiles as its own native unit.
@@ -1393,6 +1395,7 @@ pub fn tcl(inputs: anytype, outputs: anytype, opts: TclOps) [outputs.len]Tensor 
         .call_target_name = "furiosa.tcl",
         .backend_config = .{ .original = opts.ir },
         .has_side_effect = false,
+        .output_operand_aliases = opts.output_operand_aliases,
     }, compiler.location).appendTo(compiler.currentScope().block);
 
     var outputs_: [outputs.len]Tensor = undefined;

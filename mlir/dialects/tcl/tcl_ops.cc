@@ -51,6 +51,9 @@ LogicalResult VerifyGraph(Operation* op, DictionaryAttr options) {
     min = max = 2;
   } else if (n == "index_write") {
     min = max = 3;
+  } else if (n == "copy") {
+    min = max = 2;
+    results = 0;
   } else if (n == "scratchpad") {
     min = max = 0;
   } else if (n == "full") {
@@ -116,6 +119,9 @@ LogicalResult VerifyGraph(Operation* op, DictionaryAttr options) {
         (op->getResult(0).getType() != table || !op->getOperand(0).hasOneUse()))
       return e() << "writes in place: the table must have no other use";
   }
+  if (n == "copy" && (!isa<BlockArgument>(op->getOperand(1)) ||
+                      op->getOperand(0).getType() != op->getOperand(1).getType()))
+    return e() << "copies a value into a kernel input of its type";
   if ((n == "reduce_max_i32" || n == "sym_expr") &&
       !ScalarI32(op->getResult(0).getType()))
     return e() << "requires a scalar i32 result";
@@ -371,6 +377,9 @@ LogicalResult GraphAsLogicalOp::verify() {
   return VerifyGraph(*this, getOptions());
 }
 LogicalResult GraphAsDramOp::verify() {
+  return VerifyGraph(*this, getOptions());
+}
+LogicalResult GraphCopyOp::verify() {
   return VerifyGraph(*this, getOptions());
 }
 LogicalResult GraphIndexReadOp::verify() {
