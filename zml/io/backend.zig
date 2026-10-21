@@ -40,7 +40,8 @@ pub const Options = struct {
     /// reads to the profile's alignment, at most two alignment units per
     /// request. A direct read never fills the page cache, so under
     /// `auto` a cold file stays cold and comes from the disk on every
-    /// load; on a host whose warm buffered reads beat its disk, a model
+    /// load (the residency probe samples new pages every time, so the ones
+    /// it cached do not count); on a host whose warm buffered reads beat its disk, a model
     /// loaded repeatedly is better served by `off`. Nothing changes for
     /// a profile without alignment.
     /// Warm replicated Llama-3.1-8B on eight MI300X took ~1.10 s buffered but

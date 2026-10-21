@@ -270,7 +270,9 @@ pub fn useDirectIo(self: *VFS, file: std.Io.File, policy: DirectIo) bool {
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const name = self.localName(handle, &path_buffer);
     if (policy == .auto) {
-        const cached = direct_io.cachedFraction(handle.fd(), stat.size) orelse {
+        var shift: u64 = undefined;
+        self.base.inner.random(std.mem.asBytes(&shift));
+        const cached = direct_io.cachedFraction(handle.fd(), stat.size, shift) orelse {
             log.debug("{s}: page cache residency unknown; reading buffered", .{name});
             return decideBuffered(handle);
         };
@@ -892,6 +894,41 @@ test "VFS reads the same bytes under every direct I/O policy" {
         try std.testing.expectEqual(tail.len, try file.readPositionalAll(vfs_io, &tail, alignment + 3));
         try std.testing.expectEqualSlices(u8, contents[alignment + 3 ..][0..tail.len], &tail);
         try std.testing.expectEqual(@as(usize, 0), try file.readPositional(vfs_io, &.{plain}, contents.len));
+    }
+}
+
+test "auto keeps reading a cold file direct after probing it" {
+    if (comptime !direct_io.supported) return error.SkipZigTest;
+    const testing_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // 2 MiB per sample window: many pages each, on 64 KiB-page kernels too.
+    const contents = try std.testing.allocator.alloc(u8, 64 << 20);
+    defer std.testing.allocator.free(contents);
+    @memset(contents, 0x5a);
+    const created = try tmp.dir.createFile(testing_io, "cold.bin", .{ .read = true });
+    try created.writePositionalAll(testing_io, contents, 0);
+    try created.sync(testing_io);
+    _ = std.os.linux.fadvise(created.handle, 0, 0, std.os.linux.POSIX_FADV.DONTNEED);
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = path_buffer[0..try created.realPath(testing_io, &path_buffer)];
+    created.close(testing_io);
+
+    var filesystem = try VFS.init(std.testing.allocator, testing_io);
+    defer filesystem.deinit();
+    const vfs_io = filesystem.io();
+    for (0..2) |open| {
+        const file = try std.Io.Dir.openFile(.cwd(), vfs_io, path, .{ .mode = .read_only });
+        defer file.close(vfs_io);
+        const direct = filesystem.useDirectIo(file, .auto);
+        // A filesystem that kept the file cached (tmpfs) or refused direct
+        // reads says nothing here.
+        if (open == 0 and !direct) return error.SkipZigTest;
+        // The first probe's misses queued reads of the pages it sampled;
+        // once they landed, sampling the same pages would find the file
+        // cached.
+        if (open == 0) try testing_io.sleep(.fromMilliseconds(100), .awake);
+        try std.testing.expect(direct);
     }
 }
 

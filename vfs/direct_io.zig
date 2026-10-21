@@ -25,7 +25,9 @@ pub const cold_fraction: f64 = 0.5;
 
 /// Whether a local file is read past the page cache. A direct read comes
 /// from the disk even when the cache holds the data; it also leaves the cache
-/// as it found it, so a file read directly is still cold for the next load.
+/// as it found it, so a file read directly is still cold for the next load
+/// (the `auto` probe caches what it samples, elsewhere on every probe:
+/// `cachedFraction`).
 /// Raw warm-cache reads exceeded disk throughput in the measured setups,
 /// but the loader can still favor direct reads: page-cache copies compete
 /// with DMA for host memory bandwidth. Conversely, repeated loads from a
@@ -103,20 +105,20 @@ pub const residency_samples = 32;
 
 /// The fraction of `residency_samples` pages spread over the file that the
 /// page cache holds, or null when the filesystem cannot say (no
-/// `RWF_NOWAIT`). Each sample sits mid-window, so the first one is not the
-/// header page a parser has just read. A sample of a page that is not
-/// cached queues readahead for it, a few pages per sample the reads that
-/// follow may reuse.
-/// Sampling offset zero instead made a cold shard report 1/32 cached solely
-/// because the safetensors parser had read its header. Mid-window samples
-/// avoid that systematic bias; unknown residency still selects buffered IO.
-pub fn cachedFraction(fd: std.posix.fd_t, size: u64) ?f64 {
+/// `RWF_NOWAIT`). One sample per window of the file, each `shift` bytes
+/// into its window (`shift` modulo the window), unknown residency selecting
+/// buffered IO. A sample that misses queues the read of its page, which a
+/// direct file never reads back: with the same offsets the next probe found
+/// every sample cached and read a cold file buffered, so callers draw a new
+/// `shift` for every probe. The header page a parser has just read is
+/// sampled only when `shift` lands in it, not systematically.
+pub fn cachedFraction(fd: std.posix.fd_t, size: u64, shift: u64) ?f64 {
     var buffer: [512]u8 = undefined;
     const iovec: std.posix.iovec = .{ .base = &buffer, .len = buffer.len };
     var cached: usize = 0;
     const window = size / residency_samples;
     for (0..residency_samples) |sample| {
-        const offset = window * sample + window / 2;
+        const offset = window * sample + shift % window;
         const rc = linux.preadv2(fd, @ptrCast(&iovec), 1, @intCast(offset), linux.RWF.NOWAIT);
         switch (linux.errno(rc)) {
             .SUCCESS => cached += @intFromBool(rc != 0),
