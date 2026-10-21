@@ -21,6 +21,7 @@ partition: Partitioning,
 
 pub const MAX_MESH_RANK = 4;
 pub const replicated: Sharding = .{ .mesh = null, .partition = .replicated(Shape.MAX_RANK) };
+pub const open: Sharding = .{ .mesh = null, .partition = .open(Shape.MAX_RANK) };
 
 pub fn get(sharding: Sharding, ax: usize) PartitionSpec {
     return sharding.partition.get(ax);

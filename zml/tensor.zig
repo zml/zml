@@ -80,7 +80,7 @@ pub const Tensor = struct {
     /// Ordinary results have no sharding declaration. Shardy infers their layout.
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
         var res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
-        res._shape._sharding = .{ .mesh = null, .partition = .open(sh.rank()) };
+        res._shape._sharding = .open;
 
         if (builtin.mode == .debug) {
             // Check that the MLIR value actually have the same shape.
@@ -108,7 +108,7 @@ pub const Tensor = struct {
             ._dtype = ctx.dtype(ranked_tensor.elementType()),
             ._dims = .empty,
             ._tags = .{ .buffer = @splat(Shape.TagUnknown), .len = n },
-            ._sharding = .{ .mesh = null, .partition = .open(@intCast(n)) },
+            ._sharding = .open,
         };
         for (0..n) |i| {
             sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
@@ -223,10 +223,6 @@ pub const Tensor = struct {
 
         var res = _result(partitioned_shape, op_result);
         res._shape = partitioned_shape;
-        const scope = ctx.currentScope();
-        if (scope.id_to_memory.get(self.id)) |memory| {
-            scope.id_to_memory.put(scope.arena.allocator(), res.id, memory) catch @panic("OOM");
-        }
         return res;
     }
 
@@ -972,9 +968,7 @@ pub const Tensor = struct {
             const b = Tensor.constant(DataType.Value.init(sh.dtype(), opts.stddev));
             const res_tensor_shape = Tensor.constantTensor(Shape.init(.{sh.rank()}, .i64), std.mem.sliceAsBytes(sh.dims()));
             const op = dialects.stablehlo.rng(mlirCtx(), a.value(), b.value(), res_tensor_shape.value(), .NORMAL, currentLoc()).appendTo(currentBlock());
-            var result = _result(sh, op.result(0));
-            result._shape = sh;
-            return result;
+            return _result(sh, op.result(0));
         }
 
         /// Returns a Tensor of the given shape, filled with floating point numbers sampled from a Gumbel distribution, and a new Rng state.

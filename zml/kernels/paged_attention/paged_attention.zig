@@ -330,12 +330,17 @@ test pagedAttention {
         },
     };
 
+    const random = struct {
+        fn normal(shape: zml.Shape) zml.Tensor {
+            return zml.Tensor.Rng.normal(shape, .{}).withPartitioning(shape._sharding.mesh.?, shape._sharding.partition);
+        }
+    };
     const meshes: []const *const zml.Mesh = &.{ platform.replicated_mesh, platform.meshes.get("model").? };
-    const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{} }, .{ .meshes = meshes });
+    const rng_q = try platform.compileFn(allocator, io, random.normal, .{tensors.q.shape()}, .{ .meshes = meshes });
     defer rng_q.deinit();
-    const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{} }, .{ .meshes = meshes });
+    const rng_k = try platform.compileFn(allocator, io, random.normal, .{tensors.k.shape()}, .{ .meshes = meshes });
     defer rng_k.deinit();
-    const rng_kv_cache = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.kv_cache.split.k.shape(), .{} }, .{ .meshes = meshes });
+    const rng_kv_cache = try platform.compileFn(allocator, io, random.normal, .{tensors.kv_cache.split.k.shape()}, .{ .meshes = meshes });
     defer rng_kv_cache.deinit();
 
     const triton_options_args: Options.Args = .{
