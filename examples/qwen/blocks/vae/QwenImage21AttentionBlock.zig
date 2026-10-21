@@ -17,6 +17,7 @@ to_qkv: Conv2d,
 proj: Conv2d,
 
 pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21AttentionBlock)) void {
+    QwenImage21RMS_norm.unloadBuffers(&self.norm);
     Conv2d.unloadBuffers(&self.to_qkv);
     Conv2d.unloadBuffers(&self.proj);
 }

@@ -19,8 +19,14 @@ norm1: QwenImage21RMS_norm,
 conv1: QwenImage21CausalConv3d,
 norm2: QwenImage21RMS_norm,
 conv2: QwenImage21CausalConv3d,
+conv_shortcut: ?QwenImage21CausalConv3d,
 
 pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21ResidualBlock)) void {
+    QwenImage21RMS_norm.unloadBuffers(&self.norm1);
     QwenImage21CausalConv3d.unloadBuffers(&self.conv1);
+    QwenImage21RMS_norm.unloadBuffers(&self.norm2);
     QwenImage21CausalConv3d.unloadBuffers(&self.conv2);
+    if (self.conv_shortcut) |*conv_shortcut| {
+        QwenImage21CausalConv3d.unloadBuffers(conv_shortcut);
+    }
 }
