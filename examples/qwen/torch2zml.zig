@@ -174,8 +174,8 @@ const VaeWrapper = struct {
         self: VaeWrapper,
         x: zml.Tensor,
     ) zml.Tensor {
-        const tagged = x.withTags(.{ .d, .dout, .t, .kx, .ky });
-        return self.model.forward(tagged, tagged.dim(.dout));
+        const tagged = x.withTags(.{ .bs, .c, .t, .kx, .ky });
+        return self.model.forward(tagged);
     }
 };
 
