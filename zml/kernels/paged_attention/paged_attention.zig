@@ -6,7 +6,7 @@ const zml = @import("../../zml.zig");
 const metal = @import("metal/metal.zig");
 const tpu = @import("mosaic_tpu/mosaic_tpu.zig");
 const triton = @import("triton/triton.zig");
-const tcl = @import("tcl/tcl.zig");
+pub const tcl = @import("tcl/tcl.zig");
 const stablehlo = @import("stablehlo/stablehlo.zig");
 
 const PagedAttention = @This();
