@@ -2144,12 +2144,12 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
     // Sometimes the backend recognize this pattern, but not always.
     // So let us handle that.
     if (indices_shape.count() == 1 and idx_axes.len == 1) {
-        return self
-            .slice(idx_axes[0], .dyn(indices_per_axis.get(0).asScalar(), 1))
-            // Keep downstream remeshe after the slice. SPMD engines like Neuron otherwise
-            // may hoist an all-gather before the slice and materialize the full tensor.
-            .optimizationBarrier()
-            .reshape(res_shape);
+        const sliced = self.slice(idx_axes[0], .dyn(indices_per_axis.get(0).asScalar(), 1));
+        // Keep downstream remeshe after the slice. SPMD engines like Neuron otherwise
+        // may hoist an all-gather before the slice and materialize the full tensor.
+        // Furiosa compiles one device, where the barrier would only split units.
+        const kept = if (Compiler.current().platform.target == .furiosa) sliced else sliced.optimizationBarrier();
+        return kept.reshape(res_shape);
     }
 
     var slice_dims: Shape.DimsArray = .empty;
