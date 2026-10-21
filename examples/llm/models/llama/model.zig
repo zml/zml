@@ -587,6 +587,7 @@ const SelfAttn = struct {
             token_index,
             attention_metadata,
             attention_parameters,
+            .{ .mesh = zml.Compiler.current().mesh(.model), .heads = "model", .kv_heads = "model" },
         );
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });

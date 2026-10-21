@@ -93,6 +93,27 @@ pub const Metadata = union(BackendType) {
     }
 };
 
+/// Caller-selected logical mesh and query/KV head axes. `null` explicitly replicates.
+pub const Sharding = struct {
+    mesh: *const zml.Mesh,
+    heads: ?zml.Shape.Tag,
+    kv_heads: ?zml.Shape.Tag,
+
+    pub fn kvPartition(self: Sharding, shape: zml.Shape, head_dim: anytype) zml.Sharding.Partitioning {
+        var kv = self;
+        kv.heads = self.kv_heads;
+        return kv.partition(shape, head_dim);
+    }
+
+    pub fn partition(self: Sharding, shape: zml.Shape, head_dim: anytype) zml.Sharding.Partitioning {
+        const replicated: zml.Sharding.Partitioning = .replicated(shape.rank());
+        const axis = self.heads orelse return replicated;
+        const mesh_axis = self.mesh.resolveLogicalAxis(axis) orelse
+            std.debug.panic("Attention mesh '{s}' has no logical axis '{s}'", .{ self.mesh.name, axis });
+        return replicated.set(shape.axis(head_dim), .sharded(@intCast(mesh_axis)));
+    }
+};
+
 /// Causal attention as used in transformers.
 ///
 /// **Shapes**:
@@ -104,7 +125,7 @@ pub const Metadata = union(BackendType) {
 ///   - .q is the number of queries
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
-pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
+pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, sharding: Sharding) zml.Tensor {
     return switch (parameters) {
         .stablehlo => b: {
             // Generate the attention mask.
@@ -114,9 +135,9 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
             // then slice into it, but XLA is able to optimize this correctly.
             attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.appendAxes(.{.coord}), .{});
-            const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
+            const attn_output = zml.nn.sdpa(q.withPartitioning(sharding.mesh, sharding.partition(q.shape(), .h)), k.withPartitioning(sharding.mesh, sharding.kvPartition(k.shape(), .h)), v.withPartitioning(sharding.mesh, sharding.kvPartition(v.shape(), .h)), .{ .attn_mask = attn_mask });
             break :b attn_output;
         },
-        .flash_attention => flash_attention.attention(q, k, v, token_index, metadata.flash_attention, parameters.flash_attention),
+        .flash_attention => flash_attention.attention(q, k, v, token_index, metadata.flash_attention, parameters.flash_attention, sharding),
     };
 }

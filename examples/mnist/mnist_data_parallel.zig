@@ -67,8 +67,8 @@ const Mnist = struct {
         }
 
         return x.argMax(.d).indices.convert(.u8)
-            .withPartitioning(.dp_mp, .{ .b = .data, .d = .replicated })
-            .toMemory(.host_pinned);
+            .toMemory(.host_pinned)
+            .withPartitioning(.dp_mp, .{ .b = .data, .d = .replicated });
     }
 
     const Layer = struct {

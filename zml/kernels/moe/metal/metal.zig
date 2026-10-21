@@ -80,6 +80,7 @@ pub fn fusedExperts(
     opts: zml.moe.Options,
 ) zml.Tensor {
     validateOptions(opts);
+    stdx.debug.assert(opts.sharding.experts == null or opts.sharding.mesh.numPartitionsForLogicalAxis(opts.sharding.experts.?) == 1, "Metal MoE does not support expert parallelism", .{});
     stdx.debug.assert(gate_up.bias == null, "metal backend doesn't support gate_up bias", .{});
     stdx.debug.assert(down.bias == null, "metal backend doesn't support down bias", .{});
 

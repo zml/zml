@@ -579,6 +579,7 @@ pub const Attention = struct {
                 tokens_position_offset,
                 attention_metadata,
                 attention_parameters,
+                .{ .mesh = zml.Compiler.current().mesh(.model), .heads = "model", .kv_heads = "model" },
             ).merge(.{ .d = .{ .h, .hd } }),
             else => zml.attention.attention(
                 q.squeeze(.batch),
@@ -587,6 +588,7 @@ pub const Attention = struct {
                 tokens_position_offset.squeeze(.batch),
                 attention_metadata,
                 attention_parameters,
+                .{ .mesh = zml.Compiler.current().mesh(.model), .heads = "model", .kv_heads = "model" },
             ).merge(.{ .d = .{ .h, .hd } })
                 .rename(.{ .q = .seq })
                 .insertAxes(.seq, .{.batch}),

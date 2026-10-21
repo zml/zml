@@ -65,6 +65,7 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
 }
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: paged.AttentionOptions) zml.Tensor {
+    stdx.debug.assert(opts.sharding.heads == opts.sharding.kv_heads, "Paged attention requires matching query and KV head sharding", .{});
     stdx.debug.assert(isAvailable(zml.Compiler.current().platform), "CuTe paged attention requires SM89 or newer", .{});
     stdx.debug.assert(q.dtype() == k.dtype() and q.dtype() == v.dtype() and (q.dtype() == .bf16 or q.dtype() == .f16), "CuTe paged attention requires matching BF16 or FP16 Q/K/V", .{});
     stdx.debug.assert(q.dim(.hd) == 32 or q.dim(.hd) == 64 or q.dim(.hd) == 128 or q.dim(.hd) == 256 or q.dim(.hd) == 512, "CuTe paged attention supports head dimensions 32, 64, 128, 256 and 512", .{});
@@ -72,7 +73,17 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
         return sm10x.pagedAttention(parameters, q, k, v, opts);
     if (sm120.isAvailable(zml.Compiler.current().platform) and opts.mask != .indices)
         return sm120.pagedAttention(parameters, q, k, v, opts);
-    return zml.ops.manualComputation(Context.body, Context{ .q = q, .k = k, .v = v, .parameters = parameters, .opts = opts }, q.shape());
+    return zml.ops.manualComputation(Context.body, Context{ .q = q, .k = k, .v = v, .parameters = parameters, .opts = opts }, q.shape(), .{
+        .mesh = opts.sharding.mesh,
+        .in_specs = .{
+            .q = opts.sharding.partition(q.shape(), .hkv),
+            .k = opts.sharding.partition(k.shape(), .hkv),
+            .v = opts.sharding.partition(v.shape(), .hkv),
+            .parameters = .replicated,
+            .opts = .{ .mask = .replicated, .sink = if (opts.sink) |sink| opts.sharding.partition(sink.shape(), 0) else zml.Sharding.Partitioning.replicated(0) },
+        },
+        .out_specs = opts.sharding.partition(q.shape(), .hkv),
+    });
 }
 
 const Context = struct {

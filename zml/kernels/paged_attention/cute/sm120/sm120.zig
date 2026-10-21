@@ -19,7 +19,18 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
 }
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, opts: paged.AttentionOptions) zml.Tensor {
-    return zml.ops.manualComputation(Context.body, Context{ .q = q, .k = k, .v = v, .parameters = parameters, .opts = opts }, q.shape());
+    stdx.debug.assert(opts.sharding.heads == opts.sharding.kv_heads, "Paged attention requires matching query and KV head sharding", .{});
+    return zml.ops.manualComputation(Context.body, Context{ .q = q, .k = k, .v = v, .parameters = parameters, .opts = opts }, q.shape(), .{
+        .mesh = opts.sharding.mesh,
+        .in_specs = .{
+            .q = opts.sharding.partition(q.shape(), .hkv),
+            .k = opts.sharding.partition(k.shape(), .hkv),
+            .v = opts.sharding.partition(v.shape(), .hkv),
+            .parameters = .replicated,
+            .opts = .{ .mask = .replicated, .sink = if (opts.sink) |sink| opts.sharding.partition(sink.shape(), 0) else zml.Sharding.Partitioning.replicated(0) },
+        },
+        .out_specs = opts.sharding.partition(q.shape(), .hkv),
+    });
 }
 
 const Context = struct {

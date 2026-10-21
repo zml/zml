@@ -1177,6 +1177,7 @@ fn runCases(comptime max_pages: usize, comptime num_pages: usize, cases: []const
             }
         };
         const opts: paged_attention.AttentionOptions = .{
+            .sharding = .{ .mesh = platform.replicated_mesh, .heads = null, .kv_heads = null },
             .mask = .{ .standard = .{
                 .causal = case.opts.is_causal,
                 .sliding_window = if (case.opts.sliding_window > 0) @intCast(case.opts.sliding_window) else null,

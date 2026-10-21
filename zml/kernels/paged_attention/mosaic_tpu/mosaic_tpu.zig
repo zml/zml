@@ -153,32 +153,28 @@ pub const mosaic_tpu = struct {
             "mosaic_tpu ragged paged attention q head_dim {} exceeds kernel/cache head_dim {}",
             .{ q.dim(.hd), target_head_dim },
         );
-        var q_padded = q.pad(0, .{ .hd = zml.Tensor.Pad{ .high = target_head_dim - q.dim(.hd) } });
-        q_padded._shape._sharding = q._shape._sharding;
-        return q_padded;
+        return q.pad(0, .{ .hd = zml.Tensor.Pad{ .high = target_head_dim - q.dim(.hd) } });
     }
 
     inline fn prepareInputs(parameters: Parameters, q: zml.Tensor, kv_pages: zml.Tensor) PreparedInputs {
-        const mesh = zml.Compiler.current().resolveMesh(.{.model});
-        const kv_pages_partitioned = kv_pages.withPartitioning(mesh, .{ .hkv = .model });
-        const q_merged = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(mesh, .{ .h = .model });
+        const q_merged = q.merge(.{ .h = .{ .hkv, .hg } });
         const logical_head_dim: usize = @intCast(q_merged.dim(.hd));
-        const cache_head_dim: usize = @intCast(kv_pages_partitioned.dim(.hd));
+        const cache_head_dim: usize = @intCast(kv_pages.dim(.hd));
         stdx.debug.assert(
             cache_head_dim == alignedKernelHeadDim(logical_head_dim),
             "mosaic_tpu ragged paged attention expects KV cache head_dim {} to match aligned logical head_dim {}",
             .{ cache_head_dim, logical_head_dim },
         );
-        const q_ragged = alignQueryHeadDimForKernel(q_merged, kv_pages_partitioned.dim(.hd));
-        const query_start_len = parameters.query_start_len.withPartitioning(mesh, .{ .b = .replicated });
+        const q_ragged = alignQueryHeadDimForKernel(q_merged, kv_pages.dim(.hd));
+        const query_start_len = parameters.query_start_len;
 
         return .{
             .q = q_ragged,
-            .kv_pages = kv_pages_partitioned,
-            .seq_lens = parameters.seq_lens.withPartitioning(mesh, .{ ._0 = .replicated }),
-            .block_table = parameters.block_table.withPartitioning(mesh, .{ ._0 = .replicated, ._1 = .replicated }),
+            .kv_pages = kv_pages,
+            .seq_lens = parameters.seq_lens,
+            .block_table = parameters.block_table,
             .query_start_len = query_start_len,
-            .num_seqs = activeSequenceCount(query_start_len).withPartitioning(mesh, .{ ._0 = .replicated }),
+            .num_seqs = activeSequenceCount(query_start_len),
         };
     }
 
@@ -223,6 +219,7 @@ pub const mosaic_tpu = struct {
     }
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, kv_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        stdx.debug.assert(opts.sharding.heads == opts.sharding.kv_heads, "Paged attention requires matching query and KV head sharding", .{});
         if (opts.mask == .indices) @panic("Sparse Attention is not supported on TPU");
 
         const prepared = prepareInputs(parameters, q, kv_cache);
@@ -273,6 +270,20 @@ pub const mosaic_tpu = struct {
                 .parameters = parameters,
             },
             prepared.q.shape(),
+            .{
+                .mesh = opts.sharding.mesh,
+                .in_specs = .{
+                    .q = opts.sharding.partition(prepared.q.shape(), .h),
+                    .kv_pages = opts.sharding.partition(prepared.kv_pages.shape(), .hkv),
+                    .seq_lens = .replicated,
+                    .block_table = .replicated,
+                    .query_start_len = .replicated,
+                    .num_seqs = .replicated,
+                    .opts = .{ .mask = .replicated, .sink = if (opts.sink) |sink| opts.sharding.partition(sink.shape(), 0) else zml.Sharding.Partitioning.replicated(0) },
+                    .parameters = .replicated,
+                },
+                .out_specs = opts.sharding.partition(prepared.q.shape(), .h),
+            },
         );
 
         const restored = restoreQueryHeads(q, q_out);
@@ -308,7 +319,9 @@ test "mosaic_tpu cfg uses kernel head dim and logical scale" {
         .num_seqs = zml.Tensor.init(.{1}, .i32),
     };
 
-    const cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{});
+    const mesh: zml.Mesh = .initTest(.manual, .{.model});
+    const sharding: zml.attention.Sharding = .{ .mesh = &mesh, .heads = null, .kv_heads = null };
+    const cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{ .sharding = sharding });
     try std.testing.expectEqual(@as(i64, 128), cfg.head_dim);
     try std.testing.expect(cfg.is_causal);
     try std.testing.expectApproxEqAbs(
@@ -317,11 +330,11 @@ test "mosaic_tpu cfg uses kernel head dim and logical scale" {
         0.000001,
     );
 
-    const non_causal_cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{ .mask = .{ .standard = .{ .causal = false } } });
+    const non_causal_cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{ .sharding = sharding, .mask = .{ .standard = .{ .causal = false } } });
     try std.testing.expect(!non_causal_cfg.is_causal);
     try std.testing.expectEqual(@as(?i64, null), non_causal_cfg.sliding_window);
 
-    const window_cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{ .mask = .{ .standard = .{ .sliding_window = 16 } } });
+    const window_cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{ .sharding = sharding, .mask = .{ .standard = .{ .sliding_window = 16 } } });
     try std.testing.expect(window_cfg.is_causal);
     try std.testing.expectEqual(@as(?i64, 16), window_cfg.sliding_window);
 }

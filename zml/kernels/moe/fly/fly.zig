@@ -41,9 +41,7 @@ pub fn fusedExperts(
         .gate_up_layout = layout.gate_up,
         .routing_weight_placement = opts.routing_weight_placement,
     };
-    const expert_partition = gate_up.weight.shape().partition(.expert);
-
-    if (!expert_partition.isSharded()) {
+    if (opts.sharding.experts == null) {
         return fusedExpertsImpl(args);
     }
 
@@ -51,11 +49,12 @@ pub fn fusedExperts(
         (struct {
             args: FusedExpertsArgs,
             global_num_experts: i64,
+            sharding: zml.moe.Sharding,
 
             fn call(self: @This(), _: zml.Shape) zml.Tensor {
                 const local_args = self.args;
                 const local_num_experts = local_args.gate_up.weight.dim(.expert);
-                const partition_id = zml.ops.partitionId().convert(.i32);
+                const partition_id = self.sharding.expertIndex();
                 const expert_start = partition_id.scale(local_num_experts).convert(.i32);
                 const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
 
@@ -70,11 +69,23 @@ pub fn fusedExperts(
 
                 const local_output = fusedExpertsImpl(mapped_args);
                 const local_reshaped = local_output.reshape(local_args.hidden_states.shape()).withTags(.{ .t, .d });
-                return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
+                return self.sharding.sum(local_reshaped);
             }
         }).call,
-        .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert) },
+        .{ .args = args, .global_num_experts = gate_up.weight.dim(.expert), .sharding = opts.sharding },
         input.shape(),
+        .{
+            .mesh = opts.sharding.mesh,
+            .in_specs = .{ .args = .{
+                .hidden_states = .replicated,
+                .gate_up = opts.sharding.linearSpecs(gate_up),
+                .down = opts.sharding.linearSpecs(down),
+                .topk_weights = .replicated,
+                .topk_ids = .replicated,
+                .expert_map = .replicated,
+            } },
+            .out_specs = .replicated,
+        },
     );
 }
 

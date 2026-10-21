@@ -143,3 +143,43 @@ corresponding types.
 
 7. Return the model output (`zml.Buffer`) to the host (`zml.Slice`),
    decode it (custom struct) and finally return to the user.
+
+## Manual computations and sharding
+
+Ordinary graph results leave their sharding open for Shardy to infer. A manual
+computation declares the layouts its local kernel requires, independently of
+annotations on earlier tensors:
+
+```zig
+const result = zml.ops.manualComputation(Kernel.body, .{
+    .q = projected_q,
+    .cache = updated_cache,
+    .lengths = lengths,
+}, output_shape, .{
+    .mesh = mesh,
+    .in_specs = .{
+        .q = .{ .hkv = .model },
+        .cache = .{ .hkv = .model },
+        .lengths = .replicated,
+    },
+    .out_specs = .{ .hkv = .model },
+});
+```
+
+The body receives local input tensors and local output shapes. Each tensor needs
+an explicit spec; omitted dimensions within a spec are replicated. Open
+specs, unknown axes, and dimensions that cannot be divided into equal shards
+are rejected. Specs follow nested tensor fields, including optional values;
+`.replicated` can explicitly replicate a whole subtree.
+
+`out_specs` describes how local results form the global result. Returned tensors
+retain this explicit sharding, including when returned directly from the
+executable. Subsequent ordinary graph operations leave their results open for
+Shardy to infer; an unspecified executable output defaults to replication.
+
+Attention accepts a `zml.attention.Sharding` with a mesh and separate `heads`
+and `kv_heads` logical axes. MoE takes `Options.sharding` with a mesh and an
+`experts` logical axis. An axis value of `null` explicitly requests replication.
+These choices reach the backend without reading intermediate tensor sharding.
+Mesh construction maps the logical axes onto the physical topology; the two
+meshes can have different ranks.

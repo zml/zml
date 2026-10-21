@@ -181,6 +181,7 @@ pub const AttentionMask = union(enum) {
 };
 
 pub const AttentionOptions = struct {
+    sharding: zml.attention.Sharding,
     mask: AttentionMask = .{ .standard = .{} },
     scale: ?f32 = null,
     sink: ?zml.Tensor = null,
@@ -434,17 +435,17 @@ test pagedAttention {
     }{
         .{
             .name = "unbounded",
-            .attention_options = .{ .mask = .{ .standard = .{} } },
+            .attention_options = .{ .sharding = .{ .mesh = model_meshe, .heads = "model", .kv_heads = "model" }, .mask = .{ .standard = .{} } },
             .backends = all_backends,
         },
         .{
             .name = "non_causal",
-            .attention_options = .{ .mask = .{ .standard = .{ .causal = false } } },
+            .attention_options = .{ .sharding = .{ .mesh = model_meshe, .heads = "model", .kv_heads = "model" }, .mask = .{ .standard = .{ .causal = false } } },
             .backends = &option_sensitive_backends,
         },
         .{
             .name = "sliding_window",
-            .attention_options = .{ .mask = .{ .standard = .{ .sliding_window = page_size } } },
+            .attention_options = .{ .sharding = .{ .mesh = model_meshe, .heads = "model", .kv_heads = "model" }, .mask = .{ .standard = .{ .sliding_window = page_size } } },
             .backends = &option_sensitive_backends,
         },
     };

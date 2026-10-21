@@ -32,6 +32,35 @@ const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 const log = std.log.scoped(.@"zml/Compiler");
 
 pub fn allReduce(inputs: anytype, comptime func_: anytype) AllReduceReturnType(@TypeOf(inputs)) {
+    const count = Compiler.current().meshes[0].numDevices();
+    var devices: [Platform.MAX_NUM_DEVICES]i64 = undefined;
+    for (devices[0..count], 0..) |*device, i| device.* = @intCast(i);
+    return allReduceGroups(inputs, func_, devices[0..count], count);
+}
+
+/// Reduce along one logical mesh axis, keeping other coordinates and replicas separate.
+pub fn allReduceOnAxis(inputs: anytype, comptime func_: anytype, mesh: *const Sharding.Mesh, axis: anytype) AllReduceReturnType(@TypeOf(inputs)) {
+    const logical_axis = mesh.resolveLogicalAxis(Shape.toTag(axis)) orelse @panic("Unknown logical reduction axis");
+    const size = mesh.grid.axis_sizes[logical_axis];
+    var groups: [Platform.MAX_NUM_DEVICES]i64 = undefined;
+    var replica_indices: [Platform.MAX_NUM_DEVICES]usize = @splat(0);
+    const replicas = mesh.numReplicas();
+    for (0..mesh.numDevices()) |device| {
+        const coords = mesh.grid.logical_coords[device];
+        var tile: usize = 0;
+        var group: usize = 0;
+        for (0..mesh.logical.axes.len) |dim| {
+            tile = tile * mesh.grid.axis_sizes[dim] + coords[dim];
+            if (dim != logical_axis) group = group * mesh.grid.axis_sizes[dim] + coords[dim];
+        }
+        group = group * replicas + replica_indices[tile];
+        replica_indices[tile] += 1;
+        groups[group * size + coords[logical_axis]] = @intCast(device);
+    }
+    return allReduceGroups(inputs, func_, groups[0..mesh.numDevices()], size);
+}
+
+fn allReduceGroups(inputs: anytype, comptime func_: anytype, groups: []const i64, group_size: usize) AllReduceReturnType(@TypeOf(inputs)) {
     const ctx = Compiler.current();
     const mlir_ctx = ctx.mlir_ctx;
 
@@ -75,8 +104,7 @@ pub fn allReduce(inputs: anytype, comptime func_: anytype) AllReduceReturnType(@
         else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
     };
 
-    const num_devices = ctx.meshes[0].numDevices();
-    if (num_devices <= 1) return inputs;
+    if (group_size <= 1) return inputs;
 
     const reducer_block = b: {
         const ArgsTypes: [input_tensors.len]type = @splat(ReduceArgs);
@@ -125,14 +153,9 @@ pub fn allReduce(inputs: anytype, comptime func_: anytype) AllReduceReturnType(@
         break :b block;
     };
 
-    var replica_group_storage: [constants.MAX_RANK]i64 = undefined;
-    for (0..@intCast(num_devices)) |i| {
-        replica_group_storage[i] = @intCast(i);
-    }
-    const replica_group_slice = replica_group_storage[0..@intCast(num_devices)];
     const replica_groups_attr = mlir.Attribute.denseElements(
-        .rankedTensor(&.{ 1, num_devices }, .int(mlir_ctx, .i64)),
-        replica_group_slice,
+        .rankedTensor(&.{ @intCast(groups.len / group_size), @intCast(group_size) }, .int(mlir_ctx, .i64)),
+        groups,
     );
 
     const handle = ctx.nextChannelId();
@@ -200,6 +223,15 @@ fn AllReduceReturnType(comptime InputsT: type) type {
         },
         else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
     };
+}
+
+/// The executing device's coordinate on a caller-selected logical mesh axis.
+pub fn axisIndex(mesh: *const Sharding.Mesh, axis: anytype) Tensor {
+    const logical_axis = mesh.resolveLogicalAxis(Shape.toTag(axis)) orelse @panic("Unknown logical mesh axis");
+    var coords: [Platform.MAX_NUM_DEVICES]u32 = undefined;
+    for (coords[0..mesh.numDevices()], 0..) |*coord, i| coord.* = mesh.grid.logical_coords[i][logical_axis];
+    return Tensor.constantTensor(.init(.{ .device = mesh.numDevices() }, .u32), std.mem.sliceAsBytes(coords[0..mesh.numDevices()]))
+        .gather(.{ .device = partitionId() }, .{});
 }
 
 pub fn partitionId() Tensor {
@@ -2646,10 +2678,8 @@ pub fn CustomCall(
     comptime params: struct {
         /// Name of the custom call, must be unique.
         name: [:0]const u8,
-        /// Custom call will see the data of a single device. So for a sharded buffer, it will only see a single partition. This applies
-        /// for both the input and output buffers. By default, the partitioning algorithm will assume nothing on the custom call input/output,
-        /// so everything will be forced as replicated. If do you know / ensure that the custom call is consistent with the provided input/output
-        /// sharding, this setting will avoid the shuffling of the buffer's data.
+        /// The handler supports local shards. Invoke it with `callSharded`, supplying
+        /// the mesh and input/output specs that determine the local buffer shapes.
         sharding_aware: bool,
         /// Whether the function has any side-effect, meaning that XLA cannot re-order it/optimize it out. A typical example is print.
         has_side_effect: bool,
@@ -2684,23 +2714,17 @@ pub fn CustomCall(
                 .output_operand_aliases = comptime customCallOutputOperandAliases(I, O, params.output_operand_aliases),
                 .compute_on_host = params.compute_on_host,
             };
-            if (params.sharding_aware) {
-                return shardingAwareTypedCustomCall(
-                    params.name,
-                    opts,
-                    input_tensors,
-                    output_shapes,
-                    attributes,
-                );
-            } else {
-                return typedCustomCall(
-                    params.name,
-                    opts,
-                    input_tensors,
-                    output_shapes,
-                    attributes,
-                );
-            }
+            if (params.sharding_aware) @compileError("Use callSharded with an explicit mesh and input/output specs");
+            return typedCustomCall(params.name, opts, input_tensors, output_shapes, attributes);
+        }
+
+        pub fn callSharded(input_tensors: I, output_shapes: O, attributes: A, layout: anytype) ShapeToTensor(O) {
+            if (!params.sharding_aware) @compileError("callSharded requires a sharding-aware custom call");
+            return shardingAwareTypedCustomCall(params.name, .{
+                .has_side_effect = params.has_side_effect,
+                .output_operand_aliases = comptime customCallOutputOperandAliases(I, O, params.output_operand_aliases),
+                .compute_on_host = params.compute_on_host,
+            }, input_tensors, output_shapes, attributes, layout);
         }
 
         fn handler(call_frame: *pjrt.ffi.CallFrame) callconv(.c) ?*pjrt.ffi.Error {
@@ -2734,36 +2758,21 @@ pub fn shardingAwareTypedCustomCall(
     input: anytype,
     output: anytype,
     attributes: anytype,
+    layout: anytype,
 ) ShapeToTensor(@TypeOf(output)) {
-    const Input = @TypeOf(input);
-    const Output = @TypeOf(output);
-    const Attributes = @TypeOf(attributes);
-
-    var output_shapes: [@typeInfo(Output).@"struct".field_names.len]Shape = undefined;
-    inline for (@typeInfo(Output).@"struct".field_names, 0..) |field_name, i| {
-        output_shapes[i] = @field(output, field_name);
-    }
-
     const Handler = struct {
-        input: Input,
-        attributes: Attributes,
+        input: @TypeOf(input),
+        attributes: @TypeOf(attributes),
 
-        fn body(self: @This(), sharded_output_shapes: []const Shape) []const Tensor {
-            return typedCustomCall(target_name, opts, self.input, sharded_output_shapes, self.attributes);
+        fn body(self: @This(), local_shapes: @TypeOf(output)) ShapeToTensor(@TypeOf(output)) {
+            return typedCustomCall(target_name, opts, self.input, local_shapes, self.attributes);
         }
     };
-    const output_tensors = manualComputation(
-        Handler.body,
-        .{ .input = input, .attributes = attributes },
-        @as([]const Shape, &output_shapes),
-    );
-
-    // Convert the slice back to a struct
-    var out: ShapeToTensor(Output) = undefined;
-    inline for (@typeInfo(Output).@"struct".field_names, 0..) |field_name, i| {
-        @field(out, field_name) = output_tensors[i];
-    }
-    return out;
+    return manualComputation(Handler.body, .{ .input = input, .attributes = attributes }, output, .{
+        .mesh = layout.mesh,
+        .in_specs = .{ .input = layout.in_specs },
+        .out_specs = layout.out_specs,
+    });
 }
 
 pub fn typedCustomCall(

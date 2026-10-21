@@ -43,7 +43,7 @@ pub fn fusedExperts(
     stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "cute expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
     stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "cute expects down weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
 
-    const expert_parallelism = gate_up.weight.shape().partition(.expert).isSharded();
+    const expert_parallelism = options.sharding.experts != null;
     const hidden = down.weight.dim(1);
     const intermediate = down.weight.dim(2) * 2;
 
@@ -65,9 +65,22 @@ pub fn fusedExperts(
         .topk = ids.dim(.topk),
         .swiglu_limit = options.activation.swiglu.limit,
         .expert_parallel = expert_parallelism,
+        .sharding = options.sharding,
     };
     return if (expert_parallelism)
-        zml.ops.manualComputation(Context.body, context, input.shape())
+        zml.ops.manualComputation(Context.body, context, input.shape(), .{
+            .mesh = options.sharding.mesh,
+            .in_specs = .{
+                .input = .replicated,
+                .ids = .replicated,
+                .weights = .replicated,
+                .w1 = options.sharding.partition(context.w1.shape()),
+                .s1 = options.sharding.auxiliaryPartition(context.s1, gate_up.weight.dim(.expert)),
+                .w2 = options.sharding.partition(context.w2.shape()),
+                .s2 = options.sharding.auxiliaryPartition(context.s2, down.weight.dim(.expert)),
+            },
+            .out_specs = .replicated,
+        })
     else
         context.body(input.shape());
 }
@@ -83,6 +96,7 @@ const Context = struct {
     topk: i64,
     swiglu_limit: ?f32,
     expert_parallel: bool,
+    sharding: zml.moe.Sharding,
 
     fn body(self: Context, _: zml.Shape) zml.Tensor {
         const experts = self.w1.dim(.expert);
@@ -92,7 +106,7 @@ const Context = struct {
         const tokens = ids.dim(.token);
         const routing_weights = self.weights.convert(.f32).reshape(.{ tokens, self.topk });
         if (self.expert_parallel) {
-            const partition_id = zml.ops.partitionId().convert(.i32);
+            const partition_id = self.sharding.expertIndex();
             const expert_start = partition_id.scale(experts);
             const expert_end = expert_start.addConstant(experts);
             // Routes of other ranks get expert -1 and are not computed here.
@@ -110,7 +124,7 @@ const Context = struct {
         }).reshape(self.input.shape().dims()).withTags(self.input.shape());
 
         return if (self.expert_parallel)
-            zml.ops.allReduce(result, zml.Tensor.add)
+            self.sharding.sum(result)
         else
             result;
     }
