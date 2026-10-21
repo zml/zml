@@ -459,6 +459,14 @@ pub const GCS = struct {
         );
     }
 
+    /// `getOrRefreshToken` from inside an attempt: a refresh is a governed
+    /// request of its own, so the attempt's stall clock does not run.
+    fn watchedToken(self: *GCS, attempt: request.Attempt, authorization_buffer: []u8) !std.http.Client.Request.Headers.Value {
+        attempt.setWaiting(true);
+        defer attempt.setWaiting(false);
+        return self.getOrRefreshToken(authorization_buffer);
+    }
+
     fn getOrRefreshToken(
         self: *GCS,
         authorization_buffer: []u8,
@@ -931,12 +939,13 @@ pub const GCS = struct {
             };
         }
 
-        fn attempt(self: *Listing, _: request.Attempt) anyerror!request.Outcome([]u8) {
+        fn attempt(self: *Listing, current: request.Attempt) anyerror!request.Outcome([]u8) {
             var head_buffer: [2 * 1024]u8 = undefined;
+            const authorization = try self.gcs.watchedToken(current, &self.authorization);
             return request.exchange([]u8, self.gcs.requestContext(), self.uri, .{
                 .headers = .{
                     .accept_encoding = .{ .override = "identity" },
-                    .authorization = try self.gcs.getOrRefreshToken(&self.authorization),
+                    .authorization = authorization,
                 },
                 .extra_headers = if (self.gcs.quotaProjectId()) |project|
                     &.{.{ .name = "x-goog-user-project", .value = project }}
@@ -1029,13 +1038,14 @@ pub const GCS = struct {
             };
         }
 
-        fn attempt(self: *SizeRequest, _: request.Attempt) anyerror!request.Outcome(u64) {
+        fn attempt(self: *SizeRequest, current: request.Attempt) anyerror!request.Outcome(u64) {
             var head_buffer: [8 * 1024]u8 = undefined;
+            const authorization = try self.gcs.watchedToken(current, &self.authorization);
             return request.exchange(u64, self.gcs.requestContext(), self.uri, .{
                 .method = .HEAD,
                 .headers = .{
                     .accept_encoding = .{ .override = "identity" },
-                    .authorization = try self.gcs.getOrRefreshToken(&self.authorization),
+                    .authorization = authorization,
                 },
                 .accept = .{ .statuses = &.{ .not_found, .unauthorized, .forbidden } },
                 .head_buffer = &head_buffer,

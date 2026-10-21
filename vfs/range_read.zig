@@ -97,7 +97,13 @@ const RangeRead = struct {
 
     fn attempt(self: *RangeRead, current: request.Attempt) anyerror!request.Outcome(void) {
         self.progress = current.progress;
-        const prepared = try self.spec.prepare(self.spec.context, current, self.range);
+        // A hook may run a governed request of its own (a re-resolve, a
+        // token refresh), which its own `perform` watches.
+        const prepared = prepared: {
+            current.setWaiting(true);
+            defer current.setWaiting(false);
+            break :prepared try self.spec.prepare(self.spec.context, current, self.range);
+        };
         std.debug.assert(prepared.extra_headers.len <= max_extra_headers);
         var headers: [max_extra_headers + 1]std.http.Header = undefined;
         @memcpy(headers[0..prepared.extra_headers.len], prepared.extra_headers);

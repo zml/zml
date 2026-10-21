@@ -927,7 +927,7 @@ test "auto keeps reading a cold file direct after probing it" {
         // The first probe's misses queued reads of the pages it sampled;
         // once they landed, sampling the same pages would find the file
         // cached.
-        if (open == 0) try testing_io.sleep(.fromMilliseconds(100), .awake);
+        if (open == 0) try testing_io.sleep(.fromMilliseconds(250), .awake);
         try std.testing.expect(direct);
     }
 }

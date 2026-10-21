@@ -313,10 +313,12 @@ pub const HF = struct {
 
         if (self.trees.get(cache_key_lookup)) |tree| return tree.items;
 
+        // Room first: once fetched, the listing cannot fail to be kept.
+        try self.trees.ensureUnusedCapacity(self.allocator, 1);
         const cache_key = try key.allocFormat(self.allocator);
         errdefer self.allocator.free(cache_key);
         const tree = try self.fetchTreeFromAPI(repo);
-        try self.trees.putNoClobber(self.allocator, cache_key, tree);
+        self.trees.putAssumeCapacityNoClobber(cache_key, tree);
         return tree.items;
     }
 
@@ -707,14 +709,21 @@ pub const HF = struct {
         const repo = Repo.parse(full_path) catch return std.Io.File.OpenError.BadPathName;
         const tree = self.getOrFetchTree(repo) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            else => return std.Io.File.OpenError.Unexpected,
+            else => {
+                log.err("hf: listing the repository of {s} failed: {}", .{ full_path, err });
+                return std.Io.File.OpenError.Unexpected;
+            },
         };
         const size = getSizeFromTree(tree, repo.path) orelse return std.Io.File.OpenError.FileNotFound;
 
         var download_url_buffer: [16 * 1024]u8 = undefined;
         const download_url = self.resolveDownloadUrl(repo, &download_url_buffer) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            else => return std.Io.File.OpenError.Unexpected,
+            else => {
+                // The path names the file; its signed URL would be a credential.
+                log.err("hf: resolving the download URL of {s} failed: {}", .{ full_path, err });
+                return std.Io.File.OpenError.Unexpected;
+            },
         };
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, full_path, download_url, size) catch return std.Io.File.OpenError.Unexpected;
@@ -932,8 +941,10 @@ pub const HF = struct {
             const repo = try Repo.parse(self.handle.uri);
             var url_buffer: [16 * 1024]u8 = undefined;
             const resolved = try self.hf.resolveDownloadUrl(repo, &url_buffer);
+            // Everything that can fail comes before anything is handed over.
             const owned = try allocator.dupe(u8, resolved);
             errdefer allocator.free(owned);
+            const uri: std.Uri = try .parse(owned);
             const for_handle = try allocator.dupe(u8, resolved);
             {
                 self.hf.mutex.lockUncancelable(self.hf.base.inner);
@@ -943,7 +954,7 @@ pub const HF = struct {
             }
             self.re_resolved = owned;
             self.url = owned;
-            self.uri = try .parse(owned);
+            self.uri = uri;
             log.warn("hf: re-resolved the download URL of {s}", .{self.handle.uri});
         }
     };

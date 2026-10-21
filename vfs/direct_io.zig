@@ -110,15 +110,17 @@ pub const residency_samples = 32;
 /// buffered IO. A sample that misses queues the read of its page, which a
 /// direct file never reads back: with the same offsets the next probe found
 /// every sample cached and read a cold file buffered, so callers draw a new
-/// `shift` for every probe. The header page a parser has just read is
-/// sampled only when `shift` lands in it, not systematically.
+/// `shift` for every probe. A file of at most `residency_samples` pages has
+/// every page sampled whatever the shift, so its first probe caches it.
+/// The header page a parser has just read is sampled only when `shift`
+/// lands in it, not systematically.
 pub fn cachedFraction(fd: std.posix.fd_t, size: u64, shift: u64) ?f64 {
     var buffer: [512]u8 = undefined;
     const iovec: std.posix.iovec = .{ .base = &buffer, .len = buffer.len };
     var cached: usize = 0;
     const window = size / residency_samples;
     for (0..residency_samples) |sample| {
-        const offset = window * sample + shift % window;
+        const offset = window * sample + shift % @max(window, 1);
         const rc = linux.preadv2(fd, @ptrCast(&iovec), 1, @intCast(offset), linux.RWF.NOWAIT);
         switch (linux.errno(rc)) {
             .SUCCESS => cached += @intFromBool(rc != 0),

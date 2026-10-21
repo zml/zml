@@ -126,6 +126,14 @@ pub const Attempt = struct {
     /// cancels an attempt this counter does not move for
     /// `RetryConfig.stall_timeout`.
     progress: ?*std.atomic.Value(u64) = null,
+    /// Set while the attempt runs a governed request of its own (a
+    /// re-resolve, a token refresh), which that request's `perform`
+    /// watches: the stall clock does not run meanwhile (`setWaiting`).
+    waiting: ?*std.atomic.Value(bool) = null,
+
+    pub fn setWaiting(self: Attempt, value: bool) void {
+        if (self.waiting) |flag| flag.store(value, .monotonic);
+    }
 };
 
 /// How often a watched attempt's progress is checked, per stall timeout.
@@ -229,8 +237,10 @@ fn watched(
         }
     };
     var progress: std.atomic.Value(u64) = .init(0);
+    var waiting: std.atomic.Value(bool) = .init(false);
     var counted = attempt;
     counted.progress = &progress;
+    counted.waiting = &waiting;
     var run: Run = .{};
     var future = ctx.io.concurrent(Run.run, .{ &run, ctx.io, context, counted }) catch |err| switch (err) {
         error.ConcurrencyUnavailable => return attemptFn(context, counted),
@@ -246,12 +256,22 @@ fn watched(
         run.done.waitTimeout(ctx.io, check) catch |err| switch (err) {
             error.Timeout => {
                 const now = progress.load(.monotonic);
-                quiet = if (now == seen) quiet + 1 else 0;
+                quiet = if (now == seen and !waiting.load(.monotonic)) quiet + 1 else 0;
                 seen = now;
                 continue;
             },
             error.Canceled => {
                 future.cancel(ctx.io);
+                // An attempt already past its last cancelation point
+                // finished: its value is the caller's, and the cancel
+                // reaches the caller at its next cancelation point.
+                if (run.result) |outcome| switch (outcome) {
+                    .done => {
+                        ctx.io.recancel();
+                        return outcome;
+                    },
+                    .retry => {},
+                } else |_| {}
                 return error.Canceled;
             },
         };
@@ -460,20 +480,27 @@ pub fn exchange(
         };
     }
 
-    var res = req.receiveHead(options.head_buffer) catch |err| switch (err) {
-        error.Timeout => return retryable(T, spec, "receive headers", err, .timeout),
-        error.HttpConnectionClosing,
-        error.HttpRequestTruncated,
-        error.ReadFailed,
-        error.WriteFailed,
-        error.ConnectionRefused,
-        error.ConnectionResetByPeer,
-        error.HostUnreachable,
-        error.NetworkUnreachable,
-        error.NetworkDown,
-        error.NameServerFailure,
-        => return retryable(T, spec, "receive headers", err, .transient),
-        else => return fatal(spec, "receive headers", err),
+    var res = req.receiveHead(options.head_buffer) catch |err| {
+        // A failed read already closed it; a redirect re-sends on a new
+        // connection that a failure leaves unusable too (or null).
+        if (req.connection) |connection| connection.closing = true;
+        switch (err) {
+            error.Timeout => return retryable(T, spec, "receive headers", err, .timeout),
+            error.HttpConnectionClosing,
+            error.HttpRequestTruncated,
+            error.ReadFailed,
+            error.WriteFailed,
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            error.NetworkDown,
+            error.NameServerFailure,
+            => return retryable(T, spec, "receive headers", err, .transient),
+            // A stalled attempt that `watched` canceled, or the caller's cancel.
+            error.Canceled => return err,
+            else => return fatal(spec, "receive headers", err),
+        }
     };
 
     if (!options.accept.allows(res.head.status, options.redirects)) {
@@ -886,6 +913,31 @@ test "an attempt that receives nothing is canceled and retried as a timeout" {
     try std.testing.expectEqual(@as(usize, 1), try perform(usize, ctx, test_spec, &hang, Hang.attempt));
     try std.testing.expectEqual(@as(u64, 6), hang.progressed);
     try std.testing.expectEqual(@as(u64, 1), stats.snapshot().timeouts);
+}
+
+test "an attempt waiting on a request of its own is not a stall" {
+    var governor: Governor = .init(.{
+        .max_retries = 3,
+        .initial_delay = .fromMilliseconds(1),
+        .max_delay = .fromMilliseconds(1),
+        .max_hold = .fromMilliseconds(1),
+        .throttle_budget = .fromSeconds(1),
+        .stall_timeout = .fromMilliseconds(120),
+    });
+    var stats: AtomicReadStats = .{};
+    const ctx = testContext(&governor, &stats);
+    const Nested = struct {
+        fn attempt(_: *@This(), current: Attempt) anyerror!Outcome(usize) {
+            // A re-resolve or token refresh waiting out a hold.
+            current.setWaiting(true);
+            defer current.setWaiting(false);
+            try std.testing.io.sleep(.fromMilliseconds(300), .awake);
+            return .{ .done = current.ordinal };
+        }
+    };
+    var nested: Nested = .{};
+    try std.testing.expectEqual(@as(usize, 0), try perform(usize, ctx, test_spec, &nested, Nested.attempt));
+    try std.testing.expectEqual(@as(u64, 0), stats.snapshot().timeouts);
 }
 
 test "the request authority is the rate-limit scope" {
