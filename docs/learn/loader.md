@@ -43,8 +43,8 @@ const b = store.view().createReplicatedTensor("b", .{.out});
 
 The store is passed to each `load` or `loadExecute` submission.
 Initialization needs no store. These submission calls also accept an optional
-progress node as their final argument (`null` disables reporting). Keep it
-alive until `awaitAll` or `deinit` returns.
+progress node as their final argument (`null` disables reporting). The
+loader copies the node; do not end it until `awaitAll` or `deinit` returns.
 The caller owns the estimated total. For a whole checkpoint loaded once,
 `store.view().count()` estimates the number of source tensors. Each loaded
 tensor completes one item, a composite tensor once for all its sources; bulk

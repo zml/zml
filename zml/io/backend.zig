@@ -650,7 +650,7 @@ pub const Backend = union(enum) {
         };
     }
 
-    pub fn submit(self: Backend, specs: []const LoadSpec, progress: ?*std.Progress.Node) SubmitError!Submission {
+    pub fn submit(self: Backend, specs: []const LoadSpec, progress: std.Progress.Node) SubmitError!Submission {
         return switch (self) {
             .direct => |direct| .{ .direct = .{
                 .loader = direct,

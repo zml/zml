@@ -46,8 +46,9 @@ const SubmitError = error{IncompatibleSharding} || backend.SubmitError || error{
 
 /// Loads checkpoint sources and optionally executes bindings over them.
 /// The platform and options' borrowed values must outlive the loader. Each
-/// submission borrows its store's source metadata, outputs, and optional
-/// progress parent until `awaitAll` or `deinit` returns.
+/// submission borrows its store's source metadata and outputs until
+/// `awaitAll` or `deinit` returns; it copies its progress node, which must
+/// not end before then.
 /// Submit and await serially on the owning task; source reads and transfers
 /// run concurrently inside the selected backend. Submissions are retired in
 /// publish order: `loadExecute` retires older ones when its own does not fit
@@ -424,7 +425,7 @@ pub const Loader = struct {
             try addPlacementBytes(placed, self.platform, spec.shape, spec.memory);
         }
         try self.pending.ensureUnusedCapacity(self.allocator, 1);
-        const submission = try self.backend.submit(specs, progress);
+        const submission = try self.backend.submit(specs, if (progress) |node| node.* else .none);
         self.pending.pushBackAssumeCapacity(.{
             .submission = submission,
             .executables = executables,

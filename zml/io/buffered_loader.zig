@@ -78,7 +78,7 @@ pub const Loader = struct {
     /// Spawns one bounded read task per spec, which assembles its
     /// destination. The batch keeps a copy of every spec's parts. Nothing
     /// runs when this fails.
-    pub fn submit(self: *Loader, specs: []const LoadSpec, progress: ?*std.Progress.Node) SubmitError!*Batch {
+    pub fn submit(self: *Loader, specs: []const LoadSpec, progress: std.Progress.Node) SubmitError!*Batch {
         try self.checkOpen();
         var largest: usize = 0;
         var part_count: usize = 0;
@@ -265,18 +265,18 @@ pub const Loader = struct {
         self: *Loader,
         batch: *Batch,
         spec: LoadSpec,
-        progress: ?*std.Progress.Node,
+        progress: std.Progress.Node,
     ) void {
         self.group.async(self.io, struct {
             fn run(
                 loader: *Loader,
                 batch_: *Batch,
                 spec_: LoadSpec,
-                progress_: ?*std.Progress.Node,
+                progress_: std.Progress.Node,
             ) void {
                 defer batch_.finish(loader.io);
-                var node = if (progress_) |parent| parent.start(spec_.parts[0].source.name, 1) else null;
-                defer if (node) |*n| n.end();
+                const node = progress_.start(spec_.parts[0].source.name, 1);
+                defer node.end();
                 loader.loadOne(spec_);
             }
         }.run, .{ self, batch, spec, progress });
@@ -658,12 +658,12 @@ test "buffered loader assembles a composite destination in reused staging" {
         // A whole tensor first, so the composite reuses its staging buffer
         // and only the zeroing keeps its bytes out of the gaps.
         var first: Buffer = undefined;
-        try loader.awaitBatch(try loader.submit(&.{.{ .shape = shape, .memory = memory, .output = &first, .parts = &whole }}, null));
+        try loader.awaitBatch(try loader.submit(&.{.{ .shape = shape, .memory = memory, .output = &first, .parts = &whole }}, .none));
         defer first.deinit();
         try load_testing.expectShards(allocator, io, &first, &full);
         try expectMemory(platform, &first, memory);
         var output: Buffer = undefined;
-        try loader.awaitBatch(try loader.submit(&.{.{ .shape = shape, .memory = memory, .output = &output, .parts = &parts, .zero_fill = true }}, null));
+        try loader.awaitBatch(try loader.submit(&.{.{ .shape = shape, .memory = memory, .output = &output, .parts = &parts, .zero_fill = true }}, .none));
         defer output.deinit();
         try load_testing.expectShards(allocator, io, &output, &expected);
         try expectMemory(platform, &output, memory);
@@ -673,9 +673,9 @@ test "buffered loader assembles a composite destination in reused staging" {
     // Without zero fill the same parts are a size mismatch, found by the
     // worker and sticky from then on.
     var never_written: Buffer = undefined;
-    const batch = try loader.submit(&.{.{ .shape = shape, .output = &never_written, .parts = &parts }}, null);
+    const batch = try loader.submit(&.{.{ .shape = shape, .output = &never_written, .parts = &parts }}, .none);
     try std.testing.expectError(error.SourceSizeMismatch, loader.awaitBatch(batch));
-    try std.testing.expectError(error.SourceSizeMismatch, loader.submit(&.{.{ .shape = shape, .output = &never_written, .parts = &whole }}, null));
+    try std.testing.expectError(error.SourceSizeMismatch, loader.submit(&.{.{ .shape = shape, .output = &never_written, .parts = &whole }}, .none));
 }
 
 /// Every shard of `buffer` is in its device's `memory` space.
