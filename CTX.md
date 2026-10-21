@@ -5947,9 +5947,14 @@ best value per risk:
 - one host-resident path;
 - `Pipeline` folded into `Loader`.
 
-A fixed DMA block size per target would delete `dma_calibration.zig`
-(about 850-900 lines with the growth API). That reverses a recorded
-decision and is left to the user.
+The review's move 5 proposed a fixed DMA block size per target in place
+of `dma_calibration.zig` (about 850-900 lines with the growth API). The
+user declined it on 2026-10-21: calibration stays, so do not propose
+removing it again. Only the review's "If declined, do the minimum" items
+remain:
+- delete `findArena`, which is always null in production;
+- tests pin one block size;
+- CPU calibration honors a one-element list.
 
 ## Open work
 

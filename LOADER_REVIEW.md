@@ -69,7 +69,7 @@ The issue numbers (#n) refer to Part 1; the move numbers refer to Part 2's simpl
 - Move 3: validate once at the front door and delete the overlap prover. About 300 lines go.
 - Move 1: give host-resident destinations one shared-allocation path. The replica-copy machinery runs only in tests.
 - Move 4: fold `Pipeline` into `Loader`, and narrow the Scheduler and the diagnostics. About 200-250 lines go.
-- Move 5 is a decision for you, because it reverses a recorded one: fix the DMA block size per target and delete `dma_calibration.zig` and the workspace growth API. About 850-900 lines go, and 0.7-1.25 s comes off each PCIe GPU init.
+- Move 5 (a fixed DMA block size per target in place of `dma_calibration.zig`) was **declined on 2026-10-21: calibration stays**. Its "If declined, do the minimum" items still apply.
 
 ## Part 1: Bugs, missing parts, tests and docs
 
@@ -438,7 +438,7 @@ Anchors are relative to `zml/zml/io/` unless they start with `monorepo/`. Steps 
 | 2 | One bound on pinned memory: the credit | 250-300 | one lock per request instead of two; nothing per block | low |
 | 3 | Validate once at the front door; Source owns disjointness | ~300 | buffered size errors arrive at `load` | low-medium |
 | 4 | Direct loader: one root object, plans that say what they mean | 200-250 | none | low |
-| 5 | Fixed DMA block size per target *(your decision)* | 850-900 | −0.7-1.25 s per GPU init | medium |
+| 5 | ~~Fixed DMA block size per target~~ *(declined: calibration stays)* | 850-900 | −0.7-1.25 s per GPU init | medium |
 | 6 | llmd: the Packer carries only model decisions | 300-400 | none (fixes a latent use-after-free) | low |
 | 7 | One byte-run representation, one lowering | 150-180 | ~25 MB arena at 1e5 tensors | medium (public API) |
 | 8 | Buffered backend: one file per URI, a few workers per batch | ~100 net | remote TPU loads: minutes → seconds | medium (no CI coverage) |
@@ -548,7 +548,7 @@ Anchors are relative to `zml/zml/io/` unless they start with `monorepo/`. Steps 
 - **Optional, unverified.** Make the job kind a tagged union (`dma_read`, `dma_staged`, `dma_gather`, `dma_fill`, `host_read`, `host_fill`), with `stage()` emitting its Extent. That would remove the `fill`/`gather`/`delivery` flags, `Plan.direct_reads`, landJob's staged branch and several debug asserts. No verifier checked it.
 - **Absorbs:** the three Pipeline findings (direct-front, execution, concurrency), direct-front "diagnostics passed through four layers", execution "Scheduler surface wider than its job", direct-front "host_destinations restates the plans", execution "data_offset is write-only", execution "items are 1:1 with extents", planner "job-length bounds", planner "seven job kinds in five flags" (optional).
 
-#### 5. Fixed DMA block size per target *(a decision for you: it reverses a recorded one)*
+#### 5. Fixed DMA block size per target *(declined 2026-10-21: calibration stays; only "If declined, do the minimum" below applies)*
 
 - **Changes.**
   - Per-target constants sit next to `max_dma_pieces_per_device`: ROCm 16 MiB, oneAPI 8 MiB, CPU 4 MiB, CUDA 8 MiB.
