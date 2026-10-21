@@ -123,7 +123,7 @@ pub fn load_tensors(
         }
 
         break :mid_block block.QwenImage21MidBlock{
-            .attensions = attentions,
+            .attentions = attentions,
             .resnets = resnets,
         };
     };

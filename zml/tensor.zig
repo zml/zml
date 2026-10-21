@@ -2095,11 +2095,11 @@ pub const Tensor = struct {
     /// Returns a Tensor with the given axis unflattened.
     ///
     /// unflatten((d0, d1, axis_m, d3), 2, n) -> (d0, d1, n, d2_m, d3)
-    pub fn unflatten(self: Tensor, axis_: i8, n: i64) Tensor {
+    pub fn unflatten(self: Tensor, axis_: anytype, n: i64) Tensor {
         // TODO: move to torch.zig, this equivalent to `spitAxis`
         stdx.debug.assert(self.rank() < constants.MAX_RANK, "unflatten expects input tensor rank to be less than {}, got {}", .{ constants.MAX_RANK, self.rank() });
 
-        const a = if (axis_ >= 0) self.axis(axis_) else self.axis(axis_) + 1;
+        const a = self.axis(axis_);
         const new_dim = std.math.divExact(i64, self.dim(a), n) catch std.debug.panic("unflatten expects chosen dimension to be divisible by 'n' but {} is not divisible by {}", .{ self.dim(a), n });
         const new_shape = self._shape.set(a, n).insert(a + 1, .{ ._ = new_dim });
 
