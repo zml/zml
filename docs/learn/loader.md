@@ -246,14 +246,13 @@ Loader-specific errors use these shared names:
 | `UnsupportedLayout` | A composite layout this loader does not assemble yet |
 | `InvalidTensorRange` | A source range cannot be represented |
 | `Internal` | A planning or transfer bookkeeping invariant failed |
-| `Closed` | An internal pool or scheduler has shut down |
+| `Closed` | The loader's scheduler or one of its gates has shut down |
 | `TensorNotFound` | A tensor has no checkpoint binding |
 
 `EmptyTensor`, `TransformedTensorNotDelivered`, and executable platform,
 shape, and placement mismatch errors remain distinct. Executable arity
 failures are `ExecutableInputCountMismatch` and
-`ExecutableOutputCountMismatch`. Internal pool requests that cannot fit
-still return `RequestExceedsCapacity`.
+`ExecutableOutputCountMismatch`.
 
 These names replace the former loader-specific profile, DMA benchmark,
 DMA budget, loader-job, and shutdown names; callers matching those errors

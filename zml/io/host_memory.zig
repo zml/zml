@@ -12,8 +12,6 @@ const Memory = @import("../platform.zig").Memory;
 const Platform = @import("../platform.zig").Platform;
 const log = @import("log.zig").mem;
 
-pub const AcquireError = error{ Closed, RequestExceedsCapacity };
-
 /// One ROCm host-memory allocation path and its bytes allocated so far.
 const HostNode = struct {
     any_device_index: usize,
@@ -446,9 +444,7 @@ pub const BlockPool = struct {
     capacity: usize,
     in_use: usize = 0,
     high_water: usize = 0,
-    closed: bool = false,
     mutex: std.Io.Mutex = .init,
-    condition: std.Io.Condition = .init,
 
     /// Builds the free list from every retained arena, once: the caller has
     /// already grown the workspace to the whole set the load may use, so the
@@ -496,17 +492,16 @@ pub const BlockPool = struct {
         self.* = undefined;
     }
 
-    /// Leases `output.len` blocks atomically, waiting for releases when the
-    /// free list is short. Allocates nothing, ever.
-    pub fn acquireMany(self: *BlockPool, io: std.Io, output: []Block) AcquireError!void {
+    /// Leases `output.len` blocks, which the caller guarantees are free: the
+    /// direct loader leases only under a lifecycle credit, and its credits
+    /// never cover more blocks than the pool holds (`Loader.Sizing`).
+    /// Never waits; allocates nothing, ever.
+    pub fn acquireMany(self: *BlockPool, io: std.Io, output: []Block) void {
         if (output.len == 0) return;
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        if (self.closed) return error.Closed;
-        if (output.len > self.capacity) return error.RequestExceedsCapacity;
-        while (self.free_blocks.items.len < output.len) {
-            self.condition.waitUncancelable(io, &self.mutex);
-            if (self.closed) return error.Closed;
+        if (output.len > self.free_blocks.items.len) {
+            std.debug.panic("BlockPool: {d} blocks leased with {d} free; a lease outside the lifecycle credits", .{ output.len, self.free_blocks.items.len });
         }
         for (output) |*block| block.* = self.free_blocks.pop().?;
         self.in_use += output.len;
@@ -523,7 +518,6 @@ pub const BlockPool = struct {
             self.free_blocks.appendAssumeCapacity(block);
         }
         self.in_use -= blocks.len;
-        self.condition.broadcast(io);
     }
 
     pub fn release(self: *BlockPool, io: std.Io, block: Block) void {
@@ -539,13 +533,6 @@ pub const BlockPool = struct {
         const block = self.free_blocks.pop() orelse return null;
         self.capacity -= 1;
         return block;
-    }
-
-    pub fn close(self: *BlockPool, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        self.closed = true;
-        self.condition.broadcast(io);
     }
 };
 
@@ -753,13 +740,13 @@ test "BlockPool ownership transfer cleans up allocation failures" {
             try std.testing.expectEqual(arena.ptr, pool.workspace.findArena(64).?.ptr);
             try std.testing.expectEqual(@as(usize, 1), pool.capacity);
             var blocks: [1]BlockPool.Block = undefined;
-            try pool.acquireMany(std.testing.io, &blocks);
+            pool.acquireMany(std.testing.io, &blocks);
             pool.releaseMany(std.testing.io, &blocks);
         }
     }.run, .{});
 }
 
-test "BlockPool acquires request blocks atomically" {
+test "BlockPool leases blocks atomically and takes them back" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var pool = pool_init: {
@@ -772,31 +759,18 @@ test "BlockPool acquires request blocks atomically" {
     defer pool.deinit();
 
     var first: [3]BlockPool.Block = undefined;
-    try pool.acquireMany(io, &first);
+    pool.acquireMany(io, &first);
     try std.testing.expectEqual(@as(usize, 3 * 64), pool.high_water * pool.block_size);
     try std.testing.expectEqual(@as(usize, 4 * 64), pool.workspace.mapped_bytes);
-    var oversized: [5]BlockPool.Block = undefined;
-    try std.testing.expectError(error.RequestExceedsCapacity, pool.acquireMany(io, &oversized));
-
-    var started: std.Io.Event = .unset;
-    var acquired: std.Io.Event = .unset;
-    var group: std.Io.Group = .init;
-    try group.concurrent(io, struct {
-        fn run(pool_: *BlockPool, io_: std.Io, started_: *std.Io.Event, acquired_: *std.Io.Event) void {
-            var blocks: [2]BlockPool.Block = undefined;
-            started_.set(io_);
-            pool_.acquireMany(io_, &blocks) catch unreachable;
-            acquired_.set(io_);
-            pool_.releaseMany(io_, &blocks);
-        }
-    }.run, .{ &pool, io, &started, &acquired });
-    try started.wait(io);
-    try io.sleep(.fromMilliseconds(5), .awake);
-    try std.testing.expect(!acquired.isSet());
-
+    var last: [1]BlockPool.Block = undefined;
+    pool.acquireMany(io, &last);
+    for (first) |block| try std.testing.expect(block.ptr != last[0].ptr);
     pool.releaseMany(io, &first);
-    try group.await(io);
-    try std.testing.expect(acquired.isSet());
+    pool.release(io, last[0]);
+    var all: [4]BlockPool.Block = undefined;
+    pool.acquireMany(io, &all);
+    try std.testing.expectEqual(@as(usize, 4 * 64), pool.high_water * pool.block_size);
+    pool.releaseMany(io, &all);
 }
 
 test "BlockPool acquisition allocates nothing once its arenas are attached" {
@@ -812,49 +786,13 @@ test "BlockPool acquisition allocates nothing once its arenas are attached" {
     defer pool.deinit();
 
     var blocks: [3]BlockPool.Block = undefined;
-    try pool.acquireMany(io, &blocks);
+    pool.acquireMany(io, &blocks);
     pool.releaseMany(io, &blocks);
 
     failing.fail_index = failing.alloc_index;
-    try pool.acquireMany(io, &blocks);
+    pool.acquireMany(io, &blocks);
     try std.testing.expect(!failing.has_induced_failure);
     pool.releaseMany(io, &blocks);
-}
-
-test "BlockPool close wakes blocked bulk acquisitions" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var pool = pool_init: {
-        var workspace = try Workspace.initForTesting(allocator, std.testing.io, 2 * 64);
-        errdefer workspace.deinit();
-
-        _ = try workspace.allocate(2 * 64);
-        break :pool_init try BlockPool.init(allocator, workspace, 64);
-    };
-    defer pool.deinit();
-
-    var held: [2]BlockPool.Block = undefined;
-    try pool.acquireMany(io, &held);
-    var started: std.Io.Event = .unset;
-    var result: std.atomic.Value(u16) = .init(0);
-    var group: std.Io.Group = .init;
-    try group.concurrent(io, struct {
-        fn run(pool_: *BlockPool, io_: std.Io, started_: *std.Io.Event, result_: *std.atomic.Value(u16)) void {
-            var block: [1]BlockPool.Block = undefined;
-            started_.set(io_);
-            pool_.acquireMany(io_, &block) catch |err| {
-                result_.store(@intFromError(err), .release);
-                return;
-            };
-            pool_.releaseMany(io_, &block);
-        }
-    }.run, .{ &pool, io, &started, &result });
-    try started.wait(io);
-    try io.sleep(.fromMilliseconds(5), .awake);
-    pool.close(io);
-    try group.await(io);
-    pool.releaseMany(io, &held);
-    try std.testing.expectEqual(@intFromError(error.Closed), result.load(.acquire));
 }
 
 test "BlockPool lease returns a block after out-of-order callbacks" {
@@ -870,7 +808,7 @@ test "BlockPool lease returns a block after out-of-order callbacks" {
     defer pool.deinit();
 
     var blocks: [1]BlockPool.Block = undefined;
-    try pool.acquireMany(io, &blocks);
+    pool.acquireMany(io, &blocks);
     var lease: BlockPool.Lease = .init(&pool, io, blocks[0], 4);
     var group: std.Io.Group = .init;
     for ([_]i64{ 4, 1, 3, 2 }) |delay_ms| {
@@ -885,7 +823,7 @@ test "BlockPool lease returns a block after out-of-order callbacks" {
     try std.testing.expect(lease.remaining.load(.acquire) == 0);
 
     var reacquired: [1]BlockPool.Block = undefined;
-    try pool.acquireMany(io, &reacquired);
+    pool.acquireMany(io, &reacquired);
     try std.testing.expectEqual(@intFromPtr(blocks[0].ptr), @intFromPtr(reacquired[0].ptr));
     pool.releaseMany(io, &reacquired);
 }
@@ -909,13 +847,10 @@ test "BlockPool reblocks retained arenas of unequal size" {
     try std.testing.expectEqual(@as(usize, 4), pool.capacity);
 
     var blocks: [4]BlockPool.Block = undefined;
-    try pool.acquireMany(io, &blocks);
+    pool.acquireMany(io, &blocks);
     try std.testing.expectEqual(@as(usize, 3), pool.workspace.backend.arenaCount());
     try std.testing.expectEqual(@as(usize, 285), pool.workspace.mapped_bytes);
     try std.testing.expectEqual(@as(usize, 4 * 64), pool.high_water * pool.block_size);
-    // Nothing grows: a request beyond the capacity can never be served.
-    var oversized: [5]BlockPool.Block = undefined;
-    try std.testing.expectError(error.RequestExceedsCapacity, pool.acquireMany(io, &oversized));
     pool.releaseMany(io, &blocks);
 }
 
@@ -937,23 +872,3 @@ test "BlockPool counts retained requests over arena tails" {
     try std.testing.expectEqual(@as(usize, 2), pool.capacity);
 }
 
-test "BlockPool rejects requests that can never fit without leasing" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var pool = pool_init: {
-        var workspace = try Workspace.initForTesting(allocator, std.testing.io, 2 * 64);
-        errdefer workspace.deinit();
-
-        _ = try workspace.allocate(2 * 64);
-
-        break :pool_init try BlockPool.init(allocator, workspace, 64);
-    };
-    defer pool.deinit();
-
-    var impossible: [3]BlockPool.Block = undefined;
-    try std.testing.expectError(error.RequestExceedsCapacity, pool.acquireMany(io, &impossible));
-    try std.testing.expectEqual(@as(usize, 0), pool.high_water * pool.block_size);
-    var fits: [2]BlockPool.Block = undefined;
-    try pool.acquireMany(io, &fits);
-    pool.releaseMany(io, &fits);
-}

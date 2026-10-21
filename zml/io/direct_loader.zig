@@ -35,7 +35,7 @@ const load_testing = @import("testing.zig");
 const TransferInitError = std.mem.Allocator.Error || pjrt.ApiError || error{ IncompatibleSharding, UnsupportedMemoryKind };
 /// Everything a worker, a pump callback or a partially published plan can
 /// record as the pipeline's sticky error.
-const PipelineError = TransferInitError || std.Io.File.OpenError || safetensors.ExactPositionalError || host_memory.AcquireError || error{ InvalidOptions, SourceSizeMismatch, InvalidLayout, UnsupportedLayout, InvalidTensorRange, Internal, Closed };
+const PipelineError = TransferInitError || std.Io.File.OpenError || safetensors.ExactPositionalError || error{ InvalidOptions, SourceSizeMismatch, InvalidLayout, UnsupportedLayout, InvalidTensorRange, Internal, Closed };
 
 /// Bounds per-device event overhead for tiny tensors. This is not a measured
 /// optimum: 64 pieces smaller than block_size / 8 cannot fill an eight-block
@@ -489,6 +489,10 @@ pub const Loader = struct {
             // credits, no longer count it.
             const zero_block = pool.detachBlock() orelse return error.OutOfMemory;
             @memset(zero_block, 0);
+            // The one bound on pinned memory in use: a credit holder leases
+            // at most `maximum_blocks_per_job` blocks and returns them before
+            // its credit, so a lease always finds its blocks free and the
+            // pool never waits (`BlockPool.acquireMany`).
             const retained_credits = pool.capacity / maximum_blocks_per_job;
             std.debug.assert(retained_credits >= fitted_width + 1);
 
@@ -726,9 +730,8 @@ pub const Loader = struct {
             self.pool.high_water * self.pool.block_size,
             self.pool.workspace.mapped_bytes,
         });
-        load_log.debug("loader waits: credit_wait_ms_per_read={d:.3}, block_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}, ahead_init_ms={d:.3}", .{
+        load_log.debug("loader waits: credit_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}, ahead_init_ms={d:.3}", .{
             millisecondsPer(self.metrics.lifecycle_wait_ns.load(.acquire), reads),
-            millisecondsPer(self.metrics.block_wait_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.read_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.dma_stage_ns.load(.acquire), reads),
             millisecondsPer(self.metrics.tensor_init_ns.load(.acquire), reads),
@@ -2843,10 +2846,8 @@ const ReadRequest = struct {
             _ = self.registerBlock(pipeline.zero_block, null, references[0]);
         } else {
             const leased = scratch.leased[0..block_count];
-            const block_wait_started = awakeNs(io);
-            try pipeline.pool.acquireMany(io, leased);
+            pipeline.pool.acquireMany(io, leased);
             errdefer pipeline.pool.releaseMany(io, leased);
-            _ = pipeline.metrics.block_wait_ns.fetchAdd(awakeNs(io) -| block_wait_started, .monotonic);
             if (pipeline.errorValue()) |err| return err;
 
             if (job.gather or job.item_len != 0) {
@@ -2947,10 +2948,8 @@ const ReadRequest = struct {
                 const block_size = pipeline.block_size;
                 const leased = scratch.leased[0..job.block_len];
                 std.debug.assert(job.block_len == job.len / block_size + @intFromBool(job.len % block_size != 0));
-                const block_wait_started = awakeNs(io);
-                try pipeline.pool.acquireMany(io, leased);
+                pipeline.pool.acquireMany(io, leased);
                 defer pipeline.pool.releaseMany(io, leased);
-                _ = pipeline.metrics.block_wait_ns.fetchAdd(awakeNs(io) -| block_wait_started, .monotonic);
                 if (pipeline.errorValue()) |err| return err;
                 const iovecs = scratch.iovecs[0..job.block_len];
                 for (iovecs, leased, 0..) |*iovec, block, block_index| {
@@ -3589,7 +3588,6 @@ const Pipeline = struct {
         if (self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic) == null) {
             load_log.failure(err, fmt, args);
             self.scheduler.fail(self.io);
-            self.pool.close(self.io);
             self.read_gate.close(self.io);
             self.request_gate.close(self.io);
             self.abortReady();
@@ -3906,11 +3904,10 @@ const Metrics = struct {
     read_operations: std.atomic.Value(u64) = .init(0),
     read_bytes: std.atomic.Value(u64) = .init(0),
     dma_submissions: std.atomic.Value(u64) = .init(0),
-    /// Time workers spend waiting for a lifecycle credit, for pinned
-    /// blocks, and inside the source read, summed over requests: waits
-    /// above the read time mean the load is DMA-completion bound.
+    /// Time workers spend waiting for a lifecycle credit and inside the
+    /// source read, summed over requests: waits above the read time mean the
+    /// load is DMA-completion bound.
     lifecycle_wait_ns: std.atomic.Value(u64) = .init(0),
-    block_wait_ns: std.atomic.Value(u64) = .init(0),
     read_ns: std.atomic.Value(u64) = .init(0),
     /// From a request's enqueue to its last DMA callback: how long the DMA
     /// stage holds a lifecycle credit and pinned blocks per request.
@@ -4892,7 +4889,7 @@ test "late vectored callback failure drains and signals completion" {
     const batch = try publishTestBatch(&scheduler, 1);
     const request = try fixture.claimRequest(&scheduler);
     var leased: [1]host_memory.BlockPool.Block = undefined;
-    try pool.acquireMany(io, &leased);
+    pool.acquireMany(io, &leased);
     const block = request.registerBlock(leased[0], &pool, 1);
     try std.testing.expect(block == &batch.plans.items[0].blocks[0]);
     var target: TensorTransfer.Target = .{ .manager = undefined, .device_index = 0, .total = 64 };
