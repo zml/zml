@@ -21,3 +21,16 @@ pub const QwenImage21TransformerBlock = @import("./blocks/generation/QwenImage21
 pub const QwenImage21Attention = @import("./blocks/generation/QwenImage21Attention.zig");
 pub const QwenImage21SwiGLUFeedForward = @import("./blocks/generation/QwenImage21SwiGLUFeedForward.zig");
 pub const QwenImage21AdaLayerNormContinuous = @import("./blocks/generation/QwenImage21AdaLayerNormContinuous.zig");
+
+// Vae
+pub const Conv2d = @import("./blocks/vae/Conv2d.zig");
+pub const QwenImage21AttentionBlock = @import("./blocks/vae/QwenImage21AttentionBlock.zig");
+pub const QwenImage21CausalConv3d = @import("./blocks/vae/QwenImage21CausalConv3d.zig");
+pub const QwenImage21Decoder3d = @import("./blocks/vae/QwenImage21Decoder3d.zig");
+pub const QwenImage21DupUp3D = @import("./blocks/vae/QwenImage21DupUp3D.zig");
+pub const QwenImage21MidBlock = @import("./blocks/vae/QwenImage21MidBlock.zig");
+pub const QwenImage21Resample = @import("./blocks/vae/QwenImage21Resample.zig");
+pub const QwenImage21ResidualBlock = @import("./blocks/vae/QwenImage21ResidualBlock.zig");
+pub const QwenImage21ResidualUpBlock = @import("./blocks/vae/QwenImage21ResidualUpBlock.zig");
+pub const QwenImage21RMS_norm = @import("./blocks/vae/QwenImage21RMS_norm.zig");
+pub const QwenImage21Upsample = @import("./blocks/vae/QwenImage21Upsample.zig");

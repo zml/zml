@@ -106,6 +106,23 @@ pub fn main(init: std.process.Init) !void {
             TextWrapper{ .model = language_model_store.model.language_model.rotary_emb, .args = compile_args },
             .{ .args = compile_args_buffers },
         );
+    } else if (std.mem.containsAtLeast(u8, activations_path, 1, "vae.")) {
+        std.debug.print("\n\nStarting testing > VaeModel\n\n", .{});
+
+        var vae_model_store: store.VaeModelStore = undefined;
+        try vae_model_store.load_tensors(allocator, io, cli_args.folder);
+        try vae_model_store.load_buffers(allocator, io, platform);
+        defer vae_model_store.deinit(allocator);
+
+        try testing.testLayer(
+            allocator,
+            io,
+            platform,
+            "vae.decoder.conv_in",
+            &activations_store.store,
+            VaeWrapper{ .model = vae_model_store.model.conv_in, .args = compile_args },
+            .{ .model = vae_model_store.model_buffer.conv_in, .args = compile_args_buffers },
+        );
     } else {
         std.debug.print("NOTHING IS BEING TESTED\n", .{});
         unreachable;
@@ -146,6 +163,21 @@ const TextWrapper = struct {
     ) [2]zml.Tensor {
         const tagged = x.withTags(.{ .bs, .seq_len, .d });
         return self.model.forward(tagged, pos_idx, self.args);
+    }
+};
+
+const VaeWrapper = struct {
+    model: block.QwenImage21CausalConv3d,
+    args: CompileArgs,
+
+    pub fn forward(
+        self: VaeWrapper,
+        x: zml.Tensor,
+    ) zml.Tensor {
+        _ = self; // autofix
+        return x;
+        // const tagged = x.withTags(.{ .d, .dout, .one, .kx, .ky });
+        // return self.model.forward(tagged);
     }
 };
 
