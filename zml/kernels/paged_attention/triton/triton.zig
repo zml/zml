@@ -6,6 +6,7 @@ const zml = @import("../../../zml.zig");
 const triton = zml.kernel.triton;
 const AttentionOptions = @import("../paged_attention.zig").AttentionOptions;
 const kernels = @import("unified_attention.zig");
+const kernels_sparse = @import("sparse_unified_attention.zig");
 const kernels_oneapi = @import("unified_attention_oneapi.zig");
 
 const log = std.log.scoped(.@"zml/attention/triton");
@@ -59,26 +60,7 @@ fn isCudaComputeCapability(expected: zml.platform.cuda.ComputeCapability) bool {
 /// Triton codegen bug is not diagnosed; this only keeps us out of it.
 const max_query_tile_elements: usize = 16 * 1024;
 
-fn select2dSparseConfig(options: paged.PagedAttentionOptions) Config2D {
-    const tile_size: usize = switch (options.indices_count) {
-        0...16 => 16,
-        17...32 => 32,
-        else => if (options.head_dim > 128) 32 else 64,
-    };
-
-    return .{
-        .block_m = @max(16, std.math.ceilPowerOfTwoAssert(usize, options.numQueriesPerKv())),
-        .block_q = 1,
-        .tile_size = tile_size,
-        .num_warps = 4,
-        .num_stages = 1,
-        .total_q_blocks = options.num_tokens + options.batch_size,
-    };
-}
-
 fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
-    if (options.indices_count > 0) return select2dSparseConfig(options);
-
     const max_num_stages_2d: usize = if (options.head_dim <= 128) 4 else 2;
 
     // Until we test on other platforms, gate the fix to GB300
@@ -145,7 +127,7 @@ fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     var reduce_num_warps: usize = 2;
     // Intel decode needs more warps to spread the work and avoid register spill.
     const attn_warps: usize = if (options.all_decode and isOneapiTarget()) 8 else 2;
-    const tile_size = if (options.indices_count > 0) 32 else options.block_size;
+    const tile_size = options.block_size;
 
     //const MAX_SEGMENTS: usize = @min(128, std.math.divCeil(usize, max_seqlen_k, tile_size));
     var num_segments = std.math.divCeil(usize, options.target_num_prgms, options.num_2d_prgms) catch unreachable;
@@ -190,6 +172,26 @@ pub fn getCuCount() usize {
     const attribute = platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count") orelse return 1;
     if (attribute.int64 <= 0) return 1;
     return @intCast(attribute.int64);
+}
+
+const SparseConfig = struct {
+    tile_size: usize,
+    num_segments: usize,
+};
+
+fn selectSparseConfig(count: usize, batch_size: usize, num_kv_heads: usize, cu_count: usize, all_decode: bool) SparseConfig {
+    std.debug.assert(count > 0 and batch_size > 0 and num_kv_heads > 0);
+    if (!all_decode) return .{ .tile_size = 32, .num_segments = 1 };
+
+    const target_num_prgms = cu_count * 4;
+    const occupancy_splits = std.math.ceilPowerOfTwoAssert(usize, std.math.divCeil(usize, target_num_prgms * 4, batch_size * num_kv_heads) catch unreachable);
+    const tile: usize = if (occupancy_splits > 128) 16 else 32;
+    const tile_splits = std.math.ceilPowerOfTwoAssert(usize, std.math.divCeil(usize, count, tile) catch unreachable);
+
+    return .{
+        .tile_size = tile,
+        .num_segments = @min(tile_splits, @min(if (tile == 16) @as(usize, 256) else 128, @max(8, occupancy_splits))),
+    };
 }
 
 pub const paged = struct {
@@ -257,8 +259,6 @@ pub const paged = struct {
         num_2d_prgms: usize,
         max_seqlen_q: usize,
         scale: ?f32,
-        /// Number of indices for sparse attention
-        indices_count: usize,
 
         pub fn numQueriesPerKv(self: PagedAttentionOptions) usize {
             return self.num_heads / self.num_kv_heads;
@@ -270,6 +270,10 @@ pub const paged = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        if (opts.mask == .indices) {
+            return pagedSparseAttention(parameters, q, k_cache, v_cache, opts);
+        }
+
         const output = zml.ops.manualComputation(
             (struct {
                 q: zml.Tensor,
@@ -296,12 +300,10 @@ pub const paged = struct {
                     // Intel decode: pack exactly one GQA group per tile (block_q == 1) so the
                     // single decode query token doesn't carry masked-out fp32 acc lanes.
                     // oneAPI decode keeps one GQA group per tile, padded to a power of two so tt.make_range emits legal Triton IR.
-                    const block_m: usize = if (self.opts.mask == .indices)
-                        @max(16, std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv))
-                    else if (!self.options.is_prefill and isOneapiTarget())
+                    const block_m: usize = if (!self.options.is_prefill and isOneapiTarget())
                         std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv)
                     else if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
-                    const block_q: usize = if (self.opts.mask == .indices) 1 else block_m / num_queries_per_kv;
+                    const block_q: usize = block_m / num_queries_per_kv;
                     const num_tokens: usize = @intCast(self.q.dim(.b));
                     const num_seqs: usize = @intCast(parameters_.block_table.dim(.b));
                     const total_q_blocks: usize = num_tokens / block_q + num_seqs;
@@ -329,10 +331,6 @@ pub const paged = struct {
                         .num_2d_prgms = num_2d_prgms,
                         .max_seqlen_q = self.options.max_seqlen_q,
                         .scale = self.opts.scale,
-                        .indices_count = switch (self.opts.mask) {
-                            .indices => |indices| @intCast(indices.dim(.topk)),
-                            else => 0,
-                        },
                     };
 
                     const use_2d_kernel = use2dKernel(
@@ -342,7 +340,7 @@ pub const paged = struct {
                     );
                     const output = if (use_2d_kernel)
                         pagedAttention2d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
-                    else if (isOneapiTarget() and self.opts.mask != .indices)
+                    else if (isOneapiTarget())
                         pagedAttention3dOneapi(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts)
                     else
                         pagedAttention3d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, paged_attention_opts);
@@ -362,6 +360,239 @@ pub const paged = struct {
             },
             q.shape(),
         );
+
+        return output;
+    }
+
+    pub fn pagedSparseAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        stdx.debug.assert(opts.mask == .indices, "Expected indices mask but got {}", .{opts.mask});
+        const indices = opts.mask.indices;
+        stdx.debug.assert(indices.rank() == 2 and indices.dtype() == .i32, "Sparse indices must be an i32 [query, topk] tensor, got {f}", .{indices.shape()});
+        stdx.debug.assert(indices.dim(.b) == q.dim(.b) and indices.dim(.topk) > 0, "Sparse indices {f} must match queries {f} with a nonempty selection capacity", .{ indices.shape(), q.shape() });
+        stdx.debug.assert(indices.shape().hasTags(.{ .b, .topk }), "Sparse indices expect to have .b, .topk tags", .{});
+        stdx.debug.assert(q.dtype() == k_cache.dtype() and q.dtype() == v_cache.dtype(), "Sparse attention requires matching query and KV dtypes", .{});
+
+        return zml.ops.manualComputation(
+            (struct {
+                q: zml.Tensor,
+                k_cache: zml.Tensor,
+                v_cache: zml.Tensor,
+                block_table: zml.Tensor,
+                seq_lens: zml.Tensor,
+                query_start_len: zml.Tensor,
+                opts: AttentionOptions,
+                options: Options,
+
+                fn body(self: @This(), _: zml.Shape) zml.Tensor {
+                    const parameters_: Parameters = .{
+                        .block_table = self.block_table,
+                        .seq_lens = self.seq_lens,
+                        .query_start_len = self.query_start_len,
+                        .options_ = self.options,
+                    };
+
+                    const config = selectSparseConfig(
+                        @intCast(self.opts.mask.indices.dim(.topk)),
+                        @intCast(self.block_table.dim(.b)),
+                        @intCast(self.q.dim(.hkv)),
+                        getCuCount(),
+                        !self.options.is_prefill,
+                    );
+
+                    return if (config.num_segments == 1)
+                        pagedSparseAttention2d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, config)
+                    else
+                        pagedSparseAttention3d(parameters_, self.q, self.k_cache, self.v_cache, self.opts, config);
+                }
+            }).body,
+            .{
+                .q = q,
+                .k_cache = k_cache,
+                .v_cache = v_cache,
+                .block_table = parameters.block_table,
+                .seq_lens = parameters.seq_lens,
+                .query_start_len = parameters.query_start_len,
+                .opts = opts,
+                .options = parameters.options_,
+            },
+            q.shape(),
+        );
+    }
+
+    pub fn pagedSparseAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, tuning: SparseConfig) zml.Tensor {
+        std.debug.assert(tuning.num_segments == 1);
+
+        const indices = opts.mask.indices;
+
+        const group = q.dim(.hg);
+        const num_kv_heads = q.dim(.hkv);
+        std.debug.assert(num_kv_heads == k_cache.dim(.hkv) and num_kv_heads == v_cache.dim(.hkv));
+        std.debug.assert(q.dim(.hd) == k_cache.dim(.hd) and q.dim(.hd) == v_cache.dim(.hd));
+
+        const all_decode = !parameters.options_.is_prefill;
+
+        const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
+
+        const qs = q_shape.computeElementStrides().constSlice();
+        const ks = k_cache.shape().computeElementStrides().constSlice();
+        const vs = v_cache.shape().computeElementStrides().constSlice();
+        const is = indices.shape().computeElementStrides().constSlice();
+        const ts = parameters.block_table.shape().computeElementStrides().constSlice();
+
+        const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(@max(16, q.dim(.hd)))));
+
+        const config: kernels_sparse.SparseAttentionConfig = .{
+            .dtype = triton.from(q.dtype()),
+            .num_seqs = @intCast(parameters.block_table.dim(.b)),
+            .num_query_heads = num_kv_heads * group,
+            .num_queries_per_kv = group,
+            .head_size = q.dim(.hd),
+            .head_size_padded = head_size_padded,
+            .block_m = @intCast(@max(16, std.math.ceilPowerOfTwoAssert(u64, @intCast(group)))),
+            .block_size = k_cache.dim(.k_chunk),
+            .tile_size = @intCast(tuning.tile_size),
+            .indices_count = indices.dim(.topk),
+            .num_segments = @intCast(tuning.num_segments),
+            .decode_sequence_grid = all_decode and parameters.options_.max_seqlen_q == 1,
+            .use_sinks = opts.sink != null,
+            .scale = opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd))))),
+            .block_table_stride = ts[parameters.block_table.axis(.b)],
+            .query_strides = .{ qs[q_shape.axis(.b)], qs[q_shape.axis(.h)], qs[q_shape.axis(.hd)] },
+            .key_strides = .{ ks[k_cache.axis(.page)], ks[k_cache.axis(.k_chunk)], ks[k_cache.axis(.hkv)], ks[k_cache.axis(.hd)] },
+            .value_strides = .{ vs[v_cache.axis(.page)], vs[v_cache.axis(.k_chunk)], vs[v_cache.axis(.hkv)], vs[v_cache.axis(.hd)] },
+            .indices_strides = .{ is[indices.axis(.b)], is[indices.axis(.topk)] },
+        };
+
+        const inputs: kernels_sparse.KernelSparseAttention2dPtr.Kernel.Inputs = .{
+            .query_ptr = q,
+            .key_ptr = k_cache,
+            .value_ptr = v_cache,
+            .indices_ptr = indices,
+            .block_tables_ptr = parameters.block_table,
+            .seq_lens_ptr = parameters.seq_lens,
+            .query_start_len_ptr = parameters.query_start_len,
+            .sink_ptr = if (opts.sink) |sink| sink.convert(.f32) else .scalar(0, .f32),
+        };
+
+        const grid: [3]i32 = .{
+            if (config.decode_sequence_grid) config.num_seqs else @intCast(q.dim(.b)),
+            @intCast(num_kv_heads),
+            1,
+        };
+
+        const warps: i32 = if (all_decode and isOneapiTarget()) 8 else 4;
+
+        const output = kernels_sparse.KernelSparseAttention2dPtr.Kernel.call(inputs, .{
+            .output = q.shape(),
+        }, .{
+            .cfg = config,
+            .grid = grid,
+            .num_stages = 1,
+            .num_warps = warps,
+        });
+
+        return output.output;
+    }
+
+    pub fn pagedSparseAttention3d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, tuning: SparseConfig) zml.Tensor {
+        std.debug.assert(tuning.num_segments > 1);
+
+        const indices = opts.mask.indices;
+        const group = q.dim(.hg);
+        const num_kv_heads = q.dim(.hkv);
+        std.debug.assert(num_kv_heads == k_cache.dim(.hkv) and num_kv_heads == v_cache.dim(.hkv));
+        std.debug.assert(q.dim(.hd) == k_cache.dim(.hd) and q.dim(.hd) == v_cache.dim(.hd));
+
+        const all_decode = !parameters.options_.is_prefill;
+
+        const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
+
+        const qs = q_shape.computeElementStrides().constSlice();
+        const ks = k_cache.shape().computeElementStrides().constSlice();
+        const vs = v_cache.shape().computeElementStrides().constSlice();
+        const is = indices.shape().computeElementStrides().constSlice();
+        const ts = parameters.block_table.shape().computeElementStrides().constSlice();
+
+        const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(u64, @intCast(@max(16, q.dim(.hd)))));
+
+        const config: kernels_sparse.SparseAttentionConfig = .{
+            .dtype = triton.from(q.dtype()),
+            .num_seqs = @intCast(parameters.block_table.dim(.b)),
+            .num_query_heads = num_kv_heads * group,
+            .num_queries_per_kv = group,
+            .head_size = q.dim(.hd),
+            .head_size_padded = head_size_padded,
+            .block_m = @intCast(@max(16, std.math.ceilPowerOfTwoAssert(u64, @intCast(group)))),
+            .block_size = k_cache.dim(.k_chunk),
+            .tile_size = @intCast(tuning.tile_size),
+            .indices_count = indices.dim(.topk),
+            .num_segments = @intCast(tuning.num_segments),
+            .decode_sequence_grid = all_decode and parameters.options_.max_seqlen_q == 1,
+            .use_sinks = opts.sink != null,
+            .scale = opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd))))),
+            .block_table_stride = ts[parameters.block_table.axis(.b)],
+            .query_strides = .{ qs[q_shape.axis(.b)], qs[q_shape.axis(.h)], qs[q_shape.axis(.hd)] },
+            .key_strides = .{ ks[k_cache.axis(.page)], ks[k_cache.axis(.k_chunk)], ks[k_cache.axis(.hkv)], ks[k_cache.axis(.hd)] },
+            .value_strides = .{ vs[v_cache.axis(.page)], vs[v_cache.axis(.k_chunk)], vs[v_cache.axis(.hkv)], vs[v_cache.axis(.hd)] },
+            .indices_strides = .{ is[indices.axis(.b)], is[indices.axis(.topk)] },
+        };
+
+        const inputs: kernels_sparse.KernelSparseAttention3dPtr.Kernel.Inputs = .{
+            .query_ptr = q,
+            .key_ptr = k_cache,
+            .value_ptr = v_cache,
+            .indices_ptr = indices,
+            .block_tables_ptr = parameters.block_table,
+            .seq_lens_ptr = parameters.seq_lens,
+            .query_start_len_ptr = parameters.query_start_len,
+            .sink_ptr = if (opts.sink) |sink| sink.convert(.f32) else .scalar(0, .f32),
+        };
+
+        const partition = kernels_sparse.SparseSegments.init(config.indices_count, config.num_segments, config.tile_size);
+        const grid: [3]i32 = .{
+            if (config.decode_sequence_grid) config.num_seqs else @intCast(q.dim(.b)),
+            @intCast(num_kv_heads),
+            @intCast(partition.launched),
+        };
+
+        const warps: i32 = if (all_decode) 8 else 4;
+
+        const stats_shape = zml.Shape.init(.{ q.dim(.b), config.num_segments, config.num_query_heads }, .f32);
+
+        const partials = kernels_sparse.KernelSparseAttention3dPtr.Kernel.call(inputs, .{
+            .output = .init(.{ q.dim(.b), config.num_query_heads, config.num_segments, head_size_padded }, .f32),
+            .segm_max = stats_shape,
+            .segm_expsum = stats_shape,
+        }, .{
+            .cfg = config,
+            .grid = grid,
+            .num_stages = 1,
+            .num_warps = warps,
+        });
+
+        const head_tile = @min(64, head_size_padded);
+
+        const output = kernels_sparse.SparseReducePtr.Kernel.call(.{
+            .segm_output_ptr = partials.output,
+            .segm_max_ptr = partials.segm_max,
+            .segm_expsum_ptr = partials.segm_expsum,
+            .query_start_len_ptr = parameters.query_start_len,
+        }, .{ .output = q.shape() }, .{
+            .cfg = .{
+                .dtype = config.dtype,
+                .num_seqs = config.num_seqs,
+                .num_query_heads = config.num_query_heads,
+                .head_size = config.head_size,
+                .head_size_padded = head_size_padded,
+                .head_tile = head_tile,
+                .num_segments = config.num_segments,
+                .launched_segments = partition.launched,
+                .output_strides = config.query_strides,
+            },
+            .grid = .{ @intCast(q.dim(.b)), @intCast(config.num_query_heads), @intCast(@divExact(head_size_padded, head_tile)) },
+            .num_stages = 1,
+            .num_warps = 4,
+        }).output;
 
         return output;
     }
@@ -393,7 +624,6 @@ pub const paged = struct {
             .use_fp8 = false,
             .all_decode = paged_attention_opts.all_decode,
             .is_causal = opts.mask.isCausal(),
-            .indices_count = @intCast(paged_attention_opts.indices_count),
         };
         log.debug("pagedAttention2d config: {any}", .{kernel_config});
 
@@ -411,10 +641,6 @@ pub const paged = struct {
         const output = kernels.KernelUnifiedAttention2dPtr.Kernel.call(
             .{
                 .query_ptr = q,
-                .indices_ptr = switch (opts.mask) {
-                    .indices => |indices| indices.transpose(.{ .b, .topk }),
-                    else => dummy,
-                },
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
                 .sink_ptr = sink,
@@ -474,7 +700,6 @@ pub const paged = struct {
             .num_segments_per_seq = @intCast(config.attention.num_segments_per_seq),
             .all_decode = paged_attention_opts.all_decode,
             .is_causal = opts.mask.isCausal(),
-            .indices_count = @intCast(paged_attention_opts.indices_count),
         };
         log.debug("pagedAttention3d attention config: {any}", .{attn_kernel_config});
 
@@ -486,7 +711,6 @@ pub const paged = struct {
             .head_size_padded = head_size_padded,
             .block_q = @intCast(config.reduce.block_q),
             .num_segments_per_seq = @intCast(config.reduce.num_segments_per_seq),
-            .indices_count = @intCast(paged_attention_opts.indices_count),
             .use_fp8 = false,
         };
         log.debug("pagedAttention3d reduce config: {any}", .{reduce_kernel_config});
@@ -511,10 +735,6 @@ pub const paged = struct {
         const attn_output = kernels.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
                 .query_ptr = q,
-                .indices_ptr = switch (opts.mask) {
-                    .indices => |indices| indices.transpose(.{ .b, .topk }),
-                    else => dummy,
-                },
                 .key_cache_ptr = k_cache,
                 .value_cache_ptr = v_cache,
                 .sink_ptr = sink,
