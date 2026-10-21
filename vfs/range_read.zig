@@ -93,8 +93,10 @@ const RangeRead = struct {
     data: []const []u8,
     offset: u64,
     size: usize,
+    progress: ?*std.atomic.Value(u64) = null,
 
     fn attempt(self: *RangeRead, current: request.Attempt) anyerror!request.Outcome(void) {
+        self.progress = current.progress;
         const prepared = try self.spec.prepare(self.spec.context, current, self.range);
         std.debug.assert(prepared.extra_headers.len <= max_extra_headers);
         var headers: [max_extra_headers + 1]std.http.Header = undefined;
@@ -122,6 +124,7 @@ const RangeRead = struct {
             self.offset,
             self.data,
             self.size,
+            self.progress,
         ) catch |err| switch (err) {
             // The loop retries a truncated body; anything else is a
             // malformed answer to a valid request.
@@ -173,7 +176,8 @@ pub fn readSize(file_size: u64, offset: u64, data: []const []u8) usize {
 }
 
 /// Validates the response against the requested range, discards the prefix
-/// of a `200` that ignored `Range`, then scatters `read_size` bytes.
+/// of a `200` that ignored `Range`, then scatters `read_size` bytes, counting
+/// what it receives in `progress`.
 pub fn readResponse(
     reader: *std.Io.Reader,
     status: std.http.Status,
@@ -181,6 +185,7 @@ pub fn readResponse(
     offset: u64,
     data: []const []u8,
     read_size: usize,
+    progress: ?*std.atomic.Value(u64),
 ) !void {
     if (read_size == 0) return error.EmptyRangeRead;
 
@@ -195,17 +200,34 @@ pub fn readResponse(
         else => return error.UnexpectedStatus,
     };
 
-    try reader.discardAll(offset - response_start);
-    try readScatter(reader, data, read_size);
+    var skip = offset - response_start;
+    while (skip != 0) {
+        const len = @min(skip, progress_slice);
+        try reader.discardAll(len);
+        count(progress, len);
+        skip -= len;
+    }
+    try readScatter(reader, data, read_size, progress);
 }
 
-pub fn readScatter(reader: *std.Io.Reader, data: []const []u8, len: usize) !void {
+/// Bytes read between two progress counts.
+const progress_slice = 1 << 20;
+
+fn count(progress: ?*std.atomic.Value(u64), len: u64) void {
+    if (progress) |counter| _ = counter.fetchAdd(len, .monotonic);
+}
+
+pub fn readScatter(reader: *std.Io.Reader, data: []const []u8, len: usize, progress: ?*std.atomic.Value(u64)) !void {
     var remaining = len;
     for (data) |buf| {
-        if (remaining == 0) break;
-        const destination = buf[0..@min(remaining, buf.len)];
-        try reader.readSliceAll(destination);
+        var destination = buf[0..@min(remaining, buf.len)];
         remaining -= destination.len;
+        while (destination.len != 0) {
+            const slice = destination[0..@min(destination.len, progress_slice)];
+            try reader.readSliceAll(slice);
+            count(progress, slice.len);
+            destination = destination[slice.len..];
+        }
     }
     if (remaining != 0) return error.UnexpectedEndOfOutput;
 }
@@ -237,6 +259,7 @@ test "range responses fill scatter buffers" {
         3,
         &.{ &first, &second },
         5,
+        null,
     );
     try std.testing.expectEqualStrings("34", &first);
     try std.testing.expectEqualStrings("567", &second);
@@ -246,7 +269,7 @@ test "200 responses that ignore Range are positioned and scattered" {
     var reader: std.Io.Reader = .fixed("0123456789");
     var first: [1]u8 = undefined;
     var second: [4]u8 = undefined;
-    try readResponse(&reader, .ok, null, 3, &.{ &first, &second }, 5);
+    try readResponse(&reader, .ok, null, 3, &.{ &first, &second }, 5, null);
     try std.testing.expectEqualStrings("3", &first);
     try std.testing.expectEqualStrings("4567", &second);
 }
@@ -254,17 +277,17 @@ test "200 responses that ignore Range are positioned and scattered" {
 test "partial responses require a covering Content-Range" {
     var reader: std.Io.Reader = .fixed("3456");
     var output: [4]u8 = undefined;
-    try std.testing.expectError(error.InvalidContentRange, readResponse(&reader, .partial_content, null, 3, &.{&output}, 4));
+    try std.testing.expectError(error.InvalidContentRange, readResponse(&reader, .partial_content, null, 3, &.{&output}, 4, null));
 
     reader = .fixed("4567");
     try std.testing.expectError(
         error.InvalidContentRange,
-        readResponse(&reader, .partial_content, .{ .start = 4, .end = 7, .total = 10 }, 3, &.{&output}, 4),
+        readResponse(&reader, .partial_content, .{ .start = 4, .end = 7, .total = 10 }, 3, &.{&output}, 4, null),
     );
 
     reader = .fixed("345");
     try std.testing.expectError(
         error.InvalidContentRange,
-        readResponse(&reader, .partial_content, .{ .start = 3, .end = 5, .total = 10 }, 3, &.{&output}, 4),
+        readResponse(&reader, .partial_content, .{ .start = 3, .end = 5, .total = 10 }, 3, &.{&output}, 4, null),
     );
 }

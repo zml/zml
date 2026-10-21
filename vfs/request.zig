@@ -29,6 +29,13 @@ pub const RetryConfig = struct {
     /// A throttling episode with no clean window longer than this fails the
     /// backend's requests with `error.RateLimited`.
     throttle_budget: std.Io.Duration,
+    /// An attempt that receives nothing for this long is canceled and
+    /// retried as a timeout: a peer that stops sending without closing the
+    /// connection would otherwise hold its reader, and the load waiting for
+    /// it, forever. Body readers count what they receive
+    /// (`Attempt.progress`); an attempt that counts nothing (a HEAD, a token
+    /// exchange) must finish within it.
+    stall_timeout: std.Io.Duration = .fromSeconds(60),
 
     /// Reads the `max_retries`, `retry_initial_delay`, `retry_max_delay`,
     /// `max_hold` and `throttle_budget` fields every backend's `InitOpts`
@@ -115,7 +122,14 @@ pub const Attempt = struct {
     /// The status the previous attempt returned, for a hook that reacts to
     /// one (an expired signed URL answering 403 after a long hold).
     previous_status: ?std.http.Status = null,
+    /// Bytes received so far, for a hook whose body is long: `perform`
+    /// cancels an attempt this counter does not move for
+    /// `RetryConfig.stall_timeout`.
+    progress: ?*std.atomic.Value(u64) = null,
 };
+
+/// How often a watched attempt's progress is checked, per stall timeout.
+const stall_checks = 12;
 
 /// Identity of one request, for the logs and for the classification.
 pub const RequestSpec = struct {
@@ -153,8 +167,9 @@ pub fn Outcome(comptime T: type) type {
 /// The one request loop. `attemptFn` performs a single HTTP exchange (see
 /// `exchange`); this drives the hold, the classification and the two budgets
 /// around it. A throttle re-runs the attempt without charging a retry, after
-/// the hold it armed; any other retryable failure sleeps the per-request
-/// backoff and charges one of `max_retries`. Cancellation propagates.
+/// the hold it armed; any other retryable failure, a stall
+/// (`RetryConfig.stall_timeout`) included, sleeps the per-request backoff and charges
+/// one of `max_retries`. A cancel of the caller propagates.
 pub fn perform(
     comptime T: type,
     ctx: Context,
@@ -167,7 +182,7 @@ pub fn perform(
     while (true) {
         try admit(ctx, spec);
         ctx.stats.recordAttempt();
-        switch (try attemptFn(context, .{ .ordinal = charged, .previous_status = previous_status })) {
+        switch (try watched(T, ctx, spec, context, attemptFn, .{ .ordinal = charged, .previous_status = previous_status })) {
             .done => |value| return value,
             .retry => |failure| {
                 ctx.stats.recordFailure(failure.failure);
@@ -188,6 +203,69 @@ pub fn perform(
             },
         }
     }
+}
+
+/// Runs one attempt on its own unit of concurrency while this task watches
+/// its progress, and cancels it after `RetryConfig.stall_timeout` without
+/// progress. A
+/// canceled read surfaces inside the attempt as a failed read, so the
+/// outcome of a stalled attempt is decided here, as a timeout. Without a
+/// unit of concurrency the attempt runs unwatched, as it always did.
+fn watched(
+    comptime T: type,
+    ctx: Context,
+    spec: RequestSpec,
+    context: anytype,
+    comptime attemptFn: fn (@TypeOf(context), Attempt) anyerror!Outcome(T),
+    attempt: Attempt,
+) anyerror!Outcome(T) {
+    const Run = struct {
+        result: anyerror!Outcome(T) = undefined,
+        done: std.Io.Event = .unset,
+
+        fn run(self: *@This(), io: std.Io, context_: @TypeOf(context), attempt_: Attempt) void {
+            self.result = attemptFn(context_, attempt_);
+            self.done.set(io);
+        }
+    };
+    var progress: std.atomic.Value(u64) = .init(0);
+    var counted = attempt;
+    counted.progress = &progress;
+    var run: Run = .{};
+    var future = ctx.io.concurrent(Run.run, .{ &run, ctx.io, context, counted }) catch |err| switch (err) {
+        error.ConcurrencyUnavailable => return attemptFn(context, counted),
+    };
+    const stall_timeout = ctx.governor.retry.stall_timeout;
+    const check: std.Io.Timeout = .{ .duration = .{
+        .raw = .fromNanoseconds(@divTrunc(stall_timeout.nanoseconds, stall_checks)),
+        .clock = .awake,
+    } };
+    var seen: u64 = 0;
+    var quiet: usize = 0;
+    while (quiet < stall_checks) {
+        run.done.waitTimeout(ctx.io, check) catch |err| switch (err) {
+            error.Timeout => {
+                const now = progress.load(.monotonic);
+                quiet = if (now == seen) quiet + 1 else 0;
+                seen = now;
+                continue;
+            },
+            error.Canceled => {
+                future.cancel(ctx.io);
+                return error.Canceled;
+            },
+        };
+        future.await(ctx.io);
+        return run.result;
+    }
+    future.cancel(ctx.io);
+    // It may have finished while being canceled.
+    if (run.result) |outcome| switch (outcome) {
+        .done => return outcome,
+        .retry => {},
+    } else |_| {}
+    log.warn("{s}: {s} received nothing for {d:.1}s; retrying", .{ spec.backend, spec.target, @as(f64, @floatFromInt(stall_timeout.nanoseconds)) / std.time.ns_per_s });
+    return .{ .retry = .{ .failure = .timeout } };
 }
 
 /// Waits out the scope's hold. Returns at once when nothing is held; fails
@@ -358,17 +436,27 @@ pub fn exchange(
         error.NetworkDown,
         error.NameServerFailure,
         => return retryable(T, spec, "connect", err, .transient),
+        // A stalled attempt that `watched` canceled, or the caller's cancel.
+        error.Canceled => return err,
         else => return fatal(spec, "connect", err),
     };
     defer req.deinit();
 
+    // A request that was not sent whole leaves its connection unusable;
+    // `deinit` would otherwise pool it, its reader still `ready`.
     if (options.payload) |payload| {
         req.sendBodyComplete(payload) catch |err| switch (err) {
-            error.WriteFailed => return retryable(T, spec, "send body", err, .transient),
+            error.WriteFailed => {
+                req.connection.?.closing = true;
+                return retryable(T, spec, "send body", err, .transient);
+            },
         };
     } else {
         req.sendBodiless() catch |err| switch (err) {
-            error.WriteFailed => return retryable(T, spec, "send headers", err, .transient),
+            error.WriteFailed => {
+                req.connection.?.closing = true;
+                return retryable(T, spec, "send headers", err, .transient);
+            },
         };
     }
 
@@ -764,6 +852,40 @@ test "retry configuration comes from the backend init options" {
     try std.testing.expectEqual(std.Io.Duration.fromSeconds(1), retry.max_delay);
     try std.testing.expectEqual(std.Io.Duration.fromSeconds(120), retry.max_hold);
     try std.testing.expectEqual(std.Io.Duration.fromSeconds(300), retry.throttle_budget);
+}
+
+test "an attempt that receives nothing is canceled and retried as a timeout" {
+    var governor: Governor = .init(.{
+        .max_retries = 3,
+        .initial_delay = .fromMilliseconds(1),
+        .max_delay = .fromMilliseconds(1),
+        .max_hold = .fromMilliseconds(1),
+        .throttle_budget = .fromSeconds(1),
+        .stall_timeout = .fromMilliseconds(120),
+    });
+    var stats: AtomicReadStats = .{};
+    const ctx = testContext(&governor, &stats);
+    const Hang = struct {
+        progressed: u64 = 0,
+        fn attempt(self: *@This(), current: Attempt) anyerror!Outcome(usize) {
+            // The first attempt hangs, the second one keeps receiving and
+            // takes longer than the stall timeout overall.
+            if (current.ordinal == 0) {
+                try std.testing.io.sleep(.fromSeconds(60), .awake);
+                return error.TestUnexpectedResult;
+            }
+            for (0..6) |_| {
+                try std.testing.io.sleep(.fromMilliseconds(40), .awake);
+                _ = current.progress.?.fetchAdd(1, .monotonic);
+                self.progressed += 1;
+            }
+            return .{ .done = current.ordinal };
+        }
+    };
+    var hang: Hang = .{};
+    try std.testing.expectEqual(@as(usize, 1), try perform(usize, ctx, test_spec, &hang, Hang.attempt));
+    try std.testing.expectEqual(@as(u64, 6), hang.progressed);
+    try std.testing.expectEqual(@as(u64, 1), stats.snapshot().timeouts);
 }
 
 test "the request authority is the rate-limit scope" {
