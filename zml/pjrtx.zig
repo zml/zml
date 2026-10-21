@@ -14,7 +14,10 @@ const log = std.log.scoped(.@"zml/pjrtx");
 pub const Client = opaque {
     pub const CompileError = std.mem.Allocator.Error || error{InvalidMlirBytecodeVersion} || pjrt.ApiError;
 
-    pub fn compile(client: *const pjrt.Client, api: *const pjrt.Api, allocator: std.mem.Allocator, io: std.Io, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*pjrt.LoadedExecutable {
+    /// Compiles on the calling thread: under zio, `Compiler.compile` has
+    /// already moved off the coroutine (`zio.blockInPlace`), and XLA's
+    /// compile needs the thread's stack, not a task's.
+    pub fn compile(client: *const pjrt.Client, api: *const pjrt.Api, allocator: std.mem.Allocator, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*pjrt.LoadedExecutable {
         const stablehlo_version = blk: {
             if (api.stablehloCurrentVersion()) |requested_version| {
                 break :blk dialects.stablehlo.smallerVersion(requested_version, dialects.stablehlo.currentVersion());
@@ -37,7 +40,7 @@ pub const Client = opaque {
             };
         };
 
-        return @ptrCast(try client.compile(api, io, .{
+        return @ptrCast(try client.compileRaw(api, .{
             .bytecode = serialized_buffer.written(),
             .bytecode_format = .mlir,
             .compile_options_pb = compile_options_pb,

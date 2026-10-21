@@ -472,11 +472,6 @@ pub const Client = opaque {
         return @ptrCast(ret.executable.?);
     }
 
-    pub fn compile(self: *const Client, api: *const Api, io: std.Io, args: CompileArgs) ApiError!*LoadedExecutable {
-        var future = io.async(compileRaw, .{ self, api, args });
-        return future.await(io);
-    }
-
     pub const BufferFromHostBufferArgs = struct {
         data: [*]const u8,
         buffer_type: BufferType,

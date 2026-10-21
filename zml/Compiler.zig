@@ -1004,7 +1004,6 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
         platform.pjrt_client,
         platform.pjrt_api,
         compiler.allocator,
-        compiler.io,
         compiler.module,
         try upb.serialize(options, upb_arena),
     );
