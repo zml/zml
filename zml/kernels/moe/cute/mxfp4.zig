@@ -312,3 +312,131 @@ test "MXFP4 CuTe boundary kernels emit for decode and prefill batches" {
         }
     }
 }
+
+test "CuTe quantization matches scalar FP8 rounding, scales, and route scatter" {
+    const platform = zml.testing.env();
+    if (!@import("cute.zig").isAvailable(platform)) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const hidden = 5120;
+    const Local = struct {
+        fn call(x: zml.Tensor, routes: zml.Tensor, cfg: GroupedQuantConfig) [2]zml.Tensor {
+            const result = groupedQuantize(x, routes, cfg);
+            return .{ result.q.bitCast(.u8), result.s };
+        }
+
+        // Enumerate the finite E4M3 codes: independent scalar nearest-even
+        // rounding, including subnormals and signed zero.
+        fn fp8(x: f32) u8 {
+            var best: u8 = 0;
+            var distance = std.math.inf(f32);
+            for (0..127) |code| {
+                const exponent: i32 = @intCast(code / 8);
+                const mantissa: f32 = @floatFromInt(code % 8);
+                const value = if (exponent == 0) mantissa * 0x1p-9 else (1 + mantissa / 8) * std.math.pow(f32, 2, @floatFromInt(exponent - 7));
+                const delta = @abs(@abs(x) - value);
+                if (delta < distance or (delta == distance and code % 2 == 0)) {
+                    best = @intCast(code);
+                    distance = delta;
+                }
+            }
+            return best | (if (std.math.signbit(x)) @as(u8, 128) else 0);
+        }
+    };
+    for ([_]bool{ true, false }) |direct| {
+        const tokens: i64 = if (direct) 1 else 3;
+        const group: i64 = if (direct) 8 else 16;
+        var host = try zml.Slice.alloc(allocator, .init(.{ tokens, hidden }, .bf16));
+        defer host.free(allocator);
+        const pattern = [_]f32{ 0, -0.0, 1.0625, 1.1875, -1.0625, -1.1875, 0x1p-10, 448 };
+        for (host.items(zml.floats.BFloat16), 0..) |*value, i| {
+            var v = pattern[i % pattern.len];
+            v = switch ((i / 32) % 5) {
+                0 => 0,
+                1 => v * 0x1p-16,
+                2 => v,
+                3 => v * 128,
+                else => if (i % 32 == 31) 450 else v,
+            };
+            value.* = .fromF32(v);
+        }
+        const routes = [_]i32{ 17, 0, -1, -1, 15, 31 };
+        const ids = routes[0..@intCast(tokens * 2)];
+        var input = try zml.Buffer.fromSlice(io, platform, host);
+        defer input.deinit();
+        var map = try zml.Buffer.fromBytes(io, platform, .init(.{tokens * 2}, .i32), std.mem.sliceAsBytes(ids));
+        defer map.deinit();
+        for ([_]i64{ 1, 4 }) |lanes| {
+            const cfg: GroupedQuantConfig = .{ .tokens = tokens, .hidden = hidden, .topk = 2, .group_size = group, .capacity = 2, .direct = direct, .lanes_per_block = lanes };
+            var exe = try platform.compileFn(allocator, io, Local.call, .{ zml.Tensor.fromShape(host.shape), zml.Tensor.init(.{tokens * 2}, .i32), cfg }, .{});
+            defer exe.deinit();
+            var runner = try exe.runner(allocator);
+            defer runner.deinit(allocator);
+            var output: [2]zml.Buffer = undefined;
+            runner.run(io, .{ input, map }, &output, .{ .wait = true });
+            defer for (&output) |*buffer| buffer.deinit();
+            const q = try output[0].toSliceAlloc(allocator, io);
+            defer q.free(allocator);
+            const scales = try output[1].toSliceAlloc(allocator, io);
+            defer scales.free(allocator);
+            for (ids, 0..) |mapped, route| {
+                if (!direct and mapped < 0) continue;
+                const row: usize = if (direct) route * @as(usize, @intCast(group)) else @intCast(mapped);
+                for (0..hidden / 32) |block| {
+                    const values = host.constItems(zml.floats.BFloat16)[(route / 2) * hidden + block * 32 ..][0..32];
+                    var maximum: f32 = 1e-4;
+                    for (values) |value| maximum = @max(maximum, @abs(value.toF32()));
+                    var scale: f32 = 0x1p-22;
+                    var exponent: u8 = 105;
+                    while (maximum > 448 * scale) : (exponent += 1) scale *= 2;
+                    const group_size: usize = @intCast(group);
+                    const local_row = row % group_size;
+                    const scale_index = (row / group_size) * (hidden / 32 * 128) + (block / 4) * 512 + (local_row % 32) * 16 + (local_row / 32) * 4 + block % 4;
+                    try std.testing.expectEqual(exponent, scales.constItems(u8)[scale_index]);
+                    for (values, 0..) |value, column| try std.testing.expectEqual(Local.fp8(value.toF32() / scale), q.constItems(u8)[row * hidden + block * 32 + column]);
+                }
+            }
+        }
+    }
+}
+
+test "CuTe combine ignores poisoned remote rows and handles partial blocks" {
+    const platform = zml.testing.env();
+    if (!@import("cute.zig").isAvailable(platform)) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const tokens = 3;
+    const topk = 17;
+    const hidden = 24;
+    var routes: [tokens * topk]i32 = undefined;
+    for (&routes, 0..) |*route, i| route.* = if (i / topk == 1 or i % 3 == 1) -1 else @intCast(i % topk);
+    var values: [tokens * topk * hidden]zml.floats.BFloat16 = undefined;
+    for (&values, 0..) |*value, i| {
+        value.* = .fromF32(if (routes[i / hidden] < 0) std.math.nan(f32) else @as(f32, @floatFromInt(@as(i32, @intCast(i % 37)) - 18)) / 8);
+    }
+    const Local = struct {
+        fn call(x: zml.Tensor, ids: zml.Tensor) zml.Tensor {
+            return combine(x, ids, .{ .tokens = tokens, .hidden = hidden, .topk = topk });
+        }
+    };
+    const x: zml.Tensor = .init(.{ tokens * topk, hidden }, .bf16);
+    const ids: zml.Tensor = .init(.{tokens * topk}, .i32);
+    var exe = try platform.compileFn(allocator, io, Local.call, .{ x, ids }, .{});
+    defer exe.deinit();
+    var input = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&values));
+    defer input.deinit();
+    var route_buffer = try zml.Buffer.fromBytes(io, platform, ids.shape(), std.mem.asBytes(&routes));
+    defer route_buffer.deinit();
+    var output = try exe.eval(allocator, io, .{ input, route_buffer });
+    defer output.deinit();
+    const actual = try output.toSliceAlloc(allocator, io);
+    defer actual.free(allocator);
+    for (actual.constItems(zml.floats.BFloat16), 0..) |value, i| {
+        var sum: f32 = 0;
+        for (0..topk) |slot| {
+            const route = (i / hidden) * topk + slot;
+            if (routes[route] >= 0) sum += values[route * hidden + i % hidden].toF32();
+        }
+        try std.testing.expectEqual(@as(u16, @bitCast(zml.floats.BFloat16.fromF32(sum))), @as(u16, @bitCast(value)));
+    }
+}
