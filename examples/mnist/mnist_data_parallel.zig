@@ -2,9 +2,11 @@
 //! Separated to kept `mnist.zig` minimal
 
 const std = @import("std");
+
 const zml = @import("zml");
 
 const base = @import("mnist.zig");
+
 const log = std.log.scoped(.mnist);
 
 pub const std_options: std.Options = .{
@@ -53,14 +55,20 @@ const Mnist = struct {
     /// just two linear layers + relu activation
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
         var x = input.onMemory(.host_pinned).toMemory(.device).merge(.{ .d = .{ .x, .y } }).convert(.f32);
+
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
+
         const compiler = zml.Compiler.current();
+
         for (0.., layers) |i, layer| {
             compiler.pushLocationFmt(@src(), "layer[{d}]", .{i});
             defer compiler.popLocation();
             x = layer.forward(x);
         }
-        return x.argMax(.d).indices.convert(.u8).withPartitioning(input.shape()._sharding.mesh.?, .{ .b = .data, .d = .replicated }).toMemory(.host_pinned);
+
+        return x.argMax(.d).indices.convert(.u8)
+            .withPartitioning(.dp_mp, .{ .b = .data, .d = .replicated })
+            .toMemory(.host_pinned);
     }
 
     const Layer = struct {
@@ -68,7 +76,7 @@ const Mnist = struct {
         bias: zml.Tensor,
 
         pub fn forward(self: Layer, input: zml.Tensor) zml.Tensor {
-            log.warn("layer(input={f}, w={f}, b={f}) -> {f}", .{ input, self.weight, self.bias, input.dot(self.weight, .d) });
+            log.info("Layer(input={f}, w={f}, b={f}) -> {f}", .{ input, self.weight, self.bias, input.dot(self.weight, .d) });
             const x = input.dot(self.weight, .d);
             return x.add(self.bias.broad(x.shape())).relu().rename(.{ .d_out = .d });
         }
@@ -100,18 +108,20 @@ pub fn main(init: std.process.Init) !void {
         &.{ .low_bandwidth, .high_bandwidth },
         &.{ 2, -1 },
     ));
-    log.info("topology used: {f}", .{dp_mp});
+    log.info("{f}", .{dp_mp});
 
     var profiler = try platform.profiler(allocator, io, .{ .session_id = "mnist" });
     defer profiler.deinit();
 
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{dp_mp});
     defer store.deinit();
+
     const mnist_model: Mnist = .init(store.view());
 
-    // // Compile model
+    // Compile model
     const bs: u32 = 4;
     const input: zml.Tensor = .withPartitioning(.init(.{ .b = bs, .x = 28, .y = 28 }, .u8), dp_mp, .{ .b = .data });
+
     var exe = exe: {
         log.info("Compiling model....", .{});
         const start: std.Io.Timestamp = .now(io, .awake);
@@ -167,7 +177,6 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // This performs a host to host pinned memcpy.
-    // TODO: show how to allocate a Host pinned buffer and write into it.
     var input_buffer: zml.Buffer = try .fromBytesOpts(io, platform, input.shape(), std.mem.sliceAsBytes(batch), .{ .memory = .host_pinned });
     defer input_buffer.deinit();
 
