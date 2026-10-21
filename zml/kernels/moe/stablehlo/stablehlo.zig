@@ -121,15 +121,25 @@ fn roundedInput(x: Tensor, linear: zml.nn.Linear, opts: Options, dtype: zml.Data
         .fp8_per_channel, .fp8_per_tensor => x.dim(.in),
         else => unreachable,
     };
-    const source = if (opts.input_quantization == .mxfp8_bf16) x.convert(.bf16) else x;
+    // This is a stored BF16 boundary in CuTe's fused activation epilogue.
+    // Keep XLA from carrying FP32 activation values into the quantizer.
+    const source = if (opts.input_quantization == .mxfp8_bf16) x.convert(.bf16).optimizationBarrier() else x;
     const grouped = source.convert(.f32).splitAxis(.in, .{ .group = @divExact(x.dim(.in), group), .element = group });
     const epsilon: f32 = if (scheme == .fp8_block32) 1e-4 else 1e-10;
     const max_value: f32 = if (output_dtype == .f8e4m3fnuz) 224 else 448;
     var scale = grouped.abs().max(.element).maximum(Tensor.scalar(epsilon, .f32)).scale(1 / max_value);
-    if (scheme == .mxfp8 or scheme == .fp8_block32) scale = scale.log().scale(1 / @log(@as(f32, 2))).ceil().scale(@log(@as(f32, 2))).exp();
+    if (scheme == .mxfp8 or scheme == .fp8_block32) scale = ceilPowerOfTwo(scale);
     const broad = scale.broad(grouped.shape());
     return grouped.div(broad).clamp(Tensor.scalar(-max_value, .f32), Tensor.scalar(max_value, .f32))
         .convert(output_dtype).optimizationBarrier().convert(.f32).mul(broad).reshape(x.shape().withDtype(.f32));
+}
+
+// Positive normal FP32 scales, bounded below by epsilon / max_value above.
+// log/exp does not reconstruct powers of two exactly and can move FP8 ties
+// across a rounding boundary even when the selected exponent is correct.
+fn ceilPowerOfTwo(x: Tensor) Tensor {
+    return x.bitCast(.u32).addConstant(0x7fffff)
+        .logical(.AND, Tensor.scalar(0x7f800000, .u32)).bitCast(.f32);
 }
 
 fn project(x: Tensor, linear: zml.nn.Linear, ids: Tensor, opts: Options, dtype: zml.DataType) Tensor {
@@ -175,7 +185,8 @@ pub fn reference(input: Tensor, topk_ids: Tensor, topk_weights: Tensor, gate_up:
     if (opts.routing_weight_placement == .before_down) activated = activated.mul(weights.broad(activated.shape()));
     var output = project(activated.rename(.{ .out = .in }), down, ids, opts, input.dtype());
     if (opts.routing_weight_placement == .after_down) output = output.mul(weights.broad(output.shape()));
-    return output.convert(input.dtype()).convert(.f32)
+    // Each route is stored in the activation dtype before the top-k reduction.
+    return output.convert(input.dtype()).optimizationBarrier().convert(.f32)
         .reshape(.{ .t = tokens, .topk = k, .d = output.dim(.out) })
         .sum(.topk).squeeze(.topk).convert(input.dtype());
 }
@@ -209,4 +220,35 @@ test "MoE compliance: FP4 midpoint rounding" {
     const actual = try output.toSliceAlloc(allocator, io);
     defer actual.free(allocator);
     try std.testing.expectEqualSlices(f32, &expected, actual.constItems(f32));
+}
+
+test "MoE compliance: exact MX scales preserve FP8 midpoint ties" {
+    const Local = struct {
+        fn call(x: Tensor) [2]Tensor {
+            const scale = ceilPowerOfTwo(x);
+            const midpoint = scale.scale(1.0625).optimizationBarrier();
+            return .{ scale, midpoint.div(scale).convert(.f8e4m3fn).optimizationBarrier().convert(.f32) };
+        }
+    };
+    const values = [_]f32{ 0x1p-22, 0.125, 0.12500001, 0.99999994, 1, 1.0000001, 3, 128 };
+    const scales = [_]f32{ 0x1p-22, 0.125, 0.25, 1, 1, 2, 4, 128 };
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    const x: Tensor = .init(.{values.len}, .f32);
+    var exe = try platform.compileFn(allocator, io, Local.call, .{x}, .{});
+    defer exe.deinit();
+    var input = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&values));
+    defer input.deinit();
+    var runner = try exe.runner(allocator);
+    defer runner.deinit(allocator);
+    var output: [2]zml.Buffer = undefined;
+    runner.run(io, .{input}, &output, .{ .wait = true });
+    defer for (&output) |*buffer| buffer.deinit();
+    const expected_values = [_][values.len]f32{ scales, @splat(1) };
+    for (output, expected_values) |buffer, expected| {
+        const actual = try buffer.toSliceAlloc(allocator, io);
+        defer actual.free(allocator);
+        try std.testing.expectEqualSlices(f32, &expected, actual.constItems(f32));
+    }
 }
