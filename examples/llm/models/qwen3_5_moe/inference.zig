@@ -38,6 +38,7 @@ pub const LayerIndexBuffer = union(enum) {
 pub const RunArgs = struct {
     io: std.Io,
     tokens_buffer: *zml.Buffer,
+    next_token_buffer: *zml.Buffer,
     token_index_buffer: *zml.Buffer,
     active_length_buffer: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
@@ -216,11 +217,13 @@ pub fn run(runner: *KernelRunner, args: RunArgs) void {
     runner.sample.run(args.io, .{
         .inputs = .{
             .hidden = hidden_buffer,
+            .tokens = args.tokens_buffer.*,
+            .active_length = args.active_length_buffer.*,
             .rng = args.rng_buffers.*,
             .token_index = args.token_index_buffer.*,
         },
         .outputs = .{
-            .tokens = args.tokens_buffer,
+            .tokens = args.next_token_buffer,
             .rng = args.rng_buffers,
             .token_index = args.token_index_buffer,
         },
@@ -307,6 +310,8 @@ fn compileSample(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.
     return compileExe(allocator, io, platform, model.Sampler.sampleTokens, .{.{
         .sampler = mdl.text_model.sampler(),
         .hidden = hiddenTensor(mdl, seqlen, parameters.meshes.model),
+        .tokens = .init(.{ .b = 1, .s = seqlen }, .u32),
+        .active_length = .init(.{}, .u32),
         .rng = parameters.rng,
         .token_index = zml.Tensor.init(.{}, .u32),
     }}, parameters, progress, phase, "sampling");

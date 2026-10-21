@@ -235,7 +235,7 @@ pub const Model = struct {
     ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
         const new_tokens, const updated_kv_cache, const new_rng = self.text_model.forward(tokens, token_index, active_length, kv_cache, self.config, rng, moe_backend);
-        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
+        return .{ new_tokens, updated_kv_cache, new_rng };
     }
 };
 
@@ -250,6 +250,8 @@ pub const Sampler = struct {
     pub const Input = struct {
         sampler: Sampler,
         hidden: zml.Tensor,
+        tokens: zml.Tensor,
+        active_length: zml.Tensor,
         rng: zml.Tensor.Rng,
         token_index: zml.Tensor,
     };
@@ -262,13 +264,15 @@ pub const Sampler = struct {
 
     pub fn sampleTokens(input: Input) Output {
         const self = input.sampler;
-        const x = self.norm.forward(input.hidden);
+        const last_index = input.active_length.convert(.i32).addConstant(-1);
+        const x = self.norm.forward(input.hidden.slice(.s, .dyn(last_index, 1)));
         const logits = self.lm_head.forward(x.withPartialTags(.{.d}), x.dtype()).rename(.{ .dout = .voc });
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, input.rng);
+        const tokens = next_tokens.convert(.u32);
         return .{
-            .tokens = next_tokens.convert(.u32),
+            .tokens = if (input.tokens.dim(.s) == 1) tokens.reuseBuffer(input.tokens) else tokens,
             .rng = new_rng,
-            .token_index = input.token_index.addConstant(1),
+            .token_index = input.token_index.addConstant(1).reuseBuffer(input.token_index),
         };
     }
 };
@@ -368,6 +372,8 @@ pub const TextModel = struct {
         const result = Sampler.sampleTokens(.{
             .sampler = self.sampler(),
             .hidden = hidden_states,
+            .tokens = tokens,
+            .active_length = active_length,
             .rng = rng,
             .token_index = token_index,
         });

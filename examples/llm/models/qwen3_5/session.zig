@@ -119,18 +119,19 @@ pub const Session = struct {
         var active_length_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.len)), .u32);
         defer active_length_buffer.deinit();
 
+        var next_token_buffer: zml.Buffer = undefined;
         inference.run(&self.prefill, .{
             .io = self.io,
             .tokens_buf = &prefill_tokens_buffer,
+            .next_token_buf = &next_token_buffer,
             .token_index_buf = &prefill_token_index_buffer,
             .active_length_buf = &active_length_buffer,
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
         }, self.layer_index_buffers);
 
-        try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
-        const generated_token = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
-        self.generated_token_slice.items(u32)[0] = generated_token;
+        defer next_token_buffer.deinit();
+        try next_token_buffer.toSlice(self.io, self.generated_token_slice);
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
@@ -168,6 +169,7 @@ pub const Session = struct {
             inference.run(&self.decode, .{
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
+                .next_token_buf = &current_token_buffer,
                 .token_index_buf = &token_index_buffer,
                 .active_length_buf = &active_length_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,

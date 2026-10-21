@@ -55,8 +55,9 @@ pub const CompilationOptions = CompilationParameters;
 pub const Args = struct {
     io: std.Io,
     tokens_buf: *zml.Buffer,
+    next_token_buf: *zml.Buffer,
     tokens_pos_buf: *zml.Buffer,
-    actual_seq_len_buf: *zml.Buffer,
+    active_length_buf: *zml.Buffer,
     rng_buf: *zml.Bufferized(zml.Tensor.Rng),
     cache_buffers: *zml.Bufferized(model.Cache),
     attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata),
@@ -169,7 +170,7 @@ pub fn run(
             .inputs = .{
                 .hidden = hidden_buffer,
                 .tokens_position_offset = args.tokens_pos_buf.*,
-                .actual_seq_len = args.actual_seq_len_buf.*,
+                .active_length = args.active_length_buf.*,
                 .cache = args.cache_buffers.*,
                 .conv_cache_index = conv_cache_index_buffer.*,
                 .kv_cache_index = kv_cache_index_buffer.*,
@@ -188,10 +189,11 @@ pub fn run(
         .inputs = .{
             .hidden = hidden_buffer,
             .tokens = args.tokens_buf.*,
+            .active_length = args.active_length_buf.*,
             .rng = args.rng_buf.*,
         },
         .outputs = .{
-            .tokens = args.tokens_buf,
+            .tokens = args.next_token_buf,
             .rng = args.rng_buf,
         },
     }, .{});
@@ -279,7 +281,7 @@ fn compileLayer(
         .layer = layer,
         .hidden = zml.Tensor.init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype()),
         .tokens_position_offset = zml.Tensor.init(.{ .batch = opts.batch_dim }, .u32),
-        .actual_seq_len = zml.Tensor.init(.{}, .u32),
+        .active_length = .init(.{}, .u32),
         .cache = opts.cache,
         .conv_cache_index = zml.Tensor.init(.{}, .u32),
         .kv_cache_index = zml.Tensor.init(.{}, .u32),
@@ -312,7 +314,8 @@ fn compileSample(
         .lm_head = mdl.lm_head,
         .embed_tokens = mdl.embed_tokens,
         .hidden = zml.Tensor.init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype()),
-        .tokens = zml.Tensor.init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32),
+        .tokens = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32),
+        .active_length = .init(.{}, .u32),
         .rng = opts.rng,
     }});
 }

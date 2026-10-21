@@ -127,9 +127,9 @@ pub const Session = struct {
         var tokens_pos_buf: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice);
         defer tokens_pos_buf.deinit();
 
-        const actual_seq_len_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(all_tokens.len)}));
-        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice);
-        defer actual_seq_len_buf.deinit();
+        const active_length_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(all_tokens.len)}));
+        var active_length_buf: zml.Buffer = try .fromSlice(self.io, self.platform, active_length_slice);
+        defer active_length_buf.deinit();
 
         const params = self.compiled_model.params;
         var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
@@ -146,18 +146,20 @@ pub const Session = struct {
         var kv_cache_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, 0, .u32);
         defer kv_cache_index_buffer.deinit();
 
+        var next_token_buf: zml.Buffer = undefined;
         inference.run(&self.prefill, .{
             .io = self.io,
             .tokens_buf = &tokens_buf,
+            .next_token_buf = &next_token_buf,
             .tokens_pos_buf = &tokens_pos_buf,
-            .actual_seq_len_buf = &actual_seq_len_buf,
+            .active_length_buf = &active_length_buf,
             .rng_buf = &self.rng_buf,
             .cache_buffers = &self.cache_buffers,
             .attention_metadata_buffers = attention_metadata_buffers,
         }, &conv_cache_index_buffer, &kv_cache_index_buffer);
 
-        try tokens_buf.toSlice(self.io, tokens_slice);
-        self.generated_token_slice.items(u32)[0] = tokens_slice.items(u32)[all_tokens.len - 1];
+        defer next_token_buf.deinit();
+        try next_token_buf.toSlice(self.io, self.generated_token_slice);
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
@@ -167,9 +169,9 @@ pub const Session = struct {
         var current_token_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, self.generated_token_slice);
         defer current_token_buffer.deinit();
 
-        const actual_seq_len_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
-        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice);
-        defer actual_seq_len_buf.deinit();
+        const active_length_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{1}));
+        var active_length_buf: zml.Buffer = try .fromSlice(self.io, self.platform, active_length_slice);
+        defer active_length_buf.deinit();
 
         const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
         defer self.allocator.free(out_tokens_buffer);
@@ -208,8 +210,9 @@ pub const Session = struct {
             inference.run(&self.decode, .{
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
+                .next_token_buf = &current_token_buffer,
                 .tokens_pos_buf = &token_pos_buffer,
-                .actual_seq_len_buf = &actual_seq_len_buf,
+                .active_length_buf = &active_length_buf,
                 .rng_buf = &self.rng_buf,
                 .cache_buffers = &self.cache_buffers,
                 .attention_metadata_buffers = attention_metadata_buffers,
