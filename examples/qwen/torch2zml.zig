@@ -174,10 +174,8 @@ const VaeWrapper = struct {
         self: VaeWrapper,
         x: zml.Tensor,
     ) zml.Tensor {
-        _ = self; // autofix
-        return x;
-        // const tagged = x.withTags(.{ .d, .dout, .one, .kx, .ky });
-        // return self.model.forward(tagged);
+        const tagged = x.withTags(.{ .d, .dout, .t, .kx, .ky });
+        return self.model.forward(tagged);
     }
 };
 
