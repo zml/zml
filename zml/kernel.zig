@@ -526,6 +526,9 @@ pub const cute = struct {
     pub const TmaConfig = cute_builder.TmaConfig;
     pub const TmaFormat = cute_builder.TmaFormat;
     pub const BlockScaledMmaConfig = cute_builder.BlockScaledMmaConfig;
+    pub const CtaGroup = cute_builder.CtaGroup;
+    pub const ctaCount = cute_builder.ctaCount;
+    pub const MBarrierScope = cute_builder.MBarrierScope;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
         return makeKernelContext(&cute_builder.dialects_needed);
