@@ -5895,8 +5895,66 @@ Baseline: 467 GiB in 11.9 s (39 GiB/s); under nsys 14.8 s.
 - NCCL: time `preload` alone, with a larger `CUDA_CACHE_MAXSIZE`, and with
   an NCCL build carrying sm_103 (or sm_100f) code.
 
+## Thirtieth pass: end-to-end loader review (2026-10-21)
+
+A read-only review of the whole load path, from llmd (`main.zig`,
+`models.zig`, `weights.zig`, the model files) through `zml/io` and `vfs/`,
+against the brief "code earns its place, fewer abstractions, logic local".
+The full report is `LOADER_REVIEW.md`:
+- "Read this first" ranks what matters.
+- Part 1 covers bugs and missing parts, tests and docs.
+- Part 2 covers the simplification plan (ten moves), performance, and what
+  earns its place.
+- Appendix A lists every finding.
+
+Method:
+- Twelve reviewers (eight by area, four cross-cutting) and two completeness
+  rounds produced 185 findings.
+- Each finding was attacked by one to three verifiers. 184 survived, 123 of
+  them with corrections; 1 was refuted (Appendix B).
+- Nothing was built or run.
+
+Headlines, each checked against the code:
+- The Source op harness (`Source.zig:1253`) runs zero cases:
+  `std.meta.declarations` lists only `pub` declarations, and every case is
+  private.
+- `//llmd:test` no longer compiles: `deepseek41.zig:3214` reads the
+  `Binding.transformed` field that the twenty-eighth pass removed.
+- llmd's quantized bindings have three correctness bugs:
+  - compressed-tensors NVFP4 expert globals ignore `.divide` on the
+    FlashInfer path;
+  - dense NVFP4 drops `input_scale`;
+  - FP8 per-tensor gate/up experts get `[E,2]` scales.
+- llmd never passes `io_impl` to `Platform.auto`, so under zio compiles skip
+  `blockInPlace` and run on 8 MiB coroutines. This is the likely cause of
+  the Laguna stack overflow.
+- Remote reads have no stall timeout, and HF re-resolve frees URLs that are
+  still in use.
+- The `auto` O_DIRECT probe warms the pages it samples, so the next load
+  reads that file buffered.
+- Error paths:
+  - pack-execution failures panic in `Exe.call`;
+  - `deinit` with pending submissions reads and transfers them all;
+  - progress stops after about 125 destinations;
+  - `Workspace.init` hits `unreachable` on mixed GPU kinds.
+
+The byte core (Source lowering, ShardGrid, planner, FIFO claims, pumps,
+credits, the drain) held on every traced path. The simplifications with the
+best value per risk:
+- the credits as the only pinned-memory bound (`BlockPool`'s wait cannot
+  fire), about 250-300 lines;
+- validation once and no overlap prover, about 300 lines;
+- one host-resident path;
+- `Pipeline` folded into `Loader`.
+
+A fixed DMA block size per target would delete `dma_calibration.zig`
+(about 850-900 lines with the growth API). That reverses a recorded
+decision and is left to the user.
+
 ## Open work
 
+- 2026-10-21 end-to-end loader review (thirtieth pass): see
+  `LOADER_REVIEW.md`. Nothing is fixed yet.
 - 2026-10-20 profile of DeepSeek's load (twenty-ninth pass, measurements
   only): a 2.4 s mid-load stall while the plugin pins the 189 GiB engram
   tables; otherwise read-bound at ~50 GiB/s; O_DIRECT re-read 44 GiB of
@@ -5935,8 +5993,9 @@ Baseline: 467 GiB in 11.9 s (39 GiB/s); under nsys 14.8 s.
   Triton test aborts on Level Zero. `Buffer.toSlice`/`toSliceAlloc`
   misread a buffer placed on a sub-mesh (they walk the platform's full
   physical mesh). `--test_filter` is ignored by the rules_zig test runner.
-  llmd `swapEngramHostPinnedBuffers`' errdefer deinits owners it leaves in
-  the list (pre-existing on master). `direct_loader.zig` still logs
+  (The note that llmd's `swapEngramHostPinnedBuffers` errdefer deinits
+  owners it leaves in the list was refuted by the thirtieth pass:
+  `Buffer.deinit` empties them, so nothing is freed twice.) `direct_loader.zig` still logs
   `TMP loader created_at` at debug level.
 
 Third-pass items left open; `PLAN.md` holds the checklist.
