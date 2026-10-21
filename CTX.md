@@ -5992,9 +5992,10 @@ zml commits, in order (on top of `qztxwlmv`):
   - the plan's block contexts and `block_start`.
 
   A DMA piece carries its request and data. The diff is 275 lines
-  shorter. **Needs a GB300 benchmark against `xmrzxtsl`.** Compare
-  timings and credit waits. The summary's pinned high water became
-  `credits_high_water` (a count) in `zqzrpnor`, so it does not compare.
+  shorter. Benchmarked against `xmrzxtsl` on GB300 in the thirty-third
+  pass: no load-time change detected at about ±2.5%. The summary's pinned
+  high water became `credits_high_water` (a count) in `zqzrpnor`, so it
+  does not compare.
 - `zqzrpnor` (review follow-ups):
   - `Loader.cancel()`, which deinit calls and llmd uses;
   - the device bound is `Platform.MAX_NUM_DEVICES` (32 without TPU);
@@ -6109,12 +6110,124 @@ Decisions it reverses or needs:
 - needs a GPU first: `host_mapped` (a device view of loader-owned pinned
   memory) is unverified on CUDA.
 
+## Thirty-third pass: benchmark of move 2 step 2 (2026-10-21, gb300-1)
+
+Question: does step 2 (`tmtwwsts`, a credit is a fixed slot of blocks)
+change load time against step 1 (`xmrzxtsl`, a pool leased under the
+credits)? The two are adjacent commits; monorepo at `pxzvsqqp`, which
+builds against both.
+
+Method:
+- gb300-1 (four GB300, two Grace nodes, 953 GB RAM; shared). Both trees
+  were applied as patches to gb300-1's checkouts and built once. Their
+  `llmd` and `examples/io` binaries were saved, and every run went through
+  a `--run_under` wrapper (`~/phase6/swap.sh`) that execs the saved binary
+  of the run's tree with the fixed tree's runfiles. The reason:
+  `zig build-lib //llmd:llmd` misses the remote cache on every source
+  change, which costs 7 to 12 min each time the tree switches. Every log
+  records its binary's sha; all 68 runs match their tree.
+- Rounds alternate AB, BA, AB, ... A run waits until its GPUs are free
+  and records the other users' GPU processes and the load average.
+- Workloads:
+  - llmd DeepSeek-V4.1-Flash (467 GiB, forward stubbed, the twenty-ninth
+    pass's setup) on GPUs 2,3: 24 rounds.
+  - `examples/io` Qwen3.8-27B (51.75 GiB) replicated and sharded on GPUs
+    2,3: 5 rounds each.
+- GPUs 2,3 are on node 1. Another user's llmd and then sglang held GPUs
+  0,1 from round 4 on, so most rounds share the host.
+- Scripts and logs are in gb300-1 `~/phase6/`: `bench2.sh`, `runds2.sh`,
+  `runio2.sh`, `extract.py` (writes `runs.jsonl`), `parse.py`. The local
+  `analyze.py` pairs the rounds.
+
+Correctness: `ZML_LOAD_CHECK=1`, Qwen3.8-27B replicated on all four GB300:
+1199/1199 tensors for both trees (4.13 s and 4.24 s, first and second
+load).
+
+### DeepSeek llmd, 24 rounds
+
+A pair is comparable when both runs calibrated the same request size and
+neither stalled in host allocation (`ahead_init_ms` < 4 s; the reclaim of
+node 1's page cache for the 189 GiB pinned engram tables took up to 20 s).
+15 of the 24 pairs are comparable.
+
+| B vs A over the comparable pairs | value |
+| --- | --- |
+| median, Hodges-Lehmann | +0.86%, +0.93% |
+| mean, 95% bootstrap CI | -0.08%, [-2.8%, +2.2%] |
+| B slower | 9/15 (sign test p=0.61, Wilcoxon p=0.39) |
+| without the 5 pairs whose GPU neighbours changed mid-run | +1.95%, [+0.4%, +3.5%], 7/10 |
+| the same, with `ahead_init_ms` as a covariate | +0.8%, [-1.2%, +3.1%] |
+| all 24 pairs, load minus allocation stall | median -0.47%, [-1.8%, +1.3%] |
+
+- Load times: A median 12.62 s (n=15 clean runs at 16 MiB), B median
+  12.65 s (n=20), Mann-Whitney p=0.97.
+- The pairs' two largest differences, rounds 18 and 23 (-12.0%, -11.1%),
+  are sglang starting during A's run.
+- The +1.95% of the steady pairs follows B's higher host-allocation time
+  in rounds 3, 8 and 14 (+0.45 to +0.54 s). That is the same code in both
+  trees. B's unstalled `ahead_init_ms` is slightly higher overall: median
+  2477 against 2415 ms, 13 of 19 pairs. Not attributed.
+- One counter moves consistently: B stops its pumps on the in-flight
+  budget more often, `pump_stops_full` +~1000 of ~103k stops, higher in
+  12/15 pairs (p=0.035). `pump_stops_empty` is lower by about the same.
+  No load time goes with it.
+- Credit wait (median 0.37 against 0.46 ms per read) and `dma_stage`
+  (1.06 against 1.30 ms) are higher in B in only 9/15 pairs, uncorrelated
+  with the load difference.
+- `dma_submit_us_per_piece` takes two modes in both trees, ~6 or ~13 µs.
+  B's three 23-29 µs values came in rounds 1, 2 and 5 only.
+
+Code (the review's mechanism lens): here a request is one block
+(`request_size` = block size, `maximumCoalescedJobBlocks` = 1). Both trees
+therefore run 33 one-block credits, return a block in the same callback as
+its credit, and reuse it last-in first-out. Step 2 removes two mutex trips
+per request (`acquireMany`, the callback's `pool.release`) and
+`Plan.blocks`. That predicts under 0.1%.
+
+Verdict: no change detected at about ±2.5%. A 1-2% difference either way
+is not excluded, and this host's resolution is about 3.8% per comparison.
+A ±1% answer needs a quiet host, one request size, and a load time that
+excludes host allocation (a temporary timer from the first read to the
+last DMA callback).
+
+### Qwen3.8-27B through `examples/io`, 5 rounds each
+
+At 16 MiB, load time follows destination creation almost exactly
+(r=0.99-1.00, 3.2 to 8.9 ms per read), and step 2 does not touch it. These
+runs say little about step 2. Replicated: 2.03-2.05 s for A, 1.99-2.15 s
+for B plus one 2.57 s. Sharded: 1.75-1.77 s for A, 1.73-1.87 s for B plus
+one 2.38 s. Both outliers are slow destination creations.
+
+### Found on the way
+
+- **The calibrated request size costs 25-30% on Qwen.**
+  - The calibration picked 8 MiB instead of 16 MiB in 4 of 10 replicated
+    and 2 of 10 sharded Qwen runs, and in 7 of 48 DeepSeek runs. Nothing
+    in the step 2 diff touches it: A 9/34, B 4/34, Fisher p=0.22.
+  - At 8 MiB, Qwen takes 2.54 s instead of 2.04 s replicated and 2.30 s
+    instead of 1.77 s sharded. It has twice the reads, and each read pays
+    the workers' per-request cost. DeepSeek is unaffected (12.59 against
+    12.62 s).
+  - The calibration measures DMA only, so its choice between two rates
+    within noise decides a cost it does not see.
+- `examples/io load ... sharded` fails on DeepSeek-V4.1-Flash with
+  `IncompatibleSharding`: some leading dimensions do not split four ways.
+- The first DeepSeek load after the host's memory filled took 30.9 s, 20 s
+  of it allocating the pinned engram tables. Node 1 had 16 GB free and
+  ~260 GB of page cache.
+- gb300-1's checkouts are back to their clean state (`utulmkkq`,
+  `nomouprz`). The saved binaries stay in `~/phase6/bin`. To use them
+  again, apply `zmlA.patch` or `zmlB.patch` plus `setup.sh` first: the
+  runfiles come from the tree.
+
 ## Open work
 
+- 2026-10-21 benchmark of move 2 step 2 (thirty-third pass): no load-time
+  change detected at about ±2.5% on two GB300. The calibration's 8 MiB
+  choice costs Qwen3.8-27B 25-30%.
 - 2026-10-21 fixes from the loader review (thirty-first pass): headline
-  bugs fixed and move 2 done in two commits; step 2 (`tmtwwsts`) needs a
-  GB300 benchmark. The Laguna-under-zio run is still to do. The other
-  review items are listed in that pass.
+  bugs fixed and move 2 done in two commits. The Laguna-under-zio run is
+  still to do. The other review items are listed in that pass.
 - 2026-10-21 end-to-end loader review (thirtieth pass): see
   `LOADER_REVIEW.md`.
 - 2026-10-20 profile of DeepSeek's load (twenty-ninth pass, measurements
