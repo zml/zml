@@ -78,10 +78,12 @@ submissions are refused and `awaitAll` keeps returning it.
 `bytesLoaded` counts the logical bytes of submissions retired with execution:
 each destination's shape once, so a composite tensor counts its padding and
 not each of its sources.
-`deinit` aborts what is still pending, which only an error path leaves
-behind, and retires it without executing it (outputs unwritten or errored,
-inputs freed), then destroys the backend. There is no per-submission handle
-and no memory knob.
+`cancel` gives up on what is still pending, which only an error path leaves
+behind: it aborts the backend and retires the submissions without executing
+them, inputs freed. Their outputs are undefined (unwritten, errored, or for
+host-resident destinations ready but partly written): free the ones that were
+assigned, read none. The loader is failed afterwards. `deinit` cancels, then
+destroys the backend. There is no per-submission handle and no memory knob.
 
 ## Composite tensors
 
@@ -240,7 +242,7 @@ Loader-specific errors use these shared names:
 | Error | Meaning |
 | --- | --- |
 | `InvalidOptions` | Invalid profile, parallelism, or alignment |
-| `UnsupportedPlatform` | More devices than the direct loader addresses (64) |
+| `UnsupportedPlatform` | More devices than ZML addresses (`Platform.MAX_NUM_DEVICES`: 32, or 64 in builds with TPU) |
 | `SourceSizeMismatch` | Source bytes differ from the destination shape in either backend |
 | `InvalidLayout` | A composite binding's parts do not fit its tensor |
 | `UnsupportedLayout` | A composite layout this loader does not assemble yet |

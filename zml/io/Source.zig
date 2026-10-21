@@ -1208,12 +1208,15 @@ fn expectCase(comptime Case: type, name: []const u8) !void {
 
     var sources: [n]Source = undefined;
     for (&sources, names, shapes) |*s, input_name, shape_| s.* = checkpoint.store.view().source(input_name, null).withTags(shape_);
-    const bound = Case.build(Source, &sources).bind(.replicated, .{}, .{});
+    // A host memory kind, which the bytes do not see, so that the rebind
+    // below must carry it.
+    const bound = Case.build(Source, &sources).bind(.replicated, .{}, .{ .memory = .host_pinned });
     const assembled = try checkpoint.assemble(bound);
     defer allocator.free(assembled);
     // The source a binding loads binds the same bytes again, in its place.
     const again = checkpoint.store.sourceOf(bound).?.rebind(bound, bound.shape());
     try std.testing.expect(checkpoint.store.getSourcesById(bound.id) == null);
+    try std.testing.expectEqual(Memory.Kind.host_pinned, checkpoint.store.getSourcesById(again.id).?.memory);
     const reassembled = try checkpoint.assemble(again);
     defer allocator.free(reassembled);
     std.testing.expectEqualSlices(u8, assembled, reassembled) catch |err| {

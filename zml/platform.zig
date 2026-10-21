@@ -324,7 +324,7 @@ pub const Platform = struct {
         const pjrt_devices = pjrt_client.addressableDevices(api);
         try validateDeviceCount(target, pjrt_devices.len);
         if (pjrt_devices.len > MAX_NUM_DEVICES) {
-            log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
+            log.warn("platform {} got {} devices, but ZML supports up to {}: the loader and multi-device buffers will refuse or fail on this platform", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
         }
 
         const pjrt_memories = pjrt_client.addressableMemories(api);

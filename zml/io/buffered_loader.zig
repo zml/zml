@@ -281,8 +281,9 @@ pub const Loader = struct {
                 progress_: std.Progress.Node,
             ) void {
                 defer batch_.finish(loader.io);
-                const node = progress_.start(spec_.parts[0].source.name, 1);
-                defer node.end();
+                // One item on the caller's node, as the direct backend counts
+                // it: a child node per tensor runs out of std.Progress's 127.
+                defer progress_.completeOne();
                 loader.loadOne(spec_);
             }
         }.run, .{ self, batch, spec, progress });

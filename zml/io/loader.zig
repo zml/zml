@@ -161,14 +161,25 @@ pub const Loader = struct {
         return self;
     }
 
-    /// Retires every pending submission without running executables (their
-    /// outputs stay unwritten, their inputs are freed), then destroys the
-    /// backend. Submissions still pending mean the caller gave up (one that
-    /// succeeded awaited them), so the backend is aborted first: queued
-    /// reads are dropped, and bulk outputs are left unwritten or errored.
-    pub fn deinit(self: *Loader) void {
-        if (self.pending.len != 0) self.backend.abort();
+    /// Gives up on every pending submission: aborts the backend (queued
+    /// reads are dropped, reads in flight finish), then retires them without
+    /// running executables and frees their inputs. Their outputs are
+    /// undefined: unwritten, errored, or for host-resident destinations
+    /// ready but partly written; free the ones that were assigned, read
+    /// none. The loader is failed afterwards. For an error path that is
+    /// about to free what pending submissions borrow, such as executables;
+    /// nothing to do when nothing is pending.
+    pub fn cancel(self: *Loader) void {
+        if (self.pending.len == 0) return;
+        self.backend.abort();
         while (self.pending.len != 0) self.retireOldest(false) catch {};
+    }
+
+    /// Cancels what is still pending (`cancel`): a caller that succeeded
+    /// awaited it, so only an error path leaves any. Then destroys the
+    /// backend.
+    pub fn deinit(self: *Loader) void {
+        self.cancel();
         self.logAdmission();
         self.pending.deinit(self.allocator);
         self.delivered.deinit(self.allocator);
@@ -298,10 +309,11 @@ pub const Loader = struct {
     }
 
     /// Retires every pending submission in publish order, running their
-    /// executables until one fails, and returns the first error seen by
-    /// this loader. Idempotent.
+    /// executables, and returns the first error seen by this loader. The
+    /// first failure aborts the backend, so nothing after it executes.
+    /// Idempotent.
     pub fn awaitAll(self: *Loader) AwaitError!void {
-        while (self.pending.len != 0) self.retireOldest(self.failure == null) catch {};
+        while (self.pending.len != 0) self.retireOldest(true) catch {};
         if (self.failure) |err| return err;
     }
 
@@ -464,7 +476,7 @@ pub const Loader = struct {
         if (!execute) return;
         for (oldest.executables) |*executable| {
             executable.execute(self.allocator, self.io) catch |err| {
-                if (self.failure == null) load_log.err("run executable: inputs={d}, output={f}: {s}", .{ executable.inputs.len, executable.exe.output_shapes[0], @errorName(err) });
+                load_log.err("run executable: inputs={d}, output={f}: {s}", .{ executable.inputs.len, executable.exe.output_shapes[0], @errorName(err) });
                 return err;
             };
         }
@@ -1271,25 +1283,7 @@ test "loadExecute frees donated and non-donated inputs once" {
     }
 }
 
-test "loader deinit aborts pending submissions without running their executables" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var fixture: LoaderTestFixture = undefined;
-    try fixture.init(allocator, io);
-    defer fixture.deinit();
-    var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2 });
-
-    const Model = struct { value: Tensor };
-    const model: Model = .{ .value = fixture.value };
-    var buffers = try mem.bufferize(allocator, Model, &model);
-    defer mem.deinitBufferized(allocator, Model, &buffers);
-    var never_written: Buffer = undefined;
-    try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &never_written)}, null);
-    try loader.load(Model, &model, &buffers, &fixture.store, null);
-    loader.deinit();
-}
-
-test "an aborted loader fails its pending submissions and refuses new ones" {
+test "cancel aborts pending submissions without running their executables" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var fixture: LoaderTestFixture = undefined;
@@ -1302,8 +1296,13 @@ test "an aborted loader fails its pending submissions and refuses new ones" {
     const model: Model = .{ .value = fixture.value };
     var buffers = try mem.bufferize(allocator, Model, &model);
     defer mem.deinitBufferized(allocator, Model, &buffers);
+    var never_written: Buffer = .{ ._platform = fixture.platform, ._shape = fixture.value.shape(), ._shards = .empty };
+    try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &never_written)}, null);
     try loader.load(Model, &model, &buffers, &fixture.store, null);
-    loader.backend.abort();
+    loader.cancel();
+    try std.testing.expectEqual(@as(usize, 0), loader.pending.len);
+    try std.testing.expectEqual(@as(usize, 0), never_written._shards.len);
+    // The abort failed the loader: what it awaits and what it is given.
     try std.testing.expectError(error.Canceled, loader.awaitAll());
     try std.testing.expectError(error.Canceled, loader.load(Model, &model, &buffers, &fixture.store, null));
     try std.testing.expectEqual(@as(usize, 0), loader.bytesLoaded());
@@ -1374,7 +1373,7 @@ test "loader initialization releases its workspace on an invalid profile" {
     var fixture: LoaderTestFixture = undefined;
     try fixture.init(allocator, io);
     defer fixture.deinit();
-    // The alignment is checked after the pool is calibrated, so this covers
+    // The alignment is checked after the pinned set is sized, so this covers
     // the backend's post-sizing errdefer path through the front end.
     var profile: VFS.LoadProfile = .local;
     profile.direct_io_alignment = 3;

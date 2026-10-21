@@ -128,9 +128,11 @@ pub const Loader = struct {
         platform: *const Platform,
         opts: BackendOptions,
     ) !*Loader {
-        // A transfer's writers are a u64 mask of devices.
-        if (platform.devices.len > 64) {
-            load_log.err("the direct loader supports up to 64 devices, got {d}: UnsupportedPlatform", .{platform.devices.len});
+        // A destination's shards and a transfer's writers (a u64 mask) are
+        // per device; Platform keeps devices past its maximum, with a warning.
+        comptime std.debug.assert(Platform.MAX_NUM_DEVICES <= ShardGrid.max_boxes);
+        if (platform.devices.len > Platform.MAX_NUM_DEVICES) {
+            load_log.err("the direct loader addresses up to {d} devices, got {d}: UnsupportedPlatform", .{ Platform.MAX_NUM_DEVICES, platform.devices.len });
             return error.UnsupportedPlatform;
         }
         const self = try allocator.create(Loader);
@@ -721,7 +723,7 @@ pub const Loader = struct {
 
     fn logSummary(self: *Loader) void {
         const reads = self.metrics.read_operations.load(.acquire);
-        load_log.debug("loader summary: batches={d}, successful={}, read_bytes={Bi:.2}, elapsed={d:.3}s, reads={d}, source_width={d}, request_size={Bi:.2}, pinned_high_water={Bi:.2}, pinned_mapped={Bi:.2}", .{
+        load_log.debug("loader summary: batches={d}, successful={}, read_bytes={Bi:.2}, elapsed={d:.3}s, reads={d}, source_width={d}, request_size={Bi:.2}, credits_high_water={d} of {d}, pinned_mapped={Bi:.2}", .{
             self.batch_count,
             !self.pipeline.failed(),
             self.metrics.read_bytes.load(.acquire),
@@ -729,7 +731,8 @@ pub const Loader = struct {
             reads,
             self.width,
             self.plan_config.request_size,
-            self.credits.high_water * self.maximum_blocks_per_job * self.plan_config.block_size,
+            self.credits.high_water,
+            self.credits.count(),
             self.workspace.mapped_bytes,
         });
         load_log.debug("loader waits: credit_wait_ms_per_read={d:.3}, read_ms_per_read={d:.3}, dma_stage_ms_per_read={d:.3}, tensor_init_ms_per_read={d:.3}, ahead_init_ms={d:.3}", .{
@@ -752,7 +755,7 @@ pub const Loader = struct {
 
 /// One submission: its plans (one per source file, published as each file
 /// is planned), the destinations it writes and their parts, and every
-/// request, block and event context created while loading it. `remaining` counts completion
+/// request and event context created while loading it. `remaining` counts completion
 /// units: one per published job plus a publish sentinel held until the
 /// submission is sealed, and one for the allocation task while it runs
 /// (`Loader.startAllocations`), taken before the sentinel is dropped. A
@@ -1007,8 +1010,10 @@ pub const Batch = struct {
 
     /// Releases `count` completion units. MEMORY-ORDER RULE: this must be the
     /// caller's final access to the batch and to anything it owns (requests,
-    /// blocks, events, destinations, parts, plans). The last unit sets `done`, and the
-    /// awaiting task frees all of it as soon as it observes the event.
+    /// events, destinations, parts, plans; a request's slot of blocks is the
+    /// loader's and went back with its credit just before). The last unit
+    /// sets `done`, and the awaiting task frees all of it as soon as it
+    /// observes the event.
     fn finishJobs(self: *Batch, count: usize) void {
         if (count == 0) return;
         if (builtin.mode == .debug) std.debug.assert(!self.freeing);
@@ -1074,8 +1079,10 @@ const Destination = struct {
     /// plan holding `parts[0]` (`Planner.JobCut.appendGatherJobs`), whose
     /// jobs also write its zero fill.
     gathered: bool = false,
-    /// The source bytes of every part not read yet: the read that brings
-    /// it to zero completes the destination's item on `progress`.
+    /// Bytes not read yet: the parts' widths, or for a gathered destination
+    /// its whole placed size (its gather jobs land the zeros too). The read
+    /// that brings it to zero completes the destination's item on
+    /// `progress`.
     unread_bytes: std.atomic.Value(u64),
     progress: std.Progress.Node = .none,
     state: LazyOnce(TensorTransfer, InitContext, TransferInitError, initTransfer) = .{},
@@ -1104,7 +1111,7 @@ const Destination = struct {
         return self.parts[0].source.name;
     }
 
-    /// Counts `bytes` of the parts as read; the last read completes the
+    /// Counts `bytes` as read (`unread_bytes`); the last read completes the
     /// destination's one progress item.
     fn recordRead(self: *Destination, bytes: u64) void {
         if (self.unread_bytes.fetchSub(bytes, .acq_rel) == bytes) self.progress.completeOne();
@@ -2671,8 +2678,7 @@ const Scheduler = struct {
     }
 };
 
-/// A claimed source job and its completion state. The plan owns its storage;
-/// the worker holds a scheduling reference until all blocks have been handed off.
+/// A claimed source job and its completion state. The plan owns its storage.
 const ReadRequest = struct {
     const Scratch = struct {
         allocator: std.mem.Allocator,
@@ -3462,7 +3468,7 @@ const Pipeline = struct {
         dma_budget_bytes: usize,
         zero_block: []u8,
     ) !Pipeline {
-        std.debug.assert(platform.devices.len <= 64);
+        std.debug.assert(platform.devices.len <= Platform.MAX_NUM_DEVICES);
         std.debug.assert(dma_budget_bytes > 0);
         const pumps = try allocator.alloc(DevicePump, platform.devices.len);
         errdefer allocator.free(pumps);
@@ -4023,7 +4029,20 @@ test "plan construction releases allocations and takes transfers only on success
     try std.testing.checkAllAllocationFailures(std.testing.allocator, AllocationTest.run, .{});
 }
 
-test "loader releases the calibrated pool when alignment validation fails" {
+test "a platform with more devices than ZML addresses is refused" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 2 * Platform.MAX_NUM_DEVICES } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+    const result: anyerror!void = if (Loader.create(allocator, io, platform, .{ .load_profile = .local })) |loader| unexpected: {
+        loader.destroy();
+        break :unexpected {};
+    } else |err| err;
+    try std.testing.expectError(error.UnsupportedPlatform, result);
+}
+
+test "loader releases the pinned set when alignment validation fails" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
@@ -5067,7 +5086,7 @@ test "overlapping batches complete under concurrent claims and retirement" {
 /// from the right source bytes or from zeros.
 const CompositeTest = struct {
     /// With a host memory kind the destinations take host jobs: direct
-    /// without `alignment`, through pool blocks with it. A DMA job is
+    /// without `alignment`, through its slot's blocks with it. A DMA job is
     /// staged where it saves `staging_gain` submissions; the replay lays
     /// its blocks out as its worker would (`jobBlocks`).
     fn run(platform: *const Platform, shape: Shape, block_size: usize, request_size: usize, memory: Memory.Kind, alignment: usize, staging_gain: usize, expect_cross_part_piece: bool) !void {
@@ -5123,7 +5142,7 @@ const CompositeTest = struct {
         try std.testing.expectEqual(@as(usize, 1), plans[0].fill_jobs);
         try std.testing.expect(plans[0].jobs[plans[0].jobs.len - 1].fill);
         try std.testing.expectEqual(@as(usize, 0), plans[1].fill_jobs);
-        // Host jobs take no block context and no DMA event; DMA jobs one
+        // Host jobs take no DMA event; DMA jobs one
         // event per writer.
         for (plans[0..plan_count]) |plan| {
             var writers: usize = 0;
