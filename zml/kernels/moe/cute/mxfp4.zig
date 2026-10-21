@@ -39,7 +39,7 @@ pub const GroupedQuantConfig = struct {
 pub fn quantizeLanes(tokens: i64) i64 {
     // Four lanes reduce latency through medium batches. Once traffic becomes
     // bandwidth-bound, the single-lane variant's larger stores win again.
-    return if (tokens <= 256) 4 else 1;
+    return if (tokens <= 2048) 4 else 1;
 }
 
 pub const CombineConfig = struct {
