@@ -117,6 +117,12 @@ pub const Loader = struct {
         try self.checkOpen();
     }
 
+    /// Fails the loader unless it already failed: tasks that have not
+    /// started their tensor return at once.
+    pub fn abort(self: *Loader) void {
+        self.recordError(error.Canceled, "loader aborted", .{});
+    }
+
     /// Every batch was awaited, so the group is idle.
     pub fn destroy(self: *Loader) void {
         self.group.await(self.io) catch {};

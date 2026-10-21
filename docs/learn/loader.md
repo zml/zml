@@ -54,7 +54,8 @@ concatenated sources can make the checkpoint estimate inexact.
 Source progress completes before the executable runs; keep the enclosing node
 alive until `awaitAll` returns to cover the full loading lifecycle.
 The caller owns the store, platform, model buffers, and executable outputs.
-Each submission borrows the store’s source metadata until it is retired.
+Each submission borrows the store’s source metadata, and a `loadExecute`
+its executables, until it is retired.
 The loader owns its backend and its pending submissions. Declare cleanup in
 the order above so the loader finishes using buffers before they are freed.
 Submit and await serially on the owning task; the backend provides the read
@@ -72,13 +73,15 @@ behind the packs, and a tensor a program computes counts as delivered once a
 therefore be written by a later `loadExecute` or by `awaitAll`.
 
 `awaitAll` retires everything and returns the first error; a failure is
-sticky: later submissions are refused and `awaitAll` keeps returning it.
+sticky: it aborts what is still pending (no more reads or executions), later
+submissions are refused and `awaitAll` keeps returning it.
 `bytesLoaded` counts the logical bytes of submissions retired with execution:
 each destination's shape once, so a composite tensor counts its padding and
 not each of its sources.
-`deinit` awaits what is still pending without executing it (outputs
-unwritten, inputs freed), then destroys the backend. There is no
-per-submission handle and no memory knob.
+`deinit` aborts what is still pending, which only an error path leaves
+behind, and retires it without executing it (outputs unwritten or errored,
+inputs freed), then destroys the backend. There is no per-submission handle
+and no memory knob.
 
 ## Composite tensors
 

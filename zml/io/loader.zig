@@ -46,9 +46,9 @@ const SubmitError = error{IncompatibleSharding} || backend.SubmitError || error{
 
 /// Loads checkpoint sources and optionally executes bindings over them.
 /// The platform and options' borrowed values must outlive the loader. Each
-/// submission borrows its store's source metadata and outputs until
-/// `awaitAll` or `deinit` returns; it copies its progress node, which must
-/// not end before then.
+/// submission borrows its store's source metadata and outputs, and a
+/// `loadExecute` its executables, until `awaitAll` or `deinit` returns; it
+/// copies its progress node, which must not end before then.
 /// Submit and await serially on the owning task; source reads and transfers
 /// run concurrently inside the selected backend. Submissions are retired in
 /// publish order: `loadExecute` retires older ones when its own does not fit
@@ -161,10 +161,13 @@ pub const Loader = struct {
         return self;
     }
 
-    /// Awaits every pending submission without running executables (their
+    /// Retires every pending submission without running executables (their
     /// outputs stay unwritten, their inputs are freed), then destroys the
-    /// backend.
+    /// backend. Submissions still pending mean the caller gave up (one that
+    /// succeeded awaited them), so the backend is aborted first: queued
+    /// reads are dropped, and bulk outputs are left unwritten or errored.
     pub fn deinit(self: *Loader) void {
+        if (self.pending.len != 0) self.backend.abort();
         while (self.pending.len != 0) self.retireOldest(false) catch {};
         self.logAdmission();
         self.pending.deinit(self.allocator);
@@ -295,10 +298,10 @@ pub const Loader = struct {
     }
 
     /// Retires every pending submission in publish order, running their
-    /// executables, and returns the first error seen by this loader.
-    /// Idempotent.
+    /// executables until one fails, and returns the first error seen by
+    /// this loader. Idempotent.
     pub fn awaitAll(self: *Loader) AwaitError!void {
-        while (self.pending.len != 0) self.retireOldest(true) catch {};
+        while (self.pending.len != 0) self.retireOldest(self.failure == null) catch {};
         if (self.failure) |err| return err;
     }
 
@@ -442,12 +445,16 @@ pub const Loader = struct {
 
     /// Retires the oldest pending submission: waits for its reads and DMA,
     /// runs its executables when `execute`, frees its inputs either way and
-    /// counts its bytes once it ran. The first error is kept in `failure`.
+    /// counts its bytes once it ran. The first error is kept in `failure`
+    /// and aborts the backend: nothing still pending can succeed.
     fn retireOldest(self: *Loader, execute: bool) AwaitError!void {
         var oldest = self.pending.popFront().?;
         defer self.release(&oldest);
         self.retire(&oldest, execute) catch |err| {
-            self.failure = self.failure orelse err;
+            if (self.failure == null) {
+                self.failure = err;
+                self.backend.abort();
+            }
             return err;
         };
     }
@@ -1264,7 +1271,7 @@ test "loadExecute frees donated and non-donated inputs once" {
     }
 }
 
-test "loader deinit awaits pending submissions without running their executables" {
+test "loader deinit aborts pending submissions without running their executables" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var fixture: LoaderTestFixture = undefined;
@@ -1280,6 +1287,26 @@ test "loader deinit awaits pending submissions without running their executables
     try loader.loadExecute(&fixture.store, &.{fixture.binding(fixture.value, &never_written)}, null);
     try loader.load(Model, &model, &buffers, &fixture.store, null);
     loader.deinit();
+}
+
+test "an aborted loader fails its pending submissions and refuses new ones" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(allocator, io);
+    defer fixture.deinit();
+    var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2 });
+    defer loader.deinit();
+
+    const Model = struct { value: Tensor };
+    const model: Model = .{ .value = fixture.value };
+    var buffers = try mem.bufferize(allocator, Model, &model);
+    defer mem.deinitBufferized(allocator, Model, &buffers);
+    try loader.load(Model, &model, &buffers, &fixture.store, null);
+    loader.backend.abort();
+    try std.testing.expectError(error.Canceled, loader.awaitAll());
+    try std.testing.expectError(error.Canceled, loader.load(Model, &model, &buffers, &fixture.store, null));
+    try std.testing.expectEqual(@as(usize, 0), loader.bytesLoaded());
 }
 
 test "loader read failure fails later submissions and awaitAll" {

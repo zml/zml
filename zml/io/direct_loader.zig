@@ -342,6 +342,13 @@ pub const Loader = struct {
         if (load_error) |err| return err;
     }
 
+    /// Fails the pipeline unless it already failed (`Pipeline.recordError`):
+    /// unclaimed jobs retire, queued transfers drain, and requests in flight
+    /// finish their read.
+    pub fn abort(self: *Loader) void {
+        self.pipeline.recordError(error.Canceled, "loader aborted", .{});
+    }
+
     /// The front end awaited every batch before this; nothing is queued or
     /// in flight, so stopping the workers is a plain shutdown.
     pub fn destroy(self: *Loader) void {

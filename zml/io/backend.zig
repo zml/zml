@@ -663,6 +663,15 @@ pub const Backend = union(enum) {
         };
     }
 
+    /// Fails the backend unless it already failed: queued work is dropped,
+    /// work in flight drains, and every later await returns the first error.
+    pub fn abort(self: Backend) void {
+        switch (self) {
+            .direct => |direct| direct.abort(),
+            .buffered => |buffered| buffered.abort(),
+        }
+    }
+
     pub fn destroy(self: Backend) void {
         switch (self) {
             .direct => |direct| direct.destroy(),
