@@ -93,8 +93,9 @@ pub const Inputs = struct {
         };
     }
 
-    fn options(i: Inputs, c: cases.Case) zml.paged_attention.AttentionOptions {
+    fn options(i: Inputs, c: cases.Case, sharding: zml.attention.Sharding) zml.paged_attention.AttentionOptions {
         return .{
+            .sharding = sharding,
             .mask = switch (c.mask) {
                 .causal => .{ .standard = .{} },
                 .non_causal => .none,
@@ -108,7 +109,7 @@ pub const Inputs = struct {
     }
 };
 
-pub fn forward(i: Inputs, c: cases.Case) zml.Tensor {
+pub fn forward(i: Inputs, c: cases.Case, sharding: zml.attention.Sharding) zml.Tensor {
     const parameters: zml.paged_attention.Parameters = .{
         .cute = .{
             .block_table = i.table,
@@ -122,7 +123,7 @@ pub fn forward(i: Inputs, c: cases.Case) zml.Tensor {
             },
         },
     };
-    return zml.paged_attention.pagedAttention(parameters, i.q, i.k, i.v, .{ .split = .{ .k = i.k, .v = i.v } }, i.options(c));
+    return zml.paged_attention.pagedAttention(parameters, i.q, i.k, i.v, .{ .split = .{ .k = i.k, .v = i.v } }, i.options(c, sharding));
 }
 
 pub fn upload(io: std.Io, platform: *const zml.Platform, inputs: Inputs, f: Fixture) !zml.Bufferized(Inputs) {

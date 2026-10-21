@@ -42,16 +42,10 @@ pub const Parameters = struct {
 };
 
 /// Attention for Neuron. Both prefill and decode lower to NKI custom calls.
-pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, parameters: Parameters) zml.Tensor {
-    // TODO: https://github.com/zml/zml/issues/914
-    const tp = zml.Compiler.current().resolveMesh(.{.model});
-    const q_sharded = q.withPartitioning(tp, .{ .h = .model });
-    const k_sharded = k.withPartitioning(tp, .{ .h = .model });
-    const v_sharded = v.withPartitioning(tp, .{ .h = .model });
-
+pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, parameters: Parameters, sharding: zml.attention.Sharding) zml.Tensor {
+    stdx.debug.assert(sharding.heads == sharding.kv_heads, "This attention kernel requires matching query and KV head sharding", .{});
     if (q.dim(.q) == 1) {
-        const token_index_2d = token_index.broad(zml.Shape.init(.{ .row = 1, .col = 1 }, token_index.dtype()))
-            .withPartitioning(tp, .{ .row = .replicated, .col = .replicated });
+        const token_index_2d = token_index.broad(zml.Shape.init(.{ .row = 1, .col = 1 }, token_index.dtype()));
 
         return zml.ops.manualComputation(
             (struct {
@@ -76,13 +70,14 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
                 }
             }).body,
             .{
-                .q = q_sharded,
-                .k = k_sharded,
-                .v = v_sharded,
+                .q = q,
+                .k = k,
+                .v = v,
                 .token_index = token_index_2d,
                 .parameters = parameters,
             },
-            q_sharded.shape(),
+            q.shape(),
+            .{ .mesh = sharding.mesh, .in_specs = .{ .q = sharding.partition(q.shape(), .h), .k = sharding.kvPartition(k.shape(), .h), .v = sharding.kvPartition(v.shape(), .h), .token_index = .replicated }, .out_specs = sharding.partition(q.shape(), .h) },
         ).convert(q.dtype());
     }
 
@@ -107,7 +102,8 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
                 )[0];
             }
         }).body,
-        .{ .q = q_sharded, .k = k_sharded, .v = v_sharded, .parameters = parameters },
-        q_sharded.shape(),
+        .{ .q = q, .k = k, .v = v, .parameters = parameters },
+        q.shape(),
+        .{ .mesh = sharding.mesh, .in_specs = .{ .q = sharding.partition(q.shape(), .h), .k = sharding.kvPartition(k.shape(), .h), .v = sharding.kvPartition(v.shape(), .h) }, .out_specs = sharding.partition(q.shape(), .h) },
     ).convert(q.dtype());
 }

@@ -178,7 +178,74 @@ pub const Backend = enum {
     }
 };
 
+/// Caller-selected expert parallelism. `experts = null` explicitly replicates.
+pub const Sharding = struct {
+    mesh: *const zml.Mesh,
+    experts: ?zml.Shape.Tag,
+
+    pub fn partition(self: Sharding, shape: zml.Shape) zml.Sharding.Partitioning {
+        const replicated: zml.Sharding.Partitioning = .replicated(shape.rank());
+        const axis = self.experts orelse return replicated;
+        const mesh_axis = self.mesh.resolveLogicalAxis(axis) orelse
+            std.debug.panic("MoE mesh '{s}' has no logical axis '{s}'", .{ self.mesh.name, axis });
+        return replicated.set(shape.axis(.expert), .sharded(@intCast(mesh_axis)));
+    }
+
+    pub fn auxiliaryPartition(self: Sharding, tensor: ?zml.Tensor, num_experts: i64) zml.Sharding.Partitioning {
+        const t = tensor orelse return .replicated(0);
+        if (t.count() == 1 or self.experts == null) return .replicated(t.rank());
+        // Packed scale buffers can be untagged; their first dimension is experts.
+        const expert_dim = t.shape().hasTag(.expert) orelse 0;
+        stdx.debug.assert(t.dim(expert_dim) == num_experts, "MoE scale/bias must be scalar or contain {} experts, got {f}", .{ num_experts, t.shape() });
+        return self.partition(t.shape().setTag(expert_dim, .expert));
+    }
+
+    const LinearSpecs = struct {
+        weight: zml.Sharding.Partitioning,
+        bias: zml.Sharding.Partitioning,
+        quantization: struct {
+            scales: zml.Sharding.Partitioning,
+            global_scale: struct { value: zml.Sharding.Partitioning },
+            input_scale: struct { value: zml.Sharding.Partitioning },
+        },
+    };
+
+    pub fn linearSpecs(self: Sharding, linear: zml.nn.Linear) LinearSpecs {
+        const q = linear.quantization;
+        return .{
+            .weight = self.partition(linear.weight.shape()),
+            .bias = self.auxiliaryPartition(linear.bias, linear.weight.dim(.expert)),
+            .quantization = .{
+                .scales = self.auxiliaryPartition(if (q) |v| v.scales else null, linear.weight.dim(.expert)),
+                .global_scale = .{ .value = self.auxiliaryPartition(if (q) |v| if (v.global_scale) |scale| scale.value else null else null, linear.weight.dim(.expert)) },
+                .input_scale = .{ .value = self.auxiliaryPartition(if (q) |v| if (v.input_scale) |scale| scale.value else null else null, linear.weight.dim(.expert)) },
+            },
+        };
+    }
+
+    pub fn constrainLinear(self: Sharding, linear: zml.nn.Linear) zml.nn.Linear {
+        var result = linear;
+        result.weight = linear.weight.withPartitioning(self.mesh, self.partition(linear.weight.shape()));
+        if (result.bias) |*bias| bias.* = bias.withPartitioning(self.mesh, self.auxiliaryPartition(bias.*, linear.weight.dim(.expert)));
+        if (result.quantization) |*q| {
+            q.scales = q.scales.withPartitioning(self.mesh, self.auxiliaryPartition(q.scales, linear.weight.dim(.expert)));
+            if (q.global_scale) |*scale| scale.value = scale.value.withPartitioning(self.mesh, self.auxiliaryPartition(scale.value, linear.weight.dim(.expert)));
+            if (q.input_scale) |*scale| scale.value = scale.value.withPartitioning(self.mesh, self.auxiliaryPartition(scale.value, linear.weight.dim(.expert)));
+        }
+        return result;
+    }
+
+    pub fn expertIndex(self: Sharding) zml.Tensor {
+        return zml.ops.axisIndex(self.mesh, self.experts.?).convert(.i32);
+    }
+
+    pub fn sum(self: Sharding, input: zml.Tensor) zml.Tensor {
+        return zml.ops.allReduceOnAxis(input, zml.Tensor.add, self.mesh, self.experts.?);
+    }
+};
+
 pub const Options = struct {
+    sharding: Sharding,
     activation: Activation,
     /// Quantize activations for Triton FP8 GEMMs; false keeps BF16 activations.
     quantize_input: bool,

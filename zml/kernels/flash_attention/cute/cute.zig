@@ -15,7 +15,8 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major >= 8;
 }
 
-pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor) zml.Tensor {
+pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, sharding: zml.attention.Sharding) zml.Tensor {
+    stdx.debug.assert(sharding.heads == sharding.kv_heads, "This attention kernel requires matching query and KV head sharding", .{});
     stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }) and k.shape().hasTags(.{ .k, .h, .hd }) and v.shape().hasTags(.{ .k, .h, .hd }), "CuTe attention requires q/h/hd and k/h/hd tags", .{});
     const batched = q.shape().hasTag(.b) != null;
     const rank: usize = if (batched) 4 else 3;
@@ -33,15 +34,15 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         stdx.debug.assert(token_index.rank() == 0, "Unbatched CuTe attention requires a scalar token position", .{});
     }
 
-    const mesh = zml.Compiler.current().resolveMesh(.{.model});
-    const q_sharded = q.withPartitioning(mesh, .{ .h = .model });
-    const k_sharded = k.withPartitioning(mesh, .{ .h = .model });
-    const v_sharded = v.withPartitioning(mesh, .{ .h = .model });
     const positions = if (batched)
         token_index.convert(.i32).broad(zml.Shape.init(.{ .b = q.dim(.b) }, .i32))
     else
         token_index.convert(.i32);
-    return zml.ops.manualComputation(Context.body, Context{ .q = q_sharded, .k = k_sharded, .v = v_sharded, .positions = positions }, q_sharded.shape());
+    return zml.ops.manualComputation(Context.body, Context{ .q = q, .k = k, .v = v, .positions = positions }, q.shape(), .{
+        .mesh = sharding.mesh,
+        .in_specs = .{ .q = sharding.partition(q.shape(), .h), .k = sharding.kvPartition(k.shape(), .h), .v = sharding.kvPartition(v.shape(), .h), .positions = .replicated },
+        .out_specs = sharding.partition(q.shape(), .h),
+    });
 }
 
 const Context = struct {

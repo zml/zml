@@ -236,9 +236,7 @@ pub fn fusedExperts(
     const gate_up_scales: ?zml.Tensor = if (gate_up.quantization) |q| q.scales else null;
     const down_scales: ?zml.Tensor = if (down.quantization) |q| q.scales else null;
 
-    const expert_partition = gate_up.weight.shape().partition(.expert);
-
-    if (expert_partition.isSharded()) {
+    if (opts.sharding.experts != null) {
         const global_num_experts = down.weight.dim(.expert);
         const partial_output = zml.ops.manualComputation(
             (struct {
@@ -249,6 +247,7 @@ pub fn fusedExperts(
                 weights_down: zml.Tensor,
                 activation: zml.moe.Activation,
                 global_num_experts: i64,
+                sharding: zml.moe.Sharding,
                 gate_up_scales: ?zml.Tensor,
                 bias_gate_up: ?zml.Tensor,
                 down_scales: ?zml.Tensor,
@@ -256,7 +255,7 @@ pub fn fusedExperts(
 
                 fn body(self: @This(), _: zml.Shape) zml.Tensor {
                     const local_num_experts = self.weights_gate_up.dim(.expert);
-                    const partition_id = zml.ops.partitionId().convert(.i32);
+                    const partition_id = self.sharding.expertIndex();
                     const expert_start = partition_id.scale(local_num_experts).convert(.i32);
                     const global_expert_ids = zml.Tensor.arange(.{ .end = self.global_num_experts }, .i32).withTags(.{.expert});
 
@@ -282,7 +281,7 @@ pub fn fusedExperts(
                             .w2_bias = self.bias_down,
                         },
                     );
-                    return local_output.reshape(self.input.shape()).withTags(.{ .t, .d });
+                    return self.sharding.sum(local_output.reshape(self.input.shape()).withTags(.{ .t, .d }));
                 }
             }).body,
             .{
@@ -293,14 +292,30 @@ pub fn fusedExperts(
                 .weights_down = down.weight,
                 .activation = opts.activation,
                 .global_num_experts = global_num_experts,
+                .sharding = opts.sharding,
                 .gate_up_scales = gate_up_scales,
                 .bias_gate_up = gate_up.bias,
                 .down_scales = down_scales,
                 .bias_down = down.bias,
             },
             input.shape(),
+            .{
+                .mesh = opts.sharding.mesh,
+                .in_specs = .{
+                    .input = .replicated,
+                    .topk_ids = .replicated,
+                    .topk_weights = .replicated,
+                    .weights_gate_up = opts.sharding.partition(gate_up.weight.shape()),
+                    .weights_down = opts.sharding.partition(down.weight.shape()),
+                    .gate_up_scales = opts.sharding.auxiliaryPartition(gate_up_scales, gate_up.weight.dim(.expert)),
+                    .down_scales = opts.sharding.auxiliaryPartition(down_scales, down.weight.dim(.expert)),
+                    .bias_gate_up = opts.sharding.auxiliaryPartition(gate_up.bias, gate_up.weight.dim(.expert)),
+                    .bias_down = opts.sharding.auxiliaryPartition(down.bias, down.weight.dim(.expert)),
+                },
+                .out_specs = .replicated,
+            },
         );
-        return zml.ops.allReduce(partial_output, zml.Tensor.add);
+        return partial_output;
     }
 
     return fusedExpertsImpl(

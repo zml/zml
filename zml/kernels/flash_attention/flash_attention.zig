@@ -126,11 +126,11 @@ pub const Metadata = union(Backend) {
 ///   - .q is the number of queries
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
-pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
+pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, sharding: zml.attention.Sharding) zml.Tensor {
     return switch (parameters) {
-        .cute => cute.attention(q, k, v, token_index),
-        .nki => nki.attention(q, k, v, token_index, parameters.nki),
-        .metal => metal.attention(q, k, v, token_index, metadata.metal),
+        .cute => cute.attention(q, k, v, token_index, sharding),
+        .nki => nki.attention(q, k, v, token_index, parameters.nki, sharding),
+        .metal => metal.attention(q.withPartitioning(sharding.mesh, sharding.partition(q.shape(), .h)), k.withPartitioning(sharding.mesh, sharding.kvPartition(k.shape(), .h)), v.withPartitioning(sharding.mesh, sharding.kvPartition(v.shape(), .h)), token_index, metadata.metal),
     };
 }
 
@@ -228,9 +228,10 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
     defer token_index.deinit();
 
     const meshes = platform.meshes.values();
+    const sharding: zml.attention.Sharding = .{ .mesh = platform.meshes.get("model").?, .heads = "model", .kv_heads = "model" };
     const reference_metadata: zml.attention.Metadata = .{ .stablehlo = {} };
     const reference_parameters: zml.attention.Parameters = .{ .stablehlo = {} };
-    const reference_exe = try platform.compileFn(allocator, io, zml.attention.attention, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, reference_metadata, reference_parameters }, .{
+    const reference_exe = try platform.compileFn(allocator, io, zml.attention.attention, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, reference_metadata, reference_parameters, sharding }, .{
         .program_name = "attention_stablehlo",
         .meshes = meshes,
     });
@@ -251,7 +252,7 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
             allocator,
             io,
             attention,
-            .{ tensors.q, tensors.k, tensors.v, tensors.token_index, metadata, parameters },
+            .{ tensors.q, tensors.k, tensors.v, tensors.token_index, metadata, parameters, sharding },
             .{
                 .program_name = try std.fmt.allocPrint(arena, "attention_{t}", .{backend}),
                 .meshes = meshes,

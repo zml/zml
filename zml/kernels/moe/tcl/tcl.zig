@@ -276,15 +276,16 @@ test "tcl fused experts run on furiosa" {
         const gu: Tensor = .init(.{ .expert = e, .dout = 2 * i, .d = d }, .bf16);
         const dn: Tensor = .init(.{ .expert = e, .d = d, .dout = i }, .bf16);
         const Mod = struct {
-            pub fn forward(x_: Tensor, ids_: Tensor, w_: Tensor, gu_: Tensor, dn_: Tensor) Tensor {
+            pub fn forward(x_: Tensor, ids_: Tensor, w_: Tensor, gu_: Tensor, dn_: Tensor, sharding: zml.moe.Sharding) Tensor {
                 return fusedExperts(x_, ids_, w_, .init(gu_, null, .dout), .init(dn_, null, .dout), .{
+                    .sharding = sharding,
                     .activation = .{ .swiglu = .{} },
                     .quantize_input = false,
                     .routing_weight_placement = .after_down,
                 });
             }
         };
-        var exe = try zml.module.compile(allocator, io, Mod.forward, .{ x, ids, w, gu, dn }, platform, .{});
+        var exe = try zml.module.compile(allocator, io, Mod.forward, .{ x, ids, w, gu, dn, zml.moe.Sharding{ .mesh = platform.replicated_mesh, .experts = null } }, platform, .{});
         defer exe.deinit();
 
         var prng: std.Random.DefaultPrng = .init(@intCast(t));

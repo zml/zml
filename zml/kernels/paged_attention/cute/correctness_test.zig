@@ -47,16 +47,16 @@ test "FP16 paged attention" {
     }) |c| try runCorrectness(std.testing.allocator, std.testing.io, platform, c, true);
 }
 
-fn forwardF16(i: Inputs, c: cases.Case) zml.Tensor {
+fn forwardF16(i: Inputs, c: cases.Case, sharding: zml.attention.Sharding) zml.Tensor {
     var inputs = i;
     inputs.q = i.q.convert(.f16);
     inputs.k = i.k.convert(.f16);
     inputs.v = i.v.convert(.f16);
-    return fixtures.forward(inputs, c).convert(.bf16);
+    return fixtures.forward(inputs, c, sharding).convert(.bf16);
 }
 
 fn runCorrectness(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, c: cases.Case, comptime compute_f16: bool) !void {
-    const exe = try platform.compileFn(a, io, if (compute_f16) forwardF16 else fixtures.forward, .{ Inputs.init(c), c }, .{ .program_name = "paged_attention_harness" });
+    const exe = try platform.compileFn(a, io, if (compute_f16) forwardF16 else fixtures.forward, .{ Inputs.init(c), c, zml.attention.Sharding{ .mesh = platform.replicated_mesh, .heads = null, .kv_heads = null } }, .{ .program_name = "paged_attention_harness" });
     defer exe.deinit();
 
     var runner = try exe.runner(a);

@@ -648,6 +648,10 @@ pub const SelfAttn = struct {
             token_index,
             zml.attention.Metadata.init(.fromBackend(.stablehlo)),
             zml.attention.Parameters.init(.fromBackend(.stablehlo)),
+            .{ .mesh = tp, .heads = "model", .kv_heads = switch (kv_head_sharding) {
+                .sharded => "model",
+                .replicated => null,
+            } },
         ).withPartitioning(tp, .{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());
@@ -784,6 +788,7 @@ pub const Moe = struct {
             .{
                 .activation = .{ .swiglu = .{} },
                 .quantize_input = false,
+                .sharding = .{ .mesh = zml.Compiler.current().mesh(.experts), .experts = "experts" },
                 .routing_weight_placement = .after_down,
             },
         ).reshape(x.shape());

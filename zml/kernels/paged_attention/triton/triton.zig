@@ -270,6 +270,7 @@ pub const paged = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        stdx.debug.assert(opts.sharding.heads == opts.sharding.kv_heads, "Paged attention requires matching query and KV head sharding", .{});
         if (opts.mask == .indices) {
             return pagedSparseAttention(parameters, q, k_cache, v_cache, opts);
         }
@@ -359,6 +360,19 @@ pub const paged = struct {
                 .options = parameters.options_,
             },
             q.shape(),
+            .{
+                .mesh = opts.sharding.mesh,
+                .in_specs = .{
+                    .q = opts.sharding.partition(q.shape(), .hkv),
+                    .k_cache = opts.sharding.partition(k_cache.shape(), .hkv),
+                    .v_cache = opts.sharding.partition(v_cache.shape(), .hkv),
+                    .block_table = .replicated,
+                    .seq_lens = .replicated,
+                    .query_start_len = .replicated,
+                    .opts = .{ .mask = .replicated, .sink = if (opts.sink) |sink| opts.sharding.partition(sink.shape(), 0) else zml.Sharding.Partitioning.replicated(0) },
+                },
+                .out_specs = opts.sharding.partition(q.shape(), .hkv),
+            },
         );
 
         return output;
@@ -416,6 +430,19 @@ pub const paged = struct {
                 .options = parameters.options_,
             },
             q.shape(),
+            .{
+                .mesh = opts.sharding.mesh,
+                .in_specs = .{
+                    .q = opts.sharding.partition(q.shape(), .hkv),
+                    .k_cache = opts.sharding.partition(k_cache.shape(), .hkv),
+                    .v_cache = opts.sharding.partition(v_cache.shape(), .hkv),
+                    .block_table = .replicated,
+                    .seq_lens = .replicated,
+                    .query_start_len = .replicated,
+                    .opts = .{ .mask = .replicated, .sink = if (opts.sink) |sink| opts.sharding.partition(sink.shape(), 0) else zml.Sharding.Partitioning.replicated(0) },
+                },
+                .out_specs = opts.sharding.partition(q.shape(), .hkv),
+            },
         );
     }
 

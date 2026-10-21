@@ -54,7 +54,7 @@ fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform,
     inputs.sinks = inputs.sinks.withPartitioning(mesh, .{ ._0 = .model });
 
     const compile_start: std.Io.Timestamp = .now(io, .awake);
-    const exe = try platform.compileFn(a, io, fixtures.forward, .{ inputs, global_case }, .{
+    const exe = try platform.compileFn(a, io, fixtures.forward, .{ inputs, global_case, zml.attention.Sharding{ .mesh = mesh, .heads = .model, .kv_heads = .model } }, .{
         .program_name = "paged_attention_harness",
         .meshes = &.{mesh},
     });

@@ -679,7 +679,6 @@ pub fn fusedExperts(
     }
 
     const runner_options: Options = .fromGlobalOptions(opts);
-    const expert_partition = gate_up.weight.shape().partition(.expert);
 
     const quant_scheme: ?zml.Quantization.Scheme = if (gate_up.quantization) |q| q.scheme else null;
 
@@ -689,7 +688,7 @@ pub fn fusedExperts(
 
         // TODO(Corentin): Do error checking on nvfp4
         // Also, maybe pass `zml.nn.Linear` directly
-        if (expert_partition.isSharded()) {
+        if (opts.sharding.experts != null) {
             return zml.ops.manualComputation(
                 (struct {
                     input: zml.Tensor,
@@ -708,13 +707,14 @@ pub fn fusedExperts(
                     gemm1_tactic: i32,
                     gemm2_tactic: i32,
                     workspace_query_device: i32,
+                    sharding: zml.moe.Sharding,
 
                     fn body(
                         self: @This(),
                         _: zml.Shape,
                     ) zml.Tensor {
                         const local_num_experts = self.gate_up_weight_unpacked.dim(.expert);
-                        const partition_id = zml.ops.partitionId().convert(.i32);
+                        const partition_id = self.sharding.expertIndex();
                         const expert_start = partition_id.scale(local_num_experts).convert(.i32);
                         const expert_end = expert_start.addConstant(local_num_experts);
 
@@ -753,7 +753,7 @@ pub fn fusedExperts(
                         const local_reshaped = local_output
                             .reshape(self.input.shape().dims())
                             .withTags(.{ .t, .d });
-                        return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
+                        return self.sharding.sum(local_reshaped);
                     }
                 }).body,
                 .{
@@ -773,8 +773,26 @@ pub fn fusedExperts(
                     .gemm1_tactic = runner_options.gemm1_tactic,
                     .gemm2_tactic = runner_options.gemm2_tactic,
                     .workspace_query_device = runner_options.workspace_query_device,
+                    .sharding = opts.sharding,
                 },
                 input.shape(),
+                .{
+                    .mesh = opts.sharding.mesh,
+                    .in_specs = .{
+                        .input = .replicated,
+                        .topk_ids = .replicated,
+                        .topk_weights = .replicated,
+                        .gate_up_weight_unpacked = opts.sharding.partition(gate_up_weight_unpacked.shape()),
+                        .down_weight_unpacked = opts.sharding.partition(down_weight_unpacked.shape()),
+                        .gate_up_input_scale = opts.sharding.auxiliaryPartition(gate_up.quantization.?.input_scale.?.value, gate_up.weight.dim(.expert)),
+                        .gate_up_scales = opts.sharding.auxiliaryPartition(gate_up.quantization.?.scales, gate_up.weight.dim(.expert)),
+                        .gate_up_global_scale = opts.sharding.auxiliaryPartition(gate_up.quantization.?.global_scale.?.value, gate_up.weight.dim(.expert)),
+                        .down_input_scale = opts.sharding.auxiliaryPartition(down.quantization.?.input_scale.?.value, down.weight.dim(.expert)),
+                        .down_scales = opts.sharding.auxiliaryPartition(down.quantization.?.scales, down.weight.dim(.expert)),
+                        .down_global_scale = opts.sharding.auxiliaryPartition(down.quantization.?.global_scale.?.value, down.weight.dim(.expert)),
+                    },
+                    .out_specs = .replicated,
+                },
             );
         }
 
@@ -794,7 +812,7 @@ pub fn fusedExperts(
         );
     }
 
-    if (expert_partition.isSharded()) {
+    if (opts.sharding.experts != null) {
         return zml.ops.manualComputation(
             (struct {
                 input: zml.Tensor,
@@ -807,13 +825,14 @@ pub fn fusedExperts(
                 gemm1_tactic: i32,
                 gemm2_tactic: i32,
                 workspace_query_device: i32,
+                sharding: zml.moe.Sharding,
 
                 fn body(
                     self: @This(),
                     _: zml.Shape,
                 ) zml.Tensor {
                     const local_num_experts = self.weights_gate_up.dim(.expert);
-                    const partition_id = zml.ops.partitionId().convert(.i32);
+                    const partition_id = self.sharding.expertIndex();
                     const expert_start = partition_id.scale(local_num_experts).convert(.i32);
                     const expert_end = expert_start.addConstant(local_num_experts);
 
@@ -846,7 +865,7 @@ pub fn fusedExperts(
                     const local_reshaped = local_output
                         .reshape(self.input.shape().dims())
                         .withTags(.{ .t, .d });
-                    return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
+                    return self.sharding.sum(local_reshaped);
                 }
             }).body,
             .{
@@ -860,8 +879,20 @@ pub fn fusedExperts(
                 .gemm1_tactic = runner_options.gemm1_tactic,
                 .gemm2_tactic = runner_options.gemm2_tactic,
                 .workspace_query_device = runner_options.workspace_query_device,
+                .sharding = opts.sharding,
             },
             input.shape(),
+            .{
+                .mesh = opts.sharding.mesh,
+                .in_specs = .{
+                    .input = .replicated,
+                    .topk_ids = .replicated,
+                    .topk_weights = .replicated,
+                    .weights_gate_up = opts.sharding.partition(gate_up.weight.shape()),
+                    .weights_down = opts.sharding.partition(down.weight.shape()),
+                },
+                .out_specs = .replicated,
+            },
         );
     }
 

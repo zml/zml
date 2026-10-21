@@ -21,11 +21,12 @@ const Case = struct {
     width: i64 = 128,
     intermediate: i64 = 128,
     experts: i64 = 8,
+    sharding: ?zml.moe.Sharding = null,
 
     pub fn compile(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Exe {
         std.debug.assert(c.backend.isAvailable(platform));
         const x: Tensor = .init(.{ .t = c.tokens, .d = c.width }, c.activation_dtype);
-        return platform.compileFn(allocator, io, forward, .{ x, c }, .{});
+        return platform.compileFn(allocator, io, forward, .{ x, c }, .{ .meshes = if (c.sharding) |sharding| &.{ platform.replicated_mesh, sharding.mesh } else &.{platform.replicated_mesh} });
     }
 
     pub fn check(c: Case, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, exe: *const zml.Exe) !void {
@@ -249,6 +250,7 @@ fn forward(input: Tensor, c: Case) Outputs {
 
     const weights = route.remainder(Tensor.scalar(3, .i32)).convert(.f32).addConstant(1).scale(0.25);
     const options: zml.moe.Options = .{
+        .sharding = c.sharding orelse .{ .mesh = zml.Compiler.current().platform.replicated_mesh, .experts = null },
         .activation = c.activation,
         .quantize_input = c.quantize_input,
         .routing_weight_placement = c.placement,
@@ -674,4 +676,32 @@ test "Mosaic TPU compatibility matrix" {
         .activations = &gated_activations,
         .biases = &.{ false, true },
     }, .{});
+}
+
+test "MoE explicit expert layouts survive generated and packed weights" {
+    const platform = zml.testing.env();
+    if (platform.devices.len < 4) return error.SkipZigTest;
+    const logical = try zml.Sharding.LogicalMesh.init(.{ .data, .experts, .pipeline }, &.{ .balanced, .balanced, .balanced }, &.{ 2, 2, -1 });
+    const mesh: zml.Mesh = try .init("manual_experts", &platform.physical_mesh, logical, .suggest(logical, &platform.physical_mesh));
+    for ([_]zml.moe.Backend{ .stablehlo, .triton, .fly, .mosaic_tpu }) |backend| {
+        if (!backend.isAvailable(platform)) continue;
+        for ([_]?zml.Quantization.Scheme{ null, .mxfp4 }) |scheme| {
+            if (backend == .mosaic_tpu and scheme != null) continue;
+            if (backend == .fly and scheme != .mxfp4) continue;
+            const case: Case = .{
+                .backend = backend,
+                .scheme = scheme,
+                .tokens = 2,
+                .topk = 2,
+                .width = if (backend == .fly) 5120 else 128,
+                .intermediate = if (backend == .fly) 2304 else 128,
+                .experts = if (backend == .fly) 2 else 8,
+                .placement = if (backend == .fly) .before_down else .after_down,
+                .sharding = .{ .mesh = &mesh, .experts = "experts" },
+            };
+            const exe = try case.compile(std.testing.allocator, std.testing.io, platform);
+            defer exe.deinit();
+            try case.check(std.testing.allocator, std.testing.io, platform, &exe);
+        }
+    }
 }

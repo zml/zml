@@ -37,7 +37,7 @@ const DemoModel = struct {
         y = y.withPartitioning(.dp_mp, .{ .batch = .data, .hidden = .model });
         y.print("dense_out");
 
-        const gate = y.scale(0.01).sigmoid().withPartitioning(.dp_mp, .{ .batch = .data, .hidden = .model });
+        const gate = y.scale(0.01).sigmoid();
         return zml.ops.manualComputation(
             (struct {
                 y: zml.Tensor,
@@ -50,6 +50,11 @@ const DemoModel = struct {
             }).body,
             .{ .y = y, .gate = gate },
             y.shape(),
+            .{
+                .mesh = zml.Compiler.current().mesh(.dp_mp),
+                .in_specs = .{ .y = .{ .batch = .data, .hidden = .model }, .gate = .{ .batch = .data, .hidden = .model } },
+                .out_specs = .{ .batch = .data, .hidden = .model },
+            },
         );
     }
 };
@@ -60,7 +65,7 @@ fn usage() void {
         \\
         \\Simple sharding demo:
         \\  - explicit partitioning on data/model axes
-        \\  - shard-local tensor print
+        \\  - tensor print
         \\  - manualComputation with multiple inputs and one output
         \\
         \\Mesh modes:
