@@ -1,0 +1,51 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
+
+py_binary(
+    name = "profile_metrics",
+    srcs = ["profile_metrics.py"],
+)
+
+py_test(
+    name = "profile_metrics_test",
+    srcs = [
+        "profile_metrics.py",
+        "profile_metrics_test.py",
+    ],
+    imports = ["."],
+    main = "profile_metrics_test.py",
+)
+
+zig_library(
+    name = "lib",
+    srcs = [
+        "cases.zig",
+        "results.zig",
+        "runner.zig",
+        "suite.zig",
+        "workload.zig",
+    ],
+    import_name = "moe_bench",
+    main = "lib.zig",
+    visibility = ["//zml/kernels/moe:__subpackages__"],
+    deps = [
+        "//bazel/stamp:zig",
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "bench",
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":lib",
+        "//zml",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":lib"],
+)
