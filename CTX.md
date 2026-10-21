@@ -5956,10 +5956,112 @@ remain:
 - tests pin one block size;
 - CPU calibration honors a one-element list.
 
+## Thirty-first pass: fixes from the loader review (2026-10-21)
+
+The bugs the thirtieth pass headlined are fixed, along with steps 1 and 2 of
+its simplification move 2. Each commit was reviewed adversarially (12
+reviewers; 31 findings, none high), and the follow-ups are their own
+commits. GPUs: none of gb300; four B70 (oneAPI, threaded io) for the
+loader smoke test.
+
+zml commits, in order (on top of `qztxwlmv`):
+- `msskpwqx`: the Source op harness runs its 23 cases. They were private,
+  and `std.meta.declarations` lists only public ones. `WidenBits` is fixed,
+  and every case round-trips through sourceOf/rebind.
+- `tnwrwmmu`: progress counts one item per destination, by an unread-bytes
+  countdown, on the caller's node (#19). Backends take
+  `std.Progress.Node` by value.
+- `uxvqmwtu`: mixed device kinds load (#9).
+- `kuwqpzmn`: `Exe.call` returns `pjrt.ApiError`. A failed pack is the
+  loader's sticky error, not a panic (#17).
+- `uyrpwyxp`: `Backend.abort`. The first failure aborts what is pending,
+  and so does deinit (#18).
+- `zmvvsmnw`: the `auto` probe draws a random shift per probe, so it no
+  longer reads its own planted pages (#7).
+- `knuqkqxr`: a request attempt is cancelled and retried after 60 s with
+  no bytes (`RetryConfig.stall_timeout`, #1). A send failure closes its
+  connection.
+- `tqpmrsnq`: each HF read copies the download URL. Logs name the file,
+  not the signed URL. The tree cache is locked (#2, #14).
+- `xmrzxtsl` (move 2, step 1): `BlockPool` never waits. The credits are
+  the one bound on pinned blocks.
+- `tmtwwsts` (move 2, step 2): a credit is a fixed slot of
+  `maximum_blocks_per_job` blocks. The following go:
+  - `BlockPool` and the per-block `Lease`;
+  - `BlockContext` and `abandonSubmissions`;
+  - the plan's block contexts and `block_start`.
+
+  A DMA piece carries its request and data. The diff is 275 lines
+  shorter. **Needs a GB300 benchmark against `xmrzxtsl`.** Compare
+  timings and credit waits. The summary's pinned high water became
+  `credits_high_water` (a count) in `zqzrpnor`, so it does not compare.
+- `zqzrpnor` (review follow-ups):
+  - `Loader.cancel()`, which deinit calls and llmd uses;
+  - the device bound is `Platform.MAX_NUM_DEVICES` (32 without TPU);
+  - the buffered backend counts one item per tensor;
+  - doc and comment fixes.
+- `sxymmslo` (review follow-ups):
+  - the stall clock pauses while an attempt runs its own governed request
+    (a HF re-resolve or a GCS token refresh);
+  - an outer cancel keeps a finished value;
+  - a `receiveHead` failure closes its connection;
+  - the probe no longer divides by zero;
+  - HF leak and order fixes, and HF open failures are logged.
+- `lmnpvsso`: `pjrtx` compiles on the calling thread. `io.async` had put
+  XLA's compile on a zio coroutine.
+
+monorepo commits (on top of `oxpzxnvt`):
+- `vqkkvptr`: llmd passes `--io-impl` to `Platform.auto` (#4). Under zio,
+  compiles then use `blockInPlace`; with `lmnpvsso`, neither MLIR emission
+  nor XLA's compile runs on an 8 MiB coroutine. This is the likely fix for
+  the Laguna zio crash. It is not verified: that needs a Laguna run under
+  zio, which the B70 rule (threaded io) excludes here.
+- `pmnrknqz`: `//llmd:test` compiles again (`binding.transformed`).
+- `ulnnrozk`: llmd tries `Exe.call`.
+- `pxzvsqqp`:
+  - compressed-tensors NVFP4 FlashInfer globals honor `.divide` (#3);
+  - dense NVFP4 keeps `input_scale` (#10);
+  - FP8 per-tensor gate/up experts get per-row scales `[E, 2n, 1]`,
+    per channel (#11);
+  - NVFP4A16 FlashInfer experts are an error, not a panic.
+- `kvklzrov`:
+  - one `Operation` for both NVFP4 global recipes;
+  - tests through `Packer.experts` (FlashInfer) and fused NVFP4;
+  - `loadInto` cancels the loader on error before freeing its programs.
+
+Verification:
+- `bazel test //zml:test //vfs:test` and `bazel build //examples/...` pass.
+- `bazel test --config=localzml //llmd/...` passes 7/7, and
+  `bazel build --config=localzml //llmd/...` passes.
+- Four B70: `examples/io load Llama-3.1-8B-Instruct tp` with
+  `ZML_LOAD_CHECK=1` reads back 291/291 in 1.45-1.62 s, cold (O_DIRECT).
+  Host-pinned `sharded` also reads back 291/291.
+
+Left from the fix review:
+- The asynchronous half of `Exe.call`'s failure path has no test.
+- The buffered backend's abort lets admitted tasks finish their tensor.
+- Under `std.Io.Threaded` with a finite `async_limit`, the per-attempt
+  watch task halves the buffered backend's remote read parallelism.
+- No test covers the range-read progress plumbing.
+- HF has no test: it needs an injectable Hub endpoint.
+
+The review's other Part 1 items are open, for example:
+- S3 credentials and key encoding (#5, #12);
+- s3/https missing optional files (#6);
+- `source_slots` keeping borrowed URIs (#8);
+- https redirects (#13);
+- GCS key files (#16);
+- safetensors header validation (#20);
+- the `loadExecute` plain branch (#21).
+
 ## Open work
 
+- 2026-10-21 fixes from the loader review (thirty-first pass): headline
+  bugs fixed and move 2 done in two commits; step 2 (`tmtwwsts`) needs a
+  GB300 benchmark. The Laguna-under-zio run is still to do. The other
+  review items are listed in that pass.
 - 2026-10-21 end-to-end loader review (thirtieth pass): see
-  `LOADER_REVIEW.md`. Nothing is fixed yet.
+  `LOADER_REVIEW.md`.
 - 2026-10-20 profile of DeepSeek's load (twenty-ninth pass, measurements
   only): a 2.4 s mid-load stall while the plugin pins the 189 GiB engram
   tables; otherwise read-bound at ~50 GiB/s; O_DIRECT re-read 44 GiB of
