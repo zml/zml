@@ -7633,7 +7633,137 @@ Checks:
 - `examples/io dma-bench`: `block_bytes=4194304 parallelism=8`; with
   `ZML_DMA_BENCH_BLOCK_MIB=64` a logged `InvalidOptions`, as expected.
 
+## Forty-seventh pass: the loader meets the VFS only through io (R15) (2026-10-22)
+
+R15 of `LOADER_API_REVIEW.md` (H-stats-stay-in-vfs, H-direct-io-per-file,
+H-backend-options, H-request-send), with the low-risk, delete-only stages
+of LOADER_REVIEW Move 10. The loader read the VFS's read statistics
+through four types to feed one debug line. One alignment per loader,
+taken from the checkpoint's profile, gated a decision the VFS makes per
+file. The five retry knobs were declared four times, and
+`RetryConfig.fromOptions` renamed them. Each governed request spelled its
+`RequestSpec` and context twice, and S3's two Listing copies disagreed.
+No other behavior change was asked for.
+
+zml (vfs/, zml/io):
+- Stats stay in the VFS. Each remote backend logs its read totals once,
+  at debug, from its `deinit` (`AtomicReadStats.logTotals`), when it
+  sent a request. Gone: `ReadStatsProvider`, `AtomicReadStats.provider`
+  and `snapshotOpaque`, `Backend.read_stats`, `LoadProfile.stats`,
+  `Diagnostics.source_stats`, the "batch source" line and the direct
+  Loader's stored `load_profile`. Tests read `&http.read_stats`.
+- Direct I/O per file. `VFS.direct_io_alignment` is the alignment where
+  direct I/O is supported, else 0. `VFS.isLocal(path)` classifies a
+  path and opens nothing. `backend.readAlignment(io, direct_io)` gives
+  the loader its alignment from those two alone, for `Loader.create` and
+  `init`'s minimum block; `LoadProfile.direct_io_alignment` goes.
+  `Planner.Reads.alignmentOf` asks `isLocal` first: a remote file is
+  planned exact and never opened on the planner, and a local drafter
+  beside an hf:// model may be read directly. `Options.direct_io` keeps
+  its auto/on/off meaning.
+- One `request.Retry` block: the five knobs with their defaults, plus
+  `stall_timeout`, now settable per backend. `RetryConfig` and
+  `fromOptions` go; the range asserts moved into `Governor.init`. Every
+  remote backend takes `init(allocator, io, client, options)`: HTTP
+  `{ protocol, retry }` (`initWithOptions` goes), HF `{ token, retry }`,
+  S3 `{ access_key, secret_key, endpoint_url, region, retry }` (`Config`
+  and `InitOpts` merged), GCS `{ credentials, endpoint_url, retry }`.
+  S3's `auth_service` is a constant, and GCS's unread region goes.
+  `VFS.Remotes` builds https with `.{ .protocol = .https }`.
+- Requests state their spec once. An `Attempt` carries the `ctx` and
+  `spec` that `perform` was given; `exchange` and `watched` read them
+  from there. Every hook drops its second spec and context, and the
+  fields that only fed them (`url`, `target`, `http`, `RangeRead.ctx`).
+  Retry, admission and throttling are unchanged.
+- Move 10's delete-only stages: GCS's unused `EndpointUrl`,
+  `JwtAssertion`/`makeAssertion` and `getTimestamp`, and its
+  commented-out `authHeaders` and service-account bodies. S3 signs
+  through one `Signature.sign` with embedded buffers, in place of three
+  copies.
+- `docs/learn/loader.md`: the per-file decision, the backend totals
+  line, and the alignment wording.
+
+Visible changes:
+- Under a VFS, a local file may be read directly with no checkpoint or
+  beside a remote one. Before, it never was.
+- Under a VFS, the loader-wide alignment is 4096 for every checkpoint
+  (it was 0 for a remote one). Remote files are still read exact, and
+  the strided-part check before publication uses each file's alignment.
+  Only the gather ranges of a plan with remote files are 8 KiB shorter.
+- The 4 KiB minimum block now applies under a VFS whatever the
+  checkpoint, and not with `direct_io = off`.
+- The per-batch source line is gone; it double-counted overlapping
+  batches. In llmd the totals come once, at shutdown.
+- S3 listing log lines name `bucket/prefix` instead of "listing".
+
+Review (workflow, refuting verifier): seven findings, four distinct, all
+low, all fixed.
+- The strided-part check before publication still used the loader-wide
+  alignment, now 4096 under any VFS. A remote strided part whose exact
+  span fit the read limit, but not once widened to 4 KiB, was newly
+  refused, although its file is read exact (reported three times). The
+  check now uses each file's alignment. A test loads a transposed tensor
+  of exactly one request, at an unaligned offset, from a registered
+  scheme, and still refuses it from the local path.
+- `init` no longer guaranteed `create`'s alignment check: a registered
+  backend with a 4 or 8 KiB read chunk and a block of the same size
+  passed `init`, then the set-up panicked on a GPU (reported twice).
+  `init` now refuses a request of at most two alignment units; a case in
+  the options test covers it. Both new tests fail with the fixes
+  reverted.
+- S3 stored its retry block a second time in `config`. A private
+  `Config` holds the four strings again, as in GCS.
+- The deleted alignment-3 test was the only one that failed `create`
+  after the carve. A new test fails the first worker start
+  (`std.Io.failingGroupConcurrent`), which unwinds the carve, the
+  credits and the pumps; dropping the pumps' errdefer makes it leak. The
+  proposed FailingAllocator index was not used: the workers allocate
+  through the loader's allocator as soon as they start, so a count read
+  after `create` races them.
+
+Not done:
+- Move 10's handle table (remote backends as stores): its largest
+  change, rated high risk, to be staged with `http_acceptance_test`
+  going through a VFS.
+- Removing `retry_once`: it changes how HF handles 401/403.
+- GCS's behavior stages: refusing service-account files at init, and
+  fetching the metadata token as a plain request.
+- The comptime VFSBase forwarders (optional, unverified).
+- `create`'s `maximumJobLen` check is now reached only by a caller that
+  skips `init`; no test covers it.
+- PLAN.md item 22 is done by this move, and PLAN.md still names
+  `InitOpts` and `retry_initial_delay`. LOADER_*.md are untouched.
+- Not run on a GPU, or against real HF, S3, GCS or HTTPS. The totals
+  line was never seen printed: no run touched a remote backend.
+
+Checks:
+- `bazel test //vfs:test` passes (49: the `fromOptions` test went).
+- `bazel test //zml:test` passes (336, 12 skip): the alignment-3 test
+  went; the per-file planner test, the remote strided-part test and the
+  worker-start test came. `//vfs:test //zml:test --runs_per_test=3`
+  passes.
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7, and
+  `bazel build --config=localzml //llmd:llmd` (monorepo not edited).
+- `zig fmt` on scratch copies: no diff in the changed code.
+- On CPU, `examples/io load` of the R13 synthetic checkpoint,
+  `ZML_LOAD_CHECK=1`, 2 packs of 4: load check 44/44 and pack check 2/2
+  replicated, sharded and tp; sharded also in host_pinned memory. tp
+  with `ZML_DIRECT_IO=on` logs "reading direct" and alignment 4096, with
+  `off` alignment 0. Sizing as in R14: request 8 MiB, block 4 MiB,
+  width 16, 33 credits.
+
 ## Open work
+
+- 2026-10-22 the loader meets the VFS only through io (forty-seventh
+  pass, zml lluzuwnv): R15 done, with Move 10's delete-only stages.
+  Remote backends log their own read totals, direct I/O is decided per
+  local file (`VFS.isLocal`, `VFS.direct_io_alignment`), the four remote
+  backends share one `request.Retry` and one `init(allocator, io,
+  client, options)`, and each request states its spec once. Open from
+  Move 10: the handle table (backends as stores), `retry_once`, and the
+  GCS behavior stages. PLAN.md still names `InitOpts` and
+  `retry_initial_delay`. Not run on a GPU or against a real remote.
 
 - 2026-10-22 one root in the direct backend (forty-sixth pass, zml
   nxtvovxr): R14 done. Pipeline and Sizing are gone, each sizing value
