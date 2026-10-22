@@ -6967,15 +6967,112 @@ Checks:
   ZML_LOAD_PACK_WIDTH=2`, passes its load check (5/5) and pack check
   (1/1).
 
+## Forty-first pass: the drafter joins the model's store (R8) (2026-10-22)
+
+R8 of `LOADER_API_REVIEW.md` (E-drafter-one-store, B-store-owns-meshes,
+L-one-store-handle). `SpeculativeContext` built a second registry and a
+second store for the drafter checkpoint, so llmd threaded the target
+store's meshes into it, and each speculative model made three starts: the
+base, the resharded lm_head, and the drafter from the second store.
+
+zml:
+- `TensorRegistry.addRepo(io, repo, prefix)` finds a checkpoint as
+  `fromRepo` does and registers each tensor as `prefix` followed by its
+  name. A drafter added under `"drafter."` is reached through
+  `View.withPrefix("drafter")`.
+- The added checkpoint owns its prefix. If a tensor already in the
+  registry is named under it, `addRepo` fails with `error.DuplicateTensor`
+  before it reads anything. `registerTensor` still uses `put`, so within
+  one checkpoint a later shard's duplicate still wins, as before.
+- `fromRepo` is `init` plus `addRepo(io, repo, "")`. `fetchRegistry`
+  became `addCheckpoint`, which adds to an existing registry under a
+  prefix; `fromPath` calls it with `""`. `parseSafetensors` (public) and
+  `parseSafetensorsIndexFiles` take the prefix; testing.zig passes `""`.
+- A test puts a single-file checkpoint and an indexed one, both naming
+  their tensor `w`, in one registry. It checks that adding the second
+  again fails, and reads both back through one store.
+- loader.md has one paragraph on a second checkpoint.
+
+llmd (monorepo):
+- `speculative.addDrafter(io, registry, drafter_model)` adds the drafter
+  repo under `"drafter."` and closes it. `"native"` (DeepSeek's DSpark
+  layers, in the target's checkpoint) adds nothing. main and zoo call it
+  before `TensorStore.init`; main exports `speculative` for zoo.
+- main now resolves `--speculative-drafter-model` for every model type.
+  qwen4, lfm2, ministral3, gemma3_text and mistral3 used to ignore the
+  flag: a bad path now fails at startup, and a valid one fetches headers
+  they never use. For deepseek41, a bad non-native path now fails in
+  `resolveModelRepo`, before it reaches `UnsupportedSpeculativeDrafter`.
+- `SpeculativeContext` keeps only the parsed config. It still opens the
+  drafter repo for config.json and closes it right after (R1(e)). Its
+  store, its `meshes` parameter and the five `store.store.meshes`
+  reach-throughs are gone.
+- `Tensors.init` binds the drafter through `drafterStore(target_store)`,
+  the target view's root under `drafter`, so a target view with a prefix
+  of its own (gemma4's `model.language_model`) does not shift it. The
+  drafter's `tp_mesh` resolves in the one store.
+- `Tensors.startLoad` is gone. llama, gemma4, laguna, qwen3_5 and
+  muse_glimmer start the base, then the whole `speculative.Tensors`
+  (resharded lm_head and drafter) from the one store: two starts before
+  the one `wait`, was three over two stores. deepseek41 is unchanged;
+  qwen4 has no drafter.
+- A test adds a temporary drafter checkpoint with `addDrafter`, checks
+  that `"native"` adds nothing, and reads the tensor through
+  `drafterStore` from a prefixed target view. Before it, no llmd test
+  touched a drafter.
+
+Review (workflow, refuting verifier): five findings, four fixed, one noted.
+- `addRepo` merged with `put`: a prefixed name equal to an existing key
+  silently replaced the first checkpoint's entry, and target keys under
+  `drafter.` would have shown up in the drafter's view. Two findings; the
+  prefix guard above fixes both.
+- loader.md and the `addRepo` comment said `withPrefix` binds. It only
+  scopes lookups; `createTensor`, or `source` then `bind`, binds.
+- The llmd test copied `Tensors.init`'s view expression. Both now call
+  `drafterStore`.
+- main resolving the drafter flag for every model type is kept, since the
+  move asks main to add a drafter whenever one is configured. It is
+  noted above.
+
+Not done:
+- R8's one start over `Weights{ base, speculative }`. Each `start` is its
+  own submission, so the drafter's reads are still planned apart from the
+  target's. Two starts needed the least churn.
+- The drafter repo is resolved twice: in `addDrafter` for its tensors and
+  in `SpeculativeContext.init` for config.json. On hf:// the second open
+  hits the backend's cached tree. Passing one Dir would change
+  `Model.init` in every model.
+- zoo's compile progress total is `store.view().count()`, which now
+  counts the drafter's tensors.
+- llmd's other reach-throughs to the store behind a view (`mesh`,
+  `unbind`) stay; they are R10's (`View.mesh`).
+- Not run on a GPU or a real drafter checkpoint. No speculative model was
+  loaded end to end, and the load time was not measured.
+
+Checks:
+- `bazel test //zml:test` passes (332, 12 skip).
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7 (`llmd:test` 263,
+  9 skip).
+- `bazel build --config=localzml //llmd:llmd //llmd:zoo`.
+
 ## Open work
 
+- 2026-10-22 the drafter joins the model's store (forty-first pass, zml
+  unqksvss and monorepo vvvpmvkl): R8 done. `TensorRegistry.addRepo`
+  puts the drafter checkpoint in the model's registry under `drafter.`;
+  `SpeculativeContext`'s second store and its meshes are gone, and the
+  speculative models make two starts from one store. Not run on a GPU or
+  a real drafter. The drafter's reads are still planned apart from the
+  target's (one start over both trees not taken). main now resolves the
+  drafter flag for every model type.
 - 2026-10-22 the store owns its registry (fortieth pass, zml orqlttun
   and monorepo zmrvtnlx): R7 done. `TensorStore.init` owns and locks the
   registry, an entry's address is its tensor's identity, `View.get` and
   `hasPrefix` replace `getShape` and `hasKey`, `Tensor.read` and
   `readRange` replace `TensorReader`, and the metadata path is gone. Not
   run on a GPU or a real model. `Source.pieces` stays public
-  (C-pieces-leak). R8 and R9 build on it.
+  (C-pieces-leak). R8 (forty-first pass) and R9 build on it.
 - 2026-10-22 VFS Remotes and one error contract (thirty-ninth pass, zml
   zvrossur and monorepo wlwvxtwp): R6 done, and with it LOADER_REVIEW #6.
   `VFS.Remotes` registers the four remote schemes; open, stat and access
