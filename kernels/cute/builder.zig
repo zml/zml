@@ -471,6 +471,10 @@ pub const TmaFormat = enum {
     default,
     u4_unpack_u8,
     u16,
+    /// 32-bit unsigned elements (`CU_TENSOR_MAP_DATA_TYPE_UINT32`).
+    u32,
+    /// 32-bit signed elements (`CU_TENSOR_MAP_DATA_TYPE_INT32`), e.g. packed UE8M0 scale factors.
+    s32,
 };
 
 pub const CtaGroup = nvvm.CtaGroup;
@@ -543,6 +547,8 @@ fn formatName(format: TmaFormat, dtype: DType) []const u8 {
     return switch (format) {
         .u4_unpack_u8 => "U4_UNPACK_U8",
         .u16 => "U16",
+        .u32 => "U32",
+        .s32 => "S32",
         .default => switch (dtype) {
             .f8e4m3fn => "U8",
             .f32 => "F32_RN",
@@ -563,6 +569,8 @@ fn tmaFormatAttribute(b: *Builder, format: TmaFormat) ?*const mlir.Attribute {
         .default => null,
         .u4_unpack_u8 => b.parseAttribute("#cute_nvgpu.tma_data_format<U4_UNPACK_U8>"),
         .u16 => b.parseAttribute("#cute_nvgpu.tma_data_format<U16>"),
+        .u32 => b.parseAttribute("#cute_nvgpu.tma_data_format<U32>"),
+        .s32 => b.parseAttribute("#cute_nvgpu.tma_data_format<S32>"),
     };
 }
 
@@ -784,6 +792,12 @@ pub const Builder = struct {
 
     fn dupeStride(arena: std.mem.Allocator, stride: ?[]const i64) std.mem.Allocator.Error!?[]const i64 {
         return if (stride) |s| try arena.dupe(i64, s) else null;
+    }
+
+    /// `declareArgs` for a list of arguments only known at run time (its length or kinds);
+    /// read them with `arg(i)`. `args` must outlive the function (e.g. arena-allocated).
+    pub fn declareArgList(self: *Builder, args: []const ArgSpec) FinishError!void {
+        return self.declareArgsLow(args);
     }
 
     fn ArgsOf(comptime Spec: type) type {
@@ -2150,6 +2164,128 @@ pub const Builder = struct {
             "!cute_nvgpu.atom.tma_store<{s}, copy_bits = {d}, mode = tiled, g_stride = <\"()\"> tma_gbasis = <\"{s}\">>",
             .{ dtypeName(config.dtype), config.copy_bits, config.global_basis.payload(self) },
         ) catch @panic("OOM"));
+    }
+
+    /// A tiled TMA map over a raw global pointer with explicit extents and strides, described
+    /// the way `cuTensorMapEncodeTiled` takes them (dimension 0 is the contiguous one): the
+    /// host builds it with `makeRawTmaAtom`, the kernel declares it with `rawTmaArgType` and
+    /// issues hand-written `cp.async.bulk.tensor` PTX on `rawTmaDescAddr`. Coordinates are in
+    /// TMA order. The CuTe compiler encodes the descriptor; its L2 promotion and OOB fill are
+    /// not exposed.
+    pub const RawTmaMap = struct {
+        /// Element type of the global tensor (`f8e4m3fn` for bytes, `i32` for packed scale
+        /// factors, `f4e2m1fn` for packed FP4 with `.u4_unpack_u8`).
+        dtype: DType,
+        format: TmaFormat = .default,
+        /// Global extents, dimension 0 first (at most 5).
+        dims: []const i64,
+        /// Element strides of dimensions 1.. (`strides[i]` belongs to `dims[i + 1]`).
+        strides: []const i64,
+        /// Box extents, dimension 0 first.
+        box: []const i64,
+        /// Shared-memory swizzle span in bytes: 0, 32, 64 or 128.
+        swizzle_bytes: u32 = 0,
+        /// `.cta_2`: 2-SM loads completing on the even CTA's barrier (loads only).
+        cta_group: CtaGroup = .cta_1,
+        /// A TMA store map instead of a load map.
+        store: bool = false,
+    };
+
+    const RawTuple = enum { values, basis, dynamic_singletons };
+
+    /// `(a,b,...)` of `values`, of `1@i` bases, or of `values` with extents of 1 dynamic
+    /// (`?`): CuTe drops static singleton modes from a TMA map, DeepGEMM keeps them.
+    fn rawTmaTuple(self: *Builder, values: []const i64, comptime kind: RawTuple) AlgebraExpr {
+        var out: std.Io.Writer.Allocating = .init(self.arena.allocator());
+        if (values.len > 1) out.writer.writeByte('(') catch @panic("OOM");
+        for (values, 0..) |v, i| {
+            if (i > 0) out.writer.writeByte(',') catch @panic("OOM");
+            switch (kind) {
+                .basis => out.writer.print("1@{d}", .{i}) catch @panic("OOM"),
+                .values => out.writer.print("{d}", .{v}) catch @panic("OOM"),
+                .dynamic_singletons => if (v == 1) out.writer.writeByte('?') catch @panic("OOM") else out.writer.print("{d}", .{v}) catch @panic("OOM"),
+            }
+        }
+        if (values.len > 1) out.writer.writeByte(')') catch @panic("OOM");
+        return .{ .text = out.written() };
+    }
+
+    /// Bytes per shared-memory element of a raw map (FP4 unpacks to one byte per element).
+    fn rawTmaSmemElementBytes(map: RawTmaMap) i64 {
+        return if (map.format == .u4_unpack_u8) 1 else @intCast(@max(1, dtypes.dtypeBitwidth(map.dtype) / 8));
+    }
+
+    /// `TmaConfig` (atom types) of a raw map.
+    pub fn rawTmaConfig(self: *Builder, map: RawTmaMap) TmaConfig {
+        std.debug.assert(map.dims.len >= 1 and map.dims.len <= 5 and map.box.len == map.dims.len and map.strides.len + 1 == map.dims.len);
+        var box_elems: i64 = 1;
+        for (map.box) |d| box_elems *= d;
+        return .{
+            .dtype = map.dtype,
+            .copy_bits = @intCast(box_elems * @as(i64, @intCast(dtypes.dtypeBitwidth(map.dtype)))),
+            .global_basis = .{ .shape = self.rawTmaTuple(map.box, .values), .stride = self.rawTmaTuple(map.box, .basis) },
+            .coordinate_layout = .{ .shape = self.rawTmaTuple(map.dims, .dynamic_singletons), .stride = self.rawTmaTuple(map.dims, .basis) },
+            .coordinate_rank = @intCast(map.dims.len),
+            .format = map.format,
+            .cta_group = if (map.store) .cta_1 else map.cta_group,
+        };
+    }
+
+    /// Kernel argument type of a raw map (a `__grid_constant__` descriptor atom).
+    pub fn rawTmaArgType(self: *Builder, map: RawTmaMap) *const mlir.Type {
+        const config = self.rawTmaConfig(map);
+        return if (map.store) self.tmaStoreAtomType(config) else self.tmaLoadAtomType(config);
+    }
+
+    /// Host side: the descriptor atom of `map` over the global pointer `pointer` (any element
+    /// type; recast to `map.dtype`).
+    pub fn makeRawTmaAtom(self: *Builder, pointer: Value, map: RawTmaMap) TmaDescriptor {
+        const config = self.rawTmaConfig(map);
+        const rank = map.dims.len;
+        var strides: [5]i64 = undefined;
+        strides[0] = 1;
+        for (map.strides, 1..) |stride, i| strides[i] = stride;
+        var compact: [5]i64 = undefined;
+        compact[0] = 1;
+        for (1..rank) |i| compact[i] = compact[i - 1] * map.box[i - 1];
+        // Singleton extents stay dynamic so the map keeps DeepGEMM's rank.
+        var singletons: [5]Value = undefined;
+        var num_singletons: usize = 0;
+        for (map.dims) |d| if (d == 1) {
+            singletons[num_singletons] = self.cst(.i32, 1);
+            num_singletons += 1;
+        };
+        const gmem_spec: LayoutSpec = .{ .shape = self.rawTmaTuple(map.dims, .dynamic_singletons), .stride = self.rawTmaTuple(strides[0..rank], .values) };
+        const gmem = self.makeTensorView(
+            self.recastPointer(pointer, map.dtype, .gmem, 16),
+            if (num_singletons == 0) self.staticLayout(gmem_spec) else self.makeLayoutShapeValues(gmem_spec, singletons[0..num_singletons]),
+        );
+        const box_layout: LayoutSpec = .{ .shape = self.rawTmaTuple(map.box, .values), .stride = self.rawTmaTuple(compact[0..rank], .values) };
+        const smem_layout = if (map.swizzle_bytes == 0) self.staticLayout(box_layout) else blk: {
+            const element_bytes = rawTmaSmemElementBytes(map);
+            const bits: i64 = switch (map.swizzle_bytes) {
+                32 => 1,
+                64 => 2,
+                128 => 3,
+                else => @panic("RawTmaMap.swizzle_bytes must be 0, 32, 64 or 128"),
+            };
+            const base: i64 = 4 - @as(i64, std.math.log2_int(u64, @intCast(element_bytes)));
+            break :blk self.makeComposedLayout(.{ .bits = bits, .base = base, .shift = 3 }, 0, box_layout);
+        };
+        const cta_map = self.staticLayout(config.global_basis);
+        return if (map.store)
+            self.makeTiledTmaStoreAtomTyped(gmem.value(), smem_layout.value(), cta_map.value(), config)
+        else
+            self.makeTiledTmaLoadAtomTyped(gmem.value(), smem_layout.value(), cta_map.value(), config);
+    }
+
+    /// Device side: the generic address (i64) of the descriptor of the raw-map argument `atom`.
+    pub fn rawTmaDescAddr(self: *Builder, atom: Value, map: RawTmaMap) Value {
+        const config = self.rawTmaConfig(map);
+        const exec_type = if (map.store) self.tmaStoreExecAtomType(config) else self.tmaLoadExecAtomType(config);
+        const exec = self.makeExecTmaTyped(.{ .inner = atom.inner, .kernel = self }, exec_type);
+        const address = self.emit(cute.nvgpu.get_tma_desc_addr(self.ctx, exec.inner, self.parseType("!cute.ptr<!cute_nvgpu.tma_descriptor_tiled, generic, align<64>>"), self.loc()));
+        return self.ptrToInt(address, .i64);
     }
 
     pub fn prefetchTmaDesc(self: *Builder, descriptor: Atom) void {
