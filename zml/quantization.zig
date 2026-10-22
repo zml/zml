@@ -107,7 +107,10 @@ pub const Quantization = struct {
     };
 
     /// What a platform's FP8 GEMMs read, so block-FP8 weights can be bound
-    /// for it once (`zml.io.TensorStore.Options.quantization`).
+    /// for it once (`zml.io.TensorStore.Options.quantization`). The store
+    /// only carries it; the code that binds block-FP8 weights reads it
+    /// (`TensorStore.View.quantization`) and converts or lays them out while
+    /// binding. `.{}` is FN, unswizzled.
     pub const Target = struct {
         /// The E4M3 encoding of FP8 weights and activations: FNUZ on CDNA3,
         /// FN on CUDA, CDNA4 and RDNA4. Null on other platforms: block-FP8
@@ -118,6 +121,10 @@ pub const Quantization = struct {
         /// Blackwell's block-scaled MMA (CUDA sm_10x).
         swizzled_scales: bool = false,
 
+        /// `platform`'s target: on CUDA, FN, its scales swizzled on sm_10x;
+        /// on ROCm, by architecture, null when its compute capability is
+        /// unknown; elsewhere, CPU included, null and unswizzled. The only
+        /// platform switch for block-FP8 weights.
         pub fn of(platform: *const Platform) Target {
             return switch (platform.target) {
                 .cuda => .{ .swizzled_scales = if (platform_mod.cuda.computeCapability(platform)) |cc| cc.major == 10 else false },

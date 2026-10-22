@@ -340,6 +340,11 @@ test "concurrent Tensor.readRange calls on one file preserve offsets" {
     try std.testing.expectEqualStrings("ABCDEFGHI", &assembled);
 }
 
+/// A checkpoint tensor: its name, its shape, and where its bytes are, at
+/// `offset` of the file `file_uri` names. The URI is what the io that read
+/// the header resolved, a VFS URI under a VFS, so read the tensor through
+/// an io that resolves it alike. A registry's entries own nothing; the
+/// registry owns their strings.
 pub const Tensor = struct {
     file_uri: []const u8,
     name: []const u8,
@@ -352,8 +357,11 @@ pub const Tensor = struct {
         return self.shape.byteSize();
     }
 
-    /// Reads the whole tensor into `buffer`, which holds exactly its bytes.
-    /// Opens `file_uri` for the call.
+    /// Reads the whole tensor into `buffer`, which holds exactly its bytes
+    /// (`OutOfBounds` otherwise). Opens `file_uri` through `io` for the
+    /// call, failing as that io's open does (under a VFS, see its error
+    /// contract); a file that ends inside the tensor is
+    /// `UnexpectedEndOfFile`.
     pub fn read(self: Tensor, io: std.Io, buffer: []u8) ReadError!void {
         if (buffer.len != self.byteSize()) return error.OutOfBounds;
         const file = try std.Io.Dir.openFile(.cwd(), io, self.file_uri, .{ .mode = .read_only });
@@ -362,8 +370,10 @@ pub const Tensor = struct {
     }
 
     /// Reads `buffer.len` bytes of the tensor from `tensor_offset`, relative
-    /// to its data, out of `file`, which the caller opened at `file_uri`.
-    /// The reads are positional, so concurrent calls may share one file.
+    /// to its data, out of `file`, which the caller opened at `file_uri`. A
+    /// range past the tensor is `OutOfBounds`, a file that ends inside it
+    /// `UnexpectedEndOfFile`. The reads are positional, so concurrent calls
+    /// may share one file.
     pub fn readRange(self: Tensor, io: std.Io, file: std.Io.File, buffer: []u8, tensor_offset: u64) ExactPositionalError!void {
         const tensor_size = self.byteSize();
         if (tensor_offset > tensor_size or buffer.len > tensor_size - tensor_offset) return error.OutOfBounds;
@@ -383,11 +393,16 @@ pub const Tensor = struct {
     }
 };
 
+/// The tensors of one or more checkpoints by name, read from their
+/// safetensors headers; no tensor data is read. It owns every name and URI.
+/// Build it complete, then hand it to `zml.io.TensorStore.init`, which owns
+/// it from then on and frees it.
 pub const TensorRegistry = struct {
     arena: std.heap.ArenaAllocator,
 
     tensors: Tensors,
 
+    /// An empty registry.
     pub fn init(allocator: std.mem.Allocator) TensorRegistry {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
@@ -395,6 +410,8 @@ pub const TensorRegistry = struct {
         };
     }
 
+    /// The checkpoint in `repo` (`addRepo` with no prefix). `repo` stays
+    /// the caller's to close.
     pub fn fromRepo(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -406,6 +423,16 @@ pub const TensorRegistry = struct {
         return registry;
     }
 
+    /// The checkpoint at `path`, read through `io`: a `.safetensors` file,
+    /// a `.safetensors.index.json` and the files it lists, or a directory
+    /// holding `model.safetensors.index.json` or `model.safetensors`. A
+    /// relative path is from the cwd; under a VFS, `path` may be a remote
+    /// URI. A missing path or entrypoint is `FileNotFound`, a denied
+    /// directory or entrypoint `PermissionDenied`; a file opened by name,
+    /// the one given or one an index lists, fails as `io`'s open does (a
+    /// denied local file is `AccessDenied`). A header whose offsets leave
+    /// the file, as in a truncated download, is `InvalidSafetensorsHeader`,
+    /// logged.
     pub fn fromPath(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -414,8 +441,9 @@ pub const TensorRegistry = struct {
         var repo = try resolveModelRepo(io, path);
         defer repo.close(io);
 
+        // `repo` is the file's directory: the file opens by its base name.
         const entrypoint_file, const entrypoint_path = if (std.mem.endsWith(u8, path, ".safetensors.index.json") or std.mem.endsWith(u8, path, ".safetensors"))
-            .{ try repo.openFile(io, path, .{ .mode = .read_only }), path }
+            .{ try repo.openFile(io, std.fs.path.basename(path), .{ .mode = .read_only }), path }
         else
             try resolveModelEntrypoint(io, repo);
         defer entrypoint_file.close(io);
@@ -426,13 +454,15 @@ pub const TensorRegistry = struct {
         return registry;
     }
 
-    /// Adds every tensor of the checkpoint in `repo`, as `fromRepo` finds
-    /// it, under `prefix` followed by its name. A second checkpoint, such as
-    /// a speculative drafter's, joins the registry under a prefix of its
-    /// own, and one store then holds both; reach the second through
-    /// `View.withPrefix`. Adding under a prefix that a tensor already here
-    /// is named under fails with `error.DuplicateTensor`. A registry a store
-    /// owns takes no more (`TensorStore.init`).
+    /// Adds every tensor of the checkpoint in `repo` (its
+    /// `model.safetensors.index.json` and the files it lists, else
+    /// `model.safetensors`) under `prefix` followed by its name. A second
+    /// checkpoint, such as a speculative drafter's, joins the registry under
+    /// a prefix of its own, and one store then holds both; reach the second
+    /// through `View.withPrefix`. Adding under a prefix that a tensor
+    /// already here is named under fails with `error.DuplicateTensor`,
+    /// before anything is read. `repo` stays the caller's to close. A
+    /// registry a store owns takes no more (`TensorStore.init`).
     pub fn addRepo(self: *TensorRegistry, io: std.Io, repo: std.Io.Dir, prefix: []const u8) !void {
         // A checkpoint added beside another owns its prefix: no tensor already
         // here may be named under it.
@@ -444,6 +474,8 @@ pub const TensorRegistry = struct {
         try addCheckpoint(self.arena.child_allocator, io, self, repo, entrypoint_file, entrypoint_path, prefix);
     }
 
+    /// Frees every entry, its name and URI. Not for a registry handed to a
+    /// store, which `TensorStore.deinit` frees.
     pub fn deinit(self: *TensorRegistry) void {
         const allocator = self.arena.allocator();
         self.tensors.deinit(allocator);
@@ -711,6 +743,35 @@ test "addRepo adds a second checkpoint under a prefix" {
     }
 }
 
+test "fromPath opens a file or an index by a path relative to the cwd" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        const header = "{\"w\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}";
+        const file = try tmp.dir.createFile(io, "layer.safetensors", .{});
+        defer file.close(io);
+        var length: [BYTES_HEADER]u8 = undefined;
+        std.mem.writeInt(u64, &length, header.len, .little);
+        try file.writePositionalAll(io, &length, 0);
+        try file.writePositionalAll(io, header, length.len);
+        try file.writePositionalAll(io, &.{ 1, 2, 3, 4 }, length.len + header.len);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "layer.safetensors.index.json", .data = "{\"weight_map\":{\"w\":\"layer.safetensors\"}}" });
+
+    for ([_][]const u8{ "layer.safetensors", "layer.safetensors.index.json" }) |name| {
+        // `tmpDir` is `.zig-cache/tmp/<sub_path>` under the cwd.
+        var path_buffer: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/{s}", .{ &tmp.sub_path, name });
+        var registry: TensorRegistry = try .fromPath(allocator, io, path);
+        defer registry.deinit();
+        var bytes: [4]u8 = undefined;
+        try registry.tensors.get("w").?.read(io, &bytes);
+        try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, &bytes);
+    }
+}
+
 const SafetensorsIndex = struct {
     arena: std.heap.ArenaAllocator,
 
@@ -793,12 +854,12 @@ pub fn resolveModelRepo(
     if (std.mem.endsWith(u8, path, ".safetensors.index.json") or
         std.mem.endsWith(u8, path, ".safetensors"))
     {
-        const dir_path = std.fs.path.dirname(path) orelse return ModelPathResolutionError.InvalidPath;
+        const dir_path = std.fs.path.dirname(path) orelse ".";
 
         const dir = std.Io.Dir.openDir(.cwd(), io, dir_path, .{}) catch |e| {
             return switch (e) {
                 error.FileNotFound => ModelPathResolutionError.FileNotFound,
-                error.PermissionDenied => ModelPathResolutionError.PermissionDenied,
+                error.AccessDenied, error.PermissionDenied => ModelPathResolutionError.PermissionDenied,
                 error.Canceled => ModelPathResolutionError.Canceled,
                 else => ModelPathResolutionError.InvalidPath,
             };
@@ -810,7 +871,7 @@ pub fn resolveModelRepo(
     const dir = std.Io.Dir.openDir(.cwd(), io, path, .{}) catch |e| {
         return switch (e) {
             error.FileNotFound => ModelPathResolutionError.FileNotFound,
-            error.PermissionDenied => ModelPathResolutionError.PermissionDenied,
+            error.AccessDenied, error.PermissionDenied => ModelPathResolutionError.PermissionDenied,
             error.Canceled => ModelPathResolutionError.Canceled,
             else => ModelPathResolutionError.InvalidPath,
         };
@@ -829,7 +890,7 @@ fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionError
             return .{ file, name };
         } else |err| switch (err) {
             error.Canceled => return ModelPathResolutionError.Canceled,
-            error.PermissionDenied => denied = true,
+            error.AccessDenied, error.PermissionDenied => denied = true,
             else => {},
         }
     }

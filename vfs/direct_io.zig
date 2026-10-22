@@ -6,6 +6,20 @@
 //! error, whereas here it is reported as a refusal for the VFS to clear the
 //! flag and answer the read buffered. Everything below `State` is Linux
 //! only and reached from code gated on `supported`.
+//!
+//! The policy is decided per local file, whatever else a reader opens: the
+//! loader asks for each file it plans (`Loader.Options.direct_io`), so a
+//! local drafter beside an `hf://` model may be read directly, and a remote
+//! file is never opened to ask (`VFS.isLocal`). Under `auto` the residency
+//! probe caches the pages it samples, but in a file of many pages per
+//! sample window it lands on other pages every time, so the ones it cached
+//! do not count; a file of at most 32 pages is sampled whole and turns
+//! buffered after its first load. Neither path wins everywhere, and
+//! residency alone cannot predict which does: warm replicated
+//! Llama-3.1-8B on eight MI300X took ~1.10 s buffered but ~4.53 s forced
+//! direct from a slow storage extent; on four GB300 with four NVMe drives
+//! in RAID0, direct took ~0.30 s versus ~0.32 s warm buffered. These are
+//! loader times, not disk-only rates.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -31,8 +45,8 @@ pub const cold_fraction: f64 = 0.5;
 /// Raw warm-cache reads exceeded disk throughput in the measured setups,
 /// but the loader can still favor direct reads: page-cache copies compete
 /// with DMA for host memory bandwidth. Conversely, repeated loads from a
-/// slow disk can benefit greatly from warming the cache with `off`. See
-/// Loader.Options.direct_io for the contrasting GB300/MI300X load results.
+/// slow disk can benefit greatly from warming the cache with `off`. The
+/// contrasting GB300/MI300X load results are in this file's header.
 pub const Policy = enum {
     off,
     /// Every file the filesystem allows.

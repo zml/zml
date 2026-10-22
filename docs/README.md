@@ -24,7 +24,7 @@ Ready to write some code? Try starting with [your first model in ZML](./tutorial
 ## Learn more...
 
 - [ZML Concepts](./learn/concepts.md) : **Tensors, Models, Executables, etc. explained**
-- [Loading checkpoints](./learn/loader.md) : **Loader ownership, backends, and DMA memory**
+- [Loading checkpoints](./learn/loader.md) : **The loading recipe, placement, programs, lifetimes and errors**
 
 ## Contribute
 

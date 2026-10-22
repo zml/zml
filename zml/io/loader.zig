@@ -5,7 +5,44 @@
 //! have room for, runs each group's programs on the caller's task once its
 //! inputs landed, and retires everything. Backends only read sources into
 //! buffers; lookup, compilation, admission and execution stay in this
-//! shared front end.
+//! shared front end. The contract is in the pub doc comments below;
+//! docs/learn/loader.md is the user guide.
+//!
+//! From bindings to specs. `start` checks every tensor and program input
+//! once, before anything is published (`prepareSpec`, `checkPlacement`).
+//! It lowers each piece of a bound source to bytes (`Source.lowerPiece`, the
+//! one rule): a part of the destination's logical bytes (the row-major bytes
+//! of its shape, before the sharding splits them), a run of `width` bytes
+//! repeated over strided dimensions. A whole checkpoint tensor is one part.
+//! A strided part of at most `max_part_runs` runs, or of runs of at least
+//! `large_run_bytes`, becomes one part per run; a spec with any other
+//! strided part (row interleaves, transposes, broadcasts) goes to the
+//! backend as strided parts, which the direct backend gathers. Each
+//! `LoadSpec` is one destination: its placed shape, its memory kind, the
+//! caller's output and the parts that fill it. The backends trust it. Only
+//! `Source` makes bindings and its pieces are disjoint by construction:
+//! nothing here checks that (Source's tests do).
+//!
+//! Order and admission. The tensors the loader fills go out first, as one
+//! submission, so every program group is admitted with them counted. A
+//! group holds the tensors of consecutive programs in model order, up to
+//! `program_group_bytes` of outputs, so the inputs of one layer's experts,
+//! adjacent in the checkpoint, are read together. Before publishing a
+//! group, `wait` waits for its programs to compile, then retires the oldest
+//! pending submissions until the group fits the room every device reports
+//! (`admission`): its limit, minus what is in use, minus the bytes the
+//! direct backend published but has not allocated yet, minus a 64 MiB
+//! reserve. A group costs its inputs, its outputs and the largest of its
+//! programs' temporaries per device, since they run one after the other.
+//! Once no program group is pending, retiring frees nothing more, and the
+//! group goes anyway (one warning). Where a device reports no limit (CPU)
+//! or the backend does not count its allocations (buffered), nothing is
+//! measured and one program group is in flight at a time.
+//!
+//! Accounting. Each spec is one progress item, which its backend
+//! completes; a program's output adds none. `wait`'s line counts each
+//! destination's bytes once: a composite counts its padding and not its
+//! sources, and a group counts its programs' inputs.
 const std = @import("std");
 
 const pjrt = @import("pjrt");
@@ -39,22 +76,39 @@ const TensorStore = @import("TensorStore.zig");
 const PrepareError = std.mem.Allocator.Error || error{InvalidBinding};
 
 /// Loads models from their checkpoint sources, and computes the tensors
-/// programs compute from theirs. The platform and options' borrowed values
-/// must outlive the loader. Start and wait serially on the owning task;
-/// source reads and transfers run concurrently inside the selected backend,
-/// compiles on tasks of their own. Submissions are retired in publish
-/// order.
+/// programs compute from theirs. A value: `init` returns at once, and the
+/// loader may be moved until its first `start`.
+///
+/// What it borrows. The platform outlives the loader and every buffer it
+/// loads. `io`, and the VFS behind it, outlive the loader: its tasks run on
+/// `io`, and the direct backend opens each source file through it and
+/// keeps it open until `deinit`, under a copy of the file's path, so
+/// nothing of the store is kept past `wait`. `start` borrows the store, the
+/// buffers and the progress node until `wait` or `cancel` returns, and
+/// reads the model during the call only. The loaded buffers are the
+/// caller's and outlive the loader.
+///
+/// Start and wait serially on the owning task; source reads and transfers
+/// run concurrently inside the selected backend, compiles on tasks of
+/// their own. Submissions are retired in publish order.
 pub const Loader = struct {
     /// Every error `start` and `wait` return. Each one fails the loader:
     /// everything started is canceled (`cancel`), and every later call
     /// returns the first error. A model whose bindings are wrong is
     /// `InvalidBinding`, logged at err with the tensor, the key its source
     /// reads (a source that reads nothing has none) and the rule it
-    /// breaks. The others come from reading the checkpoint, the devices,
-    /// the compiler, or `cancel`, and from `init`'s task: a platform with
-    /// more devices than the direct backend addresses is
-    /// `UnsupportedPlatform`, an io that cannot run its tasks concurrently
-    /// `ConcurrencyUnavailable`.
+    /// breaks. The others come from reading the checkpoint (a missing file
+    /// is `FileNotFound`; a denied one `AccessDenied` locally and
+    /// `PermissionDenied` remotely; a file that ends inside a tensor
+    /// `UnexpectedEndOfFile`, because it changed after its header was read
+    /// or the tensor's shape needs more bytes than its `data_offsets` give),
+    /// the devices, the compiler, or `cancel` (`Canceled`), and from
+    /// `init`'s task: a platform with more devices than the direct backend
+    /// addresses is `UnsupportedPlatform`, an io that cannot run its tasks
+    /// concurrently `ConcurrencyUnavailable`. Host memory the backend
+    /// cannot allocate, pin or fit under its mapped ceiling is
+    /// `OutOfMemory`, logged with the cause; device memory that runs out is
+    /// PJRT's `ResourceExhausted`.
     pub const Error = error{ InvalidBinding, Canceled, UnsupportedPlatform } || std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError ||
         safetensors.ExactPositionalError || Compiler.Error || std.Io.ConcurrentError;
 
@@ -123,8 +177,7 @@ pub const Loader = struct {
     pub const Options = struct {
         /// The checkpoint's path or URI, read by `init` only. When `io` is a
         /// VFS, the VFS backend serving that path sizes the reads (its
-        /// `VFS.LoadProfile`), whose name the loader borrows: the VFS must
-        /// outlive the loader. Null, or a plain `io`: the local sizing.
+        /// `VFS.LoadProfile`). Null, or a plain `io`: the local sizing.
         checkpoint: ?[]const u8 = null,
         /// Concurrent source reads, 1 to `max_read_parallelism`. Null takes
         /// the checkpoint's default (`backend.Options.readWidth`: 16
@@ -139,7 +192,8 @@ pub const Loader = struct {
         /// (the larger of a block and the checkpoint's read chunk) exceeds
         /// two units.
         /// Ignored by the buffered backend; CPU takes the default sizing
-        /// without measuring.
+        /// without measuring. Read by `init`'s task: the slice must live
+        /// until the first `start` or `deinit`.
         dma_block_sizes: []const usize = &dma_calibration.default_block_sizes,
         /// Direct I/O for local source files, decided per file by the
         /// VFS that opens it: `auto` reads a file past the page cache when it
@@ -150,19 +204,11 @@ pub const Loader = struct {
         /// direct file's reads to `VFS.direct_io_alignment`, at most two
         /// alignment units per request. A direct read never fills the page
         /// cache, so under `auto` a cold file stays cold and comes from the
-        /// disk on every load (in a file of many pages per sample window, the
-        /// residency probe lands on other pages every time, so the ones it
-        /// cached do not count; a file of at most 32 pages is sampled whole
-        /// and turns buffered after its first load); on a host whose warm
-        /// buffered reads beat its disk, a model loaded repeatedly is better
-        /// served by `off`. Nothing changes when `io` is not a VFS.
-        /// Warm replicated Llama-3.1-8B on eight MI300X took ~1.10 s buffered but
-        /// ~4.53 s forced direct from a slow storage extent; on four GB300
-        /// with four NVMe drives in RAID0, direct took ~0.30 s versus ~0.32 s
-        /// warm buffered. These are loader times, not disk-only rates.
-        /// Residency alone cannot predict which path wins. The loader retains
-        /// each open file, so its decision is not remeasured on every submission
-        /// if cache residency changes.
+        /// disk on every load; on a host whose warm buffered reads beat its
+        /// disk, a model loaded repeatedly is better served by `off`
+        /// (measurements in vfs/direct_io.zig). Nothing changes when `io` is
+        /// not a VFS. The loader keeps each file open until `deinit`, so a
+        /// file's decision holds for every load of this loader.
         direct_io: VFS.DirectIo = .auto,
     };
 
@@ -173,8 +219,11 @@ pub const Loader = struct {
     /// creating the backend (for the direct one: DMA calibration and the
     /// pinned pre-growth) run on a task of the loader's own, or here when
     /// `io` has no concurrency; the first `start` waits for that task and
-    /// returns its error. A value out of range, or a checkpoint whose
-    /// scheme the VFS does not serve, is `InvalidOptions`, logged.
+    /// returns its error. A read width or a block size out of range, an
+    /// empty block list, a checkpoint whose scheme the VFS does not serve,
+    /// a read chunk that a block calibration may select does not divide, or
+    /// a request too short for a widened direct read is `InvalidOptions`,
+    /// logged.
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -254,7 +303,9 @@ pub const Loader = struct {
     /// Cancels what is still started (`cancel`): a caller that succeeded
     /// waited for it, so only an error path leaves any. Then cancels
     /// `init`'s task when no `start` awaited it, destroying what it built,
-    /// and destroys the backend.
+    /// and destroys the backend: its pinned memory, its workers and the
+    /// files it keeps open, closed through `io`. The buffers it loaded stay
+    /// the caller's.
     pub fn deinit(self: *Loader) void {
         self.cancel();
         self.logAdmission();
@@ -287,24 +338,31 @@ pub const Loader = struct {
     /// pieces of its source (`Source.bind`) with every byte no piece covers
     /// set to zero. All of these are published here, as one planned
     /// submission. A tensor a program computes (`Source.bindProgram`) starts
-    /// its program compiling, once for every tensor of the same program;
-    /// `wait` lands its inputs and runs it. Every tensor and program input
-    /// is checked once, before anything is published: a tensor without a
-    /// binding, a source of no bytes or of an empty checkpoint tensor, a
-    /// source that does not fill its tensor's bytes or that this loader
-    /// cannot assemble, a placement its mesh does not divide or on devices
-    /// the platform lacks, and a memory kind the platform cannot take
-    /// (`backend.supportsMemory`) are `error.InvalidBinding`.
-    /// Several loads may be started before one `wait`. `buffers` is
-    /// `mem.bufferize` of `model`, whose buffers are empty; `start` empties
-    /// them again, and each stays empty until its load writes it whole. So
-    /// after any error each buffer is empty or holds shards for the caller
-    /// to free: `mem.deinitBufferized` frees the tree either way. `buffers`
-    /// and `store` are borrowed until `wait` or `cancel` returns; do not end
-    /// `progress` before then. `start` adds one item to `progress` for each
-    /// tensor the loader fills, a composite one once, and for each program
-    /// input; the backends complete them. The first `start` waits for
-    /// `init`'s task first, and fails with its error.
+    /// its program compiling, once for every tensor of an equal program
+    /// over the same placed shapes; `wait` lands its inputs and runs it.
+    ///
+    /// Every tensor and program input is checked once, before anything is
+    /// published: a tensor `store` did not bind, a source of no bytes or of
+    /// an empty checkpoint tensor, a source that does not fill its tensor's
+    /// bytes or that this loader cannot assemble (a run that starts or ends
+    /// inside a byte, strided parts into host memory), a placement its mesh
+    /// does not divide or on devices the platform lacks, and a memory kind
+    /// the platform cannot take are `error.InvalidBinding`. On the direct
+    /// backend, a broadcast or transpose whose source range does not fit
+    /// one read is `InvalidBinding` when its submission is published: here
+    /// for the tensors the loader fills, in `wait` for a program's inputs.
+    ///
+    /// `buffers` is `mem.bufferize` of `model`, whose buffers are empty;
+    /// `start` empties them again, and each stays empty until its load
+    /// writes it whole. So after any error each buffer is empty or holds
+    /// shards for the caller to free: `mem.deinitBufferized` frees the tree
+    /// either way. `buffers` and `store` are borrowed until `wait` or
+    /// `cancel` returns; do not end `progress` before then. `start` adds one
+    /// item to `progress` for each tensor the loader fills, a composite one
+    /// once, and for each program input; the backends complete them.
+    /// Several loads may be started before one `wait`, from one store or
+    /// several. The first `start` waits for `init`'s task, and fails with
+    /// its error.
     pub fn start(
         self: *Loader,
         model: anytype,
@@ -352,7 +410,11 @@ pub const Loader = struct {
     /// started load is in its buffers, and logs one info line: the bytes
     /// loaded, the time since the first `start` and their rate, then what
     /// the programs computed and how long publishing waited for their
-    /// compiles. Idempotent.
+    /// compiles. A program that fails to compile or run fails it; one that
+    /// does not return its tensor's shape, placed alike, is
+    /// `InvalidBinding`, and so is a program input the direct backend
+    /// cannot gather in one read (`start`). Idempotent: with nothing started
+    /// it returns at once and logs nothing.
     pub fn wait(self: *Loader) Error!void {
         if (self.failure) |err| return err;
         self.drain() catch |err| {

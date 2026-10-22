@@ -1,3 +1,28 @@
+//! A `std.Io` over local files and remote objects. A bare path or a
+//! `file://` URI is served by the inner io; a URI such as
+//! `hf://org/model/model.safetensors` or `s3://bucket/key` by the backend
+//! registered for its scheme (`registerBackend`, or the four of `Remotes`).
+//! Readers take `io()` and need not know which they read; one that must
+//! (the loader, for read sizes and direct I/O) asks `fromIo`.
+//!
+//! The VFS, and every backend registered on it, must outlive each file
+//! opened through it and each reader that keeps one open: a `Loader` keeps
+//! its source files open until its `deinit`.
+//!
+//! Errors of a remote path, alike on every backend: opening, stat-ing or
+//! probing it (`access`) fails with `FileNotFound` for a missing object
+//! (404, 410), `PermissionDenied` for a denied one (401, 403), and
+//! `Canceled` for a canceled task. Any other failure is logged at err with
+//! the backend and the path, and surfaces as `Unexpected`. On S3 a
+//! principal without `s3:ListBucket` gets 403 for a missing key too, so a
+//! probe of an optional object treats both as absent. A positional read
+//! that still fails after its retries is logged at err and surfaces as
+//! `Unexpected`; a streaming read ends with `EndOfStream` instead. A
+//! throttled backend holds its requests rather than failing them, until
+//! its throttle budget runs out (`request.Retry`). A local file fails as
+//! the inner io does (a denied one is `AccessDenied` there); it may be read
+//! past the page cache (`useDirectIo`).
+//! Each remote backend logs its read totals at debug from its `deinit`.
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -121,6 +146,8 @@ pub const RegisterError = error{
     ReservedScheme,
 } || std.mem.Allocator.Error;
 
+/// Serves `scheme` with `backend`, replacing any backend registered under
+/// it. `scheme` is kept, not copied: it must outlive the VFS.
 pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) RegisterError!void {
     if (std.mem.eql(u8, scheme, local_scheme)) return error.ReservedScheme;
     self.mutex.lockUncancelable(self.base.inner);
@@ -134,7 +161,8 @@ pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) Registe
 /// `HTTP.init` for `https`), the client honoring the proxy variables.
 /// Initialized in place, since the backends point at the client; it must not
 /// move afterwards. Close every file opened through these schemes before
-/// `deinit`; the VFS must not reach them after it.
+/// `deinit` (deinitialize a `Loader` first); the VFS must not reach them
+/// after it. Their errors follow this module's contract.
 pub const Remotes = struct {
     /// The proxies' allocations, which must outlive the client.
     arena: std.heap.ArenaAllocator,
@@ -145,7 +173,8 @@ pub const Remotes = struct {
     gs: GCS,
 
     /// Builds the client on the VFS's base io and registers the four
-    /// schemes, replacing any backend registered under them. On error
+    /// schemes, replacing any backend registered under them. `environ` is
+    /// read here only: tokens, credentials and proxies are copied. On error
     /// nothing is registered.
     pub fn init(self: *Remotes, allocator: std.mem.Allocator, vfs: *VFS, environ: *std.process.Environ.Map) !void {
         const base_io = vfs.base.inner;
@@ -183,6 +212,8 @@ pub const Remotes = struct {
     }
 };
 
+/// The `std.Io` of this VFS. It points into the VFS, which must not move
+/// once this was called.
 pub fn io(self: *VFS) std.Io {
     return .{
         .userdata = &self.base,

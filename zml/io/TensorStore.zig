@@ -1,5 +1,13 @@
 //! Associates model tensors with checkpoint sources and prefixed views,
 //! over a checkpoint registry the store owns.
+//!
+//! The store owns the registry, the bindings, and every source and program
+//! value (its arena). Views and sources point to it: once `view` was
+//! called it must not move, and it must outlive them and every load
+//! started from it (`Loader.start` borrows it until `wait` or `cancel`).
+//! It borrows the meshes of `Options.meshes`, which belong to the platform.
+//! Binding cannot fail: a missing key panics with the key, and what the
+//! loader cannot fill is its error (`Loader.start`'s `InvalidBinding`).
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -29,7 +37,9 @@ pub const Binding = union(enum) {
     pub const Load = struct {
         source: Source.Bound,
         /// Memory space the loader must deliver this tensor into, on every
-        /// device of its mesh (`View.setMemory`).
+        /// device of its mesh (`View.setMemory`). The destination is
+        /// allocated once per device whatever its pieces; a host kind takes
+        /// no device memory.
         memory: Memory.Kind = .default,
     };
 
@@ -63,6 +73,8 @@ fn samePlacedShape(a: Shape, b: Shape) bool {
 
 /// A program the loader compiles and runs to compute a tensor while loading
 /// (`Binding.compute`): `forward(output, inputs)` of the program's value.
+/// Model code makes one through `Source.bindProgram`, and reads it back
+/// with `as`.
 pub const Program = struct {
     /// The program's value, in the store's arena.
     value: *const anyopaque,
@@ -165,16 +177,19 @@ allocator: std.mem.Allocator,
 arena: std.heap.ArenaAllocator,
 
 pub const Options = struct {
-    /// The meshes `Source.withPartitioning` and `View.mesh` name.
+    /// The meshes `Source.withPartitioning` and `View.mesh` name. The slice
+    /// is copied; the meshes must outlive the store.
     meshes: []const *const Sharding.Mesh = &.{},
     /// How the platform's FP8 GEMMs want block-FP8 weights, for the code
     /// that binds them (`View.quantization`): usually `.of(platform)`.
     quantization: Quantization.Target = .{},
 };
 
-/// A store that owns `registry`, which must be complete: its map stays
-/// locked until `deinit`, so a later insert panics in safe builds. An
-/// entry's address is then its checkpoint tensor's identity (`View.get`).
+/// A store that owns `registry`, which must be complete: add every
+/// checkpoint first (`TensorRegistry.addRepo`). The caller's copy is moved
+/// in and must not be used or freed. The map stays locked until `deinit`,
+/// so a later insert panics in safe builds, and an entry's address is its
+/// checkpoint tensor's identity (`View.get`).
 pub fn init(allocator: std.mem.Allocator, registry: safetensors.TensorRegistry, opts: Options) TensorStore {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     const meshes = arena.allocator().dupe(*const Sharding.Mesh, opts.meshes) catch @panic("OOM");
@@ -190,7 +205,8 @@ pub fn init(allocator: std.mem.Allocator, registry: safetensors.TensorRegistry, 
     return self;
 }
 
-/// Frees the bindings, then the registry.
+/// Frees the bindings, the sources and programs, then the registry. No load
+/// started from the store may still run: `wait` or `cancel` it first.
 pub fn deinit(self: *TensorStore) void {
     self.id_to_sources.deinit(self.allocator);
     self.arena.deinit();
@@ -198,6 +214,8 @@ pub fn deinit(self: *TensorStore) void {
     self.registry.deinit();
 }
 
+/// The binding of tensor `id`, as the loader reads it; null when this store
+/// did not bind it.
 pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
     return self.id_to_sources.get(id);
 }
@@ -212,6 +230,8 @@ pub fn bindNew(self: *TensorStore, shape: Shape, binding: Binding) Tensor {
     return tensor;
 }
 
+/// The root view, with no prefix. It points to this store, which must not
+/// move afterwards.
 pub fn view(self: *TensorStore) View {
     return .{ .store = self };
 }
@@ -231,18 +251,26 @@ pub fn mesh(store: *const TensorStore, name: @EnumLiteral()) *const Sharding.Mes
     , .{ name_slice, stdx.fmt.slice(store.meshes) });
 }
 
+/// What model code holds: a key prefix over the store's checkpoint, to look
+/// tensors up, bind them and set their memory. A value that keeps its own
+/// copy of the prefix (256 bytes at most, longer panics) and points to the
+/// store.
 pub const View = struct {
     store: *TensorStore,
 
     prefix_buffer: [256]u8 = undefined,
     prefix_length: usize = 0,
 
+    /// The store's root view, with no prefix.
     pub fn root(self: *const View) View {
         return .{
             .store = self.store,
         };
     }
 
+    /// This view under `prefix_` and a dot: `withPrefix("model")` then
+    /// `get("embed")` looks up `model.embed`. It only scopes lookups;
+    /// nothing is bound.
     pub fn withPrefix(self: *const View, prefix_: []const u8) View {
         var buffer: [256]u8 = undefined;
         const new_prefix = makeKey(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ });
@@ -254,6 +282,7 @@ pub const View = struct {
         };
     }
 
+    /// This view under `index` and a dot, as `withPrefix` of the number.
     pub fn withLayer(self: *const View, index: usize) View {
         var buffer: [256]u8 = undefined;
         const new_prefix = makeKey(&buffer, "{s}{d}.", .{ self.prefix() orelse "", index });
@@ -365,6 +394,7 @@ pub const View = struct {
         return Source.bindProgram(inputs, shape, program);
     }
 
+    /// The checkpoint tensors under this view's prefix: a scan of every key.
     pub fn count(self: View) usize {
         var count_: usize = 0;
         const prefix_ = self.prefix() orelse "";

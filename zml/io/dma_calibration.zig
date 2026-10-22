@@ -1,3 +1,15 @@
+//! DMA sizing for the direct backend: the block size and the transfers in
+//! flight per device, decided once when the backend is created. It screens
+//! the blocks of `Loader.Options.dma_block_sizes` (2 to 32 MiB by default)
+//! on one representative device, at a fixed eight transfers per device and
+//! over fixed windows, and keeps the smallest block within 8% of the
+//! measured peak; borderline candidates get longer, alternating
+//! confirmation windows. The ring it measures in stays mapped as the load's
+//! first pinned capacity. CPU returns the 4 MiB, eight-transfer defaults
+//! without measuring: its plugin's transfer is a memcpy, and a load takes
+//! the same time at every block size. The buffered backend has nothing to
+//! size. `measure` runs the same warm-up and screen without a loader, with
+//! every knob, for `examples/io`'s `dma-bench`.
 const std = @import("std");
 
 const pjrt = @import("pjrt");

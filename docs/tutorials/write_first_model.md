@@ -6,7 +6,8 @@
 - clone ZML to work directly within the prepared example folder
 - add Zig code to implement our model
 - add some Bazel to integrate our code with ZML
-- no weights files or anything external is required for this example
+- no weights files or anything external is required, until the last step
+  loads the weights from a checkpoint
 
 The reason we're doing our exercise in the `examples` folder is because it's
 especially prepared for new ZML projects. It contains everything needed for ZML
@@ -58,10 +59,12 @@ _Module_. For compilation, only the _Tensors_ are required. No actual tensor dat
 is needed at this step. This is important for large models: we can compile them 
 while the actual weight data is being fetched from disk.
 
-To accomplish this, ZML uses a _TensorStore_. The _TensorStore_ loads everything
-that is required to make _Tensors_ and later materialize them to _Buffers_. In our
-example though, we won't even use a _TensorStore_ as it's optional. We will directly
-create tensors using their shape and data type.
+To accomplish this, ZML uses a _TensorStore_. The _TensorStore_ reads the shapes
+of a checkpoint's tensors, so that we can make _Tensors_, and the _Loader_ later
+materializes them to _Buffers_. At first we won't use them: we will directly
+create tensors using their shape and data type, and fill their buffers from
+slices. The last step, [Loading weights](#loading-weights), reads them from a
+checkpoint instead.
 
 After compilation is done, we get what we call an _Executable_. From this _Executable_ 
 we can create _Args_ and _Results_, two structs that will store respectively the inputs 
@@ -175,9 +178,9 @@ var executable = try platform.compile(allocator, io, layer, .forward, .{input}, 
 defer executable.deinit();
 ```
 
-You might wonder what this `sharding` variable is for ? ZML supports sharding tensors across multiple devices,
-and the `compile()` function needs to know how the tensors are sharded in order to compile the module correctly.
-For this simple example, we just replicate the tensors across all devices for simplicity.
+ZML supports sharding tensors across multiple devices, and `compile()` reads how
+each tensor is sharded from its shape. A tensor created from a shape alone, as
+here, is replicated on every device.
 
 
 ### Creating the "bufferized" Model
@@ -191,8 +194,8 @@ provides ways to have extra-low loading times).
 const weight_slice: zml.Slice = .init(layer.weight.shape(), std.mem.sliceAsBytes(&[3]f16{1.0, 2.0, 3.0}));
 const bias_slice: zml.Slice = .init(layer.bias.?.shape(), std.mem.sliceAsBytes(&[3]f16{1.0, 1.0, 1.0}));
 var layer_buffers: zml.Bufferized(Layer) = .{
-    .weight = try zml.Buffer.fromSlice(io, platform, weight_slice, .replicated),
-    .bias = try zml.Buffer.fromSlice(io, platform, bias_slice, .replicated),
+    .weight = try zml.Buffer.fromSlice(io, platform, weight_slice),
+    .bias = try zml.Buffer.fromSlice(io, platform, bias_slice),
 };
 defer layer_buffers.weight.deinit();
 defer layer_buffers.bias.?.deinit();
@@ -213,7 +216,7 @@ To create the _Args_ and _Results_, the _Executable_ exposes two conveniences.
 ```zig
 // create the input buffer
 const input_slice: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[3]f16{ 5.0, 5.0, 5.0 }));
-var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, .replicated);
+var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
 defer input_buffer.deinit();
 
 // create the Args and Results structs
@@ -372,15 +375,15 @@ pub fn main(init: std.process.Init) !void {
     const weight_slice: zml.Slice = .init(layer.weight.shape(), std.mem.sliceAsBytes(&[3]f16{ 1.0, 2.0, 3.0 }));
     const bias_slice: zml.Slice = .init(layer.bias.?.shape(), std.mem.sliceAsBytes(&[3]f16{ 1.0, 1.0, 1.0 }));
     var layer_buffers: zml.Bufferized(Layer) = .{
-        .weight = try zml.Buffer.fromSlice(io, platform, weight_slice, .replicated),
-        .bias = try zml.Buffer.fromSlice(io, platform, bias_slice, .replicated),
+        .weight = try zml.Buffer.fromSlice(io, platform, weight_slice),
+        .bias = try zml.Buffer.fromSlice(io, platform, bias_slice),
     };
     defer layer_buffers.weight.deinit();
     defer layer_buffers.bias.?.deinit();
 
     // create the input buffer
     const input_slice: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[3]f16{ 5.0, 5.0, 5.0 }));
-    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, .replicated);
+    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
     defer input_buffer.deinit();
 
     // create the Args and Results structs
@@ -411,10 +414,167 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
+## Loading weights
+
+Real models read their weights from a checkpoint. Let's write one for our
+layer, a `.safetensors` file holding `weight` and `bias`, with a few lines of
+Python:
+
+```python
+import json, struct
+
+weight = struct.pack("<3e", 1.0, 2.0, 3.0)  # three f16 values
+bias = struct.pack("<3e", 1.0, 1.0, 1.0)
+header = json.dumps({
+    "weight": {"dtype": "F16", "shape": [3], "data_offsets": [0, 6]},
+    "bias": {"dtype": "F16", "shape": [3], "data_offsets": [6, 12]},
+}).encode()
+with open("/tmp/layer.safetensors", "wb") as f:
+    f.write(struct.pack("<Q", len(header)) + header + weight + bias)
+```
+
+The layer now takes its tensors from a _TensorStore_ view, by name. The
+checkpoint gives their shapes; `maybeCreateTensor` leaves `bias` null when
+the checkpoint has none:
+
+```zig
+pub fn init(store: zml.io.TensorStore.View) Layer {
+    return .{
+        .weight = store.createReplicatedTensor("weight", null),
+        .bias = store.maybeCreateTensor("bias", null, .replicated, .{}),
+    };
+}
+```
+
+In `main()`, the weights come from the checkpoint whose path is the first
+argument:
+
+- a VFS reads it, local or remote (`hf://`, `s3://`, `gs://`, `https://`);
+- the loader is created first: it returns at once and gets ready while the
+  model compiles;
+- the registry reads the checkpoint's tensor names and shapes, and the store
+  takes it over;
+- `bufferize` makes one empty buffer per tensor of the layer, the loader
+  fills them (`start`, then `wait`), and `deinitBufferized` frees them.
+
+The input buffer, the call and the result stay as before. Run it with the
+checkpoint:
+
+```
+bazel run //examples/simple_layer -- /tmp/layer.safetensors
+```
+
+It prints `The result of weight * {5,5,5} + bias = {6,11,16}`, after the
+loader's `Loaded weights` line. [Loading checkpoints](../learn/loader.md)
+explains the recipe, placing tensors on several devices, and the errors.
+
+Here is the complete program:
+
+```zig
+const std = @import("std");
+const zml = @import("zml");
+
+/// Model definition
+const Layer = struct {
+    bias: ?zml.Tensor = null,
+    weight: zml.Tensor,
+
+    /// Binds the layer's tensors to the checkpoint's `weight` and `bias`.
+    pub fn init(store: zml.io.TensorStore.View) Layer {
+        return .{
+            .weight = store.createReplicatedTensor("weight", null),
+            .bias = store.maybeCreateTensor("bias", null, .replicated, .{}),
+        };
+    }
+
+    pub fn forward(self: Layer, x: zml.Tensor) zml.Tensor {
+        var y = self.weight.mul(x);
+        if (self.bias) |bias| {
+            y = y.add(bias);
+        }
+        return y;
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+
+    // The checkpoint's path or URI, the first argument.
+    const process_args = try init.minimal.args.toSlice(init.arena.allocator());
+    const path = process_args[1];
+
+    // Local paths, and hf://, s3://, gs:// and https:// URIs.
+    var vfs: zml.io.VFS = try .init(allocator, init.io);
+    defer vfs.deinit();
+    var remotes: zml.io.VFS.Remotes = undefined;
+    try remotes.init(allocator, &vfs, init.environ_map);
+    defer remotes.deinit();
+    const io = vfs.io();
+
+    var platform: *zml.Platform = try .auto(allocator, io, .{});
+    defer platform.deinit(allocator, io);
+
+    // Returns at once: the loader prepares itself while we compile.
+    var loader: zml.io.Loader = try .init(allocator, io, platform, .{ .checkpoint = path });
+    defer loader.deinit();
+
+    // The names and shapes of the checkpoint's tensors. The store owns them.
+    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+    var store: zml.io.TensorStore = .init(allocator, registry, .{});
+    defer store.deinit();
+
+    const layer: Layer = .init(store.view());
+
+    // Our computation require an input tensor
+    const input: zml.Tensor = .init(.{3}, .f16);
+
+    var executable = try platform.compile(allocator, io, layer, .forward, .{input}, .{});
+    defer executable.deinit();
+
+    // Load the weights: one buffer per tensor of the layer.
+    var layer_buffers = try zml.mem.bufferize(allocator, Layer, &layer);
+    defer zml.mem.deinitBufferized(allocator, Layer, &layer_buffers);
+    try loader.start(&layer, &layer_buffers, &store, .none);
+    try loader.wait();
+
+    // create the input buffer
+    const input_slice: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[3]f16{ 5.0, 5.0, 5.0 }));
+    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
+    defer input_buffer.deinit();
+
+    // create the Args and Results structs
+    var args = try executable.args(allocator);
+    defer args.deinit(allocator);
+
+    var results = try executable.results(allocator);
+    defer results.deinit(allocator);
+
+    // fill the Args
+    args.set(.{ layer_buffers, input_buffer });
+
+    // call our executable
+    try executable.call(io, args, &results, .{});
+
+    // Retrieve the resulting buffer
+    var result = results.get(zml.Buffer);
+    defer result.deinit();
+
+    // fetch the result buffer to CPU memory
+    const result_slice = try result.toSliceAlloc(allocator, io);
+    defer result_slice.free(allocator);
+
+    std.debug.print(
+        "\n\nThe result of weight * {d} + bias = {d}\n",
+        .{ input_slice, result_slice },
+    );
+}
+```
+
 ## Where to go from here
 
 - [Run the model on GPU](../tutorials/getting_started.md)
 - [Deploy the model on a server](../howtos/deploy_on_server.md)
 - [Dockerize this model](../howtos/dockerize_models.md)
 - [Learn more about ZML concepts](../learn/concepts.md)
+- [Load checkpoints](../learn/loader.md)
 - [Find out how to best port PyTorch models](../howtos/howto_torch2zml.md)

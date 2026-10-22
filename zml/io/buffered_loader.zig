@@ -1,7 +1,11 @@
-//! Whole-tensor staging for platforms that use Buffer.from. A composite
-//! destination is assembled in the staging: its gaps zeroed, each part read
-//! at its offset, then the whole tensor is placed as any other.
-//! The shared front end owns source lookup, programs and admission.
+//! Whole-tensor staging for platforms that use Buffer.from: TPU, neuron,
+//! metal and furiosa, until the direct path is checked on them. A
+//! composite destination is assembled in the staging: its gaps zeroed, each
+//! part read at its offset (a strided part reads its source range once and
+//! copies each run where it lands), then the whole tensor is placed as any
+//! other. Read permits and a byte budget bound the host staging; there is
+//! no calibration and no pinned memory. The shared front end owns source
+//! lookup, programs and admission.
 const std = @import("std");
 
 const pjrt = @import("pjrt");

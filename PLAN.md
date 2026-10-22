@@ -33,7 +33,7 @@ Rules that hold for every task:
 Run after every task, from `~/github/zml/zml`:
 
 ```
-~/.cache/bazel/_bazel_brabier/ed6f309db0cabd683780d1f69fd3a15d/external/rules_zig++zig+zig_0.16.0_x86_64-linux/zig fmt --check <changed files>
+~/.cache/bazel/_bazel_brabier/ed6f309db0cabd683780d1f69fd3a15d/external/rules_zig++zig+zig_0.17.0_x86_64-linux/zig fmt --check <changed files>
 bazel test //zml:test //vfs:test
 bazel build //examples/io //examples/llm //examples/mnist
 ```
@@ -80,10 +80,11 @@ All three tasks landed, each with a CPU playground run and a gb300-2 run.
   (`ready_head`/`ready_tail` under the pump mutex), the pump pops (nulling
   `next`), submits and registers the callback, the callback relinks the node
   into `retired`; `abortReady` reads `next` before `block.complete()`. Let the
-  planner store `Job.event_start` beside `block_start` so `events_used`
-  goes. Deletes `ReadyTransfer`, `ReadyQueue`, the deques, `ready_entries`,
-  `abandonSubmissions`, the catch in `ReadRequest.run`, `Scratch.queue_counts`
-  (a device mask suffices for kicks). Keep `err` destroyed by the pump or
+  planner store `Job.event_start` beside `transfer_start` so `events_used`
+  goes. Deletes `ReadyTransfer`, `ReadyQueue`, the deques, the catch in
+  `ReadRequest.run`, `Scratch.queue_counts` (a device mask suffices for
+  kicks); `ready_entries` went in the sixteenth pass, `abandonSubmissions`
+  and `Job.block_start` in the thirty-first. Keep `err` destroyed by the pump or
   `retireBatch`, never inside the callback (CTX 439-447, 3380-3387); keep
   `lockAllPumps` in `enqueueBlocks`. Required validation before landing: one
   gb300-2 DeepSeek-replicated pair against the per-device-pump arm (CTX
@@ -93,18 +94,20 @@ All three tasks landed, each with a CPU playground run and a gb300-2 run.
 - [ ] 21. DMA block override instead of the screen (C31 amended, decision).
   A per-target block table is refuted (CUDA hosts disagree: 2 MiB on the
   RTX 5090 host, 16 MiB on gb300-2, CTX 878-884, 1041). What the record
-  supports: `Loader.Options.dma.block_size: ?usize = null` that skips the
-  screen when set (still warming allocators and pre-growing), giving llmd its
-  0.3 to 1.1 s of startup back on a known host (half of the open item at CTX
-  3362-3364), plus demoting the confirmation tunables
-  (`confirmation_duration_ns`, `confirmation_minimum_transfers`,
-  `confirmation_margin`, `dma_calibration.zig:52-56`) to private constants.
-  Needs the user's decision on the knob; then a playground `ZML_DMA_BLOCK_MIB`.
+  supports: a block option that skips the screen when set (still warming
+  allocators and pre-growing), giving llmd its 0.3 to 1.1 s of startup back
+  on a known host (half of the open item at CTX 3362-3364). The loader's
+  one DMA knob is now `Loader.Options.dma_block_sizes`, and a list of one
+  block is still screened. Demoting the confirmation tunables is done for
+  the loader (thirty-eighth pass, R5): `Loader.Options` no longer has them,
+  and only `dma_calibration.measure` takes `confirmation_duration`,
+  `confirmation_minimum_transfers` and `confirmation_margin`. Needs the
+  user's decision on the knob; then a playground `ZML_DMA_BLOCK_MIB`.
 
-- [ ] 22. Drop `LoadProfile.direct_io_alignment` for the VFS constant (C11).
-  Blocked on the llmd migration adding `vfs.loadProfile` and on deciding
-  whether a profile-less VFS caller gets `.auto`; as written it would open
-  remote files on the submit task (`direct_loader.zig:977-984`).
+- [x] 22. Drop `LoadProfile.direct_io_alignment` for the VFS constant (C11).
+  Done in the forty-seventh pass (R15): `VFS.direct_io_alignment` and
+  `VFS.isLocal(path)` decide direct I/O per local file, and a remote file is
+  planned exact without being opened on the planner.
 
 ## Group D: rate limits and retries move into the VFS
 
@@ -121,7 +124,7 @@ unanimously, an AIMD permit ladder and additive recovery did not (unmeasured
 policy of the class the fifteenth pass deleted; the ladder collapses to one
 permit on a burst because permits are released per attempt). The
 choices below that the review left open are taken here as defaults and can
-be changed in `InitOpts` without touching the mechanism.
+be changed in `request.Retry` without touching the mechanism.
 
 Mechanism, in one paragraph. Every request on a backend goes through one
 loop: wait out the backend's hold, send, classify. A throttle (429
@@ -136,9 +139,10 @@ is throttled continuously for longer than `throttle_budget` fails its
 requests with `error.RateLimited`, which the loader treats as any other
 sticky failure. Cancellation propagates through the wait.
 
-Defaults taken (each an `InitOpts` field of the four backends unless noted):
+Defaults taken (each a `request.Retry` field, the `retry` option of the four
+backends since the forty-seventh pass, unless noted):
 
-- `max_retries = 5`, `retry_initial_delay = 500 ms`, `retry_max_delay = 30 s`
+- `max_retries = 5`, `initial_delay = 500 ms`, `max_delay = 30 s`
   as today; they bound the non-throttle backoff only.
 - `max_hold = 2 min`: the longest hold, applied to a server-named delay as
   well (today a `Retry-After` is honoured uncapped by the one request that
@@ -148,11 +152,11 @@ Defaults taken (each an `InitOpts` field of the four backends unless noted):
   cancellation points are audited.
 - `throttle_budget = 5 min`: an episode of throttling with no clean window
   longer than this fails with `error.RateLimited`.
-- The hold floor is `retry_initial_delay`: `Retry-After: 0` and HF's
+- The hold floor is `initial_delay`: `Retry-After: 0` and HF's
   `RateLimit; t=0` parse to zero (`range_read.zig:262-265`) and a zero hold
   is a hot loop once throttles stop charging retries.
 - Waiters wake at the deadline plus a per-waiter jitter in
-  `[0, retry_initial_delay)`, so the readers do not fire in one instant.
+  `[0, initial_delay)`, so the readers do not fire in one instant.
 - Scope key: the URI authority (`host:port`) of the request. Today
   `Governor.holdFor(key)` ignores it and returns the single hold; per
   authority is a map inside that function. One generic `HTTP` instance
@@ -169,7 +173,8 @@ Validation for the group, after tasks 23 to 27: `zig fmt --check`,
 `bazel test //vfs:test //zml:test`, the three example builds; one hf://
 Qwen3.5-4B load on the CPU playground (`bazel run --config=release
 //examples/io -- load hf://Qwen/Qwen3.5-4B sharded`) expecting
-`source_holds=0`, `source_throttles=0` on the batch source line and parity
+`source_holds=0`, `source_throttles=0` on the batch source line (gone in the
+forty-seventh pass: each remote backend logs its totals at deinit) and parity
 with the last hf:// recording in CTX.md "Fifteenth pass"; the CPU playground
 and gb300-2 runs of the group B validation are unaffected (local profiles
 have no governor traffic) and need no repeat.
@@ -195,11 +200,18 @@ have no governor traffic) and need no repeat.
 
 ## What the llmd migration needs from this API (do not remove)
 
-`Loader.init(allocator, io, platform, .{ .load_profile = try
-vfs.loadProfile(model) })` (without the profile a remote source gets width
-16, no direct I/O and no throttle watch); `load`, multi-binding `loadExecute`,
-`awaitAll`, `bytesLoaded()`, `deinit`; several stores and sharding sets per
-loader (dflash); the `delivered` set and `TransformedTensorNotDelivered`;
-`Binding.transformed` on single-source bindings; the TensorStore view API;
-defaults that work without knobs (`direct_io = .auto`, no host budget, no DMA
-options); `calibration()` optional (playground only).
+Done: llmd runs on the reworked API (thirty-fourth to forty-seventh passes,
+`LOADER_API_REVIEW.md` R1-R15 but R12). It calls `Loader.init(allocator, io,
+platform, .{ .checkpoint = model })`, which resolves the read sizing through
+the VFS (was `.load_profile = try vfs.loadProfile(model)`), then
+`start`/`wait` and `deinit` (were `load`, multi-binding `loadExecute`,
+`awaitAll` and `bytesLoaded()`, thirty-fourth and thirty-seventh passes).
+Programs ride their bindings (`Source.bindProgram`), so the `delivered` set
+and `TransformedTensorNotDelivered` are gone (`Binding.transformed` went in
+the twenty-eighth pass); one store holds the drafter too (forty-first pass).
+Still required: several starts from one store before one `wait`
+(forty-first pass), the TensorStore view API, and defaults that work
+without knobs (`direct_io = .auto`, no host budget). Several stores per
+loader remain supported, but llmd no longer uses them.
+`calibration()` is gone: dma-bench calls `dma_calibration.measure`
+(thirty-eighth pass), and the backend's dead copy went in the forty-sixth.

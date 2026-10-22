@@ -1,4 +1,19 @@
-//! Loader-owned host arenas, cut into blocks once.
+//! Loader-owned host arenas, cut into blocks once. The direct backend owns
+//! its workspace for its whole life: calibration maps its ring there, the
+//! backend grows the set to what its load holds and carves it, and
+//! `Loader.deinit` releases every arena. Callers never supply a workspace, a
+//! budget, a NUMA policy or a calibration result.
+//!
+//! The memory depends on the target: CUDA and oneAPI take page-backed arenas
+//! registered with PJRT (DmaMap), ROCm PJRT `pinned_host` buffers, and CPU
+//! plain pages, unregistered. The arenas' kind and the transfer path are
+//! separate decisions: CPU loads through the direct backend too. Page-backed
+//! arenas interleave over the host's memory-bearing NUMA nodes when the
+//! task's memory policy allows more than one; ROCm balances whole arenas
+//! across its devices' host nodes. `Workspace.mapped_bytes_ceiling` (16 GiB)
+//! is a safety guard, not a target. A failed allocation or registration, or
+//! a growth past the ceiling, is logged with its cause and returns
+//! `OutOfMemory`.
 
 const std = @import("std");
 const Alignment = std.mem.Alignment;

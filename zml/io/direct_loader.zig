@@ -1,8 +1,58 @@
 //! Direct loading follows a batch from per-file planning through FIFO claims,
-//! source reads and DMA completion. The source width is fixed for the load,
-//! per load profile (`backend.Options.readWidth`); a source that rate
-//! limits is handled by the VFS, which holds every request of that backend
-//! (`vfs/request.zig`). Runtime ownership and synchronization live here.
+//! source reads and DMA completion. Runtime ownership and synchronization
+//! live here. CUDA, ROCm, oneAPI and CPU load this way
+//! (`backend.loadsDirect`).
+//!
+//! Sizing, fixed by `Loader.create`. Calibration picks the DMA block and the
+//! per-device depth (dma_calibration.zig). A source request is the larger of
+//! the checkpoint backend's minimum read (8 MiB for local files, 16 MiB over
+//! https, s3 and gs, 32 MiB on hf) and the block: at most 32 MiB, and a
+//! whole number of blocks. The source width is `read_parallelism`, or 16
+//! for a local checkpoint and 32 for a high-latency one
+//! (`backend.Options.readWidth`), clipped to what the mapped ceiling fits.
+//! The workspace then maps, once and before the first read, `width + 1`
+//! requests, the DMA reserve and the zero block, and cuts them into blocks
+//! (`Workspace.carve`): nothing maps during a load. A read gate holds the
+//! reads to the width. The lifecycle credits are the whole pinned set in
+//! requests, so transfers that still hold blocks keep the DMA stage fed and
+//! never want a block the reads did not leave free. The width never
+//! changes: a source that answers 429 (or 503 on the object stores) is held
+//! one layer down, where the VFS holds every request of that backend
+//! (vfs/request.zig), so the traffic falls while the memory bounds stay.
+//!
+//! Planning and claims. `submit` sorts a submission's parts by file and
+//! offset, plans one file at a time and publishes each plan at once, so the
+//! workers read the first file while the next is planned. A plan merges
+//! touching or overlapping ranges into reads, never across a gap or a file,
+//! and cuts them into jobs of at most a request; jobs keep that file order,
+//! and the `Scheduler` hands them out in submission order. A worker takes a
+//! credit, claims a job, reads it into its slot's pinned blocks and queues
+//! its preplanned transfer pieces on per-device pumps. A block may feed
+//! several outputs or devices; the request keeps its credit until every
+//! piece it queued completed or was abandoned. The last-transfer flag goes
+//! on the piece that completes a destination's bytes, so reads and DMA
+//! complete in any order. A batch owns its plans and callback contexts
+//! until every job completes; a failure retires the unclaimed jobs and
+//! drains what is in flight before the batch goes.
+//!
+//! Destinations. A part's source bytes map to its destination's logical
+//! offsets, which the destination's `ShardGrid` places on the devices by
+//! arithmetic. Pieces of one destination merge across parts when block,
+//! writers and both offsets are contiguous, and its parts may come from
+//! different files and plans. Bytes no part covers go out with the plan of
+//! its first part, as a last fill job that reads nothing and transfers from
+//! the zero block, which no credit owns. The job of a tensor sharded along
+//! any axis but its first is staged by destination where that saves
+//! submissions (`JobCut.placeDma`); Llama's plans take 1-4 ms, against
+//! 73-112 ms when every row and device was a span. Strided parts are
+//! gathered (`JobCut.appendGatherJobs`), their runs copied out of the
+//! worker's bounce buffer by `Lattice.copyRuns`. Block-scale swizzles gather
+//! this way, as runs of four bytes. Runs under 4 KiB cost host copies, where
+//! a program costs a compile and staging memory: on DeepSeek-V4.1 over two
+//! GB300, laying the MXFP4 experts out here (gate and up rows interleaved,
+//! scales swizzled) copied 77 to 189 GiB through bounce buffers, 17 to 36 s
+//! of worker time; as programs it copied 1 to 3 GiB and loaded 0.1 to 1.1 s
+//! faster, for 4 to 6 GiB more device memory at the peak.
 
 const std = @import("std");
 const builtin = @import("builtin");

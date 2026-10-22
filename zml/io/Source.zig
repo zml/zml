@@ -2,12 +2,20 @@
 //! by computing: a checkpoint tensor, or slices, reshapes, transposes,
 //! broadcasts, paddings, concatenations and stacks of checkpoint tensors.
 //! The ops are `zml.Tensor`'s shape ops, with the same names, tags and
-//! argument conventions. A source touches neither the registry nor the
-//! store's bindings. Its placement comes last (`withPartitioning` or `as`),
-//! and only a placed source binds: `bind` makes the model tensor the loader
-//! fills from it, `bindProgram` one a program computes from several.
-//! Sources are built during model init and live in the store's arena; a
-//! binding's sources all come from one store.
+//! argument conventions; slices are static and contiguous, and padding is
+//! zeros only.
+//!
+//! A source comes from its store (`View.source`) and its pieces live in
+//! the store's arena, where the ops that rewrite them allocate. Nothing is
+//! freed before `TensorStore.deinit`, and the store must not move while
+//! sources point to it. The ops touch neither the registry nor the
+//! bindings. Sources of different stores do not mix: `concatenate`,
+//! `stack` and `bindProgram` panic on them. Placement comes last
+//! (`withPartitioning` or `as`): an op on a placed source panics, and
+//! `unplaced` drops the placement. `bind` and `bindProgram` are the only
+//! terminals, and take only placed sources: `bind` records the model
+//! tensor the loader fills from the source, `bindProgram` one a program
+//! computes from several. Sources are built during model init.
 const std = @import("std");
 
 const stdx = @import("stdx");

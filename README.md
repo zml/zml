@@ -194,17 +194,11 @@ const Mnist = struct {
 };
 ```
 
-The direct loader (CUDA, ROCm, oneAPI and CPU; CPU arenas are plain pages)
-sizes its transfers once: it calibrates synthetic transfers on one
-representative device and keeps the result for the whole load.
-`Loader.init` returns at once and calibrates on a task of its own, so
-initialize the loader early and compile the model meanwhile; the first
-`start` waits for what is left. When `io` is a VFS, pass the checkpoint's
-path (`.checkpoint = path`): the VFS backend serving it sizes the reads.
-
-On CPU the calibration returns the 4 MiB/eight-transfer defaults without
-measuring: the plugin's transfer is a memcpy, and a load takes the same time
-at every block size.
+`Loader.init` returns at once and calibrates its transfers on a task of its
+own, so initialize the loader early and compile the model meanwhile; the
+first `start` waits for what is left.
+[Loading checkpoints](./docs/learn/loader.md) gives the full recipe, with
+remote checkpoints, placement, lifetimes and errors.
 
 For a full walkthrough, see:
 

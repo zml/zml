@@ -1,7 +1,9 @@
 //! The loader's log scopes. A failure is logged once, where it is
-//! detected: at `err` when it fails initialization or the load, at `debug`
-//! when the loader stays usable. Frames that only propagate an error do
-//! not log it again.
+//! detected, at `err` with the values that explain it; cancellation and
+//! shutdown log at `debug`. Frames that only propagate an error do not log
+//! it again. Test builds log `err` at `debug`, since the test runner counts
+//! logged errors as failures: error-path tests assert the returned errors
+//! and the cleanup, not the logs.
 const std = @import("std");
 const builtin = @import("builtin");
 
