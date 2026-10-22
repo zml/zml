@@ -8,6 +8,7 @@ const Compiler = @import("../Compiler.zig");
 const Exe = @import("../exe.zig").Exe;
 const Memory = @import("../platform.zig").Memory;
 const Platform = @import("../platform.zig").Platform;
+const Quantization = @import("../quantization.zig").Quantization;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
@@ -197,6 +198,7 @@ pub const Source = @import("Source.zig");
 
 registry: safetensors.TensorRegistry,
 meshes: []const *const Sharding.Mesh,
+quantization: Quantization.Target,
 id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
 allocator: std.mem.Allocator,
 arena: std.heap.ArenaAllocator,
@@ -204,6 +206,9 @@ arena: std.heap.ArenaAllocator,
 pub const Options = struct {
     /// The meshes `View.createTensor` and `Source.bind` name.
     meshes: []const *const Sharding.Mesh = &.{},
+    /// How the platform's FP8 GEMMs want block-FP8 weights, for the code
+    /// that binds them (`View.quantization`): usually `.of(platform)`.
+    quantization: Quantization.Target = .{},
 };
 
 /// A store that owns `registry`, which must be complete: its map stays
@@ -215,6 +220,7 @@ pub fn init(allocator: std.mem.Allocator, registry: safetensors.TensorRegistry, 
     var self: TensorStore = .{
         .registry = registry,
         .meshes = meshes,
+        .quantization = opts.quantization,
         .id_to_sources = .empty,
         .allocator = allocator,
         .arena = arena,
@@ -372,6 +378,11 @@ pub const View = struct {
     /// See `TensorStore.setMemory`.
     pub fn setMemory(self: View, tensor: Tensor, kind: Memory.Kind) void {
         self.store.setMemory(tensor, kind);
+    }
+
+    /// See `Options.quantization`.
+    pub fn quantization(self: View) Quantization.Target {
+        return self.store.quantization;
     }
 
     /// The checkpoint tensor `subkey` as a `Source`, with `tags` (null keeps

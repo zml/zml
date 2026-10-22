@@ -105,6 +105,31 @@ pub const Quantization = struct {
             return self == .mxfp8 or self == .mxfp4;
         }
     };
+
+    /// What a platform's FP8 GEMMs read, so block-FP8 weights can be bound
+    /// for it once (`zml.io.TensorStore.Options.quantization`).
+    pub const Target = struct {
+        /// The E4M3 encoding of FP8 weights and activations: FNUZ on CDNA3,
+        /// FN on CUDA, CDNA4 and RDNA4. Null on other platforms: block-FP8
+        /// activations stay BF16 (`quantizeInput`), and weights keep the
+        /// checkpoint's encoding.
+        fp8: ?DataType = .f8e4m3fn,
+        /// Whether e8m0 block scales are laid out in the 128x4 blocks of
+        /// Blackwell's block-scaled MMA (CUDA sm_10x).
+        swizzled_scales: bool = false,
+
+        pub fn of(platform: *const Platform) Target {
+            return switch (platform.target) {
+                .cuda => .{ .swizzled_scales = if (platform_mod.cuda.computeCapability(platform)) |cc| cc.major == 10 else false },
+                .rocm => .{ .fp8 = if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
+                    .cdna4, .rdna4 => .f8e4m3fn,
+                    .cdna3 => .f8e4m3fnuz,
+                    .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => null,
+                } else null },
+                else => .{ .fp8 = null },
+            };
+        }
+    };
 };
 
 pub const QuantizedInput = struct {
@@ -127,16 +152,7 @@ pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag,
     return switch (quantization.scheme) {
         .nvfp4 => if (supportsNvfp4InputQuantization(platform)) quantizeNvfp4(input.convert(.bf16), global_scale, axis) else null,
         .fp8_block32, .fp8_block128 => blk: {
-            const dtype: DataType = switch (platform.target) {
-                .cuda => .f8e4m3fn,
-                .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
-                    .cdna4, .rdna4 => .f8e4m3fn,
-                    .cdna3 => .f8e4m3fnuz,
-                    .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => return null,
-                } else return null,
-                else => return null,
-            };
-
+            const dtype = Quantization.Target.of(platform).fp8 orelse return null;
             break :blk switch (quantization.scheme) {
                 .fp8_block32 => quantizeBlockFp8(input, axis, 32, dtype, .f8e8m0),
                 .fp8_block128 => quantizeBlockFp8(input.convert(.bf16), axis, 128, dtype, .f32),
@@ -162,23 +178,6 @@ pub fn quantizeMxfp4(x: Tensor, axis: anytype) QuantizedInput {
         .scales = scales.reshape(x.shape().setDim(axis, @divExact(x.dim(axis), mx_block_size)).withDtype(.f32)).convert(.f8e8m0),
         .global_scale = null,
     };
-}
-
-pub fn quantizeMxfp8(x: Tensor, axis: anytype) QuantizedInput {
-    const platform = zml.Compiler.current().platform;
-
-    const dtype: ?DataType = switch (platform.target) {
-        .cuda, .cpu, .tpu => .f8e4m3fn,
-        .rocm => if (platform_mod.rocm.computeCapability(platform)) |capability| switch (capability.architecture()) {
-            .cdna4, .rdna4 => .f8e4m3fn,
-            .cdna3 => .f8e4m3fnuz,
-            .cdna1, .cdna2, .rdna2, .rdna3, .rdna3_5 => null,
-        } else null,
-        else => null,
-    };
-
-    if (dtype == null) std.debug.panic("MXFP8 is not supported on {}", .{platform.target});
-    return quantizeBlockFp8(x, axis, mx_block_size, dtype.?, .f8e8m0);
 }
 
 fn ceilPowerOfTwo(raw_scale: Tensor) Tensor {

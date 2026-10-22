@@ -53,6 +53,16 @@ entry itself. `View.hasPrefix(subkey)` asks whether any key starts with
 `readRange(io, file, buffer, offset)`, a range of it from a file the caller
 opened.
 
+`TensorStore.Options.quantization` says what the platform's FP8 GEMMs read:
+`zml.Quantization.Target.of(platform)` gives the E4M3 encoding and
+whether e8m0 block scales are swizzled (CUDA sm_10x). The encoding is FNUZ
+on CDNA3 and FN on CUDA, CDNA4 and RDNA4. It is null elsewhere, CPU
+included: block-FP8 activations stay BF16 and weights keep the
+checkpoint's encoding. Without a target, the store assumes FN,
+unswizzled. The store only carries it; code that binds block-FP8 weights
+reads it with `View.quantization()` and converts or lays them out while
+binding.
+
 A second checkpoint, such as a speculative drafter's, joins the same
 registry under a prefix of its own before the store takes it:
 `registry.addRepo(io, drafter_repo, "drafter.")` registers each of its
