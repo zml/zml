@@ -601,7 +601,7 @@ pub fn supportsMemory(platform: *const Platform, kind: Memory.Kind) bool {
     return true;
 }
 
-/// Whether bytes delivered into `kind` take device memory, which loadExecute
+/// Whether bytes delivered into `kind` take device memory, which program
 /// admission measures. Host memory spaces never count against a device.
 pub fn countsAgainstDevice(kind: Memory.Kind) bool {
     return switch (kind) {

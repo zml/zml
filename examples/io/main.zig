@@ -235,31 +235,29 @@ pub fn main(init: std.process.Init) !void {
             var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{tensor_parallel});
             defer store.deinit();
 
-            // Expert-pack instrument: N bindings of W same-shape rank-2 tensors,
-            // each loaded through `loadExecute` with a stack executable.
+            // Expert-pack instrument: N tensors a stack program computes
+            // from W same-shape rank-2 tensors each.
             const pack_options: PackOptions = .{
                 .packs = try envUsize(init.environ_map, "ZML_LOAD_PACKS", 0),
                 .width = try envUsize(init.environ_map, "ZML_LOAD_PACK_WIDTH", 64),
-                .pairs = try envUsize(init.environ_map, "ZML_LOAD_PACK_PAIRS", 0),
+                .group_bytes = try envOptionalUsize(init.environ_map, "ZML_LOAD_PACK_GROUP_BYTES"),
                 .check = try envUsize(init.environ_map, "ZML_LOAD_PACK_CHECK", 1) != 0,
                 .max_elements = try envUsize(init.environ_map, "ZML_LOAD_PACK_MAX_ELEMENTS", std.math.maxInt(i32)),
             };
             if (pack_options.width == 0) return error.InvalidArgument;
-            const pack_plan = try planPacks(init.arena.allocator(), allocator, io, platform, &registry, &store, pack_options);
-            defer for (pack_plan.exes) |*exe| exe.deinit();
+            const pack_plan = try planPacks(init.arena.allocator(), platform, &registry, &store, pack_options);
             if (pack_options.packs > 0) {
-                log.info("pack plan: packs={d} requested={d} width={d} pairs={d} executables={d} bytes={Bi:.2}", .{
+                log.info("pack plan: packs={d} requested={d} width={d} bytes={Bi:.2}", .{
                     pack_plan.packs.len,
                     pack_options.packs,
                     pack_options.width,
-                    pack_options.pairs,
-                    pack_plan.exes.len,
                     pack_plan.bytes,
                 });
             }
 
             const AllTensorsModel = struct {
                 tensors: []zml.Tensor,
+                packs: []zml.Tensor,
             };
 
             const tensor_count = registry.tensors.count() - pack_plan.packed_count;
@@ -297,7 +295,7 @@ pub fn main(init: std.process.Init) !void {
                 load_count += 1;
             }
 
-            const model: AllTensorsModel = .{ .tensors = tensors };
+            const model: AllTensorsModel = .{ .tensors = tensors, .packs = pack_plan.packs };
 
             var progress = std.Progress.start(io, .{
                 .root_name = "zml.examples.load",
@@ -307,11 +305,6 @@ pub fn main(init: std.process.Init) !void {
             defer progress.end();
 
             try platform.warmupDeviceAllocators(io);
-
-            const pack_outputs = try allocator.alloc(zml.Buffer, pack_plan.packs.len);
-            defer allocator.free(pack_outputs);
-            var packs_loaded: usize = 0;
-            defer for (pack_outputs[0..packs_loaded]) |*output| output.deinit();
 
             var check_error: ?anyerror = null;
             // Stamped before the read-back check so the summary excludes it.
@@ -345,36 +338,15 @@ pub fn main(init: std.process.Init) !void {
                     },
                 });
                 defer loader.deinit();
+                if (pack_options.group_bytes) |bytes| loader.program_group_bytes = bytes;
 
-                // The loader admits the pack submissions itself; the bulk
-                // queues behind them and one await retires everything.
-                const packs_per_submission: usize = if (pack_options.pairs != 0) 2 else 1;
-                var next_pack: usize = 0;
-                while (next_pack < pack_plan.packs.len) {
-                    const count = @min(packs_per_submission, pack_plan.packs.len - next_pack);
-                    var bindings: [2]zml.io.Loader.Binding = undefined;
-                    for (
-                        bindings[0..count],
-                        pack_plan.packs[next_pack..][0..count],
-                        pack_outputs[next_pack..][0..count],
-                    ) |*binding, pack, *output| {
-                        binding.* = .{
-                            .tensor = pack.tensor,
-                            .output = output,
-                            .exe = &pack_plan.exes[pack.exe_index],
-                        };
-                    }
-                    try loader.loadExecute(&store, bindings[0..count], &progress);
-                    next_pack += count;
-                }
-                try loader.load(AllTensorsModel, &model, &loaded, &store, &progress);
-                try loader.awaitAll();
-                packs_loaded = pack_plan.packs.len;
+                // One start: the bulk is published at once while the stack
+                // programs compile, and wait publishes the packs in groups
+                // the devices admit.
+                try loader.start(&model, &loaded, &store, &progress);
+                try loader.wait();
                 total_bytes = loader.bytesLoaded();
-                defer {
-                    for (loaded.tensors) |*buffer_| buffer_.deinit();
-                    init.arena.allocator().free(loaded.tensors);
-                }
+                defer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
 
                 load_took = now.untilNow(io, .awake);
                 // Not `try`: the `errdefer` above and the `defer` just
@@ -384,23 +356,24 @@ pub fn main(init: std.process.Init) !void {
                         check_error = err;
                     };
                 }
+                if (check_error == null and pack_options.check and pack_plan.packs.len > 0) {
+                    checkPacks(allocator, io, &store, pack_plan.packs, loaded.packs) catch |err| {
+                        check_error = err;
+                    };
+                }
             }
             if (check_error) |err| return err;
-
-            if (pack_options.check and pack_plan.packs.len > 0) {
-                try checkPacks(allocator, io, &store, pack_plan.packs, pack_outputs);
-            }
         },
     }
 }
 
 const PackOptions = struct {
-    /// Number of pack submissions (0 disables the instrument).
+    /// Number of packs (0 disables the instrument).
     packs: usize,
     /// Sources per pack.
     width: usize,
-    /// Pair two packs per submission.
-    pairs: usize,
+    /// The loader's program group size; null keeps its default.
+    group_bytes: ?usize,
     /// Read sample packs back and compare with the source bytes.
     check: bool,
     /// Largest pack output in elements. The oneAPI PJRT plugin launches
@@ -408,16 +381,8 @@ const PackOptions = struct {
     max_elements: usize,
 };
 
-const Pack = struct {
-    tensor: zml.Tensor,
-    exe_index: usize,
-    bytes: usize,
-};
-
 const PackPlan = struct {
-    packs: []const Pack,
-    /// One stack executable per distinct source shape.
-    exes: []zml.Exe,
+    packs: []zml.Tensor,
     /// Indexed like the registry: true for keys owned by a pack.
     packed_mask: []const bool,
     packed_count: usize,
@@ -431,8 +396,6 @@ const PackPlan = struct {
 /// order. Stops after `options.packs` packs.
 fn planPacks(
     arena: std.mem.Allocator,
-    allocator: std.mem.Allocator,
-    io: std.Io,
     platform: *const zml.Platform,
     registry: *const zml.safetensors.TensorRegistry,
     store: *zml.io.TensorStore,
@@ -443,9 +406,7 @@ fn planPacks(
     const packed_mask = try arena.alloc(bool, entries.len);
     @memset(packed_mask, false);
 
-    var exes: std.ArrayListUnmanaged(zml.Exe) = .empty;
-    errdefer for (exes.items) |*exe| exe.deinit();
-    var packs: std.ArrayListUnmanaged(Pack) = .empty;
+    var packs: std.ArrayListUnmanaged(zml.Tensor) = .empty;
     var packed_count: usize = 0;
     var bytes: usize = 0;
 
@@ -471,7 +432,6 @@ fn planPacks(
             shape: zml.Shape,
             skipped: bool,
             members: std.ArrayListUnmanaged(usize) = .empty,
-            exe_index: ?usize = null,
         };
         var classes: std.ArrayListUnmanaged(Class) = .empty;
 
@@ -507,17 +467,8 @@ fn planPacks(
             packed_count += options.width;
 
             const shape = packShape(platform, entry.shape, options.width);
-            const tensor = store.view().maybeCreateBinding(source_keys, shape) orelse return error.MissingPackSource;
-            if (class.exe_index == null) {
-                const inputs = try allocator.alloc(zml.Tensor, options.width);
-                defer allocator.free(inputs);
-                for (inputs) |*input| input.* = .fromShape(entry.shape);
-                try exes.append(arena, try platform.compileFn(allocator, io, stackPack, .{inputs}, .{
-                    .program_name = "playground_pack",
-                }));
-                class.exe_index = exes.items.len - 1;
-            }
-            try packs.append(arena, .{ .tensor = tensor, .exe_index = class.exe_index.?, .bytes = shape.byteSize() });
+            const tensor = store.view().maybeCreateBinding(source_keys, shape, stackPack, .{}) orelse return error.MissingPackSource;
+            try packs.append(arena, tensor);
             bytes += shape.byteSize();
             if (packs.items.len == options.packs) break;
         }
@@ -525,7 +476,6 @@ fn planPacks(
 
     return .{
         .packs = packs.items,
-        .exes = exes.items,
         .packed_mask = packed_mask,
         .packed_count = packed_count,
         .bytes = bytes,
@@ -542,7 +492,7 @@ fn packShape(platform: *const zml.Platform, source: zml.Shape, width: usize) zml
         .withPartitioning(platform.replicated_mesh, .{ .expert = .replicated, .rows = .replicated, .cols = .replicated });
 }
 
-fn stackPack(inputs: []const zml.Tensor) zml.Tensor {
+fn stackPack(_: struct {}, _: zml.Shape, inputs: []const zml.Tensor) zml.Tensor {
     return zml.Tensor.stack(inputs, 0, .expert)
         .withTags(.{ .expert, .rows, .cols })
         .withPartitioning(.replicated, .{ .expert = .replicated, .rows = .replicated, .cols = .replicated });
@@ -554,14 +504,14 @@ fn checkPacks(
     allocator: std.mem.Allocator,
     io: std.Io,
     store: *const zml.io.TensorStore,
-    packs: []const Pack,
+    packs: []const zml.Tensor,
     outputs: []const zml.Buffer,
 ) !void {
     const samples = [_]usize{ 0, packs.len / 2, packs.len - 1 };
     var checked: usize = 0;
     for (samples, 0..) |sample, i| {
         if (std.mem.indexOfScalar(usize, samples[0..i], sample) != null) continue;
-        const sources = (store.getSourcesById(packs[sample].tensor.id) orelse return error.NotFound).tensors;
+        const sources = (store.getSourcesById(packs[sample].id) orelse return error.NotFound).tensors;
         const slice = try outputs[sample].toSliceAlloc(allocator, io);
         defer slice.free(allocator);
         const packed_bytes = slice.constData();

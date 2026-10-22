@@ -4,7 +4,10 @@ const log = std.log.scoped(.@"zml/io/load");
 
 const stdx = @import("stdx");
 
+const Compiler = @import("../Compiler.zig");
+const Exe = @import("../exe.zig").Exe;
 const Memory = @import("../platform.zig").Memory;
+const Platform = @import("../platform.zig").Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
@@ -22,10 +25,54 @@ pub const Binding = struct {
     /// one source that is the whole tensor.
     layout: ?*const Layout = null,
     /// Set when a program computes the tensor while loading
-    /// (`Loader.loadExecute`, `Source.bindProgram`): the program's inputs in
-    /// order, each filled from `tensors` and placed by its shape. The loader
-    /// never fills such a tensor itself, so `layout` is unused.
-    inputs: ?[]const Layout = null,
+    /// (`Source.bindProgram`). The loader never fills such a tensor itself,
+    /// so `layout` and `memory` are unused.
+    program: ?*const Program = null,
+};
+
+/// A program the loader compiles and runs to compute a tensor while loading
+/// (`Source.bindProgram`): `func(args, output, inputs)` over its inputs,
+/// landed in default device memory, placed by their shapes.
+pub const Program = struct {
+    /// The program's inputs in order, each filled from `Binding.tensors`.
+    inputs: []const Layout,
+    /// The program's plain-data arguments, in the store's arena.
+    args: *const anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        name: []const u8,
+        compile: *const fn (
+            args: *const anyopaque,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            platform: *const Platform,
+            opts: Compiler.Options,
+            output: Shape,
+            inputs: []const Tensor,
+        ) Compiler.Error!Exe,
+        eql: *const fn (a: *const anyopaque, b: *const anyopaque) bool,
+    };
+
+    /// Whether this program computing `output` and `other` computing
+    /// `other_output` compile to the same executable: the same function,
+    /// equal args, and the same shapes placed alike.
+    pub fn sameExecutable(self: Program, output: Shape, other: Program, other_output: Shape) bool {
+        if (self.vtable != other.vtable or !self.vtable.eql(self.args, other.args)) return false;
+        if (!samePlacedShape(output, other_output) or self.inputs.len != other.inputs.len) return false;
+        for (self.inputs, other.inputs) |a, b| {
+            if (!samePlacedShape(a.shape, b.shape)) return false;
+        }
+        return true;
+    }
+
+    fn samePlacedShape(a: Shape, b: Shape) bool {
+        if (!a.eqlWithTags(b) or a._sharding.mesh != b._sharding.mesh) return false;
+        for (0..a.rank()) |axis| {
+            if (a.partition(axis) != b.partition(axis)) return false;
+        }
+        return true;
+    }
 };
 
 /// A composite tensor: byte parts of checkpoint tensors placed in the
@@ -115,7 +162,7 @@ pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
 /// unbound, or computed by a program.
 pub fn sourceOf(self: *TensorStore, tensor: Tensor) ?Source {
     const binding = self.id_to_sources.get(tensor.id) orelse return null;
-    if (binding.inputs != null) return null;
+    if (binding.program != null) return null;
     return .ofBinding(self, binding, tensor.shape());
 }
 
@@ -295,17 +342,17 @@ pub const View = struct {
         return placed;
     }
 
-    /// A tensor of `shape` that a program computes while loading
-    /// (`Source.bindProgram`) from the checkpoint tensors `sources`, each
-    /// whole and replicated, in this order. Null when one is missing.
-    pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape) ?Tensor {
+    /// A tensor of `shape` that `func(args, shape, inputs)` computes while
+    /// loading (`Source.bindProgram`) from the checkpoint tensors `sources`,
+    /// each whole and replicated, in this order. Null when one is missing.
+    pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape, comptime func: anytype, args: Source.ProgramArgs(func)) ?Tensor {
         const inputs = self.store.allocator.alloc(Source.Input, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
         defer self.store.allocator.free(inputs);
         for (sources, inputs) |subkey, *input| {
             const source_ = self.maybeSource(subkey, null) orelse return null;
             input.* = source_.place(.replicated, .{});
         }
-        return Source.bindProgram(inputs, shape);
+        return Source.bindProgram(inputs, shape, func, args);
     }
 
     pub fn getShape(self: View, subkey: []const u8) ?Shape {
@@ -372,6 +419,17 @@ test "missing reader keys return TensorNotFound" {
     defer store.deinit();
 
     try std.testing.expectError(error.TensorNotFound, store.view().withPrefix("layer").getReader("weights", std.testing.io, &.{}));
+}
+
+test "programs over identical shapes on different meshes or partitionings compile apart" {
+    var meshes: [2]Sharding.Mesh = undefined;
+    meshes[0].name = "first";
+    meshes[1].name = "second";
+    const first = Shape.init(.{ .qout = 8, .qk = 16 }, .bf16).withPartitioning(&meshes[0], .{ .qout = .replicated, .qk = .replicated });
+    const second = first.withPartitioning(&meshes[1], .{ .qout = .replicated, .qk = .replicated });
+    try std.testing.expect(Program.samePlacedShape(first, first));
+    try std.testing.expect(!Program.samePlacedShape(first, second));
+    try std.testing.expect(!Program.samePlacedShape(first, first.withPartitioning(first._sharding.mesh.?, .{ .qout = .open })));
 }
 
 test "setMemory changes the memory space of a created tensor's binding" {

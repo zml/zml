@@ -176,8 +176,8 @@ const Mnist = struct {
             .read_parallelism = 1,
         });
         defer loader.deinit();
-        try loader.load(Mnist, self, &buffers, store, null);
-        try loader.awaitAll();
+        try loader.start(self, &buffers, store, null);
+        try loader.wait();
 
         return buffers;
     }

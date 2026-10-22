@@ -451,8 +451,8 @@ pub fn testLayer(
     {
         var loader = try zml.io.Loader.init(allocator, io, platform, .auto);
         defer loader.deinit();
-        try loader.load(ArgsT, &args, &args_buffers, activation_store.store, null);
-        try loader.awaitAll();
+        try loader.start(&args, &args_buffers, activation_store.store, null);
+        try loader.wait();
     }
 
     exe_args.set(.{ layer_weights, args_buffers });

@@ -1,12 +1,13 @@
 # Loading checkpoints
 
-`zml.io.Loader` turns checkpoint sources into device buffers. `load` submits
-the tensors of a model, each from one source or, for a composite tensor, from
-several sources assembled in its destination; `loadExecute` submits the
-inputs of executable bindings. Reads and transfers may start before submission returns.
-Submissions are retired in submission order: the loader waits for the reads,
-then for `loadExecute` runs each executable in binding order on the calling
-task, writes its output and frees its inputs.
+`zml.io.Loader` turns checkpoint sources into device buffers. `start` takes a
+whole model. Every tensor the loader fills itself, from one source or, for a
+composite tensor, from several sources assembled in its destination, is
+published at once, and the programs that compute the other tensors start
+compiling (`Source.bindProgram`). `wait` then lands the programs' inputs in
+groups the devices have room for, runs each group's programs on the calling
+task, writes their outputs and frees the inputs, and returns once every
+started load is in its buffers.
 
 ```zig
 var buffers = try zml.mem.bufferize(allocator, Model, &model);
@@ -17,8 +18,8 @@ var loader = try zml.io.Loader.init(allocator, io, platform, .{
 });
 defer loader.deinit();
 
-try loader.load(Model, &model, &buffers, &store, null);
-try loader.awaitAll();
+try loader.start(&model, &buffers, &store, null);
+try loader.wait();
 ```
 
 Placement comes from each tensor's shape, not from the submission: the mesh
@@ -29,10 +30,9 @@ device). A binding's memory kind picks the destination memory space on each
 device: a tensor created with `createHostPinnedTensor` lands in the device's
 `host_pinned` memory, every other tensor in its default memory.
 `TensorStore.setMemory(tensor, kind)` (or `View.setMemory`) changes it after
-the tensor was created, for a placement decided later.
-`loadExecute` places the inputs and checks the outputs against the
-executable's `input_shapes` and `output_shapes`, whose shardings carry the
-placement; a binding's tensor must match the executable's output placement.
+the tensor was created, for a placement decided later. A program's inputs
+are placed by their own shapes (see Programs over sources), and its output
+must be placed like its tensor.
 
 ```zig
 const tp = try platform.registerMesh("tp", .mesh(.{ .model = .high_bandwidth }));
@@ -41,46 +41,46 @@ const w = store.view().createTensor("w", .{ .out, .in }, .tp, .{ .out = .model }
 const b = store.view().createReplicatedTensor("b", .{.out});
 ```
 
-The store is passed to each `load` or `loadExecute` submission.
-Initialization needs no store. These submission calls also accept an optional
-progress node as their final argument (`null` disables reporting). The
-loader copies the node; do not end it until `awaitAll` or `deinit` returns.
-The caller owns the estimated total. For a whole checkpoint loaded once,
-`store.view().count()` estimates the number of source tensors. Each loaded
-tensor completes one item, a composite tensor once for all its sources; bulk
-loads skip the tensors programs compute, once delivered, and executable loads
-count their inputs, not their outputs. Unused, repeatedly loaded or
-concatenated sources can make the checkpoint estimate inexact.
-Source progress completes before the executable runs; keep the enclosing node
-alive until `awaitAll` returns to cover the full loading lifecycle.
-The caller owns the store, platform, model buffers, and executable outputs.
-Each submission borrows the store’s source metadata, and a `loadExecute`
-its executables, until it is retired.
-The loader owns its backend and its pending submissions. Declare cleanup in
-the order above so the loader finishes using buffers before they are freed.
-Submit and await serially on the owning task; the backend provides the read
-and transfer concurrency. A loader may have any number of pending submissions.
+The store is passed to each `start`; initialization needs no store. `start`
+also accepts an optional progress node as its final argument (`null` disables
+reporting). The loader copies the node; do not end it until `wait` or
+`deinit` returns. The caller owns the estimated total. For a whole checkpoint
+loaded once, `store.view().count()` estimates the number of source tensors.
+Each loaded tensor completes one item, a composite tensor once for all its
+sources; a tensor a program computes counts its inputs, not its output.
+Unused, repeatedly loaded or concatenated sources can make the checkpoint
+estimate inexact. Source progress completes before a program runs; keep the
+enclosing node alive until `wait` returns to cover the full loading
+lifecycle. The caller owns the store, platform and model buffers; a started
+load borrows them until `wait` returns. The loader owns its backend, the
+programs it compiles and its pending submissions. Declare cleanup in the
+order above so the loader finishes using buffers before they are freed.
+Start and wait serially on the owning task; the backend provides the read and
+transfer concurrency, and each program compiles on a task of its own. Several
+loads may be started before one `wait`.
 
-`loadExecute` admits its submission itself. Before publishing, it retires the
-oldest pending submissions until the new one fits the room the devices report
-(their memory limit minus what is in use, minus the loader’s own unlanded
-weights), at a cost of inputs, temporaries and output per device; it always
-admits when nothing is pending. Where a device reports no memory limit (CPU)
-or the backend cannot account its allocations, every pending submission is
-retired first. `load` is never gated: submitted after `loadExecute`, it queues
-behind the packs, and a tensor a program computes counts as delivered once a
-`loadExecute` naming it was submitted. Outputs of earlier bindings may
-therefore be written by a later `loadExecute` or by `awaitAll`.
+`wait` admits the program groups itself. A group holds the tensors of
+consecutive programs in model order, up to `Loader.program_group_bytes` of
+outputs (8 GiB), so the inputs of one layer's experts, adjacent in the
+checkpoint, are read together. Before publishing a group, `wait` waits for its
+programs to compile, then retires the oldest pending submissions until the
+group fits the room the devices report (their memory limit minus what is in
+use, minus the loader’s own unlanded weights), at a cost of inputs,
+temporaries and outputs per device; it always admits when no group is
+pending. Where a device reports no memory limit (CPU) or the backend cannot
+account its allocations, one group is in flight at a time. The tensors the
+loader fills itself are never gated: `start` publishes them before any group,
+so every group is admitted with them counted.
 
-`awaitAll` retires everything and returns the first error; a failure is
-sticky: it aborts what is still pending (no more reads or executions), later
-submissions are refused and `awaitAll` keeps returning it.
+Every error of `start` or `wait` fails the loader: what was started is
+canceled, and every later call returns the first error. `wait` is idempotent.
 `bytesLoaded` counts the logical bytes of submissions retired with execution:
 each destination's shape once, so a composite tensor counts its padding and
 not each of its sources.
-`cancel` gives up on what is still pending, which only an error path leaves
-behind: it aborts the backend and retires the submissions without executing
-them, inputs freed. Their outputs are undefined (unwritten, errored, or for
+`cancel` gives up on everything started, which only an error between `start`
+and `wait` leaves behind: it drops the queued groups, aborts the backend,
+retires the submissions without running their programs, inputs freed, and
+waits for the compiles. The outputs are undefined (unwritten, errored, or for
 host-resident destinations ready but partly written): free the ones that were
 assigned, read none. The loader is failed afterwards. `deinit` cancels, then
 destroys the backend. There is no per-submission handle and no memory knob.
@@ -89,7 +89,7 @@ destroys the backend. There is no per-submission handle and no memory knob.
 
 A composite tensor is one destination filled from several checkpoint byte
 ranges, with every byte no range covers set to zero. The loader assembles it
-with the ordinary `load`: no program, no `loadExecute`, no buffer per source.
+as it fills a plain tensor: no program, no buffer per source.
 The destination is placed like any tensor, by its shape's sharding, into the
 memory space its binding names (`.default` or `.host_pinned`), and it is
 allocated once per device whatever its parts: in `.default` that is device
@@ -130,7 +130,7 @@ binding back into a source, so code that receives a bound tensor (a
 `Linear`'s scales) can rework it with more ops and `Source.rebind` it in
 place of the old binding.
 
-`load` checks a composite binding before submitting anything: the layout
+`start` checks a composite binding before submitting anything: the layout
 fills the tensor's bytes, it has a part, each part reads a source of the
 binding, stays inside it and the destination, and parts do not overlap;
 otherwise `InvalidLayout`. A zero-byte source is `EmptyTensor`. A strided
@@ -198,17 +198,20 @@ block-FP8 scales (a few MiB) in the loader.
 ## Programs over sources
 
 What stays a program is what computes rather than moves bytes: a dtype
-conversion, a dequantization, a global scale's maximum. `Source.bindProgram(inputs,
-output)` binds a tensor that a program computes while loading, from sources:
-each input is placed by its own shape, as `bind` places a tensor
+conversion, a dequantization, a global scale's maximum.
+`Source.bindProgram(inputs, output, func, args)` binds a tensor that
+`func(args, output, inputs)` computes while loading, from sources: each input
+is placed by its own shape, as `bind` places a tensor
 (`source.place(mesh, partitioning)`, or `placeAs(shape)`), so a program can
 take a fused weight and its scale grid with every device landing only its
-slice. The binding keeps one `Layout` per input (`Binding.inputs`).
-`loadExecute` lands each input as `load` lands a bound source, in default
-device memory, runs the executable over them in order, then frees them; the
-executable's input shapes must have the inputs' dimensions and placement,
-and its output the tensor's. A tensor bound to a source can go through
-`loadExecute` too, as its one input. `View.maybeCreateBinding(keys, shape)`
+slice. The binding keeps the program and one `Layout` per input
+(`Binding.program`). `args` is plain data, checked at compile time, so the
+loader compiles one executable for every tensor of the same `func`, equal
+`args` and the same placed shapes, and starts each compile as soon as `start`
+sees it. It lands each input as it lands a bound source, in default device
+memory, runs the program over them, then frees them; the program must return
+the tensor's shape, placed alike, or `wait` fails with
+`ProgramOutputMismatch`. `View.maybeCreateBinding(keys, shape, func, args)`
 is the shorthand for whole checkpoint tensors, replicated.
 
 A tensor a program computes has no source (`sourceOf` is null). To convert a
@@ -217,9 +220,8 @@ placed like the tensor, and `TensorStore.unbind` the old tensor.
 
 ## Errors and diagnostics
 
-The public operations declare `Loader.LoadError`,
-`Loader.LoadExecuteError`, and `Loader.AwaitError`; `Loader.init` returns an
-inferred error set. Their finite error sets
+`start` and `wait` declare one error set, `Loader.Error`; `Loader.init`
+returns an inferred error set. Their finite error sets
 include the underlying file I/O, allocation, cancellation, sharding, and PJRT
 errors. For example, missing files still return `FileNotFound`, truncated
 reads return `UnexpectedEndOfFile`. Host-memory allocation and DMA registration
@@ -227,15 +229,12 @@ log the original PJRT failure and return `OutOfMemory`.
 Exceeding the host-memory mapped ceiling also logs the budget details at `err`
 and returns `OutOfMemory`.
 
-A failure is logged once, where it is detected. Validation and failures
-before publication leave the loader usable and log at `debug`; an
-initialization failure and the first terminal failure log at `err` with the
-values that explain it. Frames that only propagate an error do not log it
-again, and subsequent calls return the stored error. Worker cancellation and
-normal shutdown use `debug`. A planning failure before the first file is
-published is recoverable; the same failure after partial publication is
-terminal. The direct backend validates source sizes and parts before
-publication, while the buffered backend checks them in its workers.
+A failure is logged once, where it is detected, at `err` with the values that
+explain it: a rejected binding names its tensor. Frames that only propagate
+an error do not log it again, and subsequent calls return the stored error.
+Worker cancellation and normal shutdown use `debug`. The direct backend
+validates source sizes and parts before publication, while the buffered
+backend checks them in its workers.
 
 Loader-specific errors use these shared names:
 
@@ -250,11 +249,9 @@ Loader-specific errors use these shared names:
 | `Internal` | A planning or transfer bookkeeping invariant failed |
 | `Closed` | The loader's scheduler or one of its gates has shut down |
 | `TensorNotFound` | A tensor has no checkpoint binding |
+| `ProgramOutputMismatch` | A program does not return its tensor's shape, placed alike |
 
-`EmptyTensor`, `TransformedTensorNotDelivered`, and executable platform,
-shape, and placement mismatch errors remain distinct. Executable arity
-failures are `ExecutableInputCountMismatch` and
-`ExecutableOutputCountMismatch`.
+`EmptyTensor` remains distinct.
 
 These names replace the former loader-specific profile, DMA benchmark,
 DMA budget, loader-job, and shutdown names; callers matching those errors
@@ -270,8 +267,8 @@ builds because the Zig test runner counts logged errors as failures.
 | Module | Responsibility |
 | --- | --- |
 | `zml/io.zig` | Public IO facade |
-| `zml/io/loader.zig` | Loader options, FIFO submissions, admission, source preparation and executable ownership |
-| `zml/io/execute_admission.zig` | Pure per-device room and cost arithmetic behind `loadExecute` admission |
+| `zml/io/loader.zig` | Loader options, starts, program compiles and groups, FIFO submissions, admission and source preparation |
+| `zml/io/execute_admission.zig` | Pure per-device room and cost arithmetic behind program admission |
 | `zml/io/backend.zig` | Backend selection, submission dispatch and the shared `LoadSpec` contract |
 | `zml/io/TensorStore.zig` | Checkpoint lookup, source bindings and prefixed model views |
 | `zml/io/direct_loader.zig` | Planning, FIFO scheduling, source workers and transfer completion |

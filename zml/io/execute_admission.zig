@@ -1,4 +1,4 @@
-//! The arithmetic behind `Loader.loadExecute` admission: what a submission
+//! The arithmetic behind `Loader` program admission: what a submission
 //! needs on each device, what the devices have left, and whether the next
 //! submission fits beside the ones still pending. Everything is per device
 //! (index = `platform.devices` index) in bytes; nothing here touches a

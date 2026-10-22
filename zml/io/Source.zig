@@ -10,9 +10,12 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
+const Compiler = @import("../Compiler.zig");
 const constants = @import("../constants.zig");
 const DataType = @import("../dtype.zig").DataType;
+const Exe = @import("../exe.zig").Exe;
 const Memory = @import("../platform.zig").Memory;
+const Platform = @import("../platform.zig").Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
@@ -83,7 +86,7 @@ pub fn init(store: *TensorStore, tensor: *const safetensors.Tensor, tags: ?[]con
 /// parts as pieces. `shape_` must fill the bytes the binding fills, its
 /// elements whole bytes or packed within the parts' runs.
 pub fn ofBinding(store: *TensorStore, binding: TensorStore.Binding, shape_: Shape) Source {
-    stdx.debug.assert(binding.inputs == null, "Source.ofBinding: a program computes {f}, which has no source", .{shape_});
+    stdx.debug.assert(binding.program == null, "Source.ofBinding: a program computes {f}, which has no source", .{shape_});
     var res_shape = shape_;
     res_shape._sharding = .replicated;
     const ebits: u64 = res_shape.dtype().bitSizeOf();
@@ -558,12 +561,18 @@ pub fn placeAs(self: Source, placed: Shape) Input {
     return .{ .source = self, .shape = placed };
 }
 
-/// Makes a model tensor of `output` that a program computes while loading
-/// (`Loader.loadExecute`), from `inputs` in this order: the loader lands
+/// Makes a model tensor of `output` that `func(args, output, inputs)`
+/// computes while loading, over `inputs` in this order. The loader lands
 /// each input as it lands a bound source, placed by its shape, in default
-/// device memory, runs the program over them, then frees them. The
-/// program's input shapes are the inputs' (`TensorStore.Binding.inputs`).
-pub fn bindProgram(inputs: []const Input, output: Shape) Tensor {
+/// device memory; compiles the program once for every tensor of the same
+/// `func`, equal `args` and the same placed shapes; runs it, and frees the
+/// inputs. `func` returns a tensor of `output`, placed alike. `args` is
+/// plain data, without pointers, so equal args are found by value.
+pub fn bindProgram(inputs: []const Input, output: Shape, comptime func: anytype, args: ProgramArgs(func)) Tensor {
+    const Args = ProgramArgs(func);
+    comptime {
+        if (!isPlainData(Args)) @compileError("Source.bindProgram: args of " ++ @typeName(Args) ++ " must be plain data, without pointers");
+    }
     stdx.debug.assert(inputs.len != 0, "Source.bindProgram: a program computing {f} needs an input", .{output});
     const store = inputs[0].source.store;
     var lowering: Lowering = .init(store);
@@ -574,9 +583,64 @@ pub fn bindProgram(inputs: []const Input, output: Shape) Tensor {
         layout.* = lowering.layout(input);
     }
     const tensors = lowering.tensors.toOwnedSlice(lowering.arena) catch oom();
+    const Erased = struct {
+        const vtable: TensorStore.Program.VTable = .{ .name = @typeName(Args), .compile = compile, .eql = eql };
+
+        fn typed(erased: *const anyopaque) Args {
+            if (@sizeOf(Args) == 0) return undefined;
+            return @as(*const Args, @ptrCast(@alignCast(erased))).*;
+        }
+
+        fn compile(
+            erased: *const anyopaque,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            platform: *const Platform,
+            opts: Compiler.Options,
+            output_: Shape,
+            inputs_: []const Tensor,
+        ) Compiler.Error!Exe {
+            return Compiler.compile(allocator, io, platform, func, .{ typed(erased), output_, inputs_ }, opts);
+        }
+
+        fn eql(a: *const anyopaque, b: *const anyopaque) bool {
+            return std.meta.eql(typed(a), typed(b));
+        }
+    };
+    const stored: *const anyopaque = if (@sizeOf(Args) == 0) &no_args else stored: {
+        const copy = lowering.arena.create(Args) catch oom();
+        copy.* = args;
+        break :stored copy;
+    };
+    const program = lowering.arena.create(TensorStore.Program) catch oom();
+    program.* = .{ .inputs = layouts, .args = stored, .vtable = &Erased.vtable };
     const tensor: Tensor = .fromShape(output);
-    store.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .inputs = layouts }) catch oom();
+    store.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .program = program }) catch oom();
     return tensor;
+}
+
+/// The args of a program `func(args, output, inputs)` (`bindProgram`).
+pub fn ProgramArgs(comptime func: anytype) type {
+    return @typeInfo(@TypeOf(func)).@"fn".param_types[0].?;
+}
+
+/// What a program of zero-sized args points to.
+const no_args: u8 = 0;
+
+/// Values compared by value: no pointer anywhere inside.
+fn isPlainData(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .void, .bool, .int, .float, .@"enum" => true,
+        .array => |info| isPlainData(info.child),
+        .optional => |info| isPlainData(info.child),
+        .@"struct" => |info| inline for (info.field_types) |Field| {
+            if (!isPlainData(Field)) break false;
+        } else true,
+        .@"union" => |info| info.tag_type != null and inline for (info.field_types) |Field| {
+            if (!isPlainData(Field)) break false;
+        } else true,
+        else => false,
+    };
 }
 
 /// Lowers sources to byte parts of the checkpoint tensors they read, each
