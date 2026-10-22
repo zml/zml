@@ -12,7 +12,6 @@ zig_library(
     deps = [
         "//mlir",
         "//mlir/dialects/scf",
-        "//stdx",
     ],
 )
 

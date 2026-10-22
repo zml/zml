@@ -11,10 +11,10 @@ cc_library(
     tags = ["manual"],
     deps = [
         ":dialect",
+        ":headers",
         "//mlir/dialects/cute_nvgpu:dialect",
         "@llvm-project//mlir:CAPIIR",
     ],
-    alwayslink = True,
 )
 
 zig_library(
@@ -22,7 +22,6 @@ zig_library(
     import_name = "mlir/dialects/cute_ir",
     main = "cute_ir.zig",
     tags = ["manual"],
-    visibility = ["//visibility:public"],
     deps = [
         ":capi",
         "//mlir",
@@ -41,7 +40,7 @@ zig_test(
 )
 
 td_library(
-    name = "tabledefs",
+    name = "td_files",
     srcs = [
         "CuteAttrsAll.td",
         "CuteAttrsCompiler.td",
@@ -51,7 +50,12 @@ td_library(
         "CuteTypesCompiler.td",
     ],
     includes = ["/"],
-    deps = ["@cute_ir//:cute_ir_dialect_td"],
+    deps = [
+        "@cute_ir//:cute_ir_dialect_td",
+        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+    ],
 )
 
 gentbl_cc_library(
@@ -68,7 +72,7 @@ gentbl_cc_library(
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
     td_file = "CuteEnums.td",
-    deps = [":tabledefs"],
+    deps = [":td_files"],
 )
 
 gentbl_cc_library(
@@ -91,7 +95,7 @@ gentbl_cc_library(
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
     td_file = "CuteAttrsAll.td",
-    deps = [":tabledefs"],
+    deps = [":td_files"],
 )
 
 genrule(
@@ -123,7 +127,7 @@ gentbl_cc_library(
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
     td_file = "CuteTypesAll.td",
-    deps = [":tabledefs"],
+    deps = [":td_files"],
 )
 
 gentbl_cc_library(
@@ -140,7 +144,7 @@ gentbl_cc_library(
     ],
     tblgen = "@llvm-project//mlir:mlir-tblgen",
     td_file = "CuteOps.td",
-    deps = [":tabledefs"],
+    deps = [":td_files"],
 )
 
 cc_library(

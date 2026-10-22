@@ -15,7 +15,6 @@ cc_library(
         "@flydsl//:TiledOpTraits",
         "@llvm-project//mlir:CAPIIR",
     ],
-    alwayslink = True,
 )
 
 zig_library(

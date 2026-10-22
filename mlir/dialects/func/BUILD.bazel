@@ -10,7 +10,6 @@ cc_library(
         "@llvm-project//mlir:CAPIIR",
         "@llvm-project//mlir:FuncExtensions",
     ],
-    alwayslink = True,
 )
 
 zig_library(
