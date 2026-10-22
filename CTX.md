@@ -124,88 +124,34 @@ Zig formatting, Buildifier, and `git diff --check` passed.
 
 ### Scope and API
 
-- `zml.io.Loader` selects the direct path for CUDA, ROCm, oneAPI and CPU
-  (`mem.DmaWorkspace.isSupported`; CPU arenas are plain pages, see "Ninth
-  pass") and the buffered path for TPU, neuron and metal. A loader owns its
-  worker pool and every submission it published, kept in a FIFO until
-  retired. `load(Model, model, buffers, store, progress)` submits all
-  single-source tensors of a model (no `shardings` argument since the
-  2026-10-14 master merge: placement comes from each tensor's shape); `loadExecute(store, bindings,
-  progress)` submits the sources of one or more `Binding{tensor, output,
-  exe}` as ONE planned submission so adjacent sources of different bindings
-  coalesce; both return `!void` (fourteenth pass; before it every submission
-  returned a `Handle`). Retiring a submission waits for its reads and DMA,
-  then for bindings runs each executable in binding order on the retiring
-  task with `.wait = true`, writes `output.*`, frees the inputs and commits
-  the submission's logical bytes to `bytesLoaded()`. `awaitAll` retires
-  everything in publish order and returns the first error, which is sticky:
-  later submissions are refused. `deinit` awaits what is pending without
-  running executables. A zero-byte tensor is `error.EmptyTensor`.
-- Memory policy lives in `loadExecute` (fourteenth pass): before publishing
-  it retires the oldest pending submissions, running their executables on the
-  calling task, until its own cost (inputs, output and the executable's
-  compiled temporaries per device) fits the room the devices report
-  (`bytes_limit - bytes_in_use` minus the loader's submitted-but-unallocated
-  bytes minus a 64 MiB reserve, `zml/io/execute_admission.zig`); one
-  submission is always admitted. Where a device reports no limit (CPU) or the
-  backend does not count its allocations (buffered), every pending submission
-  is retired first, the pre-rework synchronous order. `load` is never gated,
-  and a transformed tensor counts as delivered once a `loadExecute` naming it
-  was submitted, so a bulk submitted after the packs queues behind them.
-  There is no caller-side window and no memory knob.
-- `VFS.loadProfile(path)` is prepared once for a model load and passed as a
-  borrowed `LoadProfile`. It contains a backend name, minimum read chunk,
-  `high_latency`, and optional aggregate retry/throttle statistics. Those
-  statistics are observability, not control (sixteenth pass): nothing in the
-  loader reacts to them, and they are backend-wide rather than load-tagged.
-- Profile minima are local/file 8 MiB, HTTP/S3/GCS 16 MiB, and HF 32 MiB.
-  Effective source request size is the greater of the profile minimum and
-  calibrated DMA block size, capped at the supported 32 MiB maximum.
-- The source width is fixed per load (fifteenth pass): `Options.read_parallelism`,
-  null for the profile's default of 16 (local) or 32 (high-latency). The current
-  `Loader` API differs from the adjacent monorepo's older checkout: store,
-  shardings, progress, and profile now belong to loader initialization.
-- `DirectMemoryWriter`, `DirectShardWriter`, and `DynamicBufferPool` are no
-  longer public loader mechanisms. There is no executor inside the loader:
-  executables run on the caller's task, inside `loadExecute` when admission
-  retires older submissions and inside `awaitAll`; publish order is the
-  execution order.
-- Model traversal, tensor-store lookup, resolved sharding selection, and output
-  flattening happen once in the shared `Loader.load` front end. Executable
-  source lookup, validation, input-shell allocation (`BoundExecutable`),
-  execution, and output ownership similarly live once above the backend
-  split; buffered and direct loaders implement only `submit(specs)` and
-  `awaitBatch`. The buffered memory writer is private.
-- `zml/io.zig` is the public facade. The shared loader front end is in
-  `zml/io/loader.zig`, while `zml/io/backend.zig` owns backend selection,
-  submission dispatch, and the `LoadSpec` contract. Direct planning,
-  scheduling, transfer lifecycle, and their tests are in
-  `zml/io/direct_loader.zig`; platform-owned DMA settings, retained arenas,
-  and calibration are in `zml/io/dma_calibration.zig`; pure sharding-to-byte-span
-  expansion is in `zml/io/DispatchSpans.zig`.
-- `Loader` owns IO, platform, store, and front-end options directly rather than
-  recovering duplicated state from its active backend. The buffered backend
-  retains none of the unused store/options; the direct backend retains only
-  the load profile and progress pointer needed after construction.
-- The front end counts a submission's logical bytes when it is retired with
-  execution (`bytesLoaded`; the backends no longer count, fifteenth pass).
-  Direct diagnostics are batch-owned (publish, seal and completion offsets
-  from loader creation, planned jobs/items/transfers, plan count with total
-  planning time, VFS delta since publish) and logged once per batch at await;
-  loader-wide totals (reads, physical bytes, DMA submissions, pool
-  high-water/mapped, width) are logged once at `destroy`.
-- The compatibility target observed in `~/github/zml/monorepo` is behavioral:
-  repeated `loadExecute`, whole-model `load`, multi-source `TensorStore`
-  bindings, and cumulative loaded-byte accounting. That checkout is migrated
-  to the handle API in task 5.
+Since R16 (forty-eighth pass) the contracts live in the pub doc comments,
+and docs/learn/loader.md is the guide. This section points to them:
+
+- API, lifetimes and errors: `Loader` (`init`, `start`, `wait`, `cancel`,
+  `deinit`, `Options`, `Error`), `TensorStore` (`View`, `Binding`,
+  `Program`), `Source`, `Quantization.Target`, and the registry
+  (`TensorRegistry.fromPath`, `addRepo`, `Tensor.read`, `readRange`).
+- From bindings to specs, program groups, admission and accounting: the
+  loader.zig `//!` header. Where admission cannot measure the room (a
+  device that reports no limit, such as CPU, or the buffered backend), one
+  program group is in flight at a time.
+- Backend selection and the `LoadSpec` contract: backend.zig. The direct
+  backend's sizing, planner, credits and pumps: the direct_loader.zig
+  header. The buffered backend: the buffered_loader.zig header. The module
+  map: `zml/io.zig`.
+- Diagnostics: each direct batch logs its planning and completion lines at
+  debug when it is awaited, and the backend logs its totals (reads, bytes,
+  credits high water, pinned mapped, waits, DMA) at debug from `destroy`.
+  The loader logs its admission at debug from `deinit`.
 
 ### Source and VFS data plane
 
 - `safetensors.readFilePositionalAllV` is the one exact positional scatter
   implementation for tensor readers and direct-loader pinned reads. It handles
-  short-read resumption and local `IOV_MAX` batching; `TensorReader` adds tensor
-  range validation and borrowed readers over a shared open file. Each distinct
-  safetensor object is opened once per model-wide load.
+  short-read resumption and local `IOV_MAX` batching; `Tensor.readRange`
+  adds tensor range validation over a shared open file. The direct backend
+  opens each distinct safetensor object once and keeps it open until the
+  loader's `deinit` (the `Loader` doc comment).
 - HTTP, S3, GCS, and HF share one range read loop,
   `range_read.performRangeRead` over the governed loop of
   `vfs/request.zig`: one whole Range request per admitted positional call,
@@ -220,12 +166,13 @@ Zig formatting, Buildifier, and `git diff --check` passed.
   its extra headers; the loop appends `Range`. S3 recomputes the SigV4 timestamp and signature in the hook per
   attempt, GCS copies (refreshing when expired) its bearer per attempt, HTTP
   and HF return a static request. The backends keep URL construction,
-  credential assembly and their `backend()` profile; retry settings are one
-  `RetryConfig` built from each backend's `InitOpts`, and the stats provider
-  is `AtomicReadStats.provider()`.
-- Registration is `VFS.registerBackend` only (`VFS.register` is gone);
-  `loadProfile` resolves a bare path through the registered `file` backend and
-  falls back to `LoadProfile.local`.
+  credential assembly and their `backend()` read hints; retry settings are
+  one `request.Retry`, each backend's `retry` option, and each backend
+  counts its reads in an `AtomicReadStats` and logs the totals at debug
+  from its `deinit` (forty-seventh pass).
+- Registration, `Remotes`, load profiles, the remote error contract and the
+  VFS's lifetime: the vfs/vfs.zig header and the doc comments of
+  `registerBackend`, `Remotes`, `io` and `loadProfile`.
 - Shared Range handling reads `Content-Range` before taking the body reader
   (which releases the head bytes), validates that it covers the request,
   handles a server returning `200` and ignoring Range by discarding the
@@ -244,7 +191,7 @@ Zig formatting, Buildifier, and `git diff --check` passed.
 - Rate limiting is a hold, in `vfs/request.zig`. One `Governor` per backend
   instance (keyed by URI authority, so a per-authority scope is a change to
   one function) holds a deadline: a throttle arms it at
-  `max(server delay, full-jitter backoff)` clamped to `[retry_initial_delay,
+  `max(server delay, full-jitter backoff)` clamped to `[initial_delay,
   max_hold]`, extends it when a later answer names something longer, and
   never shortens it. Every request of that backend waits the deadline out,
   each with its own jitter, and re-checks, since it may have been extended.
@@ -253,18 +200,23 @@ Zig formatting, Buildifier, and `git diff --check` passed.
   fails the backend's requests with `error.RateLimited` until one comes.
   Timeouts never hold. Two budgets, not one: a throttle is not charged to
   `max_retries`, so a limited server cannot exhaust a reader, and everything
-  else keeps the per-request backoff. Defaults: five retries, 500 ms to 30 s
-  of backoff, a 2 minute hold cap, a 5 minute episode budget, all
-  `InitOpts` fields of the four backends. The hold is a deadline rather
+  else keeps the per-request backoff. The defaults are the `request.Retry`
+  fields: five retries, 500 ms to 30 s of backoff, a 2 minute hold cap, a
+  5 minute episode budget. The hold is a deadline rather
   than a permit, so it composes with the loader's fixed width instead of
   competing with it, and a request holding a source credit simply waits.
 - One source job performs one exact absolute scatter read into pinned blocks.
   Extra physical calls occur only for short reads/retries or `IOV_MAX` limits.
   The loader counts read operations, not physical calls: a remote source's
-  physical request count comes from the VFS `batch source` line, and a local
-  profile has none.
+  physical request count comes from its backend's read totals, logged at
+  its `deinit`, and a local file has none.
 
 ### Coalesced source planner
+
+The direct_loader.zig `//!` header is the current summary of the direct
+backend. The three sections below keep the detail and the reasons from the
+passes that built it; a name here can lag a later rename (the passes
+record them).
 
 The old planner made jobs tensor-local. `source_request_size` was only a cap,
 so small adjacent tensors each caused a source operation. `DirectLoader.submit`
@@ -475,56 +427,20 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
 
 ### DMA memory and calibration
 
-- `DmaBlockPool` is a load-scoped view over platform-owned arenas. It supports
-  blocking atomic multi-block acquisition, callback reference leases, a hard
-  mapped-byte ceiling, demand growth, NUMA reserves, and augmenting-path
-  affinity assignment. Matching is correctness logic: greedily assigning a
-  replicated block can consume the only block usable by a later strict-local
-  request. Construction is exclusively arena-provider backed, including tests;
-  there is no alternate owned-slab mode or externally refreshed-arena path.
-  Acquired block handles carry their NUMA node, so final callback release goes
-  directly to the correct free list without scanning retained arenas.
-- Calibration resources/settings belong to `Platform`. Conservative defaults
-  work without calibration; `benchTransfer` atomically replaces them and its
-  arenas are retained as the loader's initial pool. Platform state prevents
-  calibration, loading, inspection, and teardown from borrowing the workspace
-  concurrently.
-- DMA configuration does not copy platform identity. It owns NUMA nodes in
-  platform order plus block size, per-device width, and mapped budget; the
-  stable `Platform` pointer is authoritative for device IDs and kind. Both
-  default and calibrated settings reject empty, oversized, or heterogeneous
-  platforms before allocating workspace.
-- Current detector screens DMA blocks 2/4/8/16/32 MiB at width eight. Default
-  screens require at least 2 ms and 32 completions. Borderline results use
-  three alternating pairs at 25 ms/256 transfers. The 8% near-peak rule favors
-  a smaller block. It tunes one representative device, warms every device
-  allocator concurrently through `Platform.warmupDeviceAllocators(io)` (the
-  only warm-up implementation), applies the uniform selected tuple, and grows
-  the retained all-device working set. There is no decision-dead aggregate
-  timing phase.
-- Calibration code is specialized for that representative lane: a window
-  returns one metric directly, screen candidates own three inline samples, and
-  the report contains one measured recommendation. There are no lane slices,
-  one-element result allocations, nullable candidate widths, or synthesized
-  recommendations for devices that were not measured.
-- Calibration reports one `dma_bench` summary line: platform, device kind,
-  selected block and width, measured GiB/s, elapsed/calibration/allocator
-  warm-up ms, retained mapped bytes and NUMA pool count. There is no timing
-  decomposition, no per-window `dma_bench_sample` line, and no transfer
-  latency accumulator; per-arena mapping cost is logged where each arena is
-  mapped, and the loader's own `live loader ready` line reports pre-growth.
-- Retained arenas are initial capacity, not the full permissible live set.
-  Detection starts with one largest-candidate calibration ring, reuses it,
-  grows after selection to the all-device working set, and permits bounded slab
-  growth up to the mapped-memory ceiling. One `allocate(node, bytes)` is the
-  only arena growth path - calibration ring, post-selection reserves,
-  pre-grown working set and load-time demand - and it holds the mapped-ceiling
-  check; `ensureLoadBlockReserves` and `ensureSourceWorkingSet` only compute
-  per-pool block targets and grow independent nodes concurrently. Workspace
-  validation, arena reserves, worker scratch, and pinned feasibility use the
-  exact maximum
-  coalesced-job bound `ceil(max_job_len / block_size)`; device or writer count
-  does not inflate the blocks required by one source job.
+- Host memory (arenas per platform, NUMA interleave, the 16 GiB mapped
+  ceiling, `OutOfMemory`): the host_memory.zig header. The direct backend
+  owns its workspace and maps it once, before the first read; nothing maps
+  during a load.
+- Calibration (the screen, CPU's defaults, `measure` for dma-bench): the
+  dma_calibration.zig header. The screen's windows and margins are the
+  `dma_calibration.Options` defaults: 2 ms and 32 transfers per window,
+  25 ms and 256 transfers per borderline confirmation. Calibration logs
+  one `dma_bench` line at debug: platform, device kind, block, width,
+  GiB/s, duration and retained mapped bytes.
+- `Platform.warmupDeviceAllocators(io)` is the only allocator warm-up;
+  `init`'s task and `measure` run it before calibrating. Calibration
+  measures one representative device, and the selected block and depth
+  apply to every device.
 
 ## Latest DeepSeek result: why coalescing mattered
 
@@ -7753,7 +7669,145 @@ Checks:
   `off` alignment 0. Sizing as in R14: request 8 MiB, block 4 MiB,
   width 16, 33 credits.
 
+## Forty-eighth pass: docs (R16) (2026-10-22)
+
+R16 of `LOADER_API_REVIEW.md` (K-docs-one-place-per-contract,
+K-newcomer-recipe, M2-source-doc-contract, J-lifetime-graph). Each loader
+contract was written up to four times (loader.md, the doc comments, CTX
+"Current design", private comments) and the copies disagreed, admission
+when the room cannot be measured among them. Two-thirds of loader.md
+described internals, and no tutorial loaded a checkpoint.
+
+zml:
+- The pub doc comments are the contract: `Loader` (`init`, `start`,
+  `wait`, `cancel`, `deinit`, `Options`, `Error`), `TensorStore`, `View`,
+  `Binding`, `Program`, `Source`, `Quantization.Target`, the VFS (its
+  error contract and lifetime in the vfs.zig header, `Remotes`,
+  `registerBackend`, `io`) and the registry (`fromPath`, `addRepo`,
+  `Tensor.read`, `readRange`). Each says what it borrows, for how long,
+  and what fails and how. The `Loader` doc names the borrows that last as
+  long as the loader: the platform, and `io` with the VFS behind it,
+  through which the loader keeps its source files open until `deinit`;
+  file paths are copied.
+- Source.zig's module doc states the one-store and lifetime rules: pieces
+  live in the store's arena, the store must not move, sources of two
+  stores panic in `concatenate`, `stack` and `bindProgram`, placement
+  comes last, and `bind`/`bindProgram` are the only terminals.
+- docs/learn/loader.md is a guide of 205 lines: the recipe, placement,
+  composite tensors, programs, lifetime and failure (a borrow table) and
+  the errors a caller can act on. Its internals moved to the `//!`
+  headers that own them: loader.zig (specs, admission, accounting),
+  direct_loader.zig (sizing, planner, credits, pumps, gathers and the
+  DeepSeek loader-versus-program numbers), host_memory.zig,
+  dma_calibration.zig (new header), buffered_loader.zig,
+  vfs/direct_io.zig (the per-file policy and its numbers), log.zig, and
+  the module map in zml/io.zig. log.zig's "debug when the loader stays
+  usable" rule was obsolete and went. README links to the guide.
+- write_first_model: the six `fromSlice` calls lose their stale
+  `.replicated` argument, the "TensorStore is optional" and `sharding`
+  paragraphs are rewritten, and a "Loading weights" step writes a
+  checkpoint with a short Python script and loads it with the recipe.
+- `TensorRegistry.fromPath` takes a relative file path. It opened the
+  file by its full path inside the file's own directory, so
+  `ckpt/layer.safetensors` looked for `ckpt/ckpt/layer.safetensors`
+  (`FileNotFound`), and a bare file name was `InvalidPath`. It now opens
+  the base name, and a bare name's directory is the cwd. A local denied
+  directory or entrypoint is `PermissionDenied`, as on a remote; it was
+  `InvalidPath` or `FileNotFound`. A test loads a file and an index by a
+  cwd-relative path.
+- CTX "Current design": "Scope and API" and "DMA memory and calibration"
+  are pointers to the doc comments and headers, with what is written
+  nowhere else (diagnostics lines, the calibration windows). The VFS
+  bullets name `request.Retry`, the backends' read totals and the
+  vfs.zig header. The planner, pinned-block and scheduling sections are
+  marked as detail behind the direct_loader.zig header.
+- PLAN.md: the zig path is 0.17.0, task 22 is done (forty-seventh pass),
+  task 21's confirmation tunables are demoted (thirty-eighth), Group D
+  names `request.Retry`, `initial_delay` and `max_delay`, and the llmd
+  migration list is marked done with its passes.
+
+monorepo: AGENTS.md's `errdefer if (fut.cancel(io)) |value|
+value.deinit(...)` gains a caveat: after the await, `cancel` returns the
+future's stored copy, so the idiom is wrong for a by-value handle that
+changes once the future completes (examples/llm's `Loader`).
+
+Copies that disagreed, and what the code does:
+- Unmeasured admission (a device without a limit, or the buffered
+  backend) keeps one program group in flight. CTX and an earlier
+  loader.md said every pending submission was retired first.
+- A denied local file is `AccessDenied` (EACCES through `std.Io.Threaded`,
+  which the VFS passes on); `PermissionDenied` is a remote's 401 or 403.
+- Device memory that runs out is PJRT's `ResourceExhausted`; only host
+  memory is `OutOfMemory`.
+- A truncated checkpoint fails `fromPath` with `InvalidSafetensorsHeader`.
+  `UnexpectedEndOfFile` from the loader means a file changed after its
+  header was read, or a tensor's shape needs more bytes than its
+  `data_offsets` give.
+- The direct backend's one-read check of a broadcast or transpose runs
+  when its submission is published: in `start` for the tensors the
+  loader fills, in `wait` for a program's inputs.
+
+Review (workflow, refuting verifier): nineteen findings, ten distinct,
+all fixed.
+- `fromPath`'s new doc promised relative file paths that failed (three
+  reports). Fixed in the code, with the test above, rather than in the
+  doc.
+- loader.md's errors table said `OutOfMemory` covers device memory (three
+  reports). It now has a `ResourceExhausted` row.
+- `start`'s doc listed the one-read check among those done before
+  anything is published (three reports). `start` and `wait` now say when
+  it runs.
+- loader.md gave `dma_block_sizes` a lifetime of "until the first
+  `start`"; `init`'s task reads it until the first `start` or `deinit`
+  (three reports).
+- `UnexpectedEndOfFile` was "a short file", which `fromPath` catches
+  first. The guide and `Loader.Error` now give both meanings, and the
+  guide names `InvalidSafetensorsHeader`.
+- The docs said a denied file is `PermissionDenied`. Locally it is
+  `AccessDenied`; `fromPath`'s directory and entrypoint probes now map it.
+- `registerBackend` keeps its scheme string uncopied, and `io()` points
+  into the VFS, which must not move after: both are now doc comments.
+- Source.zig said its ops have Tensor's panics; slices are static and
+  contiguous, and padding is zeros only.
+- PLAN.md kept "several stores per loader" as an llmd requirement; llmd
+  makes several starts from one store.
+- Item (f) had been skipped (two reports): the CTX edits above.
+
+Not done:
+- The tutorial has no build target. The implementer built both of its
+  versions in a temporary `//examples/simple_layer` and ran them on CPU
+  (the slice version printed `{6,11,16}`, the loading one loaded 12 B and
+  printed the same), then deleted it. The code can drift again.
+- mnist and the README still pass `.read_parallelism = 1`, a knob
+  K-newcomer-recipe lists as unneeded.
+- The planner, pinned-block and scheduling sections of CTX "Current
+  design" keep sixteenth-pass names (`DirectLoader.submit`,
+  `RequestContext`, `metadata_mutex`); they are only marked.
+- In `fromPath`, a denied local file opened by name (the one given, or
+  one an index lists) is still `AccessDenied`. The doc says so.
+- loader.md is 205 lines, past the 200 the move allowed.
+- Not run on a GPU, ROCm or a remote checkpoint: the docs for those paths
+  are read from the code.
+
+Checks:
+- `bazel test //zml:test` passes (337, 12 skip): the relative-path test
+  came.
+- `bazel test //vfs:test` passes.
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7, and
+  `bazel build --config=localzml //llmd:llmd`.
+- `zig fmt` on scratch copies: no diff in the changed code.
+- No docs build or lint target exists under docs/.
+
 ## Open work
+
+- 2026-10-22 docs (forty-eighth pass, zml szunznok and monorepo
+  ulnsvlvu): R16 done. The pub doc comments are the contract, loader.md
+  is a guide, the internals are in the `//!` headers, and CTX "Current
+  design" points to them. `TensorRegistry.fromPath` takes relative file
+  paths. Open: the tutorial has no build target; mnist and the README
+  pass `.read_parallelism = 1`; the direct backend sections of "Current
+  design" keep old names. Not run on a GPU.
 
 - 2026-10-22 the loader meets the VFS only through io (forty-seventh
   pass, zml lluzuwnv): R15 done, with Move 10's delete-only stages.
@@ -7762,8 +7816,8 @@ Checks:
   backends share one `request.Retry` and one `init(allocator, io,
   client, options)`, and each request states its spec once. Open from
   Move 10: the handle table (backends as stores), `retry_once`, and the
-  GCS behavior stages. PLAN.md still names `InitOpts` and
-  `retry_initial_delay`. Not run on a GPU or against a real remote.
+  GCS behavior stages. PLAN.md caught up in the forty-eighth pass. Not
+  run on a GPU or against a real remote.
 
 - 2026-10-22 one root in the direct backend (forty-sixth pass, zml
   nxtvovxr): R14 done. Pipeline and Sizing are gone, each sizing value
@@ -7838,8 +7892,8 @@ Checks:
   and monorepo sltmxrzn): R5 done. `init` checks a caller's four options
   and sets up on its own task; `dma_calibration.measure` serves dma-bench;
   `limits.zig` and `execute_admission.zig` are gone. Not run on a GPU, a
-  real model or a remote checkpoint. monorepo/AGENTS.md and PLAN.md still
-  show the old init.
+  real model or a remote checkpoint. monorepo/AGENTS.md and PLAN.md
+  caught up in the forty-eighth pass.
 - 2026-10-22 the rest of R4 (thirty-seventh pass, zml ryvvruus and
   monorepo vrounrwt): the loader logs and counts its own load, buffers
   can be freed after any failure, model bugs are `InvalidBinding`. R4 is
