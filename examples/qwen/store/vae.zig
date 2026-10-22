@@ -199,14 +199,15 @@ fn load_up_blocks(
                 .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                 .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .replicated),
                 .kernel_size = 3,
+                .padding = 1,
             },
-            .time_conv = block.QwenImage21CausalConv3d{
-                .conv = block.Conv2d{
-                    .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                    .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .replicated),
-                    .kernel_size = 1,
-                },
-            },
+            // .time_conv = block.QwenImage21CausalConv3d{
+            //     .conv = block.Conv2d{
+            //         .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
+            //         .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .replicated),
+            //         .kernel_size = 1,
+            //     },
+            // },
         };
 
         break :b0 block.QwenImage21ResidualUpBlock{
@@ -257,14 +258,15 @@ fn load_up_blocks(
                 .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                 .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .replicated),
                 .kernel_size = 3,
+                .padding = 1,
             },
-            .time_conv = block.QwenImage21CausalConv3d{
-                .conv = block.Conv2d{
-                    .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                    .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .replicated),
-                    .kernel_size = 1,
-                },
-            },
+            // .time_conv = block.QwenImage21CausalConv3d{
+            //     .conv = block.Conv2d{
+            //         .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
+            //         .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .replicated),
+            //         .kernel_size = 1,
+            //     },
+            // },
         };
 
         break :b1 block.QwenImage21ResidualUpBlock{
@@ -351,14 +353,15 @@ fn load_up_blocks(
                 .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                 .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .replicated),
                 .kernel_size = 3,
+                .padding = 1,
             },
-            .time_conv = block.QwenImage21CausalConv3d{
-                .conv = block.Conv2d{
-                    .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                    .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .replicated),
-                    .kernel_size = 1,
-                },
-            },
+            // .time_conv = block.QwenImage21CausalConv3d{
+            //     .conv = block.Conv2d{
+            //         .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
+            //         .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .replicated),
+            //         .kernel_size = 1,
+            //     },
+            // },
         };
 
         break :b2 block.QwenImage21ResidualUpBlock{
@@ -445,8 +448,8 @@ fn load_up_blocks(
                 .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                 .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .replicated),
                 .kernel_size = 3,
+                .padding = 1,
             },
-            .time_conv = null,
         };
 
         break :b3 block.QwenImage21ResidualUpBlock{
