@@ -203,6 +203,11 @@ pub const Sort = struct {
 };
 
 pub const Mfma = struct {
+    /// MFMA loads full 64-column by 128-reduction tiles without tail masks.
+    pub fn supportsShape(n: i64, k: i64) bool {
+        return n > 0 and k > 0 and @mod(n, 64) == 0 and @mod(k, 128) == 0;
+    }
+
     /// The caller owns route localization, activation and reduction.
     /// `expert_ids` contains local bank indices, including -1 for remote experts.
     /// Sorted routes must contain a real prefix followed by padding per expert.
@@ -226,7 +231,7 @@ pub const Mfma = struct {
             topk > 0 and block_m > 0 and block_m % 16 == 0);
         const n = weight.dim(1);
         const k = input.dim(1);
-        std.debug.assert((n == 4608 and k == 5120) or (n == 5120 and k == 2304));
+        std.debug.assert(supportsShape(n, k));
         std.debug.assert(input.dim(0) > 0 and weight.dim(0) > 0 and weight.dim(2) == @divExact(k, 2) and
             scales.dim(0) == weight.dim(0) and scales.dim(1) == n and scales.dim(2) == @divExact(k, 32) and
             output.dim(-1) == n);
@@ -534,7 +539,7 @@ const Gemv = struct {
 
     /// One local expert ID per original route; negative/out-of-bank IDs write zero.
     fn call(x: Tensor, weight: Tensor, scales: Tensor, ids: Tensor, output: zml.Shape, topk: usize) Tensor {
-        const cfg: Gemv.Config = if (weight.dim(1) == 4608)
+        const cfg: Gemv.Config = if (x.dim(1) >= 4096)
             .{ .rows = 4, .lanes = 64, .unroll = 1 }
         else
             .{ .rows = 4, .lanes = 32, .unroll = 5 };

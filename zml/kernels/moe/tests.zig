@@ -622,6 +622,24 @@ test "Fly compatibility matrix" {
     }, .{});
 }
 
+test "Fly general projection shapes" {
+    const pipeline: Pipeline = .{ .platform = zml.testing.env() };
+
+    // Cover GEMV, sorted MFMA with 16- and 32-row tiles, and wider projections.
+    try pipeline.run(std.testing.io, std.testing.allocator, .fly, .{
+        .formats = &.{.{ .scheme = .mxfp4 }},
+        .activations = &.{.{ .swiglu = .{} }},
+        .placements = &.{.before_down},
+        .shapes = &.{
+            .{ .width = 384, .intermediate = 128, .experts = 2 },
+            .{ .width = 384, .intermediate = 128, .experts = 2, .tokens = 7 },
+            .{ .width = 384, .intermediate = 128, .experts = 2, .tokens = 1024 },
+            .{ .width = 7168, .intermediate = 2048, .experts = 2 },
+            .{ .width = 7168, .intermediate = 2048, .experts = 2, .tokens = 7 },
+        },
+    }, .{});
+}
+
 test "Metal compatibility matrix" {
     const platform = zml.testing.env();
 

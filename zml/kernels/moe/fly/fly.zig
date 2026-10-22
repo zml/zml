@@ -209,27 +209,32 @@ pub fn supports(opts: FusedExpertsArgs) bool {
         opts.routing_weight_placement != .before_down) return false;
     const gate_up = opts.gate_up.weight;
     const down = opts.down.weight;
-    if (gate_up.rank() != 3 or down.rank() != 3 or opts.hidden_states.dim(.d) != 5120) return false;
+    if (gate_up.rank() != 3 or down.rank() != 3) return false;
     const gate_up_scale = opts.gate_up.quantizationScales() orelse return false;
     const down_scale = opts.down.quantizationScales() orelse return false;
     const experts = if (opts.expert_map) |map| map.dim(.expert) else gate_up.dim(0);
     if (experts < 1 or experts > 512) return false;
-    inline for (.{ .{ gate_up, gate_up_scale, 4608, 5120 }, .{ down, down_scale, 5120, 2304 } }) |projection| {
-        const weight, const scale, const n, const k = projection;
+    var max_width: i64 = opts.hidden_states.dim(.d);
+    inline for (.{ .{ gate_up, gate_up_scale }, .{ down, down_scale } }) |projection| {
+        const weight, const scale = projection;
         const packing_factor: i64 = switch (weight.dtype()) {
             .u8, .i8 => 2,
             .f4e2m1 => 1,
             else => return false,
         };
-        if (weight.dim(0) < 1 or weight.dim(0) > 512 or weight.dim(1) != n or weight.dim(2) * packing_factor != k or
-            scale.rank() != 3 or scale.dim(0) != weight.dim(0) or scale.dim(1) != n or scale.dim(2) != k / 32) return false;
+        const n = weight.dim(1);
+        const k = weight.dim(2) * packing_factor;
+        if (!fly.Mfma.supportsShape(n, k)) return false;
+        max_width = @max(max_width, n);
+        if (weight.dim(0) < 1 or weight.dim(0) > 512 or
+            scale.rank() != 3 or scale.dim(0) != weight.dim(0) or scale.dim(1) != n or scale.dim(2) != @divExact(k, 32)) return false;
         switch (scale.dtype()) {
             .u8, .i8, .f8e8m0 => {},
             else => return false,
         }
     }
     const routes = opts.hidden_states.dim(.t) * opts.topk_ids.dim(.topk);
-    return routes > 0 and routes <= std.math.maxInt(i32) / 5120;
+    return routes > 0 and routes <= @divTrunc(std.math.maxInt(i32), max_width);
 }
 
 pub fn prepareInput(x: Tensor, scheme: ?zml.Quantization.Scheme, _: zml.DataType, _: bool) struct { Tensor, ?Tensor } {
