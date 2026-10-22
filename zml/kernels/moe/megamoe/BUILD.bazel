@@ -1,0 +1,75 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
+
+package(default_visibility = ["//zml:__pkg__"])
+
+# `zml.moe.megamoe` (the op), compiled into `//zml`; it imports `:lib` by name.
+filegroup(
+    name = "megamoe",
+    srcs = [
+        "megamoe.zig",
+    ],
+)
+
+# Kernel-side MegaMoE modules (layout replica, PTX primitives, staging and MegaMoE kernels, the
+# Program's host function). They depend on the CuTe builder only, so `//zml` can depend on this
+# library and its tests build without `//zml`.
+zig_library(
+    name = "lib",
+    srcs = [
+        "device.zig",
+        "flow.zig",
+        "kernel.zig",
+        "kernel_test.zig",
+        "layout.zig",
+        "layout_test.zig",
+        "program.zig",
+        "ptx.zig",
+        "ptx_test.zig",
+        "scheduler.zig",
+        "staging.zig",
+        "tma.zig",
+    ],
+    import_name = "zml/kernels/moe/megamoe/lib",
+    main = "lib.zig",
+    tags = ["manual"],
+    visibility = ["//zml:__subpackages__"],
+    deps = [
+        "//kernels/cute:cute_builder",
+        "//mlir",
+        "//mlir/dialects",
+    ],
+)
+
+# Layout replica against DeepGEMM's numbers, PTX and kernel/program emission (module verification).
+zig_test(
+    name = "test",
+    deps = [":lib"],
+)
+
+# GPU micro-tests: DeepGEMM numerics and TMA descriptors (needs an SM100 GPU and reference
+# files from `gt/`; set MEGAMOE_REF_DIR). Run with --test_strategy=standalone.
+zig_test(
+    name = "gpu_test",
+    main = "gpu_test.zig",
+    tags = ["manual"],
+    deps = [
+        ":lib",
+        "//mlir",
+        "//mlir/dialects",
+        "//zml",
+    ],
+)
+
+# Runs zml.moe.megamoe on DeepGEMM reference dumps; see check.zig for usage.
+zig_binary(
+    name = "check",
+    main = "check.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_test(
+    name = "check_test",
+    main = "check.zig",
+    deps = ["//zml"],
+)

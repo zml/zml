@@ -11,6 +11,8 @@ pub const metal = @import("metal/metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu/mosaic_tpu.zig");
 pub const triton = @import("triton/triton.zig");
 pub const fly = @import("fly/fly.zig");
+/// DeepGEMM MegaMoE: fused EP dispatch, FP8 x FP4 experts, shared expert and combine.
+pub const megamoe = @import("megamoe/megamoe.zig");
 
 const log = std.log.scoped(.@"zml/moe");
 
