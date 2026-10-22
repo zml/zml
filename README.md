@@ -170,7 +170,7 @@ const Mnist = struct {
         store: *const zml.io.TensorStore,
     ) !zml.Bufferized(Mnist) {
         var buffers = try zml.mem.bufferize(allocator, Mnist, self);
-        errdefer unloadBuffers(&buffers);
+        errdefer zml.mem.deinitBufferized(allocator, Mnist, &buffers);
 
         var loader = try zml.io.Loader.init(allocator, io, platform, .{
             .read_parallelism = 1,
@@ -180,13 +180,6 @@ const Mnist = struct {
         try loader.wait();
 
         return buffers;
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {
-        self.fc1.weight.deinit();
-        self.fc1.bias.deinit();
-        self.fc2.weight.deinit();
-        self.fc2.bias.deinit();
     }
 
     /// just two linear layers + relu activation

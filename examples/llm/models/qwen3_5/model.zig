@@ -100,8 +100,7 @@ pub const LoadedModel = struct {
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         _ = self;
-        TextModel.unloadBuffers(&buffers.text_model, allocator);
-        zml.nn.Linear.unloadBuffers(&buffers.lm_head);
+        zml.mem.deinitBufferized(allocator, Model, buffers);
     }
 
     pub fn compile(
@@ -175,7 +174,7 @@ pub const Model = struct {
     ) !zml.Bufferized(Model) {
         const now: std.Io.Timestamp = .now(io, .awake);
         var buffers = try zml.mem.bufferize(allocator, Model, self);
-        errdefer Model.unloadBuffers(&buffers, allocator);
+        errdefer zml.mem.deinitBufferized(allocator, Model, &buffers);
         var loader = try zml.io.Loader.init(allocator, io, platform, .{
             .load_profile = load_profile,
         });
@@ -192,10 +191,6 @@ pub const Model = struct {
         return buffers;
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
-        TextModel.unloadBuffers(&self.text_model, allocator);
-        zml.nn.Linear.unloadBuffers(&self.lm_head);
-    }
     pub fn forward(
         self: Model,
         tokens_: zml.Tensor,
@@ -303,15 +298,6 @@ pub const TextModel = struct {
         allocator.free(self.layers);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(TextModel), allocator: std.mem.Allocator) void {
-        self.embed_tokens.weight.deinit();
-        for (self.layers) |*layer| {
-            TransformerLayer.unloadBuffers(layer);
-        }
-        allocator.free(self.layers);
-        RmsNorm.unloadBuffers(&self.norm);
-    }
-
     pub fn forward(
         self: TextModel,
         tokens: zml.Tensor,
@@ -380,16 +366,6 @@ pub const TransformerLayer = struct {
             .mlp = .init(store.withPrefix("mlp")),
             .post_attention_layernorm = RmsNorm.init(store.withPrefix("post_attention_layernorm"), config.text_config.rms_norm_eps),
         };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
-        RmsNorm.unloadBuffers(&self.input_layernorm);
-        switch (self.attn) {
-            .full_attention => |*self_attn| SelfAttn.unloadBuffers(self_attn),
-            .linear_attention => |*linear_attn| GatedDeltaNet.unloadBuffers(linear_attn),
-        }
-        Mlp.unloadBuffers(&self.mlp);
-        RmsNorm.unloadBuffers(&self.post_attention_layernorm);
     }
 
     pub fn forward(
@@ -503,10 +479,6 @@ pub const Mlp = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
-        zml.Buffer.deinitAll(Mlp, self);
-    }
-
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         const up_projed = self.up_proj.forward(x, x.dtype());
         const gate = self.gate_proj.forward(x, x.dtype());
@@ -556,10 +528,6 @@ pub const SelfAttn = struct {
             .rotary_dim = rotary_dim,
             .rotary_embed = .init(rotary_dim, config.text_config.rope_parameters.rope_theta, config.text_config.rope_parameters.mrope_section),
         };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
-        zml.Buffer.deinitAll(SelfAttn, self);
     }
 
     fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
@@ -779,10 +747,6 @@ pub const GatedDeltaNet = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(GatedDeltaNet)) void {
-        zml.Buffer.deinitAll(GatedDeltaNet, self);
-    }
-
     fn recurrentGatedDeltaRule(
         query: zml.Tensor,
         key: zml.Tensor,
@@ -958,10 +922,6 @@ pub const RmsNorm = struct {
         return .{ .weight = store.createTensor("weight", .{.d}, .model, .{ .d = .replicated }), .eps = eps };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
-        self.weight.deinit();
-    }
-
     pub fn forward(self: RmsNorm, x: zml.Tensor) zml.Tensor {
         const x_f32 = x.convert(.f32);
         const weight_f32 = self.weight.convert(.f32);
@@ -977,10 +937,6 @@ pub const RmsNormGated = struct {
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNormGated {
         return .{ .weight = store.createTensor("weight", .{.d}, .model, .{ .d = .replicated }), .eps = eps };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(RmsNormGated)) void {
-        self.weight.deinit();
     }
 
     pub fn forward(self: RmsNormGated, x: zml.Tensor, gate: zml.Tensor) zml.Tensor {

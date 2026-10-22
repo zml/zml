@@ -94,8 +94,7 @@ pub const LoadedModel = struct {
     }
 
     pub fn unloadBuffers(_: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        if (buffers.lm_head) |*lm_head| zml.nn.Linear.unloadBuffers(lm_head);
-        Llama.unloadBuffers(&buffers.model, allocator);
+        zml.mem.deinitBufferized(allocator, Model, buffers);
     }
 
     pub fn compile(
@@ -165,7 +164,7 @@ pub const Model = struct {
         const now: std.Io.Timestamp = .now(io, .awake);
 
         var buffers = try zml.mem.bufferize(allocator, Model, self);
-        errdefer Model.unloadBuffers(&buffers, allocator);
+        errdefer zml.mem.deinitBufferized(allocator, Model, &buffers);
 
         var loader = try zml.io.Loader.init(allocator, io, platform, .{
             .load_profile = load_profile,
@@ -181,11 +180,6 @@ pub const Model = struct {
         log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
 
         return buffers;
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
-        if (self.lm_head) |*lm_head| zml.nn.Linear.unloadBuffers(lm_head);
-        Llama.unloadBuffers(&self.model, allocator);
     }
 
     fn lmHead(self: Model) LmHead {
@@ -256,15 +250,6 @@ const Llama = struct {
     }
 
     pub fn deinit(self: Llama, allocator: std.mem.Allocator) void {
-        allocator.free(self.layers);
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Llama), allocator: std.mem.Allocator) void {
-        self.embed_tokens.weight.deinit();
-        RmsNorm.unloadBuffers(&self.norm);
-        for (self.layers) |*layer| {
-            TransformerLayer.unloadBuffers(layer);
-        }
         allocator.free(self.layers);
     }
 
@@ -385,13 +370,6 @@ pub const TransformerLayer = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
-        RmsNorm.unloadBuffers(&self.input_layernorm);
-        SelfAttn.unloadBuffers(&self.self_attn);
-        RmsNorm.unloadBuffers(&self.post_attention_layernorm);
-        Mlp.unloadBuffers(&self.mlp);
-    }
-
     pub const Input = struct {
         layer: TransformerLayer,
         hidden: zml.Tensor,
@@ -450,10 +428,6 @@ const RmsNorm = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
-        self.weight.deinit();
-    }
-
     /// L2 normalization of input tensor along `.d` axis.
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
@@ -473,10 +447,6 @@ const Mlp = struct {
             .gate_proj = .init(store.createTensor("gate_proj.weight", .{ .dout, .d }, .model, .{ .dout = .model }), null, .d),
             .down_proj = .init(store.createTensor("down_proj.weight", .{ .dout, .d }, .model, .{ .d = .model }), null, .d),
         };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
-        zml.Buffer.deinitAll(Mlp, self);
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
@@ -518,10 +488,6 @@ const SelfAttn = struct {
                 .scaling = rope_scaling,
             },
         };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
-        zml.Buffer.deinitAll(SelfAttn, self);
     }
 
     /// Self zml.attention.

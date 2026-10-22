@@ -212,3 +212,22 @@ test "deinitBufferized frees recursive const slices" {
     var bufferized = try bufferize(std.testing.allocator, Model, &model);
     deinitBufferized(std.testing.allocator, Model, &bufferized);
 }
+
+test "deinitBufferized frees slices under optionals and unions" {
+    const Layer = struct { weights: []const Tensor };
+    const Ffn = union(enum) { dense: Layer, experts: []const Layer, none: void };
+    const Model = struct {
+        present: ?Layer,
+        absent: ?Layer,
+        ffns: [3]Ffn,
+    };
+    var weights: [3]Tensor = undefined;
+    const experts = [_]Layer{ .{ .weights = weights[0..1] }, .{ .weights = weights[1..3] } };
+    const model: Model = .{
+        .present = .{ .weights = &weights },
+        .absent = null,
+        .ffns = .{ .{ .dense = .{ .weights = weights[2..3] } }, .{ .experts = &experts }, .none },
+    };
+    var bufferized = try bufferize(std.testing.allocator, Model, &model);
+    deinitBufferized(std.testing.allocator, Model, &bufferized);
+}

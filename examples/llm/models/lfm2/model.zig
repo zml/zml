@@ -98,7 +98,7 @@ pub const LoadedModel = struct {
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         _ = self;
-        Model.unloadBuffers(buffers, allocator);
+        zml.mem.deinitBufferized(allocator, Model, buffers);
     }
 
     pub fn compile(
@@ -167,7 +167,7 @@ pub const Model = struct {
     ) !zml.Bufferized(Model) {
         const now: std.Io.Timestamp = .now(io, .awake);
         var buffers = try zml.mem.bufferize(allocator, Model, self);
-        errdefer Model.unloadBuffers(&buffers, allocator);
+        errdefer zml.mem.deinitBufferized(allocator, Model, &buffers);
 
         var loader = try zml.io.Loader.init(allocator, io, platform, .{
             .load_profile = load_profile,
@@ -183,15 +183,6 @@ pub const Model = struct {
         log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
 
         return buffers;
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
-        self.embed_tokens.weight.deinit();
-        LmHead.unloadBuffers(&self.lm_head);
-        for (self.layers) |*layer| {
-            DecoderLayer.unloadBuffers(layer);
-        }
-        allocator.free(self.layers);
     }
 
     pub fn forward(
@@ -308,10 +299,6 @@ pub const LmHead = struct {
         const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, input.rng);
         return .{ .tokens = new_tokens.convert(input.tokens.dtype()).reuseBuffer(input.tokens), .rng = new_rng };
     }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(LmHead)) void {
-        RmsNorm.unloadBuffers(&self.embedding_norm);
-    }
 };
 
 pub const OperatorKind = enum { conv, full_attention };
@@ -410,16 +397,6 @@ pub const DecoderLayer = struct {
             .kv_cache_index = kv_cache_index.reuseBuffer(input.kv_cache_index),
         };
     }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(DecoderLayer)) void {
-        switch (self.operator) {
-            .conv => |*operator| ShortConv.unloadBuffers(operator),
-            .self_attn => |*operator| Attention.unloadBuffers(operator),
-        }
-        RmsNorm.unloadBuffers(&self.operator_norm);
-        RmsNorm.unloadBuffers(&self.ffn_norm);
-        Mlp.unloadBuffers(&self.feed_forward);
-    }
 };
 
 pub const ConvParameters = struct { is_prefill: bool };
@@ -484,12 +461,6 @@ pub const ShortConv = struct {
 
         const output = self.out_proj.forward(y);
         return .{ output.reuseBuffer(input), cache.reuseBuffer(cache_) };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(ShortConv)) void {
-        Linear.unloadBuffers(&self.in_proj);
-        Linear.unloadBuffers(&self.out_proj);
-        self.kernel.deinit();
     }
 };
 
@@ -578,15 +549,6 @@ pub const Attention = struct {
 
         return .{ self.out_proj.forward(attn).reuseBuffer(x), new_kv_cache.reuseBuffer(kv_cache) };
     }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
-        Linear.unloadBuffers(&self.q_proj);
-        Linear.unloadBuffers(&self.k_proj);
-        Linear.unloadBuffers(&self.v_proj);
-        Linear.unloadBuffers(&self.out_proj);
-        RmsNorm.unloadBuffers(&self.q_layernorm);
-        RmsNorm.unloadBuffers(&self.k_layernorm);
-    }
 };
 
 pub const Cache = struct {
@@ -595,11 +557,6 @@ pub const Cache = struct {
 
     pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Cache) {
         return .{ .conv = try self.conv.initBuffers(allocator, io, platform), .kv = try self.kv.initBuffers(io, platform) };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Cache)) void {
-        ConvCache.unloadBuffers(&self.conv);
-        KvCache.unloadBuffers(&self.kv);
     }
 
     pub fn reuseBuffer(self: Cache, other: Cache) Cache {
@@ -622,10 +579,6 @@ pub const ConvCache = struct {
         return .{ .state = try zml.Buffer.fromBytes(io, platform, sh, host) };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(ConvCache)) void {
-        self.state.deinit();
-    }
-
     pub fn reuseBuffer(self: ConvCache, other: ConvCache) ConvCache {
         return .{ .state = self.state.reuseBuffer(other.state) };
     }
@@ -642,11 +595,6 @@ pub const KvCache = struct {
 
     pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
         return .{ .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}), .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}) };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(KvCache)) void {
-        self.k.deinit();
-        self.v.deinit();
     }
 
     pub fn reuseBuffer(self: KvCache, other: KvCache) KvCache {
@@ -684,11 +632,6 @@ pub const Linear = struct {
         return .{ .weight = weight, .bias = bias, .in_tag = zml.Shape.toTag(tag), .out_tag = out_tag };
     }
 
-    pub fn unloadBuffers(linear: *zml.Bufferized(Linear)) void {
-        linear.weight.deinit();
-        if (linear.bias) |*bias| bias.deinit();
-    }
-
     pub fn forward(self: Linear, x: zml.Tensor) zml.Tensor {
         var y = x.dot(self.weight, self.in_tag).renameTag(self.out_tag, self.in_tag);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())).reuseBuffer(x) else y;
@@ -708,12 +651,6 @@ const Mlp = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
-        Linear.unloadBuffers(&self.w1);
-        Linear.unloadBuffers(&self.w2);
-        Linear.unloadBuffers(&self.w3);
-    }
-
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         return self.w2.forward(self.w1.forward(x).silu().mul(self.w3.forward(x))).reuseBuffer(x);
     }
@@ -726,10 +663,6 @@ const RmsNorm = struct {
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32, tag: anytype) RmsNorm {
         return .{ .weight = store.createReplicatedTensor("weight", .{tag}), .eps = eps, .tag = zml.Shape.toTag(tag) };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
-        self.weight.deinit();
     }
 
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {

@@ -31,10 +31,6 @@ pub const Linear = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Linear)) void {
-        zml.Buffer.deinitAll(Linear, self);
-    }
-
     pub fn quantizationScheme(self: Linear) ?Quantization.Scheme {
         return if (self.quantization) |q| q.scheme else null;
     }
