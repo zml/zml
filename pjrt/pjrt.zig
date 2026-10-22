@@ -945,6 +945,8 @@ pub const Executable = opaque {
         /// much: How argument is reused for output.
         alias_size_in_bytes: u64,
         temp_size_in_bytes: u64,
+        total_allocation_bytes: u64,
+        indefinite_allocations: u64,
 
         /// memory: Host usage stats.
         host_generated_code_size_in_bytes: u64,
@@ -964,6 +966,8 @@ pub const Executable = opaque {
             .output_size_in_bytes = @intCast(ret.output_size_in_bytes),
             .alias_size_in_bytes = @intCast(ret.alias_size_in_bytes),
             .temp_size_in_bytes = @intCast(ret.temp_size_in_bytes),
+            .total_allocation_bytes = @intCast(ret.total_allocation_bytes),
+            .indefinite_allocations = @intCast(ret.indefinite_allocations),
             .host_generated_code_size_in_bytes = @intCast(ret.host_generated_code_size_in_bytes),
             .host_argument_size_in_bytes = @intCast(ret.host_argument_size_in_bytes),
             .host_output_size_in_bytes = @intCast(ret.host_output_size_in_bytes),
