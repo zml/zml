@@ -668,6 +668,10 @@ pub const cute = struct {
                 cfg: ConfigT,
                 zeroed_outputs: []const i32 = &.{},
                 scalars: []const i64 = &.{},
+                /// See `ops.CuteOps.symmetric_workspace`; the host function
+                /// declares its parameters with
+                /// `Builder.declareArgsWithSymmetricWorkspace`.
+                symmetric_workspace: ?ops.CuteOps.SymmetricWorkspace = null,
                 output_operand_aliases: ?ops.CustomCallOutputOperandAliases(Inputs, Outputs) = null,
             };
 
@@ -699,6 +703,7 @@ pub const cute = struct {
                     .ir = ir,
                     .zeroed_outputs = opts.zeroed_outputs,
                     .scalars = opts.scalars,
+                    .symmetric_workspace = opts.symmetric_workspace,
                     .output_operand_aliases = aliases.constSlice(),
                 });
 

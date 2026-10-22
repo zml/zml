@@ -699,10 +699,65 @@ pub const Builder = struct {
     /// One field per kernel argument: `.{ .a = .{ .tensor = .{ .dtype = .f32, .shape = &.{n} } } }`
     /// yields a `Tensor`, `.{ .p = .{ .ptr = .f32 } }` a pointer `Value`.
     pub fn declareArgs(self: *Builder, spec: anytype) FinishError!ArgsOf(@TypeOf(spec)) {
-        const Spec = @TypeOf(spec);
-        const fields = @typeInfo(Spec).@"struct".field_names;
+        const arg_specs = try self.arena.allocator().alloc(ArgSpec, @typeInfo(@TypeOf(spec)).@"struct".field_names.len);
+        try fillArgSpecs(self.arena.allocator(), spec, arg_specs);
+        try self.declareArgsLow(arg_specs);
+        return self.namedArgs(@TypeOf(spec));
+    }
 
-        const arg_specs = try self.arena.allocator().alloc(ArgSpec, fields.len);
+    pub fn SymmetricWorkspaceArgs(comptime Spec: type) type {
+        return struct {
+            args: ArgsOf(Spec),
+            /// Every rank's workspace, `!cute.ptr<i8, gmem, align<16>>`, in
+            /// rank order. This rank's is `workspaces[rank]`.
+            workspaces: []const Value,
+            /// This rank (`i32`): the partition id.
+            rank: Value,
+        };
+    }
+
+    /// The host function of a program called with a symmetric workspace
+    /// (`zml.kernel.cute.Program.CallOpts.symmetric_workspace`): `spec` as
+    /// for `declareArgs` (the custom call's buffers, then its scalars), then
+    /// the parameters XLA appends: the workspace address of each of the
+    /// `num_ranks` ranks (partitions), in rank order, then the rank.
+    pub fn declareArgsWithSymmetricWorkspace(self: *Builder, spec: anytype, num_ranks: usize) FinishError!SymmetricWorkspaceArgs(@TypeOf(spec)) {
+        std.debug.assert(self.function_kind == .host and num_ranks > 0);
+        const fields = @typeInfo(@TypeOf(spec)).@"struct".field_names;
+        const arena = self.arena.allocator();
+        const arg_specs = try arena.alloc(ArgSpec, fields.len + num_ranks + 1);
+        try fillArgSpecs(arena, spec, arg_specs[0..fields.len]);
+        for (arg_specs[fields.len..][0..num_ranks], 0..) |*a, r| {
+            a.* = .{ .name = try std.fmt.allocPrint(arena, "workspace{d}", .{r}), .kind = .{ .ptr = .i8 } };
+        }
+        arg_specs[fields.len + num_ranks] = .{ .name = "rank", .kind = .{ .mlir_type = .{ .type_ = DType.i32.toMlir(self.ctx) } } };
+        try self.declareArgsLow(arg_specs);
+
+        const workspaces = try arena.alloc(Value, num_ranks);
+        for (workspaces, 0..) |*w, r| w.* = self.arg(fields.len + r);
+        return .{
+            .args = self.namedArgs(@TypeOf(spec)),
+            .workspaces = workspaces,
+            .rank = self.arg(fields.len + num_ranks),
+        };
+    }
+
+    fn namedArgs(self: *Builder, comptime Spec: type) ArgsOf(Spec) {
+        const fields = @typeInfo(Spec).@"struct".field_names;
+        var named: ArgsOf(Spec) = undefined;
+        inline for (fields, 0..) |f, i| {
+            @field(named, f) = switch (@FieldType(ArgsOf(Spec), f)) {
+                Tensor => self.tensors[i].?,
+                else => self.arg(i),
+            };
+        }
+        return named;
+    }
+
+    /// Shapes and strides are copied into `arena`: a spec written `&.{ m, n }` with run-time
+    /// values coerces to a slice of a temporary array in this function's frame.
+    fn fillArgSpecs(arena: std.mem.Allocator, spec: anytype, arg_specs: []ArgSpec) std.mem.Allocator.Error!void {
+        const fields = @typeInfo(@TypeOf(spec)).@"struct".field_names;
         inline for (fields, 0..) |f, i| {
             const raw = @field(spec, f);
             const variant = @typeInfo(@TypeOf(raw)).@"struct".field_names[0];
@@ -711,8 +766,8 @@ pub const Builder = struct {
                 .ptr => .{ .ptr = inner },
                 .tensor => .{ .tensor = .{
                     .dtype = inner.dtype,
-                    .shape = inner.shape,
-                    .stride = if (@hasField(@TypeOf(inner), "stride")) inner.stride else null,
+                    .shape = try arena.dupe(i64, inner.shape),
+                    .stride = if (@hasField(@TypeOf(inner), "stride")) try dupeStride(arena, inner.stride) else null,
                     .alignment = if (@hasField(@TypeOf(inner), "alignment")) inner.alignment else 16,
                 } },
                 .mlir_type => .{ .mlir_type = .{
@@ -725,16 +780,10 @@ pub const Builder = struct {
                 } },
             } };
         }
-        try self.declareArgsLow(arg_specs);
+    }
 
-        var named: ArgsOf(Spec) = undefined;
-        inline for (fields, 0..) |f, i| {
-            @field(named, f) = switch (@FieldType(ArgsOf(Spec), f)) {
-                Tensor => self.tensors[i].?,
-                else => self.arg(i),
-            };
-        }
-        return named;
+    fn dupeStride(arena: std.mem.Allocator, stride: ?[]const i64) std.mem.Allocator.Error!?[]const i64 {
+        return if (stride) |s| try arena.dupe(i64, s) else null;
     }
 
     fn ArgsOf(comptime Spec: type) type {
@@ -3375,6 +3424,41 @@ test "complete program emits a Zig-built CUDA host launch" {
     try expectContains(ir, "cuda.kernel");
     try expectContains(ir, "sym_name = \"program_add\"");
     try expectContains(ir, "cuda.launch_ex");
+}
+
+test "a host function declares the symmetric workspace parameters last" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.openProgram(std.testing.allocator, ctx, "workspace_kernel");
+    defer b.deinit();
+    _ = try b.declareArgs(.{
+        .output = .{ .ptr = DType.i32 },
+        .peer = .{ .ptr = DType.i8 },
+        .rank = .{ .mlir_type = .{ .type_ = DType.i32.toMlir(ctx) } },
+    });
+    b.endFunction(.{ 32, 1, 1 });
+
+    b.beginFunction("workspace_program", .host);
+    const host = try b.declareArgsWithSymmetricWorkspace(.{
+        .output = .{ .ptr = DType.i32 },
+        .count = .{ .mlir_type = .{ .type_ = DType.i64.toMlir(ctx) } },
+    }, 2);
+    try std.testing.expectEqual(2, host.workspaces.len);
+    const one = b.cst(.i32, 1);
+    const config = b.makeLaunchConfig(.{
+        .grid = .{ one, one, one },
+        .block = .{ b.cst(.i32, 32), one, one },
+        .dynamic_smem = b.kernelSmemSize("workspace_kernel"),
+        .stream = b.cudaStream(),
+    });
+    const launched = b.launchEx("workspace_kernel", config, .{ host.args.output, host.workspaces[1], host.rank });
+    b.returnHostStatus(b.cudaResultStatus(launched));
+    b.endFunction(null);
+
+    const ir = try b.finishProgram();
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "function_type = (!cute.ptr<i32, gmem, align<16>>, i64, !cute.ptr<i8, gmem, align<16>>, !cute.ptr<i8, gmem, align<16>>, i32) -> i32");
 }
 
 test "SM100 block-scaled MMA atoms use the CuTe DSL instruction shapes" {

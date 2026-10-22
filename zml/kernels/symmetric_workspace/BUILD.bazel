@@ -1,0 +1,13 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+# Runs on every visible CUDA device, one rank per device:
+#   CUDA_VISIBLE_DEVICES=0,1 bazel run --@zml//platforms:cuda=true //zml/kernels/symmetric_workspace:check
+zig_binary(
+    name = "check",
+    main = "check.zig",
+    tags = ["manual"],
+    deps = [
+        "//mlir/dialects",
+        "//zml",
+    ],
+)
