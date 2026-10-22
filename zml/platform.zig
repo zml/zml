@@ -465,6 +465,8 @@ pub const Platform = struct {
         };
         var first_error: std.atomic.Value(u16) = .init(0);
         var group: std.Io.Group = .init;
+        // A failed spawn leaves the earlier tasks writing `first_error`.
+        errdefer group.cancel(io);
         for (self.devices, 0..) |_, device_index| try group.concurrent(io, Worker.run, .{Worker{
             .platform = self,
             .device_index = device_index,

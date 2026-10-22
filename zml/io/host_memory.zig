@@ -264,7 +264,12 @@ const Backend = union(enum) {
 
         fn free(self: *const HugePageAllocator, buf: []align(std.heap.page_size_min) u8) void {
             if (self.platform) |platform| {
-                platform.pjrt_client.dmaUnmap(platform.pjrt_api, @ptrCast(buf)) catch unreachable;
+                // Unregistering can fail after a device error. The pages may
+                // still be registered, so they are leaked, not reused.
+                platform.pjrt_client.dmaUnmap(platform.pjrt_api, @ptrCast(buf)) catch |err| {
+                    log.warn("DMA unregistration failed for {Bi:.2} of host memory, which stays allocated: {s}", .{ buf.len, @errorName(err) });
+                    return;
+                };
             }
             const alignment: Alignment = comptime .fromByteUnits(std.heap.page_size_min);
             self.parent.rawFree(buf, effectiveAlignment(alignment, buf.len), @returnAddress());

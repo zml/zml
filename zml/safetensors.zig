@@ -868,6 +868,12 @@ pub fn parseSafetensors(
     const file_uri = file_uri_buf[0..file_uri_len];
 
     const json_header_length: u64 = try reader.interface.takeInt(u64, .little);
+    // The header and every tensor's data must lie inside the file.
+    const file_length = try file.length(io);
+    if (json_header_length > file_length -| BYTES_HEADER) {
+        log.warn("Invalid safetensors header in {s}: {d} bytes of header in a file of {d}", .{ file_uri, json_header_length, file_length });
+        return error.InvalidSafetensorsHeader;
+    }
     const data_start_offset = BYTES_HEADER + json_header_length;
     const json_data = try arena.allocator().alloc(u8, @intCast(json_header_length));
 
@@ -905,7 +911,10 @@ pub fn parseSafetensors(
         }
 
         const offset_field = value.object.get("data_offsets").?;
-        const start: u64 = @intCast(offset_field.array.items[0].integer);
+        const start = dataStart(offset_field, file_length - data_start_offset) orelse {
+            log.warn("Invalid safetensors header in {s}: tensor {s} has data_offsets {f}, which must run forward within the file's {d} data bytes", .{ file_uri, key, std.json.fmt(offset_field, .{}), file_length - data_start_offset });
+            return error.InvalidSafetensorsHeader;
+        };
         const dtype = try stringToDtype(value.object.get("dtype").?.string);
 
         var dims: Dims = .empty;
@@ -921,6 +930,65 @@ pub fn parseSafetensors(
         };
 
         try registry.registerTensor(tensor);
+    }
+}
+
+/// The start of a tensor's `data_offsets`, `[start, end)` after the header,
+/// when they run forward and end within `data_len` bytes.
+fn dataStart(offsets: std.json.Value, data_len: u64) ?u64 {
+    if (offsets != .array or offsets.array.items.len != 2) return null;
+    var bounds: [2]u64 = undefined;
+    for (&bounds, offsets.array.items) |*bound, item| bound.* = switch (item) {
+        .integer => |integer| std.math.cast(u64, integer) orelse return null,
+        // Integers past i64.
+        .number_string => |digits| std.fmt.parseInt(u64, digits, 10) catch return null,
+        else => return null,
+    };
+    if (bounds[0] > bounds[1] or bounds[1] > data_len) return null;
+    return bounds[0];
+}
+
+test "parseSafetensors rejects a header or data_offsets that run backward, overflow or end past the file" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const max = "18446744073709551615";
+    // One tensor of 4 bytes, the file's only data. `header_len` overrides
+    // the header's length field.
+    const cases = [_]struct { offsets: []const u8, header_len: ?u64 = null, valid: bool = false }{
+        .{ .offsets = "[0,4]", .valid = true },
+        .{ .offsets = "[4,0]" },
+        .{ .offsets = "[0,5]" },
+        .{ .offsets = "[-4,4]" },
+        .{ .offsets = "[0," ++ max ++ "]" },
+        .{ .offsets = "[" ++ max ++ "," ++ max ++ "]" },
+        .{ .offsets = "[0,18446744073709551616]" },
+        .{ .offsets = "[0]" },
+        .{ .offsets = "[0,4]", .header_len = 1 << 20 },
+        .{ .offsets = "[0,4]", .header_len = std.math.maxInt(u64) },
+    };
+    for (cases, 0..) |case, index| {
+        var header_buffer: [128]u8 = undefined;
+        const header = try std.fmt.bufPrint(&header_buffer, "{{\"x\":{{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":{s}}}}}", .{case.offsets});
+        var name_buffer: [32]u8 = undefined;
+        const file = try tmp.dir.createFile(io, try std.fmt.bufPrint(&name_buffer, "{d}.safetensors", .{index}), .{ .read = true });
+        defer file.close(io);
+        var length: [BYTES_HEADER]u8 = undefined;
+        std.mem.writeInt(u64, &length, case.header_len orelse header.len, .little);
+        try file.writePositionalAll(io, &length, 0);
+        try file.writePositionalAll(io, header, length.len);
+        try file.writePositionalAll(io, &.{ 1, 2, 3, 4 }, length.len + header.len);
+
+        var registry: TensorRegistry = .init(allocator);
+        defer registry.deinit();
+        const result = parseSafetensors(allocator, io, &registry, file);
+        if (case.valid) {
+            try result;
+            try std.testing.expectEqual(@as(u64, BYTES_HEADER + header.len), registry.tensors.get("x").?.offset);
+        } else {
+            try std.testing.expectError(error.InvalidSafetensorsHeader, result);
+        }
     }
 }
 

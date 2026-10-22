@@ -100,6 +100,10 @@ pub const Loader = struct {
     credits: Credits,
     pipeline: Pipeline,
     worker_group: std.Io.Group = .init,
+    /// One per source path. Its file opens at first use (during planning
+    /// when a VFS decides direct IO, otherwise at the first read) and stays
+    /// open until `destroy`. Keyed by the slot's own copy of the path: the
+    /// registry that named it may go once the batch retired.
     source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
     /// Device bytes allocated for outputs so far, per `platform.devices`
     /// index, cumulative: the front end subtracts it from what it submitted
@@ -245,7 +249,9 @@ pub const Loader = struct {
             if (batch.plans.items.len == 0) {
                 load_log.debug("reject batch {d} before publication: source={s}: {s}", .{ batch.diagnostics.sequence, batch.planning_source, @errorName(err) });
                 self.destroyBatch(batch);
-                return err;
+                // An older batch that failed since `checkOpen` stopped the
+                // scheduler, whose publish then says only `Closed`.
+                return self.pipeline.errorValue() orelse err;
             }
             // Planning failed after part of the batch was published: fail
             // the pipeline, seal and await this batch, and return the sticky
@@ -364,6 +370,7 @@ pub const Loader = struct {
         var slots = self.source_slots.valueIterator();
         while (slots.next()) |slot| {
             slot.*.deinit(self.io);
+            self.allocator.free(slot.*.uri);
             self.allocator.destroy(slot.*);
         }
         self.source_slots.deinit(self.allocator);
@@ -619,10 +626,12 @@ pub const Loader = struct {
 
     fn sourceSlot(self: *Loader, uri: []const u8) !*SourceSlot {
         if (self.source_slots.get(uri)) |slot| return slot;
+        const owned = try self.allocator.dupe(u8, uri);
+        errdefer self.allocator.free(owned);
         const slot = try self.allocator.create(SourceSlot);
         errdefer self.allocator.destroy(slot);
-        slot.* = .{ .uri = uri };
-        try self.source_slots.putNoClobber(self.allocator, uri, slot);
+        slot.* = .{ .uri = owned };
+        try self.source_slots.putNoClobber(self.allocator, owned, slot);
         return slot;
     }
 
@@ -4160,6 +4169,128 @@ test "loader failures clean up before publication, after publication and during 
             try std.testing.expectError(expected, result);
         }
     };
+}
+
+test "a submit the loader fails between its open check and its first publish returns that failure, not Closed" {
+    const io = std.testing.io;
+    const platform = Platform.init(std.testing.allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(std.testing.allocator, io);
+    // Fails the loader in the submitting task's next allocation: after
+    // `submit`'s open check and before its first publish, where a worker of
+    // an older batch can fail it and the scheduler then answers `Closed`.
+    const FailNextAllocation = struct {
+        parent: std.mem.Allocator,
+        loader: *Loader = undefined,
+        thread: std.Thread.Id = undefined,
+        armed: std.atomic.Value(bool) = .init(false),
+
+        fn arm(self: *@This(), loader: *Loader) void {
+            self.loader = loader;
+            self.thread = std.Thread.getCurrentId();
+            self.armed.store(true, .release);
+        }
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            // The workers allocate on threads of their own.
+            if (self.armed.load(.acquire) and self.thread == std.Thread.getCurrentId()) {
+                self.armed.store(false, .monotonic);
+                self.loader.pipeline.recordError(error.UnexpectedEndOfFile, "an older batch's read", .{});
+            }
+            return self.parent.rawAlloc(len, alignment, ret_addr);
+        }
+
+        fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.rawResize(memory, alignment, new_len, ret_addr);
+        }
+
+        fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.rawRemap(memory, alignment, new_len, ret_addr);
+        }
+
+        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.parent.rawFree(memory, alignment, ret_addr);
+        }
+    };
+    var failing: FailNextAllocation = .{ .parent = std.testing.allocator };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [1024]u8 = undefined;
+    const path = path: {
+        const file = try tmp.dir.createFile(io, "weights.bin", .{ .read = true });
+        defer file.close(io);
+        try file.writePositionalAll(io, &.{ 1, 2, 3, 4 }, 0);
+        const len = try file.realPath(io, &path_buffer);
+        break :path path_buffer[0..len];
+    };
+    var source: safetensors.Tensor = .{ .file_uri = path, .name = "x", .shape = .init(.{4}, .u8), .offset = 0 };
+    var output: Buffer = .{ ._platform = platform, ._shape = source.shape, ._shards = .empty };
+    defer output.deinit();
+    const loader = try Loader.create(failing.allocator(), io, platform, .{
+        .read_parallelism = 2,
+        .load_profile = .local,
+        .direct_io = .off,
+    });
+    defer loader.destroy();
+    const parts = [_]LoadPart{.whole(&source)};
+    failing.arm(loader);
+    const result: anyerror!void = if (loader.submit(&.{.{ .shape = source.shape, .output = &output, .parts = &parts }}, .none)) |batch| unexpected: {
+        loader.awaitBatch(batch) catch {};
+        break :unexpected {};
+    } else |err| err;
+    try std.testing.expectError(error.UnexpectedEndOfFile, result);
+    try std.testing.expectEqual(@as(usize, 0), loader.batch_count);
+}
+
+test "source slots keep their own copy of each path" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const contents = [_]u8{ 1, 2, 3, 4 };
+    var path_buffer: [1024]u8 = undefined;
+    const path = path: {
+        const file = try tmp.dir.createFile(io, "weights.bin", .{ .read = true });
+        defer file.close(io);
+        try file.writePositionalAll(io, &contents, 0);
+        const len = try file.realPath(io, &path_buffer);
+        break :path path_buffer[0..len];
+    };
+    const loader = try Loader.create(allocator, io, platform, .{
+        .read_parallelism = 2,
+        .load_profile = .local,
+        .direct_io = .off,
+    });
+    defer loader.destroy();
+    // Each submission names the file through a string of its own, freed
+    // right after the submit: workers open the file through its slot.
+    for (0..2) |_| {
+        const uri = try allocator.dupe(u8, path);
+        var source: safetensors.Tensor = .{ .file_uri = uri, .name = "x", .shape = .init(.{4}, .u8), .offset = 0 };
+        var output: Buffer = .{ ._platform = platform, ._shape = source.shape, ._shards = .empty };
+        defer output.deinit();
+        const parts = [_]LoadPart{.whole(&source)};
+        const submitted = loader.submit(&.{.{ .shape = source.shape, .output = &output, .parts = &parts }}, .none);
+        allocator.free(uri);
+        try loader.awaitBatch(try submitted);
+        const loaded = try output.toSliceAlloc(allocator, io);
+        defer loaded.free(allocator);
+        try std.testing.expectEqualSlices(u8, &contents, loaded.constData());
+    }
+    // The testing allocator overwrites freed bytes: a slot keyed by the
+    // first string would miss the second lookup.
+    try std.testing.expectEqual(@as(usize, 1), loader.source_slots.count());
 }
 
 /// One plain destination per source, as `createDestinations` builds them for

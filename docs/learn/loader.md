@@ -263,7 +263,7 @@ Loader-specific errors use these shared names:
 | `UnsupportedLayout` | A composite layout this loader does not assemble yet |
 | `InvalidTensorRange` | A source range cannot be represented |
 | `Internal` | A planning or transfer bookkeeping invariant failed |
-| `Closed` | The loader's scheduler or one of its gates has shut down |
+| `Closed` | Internal: the direct backend's scheduler or a gate has shut down. Callers get the failure that shut it down instead |
 | `TensorNotFound` | A tensor has no checkpoint binding |
 | `ProgramOutputMismatch` | A program does not return its tensor's shape, placed alike |
 

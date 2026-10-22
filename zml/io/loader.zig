@@ -9,6 +9,7 @@
 const std = @import("std");
 
 const pjrt = @import("pjrt");
+const stdx = @import("stdx");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
@@ -765,6 +766,11 @@ fn prepareModel(
     buffers: *Bufferized(Model),
 ) PrepareError!PreparedModel {
     const tensor_count = meta.count(Tensor, model);
+    // Tensors and buffers pair by visit order: a buffer tree whose optionals,
+    // slices or unions differ from the model's would write past `flattened`
+    // or leave buffers unpaired.
+    const buffer_count = meta.count(Buffer, buffers);
+    stdx.debug.assert(buffer_count == tensor_count, "Loader.start: the model has {d} tensors but its buffers {d}; bufferize the buffers from this model", .{ tensor_count, buffer_count });
     const flattened = try allocator.alloc(*Buffer, tensor_count);
     defer allocator.free(flattened);
     meta.forEachVisit(buffers, *Buffer, struct {
