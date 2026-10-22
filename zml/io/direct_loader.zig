@@ -1,6 +1,6 @@
 //! Direct loading follows a batch from per-file planning through FIFO claims,
 //! source reads and DMA completion. The source width is fixed for the load,
-//! per load profile (`limits.defaultReadParallelism`); a source that rate
+//! per load profile (`backend.Options.readWidth`); a source that rate
 //! limits is handled by the VFS, which holds every request of that backend
 //! (`vfs/request.zig`). Runtime ownership and synchronization live here.
 
@@ -26,7 +26,6 @@ const LoadSpec = backend.LoadSpec;
 const ShardGrid = @import("ShardGrid.zig");
 const dma_calibration = @import("dma_calibration.zig");
 const host_memory = @import("host_memory.zig");
-const load_limits = @import("limits.zig");
 const load_log = @import("log.zig").load;
 const load_testing = @import("testing.zig");
 
@@ -44,6 +43,15 @@ const PipelineError = TransferInitError || std.Io.File.OpenError || safetensors.
 /// high-water grew 0.9-1.0 -> 2.36-2.50 GiB over six paired runs. That
 /// tradeoff did not justify a larger default stage.
 const max_dma_pieces_per_device: usize = 64;
+
+/// The blocks one job spans at most: the request within the scatter limit
+/// of one positional read, in whole blocks.
+fn maximumCoalescedJobBlocks(request_size: usize, block_size: usize) usize {
+    std.debug.assert(request_size != 0 and block_size != 0);
+    const scatter_limit = block_size *| safetensors.max_positional_iovecs;
+    const maximum_job_len = @min(request_size, scatter_limit);
+    return maximum_job_len / block_size + @intFromBool(maximum_job_len % block_size != 0);
+}
 
 /// How a job's bytes reach their destinations. A destination in a host
 /// memory space (`Destination.hostResident`) is written by the worker that
@@ -420,42 +428,34 @@ pub const Loader = struct {
             var workspace = try host_memory.Workspace.init(allocator, io, platform);
             errdefer workspace.deinit();
             const calibration, const request_size, const maximum_blocks_per_job, const fitted_width = sized: {
-                const calibration = dma_calibration.calibrate(&workspace, platform, opts.dma) catch |err| {
-                    load_log.err("calibrate DMA: target={t}, mapped_ceiling={d}: {s}", .{
+                // At debug when canceled: `Loader.deinit` cancels a set-up
+                // no `start` waited for.
+                const calibration = dma_calibration.calibrate(&workspace, platform, .{ .block_sizes = opts.dma_block_sizes }) catch |err| {
+                    load_log.failure(err, "calibrate DMA: target={t}, mapped_ceiling={d}", .{
                         platform.target,
                         workspace.max_mapped_bytes,
-                        @errorName(err),
                     });
                     return err;
                 };
 
                 const block_size = calibration.block_size;
 
-                const request_size = load_limits.effectiveSourceRequestSize(
-                    opts.load_profile.read_chunk_size,
-                    block_size,
-                ) catch |err| {
-                    load_log.err("source request size: profile={s}, read_chunk_size={d}, dma_block_size={d}, maximum={d}: {s}", .{ opts.load_profile.name, opts.load_profile.read_chunk_size, block_size, load_limits.max_read_request_size, @errorName(err) });
-                    return err;
-                };
+                // The larger of the profile's minimum read and the block.
                 // A request is a whole number of blocks, so the pinned set is
                 // an exact number of requests and the lifecycle credits are
-                // the capacity in requests. Every shipped profile satisfies
-                // it (8, 16 and 32 MiB chunks over power-of-two blocks).
-                if (request_size % block_size != 0) {
-                    load_log.err("source request {d} is not a multiple of the DMA block size {d}: InvalidOptions", .{ request_size, block_size });
-                    return error.InvalidOptions;
-                }
-                const maximum_blocks_per_job = try load_limits.maximumCoalescedJobBlocks(
-                    request_size,
-                    block_size,
-                );
+                // the capacity in requests: `Loader.init` checked it for
+                // every block calibration may select, and every shipped
+                // profile satisfies it (8, 16 and 32 MiB chunks over
+                // power-of-two blocks).
+                const request_size = @max(opts.load_profile.read_chunk_size, block_size);
+                std.debug.assert(request_size <= backend.max_read_request_size and request_size % block_size == 0);
+                const maximum_blocks_per_job = maximumCoalescedJobBlocks(request_size, block_size);
                 // The DMA stage of every device, kept mapped beside the
                 // source working set; at least one maximal source request,
                 // so a single request always fits beside it.
                 const dma_reserve = @max(
                     calibration.max_in_flight_per_device * platform.devices.len,
-                    try load_limits.maximumCoalescedJobBlocks(load_limits.max_read_request_size, block_size),
+                    maximumCoalescedJobBlocks(backend.max_read_request_size, block_size),
                 );
                 // The set is sized once, here: the width is what the mapped
                 // ceiling fits, and the whole set is mapped before the first
@@ -2398,7 +2398,7 @@ const Planner = struct {
     /// the scatter limit, less the two alignment units its widened read
     /// can add, so a widened job still fits `maximumCoalescedJobBlocks`.
     fn maximumJobLen(config: Config) error{InvalidOptions}!usize {
-        const scatter_limit = config.block_size *| load_limits.max_positional_iovecs;
+        const scatter_limit = config.block_size *| safetensors.max_positional_iovecs;
         const unpadded = @min(config.request_size, scatter_limit);
         if (unpadded == 0) return error.InvalidOptions;
         if (config.alignment == 0) return unpadded;
@@ -2722,10 +2722,10 @@ const ReadRequest = struct {
             errdefer allocator.free(iovecs);
             const queue_counts = try allocator.alloc(usize, device_count);
             errdefer allocator.free(queue_counts);
-            const host_iovecs = try allocator.alloc([]u8, load_limits.max_positional_iovecs);
+            const host_iovecs = try allocator.alloc([]u8, safetensors.max_positional_iovecs);
             errdefer allocator.free(host_iovecs);
             // Room for a whole transfer: a copy for every writer past the first.
-            const host_copies = try allocator.alloc(HostScatter.Copy, @max(load_limits.max_positional_iovecs, device_count));
+            const host_copies = try allocator.alloc(HostScatter.Copy, @max(safetensors.max_positional_iovecs, device_count));
             return .{
                 .allocator = allocator,
                 .iovecs = iovecs,
@@ -4475,7 +4475,7 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     var iov_source: safetensors.Tensor = .{
         .file_uri = "iov",
         .name = "iov0",
-        .shape = .init(.{@as(i64, @intCast(load_limits.max_positional_iovecs + 1))}, .u8),
+        .shape = .init(.{@as(i64, @intCast(safetensors.max_positional_iovecs + 1))}, .u8),
         .offset = 0,
     };
     var iov_slot: SourceSlot = .{ .uri = "iov" };
@@ -4486,12 +4486,12 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     const iov_plan = try Planner.prepareTestPlan(allocator, @as(*[1]Part, &iov_part), &.{0}, .{
         .device_count = device_count,
         .block_size = 1,
-        .request_size = load_limits.max_positional_iovecs + 1,
+        .request_size = safetensors.max_positional_iovecs + 1,
         .alignment = 0,
     });
     defer iov_plan.destroy();
     try std.testing.expectEqual(@as(usize, 2), iov_plan.jobs.len);
-    try std.testing.expectEqual(load_limits.max_positional_iovecs, iov_plan.jobs[0].len);
+    try std.testing.expectEqual(safetensors.max_positional_iovecs, iov_plan.jobs[0].len);
     try std.testing.expectEqual(@as(usize, 1), iov_plan.jobs[1].len);
 
     var aligned_sources = [_]safetensors.Tensor{
@@ -4891,38 +4891,14 @@ test "device pump admits by bytes and by pieces" {
     try std.testing.expect(!pump.hasRoom(8));
 }
 
-test "source request size combines the VFS floor with DMA granularity" {
-    try std.testing.expectEqual(
-        @as(usize, 8 * 1024 * 1024),
-        try load_limits.effectiveSourceRequestSize(8 * 1024 * 1024, 8 * 1024 * 1024),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 16 * 1024 * 1024),
-        try load_limits.effectiveSourceRequestSize(8 * 1024 * 1024, 16 * 1024 * 1024),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 16 * 1024 * 1024),
-        try load_limits.effectiveSourceRequestSize(16 * 1024 * 1024, 8 * 1024 * 1024),
-    );
-    try std.testing.expectEqual(
-        load_limits.max_read_request_size,
-        try load_limits.effectiveSourceRequestSize(32 * 1024 * 1024, 16 * 1024 * 1024),
-    );
-    try std.testing.expectError(error.InvalidOptions, load_limits.effectiveSourceRequestSize(0, 8 * 1024 * 1024));
-    try std.testing.expectError(
-        error.InvalidOptions,
-        load_limits.effectiveSourceRequestSize(load_limits.max_read_request_size + 1, 8 * 1024 * 1024),
-    );
-}
-
 test "coalesced job block bound is independent of device count" {
     try std.testing.expectEqual(
         @as(usize, 2),
-        try load_limits.maximumCoalescedJobBlocks(32 * 1024 * 1024, 16 * 1024 * 1024),
+        maximumCoalescedJobBlocks(32 * 1024 * 1024, 16 * 1024 * 1024),
     );
     try std.testing.expectEqual(
         @as(usize, 3),
-        try load_limits.maximumCoalescedJobBlocks(17 * 1024 * 1024, 8 * 1024 * 1024),
+        maximumCoalescedJobBlocks(17 * 1024 * 1024, 8 * 1024 * 1024),
     );
 }
 

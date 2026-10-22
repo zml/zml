@@ -449,7 +449,7 @@ pub fn testLayer(
     var args_buffers = try zml.mem.bufferize(allocator, ArgsT, &args);
     defer zml.mem.deinitBufferized(allocator, ArgsT, &args_buffers);
     {
-        var loader = try zml.io.Loader.init(allocator, io, platform, .auto);
+        var loader = try zml.io.Loader.init(allocator, io, platform, .{});
         defer loader.deinit();
         try loader.start(&args, &args_buffers, activation_store.store, .none);
         try loader.wait();

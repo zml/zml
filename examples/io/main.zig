@@ -169,20 +169,13 @@ pub fn main(init: std.process.Init) !void {
                 &zml.io.dma_calibration.default_block_sizes,
             );
             const window_ms = try envUsize(init.environ_map, "ZML_DMA_BENCH_WINDOW_MS", 2);
-            var loader = try zml.io.Loader.init(allocator, io, platform, .{
-                .dma = .{
-                    .block_sizes = block_sizes,
-                    .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
-                    .minimum_duration = .fromMilliseconds(std.math.cast(i64, window_ms) orelse return error.Overflow),
-                    .minimum_transfers = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 32),
-                    .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
-                },
+            const calibration = try zml.io.dma_calibration.measure(allocator, io, platform, .{
+                .block_sizes = block_sizes,
+                .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
+                .minimum_duration = .fromMilliseconds(std.math.cast(i64, window_ms) orelse return error.Overflow),
+                .minimum_transfers = try envUsize(init.environ_map, "ZML_DMA_BENCH_MIN_TRANSFERS", 32),
+                .block_selection_tolerance = try envF64(init.environ_map, "ZML_DMA_BENCH_BLOCK_TOLERANCE", 0.08),
             });
-            defer loader.deinit();
-            const calibration = switch (loader.backend) {
-                .direct => |backend| backend.calibration,
-                else => @panic("Current platform didn't calibrate DMA."),
-            };
             try stdout_writer.interface.print(
                 "dma_benchmark block_bytes={d} parallelism={d}\n",
                 .{ calibration.block_size, calibration.max_in_flight_per_device },
@@ -319,18 +312,14 @@ pub fn main(init: std.process.Init) !void {
 
                 // Null takes the profile's width (16 locally, 32 remote).
                 const load_read_parallelism = try envOptionalUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM");
-                const load_profile = try vfs.loadProfile(path);
                 const check_stride = try envUsize(init.environ_map, "ZML_LOAD_CHECK", 0);
 
                 var loaded = try zml.mem.bufferize(init.arena.allocator(), AllTensorsModel, &model);
                 errdefer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
                 var loader = try zml.io.Loader.init(init.arena.allocator(), io, platform, .{
-                    .dma = .{
-                        .block_sizes = load_dma_block_sizes,
-                        .block_parallelism = try envUsize(init.environ_map, "ZML_DMA_BENCH_BLOCK_PARALLELISM", 8),
-                    },
+                    .checkpoint = path,
                     .read_parallelism = load_read_parallelism,
-                    .load_profile = load_profile,
+                    .dma_block_sizes = load_dma_block_sizes,
                     .direct_io = std.meta.stringToEnum(zml.io.VFS.DirectIo, init.environ_map.get("ZML_DIRECT_IO") orelse "auto") orelse {
                         log.err("ZML_DIRECT_IO must be off, on or auto", .{});
                         return error.InvalidArgument;

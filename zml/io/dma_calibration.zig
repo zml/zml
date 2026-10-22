@@ -4,8 +4,8 @@ const pjrt = @import("pjrt");
 
 const Platform = @import("../platform.zig").Platform;
 const Target = @import("../platform.zig").Target;
+const backend = @import("backend.zig");
 const host_memory = @import("host_memory.zig");
-const limits = @import("limits.zig");
 const log = @import("log.zig").io;
 
 /// Immutable result shared by every device participating in one load.
@@ -34,9 +34,12 @@ pub const default_block_sizes = [_]usize{
     32 * 1024 * 1024,
 };
 
+/// The screen's knobs. The loader sets only `block_sizes` and keeps the
+/// other defaults; `measure` takes them all.
 pub const Options = struct {
     block_sizes: []const usize = &default_block_sizes,
-    /// Fixed per-device width used by the block screen and the loader.
+    /// Fixed per-device width used by the block screen and the loader, at
+    /// most `max_block_parallelism`.
     /// Eight repeatedly won or tied on MI300X; wider stages mostly increased
     /// callback latency and pinned memory. Adaptive DMA width added state with
     /// little load benefit, so source width is the only runtime search.
@@ -58,10 +61,66 @@ pub const Options = struct {
     block_selection_tolerance: f64 = 0.08,
 };
 
-/// Called only during direct-loader initialization. Measures one representative
-/// device into the loader-owned workspace; CPU returns defaults without measuring.
-/// On a platform mixing device kinds, device 0's sizing serves every device:
-/// it is a tuning choice, valid for all of them.
+/// The widest screen `measure` takes.
+pub const max_block_parallelism: usize = 32;
+
+/// Measures as the direct loader's creation does, without a loader and with
+/// every knob of `opts`: warms the device allocators, then screens the
+/// blocks in a workspace of its own, released before it returns. CPU
+/// returns the defaults without measuring; TPU, neuron, metal and furiosa
+/// load through the buffered backend and return `UnsupportedPlatform`. A
+/// knob out of range is `InvalidOptions`, logged. For `examples/io`'s
+/// `dma-bench`.
+pub fn measure(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: Options) !Result {
+    try validate(opts);
+    switch (platform.target) {
+        .cuda, .rocm, .oneapi, .cpu => {},
+        .tpu, .neuron, .metal, .furiosa => {
+            log.err("DMA calibration: {t} loads through the buffered backend, which has no DMA to measure: UnsupportedPlatform", .{platform.target});
+            return error.UnsupportedPlatform;
+        },
+    }
+    try platform.warmupDeviceAllocators(io);
+    var workspace = try host_memory.Workspace.init(allocator, io, platform);
+    defer workspace.deinit();
+    return calibrate(&workspace, platform, opts);
+}
+
+/// A block is at most the largest source request, the bound `Loader.init`
+/// puts on its own block sizes, so every candidate's ring of
+/// `block_parallelism` blocks fits the workspace's mapped ceiling.
+fn validate(opts: Options) error{InvalidOptions}!void {
+    comptime std.debug.assert(backend.max_read_request_size * max_block_parallelism <= host_memory.Workspace.mapped_bytes_ceiling);
+    if (opts.block_parallelism == 0 or opts.block_parallelism > max_block_parallelism) {
+        log.err("invalid DMA calibration options: block_parallelism={d}, expected 1..{d}: InvalidOptions", .{ opts.block_parallelism, max_block_parallelism });
+        return error.InvalidOptions;
+    }
+    if (opts.block_sizes.len == 0) {
+        log.err("invalid DMA calibration options: block_sizes is empty: InvalidOptions", .{});
+        return error.InvalidOptions;
+    }
+    for (opts.block_sizes) |block_size| {
+        if (block_size == 0 or block_size > backend.max_read_request_size) {
+            log.err("invalid DMA calibration options: block size {d}, expected 1..{d}: InvalidOptions", .{ block_size, backend.max_read_request_size });
+            return error.InvalidOptions;
+        }
+    }
+    if (opts.minimum_duration.nanoseconds <= 0 or opts.confirmation_duration.nanoseconds <= 0) {
+        log.err("invalid DMA calibration options: minimum_duration={f}, confirmation_duration={f}, expected more than zero: InvalidOptions", .{ opts.minimum_duration, opts.confirmation_duration });
+        return error.InvalidOptions;
+    }
+    // Written so that NaN fails too.
+    if (!(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1) or !(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1)) {
+        log.err("invalid DMA calibration options: block_selection_tolerance={d}, confirmation_margin={d}, expected [0, 1): InvalidOptions", .{ opts.block_selection_tolerance, opts.confirmation_margin });
+        return error.InvalidOptions;
+    }
+}
+
+/// Measures one representative device into the direct loader's workspace;
+/// CPU returns defaults without measuring. On a platform mixing device
+/// kinds, device 0's sizing serves every device: it is a tuning choice,
+/// valid for all of them. `opts` were checked (`validate`, or
+/// `Loader.init` for the loader's block sizes).
 pub fn calibrate(
     workspace: *host_memory.Workspace,
     platform: *const Platform,
@@ -76,17 +135,6 @@ pub fn calibrate(
     // The synthetic bandwidth was not the load's bottleneck; other
     // page-size/THP configurations were not measured.
     if (platform.target == .cpu) return .default;
-
-    std.debug.assert(opts.block_sizes.len > 0);
-    std.debug.assert(opts.minimum_duration.nanoseconds > 0);
-    std.debug.assert(opts.confirmation_duration.nanoseconds > 0);
-    std.debug.assert(opts.block_parallelism > 0 and opts.block_parallelism <= limits.max_dma_parallelism);
-    std.debug.assert(opts.block_selection_tolerance >= 0 and opts.block_selection_tolerance < 1);
-    std.debug.assert(opts.confirmation_margin >= 0 and opts.confirmation_margin < 1);
-    for (opts.block_sizes) |block_size| {
-        std.debug.assert(block_size > 0 and block_size <= limits.max_read_request_size);
-        std.debug.assert(block_size <= workspace.max_mapped_bytes / opts.block_parallelism);
-    }
 
     const result = try measureTransfer(workspace, platform, opts);
 
@@ -676,6 +724,34 @@ test "DMA benchmark confirms a candidate when round qualification disagrees" {
         0.05,
         0.02,
     ));
+}
+
+test "measure refuses a knob out of range before it touches the platform" {
+    const cases = [_]Options{
+        .{ .block_sizes = &.{} },
+        .{ .block_sizes = &.{0} },
+        .{ .block_sizes = &.{backend.max_read_request_size + 1} },
+        .{ .block_sizes = &.{host_memory.Workspace.mapped_bytes_ceiling / 8 + 1} },
+        .{ .block_parallelism = 0 },
+        .{ .block_parallelism = max_block_parallelism + 1 },
+        .{ .minimum_duration = .zero },
+        .{ .confirmation_duration = .fromMilliseconds(-1) },
+        .{ .block_selection_tolerance = 1 },
+        .{ .block_selection_tolerance = std.math.nan(f64) },
+        .{ .confirmation_margin = -0.01 },
+    };
+    for (cases) |opts| {
+        try std.testing.expectError(error.InvalidOptions, measure(std.testing.allocator, std.testing.io, undefined, opts));
+    }
+}
+
+test "measure needs no loader and selects the CPU defaults" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+        return error.SkipZigTest;
+    defer platform.deinit(allocator, io);
+    try std.testing.expectEqual(Result.default, try measure(allocator, io, platform, .{}));
 }
 
 test "DMA benchmark shares one manager across candidate sizes and slots" {

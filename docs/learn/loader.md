@@ -11,13 +11,12 @@ started load is in its buffers. It logs one line: the bytes loaded, the time
 since the first `start` and their rate, and what the programs computed.
 
 ```zig
+// Returns at once; calibration runs meanwhile.
+var loader = try zml.io.Loader.init(allocator, io, platform, .{ .checkpoint = path });
+defer loader.deinit();
+
 var buffers = try zml.mem.bufferize(allocator, Model, &model);
 defer zml.mem.deinitBufferized(allocator, Model, &buffers);
-
-var loader = try zml.io.Loader.init(allocator, io, platform, .{
-    .load_profile = profile,
-});
-defer loader.deinit();
 
 try loader.start(&model, &buffers, &store, .none);
 try loader.wait();
@@ -242,9 +241,9 @@ placed like the tensor, and `TensorStore.unbind` the old tensor.
 ## Errors and diagnostics
 
 `start` and `wait` declare one error set, `Loader.Error`; `Loader.init`
-returns an inferred error set. `Loader.Error` keeps the names a caller can
-act on: file I/O (a missing file is `FileNotFound`, a truncated read
-`UnexpectedEndOfFile`), allocation, PJRT, compile errors and `Canceled`.
+returns `InvalidOptions` or `OutOfMemory`. `Loader.Error` keeps the names a
+caller can act on: file I/O (a missing file is `FileNotFound`, a truncated
+read `UnexpectedEndOfFile`), allocation, PJRT, compile errors and `Canceled`.
 Host-memory allocation and DMA registration log the original PJRT failure
 and return `OutOfMemory`. Exceeding the host-memory mapped ceiling also logs
 the budget details at `err` and returns `OutOfMemory`.
@@ -268,12 +267,18 @@ calls return the stored error. Worker cancellation and normal shutdown use
 `debug`. The direct backend validates source sizes and parts before
 publication, while the buffered backend checks them in its workers.
 
-`Loader.init` uses these names:
+`Loader.init` checks every option, logs a rejected one at `err` and
+returns `InvalidOptions`: a read width or a block size out of range, an
+empty block list, a checkpoint whose scheme the VFS does not serve, or a
+read size that a block calibration may select does not divide. What
+`init`'s task fails with comes from the first `start`, as any
+`Loader.Error`:
 
 | Error | Meaning |
 | --- | --- |
-| `InvalidOptions` | Invalid profile, parallelism, or alignment |
 | `UnsupportedPlatform` | More devices than ZML addresses (`Platform.MAX_NUM_DEVICES`: 32, or 64 in builds with TPU) |
+| `ConcurrencyUnavailable` | An `io` that cannot run the warm-up's or the workers' tasks concurrently |
+| `OutOfMemory`, PJRT errors | Warm-up, calibration or the pinned pre-growth failed |
 
 The backends keep their own names (`SourceSizeMismatch`, `InvalidLayout`,
 `UnsupportedLayout`, `InvalidTensorRange`, `EmptyTensor`); the front end
@@ -290,8 +295,7 @@ builds because the Zig test runner counts logged errors as failures.
 | Module | Responsibility |
 | --- | --- |
 | `zml/io.zig` | Public IO facade |
-| `zml/io/loader.zig` | Loader options, starts, program compiles and groups, FIFO submissions, admission and source preparation |
-| `zml/io/execute_admission.zig` | Pure per-device room and cost arithmetic behind program admission |
+| `zml/io/loader.zig` | Loader options and their checks, the set-up task, starts, program compiles and groups, FIFO submissions, admission and its per-device arithmetic, and source preparation |
 | `zml/io/backend.zig` | Backend selection, submission dispatch and the shared `LoadSpec` contract |
 | `zml/io/TensorStore.zig` | Checkpoint lookup, source bindings and prefixed model views |
 | `zml/io/direct_loader.zig` | Planning, FIFO scheduling, source workers and transfer completion |
@@ -352,45 +356,57 @@ backend. CPU's direct arenas are ordinary pages.
 
 ## Initialization and host memory
 
-`Loader.init` selects the transfer path from the platform target, and the
-backend takes the same `Loader.Options` the caller passed. That decision
-describes validated loading behavior, independently of whether host memory is
-pinned or transfers use DMA.
+`Loader.init` checks the options, resolves the checkpoint's read hints
+through `VFS.fromIo(io)` (a plain `io`, or no checkpoint, reads local files
+without direct I/O), and returns at once. A task of the loader's own then
+warms the device allocators and creates the backend, selected from the
+platform target; when `io` cannot run it concurrently, `init` runs it in
+place. The first `start` waits for that task: its error fails the loader and
+is what that `start` returns. `deinit` cancels a task no `start` waited for,
+or destroys what it built. The task holds no pointer into the loader, so the
+loader is a value that may be moved before its first `start`. Initialize it
+as soon as the platform exists and build or compile the model meanwhile.
 
-The direct backend owns its workspace for its entire lifetime. Initialization
+The direct backend owns its workspace for its entire lifetime. Its creation
 allocates that workspace, calibrates transfer sizing, and cuts the arenas into
-blocks and the credits' slots before returning. Calibration arenas become the
+blocks and the credits' slots. Calibration arenas become the
 load's initial capacity; all arenas are released by `Loader.deinit`. The
 workspace type is internal to `io/host_memory.zig`.
 
-Callers configure calibration through `Loader.Options.dma`. Calibration options
-are checked with assertions; every candidate block size at the configured
-parallelism must fit within the workspace mapped ceiling. The direct
+Calibration screens the blocks of `Loader.Options.dma_block_sizes`, each at
+most 32 MiB and at least the checkpoint's direct I/O alignment, at a fixed
+eight transfers per device; its windows and its selection tolerance are
+fixed too. The direct
 backend caps its pinned arenas at a fixed 16 GiB, a safety guard rather than
 an allocation target; callers never supply a workspace, a budget, a NUMA
 policy or a calibration result. Page-backed arenas automatically interleave across the
 host's memory-bearing NUMA nodes when more than one is discoverable.
-The direct backend keeps the sizing selected during initialization
-(`loader.backend.direct.calibration`, which the `examples/io` `dma-bench`
-command prints); buffered loading has none. There is no separate public
-benchmark or recalibration operation.
+The direct backend keeps the sizing selected during its creation; buffered
+loading has none. `dma_calibration.measure(allocator, io, platform, opts)`
+runs the same warm-up and screen without a loader, in a workspace of its
+own, with every knob of `dma_calibration.Options` (block sizes, transfers
+per device, window length and transfer count, selection tolerance,
+confirmation windows); a knob out of range (a block above 32 MiB among
+them) is `InvalidOptions`. TPU, neuron, metal and furiosa load through the
+buffered backend, so `measure` returns `UnsupportedPlatform` there. The
+`examples/io` `dma-bench` command prints its result.
 
 CPU uses default transfer sizing without measurement. Buffered backends skip
 calibration. CUDA and oneAPI register host pages with PJRT; ROCm obtains pinned
 host buffers from PJRT; CPU uses unregistered pages. The arena allocation
 strategy and the loader's transfer path are separate decisions.
 
-The source profile supplies a minimum read size. The effective request size
-is the larger of that minimum and the selected DMA block, within the supported
-limit. The source width is fixed for the load: `Options.read_parallelism`, or
-the profile's default when null (`limits.defaultReadParallelism`: 16 reads for
-local files, 32 for a high-latency source), clipped to what the pre-grown
-pinned set holds. The direct backend pre-grows that many requests plus the
-DMA reserve before the first read, so nothing maps during a load. A read gate
-enforces the width; the lifecycle credits are the whole pre-grown capacity, so
-transfers that still hold host blocks keep the DMA stage fed without ever
-needing a block the reads did not leave free. The width never changes during
-a load: a source that answers 429 (or 503 on the object stores) is handled
-one layer down, where the VFS holds every request of that backend until the
-delay it named has passed, so the traffic falls without the loader's memory
-bounds moving.
+The checkpoint's VFS backend supplies a minimum read size (8 MiB for local
+files). The effective request size is the larger of that minimum and the
+selected DMA block, at most 32 MiB, and a whole number of blocks. The source
+width is fixed for the load: `Options.read_parallelism`, or the profile's
+default when null (16 reads for local files, 32 for a high-latency source),
+clipped to what the pre-grown pinned set holds. The direct backend pre-grows
+that many requests plus the DMA reserve before the first read, so nothing
+maps during a load. A read gate enforces the width; the lifecycle credits
+are the whole pre-grown capacity, so transfers that still hold host blocks
+keep the DMA stage fed without ever needing a block the reads did not leave
+free. The width never changes during a load: a source that answers 429 (or
+503 on the object stores) is handled one layer down, where the VFS holds
+every request of that backend until the delay it named has passed, so the
+traffic falls without the loader's memory bounds moving.

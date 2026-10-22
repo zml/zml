@@ -69,8 +69,8 @@ const Handle = struct {
 /// independently calibrated DMA block and the supported request-size limit.
 pub const LoadProfile = struct {
     /// Local files read without a VFS: buffered, exact reads. Also the
-    /// fallback of a caller that prepares no profile. This value is borrowed
-    /// and does not require deinitialization.
+    /// loader's profile when it is given no checkpoint or no VFS. This
+    /// value is borrowed and does not require deinitialization.
     pub const local: LoadProfile = .{
         .name = "local",
         .read_chunk_size = 8 * 1024 * 1024,
@@ -183,10 +183,10 @@ const io_vtable: std.Io.VTable = VFSBase.vtable(.{
     .fileRealPath = fileRealPath,
 });
 
-/// Prepares the source tuning and feedback provider for one model load. A
-/// path resolves as it does for `openFile`: a bare path or a `file://` URI
-/// is local, served by the inner `Io`, and the loader may read it directly
-/// (`useDirectIo`).
+/// Prepares the source tuning and feedback provider for one model load
+/// (`Loader.init` asks for its checkpoint's). A path resolves as it does
+/// for `openFile`: a bare path or a `file://` URI is local, served by the
+/// inner `Io`, and the loader may read it directly (`useDirectIo`).
 /// Returned strings and providers borrow backend state, so this VFS and its
 /// registered backend must outlive the load.
 pub fn loadProfile(self: *VFS, path: []const u8) !LoadProfile {

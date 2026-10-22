@@ -248,7 +248,7 @@ pub fn main(init: std.process.Init) !void {
     var mlp_weights = try zml.mem.bufferize(allocator, Mlp, &mlp);
     defer zml.mem.deinitBufferized(allocator, Mlp, &mlp_weights);
     {
-        var loader = try zml.io.Loader.init(allocator, io, platform, .auto);
+        var loader = try zml.io.Loader.init(allocator, io, platform, .{});
         defer loader.deinit();
         try loader.start(&mlp, &mlp_weights, &model_store, .none);
         try loader.wait();

@@ -12,52 +12,36 @@ const TensorStore = @import("TensorStore.zig");
 const buffered_loader = @import("buffered_loader.zig");
 const direct_loader = @import("direct_loader.zig");
 const dma_calibration = @import("dma_calibration.zig");
-const limits = @import("limits.zig");
 
 pub const SubmitError = direct_loader.Loader.SubmitError || buffered_loader.Loader.SubmitError;
 pub const AwaitError = direct_loader.Loader.AwaitError || buffered_loader.Loader.AwaitError;
 
-pub const Options = struct {
-    pub const auto: Options = .{};
+/// The largest source request, and so the largest DMA block: a request is
+/// a whole number of blocks, at least one.
+pub const max_read_request_size: usize = 32 * 1024 * 1024;
 
-    /// Concurrent source reads, at most `limits.max_read_parallelism`.
-    /// Null takes the profile's default (`limits.defaultReadParallelism`:
-    /// 16 locally, 32 on a high-latency source), clipped to one less than
-    /// what the pre-grown pinned set holds. Fixed for the load: a source
-    /// that rate limits holds the VFS instead (`vfs/request.zig`).
+/// `Loader.Options` as `Loader.init` checked them, the checkpoint resolved
+/// to its VFS backend's read hints. See `Loader.Options` for each field.
+pub const Options = struct {
     read_parallelism: ?usize = null,
-    /// Model-wide source tuning prepared from the VFS path. The default
-    /// is the no-VFS local profile; prepare one with `VFS.loadProfile`
-    /// for a VFS path.
     load_profile: VFS.LoadProfile = .local,
-    /// Calibrate transfer sizing during initialization. Ignored by buffered
-    /// backends; CPU uses the default sizing without measurement.
-    dma: dma_calibration.Options = .{},
-    /// Direct I/O for local source files, decided per file by the
-    /// VFS that opens it: `auto` reads a file past the page cache when it
-    /// is mostly not cached at the first decision, `on` whenever the
-    /// filesystem allows it, `off` never. The planner widens a direct file's
-    /// reads to the profile's alignment, at most two alignment units per
-    /// request. A direct read never fills the page cache, so under
-    /// `auto` a cold file stays cold and comes from the disk on every
-    /// load (in a file of many pages per sample window, the residency probe
-    /// lands on other pages every time, so the ones it cached do not count;
-    /// a file of at most 32 pages is sampled whole and turns buffered after
-    /// its first load); on a host whose warm buffered reads beat its disk, a model
-    /// loaded repeatedly is better served by `off`. Nothing changes for
-    /// a profile without alignment.
-    /// Warm replicated Llama-3.1-8B on eight MI300X took ~1.10 s buffered but
-    /// ~4.53 s forced direct from a slow storage extent; on four GB300
-    /// with four NVMe drives in RAID0, direct took ~0.30 s versus ~0.32 s
-    /// warm buffered. These are loader times, not disk-only rates.
-    /// Residency alone cannot predict which path wins. The loader retains
-    /// each open file, so its decision is not remeasured on every submission
-    /// if cache residency changes.
+    dma_block_sizes: []const usize = &dma_calibration.default_block_sizes,
     direct_io: VFS.DirectIo = .auto,
 
-    /// The width the backend uses: the option, or the profile default.
+    /// Concurrent source reads by latency class, from the recorded
+    /// width sweeps. Local sources knee at 12 to 16 on every host
+    /// measured: the B70 peaks at 12 to 16 and loses 11% at 24, one MI300X
+    /// prefers 12, the RTX 5090 host 16 over 12, and the GB300 plateau from 12
+    /// to 48 has 16 within 5% of its best rung, so 16 is the width with the
+    /// smallest regret. Remote sources plateau from 24 to 32: hf:// reads 32
+    /// and 64 alike and AWS was flat from 24, while pinned memory grows with
+    /// the width (32 x 32 MiB requests pin 1.5 GiB).
+    const local_read_parallelism: usize = 16;
+    const high_latency_read_parallelism: usize = 32;
+
+    /// The width the backend uses: the option, or the profile's default.
     pub fn readWidth(self: Options) usize {
-        return self.read_parallelism orelse limits.defaultReadParallelism(self.load_profile.high_latency);
+        return self.read_parallelism orelse if (self.load_profile.high_latency) high_latency_read_parallelism else local_read_parallelism;
     }
 };
 

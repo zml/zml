@@ -195,15 +195,12 @@ const Mnist = struct {
 ```
 
 The direct loader (CUDA, ROCm, oneAPI and CPU; CPU arenas are plain pages)
-sizes its transfers once, during `Loader.init`: it calibrates synthetic
-transfers on one representative device and keeps the result for the whole
-load. Tune the screen through the loader options:
-
-```zig
-var loader = try zml.io.Loader.init(allocator, io, platform, .{
-    .dma = .{ .block_parallelism = 8 },
-});
-```
+sizes its transfers once: it calibrates synthetic transfers on one
+representative device and keeps the result for the whole load.
+`Loader.init` returns at once and calibrates on a task of its own, so
+initialize the loader early and compile the model meanwhile; the first
+`start` waits for what is left. When `io` is a VFS, pass the checkpoint's
+path (`.checkpoint = path`): the VFS backend serving it sizes the reads.
 
 On CPU the calibration returns the 4 MiB/eight-transfer defaults without
 measuring: the plugin's transfer is a memcpy, and a load takes the same time

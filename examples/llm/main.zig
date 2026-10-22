@@ -81,15 +81,11 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    // Load buffers after compilation to leave enough device memory for autotuning.
-    const load_profile = try vfs.loadProfile(args.model);
-    var loader_fut = try io.concurrent(zml.io.Loader.init, .{ allocator, io, platform, .{
-        .load_profile = load_profile,
-    } });
-    defer if (loader_fut.cancel(io)) |loader| {
-        var l = loader;
-        l.deinit();
-    } else |_| {};
+    // Returns at once: the loader calibrates on its own task while the model
+    // is initialized and compiled. Load buffers after compilation to leave
+    // enough device memory for autotuning.
+    var loader: ?zml.io.Loader = try zml.io.Loader.init(allocator, io, platform, .{ .checkpoint = args.model });
+    defer if (loader) |*l| l.deinit();
 
     const backend: zml.attention.Backend = if (args.backend) |selected| switch (selected) {
         .stablehlo => .{ .stablehlo = {} },
@@ -142,10 +138,11 @@ pub fn main(init: std.process.Init) !void {
     compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, meshes, args.seqlen, &progress);
     defer compiled_model.deinit();
 
-    var loader = try loader_fut.await(io);
-
-    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, &loader, progress, &store);
+    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, &loader.?, progress, &store);
     defer model.unloadBuffers(&model_buffers, allocator);
+    // Release the pinned staging pools as soon as the weights are loaded.
+    loader.?.deinit();
+    loader = null;
 
     const tokenizer = try tokenizer_fut.await(io);
 

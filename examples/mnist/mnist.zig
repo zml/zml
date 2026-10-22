@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
 
     // Init model
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{platform.replicated_mesh});
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{});
     defer store.deinit();
     const mnist_model: Mnist = .init(store.view());
 

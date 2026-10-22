@@ -4,7 +4,6 @@ const std = @import("std");
 
 pub const VFS = @import("vfs");
 
-pub const limits = @import("io/limits.zig");
 const loader = @import("io/loader.zig");
 pub const Loader = loader.Loader;
 pub const TensorStore = @import("io/TensorStore.zig");
