@@ -210,7 +210,7 @@ fn load_up_blocks(
         };
 
         break :b0 block.QwenImage21ResidualUpBlock{
-            .avg_shortcut = block.QwenImage21DupUp3D{ .factor_t = 1 },
+            .avg_shortcut = block.QwenImage21DupUp3D{ .out_channels = 1152, .factor_t = 2, .factor_s = 2 },
             .resnets = resnets,
             .upsampler = upsampler,
         };
@@ -268,7 +268,7 @@ fn load_up_blocks(
         };
 
         break :b1 block.QwenImage21ResidualUpBlock{
-            .avg_shortcut = block.QwenImage21DupUp3D{ .factor_t = 1 },
+            .avg_shortcut = block.QwenImage21DupUp3D{ .out_channels = 1152, .factor_t = 2, .factor_s = 2 },
             .resnets = resnets,
             .upsampler = upsampler,
         };
@@ -362,7 +362,7 @@ fn load_up_blocks(
         };
 
         break :b2 block.QwenImage21ResidualUpBlock{
-            .avg_shortcut = block.QwenImage21DupUp3D{ .factor_t = 1 },
+            .avg_shortcut = block.QwenImage21DupUp3D{ .out_channels = 576, .factor_t = 2, .factor_s = 2 },
             .resnets = resnets,
             .upsampler = upsampler,
         };
@@ -450,7 +450,7 @@ fn load_up_blocks(
         };
 
         break :b3 block.QwenImage21ResidualUpBlock{
-            .avg_shortcut = block.QwenImage21DupUp3D{ .factor_t = 1 },
+            .avg_shortcut = block.QwenImage21DupUp3D{ .out_channels = 288, .factor_t = 1, .factor_s = 2 },
             .resnets = resnets,
             .upsampler = upsampler,
         };
@@ -527,7 +527,7 @@ fn load_up_blocks(
         }
 
         break :b4 block.QwenImage21ResidualUpBlock{
-            .avg_shortcut = block.QwenImage21DupUp3D{ .factor_t = 1 },
+            .avg_shortcut = null,
             .resnets = resnets,
             .upsampler = null,
         };
