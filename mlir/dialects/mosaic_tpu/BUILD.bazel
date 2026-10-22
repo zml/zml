@@ -7,19 +7,18 @@ cc_library(
     srcs = ["capi.cc"],
     hdrs = ["capi.h"],
     tags = ["manual"],
-    visibility = ["//visibility:private"],
     deps = [
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:CAPIIR",
         "@xla//xla/mosaic:tpu_dialect",
     ],
-    alwayslink = True,
 )
 
 zig_library(
     name = "mosaic_tpu",
     import_name = "mlir/dialects/mosaic_tpu",
     main = "mosaic_tpu.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         ":capi",

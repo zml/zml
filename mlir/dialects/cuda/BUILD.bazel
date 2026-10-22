@@ -11,9 +11,9 @@ cc_library(
     tags = ["manual"],
     deps = [
         ":dialect",
+        ":headers",
         "@llvm-project//mlir:CAPIIR",
     ],
-    alwayslink = True,
 )
 
 zig_library(
@@ -24,7 +24,6 @@ zig_library(
     import_name = "mlir/dialects/cuda",
     main = "cuda.zig",
     tags = ["manual"],
-    visibility = ["//visibility:public"],
     deps = [
         ":capi",
         "//mlir",
@@ -43,7 +42,13 @@ zig_test(
 
 td_library(
     name = "td_files",
-    srcs = glob(["*.td"]),
+    srcs = [
+        "CudaAttrs.td",
+        "CudaDialect.td",
+        "CudaEnums.td",
+        "CudaOps.td",
+        "CudaTypes.td",
+    ],
     includes = ["/"],
     deps = [
         "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",

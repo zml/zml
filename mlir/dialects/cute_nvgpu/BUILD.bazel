@@ -11,10 +11,10 @@ cc_library(
     tags = ["manual"],
     deps = [
         ":dialect",
+        ":headers",
         "//mlir/dialects/cute_ir:dialect",
         "@llvm-project//mlir:CAPIIR",
     ],
-    alwayslink = True,
 )
 
 zig_library(
@@ -22,7 +22,6 @@ zig_library(
     import_name = "mlir/dialects/cute_nvgpu",
     main = "cute_nvgpu.zig",
     tags = ["manual"],
-    visibility = ["//visibility:public"],
     deps = [
         ":capi",
         "//mlir",
@@ -43,10 +42,17 @@ zig_test(
 
 td_library(
     name = "td_files",
-    srcs = glob(["*.td"]),
+    srcs = [
+        "CuteNVGPUAttrs.td",
+        "CuteNVGPUDialect.td",
+        "CuteNVGPUEnums.td",
+        "CuteNVGPUOps.td",
+        "CuteNVGPUTypes.td",
+    ],
     includes = ["/"],
     deps = [
-        "//mlir/dialects/cute_ir:tabledefs",
+        "//mlir/dialects/cute_ir:td_files",
+        "@cute_ir//:cute_ir_dialect_td",
         "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
         "@llvm-project//mlir:OpBaseTdFiles",
         "@llvm-project//mlir:SideEffectInterfacesTdFiles",
@@ -166,7 +172,10 @@ cc_library(
         ":ops_inc_gen",
         ":types_inc_gen",
         "//mlir/dialects/cute_ir:headers",
+        "@llvm-project//mlir:BytecodeOpInterface",
+        "@llvm-project//mlir:IR",
         "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:SideEffectInterfaces",
     ],
 )
 

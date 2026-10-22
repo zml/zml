@@ -183,18 +183,6 @@ zig_library(
     }),
 )
 
-zig_library(
-    name = "moe_mosaic_tpu_gmm_ep",
-    import_name = "zml/moe/mosaic_tpu_kernels/gmm_ep",
-    main = "//zml/kernels/moe/mosaic_tpu:gmm_ep.zig",
-    tags = ["manual"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":zml",
-        "//kernels/mosaic_tpu:mosaic_tpu_builder",
-    ],
-)
-
 zig_test(
     name = "test",
     deps = ["//zml"],

@@ -5,7 +5,6 @@ cc_library(
     name = "c",
     hdrs = ["mlir.h"],
     tags = ["manual"],
-    visibility = ["//mlir:__subpackages__"],
     deps = [
         "@llvm-project//mlir:CAPIIR",
         "@llvm-project//mlir:CAPITransforms",
