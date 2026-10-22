@@ -6739,8 +6739,124 @@ Checks:
   of a synthetic checkpoint passes its load and pack checks, replicated
   and tp with 2 packs of 4, and sharded without packs.
 
+## Thirty-ninth pass: VFS Remotes and one error contract (R6) (2026-10-22)
+
+R6 of `LOADER_API_REVIEW.md` (H-remotes-bundle, H-error-contract,
+H-vfs-surface; LOADER_REVIEW #6). Four callers assembled the HTTP client
+and the remote backends by hand, and examples/llm had drifted: no https,
+no proxies. Each backend failed a missing object its own way: HTTP with
+`Unexpected`, S3 with `FileNotFound` for a 404 but `Unexpected` for a 403,
+hf with `Unexpected` for any tree failure, `Canceled` included. A missing
+optional file aborted llmd on s3:// and https://.
+
+zml:
+- `VFS.Remotes.init(self, allocator, vfs, environ)` builds the client on
+  the VFS's base io, with `initDefaultProxies` into an arena of its own,
+  and the `https`, `hf`, `s3` and `gs` backends through their `.auto`
+  constructors (`HTTP.init` for https). It is initialized in place, since
+  the backends point at the client. It reserves room in the VFS map
+  before it registers the four schemes, so nothing is registered on
+  error. `deinit` tears down in reverse. Each backend's own constructor
+  stays public.
+- examples/io and examples/llm use it; examples/llm now has https and
+  proxies. The bundled-backends test in vfs.zig goes through it with an
+  empty environment.
+- Gone: `VFS.unregister` (no caller) and `request.RateLimited` (no
+  reference). `VFSBase` and the `dirStatFile`, `dirAccess` and
+  `dirCreateFile` overrides are private.
+- One contract for open, stat and access of a remote path:
+  `FileNotFound` for 404 and 410, `PermissionDenied` for 401 and 403,
+  `Canceled` passed through. Any other failure is logged at err (backend,
+  path, error) and surfaces as `Unexpected`. `request.open_statuses`,
+  `openStatus` and `openFailure` are the one mapping; http, hf, s3 and gs
+  use them.
+- `access` sent nothing on http, s3 and gs and always succeeded. It now
+  sends the same HEAD as `statFile`.
+- hf: `statFile` of a missing path returned `IsDir`; it now returns
+  `FileNotFound`.
+- S3 answers 403 for a missing key when the principal lacks
+  `s3:ListBucket`. It is reported as `PermissionDenied`, and the S3 doc and
+  loader.md say a probe of an optional file treats it as absent.
+- `resolveModelEntrypoint` tries `model.safetensors` after a denied index.
+  It returns `PermissionDenied` only when neither opens and one probe was
+  denied, and returns `Canceled` at once. Before, every failure was a
+  silent `FileNotFound`. `resolveModelRepo` passes `PermissionDenied` and
+  `Canceled` through instead of `InvalidPath`.
+- The `throttle_budget` docs no longer name `error.RateLimited`, which
+  never reaches a caller.
+- loader.md states the contract and shows the `Remotes` setup.
+
+llmd (monorepo):
+- main.zig and zoo.zig use `VFS.Remotes`.
+- The two chat template probes treat `PermissionDenied` as absent, with a
+  warning. Every other open in llmd and the examples is of a required
+  file.
+
+Tests, new (no network):
+- The status mapping and the three errors `openFailure` passes through.
+- http, s3 and gs against the mock server: open, stat and access of an
+  object refused with 404, 410, 401 and 403, plus one served. The mock
+  server's unused `missing` list became `refusals` (path and status).
+- hf: absent paths and `IsDir`, from a pre-filled repository listing.
+- `resolveModelEntrypoint` on S3: the single file after a 403 index,
+  `PermissionDenied` when both are 403, `FileNotFound` when both are 404.
+
+Review (workflow, refuting verifier): seven findings, four distinct, all
+fixed.
+- gs:// requests had no leading slash: `gcsUri` used the VFS path
+  `bucket/key` as the raw URI path, so every real open, stat, access and
+  read sent `HEAD bucket/key?alt=media`, and behind a proxy
+  `https://storage.googleapis.combucket/key`. Pre-existing, and the new
+  test hid it by passing `/bucket/` for GCS only. `gcsUri` now formats
+  `/bucket/key` into a caller buffer, and the test passes `bucket/` as
+  for S3. Not checked against real GCS.
+- `request.RateLimited` was dead. The new `throttle_budget` docs promised
+  `Unexpected`, but a streaming read ends with `EndOfStream`; they now
+  only say the requests fail. `Accept.statuses` no longer cites a 401
+  re-authentication no request does.
+- `VFSBase` was still exported; it is private. `ReadHints` stays public:
+  it types `Backend.read_hints`.
+- Nothing tested the entrypoint fallback. The S3 test above does.
+
+Not done:
+- A streaming read still turns any backend failure, `RateLimited`
+  included, into `EndOfStream` after an err log: a throttled `cp` ends
+  early. LOADER_REVIEW #10, for the VFS-store move.
+- On S3, wrong credentials and a missing key without `s3:ListBucket` both
+  give `PermissionDenied`. A required open (`config.json`) still fails on
+  it.
+- HF's denied paths are untested: its URLs are fixed to huggingface.co.
+  The `Unexpected` branch of `openFailure` is untested, because an err log
+  fails a Zig test.
+- 401, 403 and 404 at open or stat are no longer logged by the VFS; the
+  caller gets the typed error. A private or missing hf:// repository is
+  `PermissionDenied` or `FileNotFound` now, not `InvalidPath`.
+- An unexpected status logs two err lines: the status from `exchange`, the
+  error from `openFailure`.
+- `Remotes.init` takes a mutable `*Environ.Map`, because the `.auto`
+  constructors do.
+- `docs/howtos/huggingface_access_token.md` names `HUGGINGFACE_TOKEN`;
+  `HF.auto` reads `HF_TOKEN`.
+- Not run against real HF, S3, GCS or HTTPS servers.
+
+Checks:
+- `bazel test //zml:test` passes (331, 12 skip).
+- `bazel test //vfs:test` passes 50/50.
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7.
+- `bazel build --config=localzml //llmd:llmd //llmd:zoo`.
+- `examples/io stat` under `env -i`, with a fake proxy variable: a local
+  file prints its size, a missing one fails with `FileNotFound`.
+
 ## Open work
 
+- 2026-10-22 VFS Remotes and one error contract (thirty-ninth pass, zml
+  zvrossur and monorepo wlwvxtwp): R6 done, and with it LOADER_REVIEW #6.
+  `VFS.Remotes` registers the four remote schemes; open, stat and access
+  fail with `FileNotFound`, `PermissionDenied`, `Canceled` or a logged
+  `Unexpected` on every backend; gs:// requests get their leading slash.
+  Not run against a real remote. `huggingface_access_token.md` names the
+  wrong variable (`HF_TOKEN` is read).
 - 2026-10-22 Loader.init returns at once (thirty-eighth pass, zml vyswqxpw
   and monorepo sltmxrzn): R5 done. `init` checks a caller's four options
   and sets up on its own task; `dma_calibration.measure` serves dma-bench;
