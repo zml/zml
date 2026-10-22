@@ -7,7 +7,8 @@ published at once, and the programs that compute the other tensors start
 compiling (`Source.bindProgram`). `wait` then lands the programs' inputs in
 groups the devices have room for, runs each group's programs on the calling
 task, writes their outputs and frees the inputs, and returns once every
-started load is in its buffers.
+started load is in its buffers. It logs one line: the bytes loaded, the time
+since the first `start` and their rate, and what the programs computed.
 
 ```zig
 var buffers = try zml.mem.bufferize(allocator, Model, &model);
@@ -44,12 +45,10 @@ const b = store.view().createReplicatedTensor("b", .{.out});
 The store is passed to each `start`; initialization needs no store. `start`
 also takes a progress node as its final argument (`.none` disables
 reporting). The loader copies the node; do not end it until `wait` or
-`cancel` returns. The caller owns the estimated total. For a whole checkpoint
-loaded once, `store.view().count()` estimates the number of source tensors.
-Each loaded tensor completes one item, a composite tensor once for all its
-sources; a tensor a program computes counts its inputs, not its output.
-Unused, repeatedly loaded or concatenated sources can make the checkpoint
-estimate inexact. Source progress completes before a program runs; keep the
+`cancel` returns. `start` adds its own items to the node's estimated total,
+and the load completes them all: one per loaded tensor, a composite tensor
+once for all its sources, and one per program input; a program's output
+adds none. Source progress completes before a program runs; keep the
 enclosing node alive until `wait` returns to cover the full loading
 lifecycle. The caller owns the store, platform and model buffers; a started
 load borrows the buffers and the store until `wait` or `cancel` returns, and
@@ -76,17 +75,23 @@ so every group is admitted with them counted.
 
 Every error of `start` or `wait` fails the loader: what was started is
 canceled, and every later call returns the first error. `wait` is idempotent.
-`bytesLoaded` counts the logical bytes of submissions retired with execution:
-each destination's shape once, so a composite tensor counts its padding and
-not each of its sources.
+Its line counts each destination's bytes once, so a composite tensor counts
+its padding and not each of its sources, and a program counts its inputs.
 `cancel` gives up on everything started, which only an error between `start`
 and `wait` leaves behind: it drops the queued groups, aborts the backend,
 retires the submissions without running their programs, inputs freed, and
-waits for the compiles. The outputs are undefined (unwritten, errored, or for
-host-resident destinations ready but partly written): free the ones that were
-assigned, read none. The loader is failed afterwards. `deinit` cancels, then
-destroys the backend. There is no per-submission handle and no memory
+waits for the compiles. The loader is failed afterwards. `deinit` cancels,
+then destroys the backend. There is no per-submission handle and no memory
 budget: `program_group_bytes` only sizes the program groups.
+
+Whatever fails, the buffers can be freed as after a load. Pass `start` the
+buffers `bufferize` made, which are empty; `start` empties them again before
+it checks a binding, and a backend or a program writes a buffer whole or not
+at all. After an error of
+`start`, `wait` or a `cancel`, each buffer is empty or holds its shards, whose
+contents are unspecified (unwritten, errored, or partly written): read none,
+and free the tree with `zml.mem.deinitBufferized`, which skips the empty
+ones.
 
 ## Composite tensors
 
@@ -136,7 +141,7 @@ place of the old binding.
 `start` checks a composite binding before submitting anything: the layout
 fills the tensor's bytes, it has a part, each part reads a source of the
 binding, stays inside it and the destination, and parts do not overlap;
-otherwise `InvalidLayout`. A zero-byte source is `EmptyTensor`. A strided
+otherwise `InvalidBinding`, as for a zero-byte source. A strided
 part of at most 64 runs, or of runs of at least 1 MiB, becomes one load part
 per run. A composite with any other strided part (many small runs: row
 interleaves, transposes, broadcasts) goes to the backend as strided parts,
@@ -145,8 +150,8 @@ order without overlapping. Two that interleave are checked exactly when one
 of them has at most 1024 runs (each looked for among the other's), or when
 they repeat with the same strides, before or after merging the runs that
 touch (a search over the differences of their indices); any other pair is
-`UnsupportedLayout`. Strided
-parts into a host memory space are `UnsupportedLayout` too.
+`InvalidBinding`. Strided
+parts into a host memory space are `InvalidBinding` too.
 
 The front end turns a composite binding into one `LoadSpec` whose parts all
 share the destination. The direct backend plans each part like a tensor: the
@@ -226,7 +231,7 @@ compiles one executable for every tensor of an equal program over the same
 placed shapes, and starts each compile as soon as `start` sees it. It lands
 each input as it lands a bound source, in default device memory, runs the
 program over them, then frees them; the program must return the tensor's
-shape, placed alike, or `wait` fails with `ProgramOutputMismatch`.
+shape, placed alike, or `wait` fails with `InvalidBinding`.
 `View.maybeCreateBinding(keys, shape, program)` is the shorthand for whole
 checkpoint tensors, replicated.
 
@@ -237,42 +242,44 @@ placed like the tensor, and `TensorStore.unbind` the old tensor.
 ## Errors and diagnostics
 
 `start` and `wait` declare one error set, `Loader.Error`; `Loader.init`
-returns an inferred error set. Their finite error sets
-include the underlying file I/O, allocation, cancellation, sharding, and PJRT
-errors. For example, missing files still return `FileNotFound`, truncated
-reads return `UnexpectedEndOfFile`. Host-memory allocation and DMA registration
-log the original PJRT failure and return `OutOfMemory`.
-Exceeding the host-memory mapped ceiling also logs the budget details at `err`
-and returns `OutOfMemory`.
+returns an inferred error set. `Loader.Error` keeps the names a caller can
+act on: file I/O (a missing file is `FileNotFound`, a truncated read
+`UnexpectedEndOfFile`), allocation, PJRT, compile errors and `Canceled`.
+Host-memory allocation and DMA registration log the original PJRT failure
+and return `OutOfMemory`. Exceeding the host-memory mapped ceiling also logs
+the budget details at `err` and returns `OutOfMemory`.
+
+A model whose bindings are wrong is one error, `InvalidBinding`, whichever
+rule it breaks:
+
+- a tensor with no checkpoint binding;
+- a zero-byte source;
+- a source whose bytes differ from its tensor's;
+- a composite layout that does not fit its tensor, or that this loader does
+  not assemble yet;
+- a tensor whose dimensions its mesh partitions do not divide;
+- a memory kind the platform cannot take;
+- a program that does not return its tensor's shape, placed alike.
 
 A failure is logged once, where it is detected, at `err` with the values that
-explain it: a rejected binding names its tensor. Frames that only propagate
-an error do not log it again, and subsequent calls return the stored error.
-Worker cancellation and normal shutdown use `debug`. The direct backend
-validates source sizes and parts before publication, while the buffered
-backend checks them in its workers.
+explain it: a rejected binding names its tensor, its source and the rule.
+Frames that only propagate an error do not log it again, and subsequent
+calls return the stored error. Worker cancellation and normal shutdown use
+`debug`. The direct backend validates source sizes and parts before
+publication, while the buffered backend checks them in its workers.
 
-Loader-specific errors use these shared names:
+`Loader.init` uses these names:
 
 | Error | Meaning |
 | --- | --- |
 | `InvalidOptions` | Invalid profile, parallelism, or alignment |
 | `UnsupportedPlatform` | More devices than ZML addresses (`Platform.MAX_NUM_DEVICES`: 32, or 64 in builds with TPU) |
-| `SourceSizeMismatch` | Source bytes differ from the destination shape in either backend |
-| `InvalidLayout` | A composite binding's parts do not fit its tensor |
-| `UnsupportedLayout` | A composite layout this loader does not assemble yet |
-| `InvalidTensorRange` | A source range cannot be represented |
-| `Internal` | A planning or transfer bookkeeping invariant failed |
-| `Closed` | Internal: the direct backend's scheduler or a gate has shut down. Callers get the failure that shut it down instead |
-| `TensorNotFound` | A tensor has no checkpoint binding |
-| `ProgramOutputMismatch` | A program does not return its tensor's shape, placed alike |
 
-`EmptyTensor` remains distinct.
-
-These names replace the former loader-specific profile, DMA benchmark,
-DMA budget, loader-job, and shutdown names; callers matching those errors
-must update their switches. They do not change how submissions are admitted,
-retired, or cleaned up.
+The backends keep their own names (`SourceSizeMismatch`, `InvalidLayout`,
+`UnsupportedLayout`, `InvalidTensorRange`, `EmptyTensor`); the front end
+returns them as `InvalidBinding`. The front end panics on `Closed`,
+`Internal` and, after `init`, `InvalidOptions`: each means a broken
+invariant (a backend returns the error that closed it, never `Closed`).
 
 Error-path tests assert returned errors and cleanup rather than capturing logs.
 The loader's log scopes (`zml/io/log.zig`) demote `err` to `debug` in test

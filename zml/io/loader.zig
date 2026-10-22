@@ -38,13 +38,7 @@ const load_log = @import("log.zig").load;
 const load_testing = @import("testing.zig");
 const TensorStore = @import("TensorStore.zig");
 
-/// A composite binding the loader cannot place: `InvalidLayout` when its
-/// parts do not fit the tensor, `UnsupportedLayout` for a layout this loader
-/// does not assemble yet (a strided part of many small chunks).
-const LayoutError = error{ InvalidLayout, UnsupportedLayout };
-const PrepareError = std.mem.Allocator.Error || error{ TensorNotFound, EmptyTensor, UnsupportedMemoryKind } || LayoutError;
-/// Placing the sources on the devices, then the backend's own submission.
-const SubmitError = error{IncompatibleSharding} || backend.SubmitError || error{Overflow};
+const PrepareError = std.mem.Allocator.Error || error{InvalidBinding};
 
 /// Loads models from their checkpoint sources, and computes the tensors
 /// programs compute from theirs. The platform and options' borrowed values
@@ -55,8 +49,12 @@ const SubmitError = error{IncompatibleSharding} || backend.SubmitError || error{
 pub const Loader = struct {
     /// Every error `start` and `wait` return. Each one fails the loader:
     /// everything started is canceled (`cancel`), and every later call
-    /// returns the first error.
-    pub const Error = PrepareError || SubmitError || backend.AwaitError || Compiler.Error || error{ ProgramOutputMismatch, Canceled };
+    /// returns the first error. A model whose bindings are wrong is
+    /// `InvalidBinding`, logged at err with the tensor, its key and the rule
+    /// it breaks. The others come from reading the checkpoint, the devices,
+    /// the compiler, or `cancel`.
+    pub const Error = error{ InvalidBinding, Canceled } || std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError ||
+        std.Io.File.Reader.SeekError || safetensors.ExactPositionalError || Compiler.Error;
 
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -77,8 +75,13 @@ pub const Loader = struct {
     pending: std.Deque(PendingSubmission) = .empty,
     /// The first error; every later call returns it.
     failure: ?Error = null,
-    /// Logical bytes of every submission retired with execution: each
-    /// destination's shape once (`Loader.bytesLoaded`).
+    /// When the first `start` since the last `wait` ran: `wait` logs the
+    /// load's time from there.
+    started_at: ?std.Io.Timestamp = null,
+    /// Logical bytes of the submissions retired with execution since that
+    /// `start`: each destination's shape once, so a composite tensor counts
+    /// its padding and not its sources one by one, and a program group
+    /// counts its inputs.
     bytes_loaded: usize = 0,
     /// Whether admission can measure the room: the backend counts its
     /// allocations and every device reported an allocator limit at init.
@@ -163,11 +166,12 @@ pub const Loader = struct {
     /// Gives up on everything started: drops the queued groups, aborts the
     /// backend (queued reads are dropped, reads in flight finish), retires
     /// the pending submissions without running their programs, and waits
-    /// for the compiles. The outputs of the started loads are undefined:
-    /// unwritten, errored, or for host-resident destinations ready but
-    /// partly written; free the ones that were assigned, read none. The
-    /// loader is failed afterwards. For an error between `start` and
-    /// `wait`; nothing to do when nothing was started.
+    /// for the compiles. Each buffer of the started loads is then empty or
+    /// holds its shards, whose contents are unspecified (unwritten,
+    /// errored, or partly written); read none, and free the tree as after a
+    /// load (`mem.deinitBufferized`). The loader is failed afterwards. For
+    /// an error between `start` and `wait`; nothing to do when nothing was
+    /// started.
     pub fn cancel(self: *Loader) void {
         if (self.queued.len == 0 and self.pending.len == 0 and self.programs.items.len == 0) return;
         if (self.failure == null) self.failure = error.Canceled;
@@ -212,16 +216,19 @@ pub const Loader = struct {
     /// one planned submission. A tensor a program computes
     /// (`Source.bindProgram`) starts its program compiling, once for every
     /// tensor of the same program; `wait` lands its inputs and runs it.
-    /// Before anything is published, a tensor without a binding is
-    /// `error.TensorNotFound`, a zero-byte source `error.EmptyTensor`, a
-    /// composite layout that does not fit its tensor `error.InvalidLayout`
-    /// and one this loader cannot assemble yet `error.UnsupportedLayout`; a
-    /// memory kind the platform cannot take (`backend.supportsMemory`) is
-    /// `error.UnsupportedMemoryKind`. Several loads may be started before
-    /// one `wait`. `buffers` and `store` are borrowed until `wait` or
-    /// `cancel` returns; do not end `progress` before then. Progress counts
-    /// the loaded tensors, a composite one once, and the program inputs;
-    /// the caller owns the estimated total.
+    /// Before anything is published, a tensor without a binding, a
+    /// zero-byte source, a composite layout that does not fit its tensor or
+    /// that this loader cannot assemble yet, and a memory kind the platform
+    /// cannot take (`backend.supportsMemory`) are `error.InvalidBinding`.
+    /// Several loads may be started before one `wait`. `buffers` is
+    /// `mem.bufferize` of `model`, whose buffers are empty; `start` empties
+    /// them again, and each stays empty until its load writes it whole. So
+    /// after any error each buffer is empty or holds shards for the caller
+    /// to free: `mem.deinitBufferized` frees the tree either way. `buffers`
+    /// and `store` are borrowed until `wait` or `cancel` returns; do not end
+    /// `progress` before then. `start` adds one item to `progress` for each
+    /// tensor the loader fills, a composite one once, and for each program
+    /// input; the backends complete them.
     pub fn start(
         self: *Loader,
         model: anytype,
@@ -230,6 +237,10 @@ pub const Loader = struct {
         progress: std.Progress.Node,
     ) Error!void {
         if (self.failure) |err| return err;
+        if (self.started_at == null) {
+            self.started_at = .now(self.io, .awake);
+            self.bytes_loaded = 0;
+        }
         self.startModel(@TypeOf(model.*), model, buffers, store, progress) catch |err| {
             self.fail(err);
             return err;
@@ -246,6 +257,11 @@ pub const Loader = struct {
     ) Error!void {
         const prepared = try prepareModel(self.allocator, self.platform, store, Model, model, buffers);
         defer prepared.deinit(self.allocator);
+        // The backends complete one item per spec: one per tensor the loader
+        // fills and, in the groups, one per program input.
+        var items = prepared.specs.len;
+        for (prepared.computed) |item| items += item.binding.program.?.inputs.len;
+        progress.increaseEstimatedTotalItems(items);
         // Queued first: their programs compile while the rest is read.
         try self.queueGroups(store, prepared.computed, progress);
         if (prepared.specs.len != 0) try self.submit(prepared.specs, &.{}, &.{}, progress);
@@ -255,7 +271,10 @@ pub const Loader = struct {
     /// programs compiled and the devices have room for it (`admit`), and
     /// retires every submission in publish order, running a group's
     /// programs on this task once its inputs landed. Returns once every
-    /// started load is in its buffers. Idempotent.
+    /// started load is in its buffers, and logs one info line: the bytes
+    /// loaded, the time since the first `start` and their rate, then what
+    /// the programs computed and how long publishing waited for their
+    /// compiles. Idempotent.
     pub fn wait(self: *Loader) Error!void {
         if (self.failure) |err| return err;
         self.drain() catch |err| {
@@ -275,23 +294,26 @@ pub const Loader = struct {
             groups += 1;
         }
         while (self.pending.len != 0) try self.retireOldest(true);
-        if (groups != 0) {
-            load_log.info("Computed {d} tensors with {d} programs in {d} groups, {d} ms waiting for compiles", .{
-                tensors,
-                self.programs.items.len,
-                groups,
-                self.compile_wait_ns / std.time.ns_per_ms,
-            });
+        if (self.started_at) |started_at| {
+            const took = started_at.untilNow(self.io, .awake);
+            const seconds = @as(f64, @floatFromInt(@max(took.nanoseconds, 1))) / std.time.ns_per_s;
+            const rate: u64 = @intFromFloat(@as(f64, @floatFromInt(self.bytes_loaded)) / seconds);
+            if (groups == 0) {
+                load_log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ self.bytes_loaded, took, rate });
+            } else {
+                load_log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s], computed {d} tensors with {d} programs in {d} groups, {d} ms waiting for compiles", .{
+                    self.bytes_loaded,
+                    took,
+                    rate,
+                    tensors,
+                    self.programs.items.len,
+                    groups,
+                    self.compile_wait_ns / std.time.ns_per_ms,
+                });
+            }
         }
+        self.started_at = null;
         self.compile_wait_ns = 0;
-    }
-
-    /// Logical bytes of every submission retired with execution so far:
-    /// each destination's shape once, so a composite tensor counts its
-    /// padding and not its sources one by one, and a program group counts
-    /// its inputs.
-    pub fn bytesLoaded(self: *const Loader) usize {
-        return self.bytes_loaded;
     }
 
     /// Records `err` unless the loader failed already, and cancels
@@ -355,7 +377,7 @@ pub const Loader = struct {
                 if (whole) |source| {
                     if (source.byteSize() == 0) {
                         load_log.err("program input {s} in {s} of tensor {} {f} is empty", .{ source.name, source.file_uri, item.id, item.shape });
-                        return error.EmptyTensor;
+                        return error.InvalidBinding;
                     }
                     parts.appendAssumeCapacity(.whole(source));
                 } else try appendCompositeParts(self.allocator, &parts, item.id, layout.shape, tensors, .default, layout);
@@ -416,12 +438,13 @@ pub const Loader = struct {
         @memset(execution, 0);
         for (executables, 0..) |*executable, index| {
             const exe = executable.exe;
+            const name = executable.program.program.vtable.name;
             for (exe.input_shapes) |shape| {
-                try addPlacementBytes(inputs, self.platform, shape, .default);
+                try addPlacementBytes(inputs, self.platform, shape, .default, name);
             }
             // The output's memory space is the program's to choose; it is
             // charged to the devices like the default space.
-            try addPlacementBytes(execution, self.platform, exe.output_shapes[0], .default);
+            try addPlacementBytes(execution, self.platform, exe.output_shapes[0], .default, name);
             // Tensors sharing a program run one after the other, so its
             // temporaries are charged once.
             const seen = for (executables[0..index]) |*earlier| {
@@ -507,18 +530,18 @@ pub const Loader = struct {
     /// once the submission is published; on failure the caller still owns
     /// them. `execution` holds a program group's output and temporary bytes
     /// per device, empty for a bulk load.
-    fn submit(self: *Loader, specs: []const LoadSpec, executables: []BoundExecutable, execution: []u64, progress: std.Progress.Node) SubmitError!void {
+    fn submit(self: *Loader, specs: []const LoadSpec, executables: []BoundExecutable, execution: []u64, progress: std.Progress.Node) Error!void {
         var logical_bytes: usize = 0;
         const placed = self.scratch.placed;
         @memset(placed, 0);
         // One spec per destination, however many parts fill it: its bytes
         // count once, on each device it is placed on.
         for (specs) |spec| {
-            logical_bytes = try std.math.add(usize, logical_bytes, spec.shape.byteSize());
-            try addPlacementBytes(placed, self.platform, spec.shape, spec.memory);
+            logical_bytes += spec.shape.byteSize();
+            try addPlacementBytes(placed, self.platform, spec.shape, spec.memory, spec.parts[0].source.name);
         }
         try self.pending.ensureUnusedCapacity(self.allocator, 1);
-        const submission = try self.backend.submit(specs, progress);
+        const submission = self.backend.submit(specs, progress) catch |err| return backendError(err);
         self.pending.pushBackAssumeCapacity(.{
             .submission = submission,
             .executables = executables,
@@ -550,7 +573,7 @@ pub const Loader = struct {
     }
 
     fn retire(self: *Loader, oldest: *PendingSubmission, execute: bool) Error!void {
-        try oldest.submission.await();
+        oldest.submission.await() catch |err| return backendError(err);
         if (!execute) return;
         for (oldest.executables) |*executable| {
             executable.execute(self.allocator, self.io) catch |err| {
@@ -719,14 +742,37 @@ const BoundExecutable = struct {
 /// Adds the bytes `shape` occupies on each device it is placed on, the same
 /// expression the direct backend allocates by, so submitted and allocated
 /// bytes cancel exactly once everything landed. Bytes delivered into a host
-/// memory space take no device memory and count nowhere.
-fn addPlacementBytes(out: []u64, platform: *const Platform, shape: Shape, memory: Memory.Kind) error{ IncompatibleSharding, Overflow }!void {
+/// memory space take no device memory and count nowhere. A shape its mesh
+/// cannot divide is a binding error in any memory space; `name`, its source
+/// or program, names it in the log.
+fn addPlacementBytes(out: []u64, platform: *const Platform, shape: Shape, memory: Memory.Kind, name: []const u8) error{InvalidBinding}!void {
+    const placement = Sharding.Placement.init(backend.placedShape(platform, shape).packedShape()) catch {
+        load_log.err("tensor {f} from {s}: its dimensions are not divisible by its mesh partitions", .{ shape, name });
+        return error.InvalidBinding;
+    };
     if (!backend.countsAgainstDevice(memory)) return;
-    const placement: Sharding.Placement = try .init(backend.placedShape(platform, shape).packedShape());
     const bytes: u64 = placement.shape.byteSize();
-    for (placement.mesh().?.devicesInCanonicalOrder()) |device| {
-        out[device.id] = try std.math.add(u64, out[device.id], bytes);
-    }
+    for (placement.mesh().?.devicesInCanonicalOrder()) |device| out[device.id] += bytes;
+}
+
+/// A backend's error as `start` and `wait` return it. A binding the backend
+/// refused, which it logged, is `InvalidBinding`. The other names it keeps
+/// to itself mean a broken invariant: a backend returns the error that
+/// closed it, never `Closed`; `InvalidOptions` was checked by `init`; and
+/// `Internal` is the direct backend's own bookkeeping.
+fn backendError(err: backend.SubmitError) Loader.Error {
+    return switch (err) {
+        error.SourceSizeMismatch,
+        error.InvalidLayout,
+        error.UnsupportedLayout,
+        error.InvalidTensorRange,
+        error.EmptyTensor,
+        error.UnsupportedMemoryKind,
+        error.IncompatibleSharding,
+        => error.InvalidBinding,
+        error.Closed, error.InvalidOptions, error.Internal => stdx.debug.panic("loader backend: {s}", .{@errorName(err)}),
+        else => |e| e,
+    };
 }
 
 /// A tensor a program computes, the buffer it computes into and its
@@ -778,6 +824,13 @@ fn prepareModel(
             output[i] = buffer;
         }
     }.call, .{flattened});
+    // Empty until a backend or a program writes it whole, so the caller can
+    // free the tree whatever fails.
+    meta.forEachVisit(model, *const Tensor, struct {
+        fn call(i: usize, tensor: *const Tensor, output: []*Buffer, platform_: *const Platform) void {
+            output[i].* = .{ ._platform = platform_, ._shape = tensor.shape(), ._shards = .empty };
+        }
+    }.call, .{ flattened, platform });
 
     // Sized first, so the specs can slice the parts as they are appended.
     var part_count: usize = 0;
@@ -821,7 +874,7 @@ fn prepareModel(
             if (context.err != null) return;
             const binding = context.store.getSourcesById(tensor.id) orelse {
                 load_log.err("tensor {} {f} has no checkpoint binding", .{ tensor.id, tensor.shape() });
-                context.err = error.TensorNotFound;
+                context.err = error.InvalidBinding;
                 return;
             };
             if (binding.program != null) {
@@ -838,14 +891,14 @@ fn prepareModel(
                 std.debug.assert(binding.tensors.len == 1);
                 if (binding.tensors[0].byteSize() == 0) {
                     load_log.err("tensor {} has empty source {s} in {s}", .{ tensor.id, binding.tensors[0].name, binding.tensors[0].file_uri });
-                    context.err = error.EmptyTensor;
+                    context.err = error.InvalidBinding;
                     return;
                 }
                 context.parts.appendAssumeCapacity(.whole(binding.tensors[0]));
             }
             if (!backend.supportsMemory(context.platform, binding.memory)) {
                 load_log.err("tensor {} from {s} is bound to {t} memory, which {t} cannot take", .{ tensor.id, binding.tensors[0].name, binding.memory, context.platform.target });
-                context.err = error.UnsupportedMemoryKind;
+                context.err = error.InvalidBinding;
                 return;
             }
             context.specs.appendAssumeCapacity(.{
@@ -919,30 +972,31 @@ fn appendCompositeParts(
     tensors: []const *safetensors.Tensor,
     memory: Memory.Kind,
     layout: *const TensorStore.Layout,
-) (LayoutError || error{EmptyTensor})!void {
+) error{InvalidBinding}!void {
+    const key = if (tensors.len != 0) tensors[0].name else "no source";
     if (layout.shape.byteSize() != shape.byteSize()) {
-        load_log.err("composite tensor {} {f}: its layout fills {f}", .{ id, shape, layout.shape });
-        return error.InvalidLayout;
+        load_log.err("composite tensor {} {f} from {s}: its layout fills {f}", .{ id, shape, key, layout.shape });
+        return error.InvalidBinding;
     }
     if (layout.parts.len == 0) {
-        load_log.err("composite tensor {} {f} has no parts", .{ id, shape });
-        return error.InvalidLayout;
+        load_log.err("composite tensor {} {f} from {s} has no parts", .{ id, shape, key });
+        return error.InvalidBinding;
     }
     const strided = !expandsAll(layout);
     if (strided and !backend.countsAgainstDevice(memory)) {
-        load_log.err("composite tensor {} {f}: strided parts into {t} memory, which this loader does not assemble", .{ id, shape, memory });
-        return error.UnsupportedLayout;
+        load_log.err("composite tensor {} {f} from {s}: strided parts into {t} memory, which this loader does not assemble", .{ id, shape, key, memory });
+        return error.InvalidBinding;
     }
     const first = parts.items.len;
     for (layout.parts) |part| {
         if (part.source >= tensors.len) {
-            load_log.err("composite tensor {} {f}: a part reads source {d} of {d}", .{ id, shape, part.source, tensors.len });
-            return error.InvalidLayout;
+            load_log.err("composite tensor {} {f} from {s}: a part reads source {d} of {d}", .{ id, shape, key, part.source, tensors.len });
+            return error.InvalidBinding;
         }
         const source = tensors[part.source];
         if (source.byteSize() == 0) {
             load_log.err("composite tensor {} has empty source {s} in {s}", .{ id, source.name, source.file_uri });
-            return error.EmptyTensor;
+            return error.InvalidBinding;
         }
         if (strided) {
             parts.appendAssumeCapacity(.{
@@ -982,8 +1036,11 @@ fn appendCompositeParts(
         }
     }.lessThan);
     backend.checkParts(allocator, appended, shape.byteSize(), true) catch |err| {
-        load_log.err("composite tensor {} {f} of {d} bytes: parts overlap or leave the sources or the tensor ({s})", .{ id, shape, shape.byteSize(), @errorName(err) });
-        return if (err == error.UnsupportedLayout) error.UnsupportedLayout else error.InvalidLayout;
+        load_log.err("composite tensor {} {f} of {d} bytes from {s}: {s}", .{ id, shape, shape.byteSize(), key, switch (err) {
+            error.UnsupportedLayout => "strided parts this loader cannot prove disjoint",
+            else => "parts overlap or leave the sources or the tensor",
+        } });
+        return error.InvalidBinding;
     };
 }
 
@@ -1005,25 +1062,25 @@ fn validateOptions(opts: Loader.Options) error{InvalidOptions}!void {
 /// devices, each holding the same slice. The comparison is per device, not
 /// by mesh pointer and partition, so `.open` and `.replicated`, or a null
 /// mesh and the replicated mesh, agree when they place alike.
-fn checkOutput(platform: *const Platform, name: []const u8, expected: Shape, exe: *const Exe) error{ProgramOutputMismatch}!void {
+fn checkOutput(platform: *const Platform, name: []const u8, expected: Shape, exe: *const Exe) error{InvalidBinding}!void {
     if (exe.output_shapes.len != 1 or !expected.eql(exe.output_shapes[0])) {
         load_log.err("program {s} computing {f} returns {d} outputs, the first {f}", .{ name, expected, exe.output_shapes.len, if (exe.output_shapes.len != 0) exe.output_shapes[0] else expected });
-        return error.ProgramOutputMismatch;
+        return error.InvalidBinding;
     }
     const actual = exe.output_shapes[0];
     const want = Sharding.Placement.init(backend.placedShape(platform, expected).packedShape()) catch |err| {
         load_log.err("program {s}: placement of {f}: {s}", .{ name, expected, @errorName(err) });
-        return error.ProgramOutputMismatch;
+        return error.InvalidBinding;
     };
     const got = Sharding.Placement.init(backend.placedShape(platform, actual).packedShape()) catch |err| {
         load_log.err("program {s}: placement of its output {f}: {s}", .{ name, actual, @errorName(err) });
-        return error.ProgramOutputMismatch;
+        return error.InvalidBinding;
     };
     const want_devices = want.mesh().?.devicesInCanonicalOrder();
     const got_devices = got.mesh().?.devicesInCanonicalOrder();
     if (want_devices.len != got_devices.len) {
         load_log.err("program {s} places its output {f} on {d} devices, the tensor {f} on {d}", .{ name, actual, got_devices.len, expected, want_devices.len });
-        return error.ProgramOutputMismatch;
+        return error.InvalidBinding;
     }
     for (want_devices, got_devices) |w, g| {
         const want_slices = want.slices(w.coords);
@@ -1033,7 +1090,7 @@ fn checkOutput(platform: *const Platform, name: []const u8, expected: Shape, exe
         } else true;
         if (w.id != g.id or !same_slices) {
             load_log.err("program {s} places its output {f} unlike the tensor {f} on device {d}", .{ name, actual, expected, w.id });
-            return error.ProgramOutputMismatch;
+            return error.InvalidBinding;
         }
     }
 }
@@ -1180,11 +1237,20 @@ test "start publishes the bulk at once and wait runs program groups one at a tim
     try LoaderTestFixture.expectContents(allocator, io, &buffers.value, &LoaderTestFixture.contents);
     try LoaderTestFixture.expectContents(allocator, io, &buffers.first, &LoaderTestFixture.contents);
     try LoaderTestFixture.expectContents(allocator, io, &buffers.second, &LoaderTestFixture.second_contents);
-    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytesLoaded());
+    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytes_loaded);
 
     // Idempotent: a second wait neither reruns nor recounts.
     try loader.wait();
-    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytesLoaded());
+    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytes_loaded);
+
+    // The next load counts and times from its own first start.
+    try std.testing.expectEqual(null, loader.started_at);
+    var again: Buffer = undefined;
+    try loader.start(&fixture.second, &again, &fixture.store, .none);
+    try loader.wait();
+    defer again.deinit();
+    try std.testing.expectEqual(LoaderTestFixture.second_contents.len, loader.bytes_loaded);
+    try std.testing.expectEqual(null, loader.started_at);
 }
 
 test "one loader takes loads from different stores before one wait" {
@@ -1239,7 +1305,7 @@ test "tensors of one program and equal args share one compile, and one group run
     try LoaderTestFixture.expectContents(allocator, io, &buffers.a, &.{ 2, 3, 4, 5 });
     try LoaderTestFixture.expectContents(allocator, io, &buffers.b, &.{ 6, 7, 8, 9 });
     try LoaderTestFixture.expectContents(allocator, io, &buffers.c, &.{ 3, 4, 5, 6 });
-    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytesLoaded());
+    try std.testing.expectEqual(LoaderTestFixture.contents.len * 3, loader.bytes_loaded);
 }
 
 test "loader delivers a host-pinned binding into host pinned memory without charging the devices" {
@@ -1261,8 +1327,8 @@ test "loader delivers a host-pinned binding into host pinned memory without char
 
     if (!backend.supportsMemory(platform, .host_pinned)) {
         // Refused before anything is submitted.
-        try std.testing.expectError(error.UnsupportedMemoryKind, loader.start(&model, &buffers, &fixture.store, .none));
-        try LoaderTestFixture.expectFailed(&loader, error.UnsupportedMemoryKind);
+        try std.testing.expectError(error.InvalidBinding, loader.start(&model, &buffers, &fixture.store, .none));
+        try LoaderTestFixture.expectFailed(&loader, error.InvalidBinding);
         return;
     }
     try loader.start(&model, &buffers, &fixture.store, .none);
@@ -1357,7 +1423,7 @@ test "cancel gives up on everything started without running its programs" {
     // The loader is failed: what it waits for and what it is given.
     try std.testing.expectError(error.Canceled, loader.wait());
     try std.testing.expectError(error.Canceled, loader.start(&model, &buffers, &fixture.store, .none));
-    try std.testing.expectEqual(@as(usize, 0), loader.bytesLoaded());
+    try std.testing.expectEqual(@as(usize, 0), loader.bytes_loaded);
 }
 
 test "cancel frees a published group's inputs without running its program" {
@@ -1410,7 +1476,48 @@ test "a read failure fails the loader for every later call" {
     try std.testing.expectEqual(@as(usize, 0), buffers.value._shards.len);
     try std.testing.expectError(error.FileNotFound, loader.start(&model, &buffers, &fixture.store, .none));
     try std.testing.expectError(error.FileNotFound, loader.wait());
-    try std.testing.expectEqual(@as(usize, 0), loader.bytesLoaded());
+    try std.testing.expectEqual(@as(usize, 0), loader.bytes_loaded);
+}
+
+test "after a failed load every buffer is empty or whole, and deinitBufferized frees the tree" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(allocator, io);
+    defer fixture.deinit();
+    var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2 });
+    defer loader.deinit();
+
+    // A tree with a slice and optionals, some of it in the file that loads,
+    // a tensor in the file that does not exist, and a program over it.
+    const Layer = struct { weight: Tensor, bias: ?Tensor };
+    const Model = struct { layers: []Layer, broken: Tensor, computed: Tensor };
+    var layers = [_]Layer{
+        .{ .weight = fixture.value, .bias = fixture.second },
+        .{ .weight = fixture.second, .bias = null },
+    };
+    const model: Model = .{
+        .layers = &layers,
+        .broken = fixture.missing,
+        .computed = fixture.computed("missing", fixture.missing, LoaderTestFixture.Identity{}),
+    };
+    var buffers = try mem.bufferize(allocator, Model, &model);
+    // Frees whatever the failed load wrote, under the testing allocator.
+    defer mem.deinitBufferized(allocator, Model, &buffers);
+    // The direct backend may open the file as it plans, in `start`.
+    const result = if (loader.start(&model, &buffers, &fixture.store, .none)) loader.wait() else |err| err;
+    try std.testing.expectError(error.FileNotFound, result);
+    try LoaderTestFixture.expectFailed(&loader, error.FileNotFound);
+    // Each buffer holds no shard or one per device.
+    const devices = backend.placedShape(fixture.platform, fixture.value.shape())._sharding.mesh.?.devicesInCanonicalOrder().len;
+    var torn: usize = 0;
+    meta.forEachVisit(&buffers, *Buffer, struct {
+        fn call(_: usize, buffer: *Buffer, shards: usize, count: *usize) void {
+            if (buffer._shards.len != 0 and buffer._shards.len != shards) count.* += 1;
+        }
+    }.call, .{ devices, &torn });
+    try std.testing.expectEqual(0, torn);
+    try std.testing.expectEqual(0, buffers.computed._shards.len);
 }
 
 test "submitted bytes match the backend's allocations once everything landed" {
@@ -1422,7 +1529,7 @@ test "submitted bytes match the backend's allocations once everything landed" {
     const placed = try allocator.alloc(u64, fixture.platform.devices.len);
     defer allocator.free(placed);
     @memset(placed, 0);
-    try addPlacementBytes(placed, fixture.platform, fixture.value.shape(), .default);
+    try addPlacementBytes(placed, fixture.platform, fixture.value.shape(), .default, "value");
     for (placed) |bytes| try std.testing.expectEqual(LoaderTestFixture.contents.len, bytes);
 
     var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2 });
@@ -1587,12 +1694,14 @@ test "a rejected binding or a program of the wrong output fails the loader" {
     var misplaced = fixture.value;
     misplaced._shape._sharding.mesh = &foreign_mesh;
 
-    const Case = struct { tensor: Tensor, expected: anyerror, at_wait: bool = false };
+    // No binding, an empty source, and a program of the wrong shape or
+    // placement.
+    const Case = struct { tensor: Tensor, at_wait: bool = false };
     const cases = [_]Case{
-        .{ .tensor = Tensor.fromShape(fixture.value.shape()), .expected = error.TensorNotFound },
-        .{ .tensor = fixture.empty, .expected = error.EmptyTensor },
-        .{ .tensor = fixture.computed("value", fixture.value, Rows{}), .expected = error.ProgramOutputMismatch, .at_wait = true },
-        .{ .tensor = fixture.computed("value", misplaced, LoaderTestFixture.Identity{}), .expected = error.ProgramOutputMismatch, .at_wait = true },
+        .{ .tensor = Tensor.fromShape(fixture.value.shape()) },
+        .{ .tensor = fixture.empty },
+        .{ .tensor = fixture.computed("value", fixture.value, Rows{}), .at_wait = true },
+        .{ .tensor = fixture.computed("value", misplaced, LoaderTestFixture.Identity{}), .at_wait = true },
     };
     for (cases) |case| {
         var loader = try Loader.init(allocator, io, fixture.platform, .{ .read_parallelism = 2 });
@@ -1600,12 +1709,15 @@ test "a rejected binding or a program of the wrong output fails the loader" {
         var output: Buffer = undefined;
         if (case.at_wait) {
             try loader.start(&case.tensor, &output, &fixture.store, .none);
-            try std.testing.expectError(case.expected, loader.wait());
+            try std.testing.expectError(error.InvalidBinding, loader.wait());
         } else {
-            try std.testing.expectError(case.expected, loader.start(&case.tensor, &output, &fixture.store, .none));
+            try std.testing.expectError(error.InvalidBinding, loader.start(&case.tensor, &output, &fixture.store, .none));
         }
-        try LoaderTestFixture.expectFailed(&loader, case.expected);
-        try std.testing.expectError(case.expected, loader.start(&fixture.value, &output, &fixture.store, .none));
+        try LoaderTestFixture.expectFailed(&loader, error.InvalidBinding);
+        // `start` emptied the buffer before it failed.
+        try std.testing.expectEqual(0, output._shards.len);
+        output.deinit();
+        try std.testing.expectError(error.InvalidBinding, loader.start(&fixture.value, &output, &fixture.store, .none));
     }
 }
 
@@ -1623,13 +1735,13 @@ test "loader reports source size mismatches" {
     // The direct backend checks sizes as it plans, the buffered one as it
     // reads.
     if (loader.backend == .direct) {
-        try std.testing.expectError(error.SourceSizeMismatch, loader.start(&tensor, &output, &fixture.store, .none));
+        try std.testing.expectError(error.InvalidBinding, loader.start(&tensor, &output, &fixture.store, .none));
     } else {
         try loader.start(&tensor, &output, &fixture.store, .none);
-        try std.testing.expectError(error.SourceSizeMismatch, loader.wait());
+        try std.testing.expectError(error.InvalidBinding, loader.wait());
     }
-    try LoaderTestFixture.expectFailed(&loader, error.SourceSizeMismatch);
-    try std.testing.expectError(error.SourceSizeMismatch, loader.wait());
+    try LoaderTestFixture.expectFailed(&loader, error.InvalidBinding);
+    try std.testing.expectError(error.InvalidBinding, loader.wait());
 }
 
 /// Two safetensors files for composite loads, every row 16 bytes (8 u16):
@@ -1776,7 +1888,7 @@ test "loader assembles concatenated and padded sources on every placement and me
                 try load_testing.expectShards(allocator, io, &buffers.reversed, &reversed);
                 try load_testing.expectShards(allocator, io, &buffers.plain, &fixture.plain);
                 // Each destination once, padding included.
-                try std.testing.expectEqual(@as(usize, 256 + 128 + 96 + 64), loader.bytesLoaded());
+                try std.testing.expectEqual(@as(usize, 256 + 128 + 96 + 64), loader.bytes_loaded);
                 inline for (comptime std.meta.fieldNames(Model)) |field| {
                     const buffer = &@field(buffers, field);
                     const ordered = backend.placedShape(platform, buffer.shape())._sharding.mesh.?.devicesInCanonicalOrder();
@@ -2026,52 +2138,51 @@ test "composite layouts that do not fit their tensor fail the loader before subm
     const s = &store;
     const r = &fixture.registry;
 
-    const Case = struct { tensor: Tensor, expected: anyerror };
-    const cases = [_]Case{
+    const rejected = [_]Tensor{
         // No part at all, and a part of a source the binding lacks.
-        .{ .tensor = Composite.bind(s, r, &.{"a"}, destination, &.{}), .expected = error.InvalidLayout },
-        .{ .tensor = Composite.bind(s, r, &.{"a"}, destination, &.{.{ .source = 1, .dst_offset = 0, .width = 16 }}), .expected = error.InvalidLayout },
+        Composite.bind(s, r, &.{"a"}, destination, &.{}),
+        Composite.bind(s, r, &.{"a"}, destination, &.{.{ .source = 1, .dst_offset = 0, .width = 16 }}),
         // A layout of another size than its tensor.
-        .{ .tensor = Composite.bindAs(s, r, &.{"a"}, destination, .init(.{ 4, 8 }, .u16), &.{.{ .dst_offset = 0, .width = 48 }}), .expected = error.InvalidLayout },
+        Composite.bindAs(s, r, &.{"a"}, destination, .init(.{ 4, 8 }, .u16), &.{.{ .dst_offset = 0, .width = 48 }}),
         // Past the end of its source, and of the tensor.
-        .{ .tensor = Composite.bind(s, r, &.{"a"}, destination, &.{.{ .src_offset = 16, .dst_offset = 0, .width = 48 }}), .expected = error.InvalidLayout },
-        .{ .tensor = Composite.bind(s, r, &.{"a"}, destination, &.{.{ .dst_offset = 96, .width = 48 }}), .expected = error.InvalidLayout },
+        Composite.bind(s, r, &.{"a"}, destination, &.{.{ .src_offset = 16, .dst_offset = 0, .width = 48 }}),
+        Composite.bind(s, r, &.{"a"}, destination, &.{.{ .dst_offset = 96, .width = 48 }}),
         // Overlapping parts.
-        .{ .tensor = Composite.bind(s, r, &.{ "a", "b" }, destination, &.{
+        Composite.bind(s, r, &.{ "a", "b" }, destination, &.{
             .{ .source = 0, .dst_offset = 0, .width = 48 },
             .{ .source = 1, .dst_offset = 32, .width = 32 },
-        }), .expected = error.InvalidLayout },
-        .{ .tensor = Composite.bind(s, r, &.{ "a", "empty" }, destination, &.{
+        }),
+        Composite.bind(s, r, &.{ "a", "empty" }, destination, &.{
             .{ .source = 0, .dst_offset = 0, .width = 48 },
             .{ .source = 1, .dst_offset = 48, .width = 16 },
-        }), .expected = error.EmptyTensor },
+        }),
         // Strided parts whose runs overlap; two of over a thousand runs
         // each that interleave with different strides, which the checks
         // cannot prove disjoint.
-        .{ .tensor = Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{
+        Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{
             .{ .dst_offset = 0, .width = 2, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 4 }} },
             .{ .dst_offset = 2, .width = 4, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 4 }} },
-        }), .expected = error.InvalidLayout },
-        .{ .tensor = Composite.bind(s, r, &.{"wide"}, .init(.{ 64, 64 }, .u16), &.{
+        }),
+        Composite.bind(s, r, &.{"wide"}, .init(.{ 64, 64 }, .u16), &.{
             .{ .dst_offset = 0, .width = 1, .dims = &.{.{ .count = 2000, .src_stride = 0, .dst_stride = 4 }} },
             .{ .dst_offset = 2, .width = 1, .dims = &.{.{ .count = 1300, .src_stride = 0, .dst_stride = 6 }} },
-        }), .expected = error.UnsupportedLayout },
+        }),
         // Strided parts into host memory.
-        .{ .tensor = host: {
+        host: {
             const tensor = Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{.{ .dst_offset = 0, .width = 2, .dims = &.{
                 .{ .count = 8, .src_stride = 2, .dst_stride = 128 },
                 .{ .count = 64, .src_stride = 16, .dst_stride = 2 },
             } }});
             s.setMemory(tensor, .host_pinned);
             break :host tensor;
-        }, .expected = error.UnsupportedLayout },
+        },
     };
     var output: Buffer = undefined;
-    for (cases) |case| {
+    for (&rejected) |*tensor| {
         var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
         defer loader.deinit();
-        try std.testing.expectError(case.expected, loader.start(&case.tensor, &output, &store, .none));
-        try LoaderTestFixture.expectFailed(&loader, case.expected);
+        try std.testing.expectError(error.InvalidBinding, loader.start(tensor, &output, &store, .none));
+        try LoaderTestFixture.expectFailed(&loader, error.InvalidBinding);
     }
 
     // A part placed past a gap, the rest zero; parts listed out of
@@ -2258,7 +2369,7 @@ fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
     try loader.start(&table, &host_table, &store, .none);
     try loader.wait();
     defer host_table.deinit();
-    try std.testing.expectEqual(padded.len, loader.bytesLoaded());
+    try std.testing.expectEqual(padded.len, loader.bytes_loaded);
     try load_testing.expectShards(allocator, io, &host_table, padded);
 
     // Device-kind views of the pinned shards; `host_table` owns the memory

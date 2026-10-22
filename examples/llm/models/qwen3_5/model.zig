@@ -6,8 +6,6 @@ const stdx = zml.stdx;
 const common = @import("../common.zig");
 const inference = @import("inference.zig");
 
-const log = std.log.scoped(.qwen3_5);
-
 pub const Config = struct {
     text_config: TextConfig,
 };
@@ -77,24 +75,14 @@ pub const LoadedModel = struct {
     pub fn loadBuffers(
         self: *const LoadedModel,
         allocator: std.mem.Allocator,
-        io: std.Io,
         loader: *zml.io.Loader,
         progress: std.Progress.Node,
         store: *const zml.io.TensorStore,
     ) !Buffers {
-        const now: std.Io.Timestamp = .now(io, .awake);
-
         var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
         errdefer self.unloadBuffers(&buffers, allocator);
-
         try loader.start(&self.inner, &buffers, store, progress);
         try loader.wait();
-        const total_bytes = loader.bytesLoaded();
-
-        const took = now.untilNow(io, .awake);
-        const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-        log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-
         return buffers;
     }
 
@@ -161,34 +149,6 @@ pub const Model = struct {
 
     pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
         self.text_model.deinit(allocator);
-    }
-
-    pub fn load(
-        self: *const Model,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *zml.io.TensorStore,
-        progress: *std.Progress.Node,
-        load_profile: zml.io.VFS.LoadProfile,
-    ) !zml.Bufferized(Model) {
-        const now: std.Io.Timestamp = .now(io, .awake);
-        var buffers = try zml.mem.bufferize(allocator, Model, self);
-        errdefer zml.mem.deinitBufferized(allocator, Model, &buffers);
-        var loader = try zml.io.Loader.init(allocator, io, platform, .{
-            .load_profile = load_profile,
-        });
-        defer loader.deinit();
-        progress.increaseEstimatedTotalItems(store.view().count());
-        try loader.start(self, &buffers, store, progress.*);
-        try loader.wait();
-        const total_bytes = loader.bytesLoaded();
-
-        const took = now.untilNow(io, .awake);
-        const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-        log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-
-        return buffers;
     }
 
     pub fn forward(

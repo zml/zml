@@ -317,8 +317,9 @@ pub const Loader = struct {
     /// does), so a buffer that failed that way and is then marked here
     /// aborts too: two failures in one load. A program reading such a
     /// buffer fails its execution, which the front end returns; a bulk
-    /// buffer shows the error at its first use. The outputs of a failed
-    /// submission are undefined either way. A batch that
+    /// buffer shows the error at its first use. Either way an output of a
+    /// failed submission holds buffers whose contents are unspecified, or
+    /// was never written. A batch that
     /// completed without an error must have closed every target (the pump
     /// flagged the submission that completed its bytes); one that did not
     /// would leave a buffer that never becomes ready, so it fails the
@@ -552,12 +553,12 @@ pub const Loader = struct {
                 // An empty source has no transfer, so its output would never
                 // be written; the front ends reject it too.
                 if (part.source.byteSize() == 0) {
-                    load_log.debug("source {s} in {s} is empty", .{ part.source.name, part.source.file_uri });
+                    load_log.err("source {s} in {s} is empty", .{ part.source.name, part.source.file_uri });
                     return error.EmptyTensor;
                 }
             }
             backend.checkParts(self.allocator, spec.parts, placed_shape.byteSize(), spec.zero_fill) catch |err| {
-                load_log.debug("destination {f} from {s} in {s}: {d} parts for {d} bytes, zero_fill={}, first source {d} bytes: {s}", .{ spec.shape, first.name, first.file_uri, spec.parts.len, placed_shape.byteSize(), spec.zero_fill, first.byteSize(), @errorName(err) });
+                load_log.err("destination {f} from {s} in {s}: {d} parts for {d} bytes, zero_fill={}, first source {d} bytes: {s}", .{ spec.shape, first.name, first.file_uri, spec.parts.len, placed_shape.byteSize(), spec.zero_fill, first.byteSize(), @errorName(err) });
                 return err;
             };
             const destination_parts = parts[next_part..][0..spec.parts.len];
@@ -578,7 +579,7 @@ pub const Loader = struct {
                 gathered = gathered or part.dims.len != 0;
             }
             if (gathered and !backend.countsAgainstDevice(spec.memory)) {
-                load_log.debug("destination {f} from {s}: strided parts into {t} memory, which this loader does not assemble", .{ spec.shape, first.name, spec.memory });
+                load_log.err("destination {f} from {s}: strided parts into {t} memory, which this loader does not assemble", .{ spec.shape, first.name, spec.memory });
                 return error.UnsupportedLayout;
             }
             // A gathered part whose source runs are not back to back reads
@@ -593,7 +594,7 @@ pub const Loader = struct {
                 const start = part.source.offset + part.src_offset;
                 const end = start + lattice.spans().?.src;
                 if (std.mem.alignForward(u64, end, alignment) - std.mem.alignBackward(u64, start, alignment) > read_limit) {
-                    load_log.debug("destination {f} from {s}: a strided part reads {d} source bytes for every job, more than a read of {d}", .{ spec.shape, part.source.name, end - start, read_limit });
+                    load_log.err("destination {f} from {s}: a strided part reads {d} source bytes for every job, more than a read of {d}", .{ spec.shape, part.source.name, end - start, read_limit });
                     return error.UnsupportedLayout;
                 }
             };
@@ -1148,9 +1149,16 @@ const Part = struct {
 
     /// The part's bytes in its file.
     fn fileRange(self: *const Part) error{InvalidTensorRange}!struct { start: u64, end: u64 } {
-        const start = std.math.add(u64, self.source.offset, self.src_offset) catch return error.InvalidTensorRange;
-        const end = std.math.add(u64, start, self.width) catch return error.InvalidTensorRange;
+        const start = std.math.add(u64, self.source.offset, self.src_offset) catch return self.rangeError(self.src_offset);
+        const end = std.math.add(u64, start, self.width) catch return self.rangeError(self.src_offset +| self.width);
         return .{ .start = start, .end = end };
+    }
+
+    /// The part's source bytes up to `source_end`, from the source's file
+    /// offset, pass the largest file offset.
+    fn rangeError(self: *const Part, source_end: u64) error{InvalidTensorRange} {
+        load_log.err("destination {f} from {s} in {s}: {d} source bytes from offset {d} pass the largest file offset", .{ self.destination.shape, self.source.name, self.source.file_uri, source_end, self.source.offset });
+        return error.InvalidTensorRange;
     }
 };
 
@@ -2258,13 +2266,13 @@ const Planner = struct {
                 source_start = head.src + (start -| head.dst);
                 source_end = tail.src + width - ((tail.dst + width) -| end);
             }
-            const file_start = std.math.add(u64, part.source.offset, source_start) catch return error.InvalidTensorRange;
-            const file_end = std.math.add(u64, part.source.offset, source_end) catch return error.InvalidTensorRange;
+            const file_start = std.math.add(u64, part.source.offset, source_start) catch return part.rangeError(source_start);
+            const file_end = std.math.add(u64, part.source.offset, source_end) catch return part.rangeError(source_end);
             const alignment = try self.reads.alignmentOf(part.source_slot);
             const read_start = if (alignment == 0) file_start else std.mem.alignBackward(u64, file_start, alignment);
             const read_end = if (alignment == 0) file_end else std.mem.alignForward(u64, file_end, alignment);
             if (read_end - read_start > self.read_limit) {
-                load_log.debug("destination {f} from {s}: a part's source range of {d} bytes for one job exceeds a read of {d}", .{ part.destination.shape, part.source.name, read_end - read_start, self.read_limit });
+                load_log.err("destination {f} from {s}: a part's source range of {d} bytes for one job exceeds a read of {d}", .{ part.destination.shape, part.source.name, read_end - read_start, self.read_limit });
                 return error.UnsupportedLayout;
             }
             try self.extents.append(self.allocator, .{

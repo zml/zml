@@ -73,6 +73,8 @@ pub const LoadSpec = struct {
     /// source's `TensorStore` binding. The front end only submits kinds
     /// `supportsMemory` accepts.
     memory: Memory.Kind = .default,
+    /// Written whole once the destination's buffers exist, and not touched
+    /// before: a failure leaves it as it was or holding those buffers.
     output: *Buffer,
     /// What fills the destination's logical bytes, in ascending, disjoint
     /// destination order (`checkParts`): one whole source for a plain

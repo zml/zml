@@ -144,8 +144,7 @@ pub fn main(init: std.process.Init) !void {
 
     var loader = try loader_fut.await(io);
 
-    progress.increaseEstimatedTotalItems(store.view().count());
-    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, &loader, progress, &store);
+    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, &loader, progress, &store);
     defer model.unloadBuffers(&model_buffers, allocator);
 
     const tokenizer = try tokenizer_fut.await(io);

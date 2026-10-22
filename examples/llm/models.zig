@@ -58,7 +58,6 @@ pub const LoadedModel = union(ModelType) {
     pub fn loadBuffers(
         self: *LoadedModel,
         allocator: std.mem.Allocator,
-        io: std.Io,
         loader: *zml.io.Loader,
         progress: std.Progress.Node,
         store: *const zml.io.TensorStore,
@@ -67,7 +66,7 @@ pub const LoadedModel = union(ModelType) {
             inline else => |*m, t| @unionInit(
                 Buffers,
                 @tagName(t),
-                try m.loadBuffers(allocator, io, loader, progress, store),
+                try m.loadBuffers(allocator, loader, progress, store),
             ),
         };
     }

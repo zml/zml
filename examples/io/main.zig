@@ -299,7 +299,6 @@ pub fn main(init: std.process.Init) !void {
 
             var progress = std.Progress.start(io, .{
                 .root_name = "zml.examples.load",
-                .estimated_total_items = store.view().count(),
                 .disable_printing = true,
             });
             defer progress.end();
@@ -345,7 +344,10 @@ pub fn main(init: std.process.Init) !void {
                 // the devices admit.
                 try loader.start(&model, &loaded, &store, progress);
                 try loader.wait();
-                total_bytes = loader.bytesLoaded();
+                // What the loader counts: each tensor once, and a pack's
+                // inputs, which are as many bytes as the pack.
+                total_bytes = pack_plan.bytes;
+                for (tensors) |tensor| total_bytes += tensor.shape().byteSize();
                 defer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
 
                 load_took = now.untilNow(io, .awake);
