@@ -33,15 +33,17 @@ pub const paged = struct {
     pub const Parameters = triton.paged.Parameters;
 
     /// Token counts up to which `writeCache` writes rows one by one.
-    const row_writes = 32;
+    const row_writes = 1;
 
     /// Writes token rows `{.b, .hkv, .hd}` at their `page` and `offset`.
     /// Tokens without a slot carry indices past the cache, which both paths
     /// clamp onto the cache's last page: the caller must keep that page out of
-    /// its allocation. A few rows become dynamic updates, which compile into
-    /// the unit that computes them; more rows go through one in-place scatter
+    /// its allocation. One row becomes a dynamic update, which compiles into
+    /// the unit that computes it. More rows go through one in-place scatter
     /// kernel instead of XLA's scatter, which the plugin expands into a host
-    /// loop over rows.
+    /// loop over rows: as dynamic updates, each row after the first read the
+    /// cache the unit before it wrote, so became a unit of its own (512
+    /// launches of 11 us per step for 32 tokens over 8 attention layers).
     pub fn writeCache(cache: Tensor, rows: Tensor, page: Tensor, offset: Tensor) Tensor {
         if (rows.dim(.b) > row_writes) {
             const last_page = Tensor.scalar(cache.dim(.page) - 1, .i32);
