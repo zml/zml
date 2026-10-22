@@ -173,14 +173,6 @@ pub const Value = struct {
         return k.emit(if (l.isFloat()) arith.maximumf(k.ctx, l.inner, r.inner, k.loc()) else arith.maxsi(k.ctx, l.inner, r.inner, k.loc()));
     }
 
-    pub fn clamp(self: Value, rhs: anytype) Value {
-        const k = self.kern();
-        const l, const r = k.coerce(self, rhs);
-        if (l.isFloat()) return k.emit(math.clampf(k.ctx, l.inner, r.neg().inner, r.inner, k.loc()));
-        const upper = k.emit(arith.minsi(k.ctx, l.inner, r.inner, k.loc()));
-        return k.emit(arith.maxsi(k.ctx, upper.inner, r.neg().inner, k.loc()));
-    }
-
     /// Float max that ignores NaN operands (`arith.maxnumf`, a single `max.f32`), unlike
     /// the NaN-propagating `maximum`.
     pub fn maxnum(self: Value, rhs: anytype) Value {
@@ -3141,48 +3133,6 @@ test "naive elementwise add matches the Python notebook kernel" {
     try expectContains(ir, "arith.addf");
     try expectContains(ir, "\"func.return\"() : () -> ()\n  })");
     try std.testing.expect(std.mem.indexOf(u8, ir, "gpu.module") == null);
-    const parsed = try mlir.Module.parse(ctx, ir);
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-test "integer clamp emits both bounds" {
-    const ctx = try testContext();
-    defer ctx.deinit();
-
-    var b = try Builder.open(std.testing.allocator, ctx, "integer_clamp");
-    defer b.deinit();
-    const a = try b.declareArgs(.{ .out = .{ .tensor = .{ .dtype = .i32, .shape = &.{8} } } });
-    const tid = b.threadIdx().x;
-    a.out.set(.{tid}, tid.clamp(4));
-
-    const ir = try b.finish(.{ 8, 1, 1 });
-    defer std.testing.allocator.free(ir);
-    try expectContains(ir, "arith.minsi");
-    try expectContains(ir, "arith.maxsi");
-    try expectContains(ir, "arith.subi");
-    const parsed = try mlir.Module.parse(ctx, ir);
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-test "float clamp emits math.clampf" {
-    const ctx = try testContext();
-    defer ctx.deinit();
-
-    var b = try Builder.open(std.testing.allocator, ctx, "float_clamp");
-    defer b.deinit();
-    const a = try b.declareArgs(.{
-        .input = .{ .tensor = .{ .dtype = .f32, .shape = &.{8} } },
-        .out = .{ .tensor = .{ .dtype = .f32, .shape = &.{8} } },
-    });
-    const tid = b.threadIdx().x;
-    a.out.set(.{tid}, a.input.get(.{tid}).clamp(4.0));
-
-    const ir = try b.finish(.{ 8, 1, 1 });
-    defer std.testing.allocator.free(ir);
-    try expectContains(ir, "arith.negf");
-    try expectContains(ir, "math.clampf");
     const parsed = try mlir.Module.parse(ctx, ir);
     defer parsed.deinit();
     try std.testing.expect(parsed.operation().verify());
