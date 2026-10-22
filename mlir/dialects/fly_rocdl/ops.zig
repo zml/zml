@@ -9,8 +9,6 @@
 //! `AttrSizedOperandSegments` operations get their segment sizes from
 //! `Operation.make`. Attributes use `mlir.Attribute`.
 
-const std = @import("std");
-
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
@@ -88,8 +86,4 @@ pub fn make_tiled_tdm_store_atom(
         .result_type_inference = true,
         .location = location,
     });
-}
-
-test {
-    std.testing.refAllDecls(@This());
 }

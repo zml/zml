@@ -818,33 +818,3 @@ pub fn create_mask(
         .location = location,
     });
 }
-
-test {
-    std.testing.refAllDecls(@This());
-}
-
-fn expectPrints(expected: []const u8, value: anytype) !void {
-    var buf: [128]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try w.print("{f}", .{value});
-    try std.testing.expectEqualStrings(expected, w.buffered());
-}
-
-test "vector enum attributes are built through the C API" {
-    const ctx = try mlir.Context.init(.{});
-    defer ctx.deinit();
-
-    inline for (@typeInfo(CombiningKind).@"enum".field_names) |name| {
-        const value: CombiningKind = @field(CombiningKind, name);
-        const attr = try CombiningKindAttr.get(ctx, .{ .value = value });
-        try std.testing.expectEqual(value, attr.getValue());
-        try std.testing.expect(value.attribute(ctx).isA(CombiningKindAttr) != null);
-        try expectPrints("#vector.kind<" ++ name ++ ">", attr);
-    }
-    inline for (@typeInfo(IteratorType).@"enum".field_names) |name| {
-        const value: IteratorType = @field(IteratorType, name);
-        const attr = try IteratorTypeAttr.get(ctx, .{ .value = value });
-        try std.testing.expectEqual(value, attr.getValue());
-        try expectPrints("#vector.iterator_type<" ++ name ++ ">", attr);
-    }
-}

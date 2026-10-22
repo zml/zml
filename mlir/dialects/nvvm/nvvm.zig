@@ -267,7 +267,3 @@ pub fn ex2(ctx: *mlir.Context, value: *const mlir.Value, ftz: bool, location: *c
 pub fn rcp_approx_ftz(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return ops.rcp_approx_ftz_f(ctx, value, .float(ctx, .f32), location);
 }
-
-test {
-    std.testing.refAllDecls(@This());
-}

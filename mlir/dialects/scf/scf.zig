@@ -357,7 +357,3 @@ pub fn index_switch(
 
     return mlir.Operation.init(&state) catch @panic("Failed to create scf.index_switch");
 }
-
-test {
-    std.testing.refAllDecls(@This());
-}

@@ -31,5 +31,9 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = [":mosaic_tpu"],
+    main = "test.zig",
+    deps = [
+        ":mosaic_tpu",
+        "//mlir",
+    ],
 )

@@ -9,8 +9,6 @@
 //! `AttrSizedOperandSegments` operations get their segment sizes from
 //! `Operation.make`. Attributes use `mlir.Attribute`.
 
-const std = @import("std");
-
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
@@ -1259,8 +1257,4 @@ pub fn zipped_product(ctx: *mlir.Context, layout: *const mlir.Value, tile: *cons
         .result_type_inference = true,
         .location = location,
     });
-}
-
-test {
-    std.testing.refAllDecls(@This());
 }

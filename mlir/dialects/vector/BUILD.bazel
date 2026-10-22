@@ -29,5 +29,9 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = [":vector"],
+    main = "test.zig",
+    deps = [
+        ":vector",
+        "//mlir",
+    ],
 )

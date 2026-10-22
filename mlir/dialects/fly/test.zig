@@ -10,7 +10,6 @@ const typeKind = fly.typeKind;
 const expect = fly.expect;
 const layoutLikeShape = fly.layoutLikeShape;
 const elemType = fly.elemType;
-const addressSpace = fly.addressSpace;
 const ptrWithElem = fly.ptrWithElem;
 pub const dialects_needed = [_][]const u8{ "func", "arith", "scf", "math", "vector", "memref", "llvm", "gpu", "rocdl", "ub", "fly", "fly_rocdl" };
 fn insertDialects(registry: *mlir.DialectRegistry) void {

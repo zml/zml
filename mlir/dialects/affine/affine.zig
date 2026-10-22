@@ -1,6 +1,3 @@
-const std = @import("std");
-
-const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
@@ -409,8 +406,4 @@ pub fn linearize_index(
         .attributes = attrs.constSlice(),
         .location = location,
     });
-}
-
-test {
-    std.testing.refAllDecls(@This());
 }

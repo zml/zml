@@ -15,5 +15,8 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = [":scf"],
+    main = "test.zig",
+    deps = [
+        ":scf",
+    ],
 )

@@ -158,33 +158,3 @@ pub fn shuffle(ctx: *mlir.Context, value: *const mlir.Value, offset: *const mlir
 pub fn barrier(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "gpu.barrier", .{ .location = location });
 }
-
-test {
-    std.testing.refAllDecls(@This());
-}
-
-fn expectPrints(expected: []const u8, value: anytype) !void {
-    var buf: [128]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try w.print("{f}", .{value});
-    try std.testing.expectEqualStrings(expected, w.buffered());
-}
-
-test "gpu enum attributes are built through the C API" {
-    const ctx = try mlir.Context.init(.{});
-    defer ctx.deinit();
-
-    inline for (@typeInfo(Dim).@"enum".field_names) |name| {
-        const value: Dim = @field(Dim, name);
-        const attr = try DimensionAttr.get(ctx, .{ .value = value });
-        try std.testing.expectEqual(value, attr.getValue());
-        try std.testing.expect(attr.attribute().isA(DimensionAttr) != null);
-        try expectPrints("#gpu.dim<" ++ name ++ ">", attr);
-    }
-    inline for (@typeInfo(ShuffleMode).@"enum".field_names) |name| {
-        const value: ShuffleMode = @field(ShuffleMode, name);
-        const attr = try ShuffleModeAttr.get(ctx, .{ .value = value });
-        try std.testing.expectEqual(value, attr.getValue());
-        try expectPrints("#gpu.shuffle_mode<" ++ name ++ ">", attr);
-    }
-}

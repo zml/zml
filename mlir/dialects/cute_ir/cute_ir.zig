@@ -3020,7 +3020,3 @@ pub const operation_names: []const []const u8 = &.{
     "cute.zipped_divide",
     "cute.zipped_product",
 };
-
-test {
-    std.testing.refAllDecls(@This());
-}
