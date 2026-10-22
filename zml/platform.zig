@@ -733,7 +733,7 @@ pub const CreateOptions = struct {
     neuron: struct {} = .{},
     furiosa: Furiosa = .{},
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
-    metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
     io_impl: Platform.IoImpl = .threaded,
 
     pub const Furiosa = struct {
