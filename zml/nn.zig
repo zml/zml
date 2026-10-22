@@ -48,7 +48,7 @@ pub const Linear = struct {
             if (quantization.quantizeInput(q, x, self.tag, zml.Compiler.current().platform)) |input| {
                 return self.forwardQuantized(input, out_dtype);
             }
-            return self.forwardScaled(x.convert(.bf16), null, null, out_dtype);
+            return self.forwardScaled(x.convert(.bf16), null, null, .logical, out_dtype);
         }
         const y = x.dot(self.weight.convert(x.dtype()), self.tag).convert(out_dtype);
         return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
@@ -58,15 +58,18 @@ pub const Linear = struct {
     /// Convert to output_dtype before adding bias.
     pub fn forwardQuantized(self: Linear, input: quantization.QuantizedInput, output_dtype: DataType) Tensor {
         stdx.debug.assert(self.quantization != null, "forwardQuantized requires quantized weights", .{});
-        return self.forwardScaled(input.values, input.scales, input.global_scale, output_dtype);
+        return self.forwardScaled(input.values, input.scales, input.global_scale, input.scale_layout, output_dtype);
     }
 
-    fn forwardScaled(self: Linear, lhs: Tensor, lhs_scale: ?Tensor, input_global_scale: ?Tensor, output_dtype: DataType) Tensor {
+    fn forwardScaled(self: Linear, lhs: Tensor, lhs_scale: ?Tensor, input_global_scale: ?Tensor, scale_layout: quantization.QuantizedInput.ScaleLayout, output_dtype: DataType) Tensor {
         const q = self.quantization.?;
         const weight_global_scale: ?Tensor = if (q.global_scale) |s| s.asMultiplier() else null;
         const weight = if (isPackedFp4(q.scheme, self.weight.dtype())) unpackFp4(self.weight, self.tag, self.tag) else self.weight;
         const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
-        const acc = scaledDot(lhs, weight, lhs_scale, scales, output_dtype, self.tag, .{ .rhs_scale_swizzled = q.swizzled_scales });
+        const acc = scaledDot(lhs, weight, lhs_scale, scales, output_dtype, self.tag, .{
+            .lhs_scale_swizzled = scale_layout == .blackwell_128x4,
+            .rhs_scale_swizzled = q.swizzled_scales,
+        });
         const y = applyGlobalScale(acc, input_global_scale, weight_global_scale).convert(output_dtype);
         return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
     }
@@ -202,19 +205,24 @@ pub fn scaledDot(
             .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
         }),
     });
-    const attributes = [_]mlir.NamedAttribute{
-        .named(mlir_ctx, "dimension_numbers", dnums),
-        .named(mlir_ctx, "rhs_scale_swizzled", .boolean(mlir_ctx, true)),
-    };
+    var attributes: stdx.BoundedArray(mlir.NamedAttribute, 3) = .empty;
+    attributes.appendAssumeCapacity(.named(mlir_ctx, "dimension_numbers", dnums));
+    if (opts.lhs_scale_swizzled) {
+        stdx.debug.assert(lhs_scale != null and lhs.rank() == 2 and lhs_scale_operand.rank() == 2 and lhs_contracting_axes.get(0) == 1, "scaledDot: a swizzled lhs scale needs a [m, k] lhs with scales, got {f}", .{lhs});
+        attributes.appendAssumeCapacity(.named(mlir_ctx, "lhs_scale_swizzled", .boolean(mlir_ctx, true)));
+    }
     if (opts.rhs_scale_swizzled) {
         stdx.debug.assert(rhs.rank() == 2 and rhs_scale.rank() == 2 and rhs_contracting_axes.get(0) == 1, "scaledDot: a swizzled rhs scale needs a [n, k] rhs, got {f}", .{rhs});
+        attributes.appendAssumeCapacity(.named(mlir_ctx, "rhs_scale_swizzled", .boolean(mlir_ctx, true)));
     }
     return ops.composite("xla.scaled_dot", &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand }, &.{res_shape}, scaledDotReference, res_shape, .{
-        .composite_attributes = if (opts.rhs_scale_swizzled) &attributes else attributes[0..1],
+        .composite_attributes = attributes.constSlice(),
     })[0];
 }
 
 pub const ScaledDotOpts = struct {
+    /// The lhs scale uses `quantization.BlackwellScaleLayout`, per device.
+    lhs_scale_swizzled: bool = false,
     /// The rhs scale's `[n, k / block]` grid is stored in the 128x4 blocked layout of Blackwell's block-scaled mma,
     /// each device's slice on its own.
     // TODO: fine for now, but we should find a better way to express how a scale is laid out.
@@ -305,6 +313,93 @@ test "block128 scaled dot layouts" {
                 defer linear_expected.free(allocator);
                 try zml.testing.expectClose(io, linear_expected, output.linear, .{ .absolute_tolerance = 0.125, .relative_tolerance = 0.02 });
             }
+        }
+    }
+}
+
+test "packed activation scales linear matches independent dequantization" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .cuda) return error.SkipZigTest;
+    const Local = struct {
+        const Outputs = struct { actual: Tensor, expected: Tensor };
+
+        fn dequantize(values: Tensor, scales: Tensor) Tensor {
+            const expanded = scales.renameTag(.k, .ks)
+                .broad(values.shape().splitAxis(.k, .{ .ks = -1, .block = 32 }).withDtype(.f32))
+                .reshape(values.shape().withDtype(.f32));
+            return values.convert(.f32).mul(expanded);
+        }
+
+        fn forward(x: Tensor, w: Tensor, packed_scales: Tensor, logical: Tensor, weight_scales: Tensor, packed_weight_scales: Tensor, packed_rhs: bool) Outputs {
+            const input: quantization.QuantizedInput = .{
+                .values = x.convert(.f8e4m3fn),
+                .scales = packed_scales.bitCast(.f8e8m0),
+                .global_scale = null,
+                .scale_layout = .blackwell_128x4,
+            };
+            const linear: Linear = .{
+                .weight = w.convert(.f8e4m3fn),
+                .tag = Shape.toTag(.k),
+                .quantization = .{
+                    .scheme = .mxfp8,
+                    .scales = if (packed_rhs) packed_weight_scales.bitCast(.f8e8m0) else weight_scales.convert(.f8e8m0),
+                    .swizzled_scales = packed_rhs,
+                },
+            };
+            return .{
+                .actual = linear.forwardQuantized(input, .bf16),
+                .expected = dequantize(x, logical).dot(dequantize(w, weight_scales), .k).convert(.bf16),
+            };
+        }
+    };
+    inline for (.{ 1, 31, 32, 127, 128, 129 }) |rows| {
+        inline for (.{ false, true }) |packed_rhs| {
+            const x: Tensor = .init(.{ .m = rows, .k = 160 }, .bf16);
+            const w: Tensor = .init(.{ .n = 64, .k = 160 }, .bf16);
+            const logical: Tensor = .init(.{ .m = rows, .k = 5 }, .f32);
+            const packed_scales: Tensor = .init(quantization.BlackwellScaleLayout.paddedShape(logical.shape()).withDtype(.u8), .u8);
+            const weight_scales: Tensor = .init(.{ .n = 64, .k = 5 }, .f32);
+            const packed_weight_scales: Tensor = .init(quantization.BlackwellScaleLayout.paddedShape(weight_scales.shape()).withDtype(.u8), .u8);
+            var exe = try platform.compileFn(allocator, io, Local.forward, .{ x, w, packed_scales, logical, weight_scales, packed_weight_scales, packed_rhs }, .{});
+            defer exe.deinit();
+            var buffers: [6]zml.Buffer = undefined;
+            var initialized: usize = 0;
+            defer for (buffers[0..initialized]) |*buffer| buffer.deinit();
+            for ([_]Shape{ x.shape(), w.shape(), packed_scales.shape(), logical.shape(), weight_scales.shape(), packed_weight_scales.shape() }, 0..) |shape, input| {
+                const slice = try Slice.alloc(allocator, shape);
+                defer slice.free(allocator);
+                if (input < 2) {
+                    for (slice.items(zml.floats.BFloat16), 0..) |*value, i| {
+                        value.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast((i * 7 + i / 160) % 9)) - 4)) / 2);
+                    }
+                } else if (input == 2 or input == 5) {
+                    @memset(slice.items(u8), 0);
+                    for (0..if (input == 2) rows else 64) |row| {
+                        for (0..5) |column| {
+                            slice.items(u8)[quantization.BlackwellScaleLayout.offset(row, column, @intCast(shape.dim(1)))] = @intCast(124 + (row * 3 + column) % 7);
+                        }
+                    }
+                } else {
+                    for (slice.items(f32), 0..) |*value, i| {
+                        const row = i / 5;
+                        const column = i % 5;
+                        const exponent: i32 = @as(i32, @intCast((row * 3 + column) % 7)) - 3;
+                        value.* = std.math.pow(f32, 2, @floatFromInt(exponent));
+                    }
+                }
+                buffers[input] = try zml.Buffer.fromSlice(io, platform, slice);
+                initialized += 1;
+            }
+            var output: zml.Bufferized(Local.Outputs) = undefined;
+            var runner = try exe.runner(allocator);
+            defer runner.deinit(allocator);
+            runner.run(io, .{ buffers[0], buffers[1], buffers[2], buffers[3], buffers[4], buffers[5] }, .{&output}, .{ .wait = true });
+            defer zml.Buffer.deinitAll(Local.Outputs, &output);
+            var expected = try output.expected.toSliceAlloc(allocator, io);
+            defer expected.free(allocator);
+            try zml.testing.expectClose(io, expected, output.actual, .{ .absolute_tolerance = 0.125, .relative_tolerance = 0.02 });
         }
     }
 }

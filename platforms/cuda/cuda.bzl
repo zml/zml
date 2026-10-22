@@ -228,8 +228,8 @@ _PLUGINS = {
         "url": "https://mirror.zml.ai/plugins/202610221239.279.1.0774b841188b/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "18aecd6904598b970f528db832ac25159d344cfef69fbdb5606655c76a352fa2",
-        "url": "https://mirror.zml.ai/plugins/202610221239.279.1.0774b841188b/zml-cuda-linux-arm64.tar.zst",
+        "sha256": "203cb765a221cc0ac837446e0672f4684eafd63bdb00d96b81a4643b261d2f6a",
+        "url": "file:///tmp/benjamin/llmd-projections-20261022/runtime/zml-cuda-linux-arm64-packed-scales-203cb765a221cc0a.tar.zst",
     },
 }
 

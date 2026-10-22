@@ -111,15 +111,71 @@ pub const QuantizedInput = struct {
     values: Tensor,
     scales: Tensor,
     global_scale: ?Tensor,
+    scale_layout: ScaleLayout = .logical,
+
+    pub const ScaleLayout = enum {
+        logical,
+        /// Each device's scale grid is independently padded and packed.
+        blackwell_128x4,
+    };
 
     pub fn reuseBuffer(self: QuantizedInput, other: QuantizedInput) QuantizedInput {
+        stdx.debug.assert(self.scale_layout == other.scale_layout, "cannot reuse quantized scales with different layouts", .{});
         return .{
             .values = self.values.reuseBuffer(other.values),
             .scales = self.scales.reuseBuffer(other.scales),
             .global_scale = if (self.global_scale != null and other.global_scale != null) self.global_scale.?.reuseBuffer(other.global_scale.?) else self.global_scale,
+            .scale_layout = self.scale_layout,
         };
     }
 };
+
+/// The scale-byte layout consumed by Blackwell block-scaled matrix multiplication.
+/// `paddedShape` and `offset` describe one device's local two-dimensional grid.
+/// Pad local slices before joining them; padding never denotes additional values.
+pub const BlackwellScaleLayout = struct {
+    pub const rows = 128;
+    pub const columns = 4;
+
+    pub fn paddedShape(logical: Shape) Shape {
+        stdx.debug.assert(logical.rank() == 2, "Blackwell scales require a matrix, got {f}", .{logical});
+        return logical.setDim(0, std.mem.alignForward(i64, logical.dim(0), rows))
+            .setDim(1, std.mem.alignForward(i64, logical.dim(1), columns));
+    }
+
+    pub fn offset(row: usize, column: usize, padded_columns: usize) usize {
+        stdx.debug.assert(padded_columns % columns == 0 and column < padded_columns, "invalid Blackwell scale column {}/{}", .{ column, padded_columns });
+        return (row / rows * (padded_columns / columns) + column / columns) * (rows * columns) +
+            row % 32 * 16 + row % rows / 32 * columns + column % columns;
+    }
+};
+
+test "Blackwell scale layout padding and address bijection" {
+    inline for (.{ 1, 31, 32, 127, 128, 129, 255, 256 }) |m| {
+        inline for (.{ 1, 3, 4, 5, 17 }) |k| {
+            const logical: Shape = .init(.{ .m = m, .k = k }, .f8e8m0);
+            const padded = BlackwellScaleLayout.paddedShape(logical);
+            try std.testing.expectEqual(@as(i64, ((m + 127) / 128) * 128), padded.dim(.m));
+            try std.testing.expectEqual(@as(i64, ((k + 3) / 4) * 4), padded.dim(.k));
+            const num_rows: usize = @intCast(padded.dim(.m));
+            const num_cols: usize = @intCast(padded.dim(.k));
+            var seen = try std.testing.allocator.alloc(bool, num_rows * num_cols);
+            defer std.testing.allocator.free(seen);
+            @memset(seen, false);
+            for (0..num_rows) |row| {
+                for (0..num_cols) |col| {
+                    const index = BlackwellScaleLayout.offset(row, col, num_cols);
+                    try std.testing.expect(index < seen.len);
+                    try std.testing.expect(!seen[index]);
+                    seen[index] = true;
+                    const reference = (((row / 128 * (num_cols / 4) + col / 4) * 32 + row % 32) * 4 + row % 128 / 32) * 4 + col % 4;
+                    try std.testing.expectEqual(reference, index);
+                }
+            }
+            for (seen) |visited| try std.testing.expect(visited);
+        }
+    }
+}
 
 pub fn quantizeInput(quantization: Quantization, input: Tensor, axis: Shape.Tag, platform: *const Platform) ?QuantizedInput {
     const global_scale: ?Tensor = if (quantization.input_scale) |scale| scale.asMultiplier() else null;
