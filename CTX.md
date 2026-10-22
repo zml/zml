@@ -6619,8 +6619,134 @@ Checks:
   and pack checks, replicated with 2 packs of 4 and sharded without
   packs. Both "Loaded weights" lines show 320.25 KiB each time.
 
+## Thirty-eighth pass: Loader.init returns at once (R5) (2026-10-22)
+
+R5 of `LOADER_API_REVIEW.md` (H-profile-from-io, L-init-owns-its-task,
+A-init-returns-pointer, F-calibration-read-through-backend-field,
+F-options-validated-thrice, K-dma-options-one-knob, K-newcomer-recipe).
+`Loader.init` blocked for the allocator warm-up, the DMA calibration and
+the pinned pre-growth, so callers ran it in a future of their own: llmd
+carried the future and a `loader_awaited` flag, and examples/llm
+deinitialized a stale copy (R1 item 1). The Loader stays a value.
+
+zml:
+- `Loader.Options` is `checkpoint`, `read_parallelism`, `dma_block_sizes`
+  and `direct_io`. `init` resolves `checkpoint` through `VFS.fromIo(io)`
+  and `loadProfile`; a plain io or no checkpoint gets the local profile.
+  The loader still borrows the profile's name and stats from the VFS
+  backend, and the doc says the VFS must outlive it. `backend.Options` is
+  internal: the checked options plus `load_profile`. Its `.auto` is gone;
+  callers pass `.{}`.
+- The other DMA knobs are fixed at their old defaults (eight transfers per
+  device, the windows, the 8% tolerance), so calibration selects the same
+  sizing. On CPU a load still logs request 8 MiB, block 4 MiB, width 16
+  and alignment 4096.
+- `init` returns `error{ InvalidOptions, OutOfMemory }`. Every option is
+  checked once, in `backendOptions`, and each rejection is logged: read
+  width 1..128; read chunk 1..32 MiB; a non-empty block list, each block
+  between the direct I/O alignment and 32 MiB; the chunk a whole number of
+  every block calibration may select, the CPU default included.
+- The warm-up and the backend run in `setUp`, started with
+  `io.concurrent` else `io.async` (the thirty-fourth pass's idiom), so in
+  place on an io without concurrency. The first `start` awaits it, sets
+  `backend` (now `?Backend`) and probes memory. Its error fails the
+  loader through `fail`. The load's time starts after it. `deinit`
+  cancels a set-up no `start` awaited and destroys what it built. `cancel`
+  and `wait` before any `start` do nothing.
+- `Loader.Error` gains `UnsupportedPlatform` and `ConcurrencyUnavailable`.
+  An `InvalidOptions` from a backend after `init` panics. A cancelled
+  calibration logs at debug.
+- `dma_calibration.measure(allocator, io, platform, opts)` warms the
+  allocators and screens in a workspace of its own, with every knob, for
+  dma-bench. `validate` replaces `calibrate`'s debug asserts with logged
+  `InvalidOptions`: block parallelism 1..32, blocks 1..32 MiB, positive
+  windows, tolerance and margin in [0, 1). TPU, neuron, metal and furiosa
+  return `UnsupportedPlatform`.
+- `limits.zig` and `execute_admission.zig` are gone, and `zml.io.limits`
+  with them. `max_read_request_size` is in backend.zig, the 16/32 widths
+  in `backend.Options.readWidth`, `maximumCoalescedJobBlocks` in the
+  direct backend (no error now), the admission arithmetic in a private
+  `admission` namespace of loader.zig. `effectiveSourceRequestSize` only
+  re-checked what `init` had checked; `Sizing` now takes
+  `@max(chunk, block)` and asserts divisibility.
+- examples/llm calls `Loader.init` where the future was, and frees the
+  loader right after `loadBuffers` (an optional). The pinned pools and
+  workers no longer live through the chat. examples/io's load mode passes
+  `.checkpoint`, and dma-bench calls `measure`. mnist drops its
+  replicated mesh, the README its `.dma` knob. loader.md, the torch2zml
+  howto, vfs.zig's docs and testing.zig follow.
+
+llmd (monorepo):
+- The loader future, `loader_awaited` and `vfs.loadProfile` are gone. One
+  block holds `Loader.init` with `.checkpoint = args.model`, its deinit,
+  `model.init` and `loadBuffers`. Calibration still overlaps model init
+  and compile, and the pinned pools are freed after the load. The
+  tokenizer await, the options and the progress node moved before
+  `Loader.init`.
+
+Tests, new:
+- Every option rejection, including an unknown scheme under a VFS and a
+  block under the local alignment.
+- A failed set-up (failing allocator) fails the first `start` and `wait`.
+- An io whose `concurrent` refuses and whose `async` runs in place:
+  `init` sets up inline, `cancel` and `wait` before `start` do nothing,
+  and a moved loader loads.
+- The rate-limited HTTP load checks that the backend got the `http`
+  profile: high latency, with a stats provider.
+- `measure` refuses each bad knob before it touches the platform (a
+  32 MiB + 1 block among them), and returns the CPU defaults.
+
+Review (workflow, refuting verifier): nine findings, six distinct, all
+fixed.
+- `measure` reached host_memory's panic on buffered targets. It now
+  returns `UnsupportedPlatform`, checked after `validate` (the knob test
+  passes an undefined platform) with an exhaustive switch. The old bench
+  panicked there too.
+- `validate` had dropped the 32 MiB block cap. Restored; the mapped
+  ceiling check became a comptime assert.
+- examples/llm kept its loader for the whole chat, which R1(c) asked to
+  end. It is now freed after the load.
+- `init` built the fallback future from `Future`'s fields. It now uses
+  `io.concurrent catch io.async`; the no-concurrency test's io runs
+  `async` in place.
+- `max_read_request_size` sat in direct_loader.zig, which the front end
+  imported only for it, and the public doc named it. Moved to
+  backend.zig; the doc says 32 MiB.
+- No test saw the resolved profile reach the backend. The HTTP test does
+  now.
+
+Not done:
+- monorepo/AGENTS.md still shows the future-cancel idiom around
+  `Loader.init`, and PLAN.md still names `load_profile` and `.dma`.
+- dma-bench's `load` mode no longer reads
+  `ZML_DMA_BENCH_BLOCK_PARALLELISM`.
+- The divisibility check is conservative: it tests the 4 MiB CPU default
+  on GPU targets too, and the alignment floor applies with
+  `direct_io = .off`.
+- llmd's tokenizer await moved before `Loader.init`. The tokenizer starts
+  before `Platform.auto`, so it should be done; not measured.
+- Not run on a GPU, a real model or a remote checkpoint. No set-up was
+  cancelled mid-calibration.
+
+Checks:
+- `bazel test //zml:test` passes (330, 12 skip), also with
+  `--runs_per_test=5`.
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7.
+- `bazel build --config=localzml //llmd:llmd`.
+- On CPU, `examples/io dma-bench` prints 4194304/8, and
+  `ZML_DMA_BENCH_BLOCK_MIB=64` logs `InvalidOptions`. `examples/io load`
+  of a synthetic checkpoint passes its load and pack checks, replicated
+  and tp with 2 packs of 4, and sharded without packs.
+
 ## Open work
 
+- 2026-10-22 Loader.init returns at once (thirty-eighth pass, zml vyswqxpw
+  and monorepo sltmxrzn): R5 done. `init` checks a caller's four options
+  and sets up on its own task; `dma_calibration.measure` serves dma-bench;
+  `limits.zig` and `execute_admission.zig` are gone. Not run on a GPU, a
+  real model or a remote checkpoint. monorepo/AGENTS.md and PLAN.md still
+  show the old init.
 - 2026-10-22 the rest of R4 (thirty-seventh pass, zml ryvvruus and
   monorepo vrounrwt): the loader logs and counts its own load, buffers
   can be freed after any failure, model bugs are `InvalidBinding`. R4 is
@@ -6631,9 +6757,9 @@ Checks:
   and monorepo yyqsnszp): R3 done. Not run: no model's free path was
   exercised on a device.
 - 2026-10-22 seam bugs (thirty-fifth pass, zml zmxzvvly and monorepo
-  szqpusxv): R1 done except item 1, which goes with R5. Not run on a GPU:
-  the DSpark swizzle on sm_10x. The rest of LOADER_REVIEW #20's header
-  checks is open.
+  szqpusxv): R1 done; item 1 went with R5 (thirty-eighth pass). Not run
+  on a GPU: the DSpark swizzle on sm_10x. The rest of LOADER_REVIEW #20's
+  header checks is open.
 - 2026-10-22 one start for the whole model (thirty-fourth pass, zml and
   llmd): `Loader.start`/`wait`, programs as values in their bindings, the
   bulk published before any compile. Not run on a GPU: measure DeepSeek's
