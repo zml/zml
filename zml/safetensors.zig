@@ -400,9 +400,10 @@ pub const TensorRegistry = struct {
         io: std.Io,
         repo: std.Io.Dir,
     ) !TensorRegistry {
-        const entrypoint_file, const entrypoint_path = try resolveModelEntrypoint(io, repo);
-        defer entrypoint_file.close(io);
-        return try fetchRegistry(allocator, io, repo, entrypoint_file, entrypoint_path);
+        var registry: TensorRegistry = .init(allocator);
+        errdefer registry.deinit();
+        try registry.addRepo(io, repo, "");
+        return registry;
     }
 
     pub fn fromPath(
@@ -419,7 +420,28 @@ pub const TensorRegistry = struct {
             try resolveModelEntrypoint(io, repo);
         defer entrypoint_file.close(io);
 
-        return try fetchRegistry(allocator, io, repo, entrypoint_file, entrypoint_path);
+        var registry: TensorRegistry = .init(allocator);
+        errdefer registry.deinit();
+        try addCheckpoint(allocator, io, &registry, repo, entrypoint_file, entrypoint_path, "");
+        return registry;
+    }
+
+    /// Adds every tensor of the checkpoint in `repo`, as `fromRepo` finds
+    /// it, under `prefix` followed by its name. A second checkpoint, such as
+    /// a speculative drafter's, joins the registry under a prefix of its
+    /// own, and one store then holds both; reach the second through
+    /// `View.withPrefix`. Adding under a prefix that a tensor already here
+    /// is named under fails with `error.DuplicateTensor`. A registry a store
+    /// owns takes no more (`TensorStore.init`).
+    pub fn addRepo(self: *TensorRegistry, io: std.Io, repo: std.Io.Dir, prefix: []const u8) !void {
+        // A checkpoint added beside another owns its prefix: no tensor already
+        // here may be named under it.
+        for (self.tensors.keys()) |name| {
+            if (std.mem.startsWith(u8, name, prefix)) return error.DuplicateTensor;
+        }
+        const entrypoint_file, const entrypoint_path = try resolveModelEntrypoint(io, repo);
+        defer entrypoint_file.close(io);
+        try addCheckpoint(self.arena.child_allocator, io, self, repo, entrypoint_file, entrypoint_path, prefix);
     }
 
     pub fn deinit(self: *TensorRegistry) void {
@@ -460,16 +482,18 @@ pub const TensorRegistry = struct {
     }
 };
 
-/// The registry of the checkpoint whose entrypoint `model` is open at
-/// `model_path` in `repo`: one safetensors file, or an index of the files
-/// of `repo` to read.
-fn fetchRegistry(
+/// Adds the tensors of the checkpoint whose entrypoint `model` is open at
+/// `model_path` in `repo`, one safetensors file or an index of the files of
+/// `repo` to read, to `registry` under `prefix`.
+fn addCheckpoint(
     allocator: std.mem.Allocator,
     io: std.Io,
+    registry: *TensorRegistry,
     repo: std.Io.Dir,
     model: std.Io.File,
     model_path: []const u8,
-) !TensorRegistry {
+    prefix: []const u8,
+) !void {
     if (std.mem.endsWith(u8, model_path, ".safetensors.index.json")) {
         const file_reader_buf = try allocator.alloc(u8, 64 * 1024);
         defer allocator.free(file_reader_buf);
@@ -482,35 +506,29 @@ fn fetchRegistry(
         );
         defer safetensors_index.deinit();
 
-        var registry: TensorRegistry = .init(allocator);
-        errdefer registry.deinit();
-
-        try parseSafetensorsIndexFiles(
+        return parseSafetensorsIndexFiles(
             allocator,
             io,
-            &registry,
+            registry,
             safetensors_index,
             repo,
+            prefix,
         );
-
-        return registry;
     }
     if (std.mem.endsWith(u8, model_path, ".safetensors")) {
-        var registry: TensorRegistry = .init(allocator);
-        errdefer registry.deinit();
-
-        try parseSafetensors(allocator, io, &registry, model);
-
-        return registry;
+        return parseSafetensors(allocator, io, registry, model, prefix);
     }
     return error.InvalidPath;
 }
 
+/// Adds the tensors of the safetensors `file` to `registry`, each named
+/// `prefix` followed by its key in the header.
 pub fn parseSafetensors(
     allocator: std.mem.Allocator,
     io: std.Io,
     registry: *TensorRegistry,
     file: std.Io.File,
+    prefix: []const u8,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -572,7 +590,7 @@ pub fn parseSafetensors(
 
         const tensor: Tensor = .{
             .file_uri = file_uri,
-            .name = key,
+            .name = if (prefix.len == 0) key else try std.mem.concat(arena.allocator(), u8, &.{ prefix, key }),
             .shape = .init(dims.slice(), dtype),
             .offset = data_start_offset + start,
         };
@@ -630,13 +648,66 @@ test "parseSafetensors rejects a header or data_offsets that run backward, overf
 
         var registry: TensorRegistry = .init(allocator);
         defer registry.deinit();
-        const result = parseSafetensors(allocator, io, &registry, file);
+        const result = parseSafetensors(allocator, io, &registry, file, "");
         if (case.valid) {
             try result;
             try std.testing.expectEqual(@as(u64, BYTES_HEADER + header.len), registry.tensors.get("x").?.offset);
         } else {
             try std.testing.expectError(error.InvalidSafetensorsHeader, result);
         }
+    }
+}
+
+test "addRepo adds a second checkpoint under a prefix" {
+    const TensorStore = @import("io/TensorStore.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const writeCheckpoint = struct {
+        /// A safetensors file of one tensor, `w`, of 4 bytes.
+        fn call(io_: std.Io, dir: std.Io.Dir, sub_path: []const u8, bytes: *const [4]u8) !void {
+            const header = "{\"w\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}";
+            const file = try dir.createFile(io_, sub_path, .{});
+            defer file.close(io_);
+            var length: [BYTES_HEADER]u8 = undefined;
+            std.mem.writeInt(u64, &length, header.len, .little);
+            try file.writePositionalAll(io_, &length, 0);
+            try file.writePositionalAll(io_, header, length.len);
+            try file.writePositionalAll(io_, bytes, length.len + header.len);
+        }
+    }.call;
+    // The target is one file, the drafter an index over one shard; both name
+    // their tensor `w`.
+    const target = try tmp.dir.createDirPathOpen(io, "target", .{});
+    defer target.close(io);
+    try writeCheckpoint(io, target, "model.safetensors", &.{ 1, 2, 3, 4 });
+    const drafter = try tmp.dir.createDirPathOpen(io, "drafter", .{});
+    defer drafter.close(io);
+    try writeCheckpoint(io, drafter, "shard.safetensors", &.{ 5, 6, 7, 8 });
+    try drafter.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"w\":\"shard.safetensors\"}}" });
+
+    var store: TensorStore = store: {
+        var registry: TensorRegistry = try .fromRepo(allocator, io, target);
+        errdefer registry.deinit();
+        try registry.addRepo(io, drafter, "drafter.");
+        try std.testing.expectError(error.DuplicateTensor, registry.addRepo(io, drafter, "drafter."));
+        break :store .init(allocator, registry, .{});
+    };
+    defer store.deinit();
+
+    const root = store.view();
+    try std.testing.expectEqual(@as(usize, 2), root.count());
+    const cases = [_]struct { view: TensorStore.View, name: []const u8, bytes: [4]u8 }{
+        .{ .view = root, .name = "w", .bytes = .{ 1, 2, 3, 4 } },
+        .{ .view = root.withPrefix("drafter"), .name = "drafter.w", .bytes = .{ 5, 6, 7, 8 } },
+    };
+    for (cases) |case| {
+        const tensor = case.view.get("w").?;
+        try std.testing.expectEqualStrings(case.name, tensor.name);
+        var bytes: [4]u8 = undefined;
+        try tensor.read(io, &bytes);
+        try std.testing.expectEqualSlices(u8, &case.bytes, &bytes);
     }
 }
 
@@ -698,12 +769,13 @@ fn parseSafetensorsIndexFiles(
     registry: *TensorRegistry,
     safetensors_index: SafetensorsIndex,
     repo: std.Io.Dir,
+    prefix: []const u8,
 ) !void {
     const filenames = safetensors_index.files.keys();
     for (filenames) |filename| {
         const file = try repo.openFile(io, filename, .{});
         defer file.close(io);
-        try parseSafetensors(allocator, io, registry, file);
+        try parseSafetensors(allocator, io, registry, file, prefix);
     }
 }
 

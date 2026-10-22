@@ -110,7 +110,7 @@ pub fn writeSafetensors(
         try file.writePositionalAll(io, tensor.bytes, position);
         position += tensor.bytes.len;
     }
-    try safetensors.parseSafetensors(allocator, io, registry, file);
+    try safetensors.parseSafetensors(allocator, io, registry, file, "");
 }
 
 /// A store over a copy of `registry`, for a test that builds several stores

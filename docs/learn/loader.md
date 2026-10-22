@@ -53,6 +53,14 @@ entry itself. `View.hasPrefix(subkey)` asks whether any key starts with
 `readRange(io, file, buffer, offset)`, a range of it from a file the caller
 opened.
 
+A second checkpoint, such as a speculative drafter's, joins the same
+registry under a prefix of its own before the store takes it:
+`registry.addRepo(io, drafter_repo, "drafter.")` registers each of its
+tensors as `drafter.` followed by its name, and
+`store.view().withPrefix("drafter")` reaches them: `createTensor` on that
+view, or `source` and then `bind`, binds them. One store, and the loads
+started from it, then cover both checkpoints.
+
 The store is passed to each `start`; initialization needs no store. `start`
 also takes a progress node as its final argument (`.none` disables
 reporting). The loader copies the node; do not end it until `wait` or
