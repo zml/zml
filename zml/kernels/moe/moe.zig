@@ -27,8 +27,6 @@ pub const RoutingWeightPlacement = enum { before_down, after_down };
 pub const ExpertsLayout = struct {
     /// Whether the two projections occupy contiguous halves or alternate.
     gate_up: ProjectionLayout,
-    /// Projection order within the concatenated halves or interleaved pairs.
-    gate_up_order: enum { gate_up, up_gate } = .gate_up,
     /// Backend specific transformation of the weights and scales.
     packing: Packing,
 
@@ -95,7 +93,9 @@ pub const Backend = enum {
                         .cute
                     else
                         .triton,
-                    .nvfp4 => if (cutlass_flashinfer.isNvfp4Supported(platform))
+                    .nvfp4 => if (cute.isNvfp4Supported(platform))
+                        .cute
+                    else if (cutlass_flashinfer.isNvfp4Supported(platform))
                         .flashinfer_cutlass
                     else
                         error.UnsupportedQuantization,
@@ -151,11 +151,11 @@ pub const Backend = enum {
     pub fn expertsLayout(backend: Backend, scheme: ?zml.Quantization.Scheme) !ExpertsLayout {
         return switch (backend) {
             .stablehlo => .{ .gate_up = .concatenated, .packing = .plain },
-            .cute => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
+            .cute => if (scheme == .mxfp4 or scheme == .nvfp4) .{ .gate_up = .interleaved, .packing = .swizzled_scales } else error.UnsupportedQuantization,
             .flashinfer_cutlass => if (scheme) |s| switch (s) {
                 .nvfp4 => .{ .gate_up = .concatenated, .packing = .flashinfer_nvfp4 },
                 else => error.UnsupportedQuantization,
-            } else .{ .gate_up = .concatenated, .gate_up_order = .up_gate, .packing = .plain },
+            } else error.UnsupportedQuantization,
             .mosaic_tpu, .metal => .{ .gate_up = .concatenated, .packing = .plain },
             .triton, .fly => if (scheme == .mxfp4) .{ .gate_up = .interleaved, .packing = .plain } else .{ .gate_up = .concatenated, .packing = .plain },
         };

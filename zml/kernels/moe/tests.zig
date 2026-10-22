@@ -176,16 +176,9 @@ fn packFp4Bytes(weight: Tensor) Tensor {
 }
 
 fn prepareGateUp(tensor: Tensor, layout: zml.moe.ExpertsLayout) Tensor {
-    const ordered = switch (layout.gate_up_order) {
-        .gate_up => tensor,
-        .up_gate => blk: {
-            const mid = @divExact(tensor.dim(1), 2);
-            break :blk Tensor.concatenate(&.{ tensor.slice(1, .{ .start = mid }), tensor.slice(1, .{ .end = mid }) }, 1);
-        },
-    };
     return switch (layout.gate_up) {
-        .concatenated => ordered,
-        .interleaved => interleave(ordered),
+        .concatenated => tensor,
+        .interleaved => interleave(tensor),
     };
 }
 
@@ -261,7 +254,7 @@ fn forward(input: Tensor, c: Case) Outputs {
         .routing_weight_placement = c.placement,
         .input_quantization = switch (c.backend) {
             .metal => .none,
-            .cute => .mxfp8_bf16,
+            .cute => if (c.scheme == .nvfp4) .automatic else .mxfp8_bf16,
             .triton => if (c.scheme == .mxfp4 and zml.Compiler.current().platform.target == .cuda) .mxfp8 else .automatic,
             else => .automatic,
         },
@@ -306,6 +299,8 @@ const specialized_shapes = [_]FixtureShape{
     .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 17, .topk = 2 },
     .{ .width = 5120, .intermediate = 2304, .experts = 2, .tokens = 34, .topk = 2 },
 };
+/// CuTe does not support a single route, which real models never produce.
+const specialized_shapes_cute = specialized_shapes[1..].*;
 
 const Format = struct {
     scheme: ?zml.Quantization.Scheme = null,
@@ -588,7 +583,7 @@ test "FlashInfer compatibility matrix" {
 
     // Only default SwiGLU, no linear bias, and routing after the down projection.
     try pipeline.run(std.testing.io, std.testing.allocator, .flashinfer_cutlass, .{
-        .formats = &.{ .{}, .{ .scheme = .nvfp4 } },
+        .formats = &.{.{ .scheme = .nvfp4 }},
         .activations = &.{.{ .swiglu = .{} }},
     }, .{});
 }
@@ -603,7 +598,7 @@ test "specialized CuTe MXFP4 compatibility matrix" {
         .activations = &clipped_swiglu,
         .quantize_inputs = &.{ false, true },
         .placements = &.{.before_down},
-        .shapes = &specialized_shapes,
+        .shapes = &specialized_shapes_cute,
     }, .{});
 }
 
