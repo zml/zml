@@ -23,6 +23,7 @@ pub const QwenImage21SwiGLUFeedForward = @import("./blocks/generation/QwenImage2
 pub const QwenImage21AdaLayerNormContinuous = @import("./blocks/generation/QwenImage21AdaLayerNormContinuous.zig");
 
 // Vae
+pub const AutoencoderKLQwenImage21 = @import("./blocks/vae/AutoencoderKLQwenImage21.zig");
 pub const Conv2d = @import("./blocks/vae/Conv2d.zig");
 pub const QwenImage21AttentionBlock = @import("./blocks/vae/QwenImage21AttentionBlock.zig");
 pub const QwenImage21CausalConv3d = @import("./blocks/vae/QwenImage21CausalConv3d.zig");

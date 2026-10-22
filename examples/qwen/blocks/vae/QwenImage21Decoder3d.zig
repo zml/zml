@@ -147,29 +147,6 @@ up_blocks: []QwenImage21ResidualUpBlock,
 norm_out: QwenImage21RMS_norm,
 conv_out: QwenImage21CausalConv3d,
 
-pub fn load(
-    self: *const QwenImage21Decoder3d,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    store: *const zml.io.TensorStore,
-) !zml.Bufferized(QwenImage21Decoder3d) {
-    var buffers = try zml.mem.bufferize(allocator, QwenImage21Decoder3d, self);
-    errdefer unloadBuffers(&buffers);
-
-    var loader: zml.io.Loader = try .init(allocator, platform, .{
-        .dma_chunks = 32,
-        .dma_chunk_size = 256 * zml.MiB,
-        .parallelism = 16,
-    });
-    defer loader.deinit();
-
-    try loader.load(io, QwenImage21Decoder3d, self, &buffers, store, platform.shardings.values(), .{});
-    try loader.await(io);
-
-    return buffers;
-}
-
 pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21Decoder3d)) void {
     QwenImage21CausalConv3d.unloadBuffers(&self.conv_in);
     QwenImage21MidBlock.unloadBuffers(&self.mid_block);

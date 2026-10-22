@@ -13,8 +13,8 @@ const UP_RESNET_BLOCK_COUNT: usize = 3;
 store: zml.io.TensorStore = undefined,
 registry: zml.safetensors.TensorRegistry = undefined,
 
-model: block.QwenImage21Decoder3d,
-model_buffer: zml.Bufferized(block.QwenImage21Decoder3d),
+model: block.AutoencoderKLQwenImage21,
+model_buffer: zml.Bufferized(block.AutoencoderKLQwenImage21),
 
 // From vae/diffusion_pytorch_model.safetensors
 //  decoder.conv_in.bias                                            (1152,)               F32
@@ -146,13 +146,22 @@ pub fn load_tensors(
         },
     };
 
-    self.model = block.QwenImage21Decoder3d{
+    const decoder = block.QwenImage21Decoder3d{
         .conv_in = conv_in,
         .mid_block = mid_block,
         .up_blocks = up_blocks,
         .norm_out = norm_out,
         .conv_out = conv_out,
     };
+
+    const post_quant_conv = block.QwenImage21CausalConv3d{
+        .conv = block.Conv2d{
+            .weight = self.store.view().createTensor("post_quant_conv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
+            .bias = self.store.view().createTensor("post_quant_conv.bias", .{.c}, .replicated),
+            .kernel_size = 1,
+        },
+    };
+    self.model = block.AutoencoderKLQwenImage21{ .decoder = decoder, .post_quant_conv = post_quant_conv };
 }
 
 fn load_up_blocks(
@@ -564,19 +573,19 @@ pub fn load_buffers(self: *VaeStore, allocator: std.mem.Allocator, io: std.Io, p
 }
 
 pub fn deinit(self: *VaeStore, allocator: std.mem.Allocator) void {
-    block.QwenImage21Decoder3d.unloadBuffers(&self.model_buffer);
+    block.AutoencoderKLQwenImage21.unloadBuffers(&self.model_buffer);
 
-    for (self.model.up_blocks) |b| {
+    for (self.model.decoder.up_blocks) |b| {
         allocator.free(b.resnets);
     }
-    allocator.free(self.model.up_blocks);
-    allocator.free(self.model.mid_block.resnets);
+    allocator.free(self.model.decoder.up_blocks);
+    allocator.free(self.model.decoder.mid_block.resnets);
 
-    for (self.model_buffer.up_blocks) |b| {
+    for (self.model_buffer.decoder.up_blocks) |b| {
         allocator.free(b.resnets);
     }
-    allocator.free(self.model_buffer.up_blocks);
-    allocator.free(self.model_buffer.mid_block.resnets);
+    allocator.free(self.model_buffer.decoder.up_blocks);
+    allocator.free(self.model_buffer.decoder.mid_block.resnets);
 
     self.store.deinit();
     self.registry.deinit();
