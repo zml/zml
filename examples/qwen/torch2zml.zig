@@ -118,10 +118,10 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             platform,
-            "vae.decoder.mid_block",
+            "vae.decoder.up_blocks.1.avg_shortcut",
             &activations_store.store,
-            VaeWrapper{ .model = vae_model_store.model.mid_block, .args = compile_args },
-            .{ .model = vae_model_store.model_buffer.mid_block, .args = compile_args_buffers },
+            VaeWrapper{ .model = vae_model_store.model.up_blocks[1].avg_shortcut.?, .args = compile_args },
+            .{ .args = compile_args_buffers },
         );
     } else {
         std.debug.print("NOTHING IS BEING TESTED\n", .{});
@@ -167,7 +167,7 @@ const TextWrapper = struct {
 };
 
 const VaeWrapper = struct {
-    model: block.QwenImage21MidBlock,
+    model: block.QwenImage21DupUp3D,
     args: CompileArgs,
 
     pub fn forward(

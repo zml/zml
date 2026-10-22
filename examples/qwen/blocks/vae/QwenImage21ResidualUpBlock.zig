@@ -7,7 +7,7 @@ const QwenImage21Resample = @import("./QwenImage21Resample.zig");
 
 pub const QwenImage21ResidualUpBlock = @import("./QwenImage21ResidualUpBlock.zig");
 
-avg_shortcut: QwenImage21DupUp3D,
+avg_shortcut: ?QwenImage21DupUp3D,
 resnets: []QwenImage21ResidualBlock,
 upsampler: ?QwenImage21Resample,
 
@@ -18,4 +18,22 @@ pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21ResidualUpBlock)) void {
     if (self.upsampler) |*upsampler| {
         QwenImage21Resample.unloadBuffers(upsampler);
     }
+}
+
+pub fn forward(self: QwenImage21ResidualUpBlock, x_: zml.Tensor, first_chunk: bool) zml.Tensor {
+    var x = x_;
+
+    for (self.resnets) |resnet| {
+        x = resnet.forward(x);
+    }
+
+    if (self.upsampler) |upsampler| {
+        x = upsampler.forward(x);
+    }
+
+    if (self.avg_shortcut) |avg_shortcut| {
+        x = x.add(avg_shortcut.forward(x_, first_chunk));
+    }
+
+    return x;
 }
