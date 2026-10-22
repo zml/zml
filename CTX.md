@@ -305,16 +305,16 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   and the oldest requests' blocks complete first. There are no live device
   queues, debt counters, claimed bitmap, runtime order indirection, or
   suffix-metadata arrays.
-- The scheduler is a strict FIFO of published plans under one mutex and
-  condition (sixteenth pass; it queued batches before): `publish(batch,
-  plan)` stamps the plan with its batch, appends it to the batch and adds
-  its completion units, and queues it behind every earlier plan when it has
-  jobs (capacity is reserved first so the plan, its units and the queue
-  entry appear together); `seal(batch)` only stamps the diagnostics; `claim`
-  advances the head plan's plain cursor and pops the plan with its last job;
-  `waitForWork` sleeps while nothing is unclaimed; `fail` retires the
-  unclaimed units of every queued plan and clears the queue; `remainingJobs`
-  reports the unclaimed total. A submission publishes and seals on one task,
+- The scheduler is a strict FIFO of published plans, a `std.Deque`, under
+  one mutex and condition (sixteenth pass; it queued batches before):
+  `publish(batch, plan)` stamps the plan with its batch, appends it to the
+  batch and adds its completion units, and queues it behind every earlier
+  plan when it has jobs (capacity is reserved first so the plan, its units
+  and the queue entry appear together); `claim` advances the front plan's
+  plain cursor and pops the plan with its last job; `waitForWork` sleeps
+  while nothing is unclaimed; `fail` retires the unclaimed units of every
+  queued plan and clears the queue. `submit` stamps `sealed_at` once the
+  last plan is published. A submission publishes and seals on one task,
   so its plans are contiguous in the queue in file order and a later
   submission's first job is claimed only after every job of the earlier
   ones; fairness is intra-plan and the caller's submission order is the
@@ -7943,7 +7943,156 @@ Checks:
   hunks, in deepseek41.zig, are builtin rewrites outside the change, not
   applied.
 
+## Fiftieth pass: VFS fixes and the rest of Moves 1 and 4 (2026-10-22)
+
+The audit's last "Do now" items, 3, 5 and 8, listed in the forty-ninth
+pass. zml only: llmd builds and passes unchanged.
+
+VFS (item 3):
+- A streaming read in http, hf, s3 or gcs that fails after its retries
+  logs at err and returns `InputOutput`. It ended with `EndOfStream`
+  before, so a reader saw a short file. `Canceled` passes through.
+- `fileSeekBy` saturates at both ends in all four backends and takes
+  `@abs` of the offset: `@intCast(-x)` overflowed on `minInt(i64)`, and
+  http and hf did not saturate.
+- A remote path is read-only. `writableDir` refuses create and delete of
+  files and directories, atomic create and `dirCreateFile` on a remote
+  path, from cwd or from a directory opened on the remote, and
+  `dirOpenFile` refuses any mode but `read_only`. Each logs at err and
+  fails with `ReadOnlyFileSystem` before any request. Before, no remote
+  backend implemented these: `dirCreateFile` reached the local io as
+  `bucket/key` through the backend's base layer, and the other calls
+  went there as the local path `s3:/bucket/key`.
+- A local path goes to the inner io. Relative to a directory opened
+  through the VFS, it now gets that directory's real descriptor, not the
+  VFS's handle number.
+- `stripScheme` cuts only a `scheme://` prefix, and a path from cwd
+  without `://` is local. Before, `std.Uri.parse` took any `name:` as a
+  scheme: relative to an opened directory `notes:old.txt` became `d.txt`
+  and `a:b` sliced past its end, and from cwd such a name failed with
+  `Unexpected`.
+- `base.scopedLog` logs err at debug in test builds, as
+  `zml/io/log.zig` does, so a test of a failure path can pass. The four
+  backends use it; vfs.zig uses it only for its refusals, so a
+  misaligned direct read (`refuseDirect`) still fails a test.
+- The vfs.zig header says what a streaming read fails with and that a
+  remote path is read-only.
+
+Direct backend, the rest of LOADER_REVIEW Move 4 (item 5), no behavior
+change:
+- The Scheduler's queue is a `std.Deque`. `head`, `popHead`, the
+  test-only `remainingJobs` (tests read `unclaimed_total`),
+  `Scheduler.seal` and `finishScheduling` are gone; the worker calls
+  `release`.
+- `submit` stamps `sealed_at` after `publishFiles` returns and before
+  `finishJobs(1)` drops the sentinel, on both paths.
+- `logBatch` returns at once unless debug logging is on, then counts
+  plans, job kinds, transfers and events from `batch.plans` in one loop.
+  The accumulation in `publish`, the four `Plan` counters, the four
+  `JobCut` counters and nine `Diagnostics` fields are gone.
+- The allocation task walks the host jobs' transfers in claim order and
+  skips a destination already created. `Batch.host_destinations`,
+  `Destination.queued_ahead` and `hostDestinationsInOrder` are gone. Its
+  debug line reads `host_destinations=44, ensured=N`. N counts what the
+  task created or waited for, 26 to 37 of 44 on CPU; the workers create
+  the rest.
+- A gather job has one item per extent. `Item.extent` is gone, and
+  `landJob` walks extents and items in pairs.
+- No scatter term in the job length: `maximumCoalescedJobBlocks` and its
+  test are gone, `maximumJobLen` is the request size less two alignment
+  units, and `readLimit` is the request size. The iovec test case and
+  the assert-only `Extent.data_offset` are gone; `Staged.data_offset`
+  stays.
+- `recordError`'s doc says why failing other batches is safe from any
+  thread: claims are FIFO and a queued plan holds a unit of its batch
+  (`fail`); `retireBatch` holds every pump lock while each queued
+  transfer holds its request (`abortReady`); `destroy` waits for the
+  worker group.
+
+Direct backend, LOADER_REVIEW Move 1's host write half (item 8):
+- Gone: `share_host_allocations`, `sameSlices`, `HostWriters` and
+  `hostWriters`, `HostScatter.Copy`, `addCopy`, `Scratch.host_copies` and
+  `hasRoom`'s argument. Also `sharesHostMemory`, true on every direct
+  target, whose reasoning is now `initHost`'s doc, and `HostShard`: a
+  host shard is a data pointer.
+- `initHost` finds each box's devices from `grid.writers`; they share
+  one allocation. `hostLanding` writes a transfer once, through its first
+  writer's shard, and counts `len * popCount(writer_mask)` bytes.
+- `HostResidentTest` lost its `share` dimension. `supportsMemory` and the
+  memory kinds are unchanged; narrowing them waits for R12's GPU test.
+
+Review (workflow, refuting verifier): six findings, all confirmed and
+fixed.
+- `stripScheme` mangled local names with a colon (above). A test creates
+  and deletes `notes:old.txt` through an opened local directory; with
+  the old `stripScheme` it fails with `FileNotFound`.
+- vfs.zig had moved every err to `scopedLog`, which hid a misaligned
+  direct read in tests. It is back on `std.log.scoped`, with
+  `refusal_log` for the refusals.
+- `recordError`'s doc said batches retire in publish order. The backend
+  does not promise that: a test awaits newest first, and `submit` awaits
+  a partly published batch at once. The doc now gives `abortReady`'s
+  real reason.
+- `readLimit` reached the request size through `maximumJobLen(...) catch
+  unreachable`. It returns `request_size` now.
+- The allocation line counted a destination a worker was creating as
+  created, and had lost the total. It logs `host_destinations` and
+  `ensured`.
+- The header said a remote path is read-only, but an open for writing
+  succeeded, and a write through it reached the inner io with the
+  backend's handle index as a local fd (index 1 is stdout). `dirOpenFile`
+  refuses it now.
+
+Not done:
+- Rename, symlink and hardlink to a remote path still go to the inner io
+  as a local path (`s3:/bucket/key`), and VFSBase's other forwarders hand
+  the inner io a backend's handle index: the handle-table move.
+- Atomic create of a local path returns the inner io's handles, not the
+  VFS's, as before: also the handle-table move. A path with an
+  unregistered scheme is `Unexpected`, like every other VFS call.
+- Without the scatter term, a custom `dma_block_sizes` block under 32 KiB
+  makes longer jobs; each read is still cut into `IOV_MAX` batches. The
+  default blocks are 2 MiB or more.
+- Not tested: hf's streaming and seek fixes (its URLs are fixed). Not
+  run on a GPU: the host-pinned paths.
+
+Checks:
+- `bazel test //vfs:test` passes (52). Three tests are new: on the mock
+  server, a refused GET fails a streaming read with `InputOutput` and
+  seeks saturate, for http, s3 and gs; local create and delete, from a
+  path or an opened directory, `notes:old.txt` included; remote create,
+  delete and open for writing fail, with no request and nothing on local
+  disk.
+- `bazel test //zml:test` passes (340, 12 skip; the block-bound test
+  went).
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7 (`llmd:test` 266,
+  9 skip; `weights_test` 26/26), and `bazel build --config=localzml
+  //llmd:llmd`.
+- On CPU, `examples/io load` of the synthetic checkpoint with
+  `ZML_LOAD_CHECK=1` and 2 packs of 4: replicated, sharded and tp, each
+  also host_pinned; tp with `ZML_DIRECT_IO=on` and `off`; tp host_pinned
+  with direct I/O on; tp with 3 packs, one group each. Every load and
+  pack check passes. The sizing, planning and batch lines match the
+  parent revision's, apart from timings, addresses and the allocation
+  line.
+- `dma-bench` prints `block_bytes=4194304 parallelism=8`;
+  `ZML_DMA_BENCH_BLOCK_MIB=64` fails with `InvalidOptions`.
+- `examples/io cp` to `s3://bucket/key` fails with `ReadOnlyFileSystem`
+  and writes nothing; to a local `notes:copy.txt` it copies.
+- `zig fmt` on scratch copies: no diff.
+
 ## Open work
+
+- 2026-10-22 VFS fixes and the rest of Moves 1 and 4 (fiftieth pass, zml
+  lxltkwot): the audit's items 3, 5 and 8. A failed streaming read is
+  `InputOutput`, seeks saturate, a remote path refuses create, delete and
+  an open for writing with `ReadOnlyFileSystem`, and only `scheme://` is
+  cut from a path. The Scheduler is a deque, diagnostics come from the
+  plans, and the host copy path is gone: a box's devices share one host
+  allocation. Open: rename, symlink, hardlink, the VFSBase forwarders and
+  atomic create's handles (handle-table move); `supportsMemory` waits for
+  R12. Not run on a GPU or against a real remote; hf's fixes untested.
 
 - 2026-10-22 follow-ups from the review audit (forty-ninth pass, zml
   zklqvywm and monorepo nykmyswz): the audit's "Do now" items 1, 2, 4, 6
@@ -7951,10 +8100,9 @@ Checks:
   and a tree shaped otherwise is `InvalidBinding` with its field path,
   before any buffer is written. `getSourcesById` is `bindingOf`, qwen4's
   n-grams are one `Source.concatenate`, `testLayer` is compiled, and
-  examples/llm loads in one place. Open: the audit's items 3 (VFS
-  streaming errors, seeks, remote writes), 5 (the rest of LOADER_REVIEW
-  Move 4) and 8 (Move 1's host write half), listed in that pass;
-  `testLayer` cannot fail. Not run on a GPU or a real Qwen4 checkpoint.
+  examples/llm loads in one place. The audit's items 3, 5 and 8 came in
+  the fiftieth pass. Open: `testLayer` cannot fail. Not run on a GPU or
+  a real Qwen4 checkpoint.
 
 - 2026-10-22 docs (forty-eighth pass, zml szunznok and monorepo
   ulnsvlvu): R16 done. The pub doc comments are the contract, loader.md
@@ -7979,9 +8127,7 @@ Checks:
   nxtvovxr): R14 done. Pipeline and Sizing are gone, each sizing value
   is stored once, a Job's kind is a tagged union, and the Workspace is
   `{ init, deinit, allocate, capacity, carve }`. The rest of
-  LOADER_REVIEW Move 4 is open (Scheduler deque and `seal`, plan-derived
-  diagnostics, the allocation task, `finishScheduling`). Not run on a
-  GPU.
+  LOADER_REVIEW Move 4 came in the fiftieth pass. Not run on a GPU.
 
 - 2026-10-22 one binding representation (forty-fifth pass, zml lnnnonkm
   and monorepo xmvssoyq): R13 done, with LOADER_REVIEW Moves 3, 7 and 9
