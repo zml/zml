@@ -613,6 +613,9 @@ pub const ArgSpec = struct {
     pub const MlirTypeSpec = struct {
         type_: *const mlir.Type,
         grid_constant: bool = false,
+        /// `cuda.grid_constant` instead of `cute_nvgpu.grid_constant`: what the CuTe DSL puts
+        /// on a `GridConstant[TensorMap]` (`!cuda.tensor_map`) argument.
+        cuda_grid_constant: bool = false,
     };
 
     pub const RawSpec = struct {
@@ -781,6 +784,7 @@ pub const Builder = struct {
                 .mlir_type => .{ .mlir_type = .{
                     .type_ = inner.type_,
                     .grid_constant = if (@hasField(@TypeOf(inner), "grid_constant")) inner.grid_constant else false,
+                    .cuda_grid_constant = if (@hasField(@TypeOf(inner), "cuda_grid_constant")) inner.cuda_grid_constant else false,
                 } },
                 .raw => .{ .raw = .{
                     .type_text = inner.type_text,
@@ -834,7 +838,9 @@ pub const Builder = struct {
         var any_arg_attr = false;
         for (arg_attrs, args) |*attr, a| {
             attr.* = switch (a.kind) {
-                .mlir_type => |typed| if (typed.grid_constant) .dict(ctx, &.{
+                .mlir_type => |typed| if (typed.cuda_grid_constant) .dict(ctx, &.{
+                    .named(ctx, "cuda.grid_constant", .unit(ctx)),
+                }) else if (typed.grid_constant) .dict(ctx, &.{
                     .named(ctx, "cute_nvgpu.grid_constant", .unit(ctx)),
                 }) else empty_dict,
                 .raw => |raw| if (raw.grid_constant) .dict(ctx, &.{

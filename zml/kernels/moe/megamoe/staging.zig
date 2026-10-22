@@ -24,11 +24,15 @@
 //!   drops NaN where torch's `amax` propagates it, and `cvt.rn.satfinite` gives 448 for an
 //!   infinite product where torch gives NaN.
 //!
-//! Layout: one CTA of 128 threads per (1024-column chunk, token); each thread owns 8
-//! consecutive columns, so the 4 lanes `4j..4j+3` of a warp own one 32-element group and
-//! reduce its amax with two `shfl.xor`. Lane `4j` writes the group's SF byte (into `x_sf` and
-//! the shared page). Threads 0..K-1 of chunk 0 copy the token's top-k ids and weights.
-//! Columns past `H` (when `H % 1024 != 0`) read an in-bounds address and store nothing.
+//! Layout (bandwidth-bound): each thread owns 16 consecutive columns (bf16: two 16-byte loads;
+//! FP8: one 16-byte load; one 16-byte store either way), so lanes `2j, 2j+1` own one 32-element
+//! group (amax with one `shfl.xor`) and lanes `8i..8i+7` one 128-column SF word: lane `8i`
+//! gathers its 4 SF bytes with shuffles and stores the word once into `x_sf` and once into the
+//! shared page (`.staged`: copies the input word). A CTA has `alignUp(H / 16, 32)` threads (at
+//! most 1024; wider rows take several column chunks, `grid.y`) and stages `tokens_per_cta`
+//! consecutive tokens, every load issued before the first store. Threads 0..K-1 of chunk 0 copy
+//! the tokens' top-k ids and weights. Columns past `H` and tokens past `T` read an in-bounds
+//! address and store nothing.
 const std = @import("std");
 
 const cute = @import("kernels/cute/builder");
@@ -41,9 +45,10 @@ const V = cute.Value;
 
 pub const Inputs = enum { staged, bf16 };
 
-pub const num_threads: u32 = 128;
-pub const cols_per_thread: u32 = 8;
-pub const cols_per_cta: u32 = num_threads * cols_per_thread;
+pub const cols_per_thread: u32 = 16;
+pub const max_threads: u32 = 1024;
+/// Tokens per CTA (loads in flight per thread).
+pub const tokens_per_cta: u32 = 2;
 
 pub const Config = struct {
     inputs: Inputs,
@@ -65,7 +70,7 @@ pub const Config = struct {
     pub fn init(k: layout.Kernel, buf: layout.MegaMoEBuffer, inputs: Inputs, num_tokens: u32) Config {
         const s = k.shape;
         std.debug.assert(num_tokens >= 1 and num_tokens <= s.num_max_tokens_per_rank and num_tokens <= 65535);
-        std.debug.assert(s.hidden % 128 == 0 and s.num_topk <= num_threads);
+        std.debug.assert(s.hidden % 128 == 0 and s.num_topk <= 32);
         return .{
             .inputs = inputs,
             .num_tokens = num_tokens,
@@ -81,8 +86,21 @@ pub const Config = struct {
         };
     }
 
+    /// Threads per CTA: one per 16 columns, whole warps, at most `max_threads`.
+    pub fn numThreads(self: Config) u32 {
+        return @min(max_threads, layout.alignUp(self.hidden / cols_per_thread, 32));
+    }
+
+    pub fn colsPerCta(self: Config) u32 {
+        return self.numThreads() * cols_per_thread;
+    }
+
     pub fn numChunks(self: Config) u32 {
-        return layout.ceilDiv(self.hidden, cols_per_cta);
+        return layout.ceilDiv(self.hidden, self.colsPerCta());
+    }
+
+    pub fn numTokenBlocks(self: Config) u32 {
+        return layout.ceilDiv(self.num_tokens, tokens_per_cta);
     }
 
     /// Host twin of the device row computation: the shared SF row of token `t`.
@@ -113,7 +131,7 @@ pub fn emit(b: *B, cfg: Config, name: []const u8) cute.FinishError!void {
     for (specs, Args.names) |*s, n| s.* = .{ .name = n, .kind = .{ .mlir_type = .{ .type_ = i64t } } };
     try b.declareArgList(specs);
     body(b, cfg, .{ .x = b.arg(0), .x_sf = b.arg(1), .topk_idx = b.arg(2), .topk_weights = b.arg(3), .sym_base = b.arg(4) });
-    b.endFunction(.{ @as(i32, @intCast(num_threads)), 1, 1 });
+    b.endFunction(.{ @as(i32, @intCast(cfg.numThreads())), 1, 1 });
 }
 
 /// `div.rn.f32` (IEEE division, what torch's `/` on CUDA tensors is).
@@ -130,60 +148,95 @@ fn f32Const(b: *B, comptime x: f32) V {
     return b.cst(.i32, @as(i32, @bitCast(x))).bitCast(.f32);
 }
 
+/// One token's loaded inputs: `.staged`: 4 words of FP8 `x` and (lane `8i`) the SF word;
+/// `.bf16`: 8 words of bf16 `x`.
+const Loaded = struct { x: [8]V, sf_word: V };
+
 fn body(b: *B, cfg: Config, a: Args) void {
     const H: i64 = cfg.hidden;
     const K: i64 = cfg.num_topk;
+    const U = tokens_per_cta;
     const tid = b.threadIdx().x;
-    const chunk = b.blockIdx().x;
-    const token = b.blockIdx().y.to(.i64);
+    const lane = tid.bitAnd(@as(i32, 31));
+    const chunk = b.blockIdx().y;
+    const first_token = b.blockIdx().x.mul(@as(i32, @intCast(U)));
 
-    const col = chunk.mul(@as(i32, @intCast(cols_per_cta))).add(tid.mul(@as(i32, @intCast(cols_per_thread))));
-    const valid = col.lt(@as(i32, @intCast(cfg.hidden)));
-    // Idle columns read the token's last 8 columns (in bounds) and store nothing.
-    const col64 = b.select(valid, col, @as(i32, @intCast(cfg.hidden - cols_per_thread))).to(.i64);
-    const group = col64.shrLogical(5);
-    const elem = token.mul(H).add(col64);
-    const x_dst = a.sym_base.add(@as(i64, @intCast(cfg.x_offset))).add(elem);
+    const col = chunk.mul(@as(i32, @intCast(cfg.colsPerCta()))).add(tid.mul(@as(i32, @intCast(cols_per_thread))));
+    const valid_col = col.lt(@as(i32, @intCast(cfg.hidden)));
+    // Idle columns read the token's last 16 columns (in bounds) and store nothing. Lanes
+    // `8i..8i+7` (128 columns, `H % 128 == 0`) are all valid or all idle.
+    const col64 = b.select(valid_col, col, @as(i32, @intCast(cfg.hidden - cols_per_thread))).to(.i64);
+    const sf_word_idx = col64.shrLogical(7);
+    const sf_leader = valid_col.bitAnd(lane.bitAnd(@as(i32, 7)).eq(0));
 
-    var sf_byte: V = undefined;
-    switch (cfg.inputs) {
-        .staged => {
-            const words = ptx.ldGlobal(b, 2, a.x.add(elem));
-            var store = b.openIf(valid);
-            ptx.stGlobal(b, 2, x_dst, words);
-            store.yieldThen(.{});
-            sf_byte = ptx.ldGlobalU8(b, a.x_sf.add(token.mul(@divExact(H, 32))).add(group));
-        },
-        .bf16 => {
-            const words = ptx.ldGlobal(b, 4, a.x.add(elem.mul(2)));
-            var f: [8]V = undefined;
-            for (0..4) |i| f[2 * i], f[2 * i + 1] = ptx.bfloat1622float2(b, words[i]);
-            // `x_view.abs().float().amax(dim=2).clamp(1e-4)`
-            var amax = ptx.fabsf(b, f[0]);
-            for (f[1..]) |v| amax = ptx.fmaxf(b, amax, ptx.fabsf(b, v));
-            amax = ptx.fmaxf(b, amax, ptx.shflXorSync(b, amax, @as(i32, 1)));
-            amax = ptx.fmaxf(b, amax, ptx.shflXorSync(b, amax, @as(i32, 2)));
-            amax = ptx.fmaxf(b, amax, f32Const(b, 1e-4));
-            // `sf = ceil_to_ue8m0(amax / 448.0)`
-            const bits = divRn(b, amax, f32Const(b, 448.0)).bitCast(.i32);
-            var e = bits.shrLogical(23).bitAnd(@as(i32, 0xFF)).add(ptx.zext(b, bits.bitAnd(@as(i32, 0x7FFFFF)).ne(0), .i32));
-            e = ptx.minU(b, ptx.maxU(b, e, @as(i32, 1)), @as(i32, 254));
-            // `x_view * (1.0 / sf)`: `reciprocal(sf)`, then an exact power-of-two scaling.
-            const inv = divRn(b, f32Const(b, 1.0), e.shl(23).bitCast(.f32));
-            var q: [8]V = undefined;
-            for (&q, f) |*o, v| o.* = mulRn(b, v, inv);
-            const out = [2]V{ ptx.fp8x4E4m3(b, q[0], q[1], q[2], q[3]), ptx.fp8x4E4m3(b, q[4], q[5], q[6], q[7]) };
-            var store = b.openIf(valid);
-            ptx.stGlobal(b, 2, x_dst, out);
-            store.yieldThen(.{});
-            sf_byte = e;
-        },
+    var tokens: [U]V = undefined;
+    var valid_token: [U]V = undefined;
+    for (0..U) |u| {
+        const t = first_token.add(@as(i32, @intCast(u)));
+        valid_token[u] = t.lt(@as(i32, @intCast(cfg.num_tokens)));
+        tokens[u] = b.select(valid_token[u], t, @as(i32, @intCast(cfg.num_tokens - 1))).to(.i64);
     }
 
-    // Lane 4j: the group's SF byte, K-major `x_sf` and (with a shared expert) the shared page.
-    {
-        var leader = b.openIf(valid.bitAnd(tid.bitAnd(@as(i32, 3)).eq(0)));
-        ptx.stGlobalU8(b, a.sym_base.add(@as(i64, @intCast(cfg.x_sf_offset))).add(token.mul(@divExact(H, 32))).add(group), sf_byte);
+    // Every load first.
+    var loaded: [U]Loaded = undefined;
+    for (0..U) |u| {
+        const elem = tokens[u].mul(H).add(col64);
+        switch (cfg.inputs) {
+            .staged => {
+                const w = ptx.ldGlobal(b, 4, a.x.add(elem));
+                for (0..4) |i| loaded[u].x[i] = w[i];
+                loaded[u].sf_word = ptx.ldGlobal(b, 1, a.x_sf.add(tokens[u].mul(@divExact(H, 128)).add(sf_word_idx).mul(4)))[0];
+            },
+            .bf16 => {
+                const lo = ptx.ldGlobal(b, 4, a.x.add(elem.mul(2)));
+                const hi = ptx.ldGlobal(b, 4, a.x.add(elem.mul(2)).add(16));
+                for (0..4) |i| {
+                    loaded[u].x[i] = lo[i];
+                    loaded[u].x[4 + i] = hi[i];
+                }
+            },
+        }
+    }
+
+    for (0..U) |u| {
+        const token = tokens[u];
+        const x_dst = a.sym_base.add(@as(i64, @intCast(cfg.x_offset))).add(token.mul(H).add(col64));
+        var out: [4]V = undefined;
+        var sf_word: V = undefined;
+        switch (cfg.inputs) {
+            .staged => {
+                for (0..4) |i| out[i] = loaded[u].x[i];
+                sf_word = loaded[u].sf_word;
+            },
+            .bf16 => {
+                var f: [16]V = undefined;
+                for (0..8) |i| f[2 * i], f[2 * i + 1] = ptx.bfloat1622float2(b, loaded[u].x[i]);
+                // `x_view.abs().float().amax(dim=2).clamp(1e-4)`
+                var amax = ptx.fabsf(b, f[0]);
+                for (f[1..]) |v| amax = ptx.fmaxf(b, amax, ptx.fabsf(b, v));
+                amax = ptx.fmaxf(b, amax, ptx.shflXorSync(b, amax, @as(i32, 1)));
+                amax = ptx.fmaxf(b, amax, f32Const(b, 1e-4));
+                // `sf = ceil_to_ue8m0(amax / 448.0)`
+                const bits = divRn(b, amax, f32Const(b, 448.0)).bitCast(.i32);
+                var e = bits.shrLogical(23).bitAnd(@as(i32, 0xFF)).add(ptx.zext(b, bits.bitAnd(@as(i32, 0x7FFFFF)).ne(0), .i32));
+                e = ptx.minU(b, ptx.maxU(b, e, @as(i32, 1)), @as(i32, 254));
+                // `x_view * (1.0 / sf)`: `reciprocal(sf)`, then an exact power-of-two scaling.
+                const inv = divRn(b, f32Const(b, 1.0), e.shl(23).bitCast(.f32));
+                var q: [16]V = undefined;
+                for (&q, f) |*o, v| o.* = mulRn(b, v, inv);
+                for (0..4) |i| out[i] = ptx.fp8x4E4m3(b, q[4 * i], q[4 * i + 1], q[4 * i + 2], q[4 * i + 3]);
+                // The SF word of lanes `8i..8i+7`: byte j = group j (lanes `8i + 2j`).
+                sf_word = e;
+                for (1..4) |j| sf_word = sf_word.bitOr(ptx.shflSync(b, e, lane.add(@as(i32, @intCast(2 * j)))).shl(@as(i32, @intCast(8 * j))));
+            },
+        }
+        var store = b.openIf(valid_col.bitAnd(valid_token[u]));
+        ptx.stGlobal(b, 4, x_dst, out);
+        store.yieldThen(.{});
+
+        // Lane 8i: the SF word, K-major `x_sf` and (with a shared expert) the shared page.
+        var leader = b.openIf(sf_leader.bitAnd(valid_token[u]));
+        ptx.stGlobal(b, 1, a.sym_base.add(@as(i64, @intCast(cfg.x_sf_offset))).add(token.mul(@divExact(H, 128)).add(sf_word_idx).mul(4)), .{sf_word});
         if (cfg.shared_block_m != 0) {
             const bm: i64 = cfg.shared_block_m;
             const m = token.rem(bm);
@@ -191,15 +244,13 @@ fn body(b: *B, cfg: Config, a: Args) void {
                 .add(m.div(128).mul(128))
                 .add(m.rem(32).mul(4))
                 .add(m.rem(128).div(32));
-            const word = group.shrLogical(2).mul(@as(i64, cfg.num_shared_sf_tokens)).add(row);
-            ptx.stGlobalU8(b, a.sym_base.add(@as(i64, @intCast(cfg.shared_sf_offset))).add(word.mul(4)).add(group.bitAnd(3)), sf_byte);
+            const word = sf_word_idx.mul(@as(i64, cfg.num_shared_sf_tokens)).add(row);
+            ptx.stGlobal(b, 1, a.sym_base.add(@as(i64, @intCast(cfg.shared_sf_offset))).add(word.mul(4)), .{sf_word});
         }
         leader.yieldThen(.{});
-    }
 
-    // Chunk 0, threads 0..K-1: top-k ids (i64; `.bf16`: sign-extended i32) and weights.
-    {
-        var topk = b.openIf(chunk.eq(0).bitAnd(tid.lt(@as(i32, @intCast(cfg.num_topk)))));
+        // Chunk 0, threads 0..K-1: top-k ids (i64; `.bf16`: sign-extended i32) and weights.
+        var topk = b.openIf(chunk.eq(0).bitAnd(tid.lt(@as(i32, @intCast(cfg.num_topk)))).bitAnd(valid_token[u]));
         const i = token.mul(K).add(tid.to(.i64));
         const idx = switch (cfg.inputs) {
             .staged => ptx.ldGlobalU64(b, a.topk_idx.add(i.mul(8))),
@@ -213,14 +264,14 @@ fn body(b: *B, cfg: Config, a: Args) void {
 }
 
 /// Launches the staging kernel `name` (emitted by `emit(b, cfg, name)`) from the current host
-/// function: grid (chunks, T), 128 threads, no cluster, no PDL (it overwrites input regions the
+/// function: grid (token blocks, chunks), `numThreads()` threads, no cluster, no PDL (it overwrites input regions the
 /// previous MegaMoE call of this rank has finished reading, by stream order). Returns the
 /// launch status (i32).
 pub fn emitLaunch(b: *B, cfg: Config, name: []const u8, args: Args) V {
     const one = b.cst(.i32, 1);
     const config = b.makeLaunchConfig(.{
-        .grid = .{ b.cst(.i32, @as(i32, @intCast(cfg.numChunks()))), b.cst(.i32, @as(i32, @intCast(cfg.num_tokens))), one },
-        .block = .{ b.cst(.i32, @as(i32, @intCast(num_threads))), one, one },
+        .grid = .{ b.cst(.i32, @as(i32, @intCast(cfg.numTokenBlocks()))), b.cst(.i32, @as(i32, @intCast(cfg.numChunks()))), one },
+        .block = .{ b.cst(.i32, @as(i32, @intCast(cfg.numThreads()))), one, one },
         .dynamic_smem = b.kernelSmemSize(name),
         .stream = b.cudaStream(),
     });

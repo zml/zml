@@ -61,6 +61,11 @@ pub const Config = struct {
     /// `comm::kNumTimeoutCycles` of `wait_until` (grid sync, NVLink barrier, combine): after this
     /// many `clock64` cycles the kernel `trap`s (DeepGEMM prints, then asserts). 0: no timeout.
     timeout_cycles: i64 = device.default_timeout_cycles,
+    /// The 18 maps are `!cuda.tensor_map` arguments the host encodes with
+    /// `cuTensorMapEncodeTiled` (DeepGEMM's exact descriptors, L2 promotion 256B; needs a plugin
+    /// that binds `_cuTensorMapEncodeTiled`). Otherwise CuTe TMA atoms (`makeRawTmaAtom`: L2
+    /// promotion 128B).
+    explicit_tensor_maps: bool = true,
 
     /// The DeepGEMM static asserts of the kernel body.
     pub fn check(self: Config) void {
@@ -162,7 +167,10 @@ pub fn argSpecs(b: *B, cfg: Config, maps: []const tma.Map) []cute.ArgSpec {
     specs[Args.sym_base] = .{ .name = "sym_base", .kind = .{ .mlir_type = .{ .type_ = i64t } } };
     for (0..R) |r| specs[Args.sym_offsets + r] = .{ .name = "sym_offset", .kind = .{ .mlir_type = .{ .type_ = i64t } } };
     specs[Args.symRank(R)] = .{ .name = "sym_rank", .kind = .{ .mlir_type = .{ .type_ = i32t } } };
-    for (maps, 0..) |*m, i| specs[Args.map(R, i)] = .{ .name = layout.TensorMaps.names[i], .kind = .{ .mlir_type = .{ .type_ = b.rawTmaArgType(m.raw()), .grid_constant = true } } };
+    for (maps, 0..) |*m, i| specs[Args.map(R, i)] = .{ .name = layout.TensorMaps.names[i], .kind = .{ .mlir_type = if (cfg.explicit_tensor_maps)
+        .{ .type_ = tma.tensorMapType(b), .cuda_grid_constant = true }
+    else
+        .{ .type_ = b.rawTmaArgType(m.raw()), .grid_constant = true } } };
     specs[Args.smLocalityDomains(R)] = .{ .name = "sm_locality_domains", .kind = .{ .ptr = .i8 } };
     return specs;
 }
@@ -227,7 +235,10 @@ const Kernel = struct {
         for (offsets, 0..) |*o, r| o.* = b.arg(Args.sym_offsets + r);
         self.sym = .{ .b = b, .num_ranks = R, .base = b.arg(Args.sym_base), .offsets = offsets, .rank_idx = b.arg(Args.symRank(R)) };
         self.sm_locality_domains = b.ptrToInt(b.arg(Args.smLocalityDomains(R)), .i64);
-        for (&self.descs, maps, 0..) |*d, *m, i| d.* = b.rawTmaDescAddr(b.arg(Args.map(R, i)), m.raw());
+        for (&self.descs, maps, 0..) |*d, *m, i| d.* = if (cfg.explicit_tensor_maps)
+            tma.tensorMapAddr(b, b.arg(Args.map(R, i)))
+        else
+            b.rawTmaDescAddr(b.arg(Args.map(R, i)), m.raw());
         return self;
     }
 

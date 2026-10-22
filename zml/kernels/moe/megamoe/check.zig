@@ -51,6 +51,8 @@ const Args = struct {
         \\  --from-bf16             call megamoe.forward on x_bf16 instead of forwardStaged
         \\  --ranks=<R>             override the dump's rank count (R <= dump ranks; R < dump ranks is plumbing only)
         \\  --workspace-bytes=<n>   override the workspace operand size (R = 1)
+        \\  --symmetric             R = 1: XLA's symmetric workspace instead of the workspace operand (no
+        \\                          per-call workspace copy; what R > 1 always uses)
         \\  --num-sms=<n>           override the SM count (default: the dump's)
         \\  --xla-dump=<dir>        XLA dump directory
         \\  --verify-load           read every loaded device shard back and compare it with the dump files
@@ -64,6 +66,7 @@ const Args = struct {
     from_bf16: bool = false,
     ranks: ?u32 = null,
     workspace_bytes: ?u64 = null,
+    symmetric: bool = false,
     num_sms: ?u32 = null,
     xla_dump: ?[]const u8 = null,
     verify_load: bool = false,
@@ -159,6 +162,11 @@ const Program = struct {
     fn single(p: Program, ops: Operands, workspace: zml.Tensor) [2]zml.Tensor {
         const r = p.call(ops, .{ .operand = workspace });
         return .{ r.y, r.workspace.? };
+    }
+
+    /// R = 1 with `Workspace.symmetric`.
+    fn singleSymmetric(p: Program, ops: Operands) zml.Tensor {
+        return p.call(ops, .{ .symmetric = .{ .name = workspace_name } }).y;
     }
 
     const Partition = struct { program: Program, operands: Operands };
@@ -331,8 +339,11 @@ pub fn main(init: std.process.Init) !void {
     const compile_start: std.Io.Timestamp = .now(io, .awake);
     const meshes: []const *const zml.Mesh = if (mesh) |m| &.{m} else &.{};
     const compile_opts: zml.Compiler.Options = .{ .meshes = meshes, .program_name = "megamoe_check", .xla_dump_to = args.xla_dump };
-    const exe = if (ranks == 1)
+    const operand_workspace = ranks == 1 and !args.symmetric;
+    const exe = if (operand_workspace)
         try platform.compileFn(allocator, io, Program.single, .{ program, operands, zml.Tensor.init(.{@as(i64, @intCast(workspace_bytes))}, .u8) }, compile_opts)
+    else if (ranks == 1)
+        try platform.compileFn(allocator, io, Program.singleSymmetric, .{ program, operands }, compile_opts)
     else
         try platform.compileFn(allocator, io, Program.multi, .{ program, operands }, compile_opts);
     defer exe.deinit();
@@ -342,7 +353,7 @@ pub fn main(init: std.process.Init) !void {
     var calls: Calls = .{ .allocator = allocator, .io = io, .operands = &buffers, .workspace = null };
     calls.runner = try exe.runner(allocator);
     defer calls.runner.deinit(allocator);
-    if (ranks == 1) {
+    if (operand_workspace) {
         // Zeroed once, then threaded through every call like DeepGEMM's SymmBuffer.
         const zeros = try allocator.alloc(u8, workspace_bytes);
         defer allocator.free(zeros);

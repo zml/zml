@@ -20,6 +20,7 @@ const cute = @import("kernels/cute/builder");
 const kernel = @import("kernel.zig");
 const layout = @import("layout.zig");
 const staging = @import("staging.zig");
+const tma = @import("tma.zig");
 
 const B = cute.Builder;
 const V = cute.Value;
@@ -41,6 +42,8 @@ pub const Instance = struct {
     activation_clamp: f32 = 10.0,
     fast_math: bool = true,
     timeout_cycles: i64 = @import("device.zig").default_timeout_cycles,
+    /// `kernel.Config.explicit_tensor_maps`.
+    explicit_tensor_maps: bool = true,
 
     pub fn shape(self: Instance) layout.Shape {
         return .{
@@ -71,6 +74,7 @@ pub const Instance = struct {
             .activation_clamp = self.activation_clamp,
             .fast_math = self.fast_math,
             .timeout_cycles = self.timeout_cycles,
+            .explicit_tensor_maps = self.explicit_tensor_maps,
         };
     }
 
@@ -143,15 +147,24 @@ pub fn emitLaunch(b: *B, cfg: kernel.Config, kernel_name: []const u8, args: Host
     const R = k.shape.num_ranks;
     const sym = symValues(b, R, args.symmetric);
 
-    // The 18 tensor maps.
+    // The 18 tensor maps. `encoded`: the first failing `cuTensorMapEncodeTiled` status (0: all
+    // succeeded), explicit maps only.
     const maps = kernel.tmaMaps(b, cfg);
     const atoms = b.arena.allocator().alloc(V, maps.len) catch @panic("OOM");
+    var encoded = b.cst(.i32, 0);
     inline for (layout.TensorMaps.names, 0..) |name, i| {
         const spec: layout.TensorMapSpec = @field(cfg.maps, name);
         const base = baseOf(b, args, spec.base, sym.base);
-        const ptr = b.intToPtr(if (spec.base_offset == 0) base else base.add(@as(i64, @intCast(spec.base_offset))), .i8, .gmem, 16);
-        const atom = b.makeRawTmaAtom(ptr, maps[i].raw());
-        atoms[i] = .{ .inner = atom.atom.inner, .kernel = b };
+        const address = if (spec.base_offset == 0) base else base.add(@as(i64, @intCast(spec.base_offset)));
+        if (cfg.explicit_tensor_maps) {
+            const e = tma.encodeTiled(b, spec, address);
+            atoms[i] = e.map;
+            const status = b.cudaResultStatus(e.result);
+            encoded = b.select(encoded.ne(0), encoded, status);
+        } else {
+            const atom = b.makeRawTmaAtom(b.intToPtr(address, .i8, .gmem, 16), maps[i].raw());
+            atoms[i] = .{ .inner = atom.atom.inner, .kernel = b };
+        }
     }
 
     // Kernel arguments, in `kernel.argSpecs` order.
@@ -174,7 +187,8 @@ pub fn emitLaunch(b: *B, cfg: kernel.Config, kernel_name: []const u8, args: Host
         .cluster = .{ b.cst(.i32, 2), one, one },
         .use_pdl = true,
     });
-    return b.cudaResultStatus(b.launchEx(kernel_name, config, values));
+    const launched = b.cudaResultStatus(b.launchEx(kernel_name, config, values));
+    return b.select(encoded.ne(0), encoded, launched);
 }
 
 // ==================== the whole Program ====================
