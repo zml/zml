@@ -1,3 +1,5 @@
+const std = @import("std");
+
 const mlir = @import("mlir");
 
 /// Discardable ROCDL attributes for an `llvm.func` operation.
@@ -6,8 +8,13 @@ pub const FunctionOptions = struct {
     reqdWorkGroupSize: ?[3]i32 = null,
     flatWorkGroupSize: ?[]const u8 = null,
     maxFlatWorkGroupSize: ?i32 = null,
-    wavesPerEu: ?i32 = null,
+    wavesPerEu: ?WavesPerEu = null,
     unsafeFpAtomics: ?bool = null,
+
+    pub const WavesPerEu = struct {
+        min: u32,
+        max: ?u32 = null,
+    };
 };
 
 pub fn annotateFunction(ctx: *mlir.Context, op: *mlir.Operation, opts: FunctionOptions) void {
@@ -15,7 +22,11 @@ pub fn annotateFunction(ctx: *mlir.Context, op: *mlir.Operation, opts: FunctionO
     if (opts.reqdWorkGroupSize) |size| op.setAttributeByName("rocdl.reqd_work_group_size", .denseArray(ctx, .i32, &size));
     if (opts.flatWorkGroupSize) |size| op.setAttributeByName("rocdl.flat_work_group_size", .string(ctx, size));
     if (opts.maxFlatWorkGroupSize) |size| op.setAttributeByName("rocdl.max_flat_work_group_size", .int(ctx, .i32, size));
-    if (opts.wavesPerEu) |waves| op.setAttributeByName("rocdl.waves_per_eu", .int(ctx, .i32, waves));
+    if (opts.wavesPerEu) |waves| {
+        var buffer: [24]u8 = undefined;
+        const value = if (waves.max) |max| std.fmt.bufPrint(&buffer, "{d},{d}", .{ waves.min, max }) else std.fmt.bufPrint(&buffer, "{d}", .{waves.min});
+        op.setAttributeByName("rocdl.waves_per_eu", .string(ctx, value catch unreachable));
+    }
     if (opts.unsafeFpAtomics) |enabled| op.setAttributeByName("rocdl.unsafe_fp_atomics", .boolean(ctx, enabled));
 }
 

@@ -23,8 +23,8 @@ The pinned LLVM revision supplies 374 operations, 15 attributes, and 12 enums.
   function annotations to `llvm.func`, and `xnack`/`sramecc` to LLVM-compatible
   modules. A missing module option preserves the target default; `false`
   explicitly disables the option.
-- `types` supplies the builtin vector types named in ROCDL's TableGen records
-  and LLVM pointers in ROCDL address spaces. ROCDL defines no independent
+- `types` supplies every builtin vector type ROCDL's TableGen records use,
+  named or inline, and LLVM pointers in ROCDL address spaces. ROCDL defines no independent
   MLIR types.
 - `registerDialect` registers ROCDL; loading it also loads its LLVM dependency.
   The existing `cvtPkF32Fp8` convenience builder remains available.
@@ -39,9 +39,10 @@ const load = rocdl.ops.raw_buffer_load(
 );
 ```
 
-The `:capi` target exposes registration and attribute constructors, predicates,
-and getters through `capi.h`. Declarations and implementations are grouped by
-registration, attributes, and target configuration. Getters require a handle
+The `:capi` target exposes attribute constructors, predicates, and getters
+through `capi.h`; dialect registration comes from upstream
+`mlir-c/Dialect/ROCDL.h`. Declarations and implementations are grouped by
+introspection (a test helper), attributes, and target configuration. Getters require a handle
 accepted by the matching predicate. Contexts own all returned attributes and
 strings. There are no additional C operation wrappers: Zig builders use MLIR's
 standard operation API.

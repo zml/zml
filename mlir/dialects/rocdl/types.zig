@@ -11,6 +11,9 @@ pub const AddressSpace = enum(u32) {
     shared = 3,
     constant = 4,
     private = 5,
+    buffer_fat_pointer = 7,
+    buffer_resource = 8,
+    buffer_strided_pointer = 9,
     barrier = 15,
 };
 
@@ -31,6 +34,11 @@ pub fn v16f16(ctx: *mlir.Context) *const mlir.Type {
 /// `vector<16xf32>`, as used by ROCDL operations.
 pub fn v16f32(ctx: *mlir.Context) *const mlir.Type {
     return .vector(&.{16}, .float(ctx, .f32));
+}
+
+/// `vector<16xi32>`, as used by ROCDL operations.
+pub fn v16i32(ctx: *mlir.Context) *const mlir.Type {
+    return .vector(&.{16}, .int(ctx, .i32));
 }
 
 /// `vector<2xbf16>`, as used by ROCDL operations.
@@ -73,9 +81,34 @@ pub fn v32f32(ctx: *mlir.Context) *const mlir.Type {
     return .vector(&.{32}, .float(ctx, .f32));
 }
 
+/// `vector<32xi32>`, as used by ROCDL operations.
+pub fn v32i32(ctx: *mlir.Context) *const mlir.Type {
+    return .vector(&.{32}, .int(ctx, .i32));
+}
+
 /// `vector<3xi32>`, as used by ROCDL operations.
 pub fn v3i32(ctx: *mlir.Context) *const mlir.Type {
     return .vector(&.{3}, .int(ctx, .i32));
+}
+
+/// `vector<4xf16>`, as used by ROCDL operations.
+pub fn v4f16(ctx: *mlir.Context) *const mlir.Type {
+    return .vector(&.{4}, .float(ctx, .f16));
+}
+
+/// `vector<4xf32>`, as used by ROCDL operations.
+pub fn v4f32(ctx: *mlir.Context) *const mlir.Type {
+    return .vector(&.{4}, .float(ctx, .f32));
+}
+
+/// `vector<4xf64>`, as used by ROCDL operations.
+pub fn v4f64(ctx: *mlir.Context) *const mlir.Type {
+    return .vector(&.{4}, .float(ctx, .f64));
+}
+
+/// `vector<4xi16>`, as used by ROCDL operations.
+pub fn v4i16(ctx: *mlir.Context) *const mlir.Type {
+    return .vector(&.{4}, .int(ctx, .i16));
 }
 
 /// `vector<4xi32>`, as used by ROCDL operations.
@@ -101,6 +134,11 @@ pub fn v8f16(ctx: *mlir.Context) *const mlir.Type {
 /// `vector<8xf32>`, as used by ROCDL operations.
 pub fn v8f32(ctx: *mlir.Context) *const mlir.Type {
     return .vector(&.{8}, .float(ctx, .f32));
+}
+
+/// `vector<8xi16>`, as used by ROCDL operations.
+pub fn v8i16(ctx: *mlir.Context) *const mlir.Type {
+    return .vector(&.{8}, .int(ctx, .i16));
 }
 
 /// `vector<8xi32>`, as used by ROCDL operations.

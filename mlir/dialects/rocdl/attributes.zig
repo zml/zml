@@ -22,11 +22,11 @@ pub const BufferOOBModeAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLBufferOOBModeAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLBufferOOBModeAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLBufferOOBModeAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLBufferOOBModeAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -48,11 +48,11 @@ pub const BufferOOBModeModuleFlagAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLBufferOOBModeModuleFlagAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLBufferOOBModeModuleFlagAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -74,11 +74,11 @@ pub const Gfx12AtomicCachePolicyAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLGfx12AtomicCachePolicyAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLGfx12AtomicCachePolicyAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLGfx12AtomicCachePolicyAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLGfx12AtomicCachePolicyAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -100,11 +100,11 @@ pub const Gfx12CachePolicyAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLGfx12CachePolicyAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLGfx12CachePolicyAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLGfx12CachePolicyAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLGfx12CachePolicyAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -126,11 +126,11 @@ pub const Gfx942CachePolicyAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLGfx942CachePolicyAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLGfx942CachePolicyAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLGfx942CachePolicyAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLGfx942CachePolicyAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -152,11 +152,11 @@ pub const MFMANegModifierAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLMFMANegModifierAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLMFMANegModifierAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLMFMANegModifierAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLMFMANegModifierAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -178,11 +178,11 @@ pub const MFMAPermBAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLMFMAPermBAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLMFMAPermBAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLMFMAPermBAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLMFMAPermBAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -204,11 +204,11 @@ pub const MatrixFormatAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLMatrixFormatAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLMatrixFormatAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLMatrixFormatAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLMatrixFormatAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -230,11 +230,11 @@ pub const PreGfx12CachePolicyAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLPreGfx12CachePolicyAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLPreGfx12CachePolicyAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLPreGfx12CachePolicyAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLPreGfx12CachePolicyAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -256,11 +256,11 @@ pub const SchedGroupMaskAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLSchedGroupMaskAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLSchedGroupMaskAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLSchedGroupMaskAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLSchedGroupMaskAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -282,11 +282,11 @@ pub const TBufferOOBModeModuleFlagAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLTBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLTBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLTBufferOOBModeModuleFlagAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLTBufferOOBModeModuleFlagAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -308,11 +308,11 @@ pub const WMMACModifierAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLWMMACModifierAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLWMMACModifierAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLWMMACModifierAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLWMMACModifierAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -334,11 +334,11 @@ pub const WMMAMatrixScaleAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLWMMAMatrixScaleAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLWMMAMatrixScaleAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLWMMAMatrixScaleAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLWMMAMatrixScaleAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
@@ -360,11 +360,11 @@ pub const WMMAMatrixScaleFormatAttr = opaque {
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLWMMAMatrixScaleFormatAttrGet(ctx.ptr(), @intFromEnum(value_)).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirROCDLWMMAMatrixScaleFormatAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const Self) Value {
-        return @enumFromInt(c.mlirROCDLWMMAMatrixScaleFormatAttrGetValue(self.ptr()));
+        return @fromBackingInt(@intCast(c.mlirROCDLWMMAMatrixScaleFormatAttrGetValue(self.ptr())));
     }
 
     pub fn attribute(self: *const Self) *const mlir.Attribute {
