@@ -7395,7 +7395,166 @@ Checks:
 - `bazel build --config=localzml //llmd:llmd`.
 - `zig fmt` on scratch copies: no diff in the changed code.
 
+## Forty-fifth pass: one binding representation (R13) (2026-10-22)
+
+R13 of `LOADER_API_REVIEW.md` (C-binding-holds-source,
+M2-binding-holds-pieces, F-zero-fill-is-a-size-check,
+F-backend-union-forwarders, F-free-functions-misplaced,
+G-plan-dedupe-device-check, C-pieces-leak, M2-store-mints-bound-tensor),
+with LOADER_REVIEW Moves 3, 7 and 9 and #28. A binding re-encoded its
+Source as `Layout`/`Part` over a deduplicated tensor list, and the front
+end lowered that again to `LoadPart`s. The checks were spread over the
+front end, both backends and the planner: `zero_fill` only existed so
+that a plain tensor's size mismatch surfaced inside the backends, an
+overlap prover checked what Source already guarantees, and the planner
+checked device ids after earlier files were published (#28). Part 3 #7
+approved dropping the overlap check: only Source makes bindings.
+
+zml:
+- `TensorStore.Binding` is a union: `load: { source, memory }` or
+  `compute: { program, inputs }`. Each source is a `Source.Bound`, the
+  placed shape and pieces `bind` was given, without the store.
+  `Program` keeps only its value and vtable; `sameExecutable` moved to
+  `Binding.Compute`. `bind`, `bindProgram` and `bindNew` take the union.
+- The load arm keeps the bound shape, not only the pieces: a `pad` that
+  adds only trailing rows keeps the pieces and grows the shape, so the
+  size rule cannot be read from the pieces. About one `Shape` more per
+  binding; not measured.
+- `Source.lowerPiece` is the one rule from bits to bytes, called by the
+  front end as it builds each `LoadSpec`. A run that starts or ends inside
+  a byte is `error.SubBytePosition`, so `InvalidBinding` at start rather
+  than a panic at bind.
+- Gone: `Layout`, `Part`, the `Lowering` struct and the deduplicated
+  tensor list.
+- The front end checks every tensor and program input once, before
+  anything is published (`prepareSpec`, `checkPlacement`), each failure a
+  logged `InvalidBinding`:
+  - no pieces, or a piece of an empty checkpoint tensor;
+  - bound bytes that differ from the tensor's (`zero_fill`'s old job);
+  - a sub-byte run;
+  - placement in any memory space, computed tensors included;
+  - a mesh device id at or above the platform's device count (#28);
+  - a memory kind the platform cannot take;
+  - strided parts into host memory;
+  - parts out of bounds or out of order (`backend.checkParts`, now a
+    bool).
+- Backends trust that contract. `LoadSpec.zero_fill`, the overlap prover
+  and its three tests, `Lattice.hasRunIn` and `PartsError` go. The direct
+  backend drops its empty-source, parts and strided-host checks; its
+  read-limit check moved to `Planner.checkGatherReads`, and the copy in
+  `appendExtent` is an assert. `plan_slot`/`unplanned`,
+  `Config.device_count`, the planner's device check and
+  `JobCut.destinations` go; `appendFillJob` takes the parts that are
+  their destination's first. The buffered backend always zeroes the
+  gaps. Part dimensions live in a per-start arena, so both backends copy
+  them at submit.
+- Source's test harness fails on a byte two pieces write
+  (`error.DoubleWrite`), and a test shows that it fires.
+- Move 9 still made sense with program groups gated: only the backend
+  that allocates knows what is still to land. The direct backend counts
+  a batch's device bytes when it is sealed and reports
+  `unlandedBytesPerDevice`, which `readRoom` reads. The front end's
+  `submitted_bytes` and its accounting loop go, and a group's
+  temporaries are charged as their per-device maximum, not their sum.
+  The fixed `[MAX_NUM_DEVICES]` arrays were not taken: per-device slices
+  leave the buffered backend's device ids uncapped.
+- Backend seam: one `create(allocator, io, platform, opts)` for both
+  backends, `inline else` forwarders, and `Submission` holds only its
+  batch. `loadsDirect` is the one platform list. The union stays in
+  backend.zig (Part 4).
+- `Platform.placedShape` and `Memory.Kind.isHost` replace
+  `backend.placedShape`, `countsAgainstDevice` and
+  `direct_loader.placementShape`; buffer.zig's `placementOrPanic` calls
+  `placedShape`.
+- `Source._pieces`, `Piece` and `Dim` are private to zml/io.
+  `Bound.whole()` says whether a binding reads one checkpoint tensor
+  whole; examples/io's load and pack checks use it.
+- `max_part_chunks`/`large_chunk_bytes` are `max_part_runs`/
+  `large_run_bytes`. loader.md is updated.
+
+llmd (monorepo), tests only: those that read a binding's tensors, layout
+parts or piece offsets check the union tag, `whole()`, or the bytes a
+real load lands (splitTensor, the linear split and fuse, the block-scale
+split; new `testing.expectBytes`).
+
+Review (workflow, refuting verifier): nine findings, seven distinct, all
+low, all fixed.
+- An empty checkpoint tensor bound as a program input
+  (`View.maybeCreateBinding`) had no piece, so `start` logged "reads no
+  checkpoint bytes" with no key, and with the output's id beside the
+  input's shape. `Source.bindEmpty` became `Source.emptyOf`, a placed
+  source of one piece of the empty tensor, which both View shorthands
+  bind. `prepareSpec` and `checkPlacement` log a target: `program input
+  {i} {shape} of tensor {id} {shape}`. The loader test covers the case.
+- `readRoom` kept the buffered arm Move 9 removes; it reads the direct
+  backend.
+- `addPlacementBytes` kept a memory parameter only the removed
+  accounting loop used.
+- `checkOutput` rechecked that the tensor's own shape places, which
+  `start` checks; that side panics now, and only the program's output
+  is checked.
+- `setMemory`'s doc named `Binding.memory` (reported twice); it is
+  `Binding.Load.memory`.
+- loader.md and a test comment called the sub-byte rule "an element at a
+  sub-byte position". The rule is a run that starts or ends inside a
+  byte: a whole u4[4] loads, a u4[3] does not.
+- No test drove `checkParts` to false. A unit test in backend.zig covers
+  each bound, order and overlap case, and the strided ones.
+- Also fixed: the failed set-up test counted three `init` allocations,
+  two since `submitted_bytes` left the front end.
+
+Not done:
+- A source that reads nothing after `pad` or `slice` (a padded empty
+  tensor, a slice to nothing) has no key to name; its log names only the
+  tensor. Keeping a fake piece for an empty entry in `Source.init` would
+  break `pad`, `slice` and `concatenate`.
+- A whole sub-byte tensor whose bits are not a multiple of 8 still does
+  not load; it is `InvalidBinding` at start now, a panic at bind since
+  R10. No known checkpoint has one.
+- Dropped with decision 7: the hand-built cases Source cannot make (a
+  part of a missing source, past its source or tensor, overlapping
+  parts). The misplaced-program-output case runs only with 2 or 4
+  devices, the foreign-mesh program fails at start rather than at wait,
+  and llmd's fused gate_up check asserts only "not one whole tensor".
+- `appendExtent`'s read-limit check is an assert, so unchecked in
+  ReleaseFast.
+- New public surface: `Source.Bound` and `whole()`, `lowerPiece`,
+  `emptyOf`, `Binding.Load`/`Compute`, `Platform.placedShape`,
+  `Memory.Kind.isHost`. Privacy is by convention: llmd can still read
+  `_pieces`.
+- `getSourcesById` is not renamed to `bindingOf` (not in R13).
+  `LoadPart.whole` stays, for tests.
+- Not run on a GPU: the unlanded-bytes room (CPU reports no limit, so
+  its tests only check that submitted equals allocated and nothing is
+  unlanded), temporaries charged as a maximum (admits more than before),
+  host-pinned routing into distinct memory.
+
+Checks:
+- `bazel test //zml:test` passes (333, 12 skip): the three prover tests
+  and a hand-built-layout test went; two loader tests, the double-write
+  test and the `checkParts` test came.
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7 (`llmd:test` 266,
+  9 skip; `weights_test` 26/26).
+- `bazel build --config=localzml //llmd:llmd`.
+- `zig fmt` on scratch copies: no diff in the changed code.
+- On CPU, `examples/io load` of a synthetic 52-tensor checkpoint,
+  `ZML_LOAD_CHECK=1`, 2 packs of 4: load check 44/44 and pack check 2/2
+  replicated, sharded and tp, the last two also in host_pinned memory.
+  tp with 3 packs, one group each: 3 groups, 3 admission retires, checks
+  40/40 and 3/3.
+
 ## Open work
+
+- 2026-10-22 one binding representation (forty-fifth pass, zml lnnnonkm
+  and monorepo xmvssoyq): R13 done, with LOADER_REVIEW Moves 3, 7 and 9
+  and #28. A binding keeps its placed sources' pieces,
+  `Source.lowerPiece` is the one rule from bits to bytes, the front end
+  checks every tensor and program input once before anything is
+  published, and the backends trust it. The admission ledger lives in
+  the direct backend. A source that reads nothing after `pad` or `slice`
+  still logs no key. Not run on a GPU: the unlanded-bytes room,
+  temporaries charged as a maximum, host-pinned routing.
 
 - 2026-10-22 no Packer (forty-fourth pass, zml twuoxmxk and monorepo
   moptmxsw): R11 done. llmd's weights layer is free functions over View
@@ -7438,8 +7597,9 @@ Checks:
   registry, an entry's address is its tensor's identity, `View.get` and
   `hasPrefix` replace `getShape` and `hasKey`, `Tensor.read` and
   `readRange` replace `TensorReader`, and the metadata path is gone. Not
-  run on a GPU or a real model. `Source.pieces` stays public
-  (C-pieces-leak). R8 (forty-first pass) and R9 build on it.
+  run on a GPU or a real model. `Source.pieces` stayed public
+  (C-pieces-leak) until R13 (forty-fifth pass). R8 (forty-first pass)
+  and R9 build on it.
 - 2026-10-22 VFS Remotes and one error contract (thirty-ninth pass, zml
   zvrossur and monorepo wlwvxtwp): R6 done, and with it LOADER_REVIEW #6.
   `VFS.Remotes` registers the four remote schemes; open, stat and access
