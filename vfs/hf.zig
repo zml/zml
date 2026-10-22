@@ -62,8 +62,7 @@ pub const HF = struct {
         /// Longest hold one throttle may arm over every request of this
         /// backend, a server-named delay included.
         max_hold: std.Io.Duration = .fromSeconds(120),
-        /// Continuous rate limiting for longer than this fails the requests
-        /// with `error.RateLimited`.
+        /// Continuous rate limiting for longer than this fails the requests.
         throttle_budget: std.Io.Duration = .fromSeconds(300),
     };
 
@@ -358,6 +357,7 @@ pub const HF = struct {
                     .accept_encoding = .{ .override = "identity" },
                     .authorization = self.hf.authorization,
                 },
+                .accept = .{ .statuses = request.open_statuses },
                 .redirects = .follow,
                 .head_buffer = &head_buffer,
             }, .{
@@ -369,6 +369,7 @@ pub const HF = struct {
         }
 
         fn consume(self: *TreeFetch, res: *std.http.Client.Response) anyerror!std.ArrayList(TreeNode) {
+            if (request.openStatus(res.head.status)) |err| return err;
             const allocator = self.hf.allocator;
             const body = try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse return error.MissingContentLength);
             defer allocator.free(body);
@@ -453,6 +454,7 @@ pub const HF = struct {
                     // Credentials only travel to the Hub itself.
                     .authorization = if (std.mem.startsWith(u8, self.url, "https://huggingface.co/")) self.hf.authorization else .omit,
                 },
+                .accept = .{ .statuses = request.open_statuses },
                 .redirects = .surface,
                 .head_buffer = &head_buffer,
             }, .{
@@ -465,6 +467,7 @@ pub const HF = struct {
 
         fn consume(self: *ResolveHop, res: *std.http.Client.Response) anyerror!?[]const u8 {
             if (res.head.status.class() == .success) return null;
+            if (request.openStatus(res.head.status)) |err| return err;
             const location = res.head.location orelse return error.HttpRedirectLocationMissing;
             if (location.len > self.location.len) return error.HttpRedirectLocationOversize;
             @memcpy(self.location[0..location.len], location);
@@ -630,7 +633,7 @@ pub const HF = struct {
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.OpenError.SystemResources;
 
         const repo = Repo.parse(full_path) catch return std.Io.Dir.OpenError.BadPathName;
-        const tree = self.getOrFetchTree(repo) catch return std.Io.Dir.OpenError.Unexpected;
+        const tree = self.getOrFetchTree(repo) catch |err| return request.openFailure("hf", full_path, err);
         const size = getSizeFromTree(tree, repo.path) orelse return std.Io.Dir.OpenError.FileNotFound;
 
         const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
@@ -663,19 +666,16 @@ pub const HF = struct {
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
 
         const repo = Repo.parse(full_path) catch return std.Io.Dir.StatFileError.Unexpected;
-        const tree = self.getOrFetchTree(repo) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return std.Io.Dir.StatFileError.Unexpected,
-        };
-        const node = findNode(tree, repo.path) orelse return std.Io.Dir.StatFileError.IsDir;
-
+        const tree = self.getOrFetchTree(repo) catch |err| return request.openFailure("hf", full_path, err);
+        // The repository itself is a directory.
+        if (repo.path.len == 0) return std.Io.Dir.StatFileError.IsDir;
+        const node = findNode(tree, repo.path) orelse return std.Io.Dir.StatFileError.FileNotFound;
         if (node.kind == .directory) return std.Io.Dir.StatFileError.IsDir;
-        const size = getSizeFromTree(tree, repo.path) orelse return std.Io.Dir.StatFileError.FileNotFound;
 
         return .{
             .inode = @intCast(0),
             .nlink = 0,
-            .size = size,
+            .size = node.size,
             .permissions = .fromMode(0o444),
             .kind = .file,
             .atime = null,
@@ -692,7 +692,7 @@ pub const HF = struct {
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
 
         const repo = Repo.parse(full_path) catch return std.Io.Dir.AccessError.FileNotFound;
-        const tree = self.getOrFetchTree(repo) catch return std.Io.Dir.AccessError.Unexpected;
+        const tree = self.getOrFetchTree(repo) catch |err| return request.openFailure("hf", full_path, err);
 
         if (repo.path.len == 0) return;
 
@@ -707,24 +707,12 @@ pub const HF = struct {
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
 
         const repo = Repo.parse(full_path) catch return std.Io.File.OpenError.BadPathName;
-        const tree = self.getOrFetchTree(repo) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => {
-                log.err("hf: listing the repository of {s} failed: {}", .{ full_path, err });
-                return std.Io.File.OpenError.Unexpected;
-            },
-        };
+        const tree = self.getOrFetchTree(repo) catch |err| return request.openFailure("hf", full_path, err);
         const size = getSizeFromTree(tree, repo.path) orelse return std.Io.File.OpenError.FileNotFound;
 
         var download_url_buffer: [16 * 1024]u8 = undefined;
-        const download_url = self.resolveDownloadUrl(repo, &download_url_buffer) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => {
-                // The path names the file; its signed URL would be a credential.
-                log.err("hf: resolving the download URL of {s} failed: {}", .{ full_path, err });
-                return std.Io.File.OpenError.Unexpected;
-            },
-        };
+        // Logged by the file's path: its signed URL would be a credential.
+        const download_url = self.resolveDownloadUrl(repo, &download_url_buffer) catch |err| return request.openFailure("hf", full_path, err);
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, full_path, download_url, size) catch return std.Io.File.OpenError.Unexpected;
 
@@ -959,3 +947,28 @@ pub const HF = struct {
         }
     };
 };
+
+test "HF reports a path absent from the repository listing as FileNotFound" {
+    const allocator = std.testing.allocator;
+    var client: std.http.Client = .{ .allocator = allocator, .io = std.testing.io };
+    defer client.deinit();
+    var hf: HF = try .init(allocator, std.testing.io, &client, null, .{});
+    defer hf.deinit();
+
+    // The listing `getOrFetchTree` would keep, so no request is sent.
+    var tree: std.ArrayList(TreeNode) = .empty;
+    try HF.insertTreeNode(allocator, &tree, .{ .oid = "", .path = "config.json", .type = "file", .size = 2 });
+    try HF.insertTreeNode(allocator, &tree, .{ .oid = "", .path = "nested/model.safetensors", .type = "file", .size = 8 });
+    try hf.trees.put(allocator, try allocator.dupe(u8, "owner/model@main"), tree);
+
+    const io = hf.io();
+    try std.testing.expectEqual(@as(u64, 2), (try std.Io.Dir.statFile(.cwd(), io, "owner/model/config.json", .{})).size);
+    try std.Io.Dir.access(.cwd(), io, "owner/model/nested/model.safetensors", .{});
+    try std.testing.expectError(error.IsDir, std.Io.Dir.statFile(.cwd(), io, "owner/model/nested", .{}));
+    try std.testing.expectError(error.IsDir, std.Io.Dir.statFile(.cwd(), io, "owner/model", .{}));
+
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.statFile(.cwd(), io, "owner/model/missing.json", .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.access(.cwd(), io, "owner/model/missing.json", .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFile(.cwd(), io, "owner/model/missing.json", .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.openDir(.cwd(), io, "owner/model/missing", .{}));
+}

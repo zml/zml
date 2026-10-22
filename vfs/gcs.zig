@@ -212,8 +212,7 @@ pub const GCS = struct {
         /// Longest hold one throttle may arm over every request of this
         /// backend, a server-named delay included.
         max_hold: std.Io.Duration = .fromSeconds(120),
-        /// Continuous rate limiting for longer than this fails the requests
-        /// with `error.RateLimited`.
+        /// Continuous rate limiting for longer than this fails the requests.
         throttle_budget: std.Io.Duration = .fromSeconds(300),
     };
 
@@ -645,12 +644,9 @@ pub const GCS = struct {
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
         const self: *GCS = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
-        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            error.FileNotFound => return std.Io.File.OpenError.FileNotFound,
-            error.PermissionDenied => return std.Io.File.OpenError.PermissionDenied,
-            else => return std.Io.File.OpenError.Unexpected,
-        };
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
+        const size = self.fetchSize(path) catch |err| return request.openFailure("gcs", path, err);
 
         return .{
             .inode = 0,
@@ -665,19 +661,19 @@ pub const GCS = struct {
         };
     }
 
-    fn dirAccess(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {}
+    fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+        const self: *GCS = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
+        _ = self.fetchSize(path) catch |err| return request.openFailure("gcs", path, err);
+    }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *GCS = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
-        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            error.FileNotFound => return std.Io.File.OpenError.FileNotFound,
-            error.PermissionDenied => return std.Io.File.OpenError.PermissionDenied,
-            else => return std.Io.File.OpenError.Unexpected,
-        };
-
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
+        const size = self.fetchSize(path) catch |err| return request.openFailure("gcs", path, err);
+
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, path, size) catch return std.Io.File.OpenError.Unexpected;
 
@@ -860,9 +856,12 @@ pub const GCS = struct {
         }
     }
 
-    fn gcsUri(self: *GCS, path: []const u8) std.Uri {
+    /// The object's URI. A VFS path is `bucket/key`; the request target
+    /// needs `/bucket/key`, formatted into `buffer`, which the URI borrows.
+    fn gcsUri(self: *GCS, path: []const u8, buffer: []u8) !std.Uri {
         var uri = self.config.endpoint_uri;
-        uri.path = .{ .raw = path };
+        const absolute = if (std.mem.startsWith(u8, path, "/")) path else std.fmt.bufPrint(buffer, "/{s}", .{path}) catch return error.NameTooLong;
+        uri.path = .{ .raw = absolute };
         uri.query = .{ .percent_encoded = "alt=media" };
         return uri;
     }
@@ -1013,16 +1012,15 @@ pub const GCS = struct {
         return try results.toOwnedSlice(self.allocator);
     }
 
-    fn fetchSize(self: *GCS, dir: std.Io.Dir, sub_path: []const u8) !u64 {
-        var path_buffer: [8 * 1024]u8 = undefined;
-        const path = try self.resolvePath(dir, sub_path, &path_buffer);
-        const uri = self.gcsUri(path);
+    fn fetchSize(self: *GCS, path: []const u8) !u64 {
+        var uri_path_buffer: [8 * 1024 + 1]u8 = undefined;
+        const uri = try self.gcsUri(path, &uri_path_buffer);
         var head: SizeRequest = .{ .gcs = self, .uri = uri, .target = path };
         return request.perform(u64, self.requestContext(), head.spec(), &head, SizeRequest.attempt);
     }
 
-    /// The object's size: one HEAD, with 404 and the permission statuses
-    /// kept as their own errors.
+    /// The object's size: one HEAD. An absent or denied object fails as
+    /// `request.openStatus` says.
     const SizeRequest = struct {
         gcs: *GCS,
         uri: std.Uri,
@@ -1047,17 +1045,14 @@ pub const GCS = struct {
                     .accept_encoding = .{ .override = "identity" },
                     .authorization = authorization,
                 },
-                .accept = .{ .statuses = &.{ .not_found, .unauthorized, .forbidden } },
+                .accept = .{ .statuses = request.open_statuses },
                 .head_buffer = &head_buffer,
             }, self.spec(), self, SizeRequest.consume);
         }
 
         fn consume(_: *SizeRequest, res: *std.http.Client.Response) anyerror!u64 {
-            return switch (res.head.status) {
-                .not_found => error.FileNotFound,
-                .unauthorized, .forbidden => error.PermissionDenied,
-                else => res.head.content_length orelse error.MissingContentLength,
-            };
+            if (request.openStatus(res.head.status)) |err| return err;
+            return res.head.content_length orelse error.MissingContentLength;
         }
     };
 
@@ -1072,7 +1067,8 @@ pub const GCS = struct {
     }
 
     fn performRead(self: *GCS, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        var bearer: BearerRequest = .{ .gcs = self, .uri = self.gcsUri(handle.uri) };
+        var uri_path_buffer: [8 * 1024 + 1]u8 = undefined;
+        var bearer: BearerRequest = .{ .gcs = self, .uri = try self.gcsUri(handle.uri, &uri_path_buffer) };
         return range_read.performRangeRead(self.requestContext(), .{
             .request = .{
                 .backend = "gcs",

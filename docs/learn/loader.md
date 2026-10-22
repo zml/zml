@@ -248,6 +248,13 @@ Host-memory allocation and DMA registration log the original PJRT failure
 and return `OutOfMemory`. Exceeding the host-memory mapped ceiling also logs
 the budget details at `err` and returns `OutOfMemory`.
 
+Every remote scheme of the VFS fails an open, a stat or an `access` alike: a
+missing object is `FileNotFound` (404, 410) and a denied one
+`PermissionDenied` (401, 403). On S3, a principal without `s3:ListBucket`
+gets `PermissionDenied` for a missing key too, so a probe of an optional file
+treats both as absent. Any other remote failure is logged at `err` and
+surfaces as `Unexpected`.
+
 A model whose bindings are wrong is one error, `InvalidBinding`, whichever
 rule it breaks:
 
@@ -366,6 +373,19 @@ is what that `start` returns. `deinit` cancels a task no `start` waited for,
 or destroys what it built. The task holds no pointer into the loader, so the
 loader is a value that may be moved before its first `start`. Initialize it
 as soon as the platform exists and build or compile the model meanwhile.
+
+A remote checkpoint (`hf://`, `s3://`, `gs://`, `https://`) is read through a
+VFS. `VFS.Remotes` registers those four schemes on one HTTP client, each
+configured from the environment (tokens, credentials, proxies):
+
+```zig
+var vfs: zml.io.VFS = try .init(allocator, init.io);
+defer vfs.deinit();
+var remotes: zml.io.VFS.Remotes = undefined; // initialized in place
+try remotes.init(allocator, &vfs, init.environ_map);
+defer remotes.deinit();
+const io = vfs.io(); // for the registry, the loader and every other reader
+```
 
 The direct backend owns its workspace for its entire lifetime. Its creation
 allocates that workspace, calibrates transfer sizing, and cuts the arenas into

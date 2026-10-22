@@ -1092,7 +1092,9 @@ pub fn resolveFiletype(path: []const u8) FileType {
 
 pub const ModelPathResolutionError = error{
     FileNotFound,
+    PermissionDenied,
     InvalidPath,
+    Canceled,
 } || std.mem.Allocator.Error;
 
 pub fn resolveModelRepo(
@@ -1107,6 +1109,8 @@ pub fn resolveModelRepo(
         const dir = std.Io.Dir.openDir(.cwd(), io, dir_path, .{}) catch |e| {
             return switch (e) {
                 error.FileNotFound => ModelPathResolutionError.FileNotFound,
+                error.PermissionDenied => ModelPathResolutionError.PermissionDenied,
+                error.Canceled => ModelPathResolutionError.Canceled,
                 else => ModelPathResolutionError.InvalidPath,
             };
         };
@@ -1117,6 +1121,8 @@ pub fn resolveModelRepo(
     const dir = std.Io.Dir.openDir(.cwd(), io, path, .{}) catch |e| {
         return switch (e) {
             error.FileNotFound => ModelPathResolutionError.FileNotFound,
+            error.PermissionDenied => ModelPathResolutionError.PermissionDenied,
+            error.Canceled => ModelPathResolutionError.Canceled,
             else => ModelPathResolutionError.InvalidPath,
         };
     };
@@ -1125,21 +1131,73 @@ pub fn resolveModelRepo(
 }
 
 pub fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionError!struct { std.Io.File, []const u8 } {
-    {
-        const index_name = "model.safetensors.index.json";
-        if (repo.openFile(io, index_name, .{ .mode = .read_only })) |index_file| {
-            return .{ index_file, "model.safetensors.index.json" };
-        } else |_| {}
+    // When neither opens, a denied probe is what is reported. On S3 it may
+    // mean absent: a bucket that may not be listed answers 403 for a
+    // missing key.
+    var denied = false;
+    for ([_][]const u8{ "model.safetensors.index.json", "model.safetensors" }) |name| {
+        if (repo.openFile(io, name, .{ .mode = .read_only })) |file| {
+            return .{ file, name };
+        } else |err| switch (err) {
+            error.Canceled => return ModelPathResolutionError.Canceled,
+            error.PermissionDenied => denied = true,
+            else => {},
+        }
     }
+    return if (denied) ModelPathResolutionError.PermissionDenied else ModelPathResolutionError.FileNotFound;
+}
+
+test "resolveModelEntrypoint falls back past a denied index and reports a denied probe" {
+    const VFS = @import("vfs");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    // `served` has only the single file, behind an index S3 refuses with the
+    // 403 a principal without `s3:ListBucket` gets for a missing key.
+    var object: [8]u8 = @splat(0);
+    var server = try VFS.mock_server.MockServer.init(io, &object, .{
+        .objects = &.{.{ .path = "/bucket/served/model.safetensors", .bytes = &object }},
+        .refusals = &.{
+            .{ .path = "/bucket/served/model.safetensors.index.json", .status = .forbidden },
+            .{ .path = "/bucket/denied/model.safetensors.index.json", .status = .forbidden },
+            .{ .path = "/bucket/denied/model.safetensors", .status = .forbidden },
+            .{ .path = "/bucket/missing/model.safetensors.index.json", .status = .not_found },
+            .{ .path = "/bucket/missing/model.safetensors", .status = .not_found },
+        },
+    });
+    var server_group: std.Io.Group = .init;
+    try VFS.mock_server.startMockServer(&server, &server_group, io);
+    var server_joined = false;
+    defer VFS.mock_server.cleanupMockServer(&server, &server_group, io, server_joined);
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    var endpoint_buffer: [64]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.port()});
+    var s3: VFS.S3 = try .init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1" }, .{});
+    defer s3.deinit();
 
     {
-        const model_name = "model.safetensors";
-        if (repo.openFile(io, model_name, .{ .mode = .read_only })) |model_file| {
-            return .{ model_file, "model.safetensors" };
-        } else |_| {}
+        const repo = try std.Io.Dir.openDir(.cwd(), s3.io(), "bucket/served", .{});
+        defer repo.close(s3.io());
+        const file, const name = try resolveModelEntrypoint(s3.io(), repo);
+        defer file.close(s3.io());
+        try std.testing.expectEqualStrings("model.safetensors", name);
+    }
+    {
+        const repo = try std.Io.Dir.openDir(.cwd(), s3.io(), "bucket/denied", .{});
+        defer repo.close(s3.io());
+        try std.testing.expectError(error.PermissionDenied, resolveModelEntrypoint(s3.io(), repo));
+    }
+    {
+        const repo = try std.Io.Dir.openDir(.cwd(), s3.io(), "bucket/missing", .{});
+        defer repo.close(s3.io());
+        try std.testing.expectError(error.FileNotFound, resolveModelEntrypoint(s3.io(), repo));
     }
 
-    return ModelPathResolutionError.FileNotFound;
+    server_group.cancel(io);
+    server_joined = true;
+    try server.check();
 }
 
 const Metadata = union(enum) {

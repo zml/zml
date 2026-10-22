@@ -19,8 +19,7 @@ pub const HTTP = struct {
         /// Longest hold one throttle may arm over every request of this
         /// backend, a server-named delay included.
         max_hold: std.Io.Duration = .fromSeconds(120),
-        /// Continuous rate limiting for longer than this fails the requests
-        /// with `error.RateLimited`.
+        /// Continuous rate limiting for longer than this fails the requests.
         throttle_budget: std.Io.Duration = .fromSeconds(300),
     };
 
@@ -231,10 +230,9 @@ pub const HTTP = struct {
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
         const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
-        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return std.Io.Dir.StatFileError.Unexpected,
-        };
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
+        const size = self.fetchSize(path) catch |err| return request.openFailure("http", path, err);
 
         return .{
             .inode = @intCast(0),
@@ -249,18 +247,19 @@ pub const HTTP = struct {
         };
     }
 
-    fn dirAccess(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {}
+    fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
+        _ = self.fetchSize(path) catch |err| return request.openFailure("http", path, err);
+    }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
-        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return std.Io.File.OpenError.Unexpected,
-        };
-
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
+        const size = self.fetchSize(path) catch |err| return request.openFailure("http", path, err);
 
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, path, size) catch return std.Io.File.OpenError.Unexpected;
@@ -360,13 +359,12 @@ pub const HTTP = struct {
         return path.len;
     }
 
-    fn fetchSize(self: *HTTP, dir: std.Io.Dir, sub_path: []const u8) !u64 {
-        var path_buffer: [8 * 1024]u8 = undefined;
+    /// The size of the object at `url`, a resolved path without its scheme.
+    fn fetchSize(self: *HTTP, url: []const u8) !u64 {
         var redirect_buffer: [8 * 1024]u8 = undefined;
         var aux_buffer: []u8 = &redirect_buffer;
 
         const scheme = @tagName(self.protocol);
-        const url = try self.resolvePath(dir, sub_path, &path_buffer);
         const full_url = try std.fmt.bufPrint(aux_buffer, "{s}://{s}", .{ scheme, url });
 
         var uri = std.Uri.parse(full_url) catch return std.Io.File.OpenError.BadPathName;
@@ -393,7 +391,8 @@ pub const HTTP = struct {
 
     /// One HEAD of the redirect chain: the size, or the `Location` to
     /// follow, copied into the hop's own storage because the head buffer
-    /// dies with the response.
+    /// dies with the response. An absent or denied object fails as
+    /// `request.openStatus` says.
     const SizeHop = struct {
         const Result = union(enum) { size: u64, redirect: []const u8 };
 
@@ -407,6 +406,7 @@ pub const HTTP = struct {
             return request.exchange(Result, self.http.requestContext(), self.uri, .{
                 .method = .HEAD,
                 .headers = .{ .accept_encoding = .{ .override = "identity" } },
+                .accept = .{ .statuses = request.open_statuses },
                 .redirects = .surface,
                 .head_buffer = &head_buffer,
             }, .{
@@ -426,7 +426,7 @@ pub const HTTP = struct {
                     @memcpy(self.location[0..location.len], location);
                     return .{ .redirect = self.location[0..location.len] };
                 },
-                else => return error.UnexpectedStatus,
+                else => return request.openStatus(res.head.status) orelse error.UnexpectedStatus,
             }
         }
     };

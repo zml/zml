@@ -31,30 +31,12 @@ pub fn main(init: std.process.Init) !void {
     else
         it.next() orelse return error.MissingPath;
 
-    var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
-
-    try http_client.initDefaultProxies(allocator, init.environ_map);
-    defer http_client.deinit();
-
-    var vfs_https: zml.io.VFS.HTTP = try .init(allocator, init.io, &http_client, .https);
-    defer vfs_https.deinit();
-
-    var hf_vfs: zml.io.VFS.HF = try .auto(allocator, init.io, &http_client, init.environ_map);
-    defer hf_vfs.deinit();
-
-    var s3_vfs: zml.io.VFS.S3 = try .auto(allocator, init.io, &http_client, init.environ_map);
-    defer s3_vfs.deinit();
-
-    var gcs_vfs: zml.io.VFS.GCS = try .auto(allocator, init.io, &http_client, init.environ_map);
-    defer gcs_vfs.deinit();
-
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
 
-    try vfs.registerBackend("https", vfs_https.backend());
-    try vfs.registerBackend("hf", hf_vfs.backend());
-    try vfs.registerBackend("s3", s3_vfs.backend());
-    try vfs.registerBackend("gs", gcs_vfs.backend());
+    var remotes: zml.io.VFS.Remotes = undefined;
+    try remotes.init(allocator, &vfs, init.environ_map);
+    defer remotes.deinit();
 
     const io = vfs.io();
 

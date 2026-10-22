@@ -30,13 +30,16 @@ pub const MockServer = struct {
     /// One extra path the server serves beside `/object`.
     const Object = struct { path: []const u8, bytes: []const u8 };
 
+    /// A path answered with `status` and no object, on purpose.
+    pub const Refusal = struct { path: []const u8, status: std.http.Status };
+
     const Options = struct {
         fail_first_gets: usize = 0,
         barrier_gets: usize = 0,
         throttle: Throttle = .{},
         objects: []const Object = &.{},
-        /// Paths answered with 404 on purpose.
-        missing: []const []const u8 = &.{},
+        /// Paths answered with a status of their own (404, 403, ...).
+        refusals: []const Refusal = &.{},
     };
 
     tcp: std.Io.net.Server,
@@ -45,7 +48,7 @@ pub const MockServer = struct {
     barrier_gets: usize,
     throttle: Throttle,
     objects: []const Object,
-    missing: []const []const u8,
+    refusals: []const Refusal,
     get_barrier: std.Io.Event = .unset,
     head_requests: std.atomic.Value(usize) = .init(0),
     get_requests: std.atomic.Value(usize) = .init(0),
@@ -77,7 +80,7 @@ pub const MockServer = struct {
             .barrier_gets = opts.barrier_gets,
             .throttle = opts.throttle,
             .objects = opts.objects,
-            .missing = opts.missing,
+            .refusals = opts.refusals,
         };
     }
 
@@ -95,11 +98,11 @@ pub const MockServer = struct {
         return null;
     }
 
-    fn isMissing(self: *const MockServer, target: []const u8) bool {
-        for (self.missing) |path| {
-            if (std.mem.eql(u8, path, target)) return true;
+    fn refusalFor(self: *const MockServer, target: []const u8) ?std.http.Status {
+        for (self.refusals) |refusal| {
+            if (std.mem.eql(u8, refusal.path, target)) return refusal.status;
         }
-        return false;
+        return null;
     }
 
     fn nowNs(io: std.Io) i64 {
@@ -204,11 +207,12 @@ pub const MockServer = struct {
         var request = try server.receiveHead();
 
         const body = self.bodyFor(request.head.target) orelse {
-            try request.respond("not found", .{
-                .status = .not_found,
+            const refusal = self.refusalFor(request.head.target);
+            try request.respond("refused", .{
+                .status = refusal orelse .not_found,
                 .keep_alive = false,
             });
-            if (self.isMissing(request.head.target)) return;
+            if (refusal != null) return;
             return error.UnexpectedTarget;
         };
 

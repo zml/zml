@@ -15,7 +15,7 @@ pub const Backend = base_module.Backend;
 pub const ReadHints = base_module.ReadHints;
 pub const ReadStats = base_module.ReadStats;
 pub const ReadStatsProvider = base_module.ReadStatsProvider;
-pub const VFSBase = base_module.VFSBase;
+const VFSBase = base_module.VFSBase;
 /// See `useDirectIo`.
 pub const DirectIo = direct_io.Policy;
 
@@ -136,14 +136,59 @@ pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) Registe
     try self.backends.put(self.allocator, scheme, backend);
 }
 
-/// Handles store their backend's index: no handle of this or any later
-/// registered backend may still be open.
-pub fn unregister(self: *VFS, scheme: []const u8) bool {
-    self.mutex.lockUncancelable(self.base.inner);
-    defer self.mutex.unlock(self.base.inner);
+/// The remote schemes on one HTTP client: `https`, `hf`, `s3` and `gs`, each
+/// configured from the environment through its backend's `auto` (plain
+/// `HTTP.init` for `https`), the client honoring the proxy variables.
+/// Initialized in place, since the backends point at the client; it must not
+/// move afterwards. Close every file opened through these schemes before
+/// `deinit`; the VFS must not reach them after it.
+pub const Remotes = struct {
+    /// The proxies' allocations, which must outlive the client.
+    arena: std.heap.ArenaAllocator,
+    client: std.http.Client,
+    https: HTTP,
+    hf: HF,
+    s3: S3,
+    gs: GCS,
 
-    return self.backends.orderedRemove(scheme);
-}
+    /// Builds the client on the VFS's base io and registers the four
+    /// schemes, replacing any backend registered under them. On error
+    /// nothing is registered.
+    pub fn init(self: *Remotes, allocator: std.mem.Allocator, vfs: *VFS, environ: *std.process.Environ.Map) !void {
+        const base_io = vfs.base.inner;
+        self.arena = .init(allocator);
+        errdefer self.arena.deinit();
+        self.client = .{ .allocator = allocator, .io = base_io };
+        errdefer self.client.deinit();
+        try self.client.initDefaultProxies(self.arena.allocator(), environ);
+        self.https = try .init(allocator, base_io, &self.client, .https);
+        errdefer self.https.deinit();
+        self.hf = try .auto(allocator, base_io, &self.client, environ);
+        errdefer self.hf.deinit();
+        self.s3 = try .auto(allocator, base_io, &self.client, environ);
+        errdefer self.s3.deinit();
+        self.gs = try .auto(allocator, base_io, &self.client, environ);
+        errdefer self.gs.deinit();
+
+        vfs.mutex.lockUncancelable(base_io);
+        defer vfs.mutex.unlock(base_io);
+        // Room first: once a scheme is registered, nothing can fail.
+        try vfs.backends.ensureUnusedCapacity(vfs.allocator, 4);
+        vfs.backends.putAssumeCapacity("https", self.https.backend());
+        vfs.backends.putAssumeCapacity("hf", self.hf.backend());
+        vfs.backends.putAssumeCapacity("s3", self.s3.backend());
+        vfs.backends.putAssumeCapacity("gs", self.gs.backend());
+    }
+
+    pub fn deinit(self: *Remotes) void {
+        self.gs.deinit();
+        self.s3.deinit();
+        self.hf.deinit();
+        self.https.deinit();
+        self.client.deinit();
+        self.arena.deinit();
+    }
+};
 
 pub fn io(self: *VFS) std.Io {
     return .{
@@ -502,7 +547,7 @@ fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.D
     return backend.vtable.dirStat(backend.userdata, dir_);
 }
 
-pub fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
+fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     _, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
         log.err("Failed to lookup backend for dir stat file '{s}' : {any}", .{ sub_path, err });
@@ -511,7 +556,7 @@ pub fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8,
     return backend.vtable.dirStatFile(backend.userdata, dir_, stripScheme(sub_path), options);
 }
 
-pub fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     _, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
         log.err("Failed to lookup backend for dir access '{s}' : {any}", .{ sub_path, err });
@@ -520,7 +565,7 @@ pub fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, o
     return backend.vtable.dirAccess(backend.userdata, dir_, stripScheme(sub_path), options);
 }
 
-pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
         log.err("Failed to lookup backend for dir create file '{s}' : {any}", .{ sub_path, err });
@@ -756,31 +801,15 @@ test "VFS prepares load profiles for local and registered paths" {
     try std.testing.expectEqual(@as(?*VFS, null), VFS.fromIo(std.testing.io));
 }
 
-test "VFS reports the configured load profile for every bundled backend" {
-    var client: std.http.Client = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-    defer client.deinit();
-
-    var http = try HTTP.init(std.testing.allocator, std.testing.io, &client, .https);
-    defer http.deinit();
-    var s3 = try S3.init(std.testing.allocator, std.testing.io, &client, .{
-        .endpoint_url = "https://s3.amazonaws.com",
-        .region = "us-east-1",
-    }, .{});
-    defer s3.deinit();
-    var gcs = try GCS.init(std.testing.allocator, std.testing.io, &client, .{});
-    defer gcs.deinit();
-    var hf = try HF.init(std.testing.allocator, std.testing.io, &client, null, .{});
-    defer hf.deinit();
-
+test "Remotes registers every remote scheme with its load profile" {
     var filesystem = try VFS.init(std.testing.allocator, std.testing.io);
     defer filesystem.deinit();
-    try filesystem.registerBackend("https", http.backend());
-    try filesystem.registerBackend("s3", s3.backend());
-    try filesystem.registerBackend("gs", gcs.backend());
-    try filesystem.registerBackend("hf", hf.backend());
+    // No credentials and no proxies: nothing is read from the user's home.
+    var environ: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environ.deinit();
+    var remotes: Remotes = undefined;
+    try remotes.init(std.testing.allocator, &filesystem, &environ);
+    defer remotes.deinit();
 
     const Case = struct {
         path: []const u8,

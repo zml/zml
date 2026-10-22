@@ -15,10 +15,6 @@ const ReadFailure = base.ReadFailure;
 
 const log = std.log.scoped(.@"zml/vfs/request");
 
-/// Backend-wide rate limiting exceeded `throttle_budget` without a clean
-/// window: the caller's request never ran.
-pub const RateLimited = error.RateLimited;
-
 pub const RetryConfig = struct {
     /// Retries per request for failures that are not rate limiting.
     max_retries: usize,
@@ -385,8 +381,7 @@ fn clampDelay(value: std.Io.Duration, low: std.Io.Duration, high: std.Io.Duratio
 /// Statuses an attempt accepts beyond the 2xx class; anything else is
 /// classified as a retry or fails the request.
 pub const Accept = struct {
-    /// Individual statuses the caller maps itself (404 to `FileNotFound`, a
-    /// 401 it re-authenticates).
+    /// Individual statuses the caller maps itself, such as `open_statuses`.
     statuses: []const std.http.Status = &.{},
 
     fn allows(self: Accept, status: std.http.Status, redirects: Redirects) bool {
@@ -556,6 +551,40 @@ pub fn classifyStatus(status: std.http.Status, unavailable: ReadFailure) ?ReadFa
         .too_many_requests => .throttle,
         .service_unavailable => unavailable,
         else => if (status.class() == .server_error) .server_failure else null,
+    };
+}
+
+/// How opening, stat-ing or probing (`access`) a remote path fails, on every
+/// backend: an absent object is `FileNotFound` (404, 410), a forbidden one
+/// `PermissionDenied` (401, 403), and a canceled task `Canceled`. Any other
+/// failure is logged by `openFailure` and surfaces as `Unexpected`.
+pub const OpenError = error{ FileNotFound, PermissionDenied, Canceled, Unexpected };
+
+/// What a metadata request accepts, for its `consume` to map with
+/// `openStatus` instead of failing the request.
+pub const open_statuses: []const std.http.Status = &.{ .not_found, .gone, .unauthorized, .forbidden };
+
+/// The error a status of `open_statuses` means for the path it answered;
+/// null for any other status.
+pub fn openStatus(status: std.http.Status) ?error{ FileNotFound, PermissionDenied } {
+    return switch (status) {
+        .not_found, .gone => error.FileNotFound,
+        .unauthorized, .forbidden => error.PermissionDenied,
+        else => null,
+    };
+}
+
+/// A failed open, stat or access of `path` as `OpenError` reports it.
+/// `backend` names the backend in the log line.
+pub fn openFailure(backend: []const u8, path: []const u8, err: anyerror) OpenError {
+    return switch (err) {
+        error.FileNotFound => error.FileNotFound,
+        error.PermissionDenied => error.PermissionDenied,
+        error.Canceled => error.Canceled,
+        else => {
+            log.err("{s}: looking up {s} failed: {t}", .{ backend, path, err });
+            return error.Unexpected;
+        },
     };
 }
 
@@ -850,6 +879,23 @@ test "retry status classification is typed and 503 depends on the backend" {
     try std.testing.expectEqual(ReadFailure.server_failure, classifyStatus(.service_unavailable, .server_failure).?);
     try std.testing.expectEqual(ReadFailure.throttle, classifyStatus(.service_unavailable, .throttle).?);
     try std.testing.expect(classifyStatus(.not_found, .throttle) == null);
+}
+
+test "absent and denied statuses map to one error each" {
+    try std.testing.expect(openStatus(.not_found).? == error.FileNotFound);
+    try std.testing.expect(openStatus(.gone).? == error.FileNotFound);
+    try std.testing.expect(openStatus(.unauthorized).? == error.PermissionDenied);
+    try std.testing.expect(openStatus(.forbidden).? == error.PermissionDenied);
+    for (open_statuses) |status| try std.testing.expect(openStatus(status) != null);
+    for ([_]std.http.Status{ .ok, .partial_content, .bad_request, .too_many_requests, .internal_server_error, .service_unavailable }) |status| {
+        try std.testing.expect(openStatus(status) == null);
+    }
+
+    // The contract's own errors pass through unlogged; any other is logged
+    // at err, which the test runner would count, so it is not exercised.
+    try std.testing.expect(openFailure("test", "object", error.FileNotFound) == error.FileNotFound);
+    try std.testing.expect(openFailure("test", "object", error.PermissionDenied) == error.PermissionDenied);
+    try std.testing.expect(openFailure("test", "object", error.Canceled) == error.Canceled);
 }
 
 test "server retry delay comes from Retry-After seconds or a RateLimit reset" {

@@ -153,8 +153,7 @@ pub const S3 = struct {
         /// Longest hold one throttle may arm over every request of this
         /// backend, a server-named delay included.
         max_hold: std.Io.Duration = .fromSeconds(120),
-        /// Continuous rate limiting for longer than this fails the requests
-        /// with `error.RateLimited`.
+        /// Continuous rate limiting for longer than this fails the requests.
         throttle_budget: std.Io.Duration = .fromSeconds(300),
     };
 
@@ -426,12 +425,9 @@ pub const S3 = struct {
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
         const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
-        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            error.FileNotFound => return std.Io.File.OpenError.FileNotFound,
-            error.BadPathName => return std.Io.File.OpenError.BadPathName,
-            else => return std.Io.File.OpenError.Unexpected,
-        };
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
+        const size = self.fetchSize(path) catch |err| return request.openFailure("s3", path, err);
 
         return .{
             .inode = 0,
@@ -446,19 +442,19 @@ pub const S3 = struct {
         };
     }
 
-    fn dirAccess(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {}
+    fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
+        _ = self.fetchSize(path) catch |err| return request.openFailure("s3", path, err);
+    }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
-        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            error.FileNotFound => return std.Io.File.OpenError.FileNotFound,
-            error.BadPathName => return std.Io.File.OpenError.BadPathName,
-            else => return std.Io.File.OpenError.Unexpected,
-        };
-
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
+        const size = self.fetchSize(path) catch |err| return request.openFailure("s3", path, err);
+
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, path, size) catch return std.Io.File.OpenError.Unexpected;
 
@@ -777,11 +773,8 @@ pub const S3 = struct {
         return try results.toOwnedSlice(self.allocator);
     }
 
-    fn fetchSize(self: *S3, dir: std.Io.Dir, sub_path: []const u8) !u64 {
-        var path_buffer: [8 * 1024]u8 = undefined;
+    fn fetchSize(self: *S3, path: []const u8) !u64 {
         var url_buf: [8 * 1024]u8 = undefined;
-
-        const path = try self.resolvePath(dir, sub_path, &path_buffer);
         const url = try self.s3Url(path, &url_buf);
 
         const uri = std.Uri.parse(url) catch return error.BadPathName;
@@ -802,7 +795,11 @@ pub const S3 = struct {
         }, &head, SizeRequest.attempt);
     }
 
-    /// The object's size: one signed HEAD, with 404 kept as `FileNotFound`.
+    /// The object's size: one signed HEAD. An absent object is
+    /// `FileNotFound` and a denied one `PermissionDenied`
+    /// (`request.openStatus`). A principal without `s3:ListBucket` gets 403
+    /// for a missing key too, so on S3 `PermissionDenied` may mean absent: a
+    /// caller probing an optional object treats both as absent.
     const SizeRequest = struct {
         s3: *S3,
         uri: std.Uri,
@@ -827,7 +824,7 @@ pub const S3 = struct {
                     .authorization = if (authorization) |auth| .{ .override = auth } else .omit,
                 },
                 .extra_headers = &self.headers,
-                .accept = .{ .statuses = &.{.not_found} },
+                .accept = .{ .statuses = request.open_statuses },
                 .head_buffer = &head_buffer,
             }, .{
                 .backend = "s3",
@@ -838,7 +835,7 @@ pub const S3 = struct {
         }
 
         fn consume(_: *SizeRequest, res: *std.http.Client.Response) anyerror!u64 {
-            if (res.head.status == .not_found) return error.FileNotFound;
+            if (request.openStatus(res.head.status)) |err| return err;
             return res.head.content_length orelse error.MissingContentLength;
         }
     };
