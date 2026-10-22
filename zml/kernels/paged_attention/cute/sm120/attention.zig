@@ -1,7 +1,7 @@
 const std = @import("std");
 const mlir = @import("mlir");
-const llvm = @import("mlir/dialects").llvm;
-const vector = @import("mlir/dialects").vector;
+const llvm = @import("mlir/dialects/llvm");
+const vector = @import("mlir/dialects/vector");
 
 const zml = @import("../../../../zml.zig");
 const cute = zml.kernel.cute;
@@ -92,14 +92,14 @@ fn unpackStruct(b: *B, comptime n: usize, value: V, dtype: cute.DType) [n]V {
 fn matrixLoad(b: *B, comptime n: usize, comptime transpose: bool, address: V) [n]V {
     const assembly = std.fmt.comptimePrint("ldmatrix.sync.aligned.m8n8.x{d}{s}.shared.b16 {{", .{ n, if (transpose) ".trans" else "" }) ++
         (if (n == 4) "$0, $1, $2, $3}, [$4];" else "$0, $1}, [$2];");
-    const result = b.emit(llvm.inline_asm(b.ctx, assembly, &.{address.inner}, b.parseType(if (n == 4) "!llvm.struct<(i32, i32, i32, i32)>" else "!llvm.struct<(i32, i32)>"), .{ .constraints = if (n == 4) "=r,=r,=r,=r,r" else "=r,=r,r", .has_side_effects = true }, b.loc()));
+    const result = b.emit(llvm.inline_asm(b.ctx, assembly, &.{address.inner}, .{ .result_type = b.parseType(if (n == 4) "!llvm.struct<(i32, i32, i32, i32)>" else "!llvm.struct<(i32, i32)>"), .constraints = if (n == 4) "=r,=r,=r,=r,r" else "=r,=r,r", .has_side_effects = true }, b.loc()));
     return unpackStruct(b, n, result, .i32);
 }
 
 fn mma(b: *B, comptime dtype: cute.DType, a: [4]V, k: [2]V, acc: [4]V) [4]V {
     const assembly = "mma.sync.aligned.m16n8k16.row.col.f32." ++ @tagName(dtype) ++ "." ++ @tagName(dtype) ++ ".f32 " ++
         "{$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, $9}, {$10, $11, $12, $13};";
-    const result = b.emit(llvm.inline_asm(b.ctx, assembly, &.{ a[0].inner, a[1].inner, a[2].inner, a[3].inner, k[0].inner, k[1].inner, acc[0].inner, acc[1].inner, acc[2].inner, acc[3].inner }, b.parseType("!llvm.struct<(f32, f32, f32, f32)>"), .{ .constraints = "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f" }, b.loc()));
+    const result = b.emit(llvm.inline_asm(b.ctx, assembly, &.{ a[0].inner, a[1].inner, a[2].inner, a[3].inner, k[0].inner, k[1].inner, acc[0].inner, acc[1].inner, acc[2].inner, acc[3].inner }, .{ .result_type = b.parseType("!llvm.struct<(f32, f32, f32, f32)>"), .constraints = "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f" }, b.loc()));
     return unpackStruct(b, 4, result, .f32);
 }
 
