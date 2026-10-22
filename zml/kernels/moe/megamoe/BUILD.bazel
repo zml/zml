@@ -7,6 +7,7 @@ filegroup(
     name = "megamoe",
     srcs = [
         "megamoe.zig",
+        "weights.zig",
     ],
 )
 
@@ -58,6 +59,14 @@ zig_test(
         "//mlir/dialects",
         "//zml",
     ],
+)
+
+# Checkpoint -> MegaMoE weight transforms (`zml.moe.megamoe.weights`): host index-map tests;
+# opt-in device tests against the reference weight stores, see weights_test.zig.
+zig_test(
+    name = "weights_test",
+    main = "weights_test.zig",
+    deps = ["//zml"],
 )
 
 # Runs zml.moe.megamoe on DeepGEMM reference dumps; see check.zig for usage.

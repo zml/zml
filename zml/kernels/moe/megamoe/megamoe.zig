@@ -20,6 +20,9 @@ const lib = @import("zml/kernels/moe/megamoe/lib");
 
 const program = lib.program;
 
+/// DeepSeek-V4.1 checkpoint expert weights to the `Weights` layouts (load-time tensor ops).
+pub const weights = @import("weights.zig");
+
 /// `layout::kLCMCandidateBlockM`: the least common multiple of DeepGEMM's candidate
 /// BLOCK_M values, used to align `num_max_tokens_per_rank`.
 pub const token_alignment: u32 = lib.layout.token_alignment;
@@ -126,7 +129,7 @@ pub const Result = struct { y: zml.Tensor, workspace: ?zml.Tensor };
 pub fn forwardStaged(
     problem: Problem,
     inputs: StagedInputs,
-    weights: Weights,
+    weights_: Weights,
     /// `[num_sms]` u8, indexed by `%smid`: `num_sms` (the grid size) must be the device's SM
     /// count (DeepGEMM sizes this table by the device's SM count, independently of the grid).
     sm_locality_domains: zml.Tensor,
@@ -138,7 +141,7 @@ pub fn forwardStaged(
     expectShape("x", inputs.x, &.{ tokens, problem.hidden }, &.{ .u8, .f8e4m3fn });
     expectShape("x_sf", inputs.x_sf, &.{ tokens, @divExact(problem.hidden, 128) }, &.{.i32});
     expectShape("topk_idx", inputs.topk_idx, &.{ tokens, problem.num_topk }, &.{.i64});
-    validateWeights(problem, weights);
+    validateWeights(problem, weights_);
     validateWorkspace(problem, sm_locality_domains, workspace);
 
     return call(.staged, problem, .{
@@ -146,7 +149,7 @@ pub fn forwardStaged(
         .x_sf = inputs.x_sf,
         .topk_idx = inputs.topk_idx,
         .topk_weights = inputs.topk_weights,
-    }, weights, sm_locality_domains, workspace);
+    }, weights_, sm_locality_domains, workspace);
 }
 
 /// Same, from bf16 activations: staging (FP8 1x32 UE8M0 quantization, i32->i64 ids, shared-expert SF
@@ -160,7 +163,7 @@ pub fn forward(
     topk_idx: zml.Tensor,
     /// `[T, K]` f32.
     topk_weights: zml.Tensor,
-    weights: Weights,
+    weights_: Weights,
     /// `[num_sms]` u8, indexed by `%smid`: `num_sms` (the grid size) must be the device's SM
     /// count (DeepGEMM sizes this table by the device's SM count, independently of the grid).
     sm_locality_domains: zml.Tensor,
@@ -171,7 +174,7 @@ pub fn forward(
     validateTokens(problem, x, topk_weights);
     expectShape("x", x, &.{ tokens, problem.hidden }, &.{.bf16});
     expectShape("topk_idx", topk_idx, &.{ tokens, problem.num_topk }, &.{.i32});
-    validateWeights(problem, weights);
+    validateWeights(problem, weights_);
     validateWorkspace(problem, sm_locality_domains, workspace);
 
     return call(.bf16, problem, .{
@@ -179,7 +182,7 @@ pub fn forward(
         .x_sf = null,
         .topk_idx = topk_idx,
         .topk_weights = topk_weights,
-    }, weights, sm_locality_domains, workspace);
+    }, weights_, sm_locality_domains, workspace);
 }
 
 /// The CuTe Program of one input kind and workspace mode (`program.emitProgram`); its custom
@@ -217,7 +220,7 @@ fn call(
     comptime inputs: program.InputKind,
     problem: Problem,
     acts: Activations,
-    weights: Weights,
+    weights_: Weights,
     sm_locality_domains: zml.Tensor,
     workspace: Workspace,
 ) Result {
@@ -230,14 +233,14 @@ fn call(
         .x_sf = acts.x_sf,
         .topk_idx = acts.topk_idx,
         .topk_weights = acts.topk_weights,
-        .l1_w = weights.l1_w,
-        .l1_sf = weights.l1_sf,
-        .l2_w = weights.l2_w,
-        .l2_sf = weights.l2_sf,
-        .shared_l1_w = byteView(weights.shared_l1_w orelse weights.l1_w),
-        .shared_l1_sf = weights.shared_l1_sf orelse weights.l1_sf,
-        .shared_l2_w = byteView(weights.shared_l2_w orelse weights.l2_w),
-        .shared_l2_sf = weights.shared_l2_sf orelse weights.l2_sf,
+        .l1_w = weights_.l1_w,
+        .l1_sf = weights_.l1_sf,
+        .l2_w = weights_.l2_w,
+        .l2_sf = weights_.l2_sf,
+        .shared_l1_w = byteView(weights_.shared_l1_w orelse weights_.l1_w),
+        .shared_l1_sf = weights_.shared_l1_sf orelse weights_.l1_sf,
+        .shared_l2_w = byteView(weights_.shared_l2_w orelse weights_.l2_w),
+        .shared_l2_sf = weights_.shared_l2_sf orelse weights_.l2_sf,
         .sm_locality_domains = sm_locality_domains,
     };
     const y_shape = acts.x.shape().withDtype(.bf16);
@@ -281,16 +284,16 @@ fn validateTokens(problem: Problem, x: zml.Tensor, topk_weights: zml.Tensor) voi
     expectShape("topk_weights", topk_weights, &.{ tokens, problem.num_topk }, &.{.f32});
 }
 
-fn validateWeights(problem: Problem, weights: Weights) void {
+fn validateWeights(problem: Problem, weights_: Weights) void {
     const experts = problem.numExpertsPerRank();
     const h = problem.hidden;
     const i = problem.intermediate;
-    expectShape("l1_w", weights.l1_w, &.{ experts, 2 * i, h / 2 }, &.{ .u8, .i8 });
-    expectShape("l2_w", weights.l2_w, &.{ experts, h, i / 2 }, &.{ .u8, .i8 });
-    expectShape("l1_sf", weights.l1_sf, &.{ experts, h / 128, 2 * i }, &.{.i32});
-    expectShape("l2_sf", weights.l2_sf, &.{ experts, i / 128, h }, &.{.i32});
+    expectShape("l1_w", weights_.l1_w, &.{ experts, 2 * i, h / 2 }, &.{ .u8, .i8 });
+    expectShape("l2_w", weights_.l2_w, &.{ experts, h, i / 2 }, &.{ .u8, .i8 });
+    expectShape("l1_sf", weights_.l1_sf, &.{ experts, h / 128, 2 * i }, &.{.i32});
+    expectShape("l2_sf", weights_.l2_sf, &.{ experts, i / 128, h }, &.{.i32});
 
-    const shared = [_]?zml.Tensor{ weights.shared_l1_w, weights.shared_l1_sf, weights.shared_l2_w, weights.shared_l2_sf };
+    const shared = [_]?zml.Tensor{ weights_.shared_l1_w, weights_.shared_l1_sf, weights_.shared_l2_w, weights_.shared_l2_sf };
     var present: u32 = 0;
     for (shared) |t| present += @intFromBool(t != null);
     if (problem.num_shared_experts == 0) {
@@ -299,10 +302,10 @@ fn validateWeights(problem: Problem, weights: Weights) void {
     }
     stdx.debug.assert(present == shared.len, "MegaMoE with {d} shared experts needs all four shared weight tensors, got {d}", .{ problem.num_shared_experts, present });
     const si = i * problem.num_shared_experts;
-    expectShape("shared_l1_w", weights.shared_l1_w.?, &.{ 2 * si, h }, &.{ .u8, .f8e4m3fn });
-    expectShape("shared_l2_w", weights.shared_l2_w.?, &.{ h, si }, &.{ .u8, .f8e4m3fn });
-    expectShape("shared_l1_sf", weights.shared_l1_sf.?, &.{ h / 128, 2 * si }, &.{.i32});
-    expectShape("shared_l2_sf", weights.shared_l2_sf.?, &.{ si / 128, h }, &.{.i32});
+    expectShape("shared_l1_w", weights_.shared_l1_w.?, &.{ 2 * si, h }, &.{ .u8, .f8e4m3fn });
+    expectShape("shared_l2_w", weights_.shared_l2_w.?, &.{ h, si }, &.{ .u8, .f8e4m3fn });
+    expectShape("shared_l1_sf", weights_.shared_l1_sf.?, &.{ h / 128, 2 * si }, &.{.i32});
+    expectShape("shared_l2_sf", weights_.shared_l2_sf.?, &.{ si / 128, h }, &.{.i32});
 }
 
 fn validateWorkspace(problem: Problem, sm_locality_domains: zml.Tensor, workspace: Workspace) void {
