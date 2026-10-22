@@ -1,8 +1,24 @@
-const std = @import("std");
-
 const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
+
+pub const dialect_namespace = "gpu";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("gpu");
+}
+
+pub const operation_names: []const []const u8 = &.{
+    "gpu.barrier",
+    "gpu.block_dim",
+    "gpu.block_id",
+    "gpu.func",
+    "gpu.grid_dim",
+    "gpu.module",
+    "gpu.return",
+    "gpu.shuffle",
+    "gpu.thread_id",
+};
 
 /// A dimension, either `x`, `y` or `z`.
 pub const Dim = enum(u32) {
@@ -26,11 +42,9 @@ pub const DimensionAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAGPUDimension;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "dim";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -53,11 +67,9 @@ pub const ShuffleModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAGPUShuffleMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "shuffle_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }

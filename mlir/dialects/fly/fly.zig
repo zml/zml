@@ -2,7 +2,6 @@ const std = @import("std");
 
 const c = @import("c");
 const mlir = @import("mlir");
-const stdx = @import("stdx");
 
 pub const attributes = @import("attributes.zig");
 pub const ops = @import("ops.zig");
@@ -12,13 +11,13 @@ pub const AddressSpace = attributes.AddressSpace;
 pub const GemmTraversalOrder = attributes.GemmTraversalOrder;
 pub const MmaOperand = attributes.MmaOperand;
 
-pub const dialects_needed = [_][]const u8{"fly"};
+pub const dialect_namespace = "fly";
 
-pub fn insertDialects(registry: *mlir.DialectRegistry) void {
-    inline for (dialects_needed) |d| {
-        mlir.DialectHandle.fromString(d).insertDialect(registry);
-    }
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("fly");
 }
+
+pub const operation_names = ops.operation_names;
 
 /// `Operation.make` that names the op and its operand types on failure: a
 /// rejected `inferReturnTypes` otherwise panics with nothing to go on.

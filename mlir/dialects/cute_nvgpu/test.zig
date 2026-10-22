@@ -8,7 +8,7 @@ fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
     cute_ir.registerDialect(registry);
-    registry.registerDialect("cute_nvgpu");
+    cute_nvgpu.registerDialect(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;

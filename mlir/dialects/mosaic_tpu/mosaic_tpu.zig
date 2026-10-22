@@ -9,6 +9,66 @@ const stdx = @import("stdx");
 /// the custom-call JSON `serialization_format`, which remains 1.
 pub const SERDE_VERSION: i32 = 18;
 
+pub const dialect_namespace = "tpu";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("tpu");
+}
+
+pub const operation_names: []const []const u8 = &.{
+    "tpu.all_reduce",
+    "tpu.assume_layout",
+    "tpu.assume_multiple",
+    "tpu.barrier",
+    "tpu.bitcast",
+    "tpu.bitcast_vreg",
+    "tpu.broadcast_in_sublanes",
+    "tpu.concatenate",
+    "tpu.create_mask",
+    "tpu.delay",
+    "tpu.device_id",
+    "tpu.dynamic_rotate",
+    "tpu.enqueue_dma",
+    "tpu.erase_memref_layout",
+    "tpu.extf",
+    "tpu.fptosi",
+    "tpu.fptoui",
+    "tpu.iota",
+    "tpu.load",
+    "tpu.mask_cast",
+    "tpu.matmul",
+    "tpu.memref_bitcast",
+    "tpu.memref_reshape",
+    "tpu.memref_slice",
+    "tpu.memref_squeeze",
+    "tpu.reciprocal",
+    "tpu.reduce_index",
+    "tpu.region",
+    "tpu.reinterpret_cast",
+    "tpu.reshape",
+    "tpu.scan",
+    "tpu.sem_alloc",
+    "tpu.sem_barrier",
+    "tpu.sem_read",
+    "tpu.sem_signal",
+    "tpu.sem_wait",
+    "tpu.sitofp",
+    "tpu.sort",
+    "tpu.store",
+    "tpu.strided_load",
+    "tpu.strided_store",
+    "tpu.trace",
+    "tpu.trace_start",
+    "tpu.trace_stop",
+    "tpu.transpose",
+    "tpu.truncf",
+    "tpu.uitofp",
+    "tpu.vector_load",
+    "tpu.vector_store",
+    "tpu.wait_dma2",
+    "tpu.yield",
+};
+
 /// Register the `mosaic-serde` pass so `PassManager.parse` can pick it up by
 /// name. Idempotent — safe to call repeatedly. Required before running the
 /// `mosaic-serde{serialize=true}` pipeline that produces the bytecode embedded
@@ -28,11 +88,9 @@ pub const SemaphoreType = opaque {
     pub const isAFn = c.mlirTypeIsATpuSemaphore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "semaphore";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -57,11 +115,9 @@ pub const DMASemaphoreType = opaque {
     pub const isAFn = c.mlirTypeIsATpuDMASemaphore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "dma_semaphore";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -95,6 +151,10 @@ pub const Float8EXMYType = opaque {
 
     pub fn underlyingType(self: *const Float8EXMYType) *const mlir.Type {
         return @ptrCast(c.mlirTpuFloat8EXMYTypeGetUnderlyingType(self.ptr()).ptr);
+    }
+
+    pub fn type_(self: *const Float8EXMYType) *const mlir.Type {
+        return @ptrCast(self);
     }
 };
 
@@ -146,11 +206,9 @@ pub const ReductionKindAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuReductionKind;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "reduction_kind";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -185,11 +243,9 @@ pub const ContractPrecisionAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuContractPrecision;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "contract_precision";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -223,11 +279,9 @@ pub const RoundingModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuRoundingMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "rounding_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -262,11 +316,9 @@ pub const CoreTypeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuCoreType;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "core_type";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -302,11 +354,9 @@ pub const DimensionSemanticsAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuDimensionSemantics;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "dimension_semantics";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -340,11 +390,9 @@ pub const PipelineModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuPipelineMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "pipeline_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -378,11 +426,9 @@ pub const RevisitModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuRevisitMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "revisit_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -422,11 +468,9 @@ pub const MemorySpaceAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuMemorySpace;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "memory_space";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -455,11 +499,9 @@ pub const ElementWindowAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuElementWindow;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "element_window";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -492,7 +534,7 @@ pub const ElementWindowAttr = opaque {
 };
 
 /// `#tpu.element_window<[pad_low], [pad_high]>` — per-arg window padding.
-pub fn elementWindowAttribute(
+pub fn elementWindowAttr(
     ctx: *mlir.Context,
     pad_low: []const i64,
     pad_high: []const i64,
@@ -508,11 +550,9 @@ pub const DotDimensionNumbersAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuDotDimensionNumbers;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "dot_dimension_numbers";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -633,15 +673,17 @@ pub fn reduce_index(
     });
 }
 
+pub const ScanOpts = struct {
+    mask: ?*const mlir.Value = null,
+};
+
 /// Scan the last dimension; an optional rank-one mask spans that dimension.
 pub fn scan(
     ctx: *mlir.Context,
     input: *const mlir.Value,
     kind: ReductionKind,
     result_type: *const mlir.Type,
-    opts: struct {
-        mask: ?*const mlir.Value = null,
-    },
+    opts: ScanOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 2) = .empty;
@@ -669,10 +711,10 @@ pub fn sort(
     ctx: *mlir.Context,
     keys: *const mlir.Value,
     values: *const mlir.Value,
-    opts: SortOpts,
     output_mask_type: *const mlir.Type,
     sorted_keys_type: *const mlir.Type,
     sorted_values_type: *const mlir.Type,
+    opts: SortOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
@@ -703,8 +745,8 @@ pub fn load(
     ctx: *mlir.Context,
     base: *const mlir.Value,
     indices: []const *const mlir.Value,
-    opts: LoadOpts,
     result_type: *const mlir.Type,
+    opts: LoadOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 16) = .empty;
@@ -772,8 +814,8 @@ pub fn vector_load(
     ctx: *mlir.Context,
     base: *const mlir.Value,
     indices: []const *const mlir.Value,
-    opts: VectorLoadOpts,
     result_type: *const mlir.Type,
+    opts: VectorLoadOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 17) = .empty;
@@ -887,7 +929,7 @@ pub const MatmulOpts = struct {
     precision: ?ContractPrecision = null,
     /// Optional `#tpu.dot_dimension_numbers<...>` attribute. When omitted the
     /// canonicalizer derives one. Build with `DotDimensionNumbersAttr` or
-    /// `dotDimensionNumbers`.
+    /// `dotDimensionNumbersAttr`.
     dimension_numbers: ?*const mlir.Attribute = null,
 };
 
@@ -896,8 +938,8 @@ pub fn matmul(
     lhs: *const mlir.Value,
     rhs: *const mlir.Value,
     acc: *const mlir.Value,
-    opts: MatmulOpts,
     result_type: *const mlir.Type,
+    opts: MatmulOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 5) = .empty;
@@ -921,12 +963,14 @@ pub fn matmul(
     });
 }
 
+pub const IotaOpts = struct {
+    dimensions: ?[]const i32 = null,
+};
+
 pub fn iota(
     ctx: *mlir.Context,
     result_type: *const mlir.Type,
-    opts: struct {
-        dimensions: ?[]const i32 = null,
-    },
+    opts: IotaOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
@@ -1501,7 +1545,7 @@ pub fn trace_stop(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Oper
 /// Build a `#tpu.dot_dimension_numbers<...>` attribute. Mirrors
 /// `tpu_ops.td:TPU_DotDimensionNumbersAttr`. Pass empty slices for the
 /// fields you don't use (most dot operations leave batch dims empty).
-pub fn dotDimensionNumbers(
+pub fn dotDimensionNumbersAttr(
     ctx: *mlir.Context,
     lhs_contracting: []const i64,
     rhs_contracting: []const i64,

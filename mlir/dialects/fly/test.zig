@@ -1,7 +1,19 @@
 const std = @import("std");
-const mlir = @import("mlir");
+
+const arith = @import("mlir/dialects/arith");
 const fly = @import("mlir/dialects/fly");
 const fly_rocdl = @import("mlir/dialects/fly_rocdl");
+const func = @import("mlir/dialects/func");
+const gpu = @import("mlir/dialects/gpu");
+const llvm = @import("mlir/dialects/llvm");
+const math = @import("mlir/dialects/math");
+const memref = @import("mlir/dialects/memref");
+const mlir = @import("mlir");
+const rocdl = @import("mlir/dialects/rocdl");
+const scf = @import("mlir/dialects/scf");
+const ub = @import("mlir/dialects/ub");
+const vector = @import("mlir/dialects/vector");
+
 const attributes = fly.attributes;
 const ops = fly.ops;
 const types = fly.types;
@@ -11,10 +23,6 @@ const expect = fly.expect;
 const layoutLikeShape = fly.layoutLikeShape;
 const elemType = fly.elemType;
 const ptrWithElem = fly.ptrWithElem;
-pub const dialects_needed = [_][]const u8{ "func", "arith", "scf", "math", "vector", "memref", "llvm", "gpu", "rocdl", "ub", "fly", "fly_rocdl" };
-fn insertDialects(registry: *mlir.DialectRegistry) void {
-    inline for (dialects_needed) |name| registry.registerDialect(name);
-}
 
 test {
     std.testing.refAllDecls(fly);
@@ -30,7 +38,18 @@ test {
 fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    insertDialects(registry);
+    func.registerDialect(registry);
+    arith.registerDialect(registry);
+    scf.registerDialect(registry);
+    math.registerDialect(registry);
+    vector.registerDialect(registry);
+    memref.registerDialect(registry);
+    llvm.registerDialect(registry);
+    gpu.registerDialect(registry);
+    rocdl.registerDialect(registry);
+    ub.registerDialect(registry);
+    fly.registerDialect(registry);
+    fly_rocdl.registerDialect(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;
@@ -60,7 +79,7 @@ test "every generated operation builder names a registered operation" {
     const ctx = try testContext();
     defer ctx.deinit();
 
-    for (ops.names ++ fly_rocdl.ops.names) |name| {
+    for (ops.operation_names ++ fly_rocdl.ops.operation_names) |name| {
         if (!ctx.isRegisteredOperation(name)) {
             std.debug.print("`{s}` is not registered\n", .{name});
             return error.TestUnexpectedResult;
@@ -118,13 +137,13 @@ test "types and attributes are built through the C API" {
     try std.testing.expectEqual(types.IntTupleType.Leaf{ .static = 4 }, layout.getShape().getElement(1).getLeaf());
 
     const global = try attributes.AddressSpaceAttr.get(ctx, .{ .addressSpace = .global });
-    const memref = try types.MemRefType.get(ctx, .{
+    const memref_type = try types.MemRefType.get(ctx, .{
         .elemTy = .float(ctx, .f16),
         .addressSpace = global.attribute(),
         .layout = layout.getAttr().attribute(),
     });
-    try expectPrints("!fly.memref<f16, global, (2,4):(4,1)>", memref);
-    try expectPrints("!fly.int_tuple<(2,4)>", layoutLikeShape(memref.type_()));
+    try expectPrints("!fly.memref<f16, global, (2,4):(4,1)>", memref_type);
+    try expectPrints("!fly.int_tuple<(2,4)>", layoutLikeShape(memref_type.type_()));
 
     const shared = try attributes.AddressSpaceAttr.get(ctx, .{ .addressSpace = .shared });
     const ptr = try types.PointerType.get(ctx, .{
@@ -249,4 +268,15 @@ test "structural readers" {
     const m = try mlir.Type.parse(ctx, "!fly.memref<bf16, shared, S<3,3,3> o 0 o (64,32):(32,1), align<16>>");
     try expectPrints("!fly.int_tuple<(64,32)>", layoutLikeShape(m));
     try expectPrints("bf16", elemType(m));
+}
+
+test "every bound operation is registered" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    fly.registerDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    for (fly.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    try std.testing.expect(!ctx.allowUnregisteredDialects());
 }

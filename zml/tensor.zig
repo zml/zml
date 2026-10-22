@@ -1,8 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const stablehlo = @import("mlir/dialects/stablehlo");
 const mlir = @import("mlir");
+const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 
 const Compiler = @import("Compiler.zig");
@@ -809,7 +809,7 @@ pub const Tensor = struct {
 
     pub const Rng = struct {
         _state: Tensor,
-        algorithm: stablehlo.RngAlgorithm.Type = .DEFAULT,
+        algorithm: stablehlo.RngAlgorithmAttr.Type = .DEFAULT,
 
         pub const Buffer = mem.Bufferized(Rng);
 
@@ -2951,8 +2951,8 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             Tensor.scalar(padding_value, self.dtype()).value(),
-            currentLoc(),
             .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
+            currentLoc(),
         ).appendTo(currentBlock());
 
         return _result(res_shape, pad_op.result(0));
@@ -3684,9 +3684,9 @@ pub const Tensor = struct {
     pub fn sort(self: Tensor, axis_: anytype, opts: SortOpts) SortRes {
         const a = self.axis(axis_);
         const indices = Tensor.arange(.{ .end = self.dim(a) }, .i32).broadcast(self._shape, &.{a});
-        const direction: stablehlo.ComparisonDirection.Direction = if (opts.descending) .GT else .LT;
+        const direction: stablehlo.ComparisonDirectionAttr.Direction = if (opts.descending) .GT else .LT;
         const res = ops.sort(.{ self, indices }, a, struct {
-            fn call(values: ops.SortArgs, _: ops.SortArgs, direction_: stablehlo.ComparisonDirection.Direction) Tensor {
+            fn call(values: ops.SortArgs, _: ops.SortArgs, direction_: stablehlo.ComparisonDirectionAttr.Direction) Tensor {
                 return values.left.cmp(direction_, values.right);
             }
         }.call, .{direction}, true);
@@ -4369,7 +4369,7 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the element-wise result of the given 'cmp' comparison between the two input Tensors.
-    pub fn cmp(self: Tensor, direction: stablehlo.ComparisonDirection.Direction, other: Tensor) Tensor {
+    pub fn cmp(self: Tensor, direction: stablehlo.ComparisonDirectionAttr.Direction, other: Tensor) Tensor {
         stdx.debug.assert(self.dtype() == other.dtype(), "cmp expects input tensors to be of the same type, got {t} and {t}", .{ self.dtype(), other.dtype() });
 
         if (self.rank() == 0 and other.rank() != 0) return self.broadcast(other._shape, &.{}).cmp(direction, other);
@@ -4381,7 +4381,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             other.value(),
-            stablehlo.ComparisonDirection.init(mlirCtx(), direction).getValue(),
+            stablehlo.ComparisonDirectionAttr.get(mlirCtx(), .{ .value = direction }).getValue(),
             getComparisonType(mlirCtx(), self.dtype()).getValue(),
             currentLoc(),
         ).appendTo(currentBlock());
@@ -4858,13 +4858,13 @@ fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(co
     return Shape.init(dims_arr[0..in_dims.len], dt);
 }
 
-fn getComparisonType(ctx: *mlir.Context, dtype: DataType) *const stablehlo.CompareType {
-    return .init(ctx, switch (dtype.class()) {
+fn getComparisonType(ctx: *mlir.Context, dtype: DataType) *const stablehlo.CompareTypeAttr {
+    return .get(ctx, .{ .value = switch (dtype.class()) {
         .bool => .UNSIGNED,
         .integer => if (dtype.isSignedInt()) .SIGNED else .UNSIGNED,
         .float => .FLOAT,
         .complex => @panic("Can't compare complex numbers"),
-    });
+    } });
 }
 
 test "Tensor.maxPool1d" {

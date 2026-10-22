@@ -17,5 +17,6 @@ zig_test(
     main = "test.zig",
     deps = [
         ":math",
+        "//mlir",
     ],
 )

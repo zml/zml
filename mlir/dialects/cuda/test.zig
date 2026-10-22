@@ -16,7 +16,7 @@ test {
 fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    registry.registerDialect("cuda");
+    cuda.registerDialect(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;
@@ -25,7 +25,7 @@ fn testContext() !*mlir.Context {
 test "every bound operation is registered" {
     const ctx = try testContext();
     defer ctx.deinit();
-    for (cuda.ops.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (cuda.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }
 

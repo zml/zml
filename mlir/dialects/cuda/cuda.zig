@@ -4,11 +4,16 @@
 //! kernels do not choose.
 
 const mlir = @import("mlir");
-const stdx = @import("stdx");
 
 pub const ops = @import("ops.zig");
 
 pub const dialect_namespace = ops.dialect_namespace;
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("cuda");
+}
+
+pub const operation_names = ops.operation_names;
 
 pub fn streamType(ctx: *mlir.Context) *const mlir.Type {
     return (ops.StreamType.get(ctx, .{}) catch unreachable).type_();
@@ -45,7 +50,7 @@ pub fn kernel(ctx: *mlir.Context, args: KernelArgs) *mlir.Operation {
 }
 
 pub fn return_(ctx: *mlir.Context, values: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-    return ops.@"return"(ctx, values, location);
+    return ops.return_(ctx, values, location);
 }
 
 pub fn cast(ctx: *mlir.Context, dst: *const mlir.Type, src: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {

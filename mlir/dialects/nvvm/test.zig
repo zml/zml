@@ -17,7 +17,7 @@ test "every enum attribute prints as the compiler does" {
     @setEvalBranchQuota(1_000_000);
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    mlir.DialectHandle.fromString(nvvm.ops.dialect_handle).insertDialect(registry);
+    nvvm.registerDialect(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     inline for (.{
@@ -131,7 +131,7 @@ test "every enum attribute prints as the compiler does" {
 fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    registry.registerDialect("cute_nvvm");
+    nvvm.registerDialect(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;
@@ -140,7 +140,7 @@ fn testContext() !*mlir.Context {
 test "every bound operation is registered" {
     const ctx = try testContext();
     defer ctx.deinit();
-    for (nvvm.ops.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (nvvm.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }
 

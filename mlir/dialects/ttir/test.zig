@@ -1,6 +1,10 @@
 const std = @import("std");
 
+const arith = @import("mlir/dialects/arith");
+const func = @import("mlir/dialects/func");
+const math = @import("mlir/dialects/math");
 const mlir = @import("mlir");
+const scf = @import("mlir/dialects/scf");
 const ttir = @import("mlir/dialects/ttir");
 
 test {
@@ -13,9 +17,11 @@ test "tt.func round-trip" {
 
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    inline for (.{ "func", "arith", "scf", "math", "tt" }) |d| {
-        mlir.DialectHandle.fromString(d).insertDialect(registry);
-    }
+    func.registerDialect(registry);
+    arith.registerDialect(registry);
+    scf.registerDialect(registry);
+    math.registerDialect(registry);
+    ttir.registerDialect(registry);
 
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
@@ -88,4 +94,15 @@ test "tt.func round-trip" {
     const parsed = try mlir.Module.parse(ctx, al.written());
     defer parsed.deinit();
     try std.testing.expect(parsed.operation().verify());
+}
+
+test "every bound operation is registered" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    ttir.registerDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    for (ttir.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    try std.testing.expect(!ctx.allowUnregisteredDialects());
 }

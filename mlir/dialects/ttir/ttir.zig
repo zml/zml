@@ -4,6 +4,62 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+pub const dialect_namespace = "tt";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("tt");
+}
+
+pub const operation_names: []const []const u8 = &.{
+    "tt.addptr",
+    "tt.assert",
+    "tt.atomic_cas",
+    "tt.atomic_rmw",
+    "tt.bitcast",
+    "tt.broadcast",
+    "tt.call",
+    "tt.clampf",
+    "tt.descriptor_gather",
+    "tt.descriptor_load",
+    "tt.descriptor_reduce",
+    "tt.descriptor_scatter",
+    "tt.descriptor_store",
+    "tt.dot",
+    "tt.dot_scaled",
+    "tt.elementwise_inline_asm",
+    "tt.expand_dims",
+    "tt.extern_elementwise",
+    "tt.fp_to_fp",
+    "tt.func",
+    "tt.gather",
+    "tt.get_num_programs",
+    "tt.get_program_id",
+    "tt.histogram",
+    "tt.int_to_ptr",
+    "tt.join",
+    "tt.load",
+    "tt.make_range",
+    "tt.make_tensor_descriptor",
+    "tt.map_elementwise",
+    "tt.map_elementwise.return",
+    "tt.mulhiui",
+    "tt.precise_divf",
+    "tt.precise_sqrt",
+    "tt.print",
+    "tt.ptr_to_int",
+    "tt.reduce",
+    "tt.reduce.return",
+    "tt.reshape",
+    "tt.return",
+    "tt.scan",
+    "tt.scan.return",
+    "tt.splat",
+    "tt.split",
+    "tt.store",
+    "tt.trans",
+    "tt.unsplat",
+};
+
 // =============================================================================
 // Types — !tt.ptr<T, addr_space>
 // =============================================================================
@@ -17,8 +73,13 @@ pub const PointerType = opaque {
     pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
 
-    pub fn get(pointee_type: *const mlir.Type, address_space: i32) *const PointerType {
-        return @ptrCast(c.mlirTritonPointerTypeGet(pointee_type.ptr(), address_space).ptr);
+    pub const InitArgs = struct {
+        pointee_type: *const mlir.Type,
+        address_space: i32,
+    };
+
+    pub fn get(args: InitArgs) *const PointerType {
+        return @ptrCast(c.mlirTritonPointerTypeGet(args.pointee_type.ptr(), args.address_space).ptr);
     }
 
     pub fn pointee(self: *const PointerType) *const mlir.Type {
@@ -28,11 +89,15 @@ pub const PointerType = opaque {
     pub fn addressSpace(self: *const PointerType) i32 {
         return c.mlirTritonPointerTypeGetAddressSpace(self.ptr());
     }
+
+    pub fn type_(self: *const PointerType) *const mlir.Type {
+        return @ptrCast(self);
+    }
 };
 
 /// Convenience alias: `!tt.ptr<T, addr_space>` as a plain *const mlir.Type.
 pub fn pointerType(pointee_type: *const mlir.Type, address_space: i32) *const mlir.Type {
-    return @ptrCast(PointerType.get(pointee_type, address_space));
+    return @ptrCast(PointerType.get(.{ .pointee_type = pointee_type, .address_space = address_space }));
 }
 
 // -----------------------------------------------------------------------------
@@ -48,21 +113,25 @@ pub const TensorDescType = opaque {
     pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
 
-    /// `shared_layout` may be null for an unlayout'd descriptor.
-    pub fn get(
+    pub const InitArgs = struct {
         shape: []const i64,
         element_type: *const mlir.Type,
-        opts: struct {
-            shared_layout: ?*const mlir.Attribute = null,
-        },
-    ) *const TensorDescType {
-        const attr_ptr = if (opts.shared_layout) |a| a.ptr() else c.MlirAttribute{ .ptr = null };
+        /// May be null for an unlayout'd descriptor.
+        shared_layout: ?*const mlir.Attribute = null,
+    };
+
+    pub fn get(args: InitArgs) *const TensorDescType {
+        const attr_ptr = if (args.shared_layout) |a| a.ptr() else c.MlirAttribute{ .ptr = null };
         return @ptrCast(c.mlirTritonTensorDescTypeGet(
-            @intCast(shape.len),
-            shape.ptr,
-            element_type.ptr(),
+            @intCast(args.shape.len),
+            args.shape.ptr,
+            args.element_type.ptr(),
             attr_ptr,
         ).ptr);
+    }
+
+    pub fn type_(self: *const TensorDescType) *const mlir.Type {
+        return @ptrCast(self);
     }
 };
 
@@ -73,7 +142,7 @@ pub fn tensorDescType(
         shared_layout: ?*const mlir.Attribute = null,
     },
 ) *const mlir.Type {
-    return @ptrCast(TensorDescType.get(shape, element_type, .{ .shared_layout = opts.shared_layout }));
+    return @ptrCast(TensorDescType.get(.{ .shape = shape, .element_type = element_type, .shared_layout = opts.shared_layout }));
 }
 
 // =============================================================================
@@ -89,9 +158,9 @@ pub const InputPrecision = enum(i32) { tf32 = 0, tf32x3 = 1, ieee = 2, bf16x3 = 
 
 /// Atomic read-modify-write operations.
 pub const RMWOp = enum(i32) {
-    and_ = 1,
-    or_ = 2,
-    xor_ = 3,
+    @"and" = 1,
+    @"or" = 2,
+    xor = 3,
     add = 4,
     fadd = 5,
     max = 6,
@@ -140,56 +209,56 @@ pub const DescriptorReduceKind = enum(i32) {
     max = 3,
     inc = 4,
     dec = 5,
-    and_ = 6,
-    or_ = 7,
-    xor_ = 8,
+    @"and" = 6,
+    @"or" = 7,
+    xor = 8,
 };
 
-pub fn programDim(ctx: *mlir.Context, v: ProgramIDDim) *const mlir.Attribute {
+pub fn programDimAttr(ctx: *mlir.Context, v: ProgramIDDim) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonProgramIDDimAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn cacheModifier(ctx: *mlir.Context, v: CacheModifier) *const mlir.Attribute {
+pub fn cacheModifierAttr(ctx: *mlir.Context, v: CacheModifier) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonCacheModifierAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn evictionPolicy(ctx: *mlir.Context, v: EvictionPolicy) *const mlir.Attribute {
+pub fn evictionPolicyAttr(ctx: *mlir.Context, v: EvictionPolicy) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonEvictionPolicyAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn paddingOption(ctx: *mlir.Context, v: PaddingOption) *const mlir.Attribute {
+pub fn paddingOptionAttr(ctx: *mlir.Context, v: PaddingOption) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonPaddingOptionAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn roundingMode(ctx: *mlir.Context, v: RoundingMode) *const mlir.Attribute {
+pub fn roundingModeAttr(ctx: *mlir.Context, v: RoundingMode) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonRoundingModeAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn inputPrecision(ctx: *mlir.Context, v: InputPrecision) *const mlir.Attribute {
+pub fn inputPrecisionAttr(ctx: *mlir.Context, v: InputPrecision) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonInputPrecisionAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn rmwOp(ctx: *mlir.Context, v: RMWOp) *const mlir.Attribute {
+pub fn rmwOpAttr(ctx: *mlir.Context, v: RMWOp) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonRMWOpAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn memSemantic(ctx: *mlir.Context, v: MemSemantic) *const mlir.Attribute {
+pub fn memSemanticAttr(ctx: *mlir.Context, v: MemSemantic) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonMemSemanticAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn memSyncScope(ctx: *mlir.Context, v: MemSyncScope) *const mlir.Attribute {
+pub fn memSyncScopeAttr(ctx: *mlir.Context, v: MemSyncScope) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonMemSyncScopeAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn propagateNan(ctx: *mlir.Context, v: PropagateNan) *const mlir.Attribute {
+pub fn propagateNanAttr(ctx: *mlir.Context, v: PropagateNan) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonPropagateNanAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn scaleDotElemType(ctx: *mlir.Context, v: ScaleDotElemType) *const mlir.Attribute {
+pub fn scaleDotElemTypeAttr(ctx: *mlir.Context, v: ScaleDotElemType) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonScaleDotElemTypeAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn descriptorReduceKind(ctx: *mlir.Context, v: DescriptorReduceKind) *const mlir.Attribute {
+pub fn descriptorReduceKindAttr(ctx: *mlir.Context, v: DescriptorReduceKind) *const mlir.Attribute {
     return @ptrCast(c.mlirTritonDescriptorReduceKindAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
@@ -276,7 +345,7 @@ pub fn get_program_id(ctx: *mlir.Context, axis: ProgramIDDim, location: *const m
     return .make(ctx, "tt.get_program_id", .{
         .results = .{ .flat = &.{.int(ctx, .i32)} },
         .attributes = &.{
-            .named(ctx, "axis", programDim(ctx, axis)),
+            .named(ctx, "axis", programDimAttr(ctx, axis)),
         },
         .location = location,
     });
@@ -286,7 +355,7 @@ pub fn get_num_programs(ctx: *mlir.Context, axis: ProgramIDDim, location: *const
     return .make(ctx, "tt.get_num_programs", .{
         .results = .{ .flat = &.{.int(ctx, .i32)} },
         .attributes = &.{
-            .named(ctx, "axis", programDim(ctx, axis)),
+            .named(ctx, "axis", programDimAttr(ctx, axis)),
         },
         .location = location,
     });
@@ -450,8 +519,8 @@ pub fn load(
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
             .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
-            .named(ctx, "cache", cacheModifier(ctx, cache)),
-            .named(ctx, "evict", evictionPolicy(ctx, evict)),
+            .named(ctx, "cache", cacheModifierAttr(ctx, cache)),
+            .named(ctx, "evict", evictionPolicyAttr(ctx, evict)),
             .named(ctx, "isVolatile", .boolean(ctx, is_volatile)),
         },
         .location = location,
@@ -476,8 +545,8 @@ pub fn store(
     return .make(ctx, "tt.store", .{
         .operands = .{ .flat = buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "cache", cacheModifier(ctx, cache)),
-            .named(ctx, "evict", evictionPolicy(ctx, evict)),
+            .named(ctx, "cache", cacheModifierAttr(ctx, cache)),
+            .named(ctx, "evict", evictionPolicyAttr(ctx, evict)),
         },
         .location = location,
     });
@@ -501,7 +570,7 @@ pub fn dot(
         .operands = .{ .flat = &.{ a, b, c_acc } },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "inputPrecision", inputPrecision(ctx, input_precision_)),
+            .named(ctx, "inputPrecision", inputPrecisionAttr(ctx, input_precision_)),
             .named(ctx, "maxNumImpreciseAcc", .int(ctx, .i32, max_num_imprecise_acc)),
         },
         .location = location,
@@ -602,7 +671,7 @@ pub fn fp_to_fp(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.rounding) |rm| {
-        attrs.appendAssumeCapacity(.named(ctx, "rounding", roundingMode(ctx, rm)));
+        attrs.appendAssumeCapacity(.named(ctx, "rounding", roundingModeAttr(ctx, rm)));
     }
     return .make(ctx, "tt.fp_to_fp", .{
         .operands = .{ .flat = &.{src} },
@@ -629,7 +698,7 @@ pub fn clampf(
         .operands = .{ .flat = &.{ x, min, max } },
         .results = .{ .flat = &.{x.type_()} },
         .attributes = &.{
-            .named(ctx, "propagateNan", propagateNan(ctx, propagate_nan)),
+            .named(ctx, "propagateNan", propagateNanAttr(ctx, propagate_nan)),
         },
         .location = location,
     });
@@ -850,9 +919,9 @@ pub fn atomic_rmw(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{val.type_()} },
         .attributes = &.{
-            .named(ctx, "atomic_rmw_op", rmwOp(ctx, rmw)),
-            .named(ctx, "sem", memSemantic(ctx, sem)),
-            .named(ctx, "scope", memSyncScope(ctx, scope)),
+            .named(ctx, "atomic_rmw_op", rmwOpAttr(ctx, rmw)),
+            .named(ctx, "sem", memSemanticAttr(ctx, sem)),
+            .named(ctx, "scope", memSyncScopeAttr(ctx, scope)),
         },
         .location = location,
     });
@@ -872,8 +941,8 @@ pub fn atomic_cas(
         .operands = .{ .flat = &.{ ptr_val, cmp, val } },
         .results = .{ .flat = &.{val.type_()} },
         .attributes = &.{
-            .named(ctx, "sem", memSemantic(ctx, sem)),
-            .named(ctx, "scope", memSyncScope(ctx, scope)),
+            .named(ctx, "sem", memSemanticAttr(ctx, sem)),
+            .named(ctx, "scope", memSyncScopeAttr(ctx, scope)),
         },
         .location = location,
     });
@@ -972,8 +1041,8 @@ pub fn dot_scaled(
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
             .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
-            .named(ctx, "a_elem_type", scaleDotElemType(ctx, a_elem_type)),
-            .named(ctx, "b_elem_type", scaleDotElemType(ctx, b_elem_type)),
+            .named(ctx, "a_elem_type", scaleDotElemTypeAttr(ctx, a_elem_type)),
+            .named(ctx, "b_elem_type", scaleDotElemTypeAttr(ctx, b_elem_type)),
             .named(ctx, "fastMath", .boolean(ctx, fast_math)),
             .named(ctx, "lhs_k_pack", .boolean(ctx, lhs_k_pack)),
             .named(ctx, "rhs_k_pack", .boolean(ctx, rhs_k_pack)),
@@ -1060,7 +1129,7 @@ pub fn make_tensor_descriptor(
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "padding", paddingOption(ctx, padding)),
+            .named(ctx, "padding", paddingOptionAttr(ctx, padding)),
         },
         .location = location,
     });
@@ -1082,8 +1151,8 @@ pub fn descriptor_load(
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "cache", cacheModifier(ctx, cache)),
-            .named(ctx, "evict", evictionPolicy(ctx, evict)),
+            .named(ctx, "cache", cacheModifierAttr(ctx, cache)),
+            .named(ctx, "evict", evictionPolicyAttr(ctx, evict)),
         },
         .location = location,
     });
@@ -1119,7 +1188,7 @@ pub fn descriptor_reduce(
     return .make(ctx, "tt.descriptor_reduce", .{
         .operands = .{ .flat = buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "kind", descriptorReduceKind(ctx, kind)),
+            .named(ctx, "kind", descriptorReduceKindAttr(ctx, kind)),
         },
         .location = location,
     });

@@ -67,7 +67,7 @@ operation. Do not regex the `.td` files.
 - Builders call `make` from `fly.zig`, which verifies the operation and names
   the operand types when creation fails.
 - Each file starts with a header naming the FlyDSL commit and the `.td` it
-  was generated from, and exports `names`, the list of operation names, for
+  was generated from, and exports `operation_names`, the list of operation names, for
   the registration test.
 
 Regions, successors and `VariadicOfVariadic` operands have no use in either
@@ -77,7 +77,7 @@ dialect today; when one appears, extend the generator and this file.
 
 - `zig fmt` the generated files.
 - `bazel test //mlir/dialects/fly:test //kernels/fly:test`: every name in
-  `ops.names` and `rocdl.ops.names` must be a registered operation.
+  `ops.operation_names` and `fly_rocdl.ops.operation_names` must be a registered operation.
 - Callers that no longer compile are the point of generating: an operation
   whose signature changed in FlyDSL now fails at the call site. Fix them in
   the same change (`kernels/fly/builder.zig`, `zml/*/fly_kernels`).

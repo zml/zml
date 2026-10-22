@@ -10,6 +10,113 @@ const stdx = @import("stdx");
 
 pub const dialect_namespace = "cuda_tile";
 
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("cuda_tile");
+}
+
+pub const operation_names: []const []const u8 = &.{
+    "cuda_tile.absf",
+    "cuda_tile.absi",
+    "cuda_tile.addf",
+    "cuda_tile.addi",
+    "cuda_tile.alloca",
+    "cuda_tile.andi",
+    "cuda_tile.assert",
+    "cuda_tile.assume",
+    "cuda_tile.atan2",
+    "cuda_tile.atomic_cas_tko",
+    "cuda_tile.atomic_red_view_tko",
+    "cuda_tile.atomic_rmw_tko",
+    "cuda_tile.bitcast",
+    "cuda_tile.break",
+    "cuda_tile.broadcast",
+    "cuda_tile.cat",
+    "cuda_tile.ceil",
+    "cuda_tile.cmpf",
+    "cuda_tile.cmpi",
+    "cuda_tile.constant",
+    "cuda_tile.continue",
+    "cuda_tile.cos",
+    "cuda_tile.cosh",
+    "cuda_tile.divf",
+    "cuda_tile.divi",
+    "cuda_tile.entry",
+    "cuda_tile.exp",
+    "cuda_tile.exp2",
+    "cuda_tile.exti",
+    "cuda_tile.extract",
+    "cuda_tile.floor",
+    "cuda_tile.fma",
+    "cuda_tile.for",
+    "cuda_tile.fpowf",
+    "cuda_tile.ftof",
+    "cuda_tile.ftoi",
+    "cuda_tile.get_global",
+    "cuda_tile.get_index_space_shape",
+    "cuda_tile.get_num_tile_blocks",
+    "cuda_tile.get_tensor_shape",
+    "cuda_tile.get_tile_block_id",
+    "cuda_tile.global",
+    "cuda_tile.if",
+    "cuda_tile.int_to_ptr",
+    "cuda_tile.iota",
+    "cuda_tile.itof",
+    "cuda_tile.join_tokens",
+    "cuda_tile.load_ptr_tko",
+    "cuda_tile.load_view_tko",
+    "cuda_tile.log",
+    "cuda_tile.log2",
+    "cuda_tile.loop",
+    "cuda_tile.make_gather_scatter_view",
+    "cuda_tile.make_partition_view",
+    "cuda_tile.make_strided_view",
+    "cuda_tile.make_tensor_view",
+    "cuda_tile.make_token",
+    "cuda_tile.maxf",
+    "cuda_tile.maxi",
+    "cuda_tile.minf",
+    "cuda_tile.mini",
+    "cuda_tile.mmaf",
+    "cuda_tile.mmaf_scaled",
+    "cuda_tile.mmai",
+    "cuda_tile.module",
+    "cuda_tile.mulf",
+    "cuda_tile.mulhii",
+    "cuda_tile.muli",
+    "cuda_tile.negf",
+    "cuda_tile.negi",
+    "cuda_tile.offset",
+    "cuda_tile.ori",
+    "cuda_tile.pack",
+    "cuda_tile.permute",
+    "cuda_tile.print_tko",
+    "cuda_tile.ptr_to_int",
+    "cuda_tile.ptr_to_ptr",
+    "cuda_tile.reduce",
+    "cuda_tile.remf",
+    "cuda_tile.remi",
+    "cuda_tile.reshape",
+    "cuda_tile.return",
+    "cuda_tile.rsqrt",
+    "cuda_tile.scan",
+    "cuda_tile.select",
+    "cuda_tile.shli",
+    "cuda_tile.shri",
+    "cuda_tile.sin",
+    "cuda_tile.sinh",
+    "cuda_tile.sqrt",
+    "cuda_tile.store_ptr_tko",
+    "cuda_tile.store_view_tko",
+    "cuda_tile.subf",
+    "cuda_tile.subi",
+    "cuda_tile.tan",
+    "cuda_tile.tanh",
+    "cuda_tile.trunci",
+    "cuda_tile.unpack",
+    "cuda_tile.xori",
+    "cuda_tile.yield",
+};
+
 fn stringRef(s: []const u8) c.MlirStringRef {
     return .{ .data = s.ptr, .length = s.len };
 }
@@ -41,6 +148,10 @@ pub const PointerType = opaque {
     pub fn pointee(self: *const PointerType) *const mlir.Type {
         return typeFromC(c.mlirCudaTilePointerTypeGetPointeeType(self.ptr()));
     }
+
+    pub fn type_(self: *const PointerType) *const mlir.Type {
+        return @ptrCast(self);
+    }
 };
 
 pub fn pointerType(ctx: *mlir.Context, pointee_type: *const mlir.Type) *const mlir.Type {
@@ -58,8 +169,13 @@ pub const TileType = opaque {
     pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, shape: []const i64, elem: *const mlir.Type) *const TileType {
-        return @ptrCast(typeFromC(c.mlirCudaTileTileTypeGet(ctx.ptr(), @intCast(shape.len), shape.ptr, elem.ptr())));
+    pub const InitArgs = struct {
+        shape: []const i64,
+        elem: *const mlir.Type,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) *const TileType {
+        return @ptrCast(typeFromC(c.mlirCudaTileTileTypeGet(ctx.ptr(), @intCast(args.shape.len), args.shape.ptr, args.elem.ptr())));
     }
 
     pub fn elementType(self: *const TileType) *const mlir.Type {
@@ -73,10 +189,14 @@ pub const TileType = opaque {
     pub fn dimension(self: *const TileType, i: usize) i64 {
         return c.mlirCudaTileTileTypeGetDimSize(self.ptr(), @intCast(i));
     }
+
+    pub fn type_(self: *const TileType) *const mlir.Type {
+        return @ptrCast(self);
+    }
 };
 
 pub fn tileType(ctx: *mlir.Context, shape: []const i64, elem: *const mlir.Type) *const mlir.Type {
-    return @ptrCast(TileType.get(ctx, shape, elem));
+    return @ptrCast(TileType.get(ctx, .{ .shape = shape, .elem = elem }));
 }
 
 /// `!cuda_tile.token` — the ordering token every `*_tko` op produces.
@@ -91,6 +211,10 @@ pub const TokenType = opaque {
 
     pub fn get(ctx: *mlir.Context) *const TokenType {
         return @ptrCast(typeFromC(c.mlirCudaTileTokenTypeGet(ctx.ptr())));
+    }
+
+    pub fn type_(self: *const TokenType) *const mlir.Type {
+        return @ptrCast(self);
     }
 };
 
@@ -113,10 +237,18 @@ pub const TensorViewType = opaque {
         return c.mlirCudaTileTensorViewTypeGetDynamicSize();
     }
 
-    pub fn get(ctx: *mlir.Context, elem: *const mlir.Type, shape: []const i64, strides: []const i64) *const TensorViewType {
+    pub const InitArgs = struct {
+        elem: *const mlir.Type,
+        shape: []const i64,
+        strides: []const i64,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) *const TensorViewType {
+        const shape = args.shape;
+        const strides = args.strides;
         return @ptrCast(typeFromC(c.mlirCudaTileTensorViewTypeGet(
             ctx.ptr(),
-            elem.ptr(),
+            args.elem.ptr(),
             @intCast(shape.len),
             shape.ptr,
             @intCast(strides.len),
@@ -139,10 +271,14 @@ pub const TensorViewType = opaque {
     pub fn stride(self: *const TensorViewType, i: usize) i64 {
         return c.mlirCudaTileTensorViewTypeGetStride(self.ptr(), @intCast(i));
     }
+
+    pub fn type_(self: *const TensorViewType) *const mlir.Type {
+        return @ptrCast(self);
+    }
 };
 
 pub fn tensorViewType(ctx: *mlir.Context, elem: *const mlir.Type, shape: []const i64, strides: []const i64) *const mlir.Type {
-    return @ptrCast(TensorViewType.get(ctx, elem, shape, strides));
+    return @ptrCast(TensorViewType.get(ctx, .{ .elem = elem, .shape = shape, .strides = strides }));
 }
 
 const DimMap = stdx.BoundedArray(i32, mlir.ShapedType.MAX_RANK);
@@ -171,15 +307,17 @@ pub const PartitionViewType = opaque {
 
     /// An empty `dim_map` is the identity; the type requires one entry per
     /// tile dimension.
-    pub fn get(
-        ctx: *mlir.Context,
+    pub const InitArgs = struct {
         tile_shape: []const i32,
         tensor_view: *const mlir.Type,
-        dim_map: []const i32,
-        opts: struct {
-            padding: ?PaddingValue = null,
-        },
-    ) *const PartitionViewType {
+        dim_map: []const i32 = &.{},
+        padding: ?PaddingValue = null,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) *const PartitionViewType {
+        const tile_shape = args.tile_shape;
+        const tensor_view = args.tensor_view;
+        const dim_map = args.dim_map;
         const tile_attr: *const mlir.Attribute = .denseArray(ctx, .i32, tile_shape);
         const map = identityDimMap(dim_map, tile_shape.len);
         return @ptrCast(typeFromC(c.mlirCudaTilePartitionViewTypeGet(
@@ -188,7 +326,7 @@ pub const PartitionViewType = opaque {
             tensor_view.ptr(),
             @intCast(map.len),
             map.constSlice().ptr,
-            if (opts.padding) |p| p.attribute(ctx).ptr() else null_attr,
+            if (args.padding) |p| p.attribute(ctx).ptr() else null_attr,
         )));
     }
 
@@ -203,6 +341,10 @@ pub const PartitionViewType = opaque {
     pub fn viewIndexRank(self: *const PartitionViewType) usize {
         return @intCast(c.mlirCudaTilePartitionViewTypeGetViewIndexRank(self.ptr()));
     }
+
+    pub fn type_(self: *const PartitionViewType) *const mlir.Type {
+        return @ptrCast(self);
+    }
 };
 
 /// `!cuda_tile.strided_view<tile=(...), strides=(...), ...>` (13.3).
@@ -215,16 +357,19 @@ pub const StridedViewType = opaque {
     pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
 
-    pub fn get(
-        ctx: *mlir.Context,
+    pub const InitArgs = struct {
         tile_shape: []const i32,
         traversal_strides: []const i32,
         tensor_view: *const mlir.Type,
-        dim_map: []const i32,
-        opts: struct {
-            padding: ?PaddingValue = null,
-        },
-    ) *const StridedViewType {
+        dim_map: []const i32 = &.{},
+        padding: ?PaddingValue = null,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) *const StridedViewType {
+        const tile_shape = args.tile_shape;
+        const traversal_strides = args.traversal_strides;
+        const tensor_view = args.tensor_view;
+        const dim_map = args.dim_map;
         const tile_attr: *const mlir.Attribute = .denseArray(ctx, .i32, tile_shape);
         const strides_attr: *const mlir.Attribute = .denseArray(ctx, .i32, traversal_strides);
         const map = identityDimMap(dim_map, tile_shape.len);
@@ -235,7 +380,7 @@ pub const StridedViewType = opaque {
             tensor_view.ptr(),
             @intCast(map.len),
             map.constSlice().ptr,
-            if (opts.padding) |p| p.attribute(ctx).ptr() else null_attr,
+            if (args.padding) |p| p.attribute(ctx).ptr() else null_attr,
         )));
     }
 
@@ -245,6 +390,10 @@ pub const StridedViewType = opaque {
 
     pub fn viewIndexRank(self: *const StridedViewType) usize {
         return @intCast(c.mlirCudaTileStridedViewTypeGetViewIndexRank(self.ptr()));
+    }
+
+    pub fn type_(self: *const StridedViewType) *const mlir.Type {
+        return @ptrCast(self);
     }
 };
 
@@ -256,11 +405,9 @@ pub const GatherScatterViewType = opaque {
     pub const isAFn = c.mlirTypeIsACudaTileGatherScatterView;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "gather_scatter_view";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -489,11 +636,9 @@ pub const OptimizationHintsAttr = opaque {
     pub const isAFn = c.mlirCudaTileAttributeIsAOptimizationHintsAttr;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "optimization_hints";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -529,7 +674,7 @@ fn hintDictionary(ctx: *mlir.Context, hint: anytype) *const mlir.Attribute {
 
 /// `#cuda_tile.optimization_hints` from a slice of `EntryHint`,
 /// `LoadStoreHint` or `PtrLoadStoreHint`.
-pub fn optimizationHints(ctx: *mlir.Context, hints: anytype) *const mlir.Attribute {
+pub fn optimizationHintsAttr(ctx: *mlir.Context, hints: anytype) *const mlir.Attribute {
     var entries: stdx.BoundedArray(mlir.NamedAttribute, std.meta.fieldNames(Arch).len) = .empty;
     for (hints) |h| entries.appendAssumeCapacity(.named(ctx, @tagName(h.arch), hintDictionary(ctx, h)));
     const value: *const mlir.DictionaryAttribute = @ptrCast(mlir.Attribute.dict(ctx, entries.constSlice()));
@@ -548,11 +693,9 @@ pub const DivByAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaTileDivBy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "div_by";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -584,7 +727,7 @@ pub const DivByAttr = opaque {
 };
 
 /// `along` defaults to 0 when only `every` is given.
-pub fn divBy(
+pub fn divByAttr(
     ctx: *mlir.Context,
     divisor: u64,
     opts: struct {
@@ -608,11 +751,9 @@ pub const SameElementsAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaTileSameElements;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "same_elements";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -628,7 +769,7 @@ pub const SameElementsAttr = opaque {
     }
 };
 
-pub fn sameElements(ctx: *mlir.Context, values: []const i64) *const mlir.Attribute {
+pub fn sameElementsAttr(ctx: *mlir.Context, values: []const i64) *const mlir.Attribute {
     const attr = SameElementsAttr.get(ctx, .{ .values = values }) catch unreachable;
     return attr.attribute();
 }
@@ -640,11 +781,9 @@ pub const BoundedAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaTileBounded;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "bounded";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -664,7 +803,7 @@ pub const BoundedAttr = opaque {
     }
 };
 
-pub fn bounded(
+pub fn boundedAttr(
     ctx: *mlir.Context,
     opts: struct {
         lb: ?i64 = null,
@@ -681,11 +820,11 @@ pub fn splatAttr(tile_ty: *const mlir.Type, elem_attr: *const mlir.Attribute) *c
     return attrFromC(c.mlirDenseElementsAttrSplatGet(tile_ty.ptr(), elem_attr.ptr()));
 }
 
-pub fn intElem(elem_ty: *const mlir.Type, value: i64) *const mlir.Attribute {
+pub fn intElemAttr(elem_ty: *const mlir.Type, value: i64) *const mlir.Attribute {
     return attrFromC(c.mlirIntegerAttrGet(elem_ty.ptr(), value));
 }
 
-pub fn floatElem(ctx: *mlir.Context, elem_ty: *const mlir.Type, value: f64) *const mlir.Attribute {
+pub fn floatElemAttr(ctx: *mlir.Context, elem_ty: *const mlir.Type, value: f64) *const mlir.Attribute {
     return attrFromC(c.mlirFloatAttrDoubleGet(ctx.ptr(), elem_ty.ptr(), value));
 }
 

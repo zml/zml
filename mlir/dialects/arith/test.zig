@@ -33,3 +33,14 @@ test "arith fastmath attribute is built through the C API" {
     }
     try std.testing.expectError(error.InvalidMlir, arith.FastMathAttr.get(ctx, .{ .value = .{ ._padding = 1 } }));
 }
+
+test "every bound operation is registered" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    arith.registerDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    for (arith.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    try std.testing.expect(!ctx.allowUnregisteredDialects());
+}

@@ -1,4 +1,3 @@
-const std = @import("std");
 const c = @import("c");
 const mlir = @import("mlir");
 
@@ -9,12 +8,10 @@ pub const TargetAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLTarget;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub const Options = struct {
+    pub const InitArgs = struct {
         optLevel: i32 = 2,
         triple: []const u8 = "amdgcn-amd-amdhsa",
         chip: []const u8 = "gfx900",
@@ -24,16 +21,16 @@ pub const TargetAttr = opaque {
         link: ?*const mlir.Attribute = null,
     };
 
-    pub fn get(ctx: *mlir.Context, opts: Options) mlir.Error!*const Self {
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
         return @ptrCast(c.mlirROCDLTargetAttrGet(
             ctx.ptr(),
-            opts.optLevel,
-            mlir.stringRef(opts.triple),
-            mlir.stringRef(opts.chip),
-            mlir.stringRef(opts.features),
-            mlir.stringRef(opts.abi),
-            .{ .ptr = if (opts.flags) |a| @constCast(a.ptr().ptr) else null },
-            .{ .ptr = if (opts.link) |a| @constCast(a.ptr().ptr) else null },
+            args.optLevel,
+            mlir.stringRef(args.triple),
+            mlir.stringRef(args.chip),
+            mlir.stringRef(args.features),
+            mlir.stringRef(args.abi),
+            .{ .ptr = if (args.flags) |a| @constCast(a.ptr().ptr) else null },
+            .{ .ptr = if (args.link) |a| @constCast(a.ptr().ptr) else null },
         ).ptr orelse return error.InvalidMlir);
     }
 

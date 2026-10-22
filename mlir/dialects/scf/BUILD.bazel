@@ -18,5 +18,6 @@ zig_test(
     main = "test.zig",
     deps = [
         ":scf",
+        "//mlir",
     ],
 )

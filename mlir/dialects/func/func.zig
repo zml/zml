@@ -3,6 +3,18 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+pub const dialect_namespace = "func";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("func");
+}
+
+pub const operation_names: []const []const u8 = &.{
+    "func.call",
+    "func.func",
+    "func.return",
+};
+
 const FuncOpArgs = struct {
     pub const Visibility = enum {
         public,

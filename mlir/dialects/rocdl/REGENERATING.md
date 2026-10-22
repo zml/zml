@@ -24,7 +24,7 @@ belongs to the bindings.
 
 ## What each file must contain
 
-- `ops.zig`: `names`, every operation sorted by name, and one builder
+- `ops.zig`: `operation_names`, every operation sorted by name, and one builder
   per operation named by its mnemonic with dots replaced by underscores.
   Parameters, in order: `ctx`, the operands, the result types (`<name>_type`),
   the required attributes, an `opts` struct of the optional, defaulted and unit

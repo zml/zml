@@ -1,8 +1,6 @@
 //! Zig bindings of NVIDIA's CUDA host dialect of the CuTe DSL (nvidia-cutlass-dsl 4.8.0), generated
 //! from the dialect's .td files; do not edit.
 
-const std = @import("std");
-
 const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
@@ -312,11 +310,9 @@ pub const AssumeKernelAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaAssumeKernel;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "assume_kernel_attr";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -339,11 +335,9 @@ pub const ComputeTargetAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaComputeTarget;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "compute_target";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -377,11 +371,9 @@ pub const DevMaxSharedMemoryOptinAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaDevMaxSharedMemoryOptin;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "dev_max_shared_memory_optin";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -400,11 +392,9 @@ pub const DeviceAttributesAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaDeviceAttributes;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "device_attributes";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -427,11 +417,9 @@ pub const ExecutableAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaExecutable;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "executable";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -454,11 +442,9 @@ pub const FuncAttributesAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaFuncAttributes;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "func_attributes";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -481,11 +467,9 @@ pub const ArchSetType = opaque {
     pub const isAFn = c.mlirTypeIsACudaArchSet;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "arch_set";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -504,11 +488,9 @@ pub const EventType = opaque {
     pub const isAFn = c.mlirTypeIsACudaEvent;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "event";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -527,11 +509,9 @@ pub const GraphDeviceNodeType = opaque {
     pub const isAFn = c.mlirTypeIsACudaGraphDeviceNode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "graph_device_node";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -550,11 +530,9 @@ pub const GraphExecType = opaque {
     pub const isAFn = c.mlirTypeIsACudaGraphExec;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "graph_exec";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -573,11 +551,9 @@ pub const GraphNodeType = opaque {
     pub const isAFn = c.mlirTypeIsACudaGraphNode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "graph_node";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -596,11 +572,9 @@ pub const GraphType = opaque {
     pub const isAFn = c.mlirTypeIsACudaGraph;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "graph";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -619,11 +593,9 @@ pub const IntType = opaque {
     pub const isAFn = c.mlirTypeIsACudaInt;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "int";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -642,11 +614,9 @@ pub const KernelType = opaque {
     pub const isAFn = c.mlirTypeIsACudaKernel;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "kernel";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -665,11 +635,9 @@ pub const LaunchConfigType = opaque {
     pub const isAFn = c.mlirTypeIsACudaLaunchConfig;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "launch_cfg";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -692,11 +660,9 @@ pub const LibraryType = opaque {
     pub const isAFn = c.mlirTypeIsACudaLibrary;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "library";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -715,11 +681,9 @@ pub const ModuleType = opaque {
     pub const isAFn = c.mlirTypeIsACudaModule;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "module";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -738,11 +702,9 @@ pub const ResultType = opaque {
     pub const isAFn = c.mlirTypeIsACudaResult;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "result";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -761,11 +723,9 @@ pub const RuntimeDevicePropType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeDeviceProp;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.device_prop";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -784,11 +744,9 @@ pub const RuntimeDim3Type = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeDim3;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.dim_3";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -807,11 +765,9 @@ pub const RuntimeExtentType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeExtent;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.extent";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -830,11 +786,9 @@ pub const RuntimeKernelNodeParamsType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeKernelNodeParams;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.kernel_node_params";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -853,11 +807,9 @@ pub const RuntimeLaunchAttributeValueClusterSchedulingPolicyPreferenceType = opa
     pub const isAFn = c.mlirTypeIsACudaRuntimeLaunchAttributeValueClusterSchedulingPolicyPreference;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.launch_attribute_value.cluster_scheduling_policy_preference";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -876,11 +828,9 @@ pub const RuntimeLaunchAttributeValueCooperativeType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeLaunchAttributeValueCooperative;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.launch_attribute_value.cooperative";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -899,11 +849,9 @@ pub const RuntimeLaunchAttributeValueMemSyncDomainType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeLaunchAttributeValueMemSyncDomain;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.launch_attribute_value.mem_sync_domain";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -922,11 +870,9 @@ pub const RuntimeLaunchAttributeValueNvlinkUtilCentricSchedulingType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeLaunchAttributeValueNvlinkUtilCentricScheduling;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.launch_attribute_value.nvlink_util_centric_scheduling";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -945,11 +891,9 @@ pub const RuntimeLaunchAttributeValuePortableClusterSizeModeType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeLaunchAttributeValuePortableClusterSizeMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.launch_attribute_value.portable_cluster_size_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -968,11 +912,9 @@ pub const RuntimeLaunchAttributeValuePriorityType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeLaunchAttributeValuePriority;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.launch_attribute_value.priority";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -991,11 +933,9 @@ pub const RuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowedType 
     pub const isAFn = c.mlirTypeIsACudaRuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowed;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.launch_attribute_value.programmatic_stream_serialization_allowed";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1014,11 +954,9 @@ pub const RuntimeLaunchAttributeValueSharedMemCarveoutType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeLaunchAttributeValueSharedMemCarveout;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.launch_attribute_value.shared_mem_carveout";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1037,11 +975,9 @@ pub const RuntimeLaunchAttributeValueSharedMemoryModeType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeLaunchAttributeValueSharedMemoryMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.launch_attribute_value.shared_memory_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1060,11 +996,9 @@ pub const RuntimeLaunchAttributeValueSyncPolicyType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeLaunchAttributeValueSyncPolicy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.launch_attribute_value.sync_policy";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1083,11 +1017,9 @@ pub const RuntimeMemcpy3DParamsType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeMemcpy3DParams;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.memcpy_3d_params";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1106,11 +1038,9 @@ pub const RuntimePitchedPtrType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimePitchedPtr;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.pitched_ptr";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1129,11 +1059,9 @@ pub const RuntimePosType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimePos;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.pos";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1152,11 +1080,9 @@ pub const RuntimeUuidType = opaque {
     pub const isAFn = c.mlirTypeIsACudaRuntimeUuid;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "runtime.uuid";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1175,11 +1101,9 @@ pub const StreamType = opaque {
     pub const isAFn = c.mlirTypeIsACudaStream;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "stream";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1198,11 +1122,9 @@ pub const TensorMapType = opaque {
     pub const isAFn = c.mlirTypeIsACudaTensorMap;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tensor_map";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2081,7 +2003,7 @@ pub fn result_succeeded(ctx: *mlir.Context, cuda_result: *const mlir.Value, succ
 }
 
 /// `cuda.return`. Result types are explicit; attributes use mlir.Attribute. Not verified on creation: a terminator is only one in its block.
-pub fn @"return"(ctx: *mlir.Context, inputs: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+pub fn return_(ctx: *mlir.Context, inputs: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "cuda.return", .{
         .operands = .{ .flat = inputs },
         .verify = false,

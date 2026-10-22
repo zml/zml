@@ -4,18 +4,18 @@ const func = @import("mlir/dialects/func");
 const mlir = @import("mlir");
 const shardy = @import("mlir/dialects/shardy");
 
-const ManualAxesAttribute = shardy.ManualAxesAttribute;
-const TensorShardingAttribute = shardy.TensorShardingAttribute;
-const TensorShardingPerValueAttribute = shardy.TensorShardingPerValueAttribute;
+const ManualAxesAttr = shardy.ManualAxesAttr;
+const TensorShardingAttr = shardy.TensorShardingAttr;
+const TensorShardingPerValueAttr = shardy.TensorShardingPerValueAttr;
 
 test {
     std.testing.refAllDecls(shardy);
 }
 
-test TensorShardingAttribute {
+test TensorShardingAttr {
     const registry: *mlir.DialectRegistry = try .init();
     defer registry.deinit();
-    registry.registerDialect("sdy");
+    shardy.registerDialect(registry);
     func.registerExtensions(registry);
 
     var ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
@@ -27,17 +27,17 @@ test TensorShardingAttribute {
 
     {
         defer w.clearRetainingCapacity();
-        const sharding: *const TensorShardingAttribute = .init(ctx, .{
+        const sharding: *const TensorShardingAttr = .get(ctx, .{
             .mesh = "folded_mesh",
             .dimensions = &.{.replicated(ctx)},
             .replicated_axes = &.{ .named(ctx, "link_x"), .named(ctx, "link_y") },
         });
-        try sharding.asAttr().format(&w.writer);
+        try sharding.attribute().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@folded_mesh, [{}], replicated={\"link_x\", \"link_y\"}>", w.written());
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding: *const TensorShardingAttribute = .init(ctx, .{
+        const sharding: *const TensorShardingAttr = .get(ctx, .{
             .mesh = "suggested_mesh",
             .dimensions = &.{
                 .closed(ctx, &.{.named(ctx, "link_z")}),
@@ -45,50 +45,50 @@ test TensorShardingAttribute {
             },
             .replicated_axes = &.{.named(ctx, "link_y")},
         });
-        try sharding.asAttr().format(&w.writer);
+        try sharding.attribute().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@suggested_mesh, [{\"link_z\"}, {\"link_x\"}], replicated={\"link_y\"}>", w.written());
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding: *const TensorShardingAttribute = .init(ctx, .{
+        const sharding: *const TensorShardingAttr = .get(ctx, .{
             .mesh = "fold_mesh",
             .dimensions = &.{ .closed(ctx, &.{.named(ctx, "link_x")}), .replicated(ctx) },
         });
-        try sharding.asAttr().format(&w.writer);
+        try sharding.attribute().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@fold_mesh, [{\"link_x\"}, {}]>", w.written());
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding: *const TensorShardingAttribute = .init(ctx, .{
+        const sharding: *const TensorShardingAttr = .get(ctx, .{
             .mesh = "folded_mesh",
             .dimensions = &.{.closed(ctx, &.{ .named(ctx, "link_x"), .named(ctx, "link_y") })},
         });
-        try sharding.asAttr().format(&w.writer);
+        try sharding.attribute().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@folded_mesh, [{\"link_x\", \"link_y\"}]>", w.written());
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding: *const TensorShardingAttribute = .init(ctx, .{
+        const sharding: *const TensorShardingAttr = .get(ctx, .{
             .mesh = "strategy_fold",
             .dimensions = &.{.closed(ctx, &.{.named(ctx, "link_x")})},
             .replicated_axes = &.{.named(ctx, "link_y")},
         });
-        try sharding.asAttr().format(&w.writer);
+        try sharding.attribute().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@strategy_fold, [{\"link_x\"}], replicated={\"link_y\"}>", w.written());
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding: *const TensorShardingAttribute = .init(ctx, .{
+        const sharding: *const TensorShardingAttr = .get(ctx, .{
             .mesh = "mix_mesh",
             .dimensions = &.{ .open(ctx, &.{}), .replicated(ctx) },
             .replicated_axes = &.{ .named(ctx, "link_x"), .named(ctx, "link_y") },
         });
-        try sharding.asAttr().format(&w.writer);
+        try sharding.attribute().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@mix_mesh, [{?}, {}], replicated={\"link_x\", \"link_y\"}>", w.written());
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding: *const TensorShardingAttribute = .init(ctx, .{
+        const sharding: *const TensorShardingAttr = .get(ctx, .{
             .mesh = "3d_mesh",
             .dimensions = &.{
                 .closed(ctx, &.{.named(ctx, "link_x")}),
@@ -96,39 +96,39 @@ test TensorShardingAttribute {
                 .closed(ctx, &.{.named(ctx, "link_z")}),
             },
         });
-        try sharding.asAttr().format(&w.writer);
+        try sharding.attribute().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@\"3d_mesh\", [{\"link_x\"}, {\"link_y\"}, {\"link_z\"}]>", w.written());
     }
 }
 
-test TensorShardingPerValueAttribute {
+test TensorShardingPerValueAttr {
     const registry: *mlir.DialectRegistry = try .init();
     defer registry.deinit();
-    registry.registerDialect("sdy");
+    shardy.registerDialect(registry);
     func.registerExtensions(registry);
 
     var ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
 
-    const shardings: [2]*const TensorShardingAttribute = .{
-        .init(ctx, .{
+    const shardings: [2]*const TensorShardingAttr = .{
+        .get(ctx, .{
             .mesh = "mesh",
             .dimensions = &.{.closed(ctx, &.{.named(ctx, "link_x")})},
         }),
-        .init(ctx, .{
+        .get(ctx, .{
             .mesh = "mesh",
             .dimensions = &.{.replicated(ctx)},
             .replicated_axes = &.{.named(ctx, "link_y")},
         }),
     };
 
-    const per_value = TensorShardingPerValueAttribute.init(ctx, &shardings);
+    const per_value = TensorShardingPerValueAttr.get(ctx, &shardings);
 
     var w: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer w.deinit();
 
-    try per_value.asAttr().format(&w.writer);
+    try per_value.attribute().format(&w.writer);
     try std.testing.expectEqualSlices(
         u8,
         "#sdy.sharding_per_value<[<@mesh, [{\"link_x\"}]>, <@mesh, [{}], replicated={\"link_y\"}>]>",
@@ -136,10 +136,10 @@ test TensorShardingPerValueAttribute {
     );
 }
 
-test ManualAxesAttribute {
+test ManualAxesAttr {
     const registry: *mlir.DialectRegistry = try .init();
     defer registry.deinit();
-    registry.registerDialect("sdy");
+    shardy.registerDialect(registry);
     func.registerExtensions(registry);
 
     var ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
@@ -151,7 +151,7 @@ test ManualAxesAttribute {
         .init(ctx, "link_y"),
     };
 
-    const manual_axes: *const ManualAxesAttribute = .init(ctx, &axes);
+    const manual_axes: *const ManualAxesAttr = .get(ctx, &axes);
 
     try std.testing.expectEqual(2, manual_axes.numAxes());
     try std.testing.expectEqualStrings("link_x", manual_axes.axis(0));
@@ -160,6 +160,6 @@ test ManualAxesAttribute {
     var w: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer w.deinit();
 
-    try manual_axes.asAttr().format(&w.writer);
+    try manual_axes.attribute().format(&w.writer);
     try std.testing.expectEqualSlices(u8, "#sdy<manual_axes{\"link_x\", \"link_y\"}>", w.written());
 }

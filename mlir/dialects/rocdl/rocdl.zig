@@ -41,9 +41,13 @@ pub const WMMACModifier = enums.WMMACModifier;
 pub const WMMAMatrixScale = enums.WMMAMatrixScale;
 pub const WMMAMatrixScaleFormat = enums.WMMAMatrixScaleFormat;
 
+pub const dialect_namespace = "rocdl";
+
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("rocdl");
 }
+
+pub const operation_names = ops.operation_names;
 
 /// Converts two packed FP8 values from the selected word to vector<2xf32>.
 pub fn cvtPkF32Fp8(

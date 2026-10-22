@@ -6,7 +6,7 @@ const mosaic_tpu = @import("mlir/dialects/mosaic_tpu");
 fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    registry.registerDialect("tpu");
+    mosaic_tpu.registerDialect(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;
@@ -90,7 +90,7 @@ test "matmul and reinterpret cast satisfy current required properties" {
     const lhs = args.addArgument(vector_type, loc);
     const rhs = args.addArgument(vector_type, loc);
     const acc = args.addArgument(vector_type, loc);
-    const product = mosaic_tpu.matmul(ctx, lhs, rhs, acc, .{}, vector_type, loc);
+    const product = mosaic_tpu.matmul(ctx, lhs, rhs, acc, vector_type, .{}, loc);
     defer product.deinit();
     try std.testing.expect(product.verify());
     try std.testing.expect(!product.attributeByName("transpose_lhs_hint").?.isA(mlir.BoolAttribute).?.value());
@@ -178,9 +178,9 @@ test "tpu array attributes are built through the C API" {
     try std.testing.expectEqual(2, window.getNumPadHigh());
     try std.testing.expectEqual(3, window.getPadHigh(1));
     try expectPrints("#tpu.element_window<[0, 2], [1, 3]>", window);
-    try std.testing.expect(mosaic_tpu.elementWindowAttribute(ctx, &.{ 0, 2 }, &.{ 1, 3 }).eql(window.attribute()));
+    try std.testing.expect(mosaic_tpu.elementWindowAttr(ctx, &.{ 0, 2 }, &.{ 1, 3 }).eql(window.attribute()));
 
-    const dims = mosaic_tpu.dotDimensionNumbers(ctx, &.{1}, &.{0}, &.{0}, &.{1}, &.{ 0, 0, 1, 1 }, &.{}, &.{});
+    const dims = mosaic_tpu.dotDimensionNumbersAttr(ctx, &.{1}, &.{0}, &.{0}, &.{1}, &.{ 0, 0, 1, 1 }, &.{}, &.{});
     try expectPrints("#tpu.dot_dimension_numbers<[1], [0], [0], [1], [0, 0, 1, 1], [], []>", dims);
 
     const batched = try mosaic_tpu.DotDimensionNumbersAttr.get(ctx, .{
@@ -196,4 +196,15 @@ test "tpu array attributes are built through the C API" {
     try std.testing.expectEqual(1, batched.getOutputDimOrder(3));
     try std.testing.expectEqual(0, batched.getRhsBatchDims(0));
     try expectPrints("#tpu.dot_dimension_numbers<[2], [1], [1], [], [0, 0, 0, 1], [0], [0]>", batched);
+}
+
+test "every bound operation is registered" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    mosaic_tpu.registerDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    for (mosaic_tpu.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    try std.testing.expect(!ctx.allowUnregisteredDialects());
 }

@@ -1,14 +1,13 @@
 const std = @import("std");
 
 const arith = @import("mlir/dialects/arith");
+const dsl = @import("kernels/common");
+const fly = @import("mlir/dialects/fly");
 const gpu = @import("mlir/dialects/gpu");
 const llvm = @import("mlir/dialects/llvm");
 const math = @import("mlir/dialects/math");
 const rocdl = @import("mlir/dialects/rocdl");
-const scf = @import("mlir/dialects/scf");
 const vector = @import("mlir/dialects/vector");
-const fly = @import("mlir/dialects/fly");
-const dsl = @import("kernels/common");
 const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
 const stdx = @import("stdx");
@@ -1209,7 +1208,7 @@ pub const Builder = struct {
         return self.emit(fly.ops.make_copy_atom(self.ctx, &.{}, t, .int(self.ctx, .i32, bits), self.loc()));
     }
 
-    /// `op` is an MMA op type, such as a `rocdl.MmaOpCDNA3MFMAType`.
+    /// `op` is an MMA op type, such as a `fly_rocdl.MmaOpCDNA3MFMAType`.
     pub fn mmaAtom(self: *Builder, op: *const mlir.Type) Value {
         const t = must(fly.types.MmaAtomType.get(self.ctx, .{ .mmaOp = op })).type_();
         return self.emit(fly.ops.make_mma_atom(self.ctx, t, self.loc()));

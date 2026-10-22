@@ -7,8 +7,6 @@
 const std = @import("std");
 const func = @import("mlir/dialects/func");
 const mlir = @import("mlir");
-const arith = @import("mlir/dialects/arith");
-const memref = @import("mlir/dialects/memref");
 const scf = @import("mlir/dialects/scf");
 const builder = @import("builder.zig");
 

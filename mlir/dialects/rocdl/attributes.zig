@@ -1,7 +1,6 @@
 // Generated from LLVM ROCDL TableGen records; see REGENERATING.md.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-const std = @import("std");
 const c = @import("c");
 const mlir = @import("mlir");
 const enums = @import("enums.zig");
@@ -16,16 +15,18 @@ pub const BufferOOBModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLBufferOOBMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLBufferOOBModeAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLBufferOOBModeAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLBufferOOBModeAttrGetValue(self.ptr())));
     }
 
@@ -42,16 +43,18 @@ pub const BufferOOBModeModuleFlagAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLBufferOOBModeModuleFlag;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLBufferOOBModeModuleFlagAttrGetValue(self.ptr())));
     }
 
@@ -68,16 +71,18 @@ pub const Gfx12AtomicCachePolicyAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLGfx12AtomicCachePolicy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLGfx12AtomicCachePolicyAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLGfx12AtomicCachePolicyAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLGfx12AtomicCachePolicyAttrGetValue(self.ptr())));
     }
 
@@ -94,16 +99,18 @@ pub const Gfx12CachePolicyAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLGfx12CachePolicy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLGfx12CachePolicyAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLGfx12CachePolicyAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLGfx12CachePolicyAttrGetValue(self.ptr())));
     }
 
@@ -120,16 +127,18 @@ pub const Gfx942CachePolicyAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLGfx942CachePolicy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLGfx942CachePolicyAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLGfx942CachePolicyAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLGfx942CachePolicyAttrGetValue(self.ptr())));
     }
 
@@ -146,16 +155,18 @@ pub const MFMANegModifierAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLMFMANegModifier;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLMFMANegModifierAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLMFMANegModifierAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLMFMANegModifierAttrGetValue(self.ptr())));
     }
 
@@ -172,16 +183,18 @@ pub const MFMAPermBAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLMFMAPermB;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLMFMAPermBAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLMFMAPermBAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLMFMAPermBAttrGetValue(self.ptr())));
     }
 
@@ -198,16 +211,18 @@ pub const MatrixFormatAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLMatrixFormat;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLMatrixFormatAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLMatrixFormatAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLMatrixFormatAttrGetValue(self.ptr())));
     }
 
@@ -224,16 +239,18 @@ pub const PreGfx12CachePolicyAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLPreGfx12CachePolicy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLPreGfx12CachePolicyAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLPreGfx12CachePolicyAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLPreGfx12CachePolicyAttrGetValue(self.ptr())));
     }
 
@@ -250,16 +267,18 @@ pub const SchedGroupMaskAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLSchedGroupMask;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLSchedGroupMaskAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLSchedGroupMaskAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLSchedGroupMaskAttrGetValue(self.ptr())));
     }
 
@@ -276,16 +295,18 @@ pub const TBufferOOBModeModuleFlagAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLTBufferOOBModeModuleFlag;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLTBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLTBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLTBufferOOBModeModuleFlagAttrGetValue(self.ptr())));
     }
 
@@ -302,16 +323,18 @@ pub const WMMACModifierAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLWMMACModifier;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLWMMACModifierAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLWMMACModifierAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLWMMACModifierAttrGetValue(self.ptr())));
     }
 
@@ -328,16 +351,18 @@ pub const WMMAMatrixScaleAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLWMMAMatrixScale;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLWMMAMatrixScaleAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLWMMAMatrixScaleAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLWMMAMatrixScaleAttrGetValue(self.ptr())));
     }
 
@@ -354,16 +379,18 @@ pub const WMMAMatrixScaleFormatAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAROCDLWMMAMatrixScaleFormat;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value_: Value) mlir.Error!*const Self {
-        return @ptrCast(c.mlirROCDLWMMAMatrixScaleFormatAttrGet(ctx.ptr(), @backingInt(value_)).ptr orelse return error.InvalidMlir);
+    pub const InitArgs = struct {
+        value: Value,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        return @ptrCast(c.mlirROCDLWMMAMatrixScaleFormatAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn value(self: *const Self) Value {
+    pub fn getValue(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLWMMAMatrixScaleFormatAttrGetValue(self.ptr())));
     }
 
