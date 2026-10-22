@@ -181,21 +181,14 @@ pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21Decoder3d)) void {
 }
 
 pub fn forward(self: QwenImage21Decoder3d, input_ids: zml.Tensor) zml.Tensor {
-    std.debug.print("input_ids: {f}\n", .{input_ids.shape()});
     const conved_in = self.conv_in.forward(input_ids);
-    std.debug.print("conved_in: {f}\n", .{conved_in.shape()});
     const mid = self.mid_block.forward(conved_in);
-    std.debug.print("mid: {f}\n", .{mid.shape()});
 
     var blocked = mid;
     for (self.up_blocks) |block| {
-        std.debug.print("\n", .{});
         blocked = block.forward(blocked);
-        std.debug.print("\n", .{});
     }
 
     const normed_out = self.norm_out.forward(blocked).silu();
-    std.debug.print("normed_out: {f}\n", .{normed_out.shape()});
-    std.debug.print("self.conv_out.forward(normed_out): {f}\n", .{self.conv_out.forward(normed_out).shape()});
     return self.conv_out.forward(normed_out);
 }
