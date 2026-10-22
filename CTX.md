@@ -7056,7 +7056,133 @@ Checks:
   9 skip).
 - `bazel build --config=localzml //llmd:llmd //llmd:zoo`.
 
+## Forty-second pass: block-FP8 at bind time (R9) (2026-10-22)
+
+R9 of `LOADER_API_REVIEW.md` (M3-bind-time-fp8, M3-drop-scale-guard,
+M3-dspark-unswizzled, M3-fp8-target, M3-bf16linear-bind-once; "Read this
+first" item 9). The platform's block-FP8 encoding and scale layout were
+post-passes that models opted into. Only qwen3_5 and deepseek41 called
+`normalizeBlockFp8`, so on CDNA3 every other model bound FN weights
+against FNUZ activations. The swizzle on sm_10x was a hand list that
+missed DSpark until R1's stop-gap. The scale guard (`canDoubleScale`)
+read every scale tensor at model init: 92,160 serial opens on
+Qwen3.5-MoE. On Part 3 #4 the user kept the guard, but inside the
+conversion program, per block, with no read at init.
+
+zml:
+- `Quantization.Target{ fp8, swizzled_scales }` and `Target.of(platform)`
+  are the one platform switch. `fp8` is the E4M3 encoding: FNUZ on
+  CDNA3, FN on CUDA, CDNA4 and RDNA4, null elsewhere (CPU included),
+  where block-FP8 activations stay BF16. `swizzled_scales` is set on CUDA
+  sm_10x. `quantizeInput` reads `fp8`, and nn's block128 test uses it.
+- `quantizeMxfp8`, the third copy of the switch, had no caller and is
+  gone.
+- `TensorStore.Options.quantization` (default FN, unswizzled) and
+  `View.quantization()`. The store only carries it. loader.md has one
+  paragraph.
+
+llmd (monorepo):
+- `linear.bindBlockFp8(view, scheme, weight, scales)` binds a placed
+  weight and its placed scales once. `createWeight`, the fuse paths
+  (through `fusedSource`, split out of `bindFused`) and `experts`
+  (through `stackExpert`, which returns a placed source or a tensor a
+  program lays out) call it.
+  - FN weights on an FNUZ target bind `NormalizeBlockFp8Weight` and
+    `NormalizeBlockFp8Scale`.
+  - The e8m0 scales of a matrix on a swizzling target bind
+    `swizzleBlockFp8Scale` as a Source expression. Only rank-2 grids are
+    swizzled: stacked experts keep the layout their MoE backend reads.
+  - Other schemes bind as placed.
+- main and zoo pass `.quantization = .of(platform)`. `Fixture.store()`
+  uses `.of(cpu)`; `Fixture.storeFor(target)` takes a hand-built one.
+- The guard is in the programs, per block. `NormalizeBlockFp8Weight`
+  takes the weight and its scale grid. Where a block's scale can double,
+  it keeps the FN bits. Elsewhere it re-encodes the values to FNUZ,
+  saturating at ±240. In both cases -0 becomes 0 and both FN NaNs become
+  the FNUZ NaN; the re-encode needs this too, since XLA turns -0 and 448
+  into NaN when converting to FNUZ. `NormalizeBlockFp8Scale` doubles a
+  scale where the result stays finite. Both use one bit test,
+  `canDouble`: e8m0 below 254, bf16 and f32 exponent below max-1, so NaN
+  and infinite scales do not double.
+- `expandBlocks` maps a scale grid onto its weight's blocks: 2-D blocks,
+  a partial last block, leading expert axes. `DequantizeBlockFp8` uses
+  it too. fp8_block32 is 32x32 tiles (`Scheme.accepts`), so both schemes
+  have 2-D blocks.
+- An expert stack a program lays out that would need conversion still
+  fails with `UnsupportedFp8NormalizationProgram`. The memory rule holds
+  by order: the conversion is bound before any `setMemory`, and no
+  Linear is put in host memory in llmd.
+- `bf16Linear` (deepseek41's wo_a) builds its target with `linear.view`
+  and `linear.partitionShape` and binds `DequantizeBlockFp8` once; the
+  bias comes from the new `linear.createBias`. It never calls the
+  helper, so wo_a is not swizzled.
+- Gone: `Packer.normalizeBlockFp8`, `normalizeLinearBlockFp8`,
+  `normalizeBlockFp8Tensor` and the `normalized` map;
+  `maybeSwizzleBlockFp8Scales`, `swizzleBlockFp8Scales` and
+  `UnsupportedScaleProgram`; `canDoubleScale`, its test and its io; the
+  opt-in calls in deepseek41 (`Layer.init`, `DSparkLayer.init`,
+  `DSparkDrafter.init`, `Model.init`) and qwen3_5's `Model.init`;
+  `Packer.platform`, and with it the platform argument of `Packer.init`
+  (28 call sites) and of the drafters' `Spec.init`.
+- Tests:
+  - A CPU test compiles and runs both programs on plain and stacked
+    weights with e8m0, bf16 and f32 scales, each grid with scales that
+    cannot double, NaN scales, ordinary scales and a partial block.
+    Ordinary blocks decode times scale to the FN value times scale
+    exactly; blocks that cannot double give the value clamped at ±240
+    under the unchanged scale. XLA CPU runs f8e4m3fnuz. Four deliberate
+    breakages of the programs each failed it.
+  - On a hand-built FNUZ target, `create` and `experts` (block32 and
+    block128) bind the conversion programs (7 programs) and `bf16Linear`
+    stays BF16. On a swizzling target only the e8m0 matrix scales are
+    swizzled. On the CPU's own target nothing is converted. No test calls
+    an opt-in.
+  - The swizzle test and the fused conversion test use hand-built
+    targets; the conversion test expects 2 programs.
+
+Review (workflow, refuting verifier): three findings, one defect, fixed.
+loader.md said `Target.of` gives "FN elsewhere"; it gives null off CUDA,
+CDNA3, CDNA4 and RDNA4, CPU included. The `fp8` field doc said null
+"where the platform has no FP8 GEMM", but CUDA sm_8x gets FN. Both now
+name what `of` returns.
+
+Not done:
+- Not run on a GPU. On MI300, every block-FP8 model now gets FNUZ
+  weights, and the per-block re-encode has not run on ROCm. On GB300,
+  every rank-2 e8m0 block-FP8 Linear built through create or fuse is
+  now swizzled. That includes DSpark and any deepseek41 compressor,
+  indexer, router or head projection stored as e8m0, which the old list
+  skipped. The DeepSeek checkpoint was not read to confirm which ones
+  are.
+- A hand-built target with both FNUZ and swizzled scales would run the
+  scale program over the swizzled grid, turning its zero padding into
+  1. `Target.of` never returns both; it is untested.
+- On CUDA, `quantizeInput` asks for the compute capability once per
+  block-FP8 Linear, at trace time.
+- `TensorStore.unbind`, `sourceOf`, `Source.ofBinding` and
+  `Source.rebind` have only test callers now; R10 deletes them.
+  `Packer.deinit` is empty, and its callers stay for R11.
+- `setMemory` does not reject a tensor a program computes: qwen4 may
+  move n-gram rows that a program concatenates.
+
+Checks:
+- `bazel test //zml:test` passes (332, 12 skip).
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7 (`llmd:test` 264,
+  9 skip; `weights_test` 24/24).
+- `bazel build --config=localzml //llmd:llmd //llmd:zoo`.
+- `zig fmt` on scratch copies: no diff in the changed code.
+
 ## Open work
+
+- 2026-10-22 block-FP8 at bind time (forty-second pass, zml urqymvvl and
+  monorepo sukonzkw): R9 done, and with it "Read this first" item 9.
+  `Quantization.Target.of(platform)` is the one platform switch, the
+  store carries it, and `linear.bindBlockFp8` converts or swizzles every
+  block-FP8 Linear while binding it; the scale guard is per block, in
+  the program. Not run on a GPU: MI300 accuracy (every block-FP8 model,
+  re-encoded blocks especially) and GB300 speed (the newly swizzled
+  projections, DSpark included).
 
 - 2026-10-22 the drafter joins the model's store (forty-first pass, zml
   unqksvss and monorepo vvvpmvkl): R8 done. `TensorRegistry.addRepo`
