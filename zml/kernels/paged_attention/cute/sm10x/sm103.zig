@@ -1,6 +1,6 @@
 const std = @import("std");
 const mlir = @import("mlir");
-const llvm = @import("mlir/dialects").llvm;
+const llvm = @import("mlir/dialects/llvm");
 
 const cute = @import("../../../../zml.zig").kernel.cute;
 
@@ -28,7 +28,7 @@ pub fn loadScores(b: *cute.Builder, address: cute.Value) Scores {
             "!llvm.struct<(" ++ fields ++ ")>",
         };
     };
-    const result = b.emit(llvm.inline_asm(b.ctx, asm_parts[0], &.{address.inner}, b.parseType(asm_parts[2]), .{ .constraints = asm_parts[1], .has_side_effects = true }, b.loc()));
+    const result = b.emit(llvm.inline_asm(b.ctx, asm_parts[0], &.{address.inner}, .{ .result_type = b.parseType(asm_parts[2]), .constraints = asm_parts[1], .has_side_effects = true }, b.loc()));
     var scores: Scores = undefined;
     for (0..65) |i| {
         const value = b.emit(mlir.Operation.make(b.ctx, "llvm.extractvalue", .{
