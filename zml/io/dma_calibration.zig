@@ -183,8 +183,7 @@ fn measureTransfer(
     }
     // Map one ring for the largest candidate at the fixed transfer width;
     // every candidate reuses it.
-    const calibration_source = workspace.findArena(max_total_bytes) orelse
-        try workspace.allocate(max_total_bytes);
+    const calibration_source = try workspace.allocate(max_total_bytes);
 
     var session = try Session.init(allocator, io, platform, opts.block_sizes, opts.block_parallelism);
     defer session.deinit();

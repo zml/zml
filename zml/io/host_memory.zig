@@ -297,9 +297,10 @@ const Backend = union(enum) {
     };
 };
 
-/// Host arenas owned by one direct loader. Calibration fills the initial
-/// arena set during initialization; loading reuses and grows it. Deinitialize
-/// after all transfers finish and before the platform.
+/// Host arenas owned by one direct loader. Calibration maps its ring
+/// (`allocate`); the loader then grows the set to what its load holds and
+/// cuts it into blocks, once (`carve`). Deinitialize after all transfers
+/// finish and before the platform.
 pub const Workspace = struct {
     /// Safety guard on the arenas' total host memory (pinned on the DMA
     /// targets), not an allocation target: calibration and the load's
@@ -313,6 +314,8 @@ pub const Workspace = struct {
     /// `mapped_bytes_ceiling`, or a test's own ceiling.
     max_mapped_bytes: usize,
     mapped_bytes: usize = 0,
+    /// Set by `carve`: nothing maps after it.
+    carved: bool = false,
 
     pub fn init(
         allocator: Allocator,
@@ -340,19 +343,9 @@ pub const Workspace = struct {
         self.* = undefined;
     }
 
-    /// Borrows the newest retained arena that fits, when no arena growth is running.
-    pub fn findArena(self: *const Workspace, minimum_len: usize) ?[]u8 {
-        var index = self.backend.arenaCount();
-        while (index != 0) {
-            index -= 1;
-            const arena = self.backend.arenaAt(index);
-            if (arena.len >= minimum_len) return arena;
-        }
-        return null;
-    }
-
-    /// Retains one new arena within the mapped-byte ceiling.
+    /// Retains one new arena within the mapped-byte ceiling, before `carve`.
     pub fn allocate(self: *Workspace, bytes: usize) Allocator.Error![]u8 {
+        std.debug.assert(!self.carved);
         if (bytes > self.max_mapped_bytes - self.mapped_bytes) {
             log.err("host memory allocation exceeds mapped ceiling: requested={Bi:.2}, mapped={Bi:.2}, ceiling={Bi:.2}: OutOfMemory", .{ bytes, self.mapped_bytes, self.max_mapped_bytes });
             return error.OutOfMemory;
@@ -362,8 +355,42 @@ pub const Workspace = struct {
         return allocation;
     }
 
+    /// The blocks of `block_size` the workspace can hold: those of its
+    /// retained arenas, and those the mapped ceiling still allows.
+    pub fn capacity(self: *const Workspace, block_size: usize) usize {
+        return self.usableBlocks(block_size) + (self.max_mapped_bytes - self.mapped_bytes) / block_size;
+    }
+
+    /// Maps the blocks missing below `first_blocks` as one arena, then those
+    /// missing below `total_blocks` as another, and cuts every retained arena
+    /// into blocks of `block_size`, once. The set is then complete: nothing
+    /// maps inside a load (a slab mapped there cost 146 to 230 ms of
+    /// hipHostMalloc on MI300X), and `allocate` asserts it. Arena tails
+    /// smaller than one block stay mapped and unused. Blocks are not split
+    /// per NUMA node: strict per-node pools duplicated source reserves and
+    /// constrained reads to the smallest node; placement belongs to arena
+    /// allocation. The caller owns the list, allocated with the workspace's
+    /// allocator; the workspace owns the memory.
+    pub fn carve(self: *Workspace, block_size: usize, first_blocks: usize, total_blocks: usize) Allocator.Error![]Block {
+        std.debug.assert(!self.carved and block_size != 0);
+        try self.growToBlocks(block_size, first_blocks);
+        try self.growToBlocks(block_size, total_blocks);
+        const blocks = try self.allocator.alloc(Block, self.usableBlocks(block_size));
+        var next: usize = 0;
+        for (0..self.backend.arenaCount()) |i| {
+            const arena = self.backend.arenaAt(i);
+            for (0..arena.len / block_size) |j| {
+                blocks[next] = arena[j * block_size ..][0..block_size];
+                next += 1;
+            }
+        }
+        std.debug.assert(next == blocks.len);
+        self.carved = true;
+        return blocks;
+    }
+
     /// Counts complete blocks across retained arenas; block_size must be nonzero.
-    pub fn usableBlocks(self: *const Workspace, block_size: usize) usize {
+    fn usableBlocks(self: *const Workspace, block_size: usize) usize {
         var usable: usize = 0;
         for (0..self.backend.arenaCount()) |index| usable += self.backend.arenaAt(index).len / block_size;
         return usable;
@@ -371,7 +398,7 @@ pub const Workspace = struct {
 
     /// Maps the blocks missing below `target_blocks` as one arena. Requires a
     /// nonzero block_size; the workspace has one coordinating owner.
-    pub fn growToBlocks(self: *Workspace, block_size: usize, target_blocks: usize) Allocator.Error!void {
+    fn growToBlocks(self: *Workspace, block_size: usize, target_blocks: usize) Allocator.Error!void {
         const usable_blocks = self.usableBlocks(block_size);
         const missing_blocks = target_blocks -| usable_blocks;
         if (missing_blocks == 0) return;
@@ -402,29 +429,6 @@ pub const Workspace = struct {
 };
 
 pub const Block = []u8;
-
-/// Every retained arena cut into blocks of `block_size`, once: the caller has
-/// already grown the workspace to the whole set the load may use, so nothing
-/// maps inside a load (a slab mapped there cost 146 to 230 ms of
-/// hipHostMalloc on MI300X). Arena tails smaller than one block stay mapped
-/// and unused. Blocks are not split per NUMA node: strict per-node pools
-/// duplicated source reserves and constrained reads to the smallest node;
-/// placement belongs to arena allocation. The caller owns the list, the
-/// workspace the memory.
-pub fn carveBlocks(allocator: Allocator, workspace: *const Workspace, block_size: usize) Allocator.Error![]Block {
-    std.debug.assert(block_size != 0);
-    const blocks = try allocator.alloc(Block, workspace.usableBlocks(block_size));
-    var next: usize = 0;
-    for (0..workspace.backend.arenaCount()) |i| {
-        const arena = workspace.backend.arenaAt(i);
-        for (0..arena.len / block_size) |j| {
-            blocks[next] = arena[j * block_size ..][0..block_size];
-            next += 1;
-        }
-    }
-    std.debug.assert(next == blocks.len);
-    return blocks;
-}
 
 /// PJRT is the sole owner of these hipHostMalloc-backed bytes. Never DmaMap
 /// or DmaUnmap the borrowed pointer: unregistering allocation-owned memory
@@ -561,17 +565,39 @@ test "parseNodeList accepts kernel node lists" {
     try std.testing.expectEqual(@as(u64, 0b1), parseNodeList("0,64"));
 }
 
-test "Workspace finds retained arenas behind newer smaller allocations" {
-    var workspace = try Workspace.initForTesting(std.testing.allocator, std.testing.io, 256);
+test "Workspace capacity counts retained arenas and the room under the ceiling, which carve maps" {
+    const allocator = std.testing.allocator;
+    var workspace = try Workspace.initForTesting(allocator, std.testing.io, 256);
     defer workspace.deinit();
 
-    try std.testing.expect(workspace.findArena(1) == null);
-    const large = try workspace.allocate(128);
-    const small = try workspace.allocate(64);
-    try std.testing.expectEqual(@intFromPtr(large.ptr), @intFromPtr(workspace.findArena(100).?.ptr));
-    try std.testing.expectEqual(@intFromPtr(small.ptr), @intFromPtr(workspace.findArena(32).?.ptr));
-    try std.testing.expect(workspace.findArena(129) == null);
+    try std.testing.expectEqual(@as(usize, 4), workspace.capacity(64));
+    _ = try workspace.allocate(128);
+    _ = try workspace.allocate(64);
     try std.testing.expectEqual(@as(usize, 192), workspace.mapped_bytes);
+    // Whole blocks only: the arenas hold one block of 100 bytes, and the 64
+    // bytes left under the ceiling none.
+    try std.testing.expectEqual(@as(usize, 1), workspace.capacity(100));
+    try std.testing.expectEqual(@as(usize, 4), workspace.capacity(64));
+    // The first step is already mapped; the second maps the last block.
+    const blocks = try workspace.carve(64, 3, 4);
+    defer allocator.free(blocks);
+    try std.testing.expectEqual(@as(usize, 4), blocks.len);
+    try std.testing.expectEqual(@as(usize, 256), workspace.mapped_bytes);
+    try std.testing.expectEqual(@as(usize, 3), workspace.backend.arenaCount());
+    try std.testing.expect(workspace.carved);
+}
+
+test "Workspace carve maps the first blocks as their own arena, then the rest" {
+    const allocator = std.testing.allocator;
+    var workspace = try Workspace.initForTesting(allocator, std.testing.io, 256);
+    defer workspace.deinit();
+
+    const blocks = try workspace.carve(64, 2, 4);
+    defer allocator.free(blocks);
+    try std.testing.expectEqual(@as(usize, 4), blocks.len);
+    try std.testing.expectEqual(@as(usize, 2), workspace.backend.arenaCount());
+    try std.testing.expectEqual(@as(usize, 128), workspace.backend.arenaAt(0).len);
+    try std.testing.expectEqual(@as(usize, 128), workspace.backend.arenaAt(1).len);
 }
 
 test "Workspace arena ownership cleans up allocation failures" {
@@ -585,7 +611,7 @@ test "Workspace arena ownership cleans up allocation failures" {
             try std.testing.expectEqual(@as(usize, 192), workspace.mapped_bytes);
             try std.testing.expectError(error.OutOfMemory, workspace.allocate(128));
             try std.testing.expectEqual(@as(usize, 192), workspace.mapped_bytes);
-            try std.testing.expectEqual(@as(usize, 128), workspace.findArena(100).?.len);
+            try std.testing.expectEqual(@as(usize, 2), workspace.backend.arenaCount());
             try std.testing.expectEqual(@as(usize, 3), workspace.usableBlocks(64));
             try workspace.growToBlocks(64, 4);
             try std.testing.expectEqual(@as(usize, 256), workspace.mapped_bytes);
@@ -623,7 +649,7 @@ test "blocks are carved from retained arenas of unequal size, tails left out" {
     _ = try workspace.allocate(127);
     _ = try workspace.allocate(127);
 
-    const blocks = try carveBlocks(allocator, &workspace, 64);
+    const blocks = try workspace.carve(64, 0, 0);
     defer allocator.free(blocks);
     // Two blocks from the first arena, one from each of the others.
     try std.testing.expectEqual(@as(usize, 6), blocks.len);

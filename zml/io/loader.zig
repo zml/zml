@@ -1110,9 +1110,9 @@ fn backendOptions(io: std.Io, opts: Loader.Options) error{InvalidOptions}!backen
         }
     }
     // A source request is the larger of the read chunk and the block
-    // calibration selected, and a whole number of blocks (direct `Sizing`).
-    // Checked for every block it may select: a candidate, or on CPU the
-    // default.
+    // calibration selected, and a whole number of blocks (the direct
+    // `Loader.create`). Checked for every block it may select: a
+    // candidate, or on CPU the default.
     for ([_][]const usize{ opts.dma_block_sizes, &.{dma_calibration.Result.default.block_size} }) |block_sizes| {
         for (block_sizes) |block_size| {
             if (@max(profile.read_chunk_size, block_size) % block_size != 0) {
