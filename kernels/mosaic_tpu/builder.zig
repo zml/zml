@@ -836,8 +836,6 @@ pub const Builder = struct {
             // Body is empty at declare time — verify only at `finish`.
             .verify = false,
             .extra_attributes = extra_attrs.constSlice(),
-            // sym_visibility omitted — defaults to public, elided when unset.
-            .visibility = null,
         });
         _ = func_op.appendTo(self.module.body());
 
@@ -2276,7 +2274,6 @@ pub const Builder = struct {
                 .results = result_types,
                 .block = block,
                 .location = unknown_loc,
-                .visibility = null,
                 .verify = false,
                 .extra_attributes = extra_attrs.constSlice(),
             });

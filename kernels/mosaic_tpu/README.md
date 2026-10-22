@@ -130,7 +130,7 @@ windows) can be runtime values from a config.
 > Kernel re-exports — `MyKernel.Kernel.Config`, `.Inputs`, `.Outputs`,
 > `.Results`, `.CallOpts`).
 >
-> Single-kernel files (e.g. `zml/attention/mosaic_tpu_kernels/ragged_attention.zig`)
+> Single-kernel files (e.g. `zml/kernels/paged_attention/mosaic_tpu/ragged_attention.zig`)
 > can skip the wrapper and put `pub const Cfg` / `pub const Kernel` at
 > module scope directly — the wrapper is just convenient when several
 > kernels share a file.

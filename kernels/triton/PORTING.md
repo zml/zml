@@ -85,7 +85,7 @@ function.
 
 ### Step 1.2 — Sketch the Zig declaration
 
-Inside `zml/moe/triton_kernels.zig` or `zml/attention/triton_kernels.zig`
+Inside `zml/kernels/moe/triton/` or `zml/kernels/paged_attention/triton/`
 (or whichever production file fits), add:
 
 ```zig
@@ -699,7 +699,7 @@ If a divergence resists all the standard fixes:
 3. **Verify the Python override args match the Zig config.** Mismatched
    constexpr values (e.g. `BLOCK_SIZE=64` in Zig vs `1024` auto-default
    in Python) generate completely different IR.
-4. **Compare against `zml/moe/triton_kernels.zig` MoE kernels** — they
+4. **Compare against the `zml/kernels/moe/triton/` MoE kernels** — they
    went through this loop and are reasonable references for the patterns
    above.
 

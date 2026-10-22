@@ -97,8 +97,8 @@ runtime must agree on the dialect version. FlyDSL HEAD may differ from both.
 
 ## Model kernels
 
-The [MoE kernels](../../zml/moe/fly_kernels/) include native routing and
-MXFP4 GEMV/MFMA implementations. The
-[sparse MLA kernel](../../zml/attention/fly_kernels/sparse_mla.zig) uses SSA
+The [MoE kernels](../../zml/kernels/moe/fly/) include native routing and
+MXFP4 GEMV/MFMA implementations. llmd's sparse MLA kernel
+(`llmd/kernels/mla/fly/sparse_mla.zig`, downstream) uses SSA
 matrix accumulators through attention loops. These are examples of the
 builder APIs with model tensor layouts and launch wrappers.

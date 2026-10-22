@@ -758,7 +758,6 @@ pub const Builder = struct {
                 .args_attributes = if (any_arg_attr) arg_attrs else null,
                 .results = &.{},
                 .location = self.loc(),
-                .visibility = null,
                 .verify = false,
                 .extra_attributes = &.{
                     .named(ctx, "cute.kernel", .unit(ctx)),
@@ -782,7 +781,6 @@ pub const Builder = struct {
                 .args_attributes = if (any_arg_attr) arg_attrs else null,
                 .results = &.{.int(ctx, .i32)},
                 .location = self.loc(),
-                .visibility = null,
                 .verify = false,
                 .extra_attributes = &.{.named(ctx, "llvm.emit_c_interface", .unit(ctx))},
             }),

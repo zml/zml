@@ -2,10 +2,11 @@
 //! 1941889400621f1fc3d8f03bada1a4e7380cdf7e; do not edit, see ../fly/REGENERATING.md.
 //!
 //! Builders take the operands, then the result types (only for operations
-//! that do not infer them), then the attributes, then the location.
-//! Parameters are the ODS names in snake case, with a trailing underscore
-//! where needed. Pass `null` for absent optional operands or attributes and
-//! `&.{}` for empty variadic ones; variable-length operand groups of
+//! that do not infer them), then the required attributes, then an `opts`
+//! struct of optional operands and attributes (pass `.{}` to omit them), then
+//! the location. Parameters are the ODS names in snake case, with a trailing
+//! underscore where needed. Pass `&.{}` for empty variadic operands;
+//! variable-length operand groups of
 //! `AttrSizedOperandSegments` operations get their segment sizes from
 //! `Operation.make`. Attributes use `mlir.Attribute`.
 

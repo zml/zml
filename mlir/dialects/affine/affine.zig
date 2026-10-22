@@ -292,7 +292,7 @@ pub fn vector_store(
 
 pub const ParallelArgs = struct {
     /// Per-loop-dim reductions, one entry per result. Use the same kinds as
-    /// `mlir.dialects.memref.AtomicRMWKind` (the dialect uses
+    /// `AtomicRMWKind` in `mlir/dialects/memref` (the dialect uses
     /// `arith::AtomicRMWKind`). Pass `&.{}` for parallel loops with no
     /// loop-carried reductions.
     reductions: []const i64 = &.{},

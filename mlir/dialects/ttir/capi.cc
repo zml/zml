@@ -10,8 +10,9 @@
 
 // Note: the second arg `tt` controls the generated symbol name
 // `mlirGetDialectHandle__tt__`, which `mlir.DialectHandle.fromString("tt")` on
-// the Zig side resolves at comptime (see mlir/mlir.zig:696-698). Must match the
-// dialect's declared name (`let name = "tt"` in TritonDialect.td).
+// the Zig side resolves at comptime (see `DialectHandle.fromString` in
+// mlir/mlir.zig). Must match the dialect's declared name (`let name = "tt"` in
+// TritonDialect.td).
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Triton, tt, mlir::triton::TritonDialect)
 
 using mlir::cast;
