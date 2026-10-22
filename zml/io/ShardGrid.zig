@@ -52,7 +52,7 @@ box_count: usize,
 /// The canonical device indices holding each box.
 writers: [max_boxes]u64 = @splat(0),
 
-/// `shape`'s sharding must name a mesh (`backend.placedShape`): its
+/// `shape`'s sharding must name a mesh (`Platform.placedShape`): its
 /// devices, in canonical order, are the writers the masks index.
 pub fn init(shape: Shape) InitError!ShardGrid {
     const placement: Sharding.Placement = try .init(shape);

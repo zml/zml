@@ -8,7 +8,6 @@ const Platform = @import("../platform.zig").Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const constants = @import("../constants.zig");
-const TensorStore = @import("TensorStore.zig");
 const buffered_loader = @import("buffered_loader.zig");
 const direct_loader = @import("direct_loader.zig");
 const dma_calibration = @import("dma_calibration.zig");
@@ -46,12 +45,13 @@ pub const Options = struct {
 };
 
 /// One destination, its caller-owned output and the source ranges that fill
-/// it. A backend copies each spec and its parts during submission; the
-/// sources and the output stay alive until await.
+/// it, as the front end checked them (`checkParts`): backends trust them. A
+/// backend copies each spec, its parts and their dimensions during
+/// submission; the sources and the output stay alive until await.
 pub const LoadSpec = struct {
     /// The destination's global shape, which the output buffer keeps. Its
     /// sharding places the bytes on the devices; a shape without a mesh is
-    /// replicated over every device (`placedShape`).
+    /// replicated over every device (`Platform.placedShape`).
     shape: Shape,
     /// The memory space of each device that receives the bytes, from the
     /// source's `TensorStore` binding. The front end only submits kinds
@@ -61,13 +61,8 @@ pub const LoadSpec = struct {
     /// before: a failure leaves it as it was or holding those buffers.
     output: *Buffer,
     /// What fills the destination's logical bytes, in ascending, disjoint
-    /// destination order (`checkParts`): one whole source for a plain
-    /// tensor, one range per source for a composite one.
+    /// destination order; every byte no part covers is zero.
     parts: []const LoadPart,
-    /// Whether bytes no part covers are zero. Without it the parts must
-    /// cover every byte, so a source of the wrong size is
-    /// `error.SourceSizeMismatch`, not a silently padded tensor.
-    zero_fill: bool = false,
 };
 
 /// `width` bytes of `source` from `src_offset` (relative to the tensor's
@@ -83,7 +78,14 @@ pub const LoadPart = struct {
     /// Outermost first; empty for one contiguous run.
     dims: []const Dim = &.{},
 
-    pub const Dim = TensorStore.Part.Dim;
+    /// A step of the part's runs: `count` of them, each moving the source
+    /// and destination offsets by their strides. A zero `src_stride`
+    /// repeats the same bytes.
+    pub const Dim = struct {
+        count: u64,
+        src_stride: u64,
+        dst_stride: u64,
+    };
 
     /// The whole of `source`, at the start of the destination.
     pub fn whole(source: *const safetensors.Tensor) LoadPart {
@@ -198,12 +200,6 @@ pub const Lattice = struct {
             if (self.at(middle).dst >= offset) high = middle else low = middle + 1;
         }
         return low;
-    }
-
-    /// Whether a run has a byte in the destination range `[start, end)`.
-    pub fn hasRunIn(self: Lattice, start: u64, end: u64) bool {
-        const first = self.firstEndingAfter(start);
-        return first < self.runs() and self.at(first).dst < end;
     }
 
     /// The destination bytes of the runs inside `[start, end)`.
@@ -335,239 +331,58 @@ pub const Lattice = struct {
     }
 };
 
-pub const PartsError = error{ SourceSizeMismatch, InvalidLayout, UnsupportedLayout };
-
-/// What both backends rely on from a spec's parts: there is at least one,
-/// each is non-empty and inside its source, they come in ascending
-/// destination order without overlapping, and they stay inside the
-/// destination's `destination_bytes`. Without `zero_fill` they must cover
-/// every destination byte; a plain tensor whose source is larger or smaller
-/// than its shape fails there, with `SourceSizeMismatch`. Strided parts must
-/// land in index order (`Lattice.dstOrdered`). Where many of them
-/// interleave, their runs are listed and sorted when there are few enough
-/// (`allocator` holds them while checking); otherwise two interleaved
-/// parts are proven disjoint only when they repeat with the same strides
-/// (`overlaps`), other pairs are `UnsupportedLayout`. Every other violation
-/// is `InvalidLayout`.
-pub fn checkParts(allocator: std.mem.Allocator, parts: []const LoadPart, destination_bytes: u64, zero_fill: bool) PartsError!void {
-    if (parts.len == 0) return error.InvalidLayout;
+/// Whether `parts` keep the `LoadSpec` contract for a destination of
+/// `destination_bytes`: there is at least one, each is non-empty and inside
+/// its source and the destination, and they come in ascending destination
+/// order, contiguous ones without overlapping. Strided parts must land in
+/// index order (`Lattice.dstOrdered`); interleaving ones are not checked
+/// against each other, since only `Source` makes them, disjoint by
+/// construction.
+pub fn checkParts(parts: []const LoadPart, destination_bytes: u64) bool {
+    if (parts.len == 0) return false;
     for (parts) |part| {
-        if (part.dims.len != 0) return checkStridedParts(allocator, parts, destination_bytes, zero_fill);
+        if (part.dims.len != 0) return checkStridedParts(parts, destination_bytes);
     }
     var end: u64 = 0;
-    var covered: u64 = 0;
     for (parts) |part| {
-        const source_end = std.math.add(u64, part.src_offset, part.width) catch return error.InvalidLayout;
-        const part_end = std.math.add(u64, part.dst_offset, part.width) catch return error.InvalidLayout;
-        if (part.width == 0 or source_end > part.source.byteSize() or part.dst_offset < end) return error.InvalidLayout;
-        end = part_end;
-        covered += part.width;
+        const source_end = std.math.add(u64, part.src_offset, part.width) catch return false;
+        if (part.width == 0 or source_end > part.source.byteSize() or part.dst_offset < end) return false;
+        end = std.math.add(u64, part.dst_offset, part.width) catch return false;
     }
-    if (!zero_fill and covered != destination_bytes) return error.SourceSizeMismatch;
-    if (end > destination_bytes) return error.InvalidLayout;
+    return end <= destination_bytes;
 }
 
-fn checkStridedParts(allocator: std.mem.Allocator, parts: []const LoadPart, destination_bytes: u64, zero_fill: bool) PartsError!void {
+fn checkStridedParts(parts: []const LoadPart, destination_bytes: u64) bool {
     var covered: u64 = 0;
     var previous_start: u64 = 0;
     for (parts) |part| {
         const lattice = part.lattice();
-        if (part.width == 0 or part.dims.len > max_part_dims or !lattice.dstOrdered()) return error.InvalidLayout;
-        const spans = lattice.spans() orelse return error.InvalidLayout;
-        const source_end = std.math.add(u64, part.src_offset, spans.src) catch return error.InvalidLayout;
-        const part_end = std.math.add(u64, part.dst_offset, spans.dst) catch return error.InvalidLayout;
-        if (source_end > part.source.byteSize() or part_end > destination_bytes or part.dst_offset < previous_start) return error.InvalidLayout;
+        if (part.width == 0 or part.dims.len > max_part_dims or !lattice.dstOrdered()) return false;
+        const spans = lattice.spans() orelse return false;
+        const source_end = std.math.add(u64, part.src_offset, spans.src) catch return false;
+        const part_end = std.math.add(u64, part.dst_offset, spans.dst) catch return false;
+        if (source_end > part.source.byteSize() or part_end > destination_bytes or part.dst_offset < previous_start) return false;
         previous_start = part.dst_offset;
         covered += lattice.runs() * part.width;
     }
-    if (covered > destination_bytes) return error.InvalidLayout;
-    if (!zero_fill and covered != destination_bytes) return error.SourceSizeMismatch;
-    // Parts are sorted by their first byte; a part's bytes stay before its
-    // span's end, so only parts of one cluster, whose spans meet, can
-    // overlap.
-    var start: usize = 0;
-    while (start < parts.len) {
-        var end = parts[start].dst_offset + parts[start].lattice().spans().?.dst;
-        var runs = parts[start].lattice().runs();
-        var stop = start + 1;
-        while (stop < parts.len and parts[stop].dst_offset < end) : (stop += 1) {
-            end = @max(end, parts[stop].dst_offset + parts[stop].lattice().spans().?.dst);
-            runs += parts[stop].lattice().runs();
-        }
-        try checkCluster(allocator, parts[start..stop], runs);
-        start = stop;
-    }
+    return covered <= destination_bytes;
 }
 
-/// The most runs `checkCluster` lists to sort them.
-const max_listed_runs = 1 << 21;
-
-/// Whether the parts of a cluster, `runs` runs in all, are disjoint. A few
-/// parts (an interleave of members) are checked pair by pair; many that
-/// interleave (a swizzle of a column-sharded grid, each part spanning the
-/// tensor) would make that quadratic, so their runs are sorted instead when
-/// they are few enough to list.
-fn checkCluster(allocator: std.mem.Allocator, cluster: []const LoadPart, runs: u64) PartsError!void {
-    if (cluster.len < 2) return;
-    const Range = struct { start: u64, end: u64 };
-    if (cluster.len > 8 and runs <= max_listed_runs) {
-        if (allocator.alloc(Range, @intCast(runs))) |ranges| {
-            defer allocator.free(ranges);
-            var count: usize = 0;
-            for (cluster) |part| {
-                var cursor: Lattice.Cursor = .init(part.lattice(), 0, part.lattice().runs());
-                while (cursor.next()) |run| {
-                    ranges[count] = .{ .start = run.dst, .end = run.dst + part.width };
-                    count += 1;
-                }
-            }
-            std.mem.sort(Range, ranges, {}, struct {
-                fn lessThan(_: void, lhs: Range, rhs: Range) bool {
-                    return lhs.start < rhs.start;
-                }
-            }.lessThan);
-            for (ranges[1..], ranges[0 .. ranges.len - 1]) |range, previous| {
-                if (range.start < previous.end) return error.InvalidLayout;
-            }
-            return;
-        } else |_| {}
-    }
-    for (cluster, 0..) |part, index| {
-        const end = part.dst_offset + part.lattice().spans().?.dst;
-        for (cluster[index + 1 ..]) |other| {
-            if (other.dst_offset >= end) break;
-            if (try overlaps(part, other)) return error.InvalidLayout;
-        }
-    }
-}
-
-/// Whether two strided parts share a destination byte. Exact when one has
-/// few runs: each is looked for among the other's (`Lattice.hasRunIn`).
-/// Otherwise exact when they repeat with the same strides once their
-/// touching runs are merged, or else as they are (`Footprint.overlaps`);
-/// any other pair is `UnsupportedLayout`.
-fn overlaps(part: LoadPart, other: LoadPart) error{UnsupportedLayout}!bool {
-    const few = 1024;
-    for ([2]LoadPart{ part, other }, [2]LoadPart{ other, part }) |a, b| {
-        const footprint: Footprint = .of(a, true);
-        if (footprint.lattice().runs() > few) continue;
-        const against: Footprint = .of(b, true);
-        var cursor: Lattice.Cursor = .init(footprint.lattice(), 0, footprint.lattice().runs());
-        while (cursor.next()) |run| {
-            if (against.lattice().hasRunIn(run.dst, run.dst + footprint.width)) return true;
-        }
-        return false;
-    }
-    const merged = Footprint.of(part, true).overlaps(Footprint.of(other, true)) catch null;
-    return merged orelse Footprint.of(part, false).overlaps(Footprint.of(other, false));
-}
-
-/// A part's destination bytes alone, its dimensions of one step dropped,
-/// and, when `merge`, those whose runs touch merged into wider runs.
-const Footprint = struct {
-    start: u64,
-    width: u64,
-    dims: [max_part_dims]LoadPart.Dim = undefined,
-    len: usize = 0,
-
-    fn of(part: LoadPart, merge: bool) Footprint {
-        var footprint: Footprint = .{ .start = part.dst_offset, .width = part.width };
-        var d = part.dims.len;
-        while (d > 0) {
-            d -= 1;
-            const dim = part.dims[d];
-            if (dim.count < 2) continue;
-            if (!merge) {
-                footprint.dims[footprint.len] = .{ .count = dim.count, .src_stride = 0, .dst_stride = dim.dst_stride };
-                footprint.len += 1;
-                continue;
-            }
-            if (footprint.len == 0 and dim.dst_stride == footprint.width) {
-                footprint.width *= dim.count;
-                continue;
-            }
-            if (footprint.len != 0) {
-                const inner = &footprint.dims[footprint.len - 1];
-                if (dim.dst_stride == inner.count * inner.dst_stride) {
-                    inner.count *= dim.count;
-                    continue;
-                }
-            }
-            footprint.dims[footprint.len] = .{ .count = dim.count, .src_stride = 0, .dst_stride = dim.dst_stride };
-            footprint.len += 1;
-        }
-        std.mem.reverse(LoadPart.Dim, footprint.dims[0..footprint.len]);
-        return footprint;
-    }
-
-    fn lattice(self: *const Footprint) Lattice {
-        return .{ .src_offset = 0, .dst_offset = self.start, .width = self.width, .dims = self.dims[0..self.len] };
-    }
-
-    /// Whether some byte is in both: exact for a contiguous footprint
-    /// against any, and for two that repeat with the same strides, counts
-    /// and widths aside (an interleave of members, however many dimensions
-    /// it has).
-    fn overlaps(self: Footprint, other: Footprint) error{UnsupportedLayout}!bool {
-        if (self.len == 0) return other.lattice().hasRunIn(self.start, self.start + self.width);
-        if (other.len == 0) return self.lattice().hasRunIn(other.start, other.start + other.width);
-        if (self.len != other.len) return error.UnsupportedLayout;
-        for (self.dims[0..self.len], other.dims[0..other.len]) |a, b| {
-            if (a.dst_stride != b.dst_stride) return error.UnsupportedLayout;
-        }
-        // Run i of self and run j of other overlap when the gap between
-        // their starts, diff + sum((j - i) * stride), lies in
-        // (-other.width, self.width). Each difference m = j - i lies in
-        // (-n_self, n_other) on its dimension, any of which some i and j
-        // give, so the search is for such an m.
-        var search: OverlapSearch = .{ .self = &self, .other = &other };
-        const diff: i128 = @as(i128, other.start) - @as(i128, self.start);
-        return search.find(0, -@as(i128, other.width) - diff, @as(i128, self.width) - diff);
-    }
-
-    /// A depth-first search for steps `m` with `sum(m * stride)` in an open
-    /// interval, outermost dimension first. The dimensions are ordered
-    /// (`Lattice.dstOrdered`), so the inner ones reach less than a stride
-    /// of the outer one and each level has few candidates; the search gives
-    /// up past `budget` of them.
-    const OverlapSearch = struct {
-        self: *const Footprint,
-        other: *const Footprint,
-        budget: u32 = 1 << 16,
-
-        fn find(search: *OverlapSearch, d: usize, low: i128, high: i128) error{UnsupportedLayout}!bool {
-            const len = search.self.len;
-            if (d == len) return low < 0 and 0 < high;
-            // What dimensions d + 1 on can add, below and above zero.
-            var below: i128 = 0;
-            var above: i128 = 0;
-            for (d + 1..len) |k| {
-                const stride: i128 = search.self.dims[k].dst_stride;
-                below += (@as(i128, search.self.dims[k].count) - 1) * stride;
-                above += (@as(i128, search.other.dims[k].count) - 1) * stride;
-            }
-            const stride: i128 = search.self.dims[d].dst_stride;
-            const first = @max(1 - @as(i128, search.self.dims[d].count), (std.math.divFloor(i128, low - above, stride) catch unreachable) + 1);
-            const last = @min(@as(i128, search.other.dims[d].count) - 1, (std.math.divCeil(i128, high + below, stride) catch unreachable) - 1);
-            var m = first;
-            while (m <= last) : (m += 1) {
-                if (search.budget == 0) return error.UnsupportedLayout;
-                search.budget -= 1;
-                if (try search.find(d + 1, low - m * stride, high - m * stride)) return true;
-            }
-            return false;
-        }
+/// Whether `platform` loads through the direct backend. Transfer-manager
+/// support and host pinning are independent. CPU implements byte-range
+/// transfers from ordinary pages but not DmaMap, so it can share coalescing
+/// and bounded blocks without DMA support. The whole-tensor buffered path
+/// lacked those benefits: on one B70, interleaved HF Qwen3.5-4B loads took
+/// 10.9/16.3 s direct versus 48.3/47.6 s buffered; coalescing reduced
+/// roughly 900 source calls to 278. Both coalescing and blind width growth
+/// changed, and network results varied between days. TPU symbols alone did
+/// not prove a working transfer implementation; TPU, neuron, metal and
+/// furiosa keep the buffered path pending runtime checks.
+fn loadsDirect(platform: *const Platform) bool {
+    return switch (platform.target) {
+        .cuda, .rocm, .oneapi, .cpu => true,
+        .tpu, .neuron, .metal, .furiosa => false,
     };
-};
-
-/// `shape` with the platform's replicated mesh when it names none, which is
-/// how a buffer places an unsharded shape (`PjrtBufferMetadata.init`): every
-/// placement the loader computes goes through this, so the bytes it counts,
-/// the devices it allocates on and the spans it writes agree.
-pub fn placedShape(platform: *const Platform, shape: Shape) Shape {
-    var placed = shape;
-    if (placed._sharding.mesh == null) placed._sharding.mesh = platform.replicated_mesh;
-    return placed;
 }
 
 /// Whether the loader can deliver into `kind` on `platform`: every device
@@ -577,26 +392,14 @@ pub fn placedShape(platform: *const Platform, shape: Shape) Shape {
 /// plugin resolves every kind to its one memory space).
 pub fn supportsMemory(platform: *const Platform, kind: Memory.Kind) bool {
     if (kind == .default) return true;
-    switch (platform.target) {
-        .cuda, .rocm, .oneapi, .cpu => {},
-        .tpu, .neuron, .metal, .furiosa => if (kind == .host_pinned) return false,
-    }
+    if (kind == .host_pinned and !loadsDirect(platform)) return false;
     for (platform.devices) |*device| {
         if (device.memory(kind) == null) return false;
     }
     return true;
 }
 
-/// Whether bytes delivered into `kind` take device memory, which program
-/// admission measures. Host memory spaces never count against a device.
-pub fn countsAgainstDevice(kind: Memory.Kind) bool {
-    return switch (kind) {
-        .default, .device => true,
-        .host_pinned, .host_unpinned => false,
-    };
-}
-
-/// The transfer implementation selected for the platform.
+/// The transfer implementation selected for the platform (`loadsDirect`).
 pub const Backend = union(enum) {
     direct: *direct_loader.Loader,
     buffered: *buffered_loader.Loader,
@@ -607,48 +410,23 @@ pub const Backend = union(enum) {
         platform: *const Platform,
         opts: Options,
     ) !Backend {
-        // Transfer-manager support and host pinning are independent. CPU
-        // implements byte-range transfers from ordinary pages but not DmaMap,
-        // so it can share coalescing and bounded blocks without DMA support.
-        // The whole-tensor buffered path lacked those benefits: on one B70,
-        // interleaved HF Qwen3.5-4B loads took 10.9/16.3 s direct versus
-        // 48.3/47.6 s buffered; coalescing
-        // reduced roughly 900 source calls to 278. Both coalescing and blind
-        // width growth changed, and network results varied between days.
-        // TPU symbols alone did not prove a working transfer implementation;
-        // TPU, neuron, metal and furiosa keep the buffered path pending
-        // runtime checks.
-        return switch (platform.target) {
-            .cuda, .rocm, .oneapi, .cpu => .{
-                .direct = try direct_loader.Loader.create(
-                    allocator,
-                    io,
-                    platform,
-                    opts,
-                ),
-            },
-            .tpu, .neuron, .metal, .furiosa => .{
-                .buffered = try buffered_loader.Loader.create(
-                    allocator,
-                    io,
-                    platform,
-                    opts.readWidth(),
-                    opts.load_profile,
-                ),
-            },
-        };
+        return if (loadsDirect(platform))
+            .{ .direct = try direct_loader.Loader.create(allocator, io, platform, opts) }
+        else
+            .{ .buffered = try buffered_loader.Loader.create(allocator, io, platform, opts) };
     }
 
     pub fn submit(self: Backend, specs: []const LoadSpec, progress: std.Progress.Node) SubmitError!Submission {
         return switch (self) {
-            .direct => |direct| .{ .direct = .{
-                .loader = direct,
-                .batch = try direct.submit(specs, progress),
-            } },
-            .buffered => |buffered| .{ .buffered = .{
-                .loader = buffered,
-                .batch = try buffered.submit(specs, progress),
-            } },
+            inline else => |loader, tag| @unionInit(Submission, @tagName(tag), try loader.submit(specs, progress)),
+        };
+    }
+
+    /// Waits for and retires `submission`, which this backend published.
+    /// Its batch is dangling afterwards.
+    pub fn await(self: Backend, submission: Submission) AwaitError!void {
+        return switch (self) {
+            inline else => |loader, tag| loader.awaitBatch(@field(submission, @tagName(tag))),
         };
     }
 
@@ -656,30 +434,21 @@ pub const Backend = union(enum) {
     /// work in flight drains, and every later await returns the first error.
     pub fn abort(self: Backend) void {
         switch (self) {
-            .direct => |direct| direct.abort(),
-            .buffered => |buffered| buffered.abort(),
+            inline else => |loader| loader.abort(),
         }
     }
 
     pub fn destroy(self: Backend) void {
         switch (self) {
-            .direct => |direct| direct.destroy(),
-            .buffered => |buffered| buffered.destroy(),
+            inline else => |loader| loader.destroy(),
         }
     }
 };
 
+/// A published batch of the backend that published it.
 pub const Submission = union(enum) {
-    direct: struct { loader: *direct_loader.Loader, batch: *direct_loader.Batch },
-    buffered: struct { loader: *buffered_loader.Loader, batch: *buffered_loader.Batch },
-
-    /// Waits for and retires the batch. Its pointer is dangling afterwards.
-    pub fn await(self: Submission) AwaitError!void {
-        return switch (self) {
-            .direct => |direct| direct.loader.awaitBatch(direct.batch),
-            .buffered => |buffered| buffered.loader.awaitBatch(buffered.batch),
-        };
-    }
+    direct: *direct_loader.Batch,
+    buffered: *buffered_loader.Batch,
 };
 
 /// A random lattice whose runs land in order (`Lattice.dstOrdered`), its
@@ -729,110 +498,37 @@ test "copyRuns lands every run of a range where the cursor does" {
     }
 }
 
-test "footprints with the same strides overlap exactly when a byte is in both" {
-    var prng: std.Random.DefaultPrng = .init(0xf00d);
-    const random = prng.random();
-    var dims_buffer: [4]LoadPart.Dim = undefined;
-    var overlapping: usize = 0;
-    var disjoint: usize = 0;
-    for (0..3000) |_| {
-        const shape = randomLattice(random, dims_buffer[0..random.intRangeAtMost(usize, 1, dims_buffer.len)]);
-        var self: Footprint = .{ .start = random.intRangeAtMost(u64, 0, 40), .width = random.intRangeAtMost(u64, 1, shape.width), .len = shape.dims.len };
-        var other: Footprint = .{ .start = random.intRangeAtMost(u64, 0, 40), .width = random.intRangeAtMost(u64, 1, shape.width), .len = shape.dims.len };
-        for (shape.dims, 0..) |d, k| {
-            self.dims[k] = .{ .count = random.intRangeAtMost(u64, 1, d.count), .src_stride = 0, .dst_stride = d.dst_stride };
-            other.dims[k] = .{ .count = random.intRangeAtMost(u64, 1, d.count), .src_stride = 0, .dst_stride = d.dst_stride };
-        }
-        var bytes: [1024]u2 = @splat(0);
-        var marked = true;
-        for ([_]*const Footprint{ &self, &other }, [_]u2{ 1, 2 }) |footprint, bit| {
-            var cursor: Lattice.Cursor = .init(footprint.lattice(), 0, footprint.lattice().runs());
-            while (cursor.next()) |run| {
-                if (run.dst + footprint.width > bytes.len) marked = false else for (bytes[@intCast(run.dst)..][0..@intCast(footprint.width)]) |*byte| byte.* |= bit;
-            }
-        }
-        if (!marked) continue;
-        const expected = std.mem.indexOfScalar(u2, &bytes, 3) != null;
-        if (expected) overlapping += 1 else disjoint += 1;
-        try std.testing.expectEqual(expected, try self.overlaps(other));
-        try std.testing.expectEqual(expected, try other.overlaps(self));
-    }
-    try std.testing.expect(overlapping > 100 and disjoint > 100);
-}
-
-test "strided parts overlap exactly when a byte is in both, whatever their runs merge into" {
-    var prng: std.Random.DefaultPrng = .init(0xbeef);
-    const random = prng.random();
-    var source: safetensors.Tensor = undefined;
-    var shape_dims: [4]LoadPart.Dim = undefined;
-    var dims: [2][4]LoadPart.Dim = undefined;
-    var decided: usize = 0;
-    for (0..3000) |_| {
-        const shape = randomLattice(random, shape_dims[0..random.intRangeAtMost(usize, 1, shape_dims.len)]);
-        var parts: [2]LoadPart = undefined;
-        for (&parts, &dims) |*part, *part_dims| {
-            for (shape.dims, part_dims[0..shape.dims.len]) |d, *own| own.* = .{ .count = random.intRangeAtMost(u64, 1, d.count), .src_stride = 0, .dst_stride = d.dst_stride };
-            part.* = .{ .source = &source, .dst_offset = random.intRangeAtMost(u64, 0, 40), .width = random.intRangeAtMost(u64, 1, shape.width), .dims = part_dims[0..shape.dims.len] };
-        }
-        var bytes: [1024]u2 = @splat(0);
-        var marked = true;
-        for (parts, [_]u2{ 1, 2 }) |part, bit| {
-            var cursor: Lattice.Cursor = .init(part.lattice(), 0, part.lattice().runs());
-            while (cursor.next()) |run| {
-                if (run.dst + part.width > bytes.len) marked = false else for (bytes[@intCast(run.dst)..][0..@intCast(part.width)]) |*byte| byte.* |= bit;
-            }
-        }
-        if (!marked) continue;
-        const expected = std.mem.indexOfScalar(u2, &bytes, 3) != null;
-        try std.testing.expectEqual(expected, try overlaps(parts[0], parts[1]));
-        decided += 1;
-    }
-    try std.testing.expect(decided > 1000);
-}
-
-test "many interleaved strided parts are checked by sorting their runs" {
-    const allocator = std.testing.allocator;
-    var prng: std.Random.DefaultPrng = .init(0xc0de);
-    const random = prng.random();
-    var source: safetensors.Tensor = .{ .file_uri = "", .name = "source", .shape = Shape.init(.{1 << 16}, .u8), .offset = 0 };
-    const destination_bytes = 4096;
-    var dims: [16][2]LoadPart.Dim = undefined;
-    var outcomes: [2]usize = .{ 0, 0 };
-    for (0..400) |_| {
-        // A grid's columns, each part one of them with a stride of its
-        // own, some columns shifted onto their neighbours'.
-        const count = random.intRangeAtMost(usize, 9, dims.len);
-        var parts: [16]LoadPart = undefined;
-        for (parts[0..count], dims[0..count], 0..) |*part, *part_dims, i| {
-            const row = 4 * count + random.uintLessThan(u64, 2) * 4 * count;
-            part_dims.* = .{
-                .{ .count = random.intRangeAtMost(u64, 1, 3), .src_stride = 0, .dst_stride = 8 * row },
-                .{ .count = random.intRangeAtMost(u64, 1, 8), .src_stride = 1, .dst_stride = row },
-            };
-            const shift = if (random.uintLessThan(u8, 8) == 0) random.uintLessThan(u64, 4) else 0;
-            part.* = .{ .source = &source, .dst_offset = 4 * i + shift, .width = 4, .dims = part_dims };
-        }
-        std.mem.sort(LoadPart, parts[0..count], {}, struct {
-            fn lessThan(_: void, lhs: LoadPart, rhs: LoadPart) bool {
-                return lhs.dst_offset < rhs.dst_offset;
-            }
-        }.lessThan);
-        var bytes: [destination_bytes]u8 = @splat(0);
-        var overlapping = false;
-        for (parts[0..count]) |part| {
-            var cursor: Lattice.Cursor = .init(part.lattice(), 0, part.lattice().runs());
-            while (cursor.next()) |run| for (bytes[@intCast(run.dst)..][0..4]) |*byte| {
-                if (byte.* != 0) overlapping = true;
-                byte.* = 1;
-            };
-        }
-        if (checkParts(allocator, parts[0..count], destination_bytes, true)) {
-            try std.testing.expect(!overlapping);
-        } else |err| {
-            try std.testing.expect(overlapping);
-            try std.testing.expectEqual(error.InvalidLayout, err);
-        }
-        outcomes[@intFromBool(overlapping)] += 1;
-    }
-    try std.testing.expect(outcomes[0] > 50 and outcomes[1] > 50);
+test "checkParts refuses parts outside their source or destination, out of order or overlapping" {
+    // A source of 16 bytes into a destination of 32.
+    const source: safetensors.Tensor = .{ .file_uri = "memory", .name = "s", .shape = .init(.{16}, .u8), .offset = 0 };
+    // Runs of 4 bytes, every other 4 bytes of the destination.
+    const every_other: []const LoadPart.Dim = &.{.{ .count = 4, .src_stride = 4, .dst_stride = 8 }};
+    const refused = [_][]const LoadPart{
+        &.{},
+        &.{.{ .source = &source, .width = 0 }},
+        // Past the source, past the destination, and an overflow.
+        &.{.{ .source = &source, .src_offset = 8, .width = 9 }},
+        &.{.{ .source = &source, .dst_offset = 24, .width = 9 }},
+        &.{.{ .source = &source, .src_offset = std.math.maxInt(u64), .width = 1 }},
+        // Overlapping, and descending.
+        &.{ .{ .source = &source, .width = 8 }, .{ .source = &source, .dst_offset = 4, .width = 8 } },
+        &.{ .{ .source = &source, .dst_offset = 8, .width = 4 }, .{ .source = &source, .width = 4 } },
+        // Strided: runs that overlap on the destination, a dimension of no
+        // step, past the source, past the destination, and descending.
+        &.{.{ .source = &source, .width = 4, .dims = &.{.{ .count = 2, .src_stride = 4, .dst_stride = 2 }} }},
+        &.{.{ .source = &source, .width = 4, .dims = &.{.{ .count = 0, .src_stride = 4, .dst_stride = 8 }} }},
+        &.{.{ .source = &source, .src_offset = 4, .width = 4, .dims = every_other }},
+        &.{.{ .source = &source, .dst_offset = 8, .width = 4, .dims = every_other }},
+        &.{ .{ .source = &source, .dst_offset = 4, .width = 4, .dims = every_other }, .{ .source = &source, .width = 4, .dims = every_other } },
+    };
+    for (refused) |parts| try std.testing.expect(!checkParts(parts, 32));
+    const accepted = [_][]const LoadPart{
+        // Back to back.
+        &.{ .{ .source = &source, .width = 16 }, .{ .source = &source, .dst_offset = 16, .width = 16 } },
+        // Two strided parts interleaving their runs.
+        &.{ .{ .source = &source, .width = 4, .dims = every_other }, .{ .source = &source, .dst_offset = 4, .width = 4, .dims = every_other } },
+        // A contiguous part, then a strided one.
+        &.{ .{ .source = &source, .width = 8 }, .{ .source = &source, .dst_offset = 8, .width = 4, .dims = &.{.{ .count = 2, .src_stride = 4, .dst_stride = 8 }} } },
+    };
+    for (accepted) |parts| try std.testing.expect(checkParts(parts, 32));
 }

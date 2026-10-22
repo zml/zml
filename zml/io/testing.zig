@@ -8,7 +8,6 @@ const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const zml_testing = @import("../testing.zig");
-const backend = @import("backend.zig");
 const TensorStore = @import("TensorStore.zig");
 
 /// `device_count` devices for a test: the accelerator the tests run on
@@ -132,7 +131,7 @@ pub fn pattern(bytes: []u8, seed: u8) void {
 /// tensor's row-major bytes. Independent of `Buffer.toSliceAlloc`, which
 /// assumes the platform's own device order.
 pub fn expectShards(allocator: std.mem.Allocator, io: std.Io, buffer: *const Buffer, global: []const u8) !void {
-    const shape = backend.placedShape(buffer._platform, buffer.shape());
+    const shape = buffer._platform.placedShape(buffer.shape());
     try std.testing.expectEqual(@as(usize, 2), shape.rank());
     try std.testing.expectEqual(shape.byteSize(), global.len);
     const placement: Sharding.Placement = try .init(shape);

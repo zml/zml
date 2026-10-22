@@ -6,7 +6,6 @@ const std = @import("std");
 
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
-const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
 const Memory = @import("../platform.zig").Memory;
@@ -27,7 +26,7 @@ const log = @import("log.zig").load;
 const staging_tensors: usize = 12;
 
 pub const Loader = struct {
-    pub const AwaitError = std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError || safetensors.ExactPositionalError || backend.PartsError;
+    pub const AwaitError = std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError || safetensors.ExactPositionalError;
     /// A submission refuses on the sticky error, so it fails as an await does.
     pub const SubmitError = AwaitError;
 
@@ -54,9 +53,10 @@ pub const Loader = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        read_parallelism: usize,
-        profile: VFS.LoadProfile,
+        opts: backend.Options,
     ) !*Loader {
+        const read_parallelism = opts.readWidth();
+        const profile = opts.load_profile;
         const self = try allocator.create(Loader);
         self.* = .{
             .allocator = allocator,
@@ -76,32 +76,41 @@ pub const Loader = struct {
     }
 
     /// Spawns one bounded read task per spec, which assembles its
-    /// destination. The batch keeps a copy of every spec's parts. Nothing
-    /// runs when this fails.
+    /// destination. The batch keeps a copy of every spec's parts and their
+    /// dimensions. Nothing runs when this fails.
     pub fn submit(self: *Loader, specs: []const LoadSpec, progress: std.Progress.Node) SubmitError!*Batch {
         try self.checkOpen();
         var largest: usize = 0;
         var part_count: usize = 0;
+        var dim_count: usize = 0;
         for (specs) |spec| {
             largest = @max(largest, spec.shape.byteSize());
             part_count += spec.parts.len;
+            for (spec.parts) |part| dim_count += part.dims.len;
         }
         const batch = try self.allocator.create(Batch);
         errdefer self.allocator.destroy(batch);
         const parts = try self.allocator.alloc(LoadPart, part_count);
-        batch.* = .{ .pending = .init(1 + specs.len), .parts = parts };
+        errdefer self.allocator.free(parts);
+        const dims = try self.allocator.alloc(LoadPart.Dim, dim_count);
+        batch.* = .{ .pending = .init(1 + specs.len), .parts = parts, .dims = dims };
         self.admission.widen(self.io, largest, self.staging_slots);
         var next: usize = 0;
+        var next_dim: usize = 0;
         for (specs) |spec| {
             const spec_parts = parts[next..][0..spec.parts.len];
             next += spec.parts.len;
-            @memcpy(spec_parts, spec.parts);
+            for (spec_parts, spec.parts) |*copy, part| {
+                copy.* = part;
+                copy.dims = dims[next_dim..][0..part.dims.len];
+                @memcpy(dims[next_dim..][0..part.dims.len], part.dims);
+                next_dim += part.dims.len;
+            }
             self.submitOne(batch, .{
                 .shape = spec.shape,
                 .memory = spec.memory,
                 .output = spec.output,
                 .parts = spec_parts,
-                .zero_fill = spec.zero_fill,
             }, progress);
         }
         // Every task is spawned: drop the sentinel.
@@ -112,6 +121,7 @@ pub const Loader = struct {
     /// Waits for the batch's tasks, frees it and returns the sticky error.
     pub fn awaitBatch(self: *Loader, batch: *Batch) AwaitError!void {
         batch.done.waitUncancelable(self.io);
+        self.allocator.free(batch.dims);
         self.allocator.free(batch.parts);
         self.allocator.destroy(batch);
         try self.checkOpen();
@@ -144,7 +154,7 @@ pub const Loader = struct {
     fn loadOne(self: *Loader, spec: LoadSpec) void {
         if (self.first_error.load(.acquire) != 0) return;
         std.debug.assert(spec.parts.len != 0);
-        var stage: []const u8 = "validate";
+        var stage: []const u8 = "allocate staging for";
         var part = &spec.parts[0];
         self.loadOneStaged(spec, &stage, &part) catch |err| {
             self.recordError(err, "{s} tensor {s}: file={s}, offset={d}, source_bytes={d}, parts={d}, destination_bytes={d}", .{ stage, part.source.name, part.source.file_uri, part.source.offset, part.source.byteSize(), spec.parts.len, spec.shape.byteSize() });
@@ -160,21 +170,18 @@ pub const Loader = struct {
         part: **const LoadPart,
     ) AwaitError!void {
         const tensor_bytes = spec.shape.byteSize();
-        // Staging is reused, so a byte no part writes would publish another
-        // tensor's bytes rather than the zeroes a fresh allocation used to
-        // give: the parts must cover the tensor, or its gaps be zeroed below.
-        try backend.checkParts(self.allocator, spec.parts, tensor_bytes, spec.zero_fill);
         self.admission.reserve(self.io, tensor_bytes);
         defer self.admission.release(self.io, tensor_bytes);
-        stage.* = "allocate staging for";
         const staging = try self.staging.acquire(self.allocator, self.io, tensor_bytes);
         defer self.staging.release(self.allocator, self.io, staging);
         const tensor = staging[0..tensor_bytes];
+        // Staging is reused, so a byte no part writes would publish another
+        // tensor's bytes rather than zero: the gaps are zeroed first.
         var strided = false;
         for (spec.parts) |covered| strided = strided or covered.dims.len != 0;
-        if (spec.zero_fill and strided) {
+        if (strided) {
             @memset(tensor, 0);
-        } else if (spec.zero_fill) {
+        } else {
             // Only the gaps: the parts overwrite the rest.
             var covered_end: usize = 0;
             for (spec.parts) |covered| {
@@ -299,8 +306,10 @@ pub const Loader = struct {
 pub const Batch = struct {
     pending: std.atomic.Value(usize),
     done: std.Io.Event = .unset,
-    /// Every spec's parts, which the tasks read until the batch is done.
+    /// Every spec's parts and their dimensions, which the tasks read until
+    /// the batch is done.
     parts: []LoadPart,
+    dims: []LoadPart.Dim,
 
     fn finish(self: *Batch, io: std.Io) void {
         if (self.pending.fetchSub(1, .acq_rel) == 1) self.done.set(io);
@@ -667,7 +676,7 @@ test "buffered loader assembles a composite destination in reused staging" {
     @memcpy(expected[64..96], a[16..48]);
     const whole = [_]LoadPart{.whole(registry.tensors.getPtr("full").?)};
 
-    const loader = try Loader.create(allocator, io, platform, 2, .local);
+    const loader = try Loader.create(allocator, io, platform, .{ .read_parallelism = 2 });
     defer loader.destroy();
     for ([_]Memory.Kind{ .default, .host_pinned }) |memory| {
         // A whole tensor first, so the composite reuses its staging buffer
@@ -678,24 +687,26 @@ test "buffered loader assembles a composite destination in reused staging" {
         try load_testing.expectShards(allocator, io, &first, &full);
         try expectMemory(platform, &first, memory);
         var output: Buffer = undefined;
-        try loader.awaitBatch(try loader.submit(&.{.{ .shape = shape, .memory = memory, .output = &output, .parts = &parts, .zero_fill = true }}, .none));
+        try loader.awaitBatch(try loader.submit(&.{.{ .shape = shape, .memory = memory, .output = &output, .parts = &parts }}, .none));
         defer output.deinit();
         try load_testing.expectShards(allocator, io, &output, &expected);
         try expectMemory(platform, &output, memory);
         try std.testing.expectEqual(@as(usize, 128), loader.staging.retained_bytes);
     }
 
-    // Without zero fill the same parts are a size mismatch, found by the
-    // worker and sticky from then on.
+    // A source whose file does not exist fails the worker, and the error
+    // is sticky from then on.
+    var missing = registry.tensors.get("full").?;
+    missing.file_uri = "missing.safetensors";
     var never_written: Buffer = undefined;
-    const batch = try loader.submit(&.{.{ .shape = shape, .output = &never_written, .parts = &parts }}, .none);
-    try std.testing.expectError(error.SourceSizeMismatch, loader.awaitBatch(batch));
-    try std.testing.expectError(error.SourceSizeMismatch, loader.submit(&.{.{ .shape = shape, .output = &never_written, .parts = &whole }}, .none));
+    const batch = try loader.submit(&.{.{ .shape = shape, .output = &never_written, .parts = &.{.whole(&missing)} }}, .none);
+    try std.testing.expectError(error.FileNotFound, loader.awaitBatch(batch));
+    try std.testing.expectError(error.FileNotFound, loader.submit(&.{.{ .shape = shape, .output = &never_written, .parts = &whole }}, .none));
 }
 
 /// Every shard of `buffer` is in its device's `memory` space.
 fn expectMemory(platform: *const Platform, buffer: *const Buffer, memory: Memory.Kind) !void {
-    const devices = backend.placedShape(platform, buffer.shape())._sharding.mesh.?.devicesInCanonicalOrder();
+    const devices = platform.placedShape(buffer.shape())._sharding.mesh.?.devicesInCanonicalOrder();
     try std.testing.expectEqual(devices.len, buffer._shards.len);
     for (devices, buffer._shards.constSlice()) |device, shard| {
         try std.testing.expect(shard.memory(platform.pjrt_api) == platform.devices[device.id].memory(memory).?.pjrt_memory);

@@ -34,7 +34,7 @@ const load_testing = @import("testing.zig");
 const TransferInitError = std.mem.Allocator.Error || pjrt.ApiError || error{ IncompatibleSharding, UnsupportedMemoryKind };
 /// Everything a worker, a pump callback or a partially published plan can
 /// record as the pipeline's sticky error.
-const PipelineError = TransferInitError || std.Io.File.OpenError || safetensors.ExactPositionalError || error{ InvalidOptions, SourceSizeMismatch, InvalidLayout, UnsupportedLayout, InvalidTensorRange, Internal, Closed };
+const PipelineError = TransferInitError || std.Io.File.OpenError || safetensors.ExactPositionalError || error{ InvalidOptions, UnsupportedLayout, InvalidTensorRange, Internal, Closed };
 
 /// Bounds per-device event overhead for tiny tensors. This is not a measured
 /// optimum: 64 pieces smaller than block_size / 8 cannot fill an eight-block
@@ -78,7 +78,7 @@ const Delivery = enum {
 /// time; the workers and the pumps run concurrently with them.
 pub const Loader = struct {
     pub const AwaitError = PipelineError;
-    pub const SubmitError = PipelineError || error{EmptyTensor};
+    pub const SubmitError = PipelineError;
 
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -113,9 +113,12 @@ pub const Loader = struct {
     /// open until `destroy`. Keyed by the slot's own copy of the path: the
     /// registry that named it may go once the batch retired.
     source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
+    /// Device bytes of the outputs of the sealed batches, per
+    /// `platform.devices` index, cumulative, as `TensorTransfer.init`
+    /// allocates them; counted by the submitting task.
+    submitted_bytes: []u64,
     /// Device bytes allocated for outputs so far, per `platform.devices`
-    /// index, cumulative: the front end subtracts it from what it submitted
-    /// to know what is still to land.
+    /// index, cumulative.
     allocated_bytes: []std.atomic.Value(u64),
     created_at: std.Io.Timestamp,
     /// Submissions so far; the next batch's sequence number.
@@ -149,6 +152,9 @@ pub const Loader = struct {
         }
         const self = try allocator.create(Loader);
         errdefer allocator.destroy(self);
+        const submitted_bytes = try allocator.alloc(u64, platform.devices.len);
+        errdefer allocator.free(submitted_bytes);
+        @memset(submitted_bytes, 0);
         const allocated_bytes = try allocator.alloc(std.atomic.Value(u64), platform.devices.len);
         errdefer allocator.free(allocated_bytes);
         @memset(allocated_bytes, .init(0));
@@ -175,11 +181,11 @@ pub const Loader = struct {
             .read_gate = .init(width),
             .credits = sizing.credits,
             .pipeline = undefined,
+            .submitted_bytes = submitted_bytes,
             .allocated_bytes = allocated_bytes,
             .created_at = .now(io, .awake),
             .width = width,
             .plan_config = .{
-                .device_count = platform.devices.len,
                 .block_size = calibration.block_size,
                 .request_size = sizing.request_size,
                 .alignment = source_alignment,
@@ -235,9 +241,10 @@ pub const Loader = struct {
     /// as soon as it exists behind every earlier submission, then seals the
     /// batch: work on the first file starts while the rest is planned. The
     /// batch owns its destinations and parts until `awaitBatch` retires it.
-    /// Every spec's parts are checked against its destination first, so a
-    /// source that does not fit fails before anything is published. Nothing
-    /// is published when a failure precedes the first plan; a later planning
+    /// The specs keep the `LoadSpec` contract, which the front end checked;
+    /// a strided part that does not fit one read fails before anything is
+    /// published (`Planner.checkGatherReads`). Nothing is published when a
+    /// failure precedes the first plan; a later planning
     /// failure fails the loader (a partial submission can never complete),
     /// the batch is awaited here and the caller sees only the error. The
     /// batch's host-resident destinations are then created ahead of their
@@ -273,6 +280,7 @@ pub const Loader = struct {
         };
         self.scheduler.seal(self.io, batch);
         self.batch_count += 1;
+        self.countSubmitted(batch);
         self.startAllocations(batch);
         // Every plan is visible: drop the publish sentinel. A batch without
         // jobs completes right here.
@@ -391,6 +399,7 @@ pub const Loader = struct {
 
         const allocator = self.allocator;
         allocator.free(self.allocated_bytes);
+        allocator.free(self.submitted_bytes);
         allocator.destroy(self);
     }
 
@@ -398,6 +407,24 @@ pub const Loader = struct {
     /// index. Freeing an output does not decrease these counters.
     pub fn allocatedBytesPerDevice(self: *const Loader, out: []u64) void {
         for (out, self.allocated_bytes) |*bytes, *counter| bytes.* = counter.load(.acquire);
+    }
+
+    /// Output bytes of the sealed batches not allocated yet, per
+    /// `platform.devices` index: what is still to land on each device.
+    /// Workers allocate as they read, possibly before the batch is sealed,
+    /// so the difference saturates.
+    pub fn unlandedBytesPerDevice(self: *const Loader, out: []u64) void {
+        for (out, self.submitted_bytes, self.allocated_bytes) |*bytes, submitted, *allocated| bytes.* = submitted -| allocated.load(.acquire);
+    }
+
+    /// Counts the device bytes of the sealed `batch`: a box of each
+    /// destination outside host memory on each of its devices, as
+    /// `TensorTransfer.init` allocates them.
+    fn countSubmitted(self: *Loader, batch: *const Batch) void {
+        for (batch.destinations) |*destination| {
+            if (destination.hostResident()) continue;
+            for (destination.placed_shape._sharding.mesh.?.devicesInCanonicalOrder()) |device| self.submitted_bytes[device.id] += destination.grid.box_bytes;
+        }
     }
 
     fn checkOpen(self: *Loader) !void {
@@ -526,9 +553,8 @@ pub const Loader = struct {
         }
     };
 
-    /// Creates the batch's destinations, one per spec, and their parts,
-    /// after checking each spec's parts against its destination
-    /// (`backend.checkParts`); on failure nothing stays allocated. A
+    /// Creates the batch's destinations, one per spec, with copies of their
+    /// parts and dimensions; on failure nothing stays allocated. A
     /// destination's device state is created lazily by the first worker that
     /// reads or fills for it, or by the allocation task.
     fn createDestinations(
@@ -538,34 +564,30 @@ pub const Loader = struct {
         progress: std.Progress.Node,
     ) !void {
         var part_count: usize = 0;
-        for (specs) |spec| part_count += spec.parts.len;
+        var dim_count: usize = 0;
+        for (specs) |spec| {
+            part_count += spec.parts.len;
+            for (spec.parts) |part| dim_count += part.dims.len;
+        }
         const destinations = try self.allocator.alloc(Destination, specs.len);
         errdefer self.allocator.free(destinations);
         const parts = try self.allocator.alloc(Part, part_count);
         errdefer self.allocator.free(parts);
+        const dims = try self.allocator.alloc(LoadPart.Dim, dim_count);
+        errdefer self.allocator.free(dims);
         var next_part: usize = 0;
+        var next_dim: usize = 0;
         var logical_bytes: usize = 0;
         for (specs, destinations) |spec, *destination| {
-            std.debug.assert(spec.parts.len != 0);
-            const first = spec.parts[0].source;
-            const placed_shape = placementShape(self.platform, spec.shape);
-            for (spec.parts) |part| {
-                // An empty source has no transfer, so its output would never
-                // be written; the front ends reject it too.
-                if (part.source.byteSize() == 0) {
-                    load_log.err("source {s} in {s} is empty", .{ part.source.name, part.source.file_uri });
-                    return error.EmptyTensor;
-                }
-            }
-            backend.checkParts(self.allocator, spec.parts, placed_shape.byteSize(), spec.zero_fill) catch |err| {
-                load_log.err("destination {f} from {s} in {s}: {d} parts for {d} bytes, zero_fill={}, first source {d} bytes: {s}", .{ spec.shape, first.name, first.file_uri, spec.parts.len, placed_shape.byteSize(), spec.zero_fill, first.byteSize(), @errorName(err) });
-                return err;
-            };
+            const placed_shape = self.platform.placedShape(spec.shape).packedShape();
             const destination_parts = parts[next_part..][0..spec.parts.len];
             next_part += spec.parts.len;
             var covered_bytes: u64 = 0;
             var gathered = false;
             for (spec.parts, destination_parts) |part, *slot| {
+                const part_dims = dims[next_dim..][0..part.dims.len];
+                next_dim += part.dims.len;
+                @memcpy(part_dims, part.dims);
                 slot.* = .{
                     .source = part.source,
                     .source_slot = try self.sourceSlot(part.source.file_uri),
@@ -573,31 +595,11 @@ pub const Loader = struct {
                     .src_offset = part.src_offset,
                     .dst_offset = part.dst_offset,
                     .width = part.width,
-                    .dims = part.dims,
+                    .dims = part_dims,
                 };
                 covered_bytes += part.width;
                 gathered = gathered or part.dims.len != 0;
             }
-            if (gathered and !backend.countsAgainstDevice(spec.memory)) {
-                load_log.err("destination {f} from {s}: strided parts into {t} memory, which this loader does not assemble", .{ spec.shape, first.name, spec.memory });
-                return error.UnsupportedLayout;
-            }
-            // A gathered part whose source runs are not back to back reads
-            // its whole source range in every job (`JobCut.appendExtent`):
-            // refused here, before anything is published, when that range
-            // does not fit one read.
-            if (gathered) for (spec.parts) |part| {
-                const lattice = part.lattice();
-                if (lattice.srcTiled()) continue;
-                const read_limit = try Planner.maximumJobLen(.{ .device_count = 0, .block_size = self.plan_config.block_size, .request_size = self.plan_config.request_size, .alignment = 0 });
-                const alignment = @max(self.plan_config.alignment, 1);
-                const start = part.source.offset + part.src_offset;
-                const end = start + lattice.spans().?.src;
-                if (std.mem.alignForward(u64, end, alignment) - std.mem.alignBackward(u64, start, alignment) > read_limit) {
-                    load_log.err("destination {f} from {s}: a strided part reads {d} source bytes for every job, more than a read of {d}", .{ spec.shape, part.source.name, end - start, read_limit });
-                    return error.UnsupportedLayout;
-                }
-            };
             destination.* = .{
                 .shape = spec.shape,
                 .placed_shape = placed_shape,
@@ -605,16 +607,17 @@ pub const Loader = struct {
                 .memory = spec.memory,
                 .output = spec.output,
                 .parts = destination_parts,
-                .zero_fill = spec.zero_fill,
                 .gathered = gathered,
                 // A gathered destination's jobs land every byte, zeros too.
                 .unread_bytes = .init(if (gathered) placed_shape.byteSize() else covered_bytes),
                 .progress = progress,
             };
+            if (gathered) for (destination_parts) |*part| try Planner.checkGatherReads(self.plan_config, part);
             logical_bytes += spec.shape.byteSize();
         }
         batch.destinations = destinations;
         batch.parts = parts;
+        batch.dims = dims;
         batch.diagnostics.source_items = parts.len;
         batch.diagnostics.logical_bytes = logical_bytes;
     }
@@ -995,6 +998,8 @@ pub const Batch = struct {
     /// The destinations' parts, each destination's consecutive and in its
     /// destination order: what the planner sorts by file offset.
     parts: []Part = &.{},
+    /// The strided parts' dimensions.
+    dims: []LoadPart.Dim = &.{},
     /// The host-resident destinations in the order their first job is
     /// claimed: what the allocation task creates ahead of the reads.
     host_destinations: []*Destination = &.{},
@@ -1036,6 +1041,7 @@ pub const Batch = struct {
     /// which `Pipeline.retireBatch` must already have retired.
     fn destroy(self: *Batch) void {
         self.allocator.free(self.host_destinations);
+        self.allocator.free(self.dims);
         self.allocator.free(self.parts);
         self.allocator.free(self.destinations);
         for (self.plans.items) |plan| plan.destroy();
@@ -1071,20 +1077,18 @@ const Destination = struct {
     /// The caller's shape, which the output buffer keeps.
     shape: Shape,
     /// What PJRT allocates and the planner cuts: `shape` packed, its
-    /// sharding naming a mesh (`placementShape`).
+    /// sharding naming a mesh (`Platform.placedShape`).
     placed_shape: Shape,
     /// Where `placed_shape`'s logical bytes land on its devices.
     grid: ShardGrid,
     /// The memory space of every destination buffer.
     memory: Memory.Kind = .default,
     output: *Buffer,
-    /// What fills it, in ascending destination order (`backend.checkParts`):
-    /// a slice of the batch's parts.
+    /// What fills it, in ascending, disjoint destination order
+    /// (`backend.LoadSpec`): a slice of the batch's parts. Bytes no part
+    /// covers are written from the loader's zero block, by the fill job of
+    /// the plan holding `parts[0]`.
     parts: []Part,
-    /// Bytes no part covers are written from the loader's zero block, by the
-    /// fill job of the plan holding `parts[0]`; without it the parts cover
-    /// every byte.
-    zero_fill: bool = false,
     /// Fed by strided parts: planned whole, by logical ranges, with the
     /// plan holding `parts[0]` (`Planner.JobCut.appendGatherJobs`), whose
     /// jobs also write its zero fill.
@@ -1096,16 +1100,12 @@ const Destination = struct {
     unread_bytes: std.atomic.Value(u64),
     progress: std.Progress.Node = .none,
     state: LazyOnce(TensorTransfer, InitContext, TransferInitError, initTransfer) = .{},
-    /// Planner scratch: this destination's index among those the plan being
-    /// prepared writes. Meaningful only inside one `preparePlan` call, which
-    /// sets it for every destination it touches before reading it.
-    plan_slot: usize = undefined,
     /// Already listed in `Batch.host_destinations`.
     queued_ahead: bool = false,
 
     /// In a host memory space: written by the CPU, not by DMA.
     fn hostResident(self: *const Destination) bool {
-        return !backend.countsAgainstDevice(self.memory);
+        return self.memory.isHost();
     }
 
     fn ensureState(self: *Destination, direct: *Loader) TransferInitError!*TensorTransfer {
@@ -1303,10 +1303,8 @@ const TensorTransfer = struct {
             initialized += 1;
             pjrt_buffers.appendAssumeCapacity(pjrt_buffer);
         }
-        if (backend.countsAgainstDevice(destination.memory)) {
-            for (targets) |target| {
-                _ = direct.allocated_bytes[target.device_index].fetchAdd(target.total, .monotonic);
-            }
+        for (targets) |target| {
+            _ = direct.allocated_bytes[target.device_index].fetchAdd(target.total, .monotonic);
         }
 
         destination.output.* = .fromPjrtBuffers(platform, destination.shape, pjrt_buffers.constSlice());
@@ -1577,7 +1575,6 @@ fn sameSlices(lhs: Sharding.Placement.Slices, rhs: Sharding.Placement.Slices) bo
 const Planner = struct {
     /// What every plan of a loader is cut by.
     const Config = struct {
-        device_count: usize,
         block_size: usize,
         request_size: usize,
         /// Every read of a file read directly starts and ends at a multiple
@@ -1685,12 +1682,6 @@ const Planner = struct {
         reads: Reads,
     ) !*Batch.Plan {
         const source_slot = parts[order[0]].source_slot;
-        // Each destination this file writes once, however many of its
-        // parts the file holds; `plan_slot` marks it.
-        var destinations: std.ArrayList(*Destination) = .empty;
-        defer destinations.deinit(allocator);
-        const unplanned = std.math.maxInt(usize);
-        for (order) |part_index| parts[part_index].destination.plan_slot = unplanned;
         var host_parts: usize = 0;
         var gathered_parts: usize = 0;
         for (order) |part_index| {
@@ -1701,14 +1692,6 @@ const Planner = struct {
                 gathered_parts += 1;
             } else if (destination.hostResident()) {
                 host_parts += 1;
-            }
-            if (destination.plan_slot != unplanned) continue;
-            destination.plan_slot = destinations.items.len;
-            try destinations.append(allocator, destination);
-            // Every later use of a device id indexes a per-device array (the
-            // pumps, the transfer targets); check them once, here.
-            for (destination.placed_shape._sharding.mesh.?.devicesInCanonicalOrder()) |device| {
-                if (device.id >= config.device_count) return error.IncompatibleSharding;
             }
         }
 
@@ -1738,12 +1721,11 @@ const Planner = struct {
         var cut: JobCut = .{
             .allocator = allocator,
             .parts = parts,
-            .destinations = destinations.items,
             .config = config,
             .reads = reads,
             .maximum_job_len = try maximumJobLen(config),
             .gather_len = try maximumJobLen(gather_config),
-            .read_limit = try maximumJobLen(.{ .device_count = config.device_count, .block_size = config.block_size, .request_size = config.request_size, .alignment = 0 }),
+            .read_limit = readLimit(config),
         };
         defer cut.deinit();
         try cut.cutRuns(class_order[0 .. read_parts - host_parts], false);
@@ -1767,8 +1749,8 @@ const Planner = struct {
         // The zero fill of each destination goes out once, with the plan
         // of its first part; it depends on no read, so one job after this
         // file's reads carries all of it, one per delivery class.
-        try cut.appendFillJob(source_slot, false);
-        try cut.appendFillJob(source_slot, true);
+        try cut.appendFillJob(order, false);
+        try cut.appendFillJob(order, true);
 
         const plan = plan: {
             const transfers = try cut.transfers.toOwnedSlice(allocator);
@@ -1819,12 +1801,11 @@ const Planner = struct {
 
         allocator: std.mem.Allocator,
         parts: []Part,
-        /// The destinations this plan writes: what the fill jobs cover.
-        destinations: []*Destination,
         config: Config,
         reads: Reads,
         maximum_job_len: usize,
-        /// The longest logical range of a gather job, and its longest read.
+        /// The longest logical range of a gather job, and its longest read
+        /// (`readLimit`).
         gather_len: usize,
         read_limit: usize,
         jobs: std.ArrayList(Batch.Plan.Job) = .empty,
@@ -2182,7 +2163,7 @@ const Planner = struct {
             defer allocator.free(reach);
             var furthest: u64 = 0;
             for (parts, reach) |*part, *at| {
-                const spans = part.lattice().spans() orelse return error.InvalidLayout;
+                const spans = part.lattice().spans().?;
                 furthest = @max(furthest, part.dst_offset + spans.dst);
                 at.* = furthest;
             }
@@ -2271,10 +2252,9 @@ const Planner = struct {
             const alignment = try self.reads.alignmentOf(part.source_slot);
             const read_start = if (alignment == 0) file_start else std.mem.alignBackward(u64, file_start, alignment);
             const read_end = if (alignment == 0) file_end else std.mem.alignForward(u64, file_end, alignment);
-            if (read_end - read_start > self.read_limit) {
-                load_log.err("destination {f} from {s}: a part's source range of {d} bytes for one job exceeds a read of {d}", .{ part.destination.shape, part.source.name, read_end - read_start, self.read_limit });
-                return error.UnsupportedLayout;
-            }
+            // A range in order is clipped to the job's, and `checkGatherReads`
+            // refused a part whose whole range does not fit.
+            std.debug.assert(read_end - read_start <= self.read_limit);
             try self.extents.append(self.allocator, .{
                 .source_slot = part.source_slot,
                 .file_offset = read_start,
@@ -2345,14 +2325,16 @@ const Planner = struct {
         }
 
         /// The zero fill of the destinations of one delivery class whose
-        /// first part is in this file, as one job. A DMA fill job reads
-        /// one block, the zero block; a host one writes zeros in place.
-        /// A gathered destination's jobs write its zeros themselves.
-        fn appendFillJob(self: *JobCut, source_slot: *SourceSlot, host: bool) !void {
+        /// first part is among this file's (`order`), as one job. A DMA
+        /// fill job reads one block, the zero block; a host one writes zeros
+        /// in place. A gathered destination's jobs write its zeros
+        /// themselves.
+        fn appendFillJob(self: *JobCut, order: []const usize, host: bool) !void {
             const fill_start = self.transfers.items.len;
-            for (self.destinations) |destination| {
-                if (!destination.zero_fill or destination.gathered or destination.parts[0].source_slot != source_slot or
-                    destination.hostResident() != host) continue;
+            for (order) |part_index| {
+                const part = &self.parts[part_index];
+                const destination = part.destination;
+                if (part != &destination.parts[0] or destination.gathered or destination.hostResident() != host) continue;
                 try appendFillTransfers(self.allocator, &self.transfers, fill_start, destination, if (host) unblocked else self.config.block_size);
             }
             const fill_transfers = self.transfers.items[fill_start..];
@@ -2392,6 +2374,30 @@ const Planner = struct {
     };
     fn blockCount(len: usize, block_size: usize) usize {
         return len / block_size + @intFromBool(len % block_size != 0);
+    }
+
+    /// The longest read of a gather job's extent: a request, unwidened.
+    /// `Loader.create` checked the config.
+    fn readLimit(config: Config) usize {
+        var unaligned = config;
+        unaligned.alignment = 0;
+        return maximumJobLen(unaligned) catch unreachable;
+    }
+
+    /// A strided part whose source runs are not back to back reads its whole
+    /// source range in every job (`JobCut.appendExtent`): refused before
+    /// anything is published when that range does not fit one read.
+    fn checkGatherReads(config: Config, part: *const Part) error{UnsupportedLayout}!void {
+        const lattice = part.lattice();
+        if (lattice.srcTiled()) return;
+        const read_limit = readLimit(config);
+        const alignment = @max(config.alignment, 1);
+        const start = part.source.offset + part.src_offset;
+        const end = start + lattice.spans().?.src;
+        if (std.mem.alignForward(u64, end, alignment) - std.mem.alignBackward(u64, start, alignment) > read_limit) {
+            load_log.err("destination {f} from {s}: a strided part reads {d} source bytes for every job, more than a read of {d}", .{ part.destination.shape, part.source.name, end - start, read_limit });
+            return error.UnsupportedLayout;
+        }
     }
 
     /// The longest tensor range one job may cover: the request size within
@@ -3996,12 +4002,6 @@ fn LazyOnce(comptime T: type, comptime Ctx: type, comptime ErrorSet: type, compt
     };
 }
 
-/// What the backend places for a destination of `shape`: its packed PJRT
-/// shape, its sharding naming a mesh (`backend.placedShape`).
-fn placementShape(platform: *const Platform, shape: Shape) Shape {
-    return backend.placedShape(platform, shape).packedShape();
-}
-
 fn secondsBetween(from: std.Io.Timestamp, to: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(from.durationTo(to).nanoseconds)) / std.time.ns_per_s;
 }
@@ -4126,14 +4126,15 @@ test "loader failures clean up before publication, after publication and during 
 
         switch (failure) {
             .before_publication => {
-                // Sizes are checked before anything is published, even in a
-                // file the batch would plan after a published one.
-                specs[1].shape = .init(.{8}, .u8);
+                // The first file's range overflows, which fails its planning
+                // before any plan was published.
+                sources[0].offset = std.math.maxInt(u64) - 1;
                 const result: anyerror!void = if (loader.submit(&specs, .none)) |batch| unexpected: {
                     loader.awaitBatch(batch) catch {};
                     break :unexpected {};
                 } else |err| err;
-                try std.testing.expectError(error.SourceSizeMismatch, result);
+                try std.testing.expectError(error.InvalidTensorRange, result);
+                sources[0].offset = 0;
             },
             .after_publication => {
                 // The later file's range overflows, which fails its planning
@@ -4318,7 +4319,7 @@ fn initPlainParts(
             .destination = destination,
             .width = source.byteSize(),
         };
-        const placed = placementShape(platform, source.shape);
+        const placed = platform.placedShape(source.shape).packedShape();
         destination.* = .{
             .shape = source.shape,
             .placed_shape = placed,
@@ -4419,16 +4420,11 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     var destinations: [sources.len]Destination = undefined;
     var parts: [sources.len]Part = undefined;
     initPlainParts(platform, &sources, &.{ &slots[0], &slots[0], &slots[0], &slots[0], &slots[1] }, &outputs, &destinations, &parts);
-    var device_count: usize = 0;
-    for (platform.replicated_mesh.devicesInCanonicalOrder()) |device| {
-        device_count = @max(device_count, @as(usize, @intCast(device.id)) + 1);
-    }
 
     var scheduler: Scheduler = .init(allocator);
     defer scheduler.deinit();
     const batch = try Batch.create(allocator, io, .{});
     try Planner.publishFiles(&scheduler, io, batch, &parts, .{
-        .device_count = device_count,
         .block_size = 4,
         .request_size = 8,
         .alignment = 0,
@@ -4484,7 +4480,6 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     var iov_part: Part = undefined;
     initPlainParts(platform, @as(*[1]safetensors.Tensor, &iov_source), &.{&iov_slot}, @as(*[1]Buffer, &iov_output), @as(*[1]Destination, &iov_destination), @as(*[1]Part, &iov_part));
     const iov_plan = try Planner.prepareTestPlan(allocator, @as(*[1]Part, &iov_part), &.{0}, .{
-        .device_count = device_count,
         .block_size = 1,
         .request_size = safetensors.max_positional_iovecs + 1,
         .alignment = 0,
@@ -4505,7 +4500,6 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     var aligned_items: [aligned_sources.len]Part = undefined;
     initPlainParts(platform, &aligned_sources, &.{ &aligned_slot, &aligned_slot, &aligned_slot }, &aligned_outputs, &aligned_destinations, &aligned_items);
     const aligned_plan = try Planner.prepareTestPlan(allocator, &aligned_items, &.{ 0, 1, 2 }, .{
-        .device_count = device_count,
         .block_size = 4,
         .request_size = 8,
         .alignment = 0,
@@ -4522,7 +4516,6 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     // its transfers relative to the widened start; the last read runs past
     // the tensor data, of which every byte is required.
     const widened_plan = try Planner.prepareTestPlan(allocator, &aligned_items, &.{ 0, 1, 2 }, .{
-        .device_count = device_count,
         .block_size = 4,
         .request_size = 16,
         .alignment = 4,
@@ -4547,7 +4540,6 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
 
     // No room for the widening: two alignment units must fit in a request.
     const invalid_plan: anyerror!void = if (Planner.prepareTestPlan(allocator, &aligned_items, &.{ 0, 1, 2 }, .{
-        .device_count = device_count,
         .block_size = 4,
         .request_size = 8,
         .alignment = 4,
@@ -4557,7 +4549,6 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     } else |err| err;
     try std.testing.expectError(error.InvalidOptions, invalid_plan);
     try std.testing.expectError(error.InvalidOptions, Planner.maximumJobLen(.{
-        .device_count = 1,
         .block_size = 4,
         .request_size = 16,
         .alignment = 3,
@@ -4585,16 +4576,11 @@ test "scheduler publishes a submission one file at a time and claims the files i
     var destinations: [sources.len]Destination = undefined;
     var parts: [sources.len]Part = undefined;
     initPlainParts(platform, &sources, &.{ &slots[1], &slots[0], &slots[0] }, &outputs, &destinations, &parts);
-    var device_count: usize = 0;
-    for (platform.replicated_mesh.devicesInCanonicalOrder()) |device| {
-        device_count = @max(device_count, @as(usize, @intCast(device.id)) + 1);
-    }
 
     var scheduler: Scheduler = .init(allocator);
     defer scheduler.deinit();
     const batch = try Batch.create(allocator, io, .{});
     try Planner.publishFiles(&scheduler, io, batch, &parts, .{
-        .device_count = device_count,
         .block_size = 4,
         .request_size = 4,
         .alignment = 0,
@@ -5229,8 +5215,8 @@ const CompositeTest = struct {
         };
         const plain_shape = shape.setDim(0, 4);
         destinations = .{
-            .{ .shape = shape, .placed_shape = placementShape(platform, shape), .grid = try .init(placementShape(platform, shape)), .memory = memory, .output = &outputs[0], .parts = parts[0..3], .zero_fill = true, .unread_bytes = .init(144) },
-            .{ .shape = plain_shape, .placed_shape = placementShape(platform, plain_shape), .grid = try .init(placementShape(platform, plain_shape)), .memory = memory, .output = &outputs[1], .parts = parts[3..4], .unread_bytes = .init(64) },
+            .{ .shape = shape, .placed_shape = platform.placedShape(shape).packedShape(), .grid = try .init(platform.placedShape(shape).packedShape()), .memory = memory, .output = &outputs[0], .parts = parts[0..3], .unread_bytes = .init(144) },
+            .{ .shape = plain_shape, .placed_shape = platform.placedShape(plain_shape).packedShape(), .grid = try .init(platform.placedShape(plain_shape).packedShape()), .memory = memory, .output = &outputs[1], .parts = parts[3..4], .unread_bytes = .init(64) },
         };
         const host = destinations[0].hostResident();
 
@@ -5243,7 +5229,6 @@ const CompositeTest = struct {
         while (start < order.len) : (plan_count += 1) {
             const end = Planner.fileGroupEnd(&parts, order, start);
             plans[plan_count] = try Planner.prepareTestPlan(allocator, &parts, order[start..end], .{
-                .device_count = platform.devices.len,
                 .block_size = block_size,
                 .request_size = request_size,
                 .alignment = alignment,
@@ -5487,7 +5472,6 @@ test "concurrent pipeline failures preserve the first error" {
 
 test "read alignment overflow is an invalid option" {
     try std.testing.expectError(error.InvalidOptions, Planner.maximumJobLen(.{
-        .device_count = 1,
         .block_size = 4096,
         .request_size = 4096,
         .alignment = @as(usize, 1) << (@bitSizeOf(usize) - 1),
@@ -5533,7 +5517,7 @@ test "host-resident and DMA parts never share a job, and overlapping host parts 
     };
     const memories = [_]Memory.Kind{ .host_pinned, .default, .host_pinned, .host_pinned };
     for (&destinations, &outputs, &parts, memories) |*destination, *output, *part, memory| {
-        destination.* = .{ .shape = shape, .placed_shape = placementShape(platform, shape), .grid = try .init(placementShape(platform, shape)), .memory = memory, .output = output, .parts = @as(*[1]Part, part), .unread_bytes = .init(64) };
+        destination.* = .{ .shape = shape, .placed_shape = platform.placedShape(shape).packedShape(), .grid = try .init(platform.placedShape(shape).packedShape()), .memory = memory, .output = output, .parts = @as(*[1]Part, part), .unread_bytes = .init(64) };
     }
 
     const order = try Planner.sortedPartOrder(allocator, &parts);
@@ -5547,7 +5531,6 @@ test "host-resident and DMA parts never share a job, and overlapping host parts 
     for (wanted, ahead) |want, destination| try std.testing.expect(want == destination);
 
     const plan = try Planner.prepareTestPlan(allocator, &parts, order, .{
-        .device_count = platform.devices.len,
         .block_size = 64,
         .request_size = 1024,
         .alignment = 0,
@@ -5656,7 +5639,7 @@ test "a strided part whose source does not fit one read is refused before anythi
         .{ .count = 32, .src_stride = 16, .dst_stride = 1 },
     } };
     var output: Buffer = undefined;
-    const spec: LoadSpec = .{ .shape = .init(.{ 16, 32 }, .u8), .output = &output, .parts = (&part)[0..1], .zero_fill = true };
+    const spec: LoadSpec = .{ .shape = .init(.{ 16, 32 }, .u8), .output = &output, .parts = (&part)[0..1] };
     const loader = try Loader.create(allocator, io, devices.platform, .{ .read_parallelism = 2, .direct_io = .off });
     defer loader.destroy();
     loader.plan_config.request_size = 256;
@@ -5749,7 +5732,7 @@ const HostResidentTest = struct {
             // Host shards in each device's host memory; the replicated ones
             // one allocation when shared.
             for (outputs, memories) |output, memory| {
-                const ordered = backend.placedShape(platform, output.shape())._sharding.mesh.?.devicesInCanonicalOrder();
+                const ordered = platform.placedShape(output.shape())._sharding.mesh.?.devicesInCanonicalOrder();
                 for (ordered, output._shards.constSlice()) |device, shard| {
                     try std.testing.expect(shard.memory(platform.pjrt_api) == platform.devices[device.id].memory(memory).?.pjrt_memory);
                 }

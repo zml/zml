@@ -95,8 +95,9 @@ outputs (8 GiB), so the inputs of one layer's experts, adjacent in the
 checkpoint, are read together. Before publishing a group, `wait` waits for its
 programs to compile, then retires the oldest pending submissions until the
 group fits the room the devices report (their memory limit minus what is in
-use, minus the loader’s own unlanded weights), at a cost of inputs,
-temporaries and outputs per device; it always admits when no group is
+use, minus the weights the backend has yet to allocate), at a cost of
+inputs, outputs and the largest program's temporaries per device (a group's
+programs run one after the other); it always admits when no group is
 pending. Where a device reports no memory limit (CPU) or the backend cannot
 account its allocations, one group is in flight at a time. The tensors the
 loader fills itself are never gated: `start` publishes them before any group,
@@ -164,26 +165,21 @@ const qkv = Source.concatenate(&members, .r).merge(.{ .dout = .{ .group, .r } })
 
 A source is a few pieces, each an affine lattice over one checkpoint tensor;
 reshapes never touch them, and the other ops rewrite them without
-enumerating rows. `bind` lowers them to the binding's `TensorStore.Layout`:
-byte `Part`s of the destination's logical bytes (row-major bytes of its
-shape, before the sharding splits them), each a run of `width` bytes
-repeated over strided dimensions. A source that is one whole checkpoint
-tensor binds plainly, like `createTensor`.
+enumerating rows. `bind` records the placed source as it is, its shape and
+pieces (`TensorStore.Binding.load`). `start` lowers each piece to bytes
+(`Source.lowerPiece`, the one rule): a part of the destination's logical
+bytes (row-major bytes of its shape, before the sharding splits them), a
+run of `width` bytes repeated over strided dimensions. A source that is one
+whole checkpoint tensor is one part, its whole bytes.
 
-`start` checks a composite binding before submitting anything: the layout
-fills the tensor's bytes, it has a part, each part reads a source of the
-binding, stays inside it and the destination, and parts do not overlap;
-otherwise `InvalidBinding`, as for a zero-byte source. A strided
-part of at most 64 runs, or of runs of at least 1 MiB, becomes one load part
-per run. A composite with any other strided part (many small runs: row
-interleaves, transposes, broadcasts) goes to the backend as strided parts,
-which the direct backend gathers (below). Strided parts must land in run
-order without overlapping. Two that interleave are checked exactly when one
-of them has at most 1024 runs (each looked for among the other's), or when
-they repeat with the same strides, before or after merging the runs that
-touch (a search over the differences of their indices); any other pair is
-`InvalidBinding`. Strided
-parts into a host memory space are `InvalidBinding` too.
+`start` checks every tensor once, before submitting anything (see Errors).
+Only `Source` makes bindings, and its pieces are disjoint by construction:
+the loader relies on that and does not check it (Source's tests do). A
+strided part of at most 64 runs, or of runs of at least 1 MiB, becomes one
+load part per run. A composite with any other strided part (many small
+runs: row interleaves, transposes, broadcasts) goes to the backend as
+strided parts, which the direct backend gathers (below); strided parts into
+a host memory space are `InvalidBinding`.
 
 The front end turns a composite binding into one `LoadSpec` whose parts all
 share the destination. The direct backend plans each part like a tensor: the
@@ -256,7 +252,7 @@ const weight = Source.bindProgram(&.{ w.as(placed), s.as(scales) }, placed.withD
 
 A program is a value of its own type: plain data, checked at compile time,
 whose type name names the compiled module in traces and logs. The binding
-keeps it and one `Layout` per input (`Binding.program`, a
+keeps it and each placed input (`Binding.compute`, whose `program` is a
 `TensorStore.Program`; `Program.as(T)` reads the value back). The loader
 compiles one executable for every tensor of an equal program over the same
 placed shapes, and starts each compile as soon as `start` sees it. It lands
@@ -287,20 +283,26 @@ A model whose bindings are wrong is one error, `InvalidBinding`, whichever
 rule it breaks:
 
 - a tensor with no checkpoint binding;
-- a zero-byte source;
+- a source that reads no bytes, or reads an empty checkpoint tensor;
 - a source whose bytes differ from its tensor's;
-- a composite layout that does not fit its tensor, or that this loader does
-  not assemble yet;
-- a tensor whose dimensions its mesh partitions do not divide;
+- a source this loader cannot assemble: a run of elements that starts or
+  ends inside a byte (sub-byte dtypes), or strided parts into a host memory
+  space;
+- a tensor whose dimensions its mesh partitions do not divide, or whose mesh
+  holds devices the platform lacks, in any memory space;
 - a memory kind the platform cannot take;
 - a program that does not return its tensor's shape, placed alike.
 
 A failure is logged once, where it is detected, at `err` with the values that
-explain it: a rejected binding names its tensor, its source and the rule.
+explain it: a rejected binding names its tensor (for a program input, the
+input and its tensor), the checkpoint key its source reads and the rule. A
+source that reads nothing, such as a padded empty tensor, has no key to name.
 Frames that only propagate an error do not log it again, and subsequent
 calls return the stored error. Worker cancellation and normal shutdown use
-`debug`. The direct backend validates source sizes and parts before
-publication, while the buffered backend checks them in its workers.
+`debug`. The front end checks every tensor and program input once, before
+anything is published, and the backends trust what it submits
+(`LoadSpec`); the direct backend still refuses, before publication, a
+strided part whose source range does not fit one read.
 
 `Loader.init` checks every option, logs a rejected one at `err` and
 returns `InvalidOptions`: a read width or a block size out of range, an
@@ -315,9 +317,9 @@ read size that a block calibration may select does not divide. What
 | `ConcurrencyUnavailable` | An `io` that cannot run the warm-up's or the workers' tasks concurrently |
 | `OutOfMemory`, PJRT errors | Warm-up, calibration or the pinned pre-growth failed |
 
-The backends keep their own names (`SourceSizeMismatch`, `InvalidLayout`,
-`UnsupportedLayout`, `InvalidTensorRange`, `EmptyTensor`); the front end
-returns them as `InvalidBinding`. The front end panics on `Closed`,
+The backends keep their own names (`UnsupportedLayout`,
+`InvalidTensorRange`, `IncompatibleSharding`, `UnsupportedMemoryKind`); the
+front end returns them as `InvalidBinding`. The front end panics on `Closed`,
 `Internal` and, after `init`, `InvalidOptions`: each means a broken
 invariant (a backend returns the error that closed it, never `Closed`).
 
@@ -344,11 +346,11 @@ builds because the Zig test runner counts logged errors as failures.
 | `zml/mem.zig` | Generic buffer conversion and public host-memory placement policy |
 
 The shared front end resolves sources and placements once, from each tensor's
-shape, or for a program's inputs from their placed shapes (`Program.inputs`).
-Each `LoadSpec` is one destination:
+shape, or for a program's inputs from their placed shapes
+(`Binding.compute.inputs`). Each `LoadSpec` is one destination:
 the target shape with its placement, the destination memory kind, the
-caller-owned output, and the parts that fill it, one whole source for a plain
-tensor.
+caller-owned output, and the parts that fill it, the binding's pieces in
+bytes.
 Backends consume those specs without knowing about model traversal or
 programs.
 

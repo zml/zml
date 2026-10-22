@@ -484,15 +484,16 @@ fn checkPacks(
     var checked: usize = 0;
     for (samples, 0..) |sample, i| {
         if (std.mem.indexOfScalar(usize, samples[0..i], sample) != null) continue;
-        const sources = (store.getSourcesById(packs[sample].id) orelse return error.NotFound).tensors;
+        const inputs = (store.getSourcesById(packs[sample].id) orelse return error.NotFound).compute.inputs;
         const slice = try outputs[sample].toSliceAlloc(allocator, io);
         defer slice.free(allocator);
         const packed_bytes = slice.constData();
-        const source_bytes: usize = @intCast(sources[0].byteSize());
-        if (packed_bytes.len != source_bytes * sources.len) return error.PackContentMismatch;
+        const source_bytes: usize = @intCast(inputs[0].whole().?.byteSize());
+        if (packed_bytes.len != source_bytes * inputs.len) return error.PackContentMismatch;
         const expected = try allocator.alloc(u8, source_bytes);
         defer allocator.free(expected);
-        for (sources, 0..) |source, expert| {
+        for (inputs, 0..) |input, expert| {
+            const source = input.whole().?;
             try source.read(io, expected);
             const actual = packed_bytes[expert * source_bytes ..][0..source_bytes];
             if (!std.mem.eql(u8, expected, actual)) {
@@ -511,9 +512,9 @@ fn checkPacks(
 /// replicated buffer is compared on every replica; a partitioned one is
 /// assembled with `toSliceAlloc`, which keeps the last replica of a region
 /// that several devices hold. Each source file is opened once (an
-/// `hf://` open is a HEAD plus a redirect). Skipped: tensors with several
-/// sources, and sub-byte tensors partitioned over several devices
-/// (`toSliceAlloc` places their shards by element stride).
+/// `hf://` open is a HEAD plus a redirect). Skipped: tensors that are not
+/// one whole checkpoint tensor, and sub-byte tensors partitioned over
+/// several devices (`toSliceAlloc` places their shards by element stride).
 fn checkLoaded(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -525,11 +526,13 @@ fn checkLoaded(
     std.debug.assert(tensors.len == buffers.len);
     const Eligibility = struct {
         fn source(store_: *const zml.io.TensorStore, tensor: zml.Tensor, buffer: zml.Buffer) ?*const zml.safetensors.Tensor {
-            const sources = (store_.getSourcesById(tensor.id) orelse return null).tensors;
-            if (sources.len != 1) return null;
+            const whole = switch (store_.getSourcesById(tensor.id) orelse return null) {
+                .load => |load| load.source.whole() orelse return null,
+                .compute => return null,
+            };
             const partitioned = buffer.byteSize() / buffer.numShards() != tensor.byteSize();
             if (partitioned and tensor.dtype().bitSizeOf() < 8) return null;
-            return sources[0];
+            return whole;
         }
     };
     var largest: ?usize = null;

@@ -444,9 +444,7 @@ pub const PjrtBufferMetadata = struct {
 };
 
 fn placementOrPanic(platform: *const Platform, shape: Shape) Sharding.Placement {
-    var sh = shape;
-    if (sh._sharding.mesh == null) sh._sharding.mesh = platform.replicated_mesh;
-    return Sharding.Placement.init(sh) catch |err| {
+    return Sharding.Placement.init(platform.placedShape(shape)) catch |err| {
         @branchHint(.cold);
         std.debug.panic("Buffer shape {f} is incompatible with its mesh: {t}", .{ shape, err });
     };

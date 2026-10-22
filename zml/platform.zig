@@ -64,6 +64,15 @@ pub const Memory = struct {
         host_unpinned,
         host_pinned,
         device,
+
+        /// Whether `kind` is a host memory space, which takes no device
+        /// memory.
+        pub fn isHost(self: Kind) bool {
+            return switch (self) {
+                .default, .device => false,
+                .host_pinned, .host_unpinned => true,
+            };
+        }
     };
 
     pjrt_memory: *const pjrt.Memory,
@@ -654,6 +663,14 @@ pub const Platform = struct {
             if (i < self.devices.len - 1) try writer.writeAll(", ");
         }
         try writer.writeAll(" }");
+    }
+
+    /// `shape` placed as a buffer places it: on its mesh, or replicated on
+    /// every device (`replicated_mesh`) when it names none.
+    pub fn placedShape(self: *const Platform, shape: zml.Shape) zml.Shape {
+        var placed = shape;
+        if (placed._sharding.mesh == null) placed._sharding.mesh = self.replicated_mesh;
+        return placed;
     }
 
     pub fn memoryKind(self: *const Platform, kind: Memory.Kind) []const u8 {
