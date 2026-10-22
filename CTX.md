@@ -6517,8 +6517,116 @@ Checks:
 - `bazel test --config=localzml //llmd/...` passes 7/7.
 - `bazel build --config=localzml //llmd:llmd`.
 
+## Thirty-seventh pass: the rest of R4 (2026-10-22)
+
+The rest of R4 of `LOADER_API_REVIEW.md`, on the thirty-fourth pass's
+start/wait: A-bytesloaded-is-a-log-line, K-example-loaders, A-error-sets,
+A-progress-by-value-loader-total and J-outputs-empty-at-submission. The
+caller still owns the buffer tree; a `load` that returns it is not taken.
+
+zml:
+- `Loader.wait()` logs "Loaded weights [bytes, time, rate]" itself. The
+  time runs from the first `start` since the last `wait`, and the bytes
+  are that load's. When programs ran, the same line goes on with the
+  tensors computed, programs, groups and compile wait; the separate
+  "Computed" line is gone. A second `wait` logs nothing.
+- `bytesLoaded` is gone. Tests read the `bytes_loaded` field.
+- `start` adds its own items to the progress node: one per tensor the
+  loader fills, a composite one once, and one per program input. That is
+  what the backends complete. Callers no longer estimate them.
+- After any error of `start`, `wait` or `cancel`, every buffer is empty
+  or holds shards the caller frees, so `deinitBufferized` on the tree is
+  always right. `bufferize` already left each buffer empty, and both
+  backends and the program path write a buffer whole or not at all. The
+  gap was a buffer the caller left `undefined`: `start` now empties every
+  buffer before it checks a binding. On a failed loader, or when its
+  first allocation fails, it returns before that, so the docs ask for
+  `bufferize`'s buffers.
+- `Loader.Error` is `InvalidBinding` and `Canceled`, plus allocation,
+  PJRT, file open and seek, safetensors read and compiler errors.
+  TensorNotFound, EmptyTensor, UnsupportedMemoryKind, the layout errors,
+  IncompatibleSharding and ProgramOutputMismatch became `InvalidBinding`,
+  each logged at err with the tensor, its source and the rule. The
+  backends keep their own names; `backendError` maps them. `Overflow` is
+  gone (plain sums). `Closed`, `Internal` and `InvalidOptions` after
+  `init` panic: a backend returns the error that closed it, and `init`
+  checked the options. The direct backend's binding rejections log at
+  err, not debug. No caller in either repo switched on a loader error.
+- examples/llm: the four Model-level loaders nobody called are gone
+  (llama, lfm2, qwen3_5, qwen3_5_moe). `LoadedModel.loadBuffers` is
+  bufferize, start and wait, and no longer takes `io`.
+- examples/io sums its own bytes for its line: the pack plan's plus each
+  tensor's. Its output now has two "Loaded weights" lines. The loader's,
+  in scope `zml/io/load`, comes first and is timed from the first
+  `start`, without `Loader.init` and DMA calibration. The example's own,
+  in scope `vfs`, includes them. The examples/io figures in earlier
+  passes are the `vfs` line.
+- mnist and the `zml/testing.zig` helper now print the loader's line too.
+
+llmd (monorepo):
+- `Model.loadBuffers` drops its timestamp, byte count, log line and `io`
+  parameter, and `weights.computeLoadBandwidth` is gone. The line now
+  comes from the loader, in scope `zml/io/load` instead of `models`. Its
+  time no longer includes `finalizeLoadedBuffers` (qwen4's `bakeWeights`,
+  deepseek41's view swaps).
+- The "Loading weights" node had no total. It now gets one from the
+  loader.
+
+Tests:
+- New: a load of a model with a slice, optionals, a tensor in a missing
+  file and a program over it fails with `FileNotFound`, and
+  `deinitBufferized` frees the tree under the testing allocator. A
+  temporary probe showed every bulk buffer held its shards when the load
+  failed, so the test does free buffers from a failed load.
+- The rejected-binding test checks that `start` emptied its `undefined`
+  output. The expectError calls expect `InvalidBinding`.
+- The first loader test starts a second load on the same loader: its
+  bytes are that load's alone, and `started_at` is cleared after each
+  `wait`.
+
+Review (workflow, refuting verifier): five findings, all low.
+- A tensor bound to host memory with a sharding its dimensions cannot
+  divide reached the caller as `InvalidBinding` with no log at any level.
+  The front end checked the sharding only for device memory.
+  `addPlacementBytes` now checks it in every memory space.
+- A source registered with an offset near u64 max failed planning with
+  `InvalidTensorRange`, logged only at debug when nothing was published
+  yet. `Part.fileRange` and `appendExtent` now log it at err.
+- loader.md said `start` empties the buffers "before it can fail". It
+  fails first on a failed loader or a failed allocation. Reworded.
+- No test ran a second load on one loader. One does now (above).
+- examples/io's second line: kept, as the move asks; noted above.
+
+Not done:
+- Pairing by construction (M1-pair-by-structure): the caller still
+  builds the tree, so R1's count assert is the only check.
+- The direct backend's job-end alignment overflow still returns
+  `InvalidTensorRange` with no err log. It needs an offset within one
+  alignment of u64 max and direct I/O.
+- Tests cannot tell which binding rule fired; only the log says. A
+  binding error in a partly published direct batch can be logged at err
+  twice: at its site and by the pipeline's failure log.
+- The progress total has no test (`std.Progress` keeps its counters
+  private), and no bar was watched to the end.
+- Not run on a GPU, and no real model was loaded.
+
+Checks:
+- `bazel test //zml:test` passes (327, 12 skip).
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7.
+- `bazel build --config=localzml //llmd:llmd`.
+- On CPU, `examples/io load` of a synthetic checkpoint passes its load
+  and pack checks, replicated with 2 packs of 4 and sharded without
+  packs. Both "Loaded weights" lines show 320.25 KiB each time.
+
 ## Open work
 
+- 2026-10-22 the rest of R4 (thirty-seventh pass, zml ryvvruus and
+  monorepo vrounrwt): the loader logs and counts its own load, buffers
+  can be freed after any failure, model bugs are `InvalidBinding`. R4 is
+  done except pairing by construction, which start/wait leaves to R1's
+  assert. Not run on a GPU or a real model; no progress bar watched to
+  the end.
 - 2026-10-22 deinitBufferized everywhere (thirty-sixth pass, zml rktvmymx
   and monorepo yyqsnszp): R3 done. Not run: no model's free path was
   exercised on a device.
