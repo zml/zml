@@ -20,6 +20,7 @@ pub fn row(c: cases.Case, f: fixtures.Fixture, seq: usize, token: usize, head: u
             .indices, .non_causal => true,
             .causal => key <= position,
             .window => key <= position and @as(i64, @intCast(key)) > @as(i64, @intCast(position)) - c.window,
+            .non_causal_window => @as(i64, @intCast(key)) > @as(i64, @intCast(position)) - c.window,
         };
         scores[j] = -std.math.inf(f32);
         if (!valid) continue;

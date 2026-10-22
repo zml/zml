@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub const page_size = 16;
 pub const topk = 8;
-pub const Mask = enum { causal, non_causal, window, indices };
+pub const Mask = enum { causal, non_causal, window, non_causal_window, indices };
 
 pub const Case = struct {
     name: []const u8 = "standard",
@@ -13,6 +13,9 @@ pub const Case = struct {
     prefill: usize = 0,
     chunk: usize = 17,
     kv_len: usize = 65,
+    kv_capacity: ?usize = null,
+    inactive: usize = 0,
+    shuffle_pages: bool = false,
     skew: bool = false,
     mask: Mask = .causal,
     empty_indices: bool = false,
@@ -21,19 +24,20 @@ pub const Case = struct {
     scale: ?f32 = null,
 
     pub fn tokens(c: Case) usize {
-        return c.prefill * c.chunk + c.batch - c.prefill;
+        return c.prefill * c.chunk + c.batch - c.prefill - c.inactive;
     }
     pub fn pages(c: Case) usize {
-        return std.math.divCeil(usize, c.kv_len, page_size) catch unreachable;
+        return std.math.divCeil(usize, c.kv_capacity orelse c.kv_len, page_size) catch unreachable;
     }
     pub fn heads(c: Case) usize {
         return c.kv_heads * c.group;
     }
     pub fn queryLen(c: Case, seq: usize) usize {
-        return if (seq < c.prefill) c.chunk else 1;
+        return if (seq >= c.batch - c.inactive) 0 else if (seq < c.prefill) c.chunk else 1;
     }
     pub fn kvLen(c: Case, seq: usize) usize {
         const qlen = c.queryLen(seq);
+        if (qlen == 0) return 0;
         const reduction = if (c.skew) (seq * 17) % c.kv_len else 0;
         return @max(qlen, c.kv_len - @min(reduction, c.kv_len - 1));
     }
@@ -41,7 +45,7 @@ pub const Case = struct {
 
 // Eight geometry cases plus orthogonal semantics/boundary cases, not a Cartesian product.
 pub const correctness = blk: {
-    var result: [17]Case = undefined;
+    var result: [26]Case = undefined;
     var i: usize = 0;
     for ([_]usize{ 64, 128, 256, 512 }) |dim| {
         for ([_]bool{ false, true }) |mixed| {
@@ -58,6 +62,15 @@ pub const correctness = blk: {
     result[14] = .{ .name = "skew", .head_dim = 256, .batch = 4, .prefill = 2, .skew = true, .kv_len = 129 };
     result[15] = .{ .name = "mixed_short_chunks", .batch = 4, .prefill = 2, .chunk = 16, .skew = true, .kv_len = 64 };
     result[16] = .{ .name = "empty_indices", .prefill = 1, .mask = .indices, .empty_indices = true };
+    result[17] = .{ .name = "d32", .head_dim = 32, .group = 1, .kv_len = 33 };
+    result[18] = .{ .name = "odd_group", .group = 5, .prefill = 1, .chunk = 9, .kv_len = 79 };
+    result[19] = .{ .name = "group_tile_tail", .head_dim = 256, .batch = 1, .group = 19, .kv_len = 257 };
+    result[20] = .{ .name = "shuffled_mixed", .head_dim = 512, .batch = 4, .prefill = 2, .group = 3, .chunk = 11, .kv_len = 129, .shuffle_pages = true };
+    result[21] = .{ .name = "split_sink", .head_dim = 512, .batch = 1, .kv_len = 4097, .sink = true, .shuffle_pages = true };
+    result[22] = .{ .name = "split_window_sink", .head_dim = 256, .batch = 1, .kv_len = 4097, .mask = .window, .window = 257, .sink = true };
+    result[23] = .{ .name = "inactive_sequence", .batch = 4, .prefill = 1, .inactive = 1, .kv_len = 129 };
+    result[24] = .{ .name = "non_causal_window", .head_dim = 64, .prefill = 1, .kv_len = 65, .mask = .non_causal_window, .window = 7 };
+    result[25] = .{ .name = "empty_splits", .batch = 1, .kv_len = 1, .kv_capacity = 4096, .sink = true };
     break :blk result;
 };
 

@@ -1,0 +1,9 @@
+package(default_visibility = ["//zml/kernels/paged_attention/cute:__pkg__"])
+
+filegroup(
+    name = "sm120",
+    srcs = [
+        "attention.zig",
+        "sm120.zig",
+    ],
+)

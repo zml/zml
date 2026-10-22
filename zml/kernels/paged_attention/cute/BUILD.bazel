@@ -7,8 +7,8 @@ filegroup(
     srcs = [
         "attention.zig",
         "cute.zig",
-        "sm100.zig",
-        "sm100_attention.zig",
+        "//zml/kernels/paged_attention/cute/sm100",
+        "//zml/kernels/paged_attention/cute/sm120",
     ],
 )
 
