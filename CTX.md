@@ -6250,8 +6250,122 @@ one 2.38 s. Both outliers are slow destination creations.
   again, apply `zmlA.patch` or `zmlB.patch` plus `setup.sh` first: the
   runfiles come from the tree.
 
+## Thirty-fourth pass: one start for the whole model (2026-10-22)
+
+The user's decision on the API review's Part 3: submit everything at once
+("start with everything"), with the loader orchestrating the programs. That
+is R2, plus R4 as start/wait rather than a blocking `load`. The CPU map for
+the CDNA3 conversion is set aside.
+
+API (zml):
+- A program is a value of its own type, plain data (comptime check), that
+  declares `pub fn forward(self, output: Shape, inputs: []const Tensor)
+  Tensor`. `Source.bindProgram(inputs, output, program)` and
+  `View.maybeCreateBinding(keys, shape, program)` record it in the
+  binding: `TensorStore.Binding.program` is a `TensorStore.Program` (input
+  layouts, the value in the store's arena, a vtable per type built by
+  `Program.init`). The type name names the compiled module in traces,
+  dumps and logs. `Program.as(T)` reads the value back.
+- `Loader.start(model, buffers, store, progress)` takes a whole model,
+  progress by value. It starts compiling each distinct program on a task
+  of its own (`io.concurrent`, falling back to `io.async`; deduped by
+  `Program.sameExecutable`: same type, equal value, same placed shapes).
+  It queues the program tensors in model order, in groups of at most
+  `Loader.program_group_bytes` (8 GiB, was llmd's `group_bytes`), and
+  publishes every tensor the loader fills itself at once.
+- `Loader.wait()` publishes the queued groups in order, each once its
+  programs compiled (output checked: `error.ProgramOutputMismatch`) and the
+  devices have room. It retires everything in publish order, running each
+  group's programs on the caller's task, and logs one info line: tensors
+  computed, programs, groups and the time spent waiting for compiles.
+  Idempotent.
+- One error set, `Loader.Error`. Every error of `start` or `wait` fails the
+  loader and cancels everything started, so nothing stays borrowed. The
+  "validation leaves the loader usable" rule is gone. `cancel` stays
+  public for an error between `start` and `wait`. Binding rejections log
+  at `err` (#30 for the front end).
+- Gone: `load`, `loadExecute`, `Loader.Binding`, `awaitAll`, the
+  `delivered` map and `TransformedTensorNotDelivered`,
+  `LoadError`/`LoadExecuteError`/`AwaitError`, and the executable-versus-
+  binding checks (input count, input shape, platform, placement): the
+  loader compiles from the binding's own shapes, so only the output is
+  checked.
+
+Order: the bulk is published first, then the groups.
+- Groups are admitted with the bulk's bytes counted. Before, the bulk went
+  last and ungated, after the last group had been admitted without it.
+- The bulk no longer waits for any compile. DeepSeek's main batch used to
+  be published 1.9 s behind the pack compiles (twenty-ninth pass).
+- Group reads now come after the bulk's.
+- Not measured: no GPU.
+
+llmd (monorepo):
+- Each `bindProgram` + `recipes.put` pair is one `bindProgram(inputs,
+  output, Program{...})` call. The programs are named structs:
+  `DequantizeBlockFp8`, `NormalizeBlockFp8`, `Nvfp4ActivationGlobal`,
+  `Nvfp4WeightGlobal`, `LayOutExperts`, `ConcatenateRows`.
+- Gone:
+  - the `Recipe` union, `Packer.recipes`, `Program`, `loadPacked`,
+    `program`, `compileRecipe`, `deinitPrograms`, `sameLoadShape` and
+    `loadInto`;
+  - the uncalled `Packer.convertRows`/`dequantizeBlocks` and the drafters'
+    `Spec.modelParallelism`.
+- `bf16Linear` and `swizzleBlockFp8Scales` are free functions. The errors
+  are `UnsupportedScaleProgram` and `UnsupportedFp8NormalizationProgram`.
+- One lifecycle:
+  - a model's `startLoad(loader, store, progress)` only starts its loads:
+    the target, the resharded lm_head and the drafter;
+  - `models.zig` owns the "Loading weights" node, waits once, then calls
+    `finalizeLoadedBuffers`. Nothing implemented it before. Now deepseek41
+    swaps its Engram views there, and qwen4 its n-gram views plus
+    `bakeWeights`;
+  - qwen3_5's drafter now overlaps its base load;
+  - the drafters' own progress nodes are gone. They were never ended.
+- Tests: `packer.recipes.count()` became `testing.programCount(store,
+  value)`, and the NVFP4 test reads each global's operation with
+  `Program.as`.
+
+`examples/io`: the packs are part of the one model, and the stack program is
+`StackPack`. `ZML_LOAD_PACK_PAIRS` became `ZML_LOAD_PACK_GROUP_BYTES`, the
+loader's group size. `load_took` now includes the pack compiles.
+
+Review (workflow: four reviewers by dimension, one refuting verifier each).
+Fixed:
+- Program names came from the args type, so the two NVFP4 programs shared
+  one name. Fixed by programs as named types.
+- The erasure lived in Source.zig, away from `TensorStore.Program`.
+- On `std.Io.Threaded`, `io.async` runs the compile inline once
+  busy_count reaches cpu_count-1, and the direct backend's width+1 workers
+  count. On such hosts every compile would have run inside `start`, before
+  the bulk was published. Compiles now start with `io.concurrent`.
+  llmd's zio and its threaded mode (unlimited async) were not affected.
+- Progress is taken by value.
+- Compile cost was unobservable. The info line above restores it.
+- No test cancelled a published group. One does now, and another covers
+  dedupe by program type and value.
+- Dead code, stale docs, and qwen3_5 serializing its drafter behind its
+  base.
+
+Not taken:
+- counting bulk retirements apart from group retirements in the admission
+  metric. They stay counted together, as before: a bulk retire is a real
+  head-of-line wait.
+
+Checks:
+- `bazel test //zml:test` passes (322, 12 skip).
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7.
+- On CPU, `examples/io load` of a synthetic checkpoint with 2 packs of 4
+  passes its load and pack checks, in one group and in one group per pack.
+  In the second case, serial admission retired 2 before the second group.
+
 ## Open work
 
+- 2026-10-22 one start for the whole model (thirty-fourth pass, zml and
+  llmd): `Loader.start`/`wait`, programs as values in their bindings, the
+  bulk published before any compile. Not run on a GPU: measure DeepSeek's
+  load against the twenty-ninth pass, since its program groups now read
+  after the bulk instead of before it.
 - 2026-10-21 benchmark of move 2 step 2 (thirty-third pass): no load-time
   change detected at about ±2.5% on two GB300. The calibration's 8 MiB
   choice costs Qwen3.8-27B 25-30%. 8 MiB sits on the screen's 8%
