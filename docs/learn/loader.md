@@ -18,7 +18,7 @@ var loader = try zml.io.Loader.init(allocator, io, platform, .{
 });
 defer loader.deinit();
 
-try loader.start(&model, &buffers, &store, null);
+try loader.start(&model, &buffers, &store, .none);
 try loader.wait();
 ```
 
@@ -42,9 +42,9 @@ const b = store.view().createReplicatedTensor("b", .{.out});
 ```
 
 The store is passed to each `start`; initialization needs no store. `start`
-also accepts an optional progress node as its final argument (`null` disables
+also takes a progress node as its final argument (`.none` disables
 reporting). The loader copies the node; do not end it until `wait` or
-`deinit` returns. The caller owns the estimated total. For a whole checkpoint
+`cancel` returns. The caller owns the estimated total. For a whole checkpoint
 loaded once, `store.view().count()` estimates the number of source tensors.
 Each loaded tensor completes one item, a composite tensor once for all its
 sources; a tensor a program computes counts its inputs, not its output.
@@ -52,7 +52,9 @@ Unused, repeatedly loaded or concatenated sources can make the checkpoint
 estimate inexact. Source progress completes before a program runs; keep the
 enclosing node alive until `wait` returns to cover the full loading
 lifecycle. The caller owns the store, platform and model buffers; a started
-load borrows them until `wait` returns. The loader owns its backend, the
+load borrows the buffers and the store until `wait` or `cancel` returns, and
+the progress node must not end before then. The model itself is read during
+`start` only. The loader owns its backend, the
 programs it compiles and its pending submissions. Declare cleanup in the
 order above so the loader finishes using buffers before they are freed.
 Start and wait serially on the owning task; the backend provides the read and
@@ -83,7 +85,8 @@ retires the submissions without running their programs, inputs freed, and
 waits for the compiles. The outputs are undefined (unwritten, errored, or for
 host-resident destinations ready but partly written): free the ones that were
 assigned, read none. The loader is failed afterwards. `deinit` cancels, then
-destroys the backend. There is no per-submission handle and no memory knob.
+destroys the backend. There is no per-submission handle and no memory
+budget: `program_group_bytes` only sizes the program groups.
 
 ## Composite tensors
 
@@ -199,20 +202,33 @@ block-FP8 scales (a few MiB) in the loader.
 
 What stays a program is what computes rather than moves bytes: a dtype
 conversion, a dequantization, a global scale's maximum.
-`Source.bindProgram(inputs, output, func, args)` binds a tensor that
-`func(args, output, inputs)` computes while loading, from sources: each input
-is placed by its own shape, as `bind` places a tensor
+`Source.bindProgram(inputs, output, program)` binds a tensor that
+`program.forward(output, inputs)` computes while loading, from sources: each
+input is placed by its own shape, as `bind` places a tensor
 (`source.place(mesh, partitioning)`, or `placeAs(shape)`), so a program can
 take a fused weight and its scale grid with every device landing only its
-slice. The binding keeps the program and one `Layout` per input
-(`Binding.program`). `args` is plain data, checked at compile time, so the
-loader compiles one executable for every tensor of the same `func`, equal
-`args` and the same placed shapes, and starts each compile as soon as `start`
-sees it. It lands each input as it lands a bound source, in default device
-memory, runs the program over them, then frees them; the program must return
-the tensor's shape, placed alike, or `wait` fails with
-`ProgramOutputMismatch`. `View.maybeCreateBinding(keys, shape, func, args)`
-is the shorthand for whole checkpoint tensors, replicated.
+slice.
+
+```zig
+const Dequantize = struct {
+    block_size: i64,
+
+    pub fn forward(self: Dequantize, output: zml.Shape, inputs: []const zml.Tensor) zml.Tensor { ... }
+};
+const weight = Source.bindProgram(&.{ w.placeAs(placed), s.placeAs(scales) }, placed, Dequantize{ .block_size = 128 });
+```
+
+A program is a value of its own type: plain data, checked at compile time,
+whose type name names the compiled module in traces and logs. The binding
+keeps it and one `Layout` per input (`Binding.program`, a
+`TensorStore.Program`; `Program.as(T)` reads the value back). The loader
+compiles one executable for every tensor of an equal program over the same
+placed shapes, and starts each compile as soon as `start` sees it. It lands
+each input as it lands a bound source, in default device memory, runs the
+program over them, then frees them; the program must return the tensor's
+shape, placed alike, or `wait` fails with `ProgramOutputMismatch`.
+`View.maybeCreateBinding(keys, shape, program)` is the shorthand for whole
+checkpoint tensors, replicated.
 
 A tensor a program computes has no source (`sourceOf` is null). To convert a
 bound tensor, take its source with `sourceOf`, bind the program over it
@@ -282,12 +298,13 @@ builds because the Zig test runner counts logged errors as failures.
 | `zml/mem.zig` | Generic buffer conversion and public host-memory placement policy |
 
 The shared front end resolves sources and placements once, from each tensor's
-shape (or the executable's input shapes). Each `LoadSpec` is one destination:
+shape, or for a program's inputs from their placed shapes (`Program.inputs`).
+Each `LoadSpec` is one destination:
 the target shape with its placement, the destination memory kind, the
 caller-owned output, and the parts that fill it, one whole source for a plain
 tensor.
 Backends consume those specs without knowing about model traversal or
-executable bindings.
+programs.
 
 The direct backend reads coalesced source ranges into reusable host blocks.
 Its `Planner` produces immutable jobs and transfer records, one plan per file.

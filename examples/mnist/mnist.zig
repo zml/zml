@@ -50,7 +50,7 @@ const Mnist = struct {
             .read_parallelism = 1,
         });
         defer loader.deinit();
-        try loader.start(self, &buffers, store, null);
+        try loader.start(self, &buffers, store, .none);
         try loader.wait();
 
         return buffers;

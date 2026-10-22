@@ -77,7 +77,7 @@ pub const LoadedModel = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         loader: *zml.io.Loader,
-        progress: ?*std.Progress.Node,
+        progress: std.Progress.Node,
         store: *const zml.io.TensorStore,
     ) !Buffers {
         const now: std.Io.Timestamp = .now(io, .awake);
@@ -174,7 +174,7 @@ pub const Model = struct {
         });
         defer loader.deinit();
         progress.increaseEstimatedTotalItems(store.view().count());
-        try loader.start(self, &buffers, store, progress);
+        try loader.start(self, &buffers, store, progress.*);
         try loader.wait();
         const total_bytes = loader.bytesLoaded();
 

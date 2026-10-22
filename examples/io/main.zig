@@ -343,7 +343,7 @@ pub fn main(init: std.process.Init) !void {
                 // One start: the bulk is published at once while the stack
                 // programs compile, and wait publishes the packs in groups
                 // the devices admit.
-                try loader.start(&model, &loaded, &store, &progress);
+                try loader.start(&model, &loaded, &store, progress);
                 try loader.wait();
                 total_bytes = loader.bytesLoaded();
                 defer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
@@ -467,7 +467,7 @@ fn planPacks(
             packed_count += options.width;
 
             const shape = packShape(platform, entry.shape, options.width);
-            const tensor = store.view().maybeCreateBinding(source_keys, shape, stackPack, .{}) orelse return error.MissingPackSource;
+            const tensor = store.view().maybeCreateBinding(source_keys, shape, StackPack{}) orelse return error.MissingPackSource;
             try packs.append(arena, tensor);
             bytes += shape.byteSize();
             if (packs.items.len == options.packs) break;
@@ -483,7 +483,7 @@ fn planPacks(
 }
 
 /// Pack output shape: a leading `expert` axis, fully replicated on the
-/// platform's replicated mesh, the mesh `stackPack` names, so that the
+/// platform's replicated mesh, the mesh `StackPack` names, so that the
 /// loader's expected output placement equals the executable's.
 fn packShape(platform: *const zml.Platform, source: zml.Shape, width: usize) zml.Shape {
     return source
@@ -492,11 +492,14 @@ fn packShape(platform: *const zml.Platform, source: zml.Shape, width: usize) zml
         .withPartitioning(platform.replicated_mesh, .{ .expert = .replicated, .rows = .replicated, .cols = .replicated });
 }
 
-fn stackPack(_: struct {}, _: zml.Shape, inputs: []const zml.Tensor) zml.Tensor {
-    return zml.Tensor.stack(inputs, 0, .expert)
-        .withTags(.{ .expert, .rows, .cols })
-        .withPartitioning(.replicated, .{ .expert = .replicated, .rows = .replicated, .cols = .replicated });
-}
+/// The pack program: its sources stacked on a leading `expert` axis.
+const StackPack = struct {
+    pub fn forward(_: StackPack, _: zml.Shape, inputs: []const zml.Tensor) zml.Tensor {
+        return zml.Tensor.stack(inputs, 0, .expert)
+            .withTags(.{ .expert, .rows, .cols })
+            .withPartitioning(.replicated, .{ .expert = .replicated, .rows = .replicated, .cols = .replicated });
+    }
+};
 
 /// Reads the first, middle and last pack back to host and compares each
 /// expert slice with the bytes of its source tensor.

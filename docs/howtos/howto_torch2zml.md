@@ -250,7 +250,7 @@ pub fn main(init: std.process.Init) !void {
     {
         var loader = try zml.io.Loader.init(allocator, io, platform, .auto);
         defer loader.deinit();
-        try loader.start(&mlp, &mlp_weights, &model_store, null);
+        try loader.start(&mlp, &mlp_weights, &model_store, .none);
         try loader.wait();
     }
 }

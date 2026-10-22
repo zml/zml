@@ -31,19 +31,21 @@ pub const Binding = struct {
 };
 
 /// A program the loader compiles and runs to compute a tensor while loading
-/// (`Source.bindProgram`): `func(args, output, inputs)` over its inputs,
-/// landed in default device memory, placed by their shapes.
+/// (`Source.bindProgram`): `forward(output, inputs)` of the program's value,
+/// over its inputs landed in default device memory, placed by their shapes.
 pub const Program = struct {
     /// The program's inputs in order, each filled from `Binding.tensors`.
     inputs: []const Layout,
-    /// The program's plain-data arguments, in the store's arena.
-    args: *const anyopaque,
+    /// The program's value, in the store's arena.
+    value: *const anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
+        /// The program's type name, which names its compiled module in
+        /// traces, dumps and logs.
         name: []const u8,
         compile: *const fn (
-            args: *const anyopaque,
+            value: *const anyopaque,
             allocator: std.mem.Allocator,
             io: std.Io,
             platform: *const Platform,
@@ -54,11 +56,36 @@ pub const Program = struct {
         eql: *const fn (a: *const anyopaque, b: *const anyopaque) bool,
     };
 
+    /// The program `program` over `inputs`, its value copied into `arena`.
+    /// Its type declares `pub fn forward(self, output: Shape, inputs: []const
+    /// Tensor) Tensor` and is plain data, without pointers, so equal values
+    /// are found by value and compile once.
+    pub fn init(arena: std.mem.Allocator, inputs: []const Layout, program: anytype) std.mem.Allocator.Error!*const Program {
+        const T = @TypeOf(program);
+        comptime {
+            if (!isPlainData(T)) @compileError("TensorStore.Program: " ++ @typeName(T) ++ " must be plain data, without pointers");
+        }
+        const value: *const anyopaque = if (@sizeOf(T) == 0) &no_value else value: {
+            const copy = try arena.create(T);
+            copy.* = program;
+            break :value copy;
+        };
+        const self = try arena.create(Program);
+        self.* = .{ .inputs = inputs, .value = value, .vtable = &Erased(T).vtable };
+        return self;
+    }
+
+    /// The program's value, if it is a `T`.
+    pub fn as(self: Program, comptime T: type) ?T {
+        if (self.vtable != &Erased(T).vtable) return null;
+        return Erased(T).typed(self.value);
+    }
+
     /// Whether this program computing `output` and `other` computing
-    /// `other_output` compile to the same executable: the same function,
-    /// equal args, and the same shapes placed alike.
+    /// `other_output` compile to the same executable: programs of one type
+    /// and equal values, over the same shapes placed alike.
     pub fn sameExecutable(self: Program, output: Shape, other: Program, other_output: Shape) bool {
-        if (self.vtable != other.vtable or !self.vtable.eql(self.args, other.args)) return false;
+        if (self.vtable != other.vtable or !self.vtable.eql(self.value, other.value)) return false;
         if (!samePlacedShape(output, other_output) or self.inputs.len != other.inputs.len) return false;
         for (self.inputs, other.inputs) |a, b| {
             if (!samePlacedShape(a.shape, b.shape)) return false;
@@ -72,6 +99,53 @@ pub const Program = struct {
             if (a.partition(axis) != b.partition(axis)) return false;
         }
         return true;
+    }
+
+    /// What a program of a zero-sized type points to.
+    const no_value: u8 = 0;
+
+    /// The vtable of programs of type `T`, one per type.
+    fn Erased(comptime T: type) type {
+        return struct {
+            const vtable: VTable = .{ .name = @typeName(T), .compile = compile, .eql = eql };
+
+            fn typed(erased: *const anyopaque) T {
+                if (@sizeOf(T) == 0) return undefined;
+                return @as(*const T, @ptrCast(@alignCast(erased))).*;
+            }
+
+            fn compile(
+                erased: *const anyopaque,
+                allocator: std.mem.Allocator,
+                io: std.Io,
+                platform: *const Platform,
+                opts: Compiler.Options,
+                output: Shape,
+                inputs: []const Tensor,
+            ) Compiler.Error!Exe {
+                return Compiler.compile(allocator, io, platform, T.forward, .{ typed(erased), output, inputs }, opts);
+            }
+
+            fn eql(a: *const anyopaque, b: *const anyopaque) bool {
+                return std.meta.eql(typed(a), typed(b));
+            }
+        };
+    }
+
+    /// Values compared by value: no pointer anywhere inside.
+    fn isPlainData(comptime T: type) bool {
+        return switch (@typeInfo(T)) {
+            .void, .bool, .int, .float, .@"enum" => true,
+            .array => |info| isPlainData(info.child),
+            .optional => |info| isPlainData(info.child),
+            .@"struct" => |info| inline for (info.field_types) |Field| {
+                if (!isPlainData(Field)) break false;
+            } else true,
+            .@"union" => |info| info.tag_type != null and inline for (info.field_types) |Field| {
+                if (!isPlainData(Field)) break false;
+            } else true,
+            else => false,
+        };
     }
 };
 
@@ -342,17 +416,17 @@ pub const View = struct {
         return placed;
     }
 
-    /// A tensor of `shape` that `func(args, shape, inputs)` computes while
-    /// loading (`Source.bindProgram`) from the checkpoint tensors `sources`,
-    /// each whole and replicated, in this order. Null when one is missing.
-    pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape, comptime func: anytype, args: Source.ProgramArgs(func)) ?Tensor {
+    /// A tensor of `shape` that `program` computes while loading
+    /// (`Source.bindProgram`) from the checkpoint tensors `sources`, each
+    /// whole and replicated, in this order. Null when one is missing.
+    pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape, program: anytype) ?Tensor {
         const inputs = self.store.allocator.alloc(Source.Input, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
         defer self.store.allocator.free(inputs);
         for (sources, inputs) |subkey, *input| {
             const source_ = self.maybeSource(subkey, null) orelse return null;
             input.* = source_.place(.replicated, .{});
         }
-        return Source.bindProgram(inputs, shape, func, args);
+        return Source.bindProgram(inputs, shape, program);
     }
 
     pub fn getShape(self: View, subkey: []const u8) ?Shape {
@@ -421,7 +495,45 @@ test "missing reader keys return TensorNotFound" {
     try std.testing.expectError(error.TensorNotFound, store.view().withPrefix("layer").getReader("weights", std.testing.io, &.{}));
 }
 
-test "programs over identical shapes on different meshes or partitionings compile apart" {
+test "programs of one type and equal values over the same placed shapes share an executable" {
+    var registry = safetensors.TensorRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.registerTensor(.{ .file_uri = "weights", .name = "t", .shape = .init(.{4}, .u8), .offset = 0 });
+    var store = TensorStore.fromRegistry(std.testing.allocator, &registry, &.{});
+    defer store.deinit();
+    const Scale = struct {
+        factor: u8,
+
+        pub fn forward(_: @This(), _: Shape, inputs: []const Tensor) Tensor {
+            return inputs[0];
+        }
+    };
+    const Shift = struct {
+        factor: u8,
+
+        pub fn forward(_: @This(), _: Shape, inputs: []const Tensor) Tensor {
+            return inputs[0];
+        }
+    };
+    const shape: Shape = .init(.{4}, .u8);
+    const root = store.view();
+    const tensors = [_]Tensor{
+        root.maybeCreateBinding(&.{"t"}, shape, Scale{ .factor = 1 }).?,
+        root.maybeCreateBinding(&.{"t"}, shape, Scale{ .factor = 1 }).?,
+        root.maybeCreateBinding(&.{"t"}, shape, Scale{ .factor = 2 }).?,
+        root.maybeCreateBinding(&.{"t"}, shape, Shift{ .factor = 1 }).?,
+    };
+    var programs: [tensors.len]Program = undefined;
+    for (&programs, tensors) |*program, tensor| program.* = store.getSourcesById(tensor.id).?.program.?.*;
+    try std.testing.expect(programs[0].sameExecutable(shape, programs[1], shape));
+    try std.testing.expect(!programs[0].sameExecutable(shape, programs[2], shape));
+    try std.testing.expect(!programs[0].sameExecutable(shape, programs[3], shape));
+    try std.testing.expect(!programs[0].sameExecutable(shape, programs[1], shape.withDtype(.i8)));
+    try std.testing.expectEqual(1, programs[3].as(Shift).?.factor);
+    try std.testing.expect(programs[3].as(Scale) == null);
+}
+
+test "placed shapes on different meshes or partitionings differ" {
     var meshes: [2]Sharding.Mesh = undefined;
     meshes[0].name = "first";
     meshes[1].name = "second";

@@ -60,7 +60,7 @@ pub const LoadedModel = union(ModelType) {
         allocator: std.mem.Allocator,
         io: std.Io,
         loader: *zml.io.Loader,
-        progress: ?*std.Progress.Node,
+        progress: std.Progress.Node,
         store: *const zml.io.TensorStore,
     ) !Buffers {
         return switch (self.*) {

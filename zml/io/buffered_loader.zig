@@ -1,7 +1,7 @@
 //! Whole-tensor staging for platforms that use Buffer.from. A composite
 //! destination is assembled in the staging: its gaps zeroed, each part read
 //! at its offset, then the whole tensor is placed as any other.
-//! The shared front end owns source lookup, executable bindings and admission.
+//! The shared front end owns source lookup, programs and admission.
 const std = @import("std");
 
 const pjrt = @import("pjrt");
