@@ -67,6 +67,7 @@ pub fn load_tensors(
             .weight = store_view.createTensor("conv_in.weight", .{ .bs, .c, .kx, .ky }, .replicated),
             .bias = store_view.createTensor("conv_in.bias", .{.c}, .replicated),
             .kernel_size = 3,
+            .padding = 1,
         },
     };
 
@@ -105,6 +106,7 @@ pub fn load_tensors(
                         .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
@@ -116,6 +118,7 @@ pub fn load_tensors(
                         .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .conv_shortcut = null,
@@ -139,6 +142,7 @@ pub fn load_tensors(
             .weight = store_view.createTensor("conv_out.weight", .{ .bs, .c, .kx, .ky }, .replicated),
             .bias = store_view.createTensor("conv_out.bias", .{.c}, .replicated),
             .kernel_size = 3,
+            .padding = 1,
         },
     };
 
@@ -175,6 +179,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
@@ -186,6 +191,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .conv_shortcut = null,
@@ -234,6 +240,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
@@ -245,6 +252,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .conv_shortcut = null,
@@ -294,6 +302,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
@@ -305,6 +314,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .conv_shortcut = block.QwenImage21CausalConv3d{
@@ -329,6 +339,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
@@ -340,6 +351,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .conv_shortcut = null,
@@ -389,6 +401,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
@@ -400,6 +413,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .conv_shortcut = block.QwenImage21CausalConv3d{
@@ -424,6 +438,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
@@ -435,6 +450,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .conv_shortcut = null,
@@ -477,6 +493,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
@@ -488,6 +505,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .conv_shortcut = block.QwenImage21CausalConv3d{
@@ -512,6 +530,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
@@ -523,6 +542,7 @@ fn load_up_blocks(
                         .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
                         .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
                         .kernel_size = 3,
+                        .padding = 1,
                     },
                 },
                 .conv_shortcut = null,

@@ -118,10 +118,10 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             platform,
-            "vae.decoder.up_blocks.0.upsampler",
+            "vae.decoder",
             &activations_store.store,
-            VaeWrapper{ .model = vae_model_store.model.up_blocks[0].upsampler.?, .args = compile_args },
-            .{ .model = vae_model_store.model_buffer.up_blocks[0].upsampler.?, .args = compile_args_buffers },
+            VaeWrapper{ .model = vae_model_store.model },
+            .{ .model = vae_model_store.model_buffer },
         );
     } else {
         std.debug.print("NOTHING IS BEING TESTED\n", .{});
@@ -167,8 +167,7 @@ const TextWrapper = struct {
 };
 
 const VaeWrapper = struct {
-    model: block.QwenImage21Resample,
-    args: CompileArgs,
+    model: block.QwenImage21Decoder3d,
 
     pub fn forward(
         self: VaeWrapper,
