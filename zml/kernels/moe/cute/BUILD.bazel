@@ -30,3 +30,11 @@ zig_test(
         "//zml/kernels/moe/bench:lib",
     ],
 )
+
+# The CuTe MoE on MegaMoE's weight layout against its own layout, bit for bit
+# (needs an SM100 GPU, skipped elsewhere). Run with --test_strategy=standalone.
+zig_test(
+    name = "megamoe_layout_test",
+    main = "megamoe_layout_test.zig",
+    deps = ["//zml"],
+)

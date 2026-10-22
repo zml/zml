@@ -348,6 +348,36 @@ pub const Epilogue = enum {
     route_rows,
 };
 
+/// Memory layout of the expert weights (the A operand) and their scales.
+pub const WeightLayout = enum {
+    /// This backend's (`zml.moe.Backend.expertsLayout(.cute, .mxfp4)`): gate
+    /// and up rows interleaved one by one, 128x4 scale atoms in K-major order,
+    /// bytes `[expert, m / 128, k / 128, 512]`.
+    cute,
+    /// MegaMoE's (`zml.moe.megamoe.Weights`): gate and up rows interleaved by
+    /// 8, scale atoms in MN-major order, bytes `[expert, k / 128, m / 128,
+    /// 512]`. DeepGEMM's UTCCP-permuted words of four UE8M0 exponents form the
+    /// same 512-byte atom as `.cute`: row `r` of a 128-row block and K group
+    /// `j` at byte `16 * (r % 32) + 4 * (r / 32) + j`.
+    megamoe,
+
+    /// Gate rows before the matching up rows in the up projection's weights.
+    fn gateUpInterleave(self: WeightLayout) i32 {
+        return switch (self) {
+            .cute => 1,
+            .megamoe => 8,
+        };
+    }
+
+    /// Element type of the scale operand: bytes, or MegaMoE's i32 words.
+    fn scaleType(self: WeightLayout) cute.DType {
+        return switch (self) {
+            .cute => .i8,
+            .megamoe => .i32,
+        };
+    }
+};
+
 pub const Config = struct {
     experts: i64,
     /// GEMM output rows (4608 for gate/up, 5120 for down).
@@ -375,6 +405,7 @@ pub const Config = struct {
     /// `schedule` is then just the `[routes]` expert ids; its size and
     /// active-count sections and `route_inverse` are not read.
     direct: bool = false,
+    weight_layout: WeightLayout = .cute,
 
     /// Rows stored per group in the routed operands: one whole N tile, of
     /// which direct routing fills only the first. A tensor map whose row mode
@@ -685,7 +716,7 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
         .weight = .{ .ptr = cute.DType.i8 },
         .schedule = .{ .ptr = cute.DType.i32 },
         .input_quant = .{ .ptr = cute.DType.f8e4m3fn },
-        .weight_scale = .{ .ptr = cute.DType.i8 },
+        .weight_scale = .{ .ptr = cfg.weight_layout.scaleType() },
         .input_scale = .{ .ptr = cute.DType.i8 },
     };
     const shape = .{
@@ -1614,6 +1645,8 @@ const EpilogueOperands = struct {
     group_rows: i64 = 0,
     /// `Config.swiglu_limit`.
     swiglu_limit: f32 = 10.0,
+    /// `WeightLayout.gateUpInterleave` of `Config.weight_layout`.
+    gate_up_interleave: i32 = 1,
     /// Bytes of one output row of the down projection.
     row_bytes: i64 = 0,
     /// Activations per routed row of the up projection's output.
@@ -1801,7 +1834,10 @@ fn routedLanes(b: *B, comptime tile: Tile, operands: EpilogueOperands, group: V,
 /// of the interleaved projection, so even threads hold a gate and their odd
 /// neighbour the matching up value. Each even thread computes one SwiGLU
 /// activation per routed row; 32 consecutive activations span two warps,
-/// whose partial maxima meet in shared memory.
+/// whose partial maxima meet in shared memory. With rows interleaved by 8
+/// (`WeightLayout.megamoe`), threads `t % 16 < 8` hold the gates and thread
+/// `t + 8` the matching up values; each warp still holds 16 consecutive
+/// activations.
 ///
 /// At decode sizes most rows of a group are padding, whose outputs are never
 /// read. `count` is uniform across the CTA, so whole 8-row chunks of padding
@@ -1817,13 +1853,25 @@ fn storeTileSwiglu(b: *B, comptime tile: Tile, storage: StageStorage, operands: 
         swigluStaged(b, tile, storage, operands, thread, routed, tile_m, group, columns, chunk);
 }
 
+/// Whether accumulator row `row` of the up projection holds a gate (else an
+/// up) projection: gate and up rows alternate in runs of `interleave`.
+fn isGateRow(row: V, interleave: i32) V {
+    return if (interleave == 1) row.rem(2).eq(0) else row.rem(2 * interleave).lt(interleave);
+}
+
+/// Activation of its 128-row tile that accumulator row `row` belongs to.
+fn activationOfRow(row: V, interleave: i32) V {
+    return if (interleave == 1) row.div(2) else row.div(2 * interleave).mul(interleave).add(row.rem(interleave));
+}
+
 const swiglu_chunk = 8;
 
 /// `swigluRows` for grouped routing, quantized through shared memory.
 ///
 /// Thread `t` holds accumulator row `t` of every routed row of the pass, the
-/// gate (even `t`) or up (odd `t`) projection of activation `t / 2`. Each
-/// gate thread computes its activations, with the reference model's BF16
+/// gate (even `t`) or up (odd `t`) projection of activation `t / 2`, or with
+/// rows interleaved by 8 as `isGateRow` and `activationOfRow` say. Each gate
+/// thread computes its activations, with the reference model's BF16
 /// roundings, into the warpgroup's staging area `[routed row][64
 /// activations]`. Then four threads take one routed row, a pair of them per
 /// 32-activation MX block: each reduces the maximum of 16 activations in
@@ -1834,7 +1882,7 @@ fn swigluStaged(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epi
     const rows: i64 = comptime tile.chunkRows();
     const chunk_first: i32 = comptime @intCast(chunk * @as(usize, @intCast(rows)));
     const tid = thread.row;
-    const is_gate = tid.rem(2).eq(0);
+    const is_gate = isGateRow(tid, operands.gate_up_interleave);
     const limit = operands.swiglu_limit;
     const staging_layout = b.layoutSpec(.{ max_epilogue_groups, rows, 64 }, .{ rows * 64, 64, 1 });
     const staging = b.makeViewTyped(storage.staging, b.staticLayout(staging_layout), b.memrefType(.bf16, .smem, 1024, b.layoutType(staging_layout)));
@@ -1849,7 +1897,7 @@ fn swigluStaged(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epi
         for (columns[first..last], activations[0 .. last - first], first..) |value, *activation, column| {
             // The reference model rounds the projection to BF16.
             const gate = value.to(.bf16).to(.f32).minimum(limit);
-            const up_value = b.shuffleXor(value, 1).to(.bf16).to(.f32).maximum(-limit).minimum(limit);
+            const up_value = b.shuffleXor(value, operands.gate_up_interleave).to(.bf16).to(.f32).maximum(-limit).minimum(limit);
             // up * SiLU(gate), with the hardware approximations Python's
             // fastmath selects: exp(-g) = 2^(-g * log2 e).
             const exp_neg = b.unaryF32("ex2.approx.ftz.f32", gate.mul(-std.math.log2e));
@@ -1858,7 +1906,7 @@ fn swigluStaged(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epi
         }
         var gate_lane = b.openIf(is_gate);
         for (activations[0 .. last - first], first..) |activation, column| {
-            staging.set(.{ thread.group, b.cst(.i32, @as(i32, @intCast(column))), tid.div(2) }, activation);
+            staging.set(.{ thread.group, b.cst(.i32, @as(i32, @intCast(column))), activationOfRow(tid, operands.gate_up_interleave) }, activation);
         }
         gate_lane.yieldThen(.{});
         if (live) |*l| l.yieldThen(.{});
@@ -1921,7 +1969,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
     const tid = thread.row;
     const lane = tid.rem(32);
     const warp = thread.warp;
-    const is_gate = tid.rem(2).eq(0);
+    const is_gate = isGateRow(tid, operands.gate_up_interleave);
     const first_row = group.mul(operands.group_rows);
     const f32_type = cute.DType.f32.toMlir(b.ctx);
     // The TMA C staging buffer is unused by this epilogue: each warpgroup
@@ -1948,13 +1996,13 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
             // The reference model rounds the projection to BF16.
             const limit = operands.swiglu_limit;
             const gate = value.to(.bf16).to(.f32).minimum(limit);
-            const up_value = b.shuffleXor(value, 1).to(.bf16).to(.f32).maximum(-limit).minimum(limit);
+            const up_value = b.shuffleXor(value, operands.gate_up_interleave).to(.bf16).to(.f32).maximum(-limit).minimum(limit);
             // up * SiLU(gate), with the hardware approximations Python's
             // fastmath selects: exp(-g) = 2^(-g * log2 e).
             const exp_neg = b.unaryF32("ex2.approx.ftz.f32", gate.mul(-std.math.log2e));
             var result = up_value.mul(gate).mul(b.unaryF32("rcp.approx.ftz.f32", exp_neg.add(1.0)));
             result = result.mul(b.shuffleIdx(routed.weight.?, c)).to(.bf16).to(.f32);
-            // Odd threads hold no activation and must not raise the maxima.
+            // Up threads hold no activation and must not raise the maxima.
             activation.* = b.select(is_gate, result, b.cst(.f32, 0));
             const maximum = b.warpMaxNonNegative(activation.*.abs());
             chunk_maximum = b.select(lane.eq(c), maximum, chunk_maximum);
@@ -1986,7 +2034,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
     // The next tile reuses the scratch maxima.
     b.namedBarrier(barrier_id, 128);
 
-    const activation_index = tile_m.mul(64).add(tid.div(2));
+    const activation_index = tile_m.mul(64).add(activationOfRow(tid, operands.gate_up_interleave));
     for (0..row_chunks) |row_chunk| {
         const first = row_chunk * swiglu_chunk;
         const last = @min(first + swiglu_chunk, live);
@@ -2272,6 +2320,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
             .direct = cfg.direct,
             .group_rows = cfg.groupRows(),
             .swiglu_limit = cfg.swiglu_limit,
+            .gate_up_interleave = cfg.weight_layout.gateUpInterleave(),
             .q_columns = @divExact(cfg.m, 2),
         }),
         .route_rows => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, direct, pair, .{
@@ -2322,7 +2371,15 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const sf_order = b.makeIntTuple(.{ 1, 0, 2 });
     const sfa_shape = b.makeShapeValues(.{ b.arg(host_arg.problem_m), b.arg(host_arg.problem_k), b.arg(host_arg.expert_count) }, b.parseType("!cute.shape<\"(?,?,?)\">"));
     const sfb_shape = b.makeShapeValues(.{ b.arg(host_arg.problem_n), b.arg(host_arg.problem_k), b.arg(host_arg.problem_l) }, b.parseType("!cute.shape<\"(?,?,?)\">"));
-    const dynamic_sfa_layout = b.tileToShapeTyped(sf_atom_layout, sfa_shape, sf_order, b.layoutType(dynamic_sf_layout));
+    // MegaMoE's weight scales step M atoms first.
+    const sfa_order, const sfa_layout = switch (cfg.weight_layout) {
+        .cute => .{ sf_order, dynamic_sf_layout },
+        .megamoe => .{ b.makeIntTuple(.{ 0, 1, 2 }), b.layoutSpec(
+            .{ .{ .{ 32, 4 }, cute.AlgebraToken.dynamic }, .{ .{ 32, 4 }, cute.AlgebraToken.dynamic }, .{ 1, cute.AlgebraToken.dynamic } },
+            .{ .{ .{ 16, 4 }, 512 }, .{ .{ 0, 1 }, sf_stride }, .{ 0, sf_stride } },
+        ) },
+    };
+    const dynamic_sfa_layout = b.tileToShapeTyped(sf_atom_layout, sfa_shape, sfa_order, b.layoutType(sfa_layout));
     const dynamic_sfb_layout = b.tileToShapeTyped(sf_atom_layout, sfb_shape, sf_order, b.layoutType(dynamic_sf_layout));
     const gSFA = b.makeTensorView(b.recastPointer(b.arg(host_arg.weight_scale), .f8e8m0fnu, .gmem, 16), dynamic_sfa_layout);
     const gSFB = b.makeTensorView(b.recastPointer(b.arg(host_arg.input_scale), .f8e8m0fnu, .gmem, 16), dynamic_sfb_layout);
@@ -2395,23 +2452,26 @@ test "CuTe MXFP4 GEMM programs emit their host launch for every tile width" {
         const n = shape[0];
         const ctas = shape[1];
         inline for (.{ .{ UpQuantized, Epilogue.swiglu_mxfp8, 4608, 5120 }, .{ DownRows, Epilogue.route_rows, 5120, 2304 } }) |program| {
-            const cfg: Config = .{
-                .experts = 192,
-                .m = program[2],
-                .n = n,
-                .k = program[3],
-                .groups = 227,
-                .epilogue = program[1],
-                .routes = 576,
-                .direct = n == 8,
-                .two_cta = ctas == 2,
-            };
-            const ir = try program[0].emit(std.testing.allocator, cfg);
-            defer std.testing.allocator.free(ir);
-            try std.testing.expect(std.mem.indexOf(u8, ir, deviceName(program[1])) != null);
-            try std.testing.expect(std.mem.indexOf(u8, ir, "cuda.launch_ex") != null);
-            try std.testing.expect(std.mem.indexOf(u8, ir, "make_non_exec_tiled_tma_load") != null);
-            try std.testing.expect(std.mem.indexOf(u8, ir, std.fmt.comptimePrint("sm100.mma_bs<{d}x{d}x32, num_cta = {d}", .{ 128 * ctas, n, ctas })) != null);
+            for (std.enums.values(WeightLayout)) |layout| {
+                const cfg: Config = .{
+                    .experts = 192,
+                    .m = program[2],
+                    .n = n,
+                    .k = program[3],
+                    .groups = 227,
+                    .epilogue = program[1],
+                    .routes = 576,
+                    .direct = n == 8,
+                    .two_cta = ctas == 2,
+                    .weight_layout = layout,
+                };
+                const ir = try program[0].emit(std.testing.allocator, cfg);
+                defer std.testing.allocator.free(ir);
+                try std.testing.expect(std.mem.indexOf(u8, ir, deviceName(program[1])) != null);
+                try std.testing.expect(std.mem.indexOf(u8, ir, "cuda.launch_ex") != null);
+                try std.testing.expect(std.mem.indexOf(u8, ir, "make_non_exec_tiled_tma_load") != null);
+                try std.testing.expect(std.mem.indexOf(u8, ir, std.fmt.comptimePrint("sm100.mma_bs<{d}x{d}x32, num_cta = {d}", .{ 128 * ctas, n, ctas })) != null);
+            }
         }
     }
 }

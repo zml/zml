@@ -17,14 +17,24 @@ pub const Inputs = struct {
     /// `[tokens, topk]` FP32.
     routing_weights: zml.Tensor,
     w1: zml.Tensor,
-    /// `w1` scales in the 128x4 tensor-core layout (rows tiled by 4x32, columns by 4).
+    /// `w1` scales in 128x4 tensor-core atoms (rows tiled by 4x32, columns by 4).
     s1: zml.Tensor,
     w2: zml.Tensor,
-    /// `w2` scales in the 128x4 tensor-core layout (rows tiled by 4x32, columns by 4).
+    /// `w2` scales in 128x4 tensor-core atoms (rows tiled by 4x32, columns by 4).
     s2: zml.Tensor,
     /// `[tokens, topk]` local expert ids.
     ids: zml.Tensor,
+    /// How `w1`, `s1`, `w2` and `s2` are laid out: this backend's layout, or
+    /// MegaMoE's (`zml.moe.megamoe.Weights`), whose scales are i32 words.
+    weight_layout: persistent.WeightLayout = .cute,
 };
+
+/// The scale bytes as the GEMMs take them. MegaMoE's i32 words of four
+/// exponents pass as they are: a narrowing bitcast adds an axis, and XLA may
+/// copy the scales to make it.
+fn scaleBytes(scales: zml.Tensor) zml.Tensor {
+    return if (scales.dtype().sizeOf() == 1) scales.bitCast(.u8) else scales;
+}
 
 /// The kernels are tuned for the DeepSeek V4.1 expert geometry, shared by the
 /// main MoE and the D-Spark drafter. Expert count and top-k are parameters.
@@ -293,6 +303,7 @@ pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: 
         .direct = direct,
         .swiglu_limit = swiglu_limit,
         .two_cta = plan.two_cta,
+        .weight_layout = a.weight_layout,
     };
     var down_cfg = up_cfg;
     down_cfg.m = hidden;
@@ -312,14 +323,14 @@ pub fn forward(tokens: i64, hidden: i64, intermediate: i64, experts: i64, topk: 
         .weight = a.w1,
         .schedule = routing.schedule,
         .input_quant = q1.q,
-        .weight_scale = a.s1.bitCast(.u8),
+        .weight_scale = scaleBytes(a.s1),
         .input_scale = q1.s,
     }, routing.route_inverse, a.routing_weights.reshape(.{routes}));
     const down = persistent.downRows(down_cfg, .{
         .weight = a.w2,
         .schedule = routing.schedule,
         .input_quant = q2.q,
-        .weight_scale = a.s2.bitCast(.u8),
+        .weight_scale = scaleBytes(a.s2),
         .input_scale = q2.s,
     }, routing.route_inverse);
     return boundary.combine(down, routing.route_map orelse routing.schedule, .{

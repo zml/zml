@@ -56,17 +56,71 @@ pub fn fusedExpertsWithPlan(
     const dq = down.quantization orelse @panic("cute backend requires down quantization to be set");
     stdx.debug.assert(gq.scheme == .mxfp4 and dq.scheme == .mxfp4, "cute expects gate_up and down quantization scheme to be mxfp4, got {} and {}", .{ gq.scheme, dq.scheme });
 
-    // Weight storage for mxfp4 in HF is expressed as u8 or i8
-    stdx.debug.assert(gate_up.weight.dtype() == .u8 or gate_up.weight.dtype() == .i8, "cute expects gate_up weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
-    stdx.debug.assert(down.weight.dtype() == .u8 or down.weight.dtype() == .i8, "cute expects down weight dtype to be u8 or i8, got {}", .{gate_up.weight.dtype()});
+    return routedExperts(input, ids, weights, .{
+        .w1 = gate_up.weight,
+        .s1 = gq.scales,
+        .w2 = down.weight,
+        .s2 = dq.scales,
+        .layout = .cute,
+    }, options, plan);
+}
 
-    const expert_parallelism = gate_up.weight.shape().partition(.expert).isSharded();
-    const hidden = down.weight.dim(1);
-    const intermediate = down.weight.dim(2) * 2;
+/// `fusedExperts` on MegaMoE's routed experts (`zml.moe.megamoe.Weights`), so
+/// that one copy of the weights serves both MoE kernels, e.g. MegaMoE for
+/// prefill and these GEMMs for decode. The GEMMs read MegaMoE's layout in
+/// place (`kernels.persistent.WeightLayout.megamoe`). MegaMoE's fused shared
+/// expert is not run. Experts sharded over `.expert` run expert parallel, like
+/// `fusedExperts`: rank r holds expert block r.
+pub fn fusedMegaMoEExperts(
+    input: zml.Tensor,
+    ids: zml.Tensor,
+    weights: zml.Tensor,
+    experts: zml.moe.megamoe.Weights,
+    options: zml.moe.Options,
+) zml.Tensor {
+    zml.moe.validateRoutingInputs(input, ids, weights);
+    const plan = kernels.launchPlan(zml.Compiler.current().platform, input.dim(.t), experts.l2_w.dim(1), experts.l2_w.dim(2) * 2, experts.l1_w.dim(.expert), ids.dim(.topk)) catch |err|
+        stdx.debug.panic("invalid CuTe MoE launch configuration: {s}", .{@errorName(err)});
+    validateOptions(options);
+    stdx.debug.assert(input.dtype() == .bf16, "cute backend only supports bf16 inputs, got {}", .{input.dtype()});
+    stdx.debug.assert(experts.l1_sf.dtype() == .i32 and experts.l2_sf.dtype() == .i32, "cute expects MegaMoE's i32 scale words, got {} and {}", .{ experts.l1_sf.dtype(), experts.l2_sf.dtype() });
+    return routedExperts(input, ids, weights, .{
+        .w1 = experts.l1_w,
+        .s1 = experts.l1_sf,
+        .w2 = experts.l2_w,
+        .s2 = experts.l2_sf,
+        .layout = .megamoe,
+    }, options, plan);
+}
+
+/// Routed expert weights `[experts, rows, columns]` and their scales, in `layout`.
+const RoutedWeights = struct {
+    w1: zml.Tensor,
+    s1: zml.Tensor,
+    w2: zml.Tensor,
+    s2: zml.Tensor,
+    layout: kernels.persistent.WeightLayout,
+};
+
+fn routedExperts(
+    input: zml.Tensor,
+    ids: zml.Tensor,
+    weights: zml.Tensor,
+    routed: RoutedWeights,
+    options: zml.moe.Options,
+    plan: kernels.LaunchPlan,
+) zml.Tensor {
+    // Weight storage for mxfp4 in HF is expressed as u8 or i8
+    stdx.debug.assert(routed.w1.dtype() == .u8 or routed.w1.dtype() == .i8, "cute expects gate_up weight dtype to be u8 or i8, got {}", .{routed.w1.dtype()});
+    stdx.debug.assert(routed.w2.dtype() == .u8 or routed.w2.dtype() == .i8, "cute expects down weight dtype to be u8 or i8, got {}", .{routed.w2.dtype()});
+
+    const expert_parallelism = routed.w1.shape().partition(.expert).isSharded();
+    const hidden = routed.w2.dim(1);
+    const intermediate = routed.w2.dim(2) * 2;
 
     // The CuTe GEMMs are specialized on one set of dimensions
     kernels.validateShapes(hidden, intermediate);
-    plan.validate(zml.Compiler.current().platform, input.dim(.t), hidden, intermediate, gate_up.weight.dim(.expert), ids.dim(.topk)) catch |err|
+    plan.validate(zml.Compiler.current().platform, input.dim(.t), hidden, intermediate, routed.w1.dim(.expert), ids.dim(.topk)) catch |err|
         stdx.debug.panic("invalid CuTe MoE launch configuration: {s}", .{@errorName(err)});
 
     // The SwiGLU clamp is a kernel parameter, but the routing weight is
@@ -77,10 +131,11 @@ pub fn fusedExpertsWithPlan(
         .input = input,
         .ids = ids,
         .weights = weights,
-        .w1 = gate_up.weight,
-        .s1 = gq.scales,
-        .w2 = down.weight,
-        .s2 = dq.scales,
+        .w1 = routed.w1,
+        .s1 = routed.s1,
+        .w2 = routed.w2,
+        .s2 = routed.s2,
+        .weight_layout = routed.layout,
         .topk = ids.dim(.topk),
         .swiglu_limit = options.activation.swiglu.limit.?,
         .expert_parallel = expert_parallelism,
@@ -100,6 +155,7 @@ const Context = struct {
     s1: zml.Tensor,
     w2: zml.Tensor,
     s2: zml.Tensor,
+    weight_layout: kernels.persistent.WeightLayout,
     topk: i64,
     swiglu_limit: f32,
     expert_parallel: bool,
@@ -128,6 +184,7 @@ const Context = struct {
             .w2 = self.w2,
             .s2 = self.s2,
             .ids = ids,
+            .weight_layout = self.weight_layout,
         }, self.plan).reshape(self.input.shape().dims()).withTags(self.input.shape());
 
         return if (self.expert_parallel)
