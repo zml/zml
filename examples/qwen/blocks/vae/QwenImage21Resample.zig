@@ -9,11 +9,17 @@ pub const QwenImage21Resample = @This();
 
 upsample: QwenImage21Upsample,
 conv: Conv2d,
-time_conv: ?QwenImage21CausalConv3d,
+// time_conv: ?QwenImage21CausalConv3d,
 
 pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21Resample)) void {
     Conv2d.unloadBuffers(&self.conv);
-    if (self.time_conv) |*conv| {
-        QwenImage21CausalConv3d.unloadBuffers(conv);
-    }
+    // if (self.time_conv) |*conv| {
+    //     QwenImage21CausalConv3d.unloadBuffers(conv);
+    // }
+}
+
+pub fn forward(self: QwenImage21Resample, x: zml.Tensor) zml.Tensor {
+    const sliced = x.squeeze(.t);
+    const resample = self.conv.forward(self.upsample.forward(sliced)).withTags(.{ .bs, .c, .kx, .ky });
+    return resample.insertAxes(.kx, .{.t});
 }
