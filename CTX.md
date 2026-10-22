@@ -7287,7 +7287,125 @@ Checks:
 - `bazel build --config=localzml //llmd:llmd`.
 - `zig fmt` on scratch copies: no diff in the changed code.
 
+## Forty-fourth pass: no Packer (R11) (2026-10-22)
+
+R11 of `LOADER_API_REVIEW.md` (Part 3 #9; D-packer-state, D-one-fuse,
+D-error-context, E-ministral-fp8, E-moe-setup). After R9 the Packer held
+only an allocator and the expert layout, and its `deinit` was empty, yet
+about 70 init functions took it. The five MoE models each repeated about
+45 lines of expert setup, ministral3 kept a hand-rolled FP8 Linear, and a
+checkpoint that did not match failed with one of four bare error names and
+no key. This pass also undoes R8's drafter flag regression (forty-first
+pass).
+
+llmd (monorepo):
+- `Packer`, `Interleaving` and `expertsFormat` are gone, with the packer
+  parameter of every model, spec and drafter init. The drafters' empty
+  `Spec.deinit` and their unused allocator go too.
+- Fusion is free functions over View in `weights/linear.zig`.
+  `linear.fuse(views, out, contracting, partitioning)` replaces
+  `interleaveLinears(.per_shard)` and `concatenateLinears`: each device
+  the output axis splits over holds its rows of every member, and
+  replicated rows are a plain concatenation. The three
+  `concatenateLinears` callers (deepseek41 `wq_a_wkv`, qwen4
+  `down_inject` and `key_value_proj`) are replicated, so they bind as
+  before. `Interleaving.explicit` is gone; its tests call the
+  file-private `fuseGroups`. Models name `weights.linear.FusedLinear`.
+- `weights.experts(allocator, view, spec)` binds one MoE layer's gate_up
+  and down. It reads a fused gate_up, per expert or pre-stacked, else gate
+  and up apart; it fails with the key when neither is there. Names
+  default to HF's; deepseek41 passes `w1`/`w3`/`w2`.
+  `weights.moeBackend(platform, view, projection)` picks the kernel from
+  the scheme and dtype the experts store `projection` in. qwen3_5, qwen4,
+  laguna, gemma4 and deepseek41 (DSpark layers included) use both.
+- ExpertLayout keeps both behaviours and the `.device` default, now on
+  the private `Projection`; only the layout tests choose `.loader`. The
+  choice is still the user's (open decision).
+- ministral3's `o_proj` and `down_proj` use `linear.create`, and its own
+  FP8 Linear goes: scaled_dot already ran as bf16 there. `linear.detect`
+  classifies the Mistral FP8 layout (a scalar `weight_scale_inv` and an
+  `activation_scale`) as `fp8_per_tensor`. `activation_scale` is no
+  longer bound, and the emulated activation rounding is gone.
+- One `weights.Error = error{CheckpointMismatch}`, raised through
+  `mismatch(view, key, fmt, args)`. It logs the full key and the reason
+  at `err`, and at `debug` in tests, since the test runner counts logged
+  errors as failures. It replaces `MissingFusedComponent`,
+  `InvalidProjectionLayout`, `IncompatibleProjections` and
+  `MissingWeight`, qwen4's n-gram lookup included. Conditions only a code
+  bug reaches are asserts. `UnsupportedQuantization`,
+  `UnsupportedWeightDtype` and `UnsupportedFp8NormalizationProgram`
+  stay.
+- Loads are one line. qwen4 sets its n-gram tables' memory in
+  `Model.init`, so its `startLoad` is one `loader.start`; deepseek41's is
+  too, and gemma3_text, lfm2, ministral3 and mistral3 use the default in
+  `models.zig`.
+- `ModelType.hasDrafterCheckpoint`: main and zoo add the drafter
+  checkpoint only for llama, laguna, qwen3_5, gemma4 and muse_glimmer.
+  qwen4, lfm2, ministral3, gemma3 and mistral3 ignore the flag again, and
+  deepseek41 reaches `UnsupportedSpeculativeDrafter` for anything but
+  `native` again.
+- Bindings keep their tensors, programs and placement. MoE layers now
+  bind their experts before the router and shared expert, so tensor ids
+  differ; the loader works in model order.
+- Tests: the six old error expectations expect `CheckpointMismatch`. New:
+  experts fused and apart, per expert and pre-stacked, a missing gate_up,
+  and `moeBackend`'s error; the Mistral FP8 layout. The block-FP8
+  swizzle test used a sharded concatenation; its expected layout is now
+  `fuse`'s, per device.
+
+zml: the `ExpertsLayout` doc in `zml/moe/moe.zig` named the packer. It now
+says the experts are loaded in this layout.
+
+Review (workflow, refuting verifier): ten findings, eight distinct, all
+low, all fixed.
+- `ExpertSpec.layout` was never set, and the layout tests set the private
+  `Projection.layout`: two knobs, the public one dead. It is gone.
+- `fusedSource` reported every mismatch at the weight's key, also for a
+  bias, scale or global scale. It now takes the component and reports its
+  own key.
+- `fuse`'s doc said the members share their scales. They share the
+  scheme, the kinds of global and input scale, and having a bias;
+  independent per-tensor scales become per channel.
+- `hasDrafterCheckpoint`'s doc used "its own checkpoint" in two opposite
+  senses. It now says DeepSeek's drafter is native.
+- `Tensors.init`, `DSparkDrafter.init` and `drafter_spec` stayed mutable
+  only for the Packer. They are const.
+- `moe.zig` named the packer (above).
+- No test covered the per-expert fused gate_up probe. The experts test
+  has that case now.
+- Without gate_up, `experts` fell back to gate and up even when those
+  were missing, and an assert fired that named no key. It now fails with
+  `CheckpointMismatch` at the gate_up key. `expertLinear`'s doc said it
+  failed without per-expert tensors; it binds the pre-stacked one.
+
+Not done:
+- llama, gemma4, laguna, muse_glimmer and qwen3_5 still make two starts,
+  base then speculative. That is R8's one start over
+  `Weights{ base, speculative }`, which needs `Bufferized(Weights)` and
+  changes load planning.
+- Not run on a GPU or a real checkpoint: ministral3's FP8 projections
+  through `linear.create`, the MoE models' expert detection, and the new
+  binding order in MoE layers.
+
+Checks:
+- `bazel test //zml:test` passes (333, 12 skip).
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7 (`llmd:test` 266,
+  9 skip; `weights_test` 26/26).
+- `bazel build --config=localzml //llmd:llmd`.
+- `zig fmt` on scratch copies: no diff in the changed code.
+
 ## Open work
+
+- 2026-10-22 no Packer (forty-fourth pass, zml twuoxmxk and monorepo
+  moptmxsw): R11 done. llmd's weights layer is free functions over View
+  (`linear.fuse`, `weights.experts`, `weights.moeBackend`), a checkpoint
+  that does not match fails with `weights.Error` and its key, and
+  ministral3's FP8 projections go through `linear.create`. Every load is
+  one start, except the five speculative models' base and drafter pair
+  (R8's one start over both, not taken). The drafter checkpoint is added
+  only for models that read one. ExpertLayout (`.loader` or `.device`)
+  is still the user's call. Not run on a GPU or a real checkpoint.
 
 - 2026-10-22 a Source carries its placement (forty-third pass, zml
   nuulylpo and monorepo uxxqmoxo): R10 done. A Source is placed last
@@ -7313,8 +7431,8 @@ Checks:
   `SpeculativeContext`'s second store and its meshes are gone, and the
   speculative models make two starts from one store. Not run on a GPU or
   a real drafter. The drafter's reads are still planned apart from the
-  target's (one start over both trees not taken). main now resolves the
-  drafter flag for every model type.
+  target's (one start over both trees not taken). main resolved the
+  drafter flag for every model type until R11 (forty-fourth pass).
 - 2026-10-22 the store owns its registry (fortieth pass, zml orqlttun
   and monorepo zmrvtnlx): R7 done. `TensorStore.init` owns and locks the
   registry, an entry's address is its tensor's identity, `View.get` and
