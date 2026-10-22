@@ -548,9 +548,11 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
     {
         var i = k.openIf(k.cmpi(.eq, k.addi(a.heads_blk_idx, a.q_blk_idx), k.lift(@as(i32, 0))));
         const first_seq_idx = nextNonemptyKvSequence(k, cfg, a, init_seq_idx, num_seqs);
-        var nonempty = k.openIf(k.cmpi(.slt, first_seq_idx, num_seqs));
-        createKvAsyncCopyDescriptors(k, cfg, a, a.heads_blk_idx, first_seq_idx, k.lift(@as(i32, 0)), init_buf_idx);
-        nonempty.yieldThen(.{});
+        {
+            var nonempty = k.openIf(k.cmpi(.slt, first_seq_idx, num_seqs));
+            createKvAsyncCopyDescriptors(k, cfg, a, a.heads_blk_idx, first_seq_idx, k.lift(@as(i32, 0)), init_buf_idx);
+            nonempty.yieldThen(.{});
+        }
         i.yieldThen(.{});
     }
 
