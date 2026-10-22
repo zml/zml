@@ -120,8 +120,8 @@ pub fn main(init: std.process.Init) !void {
             platform,
             "vae.decoder",
             &activations_store.store,
-            VaeWrapper{ .model = vae_model_store.model },
-            .{ .model = vae_model_store.model_buffer },
+            VaeWrapper{ .model = vae_model_store.model, .args = compile_args },
+            .{ .model = vae_model_store.model_buffer, .args = compile_args_buffers },
         );
     } else {
         std.debug.print("NOTHING IS BEING TESTED\n", .{});
@@ -167,17 +167,19 @@ const TextWrapper = struct {
 };
 
 const VaeWrapper = struct {
-    model: block.QwenImage21Decoder3d,
+    model: block.AutoencoderKLQwenImage21,
+    args: CompileArgs,
 
     pub fn forward(
         self: VaeWrapper,
         x: zml.Tensor,
     ) zml.Tensor {
         const tagged = x.withTags(.{ .bs, .c, .t, .kx, .ky });
-        return self.model.forward(tagged);
+        return self.model.forward(tagged, self.args);
     }
 };
 
 test {
     _ = @import("./blocks/tokenizer.zig");
+    _ = @import("./blocks/vae/AutoencoderKLQwenImage21.zig");
 }
