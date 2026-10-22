@@ -1,8 +1,67 @@
-const std = @import("std");
-
 const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
+
+pub const dialect_namespace = "arith";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("arith");
+}
+
+pub const operation_names: []const []const u8 = &.{
+    "arith.addf",
+    "arith.addi",
+    "arith.addui_extended",
+    "arith.andi",
+    "arith.bitcast",
+    "arith.ceildivsi",
+    "arith.ceildivui",
+    "arith.cmpf",
+    "arith.cmpi",
+    "arith.constant",
+    "arith.convertf",
+    "arith.divf",
+    "arith.divsi",
+    "arith.divui",
+    "arith.extf",
+    "arith.extsi",
+    "arith.extui",
+    "arith.floordivsi",
+    "arith.flush_denormals",
+    "arith.fptosi",
+    "arith.fptoui",
+    "arith.index_cast",
+    "arith.index_castui",
+    "arith.maximumf",
+    "arith.maxnumf",
+    "arith.maxsi",
+    "arith.maxui",
+    "arith.minimumf",
+    "arith.minnumf",
+    "arith.minsi",
+    "arith.minui",
+    "arith.mulf",
+    "arith.muli",
+    "arith.mulsi_extended",
+    "arith.mului_extended",
+    "arith.negf",
+    "arith.ori",
+    "arith.remf",
+    "arith.remsi",
+    "arith.remui",
+    "arith.scaling_truncf",
+    "arith.select",
+    "arith.shli",
+    "arith.shrsi",
+    "arith.shrui",
+    "arith.sitofp",
+    "arith.subf",
+    "arith.subi",
+    "arith.truncf",
+    "arith.trunci",
+    "arith.uitofp",
+    "arith.xori",
+};
 
 // =============================================================================
 // Predicate enums (match ArithBase.td exactly)
@@ -24,7 +83,7 @@ pub const CmpIPredicate = enum(i64) {
 
 /// Arith cmpf predicates. Values match mlir::arith::CmpFPredicate.
 pub const CmpFPredicate = enum(i64) {
-    always_false = 0,
+    false = 0,
     oeq = 1,
     ogt = 2,
     oge = 3,
@@ -39,7 +98,7 @@ pub const CmpFPredicate = enum(i64) {
     ule = 12,
     une = 13,
     uno = 14,
-    always_true = 15,
+    true = 15,
 };
 
 // =============================================================================
@@ -68,11 +127,9 @@ pub const FastMathAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAArithFastMath;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "fastmath";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }

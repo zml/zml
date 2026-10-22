@@ -28,6 +28,7 @@ zig_library(
     deps = [
         ":capi",
         "//mlir",
+        "//mlir/dialects/fly",
         "//stdx",
     ],
 )
@@ -37,5 +38,6 @@ zig_test(
     main = "test.zig",
     deps = [
         ":fly_rocdl",
+        "//mlir",
     ],
 )

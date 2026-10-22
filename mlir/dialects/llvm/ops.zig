@@ -2,6 +2,22 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+pub const dialect_namespace = "llvm";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("llvm");
+}
+
+pub const operation_names: []const []const u8 = &.{
+    "llvm.bitcast",
+    "llvm.call_intrinsic",
+    "llvm.fmul",
+    "llvm.inline_asm",
+    "llvm.inttoptr",
+    "llvm.load",
+    "llvm.store",
+};
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -60,7 +76,7 @@ pub fn fmul(ctx: *mlir.Context, lhs: *const mlir.Value, rhs: *const mlir.Value, 
 // Memory
 // =============================================================================
 
-pub const LoadOptions = struct {
+pub const LoadOpts = struct {
     /// Alignment in bytes (none: the natural alignment of the type).
     alignment: ?u64 = null,
     /// The memory is not written while the kernel runs (`!invariant.load`; on NVPTX
@@ -69,7 +85,7 @@ pub const LoadOptions = struct {
 };
 
 /// llvm.load — a value of type `result_type` through `pointer`.
-pub fn load(ctx: *mlir.Context, pointer: *const mlir.Value, result_type: *const mlir.Type, opts: LoadOptions, location: *const mlir.Location) *mlir.Operation {
+pub fn load(ctx: *mlir.Context, pointer: *const mlir.Value, result_type: *const mlir.Type, opts: LoadOpts, location: *const mlir.Location) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
     if (opts.alignment) |alignment| {
         attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, alignment)));
@@ -85,13 +101,13 @@ pub fn load(ctx: *mlir.Context, pointer: *const mlir.Value, result_type: *const 
     });
 }
 
-pub const StoreOptions = struct {
+pub const StoreOpts = struct {
     /// Alignment in bytes (none: the natural alignment of the type).
     alignment: ?u64 = null,
 };
 
 /// llvm.store — `value` through `pointer`.
-pub fn store(ctx: *mlir.Context, value: *const mlir.Value, pointer: *const mlir.Value, opts: StoreOptions, location: *const mlir.Location) *mlir.Operation {
+pub fn store(ctx: *mlir.Context, value: *const mlir.Value, pointer: *const mlir.Value, opts: StoreOpts, location: *const mlir.Location) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.alignment) |alignment| {
         attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, alignment)));
@@ -130,7 +146,7 @@ pub fn call_intrinsic(
     });
 }
 
-pub const InlineAsmOptions = struct {
+pub const InlineAsmOpts = struct {
     result_type: ?*const mlir.Type = null,
 
     /// LLVM constraint string, e.g. `"=r,r"` (outputs first).
@@ -145,7 +161,7 @@ pub fn inline_asm(
     ctx: *mlir.Context,
     asm_string: []const u8,
     operands: []const *const mlir.Value,
-    opts: InlineAsmOptions,
+    opts: InlineAsmOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 3) = .empty;

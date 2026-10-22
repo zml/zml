@@ -3,7 +3,6 @@ const std = @import("std");
 const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
-const cute = @This();
 
 pub const dialect_namespace = "cute";
 
@@ -15,16 +14,12 @@ pub const CuteType = opaque {
     pub const isAFn = c.mlirTypeIsACuteType;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
-
-    pub fn format(self: *const CuteType, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        const t: *const mlir.Type = @ptrCast(self);
-        return t.format(writer);
-    }
 };
 
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
-    registry.registerDialect(dialect_namespace);
+    registry.registerDialect("cute");
 }
 
 pub const AlgebraKind = AttributeKind;
@@ -44,13 +39,13 @@ pub fn algebraType(ctx: *mlir.Context, kind: AlgebraKind, expression: []const u8
                 .composed_layout => ComposedLayoutType,
                 .swizzle => SwizzleType,
             };
-            const attr = try algebraAttribute(ctx, @field(AttributeKind, @tagName(k)), expression);
+            const attr = try algebraAttr(ctx, @field(AttributeKind, @tagName(k)), expression);
             break :blk (try T.get(ctx, .{ .attr = attr })).type_();
         },
     };
 }
 
-pub fn algebraAttribute(ctx: *mlir.Context, kind: AttributeKind, expression: []const u8) !*const mlir.Attribute {
+pub fn algebraAttr(ctx: *mlir.Context, kind: AttributeKind, expression: []const u8) !*const mlir.Attribute {
     return switch (kind) {
         inline else => |k| blk: {
             const A = switch (k) {
@@ -105,6 +100,7 @@ pub const IntTupleAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteIntTuple;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const IntTupleAttr {
@@ -119,10 +115,6 @@ pub const IntTupleAttr = opaque {
     pub fn attribute(self: *const IntTupleAttr) *const mlir.Attribute {
         return @ptrCast(self);
     }
-
-    pub fn format(self: *const IntTupleAttr, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
 };
 
 pub const CoordAttr = opaque {
@@ -131,6 +123,7 @@ pub const CoordAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteCoord;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const CoordAttr {
@@ -145,10 +138,6 @@ pub const CoordAttr = opaque {
     pub fn attribute(self: *const CoordAttr) *const mlir.Attribute {
         return @ptrCast(self);
     }
-
-    pub fn format(self: *const CoordAttr, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
 };
 
 pub const ShapeAttr = opaque {
@@ -157,6 +146,7 @@ pub const ShapeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteShape;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const ShapeAttr {
@@ -171,10 +161,6 @@ pub const ShapeAttr = opaque {
     pub fn attribute(self: *const ShapeAttr) *const mlir.Attribute {
         return @ptrCast(self);
     }
-
-    pub fn format(self: *const ShapeAttr, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
 };
 
 pub const StrideAttr = opaque {
@@ -183,6 +169,7 @@ pub const StrideAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteStride;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const StrideAttr {
@@ -197,10 +184,6 @@ pub const StrideAttr = opaque {
     pub fn attribute(self: *const StrideAttr) *const mlir.Attribute {
         return @ptrCast(self);
     }
-
-    pub fn format(self: *const StrideAttr, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
 };
 
 pub const LayoutAttr = opaque {
@@ -209,6 +192,7 @@ pub const LayoutAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteLayout;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const LayoutAttr {
@@ -223,10 +207,6 @@ pub const LayoutAttr = opaque {
     pub fn attribute(self: *const LayoutAttr) *const mlir.Attribute {
         return @ptrCast(self);
     }
-
-    pub fn format(self: *const LayoutAttr, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
 };
 
 pub const TileAttr = opaque {
@@ -235,6 +215,7 @@ pub const TileAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteTile;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const TileAttr {
@@ -249,10 +230,6 @@ pub const TileAttr = opaque {
     pub fn attribute(self: *const TileAttr) *const mlir.Attribute {
         return @ptrCast(self);
     }
-
-    pub fn format(self: *const TileAttr, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
 };
 
 pub const ComposedLayoutAttr = opaque {
@@ -261,6 +238,7 @@ pub const ComposedLayoutAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteComposedLayout;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const ComposedLayoutAttr {
@@ -275,10 +253,6 @@ pub const ComposedLayoutAttr = opaque {
     pub fn attribute(self: *const ComposedLayoutAttr) *const mlir.Attribute {
         return @ptrCast(self);
     }
-
-    pub fn format(self: *const ComposedLayoutAttr, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
 };
 
 pub const SwizzleAttr = opaque {
@@ -287,6 +261,7 @@ pub const SwizzleAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteSwizzle;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
     pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const SwizzleAttr {
@@ -300,10 +275,6 @@ pub const SwizzleAttr = opaque {
 
     pub fn attribute(self: *const SwizzleAttr) *const mlir.Attribute {
         return @ptrCast(self);
-    }
-
-    pub fn format(self: *const SwizzleAttr, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
     }
 };
 
@@ -360,11 +331,9 @@ pub const ArithTupleIteratorType = opaque {
     pub const isAFn = c.mlirTypeIsACuteArithTupleIterator;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "arith_tuple_iter";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -387,11 +356,9 @@ pub const ComposedLayoutType = opaque {
     pub const isAFn = c.mlirTypeIsACuteComposedLayout;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "composed_layout";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -414,16 +381,14 @@ pub const ConstrainedIntType = opaque {
     pub const isAFn = c.mlirTypeIsACuteConstrainedInt;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
     pub const InitArgs = struct {
         divisibility: i64,
-        width: c_uint,
+        width: u32,
         isPow2: bool,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
@@ -433,7 +398,7 @@ pub const ConstrainedIntType = opaque {
     pub fn getDivisibility(self: *const Self) i64 {
         return c.mlirCuteConstrainedIntTypeGetDivisibility(self.ptr());
     }
-    pub fn getWidth(self: *const Self) c_uint {
+    pub fn getWidth(self: *const Self) u32 {
         return c.mlirCuteConstrainedIntTypeGetWidth(self.ptr());
     }
     pub fn getIsPow2(self: *const Self) bool {
@@ -448,11 +413,9 @@ pub const CoordTensorType = opaque {
     pub const isAFn = c.mlirTypeIsACuteCoordTensor;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "coord_tensor";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -479,11 +442,9 @@ pub const CoordType = opaque {
     pub const isAFn = c.mlirTypeIsACuteCoord;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "coord";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -506,23 +467,21 @@ pub const FastDivmodDivisorType = opaque {
     pub const isAFn = c.mlirTypeIsACuteFastDivmodDivisor;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "fast_divmod_divisor";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
     pub const InitArgs = struct {
-        width: c_uint,
+        width: u32,
         isPow2: bool,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
         const result = c.mlirCuteFastDivmodDivisorTypeGet(ctx.ptr(), args.width, args.isPow2);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getWidth(self: *const Self) c_uint {
+    pub fn getWidth(self: *const Self) u32 {
         return c.mlirCuteFastDivmodDivisorTypeGetWidth(self.ptr());
     }
     pub fn getIsPow2(self: *const Self) bool {
@@ -537,11 +496,9 @@ pub const IntTupleType = opaque {
     pub const isAFn = c.mlirTypeIsACuteIntTuple;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "int_tuple";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -564,11 +521,9 @@ pub const LayoutType = opaque {
     pub const isAFn = c.mlirTypeIsACuteLayout;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "layout";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -591,11 +546,9 @@ pub const MemRefType = opaque {
     pub const isAFn = c.mlirTypeIsACuteMemRef;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "memref";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -622,11 +575,9 @@ pub const PtrType = opaque {
     pub const isAFn = c.mlirTypeIsACutePtr;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "ptr";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -665,11 +616,9 @@ pub const ShapeType = opaque {
     pub const isAFn = c.mlirTypeIsACuteShape;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "shape";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -692,11 +641,9 @@ pub const SparseElemType = opaque {
     pub const isAFn = c.mlirTypeIsACuteSparseElem;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sparse_elem";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -723,11 +670,9 @@ pub const StrideType = opaque {
     pub const isAFn = c.mlirTypeIsACuteStride;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "stride";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -750,11 +695,9 @@ pub const SwizzleType = opaque {
     pub const isAFn = c.mlirTypeIsACuteSwizzle;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "swizzle";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -777,11 +720,9 @@ pub const TileType = opaque {
     pub const isAFn = c.mlirTypeIsACuteTile;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tile";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -804,11 +745,9 @@ pub const TiledCopyType = opaque {
     pub const isAFn = c.mlirTypeIsACuteTiledCopy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tiled_copy";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -840,11 +779,9 @@ pub const TiledCopyV2Type = opaque {
     pub const isAFn = c.mlirTypeIsACuteTiledCopyV2;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tiled_copy_v2";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -875,11 +812,9 @@ pub const TiledMmaType = opaque {
     pub const isAFn = c.mlirTypeIsACuteTiledMma;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tiled_mma";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -913,11 +848,9 @@ pub const TupleType = opaque {
     pub const isAFn = c.mlirTypeIsACuteTuple;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tuple";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -943,11 +876,9 @@ pub const BitLayoutAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteBitLayout;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "bitlayout";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -970,11 +901,9 @@ pub const CopyAtomAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteCopyAtom;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "copy_atom";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -1009,11 +938,9 @@ pub const CopyAtomV2Attr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteCopyAtomV2;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "copy_atom_v2";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -1052,11 +979,9 @@ pub const MmaAtomAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteMmaAtom;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "mma_atom";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -1119,11 +1044,9 @@ pub const MxMmaAtomAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteMxMmaAtom;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "mx_mma_atom";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -1210,11 +1133,9 @@ pub const ReductionOpAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteReductionOp;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "reduction_op";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -1237,11 +1158,9 @@ pub const SparseMmaAtomAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteSparseMmaAtom;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sparse_mma_atom";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -1316,11 +1235,9 @@ pub const SparseMxMmaAtomAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteSparseMxMmaAtom;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sparse_mx_mma_atom";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }

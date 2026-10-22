@@ -4,7 +4,7 @@
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-pub const names = [_][]const u8{
+pub const operation_names: []const []const u8 = &.{
     "rocdl.asyncmark",
     "rocdl.ballot",
     "rocdl.barrier",

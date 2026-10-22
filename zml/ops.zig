@@ -2,10 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const func = @import("mlir/dialects/func");
-const stablehlo = @import("mlir/dialects/stablehlo");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const platforms = @import("platforms");
+const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 
 const manual_computation = @import("ops/manual_computation.zig");
@@ -136,7 +136,7 @@ pub fn allReduce(inputs: anytype, comptime func_: anytype) AllReduceReturnType(@
     );
 
     const handle = ctx.nextChannelId();
-    const channel_handle_attr = stablehlo.channelHandle(
+    const channel_handle_attr = stablehlo.channelHandleAttr(
         mlir_ctx,
         handle,
         .collective,

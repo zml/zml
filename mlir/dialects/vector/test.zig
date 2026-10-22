@@ -32,3 +32,14 @@ test "vector enum attributes are built through the C API" {
         try expectPrints("#vector.iterator_type<" ++ name ++ ">", attr);
     }
 }
+
+test "every bound operation is registered" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    vector.registerDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    for (vector.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    try std.testing.expect(!ctx.allowUnregisteredDialects());
+}

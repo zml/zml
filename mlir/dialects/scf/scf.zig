@@ -3,6 +3,27 @@ const std = @import("std");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+pub const dialect_namespace = "scf";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("scf");
+}
+
+pub const operation_names: []const []const u8 = &.{
+    "scf.condition",
+    "scf.execute_region",
+    "scf.for",
+    "scf.forall",
+    "scf.forall.in_parallel",
+    "scf.if",
+    "scf.index_switch",
+    "scf.parallel",
+    "scf.reduce",
+    "scf.reduce.return",
+    "scf.while",
+    "scf.yield",
+};
+
 pub const ForOpts = struct {
     /// Per td: `scf.for` uses signed comparison by default. Setting this emits
     /// the `unsignedCmp` UnitAttr so the induction variable advances with

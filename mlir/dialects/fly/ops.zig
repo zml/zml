@@ -15,7 +15,7 @@ const stdx = @import("stdx");
 const make = @import("fly.zig").make;
 
 /// Every operation bound here, for the registration test.
-pub const names = [_][]const u8{
+pub const operation_names: []const []const u8 = &.{
     "fly.add_offset",
     "fly.append",
     "fly.apply_swizzle",

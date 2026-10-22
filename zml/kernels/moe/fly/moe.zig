@@ -387,7 +387,7 @@ pub const Mfma = struct {
         };
         const initial = loader.load(b, b.constant(.i64, 0), b.constant(.i64, 0));
         b.barrier();
-        const atom = b.mmaAtom((fly.rocdl.MmaOpCDNA3MFMAType.get(b.ctx, .{
+        const atom = b.mmaAtom((fly.fly_rocdl.MmaOpCDNA3MFMAType.get(b.ctx, .{
             .m = 16,
             .n = 16,
             .k = 16,

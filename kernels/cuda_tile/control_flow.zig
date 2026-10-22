@@ -3,9 +3,9 @@
 //! `if`, `break` leaves a `loop`. An already-terminated branch is left alone.
 
 const std = @import("std");
-const mlir = @import("mlir");
 const cuda_tile = @import("mlir/dialects/cuda_tile");
 const dsl = @import("kernels/common");
+const mlir = @import("mlir");
 
 pub const tupleArity = dsl.tupleArity;
 

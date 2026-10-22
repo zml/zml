@@ -8,7 +8,7 @@ fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
     rocdl.registerDialect(registry);
-    const ctx = try mlir.Context.init(.{ .registry = registry });
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;
 }
@@ -31,12 +31,8 @@ test {
 }
 
 test "packed FP8 conversion uses the registered LLVM ROCDL dialect" {
-    const registry = try mlir.DialectRegistry.init();
-    defer registry.deinit();
-    rocdl.registerDialect(registry);
-    const ctx = try mlir.Context.init(.{ .registry = registry });
+    const ctx = try testContext();
     defer ctx.deinit();
-    ctx.loadAllAvailableDialects();
     try std.testing.expect(ctx.isRegisteredOperation("rocdl.cvt.pk.f32.fp8"));
 
     const loc = mlir.Location.unknown(ctx);
@@ -51,14 +47,15 @@ test "packed FP8 conversion uses the registered LLVM ROCDL dialect" {
     }
 }
 
-test "every registered ROCDL operation has a generated builder" {
+test "every bound operation is registered" {
     const ctx = try testContext();
     defer ctx.deinit();
-    try std.testing.expectEqual(rocdl.ops.names.len, @as(usize, @intCast(c.mlirROCDLGetOperationCount(ctx.ptr()))));
-    for (rocdl.ops.names, 0..) |name, i| {
+    try std.testing.expectEqual(rocdl.operation_names.len, @as(usize, @intCast(c.mlirROCDLGetOperationCount(ctx.ptr()))));
+    for (rocdl.operation_names, 0..) |name, i| {
         try std.testing.expect(ctx.isRegisteredOperation(name));
-        for (rocdl.ops.names[0..i]) |earlier| try std.testing.expect(!std.mem.eql(u8, name, earlier));
+        for (rocdl.operation_names[0..i]) |earlier| try std.testing.expect(!std.mem.eql(u8, name, earlier));
     }
+    try std.testing.expect(!ctx.allowUnregisteredDialects());
 }
 
 test "all ROCDL enum attributes construct and round-trip every named value" {
@@ -67,17 +64,17 @@ test "all ROCDL enum attributes construct and round-trip every named value" {
     defer ctx.deinit();
     inline for (rocdl.attributes.enum_attributes) |A| {
         for (std.enums.values(A.Value)) |value| {
-            const attribute = try A.get(ctx, value);
+            const attribute = try A.get(ctx, .{ .value = value });
             try std.testing.expect(attribute.isA(A) != null);
-            try std.testing.expectEqual(value, attribute.value());
+            try std.testing.expectEqual(value, attribute.getValue());
             try expectAttributeRoundTrip(ctx, attribute.attribute());
         }
     }
     const mask: rocdl.SchedGroupMask = .combine(&.{ .valu, .mfma_wmma, .ds_read });
     try std.testing.expect(mask.contains(.mfma_wmma));
     try std.testing.expect(!mask.contains(.all_vmem));
-    const attribute = try rocdl.SchedGroupMaskAttr.get(ctx, mask);
-    try std.testing.expectEqual(mask, attribute.value());
+    const attribute = try rocdl.SchedGroupMaskAttr.get(ctx, .{ .value = mask });
+    try std.testing.expectEqual(mask, attribute.getValue());
     try expectAttributeRoundTrip(ctx, attribute.attribute());
 }
 
@@ -86,8 +83,8 @@ test "ROCDL enum constructors reject invalid values and flag bits" {
     defer ctx.deinit();
     try std.testing.expect(c.mlirROCDLMatrixFormatAttrGet(ctx.ptr(), 5).ptr == null);
     try std.testing.expect(c.mlirROCDLWMMACModifierAttrGet(ctx.ptr(), 65536).ptr == null);
-    try std.testing.expectError(error.InvalidMlir, rocdl.SchedGroupMaskAttr.get(ctx, @fromBackingInt(1 << 20)));
-    try std.testing.expectError(error.InvalidMlir, rocdl.PreGfx12CachePolicyAttr.get(ctx, @fromBackingInt(1 << 6)));
+    try std.testing.expectError(error.InvalidMlir, rocdl.SchedGroupMaskAttr.get(ctx, .{ .value = @fromBackingInt(1 << 20) }));
+    try std.testing.expectError(error.InvalidMlir, rocdl.PreGfx12CachePolicyAttr.get(ctx, .{ .value = @fromBackingInt(1 << 6) }));
 }
 
 test "target attributes expose all fields and reject invalid options" {
@@ -163,7 +160,7 @@ test "ROCDL barriers buffer loads and matrix operations verify and reparse" {
         rocdl.ops.s_barrier(ctx, loc),
         rocdl.ops.s_sleep(ctx, .int(ctx, .i32, 1), loc),
         rocdl.ops.workitem_id_x(ctx, i32Type, .{}, loc),
-        rocdl.ops.sched_barrier(ctx, (try rocdl.SchedGroupMaskAttr.get(ctx, .combine(&.{ .valu, .mfma_wmma }))).attribute(), loc),
+        rocdl.ops.sched_barrier(ctx, (try rocdl.SchedGroupMaskAttr.get(ctx, .{ .value = .combine(&.{ .valu, .mfma_wmma }) })).attribute(), loc),
         rocdl.ops.raw_buffer_load(ctx, block.argument(0), block.argument(1), block.argument(1), f32Type, .{}, loc),
         rocdl.ops.raw_buffer_load(
             ctx,
@@ -171,10 +168,10 @@ test "ROCDL barriers buffer loads and matrix operations verify and reparse" {
             block.argument(1),
             block.argument(1),
             f32Type,
-            .{ .aux = (try rocdl.Gfx942CachePolicyAttr.get(ctx, .combine(&.{ .sc0, .nt }))).attribute() },
+            .{ .aux = (try rocdl.Gfx942CachePolicyAttr.get(ctx, .{ .value = .combine(&.{ .sc0, .nt }) })).attribute() },
             loc,
         ),
-        rocdl.ops.mfma_f32_16x16x4f32(ctx, block.argument(2), block.argument(2), block.argument(3), vec4f32, zero, zero, (try rocdl.MFMAPermBAttr.get(ctx, .none)).attribute(), loc),
+        rocdl.ops.mfma_f32_16x16x4f32(ctx, block.argument(2), block.argument(2), block.argument(3), vec4f32, zero, zero, (try rocdl.MFMAPermBAttr.get(ctx, .{ .value = .none })).attribute(), loc),
     };
     inline for (opList) |op| {
         try std.testing.expect(op.verify());

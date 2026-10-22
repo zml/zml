@@ -9,6 +9,14 @@ const mlir = @import("mlir");
 
 pub const ops = @import("ops.zig");
 
+pub const dialect_namespace = ops.dialect_namespace;
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("cute_nvvm");
+}
+
+pub const operation_names = ops.operation_names;
+
 fn enumAttribute(comptime T: type, ctx: *mlir.Context, value: @FieldType(T.InitArgs, "value")) *const mlir.Attribute {
     return (T.get(ctx, .{ .value = value }) catch unreachable).attribute();
 }

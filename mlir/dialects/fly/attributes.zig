@@ -1,5 +1,3 @@
-const std = @import("std");
-
 const c = @import("c");
 const mlir = @import("mlir");
 
@@ -10,12 +8,10 @@ pub const IntAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAFlyInt;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
     }
 
     pub fn getStatic(ctx: *mlir.Context, value: i32) mlir.Error!*const Self {
@@ -38,12 +34,10 @@ pub const IntTupleAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAFlyIntTuple;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
     }
 
     pub const InitArgs = struct {
@@ -84,12 +78,10 @@ pub const LayoutAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAFlyLayout;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
     }
 
     pub const InitArgs = struct {
@@ -110,12 +102,10 @@ pub const TileAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAFlyTile;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
     }
 
     pub const InitArgs = struct {
@@ -139,12 +129,10 @@ pub const SwizzleAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAFlySwizzle;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
     }
 
     pub const InitArgs = struct {
@@ -166,12 +154,10 @@ pub const AlignAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAFlyAlign;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
     }
 
     pub const InitArgs = struct {
@@ -193,12 +179,10 @@ pub const AddressSpaceAttr = opaque {
     pub const isAFn = c.mlirAttributeIsAFlyAddressSpace;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
     }
 
     pub const InitArgs = struct {

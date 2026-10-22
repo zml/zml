@@ -3,6 +3,19 @@ const std = @import("std");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+pub const dialect_namespace = "cf";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("cf");
+}
+
+pub const operation_names: []const []const u8 = &.{
+    "cf.assert",
+    "cf.br",
+    "cf.cond_br",
+    "cf.switch",
+};
+
 // =============================================================================
 // cf.assert
 // =============================================================================

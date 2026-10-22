@@ -1,9 +1,15 @@
-const std = @import("std");
-
 const c = @import("c");
 const mlir = @import("mlir");
 
 pub const ops = @import("ops.zig");
+
+pub const dialect_namespace = "fly_rocdl";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("fly_rocdl");
+}
+
+pub const operation_names = ops.operation_names;
 
 /// `#fly_rocdl.buffer_desc`, an address space for buffer-descriptor pointers.
 pub const BufferDescAddressAttr = opaque {
@@ -11,11 +17,9 @@ pub const BufferDescAddressAttr = opaque {
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
     }
 
     pub fn get(ctx: *mlir.Context) mlir.Error!*const Self {
@@ -30,12 +34,10 @@ pub const CopyOpCDNA3BufferCopyType = opaque {
     pub const isAFn = c.mlirTypeIsAFlyROCDLCopyOpCDNA3BufferCopy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
     }
 
     pub const InitArgs = struct {
@@ -57,12 +59,10 @@ pub const CopyOpCDNA3BufferCopyLDSType = opaque {
     pub const isAFn = c.mlirTypeIsAFlyROCDLCopyOpCDNA3BufferCopyLDS;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
     }
 
     pub const InitArgs = struct {
@@ -82,12 +82,10 @@ pub const MmaOpCDNA3MFMAType = opaque {
     pub const isAFn = c.mlirTypeIsAFlyROCDLMmaOpCDNA3MFMA;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
     }
 
     pub const InitArgs = struct {
@@ -112,12 +110,10 @@ pub const MmaOpGFX11WMMAType = opaque {
     pub const isAFn = c.mlirTypeIsAFlyROCDLMmaOpGFX11WMMA;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
     }
 
     pub const InitArgs = WmmaInitArgs;
@@ -135,12 +131,10 @@ pub const MmaOpGFX120XWMMAType = opaque {
     pub const isAFn = c.mlirTypeIsAFlyROCDLMmaOpGFX120XWMMA;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
-    }
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
     }
 
     pub const InitArgs = WmmaInitArgs;

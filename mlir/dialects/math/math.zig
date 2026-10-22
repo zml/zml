@@ -1,5 +1,60 @@
 const mlir = @import("mlir");
 
+pub const dialect_namespace = "math";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("math");
+}
+
+pub const operation_names: []const []const u8 = &.{
+    "math.absf",
+    "math.absi",
+    "math.acos",
+    "math.acosh",
+    "math.asin",
+    "math.asinh",
+    "math.atan",
+    "math.atan2",
+    "math.atanh",
+    "math.cbrt",
+    "math.ceil",
+    "math.clampf",
+    "math.copysign",
+    "math.cos",
+    "math.cosh",
+    "math.ctlz",
+    "math.ctpop",
+    "math.cttz",
+    "math.erf",
+    "math.erfc",
+    "math.exp",
+    "math.exp2",
+    "math.expm1",
+    "math.floor",
+    "math.fma",
+    "math.fpowi",
+    "math.ipowi",
+    "math.isfinite",
+    "math.isinf",
+    "math.isnan",
+    "math.isnormal",
+    "math.log",
+    "math.log10",
+    "math.log1p",
+    "math.log2",
+    "math.powf",
+    "math.round",
+    "math.roundeven",
+    "math.rsqrt",
+    "math.sin",
+    "math.sincos",
+    "math.sinh",
+    "math.sqrt",
+    "math.tan",
+    "math.tanh",
+    "math.trunc",
+};
+
 // =============================================================================
 // Float unary — SameOperandsAndResultType. Result type inferred from operand.
 // =============================================================================

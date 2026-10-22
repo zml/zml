@@ -8,7 +8,6 @@
 const std = @import("std");
 
 const arith = @import("mlir/dialects/arith");
-const cf = @import("mlir/dialects/cf");
 const func = @import("mlir/dialects/func");
 const math = @import("mlir/dialects/math");
 const memref = @import("mlir/dialects/memref");
@@ -382,7 +381,7 @@ pub const MatmulOpts = struct {
     transpose_lhs_hint: bool = false,
     precision: ?ContractPrecision = null,
     /// Optional `#tpu.dot_dimension_numbers<...>` attribute. When omitted the
-    /// canonicalizer derives one. Build with `tpu.dotDimensionNumbers`.
+    /// canonicalizer derives one. Build with `mosaic_tpu.dotDimensionNumbersAttr`.
     dimension_numbers: ?*const mlir.Attribute = null,
 };
 
@@ -816,7 +815,7 @@ pub const Builder = struct {
                     inner.appendAssumeCapacity(.named(ctx, "transform_indices", .flatSymbolRef(ctx, sym_name)));
                     inner.appendAssumeCapacity(.named(ctx, "window_bounds", .denseArray(ctx, .i64, block_shape)));
                     if (w.element_window) |ew| {
-                        inner.appendAssumeCapacity(.named(ctx, "window_kind", mosaic_tpu.elementWindowAttribute(ctx, ew.pad_low, ew.pad_high)));
+                        inner.appendAssumeCapacity(.named(ctx, "window_kind", mosaic_tpu.elementWindowAttr(ctx, ew.pad_low, ew.pad_high)));
                     }
                     wp_buf[idx] = .dict(ctx, inner.constSlice());
                     idx += 1;
@@ -1461,7 +1460,7 @@ pub const Builder = struct {
         const result_ty = self.refVectorType(ref);
         const idx_inner = self.indicesOrZero(ref, indices);
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
-        return self.emit(mosaic_tpu.vector_load(ctx, ref.inner, idx_inner, .{ .strides = opts.strides, .mask = mask_inner }, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.vector_load(ctx, ref.inner, idx_inner, result_ty, .{ .strides = opts.strides, .mask = mask_inner }, self.loc()));
     }
 
     /// `tpu.vector_load` with an explicit result vector shape.
@@ -1470,7 +1469,7 @@ pub const Builder = struct {
         const result_ty = mlir.Type.vector(shape, ref.elemType());
         const idx_inner = self.indicesOrZero(ref, indices);
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
-        return self.emit(mosaic_tpu.vector_load(ctx, ref.inner, idx_inner, .{ .strides = opts.strides, .mask = mask_inner }, result_ty, self.loc()));
+        return self.emit(mosaic_tpu.vector_load(ctx, ref.inner, idx_inner, result_ty, .{ .strides = opts.strides, .mask = mask_inner }, self.loc()));
     }
 
     /// `tpu.vector_store(value, ref)` — full-shape vector store.
@@ -1569,6 +1568,7 @@ pub const Builder = struct {
             lhs.inner,
             rhs.inner,
             acc.inner,
+            acc.type_(),
             .{
                 .transpose_lhs = opts.transpose_lhs,
                 .transpose_rhs = opts.transpose_rhs,
@@ -1576,7 +1576,6 @@ pub const Builder = struct {
                 .precision = opts.precision,
                 .dimension_numbers = opts.dimension_numbers,
             },
-            acc.type_(),
             self.loc(),
         ));
     }
@@ -1791,10 +1790,10 @@ pub const Builder = struct {
             self.ctx,
             keys.inner,
             values.inner,
-            .{ .descending = opts.descending, .mask = m_inner },
             out_mask_ty,
             keys.type_(),
             values.type_(),
+            .{ .descending = opts.descending, .mask = m_inner },
             self.loc(),
         );
         _ = op.appendTo(self.currentBlock());
@@ -1986,7 +1985,7 @@ pub const Builder = struct {
         lhs_batch: []const i64,
         rhs_batch: []const i64,
     ) *const mlir.Attribute {
-        return mosaic_tpu.dotDimensionNumbers(
+        return mosaic_tpu.dotDimensionNumbersAttr(
             self.ctx,
             lhs_contracting,
             rhs_contracting,

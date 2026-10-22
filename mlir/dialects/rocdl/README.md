@@ -32,7 +32,7 @@ The pinned LLVM revision supplies 374 operations, 15 attributes, and 12 enums.
 ```zig
 const rocdl = @import("mlir/dialects/rocdl");
 
-const policy = try rocdl.Gfx942CachePolicyAttr.get(ctx, .combine(&.{ .sc0, .nt }));
+const policy = try rocdl.Gfx942CachePolicyAttr.get(ctx, .{ .value = .combine(&.{ .sc0, .nt }) });
 const load = rocdl.ops.raw_buffer_load(
     ctx, resource, offset, scalar_offset,
     mlir.Type.float(ctx, .f32), .{ .aux = policy.attribute() }, location,

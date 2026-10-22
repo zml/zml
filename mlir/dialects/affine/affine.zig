@@ -1,6 +1,28 @@
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+pub const dialect_namespace = "affine";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("affine");
+}
+
+pub const operation_names: []const []const u8 = &.{
+    "affine.apply",
+    "affine.delinearize_index",
+    "affine.for",
+    "affine.if",
+    "affine.linearize_index",
+    "affine.load",
+    "affine.max",
+    "affine.min",
+    "affine.parallel",
+    "affine.store",
+    "affine.vector_load",
+    "affine.vector_store",
+    "affine.yield",
+};
+
 // =============================================================================
 // affine.apply / affine.min / affine.max
 // =============================================================================
@@ -61,7 +83,7 @@ pub fn max(
 // affine.for / affine.yield
 // =============================================================================
 
-pub const ForArgs = struct {
+pub const ForOpts = struct {
     /// Constant lower bound. Pass `null` when supplying a `lower_bound_map`.
     lower_bound: ?i64 = null,
     /// Constant upper bound. Pass `null` when supplying an `upper_bound_map`.
@@ -84,33 +106,33 @@ pub const ForArgs = struct {
 /// block takes `index, *init_arg_types` and must terminate with `affine.yield`.
 pub fn for_(
     ctx: *mlir.Context,
-    args: ForArgs,
     body: *mlir.Block,
+    opts: ForOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     // Resolve final maps.
-    const lb_map = args.lower_bound_map orelse blk: {
-        const cst = mlir.AffineExpr.constant(ctx, args.lower_bound orelse 0);
+    const lb_map = opts.lower_bound_map orelse blk: {
+        const cst = mlir.AffineExpr.constant(ctx, opts.lower_bound orelse 0);
         break :blk mlir.AffineMap.get(ctx, 0, 0, &.{cst});
     };
-    const ub_map = args.upper_bound_map orelse blk: {
-        const cst = mlir.AffineExpr.constant(ctx, args.upper_bound orelse 0);
+    const ub_map = opts.upper_bound_map orelse blk: {
+        const cst = mlir.AffineExpr.constant(ctx, opts.upper_bound orelse 0);
         break :blk mlir.AffineMap.get(ctx, 0, 0, &.{cst});
     };
 
     var operands: stdx.BoundedArray(*const mlir.Value, 64) = .empty;
-    operands.appendSliceAssumeCapacity(args.lower_bound_operands);
-    operands.appendSliceAssumeCapacity(args.upper_bound_operands);
-    operands.appendSliceAssumeCapacity(args.inits);
+    operands.appendSliceAssumeCapacity(opts.lower_bound_operands);
+    operands.appendSliceAssumeCapacity(opts.upper_bound_operands);
+    operands.appendSliceAssumeCapacity(opts.inits);
 
     const seg_sizes = [3]i32{
-        @intCast(args.lower_bound_operands.len),
-        @intCast(args.upper_bound_operands.len),
-        @intCast(args.inits.len),
+        @intCast(opts.lower_bound_operands.len),
+        @intCast(opts.upper_bound_operands.len),
+        @intCast(opts.inits.len),
     };
 
     var result_types: stdx.BoundedArray(*const mlir.Type, 64) = .empty;
-    for (args.inits) |v| result_types.appendAssumeCapacity(v.type_());
+    for (opts.inits) |v| result_types.appendAssumeCapacity(v.type_());
 
     return mlir.Operation.make(ctx, "affine.for", .{
         .operands = .{ .flat = operands.constSlice() },
@@ -120,7 +142,7 @@ pub fn for_(
             .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
             .named(ctx, "lowerBoundMap", .affineMap(lb_map)),
             .named(ctx, "upperBoundMap", .affineMap(ub_map)),
-            .named(ctx, "step", .int(ctx, .i64, args.step)),
+            .named(ctx, "step", .int(ctx, .i64, opts.step)),
         },
         // The for body may reference outer SSA values that only become
         // reachable once it's appended to its parent — defer to module-level

@@ -8,27 +8,19 @@ const cute_ir = @import("mlir/dialects/cute_ir");
 
 pub const dialect_namespace = "cute_nvgpu";
 
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("cute_nvgpu");
+}
+
 pub const NVGPUType = opaque {
     const M = mlir.Methods(NVGPUType, c.MlirType);
 
     pub const isAFn = c.mlirTypeIsACuteNVGPUType;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
-
-    pub fn format(self: *const NVGPUType, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        const t: *const mlir.Type = @ptrCast(self);
-        return t.format(writer);
-    }
 };
-
-/// Parses `!cute_nvgpu.<T.mnemonic><payload>`, such as `<f32>` for
-/// `CopyAtomSIMTSyncCopyType`, and returns it as a `T`.
-pub fn typeFromPayload(comptime T: type, ctx: *mlir.Context, payload: []const u8) mlir.Error!*const T {
-    var buffer: [1024]u8 = undefined;
-    const text = std.fmt.bufPrint(&buffer, "!" ++ dialect_namespace ++ "." ++ T.mnemonic ++ "{s}", .{payload}) catch return error.InvalidMlir;
-    return (try mlir.Type.parse(ctx, text)).isA(T) orelse error.InvalidMlir;
-}
 
 // Enums, generated from the dialect's .td files; values are the compiler's.
 
@@ -412,11 +404,9 @@ pub const CopyAtomBulkCopyG2SType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomBulkCopyG2S;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.bulk_copy_g2s";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -447,11 +437,9 @@ pub const CopyAtomBulkCopyS2GType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomBulkCopyS2G;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.bulk_copy_s2g";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -482,11 +470,9 @@ pub const CopyAtomBulkCopyS2SType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomBulkCopyS2S;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.bulk_copy_s2s";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -513,11 +499,9 @@ pub const CopyAtomDsmemStoreType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomDsmemStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.dsmem_store";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -544,11 +528,9 @@ pub const CopyAtomG2RType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomG2R;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.g2r";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -603,11 +585,9 @@ pub const CopyAtomIm2ColTmaLoadType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomIm2ColTmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.im2col_tma_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -650,11 +630,9 @@ pub const CopyAtomIm2ColTmaStoreType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomIm2ColTmaStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.im2col_tma_store";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -689,11 +667,9 @@ pub const CopyAtomLdsmType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomLdsm;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.ldsm";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -732,11 +708,9 @@ pub const CopyAtomNonExec2DGather4TmaLoadType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomNonExec2DGather4TmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.non_exec_2d_gather4_tma_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -776,11 +750,9 @@ pub const CopyAtomNonExec2DScatter4TmaStoreType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomNonExec2DScatter4TmaStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.non_exec_2d_scatter4_tma_store";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -816,11 +788,9 @@ pub const CopyAtomNonExecIm2ColTmaLoadType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomNonExecIm2ColTmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.non_exec_im2col_tma_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -860,11 +830,9 @@ pub const CopyAtomNonExecIm2ColTmaStoreType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomNonExecIm2ColTmaStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.non_exec_im2col_tma_store";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -900,11 +868,9 @@ pub const CopyAtomNonExecTiledTmaLoadType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomNonExecTiledTmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.non_exec_tiled_tma_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -944,11 +910,9 @@ pub const CopyAtomNonExecTiledTmaReduceType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomNonExecTiledTmaReduce;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.non_exec_tiled_tma_reduce";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -988,11 +952,9 @@ pub const CopyAtomNonExecTiledTmaStoreType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomNonExecTiledTmaStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.non_exec_tiled_tma_store";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1028,11 +990,9 @@ pub const CopyAtomR2GType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomR2G;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.r2g";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1079,11 +1039,9 @@ pub const CopyAtomR2SType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomR2S;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.r2s";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1122,11 +1080,9 @@ pub const CopyAtomS2RType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomS2R;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.s2r";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1165,11 +1121,9 @@ pub const CopyAtomSIMTAsyncCopyType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomSIMTAsyncCopy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.simt_async_copy";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1200,11 +1154,9 @@ pub const CopyAtomSIMTMultimemLdReduceType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomSIMTMultimemLdReduce;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.simt_multimem_ld_reduce";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1247,11 +1199,9 @@ pub const CopyAtomSIMTMultimemRedType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomSIMTMultimemRed;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.simt_multimem_red";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1290,11 +1240,9 @@ pub const CopyAtomSIMTMultimemStType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomSIMTMultimemSt;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.simt_multimem_st";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1329,11 +1277,9 @@ pub const CopyAtomSIMTSyncCopyType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomSIMTSyncCopy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.universal_copy";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1368,11 +1314,9 @@ pub const CopyAtomSM100CopyS2TType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomSM100CopyS2T;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.s2t_copy";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1411,11 +1355,9 @@ pub const CopyAtomSM100S2TCopyV2Type = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomSM100S2TCopyV2;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.sm100_s2t_copy_v2";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1458,11 +1400,9 @@ pub const CopyAtomSM100TmemLoadType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomSM100TmemLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.tmem_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1470,7 +1410,7 @@ pub const CopyAtomSM100TmemLoadType = opaque {
         valType: *const mlir.Type,
         numDp: c_int,
         numBit: c_int,
-        numRep: c_uint,
+        numRep: u32,
         pack16b: bool = false,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
@@ -1486,7 +1426,7 @@ pub const CopyAtomSM100TmemLoadType = opaque {
     pub fn getNumBit(self: *const Self) c_int {
         return c.mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGetNumBit(self.ptr());
     }
-    pub fn getNumRep(self: *const Self) c_uint {
+    pub fn getNumRep(self: *const Self) u32 {
         return c.mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGetNumRep(self.ptr());
     }
     pub fn getPack16b(self: *const Self) bool {
@@ -1501,11 +1441,9 @@ pub const CopyAtomSM100TmemStoreType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomSM100TmemStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.tmem_store";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1513,7 +1451,7 @@ pub const CopyAtomSM100TmemStoreType = opaque {
         valType: *const mlir.Type,
         numDp: c_int,
         numBit: c_int,
-        numRep: c_uint,
+        numRep: u32,
         expand16b: bool = false,
     };
     pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
@@ -1529,7 +1467,7 @@ pub const CopyAtomSM100TmemStoreType = opaque {
     pub fn getNumBit(self: *const Self) c_int {
         return c.mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGetNumBit(self.ptr());
     }
-    pub fn getNumRep(self: *const Self) c_uint {
+    pub fn getNumRep(self: *const Self) u32 {
         return c.mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGetNumRep(self.ptr());
     }
     pub fn getExpand16b(self: *const Self) bool {
@@ -1544,11 +1482,9 @@ pub const CopyAtomSM107TmemLoadSPCompressType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomSM107TmemLoadSPCompress;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.tmem_load_spcompress";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1556,7 +1492,7 @@ pub const CopyAtomSM107TmemLoadSPCompressType = opaque {
         valType: *const mlir.Type,
         numDp: c_int,
         numBit: c_int,
-        numRep: c_uint,
+        numRep: u32,
         redOp: TmemLoadRedOp,
         red: bool = false,
         nan: bool = false,
@@ -1574,7 +1510,7 @@ pub const CopyAtomSM107TmemLoadSPCompressType = opaque {
     pub fn getNumBit(self: *const Self) c_int {
         return c.mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetNumBit(self.ptr());
     }
-    pub fn getNumRep(self: *const Self) c_uint {
+    pub fn getNumRep(self: *const Self) u32 {
         return c.mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetNumRep(self.ptr());
     }
     pub fn getRedOp(self: *const Self) TmemLoadRedOp {
@@ -1595,11 +1531,9 @@ pub const CopyAtomSM10xTmemLoadRedType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomSM10xTmemLoadRed;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.tmem_load_red";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1607,7 +1541,7 @@ pub const CopyAtomSM10xTmemLoadRedType = opaque {
         valType: *const mlir.Type,
         numDp: c_int,
         numBit: c_int,
-        numRep: c_uint,
+        numRep: u32,
         redOp: TmemLoadRedOp,
         nan: bool = false,
         halfSplitOff: ?*const mlir.Attribute = null,
@@ -1625,7 +1559,7 @@ pub const CopyAtomSM10xTmemLoadRedType = opaque {
     pub fn getNumBit(self: *const Self) c_int {
         return c.mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetNumBit(self.ptr());
     }
-    pub fn getNumRep(self: *const Self) c_uint {
+    pub fn getNumRep(self: *const Self) u32 {
         return c.mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetNumRep(self.ptr());
     }
     pub fn getRedOp(self: *const Self) TmemLoadRedOp {
@@ -1646,11 +1580,9 @@ pub const CopyAtomStsmType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomStsm;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.stsm";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1685,11 +1617,9 @@ pub const CopyAtomTmaLoadType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomTmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.tma_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1748,11 +1678,9 @@ pub const CopyAtomTmaReduceType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomTmaReduce;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.tma_reduce";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1795,11 +1723,9 @@ pub const CopyAtomTmaStoreType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUCopyAtomTmaStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.tma_store";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1850,11 +1776,9 @@ pub const MmaAtomSM100UMMABlockScaledSparseType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM100UMMABlockScaledSparse;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm100.mma_bs_sp";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1925,11 +1849,9 @@ pub const MmaAtomSM100UMMABlockScaledType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM100UMMABlockScaled;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm100.mma_bs";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -1996,11 +1918,9 @@ pub const MmaAtomSM100UMMASparseType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM100UMMASparse;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm100.mma_sp";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2067,11 +1987,9 @@ pub const MmaAtomSM100UMMAType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM100UMMA;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm100.mma";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2130,11 +2048,9 @@ pub const MmaAtomSM107UMMABlockScaledSparseType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM107UMMABlockScaledSparse;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm107.mma_bs_sp";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2209,11 +2125,9 @@ pub const MmaAtomSM107UMMABlockScaledType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM107UMMABlockScaled;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm107.mma_bs";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2284,11 +2198,9 @@ pub const MmaAtomSM107UMMASparseType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM107UMMASparse;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm107.mma_sp";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2363,11 +2275,9 @@ pub const MmaAtomSM107UMMAType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM107UMMA;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm107.mma";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2434,11 +2344,9 @@ pub const MmaAtomSM120BlockScaledType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM120BlockScaled;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "SM120.mma_bs";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2485,11 +2393,9 @@ pub const MmaAtomSM80SparseType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM80Sparse;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm80.sparse_mma";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2532,11 +2438,9 @@ pub const MmaAtomSM80Type = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM80;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm80.mma";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2579,11 +2483,9 @@ pub const MmaAtomSM89Type = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM89;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm89.mma";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2618,11 +2520,9 @@ pub const MmaAtomSM90Type = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUMmaAtomSM90;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm90.mma";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2681,11 +2581,9 @@ pub const SmemDescCircularSM103Type = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUSmemDescCircularSM103;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm103.smem_desc_circular";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2708,11 +2606,9 @@ pub const SmemDescCircularSM107Type = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUSmemDescCircularSM107;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm107.smem_desc_circular";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2735,11 +2631,9 @@ pub const SmemDescSM107Type = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUSmemDescSM107;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "sm107.smem_desc";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2758,11 +2652,9 @@ pub const SmemDescType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUSmemDesc;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "smem_desc";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2781,11 +2673,9 @@ pub const SmemDescViewType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUSmemDescView;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "smem_desc_view";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2812,11 +2702,9 @@ pub const TmaDescriptorIm2ColType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUTmaDescriptorIm2Col;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tma_descriptor_im2col";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2835,11 +2723,9 @@ pub const TmaDescriptorTiledType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUTmaDescriptorTiled;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tma_descriptor_tiled";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2858,11 +2744,9 @@ pub const UniversalFmaAtomType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUUniversalFmaAtom;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom.universal_fma";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2897,11 +2781,9 @@ pub const WorkIdResponseType = opaque {
     pub const isAFn = c.mlirTypeIsACuteNVGPUWorkIdResponse;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "workid_response";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -2920,11 +2802,9 @@ pub const AtomCopyFieldBulkCopyG2SAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldBulkCopyG2S;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_bulkg2s";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -2947,11 +2827,9 @@ pub const AtomCopyFieldBulkCopyS2GAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldBulkCopyS2G;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_bulks2g";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -2974,11 +2852,9 @@ pub const AtomCopyFieldBulkCopyS2SAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldBulkCopyS2S;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_bulks2s";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3001,11 +2877,9 @@ pub const AtomCopyFieldDsmemStoreAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldDsmemStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_dsmem_store";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3028,11 +2902,9 @@ pub const AtomCopyFieldLoadGlobalAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldLoadGlobal;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_g2r";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3055,11 +2927,9 @@ pub const AtomCopyFieldNonExec2DGather4TmaLoadAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldNonExec2DGather4TmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_non_exec_2d_gather4_tma_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3082,11 +2952,9 @@ pub const AtomCopyFieldNonExec2DScatter4TmaStoreAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldNonExec2DScatter4TmaStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_non_exec_2d_scatter4_tma_store";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3109,11 +2977,9 @@ pub const AtomCopyFieldNonExecIm2ColTmaLoadAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldNonExecIm2ColTmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_non_exec_im2col_tma_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3136,11 +3002,9 @@ pub const AtomCopyFieldNonExecIm2ColTmaStoreAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldNonExecIm2ColTmaStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_non_exec_im2col_tma_store";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3163,11 +3027,9 @@ pub const AtomCopyFieldNonExecTiledTmaLoadAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldNonExecTiledTmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_non_exec_tma_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3190,11 +3052,9 @@ pub const AtomCopyFieldNonExecTiledTmaReduceAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldNonExecTiledTmaReduce;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_non_exec_tma_reduce";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3217,11 +3077,9 @@ pub const AtomCopyFieldNonExecTiledTmaStoreAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldNonExecTiledTmaStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_non_exec_tma_store";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3244,11 +3102,9 @@ pub const AtomCopyFieldStoreGlobalAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldStoreGlobal;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_r2g";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3271,11 +3127,9 @@ pub const AtomCopyFieldTmaLoadAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldTmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_tmaload";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3298,11 +3152,9 @@ pub const AtomCopyFieldTmaReduceAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldTmaReduce;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_tmareduce";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3325,11 +3177,9 @@ pub const AtomCopyFieldTmaStoreAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomCopyFieldTmaStore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_copy_field_tmastore";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3352,11 +3202,9 @@ pub const AtomMmaFieldSM100Attr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomMmaFieldSM100;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_mma_field_sm100";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3379,11 +3227,9 @@ pub const AtomMmaFieldSM100BlockScaledAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomMmaFieldSM100BlockScaled;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_mma_field_sm100_block_scaled";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3406,11 +3252,9 @@ pub const AtomMmaFieldSM100BlockScaledSparseAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomMmaFieldSM100BlockScaledSparse;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_mma_field_sm100_block_scaled_sparse";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3433,11 +3277,9 @@ pub const AtomMmaFieldSM100SparseAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomMmaFieldSM100Sparse;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_mma_field_sm100_sparse";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3460,11 +3302,9 @@ pub const AtomMmaFieldSM120BlockScaledAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomMmaFieldSM120BlockScaled;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_mma_field_sm120_block_scaled";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3487,11 +3327,9 @@ pub const AtomMmaFieldSM80SparseAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomMmaFieldSM80Sparse;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_mma_field_sm80_sparse";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3514,11 +3352,9 @@ pub const AtomMmaFieldSM90Attr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUAtomMmaFieldSM90;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "atom_mma_field_sm90";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3541,11 +3377,9 @@ pub const BinaryOpAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUBinaryOp;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "bin_op";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3568,11 +3402,9 @@ pub const CopyS2TBroadcastAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUCopyS2TBroadcast;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "copy_s2t_broadcast_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3595,11 +3427,9 @@ pub const GatherScatterTmaLoadAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUGatherScatterTmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "gather_scatter_tma_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3622,11 +3452,9 @@ pub const Im2ColTmaLoadAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUIm2ColTmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "im2col_tma_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3649,11 +3477,9 @@ pub const LdReduceAccPrecisionKindAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPULdReduceAccPrecisionKind;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "ld_reduce_acc_precision_kind";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3676,11 +3502,9 @@ pub const LdsmSzPatternAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPULdsmSzPattern;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "ldsm_sz_pattern";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3703,11 +3527,9 @@ pub const LoadCacheModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPULoadCacheMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "load_cache_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3730,11 +3552,9 @@ pub const MMAIntOverflowAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUMMAIntOverflow;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "mma_int_overflow";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3757,11 +3577,9 @@ pub const MajorModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUMajorMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "major";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3784,11 +3602,9 @@ pub const MmaCollectorOpAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUMmaCollectorOp;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "mma_collector_op";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3811,11 +3627,9 @@ pub const MmaFragKindAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUMmaFragKind;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "mma_frag_kind";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3838,11 +3652,9 @@ pub const NotImplementedFrgAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUNotImplementedFrg;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "not_implemented_frg";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3861,11 +3673,9 @@ pub const ReductionKindAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUReductionKind;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tma_reduce_kind";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3888,11 +3698,9 @@ pub const RmemFrgAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPURmemFrg;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "rmem_frg";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3923,11 +3731,9 @@ pub const SM100CircularSmemFrgAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUSM100CircularSmemFrg;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "arch.sm100.circular_smem_frg";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3950,11 +3756,9 @@ pub const SM100SmemFrgAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUSM100SmemFrg;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "arch.sm100.smem_frg";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -3977,11 +3781,9 @@ pub const SM100TmemEFrgAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUSM100TmemEFrg;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "arch.sm100.tmem_e_frg";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -4008,11 +3810,9 @@ pub const SM100TmemFrgAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUSM100TmemFrg;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "arch.sm100.tmem_frg";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -4047,11 +3847,9 @@ pub const SM100TmemSfFrgAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUSM100TmemSfFrg;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "arch.sm100.tmem_sf_frg";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -4090,11 +3888,9 @@ pub const SM107SmemFrgAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUSM107SmemFrg;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "arch.sm107.smem_frg";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -4117,11 +3913,9 @@ pub const SM90SmemFrgAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUSM90SmemFrg;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "arch.sm90.smem_frg";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -4144,11 +3938,9 @@ pub const TiledTmaLoadAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUTiledTmaLoad;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tiled_tma_load";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -4171,11 +3963,9 @@ pub const TmaDataFormatAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUTmaDataFormat;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tma_data_format";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -4198,11 +3988,9 @@ pub const TmaLoadModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUTmaLoadMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tma_load_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -4225,11 +4013,9 @@ pub const TmaStoreModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUTmaStoreMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tma_store_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -4252,11 +4038,9 @@ pub const TmemAllocModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUTmemAllocMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tmem_alloc_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -4279,11 +4063,9 @@ pub const TmemLoadRedOpAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACuteNVGPUTmemLoadRedOp;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "tmem_load_red_op";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }

@@ -100,7 +100,7 @@ pub fn Methods(comptime T: type, comptime NativeT: type) type {
             return .{ .ptr = @ptrCast(@constCast(self)) };
         }
 
-        fn format(f: anytype) fn (self: *const T, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        pub fn format(f: anytype) fn (self: *const T, writer: *std.Io.Writer) std.Io.Writer.Error!void {
             return struct {
                 fn format(self: *const T, writer: *std.Io.Writer) std.Io.Writer.Error!void {
                     var ctx: StringCallbackCtx = .{ .writer = writer };

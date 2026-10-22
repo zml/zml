@@ -2,9 +2,10 @@ const std = @import("std");
 
 const c = @import("c");
 const func = @import("mlir/dialects/func");
-const stablehlo = @import("mlir/dialects/stablehlo");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
+const shardy = @import("mlir/dialects/shardy");
+const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 const upb = @import("upb");
 const zio = @import("zio");
@@ -61,9 +62,9 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
         mlir.registerPasses("Transforms");
 
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
-        inline for (.{ "func", "stablehlo", "sdy" }) |d| {
-            mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
-        }
+        func.registerDialect(mlir_registry);
+        stablehlo.registerDialect(mlir_registry);
+        shardy.registerDialect(mlir_registry);
         func.registerExtensions(mlir_registry);
 
         mlir_global_registry = mlir_registry;
@@ -519,7 +520,6 @@ pub fn compileInternal(
 
 /// Declare all logical meshes used by this program
 fn addPartitionerOperations(ctx: *Compiler) !void {
-    const allocator = ctx.arena.allocator();
     const mlir_ctx = ctx.mlir_ctx;
     const module = ctx.module;
 
@@ -529,11 +529,8 @@ fn addPartitionerOperations(ctx: *Compiler) !void {
         },
         .shardy => {
             for (ctx.meshes) |shd| {
-                const attr_str = try shd.sdyMeshAttr(allocator);
-                defer allocator.free(attr_str);
-
                 const name = shd.name;
-                const mesh_attr = try mlir.Attribute.parse(mlir_ctx, attr_str);
+                const mesh_attr = shd.sdyMeshAttr(mlir_ctx);
 
                 const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
                     .attributes = &.{
@@ -842,7 +839,7 @@ pub fn tensorShardingAttr(
 ) error{OutOfMemory}!*const mlir.Attribute {
     const mesh_ = shape._sharding.mesh orelse compiler.platform.replicated_mesh;
     return switch (compiler.partitioner) {
-        .shardy => (try mesh_.sdyShardingAttrForShape(allocator, compiler.mlir_ctx, shape)).asAttr(),
+        .shardy => (try mesh_.sdyShardingAttrForShape(allocator, compiler.mlir_ctx, shape)).attribute(),
         .gspmd => mesh_.gspmdShardingAttrForShape(allocator, compiler.mlir_ctx, shape) catch |err| switch (err) {
             error.WriteFailed => error.OutOfMemory, // We're writing to memory
             error.OutOfMemory => error.OutOfMemory,

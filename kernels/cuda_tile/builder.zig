@@ -562,7 +562,7 @@ pub const Builder = struct {
         const func_op = cuda_tile.entry(ctx, .{
             .name = self.name,
             .block = entry,
-            .optimization_hints = if (opts.hints.len > 0) cuda_tile.optimizationHints(ctx, opts.hints) else null,
+            .optimization_hints = if (opts.hints.len > 0) cuda_tile.optimizationHintsAttr(ctx, opts.hints) else null,
             .location = unknown_loc,
         });
         _ = func_op.appendTo(ct_body);
@@ -708,7 +708,7 @@ pub const Builder = struct {
                 .comptime_float, .float => @floatCast(value),
                 else => @compileError("Builder: unsupported scalar " ++ @typeName(T)),
             };
-            return cuda_tile.floatElem(self.ctx, elem, v);
+            return cuda_tile.floatElemAttr(self.ctx, elem, v);
         }
         const v: i64 = switch (@typeInfo(T)) {
             .comptime_int => blk: {
@@ -723,7 +723,7 @@ pub const Builder = struct {
             .comptime_float, .float => @intFromFloat(value),
             else => @compileError("Builder: unsupported scalar " ++ @typeName(T)),
         };
-        return cuda_tile.intElem(elem, v);
+        return cuda_tile.intElemAttr(elem, v);
     }
 
     fn splat(self: *Builder, tile_ty: *const mlir.Type, dtype: DType, value: anytype) Value {
@@ -887,19 +887,19 @@ pub const Builder = struct {
     }
 
     pub fn assumeDivBy(self: *Builder, v: Value, n: u64) Value {
-        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.divBy(self.ctx, n, .{}), self.loc()));
+        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.divByAttr(self.ctx, n, .{}), self.loc()));
     }
 
     pub fn assumeDivByEvery(self: *Builder, v: Value, n: u64, every: i64, along: i64) Value {
-        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.divBy(self.ctx, n, .{ .every = every, .along = along }), self.loc()));
+        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.divByAttr(self.ctx, n, .{ .every = every, .along = along }), self.loc()));
     }
 
     pub fn assumeSameElements(self: *Builder, v: Value, values: []const i64) Value {
-        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.sameElements(self.ctx, values), self.loc()));
+        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.sameElementsAttr(self.ctx, values), self.loc()));
     }
 
     pub fn assumeBounded(self: *Builder, v: Value, lb: ?i64, ub: ?i64) Value {
-        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.bounded(self.ctx, .{ .lb = lb, .ub = ub }), self.loc()));
+        return self.emit(cuda_tile.assume(self.ctx, v.inner, cuda_tile.boundedAttr(self.ctx, .{ .lb = lb, .ub = ub }), self.loc()));
     }
 
     pub fn tensorView(self: *Builder, base: Value, shape: []const i64, strides: []const i64) Value {
@@ -947,7 +947,7 @@ pub const Builder = struct {
     /// masked. That is why this DSL has no mask tile.
     pub fn partitionView(self: *Builder, tv: Value, tile: []const i64, opts: PartitionOpts) Value {
         if (!dtypes.tileLegal(tile)) std.debug.panic("Builder.partitionView: {any} is not a legal tile shape", .{tile});
-        const ty: *const mlir.Type = @ptrCast(cuda_tile.PartitionViewType.get(self.ctx, self.i32Slice(tile), tv.type_(), opts.dim_map, .{ .padding = opts.padding }));
+        const ty: *const mlir.Type = @ptrCast(cuda_tile.PartitionViewType.get(self.ctx, .{ .tile_shape = self.i32Slice(tile), .tensor_view = tv.type_(), .dim_map = opts.dim_map, .padding = opts.padding }));
         return self.emit(cuda_tile.make_partition_view(self.ctx, tv.inner, ty, self.loc()));
     }
 
@@ -955,14 +955,13 @@ pub const Builder = struct {
     /// per index instead of a whole tile.
     pub fn stridedView(self: *Builder, tv: Value, tile: []const i64, traversal_strides: []const i64, opts: PartitionOpts) Value {
         if (!dtypes.tileLegal(tile)) std.debug.panic("Builder.stridedView: {any} is not a legal tile shape", .{tile});
-        const ty: *const mlir.Type = @ptrCast(cuda_tile.StridedViewType.get(
-            self.ctx,
-            self.i32Slice(tile),
-            self.i32Slice(traversal_strides),
-            tv.type_(),
-            opts.dim_map,
-            .{ .padding = opts.padding },
-        ));
+        const ty: *const mlir.Type = @ptrCast(cuda_tile.StridedViewType.get(self.ctx, .{
+            .tile_shape = self.i32Slice(tile),
+            .traversal_strides = self.i32Slice(traversal_strides),
+            .tensor_view = tv.type_(),
+            .dim_map = opts.dim_map,
+            .padding = opts.padding,
+        }));
         return self.emit(cuda_tile.make_strided_view(self.ctx, tv.inner, ty, self.loc()));
     }
 
@@ -996,7 +995,7 @@ pub const Builder = struct {
             .ordering = ordering,
             .scope = scope,
             .token = innerOpt(token),
-            .optimization_hints = if (hints.len > 0) cuda_tile.optimizationHints(self.ctx, hints) else null,
+            .optimization_hints = if (hints.len > 0) cuda_tile.optimizationHintsAttr(self.ctx, hints) else null,
         };
     }
 

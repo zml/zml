@@ -12,10 +12,10 @@
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-const make = mlir.Operation.make;
+const make = @import("mlir/dialects/fly").make;
 
 /// Every operation bound here, for the registration test.
-pub const names = [_][]const u8{
+pub const operation_names: []const []const u8 = &.{
     "fly_rocdl.get_buffer_rsrc",
     "fly_rocdl.make_tiled_tdm_load_atom",
     "fly_rocdl.make_tiled_tdm_store_atom",
