@@ -3,9 +3,9 @@
 
 /// ROCDL buffer out-of-bounds mode
 pub const BufferOOBMode = enum(u32) {
-    Any = 0,
-    Relaxed = 1,
-    Strict = 2,
+    any = 0,
+    relaxed = 1,
+    strict = 2,
 };
 
 /// gfx12 atomic cache policy bits
@@ -23,12 +23,12 @@ pub const Gfx12AtomicCachePolicy = enum(u32) {
 
     pub fn combine(values: []const Gfx12AtomicCachePolicy) Gfx12AtomicCachePolicy {
         var bits: u32 = 0;
-        for (values) |value| bits |= @intFromEnum(value);
-        return @enumFromInt(bits);
+        for (values) |value| bits |= @backingInt(value);
+        return @fromBackingInt(bits);
     }
 
     pub fn contains(self: Gfx12AtomicCachePolicy, value: Gfx12AtomicCachePolicy) bool {
-        return @intFromEnum(self) & @intFromEnum(value) == @intFromEnum(value);
+        return @backingInt(self) & @backingInt(value) == @backingInt(value);
     }
 };
 
@@ -53,12 +53,12 @@ pub const Gfx12CachePolicy = enum(u32) {
 
     pub fn combine(values: []const Gfx12CachePolicy) Gfx12CachePolicy {
         var bits: u32 = 0;
-        for (values) |value| bits |= @intFromEnum(value);
-        return @enumFromInt(bits);
+        for (values) |value| bits |= @backingInt(value);
+        return @fromBackingInt(bits);
     }
 
     pub fn contains(self: Gfx12CachePolicy, value: Gfx12CachePolicy) bool {
-        return @intFromEnum(self) & @intFromEnum(value) == @intFromEnum(value);
+        return @backingInt(self) & @backingInt(value) == @backingInt(value);
     }
 };
 
@@ -74,12 +74,12 @@ pub const Gfx942CachePolicy = enum(u32) {
 
     pub fn combine(values: []const Gfx942CachePolicy) Gfx942CachePolicy {
         var bits: u32 = 0;
-        for (values) |value| bits |= @intFromEnum(value);
-        return @enumFromInt(bits);
+        for (values) |value| bits |= @backingInt(value);
+        return @fromBackingInt(bits);
     }
 
     pub fn contains(self: Gfx942CachePolicy, value: Gfx942CachePolicy) bool {
-        return @intFromEnum(self) & @intFromEnum(value) == @intFromEnum(value);
+        return @backingInt(self) & @backingInt(value) == @backingInt(value);
     }
 };
 
@@ -93,12 +93,12 @@ pub const MFMANegModifier = enum(u32) {
 
     pub fn combine(values: []const MFMANegModifier) MFMANegModifier {
         var bits: u32 = 0;
-        for (values) |value| bits |= @intFromEnum(value);
-        return @enumFromInt(bits);
+        for (values) |value| bits |= @backingInt(value);
+        return @fromBackingInt(bits);
     }
 
     pub fn contains(self: MFMANegModifier, value: MFMANegModifier) bool {
-        return @intFromEnum(self) & @intFromEnum(value) == @intFromEnum(value);
+        return @backingInt(self) & @backingInt(value) == @backingInt(value);
     }
 };
 
@@ -137,12 +137,12 @@ pub const PreGfx12CachePolicy = enum(u32) {
 
     pub fn combine(values: []const PreGfx12CachePolicy) PreGfx12CachePolicy {
         var bits: u32 = 0;
-        for (values) |value| bits |= @intFromEnum(value);
-        return @enumFromInt(bits);
+        for (values) |value| bits |= @backingInt(value);
+        return @fromBackingInt(bits);
     }
 
     pub fn contains(self: PreGfx12CachePolicy, value: PreGfx12CachePolicy) bool {
-        return @intFromEnum(self) & @intFromEnum(value) == @intFromEnum(value);
+        return @backingInt(self) & @backingInt(value) == @backingInt(value);
     }
 };
 
@@ -166,12 +166,12 @@ pub const SchedGroupMask = enum(u32) {
 
     pub fn combine(values: []const SchedGroupMask) SchedGroupMask {
         var bits: u32 = 0;
-        for (values) |value| bits |= @intFromEnum(value);
-        return @enumFromInt(bits);
+        for (values) |value| bits |= @backingInt(value);
+        return @fromBackingInt(bits);
     }
 
     pub fn contains(self: SchedGroupMask, value: SchedGroupMask) bool {
-        return @intFromEnum(self) & @intFromEnum(value) == @intFromEnum(value);
+        return @backingInt(self) & @backingInt(value) == @backingInt(value);
     }
 };
 
@@ -185,12 +185,12 @@ pub const WMMACModifier = enum(u16) {
 
     pub fn combine(values: []const WMMACModifier) WMMACModifier {
         var bits: u16 = 0;
-        for (values) |value| bits |= @intFromEnum(value);
-        return @enumFromInt(bits);
+        for (values) |value| bits |= @backingInt(value);
+        return @fromBackingInt(bits);
     }
 
     pub fn contains(self: WMMACModifier, value: WMMACModifier) bool {
-        return @intFromEnum(self) & @intFromEnum(value) == @intFromEnum(value);
+        return @backingInt(self) & @backingInt(value) == @backingInt(value);
     }
 };
 

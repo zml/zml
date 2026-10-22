@@ -5,7 +5,7 @@
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/IR/Diagnostics.h"
 
-// Registration
+// Introspection
 
 intptr_t mlirROCDLGetOperationCount(MlirContext context) {
   auto *ctx = unwrap(context);

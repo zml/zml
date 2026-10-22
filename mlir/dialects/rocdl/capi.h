@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-// Registration
+// Introspection
 
 MLIR_CAPI_EXPORTED intptr_t mlirROCDLGetOperationCount(MlirContext context);
 

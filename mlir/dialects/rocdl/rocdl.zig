@@ -140,8 +140,8 @@ test "ROCDL enum constructors reject invalid values and flag bits" {
     defer ctx.deinit();
     try std.testing.expect(c.mlirROCDLMatrixFormatAttrGet(ctx.ptr(), 5).ptr == null);
     try std.testing.expect(c.mlirROCDLWMMACModifierAttrGet(ctx.ptr(), 65536).ptr == null);
-    try std.testing.expectError(error.InvalidMlir, SchedGroupMaskAttr.get(ctx, @enumFromInt(1 << 20)));
-    try std.testing.expectError(error.InvalidMlir, PreGfx12CachePolicyAttr.get(ctx, @enumFromInt(1 << 6)));
+    try std.testing.expectError(error.InvalidMlir, SchedGroupMaskAttr.get(ctx, @fromBackingInt(1 << 20)));
+    try std.testing.expectError(error.InvalidMlir, PreGfx12CachePolicyAttr.get(ctx, @fromBackingInt(1 << 6)));
 }
 
 test "target attributes expose all fields and reject invalid options" {
@@ -211,7 +211,7 @@ test "ROCDL barriers buffer loads and matrix operations verify and reparse" {
     const terminator = block.terminator().?;
     const i32Type: *const mlir.Type = .int(ctx, .i32);
     const f32Type: *const mlir.Type = .float(ctx, .f32);
-    const vec4f32: *const mlir.Type = .vector(&.{4}, f32Type);
+    const vec4f32 = types.v4f32(ctx);
     const zero: *const mlir.Attribute = .int(ctx, .i32, 0);
     const opList = .{
         ops.s_barrier(ctx, loc),
@@ -239,12 +239,13 @@ test "ROCDL barriers buffer loads and matrix operations verify and reparse" {
         .reqdWorkGroupSize = .{ 64, 1, 1 },
         .flatWorkGroupSize = "64,64",
         .maxFlatWorkGroupSize = 64,
-        .wavesPerEu = 2,
+        .wavesPerEu = .{ .min = 1, .max = 2 },
         .unsafeFpAtomics = true,
     });
     annotations.annotateMemory(ctx, opList[4], .{ .lastUse = true, .noRemoteMemory = true, .noFineGrainedMemory = true, .ignoreDenormalMode = true });
     try std.testing.expect(opList[4].attributeByName("aux").?.eql(.int(ctx, .i32, 0)));
     try std.testing.expect(opList[5].attributeByName("aux").?.isA(Gfx942CachePolicyAttr) != null);
+    try std.testing.expect(function.attributeByName("rocdl.waves_per_eu").?.eql(.string(ctx, "1,2")));
     try std.testing.expect(module.operation().verify());
     var buffer: [16384]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
@@ -267,4 +268,5 @@ test "ROCDL annotations preserve module flag defaults and explicit false" {
     try std.testing.expect(module.operation().verify());
     const pointer = pointerType(ctx, .barrier);
     try std.testing.expect(pointer.eql(try mlir.Type.parse(ctx, "!llvm.ptr<15>")));
+    try std.testing.expect(pointerType(ctx, .buffer_resource).eql(try mlir.Type.parse(ctx, "!llvm.ptr<8>")));
 }
