@@ -1623,7 +1623,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
             }
             var up_value = b.shuffleXor(value, 1).to(.bf16).to(.f32);
             if (operands.swiglu_limit) |limit| {
-                up_value = up_value.clamp(limit);
+                up_value = up_value.maximum(-limit).minimum(limit);
             }
             // up * SiLU(gate), with the hardware approximations Python's
             // fastmath selects: exp(-g) = 2^(-g * log2 e).
