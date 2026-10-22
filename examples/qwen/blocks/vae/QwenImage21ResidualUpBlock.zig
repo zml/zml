@@ -20,7 +20,7 @@ pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21ResidualUpBlock)) void {
     }
 }
 
-pub fn forward(self: QwenImage21ResidualUpBlock, x_: zml.Tensor, first_chunk: bool) zml.Tensor {
+pub fn forward(self: QwenImage21ResidualUpBlock, x_: zml.Tensor) zml.Tensor {
     var x = x_;
 
     for (self.resnets) |resnet| {
@@ -32,7 +32,7 @@ pub fn forward(self: QwenImage21ResidualUpBlock, x_: zml.Tensor, first_chunk: bo
     }
 
     if (self.avg_shortcut) |avg_shortcut| {
-        x = x.add(avg_shortcut.forward(x_, first_chunk));
+        x = x.add(avg_shortcut.forward(x_));
     }
 
     return x;
