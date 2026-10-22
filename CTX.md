@@ -6359,8 +6359,97 @@ Checks:
   passes its load and pack checks, in one group and in one group per pack.
   In the second case, serial admission retired 2 before the second group.
 
+## Thirty-fifth pass: seam bugs (R1) (2026-10-22)
+
+R1 of `LOADER_API_REVIEW.md`: the seam bugs of its "Read this first", each
+a few lines with no API change. Item 1 (examples/llm's stale loader copy)
+is left to R5, which removes the loader future.
+
+zml:
+- Direct `submit` (LOADER_REVIEW #29): when planning fails before the
+  first publish, it returns `pipeline.errorValue() orelse err`. An older
+  batch that failed between `checkOpen` and that publish stopped the
+  scheduler, whose publish said only `Closed`. The other sources of
+  `Closed` reach no caller: the read gate closes only after an error is
+  recorded or in `destroy`, a closed credit pool ends the worker, and after
+  a partial publish `awaitBatch` returns the stored error. loader.md now
+  calls `Closed` internal.
+- `source_slots` (#8): `sourceSlot` dupes the path and uses the copy as
+  key and `slot.uri`; `destroy` frees it. The field's doc says when a file
+  opens and that it stays open until `destroy`. The cached open failure #8
+  notes is moot: any error now fails the loader.
+- safetensors header (#20): the header length must fit in the file, and
+  `data_offsets` must be two non-negative integers with start <= end <=
+  the data bytes, values past i64 included (`std.json` gives those as
+  `number_string`). A failure logs the file and tensor and returns
+  `InvalidSafetensorsHeader`.
+- Pairing (item 7): `MapRestrict`, so `Bufferized`, is a compile error on
+  a bounded array of the mapped type. `prepareModel` asserts that the
+  model's tensors and its buffers count alike: one more walk of the buffer
+  tree.
+- #35: a failed `dmaUnmap` in `HugePageAllocator.free` logs a warning and
+  leaks the pages instead of reaching `catch unreachable`.
+- #36: `warmupDeviceAllocators` cancels its group when a spawn fails, so
+  the earlier tasks no longer outlive it. (The review's item 8 swaps the
+  two descriptions; its file references are right.)
+
+llmd (monorepo):
+- qwen4 (item 5): `ngram_host_buffers` is freed with
+  `arena.child_allocator`, which allocated it, before `arena.deinit()`.
+- `resolveModelRepo`'s directories are closed (item 6). `speculative.zig`
+  and `zoo.zig` close theirs when the opening function returns. `main`
+  closes its own when `main` returns, not after `model.init`, its last
+  user: that would need an is-open flag for the error paths.
+- deepseek41 (item 4, stop-gap): `DSparkLayer.init` swizzles `wq_a`,
+  `wq_b`, `wkv`, `wo_b` and the shared experts' `gate_up` and `down`;
+  `DSparkDrafter.init` swizzles `main_proj`. `wo_a` is BF16, as in
+  `Layer`. R9 replaces the lists.
+
+Item 3 (success after a terminal failure) was already fixed by the
+thirty-fourth pass. Every backend submit goes through the front end's
+`submit`, reached only from `startModel` and `publish`; `start` and `wait`
+pass their errors to `fail`, and `retireOldest` sets `failure` itself.
+Nothing changed.
+
+Tests, three new:
+- A submit that an older batch fails between its open check and its first
+  publish returns that error, not `Closed`. An allocator wrapper records
+  the error in the submitting thread's next allocation.
+- Source slots outlive the path string, freed right after the submit; a
+  second load of the same path finds the one slot.
+- The header test covers offsets that run backward, end past the file,
+  are negative, reach u64 max or past it, or have one element, and header
+  lengths past the file.
+- The two direct-backend tests fail with their fix reverted. The
+  bounded-array compile error was checked with a scratch `zig test`.
+
+Review (workflow, refuting verifier): one finding, fixed. The new
+`source_slots` doc said a file opens at its first read; under a VFS with
+direct IO, llmd's setup, planning opens it to choose the alignment.
+
+Not done:
+- Item 1, with R5.
+- The rest of #20: a tensor's byte size against `end - start`, `F8_E5M2`,
+  duplicate names across shards. Other missing or mistyped fields still
+  panic on `.?` or union access. Each shard's parse now calls
+  `file.length` once.
+- Not run on a GPU. The DSpark swizzle relies on the review's check that
+  the `mtp.*` projections are block-32 F8_E4M3; an unquantized one would
+  panic in `swizzleBlockFp8Scales` on sm_10x. #35 and #36 need a device
+  error or a failed spawn and have no test.
+
+Checks:
+- `bazel test //zml:test` passes (325, 12 skip).
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7.
+- `bazel build --config=localzml //llmd:llmd`.
+
 ## Open work
 
+- 2026-10-22 seam bugs (thirty-fifth pass, zml zmxzvvly and monorepo
+  szqpusxv): R1 done except item 1, which goes with R5. Not run on a GPU:
+  the DSpark swizzle on sm_10x. The rest of LOADER_REVIEW #20's header
+  checks is open.
 - 2026-10-22 one start for the whole model (thirty-fourth pass, zml and
   llmd): `Loader.start`/`wait`, programs as values in their bindings, the
   bulk published before any compile. Not run on a GPU: measure DeepSeek's
