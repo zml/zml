@@ -7544,7 +7544,104 @@ Checks:
   tp with 3 packs, one group each: 3 groups, 3 admission retires, checks
   40/40 and 3/3.
 
+## Forty-sixth pass: one root in the direct backend (R14) (2026-10-22)
+
+R14 of `LOADER_API_REVIEW.md` (G-one-root-one-copy, G-job-kinds,
+G-workspace-protocol), the first part of LOADER_REVIEW Move 4. The
+direct backend had two roots: `Pipeline.init` took 10 parameters and
+copied the Loader's allocator, io and platform, with back-pointers to
+its read gate, credits, metrics and scheduler. `Sizing` restated the
+width and the blocks per job that the Loader also stored. A Job spread
+seven kinds over four flags, and the Workspace was five calls in a
+fixed order whose ceiling arithmetic its owner did. No behavior change
+was asked for.
+
+zml (direct_loader.zig, host_memory.zig):
+- `Pipeline`, `Pipeline.init`, `Sizing` and `pregrow` are gone. The
+  Loader holds the sticky error, the pumps and the DMA budget;
+  `recordError`, `failed` and `errorValue` are its methods. The DMA code
+  stays where it was, as `Dma`, functions over `*Loader`.
+- `create` computes the request size, the reserve and the width as
+  locals. Each value is then stored once: the width in
+  `read_gate.limit`, the blocks per job in `credits.blocks_per_slot`,
+  block size, request size and alignment in `plan_config`. The zero
+  block is `blocks[0]`. The dead `Loader.calibration` goes.
+- A `ReadRequest` holds the loader, its plan and its index, and runs
+  with `run(self, scratch)`. A `Scheduler.Claim` is `{ plan, index }`;
+  its four accessors go. `Plan.transfersOf(job)` replaces the request's
+  own accessors, since Zig rejects a method named like a local.
+- A Job is `{ file_offset, transfer_start, transfer_len, kind }`, the
+  kind a tagged union: `dma_read`, `dma_staged`, `dma_gather`,
+  `dma_fill`, `host_direct`, `host_bounce`, `host_fill`, each with only
+  its own fields. A gather over a range no part covers has no items
+  and no extents. The block count is computed (`Job.blockLen`), not
+  stored. The fill, gather and delivery flags go, with the assertions
+  on their combinations.
+- A failed request logs the job's kind beside its file offset and
+  length (`bytes=`, as before).
+- `PipelineError` is `StickyError`.
+- The Workspace is `init`, `deinit`, `allocate`, `capacity`, `carve`.
+  `capacity` does the arithmetic `create` did on its fields. `carve`
+  maps the reserve as its own arena, then the rest, and cuts every arena
+  into blocks; it replaces `pregrow` and the free `carveBlocks`. After
+  it, a `carved` flag makes `allocate` and a second `carve` fail an
+  assertion.
+- `findArena` goes: it was always null, since both callers calibrate on
+  a fresh workspace. dma_calibration.zig allocates its ring directly
+  (one line). A comment in loader.zig that named `Sizing` names
+  `Loader.create`.
+
+Review (workflow, refuting verifier): five findings, three distinct, all
+low, all fixed.
+- The failure log had dropped the read's length for the kind's tag, so
+  a short file's end-of-file error could not be checked against its
+  size. It logs both now.
+- The new doc on `Job.file_offset` said jobs are claimed in its order.
+  The fill jobs, at offset zero, are appended after the sort and
+  claimed last; the doc says so (reported twice).
+- No test pinned `carve`'s two arenas, reserve first: the tests carved
+  with the first step already mapped, or with nothing to map. A test on
+  a fresh workspace checks two arenas of two blocks each.
+
+Not done:
+- The rest of Move 4: the Scheduler deque and `seal`, diagnostics
+  derived from the plans, the allocation task, the pairwise gather
+  loop, dropping `data_offset` or `Plan.direct_reads`, and
+  `finishScheduling`.
+- `create` is one linear function of about 145 lines. It copies the
+  local `workspace` and `credits` into the Loader, and their errdefers
+  run on the locals; that is right because the copies share buffers.
+- The `carved` rule is a debug assertion, unchecked in ReleaseFast.
+- Naming left as is: `carve`'s `first_blocks`, `StickyError`.
+- Not run on a GPU: real DMA transfers, ROCm's two-arena split, and
+  calibration rings.
+
+Checks:
+- `bazel test //zml:test` passes (334, 12 skip): one carve test came;
+  the `findArena` test became a test of `capacity` and `carve`.
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7, and
+  `bazel build --config=localzml //llmd:llmd` (monorepo not edited).
+- `zig fmt` on scratch copies: no diff in the changed code.
+- On CPU, `examples/io load` of the R13 synthetic 52-tensor checkpoint,
+  `ZML_LOAD_CHECK=1`, 2 packs of 4: load check 44/44 and pack check 2/2
+  replicated, sharded and tp, the last two also in host_pinned memory.
+  tp with 3 packs, one group each: checks 40/40 and 3/3. Every run logs
+  request 8 MiB, block 4 MiB, width 16, alignment 4096, 33 credits and
+  two arenas of 128 and 140 MiB. The arena, sizing and planning lines
+  match the R13 runs; only the credits high-water mark varies.
+- `examples/io dma-bench`: `block_bytes=4194304 parallelism=8`; with
+  `ZML_DMA_BENCH_BLOCK_MIB=64` a logged `InvalidOptions`, as expected.
+
 ## Open work
+
+- 2026-10-22 one root in the direct backend (forty-sixth pass, zml
+  nxtvovxr): R14 done. Pipeline and Sizing are gone, each sizing value
+  is stored once, a Job's kind is a tagged union, and the Workspace is
+  `{ init, deinit, allocate, capacity, carve }`. The rest of
+  LOADER_REVIEW Move 4 is open (Scheduler deque and `seal`, plan-derived
+  diagnostics, the allocation task, `finishScheduling`). Not run on a
+  GPU.
 
 - 2026-10-22 one binding representation (forty-fifth pass, zml lnnnonkm
   and monorepo xmvssoyq): R13 done, with LOADER_REVIEW Moves 3, 7 and 9
