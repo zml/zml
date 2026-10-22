@@ -24,7 +24,7 @@ test {
 }
 
 /// How a backend expects the expert weights to be stored
-/// The packer writes this layout and forwardMoe reads it
+/// The experts are loaded in this layout and forwardMoe reads it
 pub const ExpertsLayout = struct {
     /// Whether the two projections occupy contiguous halves or alternate.
     gate_up: ProjectionLayout,
