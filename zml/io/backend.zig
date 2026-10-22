@@ -76,7 +76,7 @@ pub const LoadSpec = struct {
 /// With `dims` the part is strided: that run repeats for every index of
 /// `dims`, each step adding its strides to both offsets (`Lattice`).
 pub const LoadPart = struct {
-    source: *safetensors.Tensor,
+    source: *const safetensors.Tensor,
     src_offset: u64 = 0,
     dst_offset: u64 = 0,
     width: u64,
@@ -86,7 +86,7 @@ pub const LoadPart = struct {
     pub const Dim = TensorStore.Part.Dim;
 
     /// The whole of `source`, at the start of the destination.
-    pub fn whole(source: *safetensors.Tensor) LoadPart {
+    pub fn whole(source: *const safetensors.Tensor) LoadPart {
         return .{ .source = source, .width = source.byteSize() };
     }
 

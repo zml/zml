@@ -24,8 +24,8 @@ try loader.wait();
 
 Placement comes from each tensor's shape, not from the submission: the mesh
 and partitioning the tensor was created with (`View.createTensor(subkey, tags,
-.mesh_name, partitioning)` resolves the mesh among those passed to
-`TensorStore.fromRegistry`; `createReplicatedTensor` replicates it on every
+.mesh_name, partitioning)` resolves the mesh among the `meshes` passed to
+`TensorStore.init`; `createReplicatedTensor` replicates it on every
 device). A binding's memory kind picks the destination memory space on each
 device: a tensor created with `createHostPinnedTensor` lands in the device's
 `host_pinned` memory, every other tensor in its default memory.
@@ -36,10 +36,22 @@ must be placed like its tensor.
 
 ```zig
 const tp = try platform.registerMesh("tp", .mesh(.{ .model = .high_bandwidth }));
-var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{tp});
+const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &.{tp} });
+defer store.deinit(); // the bindings, then the registry
 const w = store.view().createTensor("w", .{ .out, .in }, .tp, .{ .out = .model });
 const b = store.view().createReplicatedTensor("b", .{.out});
 ```
+
+The store owns the registry it is given, which must be complete: its map is
+locked, so a later `registerTensor` panics in safe builds. `View.get(subkey)`
+returns the registry's own entry, or null, in one lookup. An entry's address
+is its checkpoint tensor's identity: every binding of the tensor holds the
+entry itself. `View.hasPrefix(subkey)` asks whether any key starts with
+`subkey`, a scan of every key. A checkpoint tensor's bytes are read with
+`safetensors.Tensor.read(io, buffer)`, the whole tensor, or
+`readRange(io, file, buffer, offset)`, a range of it from a file the caller
+opened.
 
 The store is passed to each `start`; initialization needs no store. `start`
 also takes a progress node as its final argument (`.none` disables

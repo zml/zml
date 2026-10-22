@@ -36,10 +36,9 @@ pub fn main(init: std.process.Init) !void {
 
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
     defer repo.close(io);
-    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
-    defer registry.deinit();
     const meshes: common.Meshes = try .init(platform);
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &meshes.all());
+    const registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
+    var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &meshes.all() });
     defer store.deinit();
 
     var repo_model = try llama.LoadedModel.init(allocator, io, repo, store.view(), .{});
@@ -67,10 +66,8 @@ fn run(
     model_buffers: *model.Buffers,
     meshes: []const *const zml.Mesh,
 ) !void {
-    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
-    defer registry.deinit();
-
-    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry, meshes);
+    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
+    var activation_store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = meshes });
     defer activation_store.deinit();
 
     try testLayer(allocator, io, platform, activation_store.view(), "embed_tokens", mdl.model.embed_tokens, model_buffers.model.embed_tokens, meshes, .{ .absolute_tolerance = 1e-3 });
@@ -102,7 +99,7 @@ fn testLayer(
 ) !void {
     const in_key = try std.fmt.allocPrint(allocator, "{s}.in", .{name});
     defer allocator.free(in_key);
-    const in_shape = activation_store.getShape(in_key) orelse return error.NotFound;
+    const in_shape = (activation_store.get(in_key) orelse return error.NotFound).shape;
     var in_buffer = try loadBufferFromStore(allocator, io, platform, activation_store, in_key);
     defer in_buffer.deinit();
     const in_tensor = zml.Tensor.fromShape(in_shape);
@@ -138,16 +135,12 @@ fn testLayer(
 }
 
 fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: zml.io.TensorStore.View, key: []const u8) !zml.Buffer {
-    const shape = store.getShape(key) orelse return error.NotFound;
+    const tensor = store.get(key) orelse return error.NotFound;
 
-    const host_bytes = try allocator.alloc(u8, shape.byteSize());
+    const host_bytes = try allocator.alloc(u8, tensor.byteSize());
     defer allocator.free(host_bytes);
 
-    var io_buffer: [8 * 1024]u8 = undefined;
-    var reader = try store.getReader(key, io, &io_buffer);
-    defer reader.deinit();
+    try tensor.read(io, host_bytes);
 
-    _ = try reader.interface.readSliceAll(host_bytes);
-
-    return zml.Buffer.fromBytes(io, platform, shape, host_bytes);
+    return zml.Buffer.fromBytes(io, platform, tensor.shape, host_bytes);
 }

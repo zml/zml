@@ -247,7 +247,7 @@ pub const TextModel = struct {
         config: Config,
         gen_options: Model.GenOptions,
     ) !TextModel {
-        const lm_head_prefix = if (store.root().hasKey("lm_head.weight")) "lm_head" else "model.language_model.embed_tokens";
+        const lm_head_prefix = if (store.root().get("lm_head.weight") != null) "lm_head" else "model.language_model.embed_tokens";
 
         const layers = try allocator.alloc(TransformerLayer, @intCast(config.text_config.num_hidden_layers));
         errdefer allocator.free(layers);

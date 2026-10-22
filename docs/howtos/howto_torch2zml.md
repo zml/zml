@@ -160,7 +160,6 @@ bazel build //my_project:torch2zml
 ./bazel-bin/my_project/torch2zml /path/to/my/model.safetensors.index.json ./my_project/Llama-3.2-1B-Instruct.activations.safetensors
 
 info: Found 564 activations in /Users/corendos/dev/zml/python/temp/Llama-3.2-1B-Instruct.activations.safetensors
-debug(zml/safetensors): Added new metadata key=format with value=pt
 info: Found 146 activations in /Users/corendos/models/Llama-3.2-1B-Instruct/model.safetensors
 ```
 
@@ -185,12 +184,14 @@ The `zml.nn.Linear` is the equivalent of `torch.nn.Linear` and is defined by
 its `weight` and optional `bias` tensors.
 
 To create such a struct from our `model_registry` dictionary, we first need to
-convert it to a `TensorStore`:
+convert it to a `TensorStore`. The store takes ownership of the registry and
+frees it in `deinit`, so declare `model_registry` with `const` and remove its
+`defer model_registry.deinit();` above:
 
 ```zig
 pub fn main(init: std.process.Init) !void {
     ...
-    var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry, &.{});
+    var model_store: zml.io.TensorStore = .init(allocator, model_registry, .{});
     defer model_store.deinit();
 }
 ```
@@ -296,7 +297,9 @@ pub const Wrapper = struct {
 pub fn main(init: std.process.Init) !void {
     ...
 
-    var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry, &.{});
+    // The store owns the registry: declare `activations_registry` with `const`
+    // and remove `defer activations_registry.deinit();`.
+    var activations_store: zml.io.TensorStore = .init(allocator, activations_registry, .{});
     defer activations_store.deinit();
 
     try zml.testing.testLayer(allocator, io, platform, Wrapper{ .mlp = mlp }, .forward, activations_store.view(), "model.model.layers.0.mlp", .{ .mlp = mlp_weights }, &.{}, .{});

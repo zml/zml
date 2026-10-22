@@ -9,6 +9,7 @@ const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const zml_testing = @import("../testing.zig");
 const backend = @import("backend.zig");
+const TensorStore = @import("TensorStore.zig");
 
 /// `device_count` devices for a test: the accelerator the tests run on
 /// (`zml.testing.env`, shared and never freed) when it has that many,
@@ -110,6 +111,15 @@ pub fn writeSafetensors(
         position += tensor.bytes.len;
     }
     try safetensors.parseSafetensors(allocator, io, registry, file);
+}
+
+/// A store over a copy of `registry`, for a test that builds several stores
+/// over one checkpoint: a store owns its registry.
+pub fn storeOf(allocator: std.mem.Allocator, registry: *const safetensors.TensorRegistry, meshes: []const *const Sharding.Mesh) !TensorStore {
+    var copy: safetensors.TensorRegistry = .init(allocator);
+    errdefer copy.deinit();
+    for (registry.tensors.values()) |tensor| try copy.registerTensor(tensor);
+    return .init(allocator, copy, .{ .meshes = meshes });
 }
 
 /// Distinct, nonzero bytes for test tensor number `seed`.

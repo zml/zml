@@ -1,6 +1,6 @@
-//! Associates model tensors with checkpoint sources and prefixed views.
+//! Associates model tensors with checkpoint sources and prefixed views,
+//! over a checkpoint registry the store owns.
 const std = @import("std");
-const log = std.log.scoped(.@"zml/io/load");
 
 const stdx = @import("stdx");
 
@@ -13,12 +13,11 @@ const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const Tensor = @import("../tensor.zig").Tensor;
 
-pub const ReaderError = std.Io.File.OpenError || std.Io.File.Reader.SeekError || error{TensorNotFound};
-
 const TensorStore = @This();
 
 pub const Binding = struct {
-    tensors: []*safetensors.Tensor,
+    /// Entries of the store's registry, each listed once.
+    tensors: []const *const safetensors.Tensor,
     /// Memory space the loader must deliver this tensor into, on every device of its mesh.
     memory: Memory.Kind = .default,
     /// How `tensors` fill the tensor's logical bytes. Null is the identity:
@@ -160,7 +159,7 @@ pub const Layout = struct {
 
     /// The checkpoint tensor of `tensors` that the parts copy whole and
     /// alone, if they do.
-    pub fn whole(self: Layout, tensors: []const *safetensors.Tensor) ?*safetensors.Tensor {
+    pub fn whole(self: Layout, tensors: []const *const safetensors.Tensor) ?*const safetensors.Tensor {
         if (self.parts.len != 1) return null;
         const part = self.parts[0];
         if (part.dims.len != 0 or part.src_offset != 0 or part.dst_offset != 0 or part.width != self.shape.byteSize()) return null;
@@ -196,34 +195,40 @@ pub const Part = struct {
 
 pub const Source = @import("Source.zig");
 
-registry: *safetensors.TensorRegistry,
+registry: safetensors.TensorRegistry,
 meshes: []const *const Sharding.Mesh,
 id_to_sources: std.AutoHashMapUnmanaged(Tensor.Id, Binding),
 allocator: std.mem.Allocator,
 arena: std.heap.ArenaAllocator,
 
-pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry, meshes: []const *const Sharding.Mesh) TensorStore {
+pub const Options = struct {
+    /// The meshes `View.createTensor` and `Source.bind` name.
+    meshes: []const *const Sharding.Mesh = &.{},
+};
+
+/// A store that owns `registry`, which must be complete: its map stays
+/// locked until `deinit`, so a later insert panics in safe builds. An
+/// entry's address is then its checkpoint tensor's identity (`View.get`).
+pub fn init(allocator: std.mem.Allocator, registry: safetensors.TensorRegistry, opts: Options) TensorStore {
     var arena: std.heap.ArenaAllocator = .init(allocator);
-    return .{
+    const meshes = arena.allocator().dupe(*const Sharding.Mesh, opts.meshes) catch @panic("OOM");
+    var self: TensorStore = .{
         .registry = registry,
-        .meshes = arena.allocator().dupe(*const Sharding.Mesh, meshes) catch @panic("OOM"),
+        .meshes = meshes,
         .id_to_sources = .empty,
         .allocator = allocator,
         .arena = arena,
     };
+    self.registry.tensors.lockPointers();
+    return self;
 }
 
+/// Frees the bindings, then the registry.
 pub fn deinit(self: *TensorStore) void {
     self.id_to_sources.deinit(self.allocator);
     self.arena.deinit();
-}
-
-pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) ReaderError!safetensors.TensorReader {
-    const tensor = self.getPtrFromKey(key) orelse {
-        log.debug("checkpoint has no tensor named {s}", .{key});
-        return error.TensorNotFound;
-    };
-    return tensor.reader(io, buffer, .{});
+    self.registry.tensors.unlockPointers();
+    self.registry.deinit();
 }
 
 pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
@@ -248,11 +253,6 @@ pub fn unbind(self: *TensorStore, tensor: Tensor) Binding {
     return removed.value;
 }
 
-pub fn getShape(self: *const TensorStore, key: []const u8) ?Shape {
-    const entry_ptr = self.getPtrFromKey(key) orelse return null;
-    return entry_ptr.shape;
-}
-
 /// Changes the memory space the loader delivers `tensor` into (see
 /// `Binding.memory`), for a decision made after the tensor was created.
 /// `tensor` must be bound in this store.
@@ -275,7 +275,7 @@ pub fn mesh(store: *const TensorStore, name: @EnumLiteral()) *const Sharding.Mes
     }
     std.debug.panic(
         \\Found no meshes named {s} in TensorStore.
-        \\Try passing more meshes to `zml.TensorStore.fromRegistry`.
+        \\Try passing more meshes to `zml.io.TensorStore.init`.
         \\Known meshes: {f}
     , .{ name_slice, stdx.fmt.slice(store.meshes) });
 }
@@ -318,7 +318,17 @@ pub const View = struct {
         return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
     }
 
-    pub fn hasKey(self: *const View, subkey: []const u8) bool {
+    /// The checkpoint tensor `subkey`, the registry's own entry, whose
+    /// address is the tensor's identity. Null when the checkpoint has none.
+    pub fn get(self: View, subkey: []const u8) ?*const safetensors.Tensor {
+        var buffer: [256]u8 = undefined;
+        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+        return self.store.registry.tensors.getPtr(key);
+    }
+
+    /// Whether some checkpoint key starts with `subkey` under this view:
+    /// a scan of every key. `get` answers whether one key exists.
+    pub fn hasPrefix(self: View, subkey: []const u8) bool {
         var buffer: [256]u8 = undefined;
         const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
         return for (self.store.registry.tensors.keys()) |k| {
@@ -373,9 +383,7 @@ pub const View = struct {
 
     /// Like `source`, but null when the checkpoint has no such tensor.
     pub fn maybeSource(self: View, subkey: []const u8, comptime tags: anytype) ?Source {
-        var buffer: [256]u8 = undefined;
-        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-        const entry = self.store.dupeSource(key) orelse return null;
+        const entry = self.get(subkey) orelse return null;
         const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
         const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
         return .init(self.store, entry, if (has_tags) parsed_tags.constSlice() else null);
@@ -390,15 +398,13 @@ pub const View = struct {
     }
 
     fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?[]const Shape.Tag, sharding: Sharding) ?Tensor {
-        var buffer: [256]u8 = undefined;
-        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-        const entry = self.store.dupeSource(key) orelse return null;
+        const entry = self.get(subkey) orelse return null;
 
-        const sources = self.store.arena.allocator().alloc(*safetensors.Tensor, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
+        const sources = self.store.arena.allocator().alloc(*const safetensors.Tensor, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
         errdefer self.store.arena.allocator().free(sources);
         sources[0] = entry;
 
-        const tensor: Tensor = .fromShape(placeShape(entry.shape, tags, sharding, key));
+        const tensor: Tensor = .fromShape(placeShape(entry.shape, tags, sharding, entry.name));
         self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
         return tensor;
@@ -427,18 +433,6 @@ pub const View = struct {
             input.* = source_.place(.replicated, .{});
         }
         return Source.bindProgram(inputs, shape, program);
-    }
-
-    pub fn getShape(self: View, subkey: []const u8) ?Shape {
-        var buffer: [256]u8 = undefined;
-        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-        return self.store.getShape(key);
-    }
-
-    pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) ReaderError!safetensors.TensorReader {
-        var key_buffer: [256]u8 = undefined;
-        const key = makeKey(&key_buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-        return self.store.getReader(key, io, buffer);
     }
 
     pub fn count(self: View) usize {
@@ -472,34 +466,37 @@ pub fn putSourcesNoClobber(self: *TensorStore, id: Tensor.Id, sources: Binding) 
     gop.value_ptr.* = sources;
 }
 
-fn getPtrFromKey(self: *const TensorStore, key: []const u8) ?*safetensors.Tensor {
-    const tensor_desc_ptr = self.registry.tensors.getPtr(key) orelse return null;
-    return tensor_desc_ptr;
-}
-
-fn dupeSource(self: *TensorStore, key: []const u8) ?*safetensors.Tensor {
-    const entry = self.getPtrFromKey(key) orelse return null;
-
-    const copy = self.arena.allocator().create(safetensors.Tensor) catch @panic("OOM");
-    copy.* = entry.*;
-
-    return copy;
-}
-
-test "missing reader keys return TensorNotFound" {
-    var registry = safetensors.TensorRegistry.init(std.testing.allocator);
-    defer registry.deinit();
-    var store = TensorStore.fromRegistry(std.testing.allocator, &registry, &.{});
+test "get finds exact keys, the registry's own entries, and hasPrefix any key under a prefix" {
+    var store: TensorStore = store: {
+        var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
+        errdefer registry.deinit();
+        try registry.registerTensor(.{ .file_uri = "weights", .name = "layer.experts.0.down_proj.weight", .shape = .init(.{4}, .u8), .offset = 0 });
+        break :store .init(std.testing.allocator, registry, .{});
+    };
     defer store.deinit();
 
-    try std.testing.expectError(error.TensorNotFound, store.view().withPrefix("layer").getReader("weights", std.testing.io, &.{}));
+    const layer = store.view().withPrefix("layer");
+    const entry = layer.get("experts.0.down_proj.weight").?;
+    try std.testing.expectEqual(entry, store.registry.tensors.getPtr("layer.experts.0.down_proj.weight").?);
+    try std.testing.expectEqual(null, layer.get("experts.0.down_proj"));
+    try std.testing.expectEqual(null, layer.get("weights"));
+    try std.testing.expect(layer.hasPrefix("experts"));
+    try std.testing.expect(layer.withPrefix("experts").hasPrefix(""));
+    try std.testing.expect(!layer.hasPrefix("gate"));
+
+    // Every binding of the entry holds the entry itself.
+    const tensor = layer.createReplicatedTensor("experts.0.down_proj.weight", null);
+    try std.testing.expectEqual(entry, store.getSourcesById(tensor.id).?.tensors[0]);
+    try std.testing.expectEqual(entry, layer.source("experts.0.down_proj.weight", null).pieces[0].tensor);
 }
 
 test "programs of one type and equal values over the same placed shapes share an executable" {
-    var registry = safetensors.TensorRegistry.init(std.testing.allocator);
-    defer registry.deinit();
-    try registry.registerTensor(.{ .file_uri = "weights", .name = "t", .shape = .init(.{4}, .u8), .offset = 0 });
-    var store = TensorStore.fromRegistry(std.testing.allocator, &registry, &.{});
+    var store: TensorStore = store: {
+        var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
+        errdefer registry.deinit();
+        try registry.registerTensor(.{ .file_uri = "weights", .name = "t", .shape = .init(.{4}, .u8), .offset = 0 });
+        break :store .init(std.testing.allocator, registry, .{});
+    };
     defer store.deinit();
     const Scale = struct {
         factor: u8,
@@ -545,10 +542,12 @@ test "placed shapes on different meshes or partitionings differ" {
 }
 
 test "setMemory changes the memory space of a created tensor's binding" {
-    var registry = safetensors.TensorRegistry.init(std.testing.allocator);
-    defer registry.deinit();
-    try registry.registerTensor(.{ .file_uri = "weights", .name = "table", .shape = .init(.{ 4, 2 }, .u8), .offset = 0 });
-    var store = TensorStore.fromRegistry(std.testing.allocator, &registry, &.{});
+    var store: TensorStore = store: {
+        var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
+        errdefer registry.deinit();
+        try registry.registerTensor(.{ .file_uri = "weights", .name = "table", .shape = .init(.{ 4, 2 }, .u8), .offset = 0 });
+        break :store .init(std.testing.allocator, registry, .{});
+    };
     defer store.deinit();
 
     const tensor = store.view().createReplicatedTensor("table", null);

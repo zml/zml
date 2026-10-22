@@ -55,7 +55,7 @@ pub const Loader = struct {
     /// `UnsupportedPlatform`, an io that cannot run its tasks concurrently
     /// `ConcurrencyUnavailable`.
     pub const Error = error{ InvalidBinding, Canceled, UnsupportedPlatform } || std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError ||
-        std.Io.File.Reader.SeekError || safetensors.ExactPositionalError || Compiler.Error || std.Io.ConcurrentError;
+        safetensors.ExactPositionalError || Compiler.Error || std.Io.ConcurrentError;
 
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1094,7 +1094,7 @@ fn appendCompositeParts(
     parts: *std.ArrayList(LoadPart),
     id: Tensor.Id,
     shape: Shape,
-    tensors: []const *safetensors.Tensor,
+    tensors: []const *const safetensors.Tensor,
     memory: Memory.Kind,
     layout: *const TensorStore.Layout,
 ) error{InvalidBinding}!void {
@@ -1273,7 +1273,6 @@ const LoaderTestFixture = struct {
     path_len: usize,
     missing_buffer: [1024]u8,
     missing_len: usize,
-    registry: safetensors.TensorRegistry,
     store: TensorStore,
     platform: *const Platform,
     value: Tensor,
@@ -1292,34 +1291,36 @@ const LoaderTestFixture = struct {
         const missing_path = try std.fmt.bufPrint(&self.missing_buffer, "{s}.missing", .{path});
         self.missing_len = missing_path.len;
 
-        self.registry = .init(allocator);
-        errdefer self.registry.deinit();
-        try self.registry.registerTensor(.{
-            .file_uri = path,
-            .name = "value",
-            .shape = .init(.{contents.len}, .u8),
-            .offset = 0,
-        });
-        try self.registry.registerTensor(.{
-            .file_uri = path,
-            .name = "second",
-            .shape = .init(.{second_contents.len}, .u8),
-            .offset = contents.len,
-        });
-        try self.registry.registerTensor(.{
-            .file_uri = missing_path,
-            .name = "missing",
-            .shape = .init(.{contents.len}, .u8),
-            .offset = 0,
-        });
-        try self.registry.registerTensor(.{
-            .file_uri = path,
-            .name = "empty",
-            .shape = .init(.{0}, .u8),
-            .offset = 0,
-        });
+        var registry: safetensors.TensorRegistry = .init(allocator);
+        {
+            errdefer registry.deinit();
+            try registry.registerTensor(.{
+                .file_uri = path,
+                .name = "value",
+                .shape = .init(.{contents.len}, .u8),
+                .offset = 0,
+            });
+            try registry.registerTensor(.{
+                .file_uri = path,
+                .name = "second",
+                .shape = .init(.{second_contents.len}, .u8),
+                .offset = contents.len,
+            });
+            try registry.registerTensor(.{
+                .file_uri = missing_path,
+                .name = "missing",
+                .shape = .init(.{contents.len}, .u8),
+                .offset = 0,
+            });
+            try registry.registerTensor(.{
+                .file_uri = path,
+                .name = "empty",
+                .shape = .init(.{0}, .u8),
+                .offset = 0,
+            });
+        }
         self.platform = testing.env();
-        self.store = .fromRegistry(allocator, &self.registry, &.{self.platform.replicated_mesh});
+        self.store = .init(allocator, registry, .{ .meshes = &.{self.platform.replicated_mesh} });
         self.value = self.store.view().createReplicatedTensor("value", null);
         self.second = self.store.view().createReplicatedTensor("second", null);
         self.missing = self.store.view().createReplicatedTensor("missing", null);
@@ -1328,7 +1329,6 @@ const LoaderTestFixture = struct {
 
     fn deinit(self: *LoaderTestFixture) void {
         self.store.deinit();
-        self.registry.deinit();
         self.tmp.cleanup();
     }
 
@@ -1426,7 +1426,7 @@ test "one loader takes loads from different stores before one wait" {
     var fixture: LoaderTestFixture = undefined;
     try fixture.init(allocator, io);
     defer fixture.deinit();
-    var other_store = TensorStore.fromRegistry(allocator, &fixture.registry, &.{fixture.platform.replicated_mesh});
+    var other_store = try load_testing.storeOf(allocator, &fixture.store.registry, &.{fixture.platform.replicated_mesh});
     defer other_store.deinit();
     const other = other_store.view().createReplicatedTensor("second", null);
 
@@ -1539,11 +1539,13 @@ test "a program frees its donated and non-donated inputs once" {
     defer allocator.free(path);
 
     const shape: Shape = .init(.{2}, .i32);
-    var registry: safetensors.TensorRegistry = .init(allocator);
-    defer registry.deinit();
-    try registry.registerTensor(.{ .name = "value", .file_uri = path, .shape = shape, .offset = 0 });
-    try registry.registerTensor(.{ .name = "weight", .file_uri = path, .shape = shape, .offset = 2 * @sizeOf(i32) });
-    var store: TensorStore = .fromRegistry(allocator, &registry, &.{platform.replicated_mesh});
+    var store: TensorStore = store: {
+        var registry: safetensors.TensorRegistry = .init(allocator);
+        errdefer registry.deinit();
+        try registry.registerTensor(.{ .name = "value", .file_uri = path, .shape = shape, .offset = 0 });
+        try registry.registerTensor(.{ .name = "weight", .file_uri = path, .shape = shape, .offset = 2 * @sizeOf(i32) });
+        break :store .init(allocator, registry, .{ .meshes = &.{platform.replicated_mesh} });
+    };
     defer store.deinit();
 
     const Sum = struct {
@@ -1852,20 +1854,21 @@ test "a rate-limited HTTP source loads through the VFS hold" {
     var url_buffer: [128]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/object", .{server.port()});
 
-    var registry: safetensors.TensorRegistry = .init(allocator);
-    defer registry.deinit();
-    const names = [tensors][]const u8{ "a", "b", "c", "d" };
-    for (names, 0..) |name, index| {
-        try registry.registerTensor(.{
-            .file_uri = url,
-            .name = name,
-            .shape = .init(.{tensor_bytes}, .u8),
-            .offset = 2 * index * tensor_bytes,
-        });
-    }
     const platform = testing.env();
-
-    var store: TensorStore = .fromRegistry(allocator, &registry, &.{platform.replicated_mesh});
+    var store: TensorStore = store: {
+        var registry: safetensors.TensorRegistry = .init(allocator);
+        errdefer registry.deinit();
+        const names = [tensors][]const u8{ "a", "b", "c", "d" };
+        for (names, 0..) |name, index| {
+            try registry.registerTensor(.{
+                .file_uri = url,
+                .name = name,
+                .shape = .init(.{tensor_bytes}, .u8),
+                .offset = 2 * index * tensor_bytes,
+            });
+        }
+        break :store .init(allocator, registry, .{ .meshes = &.{platform.replicated_mesh} });
+    };
     defer store.deinit();
 
     const Model = struct { a: Tensor, b: Tensor, c: Tensor, d: Tensor };
@@ -1999,7 +2002,7 @@ test "loader reports source size mismatches" {
 /// `q` [8, 8], `k` [4, 8] and `v` [4, 8]; `second` holds `plain` [4, 8],
 /// then `c` [4, 8], the experts `e{0..3}.w1` and `e{0..3}.w3` [2, 8] and
 /// `wide` [64, 8]. `empty` [0, 8] is registered without bytes. Pinned after
-/// `init`.
+/// `init`. Each store takes a copy of `registry` (`load_testing.storeOf`).
 const CompositeFixture = struct {
     tmp: std.testing.TmpDir,
     registry: safetensors.TensorRegistry,
@@ -2104,7 +2107,7 @@ test "loader assembles concatenated and padded sources on every placement and me
         defer devices.deinit();
         const platform = devices.platform;
         const tp = try devices.mesh("tp");
-        var store: TensorStore = .fromRegistry(allocator, &fixture.registry, &.{&tp});
+        var store = try load_testing.storeOf(allocator, &fixture.registry, &.{&tp});
         defer store.deinit();
         // Rows over the devices (b and c straddle shards on four), every
         // row split over them, and every byte on each of them.
@@ -2199,7 +2202,7 @@ test "loader assembles interleaved, stacked and split sources" {
         defer devices.deinit();
         const platform = devices.platform;
         const tp = try devices.mesh("tp");
-        var store: TensorStore = .fromRegistry(allocator, &fixture.registry, &.{&tp});
+        var store = try load_testing.storeOf(allocator, &fixture.registry, &.{&tp});
         defer store.deinit();
         const view = store.view();
         const groups: i64 = @intCast(device_count);
@@ -2314,7 +2317,7 @@ test "loader gathers strided sources: a row interleave across files, broadcasts 
             try devices.init(allocator, io, device_count);
             defer devices.deinit();
             const tp = try devices.mesh("tp");
-            var store: TensorStore = .fromRegistry(allocator, &registry, &.{&tp});
+            var store = try load_testing.storeOf(allocator, &registry, &.{&tp});
             defer store.deinit();
             const view = store.view();
             const rows = Source.stack(&.{ view.source("g", .{ .row, .col }), view.source("u", .{ .row, .col }) }, 1, .proj)
@@ -2365,20 +2368,20 @@ test "composite layouts that do not fit their tensor fail the loader before subm
     try fixture.init(allocator, io);
     defer fixture.deinit();
     const platform = testing.env();
-    var store: TensorStore = .fromRegistry(allocator, &fixture.registry, &.{platform.replicated_mesh});
+    var store = try load_testing.storeOf(allocator, &fixture.registry, &.{platform.replicated_mesh});
     defer store.deinit();
     const destination: Shape = .init(.{ 8, 8 }, .u16);
     const Part = TensorStore.Part;
     const Composite = struct {
-        fn bind(store_: *TensorStore, registry: *safetensors.TensorRegistry, names: []const []const u8, shape: Shape, parts: []const Part) Tensor {
-            return bindAs(store_, registry, names, shape, shape, parts);
+        fn bind(store_: *TensorStore, names: []const []const u8, shape: Shape, parts: []const Part) Tensor {
+            return bindAs(store_, names, shape, shape, parts);
         }
 
         /// A tensor of `shape` whose layout fills `filled`.
-        fn bindAs(store_: *TensorStore, registry: *safetensors.TensorRegistry, names: []const []const u8, shape: Shape, filled: Shape, parts: []const Part) Tensor {
+        fn bindAs(store_: *TensorStore, names: []const []const u8, shape: Shape, filled: Shape, parts: []const Part) Tensor {
             const arena = store_.arena.allocator();
-            const tensors = arena.alloc(*safetensors.Tensor, names.len) catch unreachable;
-            for (tensors, names) |*tensor, name| tensor.* = registry.tensors.getPtr(name).?;
+            const tensors = arena.alloc(*const safetensors.Tensor, names.len) catch unreachable;
+            for (tensors, names) |*tensor, name| tensor.* = store_.view().get(name).?;
             const layout = arena.create(TensorStore.Layout) catch unreachable;
             layout.* = .{ .shape = filled, .parts = parts };
             const tensor: Tensor = .fromShape(shape);
@@ -2387,40 +2390,39 @@ test "composite layouts that do not fit their tensor fail the loader before subm
         }
     };
     const s = &store;
-    const r = &fixture.registry;
 
     const rejected = [_]Tensor{
         // No part at all, and a part of a source the binding lacks.
-        Composite.bind(s, r, &.{"a"}, destination, &.{}),
-        Composite.bind(s, r, &.{"a"}, destination, &.{.{ .source = 1, .dst_offset = 0, .width = 16 }}),
+        Composite.bind(s, &.{"a"}, destination, &.{}),
+        Composite.bind(s, &.{"a"}, destination, &.{.{ .source = 1, .dst_offset = 0, .width = 16 }}),
         // A layout of another size than its tensor.
-        Composite.bindAs(s, r, &.{"a"}, destination, .init(.{ 4, 8 }, .u16), &.{.{ .dst_offset = 0, .width = 48 }}),
+        Composite.bindAs(s, &.{"a"}, destination, .init(.{ 4, 8 }, .u16), &.{.{ .dst_offset = 0, .width = 48 }}),
         // Past the end of its source, and of the tensor.
-        Composite.bind(s, r, &.{"a"}, destination, &.{.{ .src_offset = 16, .dst_offset = 0, .width = 48 }}),
-        Composite.bind(s, r, &.{"a"}, destination, &.{.{ .dst_offset = 96, .width = 48 }}),
+        Composite.bind(s, &.{"a"}, destination, &.{.{ .src_offset = 16, .dst_offset = 0, .width = 48 }}),
+        Composite.bind(s, &.{"a"}, destination, &.{.{ .dst_offset = 96, .width = 48 }}),
         // Overlapping parts.
-        Composite.bind(s, r, &.{ "a", "b" }, destination, &.{
+        Composite.bind(s, &.{ "a", "b" }, destination, &.{
             .{ .source = 0, .dst_offset = 0, .width = 48 },
             .{ .source = 1, .dst_offset = 32, .width = 32 },
         }),
-        Composite.bind(s, r, &.{ "a", "empty" }, destination, &.{
+        Composite.bind(s, &.{ "a", "empty" }, destination, &.{
             .{ .source = 0, .dst_offset = 0, .width = 48 },
             .{ .source = 1, .dst_offset = 48, .width = 16 },
         }),
         // Strided parts whose runs overlap; two of over a thousand runs
         // each that interleave with different strides, which the checks
         // cannot prove disjoint.
-        Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{
+        Composite.bind(s, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{
             .{ .dst_offset = 0, .width = 2, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 4 }} },
             .{ .dst_offset = 2, .width = 4, .dims = &.{.{ .count = 128, .src_stride = 8, .dst_stride = 4 }} },
         }),
-        Composite.bind(s, r, &.{"wide"}, .init(.{ 64, 64 }, .u16), &.{
+        Composite.bind(s, &.{"wide"}, .init(.{ 64, 64 }, .u16), &.{
             .{ .dst_offset = 0, .width = 1, .dims = &.{.{ .count = 2000, .src_stride = 0, .dst_stride = 4 }} },
             .{ .dst_offset = 2, .width = 1, .dims = &.{.{ .count = 1300, .src_stride = 0, .dst_stride = 6 }} },
         }),
         // Strided parts into host memory.
         host: {
-            const tensor = Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{.{ .dst_offset = 0, .width = 2, .dims = &.{
+            const tensor = Composite.bind(s, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{.{ .dst_offset = 0, .width = 2, .dims = &.{
                 .{ .count = 8, .src_stride = 2, .dst_stride = 128 },
                 .{ .count = 64, .src_stride = 16, .dst_stride = 2 },
             } }});
@@ -2439,19 +2441,19 @@ test "composite layouts that do not fit their tensor fail the loader before subm
     // A part placed past a gap, the rest zero; parts listed out of
     // destination order; one source feeding two parts; a strided part of few
     // runs, expanded; and a transpose, 512 runs of two bytes, gathered.
-    const sparse = Composite.bind(s, r, &.{"b"}, destination, &.{.{ .src_offset = 16, .dst_offset = 64, .width = 16 }});
-    const descending = Composite.bind(s, r, &.{ "a", "b" }, destination, &.{
+    const sparse = Composite.bind(s, &.{"b"}, destination, &.{.{ .src_offset = 16, .dst_offset = 64, .width = 16 }});
+    const descending = Composite.bind(s, &.{ "a", "b" }, destination, &.{
         .{ .source = 0, .dst_offset = 64, .width = 48 },
         .{ .source = 1, .dst_offset = 0, .width = 32 },
     });
-    const swapped = Composite.bind(s, r, &.{"a"}, destination, &.{
+    const swapped = Composite.bind(s, &.{"a"}, destination, &.{
         .{ .src_offset = 32, .dst_offset = 0, .width = 16 },
         .{ .src_offset = 0, .dst_offset = 16, .width = 32 },
     });
-    const strided = Composite.bind(s, r, &.{"a"}, destination, &.{.{ .dst_offset = 0, .width = 16, .dims = &.{
+    const strided = Composite.bind(s, &.{"a"}, destination, &.{.{ .dst_offset = 0, .width = 16, .dims = &.{
         .{ .count = 3, .src_stride = 16, .dst_stride = 32 },
     } }});
-    const transposed = Composite.bind(s, r, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{.{ .dst_offset = 0, .width = 2, .dims = &.{
+    const transposed = Composite.bind(s, &.{"wide"}, .init(.{ 8, 64 }, .u16), &.{.{ .dst_offset = 0, .width = 2, .dims = &.{
         .{ .count = 8, .src_stride = 2, .dst_stride = 128 },
         .{ .count = 64, .src_stride = 16, .dst_stride = 2 },
     } }});
@@ -2492,7 +2494,7 @@ test "a program takes its inputs from sources, in order" {
     try fixture.init(allocator, io);
     defer fixture.deinit();
     const platform = testing.env();
-    var store: TensorStore = .fromRegistry(allocator, &fixture.registry, &.{platform.replicated_mesh});
+    var store = try load_testing.storeOf(allocator, &fixture.registry, &.{platform.replicated_mesh});
     defer store.deinit();
     const Source = TensorStore.Source;
     const view = store.view();
@@ -2594,12 +2596,14 @@ fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var registry: safetensors.TensorRegistry = .init(allocator);
-    defer registry.deinit();
-    try load_testing.writeSafetensors(allocator, io, tmp.dir, "table.safetensors", &registry, &.{
-        .{ .name = "table", .dtype = "U8", .dims = &.{ @intCast(rows), @intCast(row_bytes) }, .bytes = padded[0 .. rows * row_bytes] },
-    });
-    var store: TensorStore = .fromRegistry(allocator, &registry, &.{mesh});
+    var store: TensorStore = store: {
+        var registry: safetensors.TensorRegistry = .init(allocator);
+        errdefer registry.deinit();
+        try load_testing.writeSafetensors(allocator, io, tmp.dir, "table.safetensors", &registry, &.{
+            .{ .name = "table", .dtype = "U8", .dims = &.{ @intCast(rows), @intCast(row_bytes) }, .bytes = padded[0 .. rows * row_bytes] },
+        });
+        break :store .init(allocator, registry, .{ .meshes = &.{mesh} });
+    };
     defer store.deinit();
     const source = store.view().source("table", .{ .row, .channel })
         .pad(0, .{ .row = TensorStore.Source.Pad{ .high = @intCast(padded_rows - rows) } });

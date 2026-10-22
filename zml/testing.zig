@@ -465,17 +465,14 @@ pub fn testLayer(
     defer for (results) |*result| result.deinit();
 
     var failed: bool = false;
-    var reader_buffer: [4096]u8 = undefined;
     for (0..output_count) |i| {
         const expected_slice = s: {
             var buffer: [256]u8 = undefined;
             const subkey = try std.fmt.bufPrint(&buffer, "{d}", .{i});
-            var reader = try store_output.getReader(subkey, io, &reader_buffer);
-            defer reader.deinit();
-            const shape = store_output.getShape(subkey).?;
-            const expected_slice: zml.Slice = try .alloc(allocator, shape);
+            const tensor = store_output.get(subkey) orelse return error.TensorNotFound;
+            const expected_slice: zml.Slice = try .alloc(allocator, tensor.shape);
             errdefer expected_slice.free(allocator);
-            try reader.interface.readSliceAll(expected_slice.data());
+            try tensor.read(io, expected_slice.data());
             break :s expected_slice;
         };
         defer expected_slice.free(allocator);

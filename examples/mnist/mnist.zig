@@ -80,17 +80,16 @@ pub fn main(init: std.process.Init) !void {
     const model_path = process_args[1];
     const t10kfilename = process_args[2];
 
-    // Read model shapes.
-    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
-    defer registry.deinit();
-
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
-    // Init model
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{});
+    // Read model shapes. The store owns the registry.
+    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
+    var store: zml.io.TensorStore = .init(allocator, registry, .{});
     defer store.deinit();
+
+    // Init model
     const mnist_model: Mnist = .init(store.view());
 
     // // Compile model

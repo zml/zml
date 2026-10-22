@@ -4,10 +4,7 @@ const DataType = @import("dtype.zig").DataType;
 const Shape = @import("shape.zig").Shape;
 const Dims = Shape.DimsArray;
 
-const StringBuilder = std.ArrayListUnmanaged(u8);
-
 pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
-pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
 
 const log = std.log.scoped(.@"zml/safetensors");
 
@@ -105,290 +102,6 @@ fn advanceScatter(
     }
 }
 
-pub const FileType = enum {
-    index,
-    safetensors,
-    unknown,
-};
-
-pub fn fetchRegistry(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    repo: std.Io.Dir,
-    model: std.Io.File,
-    model_path: []const u8,
-) !TensorRegistry {
-    const file_type = resolveFiletype(model_path);
-
-    return switch (file_type) {
-        .index => blk: {
-            const file_reader_buf = try allocator.alloc(u8, 64 * 1024);
-            defer allocator.free(file_reader_buf);
-
-            var index_reader = model.reader(io, file_reader_buf);
-
-            var safetensors_index = try parseSafetensorsIndex(
-                allocator,
-                &index_reader.interface,
-            );
-            defer safetensors_index.deinit();
-
-            var registry: TensorRegistry = try .initWithMetadata(allocator, safetensors_index.metadata);
-
-            try parseSafetensorsIndexFiles(
-                allocator,
-                io,
-                &registry,
-                safetensors_index,
-                repo,
-            );
-
-            break :blk registry;
-        },
-        .safetensors => blk: {
-            var registry: TensorRegistry = .init(allocator);
-
-            try parseSafetensors(allocator, io, &registry, model);
-
-            break :blk registry;
-        },
-        else => return error.InvalidPath,
-    };
-}
-
-pub const TensorReader = struct {
-    tensor: Tensor,
-    file: std.Io.File,
-    file_reader: std.Io.File.Reader,
-    owns_file: bool,
-    alignment: ?std.mem.Alignment,
-    remaining: u64,
-    padding_remaining: u64,
-
-    io: std.Io,
-    interface: std.Io.Reader,
-
-    pub const InitOpts = struct {
-        alignment: ?std.mem.Alignment = null,
-    };
-
-    pub const ReadPositionalError = ExactPositionalError;
-
-    pub fn init(
-        io: std.Io,
-        tensor: Tensor,
-        buffer: []u8,
-        opts: InitOpts,
-    ) !TensorReader {
-        const file = try std.Io.Dir.openFile(.cwd(), io, tensor.file_uri, .{ .mode = .read_only });
-        errdefer file.close(io);
-
-        const offset, const padding_remaining = if (opts.alignment) |alignment| blk: {
-            const aligned_offset = std.mem.alignBackward(u64, tensor.offset, alignment.toByteUnits());
-            break :blk .{ aligned_offset, tensor.offset - aligned_offset };
-        } else blk: {
-            break :blk .{ tensor.offset, 0 };
-        };
-
-        var file_reader = file.reader(io, buffer);
-        try file_reader.seekTo(offset);
-
-        return .{
-            .tensor = tensor,
-            .file = file,
-            .file_reader = file_reader,
-            .owns_file = true,
-            .alignment = opts.alignment,
-            .remaining = tensor.byteSize(),
-            .padding_remaining = padding_remaining,
-            .io = io,
-            .interface = .{
-                .vtable = if (opts.alignment) |_| blk: {
-                    break :blk &.{
-                        .stream = streamAligned,
-                        .discard = discardAligned,
-                    };
-                } else blk: {
-                    break :blk &.{
-                        .stream = stream,
-                        .discard = discard,
-                    };
-                },
-                .buffer = &.{},
-                .seek = 0,
-                .end = 0,
-            },
-        };
-    }
-
-    /// Creates a positional-only reader over a file owned by the caller.
-    /// Concurrent readers may borrow the same file because positional reads do
-    /// not use or mutate its streaming position.
-    pub fn initBorrowedPositional(io: std.Io, tensor: Tensor, file: std.Io.File) TensorReader {
-        const file_reader = file.reader(io, &.{});
-        return .{
-            .tensor = tensor,
-            .file = file,
-            .file_reader = file_reader,
-            .owns_file = false,
-            .alignment = null,
-            .remaining = tensor.byteSize(),
-            .padding_remaining = 0,
-            .io = io,
-            .interface = .{
-                .vtable = &.{
-                    .stream = stream,
-                    .discard = discard,
-                },
-                .buffer = &.{},
-                .seek = 0,
-                .end = 0,
-            },
-        };
-    }
-
-    pub fn deinit(self: *TensorReader) void {
-        if (self.owns_file) self.file.close(self.io);
-    }
-
-    /// Reads an exact tensor-relative range without changing the sequential
-    /// reader position. Multiple calls may run concurrently on the same file.
-    pub fn readPositionalAll(
-        self: *const TensorReader,
-        buffer: []u8,
-        tensor_offset: u64,
-    ) ReadPositionalError!void {
-        return self.readPositionalAllV(&.{buffer}, tensor_offset);
-    }
-
-    /// Reads an exact tensor-relative range into a scatter list without
-    /// changing the sequential reader position. Multiple calls may run
-    /// concurrently on the same file.
-    pub fn readPositionalAllV(
-        self: *const TensorReader,
-        buffers: []const []u8,
-        tensor_offset: u64,
-    ) ReadPositionalError!void {
-        var read_size: u64 = 0;
-        for (buffers) |buffer| {
-            const len = std.math.cast(u64, buffer.len) orelse return error.OutOfBounds;
-            read_size = std.math.add(u64, read_size, len) catch return error.OutOfBounds;
-        }
-        const tensor_size = self.tensor.byteSize();
-        if (tensor_offset > tensor_size or read_size > tensor_size - tensor_offset) {
-            return error.OutOfBounds;
-        }
-        if (read_size == 0) return;
-
-        const file_offset = std.math.add(u64, self.tensor.offset, tensor_offset) catch {
-            return error.OutOfBounds;
-        };
-        _ = std.math.add(u64, file_offset, read_size) catch return error.OutOfBounds;
-
-        _ = try readFilePositionalAllV(
-            self.io,
-            self.file,
-            buffers,
-            file_offset,
-            read_size,
-        );
-    }
-
-    // Limit single reads to 1GB to avoid issues on macOS where pread returns
-    // INT_MAX when the requested size is larger than 2GB
-    const max_single_read_bytes: u64 = 1 << 30;
-
-    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const self: *TensorReader = @fieldParentPtr("interface", r);
-        if (self.remaining == 0) {
-            return error.EndOfStream;
-        }
-
-        const combined_limit = limit.min(.limited64(self.remaining)).min(.limited64(max_single_read_bytes));
-        const n = try self.file_reader.interface.stream(w, combined_limit);
-        self.remaining -= n;
-        return n;
-    }
-
-    fn discard(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
-        const self: *TensorReader = @fieldParentPtr("interface", r);
-        if (self.remaining == 0) {
-            return error.EndOfStream;
-        }
-
-        const combined_limit = limit.min(.limited64(self.remaining));
-        const n = try self.file_reader.interface.discard(combined_limit);
-        self.remaining -= n;
-        return n;
-    }
-
-    fn streamAligned(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const self: *TensorReader = @fieldParentPtr("interface", r);
-        if (self.remaining == 0) {
-            return error.EndOfStream;
-        }
-
-        const requested_bytes = @min(limit.minInt64(self.remaining), max_single_read_bytes);
-
-        if (self.padding_remaining > 0) {
-            _ = try self.file_reader.interface.discard(.limited64(self.padding_remaining));
-            self.padding_remaining = 0;
-        }
-
-        const align_bytes = self.alignment.?.toByteUnits();
-        const file_offset = self.file_reader.pos - std.mem.alignBackward(u64, self.file_reader.pos, align_bytes);
-        const writer_addr = @intFromPtr(w.buffer.ptr) + w.end;
-        const writer_offset = writer_addr - std.mem.alignBackward(usize, writer_addr, align_bytes);
-
-        if (file_offset != writer_offset) {
-            const skip = if (file_offset >= writer_offset) blk: {
-                break :blk file_offset - writer_offset;
-            } else blk: {
-                break :blk align_bytes - writer_offset + file_offset;
-            };
-
-            w.advance(skip);
-        }
-
-        if (w.writableSliceGreedy(align_bytes)) |dest| {
-            const phys_buf = dest.ptr - file_offset;
-            const phys_pos = self.file_reader.pos - file_offset;
-            const phys_size = std.mem.alignBackward(usize, @min(dest.len, requested_bytes) + file_offset, align_bytes);
-
-            if (phys_size > file_offset) {
-                const phys_read = self.file.readPositional(self.io, &.{phys_buf[0..phys_size]}, phys_pos) catch unreachable;
-                if (phys_read > file_offset) {
-                    const bytes_read = phys_read - file_offset;
-                    w.advance(bytes_read);
-                    self.file_reader.pos += bytes_read;
-                    self.remaining -= bytes_read;
-                    return bytes_read;
-                }
-            }
-        } else |_| {}
-
-        const bytes_read = try self.file_reader.interface.stream(w, .limited64(requested_bytes));
-        self.remaining -= bytes_read;
-
-        return bytes_read;
-    }
-
-    fn discardAligned(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
-        const self: *TensorReader = @fieldParentPtr("interface", r);
-        if (self.remaining == 0) return 0;
-
-        if (self.padding_remaining > 0) {
-            _ = try self.file_reader.interface.discard(.limited64(self.padding_remaining));
-            self.padding_remaining = 0;
-        }
-
-        const combined_limit = limit.min(.limited64(self.remaining));
-        const n = try self.file_reader.interface.discard(combined_limit);
-        self.remaining -= n;
-        return n;
-    }
-};
-
 const CountingPositionalIo = struct {
     calls: usize = 0,
     largest_scatter: usize = 0,
@@ -436,93 +149,63 @@ const CountingPositionalIo = struct {
     }
 };
 
-test "TensorReader positional reads are tensor-relative and preserve stream position" {
+test "Tensor.readRange reads tensor-relative ranges within the tensor" {
     const io = std.testing.io;
-    const contents = "prefix0123456789";
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
-    try file.writePositionalAll(io, contents, 0);
-
-    var path_buffer: [1024]u8 = undefined;
-    const path_len = try file.realPath(io, &path_buffer);
-    file.close(io);
-
-    var stream_buffer: [4]u8 = undefined;
-    var reader = try TensorReader.init(io, .{
-        .file_uri = path_buffer[0..path_len],
-        .name = "tensor",
-        .shape = .init(.{10}, .u8),
-        .offset = "prefix".len,
-    }, &stream_buffer, .{});
-    defer reader.deinit();
-
-    var positional: [4]u8 = undefined;
-    try reader.readPositionalAll(&positional, 3);
-    try std.testing.expectEqualStrings("3456", &positional);
-
-    var first: [2]u8 = undefined;
-    var middle: [3]u8 = undefined;
-    var last: [1]u8 = undefined;
-    try reader.readPositionalAllV(&.{ &first, &middle, &last }, 2);
-    try std.testing.expectEqualStrings("23", &first);
-    try std.testing.expectEqualStrings("456", &middle);
-    try std.testing.expectEqualStrings("7", &last);
-
-    var sequential: [4]u8 = undefined;
-    try reader.interface.readSliceAll(&sequential);
-    try std.testing.expectEqualStrings("0123", &sequential);
-
-    var empty: [0]u8 = .{};
-    try reader.readPositionalAll(&empty, 10);
-    try reader.readPositionalAllV(&.{}, 10);
-    try std.testing.expectError(error.OutOfBounds, reader.readPositionalAll(&empty, 11));
-    try std.testing.expectError(error.OutOfBounds, reader.readPositionalAllV(&.{}, 11));
-
-    var too_large: [2]u8 = undefined;
-    try std.testing.expectError(error.OutOfBounds, reader.readPositionalAll(&too_large, 9));
-
-    reader.tensor.offset = std.math.maxInt(u64);
-    var overflow: [1]u8 = undefined;
-    try std.testing.expectError(error.OutOfBounds, reader.readPositionalAll(&overflow, 0));
-    try std.testing.expectError(error.OutOfBounds, reader.readPositionalAll(&overflow, 1));
-}
-
-test "TensorReader borrowed positional readers share and do not close their file" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const file = try tmp.dir.createFile(io, "shared.bin", .{ .read = true });
     defer file.close(io);
     try file.writePositionalAll(io, "prefix0123456789", 0);
 
-    const tensor: Tensor = .{
+    var tensor: Tensor = .{
         .file_uri = "unused",
         .name = "tensor",
         .shape = .init(.{10}, .u8),
         .offset = "prefix".len,
     };
-    var first = TensorReader.initBorrowedPositional(io, tensor, file);
-    var second = TensorReader.initBorrowedPositional(io, tensor, file);
+    var middle: [4]u8 = undefined;
+    try tensor.readRange(io, file, &middle, 3);
+    try std.testing.expectEqualStrings("3456", &middle);
 
-    var left: [3]u8 = undefined;
-    var right: [3]u8 = undefined;
-    try first.readPositionalAll(&left, 1);
-    try second.readPositionalAll(&right, 6);
-    try std.testing.expectEqualStrings("123", &left);
-    try std.testing.expectEqualStrings("678", &right);
-    first.deinit();
-    second.deinit();
+    var empty: [0]u8 = .{};
+    try tensor.readRange(io, file, &empty, 10);
+    try std.testing.expectError(error.OutOfBounds, tensor.readRange(io, file, &empty, 11));
 
-    var still_open: [2]u8 = undefined;
-    _ = try file.readPositionalAll(io, &still_open, "prefix".len + 4);
-    try std.testing.expectEqualStrings("45", &still_open);
+    var too_large: [2]u8 = undefined;
+    try std.testing.expectError(error.OutOfBounds, tensor.readRange(io, file, &too_large, 9));
+
+    tensor.offset = std.math.maxInt(u64);
+    var overflow: [1]u8 = undefined;
+    try std.testing.expectError(error.OutOfBounds, tensor.readRange(io, file, &overflow, 0));
+    try std.testing.expectError(error.OutOfBounds, tensor.readRange(io, file, &overflow, 1));
 }
 
-test "TensorReader positional scatter reads batch more than IOV_MAX buffers" {
+test "Tensor.read reads the whole tensor from its file" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    try file.writePositionalAll(io, "prefix0123456789", 0);
+
+    var path_buffer: [1024]u8 = undefined;
+    const path_len = try file.realPath(io, &path_buffer);
+    file.close(io);
+
+    const tensor: Tensor = .{
+        .file_uri = path_buffer[0..path_len],
+        .name = "tensor",
+        .shape = .init(.{10}, .u8),
+        .offset = "prefix".len,
+    };
+    var whole: [10]u8 = undefined;
+    try tensor.read(io, &whole);
+    try std.testing.expectEqualStrings("0123456789", &whole);
+    try std.testing.expectError(error.OutOfBounds, tensor.read(io, whole[0..9]));
+}
+
+test "readFilePositionalAllV batches more than IOV_MAX buffers" {
     const io = std.testing.io;
     const len = max_positional_iovecs + 1;
 
@@ -530,47 +213,30 @@ test "TensorReader positional scatter reads batch more than IOV_MAX buffers" {
     defer tmp.cleanup();
 
     const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    defer file.close(io);
     var contents: [len]u8 = undefined;
     for (&contents, 0..) |*byte, i| byte.* = @truncate(i);
     try file.writePositionalAll(io, &contents, 0);
 
-    var path_buffer: [1024]u8 = undefined;
-    const path_len = try file.realPath(io, &path_buffer);
-    file.close(io);
-
-    var reader = try TensorReader.init(io, .{
-        .file_uri = path_buffer[0..path_len],
-        .name = "tensor",
-        .shape = .init(.{len}, .u8),
-        .offset = 0,
-    }, &.{}, .{});
-    defer reader.deinit();
-
     var output: [len]u8 = undefined;
     var buffers: [len][]u8 = undefined;
     for (&buffers, 0..) |*buffer, i| buffer.* = output[i..][0..1];
-    try reader.readPositionalAllV(&buffers, 0);
+    try std.testing.expectEqual(@as(u64, len), try readFilePositionalAllV(io, file, &buffers, 0, len));
     try std.testing.expectEqualSlices(u8, &contents, &output);
 }
 
-test "TensorReader borrowed positional scatter resumes short reads" {
+test "readFilePositionalAllV resumes short reads" {
     var counting: CountingPositionalIo = .{ .max_result = 1 };
     const io = counting.io();
     const file: std.Io.File = .{ .handle = 0, .flags = .{ .nonblocking = false } };
-    var reader = TensorReader.initBorrowedPositional(io, .{
-        .file_uri = "unused",
-        .name = "tensor",
-        .shape = .init(.{4}, .u8),
-        .offset = 7,
-    }, file);
 
     var output: [4]u8 = undefined;
-    try reader.readPositionalAllV(&.{ output[0..1], output[1..3], output[3..4] }, 0);
+    _ = try readFilePositionalAllV(io, file, &.{ output[0..1], output[1..3], output[3..4] }, 7, output.len);
     try std.testing.expectEqual(@as(usize, 4), counting.calls);
     try std.testing.expectEqualSlices(u8, &.{ 7, 8, 9, 10 }, &output);
 }
 
-test "TensorReader positional scatter resumes partial reads across boundaries" {
+test "advanceScatter resumes partial reads across boundaries" {
     var storage: [6]u8 = undefined;
     const buffers = [_][]u8{ storage[0..2], storage[2..2], storage[2..5], storage[5..6] };
     var index: usize = 0;
@@ -587,54 +253,40 @@ test "TensorReader positional scatter resumes partial reads across boundaries" {
     try std.testing.expectError(error.UnexpectedEndOfFile, advanceScatter(&buffers, &index, &offset, 1));
 }
 
-test "TensorReader positional reads report a truncated backing file" {
+test "Tensor.readRange reports a truncated backing file" {
     const io = std.testing.io;
-    const contents = "prefix0123456789";
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
-    try file.writePositionalAll(io, contents, 0);
+    defer file.close(io);
+    try file.writePositionalAll(io, "prefix0123456789", 0);
 
-    var path_buffer: [1024]u8 = undefined;
-    const path_len = try file.realPath(io, &path_buffer);
-    file.close(io);
-
-    var stream_buffer: [4]u8 = undefined;
-    var reader = try TensorReader.init(io, .{
-        .file_uri = path_buffer[0..path_len],
+    const tensor: Tensor = .{
+        .file_uri = "unused",
         .name = "tensor",
         .shape = .init(.{12}, .u8),
         .offset = "prefix".len,
-    }, &stream_buffer, .{});
-    defer reader.deinit();
-
+    };
     var tail: [3]u8 = undefined;
-    try std.testing.expectError(error.UnexpectedEndOfFile, reader.readPositionalAll(&tail, 9));
+    try std.testing.expectError(error.UnexpectedEndOfFile, tensor.readRange(io, file, &tail, 9));
 }
 
-test "TensorReader concurrent positional chunks preserve offsets" {
+test "concurrent Tensor.readRange calls on one file preserve offsets" {
     const io = std.testing.io;
-    const contents = "prefixABCDEFGHI";
-
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
-    try file.writePositionalAll(io, contents, 0);
+    defer file.close(io);
+    try file.writePositionalAll(io, "prefixABCDEFGHI", 0);
 
-    var path_buffer: [1024]u8 = undefined;
-    const path_len = try file.realPath(io, &path_buffer);
-    file.close(io);
-
-    var reader = try TensorReader.init(io, .{
-        .file_uri = path_buffer[0..path_len],
+    const tensor: Tensor = .{
+        .file_uri = "unused",
         .name = "tensor",
         .shape = .init(.{9}, .u8),
         .offset = "prefix".len,
-    }, &.{}, .{});
-    defer reader.deinit();
+    };
 
     var chunks: [3][3]u8 = undefined;
     var start: std.Io.Event = .unset;
@@ -644,7 +296,8 @@ test "TensorReader concurrent positional chunks preserve offsets" {
     var group: std.Io.Group = .init;
     const Job = struct {
         fn run(
-            reader_: *const TensorReader,
+            tensor_: *const Tensor,
+            file_: std.Io.File,
             destination: []u8,
             offset: u64,
             start_: *std.Io.Event,
@@ -654,7 +307,7 @@ test "TensorReader concurrent positional chunks preserve offsets" {
             io_: std.Io,
         ) std.Io.Cancelable!void {
             try start_.wait(io_);
-            reader_.readPositionalAll(destination, offset) catch unreachable;
+            tensor_.readRange(io_, file_, destination, offset) catch unreachable;
             read_done_.set(io_);
             try release_completion_.wait(io_);
             completed_.set(io_);
@@ -662,7 +315,8 @@ test "TensorReader concurrent positional chunks preserve offsets" {
     };
     for (0..3) |i| {
         try group.concurrent(io, Job.run, .{
-            &reader,
+            &tensor,
+            file,
             &chunks[i],
             i * 3,
             &start,
@@ -692,12 +346,30 @@ pub const Tensor = struct {
     shape: Shape,
     offset: u64,
 
+    pub const ReadError = std.Io.File.OpenError || ExactPositionalError;
+
     pub fn byteSize(self: Tensor) u64 {
         return self.shape.byteSize();
     }
 
-    pub fn reader(self: Tensor, io: std.Io, buffer: []u8, opts: TensorReader.InitOpts) !TensorReader {
-        return TensorReader.init(io, self, buffer, opts);
+    /// Reads the whole tensor into `buffer`, which holds exactly its bytes.
+    /// Opens `file_uri` for the call.
+    pub fn read(self: Tensor, io: std.Io, buffer: []u8) ReadError!void {
+        if (buffer.len != self.byteSize()) return error.OutOfBounds;
+        const file = try std.Io.Dir.openFile(.cwd(), io, self.file_uri, .{ .mode = .read_only });
+        defer file.close(io);
+        return self.readRange(io, file, buffer, 0);
+    }
+
+    /// Reads `buffer.len` bytes of the tensor from `tensor_offset`, relative
+    /// to its data, out of `file`, which the caller opened at `file_uri`.
+    /// The reads are positional, so concurrent calls may share one file.
+    pub fn readRange(self: Tensor, io: std.Io, file: std.Io.File, buffer: []u8, tensor_offset: u64) ExactPositionalError!void {
+        const tensor_size = self.byteSize();
+        if (tensor_offset > tensor_size or buffer.len > tensor_size - tensor_offset) return error.OutOfBounds;
+        if (buffer.len == 0) return;
+        const file_offset = std.math.add(u64, self.offset, tensor_offset) catch return error.OutOfBounds;
+        _ = try readFilePositionalAllV(io, file, &.{buffer}, file_offset, buffer.len);
     }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
@@ -715,31 +387,12 @@ pub const TensorRegistry = struct {
     arena: std.heap.ArenaAllocator,
 
     tensors: Tensors,
-    metadata: Metadatas,
-
-    mutex: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator) TensorRegistry {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .tensors = .{},
-            .metadata = .{},
         };
-    }
-
-    pub fn initWithMetadata(
-        allocator: std.mem.Allocator,
-        metadata: Metadatas,
-    ) !TensorRegistry {
-        var self: TensorRegistry = .{
-            .arena = std.heap.ArenaAllocator.init(allocator),
-            .tensors = .{},
-            .metadata = .empty,
-        };
-
-        try self.mergeMetadata(metadata);
-
-        return self;
     }
 
     pub fn fromRepo(
@@ -772,44 +425,16 @@ pub const TensorRegistry = struct {
     pub fn deinit(self: *TensorRegistry) void {
         const allocator = self.arena.allocator();
         self.tensors.deinit(allocator);
-        self.metadata.deinit(allocator);
         self.arena.deinit();
     }
 
-    pub fn mergeMetadata(
-        self: *TensorRegistry,
-        other: Metadatas,
-    ) !void {
-        // self.mutex.lock();
-        // defer self.mutex.unlock();
-
-        const allocator = self.arena.allocator();
-
-        var it = other.iterator();
-        while (it.next()) |entry| {
-            const key = try allocator.dupe(u8, entry.key_ptr.*);
-            const value = try entry.value_ptr.*.clone(allocator);
-
-            const gop = try self.metadata.getOrPut(allocator, key);
-            if (gop.found_existing) {
-                gop.value_ptr.*.deinit(allocator);
-                gop.value_ptr.* = value;
-                log.debug("Overwrote existing metadata key={s} with value={f}", .{ key, value });
-            } else {
-                gop.value_ptr.* = value;
-                log.debug("Added new metadata key={s} with value={f}", .{ key, value });
-            }
-        }
-    }
-
+    /// Adds `tensor`, its name and file URI copied. A registry a store owns
+    /// takes no more (`TensorStore.init`).
     pub fn registerTensor(
         self: *TensorRegistry,
         tensor: Tensor,
     ) !void {
         const allocator = self.arena.allocator();
-
-        // self.mutex.lock();
-        // defer self.mutex.unlock();
 
         var tensor_copy = tensor;
 
@@ -817,20 +442,6 @@ pub const TensorRegistry = struct {
         tensor_copy.file_uri = try allocator.dupe(u8, tensor.file_uri);
 
         try self.tensors.put(allocator, tensor_copy.name, tensor_copy);
-    }
-
-    pub fn reader(
-        self: *TensorRegistry,
-        io: std.Io,
-        tensor_name: []const u8,
-        buffer: []u8,
-    ) !TensorReader {
-        const tensor = self.tensors.get(tensor_name) orelse {
-            log.err("Tensor {s} not found in registry", .{tensor_name});
-            return error.TensorNotFound;
-        };
-
-        return try .init(io, tensor, buffer, .{});
     }
 
     pub fn iterator(self: *TensorRegistry) Tensors.Iterator {
@@ -848,6 +459,52 @@ pub const TensorRegistry = struct {
         return total;
     }
 };
+
+/// The registry of the checkpoint whose entrypoint `model` is open at
+/// `model_path` in `repo`: one safetensors file, or an index of the files
+/// of `repo` to read.
+fn fetchRegistry(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    repo: std.Io.Dir,
+    model: std.Io.File,
+    model_path: []const u8,
+) !TensorRegistry {
+    if (std.mem.endsWith(u8, model_path, ".safetensors.index.json")) {
+        const file_reader_buf = try allocator.alloc(u8, 64 * 1024);
+        defer allocator.free(file_reader_buf);
+
+        var index_reader = model.reader(io, file_reader_buf);
+
+        var safetensors_index = try parseSafetensorsIndex(
+            allocator,
+            &index_reader.interface,
+        );
+        defer safetensors_index.deinit();
+
+        var registry: TensorRegistry = .init(allocator);
+        errdefer registry.deinit();
+
+        try parseSafetensorsIndexFiles(
+            allocator,
+            io,
+            &registry,
+            safetensors_index,
+            repo,
+        );
+
+        return registry;
+    }
+    if (std.mem.endsWith(u8, model_path, ".safetensors")) {
+        var registry: TensorRegistry = .init(allocator);
+        errdefer registry.deinit();
+
+        try parseSafetensors(allocator, io, &registry, model);
+
+        return registry;
+    }
+    return error.InvalidPath;
+}
 
 pub fn parseSafetensors(
     allocator: std.mem.Allocator,
@@ -891,17 +548,8 @@ pub fn parseSafetensors(
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
 
-        if (std.mem.eql(u8, key, "__metadata__")) {
-            // Parse metadata into a local arena to avoid concurrent allocations
-            // against registry.arena (which is not thread-safe).
-            var local_arena = std.heap.ArenaAllocator.init(allocator);
-            defer local_arena.deinit();
-
-            const metas = try parseMetadata(local_arena.allocator(), value);
-            try registry.mergeMetadata(metas);
-
-            continue;
-        }
+        // Free-form strings, which nothing reads.
+        if (std.mem.eql(u8, key, "__metadata__")) continue;
 
         const shape_field = value.object.get("shape").?.array;
 
@@ -993,29 +641,21 @@ test "parseSafetensors rejects a header or data_offsets that run backward, overf
 }
 
 const SafetensorsIndex = struct {
-    pub const Map = std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8));
-
     arena: std.heap.ArenaAllocator,
 
-    map: Map,
-    metadata: Metadatas,
+    /// The files the index's `weight_map` names, each once.
+    files: std.StringArrayHashMapUnmanaged(void),
 
     pub fn init(allocator: std.mem.Allocator) SafetensorsIndex {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .map = .empty,
-            .metadata = .empty,
+            .files = .empty,
         };
-    }
-
-    pub fn iterator(self: *SafetensorsIndex) Map.Iterator {
-        return self.map.iterator();
     }
 
     pub fn deinit(self: *SafetensorsIndex) void {
         const allocator = self.arena.allocator();
-        self.map.deinit(allocator);
-        self.metadata.deinit(allocator);
+        self.files.deinit(allocator);
         self.arena.deinit();
     }
 };
@@ -1043,23 +683,10 @@ fn parseSafetensorsIndex(
         var it = wm.object.iterator();
 
         while (it.next()) |entry| {
-            const weight_name = entry.key_ptr.*;
-            const filename = entry.value_ptr.string;
-
-            const map_entry = try safetensors_index.map.getOrPut(arena_allocator, filename);
-
-            if (!map_entry.found_existing) {
-                map_entry.value_ptr.* = .empty;
-            }
-
-            try map_entry.value_ptr.append(arena_allocator, try arena_allocator.dupe(u8, weight_name));
+            try safetensors_index.files.put(arena_allocator, entry.value_ptr.string, {});
         }
     } else {
         log.warn("No weight_map attribute found in index", .{});
-    }
-
-    if (index.object.get("metadata")) |metadata_val| {
-        safetensors_index.metadata = try parseMetadata(arena_allocator, metadata_val);
     }
 
     return safetensors_index;
@@ -1072,21 +699,11 @@ fn parseSafetensorsIndexFiles(
     safetensors_index: SafetensorsIndex,
     repo: std.Io.Dir,
 ) !void {
-    const filenames = safetensors_index.map.keys();
+    const filenames = safetensors_index.files.keys();
     for (filenames) |filename| {
         const file = try repo.openFile(io, filename, .{});
         defer file.close(io);
         try parseSafetensors(allocator, io, registry, file);
-    }
-}
-
-pub fn resolveFiletype(path: []const u8) FileType {
-    if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
-        return .index;
-    } else if (std.mem.endsWith(u8, path, ".safetensors")) {
-        return .safetensors;
-    } else {
-        return .unknown;
     }
 }
 
@@ -1130,7 +747,7 @@ pub fn resolveModelRepo(
     return dir;
 }
 
-pub fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionError!struct { std.Io.File, []const u8 } {
+fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionError!struct { std.Io.File, []const u8 } {
     // When neither opens, a denied probe is what is reported. On S3 it may
     // mean absent: a bucket that may not be listed answers 403 for a
     // missing key.
@@ -1200,143 +817,6 @@ test "resolveModelEntrypoint falls back past a denied index and reports a denied
     try server.check();
 }
 
-const Metadata = union(enum) {
-    null: void,
-    int: i64,
-    float: f64,
-    bool: bool,
-    string: []const u8,
-
-    array_bool: []const bool,
-    array_int: []const i64,
-    array_float: []const f64,
-    array_string: []const []const u8,
-
-    pub const ItemType = enum {
-        int,
-        float,
-        bool,
-        string,
-
-        pub fn toZigType(comptime kind: ItemType) type {
-            return switch (kind) {
-                .int => i64,
-                .float => f64,
-                .bool => bool,
-                .string => []const u8,
-            };
-        }
-    };
-
-    pub fn wrap(x: anytype) Metadata {
-        return switch (@TypeOf(x)) {
-            inline u8, i8, u16, i16, u32, i32, u64, i64 => .{ .int = @intCast(x) },
-            inline f16, f32, f64 => .{ .float = @floatCast(x) },
-            bool => .{ .bool = x },
-            []const u8 => .{ .string = x },
-            else => @panic("Unsupported type for Value: " ++ @typeName(@TypeOf(x))),
-        };
-    }
-
-    pub fn copySlice(allocator: std.mem.Allocator, any_slice: anytype) !Metadata {
-        return switch (@TypeOf(any_slice[0])) {
-            inline u8, i8, u16, i16, u32, i32, u64, i64 => {
-                const res = try allocator.alloc(i64, any_slice.len);
-                for (res, any_slice) |*r, val| r.* = @intCast(val);
-                return .{ .array_int = res };
-            },
-            inline f16, f32, f64 => {
-                const res = try allocator.alloc(f64, any_slice.len);
-                for (res, any_slice) |*r, val| r.* = @floatCast(val);
-                return .{ .array_float = res };
-            },
-            bool => .{ .array_bool = try allocator.dupe(bool, any_slice) },
-            []const u8 => .{ .array_string = try allocator.dupe([]const u8, @alignCast(any_slice)) },
-            else => @panic("Unsupported type for Value: " ++ @typeName(@TypeOf(any_slice))),
-        };
-    }
-
-    pub fn format(
-        self: Metadata,
-        writer: *std.Io.Writer,
-    ) !void {
-        switch (self) {
-            .null => _ = try writer.write("null"),
-            .string => |s| try writer.print("{s}", .{s}),
-            .bool => |b| try writer.print("{}", .{b}),
-            .int => |i| try writer.print("{d}", .{i}),
-            .float => |f| try writer.print("{d}", .{f}),
-            .array_bool => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("{}", .{v});
-                }
-                try writer.writeByte(']');
-            },
-            .array_int => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("{d}", .{v});
-                }
-                try writer.writeByte(']');
-            },
-            .array_float => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("{d}", .{v});
-                }
-                try writer.writeByte(']');
-            },
-            .array_string => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("\"{s}\"", .{v});
-                }
-                try writer.writeByte(']');
-            },
-        }
-    }
-
-    pub fn deinit(self: Metadata, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .string => |s| allocator.free(s),
-            .array_bool => |s| allocator.free(s),
-            .array_int => |s| allocator.free(s),
-            .array_float => |s| allocator.free(s),
-            .array_string => |s| {
-                for (s) |str| allocator.free(str);
-                allocator.free(s);
-            },
-            else => {},
-        }
-    }
-
-    pub fn clone(self: Metadata, allocator: std.mem.Allocator) !Metadata {
-        return switch (self) {
-            .null => .null,
-            .int => |v| .{ .int = v },
-            .float => |v| .{ .float = v },
-            .bool => |v| .{ .bool = v },
-            .string => |s| .{ .string = try allocator.dupe(u8, s) },
-            .array_bool => |s| .{ .array_bool = try allocator.dupe(bool, s) },
-            .array_int => |s| .{ .array_int = try allocator.dupe(i64, s) },
-            .array_float => |s| .{ .array_float = try allocator.dupe(f64, s) },
-            .array_string => |s| blk: {
-                const new_slice = try allocator.alloc([]const u8, s.len);
-                errdefer allocator.free(new_slice);
-                for (s, 0..) |str, i| {
-                    new_slice[i] = try allocator.dupe(u8, str);
-                }
-                break :blk .{ .array_string = new_slice };
-            },
-        };
-    }
-};
-
 fn stringToDtype(safetensor_type: []const u8) !DataType {
     const map = std.StaticStringMap(DataType).initComptime(.{
         .{ "F64", .f64 },
@@ -1361,97 +841,4 @@ fn stringToDtype(safetensor_type: []const u8) !DataType {
         log.err("Unsupported safetensor data type: {s}", .{safetensor_type});
         return error.UnsupportedDataType;
     };
-}
-
-fn parseMetadata(allocator: std.mem.Allocator, val: std.json.Value) !Metadatas {
-    var metadatas: Metadatas = .{};
-    var prefix_buf: [1024]u8 = undefined;
-    var prefix = StringBuilder.initBuffer(&prefix_buf);
-
-    try populateMetadata(allocator, &prefix, val, &metadatas);
-
-    return metadatas;
-}
-
-fn populateMetadata(allocator: std.mem.Allocator, prefix: *StringBuilder, val: std.json.Value, metadatas: *Metadatas) !void {
-    const key = prefix.items;
-    return switch (val) {
-        .null => try metadatas.put(allocator, try allocator.dupe(u8, key), .null),
-        .bool => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .bool = v }),
-        .integer => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .int = v }),
-        .float => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .float = v }),
-        .number_string, .string => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .string = try allocator.dupe(u8, v) }),
-        .array => |v| {
-            if (v.items.len == 0) return;
-            if (validSlice(v)) |item_type| {
-                const data: Metadata = switch (item_type) {
-                    .bool => blk: {
-                        const values = try allocator.alloc(bool, v.items.len);
-                        for (v.items, 0..) |item, i| values[i] = item.bool;
-                        break :blk .{ .array_bool = values };
-                    },
-                    .integer => blk: {
-                        const values = try allocator.alloc(i64, v.items.len);
-                        for (v.items, 0..) |item, i| values[i] = item.integer;
-                        break :blk .{ .array_int = values };
-                    },
-                    .float => blk: {
-                        const values = try allocator.alloc(f64, v.items.len);
-                        for (v.items, 0..) |item, i| values[i] = item.float;
-                        break :blk .{ .array_float = values };
-                    },
-                    inline .string, .number_string => |tag| blk: {
-                        const values = try allocator.alloc([]const u8, v.items.len);
-                        for (v.items, 0..) |item, i| {
-                            values[i] = try allocator.dupe(u8, @field(item, @tagName(tag)));
-                        }
-                        break :blk .{ .array_string = values };
-                    },
-                    .null, .array, .object => unreachable,
-                };
-                try metadatas.put(allocator, try allocator.dupe(u8, key), data);
-            } else {
-                for (v.items, 0..) |item, i| {
-                    const old_len = prefix.items.len;
-                    if (prefix.items.len > 0) {
-                        prefix.appendAssumeCapacity('.');
-                    }
-                    prefix.items.len += std.fmt.printInt(prefix.unusedCapacitySlice(), i, 10, .lower, .{});
-                    try populateMetadata(allocator, prefix, item, metadatas);
-                    prefix.items.len = old_len;
-                }
-            }
-        },
-        .object => |v| {
-            var obj_iter = v.iterator();
-            while (obj_iter.next()) |entry| {
-                const old_len = prefix.items.len;
-                if (prefix.items.len > 0) {
-                    prefix.appendAssumeCapacity('.');
-                }
-                prefix.appendSliceAssumeCapacity(entry.key_ptr.*);
-                try populateMetadata(allocator, prefix, entry.value_ptr.*, metadatas);
-                prefix.items.len = old_len;
-            }
-        },
-    };
-}
-
-/// We can only create a Zig slice out of json array, if all values
-/// in the array have the same type.
-fn validSlice(v: std.json.Array) ?std.meta.Tag(std.json.Value) {
-    if (v.items.len == 0) return null;
-
-    const item_type: std.meta.Tag(std.json.Value) = v.items[0];
-    switch (item_type) {
-        .null, .array, .object => return null,
-        else => {},
-    }
-
-    for (v.items[1..]) |item| {
-        if (item != item_type)
-            return null;
-    }
-
-    return item_type;
 }

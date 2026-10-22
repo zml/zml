@@ -583,16 +583,13 @@ pub fn bindProgram(inputs: []const Input, output: Shape, program: anytype) Tenso
 }
 
 /// Lowers sources to byte parts of the checkpoint tensors they read, each
-/// tensor deduplicated and copied once for the binding to own.
+/// tensor listed once.
 const Lowering = struct {
     store: *TensorStore,
     arena: std.mem.Allocator,
-    tensors: std.ArrayList(*safetensors.Tensor) = .empty,
-    /// Each `View.source` copies its registry entry, and the copies share
-    /// the entry's name: the key identifies the entry, not the copy.
-    indices: std.AutoHashMapUnmanaged(Entry, u32) = .empty,
-
-    const Entry = struct { name: [*]const u8, len: usize, offset: u64 };
+    tensors: std.ArrayList(*const safetensors.Tensor) = .empty,
+    /// By registry entry, the tensor's identity.
+    indices: std.AutoHashMapUnmanaged(*const safetensors.Tensor, u32) = .empty,
 
     fn init(store: *TensorStore) Lowering {
         return .{ .store = store, .arena = store.arena.allocator() };
@@ -607,12 +604,9 @@ const Lowering = struct {
         const source = input.source;
         const parts = self.arena.alloc(TensorStore.Part, source.pieces.len) catch oom();
         for (source.pieces, parts) |piece, *part| {
-            const entry: Entry = .{ .name = piece.tensor.name.ptr, .len = piece.tensor.name.len, .offset = piece.tensor.offset };
-            const found = self.indices.getOrPut(self.store.allocator, entry) catch oom();
+            const found = self.indices.getOrPut(self.store.allocator, piece.tensor) catch oom();
             if (!found.found_existing) {
-                const copy = self.arena.create(safetensors.Tensor) catch oom();
-                copy.* = piece.tensor.*;
-                self.tensors.append(self.arena, copy) catch oom();
+                self.tensors.append(self.arena, piece.tensor) catch oom();
                 found.value_ptr.* = @intCast(self.tensors.items.len - 1);
             }
             part.* = lowerPiece(self.arena, source._shape, piece);
@@ -959,15 +953,31 @@ const Buffer = @import("../buffer.zig").Buffer;
 /// A checkpoint of in-memory tensors (the registry points nowhere) and the
 /// bytes each holds.
 const TestCheckpoint = struct {
-    registry: safetensors.TensorRegistry,
     store: TensorStore,
     bytes: std.StringHashMapUnmanaged([]u8) = .empty,
     allocator: std.mem.Allocator,
-    next_offset: u64 = 0,
 
-    fn init(self: *TestCheckpoint, allocator: std.mem.Allocator) void {
-        self.* = .{ .registry = .init(allocator), .store = undefined, .allocator = allocator };
-        self.store = .fromRegistry(allocator, &self.registry, &.{});
+    const Entry = struct { name: []const u8, shape: Shape };
+
+    /// Registers `entries` end to end, each holding distinct bytes.
+    fn init(self: *TestCheckpoint, allocator: std.mem.Allocator, entries: []const Entry) !void {
+        var registry: safetensors.TensorRegistry = .init(allocator);
+        {
+            errdefer registry.deinit();
+            var offset: u64 = 0;
+            for (entries) |entry| {
+                try registry.registerTensor(.{ .file_uri = "memory", .name = entry.name, .shape = entry.shape, .offset = offset });
+                offset += entry.shape.byteSize();
+            }
+        }
+        self.* = .{ .store = .init(allocator, registry, .{}), .allocator = allocator };
+        errdefer self.deinit();
+        for (entries, 0..) |entry, index| {
+            const bytes = try allocator.alloc(u8, entry.shape.byteSize());
+            errdefer allocator.free(bytes);
+            for (bytes, 0..) |*byte, i| byte.* = @truncate(i *% 7 +% index *% 61 +% 1);
+            try self.bytes.put(allocator, self.store.registry.tensors.getKey(entry.name).?, bytes);
+        }
     }
 
     fn deinit(self: *TestCheckpoint) void {
@@ -975,16 +985,6 @@ const TestCheckpoint = struct {
         while (it.next()) |bytes| self.allocator.free(bytes.*);
         self.bytes.deinit(self.allocator);
         self.store.deinit();
-        self.registry.deinit();
-    }
-
-    /// Registers `name` of `shape` holding distinct bytes.
-    fn add(self: *TestCheckpoint, name: []const u8, shape_: Shape) !void {
-        try self.registry.registerTensor(.{ .file_uri = "memory", .name = name, .shape = shape_, .offset = self.next_offset });
-        self.next_offset += shape_.byteSize();
-        const bytes = try self.allocator.alloc(u8, shape_.byteSize());
-        for (bytes, 0..) |*byte, i| byte.* = @truncate(i *% 7 +% self.bytes.count() *% 61 +% 1);
-        try self.bytes.put(self.allocator, self.registry.tensors.getKey(name).?, bytes);
     }
 
     /// The bytes the loader would assemble for `tensor`, placed on the host.
@@ -1196,18 +1196,19 @@ fn inputShape(comptime dims_: anytype) Shape {
 fn expectCase(comptime Case: type, name: []const u8) !void {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var checkpoint: TestCheckpoint = undefined;
-    checkpoint.init(allocator);
-    defer checkpoint.deinit();
     const n = Case.inputs.len;
     var names: [n][]const u8 = undefined;
     var name_buffers: [n][16]u8 = undefined;
     var shapes: [n]Shape = undefined;
+    var entries: [n]TestCheckpoint.Entry = undefined;
     inline for (Case.inputs, 0..) |dims_, i| {
         names[i] = try std.fmt.bufPrint(&name_buffers[i], "input{d}", .{i});
         shapes[i] = inputShape(dims_);
-        try checkpoint.add(names[i], shapes[i]);
+        entries[i] = .{ .name = names[i], .shape = shapes[i] };
     }
+    var checkpoint: TestCheckpoint = undefined;
+    try checkpoint.init(allocator, &entries);
+    defer checkpoint.deinit();
 
     var sources: [n]Source = undefined;
     for (&sources, names, shapes) |*s, input_name, shape_| s.* = checkpoint.store.view().source(input_name, null).withTags(shape_);
@@ -1280,11 +1281,12 @@ test "every Source op places the bytes the same Tensor ops compute" {
 
 test "a whole checkpoint tensor binds plainly, any other source as byte parts" {
     var checkpoint: TestCheckpoint = undefined;
-    checkpoint.init(std.testing.allocator);
+    try checkpoint.init(std.testing.allocator, &.{
+        .{ .name = "q", .shape = .init(.{ 4, 3 }, .u16) },
+        .{ .name = "k", .shape = .init(.{ 2, 3 }, .u16) },
+        .{ .name = "v", .shape = .init(.{ 2, 3 }, .u16) },
+    });
     defer checkpoint.deinit();
-    try checkpoint.add("q", .init(.{ 4, 3 }, .u16));
-    try checkpoint.add("k", .init(.{ 2, 3 }, .u16));
-    try checkpoint.add("v", .init(.{ 2, 3 }, .u16));
     const view = checkpoint.store.view();
     const q = view.source("q", .{ .row, .col });
 
@@ -1295,6 +1297,10 @@ test "a whole checkpoint tensor binds plainly, any other source as byte parts" {
     try std.testing.expect(plain_binding.layout == null);
     try std.testing.expectEqual(Memory.Kind.host_pinned, plain_binding.memory);
     try std.testing.expectEqualStrings("q", plain_binding.tensors[0].name);
+    // One checkpoint tensor read twice, through two sources, is one tensor
+    // of the binding.
+    const twice = Source.concatenate(&.{ q, view.source("q", .{ .row, .col }) }, .row).bind(.replicated, .{}, .{});
+    try std.testing.expectEqual(@as(usize, 1), checkpoint.store.getSourcesById(twice.id).?.tensors.len);
 
     // q, k and v in two groups: each member is one part of two runs, its
     // rows of a group side by side with the others'.
@@ -1319,26 +1325,29 @@ test "a whole checkpoint tensor binds plainly, any other source as byte parts" {
 }
 
 test "lattices stay one piece per source at checkpoint sizes" {
-    var checkpoint: TestCheckpoint = undefined;
-    checkpoint.init(std.testing.allocator);
-    defer checkpoint.deinit();
     // Registered without bytes: nothing is evaluated.
-    try checkpoint.registry.registerTensor(.{ .file_uri = "memory", .name = "gate", .shape = .init(.{ 14336, 4096 }, .bf16), .offset = 0 });
-    try checkpoint.registry.registerTensor(.{ .file_uri = "memory", .name = "up", .shape = .init(.{ 14336, 4096 }, .bf16), .offset = 0 });
-    const view = checkpoint.store.view();
+    var store: TensorStore = store: {
+        var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
+        errdefer registry.deinit();
+        try registry.registerTensor(.{ .file_uri = "memory", .name = "gate", .shape = .init(.{ 14336, 4096 }, .bf16), .offset = 0 });
+        try registry.registerTensor(.{ .file_uri = "memory", .name = "up", .shape = .init(.{ 14336, 4096 }, .bf16), .offset = 0 });
+        break :store .init(std.testing.allocator, registry, .{});
+    };
+    defer store.deinit();
+    const view = store.view();
     const members = [_]Source{ view.source("gate", .{ .row, .col }), view.source("up", .{ .row, .col }) };
 
     // One row per group: two pieces, each 14336 runs of one row.
     const finest = cases.interleave(Source, &members, 14336);
     try std.testing.expectEqual(@as(usize, 2), finest.pieces.len);
-    const finest_binding = checkpoint.store.getSourcesById(finest.bind(.replicated, .{}, .{}).id).?;
+    const finest_binding = store.getSourcesById(finest.bind(.replicated, .{}, .{}).id).?;
     for (finest_binding.layout.?.parts) |part| {
         try std.testing.expectEqual(@as(u64, 14336), part.chunks());
         try std.testing.expectEqual(@as(u64, 8192), part.width);
     }
     // One group per device of four: four runs of 28 MiB each.
     const per_shard = cases.interleave(Source, &members, 4);
-    for (checkpoint.store.getSourcesById(per_shard.bind(.replicated, .{}, .{}).id).?.layout.?.parts) |part| {
+    for (store.getSourcesById(per_shard.bind(.replicated, .{}, .{}).id).?.layout.?.parts) |part| {
         try std.testing.expectEqual(@as(u64, 4), part.chunks());
         try std.testing.expectEqual(@as(u64, 3584 * 8192), part.width);
     }

@@ -197,9 +197,6 @@ pub fn main(init: std.process.Init) !void {
                 "ZML_DMA_BENCH_BLOCK_MIB",
                 &zml.io.dma_calibration.default_block_sizes,
             );
-            var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
-            defer registry.deinit();
-
             const tensor_parallel: *const zml.Mesh = try platform.registerMesh(
                 "tp",
                 .mesh(.{ .model = .high_bandwidth }),
@@ -207,7 +204,8 @@ pub fn main(init: std.process.Init) !void {
             const tp_partitioning: zml.Sharding.Partitioning = .init(&.{.sharded(@intCast(tensor_parallel.resolveLogicalAxis("model").?))});
             const column_partitioning: zml.Sharding.Partitioning = .init(&.{ .replicated, .sharded(@intCast(tensor_parallel.resolveLogicalAxis("model").?)) });
 
-            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{tensor_parallel});
+            const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+            var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &.{tensor_parallel} });
             defer store.deinit();
 
             // Expert-pack instrument: N tensors a stack program computes
@@ -220,7 +218,7 @@ pub fn main(init: std.process.Init) !void {
                 .max_elements = try envUsize(init.environ_map, "ZML_LOAD_PACK_MAX_ELEMENTS", std.math.maxInt(i32)),
             };
             if (pack_options.width == 0) return error.InvalidArgument;
-            const pack_plan = try planPacks(init.arena.allocator(), platform, &registry, &store, pack_options);
+            const pack_plan = try planPacks(init.arena.allocator(), platform, &store, pack_options);
             if (pack_options.packs > 0) {
                 log.info("pack plan: packs={d} requested={d} width={d} bytes={Bi:.2}", .{
                     pack_plan.packs.len,
@@ -235,7 +233,7 @@ pub fn main(init: std.process.Init) !void {
                 packs: []zml.Tensor,
             };
 
-            const tensor_count = registry.tensors.count() - pack_plan.packed_count;
+            const tensor_count = store.registry.tensors.count() - pack_plan.packed_count;
 
             const tensors = try allocator.alloc(zml.Tensor, tensor_count);
             defer allocator.free(tensors);
@@ -247,7 +245,7 @@ pub fn main(init: std.process.Init) !void {
                 return error.InvalidArgument;
             };
 
-            var registry_it = registry.iterator();
+            var registry_it = store.registry.iterator();
             var registry_index: usize = 0;
             var load_count: usize = 0;
             while (registry_it.next()) |entry| : (registry_index += 1) {
@@ -370,12 +368,11 @@ const PackPlan = struct {
 fn planPacks(
     arena: std.mem.Allocator,
     platform: *const zml.Platform,
-    registry: *const zml.safetensors.TensorRegistry,
     store: *zml.io.TensorStore,
     options: PackOptions,
 ) !PackPlan {
-    const keys = registry.tensors.keys();
-    const entries = registry.tensors.values();
+    const keys = store.registry.tensors.keys();
+    const entries = store.registry.tensors.values();
     const packed_mask = try arena.alloc(bool, entries.len);
     @memset(packed_mask, false);
 
@@ -496,9 +493,7 @@ fn checkPacks(
         const expected = try allocator.alloc(u8, source_bytes);
         defer allocator.free(expected);
         for (sources, 0..) |source, expert| {
-            var reader = try source.reader(io, &.{}, .{});
-            defer reader.deinit();
-            try reader.readPositionalAll(expected, 0);
+            try source.read(io, expected);
             const actual = packed_bytes[expert * source_bytes ..][0..source_bytes];
             if (!std.mem.eql(u8, expected, actual)) {
                 log.err("pack check: mismatch pack={d} expert={d} source={s}", .{ sample, expert, source.name });
@@ -529,7 +524,7 @@ fn checkLoaded(
 ) !void {
     std.debug.assert(tensors.len == buffers.len);
     const Eligibility = struct {
-        fn source(store_: *const zml.io.TensorStore, tensor: zml.Tensor, buffer: zml.Buffer) ?*zml.safetensors.Tensor {
+        fn source(store_: *const zml.io.TensorStore, tensor: zml.Tensor, buffer: zml.Buffer) ?*const zml.safetensors.Tensor {
             const sources = (store_.getSourcesById(tensor.id) orelse return null).tensors;
             if (sources.len != 1) return null;
             const partitioned = buffer.byteSize() / buffer.numShards() != tensor.byteSize();
@@ -574,9 +569,7 @@ fn checkLoaded(
             expected = &.{};
             expected = try allocator.alloc(u8, source_bytes);
         }
-        var reader = zml.safetensors.TensorReader.initBorrowedPositional(io, source.*, file);
-        defer reader.deinit();
-        try reader.readPositionalAll(expected[0..source_bytes], 0);
+        try source.readRange(io, file, expected[0..source_bytes], 0);
 
         if (buffer.byteSize() / buffer.numShards() == source_bytes) {
             // Every shard holds the whole tensor: compare each replica.

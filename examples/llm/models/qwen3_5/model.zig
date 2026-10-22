@@ -132,7 +132,7 @@ pub const Model = struct {
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, gen_options: GenOptions) !Model {
         // For some Qwen3.5 versions, the output projection lm_head has a standalone weight tensor, while for others it's the same as the input embedding layer
         const lm_head_prefix = b: {
-            if (store.hasKey("lm_head.weight")) break :b "lm_head";
+            if (store.get("lm_head.weight") != null) break :b "lm_head";
             break :b "model.language_model.embed_tokens";
         };
         return .{

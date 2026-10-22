@@ -27,7 +27,7 @@ const log = @import("log.zig").load;
 const staging_tensors: usize = 12;
 
 pub const Loader = struct {
-    pub const AwaitError = std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError || std.Io.File.Reader.SeekError || safetensors.TensorReader.ReadPositionalError || backend.PartsError;
+    pub const AwaitError = std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError || safetensors.ExactPositionalError || backend.PartsError;
     /// A submission refuses on the sticky error, so it fails as an await does.
     pub const SubmitError = AwaitError;
 
@@ -187,19 +187,19 @@ pub const Loader = struct {
         for (spec.parts) |*current| {
             part.* = current;
             stage.* = "open source for";
-            var reader = try current.source.reader(self.io, &.{}, .{});
-            defer reader.deinit();
+            const file = try std.Io.Dir.openFile(.cwd(), self.io, current.source.file_uri, .{ .mode = .read_only });
+            defer file.close(self.io);
             stage.* = "read";
             const start: usize = @intCast(current.dst_offset);
             if (current.dims.len == 0) {
-                try self.readInto(&reader, current.src_offset, tensor[start..][0..@intCast(current.width)]);
+                try self.readInto(current.source, file, current.src_offset, tensor[start..][0..@intCast(current.width)]);
                 continue;
             }
             // A strided part: its source range once, then each run where it lands.
             const lattice = current.lattice();
             const source = try self.allocator.alloc(u8, @intCast(lattice.spans().?.src));
             defer self.allocator.free(source);
-            try self.readInto(&reader, current.src_offset, source);
+            try self.readInto(current.source, file, current.src_offset, source);
             lattice.copyRuns(0, lattice.runs(), @intFromPtr(tensor.ptr), @intFromPtr(source.ptr) -% @as(usize, @intCast(current.src_offset)));
         }
         stage.* = "transfer";
@@ -214,19 +214,23 @@ pub const Loader = struct {
         );
     }
 
-    /// Fills `destination` from `reader`'s bytes at `source_offset`,
-    /// splitting it across helper tasks when the source permits are free.
-    /// The permits are released before the caller's transfer, so a tensor
-    /// staging to the device lends its read budget to one still reading.
+    /// Fills `destination` from `source`'s bytes at `source_offset`, read
+    /// from `file`, splitting it across helper tasks when the source permits
+    /// are free. The permits are released before the caller's transfer, so a
+    /// tensor staging to the device lends its read budget to one still
+    /// reading.
     fn readInto(
         self: *Loader,
-        reader: *const safetensors.TensorReader,
+        source: *const safetensors.Tensor,
+        file: std.Io.File,
         source_offset: u64,
         destination: []u8,
-    ) safetensors.TensorReader.ReadPositionalError!void {
+    ) safetensors.ExactPositionalError!void {
         if (destination.len == 0) return;
         var work: ChunkedRead = .{
-            .reader = reader,
+            .io = self.io,
+            .source = source,
+            .file = file,
             .source_offset = source_offset,
             .destination = destination,
             .chunk_size = self.read_chunk_size,
@@ -384,8 +388,8 @@ const ReadPermits = struct {
 };
 
 /// One tensor's read, claimed from a shared byte cursor by the owning task
-/// and its helpers. Positional reads do not move the reader, so they can run
-/// concurrently on one `TensorReader`.
+/// and its helpers. Positional reads leave the file as it was, so they can
+/// run concurrently on one file.
 ///
 /// A claim is the tensor split `workers` ways, and never smaller than the
 /// profile's `read_chunk_size` -- that field is a minimum request size, and
@@ -394,7 +398,9 @@ const ReadPermits = struct {
 /// read, exactly as before this splitting existed, and only the concurrency
 /// the source can actually carry turns into extra requests.
 const ChunkedRead = struct {
-    reader: *const safetensors.TensorReader,
+    io: std.Io,
+    source: *const safetensors.Tensor,
+    file: std.Io.File,
     /// Where `destination` starts in the tensor's bytes.
     source_offset: u64 = 0,
     destination: []u8,
@@ -415,7 +421,7 @@ const ChunkedRead = struct {
     fn readOne(self: *ChunkedRead) bool {
         if (self.failure.load(.acquire) != 0) return false;
         const span = self.claim() orelse return false;
-        self.reader.readPositionalAll(span.bytes, self.source_offset + span.offset) catch |err| {
+        self.source.readRange(self.io, self.file, span.bytes, self.source_offset + span.offset) catch |err| {
             _ = self.failure.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
             return false;
         };
@@ -534,7 +540,9 @@ const StagingPool = struct {
 test "chunked read splits a tensor only as wide as it has workers" {
     var destination: [1000]u8 = undefined;
     var work: ChunkedRead = .{
-        .reader = undefined,
+        .io = undefined,
+        .source = undefined,
+        .file = undefined,
         .destination = &destination,
         .chunk_size = 100,
     };
