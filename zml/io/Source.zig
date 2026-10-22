@@ -980,7 +980,7 @@ const TestCheckpoint = struct {
     /// so that every byte is written exactly once, by a piece or the zero
     /// fill: the loader relies on disjoint pieces and does not check them.
     fn assemble(self: *TestCheckpoint, tensor: Tensor) ![]u8 {
-        const source = self.store.getSourcesById(tensor.id).?.load.source;
+        const source = self.store.bindingOf(tensor.id).?.load.source;
         const out = try self.allocator.alloc(u8, tensor.shape().byteSize());
         errdefer self.allocator.free(out);
         @memset(out, 0);
@@ -1258,7 +1258,7 @@ test "every Source op places the bytes the same Tensor ops compute" {
 
 /// The byte parts the loader lowers `tensor`'s pieces to, in piece order.
 fn testParts(arena: std.mem.Allocator, store: *const TensorStore, tensor: Tensor) ![]backend.LoadPart {
-    const source = store.getSourcesById(tensor.id).?.load.source;
+    const source = store.bindingOf(tensor.id).?.load.source;
     const parts = try arena.alloc(backend.LoadPart, source._pieces.len);
     for (parts, source._pieces) |*part, piece| part.* = try lowerPiece(arena, source.shape, piece);
     return parts;
@@ -1283,11 +1283,11 @@ test "a source binds as its pieces, which the loader lowers to byte parts" {
     const relabeled = q.splitAxis(.row, .{ .h = 2, .hd = 2 }).merge(.{ .row = .{ .h, .hd } }).withPartitioning(.replicated, .{});
     try std.testing.expectEqual(@as(usize, 0), checkpoint.store.id_to_sources.count());
     const plain = relabeled.bind();
-    try std.testing.expectEqual(entries[0], checkpoint.store.getSourcesById(plain.id).?.load.source.whole().?);
+    try std.testing.expectEqual(entries[0], checkpoint.store.bindingOf(plain.id).?.load.source.whole().?);
     try std.testing.expectEqualDeep(&[_]backend.LoadPart{.whole(entries[0])}, try testParts(arena.allocator(), &checkpoint.store, plain));
     // One checkpoint tensor read twice is two pieces of it.
     const twice = Source.concatenate(&.{ q, view.source("q", .{ .row, .col }) }, .row).withPartitioning(.replicated, .{}).bind();
-    try std.testing.expectEqual(null, checkpoint.store.getSourcesById(twice.id).?.load.source.whole());
+    try std.testing.expectEqual(null, checkpoint.store.bindingOf(twice.id).?.load.source.whole());
     try std.testing.expectEqualDeep(&[_]backend.LoadPart{
         .{ .source = entries[0], .dst_offset = 0, .width = 24 },
         .{ .source = entries[0], .dst_offset = 24, .width = 24 },
@@ -1338,7 +1338,7 @@ test "a source is placed last, by as or withPartitioning, and binds in its place
     const placed_source = transposed.as(placed);
     const flat = placed_source.bind();
     try std.testing.expect(flat.shape().eqlWithTagsAndPartitioning(placed));
-    try std.testing.expect(checkpoint.store.getSourcesById(flat.id).?.load.source.shape.eqlWithTagsAndPartitioning(placed));
+    try std.testing.expect(checkpoint.store.bindingOf(flat.id).?.load.source.shape.eqlWithTagsAndPartitioning(placed));
     const replicated = transposed.withPartitioning(.replicated, .{}).bind();
     try std.testing.expect(replicated.shape().eqlWithTags(transposed.shape()));
     try std.testing.expectEqual(null, replicated.shape()._sharding.mesh);

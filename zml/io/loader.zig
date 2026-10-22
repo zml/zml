@@ -97,18 +97,19 @@ pub const Loader = struct {
     /// returns the first error. A model whose bindings are wrong is
     /// `InvalidBinding`, logged at err with the tensor, the key its source
     /// reads (a source that reads nothing has none) and the rule it
-    /// breaks. The others come from reading the checkpoint (a missing file
-    /// is `FileNotFound`; a denied one `AccessDenied` locally and
-    /// `PermissionDenied` remotely; a file that ends inside a tensor
-    /// `UnexpectedEndOfFile`, because it changed after its header was read
-    /// or the tensor's shape needs more bytes than its `data_offsets` give),
-    /// the devices, the compiler, or `cancel` (`Canceled`), and from
-    /// `init`'s task: a platform with more devices than the direct backend
-    /// addresses is `UnsupportedPlatform`, an io that cannot run its tasks
-    /// concurrently `ConcurrencyUnavailable`. Host memory the backend
-    /// cannot allocate, pin or fit under its mapped ceiling is
-    /// `OutOfMemory`, logged with the cause; device memory that runs out is
-    /// PJRT's `ResourceExhausted`.
+    /// breaks. Buffers shaped unlike the model (`mem.pairBufferized`) are
+    /// `InvalidBinding` too, logged with the field path. The others come
+    /// from reading the checkpoint (a missing file is `FileNotFound`; a
+    /// denied one `AccessDenied` locally and `PermissionDenied` remotely; a
+    /// file that ends inside a tensor `UnexpectedEndOfFile`, because it
+    /// changed after its header was read or the tensor's shape needs more
+    /// bytes than its `data_offsets` give), the devices, the compiler, or
+    /// `cancel` (`Canceled`), and from `init`'s task: a platform with more
+    /// devices than the direct backend addresses is `UnsupportedPlatform`,
+    /// an io that cannot run its tasks concurrently
+    /// `ConcurrencyUnavailable`. Host memory the backend cannot allocate,
+    /// pin or fit under its mapped ceiling is `OutOfMemory`, logged with
+    /// the cause; device memory that runs out is PJRT's `ResourceExhausted`.
     pub const Error = error{ InvalidBinding, Canceled, UnsupportedPlatform } || std.mem.Allocator.Error || pjrt.ApiError || std.Io.File.OpenError ||
         safetensors.ExactPositionalError || Compiler.Error || std.Io.ConcurrentError;
 
@@ -292,7 +293,7 @@ pub const Loader = struct {
     /// an error between `start` and `wait`; nothing to do when nothing was
     /// started.
     pub fn cancel(self: *Loader) void {
-        if (self.queued.len == 0 and self.pending.len == 0 and self.programs.items.len == 0) return;
+        if (!self.loadsStarted()) return;
         if (self.failure == null) self.failure = error.Canceled;
         while (self.queued.popFront()) |group| group.deinit(self.allocator);
         if (self.pending.len != 0) self.backend.?.abort();
@@ -300,13 +301,15 @@ pub const Loader = struct {
         self.releasePrograms();
     }
 
-    /// Cancels what is still started (`cancel`): a caller that succeeded
-    /// waited for it, so only an error path leaves any. Then cancels
-    /// `init`'s task when no `start` awaited it, destroying what it built,
-    /// and destroys the backend: its pinned memory, its workers and the
-    /// files it keeps open, closed through `io`. The buffers it loaded stay
-    /// the caller's.
+    /// Cancels, with a warning, loads still started (`cancel`): a caller
+    /// that succeeded waited for them, and an error path failed the loader
+    /// or canceled it (`errdefer loader.cancel()`), so any left lack their
+    /// `wait`. Then cancels `init`'s task when no `start` awaited it,
+    /// destroying what it built, and destroys the backend: its pinned
+    /// memory, its workers and the files it keeps open, closed through
+    /// `io`. The buffers it loaded stay the caller's.
     pub fn deinit(self: *Loader) void {
+        if (self.loadsStarted()) load_log.warn("Loader.deinit cancels loads started without a wait", .{});
         self.cancel();
         self.logAdmission();
         self.queued.deinit(self.allocator);
@@ -319,6 +322,11 @@ pub const Loader = struct {
         }
         if (self.backend) |backend_| backend_.destroy();
         self.* = undefined;
+    }
+
+    /// Whether loads are started and neither waited for nor canceled.
+    fn loadsStarted(self: *const Loader) bool {
+        return self.queued.len != 0 or self.pending.len != 0 or self.programs.items.len != 0;
     }
 
     /// Decided once: the CPU plugin logs an unimplemented warning on every
@@ -352,14 +360,17 @@ pub const Loader = struct {
     /// one read is `InvalidBinding` when its submission is published: here
     /// for the tensors the loader fills, in `wait` for a program's inputs.
     ///
-    /// `buffers` is `mem.bufferize` of `model`, whose buffers are empty;
-    /// `start` empties them again, and each stays empty until its load
-    /// writes it whole. So after any error each buffer is empty or holds
-    /// shards for the caller to free: `mem.deinitBufferized` frees the tree
-    /// either way. `buffers` and `store` are borrowed until `wait` or
-    /// `cancel` returns; do not end `progress` before then. `start` adds one
-    /// item to `progress` for each tensor the loader fills, a composite one
-    /// once, and for each program input; the backends complete them.
+    /// `buffers` is `mem.bufferize` of `model`, whose buffers are empty. A
+    /// tree of another structure (other union arms, optionals or slice
+    /// lengths: `mem.pairBufferized`) is `InvalidBinding`, logged with the
+    /// field path, before any buffer is written. `start` empties them
+    /// again, and each stays empty until its load writes it whole. So
+    /// after any error each buffer is empty or holds shards for the caller
+    /// to free: `mem.deinitBufferized` frees the tree either way. `buffers`
+    /// and `store` are borrowed until `wait` or `cancel` returns; do not end
+    /// `progress` before then. `start` adds one item to `progress` for each
+    /// tensor the loader fills, a composite one once, and for each program
+    /// input; the backends complete them.
     /// Several loads may be started before one `wait`, from one store or
     /// several. The first `start` waits for `init`'s task, and fails with
     /// its error.
@@ -948,69 +959,45 @@ fn prepareModel(
     model: *const Model,
     buffers: *Bufferized(Model),
 ) PrepareError!PreparedModel {
-    const tensor_count = meta.count(Tensor, model);
-    // Tensors and buffers pair by visit order: a buffer tree whose optionals,
-    // slices or unions differ from the model's would write past `flattened`
-    // or leave buffers unpaired.
-    const buffer_count = meta.count(Buffer, buffers);
-    stdx.debug.assert(buffer_count == tensor_count, "Loader.start: the model has {d} tensors but its buffers {d}; bufferize the buffers from this model", .{ tensor_count, buffer_count });
-    const flattened = try allocator.alloc(*Buffer, tensor_count);
-    defer allocator.free(flattened);
-    meta.forEachVisit(buffers, *Buffer, struct {
-        fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
-            output[i] = buffer;
+    // Tensors and buffers pair by structure, before any buffer is written: a
+    // buffer tree shaped otherwise is refused whole.
+    const Pair = struct { tensor: *const Tensor, buffer: *Buffer };
+    var pairs: std.ArrayList(Pair) = try .initCapacity(allocator, meta.count(Tensor, model));
+    defer pairs.deinit(allocator);
+    var report_buffer: [256]u8 = undefined;
+    var report: std.Io.Writer = .fixed(&report_buffer);
+    mem.pairBufferized(Model, model, buffers, &report, &pairs, struct {
+        fn call(list: *std.ArrayList(Pair), tensor: *const Tensor, buffer: *Buffer) void {
+            list.appendAssumeCapacity(.{ .tensor = tensor, .buffer = buffer });
         }
-    }.call, .{flattened});
+    }.call) catch {
+        load_log.err("buffers shaped unlike the model at model{s}; bufferize them from this model", .{report.buffered()});
+        return error.InvalidBinding;
+    };
     // Empty until a backend or a program writes it whole, so the caller can
     // free the tree whatever fails.
-    meta.forEachVisit(model, *const Tensor, struct {
-        fn call(i: usize, tensor: *const Tensor, output: []*Buffer, platform_: *const Platform) void {
-            output[i].* = .{ ._platform = platform_, ._shape = tensor.shape(), ._shards = .empty };
-        }
-    }.call, .{ flattened, platform });
+    for (pairs.items) |pair| pair.buffer.* = .{ ._platform = platform, ._shape = pair.tensor.shape(), ._shards = .empty };
 
-    const Ctx = struct {
-        platform: *const Platform,
-        store: *const TensorStore,
-        arena: std.heap.ArenaAllocator,
-        buffers: []*Buffer,
-        specs: std.ArrayList(LoadSpec) = .empty,
-        computed: std.ArrayList(Computed) = .empty,
-        err: ?PrepareError = null,
-
-        fn visit(self: *@This(), i: usize, tensor: *const Tensor) PrepareError!void {
-            const binding = self.store.getSourcesById(tensor.id) orelse {
-                load_log.err("tensor {} {f} has no checkpoint binding", .{ tensor.id, tensor.shape() });
-                return error.InvalidBinding;
-            };
-            const arena = self.arena.allocator();
-            const target: Target = .{ .id = tensor.id, .shape = tensor.shape() };
-            switch (binding) {
-                .load => |load| {
-                    const spec = try prepareSpec(arena, self.platform, target, load.source, load.memory, self.buffers[i]);
-                    try self.specs.append(arena, spec);
-                },
-                .compute => |compute| {
-                    try checkPlacement(self.platform, target, compute.program.vtable.name);
-                    try self.computed.append(arena, .{ .id = tensor.id, .shape = tensor.shape(), .output = self.buffers[i], .compute = compute });
-                },
-            }
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    errdefer arena.deinit();
+    var specs: std.ArrayList(LoadSpec) = try .initCapacity(arena.allocator(), pairs.items.len);
+    var computed: std.ArrayList(Computed) = try .initCapacity(arena.allocator(), pairs.items.len);
+    for (pairs.items) |pair| {
+        const tensor = pair.tensor;
+        const binding = store.bindingOf(tensor.id) orelse {
+            load_log.err("tensor {} {f} has no checkpoint binding", .{ tensor.id, tensor.shape() });
+            return error.InvalidBinding;
+        };
+        const target: Target = .{ .id = tensor.id, .shape = tensor.shape() };
+        switch (binding) {
+            .load => |load| specs.appendAssumeCapacity(try prepareSpec(arena.allocator(), platform, target, load.source, load.memory, pair.buffer)),
+            .compute => |compute| {
+                try checkPlacement(platform, target, compute.program.vtable.name);
+                computed.appendAssumeCapacity(.{ .id = tensor.id, .shape = tensor.shape(), .output = pair.buffer, .compute = compute });
+            },
         }
-    };
-    var ctx: Ctx = .{ .platform = platform, .store = store, .arena = .init(allocator), .buffers = flattened };
-    errdefer ctx.arena.deinit();
-    try ctx.specs.ensureTotalCapacityPrecise(ctx.arena.allocator(), tensor_count);
-    try ctx.computed.ensureTotalCapacityPrecise(ctx.arena.allocator(), tensor_count);
-    meta.forEachVisit(model, *const Tensor, struct {
-        fn call(i: usize, tensor: *const Tensor, context: *Ctx) void {
-            if (context.err != null) return;
-            context.visit(i, tensor) catch |err| {
-                context.err = err;
-            };
-        }
-    }.call, .{&ctx});
-    if (ctx.err) |err| return err;
-    return .{ .arena = ctx.arena, .specs = ctx.specs.items, .computed = ctx.computed.items };
+    }
+    return .{ .arena = arena, .specs = specs.items, .computed = computed.items };
 }
 
 /// A strided part with few runs, or with large ones, expands into one part
@@ -1436,7 +1423,7 @@ test "tensors of one program and equal args share one compile, and one group run
         .b = fixture.computed("second", fixture.second, Add{ .value = 1 }),
         .c = fixture.computed("value", fixture.value, Add{ .value = 2 }),
     };
-    try std.testing.expect(fixture.store.getSourcesById(model.a.id).? == .compute);
+    try std.testing.expect(fixture.store.bindingOf(model.a.id).? == .compute);
     var buffers = try mem.bufferize(allocator, Model, &model);
     defer mem.deinitBufferized(allocator, Model, &buffers);
     try loader.start(&model, &buffers, &fixture.store, .none);
@@ -1460,7 +1447,7 @@ test "loader delivers a host-pinned binding into host pinned memory without char
     const platform = fixture.platform;
     const pinned = fixture.store.view().createReplicatedTensor("second", null);
     fixture.store.view().setMemory(pinned, .host_pinned);
-    try std.testing.expectEqual(Memory.Kind.host_pinned, fixture.store.getSourcesById(pinned.id).?.load.memory);
+    try std.testing.expectEqual(Memory.Kind.host_pinned, fixture.store.bindingOf(pinned.id).?.load.memory);
 
     var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
     defer loader.deinit();
@@ -1951,8 +1938,8 @@ test "a rejected binding or a program of the wrong output fails the loader" {
     // program's input, by which `start` names it.
     const empty_entry = fixture.store.view().get("empty").?;
     const empty_input = fixture.computed("empty", fixture.empty, LoaderTestFixture.Identity{});
-    try std.testing.expectEqual(empty_entry, fixture.store.getSourcesById(fixture.empty.id).?.load.source._pieces[0].tensor);
-    try std.testing.expectEqual(empty_entry, fixture.store.getSourcesById(empty_input.id).?.compute.inputs[0]._pieces[0].tensor);
+    try std.testing.expectEqual(empty_entry, fixture.store.bindingOf(fixture.empty.id).?.load.source._pieces[0].tensor);
+    try std.testing.expectEqual(empty_entry, fixture.store.bindingOf(empty_input.id).?.compute.inputs[0]._pieces[0].tensor);
     // No binding, an empty source or program input, a mesh of other
     // devices, and a program of the wrong shape or placement.
     const Case = struct { tensor: Tensor, at_wait: bool = false, skip: bool = false };
@@ -1983,6 +1970,55 @@ test "a rejected binding or a program of the wrong output fails the loader" {
         output.deinit();
         try std.testing.expectError(error.InvalidBinding, loader.start(&fixture.value, &output, &fixture.store, .none));
     }
+}
+
+test "buffers of another structure fail start before any buffer is written" {
+    var fixture: LoaderTestFixture = undefined;
+    try fixture.init(std.testing.allocator, std.testing.io);
+    defer fixture.deinit();
+    const value = fixture.value;
+    const second = fixture.second;
+
+    // Each pair holds as many tensors on both sides, in another structure,
+    // and a pair precedes each mismatch.
+    const Optionals = struct { head: Tensor, a: ?Tensor, b: ?Tensor };
+    try expectStructureMismatch(&fixture, Optionals, .{ .head = value, .a = value, .b = null }, .{ .head = value, .a = null, .b = value });
+    const Arms = struct { head: Tensor, arm: union(enum) { a: Tensor, b: Tensor }, last: Tensor };
+    try expectStructureMismatch(&fixture, Arms, .{ .head = value, .arm = .{ .a = value }, .last = second }, .{ .head = value, .arm = .{ .b = value }, .last = second });
+    const Slices = struct { head: Tensor, first: []Tensor, second: []Tensor };
+    var two = [_]Tensor{ value, second };
+    var one = [_]Tensor{value};
+    var other_one = [_]Tensor{second};
+    var other_two = [_]Tensor{ second, value };
+    try expectStructureMismatch(&fixture, Slices, .{ .head = value, .first = &two, .second = &one }, .{ .head = value, .first = &other_one, .second = &other_two });
+}
+
+/// Starts `model` into the buffers bufferized from `built`, which has as
+/// many tensors in another structure: `InvalidBinding`, and every buffer as
+/// it was.
+fn expectStructureMismatch(fixture: *LoaderTestFixture, comptime Model: type, built: Model, model: Model) !void {
+    const allocator = std.testing.allocator;
+    var loader = try Loader.init(allocator, std.testing.io, fixture.platform, .{ .read_parallelism = 2 });
+    defer loader.deinit();
+    var buffers = try mem.bufferize(allocator, Model, &built);
+    defer mem.deinitBufferized(allocator, Model, &buffers);
+    // No tensor has this shape, which `start` would replace with its
+    // tensor's when it empties a buffer.
+    const untouched: Shape = .init(.{ 1, 2, 3 }, .u8);
+    meta.forEachVisit(&buffers, *Buffer, struct {
+        fn call(_: usize, buffer: *Buffer, shape: Shape) void {
+            buffer._shape = shape;
+        }
+    }.call, .{untouched});
+    try std.testing.expectError(error.InvalidBinding, loader.start(&model, &buffers, &fixture.store, .none));
+    try LoaderTestFixture.expectFailed(&loader, error.InvalidBinding);
+    var written: usize = 0;
+    meta.forEachVisit(&buffers, *Buffer, struct {
+        fn call(_: usize, buffer: *Buffer, shape: Shape, count: *usize) void {
+            if (!buffer._shape.eql(shape) or buffer._shards.len != 0) count.* += 1;
+        }
+    }.call, .{ untouched, &written });
+    try std.testing.expectEqual(0, written);
 }
 
 test "loader reports source size mismatches" {
@@ -2135,7 +2171,7 @@ test "loader assembles concatenated and padded sources on every placement and me
                     .plain = rows(view, "plain").withPartitioning(.tp, partitioning).bind(),
                 };
                 inline for (comptime std.meta.fieldNames(Model)) |name| view.setMemory(@field(model, name), memory);
-                try std.testing.expect(store.getSourcesById(model.plain.id).?.load.source.whole() != null);
+                try std.testing.expect(store.bindingOf(model.plain.id).?.load.source.whole() != null);
                 var buffers = try mem.bufferize(allocator, Model, &model);
                 defer mem.deinitBufferized(allocator, Model, &buffers);
                 var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
@@ -2241,7 +2277,7 @@ test "loader assembles interleaved, stacked and split sources" {
             .head = head.withPartitioning(.replicated, .{}).bind(),
             .tail = tail.withPartitioning(.tp, .{ .row = .model }).bind(),
         };
-        const qkv_source = store.getSourcesById(model.qkv.id).?.load.source;
+        const qkv_source = store.bindingOf(model.qkv.id).?.load.source;
         try std.testing.expectEqual(@as(usize, 3), qkv_source._pieces.len);
         for (qkv_source._pieces) |piece| {
             const part = try Source.lowerPiece(allocator, qkv_source.shape, piece);
@@ -2497,7 +2533,7 @@ test "a program takes its inputs from sources, in order" {
     const c = CompositeFixture.rows(view, "c");
     const inputs = [_]Source{ assembled.withPartitioning(.replicated, .{}), c.withPartitioning(.replicated, .{}) };
     const tensor = Source.bindProgram(&inputs, c.shape(), AddRows{});
-    const compute = store.getSourcesById(tensor.id).?.compute;
+    const compute = store.bindingOf(tensor.id).?.compute;
     try std.testing.expectEqual(2, compute.inputs.len);
     try std.testing.expect(compute.program.as(AddRows) != null and compute.program.as(LoaderTestFixture.Identity) == null);
     try std.testing.expect(compute.inputs[0].whole() == null);

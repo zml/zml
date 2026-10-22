@@ -176,6 +176,8 @@ A model whose bindings are wrong is `InvalidBinding`, whichever rule it
 breaks; the log names the tensor, the checkpoint key its source reads and
 the rule:
 
+- buffers shaped unlike the model: another union arm, optional or slice
+  length (the log names the field path instead);
 - a tensor the store did not bind;
 - a source that reads no bytes, or reads an empty checkpoint tensor;
 - a source whose bytes differ from its tensor's;

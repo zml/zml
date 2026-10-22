@@ -24,7 +24,7 @@ const Tensor = @import("../tensor.zig").Tensor;
 
 const TensorStore = @This();
 
-/// What the loader reads of a bound tensor (`getSourcesById`): the source
+/// What the loader reads of a bound tensor (`bindingOf`): the source
 /// it fills the tensor from, or the program that computes it.
 pub const Binding = union(enum) {
     /// The loader fills the tensor from `source` (`Source.bind`), every
@@ -216,7 +216,7 @@ pub fn deinit(self: *TensorStore) void {
 
 /// The binding of tensor `id`, as the loader reads it; null when this store
 /// did not bind it.
-pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
+pub fn bindingOf(self: *const TensorStore, id: Tensor.Id) ?Binding {
     return self.id_to_sources.get(id);
 }
 
@@ -435,7 +435,7 @@ test "get finds exact keys, the registry's own entries, and hasPrefix any key un
 
     // Every binding of the entry holds the entry itself.
     const tensor = layer.createReplicatedTensor("experts.0.down_proj.weight", null);
-    try std.testing.expectEqual(entry, store.getSourcesById(tensor.id).?.load.source.whole().?);
+    try std.testing.expectEqual(entry, store.bindingOf(tensor.id).?.load.source.whole().?);
     try std.testing.expectEqual(entry, layer.source("experts.0.down_proj.weight", null)._pieces[0].tensor);
 }
 
@@ -470,7 +470,7 @@ test "programs of one type and equal values over the same placed shapes share an
         root.maybeCreateBinding(&.{"t"}, shape, Shift{ .factor = 1 }).?,
     };
     var computes: [tensors.len]Binding.Compute = undefined;
-    for (&computes, tensors) |*compute, tensor| compute.* = store.getSourcesById(tensor.id).?.compute;
+    for (&computes, tensors) |*compute, tensor| compute.* = store.bindingOf(tensor.id).?.compute;
     try std.testing.expect(computes[0].sameExecutable(shape, computes[1], shape));
     try std.testing.expect(!computes[0].sameExecutable(shape, computes[2], shape));
     try std.testing.expect(!computes[0].sameExecutable(shape, computes[3], shape));
@@ -501,9 +501,9 @@ test "setMemory changes the memory space of a bound tensor's binding" {
 
     const view_ = store.view();
     const tensor = view_.createReplicatedTensor("table", null);
-    try std.testing.expectEqual(Memory.Kind.default, store.getSourcesById(tensor.id).?.load.memory);
+    try std.testing.expectEqual(Memory.Kind.default, store.bindingOf(tensor.id).?.load.memory);
     view_.setMemory(tensor, .host_pinned);
-    try std.testing.expectEqual(Memory.Kind.host_pinned, store.getSourcesById(tensor.id).?.load.memory);
+    try std.testing.expectEqual(Memory.Kind.host_pinned, store.bindingOf(tensor.id).?.load.memory);
     view_.setMemory(tensor, .default);
-    try std.testing.expectEqual(Memory.Kind.default, store.getSourcesById(tensor.id).?.load.memory);
+    try std.testing.expectEqual(Memory.Kind.default, store.bindingOf(tensor.id).?.load.memory);
 }

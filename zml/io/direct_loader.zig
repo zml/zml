@@ -302,7 +302,6 @@ pub const Loader = struct {
 
         errdefer self.stopWorkers();
         for (0..workers) |_| try self.worker_group.concurrent(io, workerMain, .{self});
-        load_log.debug("TMP loader created_at raw_ns={d}", .{@as(i64, @intCast(self.created_at.nanoseconds))});
         load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, source_width={d}, lifecycle_credits={d}, workers={d}, retained={Bi:.2}", .{
             @tagName(platform.target),
             opts.load_profile.name,
@@ -1967,7 +1966,10 @@ const Planner = struct {
                     const read_start = if (alignment == 0) job_start else std.mem.alignBackward(u64, job_start, alignment);
                     const read_end = if (alignment == 0) job_end else std.mem.alignBackward(
                         u64,
-                        std.math.add(u64, job_end, alignment - 1) catch return error.InvalidTensorRange,
+                        std.math.add(u64, job_end, alignment - 1) catch {
+                            load_log.err("{s}: a read ending at byte {d} overflows when widened to the {d}-byte alignment", .{ parts[order[run_cursor]].source.file_uri, job_end, alignment });
+                            return error.InvalidTensorRange;
+                        },
                         alignment,
                     );
                     const read_len: usize = @intCast(read_end - read_start);

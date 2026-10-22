@@ -25,7 +25,7 @@ pub const Retry = struct {
     /// a server-named delay included.
     max_hold: std.Io.Duration = .fromSeconds(120),
     /// A throttling episode with no clean window longer than this fails the
-    /// backend's requests with `error.RateLimited`.
+    /// backend's requests.
     throttle_budget: std.Io.Duration = .fromSeconds(300),
     /// An attempt that receives nothing for this long is canceled and
     /// retried as a timeout: a peer that stops sending without closing the

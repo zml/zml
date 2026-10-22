@@ -70,25 +70,6 @@ pub const LoadedModel = struct {
         self.parsed_config.deinit();
     }
 
-    pub fn loadBuffers(
-        self: *const LoadedModel,
-        allocator: std.mem.Allocator,
-        loader: *zml.io.Loader,
-        progress: std.Progress.Node,
-        store: *const zml.io.TensorStore,
-    ) !Buffers {
-        var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
-        errdefer self.unloadBuffers(&buffers, allocator);
-        try loader.start(&self.inner, &buffers, store, progress);
-        try loader.wait();
-        return buffers;
-    }
-
-    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        _ = self;
-        zml.mem.deinitBufferized(allocator, Model, buffers);
-    }
-
     pub fn compile(
         self: *const LoadedModel,
         allocator: std.mem.Allocator,

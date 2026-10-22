@@ -484,7 +484,7 @@ fn checkPacks(
     var checked: usize = 0;
     for (samples, 0..) |sample, i| {
         if (std.mem.indexOfScalar(usize, samples[0..i], sample) != null) continue;
-        const inputs = (store.getSourcesById(packs[sample].id) orelse return error.NotFound).compute.inputs;
+        const inputs = (store.bindingOf(packs[sample].id) orelse return error.NotFound).compute.inputs;
         const slice = try outputs[sample].toSliceAlloc(allocator, io);
         defer slice.free(allocator);
         const packed_bytes = slice.constData();
@@ -526,7 +526,7 @@ fn checkLoaded(
     std.debug.assert(tensors.len == buffers.len);
     const Eligibility = struct {
         fn source(store_: *const zml.io.TensorStore, tensor: zml.Tensor, buffer: zml.Buffer) ?*const zml.safetensors.Tensor {
-            const whole = switch (store_.getSourcesById(tensor.id) orelse return null) {
+            const whole = switch (store_.bindingOf(tensor.id) orelse return null) {
                 .load => |load| load.source.whole() orelse return null,
                 .compute => return null,
             };

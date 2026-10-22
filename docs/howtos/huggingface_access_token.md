@@ -17,7 +17,7 @@ access token to log into your account on Huggingface, directly from `bazel`, in 
 * the token looks something like `hf_abCdEfGhijKlM`.
 * store the token on your machine (replace the placeholder with your actual token):
 
-You can use the `HUGGINGFACE_TOKEN` environment variable to store the token or use
+You can use the `HF_TOKEN` environment variable to store the token or use
 its standard location:
 ```
 mkdir -p $HOME/.cache/huggingface/; echo <hf_my_token> > "$HOME/.cache/huggingface/token"
@@ -29,6 +29,6 @@ Now you're ready to download a gated model like `Meta-Llama-3.2-1b`!
 
 ```
 # requires token in $HOME/.cache/huggingface/token, as created by the
-# `hf auth login` command, or the `HUGGINGFACE_TOKEN` environment variable.
+# `hf auth login` command, or the `HF_TOKEN` environment variable.
 bazel run --config=release //examples/llm -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
 ```
