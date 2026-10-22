@@ -24,9 +24,7 @@ pub fn forward(self: QwenImage21ResidualUpBlock, x_: zml.Tensor) zml.Tensor {
     var x = x_;
 
     for (self.resnets) |resnet| {
-        std.debug.print("x: {f}\n", .{x.shape()});
         x = resnet.forward(x);
-        std.debug.print("x: {f}\n", .{x.shape()});
     }
 
     if (self.upsampler) |upsampler| {
