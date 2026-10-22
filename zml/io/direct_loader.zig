@@ -62,7 +62,6 @@ pub const Loader = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    load_profile: VFS.LoadProfile,
     /// The pinned arenas, grown once at creation and cut into `blocks`.
     workspace: host_memory.Workspace,
     /// The arenas cut into blocks: the zero block first, then the credits'
@@ -99,9 +98,9 @@ pub const Loader = struct {
     dma_budget_bytes: usize,
     worker_group: std.Io.Group = .init,
     /// One per source path. Its file opens at first use (during planning
-    /// when a VFS decides direct IO, otherwise at the first read) and stays
-    /// open until `destroy`. Keyed by the slot's own copy of the path: the
-    /// registry that named it may go once the batch retired.
+    /// when a VFS decides direct IO for a local file, otherwise at the first
+    /// read) and stays open until `destroy`. Keyed by the slot's own copy of
+    /// the path: the registry that named it may go once the batch retired.
     source_slots: std.StringHashMapUnmanaged(*SourceSlot) = .empty,
     /// Device bytes of the outputs of the sealed batches, per
     /// `platform.devices` index, cumulative, as `TensorTransfer.init`
@@ -221,12 +220,11 @@ pub const Loader = struct {
         errdefer allocator.free(pumps);
         @memset(pumps, .{});
 
-        const source_alignment = if (opts.direct_io != .off) opts.load_profile.direct_io_alignment orelse 0 else 0;
+        const source_alignment = backend.readAlignment(io, opts.direct_io);
         self.* = .{
             .allocator = allocator,
             .io = io,
             .platform = platform,
-            .load_profile = opts.load_profile,
             .workspace = workspace,
             .blocks = blocks,
             .scheduler = .init(allocator),
@@ -286,10 +284,7 @@ pub const Loader = struct {
     pub fn submit(self: *Loader, specs: []const LoadSpec, progress: std.Progress.Node) SubmitError!*Batch {
         try self.checkOpen();
         const batch = batch: {
-            const batch = try Batch.create(self.allocator, self.io, .{
-                .sequence = self.batch_count,
-                .source_stats = if (self.load_profile.stats) |provider| provider.snapshot() else null,
-            });
+            const batch = try Batch.create(self.allocator, self.io, .{ .sequence = self.batch_count });
             errdefer batch.destroy();
             try self.createDestinations(batch, specs, progress);
             break :batch batch;
@@ -533,7 +528,15 @@ pub const Loader = struct {
                 .unread_bytes = .init(if (gathered) placed_shape.byteSize() else covered_bytes),
                 .progress = progress,
             };
-            if (gathered) for (destination_parts) |*part| try Planner.checkGatherReads(self.plan_config, part);
+            if (gathered) for (destination_parts) |*part| {
+                // A remote file is read exact (`Planner.Reads.alignmentOf`);
+                // a local one may be read directly, its range widened.
+                var config = self.plan_config;
+                if (VFS.fromIo(self.io)) |vfs| {
+                    if (!vfs.isLocal(part.source.file_uri)) config.alignment = 0;
+                }
+                try Planner.checkGatherReads(config, part);
+            };
             logical_bytes += spec.shape.byteSize();
         }
         batch.destinations = destinations;
@@ -672,20 +675,6 @@ pub const Loader = struct {
             coalescing_ratio,
             average_read_size,
         });
-        if (self.load_profile.stats) |provider| {
-            if (diagnostics.source_stats) |previous| {
-                const delta = provider.snapshot().sub(previous);
-                load_log.debug("batch source: batch={d}, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}, source_holds={d}, hold_wait_ms={d:.3}", .{
-                    diagnostics.sequence,
-                    delta.physical_requests,
-                    delta.physical_bytes,
-                    delta.retries,
-                    delta.throttles,
-                    delta.holds,
-                    @as(f64, @floatFromInt(delta.hold_wait_ns)) / std.time.ns_per_ms,
-                });
-            }
-        }
     }
 
     fn logSummary(self: *Loader) void {
@@ -991,9 +980,6 @@ pub const Batch = struct {
         /// seal.
         published_at: ?std.Io.Timestamp = null,
         sealed_at: ?std.Io.Timestamp = null,
-        /// Aggregate source statistics at publish; the completion log reports
-        /// the delta against them (loader-wide while batches overlap).
-        source_stats: ?VFS.ReadStats = null,
     };
 
     // Borrowed source URI of the file currently being planned.
@@ -1596,9 +1582,10 @@ const Planner = struct {
         minimum_staging_gain: usize = max_dma_pieces_per_device,
     };
 
-    /// How each file is read: aligned when the VFS that opens it reads it
-    /// directly under `policy`, decided once per file and kept in its slot.
-    /// Without a VFS (`io` is none, or no alignment) every file takes
+    /// How each file is read: aligned when it is local and the VFS that
+    /// opens it reads it directly under `policy`, decided once per file and
+    /// kept in its slot. A remote file is read exact without being opened
+    /// here. Without a VFS (`io` is none, or no alignment) every file takes
     /// `alignment`. A gather job reads files other than its plan's, so it
     /// asks here for each.
     const Reads = struct {
@@ -1610,7 +1597,8 @@ const Planner = struct {
         fn alignmentOf(self: Reads, slot: *SourceSlot) !usize {
             const vfs = self.vfs orelse return self.alignment;
             if (slot.alignment) |known| return known;
-            const alignment = if (vfs.useDirectIo(try slot.ensure(self.io), self.policy)) self.alignment else 0;
+            const direct = vfs.isLocal(slot.uri) and vfs.useDirectIo(try slot.ensure(self.io), self.policy);
+            const alignment = if (direct) self.alignment else 0;
             slot.alignment = alignment;
             return alignment;
         }
@@ -1630,9 +1618,8 @@ const Planner = struct {
     /// throughput-neutral there.
     /// Widening buffered reads is not free: warm replicated Llama on four
     /// GB300 lost 3-6% when its first tensor no longer landed at block offset
-    /// zero. Ask the VFS actually owning the handle, not one remembered by
-    /// the profile, both to avoid that cost and to avoid indexing another
-    /// VFS's handle table.
+    /// zero. Ask the VFS actually owning the handle (`VFS.fromIo`), both to
+    /// avoid that cost and to avoid indexing another VFS's handle table.
     fn publishFiles(
         scheduler: *Scheduler,
         io: std.Io,
@@ -3976,23 +3963,25 @@ test "a platform with more devices than ZML addresses is refused" {
     try std.testing.expectError(error.UnsupportedPlatform, result);
 }
 
-test "loader releases the pinned set when alignment validation fails" {
+test "loader releases the pinned set when its workers cannot start" {
     const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    const platform = Platform.init(allocator, io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
+    const platform = Platform.init(allocator, std.testing.io, .cpu, .{ .cpu = .{ .device_count = 1 } }) catch
         return error.SkipZigTest;
-    defer platform.deinit(allocator, io);
-    var profile: VFS.LoadProfile = .local;
-    profile.direct_io_alignment = 3;
+    defer platform.deinit(allocator, std.testing.io);
+    // The testing io, but no worker starts: `create` fails after the carve,
+    // the credits and the pumps, and unwinds every one.
+    var vtable = std.testing.io.vtable.*;
+    vtable.groupConcurrent = std.Io.failingGroupConcurrent;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     const result: anyerror!void = if (Loader.create(allocator, io, platform, .{
         .read_parallelism = 2,
-        .load_profile = profile,
-        .direct_io = .on,
+        .load_profile = .local,
+        .direct_io = .off,
     })) |loader| unexpected: {
         loader.destroy();
         break :unexpected {};
     } else |err| err;
-    try std.testing.expectError(error.InvalidOptions, result);
+    try std.testing.expectError(error.ConcurrencyUnavailable, result);
 }
 
 test "loader failures clean up before publication, after publication and during reading" {
@@ -4311,6 +4300,42 @@ fn discardTestBatch(scheduler: *Scheduler, batch: *Batch) void {
     batch.finishJobs(1 + claimed);
     std.debug.assert(batch.done.isSet());
     batch.destroy();
+}
+
+test "the planner opens only local files to ask about direct I/O" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const contents: [2 * 4096]u8 = @splat(7);
+    var path_buffer: [1024]u8 = undefined;
+    const path = path: {
+        const file = try tmp.dir.createFile(io, "drafter.bin", .{ .read = true });
+        defer file.close(io);
+        try file.writePositionalAll(io, &contents, 0);
+        const len = try file.realPath(io, &path_buffer);
+        break :path path_buffer[0..len];
+    };
+    var vfs: VFS = try .init(allocator, io);
+    defer vfs.deinit();
+    // A scheme whose files the plain io cannot open: asking would fail.
+    try vfs.registerBackend("remote", .{ .io = io });
+    const vfs_io = vfs.io();
+    const reads: Planner.Reads = .{ .io = vfs_io, .vfs = &vfs, .policy = .on, .alignment = 4096 };
+
+    // A remote file is read exact, without an open on the planner.
+    var remote: SourceSlot = .{ .uri = "remote://bucket/model.safetensors" };
+    defer remote.deinit(vfs_io);
+    try std.testing.expectEqual(@as(usize, 0), try reads.alignmentOf(&remote));
+    try std.testing.expect(remote.file.readyValue() == null);
+
+    // A local file beside it is opened and asked, whatever the checkpoint:
+    // direct where the filesystem allows it.
+    var local: SourceSlot = .{ .uri = path };
+    defer local.deinit(vfs_io);
+    const alignment = try reads.alignmentOf(&local);
+    const file = local.file.readyValue().?.*;
+    try std.testing.expectEqual(@as(usize, if (vfs.useDirectIo(file, .on)) 4096 else 0), alignment);
 }
 
 test "source planner coalesces exact adjacent and overlapping tensor ranges per file" {
@@ -4860,7 +4885,6 @@ const TestLoader = struct {
             .allocator = allocator,
             .io = std.testing.io,
             .platform = undefined,
-            .load_profile = undefined,
             .workspace = undefined,
             .blocks = undefined,
             .scheduler = .init(allocator),
@@ -5586,6 +5610,67 @@ test "a strided part whose source does not fit one read is refused before anythi
         for (0..32) |row| transposed[column * 32 + row] = bytes[row * 16 + column];
     }
     try load_testing.expectShards(allocator, io, &output, &transposed);
+}
+
+test "a strided part of a remote file is checked against its exact source range" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var devices: load_testing.Devices = undefined;
+    try devices.init(allocator, io, 1);
+    defer devices.deinit();
+    var bytes: [128 * 128]u8 = undefined;
+    load_testing.pattern(&bytes, 1);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: safetensors.TensorRegistry = .init(allocator);
+    defer registry.deinit();
+    try load_testing.writeSafetensors(allocator, io, tmp.dir, "square.safetensors", &registry, &.{
+        .{ .name = "square", .dtype = "U8", .dims = &.{ 128, 128 }, .bytes = &bytes },
+    });
+    var vfs: VFS = try .init(allocator, io);
+    defer vfs.deinit();
+    // The same file through a registered scheme: a remote file, read exact.
+    try vfs.registerBackend("remote", .{ .io = io });
+    const local = registry.tensors.get("square").?;
+    var remote = local;
+    var uri_buffer: [1100]u8 = undefined;
+    remote.file_uri = try std.fmt.bufPrint(&uri_buffer, "remote://{s}", .{local.file_uri});
+    std.debug.assert(local.offset % 4096 != 0);
+
+    var transposed: [128 * 128]u8 = undefined;
+    for (0..128) |column| {
+        for (0..128) |row| transposed[column * 128 + row] = bytes[row * 128 + column];
+    }
+    // Transposed: its source read whole by every job, a request exactly,
+    // at an offset off the direct I/O alignment.
+    const dims = [_]LoadPart.Dim{
+        .{ .count = 128, .src_stride = 1, .dst_stride = 128 },
+        .{ .count = 128, .src_stride = 128, .dst_stride = 1 },
+    };
+    const loader = try Loader.create(allocator, vfs.io(), devices.platform, .{ .read_parallelism = 2 });
+    defer loader.destroy();
+    try std.testing.expectEqual(VFS.direct_io_alignment, loader.plan_config.alignment);
+    loader.plan_config.request_size = bytes.len;
+
+    var output: Buffer = undefined;
+    const part: LoadPart = .{ .source = &remote, .width = 1, .dims = &dims };
+    const spec: LoadSpec = .{ .shape = .init(.{ 128, 128 }, .u8), .output = &output, .parts = (&part)[0..1] };
+    try loader.awaitBatch(try loader.submit(&.{spec}, .none));
+    defer output.deinit();
+    try load_testing.expectShards(allocator, io, &output, &transposed);
+
+    // A local file may be read directly: its range widened to the alignment
+    // no longer fits.
+    if (VFS.direct_io_alignment != 0) {
+        var refused: Buffer = undefined;
+        const local_part: LoadPart = .{ .source = &local, .width = 1, .dims = &dims };
+        const local_spec: LoadSpec = .{ .shape = .init(.{ 128, 128 }, .u8), .output = &refused, .parts = (&local_part)[0..1] };
+        if (loader.submit(&.{local_spec}, .none)) |batch| {
+            try loader.awaitBatch(batch);
+            refused.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.UnsupportedLayout, err);
+    }
 }
 
 /// A host-resident load on four devices: rows sharded; columns sharded, two

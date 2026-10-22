@@ -863,7 +863,7 @@ test "resolveModelEntrypoint falls back past a denied index and reports a denied
     defer client.deinit();
     var endpoint_buffer: [64]u8 = undefined;
     const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.port()});
-    var s3: VFS.S3 = try .init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1" }, .{});
+    var s3: VFS.S3 = try .init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1" });
     defer s3.deinit();
 
     {

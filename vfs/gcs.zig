@@ -12,7 +12,6 @@ const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
 const log = std.log.scoped(.@"zml/vfs/gcs");
 
-const EndpointUrl = "https://storage.googleapis.com";
 const MetadataUrl = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 
 /// Check if running on Google Compute Engine / Cloud Run host infrastructure,
@@ -55,29 +54,11 @@ const Credentials = union(enum) {
     };
 
     const ServiceAccount = struct {
-        pub const JwtAssertion = struct {
-            iss: []const u8,
-            scope: []const u8 = "https://www.googleapis.com/auth/devstorage.read_only",
-            aud: []const u8 = "https://oauth2.googleapis.com/token",
-            exp: i64,
-            iat: i64,
-            sub: ?[]const u8 = null,
-        };
-
         type: []const u8,
         client_email: []const u8,
         private_key: []const u8,
         token_uri: []const u8,
         quota_project_id: ?[]const u8 = null,
-
-        pub fn makeAssertion(self: *const ServiceAccount, io_: std.Io) JwtAssertion {
-            const now: std.Io.Timestamp = .now(io_, .real);
-            return .{
-                .iss = self.client_email,
-                .iat = now.toSeconds(),
-                .exp = now.addDuration(.fromSeconds(3600)).toSeconds(),
-            };
-        }
     };
 
     authorized_user: AuthorizedUser,
@@ -160,7 +141,6 @@ pub const GCS = struct {
     pub const Config = struct {
         credentials: ?Credentials = null,
         endpoint_uri: std.Uri,
-        region: []const u8 = "auto",
     };
 
     const Handle = struct {
@@ -198,22 +178,13 @@ pub const GCS = struct {
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
     base: VFSBase,
 
-    pub const InitOpts = struct {
+    pub const Options = struct {
         credentials: ?union(enum) {
             json: *std.Io.Reader,
             metadata_server: void,
         } = null,
         endpoint_url: []const u8 = "https://storage.googleapis.com",
-        region: []const u8 = "auto",
-        /// Retries per request for failures that are not rate limiting.
-        max_retries: usize = 5,
-        retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
-        retry_max_delay: std.Io.Duration = .fromSeconds(30),
-        /// Longest hold one throttle may arm over every request of this
-        /// backend, a server-named delay included.
-        max_hold: std.Io.Duration = .fromSeconds(120),
-        /// Continuous rate limiting for longer than this fails the requests.
-        throttle_budget: std.Io.Duration = .fromSeconds(300),
+        retry: request.Retry = .{},
     };
 
     pub const InitError = error{
@@ -221,11 +192,11 @@ pub const GCS = struct {
         Unexpected,
     } || std.mem.Allocator.Error || std.Io.ConcurrentError;
 
-    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, opts: InitOpts) InitError!GCS {
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, options: Options) InitError!GCS {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         errdefer arena.deinit();
         const config: Config = .{
-            .credentials = if (opts.credentials) |creds| switch (creds) {
+            .credentials = if (options.credentials) |creds| switch (creds) {
                 .json => |reader| blk: {
                     var json_reader: std.json.Reader = .init(allocator, reader);
                     defer json_reader.deinit();
@@ -239,8 +210,7 @@ pub const GCS = struct {
                 },
                 .metadata_server => .{ .metadata_server = {} },
             } else null,
-            .endpoint_uri = std.Uri.parse(try arena.allocator().dupe(u8, opts.endpoint_url)) catch return InitError.Unexpected,
-            .region = try arena.allocator().dupe(u8, opts.region),
+            .endpoint_uri = std.Uri.parse(try arena.allocator().dupe(u8, options.endpoint_url)) catch return InitError.Unexpected,
         };
 
         const token: Token = .{
@@ -255,7 +225,7 @@ pub const GCS = struct {
             .client = http_client,
             .config = config,
             .token = token,
-            .governor = .init(.fromOptions(opts)),
+            .governor = .init(options.retry),
         };
     }
 
@@ -360,9 +330,9 @@ pub const GCS = struct {
             };
         }
 
-        fn attempt(self: *TokenRequest, _: request.Attempt) anyerror!request.Outcome(?[]const u8) {
+        fn attempt(self: *TokenRequest, current: request.Attempt) anyerror!request.Outcome(?[]const u8) {
             var head_buffer: [8 * 1024]u8 = undefined;
-            return request.exchange(?[]const u8, self.gcs.requestContext(), self.uri, .{
+            return request.exchange(?[]const u8, current, self.uri, .{
                 .method = self.method,
                 .headers = .{
                     .accept_encoding = .{ .override = "identity" },
@@ -373,7 +343,7 @@ pub const GCS = struct {
                 .accept = if (self.accept_any) .{ .statuses = &all_client_errors } else .{},
                 .redirects = .follow,
                 .head_buffer = &head_buffer,
-            }, self.spec(), self, TokenRequest.consume);
+            }, self, TokenRequest.consume);
         }
 
         fn consume(self: *TokenRequest, res: *std.http.Client.Response) anyerror!?[]const u8 {
@@ -399,44 +369,6 @@ pub const GCS = struct {
         _ = service_account;
         _ = buffer;
         return error.Unimplemented;
-
-        // const assertion = service_account.makeAssertion(io_);
-
-        // var tmp_buffer: [8 * 1024]u8 = undefined;
-
-        // var buffer_writer: std.Io.Writer = .fixed(buffer);
-        // var signing_input_buffer: [2 * 1024]u8 = undefined;
-        // var signing_input_writer: std.Io.Writer = .fixed(signing_input_buffer);
-
-        // const encoded_rs256_header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
-        // try signing_input_writer.print("{s}.", .{encoded_rs256_header});
-        // std.base64.url_safe_no_pad.Encoder.encodeWriter(
-        //     signing_input_writer,
-        //     try std.fmt.bufPrint(tmp_buffer, "{f}", .{
-        //         std.json.fmt(assertion, .{}),
-        //     }),
-        // );
-        // const signing_input = signing_input_writer.buffered();
-        // _ = signing_input;
-
-        // const result = try client.fetch(.{
-        //     .location = .{ .url = "https://oauth2.googleapis.com/token" },
-        //     .method = .POST,
-        //     .payload = try std.fmt.bufPrint(buffer, "grant_type=refresh_token&client_id={f}&client_secret={f}&refresh_token={f}", .{
-        //         std.fmt.alt(std.Uri.Component{ .raw = service_account.client_id }, .formatQuery),
-        //         std.fmt.alt(std.Uri.Component{ .raw = authorized_user.client_secret }, .formatQuery),
-        //         std.fmt.alt(std.Uri.Component{ .raw = authorized_user.refresh_token }, .formatQuery),
-        //     }),
-        //     .headers = .{
-        //         .accept_encoding = .{ .override = "identity" },
-        //         .content_type = .{ .override = "application/x-www-form-urlencoded" },
-        //     },
-        //     .response_writer = &response_writer,
-        // });
-        // if (result.status != .ok) {
-        //     log.err("Failed to refresh ADC token: {s}", .{response_writer.buffered()});
-        //     return error.RequestFailed;
-        // }
     }
 
     fn refreshToken(self: *GCS) !void {
@@ -490,6 +422,7 @@ pub const GCS = struct {
     }
 
     pub fn deinit(self: *GCS) void {
+        self.read_stats.logTotals("gcs");
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -543,7 +476,6 @@ pub const GCS = struct {
         return .{
             .io = self.io(),
             .read_hints = .{ .high_latency = true },
-            .read_stats = self.read_stats.provider(),
         };
     }
 
@@ -827,25 +759,6 @@ pub const GCS = struct {
         return path.len;
     }
 
-    fn getTimestamp(self: *GCS, buf: []u8) ![]const u8 {
-        const now_ts = std.Io.Clock.now(.real, self.base.inner);
-
-        const now: u64 = @intCast(@divFloor(now_ts.nanoseconds, std.time.ns_per_s));
-        const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = now };
-        const year_day = epoch_secs.getEpochDay().calculateYearDay();
-        const month_day = year_day.calculateMonthDay();
-        const day_seconds = epoch_secs.getDaySeconds();
-
-        return try std.fmt.bufPrint(buf, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
-            year_day.year,
-            @backingInt(month_day.month),
-            month_day.day_index + 1,
-            day_seconds.getHoursIntoDay(),
-            day_seconds.getMinutesIntoHour(),
-            day_seconds.getSecondsIntoMinute(),
-        });
-    }
-
     fn pathComponents(_: *GCS, path_: []const u8) struct { []const u8, []const u8 } {
         const path = std.mem.trim(u8, path_, "/");
 
@@ -865,36 +778,6 @@ pub const GCS = struct {
         uri.query = .{ .percent_encoded = "alt=media" };
         return uri;
     }
-
-    // fn authHeaders(self: *GCS, _: std.http.Method, _: std.Uri, _: []const u8, authorization_buffer: []u8) !struct {
-    //     authorization: ?[]const u8,
-    //     extra_headers: [3]?std.http.Header,
-    //     extra_len: usize,
-    // } {
-    //     if (self.config.oauth_access_token == null) {
-    //         if (self.config.googleCredentialsJsonStr) |json| {
-    //             const oauth = try refreshAuthorizedUserTokenFromJson(self.allocator, self.base.inner, json);
-    //             if (self.config.oauth_access_token) |old_token| self.allocator.free(old_token);
-    //             if (self.config.quota_project_id) |old_project| self.allocator.free(old_project);
-    //             self.config.oauth_access_token = oauth.access_token;
-    //             self.config.quota_project_id = oauth.quota_project_id;
-    //         }
-    //     }
-
-    //     const token = self.config.oauth_access_token orelse return error.MissingCredentials;
-    //     const authorization = try std.fmt.bufPrint(authorization_buffer, "Bearer {s}", .{token});
-    //     var extra_headers: [3]?std.http.Header = .{ null, null, null };
-    //     var extra_len: usize = 0;
-    //     if (self.config.quota_project_id) |project| {
-    //         extra_headers[0] = .{ .name = "x-goog-user-project", .value = project };
-    //         extra_len = 1;
-    //     }
-    //     return .{
-    //         .authorization = authorization,
-    //         .extra_headers = extra_headers,
-    //         .extra_len = extra_len,
-    //     };
-    // }
 
     fn listObjectsBody(self: *GCS, bucket: []const u8, key_prefix: []const u8) ![]u8 {
         var query_buf: [4096]u8 = undefined;
@@ -917,8 +800,13 @@ pub const GCS = struct {
         uri.path = .{ .percent_encoded = try std.fmt.bufPrint(&path_buf, "/{s}", .{bucket}) };
         uri.query = .{ .percent_encoded = query_writer.buffered() };
 
-        var listing: Listing = .{ .gcs = self, .uri = uri, .target = bucket };
-        return request.perform([]u8, self.requestContext(), listing.spec(), &listing, Listing.attempt);
+        var listing: Listing = .{ .gcs = self, .uri = uri };
+        return request.perform([]u8, self.requestContext(), .{
+            .backend = "gcs",
+            .target = bucket,
+            .unavailable = unavailable,
+            .key = request.authorityOf(uri),
+        }, &listing, Listing.attempt);
     }
 
     /// The bucket listing. The bearer token is copied per attempt, so one
@@ -926,22 +814,12 @@ pub const GCS = struct {
     const Listing = struct {
         gcs: *GCS,
         uri: std.Uri,
-        target: []const u8,
         authorization: [authorization_header_size]u8 = undefined,
-
-        fn spec(self: *const Listing) request.RequestSpec {
-            return .{
-                .backend = "gcs",
-                .target = self.target,
-                .unavailable = unavailable,
-                .key = request.authorityOf(self.uri),
-            };
-        }
 
         fn attempt(self: *Listing, current: request.Attempt) anyerror!request.Outcome([]u8) {
             var head_buffer: [2 * 1024]u8 = undefined;
             const authorization = try self.gcs.watchedToken(current, &self.authorization);
-            return request.exchange([]u8, self.gcs.requestContext(), self.uri, .{
+            return request.exchange([]u8, current, self.uri, .{
                 .headers = .{
                     .accept_encoding = .{ .override = "identity" },
                     .authorization = authorization,
@@ -951,7 +829,7 @@ pub const GCS = struct {
                 else
                     &.{},
                 .head_buffer = &head_buffer,
-            }, self.spec(), self, Listing.consume);
+            }, self, Listing.consume);
         }
 
         fn consume(self: *Listing, res: *std.http.Client.Response) anyerror![]u8 {
@@ -1015,8 +893,13 @@ pub const GCS = struct {
     fn fetchSize(self: *GCS, path: []const u8) !u64 {
         var uri_path_buffer: [8 * 1024 + 1]u8 = undefined;
         const uri = try self.gcsUri(path, &uri_path_buffer);
-        var head: SizeRequest = .{ .gcs = self, .uri = uri, .target = path };
-        return request.perform(u64, self.requestContext(), head.spec(), &head, SizeRequest.attempt);
+        var head: SizeRequest = .{ .gcs = self, .uri = uri };
+        return request.perform(u64, self.requestContext(), .{
+            .backend = "gcs",
+            .target = path,
+            .unavailable = unavailable,
+            .key = request.authorityOf(uri),
+        }, &head, SizeRequest.attempt);
     }
 
     /// The object's size: one HEAD. An absent or denied object fails as
@@ -1024,22 +907,12 @@ pub const GCS = struct {
     const SizeRequest = struct {
         gcs: *GCS,
         uri: std.Uri,
-        target: []const u8,
         authorization: [authorization_header_size]u8 = undefined,
-
-        fn spec(self: *const SizeRequest) request.RequestSpec {
-            return .{
-                .backend = "gcs",
-                .target = self.target,
-                .unavailable = unavailable,
-                .key = request.authorityOf(self.uri),
-            };
-        }
 
         fn attempt(self: *SizeRequest, current: request.Attempt) anyerror!request.Outcome(u64) {
             var head_buffer: [8 * 1024]u8 = undefined;
             const authorization = try self.gcs.watchedToken(current, &self.authorization);
-            return request.exchange(u64, self.gcs.requestContext(), self.uri, .{
+            return request.exchange(u64, current, self.uri, .{
                 .method = .HEAD,
                 .headers = .{
                     .accept_encoding = .{ .override = "identity" },
@@ -1047,7 +920,7 @@ pub const GCS = struct {
                 },
                 .accept = .{ .statuses = request.open_statuses },
                 .head_buffer = &head_buffer,
-            }, self.spec(), self, SizeRequest.consume);
+            }, self, SizeRequest.consume);
         }
 
         fn consume(_: *SizeRequest, res: *std.http.Client.Response) anyerror!u64 {

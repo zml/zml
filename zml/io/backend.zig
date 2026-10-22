@@ -19,6 +19,15 @@ pub const AwaitError = direct_loader.Loader.AwaitError || buffered_loader.Loader
 /// a whole number of blocks, at least one.
 pub const max_read_request_size: usize = 32 * 1024 * 1024;
 
+/// What the direct backend widens the reads of a file read directly to:
+/// the VFS's alignment when `io` is a VFS and `direct_io` is not `off`, else
+/// 0, every read exact. The VFS decides per local file whether it is read
+/// directly (`VFS.useDirectIo`).
+pub fn readAlignment(io: std.Io, direct_io: VFS.DirectIo) usize {
+    if (direct_io == .off or VFS.fromIo(io) == null) return 0;
+    return VFS.direct_io_alignment;
+}
+
 /// `Loader.Options` as `Loader.init` checked them, the checkpoint resolved
 /// to its VFS backend's read hints. See `Loader.Options` for each field.
 pub const Options = struct {

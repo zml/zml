@@ -13,11 +13,12 @@ const base_module = @import("base.zig");
 const direct_io = @import("direct_io.zig");
 pub const Backend = base_module.Backend;
 pub const ReadHints = base_module.ReadHints;
-pub const ReadStats = base_module.ReadStats;
-pub const ReadStatsProvider = base_module.ReadStatsProvider;
 const VFSBase = base_module.VFSBase;
 /// See `useDirectIo`.
 pub const DirectIo = direct_io.Policy;
+/// What every read of a direct file must meet in offset, buffers and total
+/// (`useDirectIo`); 0 on a system without direct I/O, where no file is.
+pub const direct_io_alignment: usize = if (direct_io.supported) direct_io.alignment else 0;
 
 test {
     _ = @import("http_acceptance_test.zig");
@@ -68,15 +69,12 @@ const Handle = struct {
 /// throughput gain. Profiles supply minima; the loader also respects its
 /// independently calibrated DMA block and the supported request-size limit.
 pub const LoadProfile = struct {
-    /// Local files read without a VFS: buffered, exact reads. Also the
-    /// loader's profile when it is given no checkpoint or no VFS. This
-    /// value is borrowed and does not require deinitialization.
+    /// Local files, through a VFS or not. Also the loader's profile when it
+    /// is given no checkpoint or no VFS.
     pub const local: LoadProfile = .{
         .name = "local",
         .read_chunk_size = 8 * 1024 * 1024,
         .high_latency = false,
-        .direct_io_alignment = null,
-        .stats = null,
     };
 
     name: []const u8,
@@ -84,11 +82,6 @@ pub const LoadProfile = struct {
     /// independently calibrated DMA block size.
     read_chunk_size: usize,
     high_latency: bool,
-    /// What a direct read of one of this profile's files must meet in
-    /// offset, buffers and total once the VFS that opened the file made it
-    /// direct (`useDirectIo`); null when no read of them is ever direct.
-    direct_io_alignment: ?usize,
-    stats: ?ReadStatsProvider,
 };
 
 allocator: std.mem.Allocator,
@@ -161,7 +154,7 @@ pub const Remotes = struct {
         self.client = .{ .allocator = allocator, .io = base_io };
         errdefer self.client.deinit();
         try self.client.initDefaultProxies(self.arena.allocator(), environ);
-        self.https = try .init(allocator, base_io, &self.client, .https);
+        self.https = try .init(allocator, base_io, &self.client, .{ .protocol = .https });
         errdefer self.https.deinit();
         self.hf = try .auto(allocator, base_io, &self.client, environ);
         errdefer self.hf.deinit();
@@ -228,19 +221,13 @@ const io_vtable: std.Io.VTable = VFSBase.vtable(.{
     .fileRealPath = fileRealPath,
 });
 
-/// Prepares the source tuning and feedback provider for one model load
-/// (`Loader.init` asks for its checkpoint's). A path resolves as it does
-/// for `openFile`: a bare path or a `file://` URI is local, served by the
-/// inner `Io`, and the loader may read it directly (`useDirectIo`).
-/// Returned strings and providers borrow backend state, so this VFS and its
-/// registered backend must outlive the load.
+/// The source tuning for one model load (`Loader.init` asks for its
+/// checkpoint's). A path resolves as it does for `openFile`: a bare path or
+/// a `file://` URI is local, served by the inner `Io`. The name borrows the
+/// registered scheme, so this VFS must outlive its use.
 pub fn loadProfile(self: *VFS, path: []const u8) !LoadProfile {
     const backend_idx, _, _ = try self.lookupDir(.cwd(), path);
-    const index = backend_idx orelse {
-        var profile = LoadProfile.local;
-        profile.direct_io_alignment = if (direct_io.supported) direct_io.alignment else null;
-        return profile;
-    };
+    const index = backend_idx orelse return .local;
     self.mutex.lockUncancelable(self.base.inner);
     defer self.mutex.unlock(self.base.inner);
     const backend = self.backends.entries.items(.value)[index];
@@ -248,9 +235,14 @@ pub fn loadProfile(self: *VFS, path: []const u8) !LoadProfile {
         .name = self.backends.entries.items(.key)[index],
         .read_chunk_size = backend.read_hints.read_chunk_size,
         .high_latency = backend.read_hints.high_latency,
-        .direct_io_alignment = null,
-        .stats = backend.read_stats,
     };
+}
+
+/// Whether `path` resolves to a local file, the only kind `useDirectIo` can
+/// read directly; an unregistered scheme is not. Opens nothing.
+pub fn isLocal(self: *VFS, path: []const u8) bool {
+    const backend_idx, _, _ = self.lookupDir(.cwd(), path) catch return false;
+    return backend_idx == null;
 }
 
 fn openHandle(self: *VFS) !struct { u32, *Handle } {
@@ -283,8 +275,8 @@ fn getFileHandle(self: *VFS, file: std.Io.File) struct { *Handle, std.Io } {
 /// Direct reads for a local file under `policy`: sets the flag on the
 /// descriptor of a read-only regular file at least one alignment unit long
 /// (and, under `auto`, mostly out of the page cache) and returns true, after
-/// which every read of the file must meet `LoadProfile.direct_io_alignment`
-/// in offset, buffers and total. False leaves the file buffered: another
+/// which every read of the file must meet `direct_io_alignment` in offset,
+/// buffers and total. False leaves the file buffered: another
 /// backend's file, `off`, a cached file under `auto`, a filesystem that
 /// refuses the flag, or a file whose direct read the kernel already
 /// rejected. The first call under `on` or `auto` decides for the handle's
@@ -782,20 +774,20 @@ test "VFS prepares load profiles for local and registered paths" {
     try std.testing.expectEqualStrings("test", profile.name);
     try std.testing.expectEqual(@as(usize, 32 * 1024 * 1024), profile.read_chunk_size);
     try std.testing.expect(profile.high_latency);
+    try std.testing.expect(!filesystem.isLocal("test://bucket/object"));
 
-    const local_alignment: ?usize = if (direct_io.supported) direct_io.alignment else null;
     for ([_][]const u8{ "/tmp/model.safetensors", "models/model.safetensors", "file:///tmp/model.safetensors" }) |path| {
         const local = try filesystem.loadProfile(path);
         try std.testing.expectEqualStrings("local", local.name);
         try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), local.read_chunk_size);
         try std.testing.expect(!local.high_latency);
-        try std.testing.expectEqual(local_alignment, local.direct_io_alignment);
-        try std.testing.expect(local.stats == null);
+        try std.testing.expect(filesystem.isLocal(path));
     }
     try std.testing.expectError(
         error.VFSNotRegistered,
         filesystem.loadProfile("missing://bucket/object"),
     );
+    try std.testing.expect(!filesystem.isLocal("missing://bucket/object"));
     try std.testing.expectError(error.ReservedScheme, filesystem.registerBackend("file", .{ .io = std.testing.io }));
     try std.testing.expectEqual(@as(?*VFS, &filesystem), VFS.fromIo(filesystem.io()));
     try std.testing.expectEqual(@as(?*VFS, null), VFS.fromIo(std.testing.io));
@@ -816,12 +808,10 @@ test "Remotes registers every remote scheme with its load profile" {
         name: []const u8,
         read_chunk_size: usize,
         high_latency: bool,
-        direct_io_alignment: ?usize = null,
     };
-    const local_alignment: ?usize = if (direct_io.supported) direct_io.alignment else null;
     const cases = [_]Case{
-        .{ .path = "file:///tmp/model", .name = "local", .read_chunk_size = 8 * 1024 * 1024, .high_latency = false, .direct_io_alignment = local_alignment },
-        .{ .path = "/var/models/model", .name = "local", .read_chunk_size = 8 * 1024 * 1024, .high_latency = false, .direct_io_alignment = local_alignment },
+        .{ .path = "file:///tmp/model", .name = "local", .read_chunk_size = 8 * 1024 * 1024, .high_latency = false },
+        .{ .path = "/var/models/model", .name = "local", .read_chunk_size = 8 * 1024 * 1024, .high_latency = false },
         .{ .path = "https://example.com/model", .name = "https", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
         .{ .path = "s3://bucket/model", .name = "s3", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
         .{ .path = "gs://bucket/model", .name = "gs", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
@@ -832,7 +822,8 @@ test "Remotes registers every remote scheme with its load profile" {
         try std.testing.expectEqualStrings(case.name, profile.name);
         try std.testing.expectEqual(case.read_chunk_size, profile.read_chunk_size);
         try std.testing.expectEqual(case.high_latency, profile.high_latency);
-        try std.testing.expectEqual(case.direct_io_alignment, profile.direct_io_alignment);
+        // Only a local file can be read directly; nothing is opened to ask.
+        try std.testing.expectEqual(std.mem.eql(u8, case.name, "local"), filesystem.isLocal(case.path));
     }
 }
 

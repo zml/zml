@@ -123,9 +123,8 @@ pub const Loader = struct {
     pub const Options = struct {
         /// The checkpoint's path or URI, read by `init` only. When `io` is a
         /// VFS, the VFS backend serving that path sizes the reads (its
-        /// `VFS.LoadProfile`), whose name and read statistics the loader
-        /// borrows: the VFS and that backend must outlive the loader. Null,
-        /// or a plain `io`: local files without direct I/O.
+        /// `VFS.LoadProfile`), whose name the loader borrows: the VFS must
+        /// outlive the loader. Null, or a plain `io`: the local sizing.
         checkpoint: ?[]const u8 = null,
         /// Concurrent source reads, 1 to `max_read_parallelism`. Null takes
         /// the checkpoint's default (`backend.Options.readWidth`: 16
@@ -133,25 +132,30 @@ pub const Loader = struct {
         /// what the pre-grown pinned set holds. Fixed for the load: a source
         /// that rate limits holds the VFS instead (`vfs/request.zig`).
         read_parallelism: ?usize = null,
-        /// The DMA block sizes calibration screens, each at least the
-        /// checkpoint's direct I/O alignment (4 KiB for a local file under a
-        /// VFS, else 1) and at most 32 MiB (`backend.max_read_request_size`).
+        /// The DMA block sizes calibration screens, each at least the direct
+        /// I/O alignment (`VFS.direct_io_alignment`, 4 KiB, when `io` is a
+        /// VFS and `direct_io` is not `off`; else 1) and at most 32 MiB
+        /// (`backend.max_read_request_size`). With that alignment, a request
+        /// (the larger of a block and the checkpoint's read chunk) exceeds
+        /// two units.
         /// Ignored by the buffered backend; CPU takes the default sizing
         /// without measuring.
         dma_block_sizes: []const usize = &dma_calibration.default_block_sizes,
         /// Direct I/O for local source files, decided per file by the
         /// VFS that opens it: `auto` reads a file past the page cache when it
         /// is mostly not cached at the first decision, `on` whenever the
-        /// filesystem allows it, `off` never. The planner widens a direct file's
-        /// reads to the profile's alignment, at most two alignment units per
-        /// request. A direct read never fills the page cache, so under
-        /// `auto` a cold file stays cold and comes from the disk on every
-        /// load (in a file of many pages per sample window, the residency probe
-        /// lands on other pages every time, so the ones it cached do not count;
-        /// a file of at most 32 pages is sampled whole and turns buffered after
-        /// its first load); on a host whose warm buffered reads beat its disk, a model
-        /// loaded repeatedly is better served by `off`. Nothing changes for
-        /// a profile without alignment.
+        /// filesystem allows it, `off` never. The checkpoint plays no part:
+        /// a local file beside a remote checkpoint may be read directly, and
+        /// a remote file never is, nor opened to ask. The planner widens a
+        /// direct file's reads to `VFS.direct_io_alignment`, at most two
+        /// alignment units per request. A direct read never fills the page
+        /// cache, so under `auto` a cold file stays cold and comes from the
+        /// disk on every load (in a file of many pages per sample window, the
+        /// residency probe lands on other pages every time, so the ones it
+        /// cached do not count; a file of at most 32 pages is sampled whole
+        /// and turns buffered after its first load); on a host whose warm
+        /// buffered reads beat its disk, a model loaded repeatedly is better
+        /// served by `off`. Nothing changes when `io` is not a VFS.
         /// Warm replicated Llama-3.1-8B on eight MI300X took ~1.10 s buffered but
         /// ~4.53 s forced direct from a slow storage extent; on four GB300
         /// with four NVMe drives in RAID0, direct took ~0.30 s versus ~0.32 s
@@ -1102,7 +1106,8 @@ fn backendOptions(io: std.Io, opts: Loader.Options) error{InvalidOptions}!backen
     }
     // A direct read is widened by up to an alignment unit at each end,
     // which a job of smaller blocks cannot hold (`Planner.maximumJobLen`).
-    const min_block = @max(profile.direct_io_alignment orelse 1, 1);
+    const alignment = backend.readAlignment(io, opts.direct_io);
+    const min_block = @max(alignment, 1);
     for (opts.dma_block_sizes) |block_size| {
         if (block_size < min_block or block_size > max_request) {
             load_log.err("invalid loader options: profile={s}, dma block size {d}, expected {d}..{d}: InvalidOptions", .{ profile.name, block_size, min_block, max_request });
@@ -1111,12 +1116,18 @@ fn backendOptions(io: std.Io, opts: Loader.Options) error{InvalidOptions}!backen
     }
     // A source request is the larger of the read chunk and the block
     // calibration selected, and a whole number of blocks (the direct
-    // `Loader.create`). Checked for every block it may select: a
-    // candidate, or on CPU the default.
+    // `Loader.create`); with an alignment, it holds a direct read widened at
+    // each end. Checked for every block it may select: a candidate, or on
+    // CPU the default.
     for ([_][]const usize{ opts.dma_block_sizes, &.{dma_calibration.Result.default.block_size} }) |block_sizes| {
         for (block_sizes) |block_size| {
-            if (@max(profile.read_chunk_size, block_size) % block_size != 0) {
+            const request = @max(profile.read_chunk_size, block_size);
+            if (request % block_size != 0) {
                 load_log.err("invalid loader options: profile={s}, read_chunk_size={d} is not a multiple of the dma block size {d}: InvalidOptions", .{ profile.name, profile.read_chunk_size, block_size });
+                return error.InvalidOptions;
+            }
+            if (alignment != 0 and request <= 2 * alignment) {
+                load_log.err("invalid loader options: profile={s}, request of {d} cannot hold a direct read widened by {d} at each end: InvalidOptions", .{ profile.name, request, alignment });
                 return error.InvalidOptions;
             }
         }
@@ -1656,9 +1667,18 @@ test "init checks every option and returns InvalidOptions" {
     }
     // Under a VFS, a local file may be read directly: a block holds an
     // alignment unit at least.
-    if ((try vfs.loadProfile("/model.safetensors")).direct_io_alignment) |alignment| {
-        const small = [_]usize{alignment / 2};
+    if (VFS.direct_io_alignment != 0) {
+        const small = [_]usize{VFS.direct_io_alignment / 2};
         if (Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = "/model.safetensors", .dma_block_sizes = &small })) |value| {
+            var loader = value;
+            loader.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.InvalidOptions, err);
+        // Whatever the checkpoint: a request of one alignment unit cannot
+        // hold a direct read widened at each end.
+        try vfs.registerBackend("tiny", .{ .io = io, .read_hints = .{ .read_chunk_size = VFS.direct_io_alignment } });
+        const unit = [_]usize{VFS.direct_io_alignment};
+        if (Loader.init(allocator, vfs.io(), platform, .{ .checkpoint = "tiny://model", .dma_block_sizes = &unit })) |value| {
             var loader = value;
             loader.deinit();
             return error.TestUnexpectedResult;
@@ -1746,18 +1766,18 @@ test "a rate-limited HTTP source loads through the VFS hold" {
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    var http: VFS.HTTP = try .initWithOptions(allocator, io, &client, .http, .{
+    var http: VFS.HTTP = try .init(allocator, io, &client, .{ .protocol = .http, .retry = .{
         .max_retries = 5,
-        .retry_initial_delay = .fromMilliseconds(20),
-        .retry_max_delay = .fromMilliseconds(20),
+        .initial_delay = .fromMilliseconds(20),
+        .max_delay = .fromMilliseconds(20),
         .max_hold = .fromSeconds(5),
         .throttle_budget = .fromSeconds(30),
-    });
+    } });
     defer http.deinit();
     var vfs: VFS = try .init(allocator, io);
     defer vfs.deinit();
     try vfs.registerBackend("http", http.backend());
-    const stats = http.backend().read_stats.?;
+    const stats = &http.read_stats;
 
     var url_buffer: [128]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/object", .{server.port()});
@@ -1824,10 +1844,12 @@ test "a rate-limited HTTP source loads through the VFS hold" {
     const credits = &loader.backend.?.direct.credits;
     try std.testing.expectEqual(credits.free.len, credits.free_len);
 
-    // The checkpoint's VFS backend, not the local profile, sized the load.
-    const profile = loader.backend.?.direct.load_profile;
-    try std.testing.expectEqualStrings("http", profile.name);
-    try std.testing.expect(profile.high_latency and profile.stats != null);
+    // The checkpoint's VFS backend, not the local profile (8 MiB), sized the
+    // reads: 16 MiB requests over the CPU's 4 MiB blocks. Its file was read
+    // exact: a remote file is never direct.
+    const direct = loader.backend.?.direct;
+    try std.testing.expectEqual(@as(usize, 16 << 20), direct.plan_config.request_size);
+    try std.testing.expectEqual(@as(usize, 0), direct.source_slots.get(url).?.alignment orelse 0);
 }
 
 test "a rejected binding or a program of the wrong output fails the loader" {

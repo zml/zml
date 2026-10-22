@@ -54,16 +54,10 @@ const RepoKey = struct {
 };
 
 pub const HF = struct {
-    pub const InitOpts = struct {
-        /// Retries per request for failures that are not rate limiting.
-        max_retries: usize = 5,
-        retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
-        retry_max_delay: std.Io.Duration = .fromSeconds(30),
-        /// Longest hold one throttle may arm over every request of this
-        /// backend, a server-named delay included.
-        max_hold: std.Io.Duration = .fromSeconds(120),
-        /// Continuous rate limiting for longer than this fails the requests.
-        throttle_budget: std.Io.Duration = .fromSeconds(300),
+    pub const Options = struct {
+        /// Sent as a bearer token to the Hub itself, never to its CDN.
+        token: ?[]const u8 = null,
+        retry: request.Retry = .{},
     };
 
     pub const Repo = struct {
@@ -137,19 +131,19 @@ pub const HF = struct {
     trees: std.StringHashMapUnmanaged(std.ArrayList(TreeNode)) = .{},
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
 
-    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8, opts: InitOpts) !HF {
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, options: Options) !HF {
         var self: HF = .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
-            .authorization = if (hf_token) |token| blk: {
+            .authorization = if (options.token) |token| blk: {
                 break :blk .{
                     .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{std.mem.trim(u8, token, " \t\n\r")}),
                 };
             } else blk: {
                 break :blk .default;
             },
-            .governor = .init(.fromOptions(opts)),
+            .governor = .init(options.retry),
         };
         errdefer switch (self.authorization) {
             .default, .omit => {},
@@ -181,10 +175,11 @@ pub const HF = struct {
 
         if (hf_token == null) log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
 
-        return init(allocator, inner, http_client, hf_token, .{});
+        return init(allocator, inner, http_client, .{ .token = hf_token });
     }
 
     pub fn deinit(self: *HF) void {
+        self.read_stats.logTotals("hf");
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -247,7 +242,6 @@ pub const HF = struct {
                 .read_chunk_size = 32 * 1024 * 1024,
                 .high_latency = true,
             },
-            .read_stats = self.read_stats.provider(),
         };
     }
 
@@ -336,7 +330,7 @@ pub const HF = struct {
         const uri = try std.Uri.parse(url);
         log.info("Fetching from HF: {s}", .{url});
 
-        var fetch: TreeFetch = .{ .hf = self, .uri = uri, .url = url };
+        var fetch: TreeFetch = .{ .hf = self, .uri = uri };
         return request.perform(std.ArrayList(TreeNode), self.requestContext(), .{
             .backend = "hf",
             .target = url,
@@ -348,11 +342,10 @@ pub const HF = struct {
     const TreeFetch = struct {
         hf: *HF,
         uri: std.Uri,
-        url: []const u8,
 
-        fn attempt(self: *TreeFetch, _: request.Attempt) anyerror!request.Outcome(std.ArrayList(TreeNode)) {
+        fn attempt(self: *TreeFetch, current: request.Attempt) anyerror!request.Outcome(std.ArrayList(TreeNode)) {
             var head_buffer: [8 * 1024]u8 = undefined;
-            return request.exchange(std.ArrayList(TreeNode), self.hf.requestContext(), self.uri, .{
+            return request.exchange(std.ArrayList(TreeNode), current, self.uri, .{
                 .headers = .{
                     .accept_encoding = .{ .override = "identity" },
                     .authorization = self.hf.authorization,
@@ -360,11 +353,6 @@ pub const HF = struct {
                 .accept = .{ .statuses = request.open_statuses },
                 .redirects = .follow,
                 .head_buffer = &head_buffer,
-            }, .{
-                .backend = "hf",
-                .target = self.url,
-                .unavailable = .server_failure,
-                .key = request.authorityOf(self.uri),
             }, self, TreeFetch.consume);
         }
 
@@ -410,7 +398,7 @@ pub const HF = struct {
         var remaining_redirects: usize = 8;
         while (true) {
             const uri: std.Uri = try .parse(url);
-            var hop: ResolveHop = .{ .hf = self, .uri = uri, .url = url, .target = target };
+            var hop: ResolveHop = .{ .hf = self, .uri = uri, .url = url };
             // Each hop is one governed request: a CDN that rate limits the
             // HEAD holds the backend exactly as a throttled GET does.
             const location = try request.perform(?[]const u8, self.requestContext(), .{
@@ -441,13 +429,11 @@ pub const HF = struct {
         hf: *HF,
         uri: std.Uri,
         url: []const u8,
-        /// What logs name: the file, not its URL.
-        target: []const u8,
         location: [8 * 1024]u8 = undefined,
 
-        fn attempt(self: *ResolveHop, _: request.Attempt) anyerror!request.Outcome(?[]const u8) {
+        fn attempt(self: *ResolveHop, current: request.Attempt) anyerror!request.Outcome(?[]const u8) {
             var head_buffer: [16 * 1024]u8 = undefined;
-            return request.exchange(?[]const u8, self.hf.requestContext(), self.uri, .{
+            return request.exchange(?[]const u8, current, self.uri, .{
                 .method = .HEAD,
                 .headers = .{
                     .accept_encoding = .{ .override = "identity" },
@@ -457,11 +443,6 @@ pub const HF = struct {
                 .accept = .{ .statuses = request.open_statuses },
                 .redirects = .surface,
                 .head_buffer = &head_buffer,
-            }, .{
-                .backend = "hf",
-                .target = self.target,
-                .unavailable = .server_failure,
-                .key = request.authorityOf(self.uri),
             }, self, ResolveHop.consume);
         }
 
@@ -952,7 +933,7 @@ test "HF reports a path absent from the repository listing as FileNotFound" {
     const allocator = std.testing.allocator;
     var client: std.http.Client = .{ .allocator = allocator, .io = std.testing.io };
     defer client.deinit();
-    var hf: HF = try .init(allocator, std.testing.io, &client, null, .{});
+    var hf: HF = try .init(allocator, std.testing.io, &client, .{});
     defer hf.deinit();
 
     // The listing `getOrFetchTree` would keep, so no request is sent.

@@ -15,16 +15,18 @@ const ReadFailure = base.ReadFailure;
 
 const log = std.log.scoped(.@"zml/vfs/request");
 
-pub const RetryConfig = struct {
+/// The retry knobs of one remote backend: its `Options.retry`.
+pub const Retry = struct {
     /// Retries per request for failures that are not rate limiting.
-    max_retries: usize,
-    initial_delay: std.Io.Duration,
-    max_delay: std.Io.Duration,
-    /// Longest hold a throttle may arm, server-named delays included.
-    max_hold: std.Io.Duration,
+    max_retries: usize = 5,
+    initial_delay: std.Io.Duration = .fromMilliseconds(500),
+    max_delay: std.Io.Duration = .fromSeconds(30),
+    /// Longest hold one throttle may arm over every request of the backend,
+    /// a server-named delay included.
+    max_hold: std.Io.Duration = .fromSeconds(120),
     /// A throttling episode with no clean window longer than this fails the
     /// backend's requests with `error.RateLimited`.
-    throttle_budget: std.Io.Duration,
+    throttle_budget: std.Io.Duration = .fromSeconds(300),
     /// An attempt that receives nothing for this long is canceled and
     /// retried as a timeout: a peer that stops sending without closing the
     /// connection would otherwise hold its reader, and the load waiting for
@@ -32,23 +34,6 @@ pub const RetryConfig = struct {
     /// (`Attempt.progress`); an attempt that counts nothing (a HEAD, a token
     /// exchange) must finish within it.
     stall_timeout: std.Io.Duration = .fromSeconds(60),
-
-    /// Reads the `max_retries`, `retry_initial_delay`, `retry_max_delay`,
-    /// `max_hold` and `throttle_budget` fields every backend's `InitOpts`
-    /// declares.
-    pub fn fromOptions(opts: anytype) RetryConfig {
-        const self: RetryConfig = .{
-            .max_retries = opts.max_retries,
-            .initial_delay = opts.retry_initial_delay,
-            .max_delay = opts.retry_max_delay,
-            .max_hold = opts.max_hold,
-            .throttle_budget = opts.throttle_budget,
-        };
-        std.debug.assert(self.initial_delay.nanoseconds >= 0);
-        std.debug.assert(self.max_delay.nanoseconds >= self.initial_delay.nanoseconds);
-        std.debug.assert(self.max_hold.nanoseconds >= self.initial_delay.nanoseconds);
-        return self;
-    }
 };
 
 /// What a hold covers. Today one governor holds one scope, its backend
@@ -84,11 +69,14 @@ pub const Hold = struct {
 
 /// One per backend instance, beside its read statistics.
 pub const Governor = struct {
-    retry: RetryConfig,
+    retry: Retry,
     mutex: std.Io.Mutex = .init,
     hold: Hold = .{},
 
-    pub fn init(retry: RetryConfig) Governor {
+    pub fn init(retry: Retry) Governor {
+        std.debug.assert(retry.initial_delay.nanoseconds >= 0);
+        std.debug.assert(retry.max_delay.nanoseconds >= retry.initial_delay.nanoseconds);
+        std.debug.assert(retry.max_hold.nanoseconds >= retry.initial_delay.nanoseconds);
         return .{ .retry = retry };
     }
 
@@ -112,6 +100,10 @@ pub const Context = struct {
 
 /// One attempt as a backend's request hook sees it.
 pub const Attempt = struct {
+    /// The request as `perform` was given it, which `exchange` sends and
+    /// logs with.
+    ctx: Context,
+    spec: RequestSpec,
     /// Zero-based; charged retries are attempt 1 and above. A throttle does
     /// not advance it.
     ordinal: usize,
@@ -120,7 +112,7 @@ pub const Attempt = struct {
     previous_status: ?std.http.Status = null,
     /// Bytes received so far, for a hook whose body is long: `perform`
     /// cancels an attempt this counter does not move for
-    /// `RetryConfig.stall_timeout`.
+    /// `Retry.stall_timeout`.
     progress: ?*std.atomic.Value(u64) = null,
     /// Set while the attempt runs a governed request of its own (a
     /// re-resolve, a token refresh), which that request's `perform`
@@ -172,7 +164,7 @@ pub fn Outcome(comptime T: type) type {
 /// `exchange`); this drives the hold, the classification and the two budgets
 /// around it. A throttle re-runs the attempt without charging a retry, after
 /// the hold it armed; any other retryable failure, a stall
-/// (`RetryConfig.stall_timeout`) included, sleeps the per-request backoff and charges
+/// (`Retry.stall_timeout`) included, sleeps the per-request backoff and charges
 /// one of `max_retries`. A cancel of the caller propagates.
 pub fn perform(
     comptime T: type,
@@ -186,7 +178,7 @@ pub fn perform(
     while (true) {
         try admit(ctx, spec);
         ctx.stats.recordAttempt();
-        switch (try watched(T, ctx, spec, context, attemptFn, .{ .ordinal = charged, .previous_status = previous_status })) {
+        switch (try watched(T, context, attemptFn, .{ .ctx = ctx, .spec = spec, .ordinal = charged, .previous_status = previous_status })) {
             .done => |value| return value,
             .retry => |failure| {
                 ctx.stats.recordFailure(failure.failure);
@@ -210,15 +202,13 @@ pub fn perform(
 }
 
 /// Runs one attempt on its own unit of concurrency while this task watches
-/// its progress, and cancels it after `RetryConfig.stall_timeout` without
+/// its progress, and cancels it after `Retry.stall_timeout` without
 /// progress. A
 /// canceled read surfaces inside the attempt as a failed read, so the
 /// outcome of a stalled attempt is decided here, as a timeout. Without a
 /// unit of concurrency the attempt runs unwatched, as it always did.
 fn watched(
     comptime T: type,
-    ctx: Context,
-    spec: RequestSpec,
     context: anytype,
     comptime attemptFn: fn (@TypeOf(context), Attempt) anyerror!Outcome(T),
     attempt: Attempt,
@@ -232,6 +222,7 @@ fn watched(
             self.done.set(io);
         }
     };
+    const ctx = attempt.ctx;
     var progress: std.atomic.Value(u64) = .init(0);
     var waiting: std.atomic.Value(bool) = .init(false);
     var counted = attempt;
@@ -280,7 +271,7 @@ fn watched(
         .done => return outcome,
         .retry => {},
     } else |_| {}
-    log.warn("{s}: {s} received nothing for {d:.1}s; retrying", .{ spec.backend, spec.target, @as(f64, @floatFromInt(stall_timeout.nanoseconds)) / std.time.ns_per_s });
+    log.warn("{s}: {s} received nothing for {d:.1}s; retrying", .{ attempt.spec.backend, attempt.spec.target, @as(f64, @floatFromInt(stall_timeout.nanoseconds)) / std.time.ns_per_s });
     return .{ .retry = .{ .failure = .timeout } };
 }
 
@@ -425,20 +416,21 @@ pub const ExchangeOptions = struct {
     head_buffer: []u8,
 };
 
-/// One HTTP exchange: send, receive the head, classify it, and hand an
-/// accepted response to `consume` while the request is alive. Connection,
-/// send and receive failures and every classified status become `.retry`;
-/// an unclassified status fails with `error.RequestFailed`.
+/// One HTTP exchange of `attempt`'s request: send, receive the head,
+/// classify it, and hand an accepted response to `consume` while the
+/// request is alive. Connection, send and receive failures and every
+/// classified status become `.retry`; an unclassified status fails with
+/// `error.RequestFailed`.
 pub fn exchange(
     comptime T: type,
-    ctx: Context,
+    attempt: Attempt,
     uri: std.Uri,
     options: ExchangeOptions,
-    spec: RequestSpec,
     context: anytype,
     comptime consume: fn (@TypeOf(context), *std.http.Client.Response) anyerror!T,
 ) anyerror!Outcome(T) {
-    var req = ctx.client.request(options.method, uri, .{
+    const spec = attempt.spec;
+    var req = attempt.ctx.client.request(options.method, uri, .{
         .redirect_behavior = options.redirects.behavior(),
         .headers = options.headers,
         .extra_headers = options.extra_headers,
@@ -910,21 +902,6 @@ test "server retry delay comes from Retry-After seconds or a RateLimit reset" {
     try std.testing.expect(serverRetryDelay(http_date) == null);
     const none = try Head.parse("HTTP/1.1 500 Internal Server Error\r\n\r\n");
     try std.testing.expect(serverRetryDelay(none) == null);
-}
-
-test "retry configuration comes from the backend init options" {
-    const retry: RetryConfig = .fromOptions(.{
-        .max_retries = @as(usize, 2),
-        .retry_initial_delay = std.Io.Duration.fromMilliseconds(5),
-        .retry_max_delay = std.Io.Duration.fromSeconds(1),
-        .max_hold = std.Io.Duration.fromSeconds(120),
-        .throttle_budget = std.Io.Duration.fromSeconds(300),
-    });
-    try std.testing.expectEqual(@as(usize, 2), retry.max_retries);
-    try std.testing.expectEqual(std.Io.Duration.fromMilliseconds(5), retry.initial_delay);
-    try std.testing.expectEqual(std.Io.Duration.fromSeconds(1), retry.max_delay);
-    try std.testing.expectEqual(std.Io.Duration.fromSeconds(120), retry.max_hold);
-    try std.testing.expectEqual(std.Io.Duration.fromSeconds(300), retry.throttle_budget);
 }
 
 test "an attempt that receives nothing is canceled and retried as a timeout" {

@@ -2,6 +2,8 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
+const log = std.log.scoped(.@"zml/vfs");
+
 pub const ReadHints = struct {
     /// Smallest source request expected to avoid excessive per-request cost
     /// or backend rate limiting. The loader may increase it to match the
@@ -112,13 +114,25 @@ pub const AtomicReadStats = struct {
         };
     }
 
-    pub fn provider(self: *AtomicReadStats) ReadStatsProvider {
-        return .{ .userdata = self, .snapshotFn = snapshotOpaque };
-    }
-
-    fn snapshotOpaque(userdata: *anyopaque) ReadStats {
-        const self: *AtomicReadStats = @ptrCast(@alignCast(userdata));
-        return self.snapshot();
+    /// Logs the totals at debug, once, from its backend's `deinit`; nothing
+    /// when the backend sent no request. Holds, retries and failures are
+    /// logged at warn as they happen (`request.zig`).
+    pub fn logTotals(self: *const AtomicReadStats, backend: []const u8) void {
+        const totals = self.snapshot();
+        if (totals.physical_requests == 0) return;
+        log.debug("{s} read totals: requests={d}, bytes={Bi:.2}, retries={d}, transient_retries={d}, timeouts={d}, server_failures={d}, throttles={d}, holds={d}, hold_wait_ms={d:.3}, retry_delay_ms={d:.3}", .{
+            backend,
+            totals.physical_requests,
+            totals.physical_bytes,
+            totals.retries,
+            totals.transient_retries,
+            totals.timeouts,
+            totals.server_failures,
+            totals.throttles,
+            totals.holds,
+            @as(f64, @floatFromInt(totals.hold_wait_ns)) / std.time.ns_per_ms,
+            @as(f64, @floatFromInt(totals.retry_delay_ns)) / std.time.ns_per_ms,
+        });
     }
 };
 
@@ -144,19 +158,9 @@ test "atomic read stats retain aggregate retry feedback" {
     try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_ms), snapshot.hold_wait_ns);
 }
 
-pub const ReadStatsProvider = struct {
-    userdata: *anyopaque,
-    snapshotFn: *const fn (userdata: *anyopaque) ReadStats,
-
-    pub fn snapshot(self: ReadStatsProvider) ReadStats {
-        return self.snapshotFn(self.userdata);
-    }
-};
-
 pub const Backend = struct {
     io: std.Io,
     read_hints: ReadHints = .{},
-    read_stats: ?ReadStatsProvider = null,
 };
 
 pub const VFSBase = struct {

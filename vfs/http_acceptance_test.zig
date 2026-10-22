@@ -14,7 +14,7 @@ const S3 = @import("s3.zig").S3;
 
 /// A retry configuration that never sleeps, for the tests that count
 /// attempts rather than time.
-fn instantRetries(max_retries: usize) vfs_request.RetryConfig {
+fn instantRetries(max_retries: usize) vfs_request.Retry {
     return .{
         .max_retries = max_retries,
         .initial_delay = .fromNanoseconds(0),
@@ -44,10 +44,10 @@ test "generic HTTP keeps a large scattered positional read to one GET" {
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    var http = try HTTP.initWithOptions(allocator, io, &client, .http, .{});
+    var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http });
     defer http.deinit();
     const http_io = http.io();
-    const stats = http.backend().read_stats.?;
+    const stats = &http.read_stats;
 
     var path_buffer: [128]u8 = undefined;
     const path = try serverPath(&path_buffer, &server);
@@ -96,14 +96,14 @@ test "generic HTTP retries serially and reports aggregate retry counters" {
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    var http = try HTTP.initWithOptions(allocator, io, &client, .http, .{
+    var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http, .retry = .{
         .max_retries = 1,
-        .retry_initial_delay = .fromNanoseconds(0),
-        .retry_max_delay = .fromNanoseconds(0),
-    });
+        .initial_delay = .fromNanoseconds(0),
+        .max_delay = .fromNanoseconds(0),
+    } });
     defer http.deinit();
     const http_io = http.io();
-    const stats = http.backend().read_stats.?;
+    const stats = &http.read_stats;
 
     var path_buffer: [128]u8 = undefined;
     const path = try serverPath(&path_buffer, &server);
@@ -161,10 +161,10 @@ test "generic HTTP physical concurrency does not exceed caller admission" {
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    var http = try HTTP.initWithOptions(allocator, io, &client, .http, .{});
+    var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http });
     defer http.deinit();
     const http_io = http.io();
-    const stats = http.backend().read_stats.?;
+    const stats = &http.read_stats;
 
     var path_buffer: [128]u8 = undefined;
     const path = try serverPath(&path_buffer, &server);
@@ -334,14 +334,14 @@ test "the shared range loop prepares the request once per attempt" {
 }
 
 /// Options whose retries and holds are short enough for a test.
-fn fastOptions(initial_ms: i64, budget_ms: i64) HTTP.InitOpts {
-    return .{
+fn fastOptions(initial_ms: i64, budget_ms: i64) HTTP.Options {
+    return .{ .protocol = .http, .retry = .{
         .max_retries = 5,
-        .retry_initial_delay = .fromMilliseconds(initial_ms),
-        .retry_max_delay = .fromMilliseconds(initial_ms),
+        .initial_delay = .fromMilliseconds(initial_ms),
+        .max_delay = .fromMilliseconds(initial_ms),
         .max_hold = .fromSeconds(30),
         .throttle_budget = .fromMilliseconds(budget_ms),
-    };
+    } };
 }
 
 /// Runs one concurrent positional read per output slice, each at its own
@@ -410,10 +410,10 @@ test "one throttled GET holds every reader of the backend" {
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    var http = try HTTP.initWithOptions(allocator, io, &client, .http, fastOptions(50, 300_000));
+    var http = try HTTP.init(allocator, io, &client, fastOptions(50, 300_000));
     defer http.deinit();
     const http_io = http.io();
-    const stats = http.backend().read_stats.?;
+    const stats = &http.read_stats;
 
     var path_buffer: [128]u8 = undefined;
     const path = try serverPath(&path_buffer, &server);
@@ -471,10 +471,10 @@ test "a rate window is absorbed by the hold instead of the retry budget" {
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    var http = try HTTP.initWithOptions(allocator, io, &client, .http, fastOptions(50, 300_000));
+    var http = try HTTP.init(allocator, io, &client, fastOptions(50, 300_000));
     defer http.deinit();
     const http_io = http.io();
-    const stats = http.backend().read_stats.?;
+    const stats = &http.read_stats;
 
     var path_buffer: [128]u8 = undefined;
     const path = try serverPath(&path_buffer, &server);
@@ -529,7 +529,7 @@ test "a zero reset still holds for the initial delay instead of hot looping" {
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    var http = try HTTP.initWithOptions(allocator, io, &client, .http, fastOptions(initial_ms, 300_000));
+    var http = try HTTP.init(allocator, io, &client, fastOptions(initial_ms, 300_000));
     defer http.deinit();
     const http_io = http.io();
 
@@ -577,10 +577,10 @@ test "a throttled HEAD at open waits the hold out and succeeds" {
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    var http = try HTTP.initWithOptions(allocator, io, &client, .http, fastOptions(20, 300_000));
+    var http = try HTTP.init(allocator, io, &client, fastOptions(20, 300_000));
     defer http.deinit();
     const http_io = http.io();
-    const stats = http.backend().read_stats.?;
+    const stats = &http.read_stats;
 
     var path_buffer: [128]u8 = undefined;
     const path = try serverPath(&path_buffer, &server);
@@ -749,7 +749,7 @@ test "a reader cancelled while the backend is held returns Canceled" {
 
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
-    var http = try HTTP.initWithOptions(allocator, io, &client, .http, fastOptions(20, 300_000));
+    var http = try HTTP.init(allocator, io, &client, fastOptions(20, 300_000));
     defer http.deinit();
     const http_io = http.io();
 
@@ -822,9 +822,9 @@ test "http, s3 and gs fail open, stat and access of an absent or denied object a
     defer client.deinit();
     var endpoint_buffer: [64]u8 = undefined;
     const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.port()});
-    var http = try HTTP.init(allocator, io, &client, .http);
+    var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http });
     defer http.deinit();
-    var s3 = try S3.init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1" }, .{});
+    var s3 = try S3.init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1" });
     defer s3.deinit();
     var gcs = try GCS.init(allocator, io, &client, .{ .endpoint_url = endpoint });
     defer gcs.deinit();

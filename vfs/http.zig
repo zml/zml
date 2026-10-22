@@ -11,16 +11,9 @@ const request = @import("request.zig");
 const log = std.log.scoped(.@"zml/vfs/http");
 
 pub const HTTP = struct {
-    pub const InitOpts = struct {
-        /// Retries per request for failures that are not rate limiting.
-        max_retries: usize = 5,
-        retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
-        retry_max_delay: std.Io.Duration = .fromSeconds(30),
-        /// Longest hold one throttle may arm over every request of this
-        /// backend, a server-named delay included.
-        max_hold: std.Io.Duration = .fromSeconds(120),
-        /// Continuous rate limiting for longer than this fails the requests.
-        throttle_budget: std.Io.Duration = .fromSeconds(300),
+    pub const Options = struct {
+        protocol: Protocol,
+        retry: request.Retry = .{},
     };
 
     const Handle = struct {
@@ -51,7 +44,7 @@ pub const HTTP = struct {
         }
     };
 
-    const Protocol = enum { http, https };
+    pub const Protocol = enum { http, https };
 
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
@@ -63,27 +56,18 @@ pub const HTTP = struct {
     closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
 
-    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, protocol: Protocol) !HTTP {
-        return initWithOptions(allocator, inner, http_client, protocol, .{});
-    }
-
-    pub fn initWithOptions(
-        allocator: std.mem.Allocator,
-        inner: std.Io,
-        http_client: *std.http.Client,
-        protocol: Protocol,
-        opts: InitOpts,
-    ) !HTTP {
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, options: Options) !HTTP {
         return .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
-            .protocol = protocol,
-            .governor = .init(.fromOptions(opts)),
+            .protocol = options.protocol,
+            .governor = .init(options.retry),
         };
     }
 
     pub fn deinit(self: *HTTP) void {
+        self.read_stats.logTotals("http");
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -127,7 +111,6 @@ pub const HTTP = struct {
         return .{
             .io = self.io(),
             .read_hints = .{ .high_latency = true },
-            .read_stats = self.read_stats.provider(),
         };
     }
 
@@ -371,7 +354,7 @@ pub const HTTP = struct {
         while (true) {
             // Each hop is one governed request: a server that rate limits
             // the HEAD holds this backend as a throttled GET would.
-            var hop: SizeHop = .{ .http = self, .uri = uri, .url = url };
+            var hop: SizeHop = .{ .uri = uri };
             const outcome = try request.perform(SizeHop.Result, self.requestContext(), .{
                 .backend = "http",
                 .target = url,
@@ -396,24 +379,17 @@ pub const HTTP = struct {
     const SizeHop = struct {
         const Result = union(enum) { size: u64, redirect: []const u8 };
 
-        http: *HTTP,
         uri: std.Uri,
-        url: []const u8,
         location: [8 * 1024]u8 = undefined,
 
-        fn attempt(self: *SizeHop, _: request.Attempt) anyerror!request.Outcome(Result) {
+        fn attempt(self: *SizeHop, current: request.Attempt) anyerror!request.Outcome(Result) {
             var head_buffer: [8 * 1024]u8 = undefined;
-            return request.exchange(Result, self.http.requestContext(), self.uri, .{
+            return request.exchange(Result, current, self.uri, .{
                 .method = .HEAD,
                 .headers = .{ .accept_encoding = .{ .override = "identity" } },
                 .accept = .{ .statuses = request.open_statuses },
                 .redirects = .surface,
                 .head_buffer = &head_buffer,
-            }, .{
-                .backend = "http",
-                .target = self.url,
-                .unavailable = .server_failure,
-                .key = request.authorityOf(self.uri),
             }, self, SizeHop.consume);
         }
 

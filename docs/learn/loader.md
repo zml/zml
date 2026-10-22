@@ -394,8 +394,8 @@ backend. CPU's direct arenas are ordinary pages.
 ## Initialization and host memory
 
 `Loader.init` checks the options, resolves the checkpoint's read hints
-through `VFS.fromIo(io)` (a plain `io`, or no checkpoint, reads local files
-without direct I/O), and returns at once. A task of the loader's own then
+through `VFS.fromIo(io)` (a plain `io`, or no checkpoint, takes the local
+ones), and returns at once. A task of the loader's own then
 warms the device allocators and creates the backend, selected from the
 platform target; when `io` cannot run it concurrently, `init` runs it in
 place. The first `start` waits for that task: its error fails the loader and
@@ -417,6 +417,13 @@ defer remotes.deinit();
 const io = vfs.io(); // for the registry, the loader and every other reader
 ```
 
+Under a VFS, whether a file is read past the page cache
+(`Loader.Options.direct_io`) is decided per local file, whatever the
+checkpoint's scheme: a local drafter beside an `hf://` model may be read
+directly. A remote file is always read exact, and the planner does not open
+it to ask. Each remote backend logs its read totals (requests, bytes,
+retries, throttles, holds) at debug when it is deinitialized.
+
 The direct backend owns its workspace for its entire lifetime. Its creation
 allocates that workspace, calibrates transfer sizing, and cuts the arenas into
 blocks and the credits' slots. Calibration arenas become the
@@ -424,7 +431,8 @@ load's initial capacity; all arenas are released by `Loader.deinit`. The
 workspace type is internal to `io/host_memory.zig`.
 
 Calibration screens the blocks of `Loader.Options.dma_block_sizes`, each at
-most 32 MiB and at least the checkpoint's direct I/O alignment, at a fixed
+most 32 MiB and at least the direct I/O alignment (`VFS.direct_io_alignment`,
+4 KiB, when `io` is a VFS and `direct_io` is not `off`), at a fixed
 eight transfers per device; its windows and its selection tolerance are
 fixed too. The direct
 backend caps its pinned arenas at a fixed 16 GiB, a safety guard rather than

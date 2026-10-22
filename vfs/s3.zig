@@ -145,25 +145,25 @@ pub const AwsSigV4 = struct {
 const ReadState = struct { index: usize, objects: [][]const u8 };
 
 pub const S3 = struct {
-    pub const InitOpts = struct {
-        /// Retries per request for failures that are not rate limiting.
-        max_retries: usize = 5,
-        retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
-        retry_max_delay: std.Io.Duration = .fromSeconds(30),
-        /// Longest hold one throttle may arm over every request of this
-        /// backend, a server-named delay included.
-        max_hold: std.Io.Duration = .fromSeconds(120),
-        /// Continuous rate limiting for longer than this fails the requests.
-        throttle_budget: std.Io.Duration = .fromSeconds(300),
-    };
-
-    pub const Config = struct {
+    /// Without both keys, requests go unsigned.
+    pub const Options = struct {
         access_key: ?[]const u8 = null,
         secret_key: ?[]const u8 = null,
         endpoint_url: []const u8,
         region: []const u8,
-        auth_service: []const u8 = "s3",
+        retry: request.Retry = .{},
     };
+
+    /// The strings of the `Options` given to `init`, owned.
+    const Config = struct {
+        access_key: ?[]const u8,
+        secret_key: ?[]const u8,
+        endpoint_url: []const u8,
+        region: []const u8,
+    };
+
+    /// The SigV4 service every request is signed for.
+    const auth_service = "s3";
 
     const Handle = struct {
         pub const Type = enum { file, directory };
@@ -198,24 +198,17 @@ pub const S3 = struct {
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
     base: VFSBase,
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        inner: std.Io,
-        http_client: *std.http.Client,
-        config: Config,
-        opts: InitOpts,
-    ) !S3 {
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, options: Options) !S3 {
         return .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
-            .governor = .init(.fromOptions(opts)),
+            .governor = .init(options.retry),
             .config = .{
-                .access_key = if (config.access_key) |k| try allocator.dupe(u8, k) else null,
-                .secret_key = if (config.secret_key) |k| try allocator.dupe(u8, k) else null,
-                .endpoint_url = try allocator.dupe(u8, config.endpoint_url),
-                .region = try allocator.dupe(u8, config.region),
-                .auth_service = try allocator.dupe(u8, config.auth_service),
+                .access_key = if (options.access_key) |k| try allocator.dupe(u8, k) else null,
+                .secret_key = if (options.secret_key) |k| try allocator.dupe(u8, k) else null,
+                .endpoint_url = try allocator.dupe(u8, options.endpoint_url),
+                .region = try allocator.dupe(u8, options.region),
             },
         };
     }
@@ -262,10 +255,11 @@ pub const S3 = struct {
             .secret_key = secret_key,
             .endpoint_url = endpoint,
             .region = region,
-        }, .{});
+        });
     }
 
     pub fn deinit(self: *S3) void {
+        self.read_stats.logTotals("s3");
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -292,7 +286,6 @@ pub const S3 = struct {
         if (self.config.secret_key) |secret_key| self.allocator.free(secret_key);
         self.allocator.free(self.config.endpoint_url);
         self.allocator.free(self.config.region);
-        self.allocator.free(self.config.auth_service);
     }
 
     pub fn io(self: *S3) std.Io {
@@ -324,7 +317,6 @@ pub const S3 = struct {
         return .{
             .io = self.io(),
             .read_hints = .{ .high_latency = true },
-            .read_stats = self.read_stats.provider(),
         };
     }
 
@@ -672,14 +664,7 @@ pub const S3 = struct {
             .fragment = null,
         };
 
-        const signer: AwsSigV4 = .{
-            .access_key = self.config.access_key,
-            .secret_key = self.config.secret_key,
-            .region = self.config.region,
-            .service = self.config.auth_service,
-        };
-
-        var listing: Listing = .{ .s3 = self, .uri = uri, .signer = signer };
+        var listing: Listing = .{ .s3 = self, .uri = uri };
         var target_buffer: [256]u8 = undefined;
         return request.perform([]u8, self.requestContext(), .{
             .backend = "s3",
@@ -690,35 +675,22 @@ pub const S3 = struct {
     }
 
     /// The bucket listing, signed again on every attempt like every other
-    /// S3 request.
+    /// S3 request (`Signature`).
     const Listing = struct {
         s3: *S3,
         uri: std.Uri,
-        signer: AwsSigV4,
-        timestamp: [16]u8 = undefined,
-        authorization: [512]u8 = undefined,
-        headers: [2]std.http.Header = undefined,
+        signature: Signature = .{},
 
-        fn attempt(self: *Listing, _: request.Attempt) anyerror!request.Outcome([]u8) {
-            const timestamp = try self.s3.getTimestamp(&self.timestamp);
-            const authorization = try self.signer.generateAuthHeader(&self.authorization, .GET, self.uri, timestamp, &.{});
-            self.headers = .{
-                .{ .name = "x-amz-date", .value = timestamp },
-                .{ .name = "x-amz-content-sha256", .value = AwsSigV4.UNSIGNED_PAYLOAD },
-            };
+        fn attempt(self: *Listing, current: request.Attempt) anyerror!request.Outcome([]u8) {
+            const authorization = try self.signature.sign(self.s3, .GET, self.uri, &.{});
             var head_buffer: [2 * 1024]u8 = undefined;
-            return request.exchange([]u8, self.s3.requestContext(), self.uri, .{
+            return request.exchange([]u8, current, self.uri, .{
                 .headers = .{
                     .accept_encoding = .{ .override = "identity" },
-                    .authorization = if (authorization) |auth| .{ .override = auth } else .omit,
+                    .authorization = authorization,
                 },
-                .extra_headers = &self.headers,
+                .extra_headers = &self.signature.headers,
                 .head_buffer = &head_buffer,
-            }, .{
-                .backend = "s3",
-                .target = "listing",
-                .unavailable = unavailable,
-                .key = request.authorityOf(self.uri),
             }, self, Listing.consume);
         }
 
@@ -779,14 +751,7 @@ pub const S3 = struct {
 
         const uri = std.Uri.parse(url) catch return error.BadPathName;
 
-        const signer: AwsSigV4 = .{
-            .access_key = self.config.access_key,
-            .secret_key = self.config.secret_key,
-            .region = self.config.region,
-            .service = self.config.auth_service,
-        };
-
-        var head: SizeRequest = .{ .s3 = self, .uri = uri, .url = url, .signer = signer };
+        var head: SizeRequest = .{ .s3 = self, .uri = uri };
         return request.perform(u64, self.requestContext(), .{
             .backend = "s3",
             .target = url,
@@ -803,34 +768,20 @@ pub const S3 = struct {
     const SizeRequest = struct {
         s3: *S3,
         uri: std.Uri,
-        url: []const u8,
-        signer: AwsSigV4,
-        timestamp: [16]u8 = undefined,
-        authorization: [512]u8 = undefined,
-        headers: [2]std.http.Header = undefined,
+        signature: Signature = .{},
 
-        fn attempt(self: *SizeRequest, _: request.Attempt) anyerror!request.Outcome(u64) {
-            const timestamp = try self.s3.getTimestamp(&self.timestamp);
-            const authorization = try self.signer.generateAuthHeader(&self.authorization, .HEAD, self.uri, timestamp, &.{});
-            self.headers = .{
-                .{ .name = "x-amz-date", .value = timestamp },
-                .{ .name = "x-amz-content-sha256", .value = AwsSigV4.UNSIGNED_PAYLOAD },
-            };
+        fn attempt(self: *SizeRequest, current: request.Attempt) anyerror!request.Outcome(u64) {
+            const authorization = try self.signature.sign(self.s3, .HEAD, self.uri, &.{});
             var head_buffer: [8 * 1024]u8 = undefined;
-            return request.exchange(u64, self.s3.requestContext(), self.uri, .{
+            return request.exchange(u64, current, self.uri, .{
                 .method = .HEAD,
                 .headers = .{
                     .accept_encoding = .{ .override = "identity" },
-                    .authorization = if (authorization) |auth| .{ .override = auth } else .omit,
+                    .authorization = authorization,
                 },
-                .extra_headers = &self.headers,
+                .extra_headers = &self.signature.headers,
                 .accept = .{ .statuses = request.open_statuses },
                 .head_buffer = &head_buffer,
-            }, .{
-                .backend = "s3",
-                .target = self.url,
-                .unavailable = unavailable,
-                .key = request.authorityOf(self.uri),
             }, self, SizeRequest.consume);
         }
 
@@ -874,29 +825,48 @@ pub const S3 = struct {
     const SignedRequest = struct {
         s3: *S3,
         uri: std.Uri,
+        signature: Signature = .{},
+
+        fn prepare(context: *anyopaque, _: request.Attempt, range: std.http.Header) anyerror!range_read.PreparedRequest {
+            const self: *SignedRequest = @ptrCast(@alignCast(context));
+            return .{
+                .uri = self.uri,
+                .authorization = try self.signature.sign(self.s3, .GET, self.uri, &.{range}),
+                .extra_headers = &self.signature.headers,
+            };
+        }
+    };
+
+    /// One attempt's SigV4 headers. Every request signs each attempt anew,
+    /// since the signature covers `x-amz-date`. The returned authorization
+    /// and `headers` point into this storage.
+    const Signature = struct {
         timestamp: [16]u8 = undefined,
         authorization: [512]u8 = undefined,
         headers: [2]std.http.Header = undefined,
 
-        fn prepare(context: *anyopaque, _: request.Attempt, range: std.http.Header) anyerror!range_read.PreparedRequest {
-            const self: *SignedRequest = @ptrCast(@alignCast(context));
-            const timestamp = try self.s3.getTimestamp(&self.timestamp);
+        /// The authorization over `uri` and `signed_headers` beside the two
+        /// headers it sets; omitted without credentials.
+        fn sign(
+            self: *Signature,
+            s3: *S3,
+            method: std.http.Method,
+            uri: std.Uri,
+            signed_headers: []const std.http.Header,
+        ) !std.http.Client.Request.Headers.Value {
+            const timestamp = try s3.getTimestamp(&self.timestamp);
             const signer: AwsSigV4 = .{
-                .access_key = self.s3.config.access_key,
-                .secret_key = self.s3.config.secret_key,
-                .region = self.s3.config.region,
-                .service = self.s3.config.auth_service,
+                .access_key = s3.config.access_key,
+                .secret_key = s3.config.secret_key,
+                .region = s3.config.region,
+                .service = auth_service,
             };
-            const authorization = try signer.generateAuthHeader(&self.authorization, .GET, self.uri, timestamp, &.{range});
+            const authorization = try signer.generateAuthHeader(&self.authorization, method, uri, timestamp, signed_headers);
             self.headers = .{
                 .{ .name = "x-amz-date", .value = timestamp },
                 .{ .name = "x-amz-content-sha256", .value = AwsSigV4.UNSIGNED_PAYLOAD },
             };
-            return .{
-                .uri = self.uri,
-                .authorization = if (authorization) |value| .{ .override = value } else .omit,
-                .extra_headers = &self.headers,
-            };
+            return if (authorization) |value| .{ .override = value } else .omit;
         }
     };
 };

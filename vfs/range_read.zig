@@ -67,7 +67,6 @@ pub fn performRangeRead(
 
     var range_buffer: [64]u8 = undefined;
     var state: RangeRead = .{
-        .ctx = ctx,
         .spec = spec,
         .range = .{
             .name = "Range",
@@ -87,7 +86,6 @@ pub fn performRangeRead(
 }
 
 const RangeRead = struct {
-    ctx: request.Context,
     spec: RangeSpec,
     range: std.http.Header,
     data: []const []u8,
@@ -110,14 +108,14 @@ const RangeRead = struct {
         headers[prepared.extra_headers.len] = self.range;
 
         var head_buffer: [8 * 1024]u8 = undefined;
-        return request.exchange(void, self.ctx, prepared.uri, .{
+        return request.exchange(void, current, prepared.uri, .{
             .headers = .{
                 .accept_encoding = .{ .override = "identity" },
                 .authorization = prepared.authorization,
             },
             .extra_headers = headers[0 .. prepared.extra_headers.len + 1],
             .head_buffer = &head_buffer,
-        }, self.spec.request, self, RangeRead.consume);
+        }, self, RangeRead.consume);
     }
 
     fn consume(self: *RangeRead, res: *std.http.Client.Response) anyerror!void {
