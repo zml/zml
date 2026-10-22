@@ -2563,10 +2563,9 @@ test "a padded host-pinned table stays in host memory and serves device gathers 
 }
 
 test "a replicated host-pinned table is one allocation that every device reads through device views" {
-    // The same table on every device: where the platform shares host memory
-    // across devices (`direct_loader.sharesHostMemory`), the loader makes it
-    // one allocation, each device's shard a view of it, and every device's
-    // kernels gather from it.
+    // The same table on every device: the direct loader makes it one
+    // allocation (`direct_loader.TensorTransfer.initHost`), each device's
+    // shard a view of it, and every device's kernels gather from it.
     try expectHostTableGathers(.replicated);
 }
 
@@ -2655,13 +2654,9 @@ fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
     const shard_bytes = shard_rows * row_bytes;
     const first_pointer = try host_table._shards.get(0).opaqueDeviceMemoryDataPointer(platform.pjrt_api);
     for (devices, host_table._shards.constSlice(), device_table._shards.constSlice()) |device, owner, view| {
-        // Replicas share one allocation where the platform shares host
-        // memory across devices; row shards never do.
+        // Replicas share one allocation; row shards never do.
         const pointer = try owner.opaqueDeviceMemoryDataPointer(platform.pjrt_api);
-        const shares = placement == .replicated and shard_count > 1 and switch (platform.target) {
-            .cpu, .cuda, .rocm, .oneapi => true,
-            else => false,
-        };
+        const shares = placement == .replicated and shard_count > 1;
         if (device.id != devices[0].id) try std.testing.expectEqual(shares, pointer == first_pointer);
         const pinned_memory = platform.devices[device.id].memory(.host_pinned).?.pjrt_memory;
         const default_memory = platform.devices[device.id].memory(.default).?.pjrt_memory;

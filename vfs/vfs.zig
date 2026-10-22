@@ -17,9 +17,11 @@
 //! principal without `s3:ListBucket` gets 403 for a missing key too, so a
 //! probe of an optional object treats both as absent. A positional read
 //! that still fails after its retries is logged at err and surfaces as
-//! `Unexpected`; a streaming read ends with `EndOfStream` instead. A
-//! throttled backend holds its requests rather than failing them, until
-//! its throttle budget runs out (`request.Retry`). A local file fails as
+//! `Unexpected`; a streaming read as `InputOutput`. A throttled backend
+//! holds its requests rather than failing them, until its throttle budget
+//! runs out (`request.Retry`). A remote path is read-only: creating or
+//! deleting a file or a directory there, or opening a file for writing, is
+//! logged at err and fails with `ReadOnlyFileSystem`. A local file fails as
 //! the inner io does (a denied one is `AccessDenied` there); it may be read
 //! past the page cache (`useDirectIo`).
 //! Each remote backend logs its read totals at debug from its `deinit`.
@@ -50,6 +52,9 @@ test {
 }
 
 const log = std.log.scoped(.@"zml/vfs");
+/// For the refusals of writes to a remote path, which tests trigger on
+/// purpose; every other err here still fails a test (`scopedLog`).
+const refusal_log = base_module.scopedLog(.@"zml/vfs");
 
 /// Indices 0-2 are the standard streams, so `std.Io.File.stdout()` and
 /// friends resolve to their own descriptor; the cwd placeholder follows.
@@ -230,16 +235,22 @@ pub fn fromIo(any_io: std.Io) ?*VFS {
 
 const io_vtable: std.Io.VTable = VFSBase.vtable(.{
     .operate = operate,
+    .dirCreateDir = dirCreateDir,
+    .dirCreateDirPath = dirCreateDirPath,
+    .dirCreateDirPathOpen = dirCreateDirPathOpen,
     .dirOpenDir = dirOpenDir,
     .dirStat = dirStat,
     .dirStatFile = dirStatFile,
     .dirAccess = dirAccess,
     .dirCreateFile = dirCreateFile,
+    .dirCreateFileAtomic = dirCreateFileAtomic,
     .dirOpenFile = dirOpenFile,
     .dirClose = dirClose,
     .dirRead = dirRead,
     .dirRealPath = dirRealPath,
     .dirRealPathFile = dirRealPathFile,
+    .dirDeleteFile = dirDeleteFile,
+    .dirDeleteDir = dirDeleteDir,
     .fileStat = fileStat,
     .fileLength = fileLength,
     .fileClose = fileClose,
@@ -489,18 +500,13 @@ fn lookupDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8) !struct { ?usiz
         }
     }
 
-    if (std.meta.eql(dir, std.Io.Dir.cwd())) {
-        if (sub_path == null) return .{ null, dir, self.base.inner };
-        if (std.fs.path.isAbsolutePosix(sub_path.?)) return self.localRoot();
-        const uri = std.Uri.parse(sub_path.?) catch return self.localRoot();
-        return self.schemeRoot(uri.scheme);
+    // Without "://", a path from cwd is local, a colon in it included.
+    if (std.meta.eql(dir, std.Io.Dir.cwd())) return self.localRoot();
+    const handle = self.getDirHandle(dir);
+    if (handle.backend_idx) |backend_idx| {
+        return .{ backend_idx, .{ .handle = @intCast(handle.handle) }, self.getBackend(backend_idx) };
     } else {
-        const handle = self.getDirHandle(dir);
-        if (handle.backend_idx) |backend_idx| {
-            return .{ backend_idx, .{ .handle = @intCast(handle.handle) }, self.getBackend(backend_idx) };
-        } else {
-            return .{ null, .{ .handle = @intCast(handle.handle) }, self.base.inner };
-        }
+        return .{ null, .{ .handle = @intCast(handle.handle) }, self.base.inner };
     }
 }
 
@@ -516,9 +522,26 @@ fn localRoot(self: *VFS) struct { ?usize, std.Io.Dir, std.Io } {
     return .{ null, std.Io.Dir.cwd(), self.base.inner };
 }
 
+/// `path` without its "scheme://" prefix; a name with a colon and no "://"
+/// is a plain local name.
 fn stripScheme(path: []const u8) []const u8 {
-    const uri = std.Uri.parse(path) catch return path;
-    return path[uri.scheme.len + 3 ..];
+    const i = std.mem.indexOf(u8, path, "://") orelse return path;
+    return path[i + 3 ..];
+}
+
+/// The inner `Io`'s directory for creating or deleting `sub_path` from
+/// `dir`. A remote path is refused: no remote backend writes, and the base
+/// layer under each one would write a local file in its place.
+fn writableDir(self: *VFS, dir: std.Io.Dir, sub_path: []const u8, operation: []const u8) error{ ReadOnlyFileSystem, Unexpected }!std.Io.Dir {
+    const backend_idx, const dir_, _ = self.lookupDir(dir, sub_path) catch |err| {
+        log.err("Failed to lookup backend to {s} '{s}' : {any}", .{ operation, sub_path, err });
+        return error.Unexpected;
+    };
+    if (self.getScheme(backend_idx)) |scheme| {
+        refusal_log.err("Cannot {s} '{s}': {s} paths are read-only", .{ operation, sub_path, scheme });
+        return error.ReadOnlyFileSystem;
+    }
+    return dir_;
 }
 
 fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
@@ -544,6 +567,32 @@ fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable
             return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
         },
     }
+}
+
+fn dirCreateDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, permissions: std.Io.Dir.Permissions) std.Io.Dir.CreateDirError!void {
+    const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+    const dir_ = try self.writableDir(dir, sub_path, "create directory");
+    return self.base.inner.vtable.dirCreateDir(self.base.inner.userdata, dir_, stripScheme(sub_path), permissions);
+}
+
+fn dirCreateDirPath(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, permissions: std.Io.Dir.Permissions) std.Io.Dir.CreateDirPathError!std.Io.Dir.CreatePathStatus {
+    const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+    const dir_ = try self.writableDir(dir, sub_path, "create directory");
+    return self.base.inner.vtable.dirCreateDirPath(self.base.inner.userdata, dir_, stripScheme(sub_path), permissions);
+}
+
+fn dirCreateDirPathOpen(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, permissions: std.Io.Dir.Permissions, options: std.Io.Dir.OpenOptions) std.Io.Dir.CreateDirPathOpenError!std.Io.Dir {
+    const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+    const dir_ = try self.writableDir(dir, sub_path, "create directory");
+    const inner = self.base.inner;
+    const fs_dir = try inner.vtable.dirCreateDirPathOpen(inner.userdata, dir_, stripScheme(sub_path), permissions, options);
+    errdefer fs_dir.close(inner);
+    const idx, const handle = self.openHandle() catch return std.Io.Dir.CreateDirPathOpenError.Unexpected;
+    handle.* = .{
+        .handle = @intCast(fs_dir.handle),
+        .backend_idx = null,
+    };
+    return .{ .handle = @intCast(idx) };
 }
 
 fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
@@ -590,20 +639,24 @@ fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, optio
 
 fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
-    const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
-        log.err("Failed to lookup backend for dir create file '{s}' : {any}", .{ sub_path, err });
-        return std.Io.File.OpenError.Unexpected;
-    };
-
-    const file = try backend.vtable.dirCreateFile(backend.userdata, dir_, stripScheme(sub_path), flags);
-    errdefer file.close(backend);
+    const dir_ = try self.writableDir(dir, sub_path, "create file");
+    const inner = self.base.inner;
+    const file = try inner.vtable.dirCreateFile(inner.userdata, dir_, stripScheme(sub_path), flags);
+    errdefer file.close(inner);
     const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
     handle.* = .{
         .handle = @intCast(file.handle),
-        .backend_idx = backend_idx,
+        .backend_idx = null,
         .flags = file.flags,
     };
     return .{ .handle = @intCast(idx), .flags = file.flags };
+}
+
+/// The atomic file holds the inner `Io`'s handles, not this VFS's.
+fn dirCreateFileAtomic(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.CreateFileAtomicOptions) std.Io.Dir.CreateFileAtomicError!std.Io.File.Atomic {
+    const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+    const dir_ = try self.writableDir(dir, sub_path, "create file");
+    return self.base.inner.vtable.dirCreateFileAtomic(self.base.inner.userdata, dir_, stripScheme(sub_path), options);
 }
 
 fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
@@ -612,6 +665,10 @@ fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, fla
         log.err("Failed to lookup backend for opening file '{s}' : {any}", .{ sub_path, err });
         return std.Io.File.OpenError.Unexpected;
     };
+    if (flags.mode != .read_only and backend_idx != null) {
+        refusal_log.err("Cannot open '{s}' for writing: {s} paths are read-only", .{ sub_path, self.getScheme(backend_idx).? });
+        return error.ReadOnlyFileSystem;
+    }
     const file = try backend.vtable.dirOpenFile(backend.userdata, dir_, stripScheme(sub_path), flags);
     errdefer file.close(backend);
     const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
@@ -680,6 +737,18 @@ fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8
     } else {
         return try backend.vtable.dirRealPathFile(backend.userdata, dir_, path_name, out_buffer);
     }
+}
+
+fn dirDeleteFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8) std.Io.Dir.DeleteFileError!void {
+    const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+    const dir_ = try self.writableDir(dir, sub_path, "delete file");
+    return self.base.inner.vtable.dirDeleteFile(self.base.inner.userdata, dir_, stripScheme(sub_path));
+}
+
+fn dirDeleteDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8) std.Io.Dir.DeleteDirError!void {
+    const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+    const dir_ = try self.writableDir(dir, sub_path, "delete directory");
+    return self.base.inner.vtable.dirDeleteDir(self.base.inner.userdata, dir_, stripScheme(sub_path));
 }
 
 fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
@@ -1037,4 +1106,84 @@ test "copy a local file through the VFS" {
     const copied = try tmp.dir.readFileAlloc(process_io, "destination", allocator, .limited(source_data.len + 1));
     defer allocator.free(copied);
     try std.testing.expectEqualSlices(u8, &source_data, copied);
+}
+
+test "creates and deletes on a local path go to the inner Io, from a path or an open directory" {
+    const testing_io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = path_buffer[0..try tmp.dir.realPath(testing_io, &path_buffer)];
+    var vfs: VFS = try .init(std.testing.allocator, testing_io);
+    defer vfs.deinit();
+    const vfs_io = vfs.io();
+
+    var uri_buffer: [std.fs.max_path_bytes + 16]u8 = undefined;
+    {
+        const opened = try std.Io.Dir.cwd().createDirPathOpen(vfs_io, try std.fmt.bufPrint(&uri_buffer, "file://{s}/a/b", .{root}), .{});
+        defer opened.close(vfs_io);
+        // Relative to the descriptor the VFS's handle stands for.
+        try opened.createDir(vfs_io, "c", .default_dir);
+        try opened.writeFile(vfs_io, .{ .sub_path = "c/file", .data = "bytes" });
+        try tmp.dir.access(testing_io, "a/b/c/file", .{});
+        try opened.deleteFile(vfs_io, "c/file");
+        try opened.deleteDir(vfs_io, "c");
+        // A colon without "://" is part of a local name.
+        try opened.writeFile(vfs_io, .{ .sub_path = "notes:old.txt", .data = "bytes" });
+        try tmp.dir.access(testing_io, "a/b/notes:old.txt", .{});
+        try opened.deleteFile(vfs_io, "notes:old.txt");
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(testing_io, "a/b/notes:old.txt", .{}));
+    }
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(testing_io, "a/b/c", .{}));
+    try std.Io.Dir.cwd().createDirPath(vfs_io, try std.fmt.bufPrint(&uri_buffer, "{s}/a/d", .{root}));
+    try tmp.dir.access(testing_io, "a/d", .{});
+    try std.Io.Dir.cwd().deleteDir(vfs_io, try std.fmt.bufPrint(&uri_buffer, "{s}/a/d", .{root}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(testing_io, "a/d", .{}));
+}
+
+test "creates and deletes on a remote path fail and write nothing anywhere" {
+    const allocator = std.testing.allocator;
+    const testing_io = std.testing.io;
+    var object: [16]u8 = @splat(0x2a);
+    var server = try mock_server.MockServer.init(testing_io, &object, .{});
+    var server_group: std.Io.Group = .init;
+    try mock_server.startMockServer(&server, &server_group, testing_io);
+    var server_joined = false;
+    defer mock_server.cleanupMockServer(&server, &server_group, testing_io, server_joined);
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = testing_io };
+    defer client.deinit();
+    var endpoint_buffer: [64]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.port()});
+    var s3 = try S3.init(allocator, testing_io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1" });
+    defer s3.deinit();
+    var vfs: VFS = try .init(allocator, testing_io);
+    defer vfs.deinit();
+    try vfs.registerBackend("s3", s3.backend());
+    const vfs_io = vfs.io();
+    const cwd = std.Io.Dir.cwd();
+
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createFile(vfs_io, "s3://bucket/key", .{}));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.openFile(vfs_io, "s3://bucket/key", .{ .mode = .read_write }));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createFileAtomic(vfs_io, "s3://bucket/key", .{}));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createDir(vfs_io, "s3://bucket/dir", .default_dir));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createDirPath(vfs_io, "s3://bucket/a/b"));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.createDirPathOpen(vfs_io, "s3://bucket/a/b", .{}));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.deleteFile(vfs_io, "s3://bucket/key"));
+    try std.testing.expectError(error.ReadOnlyFileSystem, cwd.deleteDir(vfs_io, "s3://bucket/dir"));
+    // A directory opened on the remote is no way around it.
+    const bucket = try cwd.openDir(vfs_io, "s3://bucket", .{});
+    defer bucket.close(vfs_io);
+    try std.testing.expectError(error.ReadOnlyFileSystem, bucket.createFile(vfs_io, "key", .{}));
+    try std.testing.expectError(error.ReadOnlyFileSystem, bucket.deleteFile(vfs_io, "key"));
+
+    // Nothing on local disk, where the base layer would have written, and
+    // no request to the server.
+    for ([_][]const u8{ "s3:", "bucket" }) |name| {
+        try std.testing.expectError(error.FileNotFound, cwd.access(testing_io, name, .{}));
+    }
+    server_group.cancel(testing_io);
+    server_joined = true;
+    try server.check();
+    try std.testing.expectEqual(0, server.head_requests.load(.acquire) + server.get_requests.load(.acquire));
 }

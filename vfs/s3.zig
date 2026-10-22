@@ -9,7 +9,7 @@ const Backend = @import("base.zig").Backend;
 const ReadFailure = @import("base.zig").ReadFailure;
 const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
-const log = std.log.scoped(.@"zml/vfs/s3");
+const log = @import("base.zig").scopedLog(.@"zml/vfs/s3");
 
 pub const AwsSigV4 = struct {
     access_key: ?[]const u8,
@@ -369,9 +369,12 @@ pub const S3 = struct {
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
-                const total = self.performRead(handle, o.data, handle.pos) catch |err| {
-                    log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                    return .{ .file_read_streaming = error.EndOfStream };
+                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => {
+                        log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
+                        return .{ .file_read_streaming = error.InputOutput };
+                    },
                 };
 
                 if (total == 0) {
@@ -575,16 +578,11 @@ pub const S3 = struct {
         const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
 
-        if (relative_offset >= 0) {
-            handle.pos = handle.pos +| @as(u64, @intCast(relative_offset));
-        } else {
-            const abs_offset: u64 = @intCast(-relative_offset);
-            if (abs_offset > handle.pos) {
-                handle.pos = 0;
-            } else {
-                handle.pos -= abs_offset;
-            }
-        }
+        // Saturates at both ends; `@abs` takes `minInt(i64)` too.
+        handle.pos = if (relative_offset >= 0)
+            handle.pos +| @abs(relative_offset)
+        else
+            handle.pos -| @abs(relative_offset);
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {

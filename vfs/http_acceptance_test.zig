@@ -853,3 +853,67 @@ test "http, s3 and gs fail open, stat and access of an absent or denied object a
     server_joined = true;
     try server.check();
 }
+
+test "http, s3 and gs fail a refused streaming read with InputOutput and seek back no further than 0" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var object: [64]u8 = undefined;
+    for (&object, 0..) |*byte, index| byte.* = @truncate(index *% 5 +% 1);
+    // Each backend's first GET is answered 500, and none has a retry left.
+    var server = try MockServer.init(io, &object, .{
+        .fail_first_gets = 3,
+        .objects = &.{
+            .{ .path = "/bucket/object", .bytes = &object },
+            .{ .path = "/bucket/object?alt=media", .bytes = &object },
+        },
+    });
+    var server_group: std.Io.Group = .init;
+    try startMockServer(&server, &server_group, io);
+    var server_joined = false;
+    defer cleanupMockServer(&server, &server_group, io, server_joined);
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    var endpoint_buffer: [64]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.port()});
+    var http = try HTTP.init(allocator, io, &client, .{ .protocol = .http, .retry = instantRetries(0) });
+    defer http.deinit();
+    var s3 = try S3.init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1", .retry = instantRetries(0) });
+    defer s3.deinit();
+    var gcs = try GCS.init(allocator, io, &client, .{ .endpoint_url = endpoint, .retry = instantRetries(0) });
+    defer gcs.deinit();
+
+    var path_buffer: [128]u8 = undefined;
+    const backend_ios = [_]std.Io{ http.io(), s3.io(), gcs.io() };
+    const paths = [_][]const u8{ try serverPath(&path_buffer, &server), "bucket/object", "bucket/object" };
+    var files: [backend_ios.len]std.Io.File = undefined;
+    var opened: usize = 0;
+    defer for (files[0..opened], backend_ios[0..opened]) |file, backend_io| file.close(backend_io);
+    for (&files, backend_ios, paths) |*file, backend_io, path| {
+        file.* = try std.Io.Dir.openFile(.cwd(), backend_io, path, .{});
+        opened += 1;
+    }
+
+    var head: [8]u8 = undefined;
+    const head_slices = [_][]u8{&head};
+    for (files, backend_ios) |file, backend_io| {
+        try std.testing.expectError(error.InputOutput, file.readStreaming(backend_io, &head_slices));
+    }
+    for (files, backend_ios) |file, backend_io| {
+        // Forward, then back by more than the position: at 0.
+        try backend_io.vtable.fileSeekBy(backend_io.userdata, file, 5);
+        try backend_io.vtable.fileSeekBy(backend_io.userdata, file, -9);
+        try std.testing.expectEqual(head.len, try file.readStreaming(backend_io, &head_slices));
+        try std.testing.expectEqualSlices(u8, object[0..head.len], &head);
+        // `minInt(i64)`, whose negation overflows, stops at 0 too.
+        try backend_io.vtable.fileSeekBy(backend_io.userdata, file, std.math.minInt(i64));
+        try std.testing.expectEqual(head.len, try file.readStreaming(backend_io, &head_slices));
+        try std.testing.expectEqualSlices(u8, object[0..head.len], &head);
+    }
+
+    server_group.cancel(io);
+    server_joined = true;
+    try server.check();
+    try std.testing.expectEqual(@as(usize, 9), server.get_requests.load(.acquire));
+}

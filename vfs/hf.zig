@@ -8,7 +8,7 @@ const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
 const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
-const log = std.log.scoped(.@"zml/vfs/hf");
+const log = @import("base.zig").scopedLog(.@"zml/vfs/hf");
 
 pub const API = struct {
     const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}?expand=false&recursive=true&limit=1000";
@@ -589,9 +589,12 @@ pub const HF = struct {
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
-                const total = self.performRead(handle, o.data, handle.pos) catch |err| {
-                    log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                    return .{ .file_read_streaming = error.EndOfStream };
+                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => {
+                        log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
+                        return .{ .file_read_streaming = error.InputOutput };
+                    },
                 };
 
                 if (total == 0) {
@@ -815,10 +818,11 @@ pub const HF = struct {
         const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
 
+        // Saturates at both ends; `@abs` takes `minInt(i64)` too.
         handle.pos = if (relative_offset >= 0)
-            handle.pos + @as(u64, @intCast(relative_offset))
+            handle.pos +| @abs(relative_offset)
         else
-            handle.pos - @as(u64, @intCast(-relative_offset));
+            handle.pos -| @abs(relative_offset);
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {

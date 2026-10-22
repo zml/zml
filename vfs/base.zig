@@ -1,8 +1,25 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/vfs");
+
+/// `std.log.scoped`, except that test builds log `err` at `debug`: the test
+/// runner counts logged errors as failures, and a test of a failure path
+/// checks the error it returns.
+pub fn scopedLog(comptime scope: @EnumLiteral()) type {
+    const scoped = std.log.scoped(scope);
+    return struct {
+        pub const debug = scoped.debug;
+        pub const info = scoped.info;
+        pub const warn = scoped.warn;
+
+        pub fn err(comptime format: []const u8, args: anytype) void {
+            if (builtin.is_test) scoped.debug(format, args) else scoped.err(format, args);
+        }
+    };
+}
 
 pub const ReadHints = struct {
     /// Smallest source request expected to avoid excessive per-request cost
