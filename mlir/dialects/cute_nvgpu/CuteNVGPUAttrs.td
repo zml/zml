@@ -12,8 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_ATTRS_TD
-#define CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_ATTRS_TD
+#ifndef MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUATTRS_TD
+#define MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUATTRS_TD
 
 include "mlir/dialects/cute_nvgpu/CuteNVGPUDialect.td"
 include "mlir/dialects/cute_nvgpu/CuteNVGPUEnums.td"
@@ -129,4 +129,4 @@ def CuteNVGPU_NotImplementedFrgAttr
   let assemblyFormat = "`<` `>`";
 }
 
-#endif // CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_ATTRS_TD
+#endif // MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUATTRS_TD

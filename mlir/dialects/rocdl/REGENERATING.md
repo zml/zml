@@ -41,7 +41,7 @@ belongs to the bindings.
 - `types.zig`: `AddressSpace`, `pointerType`, and a `v<N><element>` constructor
   for every vector type the records use, named or inline.
 - `capi.h`/`capi.cc`: `mlirROCDLGetOperationCount` under `// Introspection`
-  and, per enum attribute, `mlirAttributeIsAROCDL<X>Attr`, `mlirROCDL<X>AttrGet`
+  and, per enum attribute, `mlirAttributeIsAROCDL<X>`, `mlirROCDL<X>AttrGet`
   (null for out-of-range values) and `mlirROCDL<X>AttrGetValue` under
   `// Attributes`. The `// Target` sections are maintained by hand: in the
   pinned revision `ROCDLTargetAttr::getChecked` delegates to `Base::get`, so the
@@ -57,7 +57,8 @@ the bindings and this file.
 ## Checks
 
 - Format with the Zig toolchain Bazel uses (CI runs its `zig fmt --check`); an
-  older `zig fmt` leaves builtins that 0.17 rewrites.
+  older `zig fmt` leaves builtins that 0.17 rewrites. The C API follows
+  `mlir/.clang-format`.
 - `bazel test //mlir/dialects/rocdl:test //kernels/fly:test //zml:test`: every
   generated declaration is referenced, the operation list is compared to the
   native registry, and attribute tests exercise every named enum case, named

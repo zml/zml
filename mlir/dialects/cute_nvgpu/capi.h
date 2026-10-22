@@ -1,5 +1,7 @@
-#ifndef ZML_MLIR_DIALECTS_CUTE_NVGPU_CAPI_H
-#define ZML_MLIR_DIALECTS_CUTE_NVGPU_CAPI_H
+//===- capi.h - C API for the cute_nvgpu dialect ------------------*- C -*-===//
+
+#ifndef MLIR_DIALECTS_CUTE_NVGPU_CAPI_H
+#define MLIR_DIALECTS_CUTE_NVGPU_CAPI_H
 
 #include "mlir-c/IR.h"
 
@@ -891,14 +893,14 @@ MLIR_CAPI_EXPORTED bool
 mlirTypeIsACuteNVGPUCopyAtomSM100TmemLoad(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGet(
     MlirContext context, MlirType valType, int numDp, int numBit,
-    unsigned numRep, bool pack16b);
+    uint32_t numRep, bool pack16b);
 MLIR_CAPI_EXPORTED MlirType
 mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGetValType(MlirType type);
 MLIR_CAPI_EXPORTED int
 mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGetNumDp(MlirType type);
 MLIR_CAPI_EXPORTED int
 mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGetNumBit(MlirType type);
-MLIR_CAPI_EXPORTED unsigned
+MLIR_CAPI_EXPORTED uint32_t
 mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGetNumRep(MlirType type);
 MLIR_CAPI_EXPORTED bool
 mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGetPack16b(MlirType type);
@@ -908,14 +910,14 @@ MLIR_CAPI_EXPORTED bool
 mlirTypeIsACuteNVGPUCopyAtomSM100TmemStore(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGet(
     MlirContext context, MlirType valType, int numDp, int numBit,
-    unsigned numRep, bool expand16b);
+    uint32_t numRep, bool expand16b);
 MLIR_CAPI_EXPORTED MlirType
 mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGetValType(MlirType type);
 MLIR_CAPI_EXPORTED int
 mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGetNumDp(MlirType type);
 MLIR_CAPI_EXPORTED int
 mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGetNumBit(MlirType type);
-MLIR_CAPI_EXPORTED unsigned
+MLIR_CAPI_EXPORTED uint32_t
 mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGetNumRep(MlirType type);
 MLIR_CAPI_EXPORTED bool
 mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGetExpand16b(MlirType type);
@@ -926,14 +928,14 @@ MLIR_CAPI_EXPORTED bool
 mlirTypeIsACuteNVGPUCopyAtomSM107TmemLoadSPCompress(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGet(
     MlirContext context, MlirType valType, int numDp, int numBit,
-    unsigned numRep, uint32_t redOp, bool red, bool nan);
+    uint32_t numRep, uint32_t redOp, bool red, bool nan);
 MLIR_CAPI_EXPORTED MlirType
 mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetValType(MlirType type);
 MLIR_CAPI_EXPORTED int
 mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetNumDp(MlirType type);
 MLIR_CAPI_EXPORTED int
 mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetNumBit(MlirType type);
-MLIR_CAPI_EXPORTED unsigned
+MLIR_CAPI_EXPORTED uint32_t
 mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetNumRep(MlirType type);
 MLIR_CAPI_EXPORTED uint32_t
 mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetRedOp(MlirType type);
@@ -947,14 +949,14 @@ MLIR_CAPI_EXPORTED bool
 mlirTypeIsACuteNVGPUCopyAtomSM10xTmemLoadRed(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGet(
     MlirContext context, MlirType valType, int numDp, int numBit,
-    unsigned numRep, uint32_t redOp, bool nan, MlirAttribute halfSplitOff);
+    uint32_t numRep, uint32_t redOp, bool nan, MlirAttribute halfSplitOff);
 MLIR_CAPI_EXPORTED MlirType
 mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetValType(MlirType type);
 MLIR_CAPI_EXPORTED int
 mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetNumDp(MlirType type);
 MLIR_CAPI_EXPORTED int
 mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetNumBit(MlirType type);
-MLIR_CAPI_EXPORTED unsigned
+MLIR_CAPI_EXPORTED uint32_t
 mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetNumRep(MlirType type);
 MLIR_CAPI_EXPORTED uint32_t
 mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetRedOp(MlirType type);
@@ -1476,4 +1478,4 @@ mlirCuteNVGPUWorkIdResponseTypeGet(MlirContext context);
 }
 #endif
 
-#endif
+#endif // MLIR_DIALECTS_CUTE_NVGPU_CAPI_H

@@ -18,8 +18,8 @@
 //
 // Constraints not recovered:
 
-#ifndef CUTE_IR_GENERATED_CUDA_OPS_TD
-#define CUTE_IR_GENERATED_CUDA_OPS_TD
+#ifndef MLIR_DIALECTS_CUDA_CUDAOPS_TD
+#define MLIR_DIALECTS_CUDA_CUDAOPS_TD
 
 include "mlir/dialects/cuda/CudaAttrs.td"
 include "mlir/dialects/cuda/CudaEnums.td"
@@ -3069,4 +3069,4 @@ def Cuda_TensorMapEncodeTiledOp : Cuda_Op<"tensor_map_encode_tiled"> {
   );
 }
 
-#endif // CUTE_IR_GENERATED_CUDA_OPS_TD
+#endif // MLIR_DIALECTS_CUDA_CUDAOPS_TD

@@ -6,7 +6,7 @@ const mlir = @import("mlir");
 pub const TargetAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
-    pub const isAFn = c.mlirAttributeIsAROCDLTargetAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLTarget;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {

@@ -149,7 +149,7 @@ Sources specific to them, besides those in the table below:
 The bindings follow the cute ones: the C API and the Zig enums, typed
 attribute and type wrappers and operation builders are generated from
 `llvm-tblgen --dump-json` of the generated `.td` files, then formatted with
-`zig fmt`. Builders of operations with regions, and of terminators, do not
+`zig fmt` and, for the C API, `clang-format` (`mlir/.clang-format`). Builders of operations with regions, and of terminators, do not
 verify on creation (their blocks are filled, or their block is completed,
 afterwards). `mlir/dialects/nvvm/nvvm.zig` and `mlir/dialects/cuda/cuda.zig` are the
 hand-written convenience layer the builder calls; they fix the attributes the

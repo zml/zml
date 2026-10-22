@@ -1,29 +1,29 @@
-#include "capi.h"
+//===- capi.cc - C API for the cuda_tile dialect --------------------------===//
 
-#include <optional>
+#include "capi.h"
 
 #include "cuda_tile/Dialect/CudaTile/IR/Attributes.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Dialect.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Types.h"
+
 #include "mlir/CAPI/IR.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Diagnostics.h"
 
+#include <optional>
+
 using namespace mlir::cuda_tile;
 
-namespace {
-
-mlir::MLIRContext *loadCudaTile(MlirContext context) {
+static mlir::MLIRContext *loadCudaTile(MlirContext context) {
   mlir::MLIRContext *ctx = unwrap(context);
-  if (ctx) ctx->getOrLoadDialect<CudaTileDialect>();
+  if (ctx)
+    ctx->getOrLoadDialect<CudaTileDialect>();
   return ctx;
 }
 
-std::optional<int64_t> optional(bool has, int64_t value) {
+static std::optional<int64_t> optional(bool has, int64_t value) {
   return has ? std::optional<int64_t>(value) : std::nullopt;
 }
-
-}  // namespace
 
 //===----------------------------------------------------------------------===//
 // TileView
@@ -50,20 +50,20 @@ bool mlirTypeIsACudaTileGatherScatterView(MlirType type) {
   return llvm::isa<GatherScatterViewType>(unwrap(type));
 }
 
-MlirType mlirCudaTileGatherScatterViewTypeGet(MlirContext context,
-                                              intptr_t rank,
-                                              const int32_t *tileShape,
-                                              MlirType tensorView,
-                                              uint32_t sparseDim,
-                                              MlirAttribute paddingValue) {
+MlirType mlirCudaTileGatherScatterViewTypeGet(
+    MlirContext context, intptr_t rank, const int32_t *tileShape,
+    MlirType tensorView, uint32_t sparseDim, MlirAttribute paddingValue) {
   mlir::MLIRContext *ctx = loadCudaTile(context);
-  if (!ctx) return {nullptr};
+  if (!ctx)
+    return {nullptr};
   auto view = llvm::dyn_cast_or_null<TensorViewType>(unwrap(tensorView));
-  if (!view) return {nullptr};
+  if (!view)
+    return {nullptr};
   PaddingValueAttr padding;
   if (!mlirAttributeIsNull(paddingValue)) {
     padding = llvm::dyn_cast<PaddingValueAttr>(unwrap(paddingValue));
-    if (!padding) return {nullptr};
+    if (!padding)
+      return {nullptr};
   }
   auto shape = mlir::DenseI32ArrayAttr::get(
       ctx, llvm::ArrayRef<int32_t>(tileShape, rank));
@@ -85,7 +85,8 @@ uint32_t mlirCudaTileGatherScatterViewTypeGetSparseDim(MlirType type) {
 }
 
 MlirAttribute mlirCudaTileGatherScatterViewTypeGetPaddingValue(MlirType type) {
-  return wrap(llvm::cast<GatherScatterViewType>(unwrap(type)).getPaddingValue());
+  return wrap(
+      llvm::cast<GatherScatterViewType>(unwrap(type)).getPaddingValue());
 }
 
 //===----------------------------------------------------------------------===//
@@ -95,9 +96,11 @@ MlirAttribute mlirCudaTileGatherScatterViewTypeGetPaddingValue(MlirType type) {
 MlirAttribute mlirCudaTileOptimizationHintsAttrGet(MlirContext context,
                                                    MlirAttribute value) {
   mlir::MLIRContext *ctx = loadCudaTile(context);
-  if (!ctx) return {nullptr};
+  if (!ctx)
+    return {nullptr};
   auto dict = llvm::dyn_cast_or_null<mlir::DictionaryAttr>(unwrap(value));
-  if (!dict) return {nullptr};
+  if (!dict)
+    return {nullptr};
   return wrap(OptimizationHintsAttr::getChecked(
       [&] { return mlir::emitError(mlir::UnknownLoc::get(ctx)); }, ctx, dict));
 }
@@ -119,7 +122,8 @@ MlirAttribute mlirCudaTileDivByAttrGet(MlirContext context, uint64_t divisor,
                                        bool hasAlong, int64_t along) {
   mlir::MLIRContext *ctx = loadCudaTile(context);
   // The printer writes `every` and `along` together.
-  if (!ctx || hasEvery != hasAlong) return {nullptr};
+  if (!ctx || hasEvery != hasAlong)
+    return {nullptr};
   return wrap(DivByAttr::get(ctx, divisor, optional(hasEvery, every),
                              optional(hasAlong, along)));
 }
@@ -156,10 +160,11 @@ MlirAttribute mlirCudaTileSameElementsAttrGet(MlirContext context,
                                               intptr_t rank,
                                               const int64_t *values) {
   mlir::MLIRContext *ctx = loadCudaTile(context);
-  if (!ctx) return {nullptr};
+  if (!ctx)
+    return {nullptr};
   return wrap(SameElementsAttr::get(
-      ctx, mlir::DenseI64ArrayAttr::get(ctx,
-                                        llvm::ArrayRef<int64_t>(values, rank))));
+      ctx, mlir::DenseI64ArrayAttr::get(
+               ctx, llvm::ArrayRef<int64_t>(values, rank))));
 }
 
 MlirAttribute mlirCudaTileSameElementsAttrGetValues(MlirAttribute attr) {
@@ -177,7 +182,8 @@ bool mlirAttributeIsACudaTileBounded(MlirAttribute attr) {
 MlirAttribute mlirCudaTileBoundedAttrGet(MlirContext context, bool hasLb,
                                          int64_t lb, bool hasUb, int64_t ub) {
   mlir::MLIRContext *ctx = loadCudaTile(context);
-  if (!ctx) return {nullptr};
+  if (!ctx)
+    return {nullptr};
   return wrap(BoundedAttr::get(ctx, optional(hasLb, lb), optional(hasUb, ub)));
 }
 

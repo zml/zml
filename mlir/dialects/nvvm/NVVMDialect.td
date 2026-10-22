@@ -1,7 +1,7 @@
 //===- NVVMDialect.td - NVIDIA's NVVM dialect of the CuTe DSL -*- tablegen -*-===//
 
-#ifndef CUTE_IR_DIALECT_NVVM_IR_NVVM_DIALECT_TD
-#define CUTE_IR_DIALECT_NVVM_IR_NVVM_DIALECT_TD
+#ifndef MLIR_DIALECTS_NVVM_NVVMDIALECT_TD
+#define MLIR_DIALECTS_NVVM_NVVMDIALECT_TD
 
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/DialectBase.td"
@@ -30,4 +30,4 @@ class NVVM_Attr<string name, string attrMnemonic>
   let mnemonic = attrMnemonic;
 }
 
-#endif // CUTE_IR_DIALECT_NVVM_IR_NVVM_DIALECT_TD
+#endif // MLIR_DIALECTS_NVVM_NVVMDIALECT_TD

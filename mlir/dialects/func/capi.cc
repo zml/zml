@@ -1,3 +1,5 @@
+//===- capi.cc - C API for the func dialect -------------------------------===//
+
 #include "capi.h"
 
 #include "mlir/CAPI/IR.h"

@@ -1,5 +1,7 @@
-#ifndef ZML_MLIR_DIALECTS_CUDA_CAPI_H
-#define ZML_MLIR_DIALECTS_CUDA_CAPI_H
+//===- capi.h - C API for NVIDIA's cuda dialect -------------------*- C -*-===//
+
+#ifndef MLIR_DIALECTS_CUDA_CAPI_H
+#define MLIR_DIALECTS_CUDA_CAPI_H
 
 #include "mlir-c/IR.h"
 
@@ -18,37 +20,55 @@ MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Cuda, cuda);
 // values (the dialect's *Enums.td). Getters require a value accepted by the
 // matching IsA.
 
-// `#cuda.assume_kernel_attr`: Whether `cuda.launch` may assume its callee is a kernel
+// `#cuda.assume_kernel_attr`: Whether `cuda.launch` may assume its callee is a
+// kernel
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACudaAssumeKernel(MlirAttribute attr);
-MLIR_CAPI_EXPORTED MlirAttribute mlirCudaAssumeKernelAttrGet(MlirContext context, bool value);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCudaAssumeKernelAttrGet(MlirContext context, bool value);
 MLIR_CAPI_EXPORTED bool mlirCudaAssumeKernelAttrGetValue(MlirAttribute attr);
 
-// `#cuda.compute_target`: Representation, portability and architectures of a compiled executable
+// `#cuda.compute_target`: Representation, portability and architectures of a
+// compiled executable
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACudaComputeTarget(MlirAttribute attr);
-MLIR_CAPI_EXPORTED MlirAttribute mlirCudaComputeTargetAttrGet(MlirContext context, uint32_t representation, uint32_t portability, intptr_t numArchs, const uint32_t *archs);
-MLIR_CAPI_EXPORTED uint32_t mlirCudaComputeTargetAttrGetRepresentation(MlirAttribute attr);
-MLIR_CAPI_EXPORTED uint32_t mlirCudaComputeTargetAttrGetPortability(MlirAttribute attr);
-MLIR_CAPI_EXPORTED intptr_t mlirCudaComputeTargetAttrGetNumArchs(MlirAttribute attr);
-MLIR_CAPI_EXPORTED uint32_t mlirCudaComputeTargetAttrGetArchs(MlirAttribute attr, intptr_t pos);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCudaComputeTargetAttrGet(
+    MlirContext context, uint32_t representation, uint32_t portability,
+    intptr_t numArchs, const uint32_t *archs);
+MLIR_CAPI_EXPORTED uint32_t
+mlirCudaComputeTargetAttrGetRepresentation(MlirAttribute attr);
+MLIR_CAPI_EXPORTED uint32_t
+mlirCudaComputeTargetAttrGetPortability(MlirAttribute attr);
+MLIR_CAPI_EXPORTED intptr_t
+mlirCudaComputeTargetAttrGetNumArchs(MlirAttribute attr);
+MLIR_CAPI_EXPORTED uint32_t
+mlirCudaComputeTargetAttrGetArchs(MlirAttribute attr, intptr_t pos);
 
-// `#cuda.dev_max_shared_memory_optin`: The device's opt-in maximum of shared memory per block
-MLIR_CAPI_EXPORTED bool mlirAttributeIsACudaDevMaxSharedMemoryOptin(MlirAttribute attr);
-MLIR_CAPI_EXPORTED MlirAttribute mlirCudaDevMaxSharedMemoryOptinAttrGet(MlirContext context);
+// `#cuda.dev_max_shared_memory_optin`: The device's opt-in maximum of shared
+// memory per block
+MLIR_CAPI_EXPORTED bool
+mlirAttributeIsACudaDevMaxSharedMemoryOptin(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCudaDevMaxSharedMemoryOptinAttrGet(MlirContext context);
 
 // `#cuda.device_attributes`: CUDA device attributes
-MLIR_CAPI_EXPORTED bool mlirAttributeIsACudaDeviceAttributes(MlirAttribute attr);
-MLIR_CAPI_EXPORTED MlirAttribute mlirCudaDeviceAttributesAttrGet(MlirContext context, MlirAttribute values);
-MLIR_CAPI_EXPORTED MlirAttribute mlirCudaDeviceAttributesAttrGetValues(MlirAttribute attr);
+MLIR_CAPI_EXPORTED bool
+mlirAttributeIsACudaDeviceAttributes(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCudaDeviceAttributesAttrGet(MlirContext context, MlirAttribute values);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCudaDeviceAttributesAttrGetValues(MlirAttribute attr);
 
 // `#cuda.executable`: Format of a compiled executable
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACudaExecutable(MlirAttribute attr);
-MLIR_CAPI_EXPORTED MlirAttribute mlirCudaExecutableAttrGet(MlirContext context, uint32_t format);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCudaExecutableAttrGet(MlirContext context,
+                                                           uint32_t format);
 MLIR_CAPI_EXPORTED uint32_t mlirCudaExecutableAttrGetFormat(MlirAttribute attr);
 
 // `#cuda.func_attributes`: CUDA function attributes of a kernel
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACudaFuncAttributes(MlirAttribute attr);
-MLIR_CAPI_EXPORTED MlirAttribute mlirCudaFuncAttributesAttrGet(MlirContext context, MlirAttribute values);
-MLIR_CAPI_EXPORTED MlirAttribute mlirCudaFuncAttributesAttrGetValues(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCudaFuncAttributesAttrGet(MlirContext context, MlirAttribute values);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCudaFuncAttributesAttrGetValues(MlirAttribute attr);
 
 // Types
 
@@ -65,7 +85,8 @@ MLIR_CAPI_EXPORTED MlirType mlirCudaArchSetTypeGet(MlirContext context);
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaEvent(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCudaEventTypeGet(MlirContext context);
 
-// `!cuda.graph_device_node`: `GraphDeviceNode` represents CUDA device node handle for device-side node update
+// `!cuda.graph_device_node`: `GraphDeviceNode` represents CUDA device node
+// handle for device-side node update
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaGraphDeviceNode(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCudaGraphDeviceNodeTypeGet(MlirContext context);
 
@@ -81,7 +102,8 @@ MLIR_CAPI_EXPORTED MlirType mlirCudaGraphNodeTypeGet(MlirContext context);
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaGraph(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCudaGraphTypeGet(MlirContext context);
 
-// `!cuda.int`: `cuda.int` is a integer type with a bitwidth matching the underlying ABI integer bitwidth
+// `!cuda.int`: `cuda.int` is a integer type with a bitwidth matching the
+// underlying ABI integer bitwidth
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaInt(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCudaIntTypeGet(MlirContext context);
 
@@ -89,10 +111,13 @@ MLIR_CAPI_EXPORTED MlirType mlirCudaIntTypeGet(MlirContext context);
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaKernel(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCudaKernelTypeGet(MlirContext context);
 
-// `!cuda.launch_cfg`: Representation of CUDA's extensible launch configuration mirroring cuda runtime API
+// `!cuda.launch_cfg`: Representation of CUDA's extensible launch configuration
+// mirroring cuda runtime API
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaLaunchConfig(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaLaunchConfigTypeGet(MlirContext context, uint32_t maxNumAttrs);
-MLIR_CAPI_EXPORTED uint32_t mlirCudaLaunchConfigTypeGetMaxNumAttrs(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirCudaLaunchConfigTypeGet(MlirContext context,
+                                                        uint32_t maxNumAttrs);
+MLIR_CAPI_EXPORTED uint32_t
+mlirCudaLaunchConfigTypeGetMaxNumAttrs(MlirType type);
 
 // `!cuda.library`: CUDA Library handle
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaLibrary(MlirType type);
@@ -108,7 +133,8 @@ MLIR_CAPI_EXPORTED MlirType mlirCudaResultTypeGet(MlirContext context);
 
 // `!cuda.runtime.device_prop`: CUDA cudaDeviceProp struct type (value-typed).
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeDeviceProp(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeDevicePropTypeGet(MlirContext context);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeDevicePropTypeGet(MlirContext context);
 
 // `!cuda.runtime.dim_3`: CUDA dim3 struct type (value-typed).
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeDim3(MlirType type);
@@ -118,57 +144,91 @@ MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeDim3TypeGet(MlirContext context);
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeExtent(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeExtentTypeGet(MlirContext context);
 
-// `!cuda.runtime.kernel_node_params`: CUDA cudaKernelNodeParams struct type (value-typed).
+// `!cuda.runtime.kernel_node_params`: CUDA cudaKernelNodeParams struct type
+// (value-typed).
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeKernelNodeParams(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeKernelNodeParamsTypeGet(MlirContext context);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeKernelNodeParamsTypeGet(MlirContext context);
 
-// `!cuda.runtime.launch_attribute_value.cluster_scheduling_policy_preference`: `!cuda.runtime.launch_attribute_value.cluster_scheduling_policy_preference`
-MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeLaunchAttributeValueClusterSchedulingPolicyPreference(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeLaunchAttributeValueClusterSchedulingPolicyPreferenceTypeGet(MlirContext context);
+// `!cuda.runtime.launch_attribute_value.cluster_scheduling_policy_preference`
+MLIR_CAPI_EXPORTED bool
+mlirTypeIsACudaRuntimeLaunchAttributeValueClusterSchedulingPolicyPreference(
+    MlirType type);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeLaunchAttributeValueClusterSchedulingPolicyPreferenceTypeGet(
+    MlirContext context);
 
-// `!cuda.runtime.launch_attribute_value.cooperative`: `!cuda.runtime.launch_attribute_value.cooperative`
-MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeLaunchAttributeValueCooperative(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeLaunchAttributeValueCooperativeTypeGet(MlirContext context);
+// `!cuda.runtime.launch_attribute_value.cooperative`
+MLIR_CAPI_EXPORTED bool
+mlirTypeIsACudaRuntimeLaunchAttributeValueCooperative(MlirType type);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeLaunchAttributeValueCooperativeTypeGet(MlirContext context);
 
-// `!cuda.runtime.launch_attribute_value.mem_sync_domain`: `!cuda.runtime.launch_attribute_value.mem_sync_domain`
-MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeLaunchAttributeValueMemSyncDomain(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeLaunchAttributeValueMemSyncDomainTypeGet(MlirContext context);
+// `!cuda.runtime.launch_attribute_value.mem_sync_domain`
+MLIR_CAPI_EXPORTED bool
+mlirTypeIsACudaRuntimeLaunchAttributeValueMemSyncDomain(MlirType type);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeLaunchAttributeValueMemSyncDomainTypeGet(MlirContext context);
 
-// `!cuda.runtime.launch_attribute_value.nvlink_util_centric_scheduling`: `!cuda.runtime.launch_attribute_value.nvlink_util_centric_scheduling`
-MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeLaunchAttributeValueNvlinkUtilCentricScheduling(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeLaunchAttributeValueNvlinkUtilCentricSchedulingTypeGet(MlirContext context);
+// `!cuda.runtime.launch_attribute_value.nvlink_util_centric_scheduling`
+MLIR_CAPI_EXPORTED bool
+mlirTypeIsACudaRuntimeLaunchAttributeValueNvlinkUtilCentricScheduling(
+    MlirType type);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeLaunchAttributeValueNvlinkUtilCentricSchedulingTypeGet(
+    MlirContext context);
 
-// `!cuda.runtime.launch_attribute_value.portable_cluster_size_mode`: `!cuda.runtime.launch_attribute_value.portable_cluster_size_mode`
-MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeLaunchAttributeValuePortableClusterSizeMode(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeLaunchAttributeValuePortableClusterSizeModeTypeGet(MlirContext context);
+// `!cuda.runtime.launch_attribute_value.portable_cluster_size_mode`
+MLIR_CAPI_EXPORTED bool
+mlirTypeIsACudaRuntimeLaunchAttributeValuePortableClusterSizeMode(
+    MlirType type);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeLaunchAttributeValuePortableClusterSizeModeTypeGet(
+    MlirContext context);
 
-// `!cuda.runtime.launch_attribute_value.priority`: `!cuda.runtime.launch_attribute_value.priority`
-MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeLaunchAttributeValuePriority(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeLaunchAttributeValuePriorityTypeGet(MlirContext context);
+// `!cuda.runtime.launch_attribute_value.priority`
+MLIR_CAPI_EXPORTED bool
+mlirTypeIsACudaRuntimeLaunchAttributeValuePriority(MlirType type);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeLaunchAttributeValuePriorityTypeGet(MlirContext context);
 
-// `!cuda.runtime.launch_attribute_value.programmatic_stream_serialization_allowed`: `!cuda.runtime.launch_attribute_value.programmatic_stream_serialization_allowed`
-MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowed(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowedTypeGet(MlirContext context);
+// `!cuda.runtime.launch_attribute_value.programmatic_stream_serialization_allowed`
+MLIR_CAPI_EXPORTED bool
+mlirTypeIsACudaRuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowed(
+    MlirType type);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowedTypeGet(
+    MlirContext context);
 
-// `!cuda.runtime.launch_attribute_value.shared_mem_carveout`: `!cuda.runtime.launch_attribute_value.shared_mem_carveout`
-MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeLaunchAttributeValueSharedMemCarveout(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeLaunchAttributeValueSharedMemCarveoutTypeGet(MlirContext context);
+// `!cuda.runtime.launch_attribute_value.shared_mem_carveout`
+MLIR_CAPI_EXPORTED bool
+mlirTypeIsACudaRuntimeLaunchAttributeValueSharedMemCarveout(MlirType type);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeLaunchAttributeValueSharedMemCarveoutTypeGet(
+    MlirContext context);
 
-// `!cuda.runtime.launch_attribute_value.shared_memory_mode`: `!cuda.runtime.launch_attribute_value.shared_memory_mode`
-MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeLaunchAttributeValueSharedMemoryMode(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeLaunchAttributeValueSharedMemoryModeTypeGet(MlirContext context);
+// `!cuda.runtime.launch_attribute_value.shared_memory_mode`
+MLIR_CAPI_EXPORTED bool
+mlirTypeIsACudaRuntimeLaunchAttributeValueSharedMemoryMode(MlirType type);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeLaunchAttributeValueSharedMemoryModeTypeGet(MlirContext context);
 
-// `!cuda.runtime.launch_attribute_value.sync_policy`: `!cuda.runtime.launch_attribute_value.sync_policy`
-MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeLaunchAttributeValueSyncPolicy(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeLaunchAttributeValueSyncPolicyTypeGet(MlirContext context);
+// `!cuda.runtime.launch_attribute_value.sync_policy`
+MLIR_CAPI_EXPORTED bool
+mlirTypeIsACudaRuntimeLaunchAttributeValueSyncPolicy(MlirType type);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeLaunchAttributeValueSyncPolicyTypeGet(MlirContext context);
 
-// `!cuda.runtime.memcpy_3d_params`: CUDA cudaMemcpy3DParms struct type (value-typed).
+// `!cuda.runtime.memcpy_3d_params`: CUDA cudaMemcpy3DParms struct type
+// (value-typed).
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimeMemcpy3DParams(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimeMemcpy3DParamsTypeGet(MlirContext context);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimeMemcpy3DParamsTypeGet(MlirContext context);
 
 // `!cuda.runtime.pitched_ptr`: CUDA cudaPitchedPtr struct type (value-typed).
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimePitchedPtr(MlirType type);
-MLIR_CAPI_EXPORTED MlirType mlirCudaRuntimePitchedPtrTypeGet(MlirContext context);
+MLIR_CAPI_EXPORTED MlirType
+mlirCudaRuntimePitchedPtrTypeGet(MlirContext context);
 
 // `!cuda.runtime.pos`: CUDA cudaPos struct type (value-typed).
 MLIR_CAPI_EXPORTED bool mlirTypeIsACudaRuntimePos(MlirType type);
@@ -190,4 +250,4 @@ MLIR_CAPI_EXPORTED MlirType mlirCudaTensorMapTypeGet(MlirContext context);
 }
 #endif
 
-#endif
+#endif // MLIR_DIALECTS_CUDA_CAPI_H

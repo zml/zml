@@ -25,8 +25,8 @@
 // dense but cannot be divided by sparsity") is inferred from probes: every
 // probe agrees with it.
 
-#ifndef CUTE_IR_GENERATED_CUTE_TYPES_COMPILER_TD
-#define CUTE_IR_GENERATED_CUTE_TYPES_COMPILER_TD
+#ifndef MLIR_DIALECTS_CUTE_IR_CUTETYPESCOMPILER_TD
+#define MLIR_DIALECTS_CUTE_IR_CUTETYPESCOMPILER_TD
 
 include "cute_ir/Dialect/Cute/IR/CuteTypes.td"
 include "mlir/dialects/cute_ir/CuteAttrsCompiler.td"
@@ -266,4 +266,4 @@ def Cute_TupleType : Cute_Type<"Tuple", "tuple"> {
   let assemblyFormat = "`<` $types `>`";
 }
 
-#endif // CUTE_IR_GENERATED_CUTE_TYPES_COMPILER_TD
+#endif // MLIR_DIALECTS_CUTE_IR_CUTETYPESCOMPILER_TD

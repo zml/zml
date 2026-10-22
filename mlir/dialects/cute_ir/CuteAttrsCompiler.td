@@ -12,8 +12,8 @@
 //
 // The reduction_op enum attribute is in CuteEnums.td.
 
-#ifndef CUTE_IR_GENERATED_CUTE_ATTRS_COMPILER_TD
-#define CUTE_IR_GENERATED_CUTE_ATTRS_COMPILER_TD
+#ifndef MLIR_DIALECTS_CUTE_IR_CUTEATTRSCOMPILER_TD
+#define MLIR_DIALECTS_CUTE_IR_CUTEATTRSCOMPILER_TD
 
 include "cute_ir/Dialect/Cute/IR/CuteAttrs.td"
 
@@ -217,4 +217,4 @@ def Cute_SparseMxMmaAtomAttr
   }];
 }
 
-#endif // CUTE_IR_GENERATED_CUTE_ATTRS_COMPILER_TD
+#endif // MLIR_DIALECTS_CUTE_IR_CUTEATTRSCOMPILER_TD

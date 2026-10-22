@@ -9,8 +9,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CUTE_IR_DIALECT_NVVM_IR_NVVM_ATTRS_TD
-#define CUTE_IR_DIALECT_NVVM_IR_NVVM_ATTRS_TD
+#ifndef MLIR_DIALECTS_NVVM_NVVMATTRS_TD
+#define MLIR_DIALECTS_NVVM_NVVMATTRS_TD
 
 include "mlir/dialects/nvvm/NVVMDialect.td"
 include "mlir/dialects/nvvm/NVVMEnums.td"
@@ -49,4 +49,4 @@ def NVVM_TargetAttr : NVVM_Attr<"Target", "target"> {
   let genVerifyDecl = 1;
 }
 
-#endif // CUTE_IR_DIALECT_NVVM_IR_NVVM_ATTRS_TD
+#endif // MLIR_DIALECTS_NVVM_NVVMATTRS_TD

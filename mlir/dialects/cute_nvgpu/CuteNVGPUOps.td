@@ -18,8 +18,8 @@
 //   cute_nvgpu.arch.mma.SM107.umma_block_scaled_sparse operand #3: no probe type accepted; any type allowed
 //   cute_nvgpu.arch.mma.SM107.umma_sparse operand #3: no probe type accepted; any type allowed
 
-#ifndef CUTE_IR_GENERATED_CUTENVGPU_OPS_TD
-#define CUTE_IR_GENERATED_CUTENVGPU_OPS_TD
+#ifndef MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUOPS_TD
+#define MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUOPS_TD
 
 include "mlir/dialects/cute_nvgpu/CuteNVGPUAttrs.td"
 include "cute_ir/Dialect/Cute/IR/CuteAttrs.td"
@@ -2009,4 +2009,4 @@ def CuteNVGPU_UpdateTMADescOp : CuteNVGPU_Op<"update_tma_desc"> {
   );
 }
 
-#endif // CUTE_IR_GENERATED_CUTENVGPU_OPS_TD
+#endif // MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUOPS_TD

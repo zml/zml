@@ -1,5 +1,7 @@
-#ifndef ZML_MLIR_DIALECTS_CUTE_IR_CAPI_H
-#define ZML_MLIR_DIALECTS_CUTE_IR_CAPI_H
+//===- capi.h - C API for the cute dialect ------------------------*- C -*-===//
+
+#ifndef MLIR_DIALECTS_CUTE_IR_CAPI_H
+#define MLIR_DIALECTS_CUTE_IR_CAPI_H
 
 #include "mlir-c/IR.h"
 
@@ -301,11 +303,11 @@ mlirCuteComposedLayoutTypeGetAttr(MlirType type);
 MLIR_CAPI_EXPORTED bool mlirTypeIsACuteConstrainedInt(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCuteConstrainedIntTypeGet(MlirContext context,
                                                           int64_t divisibility,
-                                                          unsigned width,
+                                                          uint32_t width,
                                                           bool isPow2);
 MLIR_CAPI_EXPORTED int64_t
 mlirCuteConstrainedIntTypeGetDivisibility(MlirType type);
-MLIR_CAPI_EXPORTED unsigned mlirCuteConstrainedIntTypeGetWidth(MlirType type);
+MLIR_CAPI_EXPORTED uint32_t mlirCuteConstrainedIntTypeGetWidth(MlirType type);
 MLIR_CAPI_EXPORTED bool mlirCuteConstrainedIntTypeGetIsPow2(MlirType type);
 
 // `!cute.coord_tensor`: Coordinate tensor: an arithmetic tuple with a layout.
@@ -327,8 +329,8 @@ MLIR_CAPI_EXPORTED MlirAttribute mlirCuteCoordTypeGetAttr(MlirType type);
 // operations.
 MLIR_CAPI_EXPORTED bool mlirTypeIsACuteFastDivmodDivisor(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirCuteFastDivmodDivisorTypeGet(
-    MlirContext context, unsigned width, bool isPow2);
-MLIR_CAPI_EXPORTED unsigned
+    MlirContext context, uint32_t width, bool isPow2);
+MLIR_CAPI_EXPORTED uint32_t
 mlirCuteFastDivmodDivisorTypeGetWidth(MlirType type);
 MLIR_CAPI_EXPORTED bool mlirCuteFastDivmodDivisorTypeGetIsPow2(MlirType type);
 
@@ -452,4 +454,4 @@ MLIR_CAPI_EXPORTED MlirType mlirCuteTupleTypeGetType(MlirType type,
 }
 #endif
 
-#endif
+#endif // MLIR_DIALECTS_CUTE_IR_CAPI_H

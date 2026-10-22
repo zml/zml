@@ -6,6 +6,15 @@
 // atoms, tilings or layouts than those covered), inference fails rather than
 // guesses. test:dialect_inference_test holds these to the compiler's choice.
 
+#include "mlir/dialects/cute_ir/CuteInference.h"
+
+#include "mlir/dialects/cute_nvgpu/CuteNVGPUDialect.h"
+
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Matchers.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
+
 #include <algorithm>
 #include <functional>
 #include <numeric>
@@ -13,13 +22,6 @@
 #include <string>
 #include <tuple>
 #include <vector>
-
-#include "mlir/dialects/cute_ir/CuteInference.h"
-#include "mlir/dialects/cute_nvgpu/CuteNVGPUDialect.h"
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/ADT/TypeSwitch.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/Matchers.h"
 
 using namespace mlir;
 using namespace mlir::cutlass_compiler::cute;

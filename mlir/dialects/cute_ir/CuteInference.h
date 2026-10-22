@@ -1,7 +1,7 @@
 //===- CuteInference.h - result types the compiler infers --------*- C++ -*-===//
 
-#ifndef CUTE_IR_DIALECT_CUTE_IR_CUTE_INFERENCE_H
-#define CUTE_IR_DIALECT_CUTE_IR_CUTE_INFERENCE_H
+#ifndef MLIR_DIALECTS_CUTE_IR_CUTEINFERENCE_H
+#define MLIR_DIALECTS_CUTE_IR_CUTEINFERENCE_H
 
 #include "cute_ir/Dialect/Cute/IR/CuteDialect.h"
 
@@ -21,4 +21,4 @@ Type fastDivmodCreateDivisorResultType(Type divisor);
 Type fastDivmodComputeResultType(Type divisor);  // both results
 } // namespace mlir::cutlass_compiler::cute
 
-#endif // CUTE_IR_DIALECT_CUTE_IR_CUTE_INFERENCE_H
+#endif // MLIR_DIALECTS_CUTE_IR_CUTEINFERENCE_H

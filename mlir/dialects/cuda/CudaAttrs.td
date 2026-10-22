@@ -12,8 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CUTE_IR_DIALECT_CUDA_IR_CUDA_ATTRS_TD
-#define CUTE_IR_DIALECT_CUDA_IR_CUDA_ATTRS_TD
+#ifndef MLIR_DIALECTS_CUDA_CUDAATTRS_TD
+#define MLIR_DIALECTS_CUDA_CUDAATTRS_TD
 
 include "mlir/dialects/cuda/CudaDialect.td"
 include "mlir/dialects/cuda/CudaEnums.td"
@@ -65,4 +65,4 @@ def Cuda_FuncAttributesAttr : Cuda_Attr<"FuncAttributes", "func_attributes"> {
   let assemblyFormat = "$values";
 }
 
-#endif // CUTE_IR_DIALECT_CUDA_IR_CUDA_ATTRS_TD
+#endif // MLIR_DIALECTS_CUDA_CUDAATTRS_TD

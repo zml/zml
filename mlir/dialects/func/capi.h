@@ -1,5 +1,7 @@
-#ifndef ZML_MLIR_DIALECTS_FUNC_CAPI_H
-#define ZML_MLIR_DIALECTS_FUNC_CAPI_H
+//===- capi.h - C API for the func dialect ------------------------*- C -*-===//
+
+#ifndef MLIR_DIALECTS_FUNC_CAPI_H
+#define MLIR_DIALECTS_FUNC_CAPI_H
 
 #include "mlir-c/Dialect/Func.h"
 #include "mlir-c/IR.h"
@@ -8,10 +10,11 @@
 extern "C" {
 #endif
 
-void mlirRegisterFuncExtensions(MlirDialectRegistry registry);
+MLIR_CAPI_EXPORTED void
+mlirRegisterFuncExtensions(MlirDialectRegistry registry);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif
+#endif // MLIR_DIALECTS_FUNC_CAPI_H

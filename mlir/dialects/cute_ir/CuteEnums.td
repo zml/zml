@@ -4,8 +4,8 @@
 // Case values and spellings are the compiler's. An enum the bindings build
 // as a dialect attribute also has its EnumAttr, printed `#<mnemonic><case>`.
 
-#ifndef CUTE_IR_GENERATED_CUTE_ENUMS_TD
-#define CUTE_IR_GENERATED_CUTE_ENUMS_TD
+#ifndef MLIR_DIALECTS_CUTE_IR_CUTEENUMS_TD
+#define MLIR_DIALECTS_CUTE_IR_CUTEENUMS_TD
 
 include "cute_ir/Dialect/Cute/IR/CuteDialect.td"
 include "mlir/IR/EnumAttr.td"
@@ -67,4 +67,4 @@ def Cute_ReductionOpAttr : EnumAttr<Cute_Dialect, Cute_ReductionOpEnum, "reducti
   let assemblyFormat = "`<` $value `>`";
 }
 
-#endif // CUTE_IR_GENERATED_CUTE_ENUMS_TD
+#endif // MLIR_DIALECTS_CUTE_IR_CUTEENUMS_TD

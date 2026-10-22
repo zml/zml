@@ -1,7 +1,7 @@
 //===- CudaDialect.td - NVIDIA's CUDA host dialect of the CuTe DSL -*- tablegen -*-===//
 
-#ifndef CUTE_IR_DIALECT_CUDA_IR_CUDA_DIALECT_TD
-#define CUTE_IR_DIALECT_CUDA_IR_CUDA_DIALECT_TD
+#ifndef MLIR_DIALECTS_CUDA_CUDADIALECT_TD
+#define MLIR_DIALECTS_CUDA_CUDADIALECT_TD
 
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/DialectBase.td"
@@ -35,4 +35,4 @@ class Cuda_Attr<string name, string attrMnemonic>
   let mnemonic = attrMnemonic;
 }
 
-#endif // CUTE_IR_DIALECT_CUDA_IR_CUDA_DIALECT_TD
+#endif // MLIR_DIALECTS_CUDA_CUDADIALECT_TD

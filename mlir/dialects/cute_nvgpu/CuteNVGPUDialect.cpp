@@ -6,15 +6,15 @@
 
 #include "mlir/dialects/cute_nvgpu/CuteNVGPUDialect.h"
 
-#include <optional>
-#include <string>
-
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/ADT/TypeSwitch.h"
 #include "mlir/AsmParser/AsmParser.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/TypeSwitch.h"
+
+#include <optional>
+#include <string>
 
 using namespace mlir;
 using namespace mlir::cutlass_compiler::cute_nvgpu;

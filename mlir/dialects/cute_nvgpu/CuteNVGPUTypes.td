@@ -28,8 +28,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_TYPES_TD
-#define CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_TYPES_TD
+#ifndef MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUTYPES_TD
+#define MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUTYPES_TD
 
 include "mlir/dialects/cute_nvgpu/CuteNVGPUDialect.td"
 
@@ -747,4 +747,4 @@ def CuteNVGPU_MmaAtomSM107UMMABlockScaledSparseType
           "128x128x64, num_cta = 1, ab_major = (k, k), elem_type = (f8E4M3FN, f8E4M3FN, f32), sf_type = f8E8M0FNU, sparse_metadata_format = tid, frag_kind = ss, vec_size = 32, ab_collector_op = (discard, discard)",
           1, 1, 1, 1>;
 
-#endif // CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_TYPES_TD
+#endif // MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUTYPES_TD

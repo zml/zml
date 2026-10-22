@@ -1,5 +1,9 @@
+//===- capi.cc - C API for the cute dialect -------------------------------===//
+
 #include "capi.h"
+
 #include "cute_ir/Dialect/Cute/IR/CuteDialect.h"
+
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 #include "mlir/CAPI/Support.h"
@@ -13,9 +17,9 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Cute, cute,
 
 namespace cute = mlir::cutlass_compiler::cute;
 
-namespace {
 template <typename Attr>
-MlirAttribute getAlgebraAttribute(MlirContext context, MlirStringRef value) {
+static MlirAttribute getAlgebraAttribute(MlirContext context,
+                                         MlirStringRef value) {
   auto *ctx = unwrap(context);
   if (!ctx || (!value.data && value.length))
     return {nullptr};
@@ -27,14 +31,14 @@ MlirAttribute getAlgebraAttribute(MlirContext context, MlirStringRef value) {
   return wrap(Attr::get(ctx, std::move(*algebra)));
 }
 
-template <typename Attr> MlirStringRef getAlgebraValue(MlirAttribute attr) {
+template <typename Attr>
+static MlirStringRef getAlgebraValue(MlirAttribute attr) {
   auto value = llvm::cast<Attr>(unwrap(attr));
   // Intern the serialization so the returned view outlives this function.
   auto text = mlir::StringAttr::get(value.getContext(),
                                     cutegen::to_string(value.getRef()));
   return wrap(text.getValue());
 }
-} // namespace
 
 MlirAttribute mlirCuteIntTupleAttrGet(MlirContext context,
                                       MlirStringRef value) {
@@ -136,11 +140,10 @@ MlirStringRef mlirCuteSwizzleAttrGetValue(MlirAttribute attr) {
 
 // Compiler attributes
 
-namespace {
 // Unwraps `handle` into `out`: false when it is of another context or not a
 // T, or when it is null and not optional.
 template <typename T, typename H>
-bool unwrapAs(mlir::MLIRContext *ctx, H handle, bool optional, T &out) {
+static bool unwrapAs(mlir::MLIRContext *ctx, H handle, bool optional, T &out) {
   auto value = unwrap(handle);
   if (!value)
     return optional;
@@ -149,7 +152,6 @@ bool unwrapAs(mlir::MLIRContext *ctx, H handle, bool optional, T &out) {
   out = llvm::dyn_cast<T>(value);
   return static_cast<bool>(out);
 }
-} // namespace
 
 bool mlirAttributeIsACuteBitLayout(MlirAttribute attr) {
   return llvm::isa_and_nonnull<cute::BitLayoutAttr>(unwrap(attr));
@@ -853,7 +855,7 @@ bool mlirTypeIsACuteConstrainedInt(MlirType type) {
   return llvm::isa_and_nonnull<cute::ConstrainedIntType>(unwrap(type));
 }
 MlirType mlirCuteConstrainedIntTypeGet(MlirContext context,
-                                       int64_t divisibility, unsigned width,
+                                       int64_t divisibility, uint32_t width,
                                        bool isPow2) {
   auto *ctx = unwrap(context);
   if (!ctx)
@@ -864,7 +866,7 @@ MlirType mlirCuteConstrainedIntTypeGet(MlirContext context,
 int64_t mlirCuteConstrainedIntTypeGetDivisibility(MlirType type) {
   return llvm::cast<cute::ConstrainedIntType>(unwrap(type)).getDivisibility();
 }
-unsigned mlirCuteConstrainedIntTypeGetWidth(MlirType type) {
+uint32_t mlirCuteConstrainedIntTypeGetWidth(MlirType type) {
   return llvm::cast<cute::ConstrainedIntType>(unwrap(type)).getWidth();
 }
 bool mlirCuteConstrainedIntTypeGetIsPow2(MlirType type) {
@@ -920,7 +922,7 @@ MlirAttribute mlirCuteCoordTypeGetAttr(MlirType type) {
 bool mlirTypeIsACuteFastDivmodDivisor(MlirType type) {
   return llvm::isa_and_nonnull<cute::FastDivmodDivisorType>(unwrap(type));
 }
-MlirType mlirCuteFastDivmodDivisorTypeGet(MlirContext context, unsigned width,
+MlirType mlirCuteFastDivmodDivisorTypeGet(MlirContext context, uint32_t width,
                                           bool isPow2) {
   auto *ctx = unwrap(context);
   if (!ctx)
@@ -928,7 +930,7 @@ MlirType mlirCuteFastDivmodDivisorTypeGet(MlirContext context, unsigned width,
   ctx->getOrLoadDialect<cute::CuteDialect>();
   return wrap(cute::FastDivmodDivisorType::get(ctx, width, isPow2));
 }
-unsigned mlirCuteFastDivmodDivisorTypeGetWidth(MlirType type) {
+uint32_t mlirCuteFastDivmodDivisorTypeGetWidth(MlirType type) {
   return llvm::cast<cute::FastDivmodDivisorType>(unwrap(type)).getWidth();
 }
 bool mlirCuteFastDivmodDivisorTypeGetIsPow2(MlirType type) {

@@ -1,17 +1,18 @@
 //===- CuteNVGPUDialect.h - CuTe NVIDIA GPU dialect ------------*- C++ -*-===//
 
-#ifndef CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_DIALECT_H
-#define CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_DIALECT_H
-
-#include <optional>
+#ifndef MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUDIALECT_H
+#define MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUDIALECT_H
 
 #include "cute_ir/Dialect/Cute/IR/CuteDialect.h"
+
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+
+#include <optional>
 
 #include "mlir/dialects/cute_nvgpu/CuteNVGPUDialect.h.inc"
 
@@ -34,4 +35,4 @@ std::optional<TmaDataFormat> defaultTmaDataFormat(Type elementType);
 #define GET_OP_CLASSES
 #include "mlir/dialects/cute_nvgpu/CuteNVGPUOps.h.inc"
 
-#endif // CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_DIALECT_H
+#endif // MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUDIALECT_H
