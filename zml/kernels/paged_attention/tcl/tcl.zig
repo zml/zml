@@ -32,43 +32,10 @@ pub const paged = struct {
     pub const Options = triton.paged.Options;
     pub const Parameters = triton.paged.Parameters;
 
-    /// Token counts up to which `writeCache` writes rows one by one.
-    const row_writes = 32;
-
-    /// Writes token rows `{.b, .hkv, .hd}` at their `page` and `offset`.
-    /// Tokens without a slot carry indices past the cache, which both paths
-    /// clamp onto the cache's last page: the caller must keep that page out of
-    /// its allocation. A few rows become dynamic updates, which compile into
-    /// the unit that computes them; more rows go through one in-place scatter
-    /// kernel instead of XLA's scatter, which the plugin expands into a host
-    /// loop over rows.
-    pub fn writeCache(cache: Tensor, rows: Tensor, page: Tensor, offset: Tensor) Tensor {
-        if (rows.dim(.b) > row_writes) {
-            const last_page = Tensor.scalar(cache.dim(.page) - 1, .i32);
-            const last_offset = Tensor.scalar(cache.dim(.k_chunk) - 1, .i32);
-            const slots = page.convert(.i32).clamp(Tensor.scalar(0, .i32), last_page).scale(cache.dim(.k_chunk))
-                .add(offset.convert(.i32).clamp(Tensor.scalar(0, .i32), last_offset));
-            return WriteRows.call(
-                .{ .cache = cache, .rows = rows.convert(cache.dtype()), .slots = slots },
-                .{ .out = cache.shape() },
-                .{ .cfg = .{ .t = rows.dim(.b), .pages = cache.dim(.page), .pg = cache.dim(.k_chunk), .hkv = cache.dim(.hkv), .d = cache.dim(.hd), .dtype = tcl.from(cache.dtype()) } },
-            ).out;
-        }
-        var out = cache;
-        for (0..@intCast(rows.dim(.b))) |t| {
-            const token: Tensor.Slice = .{ .start = @intCast(t), .end = @intCast(t + 1) };
-            out = out.dynamicUpdateSlice(.{
-                .page = page.slice(.b, token).squeeze(.b),
-                .k_chunk = offset.slice(.b, token).squeeze(.b),
-            }, rows.slice(.b, token).squeeze(.b));
-        }
-        return out;
-    }
-
     /// `q` is `{.b = tokens, .hkv, .hg, .hd}`, the caches
     /// `{.page, .k_chunk, .hkv, .hd}`. Sinks are one logit per query head.
-    /// Decode reads whole pages, past each sequence's end and from pages of
-    /// other sequences: the caches must hold numbers, so zero them once.
+    /// Unwritten cache entries are excluded before the contractions; callers
+    /// need only populate the tokens covered by their sequence lengths.
     pub fn pagedAttention(parameters: Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, opts: paged_attention.AttentionOptions) Tensor {
         if (opts.mask == .indices) @panic("Sparse attention masks are not supported by TCL paged attention");
         stdx.debug.assert(q.rank() == 4 and k_cache.rank() == 4 and v_cache.rank() == 4 and k_cache.shape().eqlDims(v_cache.shape()), "TCL attention requires matching rank-four split K/V caches", .{});
@@ -154,40 +121,6 @@ pub const paged = struct {
     }
 };
 
-const WriteCfg = struct {
-    t: i64,
-    pages: i64,
-    pg: i64,
-    hkv: i64,
-    d: i64,
-    dtype: tcl.DType,
-};
-
-/// `cache[slots[t]] = rows[t]` over the cache's token slots, in place.
-const WriteRows = tcl.Kernel(WriteCfg, .{
-    .name = "paged_write_rows",
-    .inputs = &.{ "cache", "rows", "slots" },
-    .outputs = &.{"out"},
-    .run = struct {
-        fn run(b: *tcl.Builder, cfg: WriteCfg) tcl.FinishError!void {
-            const T = b.axis("T", cfg.t);
-            const P = b.axis("P", cfg.pages);
-            const PG = b.axis("PG", cfg.pg);
-            const N = b.axis("N", cfg.pages * cfg.pg);
-            const Hkv = b.axis("Hkv", cfg.hkv);
-            const D = b.axis("D", cfg.d);
-            const t = try b.declareArgs(.{
-                .cache = .{ .dtype = cfg.dtype, .axes = &.{ P, PG, Hkv, D }, .dram = .{} },
-                .rows = .{ .dtype = cfg.dtype, .axes = &.{ T, Hkv, D } },
-                .slots = .{ .dtype = .i32, .axes = &.{T} },
-            });
-            const flat = try b.reshape(t.cache, &.{ N, Hkv, D }, .{});
-            const written = try b.scatter(t.rows, t.slots, N, &.{ N, Hkv, D }, .{ .init = flat });
-            b.ret(&.{try b.update(0, try b.reshape(written, &.{ P, PG, Hkv, D }, .{}))});
-        }
-    }.run,
-});
-
 /// Keys a decode kernel attends to in one pass: TCC 2026.5 fails on the
 /// decode metadata for 131072 keys in pages of 16.
 const decode_keys = 65536;
@@ -206,7 +139,7 @@ const DecodeCfg = struct {
 
 /// Decode attention in Furiosa's form: the kernel gathers whole pages, then
 /// runs one contraction, a masked softmax and a second contraction. It reads
-/// past each sequence's end, so the caches must hold numbers (zero them once).
+/// past each sequence's end, selecting zero for those unused cache entries.
 /// The token metadata depends only on the attention parameters, which every
 /// layer shares: one kernel computes it once per forward pass.
 fn decodeAttention(parameters: paged.Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, cfg: DecodeCfg) Tensor {
@@ -329,9 +262,9 @@ const Decode = tcl.Kernel(DecodeCfg, .{
                 .k_cache = .{ .dtype = .bf16, .axes = &.{ P, PG, Hkv, D } },
                 .v_cache = .{ .dtype = .bf16, .axes = &.{ P, PG, Hkv, D } },
             });
-            const k = try b.gather(t.k_cache, t.pages, P, &.{ T, AP, PG, Hkv, D }, .{ .valid_length = t.bounds });
-            const v = try b.gather(t.v_cache, t.pages, P, &.{ T, AP, PG, Hkv, D }, .{ .valid_length = t.bounds });
             const mask = try b.reshape(t.mask, &.{ T, AP, PG }, .{});
+            const k = try maskCacheValues(b, try b.gather(t.k_cache, t.pages, P, &.{ T, AP, PG, Hkv, D }, .{ .valid_length = t.bounds }), mask);
+            const v = try maskCacheValues(b, try b.gather(t.v_cache, t.pages, P, &.{ T, AP, PG, Hkv, D }, .{ .valid_length = t.bounds }), mask);
             const keys: []const tcl.Axis = &.{ AP, PG };
             var op = b.tensorOperation(.{});
             const scores = try op.commit(op.contract(t.q, k, &.{ Hkv, G, T, AP, PG }).mulf(cfg.scale), .{});
@@ -607,6 +540,23 @@ fn validIndices(b: *tcl.Builder, indices: builder.Tensor, count: i64) tcl.Finish
     return .{ .safe = safe, .valid = valid };
 }
 
+/// Cache validity is per sequence, not per query: causal/window masking stays
+/// on scores, without replicating K/V for every row of a prefill block.
+fn cacheMask(b: *tcl.Builder, valid_pages: builder.Tensor, kvlen: builder.Tensor, position: builder.Tensor) tcl.FinishError!builder.Tensor {
+    var op = b.tensorOperation(.{});
+    const pos = try op.commit(op.fetch(position, .{ .broadcast_to = valid_pages.axes }), .{});
+    op = b.tensorOperation(.{ .tactic = .elementwise });
+    return op.commit(op.fetch(pos, .{}).muli(-1).addi(op.fetch(kvlen, .{})).binary(.maxi, 0).binary(.mini, 1).muli(op.fetch(valid_pages, .{})), .{});
+}
+
+/// A true select excludes NaN/Inf in unwritten slots; multiplying by zero
+/// would still propagate them into the contraction. Materialize only BF16.
+fn maskCacheValues(b: *tcl.Builder, values: builder.Tensor, valid: builder.Tensor) tcl.FinishError!builder.Tensor {
+    const op = b.tensorOperation(.{ .tactic = .elementwise });
+    const data = op.fetch(values, .{});
+    return op.commit(op.where(op.fetch(valid, .{ .broadcast_to = values.axes }), .ne, 0, data, 0.0), .{ .dtype = .bf16 });
+}
+
 /// Build the sequence, query, page and window mask for the current keys.
 fn attentionMask(b: *tcl.Builder, cfg: Cfg, qpos: builder.Tensor, kvlen: builder.Tensor, position: builder.Tensor, valid_keys: builder.Tensor) tcl.FinishError!builder.Tensor {
     const axes = &.{ qpos.axes[0], qpos.axes[1], position.axes[0] };
@@ -691,9 +641,11 @@ const OneShot = tcl.Kernel(Cfg, .{
             slot_op = b.tensorOperation(.{});
             const slots = try slot_op.commit(slot_op.where(valid_keys, .ne, 0, slot_op.fetch(expanded_slots, .{}), 0), .{});
             const valid_length = if (cfg.decode) prepared.kvlen else null;
-            const k = try b.gather(kc, slots, Nb, &.{ a.B, A, a.Hkv, a.D }, .{ .valid_length = valid_length });
-            const v = try b.gather(vc, slots, Nb, &.{ a.B, A, a.Hkv, a.D }, .{ .valid_length = valid_length });
-            const mask = try attentionMask(b, cfg, prepared.qpos, prepared.kvlen, try b.arange(cfg.a, .i32, &.{A}, .{}), valid_keys);
+            const position = try b.arange(cfg.a, .i32, &.{A}, .{});
+            const valid_cache = try cacheMask(b, valid_keys, prepared.kvlen, position);
+            const k = try maskCacheValues(b, try b.gather(kc, slots, Nb, &.{ a.B, A, a.Hkv, a.D }, .{ .valid_length = valid_length }), valid_cache);
+            const v = try maskCacheValues(b, try b.gather(vc, slots, Nb, &.{ a.B, A, a.Hkv, a.D }, .{ .valid_length = valid_length }), valid_cache);
+            const mask = try attentionMask(b, cfg, prepared.qpos, prepared.kvlen, position, valid_keys);
             const masked = try maskedScores(b, a, cfg, prepared.q, k, mask, A);
             var op = b.tensorOperation(.{});
             const p = if (cfg.decode) compact: {
@@ -778,8 +730,9 @@ const Flash = tcl.Kernel(Cfg, .{
             op = b.tensorOperation(.{});
             const cvl = try op.commit(op.fetch(live_pages, .{}).reduce(&.{Cp}, .addi), .{});
             const mask = try attentionMask(b, cfg, prepared.qpos, prepared.kvlen, position, valid_keys);
-            const k = try b.reshape(try b.gather(t.k_cache, idx, a.P, &.{ a.B, Cp, a.PG, a.Hkv, a.D }, .{ .valid_length = cvl }), &.{ a.B, Ck, a.Hkv, a.D }, .{});
-            const v = try b.reshape(try b.gather(t.v_cache, idx, a.P, &.{ a.B, Cp, a.PG, a.Hkv, a.D }, .{ .valid_length = cvl }), &.{ a.B, Ck, a.Hkv, a.D }, .{});
+            const valid_cache = try cacheMask(b, valid_keys, prepared.kvlen, position);
+            const k = try maskCacheValues(b, try b.reshape(try b.gather(t.k_cache, idx, a.P, &.{ a.B, Cp, a.PG, a.Hkv, a.D }, .{ .valid_length = cvl }), &.{ a.B, Ck, a.Hkv, a.D }, .{}), valid_cache);
+            const v = try maskCacheValues(b, try b.reshape(try b.gather(t.v_cache, idx, a.P, &.{ a.B, Cp, a.PG, a.Hkv, a.D }, .{ .valid_length = cvl }), &.{ a.B, Ck, a.Hkv, a.D }, .{}), valid_cache);
             const masked = try maskedScores(b, a, cfg, prepared.q, k, mask, Ck);
             op = b.tensorOperation(.{});
             const max_cur = try op.commit(op.fetch(masked, .{}).reduce(&.{Ck}, .maxf), .{});
@@ -962,6 +915,8 @@ const TestCase = struct {
     opts: attention_test.Options = .{},
     mask_all: bool = false,
     padding_page: i32 = -1,
+    poison: enum { none, k, v, both } = .none,
+    poison_value: f32 = std.math.nan(f32),
 };
 
 const TestDims = struct {
@@ -1039,6 +994,79 @@ test "tcl paged attention emits decode and prefill kernels with and without sink
             try std.testing.expect(std.mem.indexOf(u8, flash, "\"tcl.graph.for\"") != null);
         }
     }
+}
+
+test "tcl paged attention cache masking emits a BF16 select without query replication" {
+    const Mask = tcl.Kernel(usize, .{
+        .name = "cache_mask",
+        .inputs = &.{ "values", "valid" },
+        .outputs = &.{"out"},
+        .run = struct {
+            fn run(b: *tcl.Builder, _: usize) tcl.FinishError!void {
+                const B = b.axis("B", 2);
+                const A = b.axis("A", 64);
+                const Hkv = b.axis("Hkv", 2);
+                const D = b.axis("D", 32);
+                const t = try b.declareArgs(.{
+                    .values = .{ .dtype = .bf16, .axes = &.{ B, A, Hkv, D } },
+                    .valid = .{ .dtype = .i32, .axes = &.{ B, A } },
+                });
+                b.ret(&.{try maskCacheValues(b, t.values, t.valid)});
+            }
+        }.run,
+    });
+    const ir = try Mask.emit(std.testing.allocator, 0);
+    defer std.testing.allocator.free(ir);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, ir, "\"tcl.ve_select\""));
+    try std.testing.expect(std.mem.indexOf(u8, ir, "!tcl.logical<bf16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "!tcl.logical<i32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "#tcl.ve_opcode<\"mulf\">") == null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "#tcl.symbol<\"I\">") == null);
+
+    const decode = try Decode.emit(std.testing.allocator, .{ .t = 2, .a = 64, .hkv = 2, .g = 4, .d = 32, .pages = 8, .pg = 16, .scale = 0.125, .is_causal = true });
+    defer std.testing.allocator.free(decode);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, decode, "\"tcl.dpe\""));
+    try std.testing.expect(std.mem.indexOf(u8, decode, "tcl.fusible") != null);
+    try std.testing.expect(std.mem.indexOf(u8, decode, "propagate_sparse_axis_from_op = \"Gather\"") != null);
+}
+
+test "tcl paged attention excludes poisoned unused cache entries on furiosa" {
+    if (zml.testing.env().target != .furiosa) return error.SkipZigTest;
+    const seqs = [_][2]i32{ .{ 1, 17 }, .{ 1, 31 }, .{ 0, 0 }, .{ 0, 23 } };
+    try runCases(8, 32, &.{
+        .{ .prefill = false, .seqs = &seqs, .padding = 2, .poison = .k },
+        .{ .prefill = false, .seqs = &seqs, .padding = 2, .poison = .v },
+        .{ .prefill = false, .seqs = &seqs, .padding = 2, .poison = .both },
+        .{ .prefill = false, .seqs = &seqs, .padding = 2, .poison = .both, .poison_value = std.math.inf(f32) },
+        .{ .prefill = false, .seqs = &seqs, .padding = 2, .poison = .both, .poison_value = -std.math.inf(f32) },
+        .{ .prefill = false, .seqs = &seqs, .padding = 2, .poison = .both, .poison_value = 1e30 },
+        // A sink selects OneShot's compact decode softmax instead of Decode.
+        .{ .prefill = false, .seqs = &seqs, .padding = 2, .poison = .both, .opts = .{ .scale = 0.2, .sink = &.{ 0, -std.math.inf(f32) } } },
+        .{ .prefill = false, .seqs = &seqs, .padding = 2, .poison = .both, .mask_all = true, .padding_page = std.math.maxInt(i32) },
+        .{ .prefill = false, .seqs = &.{ .{ 0, 0 }, .{ 0, 0 }, .{ 0, 0 }, .{ 0, 0 } }, .padding = 4, .poison = .both },
+    }, .{ .hkv = 1, .g = 2, .d = 32 });
+
+    const mixed = [_][2]i32{ .{ 37, 65 }, .{ 0, 19 }, .{ 1, 17 }, .{ 4, 2 } };
+    try runCases(8, 32, &.{
+        .{ .prefill = true, .seqs = &mixed, .padding = 3, .poison = .k },
+        .{ .prefill = true, .seqs = &mixed, .padding = 3, .poison = .v },
+        .{ .prefill = true, .seqs = &mixed, .padding = 3, .poison = .both, .opts = .{ .is_causal = false, .sliding_window = 17, .scale = 0.2, .sink = &.{ 0, -std.math.inf(f32) } } },
+    }, .{ .hkv = 1, .g = 2, .d = 32 });
+
+    const boundary = [_][2]i32{ .{ 37, 4097 }, .{ 0, 0 }, .{ 1, 4096 }, .{ 2, 17 } };
+    try runCases(257, 1028, &.{
+        .{ .prefill = true, .seqs = &boundary, .padding = 3, .poison = .both },
+        .{ .prefill = true, .seqs = &boundary, .padding = 3, .poison = .both, .poison_value = std.math.inf(f32), .opts = .{ .is_causal = false, .sliding_window = 33, .scale = 0.2, .sink = &.{ 0, -std.math.inf(f32) } } },
+        .{ .prefill = false, .seqs = &.{ .{ 1, 4095 }, .{ 1, 4096 }, .{ 1, 4097 }, .{ 0, 0 } }, .padding = 1, .poison = .both, .opts = .{ .sliding_window = 17, .sink = &.{ 0, -std.math.inf(f32) } } },
+    }, .{ .hkv = 1, .g = 2, .d = 32 });
+    try runCases(86, 344, &.{.{
+        .prefill = true,
+        .seqs = &.{ .{ 3, 4033 }, .{ 1, 4032 }, .{ 0, 0 }, .{ 1, 4031 } },
+        .padding = 1,
+        .poison = .both,
+        .poison_value = -std.math.inf(f32),
+        .opts = .{ .sliding_window = 49 },
+    }}, .{ .hkv = 1, .g = 1, .d = 32, .page = 48 });
 }
 
 test "tcl paged attention runs on furiosa" {
@@ -1129,13 +1157,7 @@ fn runCases(comptime max_pages: usize, comptime num_pages: usize, cases: []const
     defer allocator.free(kc);
     const vc = try allocator.alloc(bf16, num_pages * page * hkv * d);
     defer allocator.free(vc);
-    for (kc) |*v| v.* = .fromF32(if (dims.uniform or dims.uniform_scores) 0 else r.floatNorm(f32));
-    for (vc, 0..) |*v, i| v.* = .fromF32(if (dims.uniform) @as(f32, @floatFromInt(i % d)) / d else r.floatNorm(f32));
     const k_t: Tensor = .init(.{ .page = num_pages, .k_chunk = page, .hkv = hkv, .hd = d }, dims.dtype);
-    var bk = try testBuffer(platform, k_t.shape(), kc);
-    defer bk.deinit();
-    var bv = try testBuffer(platform, k_t.shape(), vc);
-    defer bv.deinit();
 
     for (cases) |case| {
         var tokens: i64 = case.padding;
@@ -1177,6 +1199,35 @@ fn runCases(comptime max_pages: usize, comptime num_pages: usize, cases: []const
                 }
             }
         }
+
+        for (kc) |*v| v.* = .fromF32(if (dims.uniform or dims.uniform_scores) 0 else r.floatNorm(f32));
+        for (vc, 0..) |*v, i| v.* = .fromF32(if (dims.uniform) @as(f32, @floatFromInt(i % d)) / d else r.floatNorm(f32));
+        if (case.poison != .none) {
+            // Mark the union of live physical slots before poisoning: reordered
+            // or shared pages must retain every token a live sequence can read.
+            const live = try allocator.alloc(bool, num_pages * page);
+            defer allocator.free(live);
+            @memset(live, false);
+            for (case.seqs[0..batch], 0..) |s, seq| {
+                if (s[0] == 0) continue;
+                for (0..@intCast(s[1])) |key| {
+                    const physical = table[seq][key / page];
+                    if (physical < 0 or physical >= num_pages) continue;
+                    live[@as(usize, @intCast(physical)) * page + key % page] = true;
+                }
+            }
+            const poison = bf16.fromF32(case.poison_value);
+            for (live, 0..) |valid, slot| {
+                if (valid) continue;
+                const start = slot * hkv * d;
+                if (case.poison == .k or case.poison == .both) @memset(kc[start..][0 .. hkv * d], poison);
+                if (case.poison == .v or case.poison == .both) @memset(vc[start..][0 .. hkv * d], poison);
+            }
+        }
+        var bk = try testBuffer(platform, k_t.shape(), kc);
+        defer bk.deinit();
+        var bv = try testBuffer(platform, k_t.shape(), vc);
+        defer bv.deinit();
         var bq = try testBuffer(platform, q_t.shape(), q);
         defer bq.deinit();
         var bp: zml.Bufferized(paged.Parameters) = .{
