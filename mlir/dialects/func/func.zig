@@ -1,5 +1,4 @@
 const c = @import("c");
-const std = @import("std");
 
 const mlir = @import("mlir");
 const stdx = @import("stdx");

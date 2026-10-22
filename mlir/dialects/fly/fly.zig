@@ -123,7 +123,3 @@ pub fn ptrWithElem(ctx: *mlir.Context, ptr: *const mlir.Type, elem: *const mlir.
         .swizzle = p.getSwizzle(),
     });
 }
-
-test {
-    std.testing.refAllDecls(@This());
-}

@@ -34,6 +34,7 @@ zig_test(
     main = "test.zig",
     deps = [
         ":ttir",
+        "//mlir",
         "//mlir/dialects/arith",
         "//mlir/dialects/func",
         "//mlir/dialects/math",

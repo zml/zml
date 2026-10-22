@@ -11,6 +11,7 @@ cc_library(
     tags = ["manual"],
     deps = [
         ":dialect",
+        "//mlir/dialects/cute_ir:dialect",
         "@llvm-project//mlir:CAPIIR",
     ],
     alwayslink = True,
@@ -32,8 +33,11 @@ zig_library(
 
 zig_test(
     name = "test",
+    main = "test.zig",
     deps = [
         ":cute_nvgpu",
+        "//mlir",
+        "//mlir/dialects/cute_ir",
     ],
 )
 

@@ -1,5 +1,3 @@
-const std = @import("std");
-
 const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
@@ -162,8 +160,4 @@ pub fn inline_asm(
         .attributes = attrs.constSlice(),
         .location = location,
     });
-}
-
-test {
-    std.testing.refAllDecls(@This());
 }

@@ -1,5 +1,3 @@
-const std = @import("std");
-
 const mlir = @import("mlir");
 
 // =============================================================================
@@ -206,7 +204,3 @@ pub const isfinite = classifyOp("math.isfinite").call;
 pub const isinf = classifyOp("math.isinf").call;
 pub const isnan = classifyOp("math.isnan").call;
 pub const isnormal = classifyOp("math.isnormal").call;
-
-test {
-    std.testing.refAllDecls(@This());
-}

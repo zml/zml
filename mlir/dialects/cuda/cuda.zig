@@ -3,8 +3,6 @@
 //! which the CuTe-DSL compiler registers. Each builder fixes the attributes the
 //! kernels do not choose.
 
-const std = @import("std");
-
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
@@ -102,8 +100,4 @@ pub const LaunchExArgs = struct {
 
 pub fn launch_ex(ctx: *mlir.Context, args: LaunchExArgs) *mlir.Operation {
     return ops.launch_ex(ctx, args.config, args.inputs, resultType(ctx), args.callee, .{ .assume_kernel_attr = args.assume_kernel_attr }, args.location);
-}
-
-test {
-    std.testing.refAllDecls(@This());
 }

@@ -162,7 +162,3 @@ pub fn switch_(
 
     return mlir.Operation.init(&state) catch @panic("Failed to create cf.switch");
 }
-
-test {
-    std.testing.refAllDecls(@This());
-}

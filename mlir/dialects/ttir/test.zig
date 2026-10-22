@@ -1,3 +1,91 @@
+const std = @import("std");
+
+const mlir = @import("mlir");
+const ttir = @import("mlir/dialects/ttir");
+
 test {
-    @import("std").testing.refAllDecls(@import("mlir/dialects/ttir"));
+    std.testing.refAllDecls(ttir);
+}
+
+test "tt.func round-trip" {
+    // Build: module { tt.func public @id(%arg0: !tt.ptr<f32>) { tt.return } }
+    // by constructing it with the Zig wrappers, printing to string, and re-parsing.
+
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    inline for (.{ "func", "arith", "scf", "math", "tt" }) |d| {
+        mlir.DialectHandle.fromString(d).insertDialect(registry);
+    }
+
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+
+    try std.testing.expect(ctx.isRegisteredOperation("tt.func"));
+    try std.testing.expect(ctx.isRegisteredOperation("tt.return"));
+    try std.testing.expect(ctx.isRegisteredOperation("tt.load"));
+    try std.testing.expect(ctx.isRegisteredOperation("tt.store"));
+    try std.testing.expect(ctx.isRegisteredOperation("tt.get_program_id"));
+    try std.testing.expect(ctx.isRegisteredOperation("tt.splat"));
+    try std.testing.expect(ctx.isRegisteredOperation("tt.addptr"));
+    try std.testing.expect(ctx.isRegisteredOperation("scf.for"));
+    try std.testing.expect(ctx.isRegisteredOperation("arith.constant"));
+
+    const loc: *const mlir.Location = .unknown(ctx);
+    const module: *mlir.Module = .init(loc);
+    defer module.deinit();
+
+    const f32_ty = mlir.Type.float(ctx, .f32);
+    const ptr_ty = ttir.pointerType(f32_ty, 1);
+
+    const entry = mlir.Block.init(&.{ ptr_ty, ptr_ty }, &.{ loc, loc });
+
+    const arg0 = entry.argument(0);
+    const arg1 = entry.argument(1);
+
+    // %0 = tt.load %arg0 : !tt.ptr<f32>
+    const loaded = ttir.load(ctx, arg0, f32_ty, .none, .normal, false, .{}, loc);
+    _ = loaded.appendTo(entry);
+
+    // %1 = arith.constant 1.0 : f32 — built with Operation.make to avoid cross-dialect import
+    const one_attr: *const mlir.Attribute = .float(ctx, .f32, 1.0);
+    const one = mlir.Operation.make(ctx, "arith.constant", .{
+        .results = .{ .flat = &.{f32_ty} },
+        .attributes = &.{.named(ctx, "value", one_attr)},
+        .location = loc,
+    });
+    _ = one.appendTo(entry);
+
+    // %2 = arith.addf %0, %1 : f32
+    const summed = mlir.Operation.make(ctx, "arith.addf", .{
+        .operands = .{ .flat = &.{ loaded.result(0), one.result(0) } },
+        .result_type_inference = true,
+        .location = loc,
+    });
+    _ = summed.appendTo(entry);
+
+    // tt.store %arg1, %2
+    _ = ttir.store(ctx, arg1, summed.result(0), .none, .normal, .{}, loc).appendTo(entry);
+
+    // tt.return
+    _ = ttir.return_(ctx, &.{}, loc).appendTo(entry);
+
+    const f = ttir.func(ctx, .{
+        .name = "add_one",
+        .block = entry,
+        .location = loc,
+    });
+    _ = f.appendTo(module.body());
+
+    // Verify the operation.
+    try std.testing.expect(module.operation().verify());
+
+    // Print IR and re-parse it to confirm it's valid text.
+    var al: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer al.deinit();
+    try al.writer.print("{f}", .{module.operation()});
+
+    const parsed = try mlir.Module.parse(ctx, al.written());
+    defer parsed.deinit();
+    try std.testing.expect(parsed.operation().verify());
 }

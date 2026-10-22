@@ -28,5 +28,10 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = [":cuda_tile"],
+    main = "test.zig",
+    deps = [
+        ":capi",
+        ":cuda_tile",
+        "//mlir",
+    ],
 )

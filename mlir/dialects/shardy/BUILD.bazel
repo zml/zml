@@ -8,12 +8,16 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//mlir",
-        "//mlir/dialects/func",
         "@shardy//shardy/integrations/c:sdy_capi",
     ],
 )
 
 zig_test(
     name = "test",
-    deps = [":shardy"],
+    main = "test.zig",
+    deps = [
+        ":shardy",
+        "//mlir",
+        "//mlir/dialects/func",
+    ],
 )

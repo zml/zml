@@ -14,5 +14,8 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = [":math"],
+    main = "test.zig",
+    deps = [
+        ":math",
+    ],
 )

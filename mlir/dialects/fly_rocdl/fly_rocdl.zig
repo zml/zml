@@ -164,7 +164,3 @@ pub const WmmaInitArgs = struct {
     signB: bool = false,
     clamp: bool = false,
 };
-
-test {
-    std.testing.refAllDecls(@This());
-}

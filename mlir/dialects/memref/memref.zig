@@ -662,7 +662,3 @@ pub fn get_global(
         .location = location,
     });
 }
-
-test {
-    std.testing.refAllDecls(@This());
-}

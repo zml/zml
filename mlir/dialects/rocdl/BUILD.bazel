@@ -25,8 +25,11 @@ zig_library(
 
 zig_test(
     name = "test",
+    main = "test.zig",
     deps = [
+        ":capi",
         ":rocdl",
+        "//mlir",
     ],
 )
 
