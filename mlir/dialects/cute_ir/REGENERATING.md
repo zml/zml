@@ -318,11 +318,10 @@ A change is done when all of these hold:
    bindings), built with the tree's usual Bazel configuration.
 5. **NVIDIA's compiler reads what the kernels emit.** Dump the IR of every
    kernel the repository's tests emit through `kernels/cute`: the builder's
-   own tests, the MXFP4 emission tests under `zml/moe/cute_kernels`, and the
-   FlashMLA program (`zml/attention/cute_kernels/flashmla_sm100.zig`, whose
-   `Program.emit` needs a temporary test with a few configurations, single-CTA,
-   clustered and persistent). Dump both with the previous definitions and with
-   the new ones. In the release's venv, `import cutlass`, then parse and
+   own tests and the CuTe kernels under `zml/kernels/moe/cute`,
+   `zml/kernels/flash_attention/cute` and `zml/kernels/paged_attention/cute`.
+   Dump both with the previous definitions and with the new ones. In the
+   release's venv, `import cutlass`, then parse and
    verify each module with `cutlass._mlir.ir.Module.parse`, and compare the
    generic print (`get_asm(print_generic_op_form=True)`) of each module before
    and after: it must be identical, and a module the compiler rejected before

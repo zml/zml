@@ -973,7 +973,8 @@ pub fn assert_(
 // =============================================================================
 
 /// tt.call — direct call to another tt.func in the same module.
-/// arg_attrs / res_attrs propagate hints like tt.divisibility; pass null to omit.
+/// `opts.arg_attrs` / `opts.res_attrs` propagate hints like tt.divisibility;
+/// leave them unset to omit them.
 pub fn call(
     ctx: *mlir.Context,
     callee: []const u8,

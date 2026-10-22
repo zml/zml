@@ -60,14 +60,17 @@ Algebra types take an algebra attribute, `cute.LayoutType.get(ctx, .{ .attr =
 layout_attr })`; algebra attribute constructors call the C++ algebra parser
 with the raw expression and `getValue()` returns the canonical text. NVGPU atom
 types take their typed parameters, such as `.valType` and `.copyBits`;
-`cute.nvgpu.typeFromPayload(T, ctx, "<f32>")` parses one from the text after
-its mnemonic. For reading existing IR use MLIR's generic `Type.parse`.
+`cute_nvgpu.typeFromPayload(T, ctx, "<f32>")` (from
+`@import("mlir/dialects/cute_nvgpu")`) parses one from the text after its
+mnemonic. For reading existing IR use MLIR's generic `Type.parse`.
 
 Operation builders take the operands, then the result types, then the
 attributes, then the location, and call `mlir.Operation.make`. Parameters
 follow ODS names, with a trailing underscore where needed. Result parameters
-append `_type` or `_types`; attributes take `*const mlir.Attribute`. Pass `null`
-for absent optional parameters and `&.{}` for empty variadic ones. Dots in
+append `_type` or `_types`; attributes take `*const mlir.Attribute`. Optional
+operands, attributes and result types go in a trailing `opts` struct whose
+fields default to null; pass `.{}` to omit them, and `&.{}` for empty variadic
+operands. Dots in
 mnemonics become underscores. Variable-length operand and result groups go
 through `Operation.make`'s `.variadic` API, which writes the segment-size
 attributes. Builders verify the created operations; to defer verification, use
@@ -89,7 +92,8 @@ under Bazel's output tree. Virtual headers preserve upstream CuTe include
 paths required by the release sources.
 
 ```sh
-bazel test //mlir/dialects/cute_ir:test
+bazel test //mlir/dialects/cute_ir:test //mlir/dialects/cute_nvgpu:test \
+  //mlir/dialects/nvvm:test //mlir/dialects/cuda:test
 ```
 
 These tests only check the bindings: every bound operation is registered,

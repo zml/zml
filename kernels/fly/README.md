@@ -85,12 +85,11 @@ and `zml/kernel.zig`.
 
 Model kernels live beside their consumers:
 
-- [MoE routing](../../zml/moe/fly_kernels/moe.zig) and
-  [MXFP4 projections](../../zml/moe/fly_kernels/mxfp4.zig).
-- [Sparse MLA](../../zml/attention/fly_kernels/sparse_mla.zig).
+- [MoE routing and MXFP4 projections](../../zml/kernels/moe/fly/moe.zig).
+- Sparse MLA, downstream in llmd (`llmd/kernels/mla/fly/sparse_mla.zig`).
 
-Fly is a separate backend. The [MoE selector](../../zml/moe/moe.zig) and
-[sparse-MLA selector](../../zml/attention/sparse_mla.zig) select by platform,
+Fly is a separate backend. The [MoE selector](../../zml/kernels/moe/moe.zig) and
+llmd's sparse-MLA selector select by platform,
 architecture and dtype. The current native kernels target gfx942; their
 callers check shape support before routing or launching kernels and use
 Triton for unsupported contracts.

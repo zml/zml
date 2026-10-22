@@ -9,9 +9,10 @@ ops to a block stack, a `Value` with fluent scalar arithmetic, and a
 `zml.kernel.cute.Kernel` wrapper that turns a `run` function into a
 `stablehlo.custom_call` XLA compiles in process with `libcute_compiler.so`.
 
-The dialect binding lives in `mlir/dialects/cute_ir` (`cute`, `cute_nvgpu`,
-and NVIDIA's `nvvm` and `cuda`, types and attributes through the dialects'
-C API).
+The dialect bindings live in `mlir/dialects/cute_ir` (`cute`),
+`mlir/dialects/cute_nvgpu`, and `mlir/dialects/nvvm` and `mlir/dialects/cuda`
+for NVIDIA's `nvvm` and `cuda` (operation builders under `.ops`), with types
+and attributes through each dialect's C API.
 
 ## A kernel
 
@@ -105,8 +106,9 @@ keep region-local values from escaping their scope; the builder's `open` and
   `cst(dtype, v)` picks another type and `coerce` lifts literals to the other
   operand's type.
 * **`nvvm` and `cuda` are the compiler's.** The context registers NVIDIA's
-  `nvvm` and `cuda` dialects (`cute.nvvm`, `cute.cuda`, carried in
-  `mlir/dialects/cute_ir`) and upstream's `llvm`, so every operation is
+  `nvvm` and `cuda` dialects (`nvvm.ops`, `cuda.ops`, from the
+  `mlir/dialects/nvvm` and `mlir/dialects/cuda` packages) and upstream's
+  `llvm`, so every operation is
   verified as it is built; nothing is left unregistered.
 * **The module is just the kernel.** `finish` prints a module holding only
   `func.func @name(...)`; the CuTe compiler makes every public function a
@@ -138,7 +140,7 @@ scheduler parameters) use `zml.kernel.cute.Program` instead of `Kernel`. Its
 buffers and calls `b.launchEx`. The custom call carries no grid or block:
 XLA runs the host function with the real buffers and launches (or records in
 a command buffer) whatever it launched. `CallOpts.scalars` are passed to the
-host function after the buffers. `zml/moe/cute_kernels/persistent_mxfp4.zig`
+host function after the buffers. `zml/kernels/moe/cute/persistent_mxfp4.zig`
 is the reference: a warp-specialized SM100 block-scaled GEMM whose host
 function builds four TMA tensor maps and a PDL launch.
 
