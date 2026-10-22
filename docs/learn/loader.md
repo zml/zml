@@ -25,14 +25,14 @@ try loader.wait();
 Placement comes from each tensor's shape, not from the submission: the mesh
 and partitioning the tensor was created with (`View.createTensor(subkey, tags,
 .mesh_name, partitioning)` resolves the mesh among the `meshes` passed to
-`TensorStore.init`; `createReplicatedTensor` replicates it on every
-device). A binding's memory kind picks the destination memory space on each
-device: a tensor created with `createHostPinnedTensor` lands in the device's
-`host_pinned` memory, every other tensor in its default memory.
-`TensorStore.setMemory(tensor, kind)` (or `View.setMemory`) changes it after
-the tensor was created, for a placement decided later. A program's inputs
-are placed by their own shapes (see Programs over sources), and its output
-must be placed like its tensor.
+`TensorStore.init`, which `View.mesh(name)` returns too;
+`createReplicatedTensor` replicates it on every device). A binding's memory
+kind picks the destination memory space on each device: every tensor lands
+in its default memory unless `View.setMemory(tensor, kind)`, called after the
+tensor is bound, names another (`.host_pinned`). A program's inputs are
+placed by their own shapes (see Programs over sources), and its output must
+be placed like its tensor; it lands in default device memory, and
+`setMemory` panics on it.
 
 ```zig
 const tp = try platform.registerMesh("tp", .mesh(.{ .model = .high_bandwidth }));
@@ -68,8 +68,8 @@ registry under a prefix of its own before the store takes it:
 `registry.addRepo(io, drafter_repo, "drafter.")` registers each of its
 tensors as `drafter.` followed by its name, and
 `store.view().withPrefix("drafter")` reaches them: `createTensor` on that
-view, or `source` and then `bind`, binds them. One store, and the loads
-started from it, then cover both checkpoints.
+view binds them, as do `source`, `withPartitioning` and `bind`. One store,
+and the loads started from it, then cover both checkpoints.
 
 The store is passed to each `start`; initialization needs no store. `start`
 also takes a progress node as its final argument (`.none` disables
@@ -136,9 +136,14 @@ A composite is described with `TensorStore.Source`: a checkpoint tensor
 (`View.source(subkey, tags)`, or `maybeSource`) and `zml.Tensor`'s shape ops
 over it, with the same names, tags and arguments: `slice`, `split`,
 `chunkExact`, `splitAxis`, `merge`, `reshape`, `transpose`, `pad` (with
-zeros), `broad`, `bitCast`, `concatenate` and `stack`. A source records
-nothing until `bind(mesh, partitioning, .{ .memory })` makes the model tensor,
-partitioned by the source's final tags like `createTensor`.
+zeros), `broad`, `bitCast`, `concatenate` and `stack`. Its placement comes
+last, after every op (an op on a placed source panics):
+`withPartitioning(mesh, partitioning)`, keyed by the source's final tags like
+`createTensor` (`.replicated` takes only `.{}`), or `as(shape)`, a shape
+built elsewhere with the source's element count and dtype, whose dimensions,
+tags and sharding it takes; `unplaced()` drops it again, for code handed a
+placed source that reworks it by its placement. A source records nothing
+until `bind()` makes the model tensor from the placed source.
 
 ```zig
 const Source = zml.io.TensorStore.Source;
@@ -146,14 +151,15 @@ const Source = zml.io.TensorStore.Source;
 // host pinned memory.
 const abc = Source.concatenate(&.{ view.source("a", .{ .row, .channel }), view.source("b", .{ .row, .channel }), view.source("c", .{ .row, .channel }) }, .row);
 const table = abc.pad(0, .{ .row = Source.Pad{ .high = 16 - abc.dim(.row) } })
-    .bind(.tp, .{ .row = .model }, .{ .memory = .host_pinned });
+    .withPartitioning(.tp, .{ .row = .model }).bind();
+view.setMemory(table, .host_pinned);
 // q, k and v cut in one group per device and interleaved, so that each
 // device holds its rows of every projection: one contiguous run per member.
 var members: [3]Source = undefined;
 for (&members, [_][]const u8{ "q.weight", "k.weight", "v.weight" }) |*m, key| {
     m.* = view.source(key, .{ .dout, .d }).splitAxis(.dout, .{ .group = devices, .r = -1 });
 }
-const qkv = Source.concatenate(&members, .r).merge(.{ .dout = .{ .group, .r } }).bind(.tp, .{ .dout = .model }, .{});
+const qkv = Source.concatenate(&members, .r).merge(.{ .dout = .{ .group, .r } }).withPartitioning(.tp, .{ .dout = .model }).bind();
 ```
 
 A source is a few pieces, each an affine lattice over one checkpoint tensor;
@@ -162,10 +168,7 @@ enumerating rows. `bind` lowers them to the binding's `TensorStore.Layout`:
 byte `Part`s of the destination's logical bytes (row-major bytes of its
 shape, before the sharding splits them), each a run of `width` bytes
 repeated over strided dimensions. A source that is one whole checkpoint
-tensor binds plainly, like `createTensor`. `TensorStore.sourceOf` turns a
-binding back into a source, so code that receives a bound tensor (a
-`Linear`'s scales) can rework it with more ops and `Source.rebind` it in
-place of the old binding.
+tensor binds plainly, like `createTensor`.
 
 `start` checks a composite binding before submitting anything: the layout
 fills the tensor's bytes, it has a part, each part reads a source of the
@@ -237,11 +240,10 @@ block-FP8 scales (a few MiB) in the loader.
 What stays a program is what computes rather than moves bytes: a dtype
 conversion, a dequantization, a global scale's maximum.
 `Source.bindProgram(inputs, output, program)` binds a tensor that
-`program.forward(output, inputs)` computes while loading, from sources: each
-input is placed by its own shape, as `bind` places a tensor
-(`source.place(mesh, partitioning)`, or `placeAs(shape)`), so a program can
-take a fused weight and its scale grid with every device landing only its
-slice.
+`program.forward(output, inputs)` computes while loading, from placed
+sources: each input is placed by its own shape (`withPartitioning` or `as`),
+as `bind` places a tensor, so a program can take a fused weight and its
+scale grid with every device landing only its slice.
 
 ```zig
 const Dequantize = struct {
@@ -249,7 +251,7 @@ const Dequantize = struct {
 
     pub fn forward(self: Dequantize, output: zml.Shape, inputs: []const zml.Tensor) zml.Tensor { ... }
 };
-const weight = Source.bindProgram(&.{ w.placeAs(placed), s.placeAs(scales) }, placed, Dequantize{ .block_size = 128 });
+const weight = Source.bindProgram(&.{ w.as(placed), s.as(scales) }, placed.withDtype(.bf16), Dequantize{ .block_size = 128 });
 ```
 
 A program is a value of its own type: plain data, checked at compile time,
@@ -263,10 +265,6 @@ program over them, then frees them; the program must return the tensor's
 shape, placed alike, or `wait` fails with `InvalidBinding`.
 `View.maybeCreateBinding(keys, shape, program)` is the shorthand for whole
 checkpoint tensors, replicated.
-
-A tensor a program computes has no source (`sourceOf` is null). To convert a
-bound tensor, take its source with `sourceOf`, bind the program over it
-placed like the tensor, and `TensorStore.unbind` the old tensor.
 
 ## Errors and diagnostics
 

@@ -621,8 +621,8 @@ const Router = struct {
     pub fn init(store: zml.io.TensorStore.View, num_experts_per_tok: u32) Router {
         return .{
             .router = .init(
-                store.createTensor("weight", .{ .expert, .d }, .replicated, .{ .expert = .replicated, .d = .replicated }),
-                store.maybeCreateTensor("bias", .{.expert}, .replicated, .{ .expert = .replicated }),
+                store.createTensor("weight", .{ .expert, .d }, .replicated, .{}),
+                store.maybeCreateTensor("bias", .{.expert}, .replicated, .{}),
                 .d,
             ),
             .num_experts_per_tok = num_experts_per_tok,
@@ -664,8 +664,8 @@ pub const Moe = struct {
         return .{
             .shared_expert = Mlp.init(store.withPrefix("shared_expert")),
             .shared_expert_gate = .init(
-                store.withPrefix("shared_expert_gate").createTensor("weight", .{ .dout, .d }, .replicated, .{ .dout = .replicated, .d = .replicated }),
-                store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.dout}, .replicated, .{ .dout = .replicated }),
+                store.withPrefix("shared_expert_gate").createTensor("weight", .{ .dout, .d }, .replicated, .{}),
+                store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.dout}, .replicated, .{}),
                 .d,
             ),
             .gate_up_proj = .init(gate_up_proj_tensor, null, .d),

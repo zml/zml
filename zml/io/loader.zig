@@ -1460,7 +1460,6 @@ test "tensors of one program and equal args share one compile, and one group run
         .c = fixture.computed("value", fixture.value, Add{ .value = 2 }),
     };
     try std.testing.expect(fixture.store.getSourcesById(model.a.id).?.program != null);
-    try std.testing.expect(fixture.store.sourceOf(model.a) == null);
     var buffers = try mem.bufferize(allocator, Model, &model);
     defer mem.deinitBufferized(allocator, Model, &buffers);
     try loader.start(&model, &buffers, &fixture.store, .none);
@@ -1482,7 +1481,8 @@ test "loader delivers a host-pinned binding into host pinned memory without char
     try fixture.init(allocator, io);
     defer fixture.deinit();
     const platform = fixture.platform;
-    const pinned = fixture.store.view().createHostPinnedTensor("second", null, .replicated, .{});
+    const pinned = fixture.store.view().createReplicatedTensor("second", null);
+    fixture.store.view().setMemory(pinned, .host_pinned);
     try std.testing.expectEqual(Memory.Kind.host_pinned, fixture.store.getSourcesById(pinned.id).?.memory);
 
     var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
@@ -1946,6 +1946,8 @@ test "a rejected binding or a program of the wrong output fails the loader" {
     var misplaced = fixture.value;
     misplaced._shape._sharding.mesh = &foreign_mesh;
 
+    // An empty checkpoint tensor binds plainly, so that `start` names it.
+    try std.testing.expect(fixture.store.getSourcesById(fixture.empty.id).?.layout == null);
     // No binding, an empty source, and a program of the wrong shape or
     // placement.
     const Case = struct { tensor: Tensor, at_wait: bool = false };
@@ -2119,15 +2121,16 @@ test "loader assembles concatenated and padded sources on every placement and me
                 const model: Model = .{
                     .concatenated = Source.concatenate(&.{ rows(view, "a"), rows(view, "b"), rows(view, "c") }, .row)
                         .pad(0, .{ .row = Source.Pad{ .high = 7 } })
-                        .bind(.tp, partitioning, .{ .memory = memory }),
+                        .withPartitioning(.tp, partitioning).bind(),
                     // The padded engram-style table: one source.
-                    .padded = rows(view, "c").pad(0, .{ .row = Source.Pad{ .high = 4 } }).bind(.tp, partitioning, .{ .memory = memory }),
+                    .padded = rows(view, "c").pad(0, .{ .row = Source.Pad{ .high = 4 } }).withPartitioning(.tp, partitioning).bind(),
                     // Out of file order, on the platform's replicated mesh.
                     .reversed = Source.concatenate(&.{ rows(view, "b"), rows(view, "a") }, .row)
                         .pad(0, .{ .row = Source.Pad{ .high = 1 } })
-                        .bind(.replicated, .{}, .{ .memory = memory }),
-                    .plain = rows(view, "plain").bind(.tp, partitioning, .{ .memory = memory }),
+                        .withPartitioning(.replicated, .{}).bind(),
+                    .plain = rows(view, "plain").withPartitioning(.tp, partitioning).bind(),
                 };
+                inline for (comptime std.meta.fieldNames(Model)) |name| view.setMemory(@field(model, name), memory);
                 try std.testing.expect(store.getSourcesById(model.plain.id).?.layout == null);
                 var buffers = try mem.bufferize(allocator, Model, &model);
                 defer mem.deinitBufferized(allocator, Model, &buffers);
@@ -2223,16 +2226,16 @@ test "loader assembles interleaved, stacked and split sources" {
         // A part of q, and the rest of q with all of k.
         const head, const tail = fused.split(.row, &.{ 4, 8 })[0..2].*;
         const model: Model = .{
-            .qkv = Source.concatenate(&members, .r).merge(.{ .row = .{ .group, .r } }).bind(.tp, .{ .row = .model }, .{}),
+            .qkv = Source.concatenate(&members, .r).merge(.{ .row = .{ .group, .r } }).withPartitioning(.tp, .{ .row = .model }).bind(),
             // Experts are whole rows of the merged axis, one or two per device.
             .concatenated = Source.concatenate(&experts, .row)
                 .merge(.{ .rows = .{ .expert, .row } })
-                .bind(.tp, .{ .rows = .model }, .{}),
+                .withPartitioning(.tp, .{ .rows = .model }).bind(),
             .interleaved = Source.stack(&experts, 2, .proj)
                 .merge(.{ .rows = .{ .expert, .row, .proj } })
-                .bind(.tp, .{ .rows = .model }, .{}),
-            .head = head.bind(.replicated, .{}, .{}),
-            .tail = tail.bind(.tp, .{ .row = .model }, .{}),
+                .withPartitioning(.tp, .{ .rows = .model }).bind(),
+            .head = head.withPartitioning(.replicated, .{}).bind(),
+            .tail = tail.withPartitioning(.tp, .{ .row = .model }).bind(),
         };
         const qkv_layout = store.getSourcesById(model.qkv.id).?.layout.?;
         try std.testing.expectEqual(@as(usize, 3), qkv_layout.parts.len);
@@ -2329,12 +2332,12 @@ test "loader gathers strided sources: a row interleave across files, broadcasts 
             const flipped = view.source("z", .{ .row, .col }).transpose(.{ .col, .row }).withTags(.{ .row, .col })
                 .pad(0, .{ .row = Tensor.Pad{ .high = 2 } });
             const model: Model = .{
-                .by_rows = rows.bind(.tp, .{ .row = .model }, .{}),
-                .by_columns = rows.bind(.tp, .{ .col = .model }, .{}),
-                .scales_by_rows = repeated.bind(.tp, .{ .row = .model }, .{}),
-                .scales_by_columns = repeated.bind(.tp, .{ .col = .model }, .{}),
-                .transposed = flipped.bind(.replicated, .{}, .{}),
-                .transposed_by_columns = flipped.bind(.tp, .{ .col = .model }, .{}),
+                .by_rows = rows.withPartitioning(.tp, .{ .row = .model }).bind(),
+                .by_columns = rows.withPartitioning(.tp, .{ .col = .model }).bind(),
+                .scales_by_rows = repeated.withPartitioning(.tp, .{ .row = .model }).bind(),
+                .scales_by_columns = repeated.withPartitioning(.tp, .{ .col = .model }).bind(),
+                .transposed = flipped.withPartitioning(.replicated, .{}).bind(),
+                .transposed_by_columns = flipped.withPartitioning(.tp, .{ .col = .model }).bind(),
             };
             var buffers = try mem.bufferize(allocator, Model, &model);
             defer mem.deinitBufferized(allocator, Model, &buffers);
@@ -2384,9 +2387,7 @@ test "composite layouts that do not fit their tensor fail the loader before subm
             for (tensors, names) |*tensor, name| tensor.* = store_.view().get(name).?;
             const layout = arena.create(TensorStore.Layout) catch unreachable;
             layout.* = .{ .shape = filled, .parts = parts };
-            const tensor: Tensor = .fromShape(shape);
-            store_.putSourcesNoClobber(tensor.id, .{ .tensors = tensors, .layout = layout }) catch unreachable;
-            return tensor;
+            return store_.bindNew(shape, .{ .tensors = tensors, .layout = layout });
         }
     };
     const s = &store;
@@ -2426,7 +2427,7 @@ test "composite layouts that do not fit their tensor fail the loader before subm
                 .{ .count = 8, .src_stride = 2, .dst_stride = 128 },
                 .{ .count = 64, .src_stride = 16, .dst_stride = 2 },
             } }});
-            s.setMemory(tensor, .host_pinned);
+            s.view().setMemory(tensor, .host_pinned);
             break :host tensor;
         },
     };
@@ -2509,7 +2510,7 @@ test "a program takes its inputs from sources, in order" {
     };
     const assembled = Source.concatenate(&.{ CompositeFixture.rows(view, "a"), CompositeFixture.rows(view, "b") }, .row);
     const c = CompositeFixture.rows(view, "c");
-    const inputs = [_]Source.Input{ assembled.place(.replicated, .{}), c.place(.replicated, .{}) };
+    const inputs = [_]Source{ assembled.withPartitioning(.replicated, .{}), c.withPartitioning(.replicated, .{}) };
     const tensor = Source.bindProgram(&inputs, c.shape(), AddRows{});
     const binding = store.getSourcesById(tensor.id).?;
     const program = binding.program.?;
@@ -2517,7 +2518,6 @@ test "a program takes its inputs from sources, in order" {
     try std.testing.expect(program.as(AddRows) != null and program.as(LoaderTestFixture.Identity) == null);
     try std.testing.expect(program.inputs[0].whole(binding.tensors) == null);
     try std.testing.expect(program.inputs[1].whole(binding.tensors) != null);
-    try std.testing.expect(store.sourceOf(tensor) == null);
     var loader = try Loader.init(allocator, io, platform, .{ .read_parallelism = 2 });
     defer loader.deinit();
     var output: Buffer = undefined;
@@ -2608,9 +2608,10 @@ fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
     const source = store.view().source("table", .{ .row, .channel })
         .pad(0, .{ .row = TensorStore.Source.Pad{ .high = @intCast(padded_rows - rows) } });
     const table = switch (placement) {
-        .rows => source.bind(.model, .{ .row = .model }, .{ .memory = .host_pinned }),
-        .replicated => source.bind(.model, .{}, .{ .memory = .host_pinned }),
+        .rows => source.withPartitioning(.model, .{ .row = .model }).bind(),
+        .replicated => source.withPartitioning(.model, .{}).bind(),
     };
+    store.view().setMemory(table, .host_pinned);
     try std.testing.expectEqual(@as(i64, @intCast(padded_rows)), table.dim(.row));
 
     var in_use_before: [Platform.MAX_NUM_DEVICES]u64 = undefined;
@@ -2711,8 +2712,8 @@ fn expectHostTableGathers(placement: enum { rows, replicated }) !void {
     // devices' usage, so the residency check above can fail.
     if (!distinct_memory) return;
     const device_copy = switch (placement) {
-        .rows => source.bind(.model, .{ .row = .model }, .{}),
-        .replicated => source.bind(.model, .{}, .{}),
+        .rows => source.withPartitioning(.model, .{ .row = .model }).bind(),
+        .replicated => source.withPartitioning(.model, .{}).bind(),
     };
     var in_use_control: [Platform.MAX_NUM_DEVICES]u64 = undefined;
     for (devices) |device| in_use_control[device.id] = platform.devices[device.id].memoryStats().bytes_in_use;

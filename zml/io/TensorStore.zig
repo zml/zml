@@ -19,14 +19,15 @@ const TensorStore = @This();
 pub const Binding = struct {
     /// Entries of the store's registry, each listed once.
     tensors: []const *const safetensors.Tensor,
-    /// Memory space the loader must deliver this tensor into, on every device of its mesh.
+    /// Memory space the loader must deliver this tensor into, on every
+    /// device of its mesh (`View.setMemory`).
     memory: Memory.Kind = .default,
     /// How `tensors` fill the tensor's logical bytes. Null is the identity:
     /// one source that is the whole tensor.
     layout: ?*const Layout = null,
     /// Set when a program computes the tensor while loading
     /// (`Source.bindProgram`). The loader never fills such a tensor itself,
-    /// so `layout` and `memory` are unused.
+    /// so `layout` is unused, and its output lands in default device memory.
     program: ?*const Program = null,
 };
 
@@ -204,7 +205,7 @@ allocator: std.mem.Allocator,
 arena: std.heap.ArenaAllocator,
 
 pub const Options = struct {
-    /// The meshes `View.createTensor` and `Source.bind` name.
+    /// The meshes `Source.withPartitioning` and `View.mesh` name.
     meshes: []const *const Sharding.Mesh = &.{},
     /// How the platform's FP8 GEMMs want block-FP8 weights, for the code
     /// that binds them (`View.quantization`): usually `.of(platform)`.
@@ -241,37 +242,20 @@ pub fn getSourcesById(self: *const TensorStore, id: Tensor.Id) ?Binding {
     return self.id_to_sources.get(id);
 }
 
-/// The source `tensor`'s binding loads, in `tensor`'s shape: to rework a
-/// tensor bound elsewhere with `Source` ops, then `Source.rebind` it or
-/// feed it to a program (`Source.bindProgram`). Null when `tensor` is
-/// unbound, or computed by a program.
-pub fn sourceOf(self: *TensorStore, tensor: Tensor) ?Source {
-    const binding = self.id_to_sources.get(tensor.id) orelse return null;
-    if (binding.program != null) return null;
-    return .ofBinding(self, binding, tensor.shape());
-}
-
-/// Removes `tensor`'s binding and returns it, for a tensor the model no
-/// longer holds: one replaced by a source made from it (`sourceOf`).
-pub fn unbind(self: *TensorStore, tensor: Tensor) Binding {
-    const removed = self.id_to_sources.fetchRemove(tensor.id) orelse
-        stdx.debug.panic("Tensor {} {f} has no binding in this store", .{ tensor.id, tensor.shape() });
-    return removed.value;
-}
-
-/// Changes the memory space the loader delivers `tensor` into (see
-/// `Binding.memory`), for a decision made after the tensor was created.
-/// `tensor` must be bound in this store.
-pub fn setMemory(self: *TensorStore, tensor: Tensor, kind: Memory.Kind) void {
-    const binding = self.id_to_sources.getPtr(tensor.id) orelse
-        stdx.debug.panic("Tensor {} {f} has no binding in this store", .{ tensor.id, tensor.shape() });
-    binding.memory = kind;
+/// A new tensor of `shape`, bound to `binding`. Model code binds through
+/// `Source` (`bind`, `bindProgram`), whose layouts are disjoint by
+/// construction; `Loader.start` checks a hand-built one.
+pub fn bindNew(self: *TensorStore, shape: Shape, binding: Binding) Tensor {
+    const tensor: Tensor = .fromShape(shape);
+    self.id_to_sources.putNoClobber(self.allocator, tensor.id, binding) catch @panic("OOM");
+    return tensor;
 }
 
 pub fn view(self: *TensorStore) View {
     return .{ .store = self };
 }
 
+/// The mesh `name` among `Options.meshes`; model code asks its `View`.
 pub fn mesh(store: *const TensorStore, name: @EnumLiteral()) *const Sharding.Mesh {
     const name_slice = @tagName(name);
     for (store.meshes) |m| {
@@ -342,42 +326,47 @@ pub const View = struct {
         } else false;
     }
 
-    /// Creates a zml.Tensor from a specific entry in the store.
-    pub fn createTensor(self: View, subkey: []const u8, tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
+    /// The checkpoint tensor `subkey`, with `tags` (null keeps the
+    /// checkpoint's), placed on `mesh_` by `partitioning` and bound:
+    /// `source(subkey, tags).withPartitioning(mesh_, partitioning).bind()`.
+    /// Panics when the checkpoint has no such tensor.
+    pub fn createTensor(self: View, subkey: []const u8, comptime tags: anytype, comptime mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
         return self.maybeCreateTensor(subkey, tags, mesh_, partitioning) orelse
             stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
     }
 
-    pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
-        const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
-        const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
-        if (mesh_ == .replicated) {
-            return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .replicated);
-        }
-        const resolved_mesh = self.store.mesh(mesh_);
-        // Unspecified tensor axes are treated as replicated
-        const partition: Sharding.Partitioning = if (has_tags)
-            .parse(parsed_tags.constSlice(), resolved_mesh, .replicated, partitioning)
-        else
-            partitioning;
-        return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.constSlice() else null, .{ .mesh = resolved_mesh, .partition = partition });
+    /// Like `createTensor`, but null when the checkpoint has no such tensor.
+    pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, comptime mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
+        const source_ = self.maybeSource(subkey, tags) orelse return null;
+        const placed = source_.withPartitioning(mesh_, partitioning);
+        if (placed.count() != 0) return placed.bind();
+        // An empty checkpoint tensor is a source of no piece, which `bind`
+        // records as a composite without parts. Bound plainly, `Loader.start`
+        // rejects it by its key.
+        const entry = self.store.arena.allocator().dupe(*const safetensors.Tensor, &.{self.get(subkey).?}) catch @panic("OOM");
+        return self.store.bindNew(placed.shape(), .{ .tensors = entry });
     }
 
-    /// Like `createTensor`, but the loader delivers the tensor into each device's host pinned memory space.
-    pub fn createHostPinnedTensor(self: View, subkey: []const u8, tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
-        return self.maybeCreateHostPinnedTensor(subkey, tags, mesh_, partitioning) orelse
-            stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+    /// `createTensor` replicated on every device, without a mesh.
+    pub fn createReplicatedTensor(self: View, subkey: []const u8, comptime tags: anytype) Tensor {
+        return self.createTensor(subkey, tags, .replicated, .{});
     }
 
-    pub fn maybeCreateHostPinnedTensor(self: View, subkey: []const u8, comptime tags: anytype, mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
-        const tensor = self.maybeCreateTensor(subkey, tags, mesh_, partitioning);
-        if (tensor) |t| self.store.setMemory(t, .host_pinned);
-        return tensor;
-    }
-
-    /// See `TensorStore.setMemory`.
+    /// Changes the memory space the loader delivers `tensor` into (see
+    /// `Binding.memory`), for a decision made after the tensor was bound.
+    /// `tensor` must be bound in this store, and not computed by a program:
+    /// a program's output lands in default device memory.
     pub fn setMemory(self: View, tensor: Tensor, kind: Memory.Kind) void {
-        self.store.setMemory(tensor, kind);
+        const binding = self.store.id_to_sources.getPtr(tensor.id) orelse
+            stdx.debug.panic("Tensor {} {f} has no binding in this store", .{ tensor.id, tensor.shape() });
+        if (binding.program) |program|
+            stdx.debug.panic("setMemory: program {s} computes tensor {} {f}, whose output lands in default device memory", .{ program.vtable.name, tensor.id, tensor.shape() });
+        binding.memory = kind;
+    }
+
+    /// See `TensorStore.mesh`.
+    pub fn mesh(self: View, name: @EnumLiteral()) *const Sharding.Mesh {
+        return self.store.mesh(name);
     }
 
     /// See `Options.quantization`.
@@ -400,48 +389,15 @@ pub const View = struct {
         return .init(self.store, entry, if (has_tags) parsed_tags.constSlice() else null);
     }
 
-    pub fn createReplicatedTensor(self: View, subkey: []const u8, tags: anytype) Tensor {
-        const has_tags: bool = comptime @TypeOf(tags) != @TypeOf(null);
-        const parsed_tags: Shape.TagsArray = if (comptime has_tags) Shape.parseTags(tags) else undefined;
-
-        return self.maybeCreateTensorInternal(subkey, if (has_tags) parsed_tags.slice() else null, .replicated) orelse
-            stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
-    }
-
-    fn maybeCreateTensorInternal(self: View, subkey: []const u8, tags: ?[]const Shape.Tag, sharding: Sharding) ?Tensor {
-        const entry = self.get(subkey) orelse return null;
-
-        const sources = self.store.arena.allocator().alloc(*const safetensors.Tensor, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
-        errdefer self.store.arena.allocator().free(sources);
-        sources[0] = entry;
-
-        const tensor: Tensor = .fromShape(placeShape(entry.shape, tags, sharding, entry.name));
-        self.store.putSourcesNoClobber(tensor.id, .{ .tensors = sources, .memory = .default }) catch |e| std.debug.panic("Not handling {} errors", .{e});
-
-        return tensor;
-    }
-
-    /// `shape` with the caller's tags, then placed by `sharding`.
-    fn placeShape(shape: Shape, tags: ?[]const Shape.Tag, sharding: Sharding, key: []const u8) Shape {
-        var placed = shape;
-        if (tags) |user_tags| {
-            stdx.debug.assert(user_tags.len == placed.rank(), "tensor {s} from store has shape {f}, but `createTensor` got only {d} tags: {f}", .{ key, shape, user_tags.len, stdx.fmt.stringsZ(user_tags) });
-            @memcpy(placed._tags.slice(), user_tags);
-        }
-        placed._sharding = sharding;
-        if (sharding.mesh) |mesh_| placed = placed.withPartitioning(mesh_, sharding.partition);
-        return placed;
-    }
-
     /// A tensor of `shape` that `program` computes while loading
     /// (`Source.bindProgram`) from the checkpoint tensors `sources`, each
     /// whole and replicated, in this order. Null when one is missing.
     pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape, program: anytype) ?Tensor {
-        const inputs = self.store.allocator.alloc(Source.Input, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
+        const inputs = self.store.allocator.alloc(Source, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
         defer self.store.allocator.free(inputs);
         for (sources, inputs) |subkey, *input| {
             const source_ = self.maybeSource(subkey, null) orelse return null;
-            input.* = source_.place(.replicated, .{});
+            input.* = source_.withPartitioning(.replicated, .{});
         }
         return Source.bindProgram(inputs, shape, program);
     }
@@ -465,17 +421,6 @@ pub const View = struct {
         return key;
     }
 };
-
-/// Records `sources` as `id`'s binding; an id is bound once.
-pub fn putSourcesNoClobber(self: *TensorStore, id: Tensor.Id, sources: Binding) std.mem.Allocator.Error!void {
-    const gop = try self.id_to_sources.getOrPut(self.allocator, id);
-    if (gop.found_existing) {
-        stdx.debug.panic("Id {} already has associated sources", .{id});
-    }
-    errdefer self.id_to_sources.removeByPtr(gop.key_ptr);
-
-    gop.value_ptr.* = sources;
-}
 
 test "get finds exact keys, the registry's own entries, and hasPrefix any key under a prefix" {
     var store: TensorStore = store: {
@@ -552,7 +497,7 @@ test "placed shapes on different meshes or partitionings differ" {
     try std.testing.expect(!Program.samePlacedShape(first, first.withPartitioning(first._sharding.mesh.?, .{ .qout = .open })));
 }
 
-test "setMemory changes the memory space of a created tensor's binding" {
+test "setMemory changes the memory space of a bound tensor's binding" {
     var store: TensorStore = store: {
         var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
         errdefer registry.deinit();
@@ -561,10 +506,11 @@ test "setMemory changes the memory space of a created tensor's binding" {
     };
     defer store.deinit();
 
-    const tensor = store.view().createReplicatedTensor("table", null);
+    const view_ = store.view();
+    const tensor = view_.createReplicatedTensor("table", null);
     try std.testing.expectEqual(Memory.Kind.default, store.getSourcesById(tensor.id).?.memory);
-    store.view().setMemory(tensor, .host_pinned);
+    view_.setMemory(tensor, .host_pinned);
     try std.testing.expectEqual(Memory.Kind.host_pinned, store.getSourcesById(tensor.id).?.memory);
-    store.setMemory(tensor, .default);
+    view_.setMemory(tensor, .default);
     try std.testing.expectEqual(Memory.Kind.default, store.getSourcesById(tensor.id).?.memory);
 }
