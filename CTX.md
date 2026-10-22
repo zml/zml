@@ -386,17 +386,18 @@ overlaps the reads (Llama: 4 plans, 1-2 ms in total).
   lifecycle credit only after all its DMA children finish.
 - The width never changes during a load (sixteenth pass): rate limiting is
   handled one layer down, by the VFS governor, which holds every request of
-  the throttled backend. The loader keeps the statistics side channel for
-  observability only: the `batch source` line reports the submission's
-  requests, bytes, retries, throttles, holds and hold wait.
+  the throttled backend. The loader reads no VFS statistics: each remote
+  backend logs its read totals at debug from its `deinit` (forty-seventh
+  pass).
 - Pinned pre-growth happens at loader creation, before any load: the DMA
   reserve (calibrated depth x devices, at least one maximal request) plus
   `width + 1` source requests, as two arenas, the reserve first (ROCm
   balances bytes per allocation across its host nodes). The width itself is
-  what the mapped ceiling fits: `Sizing.init` computes it once from the
-  usable blocks plus the remaining budget and refuses below one request with
-  `DmaMappedBudgetExceeded` (264 MiB for width 16 with 8 MiB requests on the
-  CPU platform, against the 528 MiB the former 32-wide set took). The pool
+  what the mapped ceiling fits: `create` computes it once from the usable
+  blocks beside the DMA reserve (264 MiB for width 16 with 8 MiB requests
+  on the CPU platform, against the 528 MiB the former 32-wide set took),
+  and returns `OutOfMemory`, logged at err, when the ceiling fits no
+  request (direct_loader.zig:232-237). The pool
   is then sized once and never maps again, so nothing maps a slab inside a
   load (146-230 ms of hipHostMalloc on MI300X when it did) and
   `pinned_mapped == high_water` on every recorded run. A dedicated
@@ -7799,15 +7800,170 @@ Checks:
 - `zig fmt` on scratch copies: no diff in the changed code.
 - No docs build or lint target exists under docs/.
 
+## Forty-ninth pass: follow-ups from the review audit (2026-10-22)
+
+An audit checked `LOADER_API_REVIEW.md` against the code after R1-R16 and
+ranked what was left: eight groups to do, the rest kept as is with a
+reason. This pass does its "Do now" items 1, 2, 4, 6 and 7. Items 3, 5
+and 8 are the next move; they are listed below, because the audit's list
+lived in a scratch file.
+
+zml:
+- Tensors and buffers pair by structure. `mem.pairBufferized(Model,
+  model, bufferized, report, context, callback)` walks both trees at
+  once, shaped like `bufferize`, and hands each (tensor, buffer) pair to
+  the callback in `meta.visit` order. At the first place they differ
+  (another union arm, an optional set on one side only, slices of other
+  lengths) it stops with `error.Mismatch`, and `report` holds the field
+  path and what differs, as `.ffns[0].dense.weights: a slice of 1 in the
+  model, of 2 in the buffers`. Tuple fields are renumbered as
+  `MapRestrict` does. A pointer-to-one field is a compile error;
+  `bufferize` cannot build one either.
+- `prepareModel` runs that walk first and collects the pairs. A mismatch
+  logs `buffers shaped unlike the model at model<path>` at err and is
+  `InvalidBinding` before any buffer is emptied, so R1's guarantee holds.
+  The emptying and the binding loop run over the same pairs. Gone: the
+  count assert, both visit-order walks and the `Ctx`/`forEachVisit`
+  plumbing. Before, two trees with as many tensors in another structure
+  passed the assert and paired a tensor with another's buffer. The docs
+  of `start` and `Loader.Error` and loader.md's error list name the new
+  case.
+- `TensorStore.getSourcesById` is `bindingOf` (Appendix B's
+  B-keep-binding-seam), in zml, examples/io and llmd.
+- direct_loader.zig: the `TMP loader created_at` log is gone. An
+  alignment overflow logs the file, the read's end and the alignment at
+  err before `InvalidTensorRange`.
+- `Loader.deinit` warns `Loader.deinit cancels loads started without a
+  wait` when loads are still started. A failed or canceled loader has
+  none left, so the warning names a caller that skipped both `wait` and
+  `errdefer loader.cancel()`. `loadsStarted` is shared with `cancel`.
+- mnist and the README call `Loader.init(..., .{})`. `throttle_budget`'s
+  doc says only that the backend's requests fail. The Hugging Face how-to
+  names `HF_TOKEN`, which `vfs/hf.zig` reads.
+- `zml.testing.testLayer` is compiled at last. `countWithPrefix` gives
+  way to `View.count`, and a CPU test loads a one-weight `Scale` layer
+  and runs it against `x.in.0` and `x.out.0`, written with
+  `io/testing.zig`'s `writeSafetensors`. Nothing else in `testLayer`
+  needed fixing.
+- examples/llm: `LoadedModel.loadBuffers` in models.zig bufferizes,
+  starts, waits (errdefer `deinitBufferized`) and unloads for every
+  model, keyed on `@TypeOf(m.inner)`. The four per-model
+  `loadBuffers`/`unloadBuffers` copies are gone; llama_tests and
+  lfm2_tests use the recipe.
+
+llmd (monorepo):
+- qwen4's n-gram table is one `Source.concatenate` of its
+  `shard_{d}.weight` sources (`maybeSource(key, .{ .voc, .d })`, else
+  `mismatch`) along `.voc`, then `withPartitioning(.tp_mesh, .{ .voc =
+  .model }).bind()`. `weights.concatenateRows` and the `ConcatenateRows`
+  program are gone. The n-gram test builds the source the same way and
+  checks the same bytes, placement (`eqlWithTagsAndPartitioning` against
+  the old `{voc=.model, d=.replicated}` shape) and memory, device and
+  host_pinned. Its f32 case went with the program. One shard is now
+  accepted; `concatenateRows` asserted at least two.
+- Experts whose FP8 weights a program would have to convert log the
+  first expert's key, the scheme and the target FP8 type (err, debug
+  under test) before `UnsupportedFp8NormalizationProgram`.
+- `bindingOf` at every call site. dspark_drafter.zig drops an unused
+  `weights` import, and `linear.swizzleBlockFp8Scale` is private.
+
+CTX "Current design": the `batch source` sentence and the
+`Sizing.init`/`DmaMappedBudgetExceeded` sentence now say what the code
+does. The remote backends log their read totals from `deinit`, and
+`create` returns a logged `OutOfMemory` when the ceiling fits no request.
+
+Review (workflow, refuting verifier): four findings, all confirmed and
+fixed.
+- `deinit`'s doc said an error path that failed or canceled the loader
+  leaves loads for it to cancel. None does, so the `failure == null` test
+  in its warning was dead. The condition is `loadsStarted()` alone, and
+  the doc says why loads left lack their `wait`.
+- In the new loader test every mismatch was the first tensor the walk
+  met, so "no buffer written" held for free. Each tree now starts with a
+  matching `head` tensor. With the emptying moved into the pairing
+  callback, the test fails (`expected 0, found 1`); with the old
+  `prepareModel` it fails with `expected error.InvalidBinding, found
+  void`.
+- `Loader.Error`'s doc said every `InvalidBinding` names a tensor and a
+  key. It now names the structure mismatch and its field path.
+- Item 2's CTX corrections were missing from the code commit: done above.
+
+Left for the next move (the audit's items 3, 5 and 8):
+- VFS fixes that do not need the handle table. A failed streaming read
+  in http, hf, s3 and gcs ends as `EndOfStream` after an err log; it
+  should pass `Canceled` through and return `InputOutput`. `fileSeekBy`
+  should saturate in http and hf, and all four backends should take
+  `@abs(relative_offset)`: `@intCast(-x)` overflows on `minInt(i64)`. No
+  remote backend implements `dirCreateFile`, so `VFS.dirCreateFile` on
+  `s3://bucket/key` reaches the local io and writes a local file. The
+  `io_vtable` should refuse file and directory create and delete, and
+  atomic create, on remote paths.
+- The rest of LOADER_REVIEW Move 4, in direct_loader.zig: the Scheduler
+  as a `std.Deque` (`popHead`, the test-only `remainingJobs`,
+  `finishScheduling`), `seal`'s stamp, `logBatch` counting from
+  `batch.plans`, the allocation task walking host jobs in order, one
+  gather item per extent, the job-length scatter term and the assert-only
+  `Extent.data_offset`, and `recordError`'s comment. `Staged.data_offset`
+  is read by `Job.blockLen` and stays.
+- LOADER_REVIEW Move 1's host write half: `share_host_allocations`,
+  `sameSlices`, `HostWriters`, `HostScatter.Copy`, `addCopy` and
+  `host_copies`. `sharesHostMemory` is true on every direct target, so
+  the copy path runs only in tests. Narrowing `supportsMemory` waits for
+  R12's GPU test.
+- The audit kept the rest as is, among them one start over base and
+  drafter, the FNUZ conversion of experts laid out by a program, the GCS
+  service-account refusal, `retry_once` and the VFS forwarders
+  (handle-table move). Part 3's #4, MI300 accuracy after R9, needs a GPU.
+
+Not done:
+- `testLayer` logs a mismatch and returns no error, so its test shows
+  only that it compiles, runs and matches. Making it fail is a behavior
+  change for the user to decide.
+- Untested logs: the `InvalidTensorRange` overflow needs a read ending
+  within one alignment unit of the u64 maximum, and the FP8 expert log an
+  FNUZ (ROCm CDNA3) target.
+- qwen4's n-grams are not run on a real Qwen4 checkpoint or a GPU.
+- `LOADER_API_REVIEW.md` and `LOADER_REVIEW.md` still say
+  `getSourcesById`. `bazel/huggingface.bzl` still reads
+  `HUGGINGFACE_TOKEN`; nothing loads it.
+- The `deinit` warning also fires when the caller's own code fails
+  between `start` and `wait` without `errdefer loader.cancel()`, which
+  loader.md asks for.
+- loader.md is 207 lines.
+
+Checks:
+- `bazel test //zml:test` passes (341, 12 skip): two `pairBufferized`
+  tests, the structure-mismatch loader test and the `testLayer` test
+  came.
+- `bazel test //vfs:test` passes.
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7 (`weights_test`
+  26/26), and `bazel build --config=localzml //llmd:llmd`.
+- `zig fmt` on scratch copies: no diff in the changed code. Its only
+  hunks, in deepseek41.zig, are builtin rewrites outside the change, not
+  applied.
+
 ## Open work
+
+- 2026-10-22 follow-ups from the review audit (forty-ninth pass, zml
+  zklqvywm and monorepo nykmyswz): the audit's "Do now" items 1, 2, 4, 6
+  and 7. Tensors and buffers pair by structure (`mem.pairBufferized`),
+  and a tree shaped otherwise is `InvalidBinding` with its field path,
+  before any buffer is written. `getSourcesById` is `bindingOf`, qwen4's
+  n-grams are one `Source.concatenate`, `testLayer` is compiled, and
+  examples/llm loads in one place. Open: the audit's items 3 (VFS
+  streaming errors, seeks, remote writes), 5 (the rest of LOADER_REVIEW
+  Move 4) and 8 (Move 1's host write half), listed in that pass;
+  `testLayer` cannot fail. Not run on a GPU or a real Qwen4 checkpoint.
 
 - 2026-10-22 docs (forty-eighth pass, zml szunznok and monorepo
   ulnsvlvu): R16 done. The pub doc comments are the contract, loader.md
   is a guide, the internals are in the `//!` headers, and CTX "Current
   design" points to them. `TensorRegistry.fromPath` takes relative file
-  paths. Open: the tutorial has no build target; mnist and the README
-  pass `.read_parallelism = 1`; the direct backend sections of "Current
-  design" keep old names. Not run on a GPU.
+  paths. Open: the tutorial has no build target; the direct backend
+  sections of "Current design" keep old names. Not run on a GPU. mnist
+  and the README passed `.read_parallelism = 1` until the forty-ninth
+  pass.
 
 - 2026-10-22 the loader meets the VFS only through io (forty-seventh
   pass, zml lluzuwnv): R15 done, with Move 10's delete-only stages.
@@ -7886,8 +8042,8 @@ Checks:
   `VFS.Remotes` registers the four remote schemes; open, stat and access
   fail with `FileNotFound`, `PermissionDenied`, `Canceled` or a logged
   `Unexpected` on every backend; gs:// requests get their leading slash.
-  Not run against a real remote. `huggingface_access_token.md` names the
-  wrong variable (`HF_TOKEN` is read).
+  Not run against a real remote. `huggingface_access_token.md` named the
+  wrong variable until the forty-ninth pass.
 - 2026-10-22 Loader.init returns at once (thirty-eighth pass, zml vyswqxpw
   and monorepo sltmxrzn): R5 done. `init` checks a caller's four options
   and sets up on its own task; `dma_calibration.measure` serves dma-bench;
@@ -7897,9 +8053,9 @@ Checks:
 - 2026-10-22 the rest of R4 (thirty-seventh pass, zml ryvvruus and
   monorepo vrounrwt): the loader logs and counts its own load, buffers
   can be freed after any failure, model bugs are `InvalidBinding`. R4 is
-  done except pairing by construction, which start/wait leaves to R1's
-  assert. Not run on a GPU or a real model; no progress bar watched to
-  the end.
+  done; pairing by construction, left to R1's assert, came in the
+  forty-ninth pass (`mem.pairBufferized`). Not run on a GPU or a real
+  model; no progress bar watched to the end.
 - 2026-10-22 deinitBufferized everywhere (thirty-sixth pass, zml rktvmymx
   and monorepo yyqsnszp): R3 done. Not run: no model's free path was
   exercised on a device.
@@ -7962,8 +8118,7 @@ Checks:
   physical mesh). `--test_filter` is ignored by the rules_zig test runner.
   (The note that llmd's `swapEngramHostPinnedBuffers` errdefer deinits
   owners it leaves in the list was refuted by the thirtieth pass:
-  `Buffer.deinit` empties them, so nothing is freed twice.) `direct_loader.zig` still logs
-  `TMP loader created_at` at debug level.
+  `Buffer.deinit` empties them, so nothing is freed twice.)
 
 Third-pass items left open; `PLAN.md` holds the checklist.
 
