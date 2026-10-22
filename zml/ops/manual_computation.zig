@@ -57,24 +57,26 @@ pub fn manualComputation(
     const flat_input_tensors: []*Tensor = zml.meta.collectMutPtrs(Tensor, arena, &owned_inputs) catch @panic("OOM");
     defer arena.free(flat_input_tensors);
 
-    const flat_output_shapes: []const Shape = zml.meta.collectValues(Shape, arena, &output_shapes) catch @panic("OOM");
+    var owned_output_shapes: OutputShapes = output_shapes;
+    const flat_output_shapes: []*Shape = zml.meta.collectMutPtrs(Shape, arena, &owned_output_shapes) catch @panic("OOM");
+    defer arena.free(flat_output_shapes);
 
     const WrappedInputs = struct {
         inputs: *const Inputs,
-        output_shapes: OutputShapes,
+        output_shapes: *const OutputShapes,
 
         fn wrap(allocator: std.mem.Allocator, opaque_wrapper: *const anyopaque, opaque_outputs: *anyopaque) error{OutOfMemory}![]*Tensor {
             const wrapped: *const @This() = @ptrCast(@alignCast(opaque_wrapper));
             const outputs_ptr: *Outputs = @ptrCast(@alignCast(opaque_outputs));
 
-            outputs_ptr.* = body_fn(wrapped.inputs.*, wrapped.output_shapes);
+            outputs_ptr.* = body_fn(wrapped.inputs.*, wrapped.output_shapes.*);
 
             return try zml.meta.collectMutPtrs(Tensor, allocator, outputs_ptr);
         }
     };
 
     var outputs_struct: Outputs = undefined;
-    var wrapped_inputs: WrappedInputs = .{ .inputs = &owned_inputs, .output_shapes = output_shapes };
+    var wrapped_inputs: WrappedInputs = .{ .inputs = &owned_inputs, .output_shapes = &owned_output_shapes };
     _ = manualComputationInternal(
         compiler,
         arena,
@@ -101,7 +103,7 @@ noinline fn manualComputationInternal(
     input_struct: *anyopaque,
     input_tensors: []*Tensor,
     output_struct: *anyopaque,
-    output_shapes: []const Shape,
+    output_shapes: []*Shape,
     local_fn: LocalComputationFn,
 ) error{OutOfMemory}![]*Tensor {
     const global_scope = compiler.currentScope();
@@ -114,8 +116,10 @@ noinline fn manualComputationInternal(
     const manual_axes = collectManualAxes(mesh, input_tensors);
     log.debug("manualComputation({s}) will use mesh {s}, manual axes: {f}", .{ functor_name, mesh.name, stdx.fmt.stringsZ(manual_axes.constSlice()) });
 
-    const input_shapes = try arena.alloc(Shape, input_tensors.len);
-    for (input_shapes, input_tensors) |*shape, tensor| shape.* = tensor._shape;
+    const global_input_shapes = try arena.alloc(Shape, input_tensors.len);
+    for (global_input_shapes, input_tensors) |*shape, tensor| shape.* = tensor._shape;
+    const global_output_shapes = try arena.alloc(Shape, output_shapes.len);
+    for (global_output_shapes, output_shapes) |*shape, shape_ptr| shape.* = shape_ptr.*;
 
     const input_types = try arena.alloc(*const mlir.Type, input_tensors.len);
     for (input_types, input_tensors) |*input_ty, tensor_ptr| {
@@ -137,8 +141,7 @@ noinline fn manualComputationInternal(
 
     const local_scope = compiler.pushBlock(manual_block);
     defer local_scope.pop();
-    for (0.., input_tensors) |i, tensor_ptr| {
-        const global = tensor_ptr._shape;
+    for (0.., input_tensors, global_input_shapes) |i, tensor_ptr, global| {
         const local = Sharding.shardedShape(global) catch unreachable; // we already computed this above
         tensor_ptr.* = switch (compiler.partitioner) {
             .shardy => Tensor._result(local, manual_block.argument(i)),
@@ -146,18 +149,21 @@ noinline fn manualComputationInternal(
         };
     }
 
+    for (output_shapes, global_output_shapes) |shape_ptr, global| {
+        shape_ptr.* = Sharding.shardedShape(global) catch std.debug.panic("can't shard output {f} for {f}", .{ global, mesh });
+    }
+
     compiler.manual_computation_depth += 1;
     defer compiler.manual_computation_depth -= 1;
 
     const local_outputs = try local_fn(arena, input_struct, output_struct);
-    stdx.debug.assert(local_outputs.len == output_shapes.len, "manualComputation body returned {} values, expected {}", .{ local_outputs.len, output_shapes.len });
-    for (0.., local_outputs, output_shapes) |i, local_tensor, global_shape| {
-        const expected_local = Sharding.shardedShape(global_shape) catch std.debug.panic("can't shard output {f} for {f}", .{ global_shape, mesh });
-        stdx.debug.assert(expected_local.eql(local_tensor._shape), "manualComputation body output {d} expected {f}, got {f}", .{ i, expected_local, local_tensor._shape });
+    stdx.debug.assert(local_outputs.len == global_output_shapes.len, "manualComputation body returned {} values, expected {}", .{ local_outputs.len, global_output_shapes.len });
+    for (0.., local_outputs, output_shapes) |i, local_tensor, local_shape| {
+        stdx.debug.assert(local_shape.eql(local_tensor._shape), "manualComputation body output {d} expected {f}, got {f}", .{ i, local_shape.*, local_tensor._shape });
     }
 
-    const global_output_types = try arena.alloc(*const mlir.Type, output_shapes.len);
-    for (output_shapes, 0..) |output_shape, i| {
+    const global_output_types = try arena.alloc(*const mlir.Type, global_output_shapes.len);
+    for (global_output_shapes, 0..) |output_shape, i| {
         global_output_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output_shape);
     }
 
@@ -175,8 +181,8 @@ noinline fn manualComputationInternal(
                 .location = compiler.location,
             }).appendTo(manual_block);
 
-            const out_mesh_attrs = try arena.alloc(*const dialects.shardy.TensorShardingAttribute, output_shapes.len);
-            for (out_mesh_attrs, output_shapes) |*attr, shape| {
+            const out_mesh_attrs = try arena.alloc(*const dialects.shardy.TensorShardingAttribute, global_output_shapes.len);
+            for (out_mesh_attrs, global_output_shapes) |*attr, shape| {
                 attr.* = try mesh.sdyShardingAttrForShape(arena, mlir_ctx, shape);
             }
 
@@ -185,9 +191,9 @@ noinline fn manualComputationInternal(
                 .results = .{ .flat = global_output_types },
                 .blocks = &.{manual_block},
                 .attributes = &.{
-                    .named(mlir_ctx, "in_shardings", try Sharding.sdyPerValueShardingAttr(arena, mlir_ctx, input_shapes, mesh)),
+                    .named(mlir_ctx, "in_shardings", try Sharding.sdyPerValueShardingAttr(arena, mlir_ctx, global_input_shapes, mesh)),
                     .named(mlir_ctx, "out_shardings", dialects.shardy.attr.shardingsPerValue(mlir_ctx, out_mesh_attrs)),
-                    .named(mlir_ctx, "manual_axes", try Sharding.sdyManualAxesAttr(arena, mlir_ctx, input_shapes, output_shapes, mesh)),
+                    .named(mlir_ctx, "manual_axes", try Sharding.sdyManualAxesAttr(arena, mlir_ctx, global_input_shapes, global_output_shapes, mesh)),
                 },
                 .verify = true,
                 .location = compiler.location,
@@ -196,11 +202,11 @@ noinline fn manualComputationInternal(
         .gspmd => op: {
             // Gspmd calls SPMDShardToFullShape and wrap into an optimizationBarrier
             // Shortcut to avoid empty optimization barrier
-            if (output_shapes.len == 0) return &.{};
+            if (global_output_shapes.len == 0) return &.{};
 
-            const global_values = try arena.alloc(*const mlir.Value, output_shapes.len);
-            const global_types = try arena.alloc(*const mlir.Type, output_shapes.len);
-            for (output_shapes, 0..) |global_shape, i| {
+            const global_values = try arena.alloc(*const mlir.Value, global_output_shapes.len);
+            const global_types = try arena.alloc(*const mlir.Type, global_output_shapes.len);
+            for (global_output_shapes, 0..) |global_shape, i| {
                 global_values[i], global_types[i] = try gspmd.localToGlobal(compiler, arena, global_scope, local_output_values[i], global_shape);
             }
 
@@ -214,7 +220,7 @@ noinline fn manualComputationInternal(
     };
 
     // reuse local_outputs buffer to store the final result.
-    for (0.., local_outputs, output_shapes) |o, output_tensor_ptr, output_shape| {
+    for (0.., local_outputs, global_output_shapes) |o, output_tensor_ptr, output_shape| {
         output_tensor_ptr.* = Tensor._resultPropagateSharding(output_shape, op.result(o));
     }
     return local_outputs;
@@ -353,3 +359,47 @@ const shardy = struct {
         return dialects.shardy.ManualAxesAttribute.init(mlir_ctx, attrs.constSlice()).asAttr();
     }
 };
+
+test "manualComputation passes local output shapes to the callback" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    const mesh = zml.testing.tpMesh();
+    const partitions = mesh.numPartitionsForLogicalAxis(.model);
+    if (partitions == 1) return error.SkipZigTest;
+
+    var compiler: Compiler = .init(allocator, io, platform, .{ .meshes = &.{mesh} });
+    defer compiler.deinit();
+    compiler.activate();
+    defer compiler.deactivate();
+
+    const block = mlir.Block.init(&.{}, &.{});
+    defer block.deinit();
+    const scope = compiler.pushBlock(block);
+    defer scope.pop();
+
+    const global_shape = Shape.init(.{ .b = 4, .h = 3 * partitions, .hd = 128 }, .bf16)
+        .withPartitioning(mesh, .{ .h = .model });
+    const local_shape = Shape.init(.{ .b = 4, .h = 3, .hd = 128 }, .bf16);
+    const input = Tensor.zeroes(global_shape).withPartitioning(mesh, .{ .h = .model });
+    var received_shape: ?Shape = null;
+    const Context = struct {
+        input: Tensor,
+        received_shape: *?Shape,
+
+        fn body(self: @This(), output_shape: Shape) Tensor {
+            self.received_shape.* = output_shape;
+            return self.input;
+        }
+    };
+    const output = manualComputation(
+        Context.body,
+        .{ .input = input, .received_shape = &received_shape },
+        global_shape,
+    );
+
+    try std.testing.expect(received_shape != null);
+    try std.testing.expect(received_shape.?.eql(local_shape));
+    try std.testing.expect(output.shape().eql(global_shape));
+    try std.testing.expectEqualDeep(global_shape._sharding, output.shape()._sharding);
+}
