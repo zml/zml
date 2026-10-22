@@ -2,11 +2,11 @@ const stdx = @import("stdx");
 
 const zml = @import("../../../../zml.zig");
 const paged = @import("../../paged_attention.zig");
-const triton = @import("../../triton/triton.zig");
+const cute = @import("../cute.zig");
 const kernel = @import("attention.zig");
 
-pub const Options = triton.paged.Options;
-pub const Parameters = triton.paged.Parameters;
+pub const Options = cute.Options;
+pub const Parameters = cute.Parameters;
 
 test {
     _ = kernel;
@@ -58,7 +58,7 @@ const Context = struct {
         const query_tiles = if (decode) c.batch * c.queryTiles() else c.batch + @divTrunc(c.tokens * c.group + c.rows() - 1, c.rows());
         const work = query_tiles * c.kv_heads;
         const bound = if (c.window > 0) @min(c.window, c.pages_per_seq * c.page_size) else c.pages_per_seq * c.page_size;
-        c.splits = @max(1, @min(32, @min(@divTrunc(@as(i64, @intCast(triton.getCuCount())) * 2 + work - 1, work), @divTrunc(bound + 127, 128))));
+        c.splits = @max(1, @min(32, @min(@divTrunc(@as(i64, @intCast(cute.multiprocessorCount(zml.Compiler.current().platform))) * 2 + work - 1, work), @divTrunc(bound + 127, 128))));
         const sink = if (self.opts.sink) |s| s.convert(.f32).reshape(.{c.kv_heads * c.group}) else zml.Tensor.zeroes(.init(.{c.kv_heads * c.group}, .f32));
         const out = kernel.Kernel.call(.{
             .q = q,

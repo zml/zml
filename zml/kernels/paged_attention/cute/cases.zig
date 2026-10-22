@@ -45,7 +45,7 @@ pub const Case = struct {
 
 // Eight geometry cases plus orthogonal semantics/boundary cases, not a Cartesian product.
 pub const correctness = blk: {
-    var result: [26]Case = undefined;
+    var result: [34]Case = undefined;
     var i: usize = 0;
     for ([_]usize{ 64, 128, 256, 512 }) |dim| {
         for ([_]bool{ false, true }) |mixed| {
@@ -71,6 +71,14 @@ pub const correctness = blk: {
     result[23] = .{ .name = "inactive_sequence", .batch = 4, .prefill = 1, .inactive = 1, .kv_len = 129 };
     result[24] = .{ .name = "non_causal_window", .head_dim = 64, .prefill = 1, .kv_len = 65, .mask = .non_causal_window, .window = 7 };
     result[25] = .{ .name = "empty_splits", .batch = 1, .kv_len = 1, .kv_capacity = 4096, .sink = true };
+    result[26] = .{ .name = "d32_mixed", .head_dim = 32, .group = 3, .prefill = 1, .chunk = 9, .kv_len = 257, .shuffle_pages = true };
+    result[27] = .{ .name = "d64_group_tail", .head_dim = 64, .group = 19, .kv_len = 257 };
+    result[28] = .{ .name = "split_mixed_sink", .head_dim = 128, .batch = 1, .prefill = 1, .chunk = 3, .kv_len = 4097, .sink = true, .shuffle_pages = true };
+    result[29] = .{ .name = "d512_prefill", .head_dim = 512, .batch = 2, .prefill = 2, .chunk = 65, .kv_len = 257, .sink = true, .shuffle_pages = true };
+    result[30] = .{ .name = "negative_scale", .head_dim = 128, .prefill = 1, .kv_len = 257, .mask = .non_causal, .scale = -0.125 };
+    result[31] = .{ .name = "zero_scale", .head_dim = 256, .prefill = 1, .kv_len = 257, .sink = true, .scale = 0 };
+    result[32] = .{ .name = "d512_window_prefill", .head_dim = 512, .batch = 1, .prefill = 1, .chunk = 33, .kv_len = 513, .mask = .window, .window = 129, .sink = true };
+    result[33] = .{ .name = "prefill_inactive", .head_dim = 64, .batch = 4, .prefill = 2, .inactive = 2, .kv_len = 257, .group = 5 };
     break :blk result;
 };
 
