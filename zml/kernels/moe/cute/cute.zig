@@ -19,7 +19,6 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
 
 pub fn validateOptions(opts: zml.moe.Options) void {
     stdx.debug.assert(opts.activation == .swiglu, "cute backend only accepts swiglu activation, got {}", .{opts.activation});
-    stdx.debug.assert(opts.activation.swiglu.limit != null, "cute backend requires swiglu limit to be set", .{});
     stdx.debug.assert(opts.activation.swiglu.bias == null, "cute backend requires swiglu bias to be null", .{});
     stdx.debug.assert(opts.activation.swiglu.scale == null, "cute backend requires swiglu scale to be null", .{});
 }
@@ -48,7 +47,7 @@ pub fn fusedExperts(
     const hidden = down.weight.dim(1);
     const intermediate = down.weight.dim(2) * 2;
 
-    // The CuTe GEMMs are specialized on one set of dimensions
+    // Check the boundary quantizer and CuTe GEMM tile constraints.
     kernels.validateShapes(hidden, intermediate);
 
     // The SwiGLU clamp is a kernel parameter, but the routing weight is
@@ -64,7 +63,7 @@ pub fn fusedExperts(
         .w2 = down.weight,
         .s2 = dq.scales,
         .topk = ids.dim(.topk),
-        .swiglu_limit = options.activation.swiglu.limit.?,
+        .swiglu_limit = options.activation.swiglu.limit,
         .expert_parallel = expert_parallelism,
     };
     return if (expert_parallelism)
@@ -82,7 +81,7 @@ const Context = struct {
     w2: zml.Tensor,
     s2: zml.Tensor,
     topk: i64,
-    swiglu_limit: f32,
+    swiglu_limit: ?f32,
     expert_parallel: bool,
 
     fn body(self: Context, _: zml.Shape) zml.Tensor {

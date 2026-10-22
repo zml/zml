@@ -245,7 +245,7 @@ pub const Config = struct {
     routes: i64,
     /// Clamp applied to both halves of the fused SwiGLU. Emitted as an IR
     /// constant, so a threaded value costs exactly what a literal did.
-    swiglu_limit: f32 = 10.0,
+    swiglu_limit: ?f32 = 10.0,
     /// Ungrouped routing: group `g` is route `g` and holds one live row.
     /// `schedule` is then just the `[routes]` expert ids; its size and
     /// active-count sections and `route_inverse` are not read.
@@ -1408,7 +1408,7 @@ const EpilogueOperands = struct {
     /// `Config.groupRows`.
     group_rows: i64 = 0,
     /// `Config.swiglu_limit`.
-    swiglu_limit: f32 = 10.0,
+    swiglu_limit: ?f32 = 10.0,
 };
 
 /// Warps 0-3 drain each TMEM accumulator stage into registers, release it to
@@ -1617,9 +1617,14 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
         for (columns[first..last], activations[first..last], first..) |value, *activation, column| {
             const c: i32 = @intCast(column);
             // The reference model rounds the projection to BF16.
-            const limit = operands.swiglu_limit;
-            const gate = value.to(.bf16).to(.f32).minimum(limit);
-            const up_value = b.shuffleXor(value, 1).to(.bf16).to(.f32).maximum(-limit).minimum(limit);
+            var gate = value.to(.bf16).to(.f32);
+            if (operands.swiglu_limit) |limit| {
+                gate = gate.minimum(limit);
+            }
+            var up_value = b.shuffleXor(value, 1).to(.bf16).to(.f32);
+            if (operands.swiglu_limit) |limit| {
+                up_value = up_value.clamp(limit);
+            }
             // up * SiLU(gate), with the hardware approximations Python's
             // fastmath selects: exp(-g) = 2^(-g * log2 e).
             const exp_neg = b.unaryF32("ex2.approx.ftz.f32", gate.mul(-std.math.log2e));
@@ -1852,7 +1857,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     // AB and accumulator mbarriers carry all cross-warp dependencies.
     var tma_warp = b.openIf(warp.eq(5));
     switch (k_tiles) {
-        inline 18, 40 => |kt| runTmaProducer(b, tile, kt, storage, active, d.tiles_m, expert_ids, direct, partitioned_a.targets[0], partitioned_b.targets[0], exec_a, exec_b, exec_sfa, exec_sfb),
+        inline 16, 18, 32, 40 => |kt| runTmaProducer(b, tile, kt, storage, active, d.tiles_m, expert_ids, direct, partitioned_a.targets[0], partitioned_b.targets[0], exec_a, exec_b, exec_sfa, exec_sfb),
         else => std.debug.panic("unsupported MXFP4 reduction tile count {d}", .{k_tiles}),
     }
     tma_warp.yieldThen(.{});
@@ -1861,7 +1866,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     // Python's MMA role reaches its own TmemAllocator.wait_for_alloc site.
     b.namedBarrier(2, 160);
     switch (k_tiles) {
-        inline 18, 40 => |kt| runMmaConsumer(b, tile, kt, storage, tiled_mma, tmem_holding, active, d.tiles_m),
+        inline 16, 18, 32, 40 => |kt| runMmaConsumer(b, tile, kt, storage, tiled_mma, tmem_holding, active, d.tiles_m),
         else => unreachable,
     }
     mma_warp.yieldThen(.{});
