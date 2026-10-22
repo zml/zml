@@ -17,8 +17,8 @@
 //   cute.deref_desc_iter operand #0: no probe type accepted; any type allowed
 //   cute.make_desc_iter operand #0: no probe type accepted; any type allowed
 
-#ifndef CUTE_IR_GENERATED_CUTE_OPS_TD
-#define CUTE_IR_GENERATED_CUTE_OPS_TD
+#ifndef MLIR_DIALECTS_CUTE_IR_CUTEOPS_TD
+#define MLIR_DIALECTS_CUTE_IR_CUTEOPS_TD
 
 include "cute_ir/Dialect/Cute/IR/CuteAttrs.td"
 include "mlir/dialects/cute_ir/CuteEnums.td"
@@ -3792,4 +3792,4 @@ def Cute_ZippedProductOp : Cute_InferredOp<"zipped_product", [Pure]> {
   );
 }
 
-#endif // CUTE_IR_GENERATED_CUTE_OPS_TD
+#endif // MLIR_DIALECTS_CUTE_IR_CUTEOPS_TD

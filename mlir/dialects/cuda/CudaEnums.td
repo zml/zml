@@ -5,8 +5,8 @@
 // as a dialect attribute also has its EnumAttr, printed `#<mnemonic><case>`
 // or, where the compiler prints it so, `#nvvm<mnemonic case>`.
 
-#ifndef CUTE_IR_GENERATED_CUDA_ENUMS_TD
-#define CUTE_IR_GENERATED_CUDA_ENUMS_TD
+#ifndef MLIR_DIALECTS_CUDA_CUDAENUMS_TD
+#define MLIR_DIALECTS_CUDA_CUDAENUMS_TD
 
 include "mlir/dialects/cuda/CudaDialect.td"
 include "mlir/IR/EnumAttr.td"
@@ -333,4 +333,4 @@ def Cuda_StreamCaptureModeEnumEnum : I32EnumAttr<"StreamCaptureModeEnum", "Enume
   let genSpecializedAttr = 0;
 }
 
-#endif // CUTE_IR_GENERATED_CUDA_ENUMS_TD
+#endif // MLIR_DIALECTS_CUDA_CUDAENUMS_TD

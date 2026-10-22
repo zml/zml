@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CUTE_IR_DIALECT_CUDA_IR_CUDA_TYPES_TD
-#define CUTE_IR_DIALECT_CUDA_IR_CUDA_TYPES_TD
+#ifndef MLIR_DIALECTS_CUDA_CUDATYPES_TD
+#define MLIR_DIALECTS_CUDA_CUDATYPES_TD
 
 include "mlir/dialects/cuda/CudaDialect.td"
 
@@ -209,4 +209,4 @@ def Cuda_TensorMapType : Cuda_Type<"TensorMap", "tensor_map"> {
   let assemblyFormat = "";
 }
 
-#endif // CUTE_IR_DIALECT_CUDA_IR_CUDA_TYPES_TD
+#endif // MLIR_DIALECTS_CUDA_CUDATYPES_TD

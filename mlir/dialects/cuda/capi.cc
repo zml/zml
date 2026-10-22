@@ -1,23 +1,26 @@
+//===- capi.cc - C API for NVIDIA's cuda dialect --------------------------===//
+
 #include "capi.h"
+
 #include "mlir/dialects/cuda/CudaDialect.h"
+
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 #include "mlir/CAPI/Support.h"
 
 // Registration
 
-MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(
-    Cuda, cuda, mlir::cutlass_compiler::cuda::CudaDialect)
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Cuda, cuda,
+                                      mlir::cutlass_compiler::cuda::CudaDialect)
 
 // Attributes
 
 namespace cuda = mlir::cutlass_compiler::cuda;
 
-namespace {
 // Unwraps `handle` into `out`: false when it is of another context or not a
 // T, or when it is null and not optional.
 template <typename T, typename H>
-bool unwrapAs(mlir::MLIRContext *ctx, H handle, bool optional, T &out) {
+static bool unwrapAs(mlir::MLIRContext *ctx, H handle, bool optional, T &out) {
   auto value = unwrap(handle);
   if (!value)
     return optional;
@@ -26,7 +29,6 @@ bool unwrapAs(mlir::MLIRContext *ctx, H handle, bool optional, T &out) {
   out = llvm::dyn_cast<T>(value);
   return static_cast<bool>(out);
 }
-} // namespace
 
 bool mlirAttributeIsACudaAssumeKernel(MlirAttribute attr) {
   return llvm::isa_and_nonnull<cuda::AssumeKernelAttr>(unwrap(attr));
@@ -45,37 +47,49 @@ bool mlirCudaAssumeKernelAttrGetValue(MlirAttribute attr) {
 bool mlirAttributeIsACudaComputeTarget(MlirAttribute attr) {
   return llvm::isa_and_nonnull<cuda::ComputeTargetAttr>(unwrap(attr));
 }
-MlirAttribute mlirCudaComputeTargetAttrGet(MlirContext context, uint32_t representation, uint32_t portability, intptr_t numArchs, const uint32_t *archs) {
+MlirAttribute mlirCudaComputeTargetAttrGet(MlirContext context,
+                                           uint32_t representation,
+                                           uint32_t portability,
+                                           intptr_t numArchs,
+                                           const uint32_t *archs) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cuda::CudaDialect>();
-  auto representationValue = ::mlir::cutlass_compiler::cuda::symbolizeExecutableRepresentation(representation);
+  auto representationValue =
+      ::mlir::cutlass_compiler::cuda::symbolizeExecutableRepresentation(
+          representation);
   if (!representationValue)
     return {nullptr};
-  auto portabilityValue = ::mlir::cutlass_compiler::cuda::symbolizeArchPortability(portability);
+  auto portabilityValue =
+      ::mlir::cutlass_compiler::cuda::symbolizeArchPortability(portability);
   if (!portabilityValue)
     return {nullptr};
   llvm::SmallVector<::mlir::cutlass_compiler::cuda::GpuArchitecture> archsValue;
   for (intptr_t i = 0; i < numArchs; ++i) {
-    auto value = ::mlir::cutlass_compiler::cuda::symbolizeGpuArchitecture(archs[i]);
+    auto value =
+        ::mlir::cutlass_compiler::cuda::symbolizeGpuArchitecture(archs[i]);
     if (!value)
       return {nullptr};
     archsValue.push_back(*value);
   }
-  return wrap(cuda::ComputeTargetAttr::get(ctx, *representationValue, *portabilityValue, archsValue));
+  return wrap(cuda::ComputeTargetAttr::get(ctx, *representationValue,
+                                           *portabilityValue, archsValue));
 }
 uint32_t mlirCudaComputeTargetAttrGetRepresentation(MlirAttribute attr) {
-  return static_cast<uint32_t>(llvm::cast<cuda::ComputeTargetAttr>(unwrap(attr)).getRepresentation());
+  return static_cast<uint32_t>(
+      llvm::cast<cuda::ComputeTargetAttr>(unwrap(attr)).getRepresentation());
 }
 uint32_t mlirCudaComputeTargetAttrGetPortability(MlirAttribute attr) {
-  return static_cast<uint32_t>(llvm::cast<cuda::ComputeTargetAttr>(unwrap(attr)).getPortability());
+  return static_cast<uint32_t>(
+      llvm::cast<cuda::ComputeTargetAttr>(unwrap(attr)).getPortability());
 }
 intptr_t mlirCudaComputeTargetAttrGetNumArchs(MlirAttribute attr) {
   return llvm::cast<cuda::ComputeTargetAttr>(unwrap(attr)).getArchs().size();
 }
 uint32_t mlirCudaComputeTargetAttrGetArchs(MlirAttribute attr, intptr_t pos) {
-  return static_cast<uint32_t>(llvm::cast<cuda::ComputeTargetAttr>(unwrap(attr)).getArchs()[pos]);
+  return static_cast<uint32_t>(
+      llvm::cast<cuda::ComputeTargetAttr>(unwrap(attr)).getArchs()[pos]);
 }
 
 bool mlirAttributeIsACudaDevMaxSharedMemoryOptin(MlirAttribute attr) {
@@ -92,7 +106,8 @@ MlirAttribute mlirCudaDevMaxSharedMemoryOptinAttrGet(MlirContext context) {
 bool mlirAttributeIsACudaDeviceAttributes(MlirAttribute attr) {
   return llvm::isa_and_nonnull<cuda::DeviceAttributesAttr>(unwrap(attr));
 }
-MlirAttribute mlirCudaDeviceAttributesAttrGet(MlirContext context, MlirAttribute values) {
+MlirAttribute mlirCudaDeviceAttributesAttrGet(MlirContext context,
+                                              MlirAttribute values) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
@@ -103,7 +118,8 @@ MlirAttribute mlirCudaDeviceAttributesAttrGet(MlirContext context, MlirAttribute
   return wrap(cuda::DeviceAttributesAttr::get(ctx, valuesValue));
 }
 MlirAttribute mlirCudaDeviceAttributesAttrGetValues(MlirAttribute attr) {
-  return wrap(static_cast<mlir::Attribute>(llvm::cast<cuda::DeviceAttributesAttr>(unwrap(attr)).getValues()));
+  return wrap(static_cast<mlir::Attribute>(
+      llvm::cast<cuda::DeviceAttributesAttr>(unwrap(attr)).getValues()));
 }
 
 bool mlirAttributeIsACudaExecutable(MlirAttribute attr) {
@@ -114,19 +130,22 @@ MlirAttribute mlirCudaExecutableAttrGet(MlirContext context, uint32_t format) {
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cuda::CudaDialect>();
-  auto formatValue = ::mlir::cutlass_compiler::cuda::symbolizeExecutableFormat(format);
+  auto formatValue =
+      ::mlir::cutlass_compiler::cuda::symbolizeExecutableFormat(format);
   if (!formatValue)
     return {nullptr};
   return wrap(cuda::ExecutableAttr::get(ctx, *formatValue));
 }
 uint32_t mlirCudaExecutableAttrGetFormat(MlirAttribute attr) {
-  return static_cast<uint32_t>(llvm::cast<cuda::ExecutableAttr>(unwrap(attr)).getFormat());
+  return static_cast<uint32_t>(
+      llvm::cast<cuda::ExecutableAttr>(unwrap(attr)).getFormat());
 }
 
 bool mlirAttributeIsACudaFuncAttributes(MlirAttribute attr) {
   return llvm::isa_and_nonnull<cuda::FuncAttributesAttr>(unwrap(attr));
 }
-MlirAttribute mlirCudaFuncAttributesAttrGet(MlirContext context, MlirAttribute values) {
+MlirAttribute mlirCudaFuncAttributesAttrGet(MlirContext context,
+                                            MlirAttribute values) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
@@ -137,7 +156,8 @@ MlirAttribute mlirCudaFuncAttributesAttrGet(MlirContext context, MlirAttribute v
   return wrap(cuda::FuncAttributesAttr::get(ctx, valuesValue));
 }
 MlirAttribute mlirCudaFuncAttributesAttrGetValues(MlirAttribute attr) {
-  return wrap(static_cast<mlir::Attribute>(llvm::cast<cuda::FuncAttributesAttr>(unwrap(attr)).getValues()));
+  return wrap(static_cast<mlir::Attribute>(
+      llvm::cast<cuda::FuncAttributesAttr>(unwrap(attr)).getValues()));
 }
 
 // Types
@@ -233,7 +253,8 @@ MlirType mlirCudaKernelTypeGet(MlirContext context) {
 bool mlirTypeIsACudaLaunchConfig(MlirType type) {
   return llvm::isa_and_nonnull<cuda::LaunchConfigType>(unwrap(type));
 }
-MlirType mlirCudaLaunchConfigTypeGet(MlirContext context, uint32_t maxNumAttrs) {
+MlirType mlirCudaLaunchConfigTypeGet(MlirContext context,
+                                     uint32_t maxNumAttrs) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
@@ -321,21 +342,30 @@ MlirType mlirCudaRuntimeKernelNodeParamsTypeGet(MlirContext context) {
   return wrap(cuda::RuntimeKernelNodeParamsType::get(ctx));
 }
 
-bool mlirTypeIsACudaRuntimeLaunchAttributeValueClusterSchedulingPolicyPreference(MlirType type) {
-  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValueClusterSchedulingPolicyPreferenceType>(unwrap(type));
+bool mlirTypeIsACudaRuntimeLaunchAttributeValueClusterSchedulingPolicyPreference(
+    MlirType type) {
+  return llvm::isa_and_nonnull<
+      cuda::RuntimeLaunchAttributeValueClusterSchedulingPolicyPreferenceType>(
+      unwrap(type));
 }
-MlirType mlirCudaRuntimeLaunchAttributeValueClusterSchedulingPolicyPreferenceTypeGet(MlirContext context) {
+MlirType
+mlirCudaRuntimeLaunchAttributeValueClusterSchedulingPolicyPreferenceTypeGet(
+    MlirContext context) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cuda::CudaDialect>();
-  return wrap(cuda::RuntimeLaunchAttributeValueClusterSchedulingPolicyPreferenceType::get(ctx));
+  return wrap(
+      cuda::RuntimeLaunchAttributeValueClusterSchedulingPolicyPreferenceType::
+          get(ctx));
 }
 
 bool mlirTypeIsACudaRuntimeLaunchAttributeValueCooperative(MlirType type) {
-  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValueCooperativeType>(unwrap(type));
+  return llvm::isa_and_nonnull<
+      cuda::RuntimeLaunchAttributeValueCooperativeType>(unwrap(type));
 }
-MlirType mlirCudaRuntimeLaunchAttributeValueCooperativeTypeGet(MlirContext context) {
+MlirType
+mlirCudaRuntimeLaunchAttributeValueCooperativeTypeGet(MlirContext context) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
@@ -344,9 +374,11 @@ MlirType mlirCudaRuntimeLaunchAttributeValueCooperativeTypeGet(MlirContext conte
 }
 
 bool mlirTypeIsACudaRuntimeLaunchAttributeValueMemSyncDomain(MlirType type) {
-  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValueMemSyncDomainType>(unwrap(type));
+  return llvm::isa_and_nonnull<
+      cuda::RuntimeLaunchAttributeValueMemSyncDomainType>(unwrap(type));
 }
-MlirType mlirCudaRuntimeLaunchAttributeValueMemSyncDomainTypeGet(MlirContext context) {
+MlirType
+mlirCudaRuntimeLaunchAttributeValueMemSyncDomainTypeGet(MlirContext context) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
@@ -354,32 +386,45 @@ MlirType mlirCudaRuntimeLaunchAttributeValueMemSyncDomainTypeGet(MlirContext con
   return wrap(cuda::RuntimeLaunchAttributeValueMemSyncDomainType::get(ctx));
 }
 
-bool mlirTypeIsACudaRuntimeLaunchAttributeValueNvlinkUtilCentricScheduling(MlirType type) {
-  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValueNvlinkUtilCentricSchedulingType>(unwrap(type));
+bool mlirTypeIsACudaRuntimeLaunchAttributeValueNvlinkUtilCentricScheduling(
+    MlirType type) {
+  return llvm::isa_and_nonnull<
+      cuda::RuntimeLaunchAttributeValueNvlinkUtilCentricSchedulingType>(
+      unwrap(type));
 }
-MlirType mlirCudaRuntimeLaunchAttributeValueNvlinkUtilCentricSchedulingTypeGet(MlirContext context) {
+MlirType mlirCudaRuntimeLaunchAttributeValueNvlinkUtilCentricSchedulingTypeGet(
+    MlirContext context) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cuda::CudaDialect>();
-  return wrap(cuda::RuntimeLaunchAttributeValueNvlinkUtilCentricSchedulingType::get(ctx));
+  return wrap(
+      cuda::RuntimeLaunchAttributeValueNvlinkUtilCentricSchedulingType::get(
+          ctx));
 }
 
-bool mlirTypeIsACudaRuntimeLaunchAttributeValuePortableClusterSizeMode(MlirType type) {
-  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValuePortableClusterSizeModeType>(unwrap(type));
+bool mlirTypeIsACudaRuntimeLaunchAttributeValuePortableClusterSizeMode(
+    MlirType type) {
+  return llvm::isa_and_nonnull<
+      cuda::RuntimeLaunchAttributeValuePortableClusterSizeModeType>(
+      unwrap(type));
 }
-MlirType mlirCudaRuntimeLaunchAttributeValuePortableClusterSizeModeTypeGet(MlirContext context) {
+MlirType mlirCudaRuntimeLaunchAttributeValuePortableClusterSizeModeTypeGet(
+    MlirContext context) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cuda::CudaDialect>();
-  return wrap(cuda::RuntimeLaunchAttributeValuePortableClusterSizeModeType::get(ctx));
+  return wrap(
+      cuda::RuntimeLaunchAttributeValuePortableClusterSizeModeType::get(ctx));
 }
 
 bool mlirTypeIsACudaRuntimeLaunchAttributeValuePriority(MlirType type) {
-  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValuePriorityType>(unwrap(type));
+  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValuePriorityType>(
+      unwrap(type));
 }
-MlirType mlirCudaRuntimeLaunchAttributeValuePriorityTypeGet(MlirContext context) {
+MlirType
+mlirCudaRuntimeLaunchAttributeValuePriorityTypeGet(MlirContext context) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
@@ -387,21 +432,33 @@ MlirType mlirCudaRuntimeLaunchAttributeValuePriorityTypeGet(MlirContext context)
   return wrap(cuda::RuntimeLaunchAttributeValuePriorityType::get(ctx));
 }
 
-bool mlirTypeIsACudaRuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowed(MlirType type) {
-  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowedType>(unwrap(type));
+bool mlirTypeIsACudaRuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowed(
+    MlirType type) {
+  return llvm::isa_and_nonnull<
+      cuda::
+          RuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowedType>(
+      unwrap(type));
 }
-MlirType mlirCudaRuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowedTypeGet(MlirContext context) {
+MlirType
+mlirCudaRuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowedTypeGet(
+    MlirContext context) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
   ctx->getOrLoadDialect<cuda::CudaDialect>();
-  return wrap(cuda::RuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowedType::get(ctx));
+  return wrap(
+      cuda::
+          RuntimeLaunchAttributeValueProgrammaticStreamSerializationAllowedType::
+              get(ctx));
 }
 
-bool mlirTypeIsACudaRuntimeLaunchAttributeValueSharedMemCarveout(MlirType type) {
-  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValueSharedMemCarveoutType>(unwrap(type));
+bool mlirTypeIsACudaRuntimeLaunchAttributeValueSharedMemCarveout(
+    MlirType type) {
+  return llvm::isa_and_nonnull<
+      cuda::RuntimeLaunchAttributeValueSharedMemCarveoutType>(unwrap(type));
 }
-MlirType mlirCudaRuntimeLaunchAttributeValueSharedMemCarveoutTypeGet(MlirContext context) {
+MlirType mlirCudaRuntimeLaunchAttributeValueSharedMemCarveoutTypeGet(
+    MlirContext context) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
@@ -410,9 +467,11 @@ MlirType mlirCudaRuntimeLaunchAttributeValueSharedMemCarveoutTypeGet(MlirContext
 }
 
 bool mlirTypeIsACudaRuntimeLaunchAttributeValueSharedMemoryMode(MlirType type) {
-  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValueSharedMemoryModeType>(unwrap(type));
+  return llvm::isa_and_nonnull<
+      cuda::RuntimeLaunchAttributeValueSharedMemoryModeType>(unwrap(type));
 }
-MlirType mlirCudaRuntimeLaunchAttributeValueSharedMemoryModeTypeGet(MlirContext context) {
+MlirType mlirCudaRuntimeLaunchAttributeValueSharedMemoryModeTypeGet(
+    MlirContext context) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
@@ -421,9 +480,11 @@ MlirType mlirCudaRuntimeLaunchAttributeValueSharedMemoryModeTypeGet(MlirContext 
 }
 
 bool mlirTypeIsACudaRuntimeLaunchAttributeValueSyncPolicy(MlirType type) {
-  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValueSyncPolicyType>(unwrap(type));
+  return llvm::isa_and_nonnull<cuda::RuntimeLaunchAttributeValueSyncPolicyType>(
+      unwrap(type));
 }
-MlirType mlirCudaRuntimeLaunchAttributeValueSyncPolicyTypeGet(MlirContext context) {
+MlirType
+mlirCudaRuntimeLaunchAttributeValueSyncPolicyTypeGet(MlirContext context) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};

@@ -1,3 +1,5 @@
+//===- capi.cc - C API for the ub dialect ---------------------------------===//
+
 #include "capi.h"
 
 #include "mlir/CAPI/Registration.h"

@@ -1,5 +1,9 @@
+//===- capi.cc - C API for the cute_nvgpu dialect -------------------------===//
+
 #include "capi.h"
+
 #include "mlir/dialects/cute_nvgpu/CuteNVGPUDialect.h"
+
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 
@@ -12,11 +16,10 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(
 
 namespace cute_nvgpu = mlir::cutlass_compiler::cute_nvgpu;
 
-namespace {
 // Unwraps `handle` into `out`: false when it is of another context or not a
 // T, or when it is null and not optional.
 template <typename T, typename H>
-bool unwrapAs(mlir::MLIRContext *ctx, H handle, bool optional, T &out) {
+static bool unwrapAs(mlir::MLIRContext *ctx, H handle, bool optional, T &out) {
   auto value = unwrap(handle);
   if (!value)
     return optional;
@@ -25,7 +28,6 @@ bool unwrapAs(mlir::MLIRContext *ctx, H handle, bool optional, T &out) {
   out = llvm::dyn_cast<T>(value);
   return static_cast<bool>(out);
 }
-} // namespace
 
 bool mlirAttributeIsACuteNVGPUAtomCopyFieldBulkCopyG2S(MlirAttribute attr) {
   return llvm::isa_and_nonnull<cute_nvgpu::AtomCopyFieldBulkCopyG2SAttr>(
@@ -2509,7 +2511,7 @@ bool mlirTypeIsACuteNVGPUCopyAtomSM100TmemLoad(MlirType type) {
 }
 MlirType mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGet(MlirContext context,
                                                    MlirType valType, int numDp,
-                                                   int numBit, unsigned numRep,
+                                                   int numBit, uint32_t numRep,
                                                    bool pack16b) {
   auto *ctx = unwrap(context);
   if (!ctx)
@@ -2536,7 +2538,7 @@ int mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGetNumBit(MlirType type) {
   return llvm::cast<cute_nvgpu::CopyAtomSM100TmemLoadType>(unwrap(type))
       .getNumBit();
 }
-unsigned mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGetNumRep(MlirType type) {
+uint32_t mlirCuteNVGPUCopyAtomSM100TmemLoadTypeGetNumRep(MlirType type) {
   return llvm::cast<cute_nvgpu::CopyAtomSM100TmemLoadType>(unwrap(type))
       .getNumRep();
 }
@@ -2552,7 +2554,7 @@ bool mlirTypeIsACuteNVGPUCopyAtomSM100TmemStore(MlirType type) {
 }
 MlirType mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGet(MlirContext context,
                                                     MlirType valType, int numDp,
-                                                    int numBit, unsigned numRep,
+                                                    int numBit, uint32_t numRep,
                                                     bool expand16b) {
   auto *ctx = unwrap(context);
   if (!ctx)
@@ -2579,7 +2581,7 @@ int mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGetNumBit(MlirType type) {
   return llvm::cast<cute_nvgpu::CopyAtomSM100TmemStoreType>(unwrap(type))
       .getNumBit();
 }
-unsigned mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGetNumRep(MlirType type) {
+uint32_t mlirCuteNVGPUCopyAtomSM100TmemStoreTypeGetNumRep(MlirType type) {
   return llvm::cast<cute_nvgpu::CopyAtomSM100TmemStoreType>(unwrap(type))
       .getNumRep();
 }
@@ -2595,7 +2597,7 @@ bool mlirTypeIsACuteNVGPUCopyAtomSM107TmemLoadSPCompress(MlirType type) {
 }
 MlirType mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGet(
     MlirContext context, MlirType valType, int numDp, int numBit,
-    unsigned numRep, uint32_t redOp, bool red, bool nan) {
+    uint32_t numRep, uint32_t redOp, bool red, bool nan) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
@@ -2629,7 +2631,7 @@ int mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetNumBit(MlirType type) {
              unwrap(type))
       .getNumBit();
 }
-unsigned
+uint32_t
 mlirCuteNVGPUCopyAtomSM107TmemLoadSPCompressTypeGetNumRep(MlirType type) {
   return llvm::cast<cute_nvgpu::CopyAtomSM107TmemLoadSPCompressType>(
              unwrap(type))
@@ -2658,7 +2660,7 @@ bool mlirTypeIsACuteNVGPUCopyAtomSM10xTmemLoadRed(MlirType type) {
 }
 MlirType mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGet(
     MlirContext context, MlirType valType, int numDp, int numBit,
-    unsigned numRep, uint32_t redOp, bool nan, MlirAttribute halfSplitOff) {
+    uint32_t numRep, uint32_t redOp, bool nan, MlirAttribute halfSplitOff) {
   auto *ctx = unwrap(context);
   if (!ctx)
     return {nullptr};
@@ -2691,7 +2693,7 @@ int mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetNumBit(MlirType type) {
   return llvm::cast<cute_nvgpu::CopyAtomSM10xTmemLoadRedType>(unwrap(type))
       .getNumBit();
 }
-unsigned mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetNumRep(MlirType type) {
+uint32_t mlirCuteNVGPUCopyAtomSM10xTmemLoadRedTypeGetNumRep(MlirType type) {
   return llvm::cast<cute_nvgpu::CopyAtomSM10xTmemLoadRedType>(unwrap(type))
       .getNumRep();
 }

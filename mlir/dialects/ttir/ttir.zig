@@ -11,7 +11,7 @@ const stdx = @import("stdx");
 pub const PointerType = opaque {
     const M = mlir.Methods(PointerType, c.MlirType);
 
-    pub const isAFn = c.mlirTritonTypeIsAPointer;
+    pub const isAFn = c.mlirTypeIsATritonPointer;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
     pub const format = M.format(c.mlirTypePrint);
@@ -42,7 +42,7 @@ pub fn pointerType(pointee_type: *const mlir.Type, address_space: i32) *const ml
 pub const TensorDescType = opaque {
     const M = mlir.Methods(TensorDescType, c.MlirType);
 
-    pub const isAFn = c.mlirTritonTypeIsATensorDesc;
+    pub const isAFn = c.mlirTypeIsATritonTensorDesc;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
     pub const format = M.format(c.mlirTypePrint);
@@ -146,51 +146,51 @@ pub const DescriptorReduceKind = enum(i32) {
 };
 
 pub fn programDim(ctx: *mlir.Context, v: ProgramIDDim) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonProgramDimGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonProgramIDDimAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn cacheModifier(ctx: *mlir.Context, v: CacheModifier) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonCacheModifierGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonCacheModifierAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn evictionPolicy(ctx: *mlir.Context, v: EvictionPolicy) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonEvictionPolicyGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonEvictionPolicyAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn paddingOption(ctx: *mlir.Context, v: PaddingOption) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonPaddingOptionGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonPaddingOptionAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn roundingMode(ctx: *mlir.Context, v: RoundingMode) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonRoundingModeGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonRoundingModeAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn inputPrecision(ctx: *mlir.Context, v: InputPrecision) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonInputPrecisionGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonInputPrecisionAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn rmwOp(ctx: *mlir.Context, v: RMWOp) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonRMWOpGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonRMWOpAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn memSemantic(ctx: *mlir.Context, v: MemSemantic) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonMemSemanticGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonMemSemanticAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn memSyncScope(ctx: *mlir.Context, v: MemSyncScope) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonMemSyncScopeGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonMemSyncScopeAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn propagateNan(ctx: *mlir.Context, v: PropagateNan) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonPropagateNanGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonPropagateNanAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn scaleDotElemType(ctx: *mlir.Context, v: ScaleDotElemType) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonScaleDotElemTypeGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonScaleDotElemTypeAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 pub fn descriptorReduceKind(ctx: *mlir.Context, v: DescriptorReduceKind) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonDescriptorReduceKindGet(ctx.ptr(), @backingInt(v)).ptr);
+    return @ptrCast(c.mlirTritonDescriptorReduceKindAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 // =============================================================================

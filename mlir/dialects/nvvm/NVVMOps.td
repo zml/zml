@@ -38,8 +38,8 @@
 // Constraints not recovered:
 //   nvvm.convert.bf16x2.to.f8x2 `dstTy`: `fnv8E5M3FNU` has no type here and is not accepted
 
-#ifndef CUTE_IR_GENERATED_NVVM_OPS_TD
-#define CUTE_IR_GENERATED_NVVM_OPS_TD
+#ifndef MLIR_DIALECTS_NVVM_NVVMOPS_TD
+#define MLIR_DIALECTS_NVVM_NVVMOPS_TD
 
 include "mlir/dialects/nvvm/NVVMAttrs.td"
 include "mlir/dialects/nvvm/NVVMEnums.td"
@@ -6442,4 +6442,4 @@ def NVVM_WMMAStoreOp : NVVM_Op<"wmma.store"> {
   let results = (outs);
 }
 
-#endif // CUTE_IR_GENERATED_NVVM_OPS_TD
+#endif // MLIR_DIALECTS_NVVM_NVVMOPS_TD

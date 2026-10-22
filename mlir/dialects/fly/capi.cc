@@ -1,7 +1,10 @@
+//===- capi.cc - C API for the fly dialect --------------------------------===//
+
 #include "capi.h"
 
 #include "TiledOpTraits.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 
@@ -11,38 +14,30 @@ using mlir::cast;
 using mlir::isa;
 using namespace mlir::fly;
 
-namespace {
-
-mlir::MLIRContext *loadFly(MlirContext ctx) {
-  mlir::MLIRContext *context = unwrap(ctx);
-  if (context) context->getOrLoadDialect<FlyDialect>();
-  return context;
+static mlir::MLIRContext *loadFly(MlirContext context) {
+  mlir::MLIRContext *ctx = unwrap(context);
+  if (ctx)
+    ctx->getOrLoadDialect<FlyDialect>();
+  return ctx;
 }
-
 
 /// `!attr` and `attr == other` are value arithmetic on a fly IntAttr, not a
 /// null test: every handle check here goes through these two helpers.
-template <typename T>
-bool isNull(T value) {
+template <typename T> static bool isNull(T value) {
   return !static_cast<bool>(value);
 }
 
 template <typename T, typename Handle>
-T checked(Handle handle, mlir::MLIRContext *ctx) {
+static T checked(Handle handle, mlir::MLIRContext *ctx) {
   auto value = mlir::dyn_cast_if_present<T>(unwrap(handle));
-  if (isNull(value) || value.getContext() != ctx) return T{};
+  if (isNull(value) || value.getContext() != ctx)
+    return T{};
   return value;
 }
 
-
-
-}  // namespace
-
-extern "C" {
-
-#define FLY_ATTR_ISA(Name, Attr)                    \
-  bool mlirAttributeIsAFly##Name(MlirAttribute a) { \
-    return mlir::isa_and_nonnull<Attr>(unwrap(a));  \
+#define FLY_ATTR_ISA(Name, Attr)                                               \
+  bool mlirAttributeIsAFly##Name(MlirAttribute attr) {                         \
+    return mlir::isa_and_nonnull<Attr>(unwrap(attr));                          \
   }
 
 FLY_ATTR_ISA(Int, IntAttr)
@@ -55,9 +50,9 @@ FLY_ATTR_ISA(AddressSpace, AddressSpaceAttr)
 
 #undef FLY_ATTR_ISA
 
-#define FLY_TYPE_ISA(Name, Type)          \
-  bool mlirTypeIsAFly##Name(MlirType t) { \
-    return mlir::isa_and_nonnull<Type>(unwrap(t)); \
+#define FLY_TYPE_ISA(Name, Type)                                               \
+  bool mlirTypeIsAFly##Name(MlirType type) {                                   \
+    return mlir::isa_and_nonnull<Type>(unwrap(type));                          \
   }
 
 FLY_TYPE_ISA(IntTuple, IntTupleType)
@@ -76,127 +71,161 @@ FLY_TYPE_ISA(CopyOpUniversalCopy, CopyOpUniversalCopyType)
 
 #undef FLY_TYPE_ISA
 
-MlirAttribute mlirFlyIntAttrGetStatic(MlirContext ctx, int32_t value) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  return wrap(static_cast<mlir::Attribute>(IntAttr::getStatic(context, value)));
+MlirAttribute mlirFlyIntAttrGetStatic(MlirContext context, int32_t value) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  return wrap(static_cast<mlir::Attribute>(IntAttr::getStatic(ctx, value)));
 }
 
-MlirAttribute mlirFlyIntAttrGetDynamic(MlirContext ctx, int32_t width, int32_t divisibility) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  return wrap(static_cast<mlir::Attribute>(IntAttr::getDynamic(context, width, divisibility)));
+MlirAttribute mlirFlyIntAttrGetDynamic(MlirContext context, int32_t width,
+                                       int32_t divisibility) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  return wrap(static_cast<mlir::Attribute>(
+      IntAttr::getDynamic(ctx, width, divisibility)));
 }
 
-MlirAttribute mlirFlyIntAttrGetNone(MlirContext ctx) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  return wrap(static_cast<mlir::Attribute>(IntAttr::getNone(context)));
+MlirAttribute mlirFlyIntAttrGetNone(MlirContext context) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  return wrap(static_cast<mlir::Attribute>(IntAttr::getNone(ctx)));
 }
 
-MlirAttribute mlirFlyIntTupleAttrGet(MlirContext ctx, MlirAttribute value) {
-  mlir::MLIRContext *context = loadFly(ctx);
+MlirAttribute mlirFlyIntTupleAttrGet(MlirContext context, MlirAttribute value) {
+  mlir::MLIRContext *ctx = loadFly(context);
   mlir::Attribute inner = unwrap(value);
-  if (!context || isNull(inner) || inner.getContext() != context) return {nullptr};
-  return wrap(static_cast<mlir::Attribute>(IntTupleAttr::get(context, inner)));
+  if (!ctx || isNull(inner) || inner.getContext() != ctx)
+    return {nullptr};
+  return wrap(static_cast<mlir::Attribute>(IntTupleAttr::get(ctx, inner)));
 }
 
-MlirAttribute mlirFlyIntTupleAttrGetBasis(MlirContext ctx, MlirAttribute value, intptr_t nModes, const int32_t *modes) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  IntAttr intValue = checked<IntAttr>(value, context);
-  if (isNull(intValue) || (nModes > 0 && !modes)) return {nullptr};
+MlirAttribute mlirFlyIntTupleAttrGetBasis(MlirContext context,
+                                          MlirAttribute value, intptr_t nModes,
+                                          const int32_t *modes) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  IntAttr intValue = checked<IntAttr>(value, ctx);
+  if (isNull(intValue) || (nModes > 0 && !modes))
+    return {nullptr};
   return wrap(static_cast<mlir::Attribute>(
       IntTupleAttr::get(intValue, llvm::ArrayRef<int32_t>(modes, nModes))));
 }
 
-MlirAttribute mlirFlyIntTupleAttrGetTuple(MlirContext ctx, intptr_t nElements, MlirAttribute const *elements) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context || (nElements > 0 && !elements)) return {nullptr};
+MlirAttribute mlirFlyIntTupleAttrGetTuple(MlirContext context,
+                                          intptr_t nElements,
+                                          MlirAttribute const *elements) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx || (nElements > 0 && !elements))
+    return {nullptr};
   llvm::SmallVector<mlir::Attribute> values;
   values.reserve(nElements);
   for (intptr_t i = 0; i < nElements; ++i) {
-    IntTupleAttr element = checked<IntTupleAttr>(elements[i], context);
-    if (isNull(element)) return {nullptr};
+    IntTupleAttr element = checked<IntTupleAttr>(elements[i], ctx);
+    if (isNull(element))
+      return {nullptr};
     values.push_back(element);
   }
   return wrap(static_cast<mlir::Attribute>(
-      IntTupleAttr::get(context, mlir::ArrayAttr::get(context, values))));
+      IntTupleAttr::get(ctx, mlir::ArrayAttr::get(ctx, values))));
 }
 
-MlirAttribute mlirFlyLayoutAttrGet(MlirContext ctx, MlirAttribute shape, MlirAttribute stride) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  IntTupleAttr shapeAttr = checked<IntTupleAttr>(shape, context);
-  IntTupleAttr strideAttr = checked<IntTupleAttr>(stride, context);
-  if (isNull(shapeAttr) || isNull(strideAttr)) return {nullptr};
-  return wrap(static_cast<mlir::Attribute>(LayoutAttr::get(context, shapeAttr, strideAttr)));
+MlirAttribute mlirFlyLayoutAttrGet(MlirContext context, MlirAttribute shape,
+                                   MlirAttribute stride) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  IntTupleAttr shapeAttr = checked<IntTupleAttr>(shape, ctx);
+  IntTupleAttr strideAttr = checked<IntTupleAttr>(stride, ctx);
+  if (isNull(shapeAttr) || isNull(strideAttr))
+    return {nullptr};
+  return wrap(static_cast<mlir::Attribute>(
+      LayoutAttr::get(ctx, shapeAttr, strideAttr)));
 }
 
-MlirAttribute mlirFlyTileAttrGet(MlirContext ctx, MlirAttribute value) {
-  mlir::MLIRContext *context = loadFly(ctx);
+MlirAttribute mlirFlyTileAttrGet(MlirContext context, MlirAttribute value) {
+  mlir::MLIRContext *ctx = loadFly(context);
   mlir::Attribute inner = unwrap(value);
-  if (!context || isNull(inner) || inner.getContext() != context) return {nullptr};
-  return wrap(static_cast<mlir::Attribute>(TileAttr::get(context, inner)));
+  if (!ctx || isNull(inner) || inner.getContext() != ctx)
+    return {nullptr};
+  return wrap(static_cast<mlir::Attribute>(TileAttr::get(ctx, inner)));
 }
 
-MlirAttribute mlirFlyTileAttrGetModes(MlirContext ctx, intptr_t nModes, MlirAttribute const *modes) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context || (nModes > 0 && !modes)) return {nullptr};
+MlirAttribute mlirFlyTileAttrGetModes(MlirContext context, intptr_t nModes,
+                                      MlirAttribute const *modes) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx || (nModes > 0 && !modes))
+    return {nullptr};
   llvm::SmallVector<mlir::Attribute> values;
   values.reserve(nModes);
   for (intptr_t i = 0; i < nModes; ++i) {
     mlir::Attribute mode = unwrap(modes[i]);
-    if (isNull(mode) || mode.getContext() != context) return {nullptr};
+    if (isNull(mode) || mode.getContext() != ctx)
+      return {nullptr};
     values.push_back(mode);
   }
   return wrap(static_cast<mlir::Attribute>(
-      TileAttr::get(context, mlir::ArrayAttr::get(context, values))));
+      TileAttr::get(ctx, mlir::ArrayAttr::get(ctx, values))));
 }
 
-MlirAttribute mlirFlySwizzleAttrGet(MlirContext ctx, int32_t mask, int32_t base, int32_t shift) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  return wrap(static_cast<mlir::Attribute>(SwizzleAttr::get(context, mask, base, shift)));
+MlirAttribute mlirFlySwizzleAttrGet(MlirContext context, int32_t mask,
+                                    int32_t base, int32_t shift) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  return wrap(
+      static_cast<mlir::Attribute>(SwizzleAttr::get(ctx, mask, base, shift)));
 }
 
-MlirAttribute mlirFlyAlignAttrGet(MlirContext ctx, int32_t alignment) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  return wrap(static_cast<mlir::Attribute>(AlignAttr::get(context, alignment)));
+MlirAttribute mlirFlyAlignAttrGet(MlirContext context, int32_t alignment) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  return wrap(static_cast<mlir::Attribute>(AlignAttr::get(ctx, alignment)));
 }
 
-MlirAttribute mlirFlyAddressSpaceAttrGet(MlirContext ctx, int32_t addressSpace) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
+MlirAttribute mlirFlyAddressSpaceAttrGet(MlirContext context,
+                                         int32_t addressSpace) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(static_cast<mlir::Attribute>(
-      AddressSpaceAttr::get(context, static_cast<AddressSpace>(addressSpace))));
+      AddressSpaceAttr::get(ctx, static_cast<AddressSpace>(addressSpace))));
 }
 
-MlirAttribute mlirFlyMmaOperandAttrGet(MlirContext ctx, int32_t operand) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
+MlirAttribute mlirFlyMmaOperandAttrGet(MlirContext context, int32_t operand) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(static_cast<mlir::Attribute>(
-      MmaOperandAttr::get(context, static_cast<MmaOperand>(operand))));
+      MmaOperandAttr::get(ctx, static_cast<MmaOperand>(operand))));
 }
 
-MlirAttribute mlirFlyGemmTraversalOrderAttrGet(MlirContext ctx, int32_t order) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
+MlirAttribute mlirFlyGemmTraversalOrderAttrGet(MlirContext context,
+                                               int32_t order) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(static_cast<mlir::Attribute>(GemmTraversalOrderAttr::get(
-      context, static_cast<GemmTraversalOrder>(order))));
+      ctx, static_cast<GemmTraversalOrder>(order))));
 }
 
-MlirType mlirFlyIntTupleTypeGet(MlirContext ctx, MlirAttribute attr) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  IntTupleAttr value = checked<IntTupleAttr>(attr, context);
-  if (isNull(value)) return {nullptr};
+MlirType mlirFlyIntTupleTypeGet(MlirContext context, MlirAttribute attr) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  IntTupleAttr value = checked<IntTupleAttr>(attr, ctx);
+  if (isNull(value))
+    return {nullptr};
   return wrap(static_cast<mlir::Type>(IntTupleType::get(value)));
 }
 
 MlirAttribute mlirFlyIntTupleTypeGetAttr(MlirType type) {
-  return wrap(static_cast<mlir::Attribute>(cast<IntTupleType>(unwrap(type)).getAttr()));
+  return wrap(
+      static_cast<mlir::Attribute>(cast<IntTupleType>(unwrap(type)).getAttr()));
 }
 
 intptr_t mlirFlyIntTupleTypeGetNumElements(MlirType type) {
@@ -204,7 +233,8 @@ intptr_t mlirFlyIntTupleTypeGetNumElements(MlirType type) {
 }
 
 MlirType mlirFlyIntTupleTypeGetElement(MlirType type, intptr_t pos) {
-  return wrap(static_cast<mlir::Type>(cast<IntTupleType>(unwrap(type)).at(pos)));
+  return wrap(
+      static_cast<mlir::Type>(cast<IntTupleType>(unwrap(type)).at(pos)));
 }
 
 bool mlirFlyIntTupleTypeIsLeaf(MlirType type) {
@@ -232,16 +262,19 @@ int64_t mlirFlyIntTupleTypeGetStaticValue(MlirType type) {
   return cast<IntTupleType>(unwrap(type)).getAttr().getLeafAsInt().getValue();
 }
 
-MlirType mlirFlyLayoutTypeGet(MlirContext ctx, MlirAttribute attr) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  LayoutAttr value = checked<LayoutAttr>(attr, context);
-  if (isNull(value)) return {nullptr};
+MlirType mlirFlyLayoutTypeGet(MlirContext context, MlirAttribute attr) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  LayoutAttr value = checked<LayoutAttr>(attr, ctx);
+  if (isNull(value))
+    return {nullptr};
   return wrap(static_cast<mlir::Type>(LayoutType::get(value)));
 }
 
 MlirAttribute mlirFlyLayoutTypeGetAttr(MlirType type) {
-  return wrap(static_cast<mlir::Attribute>(cast<LayoutType>(unwrap(type)).getAttr()));
+  return wrap(
+      static_cast<mlir::Attribute>(cast<LayoutType>(unwrap(type)).getAttr()));
 }
 
 MlirType mlirFlyLayoutTypeGetShape(MlirType type) {
@@ -255,42 +288,53 @@ MlirType mlirFlyLayoutTypeGetStride(MlirType type) {
 }
 
 MlirAttribute mlirFlyComposedLayoutTypeGetAttr(MlirType type) {
-  return wrap(static_cast<mlir::Attribute>(cast<ComposedLayoutType>(unwrap(type)).getAttr()));
+  return wrap(static_cast<mlir::Attribute>(
+      cast<ComposedLayoutType>(unwrap(type)).getAttr()));
 }
 
-MlirType mlirFlyTileTypeGet(MlirContext ctx, MlirAttribute attr) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  TileAttr value = checked<TileAttr>(attr, context);
-  if (isNull(value)) return {nullptr};
+MlirType mlirFlyTileTypeGet(MlirContext context, MlirAttribute attr) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  TileAttr value = checked<TileAttr>(attr, ctx);
+  if (isNull(value))
+    return {nullptr};
   return wrap(static_cast<mlir::Type>(TileType::get(value)));
 }
 
 MlirAttribute mlirFlyTileTypeGetAttr(MlirType type) {
-  return wrap(static_cast<mlir::Attribute>(cast<TileType>(unwrap(type)).getAttr()));
+  return wrap(
+      static_cast<mlir::Attribute>(cast<TileType>(unwrap(type)).getAttr()));
 }
 
-MlirType mlirFlySwizzleTypeGet(MlirContext ctx, MlirAttribute attr) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  SwizzleAttr value = checked<SwizzleAttr>(attr, context);
-  if (isNull(value)) return {nullptr};
+MlirType mlirFlySwizzleTypeGet(MlirContext context, MlirAttribute attr) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  SwizzleAttr value = checked<SwizzleAttr>(attr, ctx);
+  if (isNull(value))
+    return {nullptr};
   return wrap(static_cast<mlir::Type>(SwizzleType::get(value)));
 }
 
-MlirType mlirFlyPointerTypeGet(MlirContext ctx, MlirType elemTy, MlirAttribute addressSpace, MlirAttribute alignment, MlirAttribute swizzle) {
-  mlir::MLIRContext *context = loadFly(ctx);
+MlirType mlirFlyPointerTypeGet(MlirContext context, MlirType elemTy,
+                               MlirAttribute addressSpace,
+                               MlirAttribute alignment, MlirAttribute swizzle) {
+  mlir::MLIRContext *ctx = loadFly(context);
   mlir::Type element = unwrap(elemTy);
   mlir::Attribute space = unwrap(addressSpace);
-  if (!context || isNull(element) || element.getContext() != context) return {nullptr};
-  if (isNull(space) || space.getContext() != context) return {nullptr};
-  AlignAttr align = alignment.ptr ? checked<AlignAttr>(alignment, context)
+  if (!ctx || isNull(element) || element.getContext() != ctx)
+    return {nullptr};
+  if (isNull(space) || space.getContext() != ctx)
+    return {nullptr};
+  AlignAttr align = alignment.ptr ? checked<AlignAttr>(alignment, ctx)
                                   : AlignAttr::getTrivialAlignment(element);
-  SwizzleAttr sw = swizzle.ptr ? checked<SwizzleAttr>(swizzle, context)
-                               : SwizzleAttr::getTrivialSwizzle(context);
-  if (isNull(align) || isNull(sw)) return {nullptr};
+  SwizzleAttr sw = swizzle.ptr ? checked<SwizzleAttr>(swizzle, ctx)
+                               : SwizzleAttr::getTrivialSwizzle(ctx);
+  if (isNull(align) || isNull(sw))
+    return {nullptr};
   return wrap(static_cast<mlir::Type>(
-      PointerType::get(context, element, space, align, sw)));
+      PointerType::get(ctx, element, space, align, sw)));
 }
 
 MlirType mlirFlyPointerTypeGetElemTy(MlirType type) {
@@ -302,28 +346,36 @@ MlirAttribute mlirFlyPointerTypeGetAddressSpace(MlirType type) {
 }
 
 MlirAttribute mlirFlyPointerTypeGetAlignment(MlirType type) {
-  return wrap(static_cast<mlir::Attribute>(cast<PointerType>(unwrap(type)).getAlignment()));
+  return wrap(static_cast<mlir::Attribute>(
+      cast<PointerType>(unwrap(type)).getAlignment()));
 }
 
 MlirAttribute mlirFlyPointerTypeGetSwizzle(MlirType type) {
-  return wrap(static_cast<mlir::Attribute>(cast<PointerType>(unwrap(type)).getSwizzle()));
+  return wrap(static_cast<mlir::Attribute>(
+      cast<PointerType>(unwrap(type)).getSwizzle()));
 }
 
-MlirType mlirFlyMemRefTypeGet(MlirContext ctx, MlirType elemTy, MlirAttribute addressSpace, MlirAttribute layout, MlirAttribute alignment, MlirAttribute swizzle) {
-  mlir::MLIRContext *context = loadFly(ctx);
+MlirType mlirFlyMemRefTypeGet(MlirContext context, MlirType elemTy,
+                              MlirAttribute addressSpace, MlirAttribute layout,
+                              MlirAttribute alignment, MlirAttribute swizzle) {
+  mlir::MLIRContext *ctx = loadFly(context);
   mlir::Type element = unwrap(elemTy);
   mlir::Attribute space = unwrap(addressSpace);
   mlir::Attribute lay = unwrap(layout);
-  if (!context || isNull(element) || element.getContext() != context) return {nullptr};
-  if (isNull(space) || space.getContext() != context) return {nullptr};
-  if (isNull(lay) || lay.getContext() != context) return {nullptr};
-  AlignAttr align = alignment.ptr ? checked<AlignAttr>(alignment, context)
+  if (!ctx || isNull(element) || element.getContext() != ctx)
+    return {nullptr};
+  if (isNull(space) || space.getContext() != ctx)
+    return {nullptr};
+  if (isNull(lay) || lay.getContext() != ctx)
+    return {nullptr};
+  AlignAttr align = alignment.ptr ? checked<AlignAttr>(alignment, ctx)
                                   : AlignAttr::getTrivialAlignment(element);
-  SwizzleAttr sw = swizzle.ptr ? checked<SwizzleAttr>(swizzle, context)
-                               : SwizzleAttr::getTrivialSwizzle(context);
-  if (isNull(align) || isNull(sw)) return {nullptr};
+  SwizzleAttr sw = swizzle.ptr ? checked<SwizzleAttr>(swizzle, ctx)
+                               : SwizzleAttr::getTrivialSwizzle(ctx);
+  if (isNull(align) || isNull(sw))
+    return {nullptr};
   return wrap(static_cast<mlir::Type>(
-      mlir::fly::MemRefType::get(context, element, space, lay, align, sw)));
+      mlir::fly::MemRefType::get(ctx, element, space, lay, align, sw)));
 }
 
 MlirType mlirFlyMemRefTypeGetElemTy(MlirType type) {
@@ -338,13 +390,17 @@ MlirAttribute mlirFlyMemRefTypeGetLayout(MlirType type) {
   return wrap(cast<mlir::fly::MemRefType>(unwrap(type)).getLayout());
 }
 
-MlirType mlirFlyCoordTensorTypeGet(MlirContext ctx, MlirAttribute base, MlirAttribute layout) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  IntTupleAttr baseAttr = checked<IntTupleAttr>(base, context);
+MlirType mlirFlyCoordTensorTypeGet(MlirContext context, MlirAttribute base,
+                                   MlirAttribute layout) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  IntTupleAttr baseAttr = checked<IntTupleAttr>(base, ctx);
   mlir::Attribute lay = unwrap(layout);
-  if (isNull(baseAttr) || isNull(lay) || lay.getContext() != context) return {nullptr};
-  return wrap(static_cast<mlir::Type>(CoordTensorType::get(context, baseAttr, lay)));
+  if (isNull(baseAttr) || isNull(lay) || lay.getContext() != ctx)
+    return {nullptr};
+  return wrap(
+      static_cast<mlir::Type>(CoordTensorType::get(ctx, baseAttr, lay)));
 }
 
 static mlir::Attribute outerLayoutAttr(mlir::Attribute layout) {
@@ -369,34 +425,43 @@ MlirType mlirFlyLayoutLikeTypeGetShape(MlirType type) {
       IntTupleType::get(cast<LayoutAttr>(outerLayoutAttr(layout)).getShape())));
 }
 
-MlirType mlirFlyCopyAtomTypeGet(MlirContext ctx, MlirType copyOp, int32_t valBits) {
-  mlir::MLIRContext *context = loadFly(ctx);
+MlirType mlirFlyCopyAtomTypeGet(MlirContext context, MlirType copyOp,
+                                int32_t valBits) {
+  mlir::MLIRContext *ctx = loadFly(context);
   mlir::Type op = unwrap(copyOp);
-  if (!context || isNull(op) || op.getContext() != context) return {nullptr};
-  return wrap(static_cast<mlir::Type>(CopyAtomType::get(context, op, valBits)));
+  if (!ctx || isNull(op) || op.getContext() != ctx)
+    return {nullptr};
+  return wrap(static_cast<mlir::Type>(CopyAtomType::get(ctx, op, valBits)));
 }
 
-MlirType mlirFlyMmaAtomTypeGet(MlirContext ctx, MlirType mmaOp) {
-  mlir::MLIRContext *context = loadFly(ctx);
+MlirType mlirFlyMmaAtomTypeGet(MlirContext context, MlirType mmaOp) {
+  mlir::MLIRContext *ctx = loadFly(context);
   mlir::Type op = unwrap(mmaOp);
-  if (!context || isNull(op) || op.getContext() != context) return {nullptr};
-  return wrap(static_cast<mlir::Type>(MmaAtomType::get(context, op)));
+  if (!ctx || isNull(op) || op.getContext() != ctx)
+    return {nullptr};
+  return wrap(static_cast<mlir::Type>(MmaAtomType::get(ctx, op)));
 }
 
-#define FLY_ATOM_LAYOUT(Name, AtomType, getter)                        \
-  MlirType Name(MlirType type) {                                       \
-    return wrap(static_cast<mlir::Type>(LayoutType::get(               \
-        cast<LayoutAttr>(cast<AtomType>(unwrap(type)).getter()))));    \
+#define FLY_ATOM_LAYOUT(Name, AtomType, getter)                                \
+  MlirType Name(MlirType type) {                                               \
+    return wrap(static_cast<mlir::Type>(LayoutType::get(                       \
+        cast<LayoutAttr>(cast<AtomType>(unwrap(type)).getter()))));            \
   }
 
 FLY_ATOM_LAYOUT(mlirFlyCopyAtomTypeGetThrLayout, CopyAtomType, getThrLayout)
-FLY_ATOM_LAYOUT(mlirFlyCopyAtomTypeGetThrValLayoutSrc, CopyAtomType, getThrValLayoutSrc)
-FLY_ATOM_LAYOUT(mlirFlyCopyAtomTypeGetThrValLayoutDst, CopyAtomType, getThrValLayoutDst)
-FLY_ATOM_LAYOUT(mlirFlyCopyAtomTypeGetThrValLayoutRef, CopyAtomType, getThrValLayoutRef)
+FLY_ATOM_LAYOUT(mlirFlyCopyAtomTypeGetThrValLayoutSrc, CopyAtomType,
+                getThrValLayoutSrc)
+FLY_ATOM_LAYOUT(mlirFlyCopyAtomTypeGetThrValLayoutDst, CopyAtomType,
+                getThrValLayoutDst)
+FLY_ATOM_LAYOUT(mlirFlyCopyAtomTypeGetThrValLayoutRef, CopyAtomType,
+                getThrValLayoutRef)
 FLY_ATOM_LAYOUT(mlirFlyMmaAtomTypeGetThrLayout, MmaAtomType, getThrLayout)
-FLY_ATOM_LAYOUT(mlirFlyMmaAtomTypeGetThrValLayoutA, MmaAtomType, getThrValLayoutA)
-FLY_ATOM_LAYOUT(mlirFlyMmaAtomTypeGetThrValLayoutB, MmaAtomType, getThrValLayoutB)
-FLY_ATOM_LAYOUT(mlirFlyMmaAtomTypeGetThrValLayoutC, MmaAtomType, getThrValLayoutC)
+FLY_ATOM_LAYOUT(mlirFlyMmaAtomTypeGetThrValLayoutA, MmaAtomType,
+                getThrValLayoutA)
+FLY_ATOM_LAYOUT(mlirFlyMmaAtomTypeGetThrValLayoutB, MmaAtomType,
+                getThrValLayoutB)
+FLY_ATOM_LAYOUT(mlirFlyMmaAtomTypeGetThrValLayoutC, MmaAtomType,
+                getThrValLayoutC)
 
 #undef FLY_ATOM_LAYOUT
 
@@ -407,16 +472,18 @@ MlirType mlirFlyMmaAtomTypeGetShapeMNK(MlirType type) {
 
 MlirType mlirFlyTiledCopyTypeGetTiledThrValLayoutSrc(MlirType type) {
   auto ty = cast<TiledCopyType>(unwrap(type));
-  return wrap(static_cast<mlir::Type>(LayoutType::get(tiledCopyGetTiledThrValLayoutSrc(
-      cast<CopyAtomType>(ty.getCopyAtom()), ty.getLayoutThrVal().getAttr(),
-      ty.getTileMN().getAttr()))));
+  return wrap(
+      static_cast<mlir::Type>(LayoutType::get(tiledCopyGetTiledThrValLayoutSrc(
+          cast<CopyAtomType>(ty.getCopyAtom()), ty.getLayoutThrVal().getAttr(),
+          ty.getTileMN().getAttr()))));
 }
 
 MlirType mlirFlyTiledCopyTypeGetTiledThrValLayoutDst(MlirType type) {
   auto ty = cast<TiledCopyType>(unwrap(type));
-  return wrap(static_cast<mlir::Type>(LayoutType::get(tiledCopyGetTiledThrValLayoutDst(
-      cast<CopyAtomType>(ty.getCopyAtom()), ty.getLayoutThrVal().getAttr(),
-      ty.getTileMN().getAttr()))));
+  return wrap(
+      static_cast<mlir::Type>(LayoutType::get(tiledCopyGetTiledThrValLayoutDst(
+          cast<CopyAtomType>(ty.getCopyAtom()), ty.getLayoutThrVal().getAttr(),
+          ty.getTileMN().getAttr()))));
 }
 
 MlirType mlirFlyTiledMmaTypeGetTileSizeMNK(MlirType type) {
@@ -434,9 +501,10 @@ MlirType mlirFlyTiledMmaTypeGetThrLayoutVMNK(MlirType type) {
 
 static MlirType tiledMmaTiledThrVal(MlirType tiledMma, MmaOperand operand) {
   auto ty = cast<TiledMmaType>(unwrap(tiledMma));
-  return wrap(static_cast<mlir::Type>(LayoutType::get(tiledMmaGetTiledThrValLayout(
-      cast<MmaAtomType>(ty.getMmaAtom()), ty.getAtomLayout().getAttr(),
-      ty.getPermutation().getAttr(), operand))));
+  return wrap(
+      static_cast<mlir::Type>(LayoutType::get(tiledMmaGetTiledThrValLayout(
+          cast<MmaAtomType>(ty.getMmaAtom()), ty.getAtomLayout().getAttr(),
+          ty.getPermutation().getAttr(), operand))));
 }
 
 MlirType mlirFlyTiledMmaTypeGetTiledThrValLayoutA(MlirType type) {
@@ -451,10 +519,11 @@ MlirType mlirFlyTiledMmaTypeGetTiledThrValLayoutC(MlirType type) {
   return tiledMmaTiledThrVal(type, MmaOperand::C);
 }
 
-MlirType mlirFlyCopyOpUniversalCopyTypeGet(MlirContext ctx, int32_t bitSize) {
-  mlir::MLIRContext *context = loadFly(ctx);
-  if (!context) return {nullptr};
-  return wrap(static_cast<mlir::Type>(CopyOpUniversalCopyType::get(context, bitSize)));
+MlirType mlirFlyCopyOpUniversalCopyTypeGet(MlirContext context,
+                                           int32_t bitSize) {
+  mlir::MLIRContext *ctx = loadFly(context);
+  if (!ctx)
+    return {nullptr};
+  return wrap(
+      static_cast<mlir::Type>(CopyOpUniversalCopyType::get(ctx, bitSize)));
 }
-
-}  // extern "C"

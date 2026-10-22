@@ -1,7 +1,7 @@
 //===- CuteNVGPUDialect.td - CuTe NVIDIA GPU dialect -------*- tablegen -*-===//
 
-#ifndef CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_DIALECT_TD
-#define CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_DIALECT_TD
+#ifndef MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUDIALECT_TD
+#define MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUDIALECT_TD
 
 include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/DialectBase.td"
@@ -33,4 +33,4 @@ class CuteNVGPU_Type<string name, string typeMnemonic>
   let mnemonic = typeMnemonic;
 }
 
-#endif // CUTE_IR_DIALECT_CUTENVGPU_IR_CUTENVGPU_DIALECT_TD
+#endif // MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUDIALECT_TD

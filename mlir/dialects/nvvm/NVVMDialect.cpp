@@ -2,9 +2,9 @@
 
 #include "mlir/dialects/nvvm/NVVMDialect.h"
 
-#include "llvm/ADT/TypeSwitch.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
 using namespace mlir::cutlass_compiler::nvvm;

@@ -7,8 +7,8 @@
 // nvgpu attributes are in CuteNVGPUAttrs.td, so that -gen-enum-decls
 // over this file emits the nvgpu enums only.
 
-#ifndef CUTE_IR_GENERATED_CUTENVGPU_ENUMS_TD
-#define CUTE_IR_GENERATED_CUTENVGPU_ENUMS_TD
+#ifndef MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUENUMS_TD
+#define MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUENUMS_TD
 
 include "mlir/dialects/cute_nvgpu/CuteNVGPUDialect.td"
 include "mlir/IR/EnumAttr.td"
@@ -680,4 +680,4 @@ def CuteNVGPU_TmemLoadRedOpAttr : EnumAttr<CuteNVGPU_Dialect, CuteNVGPU_TmemLoad
   let assemblyFormat = "`<` $value `>`";
 }
 
-#endif // CUTE_IR_GENERATED_CUTENVGPU_ENUMS_TD
+#endif // MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUENUMS_TD

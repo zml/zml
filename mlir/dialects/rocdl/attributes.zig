@@ -13,7 +13,7 @@ pub const BufferOOBModeAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.BufferOOBMode;
-    pub const isAFn = c.mlirAttributeIsAROCDLBufferOOBModeAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLBufferOOBMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -39,7 +39,7 @@ pub const BufferOOBModeModuleFlagAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.BufferOOBMode;
-    pub const isAFn = c.mlirAttributeIsAROCDLBufferOOBModeModuleFlagAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLBufferOOBModeModuleFlag;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -65,7 +65,7 @@ pub const Gfx12AtomicCachePolicyAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.Gfx12AtomicCachePolicy;
-    pub const isAFn = c.mlirAttributeIsAROCDLGfx12AtomicCachePolicyAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLGfx12AtomicCachePolicy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -91,7 +91,7 @@ pub const Gfx12CachePolicyAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.Gfx12CachePolicy;
-    pub const isAFn = c.mlirAttributeIsAROCDLGfx12CachePolicyAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLGfx12CachePolicy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -117,7 +117,7 @@ pub const Gfx942CachePolicyAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.Gfx942CachePolicy;
-    pub const isAFn = c.mlirAttributeIsAROCDLGfx942CachePolicyAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLGfx942CachePolicy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -143,7 +143,7 @@ pub const MFMANegModifierAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.MFMANegModifier;
-    pub const isAFn = c.mlirAttributeIsAROCDLMFMANegModifierAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLMFMANegModifier;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -169,7 +169,7 @@ pub const MFMAPermBAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.MFMAPermB;
-    pub const isAFn = c.mlirAttributeIsAROCDLMFMAPermBAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLMFMAPermB;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -195,7 +195,7 @@ pub const MatrixFormatAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.MatrixFormat;
-    pub const isAFn = c.mlirAttributeIsAROCDLMatrixFormatAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLMatrixFormat;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -221,7 +221,7 @@ pub const PreGfx12CachePolicyAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.PreGfx12CachePolicy;
-    pub const isAFn = c.mlirAttributeIsAROCDLPreGfx12CachePolicyAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLPreGfx12CachePolicy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -247,7 +247,7 @@ pub const SchedGroupMaskAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.SchedGroupMask;
-    pub const isAFn = c.mlirAttributeIsAROCDLSchedGroupMaskAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLSchedGroupMask;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -273,7 +273,7 @@ pub const TBufferOOBModeModuleFlagAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.BufferOOBMode;
-    pub const isAFn = c.mlirAttributeIsAROCDLTBufferOOBModeModuleFlagAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLTBufferOOBModeModuleFlag;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -299,7 +299,7 @@ pub const WMMACModifierAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.WMMACModifier;
-    pub const isAFn = c.mlirAttributeIsAROCDLWMMACModifierAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLWMMACModifier;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -325,7 +325,7 @@ pub const WMMAMatrixScaleAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.WMMAMatrixScale;
-    pub const isAFn = c.mlirAttributeIsAROCDLWMMAMatrixScaleAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLWMMAMatrixScale;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -351,7 +351,7 @@ pub const WMMAMatrixScaleFormatAttr = opaque {
     const Self = @This();
     const M = mlir.Methods(Self, c.MlirAttribute);
     pub const Value = enums.WMMAMatrixScaleFormat;
-    pub const isAFn = c.mlirAttributeIsAROCDLWMMAMatrixScaleFormatAttr;
+    pub const isAFn = c.mlirAttributeIsAROCDLWMMAMatrixScaleFormat;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
     pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {

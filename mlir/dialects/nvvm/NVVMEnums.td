@@ -5,8 +5,8 @@
 // as a dialect attribute also has its EnumAttr, printed `#<mnemonic><case>`
 // or, where the compiler prints it so, `#nvvm<mnemonic case>`.
 
-#ifndef CUTE_IR_GENERATED_NVVM_ENUMS_TD
-#define CUTE_IR_GENERATED_NVVM_ENUMS_TD
+#ifndef MLIR_DIALECTS_NVVM_NVVMENUMS_TD
+#define MLIR_DIALECTS_NVVM_NVVMENUMS_TD
 
 include "mlir/dialects/nvvm/NVVMDialect.td"
 include "mlir/IR/EnumAttr.td"
@@ -1383,4 +1383,4 @@ def NVVM_WGMMATypesAttr : EnumAttr<NVVM_Dialect, NVVM_WGMMATypesEnum, "wgmma_typ
   let cppNamespace = "::mlir::cutlass_compiler::nvvm";
 }
 
-#endif // CUTE_IR_GENERATED_NVVM_ENUMS_TD
+#endif // MLIR_DIALECTS_NVVM_NVVMENUMS_TD
