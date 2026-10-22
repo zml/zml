@@ -6848,8 +6848,134 @@ Checks:
 - `examples/io stat` under `env -i`, with a fake proxy variable: a local
   file prints its size, a missing one fails with `FileNotFound`.
 
+## Fortieth pass: the store owns its registry (R7) (2026-10-22)
+
+R7 of `LOADER_API_REVIEW.md` (I-store-owns-complete-registry,
+B-one-lookup, B-registry-entry-is-identity, E-has-exact,
+I-reader-is-two-functions, I-dead-metadata, I-construction-surface). The
+store borrowed a registry that could still grow, so every `View.source`
+and create path copied the entry into the store's arena (`dupeSource`),
+and Lowering copied it again. A checkpoint tensor had no identity:
+Lowering deduped by name pointer and llmd compared names (`sameTensor`).
+`hasKey` scanned every key, and callers used it as an exact test.
+`TensorReader` had two constructors, an ownership flag and two vtables,
+for callers that read a whole tensor or a range. About 290 lines parsed
+safetensors metadata that nothing read.
+
+zml:
+- `TensorStore.init(allocator, registry, opts)` takes the registry by
+  value and locks its map (`lockPointers`), so a later insert panics in
+  safe builds. `deinit` frees the bindings, then unlocks and frees the
+  registry. `opts` is `TensorStore.Options { meshes }`, a named struct
+  that R9 extends with the quantization target. `fromRegistry` is gone,
+  and with it 24 `defer registry.deinit()` lines (14 in zml, 10 in llmd).
+- An entry is its tensor's identity. `View.source` and every create path
+  hand out the registry's own `*const safetensors.Tensor`, and
+  `Binding.tensors`, `Layout.whole` and `LoadPart.source`/`whole` point
+  into the registry. Gone: `dupeSource`, `getPtrFromKey`, Lowering's
+  per-binding copy and its `Entry` key. Lowering dedupes by entry
+  pointer. A new test checks that one tensor read through two sources is
+  one tensor of the binding.
+- `View.get(subkey) ?*const safetensors.Tensor`, one hash lookup,
+  replaces `getShape` on the store and the view, and `hasKey`.
+  `View.hasPrefix(subkey)` keeps the scan for the one prefix question.
+- `safetensors.Tensor.read(io, buffer)` reads the whole tensor into a
+  buffer of exactly its size. `readRange(io, file, buffer, tensor_offset)`
+  reads a positional range from a file the caller opened. Gone:
+  `TensorReader`, `Tensor.reader`, `TensorRegistry.reader`, both
+  `getReader` and `ReaderError`. The buffered loader opens each part's
+  file, as the reader did, and `ChunkedRead` calls `readRange`.
+  `SeekError` came only from the old reader; it left the buffered
+  loader's error set and `Loader.Error`. No caller switches on it.
+- Dead code left safetensors.zig (744 lines out, 131 in): `Metadatas`,
+  `Metadata`, `initWithMetadata`, `mergeMetadata`, the registry's
+  `metadata` and `mutex`, `parseMetadata`, `populateMetadata`,
+  `validSlice`, `StringBuilder`, the index's `metadata` and weight-name
+  lists (it keeps the set of file names), `FileType` and
+  `resolveFiletype`. A header's `__metadata__` is skipped.
+- `fetchRegistry` and `resolveModelEntrypoint` stay, private: `fromRepo`
+  and `fromPath` call them. R6's entrypoint test stays. `fetchRegistry`
+  leaked the registry when a parse failed; it frees it now.
+- A store owns its registry, so tests that built several stores over one
+  registry give each a copy (`testing.storeOf`). Source.zig's
+  `TestCheckpoint` registers every entry before it creates its store.
+- mnist, examples/io, examples/llm, the llama and lfm2 tests and
+  `zml/testing.zig` use the new names. In mnist, examples/io and
+  examples/llm the registry is read right before `TensorStore.init`, so
+  nothing fallible sits between the read and the move.
+- loader.md shows `init` and states the ownership, the lock,
+  `get`/`hasPrefix` and `read`/`readRange`. The torch2zml howto uses
+  `init` and drops the metadata debug line.
+
+llmd (monorepo):
+- main, zoo and `SpeculativeContext` hand their registry to
+  `TensorStore.init`; `SpeculativeContext.registry` is gone. In main the
+  registry is now read after the platform is created, next to the NCCL
+  preload.
+- `get` replaces `getShape` and `hasKey` in weights.zig,
+  weights/linear.zig, gemma4, llama, ministral3, qwen3_5 and qwen4.
+  llama asks for `q_norm.weight` and `k_norm.weight`; the prefix test on
+  `q_norm` stood in for those keys. qwen3_5's "has layer 0 any experts"
+  is `hasPrefix("")`. dflash_drafter probes its aux norms with `get`
+  instead of binding a tensor it threw away.
+- `sameTensor` is gone. `haveSharedScale` compares the scale keys'
+  registry entries. That is exact: an `fp8_per_tensor` scale has one
+  element, which every view takes whole.
+- `canDoubleScale(io, source)` opens the scale's file once and reads it
+  64 KiB at a time with `readRange`, so memory stays bounded. Its test
+  writes the scales to temp files. R9 removes the read.
+- `Fixture.store()` gives each store a copy of the registry and returns
+  an error union (15 callers `try`). The linear bias test builds one
+  store with the bias and one without; it can no longer add the bias to
+  a live store.
+
+Review (workflow, refuting verifier): two findings, both fixed.
+- The torch2zml howto told readers to drop `defer registry.deinit()` but
+  left both registries `var`. With the defer gone nothing mutates them,
+  and Zig 0.17 rejects them as never mutated. The howto now says to
+  declare them `const`. Its first snippet keeps `var` and the defers: it
+  builds no store.
+- `TestCheckpoint.init` took a `with_bytes` flag for one test, which left
+  a mode where `assemble` panics on a missing entry. The flag is gone;
+  the lattice test, which must not allocate its 235 MB of bytes, builds
+  its store directly.
+
+Not done:
+- The lock is a safety check: in ReleaseFast a late insert is undefined
+  behavior.
+- `Source.pieces`, `Piece` and `Dim` stay public (C-pieces-leak). llmd's
+  code no longer reads them; its tests still check piece offsets.
+- LOADER_REVIEW #10's TensorReader item is moot, but
+  `readFilePositionalAllV` and `advanceScatter` still live in
+  safetensors.zig. #20's header checks are unchanged.
+- `zml.testing.testLayer` has no caller. It was compiled once through a
+  temporary test, then the test was removed.
+- Not run on a GPU or a real model: llama_tests and lfm2_tests were
+  built, not run. On CDNA3, `canDoubleScale` is covered only by its unit
+  test. main's moved registry read was not timed.
+
+Checks:
+- `bazel test //zml:test` passes (331, 12 skip).
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7 (`llmd:test` 262,
+  9 skip; `weights_test` 23/23).
+- `bazel build --config=localzml //llmd:llmd //llmd:zoo`.
+- On CPU, before the review fixes (a test and the howto),
+  `examples/io` on a synthetic 2-shard index whose headers carry
+  `__metadata__`: `safetensors` prints the tree, and `load`, replicated
+  and sharded, with `ZML_LOAD_CHECK=1 ZML_LOAD_PACKS=1
+  ZML_LOAD_PACK_WIDTH=2`, passes its load check (5/5) and pack check
+  (1/1).
+
 ## Open work
 
+- 2026-10-22 the store owns its registry (fortieth pass, zml orqlttun
+  and monorepo zmrvtnlx): R7 done. `TensorStore.init` owns and locks the
+  registry, an entry's address is its tensor's identity, `View.get` and
+  `hasPrefix` replace `getShape` and `hasKey`, `Tensor.read` and
+  `readRange` replace `TensorReader`, and the metadata path is gone. Not
+  run on a GPU or a real model. `Source.pieces` stays public
+  (C-pieces-leak). R8 and R9 build on it.
 - 2026-10-22 VFS Remotes and one error contract (thirty-ninth pass, zml
   zvrossur and monorepo wlwvxtwp): R6 done, and with it LOADER_REVIEW #6.
   `VFS.Remotes` registers the four remote schemes; open, stat and access
