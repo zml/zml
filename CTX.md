@@ -6444,8 +6444,84 @@ Checks:
 - `bazel test --config=localzml //llmd/...` passes 7/7.
 - `bazel build --config=localzml //llmd:llmd`.
 
+## Thirty-sixth pass: deinitBufferized everywhere (R3) (2026-10-22)
+
+R3 of `LOADER_API_REVIEW.md` (E-unload-generic): the owner of each
+`bufferize` result frees it with one `zml.mem.deinitBufferized` call. The
+hand-written `unloadBuffers` walkers, the inverse of `bufferize`, leak
+device memory when their struct gains a field they forget. 107 of the 112
+are gone.
+
+`deinitBufferized` (zml/mem.zig) needed no fix:
+- It frees each slice with the allocator passed, at the alignment
+  `bufferize` used, children first. It walks optionals, tagged unions (void
+  payloads included), arrays and nested slices.
+- One call visits each Buffer and each slice once. `Buffer.deinit` empties
+  `_shards`, so a buffer never loaded, or already freed by
+  `freeDeviceMemoryButKeepHostMetadataMemory`, is a no-op.
+- It cannot guard against one Buffer copied into two fields, or a second
+  call on the same tree (slices are not reset). No owner does either.
+- New test: slices under optionals and unions.
+
+zml:
+- examples/mnist and the README free the model with one call.
+- examples/llm keeps `LoadedModel.unloadBuffers` (models.zig and the four
+  models): main.zig and the llama/lfm2 tests call it. Each body is now the
+  one call. The per-layer walkers are gone, and so is
+  `Linear.unloadBuffers` in zml/nn.zig. The four unused loaders
+  (`Model.loadBuffers` or `Model.load`), left for R4, switch their errdefer
+  too.
+- The lfm2 example session frees its KV/conv cache tree the same way.
+
+llmd (monorepo), all 70 walkers gone:
+- llama, gemma4, laguna, muse_glimmer and qwen3_5 free each tree of
+  `ModelBuffers` with one call, in init's errdefer and in deinit: the base
+  tree, and the speculative one when present. gemma3_text, ministral3 and
+  lfm2 make one call on `Model`'s tree. `speculative.Tensors.initBuffers`
+  frees the head on error. The drafter trees go with the speculative tree,
+  so their walkers and the drafters' `Buffers` aliases are gone.
+- Extra work stays next to the call:
+  - deepseek41 frees its Engram host-pinned owners right after the tree,
+    as before. The errdefer in `finalizeLoadedBuffers` is unchanged.
+  - qwen4 frees its n-gram owners in `state.deinit()`, after the tree.
+    `Model.deinit` still logs "Unloading..."; a failed init no longer does.
+- `GatedDeltaNetState` and `GatedShortConvState` free their cache trees
+  the same way. These are runtime state from `initBuffers`, with no
+  slices.
+- Dropped: speculative's `buffers.* = undefined` after the free.
+
+Each walker that listed fields by hand was checked against its struct.
+None left a field out, so no leak was fixed. No two fields share a
+buffer. The only swaps after load are deepseek41's and qwen4's views,
+handled above.
+
+Review (workflow, refuting verifier): two findings, both fixed.
+qwen4/model.zig's scoped `log` was left dead when its only use, the
+walker's "Unloading..." line, was dropped. The decl is gone and the line
+is back, in qwen4.zig's `Model.deinit`. The drafters' `Buffers` aliases
+were left with no user.
+
+Not done:
+- Cache helpers with other names stay: `KvCache.deinitBuffer`,
+  `deinitBuffers` in attention.zig and multi_latent_attention.zig, the
+  gated metadata, the llama and qwen3_5 example sessions. They free
+  runtime state, not loaded weights.
+- `speculative.Tensors.initBuffers` could be one `bufferize` of `Tensors`.
+- Not run: no model was loaded and freed, on CPU or GPU. Zig does not
+  analyze the four unused examples/llm loaders, so their errdefer lines
+  were only read.
+
+Checks:
+- `bazel test //zml:test` passes (326, 12 skip).
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7.
+- `bazel build --config=localzml //llmd:llmd`.
+
 ## Open work
 
+- 2026-10-22 deinitBufferized everywhere (thirty-sixth pass, zml rktvmymx
+  and monorepo yyqsnszp): R3 done. Not run: no model's free path was
+  exercised on a device.
 - 2026-10-22 seam bugs (thirty-fifth pass, zml zmxzvvly and monorepo
   szqpusxv): R1 done except item 1, which goes with R5. Not run on a GPU:
   the DSpark swizzle on sm_10x. The rest of LOADER_REVIEW #20's header
