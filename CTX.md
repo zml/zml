@@ -7173,7 +7173,130 @@ Checks:
 - `bazel build --config=localzml //llmd:llmd //llmd:zoo`.
 - `zig fmt` on scratch copies: no diff in the changed code.
 
+## Forty-third pass: a Source carries its placement (R10) (2026-10-22)
+
+R10 of `LOADER_API_REVIEW.md` (B-one-way-to-bind, C-placed-source,
+B-replicated-drops-partitioning, B-take-replaces-sourceOf-unbind-rebind,
+C-memory-one-setter, L-one-store-handle, B-store-owns-meshes). Seven entry
+points made a model tensor from a key, six said where a Source lands, and
+five set its memory kind. `.replicated` dropped its partitioning argument,
+which 25 calls passed. On Part 3 #6 the user reversed CTX:4973-4974: memory
+is no longer a bind option, and the after-bind setter is the one that
+stays. This also closes two of the forty-second pass's "Not done" items:
+`sourceOf`, `unbind`, `rebind` and `ofBinding` are gone, and `setMemory`
+rejects a tensor a program computes.
+
+zml:
+- A Source carries its placement, set last: `withPartitioning(mesh,
+  partitioning)` or `as(shape)`. `bind()` and `bindProgram(inputs, output,
+  program)` are the only terminals and take only placed sources;
+  `bindProgram`'s inputs are `[]const Source`. An op on a placed source
+  panics, saying placement comes last. `concatenate` and `stack` check
+  every input.
+- `withPartitioning(.replicated, p)` is a compile error unless `p` is
+  `.{}`.
+- `as(shape)` takes the shape's dimensions, tags and sharding, for any
+  shape with the source's element count and dtype. That is looser than
+  `placeAs`, which wanted equal dimensions, and lets
+  `reshape(shape).bindAs(shape)` become `as(shape)`.
+- `unplaced()` drops a placement. The plan does not list it: llmd's
+  block-FP8 scale swizzle is handed placed scales and reworks them per
+  device.
+- `TensorStore.bindNew(shape, binding)` mints the tensor and records its
+  binding, in place of `putSourcesNoClobber`. `bind`, `bindProgram` and
+  the loader test's hand-built layouts call it.
+- `createTensor`, `maybeCreateTensor` and `createReplicatedTensor` are
+  short forms over `source`, `withPartitioning` and `bind`.
+  `createTensor`'s tags are now comptime. An empty checkpoint tensor still
+  binds plainly (see the review below).
+- `View.setMemory(tensor, kind)` is the one memory setter, called after
+  binding. It panics on a tensor a program computes, whose output lands in
+  default device memory. qwen4's n-gram tables are concatenations in the
+  shards' own dtype, so no program is involved there.
+- `View.mesh(name)` returns a mesh. `TensorStore.mesh` stays public for
+  Source.
+- Gone: `bindAs`, `place`, `placeAs`, `Source.Input`, `BindOptions`,
+  `Source.rebind` and `Source.ofBinding`; `TensorStore.sourceOf`, `unbind`,
+  `setMemory` and `putSourcesNoClobber`; `createHostPinnedTensor`,
+  `maybeCreateHostPinnedTensor`, `maybeCreateTensorInternal` and
+  `placeShape`.
+- The 4 dead partitioning arguments in examples/llm's qwen3_5_moe go.
+- Docs: loader.md describes placement, `unplaced`, `setMemory` and
+  `View.mesh`, and loses the sourceOf/unbind paragraphs. Its program
+  example now declares a BF16 output. The torch2zml howto called
+  `maybeCreateReplicatedTensor`, which does not exist; it now calls
+  `maybeCreateTensor(.., .replicated, .{})`. README needed no change.
+- Tests: the sourceOf/rebind round trip and the two `sourceOf == null`
+  checks are gone. A new test places a transposed source by `as` (another
+  rank, partitioned) and by `withPartitioning(.replicated, .{})`, checks
+  that both bind the same bytes, and checks `unplaced`. The host-pinned
+  cases bind, then call `setMemory`.
+
+llmd (monorepo):
+- Every source is placed last, then bound. The 8 callers that restated
+  the target shape only to place it (`reshape` then `bindAs` or
+  `placeAs`, a dead `withTags`) call `as(shape)`.
+- 20 dead partitioning arguments go: gemma4 5, qwen4/model 10, qwen3_5 2,
+  ministral3 2, laguna 1. The review counted 21; the compile error shows
+  none is left.
+- `linear.bindBlockFp8` takes placed Sources, which `fusedSource` and
+  `Stack.placed` produce. Swizzled scales go through `unplaced`, the
+  swizzle, then `as` again.
+- deepseek41's Engram tables and qwen4's n-gram rows bind, then call
+  `View.setMemory`.
+- The 11 `store.store.mesh(..)` calls are `store.mesh(..)`. The fused
+  Linear's store identity check goes: since R8 llmd has one store, and
+  `Source.concatenate` panics on sources of two. The review's other
+  reach-throughs went with R8 and R9, so model code no longer touches
+  `view.store`.
+
+Review (workflow, refuting verifier): five findings, all low, all fixed.
+- Routing `createTensor` through Source made an empty checkpoint tensor a
+  composite without parts. `start` still failed with `InvalidBinding`,
+  but logged "from no source has no parts" instead of the key, and the
+  loader test's empty case passed by the no-parts rule.
+  `View.maybeCreateTensor` binds an empty tensor plainly again, and the
+  test checks that its binding is plain. A doc-only fix was also
+  proposed; it would have left that binding different from before, which
+  R10 was to avoid.
+- `unplaced` had no zml test, and its docs said a placed source only
+  binds. Both fixed.
+- The howto and loader.md's program example, above.
+
+Not done:
+- A whole tensor of a sub-byte dtype whose bits are not a multiple of 8
+  now panics at bind (Source lowering); it used to bind plainly. No known
+  checkpoint has one.
+- A fused Linear over two stores panics instead of returning
+  `IncompatibleProjections`.
+- `createTensor` builds pieces and a layout it then drops: a little more
+  arena memory per tensor, not measured.
+- An empty source bound by hand through `Source.bind` (not
+  `createTensor`) still logs "from no source".
+- `zml/testing.zig` still reaches `store.store`; it is zml's own test
+  helper, not model code.
+- Not run on a GPU: deepseek41's Engram and qwen4's n-gram host-pinned
+  bindings were only built and read; the swizzle through `unplaced` runs
+  only in llmd's CPU tests, on a hand-built swizzling target.
+
+Checks:
+- `bazel test //zml:test` passes (333, 12 skip).
+- `bazel build //examples/...`.
+- `bazel test --config=localzml //llmd/...` passes 7/7 (`llmd:test` 264,
+  9 skip; `weights_test` 24/24).
+- `bazel build --config=localzml //llmd:llmd`.
+- `zig fmt` on scratch copies: no diff in the changed code.
+
 ## Open work
+
+- 2026-10-22 a Source carries its placement (forty-third pass, zml
+  nuulylpo and monorepo uxxqmoxo): R10 done. A Source is placed last
+  (`withPartitioning` or `as`), `bind` and `bindProgram` are the only
+  terminals, `View.setMemory` is the one memory setter and panics on a
+  program's output, and model code reaches the store only through
+  `View`. `Source.unplaced` is an addition the plan does not list. Not
+  run on a GPU: deepseek41's Engram and qwen4's n-gram host-pinned
+  tables, and the block-FP8 scale swizzle through `unplaced` on sm_10x.
 
 - 2026-10-22 block-FP8 at bind time (forty-second pass, zml urqymvvl and
   monorepo sukonzkw): R9 done, and with it "Read this first" item 9.
