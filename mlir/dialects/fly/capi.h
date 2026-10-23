@@ -12,20 +12,20 @@ extern "C" {
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Fly, fly);
 
 MLIR_CAPI_EXPORTED bool mlirAttributeIsAFlyInt(MlirAttribute attr);
-MLIR_CAPI_EXPORTED MlirAttribute mlirFlyIntAttrGetStatic(MlirContext context,
+MLIR_CAPI_EXPORTED MlirAttribute mlirFlyIntAttrStaticGet(MlirContext context,
                                                          int32_t value);
-MLIR_CAPI_EXPORTED MlirAttribute mlirFlyIntAttrGetDynamic(MlirContext context,
+MLIR_CAPI_EXPORTED MlirAttribute mlirFlyIntAttrDynamicGet(MlirContext context,
                                                           int32_t width,
                                                           int32_t divisibility);
-MLIR_CAPI_EXPORTED MlirAttribute mlirFlyIntAttrGetNone(MlirContext context);
+MLIR_CAPI_EXPORTED MlirAttribute mlirFlyIntAttrNoneGet(MlirContext context);
 
 MLIR_CAPI_EXPORTED bool mlirAttributeIsAFlyIntTuple(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirFlyIntTupleAttrGet(MlirContext context,
                                                         MlirAttribute value);
 MLIR_CAPI_EXPORTED MlirAttribute
-mlirFlyIntTupleAttrGetBasis(MlirContext context, MlirAttribute value,
+mlirFlyIntTupleAttrBasisGet(MlirContext context, MlirAttribute value,
                             intptr_t nModes, const int32_t *modes);
-MLIR_CAPI_EXPORTED MlirAttribute mlirFlyIntTupleAttrGetTuple(
+MLIR_CAPI_EXPORTED MlirAttribute mlirFlyIntTupleAttrTupleGet(
     MlirContext context, intptr_t nElements, MlirAttribute const *elements);
 
 MLIR_CAPI_EXPORTED bool mlirAttributeIsAFlyLayout(MlirAttribute attr);
@@ -36,7 +36,7 @@ MLIR_CAPI_EXPORTED MlirAttribute mlirFlyLayoutAttrGet(MlirContext context,
 MLIR_CAPI_EXPORTED bool mlirAttributeIsAFlyTile(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirAttribute mlirFlyTileAttrGet(MlirContext context,
                                                     MlirAttribute value);
-MLIR_CAPI_EXPORTED MlirAttribute mlirFlyTileAttrGetModes(
+MLIR_CAPI_EXPORTED MlirAttribute mlirFlyTileAttrModesGet(
     MlirContext context, intptr_t nModes, MlirAttribute const *modes);
 
 MLIR_CAPI_EXPORTED bool mlirAttributeIsAFlySwizzle(MlirAttribute attr);
