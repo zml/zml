@@ -7,8 +7,6 @@ const std = @import("std");
 const c = @import("c");
 const mlir = @import("mlir");
 
-pub const dialect_namespace = "sdy";
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("sdy");
 }

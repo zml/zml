@@ -15,9 +15,9 @@ dialects, with a small C API for what upstream lacks).
 
 ## Guarantees
 
-- **Registration.** The package exposes `dialect_namespace` and
-  `registerDialect(registry)`, which calls `registry.registerDialect("<handle>")`
-  with a string literal, where `<handle>` is the second argument of
+- **Registration.** The package exposes `registerDialect(registry)`, which
+  calls `registry.registerDialect("<handle>")` with a string literal, where
+  `<handle>` is the second argument of
   `MLIR_DECLARE_CAPI_DIALECT_REGISTRATION`. Tests and consumers register
   through `<pkg>.registerDialect`, never through raw strings or
   `DialectHandle.fromString`. A DSL exposes `registerDialects(registry)`,
@@ -133,8 +133,6 @@ Every dep a source includes or imports is listed directly. Format with
 ### Zig API
 
 ```zig
-pub const dialect_namespace = "cuda";
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("cuda");
 }
@@ -223,8 +221,8 @@ verified.
 3. Write `capi.h`/`capi.cc` for registration and whatever upstream's C API
    lacks: per attribute and type, a predicate, a `Get` and the parameter
    getters.
-4. Bind in `<pkg>.zig`, or generate `ops.zig`: `dialect_namespace`,
-   `registerDialect`, enums, wrappers, helpers, builders, `operation_names`.
+4. Bind in `<pkg>.zig`, or generate `ops.zig`: `registerDialect`, enums,
+   wrappers, helpers, builders, `operation_names`.
 5. Write `test.zig`.
 6. If anything is generated, add a `REGENERATING.md`.
 7. Make consumers depend on `//mlir/dialects/<pkg>` and call
@@ -255,9 +253,7 @@ grep -nE 'alwayslink|glob\(' "$d/BUILD.bazel"
 grep -rnE --include='*.zig' 'pub fn get[A-Z][A-Za-z]*\(self' "$d"
 grep -rnE --include='*.zig' --exclude=test.zig '(Type|Attribute)\.parse\(' "$d"
 grep -rln --include='*.zig' --exclude=test.zig '^test ' "$d"
-for n in 'pub const dialect_namespace' 'pub fn registerDialect'; do
-  grep -rqF --include='*.zig' "$n" "$d" || echo "missing: $n"
-done
+grep -rqF --include='*.zig' 'pub fn registerDialect' "$d" || echo "missing: registerDialect"
 if grep -rqF --include='*.zig' '.make(' "$d"; then
   grep -qF 'pub const operation_names' "$d"/*.zig || echo "missing: operation_names"
   grep -qF 'test "every bound operation is registered"' "$d/test.zig" || echo "missing: registration test"

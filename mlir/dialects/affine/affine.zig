@@ -1,8 +1,6 @@
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-pub const dialect_namespace = "affine";
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("affine");
 }

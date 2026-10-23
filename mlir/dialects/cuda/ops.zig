@@ -5,7 +5,6 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-pub const dialect_namespace = "cuda";
 /// The C dialect handle, `mlirGetDialectHandle__cuda__`.
 pub const dialect_handle = "cuda";
 

@@ -3,8 +3,6 @@ const std = @import("std");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-pub const dialect_namespace = "scf";
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("scf");
 }

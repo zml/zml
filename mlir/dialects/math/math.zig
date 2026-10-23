@@ -1,7 +1,5 @@
 const mlir = @import("mlir");
 
-pub const dialect_namespace = "math";
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("math");
 }

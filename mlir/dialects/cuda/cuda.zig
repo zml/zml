@@ -7,8 +7,6 @@ const mlir = @import("mlir");
 
 pub const ops = @import("ops.zig");
 
-pub const dialect_namespace = ops.dialect_namespace;
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("cuda");
 }

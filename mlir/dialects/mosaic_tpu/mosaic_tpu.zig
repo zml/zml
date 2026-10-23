@@ -9,8 +9,6 @@ const stdx = @import("stdx");
 /// the custom-call JSON `serialization_format`, which remains 1.
 pub const SERDE_VERSION: i32 = 18;
 
-pub const dialect_namespace = "tpu";
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("tpu");
 }

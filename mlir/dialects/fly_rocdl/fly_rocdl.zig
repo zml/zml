@@ -3,8 +3,6 @@ const mlir = @import("mlir");
 
 pub const ops = @import("ops.zig");
 
-pub const dialect_namespace = "fly_rocdl";
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("fly_rocdl");
 }

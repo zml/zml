@@ -41,8 +41,6 @@ pub const WMMACModifier = enums.WMMACModifier;
 pub const WMMAMatrixScale = enums.WMMAMatrixScale;
 pub const WMMAMatrixScaleFormat = enums.WMMAMatrixScaleFormat;
 
-pub const dialect_namespace = "rocdl";
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("rocdl");
 }

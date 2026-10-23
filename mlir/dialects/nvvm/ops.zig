@@ -5,7 +5,6 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-pub const dialect_namespace = "nvvm";
 /// The C dialect handle, `mlirGetDialectHandle__cute_nvvm__`.
 pub const dialect_handle = "cute_nvvm";
 
