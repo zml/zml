@@ -71,19 +71,26 @@ pub fn forward(self: AutoencoderKLQwenImage21, input_ids: zml.Tensor) zml.Tensor
     // 11 for a 2048x2048 image
     stdx.debug.assert(rows_count <= max_tiles, "Found that rows_count ({}) is greater than {}", .{ rows_count, max_tiles });
     stdx.debug.assert(per_row <= max_tiles, "Found that per_row ({}) is greater than {}", .{ per_row, max_tiles });
+    // Like PyTorch's slicing, tiles on the bottom/right edges are cut short, so the tiles only come in
+    // a handful of shapes. Each group of same-shaped tiles is decoded by a `stablehlo.while` that traces
+    // the decoder once, instead of unrolling one decoder per tile (121 for a 2048x2048 image).
+    var row_runs: [max_tiles]TileRun = undefined;
+    var col_runs: [max_tiles]TileRun = undefined;
+    const row_runs_count = tileRuns(height, tile_latent_stride_height, tile_latent_min_height, &row_runs);
+    const col_runs_count = tileRuns(width, tile_latent_stride_width, tile_latent_min_width, &col_runs);
+
     var tiles: Tiles = undefined;
-
-    for (0..rows_count) |x| {
-        const i: i64 = @as(i64, @intCast(x)) * tile_latent_stride_height;
-        for (0..per_row) |y| {
-            const j: i64 = @as(i64, @intCast(y)) * tile_latent_stride_width;
-            // Like PyTorch's slicing, tiles on the bottom/right edges are cut short
-            const tile = input_ids
-                .slice(.kx, .{ .start = i, .end = @min(i + tile_latent_min_height, height) })
-                .slice(.ky, .{ .start = j, .end = @min(j + tile_latent_min_width, width) });
-            const post_quant = self.post_quant_conv.forward(tile);
-
-            tiles[x][y] = self.decoder.forward(post_quant);
+    for (row_runs[0..row_runs_count]) |rows| {
+        for (col_runs[0..col_runs_count]) |cols| {
+            const decoded = self.decodeTiles(input_ids, rows, cols, .{
+                .height = tile_latent_stride_height,
+                .width = tile_latent_stride_width,
+            });
+            for (0..rows.count) |r| {
+                for (0..cols.count) |c| {
+                    tiles[rows.first + r][cols.first + c] = decoded.slice(.tile, .single(@intCast(r * cols.count + c)));
+                }
+            }
         }
     }
 
@@ -100,6 +107,93 @@ pub fn forward(self: AutoencoderKLQwenImage21, input_ids: zml.Tensor) zml.Tensor
         zml.Tensor.scalar(1, dec.dtype()).broad(dec.shape()),
     );
 }
+
+/// Consecutive tiles along one axis sharing the same size: tiles `first..first + count` all span `size` latents.
+const TileRun = struct {
+    first: usize,
+    count: usize,
+    size: i64,
+};
+
+/// Splits the tiles starting at range(0, dim, stride) into runs of tiles of the same size.
+/// Tile sizes are min(tile_size, dim - start), so they never increase and same-sized tiles are contiguous.
+fn tileRuns(dim: i64, stride: i64, tile_size: i64, runs: *[max_tiles]TileRun) usize {
+    var runs_count: usize = 0;
+    var start: i64 = 0;
+    var index: usize = 0;
+    while (start < dim) : ({
+        start += stride;
+        index += 1;
+    }) {
+        const size = @min(tile_size, dim - start);
+        if (runs_count > 0 and runs[runs_count - 1].size == size) {
+            runs[runs_count - 1].count += 1;
+        } else {
+            runs[runs_count] = .{ .first = index, .count = 1, .size = size };
+            runs_count += 1;
+        }
+    }
+    return runs_count;
+}
+
+/// Decodes the `rows.count * cols.count` latent tiles of a group with a single traced decoder.
+/// Returns {tile, bs, c, t, kx, ky}, tiles in row-major order.
+fn decodeTiles(self: AutoencoderKLQwenImage21, latents: zml.Tensor, rows: TileRun, cols: TileRun, stride: struct { height: i64, width: i64 }) zml.Tensor {
+    const tiles_count: i64 = @intCast(rows.count * cols.count);
+    const out_channels = self.decoder.conv_out.conv.weight.dim(.bs);
+    const decoded_shape = latents.shape()
+        .setDim(.c, out_channels)
+        .setDim(.kx, rows.size * spatial_compression_ratio)
+        .setDim(.ky, cols.size * spatial_compression_ratio)
+        .insertTag(0, tiles_count, .tile);
+
+    const result = zml.ops.@"while"(DecodeTiles, .{
+        .model = self,
+        .latents = latents,
+        .rows = rows,
+        .cols = cols,
+        .stride_height = stride.height,
+        .stride_width = stride.width,
+        .tiles_count = tiles_count,
+    }, .{
+        .k = .scalar(0, .i32),
+        .decoded = .zeroes(decoded_shape),
+    });
+    return result.decoded;
+}
+
+const DecodeTiles = struct {
+    model: AutoencoderKLQwenImage21,
+    latents: zml.Tensor,
+    rows: TileRun,
+    cols: TileRun,
+    stride_height: i64,
+    stride_width: i64,
+    tiles_count: i64,
+
+    pub const State = struct {
+        k: zml.Tensor,
+        decoded: zml.Tensor,
+    };
+
+    pub fn cond(self: DecodeTiles, state: State) zml.Tensor {
+        return state.k.cmp(.LT, zml.Tensor.scalar(self.tiles_count, .i32));
+    }
+
+    pub fn body(self: DecodeTiles, state: State) State {
+        const per_row: i64 = @intCast(self.cols.count);
+        const row = state.k.divByConst(per_row).addConstant(self.rows.first);
+        const col = state.k.remainderConst(per_row).addConstant(self.cols.first);
+        const tile = self.latents
+            .slice(.kx, .dyn(row.scale(self.stride_height), self.rows.size))
+            .slice(.ky, .dyn(col.scale(self.stride_width), self.cols.size));
+        const decoded_tile = self.model.decoder.forward(self.model.post_quant_conv.forward(tile));
+        return .{
+            .k = state.k.addConstant(1),
+            .decoded = state.decoded.dynamicUpdateSlice(.{ .tile = state.k }, decoded_tile),
+        };
+    }
+};
 
 const StitchArgs = struct {
     blend_height: i64,
@@ -179,6 +273,28 @@ fn blend(a: zml.Tensor, b: zml.Tensor, extent: i64, comptime axis: @EnumLiteral(
         return blended;
     }
     return zml.Tensor.concatenate(&.{ blended, b.slice(axis, .{ .start = n }) }, axis);
+}
+
+test "tileRuns groups same-sized tiles" {
+    var runs: [max_tiles]TileRun = undefined;
+
+    // 2048x2048 image: starts 0, 12, .., 120, only the last tile is cut short (128 - 120 = 8).
+    try std.testing.expectEqualSlices(TileRun, &.{
+        .{ .first = 0, .count = 10, .size = 16 },
+        .{ .first = 10, .count = 1, .size = 8 },
+    }, runs[0..tileRuns(128, 12, 16, &runs)]);
+
+    // Two edge tiles are cut short: starts 108 and 120 give 123 - 108 = 15 and 123 - 120 = 3.
+    try std.testing.expectEqualSlices(TileRun, &.{
+        .{ .first = 0, .count = 9, .size = 16 },
+        .{ .first = 9, .count = 1, .size = 15 },
+        .{ .first = 10, .count = 1, .size = 3 },
+    }, runs[0..tileRuns(123, 12, 16, &runs)]);
+
+    // Single tile, smaller than the tile size.
+    try std.testing.expectEqualSlices(TileRun, &.{
+        .{ .first = 0, .count = 1, .size = 10 },
+    }, runs[0..tileRuns(10, 12, 16, &runs)]);
 }
 
 test "blend_v and blend_h match the PyTorch reference" {
