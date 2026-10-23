@@ -71,7 +71,8 @@ pub const paged = struct {
     /// `{.page, .k_chunk, .hkv, .hd}`. Sinks are one logit per query head.
     /// Decode reads whole pages, past each sequence's end and from pages of
     /// other sequences: the caches must hold numbers, so zero them once.
-    pub fn pagedAttention(parameters: Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, opts: paged_attention.AttentionOptions) Tensor {
+    pub fn pagedAttention(table_parameters: Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, opts: paged_attention.AttentionOptions) Tensor {
+        var parameters = table_parameters;
         if (opts.mask == .indices) @panic("Sparse attention masks are not supported by TCL paged attention");
         stdx.debug.assert(q.rank() == 4 and k_cache.rank() == 4 and v_cache.rank() == 4 and k_cache.shape().eqlDims(v_cache.shape()), "TCL attention requires matching rank-four split K/V caches", .{});
         stdx.debug.assert(q.dtype().isFloat() and k_cache.dtype().isFloat() and v_cache.dtype().isFloat(), "TCL attention requires floating-point queries and caches", .{});
@@ -91,6 +92,17 @@ pub const paged = struct {
             last_pe != null and last_pe.? == .int64 and last_pe.?.int64 == 7, "TCL attention requires a complete 8-PE RNGD chip", .{});
         if (q.dim(.b) == 0) return Tensor.zeroes(q.shape());
         const page = k_cache.dim(.k_chunk);
+        if (!parameters.options_.is_prefill and q.dim(.b) == parameters.seq_lens.dim(.b) and opts.sink == null and opts.mask.slidingWindow() == null) {
+            // Decode attention costs its whole table, read or not: each launch
+            // runs a version whose table holds just the step's longest sequence.
+            var sizes: stdx.BoundedArray(i64, 32) = .empty;
+            const pages = parameters.block_table.dim(.p);
+            var size: i64 = @intCast(std.math.ceilPowerOfTwo(u64, @intCast(std.math.divCeil(i64, decode_min_keys, page) catch unreachable)) catch unreachable);
+            while (size < pages) : (size *= 2) sizes.appendAssumeCapacity(size);
+            sizes.appendAssumeCapacity(pages);
+            const width = zml.Compiler.current().launchSize(parameters.seq_lens, sizes.constSlice(), page);
+            if (width < pages) parameters.block_table = parameters.block_table.slice(.p, .{ .end = width });
+        }
         // The 2026.4 compiler has no DPE tactic for 32-key attention. Pad to
         // at least 64 keys; the extra pages remain invalid and contribute zero.
         const keys = @max(parameters.block_table.dim(.p), std.math.divCeil(i64, 64, page) catch unreachable) * page;
@@ -193,6 +205,9 @@ const WriteRows = tcl.Kernel(WriteCfg, .{
 /// Keys a decode kernel attends to in one pass: TCC 2026.5 fails on the
 /// decode metadata for 131072 keys in pages of 16.
 const decode_keys = 65536;
+
+/// Narrowest decode table a launch runs, in keys.
+const decode_min_keys = 1024;
 
 const DecodeCfg = struct {
     t: i64,

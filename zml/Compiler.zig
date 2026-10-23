@@ -47,6 +47,10 @@ location: *const mlir.Location,
 channel_id: i64 = 0,
 composite_id: i64 = 0,
 
+/// The version of the program being compiled, and how launches pick one (see `launchSize`).
+launch_version: u32 = 0,
+launch_size: ?LaunchSize = null,
+
 threadlocal var _current: ?*Compiler = null;
 
 var mlir_global_init_mutex: std.Io.Mutex = .init;
@@ -224,6 +228,67 @@ pub fn current() *Compiler {
 
 pub fn currentOrNull() ?*Compiler {
     return _current;
+}
+
+/// How each launch of a program `launchSize` split into versions picks one.
+pub const LaunchSize = struct {
+    /// The 32-bit integer argument, in host memory, whose largest element decides.
+    argument: u32,
+    /// One size per version, ascending.
+    sizes: []const i64,
+    divisor: i64,
+
+    /// The first version whose size holds `largest / divisor`, rounded up; the last otherwise.
+    pub fn pick(self: LaunchSize, largest: i64) u32 {
+        const needed = std.math.divCeil(i64, @max(largest, 0), self.divisor) catch unreachable;
+        for (self.sizes, 0..) |size, i| if (needed <= size) return @intCast(i);
+        return @intCast(self.sizes.len - 1);
+    }
+};
+
+/// A size fixed at each launch rather than once per program, for work that does not get
+/// cheaper when only part of its input matters: the program compiles once per entry of
+/// `sizes` (ascending), and each launch runs the first version whose size holds the largest
+/// element of `key`, divided by `divisor` and rounded up. `key` must be a 32-bit integer
+/// argument in host memory (`onMemory(.host_pinned)`, maybe moved with `toMemory`), which the
+/// launch reads; otherwise there is one version, of the last size. Returns the size of the
+/// version being compiled. Every call in a program must pass the same key and sizes.
+pub fn launchSize(self: *Compiler, key: Tensor, sizes: []const i64, divisor: i64) i64 {
+    stdx.debug.assert(sizes.len > 0 and key.dtype() == .i32 and divisor > 0, "launchSize needs sizes and an i32 key", .{});
+    if (self.launch_size) |known| {
+        stdx.debug.assert(std.mem.eql(i64, known.sizes, sizes) and known.divisor == divisor, "launchSize calls of a program must agree", .{});
+        return sizes[self.launch_version];
+    }
+    const argument = self.hostArgument(key) orelse return sizes[sizes.len - 1];
+    self.launch_size = .{ .argument = argument, .sizes = self.arena.allocator().dupe(i64, sizes) catch @panic("OOM"), .divisor = divisor };
+    return sizes[self.launch_version];
+}
+
+test "launch sizes pick the narrowest version that holds the key" {
+    const launch_size: LaunchSize = .{ .argument = 0, .sizes = &.{ 64, 128, 300 }, .divisor = 16 };
+    try std.testing.expectEqual(@as(u32, 0), launch_size.pick(0));
+    try std.testing.expectEqual(@as(u32, 0), launch_size.pick(1024));
+    try std.testing.expectEqual(@as(u32, 1), launch_size.pick(1025));
+    try std.testing.expectEqual(@as(u32, 2), launch_size.pick(1 << 20));
+}
+
+/// The argument `x` is, or is moved from, if it lives in host memory.
+fn hostArgument(self: *Compiler, x: Tensor) ?u32 {
+    const scope = &self.scopes.slice()[0];
+    var value = scope.value(x);
+    while (value.isA(mlir.BlockArgument) == null) {
+        const op = value.owner();
+        if (!std.mem.eql(u8, op.name(), "stablehlo.custom_call") or op.numOperands() != 1) return null;
+        value = op.operand(0);
+    }
+    var it = scope.id_to_argument.iterator();
+    while (it.next()) |entry| {
+        if (!entry.value_ptr.*.eql(value)) continue;
+        const memory = scope.id_to_memory.get(entry.key_ptr.*) orelse return null;
+        if (memory != .host_pinned and memory != .host_unpinned) return null;
+        return @intCast(value.isA(mlir.BlockArgument).?.number());
+    }
+    return null;
 }
 
 pub fn currentScope(self: *Compiler) *Scope {
@@ -437,6 +502,65 @@ pub fn compileInternal(
     args: std.meta.ArgsTuple(@TypeOf(func)),
     opts: Options,
 ) Error!Exe {
+    // The first version starts the others once its trace has found the sizes.
+    var others: OtherVersions = .{ .allocator = allocator, .io = io };
+    defer others.deinit();
+    var exe = try compileVersion(allocator, io, platform, func, args, opts, 0, &others);
+    errdefer exe.deinit();
+    if (others.futures.len == 0) return exe;
+    const versions = try exe.arena.allocator().alloc(*pjrt.LoadedExecutable, others.futures.len + 1);
+    versions[0] = exe.exe;
+    exe.versions = versions[0..1];
+    for (others.futures, versions[1..], 1..) |*future, *version, i| {
+        others.awaited += 1;
+        var other = try future.await(io);
+        version.* = other.release();
+        exe.versions = versions[0 .. i + 1];
+    }
+    return exe;
+}
+
+/// The versions after the first, compiling while it does.
+const OtherVersions = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    futures: []std.Io.Future(Error!Exe) = &.{},
+    awaited: usize = 0,
+
+    fn deinit(self: *OtherVersions) void {
+        for (self.futures[self.awaited..]) |*future| {
+            if (future.cancel(self.io)) |other| other.deinit() else |_| {}
+        }
+        self.allocator.free(self.futures);
+    }
+};
+
+fn Version(comptime func: anytype) type {
+    return struct {
+        fn compile(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, args: std.meta.ArgsTuple(@TypeOf(func)), opts: Options, version: u32) Error!Exe {
+            // Compiling blocks its thread: off the zio scheduler, as `compile` does.
+            return switch (platform.io_impl) {
+                .threaded => run(allocator, io, platform, args, opts, version),
+                .zio => try zio.blockInPlace(run, .{ allocator, io, platform, args, opts, version }),
+            };
+        }
+
+        fn run(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, args: std.meta.ArgsTuple(@TypeOf(func)), opts: Options, version: u32) Error!Exe {
+            return compileVersion(allocator, io, platform, func, args, opts, version, null);
+        }
+    };
+}
+
+fn compileVersion(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    comptime func: anytype,
+    args: std.meta.ArgsTuple(@TypeOf(func)),
+    opts: Options,
+    version: u32,
+    others: ?*OtherVersions,
+) Error!Exe {
     // TODO: Here we have somewhat of a requirement
     // Emitting MLIR requires to have the compiler context available at all times using `Compiler.current()`.
     // If in the future, we inject an Io that is not thread-based, we might have some surprises.
@@ -459,6 +583,7 @@ pub fn compileInternal(
 
     var compiler: Compiler = .init(allocator, io, platform, opts);
     defer compiler.deinit();
+    compiler.launch_version = version;
 
     var result = compiler.emitMlir(func, args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -466,6 +591,15 @@ pub fn compileInternal(
     };
     defer result.output_info.deinit(compiler.allocator);
     defer result.input_info.deinit(compiler.allocator);
+
+    if (others) |rest| if (compiler.launch_size) |launch_size| if (launch_size.sizes.len > 1) {
+        var version_opts = opts;
+        version_opts.progress = .none;
+        rest.futures = try allocator.alloc(std.Io.Future(Error!Exe), launch_size.sizes.len - 1);
+        for (rest.futures, 1..) |*future, i| {
+            future.* = rest.io.async(Version(func).compile, .{ allocator, io, platform, args, version_opts, @as(u32, @intCast(i)) });
+        }
+    };
 
     try addPartitionerOperations(&compiler);
 
@@ -499,7 +633,7 @@ pub fn compileInternal(
 
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compiler.module.operation()});
 
-    const exe = try Exe.init(
+    var exe = try Exe.init(
         allocator,
         platform,
         loaded_executable,
@@ -511,6 +645,11 @@ pub fn compileInternal(
         result.input_info.items(.aliasing_output),
     );
     errdefer exe.deinit();
+    if (compiler.launch_size) |launch_size| exe.launch_size = .{
+        .argument = launch_size.argument,
+        .sizes = try exe.arena.allocator().dupe(i64, launch_size.sizes),
+        .divisor = launch_size.divisor,
+    };
 
     opts.progress.completeOne();
     return exe;

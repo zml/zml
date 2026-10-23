@@ -30,6 +30,10 @@ pub const Exe = struct {
     num_devices: u32,
     num_partitions: u32,
 
+    /// Versions of the program by `Compiler.launchSize`, `exe` first; empty when there is one.
+    versions: []const *pjrt.LoadedExecutable = &.{},
+    launch_size: ?Compiler.LaunchSize = null,
+
     arena: std.heap.ArenaAllocator,
 
     pub fn init(
@@ -74,8 +78,29 @@ pub const Exe = struct {
 
     pub fn deinit(self: *const Exe) void {
         if (self.context) |context| context.deinit(self.platform.pjrt_api);
+        for (self.versions[@min(self.versions.len, 1)..]) |other| other.deinit(self.platform.pjrt_api);
         self.exe.deinit(self.platform.pjrt_api);
         self.arena.deinit();
+    }
+
+    /// Frees everything but the PJRT executable, which the caller then owns.
+    pub fn release(self: *Exe) *pjrt.LoadedExecutable {
+        if (self.context) |context| context.deinit(self.platform.pjrt_api);
+        const exe = self.exe;
+        self.arena.deinit();
+        return exe;
+    }
+
+    /// The version this launch runs: the one `launch_size` picks from its host argument.
+    fn version(self: *const Exe, arguments: Arguments) *pjrt.LoadedExecutable {
+        const launch_size = self.launch_size orelse return self.exe;
+        if (self.versions.len < 2) return self.exe;
+        const buffer = arguments.flat_buffers.buffers[0][launch_size.argument];
+        const data: [*]const i32 = @ptrCast(@alignCast(buffer.opaqueDeviceMemoryDataPointer(self.platform.pjrt_api) catch |err|
+            std.debug.panic("launchSize could not read its host argument: {}", .{err})));
+        var largest: i64 = std.math.minInt(i64);
+        for (data[0..self.input_shapes[launch_size.argument].count()]) |x| largest = @max(largest, @as(i64, x));
+        return self.versions[launch_size.pick(largest)];
     }
 
     pub fn args(self: *const Exe, allocator: std.mem.Allocator) !Arguments {
@@ -350,7 +375,7 @@ pub const Exe = struct {
             .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => if (opts.wait) partition_events else null,
         };
 
-        self.exe.execute(self.platform.pjrt_api, .{
+        self.version(arguments).execute(self.platform.pjrt_api, .{
             .arguments = arguments.flat_buffers.buffers,
             .num_args = arguments.expected_shapes.len,
             .results = results_.flat_buffers.buffers,
