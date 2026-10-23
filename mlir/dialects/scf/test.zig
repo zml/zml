@@ -3,6 +3,21 @@ const std = @import("std");
 const mlir = @import("mlir");
 const scf = @import("mlir/dialects/scf");
 
+const operation_names: []const []const u8 = &.{
+    "scf.condition",
+    "scf.execute_region",
+    "scf.for",
+    "scf.forall",
+    "scf.forall.in_parallel",
+    "scf.if",
+    "scf.index_switch",
+    "scf.parallel",
+    "scf.reduce",
+    "scf.reduce.return",
+    "scf.while",
+    "scf.yield",
+};
+
 test {
     @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(scf);
@@ -19,6 +34,6 @@ test "every bound operation is registered" {
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
-    for (scf.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }

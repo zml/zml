@@ -5,22 +5,6 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("affine");
 }
 
-pub const operation_names: []const []const u8 = &.{
-    "affine.apply",
-    "affine.delinearize_index",
-    "affine.for",
-    "affine.if",
-    "affine.linearize_index",
-    "affine.load",
-    "affine.max",
-    "affine.min",
-    "affine.parallel",
-    "affine.store",
-    "affine.vector_load",
-    "affine.vector_store",
-    "affine.yield",
-};
-
 // =============================================================================
 // affine.apply / affine.min / affine.max
 // =============================================================================

@@ -3,6 +3,42 @@ const std = @import("std");
 const mlir = @import("mlir");
 const vector = @import("mlir/dialects/vector");
 
+const operation_names: []const []const u8 = &.{
+    "vector.bitcast",
+    "vector.broadcast",
+    "vector.compressstore",
+    "vector.constant_mask",
+    "vector.contract",
+    "vector.create_mask",
+    "vector.deinterleave",
+    "vector.expandload",
+    "vector.extract",
+    "vector.extract_strided_slice",
+    "vector.fma",
+    "vector.from_elements",
+    "vector.gather",
+    "vector.insert",
+    "vector.insert_strided_slice",
+    "vector.interleave",
+    "vector.load",
+    "vector.maskedload",
+    "vector.maskedstore",
+    "vector.multi_reduction",
+    "vector.reduction",
+    "vector.scatter",
+    "vector.shape_cast",
+    "vector.shuffle",
+    "vector.step",
+    "vector.store",
+    "vector.to_elements",
+    "vector.transfer_read",
+    "vector.transfer_write",
+    "vector.transpose",
+    "vector.type_cast",
+    "vector.vscale",
+    "vector.yield",
+};
+
 fn expectPrints(expected: []const u8, value: anytype) !void {
     var buf: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
@@ -45,6 +81,6 @@ test "every bound operation is registered" {
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
-    for (vector.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }

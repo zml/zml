@@ -7,33 +7,6 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("memref");
 }
 
-pub const operation_names: []const []const u8 = &.{
-    "memref.alloc",
-    "memref.alloca",
-    "memref.assume_alignment",
-    "memref.atomic_rmw",
-    "memref.cast",
-    "memref.collapse_shape",
-    "memref.copy",
-    "memref.dealloc",
-    "memref.dim",
-    "memref.expand_shape",
-    "memref.extract_aligned_pointer_as_index",
-    "memref.get_global",
-    "memref.global",
-    "memref.load",
-    "memref.memory_space_cast",
-    "memref.prefetch",
-    "memref.rank",
-    "memref.realloc",
-    "memref.reinterpret_cast",
-    "memref.reshape",
-    "memref.store",
-    "memref.subview",
-    "memref.transpose",
-    "memref.view",
-};
-
 /// Sentinel matching `mlir::ShapedType::kDynamic` (== INT64_MIN).
 /// Use this in static-size/offset/stride arrays to mark a slot as dynamic.
 pub const kDynamic: i64 = std.math.minInt(i64);

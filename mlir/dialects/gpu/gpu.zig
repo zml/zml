@@ -6,18 +6,6 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("gpu");
 }
 
-pub const operation_names: []const []const u8 = &.{
-    "gpu.barrier",
-    "gpu.block_dim",
-    "gpu.block_id",
-    "gpu.func",
-    "gpu.grid_dim",
-    "gpu.module",
-    "gpu.return",
-    "gpu.shuffle",
-    "gpu.thread_id",
-};
-
 /// A dimension, either `x`, `y` or `z`.
 pub const Dim = enum(u32) {
     x = 0,

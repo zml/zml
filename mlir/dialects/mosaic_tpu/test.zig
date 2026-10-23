@@ -3,6 +3,60 @@ const std = @import("std");
 const mlir = @import("mlir");
 const mosaic_tpu = @import("mlir/dialects/mosaic_tpu");
 
+const operation_names: []const []const u8 = &.{
+    "tpu.all_reduce",
+    "tpu.assume_layout",
+    "tpu.assume_multiple",
+    "tpu.barrier",
+    "tpu.bitcast",
+    "tpu.bitcast_vreg",
+    "tpu.broadcast_in_sublanes",
+    "tpu.concatenate",
+    "tpu.create_mask",
+    "tpu.delay",
+    "tpu.device_id",
+    "tpu.dynamic_rotate",
+    "tpu.enqueue_dma",
+    "tpu.erase_memref_layout",
+    "tpu.extf",
+    "tpu.fptosi",
+    "tpu.fptoui",
+    "tpu.iota",
+    "tpu.load",
+    "tpu.mask_cast",
+    "tpu.matmul",
+    "tpu.memref_bitcast",
+    "tpu.memref_reshape",
+    "tpu.memref_slice",
+    "tpu.memref_squeeze",
+    "tpu.reciprocal",
+    "tpu.reduce_index",
+    "tpu.region",
+    "tpu.reinterpret_cast",
+    "tpu.reshape",
+    "tpu.scan",
+    "tpu.sem_alloc",
+    "tpu.sem_barrier",
+    "tpu.sem_read",
+    "tpu.sem_signal",
+    "tpu.sem_wait",
+    "tpu.sitofp",
+    "tpu.sort",
+    "tpu.store",
+    "tpu.strided_load",
+    "tpu.strided_store",
+    "tpu.trace",
+    "tpu.trace_start",
+    "tpu.trace_stop",
+    "tpu.transpose",
+    "tpu.truncf",
+    "tpu.uitofp",
+    "tpu.vector_load",
+    "tpu.vector_store",
+    "tpu.wait_dma2",
+    "tpu.yield",
+};
+
 fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
@@ -210,6 +264,6 @@ test "every bound operation is registered" {
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
-    for (mosaic_tpu.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }

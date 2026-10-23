@@ -14,4 +14,3 @@ pub const call_intrinsic = ops.call_intrinsic;
 pub const InlineAsmOpts = ops.InlineAsmOpts;
 pub const inline_asm = ops.inline_asm;
 pub const registerDialect = ops.registerDialect;
-pub const operation_names = ops.operation_names;

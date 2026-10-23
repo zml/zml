@@ -15,13 +15,6 @@ const stdx = @import("stdx");
 
 const make = @import("mlir/dialects/fly").make;
 
-/// Every operation bound here, for the registration test.
-pub const operation_names: []const []const u8 = &.{
-    "fly_rocdl.get_buffer_rsrc",
-    "fly_rocdl.make_tiled_tdm_load_atom",
-    "fly_rocdl.make_tiled_tdm_store_atom",
-};
-
 /// `fly_rocdl.get_buffer_rsrc`. Extract the raw ROCDL buffer resource from a buffer-descriptor pointer. Result types are inferred.
 pub fn get_buffer_rsrc(ctx: *mlir.Context, ptr: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return make(ctx, "fly_rocdl.get_buffer_rsrc", .{

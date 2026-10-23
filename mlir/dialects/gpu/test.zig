@@ -3,6 +3,18 @@ const std = @import("std");
 const gpu = @import("mlir/dialects/gpu");
 const mlir = @import("mlir");
 
+const operation_names: []const []const u8 = &.{
+    "gpu.barrier",
+    "gpu.block_dim",
+    "gpu.block_id",
+    "gpu.func",
+    "gpu.grid_dim",
+    "gpu.module",
+    "gpu.return",
+    "gpu.shuffle",
+    "gpu.thread_id",
+};
+
 fn expectPrints(expected: []const u8, value: anytype) !void {
     var buf: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
@@ -45,6 +57,6 @@ test "every bound operation is registered" {
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
-    for (gpu.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }

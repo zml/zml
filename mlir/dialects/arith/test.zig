@@ -3,6 +3,61 @@ const std = @import("std");
 const arith = @import("mlir/dialects/arith");
 const mlir = @import("mlir");
 
+const operation_names: []const []const u8 = &.{
+    "arith.addf",
+    "arith.addi",
+    "arith.addui_extended",
+    "arith.andi",
+    "arith.bitcast",
+    "arith.ceildivsi",
+    "arith.ceildivui",
+    "arith.cmpf",
+    "arith.cmpi",
+    "arith.constant",
+    "arith.convertf",
+    "arith.divf",
+    "arith.divsi",
+    "arith.divui",
+    "arith.extf",
+    "arith.extsi",
+    "arith.extui",
+    "arith.floordivsi",
+    "arith.flush_denormals",
+    "arith.fptosi",
+    "arith.fptoui",
+    "arith.index_cast",
+    "arith.index_castui",
+    "arith.maximumf",
+    "arith.maxnumf",
+    "arith.maxsi",
+    "arith.maxui",
+    "arith.minimumf",
+    "arith.minnumf",
+    "arith.minsi",
+    "arith.minui",
+    "arith.mulf",
+    "arith.muli",
+    "arith.mulsi_extended",
+    "arith.mului_extended",
+    "arith.negf",
+    "arith.ori",
+    "arith.remf",
+    "arith.remsi",
+    "arith.remui",
+    "arith.scaling_truncf",
+    "arith.select",
+    "arith.shli",
+    "arith.shrsi",
+    "arith.shrui",
+    "arith.sitofp",
+    "arith.subf",
+    "arith.subi",
+    "arith.truncf",
+    "arith.trunci",
+    "arith.uitofp",
+    "arith.xori",
+};
+
 fn expectPrints(expected: []const u8, value: anytype) !void {
     var buf: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
@@ -46,6 +101,6 @@ test "every bound operation is registered" {
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
-    for (arith.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }

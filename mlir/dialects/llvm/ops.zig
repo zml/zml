@@ -6,16 +6,6 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("llvm");
 }
 
-pub const operation_names: []const []const u8 = &.{
-    "llvm.bitcast",
-    "llvm.call_intrinsic",
-    "llvm.fmul",
-    "llvm.inline_asm",
-    "llvm.inttoptr",
-    "llvm.load",
-    "llvm.store",
-};
-
 // =============================================================================
 // Types
 // =============================================================================
