@@ -7,8 +7,6 @@ pub const Conv2d = @This();
 weight: zml.Tensor,
 bias: zml.Tensor,
 
-kernel_size: usize,
-padding: i64 = 0,
 stride: i64 = 1,
 
 pub fn unloadBuffers(self: *zml.Bufferized(Conv2d)) void {
@@ -17,11 +15,12 @@ pub fn unloadBuffers(self: *zml.Bufferized(Conv2d)) void {
 }
 
 pub fn forward(self: Conv2d, x: zml.Tensor) zml.Tensor {
-    stdx.debug.assert(self.weight.dim(2) == self.kernel_size, "Kernel size is wrong", .{});
-    stdx.debug.assert(self.weight.dim(3) == self.kernel_size, "Kernel size is wrong", .{});
-
+    // All the VAE convs are "same" convs: the padding is inferred from the square, odd kernel.
+    const kernel_size = self.weight.dim(.kx);
+    stdx.debug.assert(kernel_size == self.weight.dim(.ky) and @mod(kernel_size, 2) == 1, "Expected a square odd kernel, got {f}", .{self.weight});
+    const padding = @divExact(kernel_size - 1, 2);
     const conved = zml.Tensor.conv2d(x.convert(self.weight.dtype()), self.weight, .{
-        .padding = &.{ self.padding, self.padding, self.padding, self.padding },
+        .padding = &.{ padding, padding, padding, padding },
         .window_strides = &.{ self.stride, self.stride },
     });
     return conved.add(self.bias.broad(conved.shape())).convert(x.dtype());

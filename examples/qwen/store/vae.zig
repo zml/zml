@@ -64,10 +64,8 @@ pub fn load_tensors(
     const store_view = self.store.view().withPrefix("decoder");
     const conv_in = block.QwenImage21CausalConv3d{
         .conv = block.Conv2d{
-            .weight = store_view.createTensor("conv_in.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-            .bias = store_view.createTensor("conv_in.bias", .{.c}, .replicated),
-            .kernel_size = 3,
-            .padding = 1,
+            .weight = store_view.createTensor("conv_in.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+            .bias = store_view.createTensor("conv_in.bias", .{.c}, .{ .c = .model }),
         },
     };
 
@@ -77,18 +75,16 @@ pub fn load_tensors(
         const attentions_view = mid_block_view.withPrefix("attentions.0");
         const attentions = block.QwenImage21AttentionBlock{
             .norm = block.QwenImage21RMS_norm{
-                .gamma = attentions_view.createTensor("norm.gamma", .{ .c, .kx, .ky }, .replicated),
+                .gamma = attentions_view.createTensor("norm.gamma", .{ .c, .kx, .ky }, .{ .c = .model }),
                 .tag = zml.Shape.toTag(.c),
             },
             .to_qkv = block.Conv2d{
-                .weight = attentions_view.createTensor("to_qkv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                .bias = attentions_view.createTensor("to_qkv.bias", .{.c}, .replicated),
-                .kernel_size = 1,
+                .weight = attentions_view.createTensor("to_qkv.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                .bias = attentions_view.createTensor("to_qkv.bias", .{.c}, .{ .c = .model }),
             },
             .proj = block.Conv2d{
-                .weight = attentions_view.createTensor("proj.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                .bias = attentions_view.createTensor("proj.bias", .{.c}, .replicated),
-                .kernel_size = 1,
+                .weight = attentions_view.createTensor("proj.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                .bias = attentions_view.createTensor("proj.bias", .{.c}, .{ .c = .model }),
             },
         };
 
@@ -98,27 +94,23 @@ pub fn load_tensors(
             const resnet_view = mid_block_view.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .conv_shortcut = null,
@@ -134,15 +126,13 @@ pub fn load_tensors(
     const up_blocks = try load_up_blocks(allocator, store_view);
 
     const norm_out = block.QwenImage21RMS_norm{
-        .gamma = store_view.createTensor("norm_out.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+        .gamma = store_view.createTensor("norm_out.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
         .tag = zml.Shape.toTag(.c),
     };
     const conv_out = block.QwenImage21CausalConv3d{
         .conv = block.Conv2d{
-            .weight = store_view.createTensor("conv_out.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-            .bias = store_view.createTensor("conv_out.bias", .{.c}, .replicated),
-            .kernel_size = 3,
-            .padding = 1,
+            .weight = store_view.createTensor("conv_out.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+            .bias = store_view.createTensor("conv_out.bias", .{.c}, .{ .c = .model }),
         },
     };
 
@@ -156,9 +146,8 @@ pub fn load_tensors(
 
     const post_quant_conv = block.QwenImage21CausalConv3d{
         .conv = block.Conv2d{
-            .weight = self.store.view().createTensor("post_quant_conv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-            .bias = self.store.view().createTensor("post_quant_conv.bias", .{.c}, .replicated),
-            .kernel_size = 1,
+            .weight = self.store.view().createTensor("post_quant_conv.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+            .bias = self.store.view().createTensor("post_quant_conv.bias", .{.c}, .{ .c = .model }),
         },
     };
     self.model = block.AutoencoderKLQwenImage21{ .decoder = decoder, .post_quant_conv = post_quant_conv };
@@ -180,27 +169,23 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .conv_shortcut = null,
@@ -211,16 +196,13 @@ fn load_up_blocks(
         const upsampler = block.QwenImage21Resample{
             .upsample = block.QwenImage21Upsample{},
             .conv = block.Conv2d{
-                .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .replicated),
-                .kernel_size = 3,
-                .padding = 1,
+                .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .{ .c = .model }),
             },
             // .time_conv = block.QwenImage21CausalConv3d{
             //     .conv = block.Conv2d{
-            //         .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-            //         .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .replicated),
-            //         .kernel_size = 1,
+            //         .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .{.c = .model}),
+            //         .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .{.c = .model}),
             //     },
             // },
         };
@@ -241,27 +223,23 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .conv_shortcut = null,
@@ -272,16 +250,13 @@ fn load_up_blocks(
         const upsampler = block.QwenImage21Resample{
             .upsample = block.QwenImage21Upsample{},
             .conv = block.Conv2d{
-                .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .replicated),
-                .kernel_size = 3,
-                .padding = 1,
+                .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .{ .c = .model }),
             },
             // .time_conv = block.QwenImage21CausalConv3d{
             //     .conv = block.Conv2d{
-            //         .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-            //         .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .replicated),
-            //         .kernel_size = 1,
+            //         .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .{.c = .model}),
+            //         .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .{.c = .model}),
             //     },
             // },
         };
@@ -303,34 +278,29 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(0);
             resnets[0] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .conv_shortcut = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv_shortcut.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv_shortcut.bias", .{.c}, .replicated),
-                        .kernel_size = 1,
+                        .weight = resnet_view.createTensor("conv_shortcut.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv_shortcut.bias", .{.c}, .{ .c = .model }),
                     },
                 },
             };
@@ -340,27 +310,23 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .conv_shortcut = null,
@@ -371,16 +337,13 @@ fn load_up_blocks(
         const upsampler = block.QwenImage21Resample{
             .upsample = block.QwenImage21Upsample{},
             .conv = block.Conv2d{
-                .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .replicated),
-                .kernel_size = 3,
-                .padding = 1,
+                .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .{ .c = .model }),
             },
             // .time_conv = block.QwenImage21CausalConv3d{
             //     .conv = block.Conv2d{
-            //         .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-            //         .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .replicated),
-            //         .kernel_size = 1,
+            //         .weight = upsampler_view.createTensor("time_conv.weight", .{ .bs, .c, .kx, .ky }, .{.c = .model}),
+            //         .bias = upsampler_view.createTensor("time_conv.bias", .{.c}, .{.c = .model}),
             //     },
             // },
         };
@@ -402,34 +365,29 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(0);
             resnets[0] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .conv_shortcut = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv_shortcut.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv_shortcut.bias", .{.c}, .replicated),
-                        .kernel_size = 1,
+                        .weight = resnet_view.createTensor("conv_shortcut.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv_shortcut.bias", .{.c}, .{ .c = .model }),
                     },
                 },
             };
@@ -439,27 +397,23 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .conv_shortcut = null,
@@ -470,10 +424,8 @@ fn load_up_blocks(
         const upsampler = block.QwenImage21Resample{
             .upsample = block.QwenImage21Upsample{},
             .conv = block.Conv2d{
-                .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .replicated),
-                .kernel_size = 3,
-                .padding = 1,
+                .weight = upsampler_view.createTensor("resample.1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                .bias = upsampler_view.createTensor("resample.1.bias", .{.c}, .{ .c = .model }),
             },
         };
 
@@ -494,34 +446,29 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(0);
             resnets[0] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .conv_shortcut = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv_shortcut.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv_shortcut.bias", .{.c}, .replicated),
-                        .kernel_size = 1,
+                        .weight = resnet_view.createTensor("conv_shortcut.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv_shortcut.bias", .{.c}, .{ .c = .model }),
                     },
                 },
             };
@@ -531,27 +478,23 @@ fn load_up_blocks(
             const resnet_view = resup_store.withPrefix("resnets").withLayer(i);
             resnets[i] = block.QwenImage21ResidualBlock{
                 .norm1 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm1.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv1 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv1.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv1.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .norm2 = block.QwenImage21RMS_norm{
-                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .replicated),
+                    .gamma = resnet_view.createTensor("norm2.gamma", .{ .c, .t, .kx, .ky }, .{ .c = .model }),
                     .tag = zml.Shape.toTag(.c),
                 },
                 .conv2 = block.QwenImage21CausalConv3d{
                     .conv = block.Conv2d{
-                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .replicated),
-                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .replicated),
-                        .kernel_size = 3,
-                        .padding = 1,
+                        .weight = resnet_view.createTensor("conv2.weight", .{ .bs, .c, .kx, .ky }, .{ .c = .model }),
+                        .bias = resnet_view.createTensor("conv2.bias", .{.c}, .{ .c = .model }),
                     },
                 },
                 .conv_shortcut = null,
