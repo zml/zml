@@ -1051,25 +1051,6 @@ pub fn reshape(
     });
 }
 
-pub fn repeat(
-    ctx: *mlir.Context,
-    src: *const mlir.Value,
-    dimension: i32,
-    times: i32,
-    result_type: *const mlir.Type,
-    location: *const mlir.Location,
-) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tpu.repeat", .{
-        .operands = .{ .flat = &.{src} },
-        .results = .{ .flat = &.{result_type} },
-        .attributes = &.{
-            .named(ctx, "dimension", .int(ctx, .i32, dimension)),
-            .named(ctx, "times", .int(ctx, .i32, times)),
-        },
-        .location = location,
-    });
-}
-
 pub fn concatenate(
     ctx: *mlir.Context,
     sources: []const *const mlir.Value,

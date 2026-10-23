@@ -476,7 +476,7 @@ Use these for SMEM args (e.g. `cu_seqlens`) where Pallas emits scalar
 | `b.broadcastTo(src, shape)`                         | `vector.broadcast` — leading-dim broadcast or rank-prepend. |
 | `b.shapeCast(src, new_shape)`                       | `vector.shape_cast` — reshape preserving total lanes.    |
 | `b.reshape(src, new_shape)`                         | `tpu.reshape` (TPU-flavored reshape; differs from `shapeCast`). |
-| `b.repeat(src, dimension, times)`                   | `tpu.repeat`.                                            |
+| `b.repeat(src, dimension, times)`                   | `tpu.concatenate` of `times` copies, as `pltpu.repeat`.  |
 | `b.concatenate(sources, dimension)`                 | `tpu.concatenate`.                                       |
 | `b.transpose(src, permutation)`                     | `tpu.transpose`.                                         |
 | `b.broadcastInSublanes(src, lane)`                  | `tpu.broadcast_in_sublanes`.                             |

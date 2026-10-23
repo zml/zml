@@ -763,21 +763,6 @@ pub fn unsplat(
     });
 }
 
-/// tt.cat — concatenate two tensors; may reorder elements.
-pub fn cat(
-    ctx: *mlir.Context,
-    lhs: *const mlir.Value,
-    rhs: *const mlir.Value,
-    result_type: *const mlir.Type,
-    location: *const mlir.Location,
-) *mlir.Operation {
-    return .make(ctx, "tt.cat", .{
-        .operands = .{ .flat = &.{ lhs, rhs } },
-        .results = .{ .flat = &.{result_type} },
-        .location = location,
-    });
-}
-
 /// tt.join — join two tensors along a new minor dimension (shape gains +1 dim of size 2).
 pub fn join(
     ctx: *mlir.Context,
