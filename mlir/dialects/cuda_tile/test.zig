@@ -14,7 +14,12 @@ fn testContext() !*mlir.Context {
 }
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(cuda_tile);
+    inline for (comptime std.meta.declarations(cuda_tile)) |decl| {
+        const T = @field(cuda_tile, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test "dialect registers and types round-trip" {

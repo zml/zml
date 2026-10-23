@@ -11,7 +11,12 @@ fn expectPrints(expected: []const u8, value: anytype) !void {
 }
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(gpu);
+    inline for (comptime std.meta.declarations(gpu)) |decl| {
+        const T = @field(gpu, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test "gpu enum attributes are built through the C API" {

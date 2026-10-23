@@ -8,7 +8,12 @@ const scf = @import("mlir/dialects/scf");
 const ttir = @import("mlir/dialects/ttir");
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(ttir);
+    inline for (comptime std.meta.declarations(ttir)) |decl| {
+        const T = @field(ttir, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test "tt.func round-trip" {

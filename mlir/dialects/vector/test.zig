@@ -11,7 +11,12 @@ fn expectPrints(expected: []const u8, value: anytype) !void {
 }
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(vector);
+    inline for (comptime std.meta.declarations(vector)) |decl| {
+        const T = @field(vector, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test "vector enum attributes are built through the C API" {

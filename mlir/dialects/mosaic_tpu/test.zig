@@ -38,7 +38,12 @@ fn expectEnumAttr(comptime Attr: type, ctx: *mlir.Context) !void {
 }
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(mosaic_tpu);
+    inline for (comptime std.meta.declarations(mosaic_tpu)) |decl| {
+        const T = @field(mosaic_tpu, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test "DMA and semaphore wrappers satisfy current operand groups" {

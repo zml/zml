@@ -4,7 +4,12 @@ const cf = @import("mlir/dialects/cf");
 const mlir = @import("mlir");
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(cf);
+    inline for (comptime std.meta.declarations(cf)) |decl| {
+        const T = @field(cf, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test "every bound operation is registered" {

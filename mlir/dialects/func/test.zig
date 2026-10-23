@@ -4,7 +4,12 @@ const func = @import("mlir/dialects/func");
 const mlir = @import("mlir");
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(func);
+    inline for (comptime std.meta.declarations(func)) |decl| {
+        const T = @field(func, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test "func dialect and extensions register" {

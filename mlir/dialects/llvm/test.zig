@@ -4,7 +4,12 @@ const llvm = @import("mlir/dialects/llvm");
 const mlir = @import("mlir");
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(llvm);
+    inline for (comptime std.meta.declarations(llvm)) |decl| {
+        const T = @field(llvm, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test "every bound operation is registered" {

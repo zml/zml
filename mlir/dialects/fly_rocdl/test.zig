@@ -4,7 +4,12 @@ const fly_rocdl = @import("mlir/dialects/fly_rocdl");
 const mlir = @import("mlir");
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(fly_rocdl);
+    inline for (comptime std.meta.declarations(fly_rocdl)) |decl| {
+        const T = @field(fly_rocdl, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test "every bound operation is registered" {

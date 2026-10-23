@@ -9,7 +9,12 @@ const TensorShardingAttr = shardy.TensorShardingAttr;
 const TensorShardingPerValueAttr = shardy.TensorShardingPerValueAttr;
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(shardy);
+    inline for (comptime std.meta.declarations(shardy)) |decl| {
+        const T = @field(shardy, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test TensorShardingAttr {
@@ -162,4 +167,16 @@ test ManualAxesAttr {
 
     try manual_axes.attribute().format(&w.writer);
     try std.testing.expectEqualSlices(u8, "#sdy<manual_axes{\"link_x\", \"link_y\"}>", w.written());
+}
+
+test "sub-axis references build" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    shardy.registerDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    const ref = shardy.AxisRefAttr.subAxis(ctx, "x", 2, 4);
+    try std.testing.expectEqualStrings("x", ref.name());
+    try std.testing.expectEqual(@as(i64, 4), ref.subAxisInfo().?.size());
 }
