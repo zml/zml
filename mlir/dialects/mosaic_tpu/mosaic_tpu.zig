@@ -9,6 +9,10 @@ const stdx = @import("stdx");
 /// the custom-call JSON `serialization_format`, which remains 1.
 pub const SERDE_VERSION: i32 = 18;
 
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("tpu");
+}
+
 /// Register the `mosaic-serde` pass so `PassManager.parse` can pick it up by
 /// name. Idempotent — safe to call repeatedly. Required before running the
 /// `mosaic-serde{serialize=true}` pipeline that produces the bytecode embedded
@@ -28,11 +32,9 @@ pub const SemaphoreType = opaque {
     pub const isAFn = c.mlirTypeIsATpuSemaphore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "semaphore";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -57,11 +59,9 @@ pub const DMASemaphoreType = opaque {
     pub const isAFn = c.mlirTypeIsATpuDMASemaphore;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "dma_semaphore";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -95,6 +95,10 @@ pub const Float8EXMYType = opaque {
 
     pub fn underlyingType(self: *const Float8EXMYType) *const mlir.Type {
         return @ptrCast(c.mlirTpuFloat8EXMYTypeGetUnderlyingType(self.ptr()).ptr);
+    }
+
+    pub fn type_(self: *const Float8EXMYType) *const mlir.Type {
+        return @ptrCast(self);
     }
 };
 
@@ -146,11 +150,9 @@ pub const ReductionKindAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuReductionKind;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "reduction_kind";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -161,7 +163,7 @@ pub const ReductionKindAttr = opaque {
         const result = c.mlirTpuReductionKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ReductionKind {
+    pub fn value(self: *const Self) ReductionKind {
         return @fromBackingInt(@intCast(c.mlirTpuReductionKindAttrGetValue(self.ptr())));
     }
 };
@@ -185,11 +187,9 @@ pub const ContractPrecisionAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuContractPrecision;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "contract_precision";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -200,7 +200,7 @@ pub const ContractPrecisionAttr = opaque {
         const result = c.mlirTpuContractPrecisionAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ContractPrecision {
+    pub fn value(self: *const Self) ContractPrecision {
         return @fromBackingInt(@intCast(c.mlirTpuContractPrecisionAttrGetValue(self.ptr())));
     }
 };
@@ -223,11 +223,9 @@ pub const RoundingModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuRoundingMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "rounding_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -238,7 +236,7 @@ pub const RoundingModeAttr = opaque {
         const result = c.mlirTpuRoundingModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) RoundingMode {
+    pub fn value(self: *const Self) RoundingMode {
         return @fromBackingInt(@intCast(c.mlirTpuRoundingModeAttrGetValue(self.ptr())));
     }
 };
@@ -262,11 +260,9 @@ pub const CoreTypeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuCoreType;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "core_type";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -277,7 +273,7 @@ pub const CoreTypeAttr = opaque {
         const result = c.mlirTpuCoreTypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) CoreType {
+    pub fn value(self: *const Self) CoreType {
         return @fromBackingInt(@intCast(c.mlirTpuCoreTypeAttrGetValue(self.ptr())));
     }
 };
@@ -302,11 +298,9 @@ pub const DimensionSemanticsAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuDimensionSemantics;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "dimension_semantics";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -317,7 +311,7 @@ pub const DimensionSemanticsAttr = opaque {
         const result = c.mlirTpuDimensionSemanticsAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) DimensionSemantics {
+    pub fn value(self: *const Self) DimensionSemantics {
         return @fromBackingInt(@intCast(c.mlirTpuDimensionSemanticsAttrGetValue(self.ptr())));
     }
 };
@@ -340,11 +334,9 @@ pub const PipelineModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuPipelineMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "pipeline_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -355,7 +347,7 @@ pub const PipelineModeAttr = opaque {
         const result = c.mlirTpuPipelineModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) PipelineMode {
+    pub fn value(self: *const Self) PipelineMode {
         return @fromBackingInt(@intCast(c.mlirTpuPipelineModeAttrGetValue(self.ptr())));
     }
 };
@@ -378,11 +370,9 @@ pub const RevisitModeAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuRevisitMode;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "revisit_mode";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -393,7 +383,7 @@ pub const RevisitModeAttr = opaque {
         const result = c.mlirTpuRevisitModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) RevisitMode {
+    pub fn value(self: *const Self) RevisitMode {
         return @fromBackingInt(@intCast(c.mlirTpuRevisitModeAttrGetValue(self.ptr())));
     }
 };
@@ -422,11 +412,9 @@ pub const MemorySpaceAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuMemorySpace;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "memory_space";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -439,10 +427,10 @@ pub const MemorySpaceAttr = opaque {
         const result = c.mlirTpuMemorySpaceAttrGet(ctx.ptr(), @backingInt(args.value), core_type);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MemorySpace {
+    pub fn value(self: *const Self) MemorySpace {
         return @fromBackingInt(@intCast(c.mlirTpuMemorySpaceAttrGetValue(self.ptr())));
     }
-    pub fn getCoreType(self: *const Self) ?CoreType {
+    pub fn coreType(self: *const Self) ?CoreType {
         const core_type = c.mlirTpuMemorySpaceAttrGetCoreType(self.ptr());
         return if (core_type < 0) null else @fromBackingInt(@intCast(core_type));
     }
@@ -455,11 +443,9 @@ pub const ElementWindowAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuElementWindow;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "element_window";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -477,22 +463,22 @@ pub const ElementWindowAttr = opaque {
         );
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getNumPadLow(self: *const Self) usize {
+    pub fn numPadLow(self: *const Self) usize {
         return @intCast(c.mlirTpuElementWindowAttrGetNumPadLow(self.ptr()));
     }
-    pub fn getPadLow(self: *const Self, pos: usize) i64 {
+    pub fn padLow(self: *const Self, pos: usize) i64 {
         return c.mlirTpuElementWindowAttrGetPadLow(self.ptr(), @intCast(pos));
     }
-    pub fn getNumPadHigh(self: *const Self) usize {
+    pub fn numPadHigh(self: *const Self) usize {
         return @intCast(c.mlirTpuElementWindowAttrGetNumPadHigh(self.ptr()));
     }
-    pub fn getPadHigh(self: *const Self, pos: usize) i64 {
+    pub fn padHigh(self: *const Self, pos: usize) i64 {
         return c.mlirTpuElementWindowAttrGetPadHigh(self.ptr(), @intCast(pos));
     }
 };
 
 /// `#tpu.element_window<[pad_low], [pad_high]>` — per-arg window padding.
-pub fn elementWindowAttribute(
+pub fn elementWindowAttr(
     ctx: *mlir.Context,
     pad_low: []const i64,
     pad_high: []const i64,
@@ -508,11 +494,9 @@ pub const DotDimensionNumbersAttr = opaque {
     pub const isAFn = c.mlirAttributeIsATpuDotDimensionNumbers;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "dot_dimension_numbers";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -547,46 +531,46 @@ pub const DotDimensionNumbersAttr = opaque {
         );
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getNumLhsContractingDims(self: *const Self) usize {
+    pub fn numLhsContractingDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumLhsContractingDims(self.ptr()));
     }
-    pub fn getLhsContractingDims(self: *const Self, pos: usize) i64 {
+    pub fn lhsContractingDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetLhsContractingDims(self.ptr(), @intCast(pos));
     }
-    pub fn getNumRhsContractingDims(self: *const Self) usize {
+    pub fn numRhsContractingDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumRhsContractingDims(self.ptr()));
     }
-    pub fn getRhsContractingDims(self: *const Self, pos: usize) i64 {
+    pub fn rhsContractingDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetRhsContractingDims(self.ptr(), @intCast(pos));
     }
-    pub fn getNumLhsNonContractingDims(self: *const Self) usize {
+    pub fn numLhsNonContractingDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumLhsNonContractingDims(self.ptr()));
     }
-    pub fn getLhsNonContractingDims(self: *const Self, pos: usize) i64 {
+    pub fn lhsNonContractingDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetLhsNonContractingDims(self.ptr(), @intCast(pos));
     }
-    pub fn getNumRhsNonContractingDims(self: *const Self) usize {
+    pub fn numRhsNonContractingDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumRhsNonContractingDims(self.ptr()));
     }
-    pub fn getRhsNonContractingDims(self: *const Self, pos: usize) i64 {
+    pub fn rhsNonContractingDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetRhsNonContractingDims(self.ptr(), @intCast(pos));
     }
-    pub fn getNumOutputDimOrder(self: *const Self) usize {
+    pub fn numOutputDimOrder(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumOutputDimOrder(self.ptr()));
     }
-    pub fn getOutputDimOrder(self: *const Self, pos: usize) i64 {
+    pub fn outputDimOrder(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetOutputDimOrder(self.ptr(), @intCast(pos));
     }
-    pub fn getNumLhsBatchDims(self: *const Self) usize {
+    pub fn numLhsBatchDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumLhsBatchDims(self.ptr()));
     }
-    pub fn getLhsBatchDims(self: *const Self, pos: usize) i64 {
+    pub fn lhsBatchDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetLhsBatchDims(self.ptr(), @intCast(pos));
     }
-    pub fn getNumRhsBatchDims(self: *const Self) usize {
+    pub fn numRhsBatchDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumRhsBatchDims(self.ptr()));
     }
-    pub fn getRhsBatchDims(self: *const Self, pos: usize) i64 {
+    pub fn rhsBatchDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetRhsBatchDims(self.ptr(), @intCast(pos));
     }
 };
@@ -633,18 +617,22 @@ pub fn reduce_index(
     });
 }
 
+pub const ScanOpts = struct {
+    mask: ?*const mlir.Value = null,
+};
+
 /// Scan the last dimension; an optional rank-one mask spans that dimension.
 pub fn scan(
     ctx: *mlir.Context,
     input: *const mlir.Value,
     kind: ReductionKind,
-    mask: ?*const mlir.Value,
     result_type: *const mlir.Type,
+    opts: ScanOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 2) = .empty;
     operands_buf.appendAssumeCapacity(input);
-    if (mask) |m| operands_buf.appendAssumeCapacity(m);
+    if (opts.mask) |m| operands_buf.appendAssumeCapacity(m);
 
     return mlir.Operation.make(ctx, "tpu.scan", .{
         .operands = .{ .flat = operands_buf.constSlice() },
@@ -658,6 +646,8 @@ pub fn scan(
 }
 
 pub const SortOpts = struct {
+    mask: ?*const mlir.Value = null,
+
     descending: bool = false,
 };
 
@@ -665,16 +655,15 @@ pub fn sort(
     ctx: *mlir.Context,
     keys: *const mlir.Value,
     values: *const mlir.Value,
-    mask: ?*const mlir.Value,
-    opts: SortOpts,
     output_mask_type: *const mlir.Type,
     sorted_keys_type: *const mlir.Type,
     sorted_values_type: *const mlir.Type,
+    opts: SortOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     operands_buf.appendSliceAssumeCapacity(&.{ keys, values });
-    if (mask) |m| operands_buf.appendAssumeCapacity(m);
+    if (opts.mask) |m| operands_buf.appendAssumeCapacity(m);
 
     return mlir.Operation.make(ctx, "tpu.sort", .{
         .operands = .{ .flat = operands_buf.constSlice() },
@@ -700,8 +689,8 @@ pub fn load(
     ctx: *mlir.Context,
     base: *const mlir.Value,
     indices: []const *const mlir.Value,
-    opts: LoadOpts,
     result_type: *const mlir.Type,
+    opts: LoadOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 16) = .empty;
@@ -720,6 +709,8 @@ pub fn load(
 }
 
 pub const StoreOpts = struct {
+    mask: ?*const mlir.Value = null,
+
     sublane_mask: []const bool,
     sublane_stride: i32 = 1,
     add: bool = false,
@@ -731,14 +722,13 @@ pub fn store(
     value: *const mlir.Value,
     base: *const mlir.Value,
     indices: []const *const mlir.Value,
-    mask: ?*const mlir.Value,
     opts: StoreOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 18) = .empty;
     operands_buf.appendSliceAssumeCapacity(&.{ value, base });
     operands_buf.appendSliceAssumeCapacity(indices);
-    const mask_len: i32 = if (mask) |m| blk: {
+    const mask_len: i32 = if (opts.mask) |m| blk: {
         operands_buf.appendAssumeCapacity(m);
         break :blk 1;
     } else 0;
@@ -757,6 +747,8 @@ pub fn store(
 }
 
 pub const VectorLoadOpts = struct {
+    mask: ?*const mlir.Value = null,
+
     /// Per-dim load stride. Pass `&.{}` for unit-strided.
     strides: []const i32 = &.{},
 };
@@ -766,15 +758,14 @@ pub fn vector_load(
     ctx: *mlir.Context,
     base: *const mlir.Value,
     indices: []const *const mlir.Value,
-    mask: ?*const mlir.Value,
-    opts: VectorLoadOpts,
     result_type: *const mlir.Type,
+    opts: VectorLoadOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 17) = .empty;
     operands_buf.appendAssumeCapacity(base);
     operands_buf.appendSliceAssumeCapacity(indices);
-    const mask_len: i32 = if (mask) |m| blk: {
+    const mask_len: i32 = if (opts.mask) |m| blk: {
         operands_buf.appendAssumeCapacity(m);
         break :blk 1;
     } else 0;
@@ -792,6 +783,8 @@ pub fn vector_load(
 }
 
 pub const VectorStoreOpts = struct {
+    mask: ?*const mlir.Value = null,
+
     strides: []const i32 = &.{},
     add: bool = false,
 };
@@ -801,14 +794,13 @@ pub fn vector_store(
     value: *const mlir.Value,
     base: *const mlir.Value,
     indices: []const *const mlir.Value,
-    mask: ?*const mlir.Value,
     opts: VectorStoreOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 18) = .empty;
     operands_buf.appendSliceAssumeCapacity(&.{ value, base });
     operands_buf.appendSliceAssumeCapacity(indices);
-    const mask_len: i32 = if (mask) |m| blk: {
+    const mask_len: i32 = if (opts.mask) |m| blk: {
         operands_buf.appendAssumeCapacity(m);
         break :blk 1;
     } else 0;
@@ -881,7 +873,7 @@ pub const MatmulOpts = struct {
     precision: ?ContractPrecision = null,
     /// Optional `#tpu.dot_dimension_numbers<...>` attribute. When omitted the
     /// canonicalizer derives one. Build with `DotDimensionNumbersAttr` or
-    /// `dotDimensionNumbers`.
+    /// `dotDimensionNumbersAttr`.
     dimension_numbers: ?*const mlir.Attribute = null,
 };
 
@@ -890,8 +882,8 @@ pub fn matmul(
     lhs: *const mlir.Value,
     rhs: *const mlir.Value,
     acc: *const mlir.Value,
-    opts: MatmulOpts,
     result_type: *const mlir.Type,
+    opts: MatmulOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 5) = .empty;
@@ -915,14 +907,18 @@ pub fn matmul(
     });
 }
 
+pub const IotaOpts = struct {
+    dimensions: ?[]const i32 = null,
+};
+
 pub fn iota(
     ctx: *mlir.Context,
-    dimensions: ?[]const i32,
     result_type: *const mlir.Type,
+    opts: IotaOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
-    if (dimensions) |d| {
+    if (opts.dimensions) |d| {
         attrs.appendAssumeCapacity(.named(ctx, "dimensions", .denseArray(ctx, .i32, d)));
     }
     return mlir.Operation.make(ctx, "tpu.iota", .{
@@ -995,25 +991,6 @@ pub fn reshape(
     return mlir.Operation.make(ctx, "tpu.reshape", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
-        .location = location,
-    });
-}
-
-pub fn repeat(
-    ctx: *mlir.Context,
-    src: *const mlir.Value,
-    dimension: i32,
-    times: i32,
-    result_type: *const mlir.Type,
-    location: *const mlir.Location,
-) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tpu.repeat", .{
-        .operands = .{ .flat = &.{src} },
-        .results = .{ .flat = &.{result_type} },
-        .attributes = &.{
-            .named(ctx, "dimension", .int(ctx, .i32, dimension)),
-            .named(ctx, "times", .int(ctx, .i32, times)),
-        },
         .location = location,
     });
 }
@@ -1493,7 +1470,7 @@ pub fn trace_stop(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Oper
 /// Build a `#tpu.dot_dimension_numbers<...>` attribute. Mirrors
 /// `tpu_ops.td:TPU_DotDimensionNumbersAttr`. Pass empty slices for the
 /// fields you don't use (most dot operations leave batch dims empty).
-pub fn dotDimensionNumbers(
+pub fn dotDimensionNumbersAttr(
     ctx: *mlir.Context,
     lhs_contracting: []const i64,
     rhs_contracting: []const i64,
@@ -1562,199 +1539,4 @@ fn denseBoolArrayAttribute(ctx: *mlir.Context, values: []const bool) *const mlir
     var ints: stdx.BoundedArray(i32, 64) = .empty;
     for (values) |b| ints.appendAssumeCapacity(@intFromBool(b));
     return .denseArray(ctx, .bool, ints.constSlice());
-}
-
-test {
-    std.testing.refAllDecls(@This());
-}
-
-fn testContext() !*mlir.Context {
-    const registry = try mlir.DialectRegistry.init();
-    defer registry.deinit();
-    registry.registerDialect("tpu");
-    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
-    ctx.loadAllAvailableDialects();
-    return ctx;
-}
-
-fn expectSegments(op: *const mlir.Operation, expected: []const i32) !void {
-    const segments = op.attributeByName("operandSegmentSizes").?.isA(mlir.DenseArrayAttribute(.i32)).?;
-    try std.testing.expectEqual(expected.len, segments.numElements());
-    for (expected, 0..) |size, i| try std.testing.expectEqual(size, segments.element(i));
-}
-
-test "DMA and semaphore wrappers satisfy current operand groups" {
-    const ctx = try testContext();
-    defer ctx.deinit();
-    const loc = mlir.Location.unknown(ctx);
-    const args = mlir.Block.init(&.{}, &.{});
-    defer args.deinit();
-    const source = args.addArgument(try mlir.Type.parse(ctx, "memref<8x128xbf16, #tpu.memory_space<hbm>>"), loc);
-    const target = args.addArgument(try mlir.Type.parse(ctx, "memref<8x128xbf16, #tpu.memory_space<vmem>>"), loc);
-    const dma_sem = args.addArgument(try mlir.Type.parse(ctx, "memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>"), loc);
-    const sem = args.addArgument(try mlir.Type.parse(ctx, "memref<!tpu.semaphore, #tpu.memory_space<semaphore_mem>>"), loc);
-    const amount = args.addArgument(.int(ctx, .i32), loc);
-
-    const dma = enqueue_dma(ctx, source, target, dma_sem, .{}, loc);
-    defer dma.deinit();
-    try expectSegments(dma, &.{ 1, 0, 1, 1, 0, 0, 0 });
-    try std.testing.expect(dma.verify());
-    const signal = sem_signal(ctx, sem, amount, .{}, loc);
-    defer signal.deinit();
-    try expectSegments(signal, &.{ 1, 1, 0, 0, 0 });
-    try std.testing.expect(signal.verify());
-
-    const sc_sem = args.addArgument(try mlir.Type.parse(ctx, "memref<!tpu.semaphore, #tpu.memory_space<semaphore_mem, sc_vector_subcore>>"), loc);
-    const sc_dma_sem = args.addArgument(try mlir.Type.parse(ctx, "memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem, sc_vector_subcore>>"), loc);
-    const core = args.addArgument(.int(ctx, .i32), loc);
-    const subcore = args.addArgument(.int(ctx, .i32), loc);
-    const remote_signal = sem_signal(ctx, sc_sem, amount, .{ .core_id = core, .subcore_id = subcore }, loc);
-    defer remote_signal.deinit();
-    try expectSegments(remote_signal, &.{ 1, 1, 0, 1, 1 });
-    try std.testing.expect(remote_signal.operand(3).eql(subcore));
-    const remote_dma = enqueue_dma(ctx, source, target, sc_dma_sem, .{
-        .source_semaphore = dma_sem,
-        .core_id = core,
-        .subcore_id = subcore,
-    }, loc);
-    defer remote_dma.deinit();
-    try expectSegments(remote_dma, &.{ 1, 1, 1, 1, 0, 1, 1 });
-    try std.testing.expect(remote_dma.operand(5).eql(subcore));
-}
-
-test "matmul and reinterpret cast satisfy current required properties" {
-    const ctx = try testContext();
-    defer ctx.deinit();
-    const loc = mlir.Location.unknown(ctx);
-    const args = mlir.Block.init(&.{}, &.{});
-    defer args.deinit();
-    const vector_type = mlir.Type.vector(&.{ 8, 8 }, .float(ctx, .f32));
-    const lhs = args.addArgument(vector_type, loc);
-    const rhs = args.addArgument(vector_type, loc);
-    const acc = args.addArgument(vector_type, loc);
-    const product = matmul(ctx, lhs, rhs, acc, .{}, vector_type, loc);
-    defer product.deinit();
-    try std.testing.expect(product.verify());
-    try std.testing.expect(!product.attributeByName("transpose_lhs_hint").?.isA(mlir.BoolAttribute).?.value());
-
-    const ref_type = try mlir.Type.parse(ctx, "memref<8x8xf32, #tpu.memory_space<vmem>>");
-    const ref = args.addArgument(ref_type, loc);
-    const cast = reinterpret_cast(ctx, ref, ref_type, loc);
-    defer cast.deinit();
-    try expectSegments(cast, &.{ 1, 0, 0, 0 });
-    try std.testing.expect(cast.verify());
-}
-
-test "legacy reduction extrema and scan axis preserve their semantics" {
-    const ctx = try testContext();
-    defer ctx.deinit();
-    const loc = mlir.Location.unknown(ctx);
-    const args = mlir.Block.init(&.{}, &.{});
-    defer args.deinit();
-    const float_type = mlir.Type.vector(&.{ 2, 8 }, .float(ctx, .f32));
-    const int_type = mlir.Type.vector(&.{ 2, 8 }, .int(ctx, .i32));
-    const floats = args.addArgument(float_type, loc);
-    const integers = args.addArgument(int_type, loc);
-    const mask = args.addArgument(mlir.Type.vector(&.{8}, .int(ctx, .i1)), loc);
-    const float_min = all_reduce(ctx, floats, 1, .min, float_type, loc);
-    defer float_min.deinit();
-    const int_max = all_reduce(ctx, integers, 1, .max, int_type, loc);
-    defer int_max.deinit();
-    try std.testing.expect(float_min.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<minf>")));
-    try std.testing.expect(int_max.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<maxsi>")));
-
-    const int_scan = scan(ctx, integers, .max, mask, int_type, loc);
-    defer int_scan.deinit();
-    try std.testing.expect(int_scan.verify());
-    try std.testing.expect(int_scan.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<maxui>")));
-    try std.testing.expectEqual(@as(i64, 1), int_scan.attributeByName("dimension").?.isA(mlir.IntegerAttribute).?.value(i64));
-    const float_scan = scan(ctx, floats, .min, null, float_type, loc);
-    defer float_scan.deinit();
-    try std.testing.expect(float_scan.attributeByName("kind").?.eql(try mlir.Attribute.parse(ctx, "#tpu.reduction_kind<minf>")));
-}
-
-fn expectPrints(expected: []const u8, value: anytype) !void {
-    var buf: [256]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try w.print("{f}", .{value});
-    try std.testing.expectEqualStrings(expected, w.buffered());
-}
-
-fn expectEnumAttr(comptime Attr: type, ctx: *mlir.Context) !void {
-    const Enum = @FieldType(Attr.InitArgs, "value");
-    inline for (@typeInfo(Enum).@"enum".field_names) |name| {
-        const value: Enum = @field(Enum, name);
-        const attr = try Attr.get(ctx, .{ .value = value });
-        try std.testing.expectEqual(value, attr.getValue());
-        try std.testing.expect(attr.attribute().isA(Attr) != null);
-        try std.testing.expect(value.attribute(ctx).eql(attr.attribute()));
-        try expectPrints("#tpu." ++ Attr.mnemonic ++ "<" ++ name ++ ">", attr);
-    }
-}
-
-test "tpu types are built through the C API" {
-    const ctx = try mlir.Context.init(.{});
-    defer ctx.deinit();
-
-    const semaphore = try SemaphoreType.get(ctx, .{});
-    try std.testing.expect(semaphoreType(ctx).isA(SemaphoreType) != null);
-    try std.testing.expect(semaphoreType(ctx).isA(DMASemaphoreType) == null);
-    try expectPrints("!tpu.semaphore", semaphore);
-
-    const dma_semaphore = try DMASemaphoreType.get(ctx, .{});
-    try std.testing.expect(dmaSemaphoreType(ctx).isA(DMASemaphoreType) != null);
-    try expectPrints("!tpu.dma_semaphore", dma_semaphore);
-}
-
-test "tpu enum attributes are built through the C API" {
-    const ctx = try mlir.Context.init(.{});
-    defer ctx.deinit();
-
-    try expectEnumAttr(ReductionKindAttr, ctx);
-    try expectEnumAttr(ContractPrecisionAttr, ctx);
-    try expectEnumAttr(RoundingModeAttr, ctx);
-    try expectEnumAttr(CoreTypeAttr, ctx);
-    try expectEnumAttr(DimensionSemanticsAttr, ctx);
-    try expectEnumAttr(PipelineModeAttr, ctx);
-    try expectEnumAttr(RevisitModeAttr, ctx);
-    try expectEnumAttr(MemorySpaceAttr, ctx);
-
-    const smem_tc = try MemorySpaceAttr.get(ctx, .{ .value = .smem, .coreType = .sc_scalar_subcore });
-    try std.testing.expectEqual(MemorySpace.smem, smem_tc.getValue());
-    try std.testing.expectEqual(CoreType.sc_scalar_subcore, smem_tc.getCoreType().?);
-    try expectPrints("#tpu.memory_space<smem, sc_scalar_subcore>", smem_tc);
-    try std.testing.expectEqual(null, (try MemorySpaceAttr.get(ctx, .{ .value = .hbm })).getCoreType());
-    // The dialect verifier's pairing rules: no core type on hbm, no scalar subcore on vmem.
-    try std.testing.expectError(error.InvalidMlir, MemorySpaceAttr.get(ctx, .{ .value = .hbm, .coreType = .tc }));
-    try std.testing.expectError(error.InvalidMlir, MemorySpaceAttr.get(ctx, .{ .value = .vmem, .coreType = .sc_scalar_subcore }));
-}
-
-test "tpu array attributes are built through the C API" {
-    const ctx = try mlir.Context.init(.{});
-    defer ctx.deinit();
-
-    const window = try ElementWindowAttr.get(ctx, .{ .padLow = &.{ 0, 2 }, .padHigh = &.{ 1, 3 } });
-    try std.testing.expectEqual(2, window.getNumPadLow());
-    try std.testing.expectEqual(2, window.getPadLow(1));
-    try std.testing.expectEqual(2, window.getNumPadHigh());
-    try std.testing.expectEqual(3, window.getPadHigh(1));
-    try expectPrints("#tpu.element_window<[0, 2], [1, 3]>", window);
-    try std.testing.expect(elementWindowAttribute(ctx, &.{ 0, 2 }, &.{ 1, 3 }).eql(window.attribute()));
-
-    const dims = dotDimensionNumbers(ctx, &.{1}, &.{0}, &.{0}, &.{1}, &.{ 0, 0, 1, 1 }, &.{}, &.{});
-    try expectPrints("#tpu.dot_dimension_numbers<[1], [0], [0], [1], [0, 0, 1, 1], [], []>", dims);
-
-    const batched = try DotDimensionNumbersAttr.get(ctx, .{
-        .lhsContractingDims = &.{2},
-        .rhsContractingDims = &.{1},
-        .lhsNonContractingDims = &.{1},
-        .outputDimOrder = &.{ 0, 0, 0, 1 },
-        .lhsBatchDims = &.{0},
-        .rhsBatchDims = &.{0},
-    });
-    try std.testing.expectEqual(0, batched.getNumRhsNonContractingDims());
-    try std.testing.expectEqual(4, batched.getNumOutputDimOrder());
-    try std.testing.expectEqual(1, batched.getOutputDimOrder(3));
-    try std.testing.expectEqual(0, batched.getRhsBatchDims(0));
-    try expectPrints("#tpu.dot_dimension_numbers<[2], [1], [1], [], [0, 0, 0, 1], [0], [0]>", batched);
 }

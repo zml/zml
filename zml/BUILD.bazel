@@ -145,17 +145,20 @@ zig_library(
         ":xla_compile_options_upb",
         ":xla_data_upb",
         "//bazel",
+        "//dsl/cuda_tile:cuda_tile_builder",
+        "//dsl/cute:cute_builder",
+        "//dsl/fly:fly_builder",
+        "//dsl/mosaic_tpu:mosaic_tpu_builder",
+        "//dsl/triton:triton_builder",
         "//ffi:zig",
-        "//kernels/cuda_tile:cuda_tile_builder",
-        "//kernels/cute:cute_builder",
-        "//kernels/fly:fly_builder",
-        "//kernels/mosaic_tpu:mosaic_tpu_builder",
-        "//kernels/triton:triton_builder",
         "//mlir",
-        "//mlir/dialects",
-        "//mlir/dialects/cuda_tile",
-        "//mlir/dialects/fly",
+        "//mlir/dialects/func",
+        "//mlir/dialects/llvm",
         "//mlir/dialects/mosaic_tpu",
+        "//mlir/dialects/shardy",
+        "//mlir/dialects/stablehlo",
+        "//mlir/dialects/ttir",
+        "//mlir/dialects/vector",
         "//pjrt",
         "//platforms",
         "//platforms/tpu:ragged_paged",
@@ -178,18 +181,6 @@ zig_library(
         ],
         "//conditions:default": [],
     }),
-)
-
-zig_library(
-    name = "moe_mosaic_tpu_gmm_ep",
-    import_name = "zml/moe/mosaic_tpu_kernels/gmm_ep",
-    main = "moe/mosaic_tpu_kernels/gmm_ep.zig",
-    tags = ["manual"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":zml",
-        "//kernels/mosaic_tpu:mosaic_tpu_builder",
-    ],
 )
 
 zig_test(

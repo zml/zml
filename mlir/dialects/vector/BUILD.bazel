@@ -1,0 +1,36 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+cc_library(
+    name = "capi",
+    srcs = ["capi.cc"],
+    hdrs = ["capi.h"],
+    tags = ["manual"],
+    deps = [
+        "@llvm-project//mlir:CAPIIR",
+        "@llvm-project//mlir:VectorDialect",
+    ],
+)
+
+zig_library(
+    name = "vector",
+    import_name = "mlir/dialects/vector",
+    main = "vector.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":capi",
+        "//mlir",
+        "//stdx",
+        "@llvm-project//mlir:CAPIVector",
+    ],
+)
+
+zig_test(
+    name = "test",
+    main = "test.zig",
+    deps = [
+        ":vector",
+        "//mlir",
+    ],
+)

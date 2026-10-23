@@ -3,11 +3,10 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 # The TileView type interface, which NVIDIA's C API does not expose.
 cc_library(
-    name = "cuda_tile_capi",
-    srcs = ["cuda_tile_capi.cc"],
-    hdrs = ["cuda_tile_capi.h"],
-    strip_include_prefix = ".",
-    visibility = ["//visibility:private"],
+    name = "capi",
+    srcs = ["capi.cc"],
+    hdrs = ["capi.h"],
+    tags = ["manual"],
     deps = [
         "@cuda_tile//:CudaTileDialect",
         "@llvm-project//mlir:CAPIIR",
@@ -18,11 +17,11 @@ zig_library(
     name = "cuda_tile",
     import_name = "mlir/dialects/cuda_tile",
     main = "cuda_tile.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
-        ":cuda_tile_capi",
+        ":capi",
         "//mlir",
-        "//mlir:c",
         "//stdx",
         "@cuda_tile//:cuda_tile_capi",
     ],
@@ -30,5 +29,10 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = [":cuda_tile"],
+    main = "test.zig",
+    deps = [
+        ":capi",
+        ":cuda_tile",
+        "//mlir",
+    ],
 )

@@ -1,14 +1,15 @@
 const std = @import("std");
 
-const cuda_tile_builder = @import("kernels/cuda_tile/builder");
-const cute_builder = @import("kernels/cute/builder");
-const dialects = @import("mlir/dialects");
-const fly_builder = @import("kernels/fly/builder");
+const cuda_tile_builder = @import("dsl/cuda_tile/builder");
+const cute_builder = @import("dsl/cute/builder");
+const fly_builder = @import("dsl/fly/builder");
+const func = @import("mlir/dialects/func");
 const mlir = @import("mlir");
-const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
+const mosaic_tpu_builder = @import("dsl/mosaic_tpu/builder");
+const mosaic_tpu_dialect = @import("mlir/dialects/mosaic_tpu");
+const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
-const tpu_dialect = @import("mlir/dialects/mosaic_tpu");
-const triton_builder = @import("kernels/triton/builder");
+const triton_builder = @import("dsl/triton/builder");
 
 const Compiler = @import("Compiler.zig");
 const DataType = @import("dtype.zig").DataType;
@@ -25,17 +26,15 @@ fn StructOf(comptime names: []const [:0]const u8, comptime FieldT: type) type {
     return @Struct(.auto, null, &name_slices, &@splat(FieldT), &@splat(.{}));
 }
 
-fn makeKernelContext(comptime dialects_needed: []const []const u8) std.mem.Allocator.Error!*mlir.Context {
+fn makeKernelContext(comptime registerDialects: fn (*mlir.DialectRegistry) void) std.mem.Allocator.Error!*mlir.Context {
     mlir.registerPasses("Transforms");
 
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
 
-    inline for (dialects_needed) |d| {
-        mlir.DialectHandle.fromString(d).insertDialect(registry);
-    }
+    registerDialects(registry);
 
-    mlir.registerFuncExtensions(registry);
+    func.registerExtensions(registry);
 
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
@@ -46,8 +45,8 @@ fn makeKernelContext(comptime dialects_needed: []const []const u8) std.mem.Alloc
 fn resolveOutputOperandAliases(
     aliases_opt: anytype,
     operand_offset: i64,
-) stdx.BoundedArray(dialects.stablehlo.CustomCallOpts.OutputOperandAlias, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) {
-    var out: stdx.BoundedArray(dialects.stablehlo.CustomCallOpts.OutputOperandAlias, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
+) stdx.BoundedArray(stablehlo.CustomCallOpts.OutputOperandAlias, stablehlo.CustomCallOpts.MAX_RESULTS) {
+    var out: stdx.BoundedArray(stablehlo.CustomCallOpts.OutputOperandAlias, stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
 
     if (aliases_opt) |a| {
         inline for (@typeInfo(@TypeOf(a)).@"struct".field_names, 0..) |field_name, output_index| {
@@ -68,7 +67,7 @@ pub const triton = struct {
     pub const FinishError = triton_builder.FinishError;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
-        return makeKernelContext(&triton_builder.dialects_needed);
+        return makeKernelContext(triton_builder.registerDialects);
     }
 
     pub fn from(dt: DataType) DType {
@@ -181,7 +180,7 @@ pub const mosaic_tpu = struct {
     const FinishError = mosaic_tpu_builder.FinishError;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
-        return makeKernelContext(&mosaic_tpu_builder.dialects_needed);
+        return makeKernelContext(mosaic_tpu_builder.registerDialects);
     }
 
     pub fn from(dt: DataType) DType {
@@ -332,7 +331,7 @@ pub const mosaic_tpu = struct {
         const module = try mlir.Module.parse(ctx, ir);
         defer module.deinit();
 
-        tpu_dialect.registerMosaicSerdePass();
+        mosaic_tpu_dialect.registerMosaicSerdePass();
         const prev_allow_unregistered = ctx.allowUnregisteredDialects();
         ctx.setAllowUnregisteredDialects(true);
         defer ctx.setAllowUnregisteredDialects(prev_allow_unregistered);
@@ -376,7 +375,7 @@ pub const mosaic_tpu = struct {
         inputs: []const *const mlir.Value,
         result_types: []const *const mlir.Type,
         backend_config: []const u8,
-        aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias,
+        aliases: []const stablehlo.CustomCallOpts.OutputOperandAlias,
         dynamic_grid_bounds: []const Tensor,
         additional_attributes: []const mlir.NamedAttribute,
     };
@@ -384,11 +383,11 @@ pub const mosaic_tpu = struct {
     fn callTpuCustomCall(args: TpuCustomCallArgs) *mlir.Operation {
         const cur = Compiler.current();
 
-        var all_inputs: stdx.BoundedArray(*const mlir.Value, dialects.stablehlo.CustomCallOpts.MAX_OPERANDS) = .empty;
+        var all_inputs: stdx.BoundedArray(*const mlir.Value, stablehlo.CustomCallOpts.MAX_OPERANDS) = .empty;
         for (args.dynamic_grid_bounds) |t| all_inputs.appendAssumeCapacity(t.value());
         all_inputs.appendSliceAssumeCapacity(args.inputs);
 
-        return dialects.stablehlo.custom_call(
+        return stablehlo.custom_call(
             cur.mlir_ctx,
             all_inputs.constSlice(),
             args.result_types,
@@ -414,7 +413,7 @@ pub const cuda_tile = struct {
     pub const Arch = cuda_tile_builder.Arch;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
-        return makeKernelContext(&cuda_tile_builder.dialects_needed);
+        return makeKernelContext(cuda_tile_builder.registerDialects);
     }
 
     pub fn from(dt: DataType) DType {
@@ -527,7 +526,7 @@ pub const cute = struct {
     pub const BlockScaledMmaConfig = cute_builder.BlockScaledMmaConfig;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
-        return makeKernelContext(&cute_builder.dialects_needed);
+        return makeKernelContext(cute_builder.registerDialects);
     }
 
     pub fn from(dt: DataType) DType {
@@ -735,7 +734,7 @@ pub const fly = struct {
     pub const TiledMma = fly_builder.TiledMma;
     pub const Arch = fly_builder.Arch;
     pub const MmaFlavor = fly_builder.MmaFlavor;
-    pub const rocdl = fly_builder.rocdl;
+    pub const fly_rocdl = fly_builder.fly_rocdl;
 
     /// The matrix atom this device provides, or null when it has none: WMMA
     /// arrived with RDNA3, so gfx1030 has no matrix instruction at all.
@@ -760,7 +759,7 @@ pub const fly = struct {
     pub const it = fly_builder.it;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
-        return makeKernelContext(&fly_builder.dialects_needed);
+        return makeKernelContext(fly_builder.registerDialects);
     }
 
     pub fn from(dt: DataType) DType {

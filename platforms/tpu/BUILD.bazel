@@ -33,7 +33,7 @@ zig_library(
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
-        "//kernels/mosaic_tpu:mosaic_tpu_builder",
+        "//dsl/mosaic_tpu:mosaic_tpu_builder",
         "//mlir",
     ],
 )

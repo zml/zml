@@ -1,0 +1,44 @@
+const std = @import("std");
+
+const llvm = @import("mlir/dialects/llvm");
+const mlir = @import("mlir");
+
+const operation_names: []const []const u8 = &.{
+    "llvm.bitcast",
+    "llvm.call_intrinsic",
+    "llvm.fmul",
+    "llvm.inline_asm",
+    "llvm.inttoptr",
+    "llvm.load",
+    "llvm.store",
+};
+
+test {
+    @setEvalBranchQuota(100_000);
+    std.testing.refAllDecls(llvm);
+    inline for (comptime std.meta.declarations(llvm)) |decl| {
+        const T = @field(llvm, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
+}
+
+test "every bound operation is registered" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    llvm.registerDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    for (operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    try std.testing.expect(!ctx.allowUnregisteredDialects());
+}
+
+test "literal struct types build from their fields" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    llvm.registerDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    const struct_type = llvm.structType(ctx, &.{ .int(ctx, .i32), .float(ctx, .f32) });
+    try std.testing.expect(struct_type.eql(try mlir.Type.parse(ctx, "!llvm.struct<(i32, f32)>")));
+}

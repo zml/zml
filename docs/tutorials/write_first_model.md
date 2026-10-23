@@ -318,7 +318,7 @@ debug(zml/module):
 ******** ZML generated MLIR ********
 module @zml attributes {mhlo.num_partitions = 4 : i32, mhlo.num_replicas = 1 : i32} {
   sdy.mesh @replicated = <["bus"=4]>
-  func.func public @main(%arg0: tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}, %arg1: tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}, %arg2: tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}) -> (tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}) {
+  func.func @main(%arg0: tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}, %arg1: tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}, %arg2: tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}) -> (tensor<3xf16> {sdy.sharding = #sdy.sharding<@replicated, [{}], replicated={"bus"}>}) {
     %0 = stablehlo.multiply %arg1, %arg2 : tensor<3xf16>
     %1 = stablehlo.add %0, %arg0 : tensor<3xf16>
     return %1 : tensor<3xf16>

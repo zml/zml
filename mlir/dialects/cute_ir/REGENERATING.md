@@ -6,12 +6,13 @@ to check the result. How to get there is left to you: combine the sources as
 you see fit, write throwaway scripts, probe the compiler. Scripts and
 intermediate tables are not committed; only the definitions are.
 
-Paths below are relative to this directory (the one holding this file).
+Bare file names are in this directory, `../<pkg>` are the sibling packages,
+and other paths are relative to the repository root.
 
 ## Goal
 
-Every dialect this directory carries (`cute`, `cute_nvgpu`, and NVIDIA's
-`nvvm` and `cuda`, see below) must describe the DSL compiler's
+The `cute` dialect in this directory and its companions in `../cute_nvgpu`,
+`../nvvm`, and `../cuda` must describe the DSL compiler's
 registry as completely and as precisely as the release allows: every
 operation, type, attribute and enum the compiler registers, with every fact
 that can be established about each of them. Nothing is opaque unless it cannot
@@ -38,8 +39,8 @@ without it, and so that anything built here is accepted by it unchanged.
   result type inference; the other dialect `.cpp` files and the `BUILD.bazel`
   files complete them. Edit them as the new definitions require. For `nvvm`
   and `cuda` these are `NVVMDialect.{h,cpp}` (with the `#nvvm.target`
-  verifier) and `CudaDialect.{h,cpp}` under `include/` and `lib/Dialect/`.
-- **Generated: what you produce.** Every `.td` file under `include/` that is not
+  verifier) and `CudaDialect.{h,cpp}` in their dialect package roots.
+- **Generated: what you produce.** Every package-local `.td` file that is not
   a dialect declaration: the operations (`CuteOps.td`, `CuteNVGPUOps.td`,
   `NVVMOps.td`, `CudaOps.td`), the compiler's types, attributes and enums
   beyond the release (`CuteTypesCompiler.td`, `CuteAttrsCompiler.td`,
@@ -50,28 +51,29 @@ without it, and so that anything built here is accepted by it unchanged.
   any new `.td` you need to split them sensibly. The dialect declarations (`*Dialect.td`) change only as far as the
   generated files need.
 - **Language bindings, if present.** When the tree carries bindings derived
-  from these definitions (a C API under `lib/CAPI`, builder files next to this
+  from these definitions (a `capi.cc`/`capi.h` C API in each dialect package, builder files in each
   directory), regenerate them from the records of the new definitions
   (`llvm-tblgen --dump-json` gives them all; do not regex the `.td` files).
   When a class changes shape (opaque to parametric, merged, split, renamed
   accessors), change the bindings to match, and keep the existing
-  convenience helpers working where it costs little.
+  convenience helpers working where it costs little. Names, builder
+  parameters and `opts` follow `mlir/dialects/README.md`.
 
 Consumers outside this directory use the dialect classes and must keep
 compiling: search the repository for the dialect namespaces
 (`cutlass_compiler::cute`, `cute_nvgpu`, `nvvm`, `cuda`), for the Zig modules
-(`cute.nvgpu`, `cute.nvvm`, `cute.cuda`, and the convenience layers over them
-in `mlir/dialects/nvvm.zig` and `mlir/dialects/cuda.zig`) and for the headers
-under `include/cute_ir`. When a definition changes shape, update those users in the
+(`mlir/dialects/cute_nvgpu`, `mlir/dialects/nvvm`, and
+`mlir/dialects/cuda`) and for the headers
+in the dialect packages. When a definition changes shape, update those users in the
 same change. Tighter operand constraints also break consumers that built IR
 with loose types, and so does an operation that stops inferring its results:
 fix the consumer, not the constraint.
 
 ## NVIDIA's `nvvm` and `cuda` dialects
 
-The kernels the CuTe builder emits (`kernels/cute`) use two more dialects of
+The kernels the CuTe builder emits (`dsl/cute`) use two more dialects of
 the compiler: `nvvm` (special registers, mbarriers, tcgen05, ...) and `cuda`
-(kernels, launch configurations, host runtime calls). Both are carried here
+(kernels, launch configurations, host runtime calls). Both have sibling packages
 and must be regenerated with every release, like `cute` and `cute_nvgpu`.
 
 - **Neither is upstream's.** The compiler is built on NVIDIA's own LLVM
@@ -82,23 +84,22 @@ and must be regenerated with every release, like `cute` and `cute_nvgpu`.
   compiler. No `.td` ships with the release for either: rebuild both from the
   bindings and the live compiler, as for the cute dialects. Upstream's NVVM
   `.td` is neither a source nor a substitute.
-- **Where they live.** `include/cute_ir/Dialect/{NVVM,Cuda}/IR` (declarations
-  and generated `.td`), `lib/Dialect/{NVVM,Cuda}/IR` (dialect and inference
-  `.cpp`), `include/cute_ir-c/Dialect/{NVVM,Cuda}*.h` and
-  `lib/CAPI/{NVVM,Cuda}*.cpp` (C API), and `nvvm.zig`, `cuda.zig` (Zig,
-  `cute.nvvm` and `cute.cuda`).
+- **Where they live.** `../nvvm` and `../cuda` contain the declarations,
+  generated `.td` files, dialect and inference `.cpp` files, and consolidated
+  `capi.h`/`capi.cc` C APIs. Each package's `ops.zig` contains the generated
+  bindings; `nvvm.zig` and `cuda.zig` provide the convenience builders.
+
 - **Names.** The C++ namespaces are `mlir::cutlass_compiler::nvvm` and
   `mlir::cutlass_compiler::cuda`. The dialects are named `nvvm` and `cuda` as
   in the compiler, so a registry holds this `nvvm` or upstream's, never both;
   upstream's NVVM C++ is linked into the tree and must stay unregistered where
   this one is. The C dialect handles are `cute_nvvm` and `cuda`, and the C API
-  of `nvvm` is prefixed `CuteNVVM` (`mlirAttributeIsACuteNVVM<Name>`,
-  `mlirCuteNVVM<Name>AttrGet`) so that neither collides with upstream's
+  of `nvvm` is prefixed `CuteNVVM` so that neither collides with upstream's
   `mlirGetDialectHandle__nvvm__` or a future upstream NVVM C API; `cuda`'s is
   prefixed `Cuda`.
 - **`llvm` is upstream's.** NVVM operands are `!llvm.ptr<N>` and LLVM
   structs, and the builder emits `llvm.*` operations. The CuTe context
-  registers the upstream LLVM dialect, bound by `mlir/dialects/llvm_dialect.zig`
+  registers the upstream LLVM dialect, bound by `mlir/dialects/llvm/llvm.zig`
   (its builders, and `mlirLLVMPointerTypeGet` for `!llvm.ptr<N>`); the nvvm
   and cuda constraints name `::mlir::LLVM` types. NVIDIA's `llvm` is not
   vendored: its types print and parse the same, and the compiler reads the
@@ -144,10 +145,10 @@ Sources specific to them, besides those in the table below:
 
 The bindings follow the cute ones: the C API and the Zig enums, typed
 attribute and type wrappers and operation builders are generated from
-`llvm-tblgen --dump-json` of the generated `.td` files, then formatted with
-`zig fmt`. Builders of operations with regions, and of terminators, do not
-verify on creation (their blocks are filled, or their block is completed,
-afterwards). `mlir/dialects/nvvm.zig` and `mlir/dialects/cuda.zig` are the
+`llvm-tblgen --dump-json` of the generated `.td` files, following
+`mlir/dialects/README.md` (names, wrappers, comments, formatting). Builders of
+operations with regions, and of terminators, do not verify on creation (their
+blocks are filled, or their block is completed, afterwards). `mlir/dialects/nvvm/nvvm.zig` and `mlir/dialects/cuda/cuda.zig` are the
 hand-written convenience layer the builder calls; they fix the attributes the
 kernels do not choose and must keep building no text.
 
@@ -212,8 +213,7 @@ The round-trip corpus: run every example of the archive's
 `examples/python/CuTeDSL` with `CUTE_DSL_KEEP=ir-debug`, which keeps each
 compiled module's IR; set `CUTE_DSL_ARCH` for the architecture-restricted
 ones. This gives hundreds of real modules covering far more operations than
-the fixtures in the repository (the testdata under `tools/` and the kernels'
-fixtures), which are added to it.
+the kernels' fixtures in the repository, which are added to it.
 
 When sources disagree, the live compiler wins; record the disagreement in a
 comment.
@@ -313,12 +313,11 @@ A change is done when all of these hold:
    tests of every consumer found above (kernel emitters, host tools, language
    bindings), built with the tree's usual Bazel configuration.
 5. **NVIDIA's compiler reads what the kernels emit.** Dump the IR of every
-   kernel the repository's tests emit through `kernels/cute`: the builder's
-   own tests, the MXFP4 emission tests under `zml/moe/cute_kernels`, and the
-   FlashMLA program (`zml/attention/cute_kernels/flashmla_sm100.zig`, whose
-   `Program.emit` needs a temporary test with a few configurations, single-CTA,
-   clustered and persistent). Dump both with the previous definitions and with
-   the new ones. In the release's venv, `import cutlass`, then parse and
+   kernel the repository's tests emit through `dsl/cute`: the builder's
+   own tests and the CuTe kernels under `zml/kernels/moe/cute`,
+   `zml/kernels/flash_attention/cute` and `zml/kernels/paged_attention/cute`.
+   Dump both with the previous definitions and with the new ones. In the
+   release's venv, `import cutlass`, then parse and
    verify each module with `cutlass._mlir.ir.Module.parse`, and compare the
    generic print (`get_asm(print_generic_op_form=True)`) of each module before
    and after: it must be identical, and a module the compiler rejected before

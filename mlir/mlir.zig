@@ -42,6 +42,13 @@ test "variadic operation groups preserve order and dense array segment sizes" {
     try std.testing.expect(op.attributeByName("resultSegmentSizes").?.eql(.denseArray(ctx, .i32, &.{ 0, 2, 1 })));
 }
 
+test "nested symbol references print their path" {
+    const ctx = try Context.init(.{});
+    defer ctx.deinit();
+    const symbol = Attribute.symbolRef(ctx, "kernels", &.{FlatSymbolRefAttribute.init(ctx, "add")});
+    try std.testing.expect(symbol.eql(try Attribute.parse(ctx, "@kernels::@add")));
+}
+
 pub const Error = error{
     /// Invalid Mlir was created.
     InvalidMlir,
@@ -83,10 +90,6 @@ pub fn registerPasses(comptime passes: []const u8) void {
     @field(c, "mlirRegister" ++ passes ++ "Passes")();
 }
 
-pub fn registerFuncExtensions(registry: *DialectRegistry) void {
-    c.mlirRegisterFuncExtensions(registry.ptr());
-}
-
 fn isPtrConst(comptime T: type) bool {
     return @typeInfo(T).pointer.attrs.@"const";
 }
@@ -104,7 +107,7 @@ pub fn Methods(comptime T: type, comptime NativeT: type) type {
             return .{ .ptr = @ptrCast(@constCast(self)) };
         }
 
-        fn format(f: anytype) fn (self: *const T, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        pub fn format(f: anytype) fn (self: *const T, writer: *std.Io.Writer) std.Io.Writer.Error!void {
             return struct {
                 fn format(self: *const T, writer: *std.Io.Writer) std.Io.Writer.Error!void {
                     var ctx: StringCallbackCtx = .{ .writer = writer };
@@ -732,6 +735,10 @@ pub const Attribute = opaque {
 
     pub fn flatSymbolRef(ctx: *Context, symbol: []const u8) *const Attribute {
         return @ptrCast(FlatSymbolRefAttribute.init(ctx, symbol));
+    }
+
+    pub fn symbolRef(ctx: *Context, root: []const u8, nested: []const *const FlatSymbolRefAttribute) *const Attribute {
+        return @ptrCast(SymbolRefAttribute.init(ctx, root, nested));
     }
 
     pub fn unit(ctx: *Context) *const Attribute {
@@ -1777,6 +1784,20 @@ pub const FlatSymbolRefAttribute = opaque {
 
     pub fn symbol(self: *const FlatSymbolRefAttribute) []const u8 {
         return string(c.mlirFlatSymbolRefAttrGetValue(self.ptr()));
+    }
+};
+
+/// `@root::@nested...`.
+pub const SymbolRefAttribute = opaque {
+    const M = Methods(SymbolRefAttribute, c.MlirAttribute);
+
+    pub const isAFn = c.mlirAttributeIsASymbolRef;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub fn init(ctx: *Context, root: []const u8, nested: []const *const FlatSymbolRefAttribute) *const SymbolRefAttribute {
+        return @ptrCast(c.mlirSymbolRefAttrGet(ctx.ptr(), stringRef(root), @intCast(nested.len), @ptrCast(nested)).ptr);
     }
 };
 

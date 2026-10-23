@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const mlir = @import("mlir");
-const mtt = @import("kernels/mosaic_tpu/builder");
+const mtt = @import("dsl/mosaic_tpu/builder");
 
 pub const Cfg = struct {
     // Shapes that vary at compile-of-kernel time.
