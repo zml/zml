@@ -21,14 +21,14 @@ test "gpu enum attributes are built through the C API" {
     inline for (@typeInfo(gpu.Dim).@"enum".field_names) |name| {
         const value: gpu.Dim = @field(gpu.Dim, name);
         const attr = try gpu.DimensionAttr.get(ctx, .{ .value = value });
-        try std.testing.expectEqual(value, attr.getValue());
+        try std.testing.expectEqual(value, attr.value());
         try std.testing.expect(attr.attribute().isA(gpu.DimensionAttr) != null);
         try expectPrints("#gpu.dim<" ++ name ++ ">", attr);
     }
     inline for (@typeInfo(gpu.ShuffleMode).@"enum".field_names) |name| {
         const value: gpu.ShuffleMode = @field(gpu.ShuffleMode, name);
         const attr = try gpu.ShuffleModeAttr.get(ctx, .{ .value = value });
-        try std.testing.expectEqual(value, attr.getValue());
+        try std.testing.expectEqual(value, attr.value());
         try expectPrints("#gpu.shuffle_mode<" ++ name ++ ">", attr);
     }
 }

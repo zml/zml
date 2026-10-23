@@ -55,7 +55,7 @@ pub const DimensionAttr = opaque {
         const result = c.mlirGPUDimensionAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) Dim {
+    pub fn value(self: *const Self) Dim {
         return @fromBackingInt(@intCast(c.mlirGPUDimensionAttrGetValue(self.ptr())));
     }
 };
@@ -80,7 +80,7 @@ pub const ShuffleModeAttr = opaque {
         const result = c.mlirGPUShuffleModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ShuffleMode {
+    pub fn value(self: *const Self) ShuffleMode {
         return @fromBackingInt(@intCast(c.mlirGPUShuffleModeAttrGetValue(self.ptr())));
     }
 };

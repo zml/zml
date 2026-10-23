@@ -219,7 +219,7 @@ pub const ReductionKindAttr = opaque {
         const result = c.mlirTpuReductionKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ReductionKind {
+    pub fn value(self: *const Self) ReductionKind {
         return @fromBackingInt(@intCast(c.mlirTpuReductionKindAttrGetValue(self.ptr())));
     }
 };
@@ -256,7 +256,7 @@ pub const ContractPrecisionAttr = opaque {
         const result = c.mlirTpuContractPrecisionAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ContractPrecision {
+    pub fn value(self: *const Self) ContractPrecision {
         return @fromBackingInt(@intCast(c.mlirTpuContractPrecisionAttrGetValue(self.ptr())));
     }
 };
@@ -292,7 +292,7 @@ pub const RoundingModeAttr = opaque {
         const result = c.mlirTpuRoundingModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) RoundingMode {
+    pub fn value(self: *const Self) RoundingMode {
         return @fromBackingInt(@intCast(c.mlirTpuRoundingModeAttrGetValue(self.ptr())));
     }
 };
@@ -329,7 +329,7 @@ pub const CoreTypeAttr = opaque {
         const result = c.mlirTpuCoreTypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) CoreType {
+    pub fn value(self: *const Self) CoreType {
         return @fromBackingInt(@intCast(c.mlirTpuCoreTypeAttrGetValue(self.ptr())));
     }
 };
@@ -367,7 +367,7 @@ pub const DimensionSemanticsAttr = opaque {
         const result = c.mlirTpuDimensionSemanticsAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) DimensionSemantics {
+    pub fn value(self: *const Self) DimensionSemantics {
         return @fromBackingInt(@intCast(c.mlirTpuDimensionSemanticsAttrGetValue(self.ptr())));
     }
 };
@@ -403,7 +403,7 @@ pub const PipelineModeAttr = opaque {
         const result = c.mlirTpuPipelineModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) PipelineMode {
+    pub fn value(self: *const Self) PipelineMode {
         return @fromBackingInt(@intCast(c.mlirTpuPipelineModeAttrGetValue(self.ptr())));
     }
 };
@@ -439,7 +439,7 @@ pub const RevisitModeAttr = opaque {
         const result = c.mlirTpuRevisitModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) RevisitMode {
+    pub fn value(self: *const Self) RevisitMode {
         return @fromBackingInt(@intCast(c.mlirTpuRevisitModeAttrGetValue(self.ptr())));
     }
 };
@@ -483,10 +483,10 @@ pub const MemorySpaceAttr = opaque {
         const result = c.mlirTpuMemorySpaceAttrGet(ctx.ptr(), @backingInt(args.value), core_type);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MemorySpace {
+    pub fn value(self: *const Self) MemorySpace {
         return @fromBackingInt(@intCast(c.mlirTpuMemorySpaceAttrGetValue(self.ptr())));
     }
-    pub fn getCoreType(self: *const Self) ?CoreType {
+    pub fn coreType(self: *const Self) ?CoreType {
         const core_type = c.mlirTpuMemorySpaceAttrGetCoreType(self.ptr());
         return if (core_type < 0) null else @fromBackingInt(@intCast(core_type));
     }
@@ -519,16 +519,16 @@ pub const ElementWindowAttr = opaque {
         );
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getNumPadLow(self: *const Self) usize {
+    pub fn numPadLow(self: *const Self) usize {
         return @intCast(c.mlirTpuElementWindowAttrGetNumPadLow(self.ptr()));
     }
-    pub fn getPadLow(self: *const Self, pos: usize) i64 {
+    pub fn padLow(self: *const Self, pos: usize) i64 {
         return c.mlirTpuElementWindowAttrGetPadLow(self.ptr(), @intCast(pos));
     }
-    pub fn getNumPadHigh(self: *const Self) usize {
+    pub fn numPadHigh(self: *const Self) usize {
         return @intCast(c.mlirTpuElementWindowAttrGetNumPadHigh(self.ptr()));
     }
-    pub fn getPadHigh(self: *const Self, pos: usize) i64 {
+    pub fn padHigh(self: *const Self, pos: usize) i64 {
         return c.mlirTpuElementWindowAttrGetPadHigh(self.ptr(), @intCast(pos));
     }
 };
@@ -587,46 +587,46 @@ pub const DotDimensionNumbersAttr = opaque {
         );
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getNumLhsContractingDims(self: *const Self) usize {
+    pub fn numLhsContractingDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumLhsContractingDims(self.ptr()));
     }
-    pub fn getLhsContractingDims(self: *const Self, pos: usize) i64 {
+    pub fn lhsContractingDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetLhsContractingDims(self.ptr(), @intCast(pos));
     }
-    pub fn getNumRhsContractingDims(self: *const Self) usize {
+    pub fn numRhsContractingDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumRhsContractingDims(self.ptr()));
     }
-    pub fn getRhsContractingDims(self: *const Self, pos: usize) i64 {
+    pub fn rhsContractingDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetRhsContractingDims(self.ptr(), @intCast(pos));
     }
-    pub fn getNumLhsNonContractingDims(self: *const Self) usize {
+    pub fn numLhsNonContractingDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumLhsNonContractingDims(self.ptr()));
     }
-    pub fn getLhsNonContractingDims(self: *const Self, pos: usize) i64 {
+    pub fn lhsNonContractingDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetLhsNonContractingDims(self.ptr(), @intCast(pos));
     }
-    pub fn getNumRhsNonContractingDims(self: *const Self) usize {
+    pub fn numRhsNonContractingDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumRhsNonContractingDims(self.ptr()));
     }
-    pub fn getRhsNonContractingDims(self: *const Self, pos: usize) i64 {
+    pub fn rhsNonContractingDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetRhsNonContractingDims(self.ptr(), @intCast(pos));
     }
-    pub fn getNumOutputDimOrder(self: *const Self) usize {
+    pub fn numOutputDimOrder(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumOutputDimOrder(self.ptr()));
     }
-    pub fn getOutputDimOrder(self: *const Self, pos: usize) i64 {
+    pub fn outputDimOrder(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetOutputDimOrder(self.ptr(), @intCast(pos));
     }
-    pub fn getNumLhsBatchDims(self: *const Self) usize {
+    pub fn numLhsBatchDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumLhsBatchDims(self.ptr()));
     }
-    pub fn getLhsBatchDims(self: *const Self, pos: usize) i64 {
+    pub fn lhsBatchDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetLhsBatchDims(self.ptr(), @intCast(pos));
     }
-    pub fn getNumRhsBatchDims(self: *const Self) usize {
+    pub fn numRhsBatchDims(self: *const Self) usize {
         return @intCast(c.mlirTpuDotDimensionNumbersAttrGetNumRhsBatchDims(self.ptr()));
     }
-    pub fn getRhsBatchDims(self: *const Self, pos: usize) i64 {
+    pub fn rhsBatchDims(self: *const Self, pos: usize) i64 {
         return c.mlirTpuDotDimensionNumbersAttrGetRhsBatchDims(self.ptr(), @intCast(pos));
     }
 };

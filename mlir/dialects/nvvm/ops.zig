@@ -834,7 +834,7 @@ pub const AtomicOpKindAttr = opaque {
         const result = c.mlirCuteNVVMAtomicOpKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) AtomicOpKind {
+    pub fn value(self: *const Self) AtomicOpKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMAtomicOpKindAttrGetValue(self.ptr())));
     }
 };
@@ -859,7 +859,7 @@ pub const BarrierReductionAttr = opaque {
         const result = c.mlirCuteNVVMBarrierReductionAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) BarrierReduction {
+    pub fn value(self: *const Self) BarrierReduction {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMBarrierReductionAttrGetValue(self.ptr())));
     }
 };
@@ -884,7 +884,7 @@ pub const BarrierReduxKindAttr = opaque {
         const result = c.mlirCuteNVVMBarrierReduxKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) BarrierReduxKind {
+    pub fn value(self: *const Self) BarrierReduxKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMBarrierReduxKindAttrGetValue(self.ptr())));
     }
 };
@@ -909,7 +909,7 @@ pub const BlockScaleFormatAttr = opaque {
         const result = c.mlirCuteNVVMBlockScaleFormatAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) BlockScaleFormat {
+    pub fn value(self: *const Self) BlockScaleFormat {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMBlockScaleFormatAttrGetValue(self.ptr())));
     }
 };
@@ -934,7 +934,7 @@ pub const CTAGroupKindAttr = opaque {
         const result = c.mlirCuteNVVMCTAGroupKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) CTAGroupKind {
+    pub fn value(self: *const Self) CTAGroupKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMCTAGroupKindAttrGetValue(self.ptr())));
     }
 };
@@ -959,7 +959,7 @@ pub const CVTPackFloatKindAttr = opaque {
         const result = c.mlirCuteNVVMCVTPackFloatKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) CVTPackFloatKind {
+    pub fn value(self: *const Self) CVTPackFloatKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMCVTPackFloatKindAttrGetValue(self.ptr())));
     }
 };
@@ -984,7 +984,7 @@ pub const CacheEvictionPriorityAttr = opaque {
         const result = c.mlirCuteNVVMCacheEvictionPriorityAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) CacheEvictionPriority {
+    pub fn value(self: *const Self) CacheEvictionPriority {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMCacheEvictionPriorityAttrGetValue(self.ptr())));
     }
 };
@@ -1009,7 +1009,7 @@ pub const ClusterLaunchControlQueryTypeAttr = opaque {
         const result = c.mlirCuteNVVMClusterLaunchControlQueryTypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ClusterLaunchControlQueryType {
+    pub fn value(self: *const Self) ClusterLaunchControlQueryType {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMClusterLaunchControlQueryTypeAttrGetValue(self.ptr())));
     }
 };
@@ -1034,7 +1034,7 @@ pub const CompareOpKindAttr = opaque {
         const result = c.mlirCuteNVVMCompareOpKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) CompareOpKind {
+    pub fn value(self: *const Self) CompareOpKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMCompareOpKindAttrGetValue(self.ptr())));
     }
 };
@@ -1059,7 +1059,7 @@ pub const ConvertFP4TypeAttr = opaque {
         const result = c.mlirCuteNVVMConvertFP4TypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ConvertFP4Type {
+    pub fn value(self: *const Self) ConvertFP4Type {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMConvertFP4TypeAttrGetValue(self.ptr())));
     }
 };
@@ -1084,7 +1084,7 @@ pub const ConvertFP8TypeAttr = opaque {
         const result = c.mlirCuteNVVMConvertFP8TypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ConvertFP8Type {
+    pub fn value(self: *const Self) ConvertFP8Type {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMConvertFP8TypeAttrGetValue(self.ptr())));
     }
 };
@@ -1109,7 +1109,7 @@ pub const ConvertScaleKindAttr = opaque {
         const result = c.mlirCuteNVVMConvertScaleKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ConvertScaleKind {
+    pub fn value(self: *const Self) ConvertScaleKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMConvertScaleKindAttrGetValue(self.ptr())));
     }
 };
@@ -1134,7 +1134,7 @@ pub const DotAccumulateTypeAttr = opaque {
         const result = c.mlirCuteNVVMDotAccumulateTypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) DotAccumulateType {
+    pub fn value(self: *const Self) DotAccumulateType {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMDotAccumulateTypeAttrGetValue(self.ptr())));
     }
 };
@@ -1159,7 +1159,7 @@ pub const EvictKindAttr = opaque {
         const result = c.mlirCuteNVVMEvictKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) EvictKind {
+    pub fn value(self: *const Self) EvictKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMEvictKindAttrGetValue(self.ptr())));
     }
 };
@@ -1184,7 +1184,7 @@ pub const FPRoundingModeAttr = opaque {
         const result = c.mlirCuteNVVMFPRoundingModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) FPRoundingMode {
+    pub fn value(self: *const Self) FPRoundingMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMFPRoundingModeAttrGetValue(self.ptr())));
     }
 };
@@ -1209,7 +1209,7 @@ pub const GridDepActionKindAttr = opaque {
         const result = c.mlirCuteNVVMGridDepActionKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) GridDepActionKind {
+    pub fn value(self: *const Self) GridDepActionKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMGridDepActionKindAttrGetValue(self.ptr())));
     }
 };
@@ -1234,7 +1234,7 @@ pub const IntegerRoundingModeAttr = opaque {
         const result = c.mlirCuteNVVMIntegerRoundingModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) IntegerRoundingMode {
+    pub fn value(self: *const Self) IntegerRoundingMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMIntegerRoundingModeAttrGetValue(self.ptr())));
     }
 };
@@ -1259,7 +1259,7 @@ pub const L2PrefetchSizeAttr = opaque {
         const result = c.mlirCuteNVVML2PrefetchSizeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) L2PrefetchSize {
+    pub fn value(self: *const Self) L2PrefetchSize {
         return @fromBackingInt(@intCast(c.mlirCuteNVVML2PrefetchSizeAttrGetValue(self.ptr())));
     }
 };
@@ -1284,7 +1284,7 @@ pub const LdStMatrixEltTypeAttr = opaque {
         const result = c.mlirCuteNVVMLdStMatrixEltTypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) LdStMatrixEltType {
+    pub fn value(self: *const Self) LdStMatrixEltType {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMLdStMatrixEltTypeAttrGetValue(self.ptr())));
     }
 };
@@ -1309,7 +1309,7 @@ pub const LoadCacheModifierExtKindAttr = opaque {
         const result = c.mlirCuteNVVMLoadCacheModifierExtKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) LoadCacheModifierExtKind {
+    pub fn value(self: *const Self) LoadCacheModifierExtKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMLoadCacheModifierExtKindAttrGetValue(self.ptr())));
     }
 };
@@ -1334,7 +1334,7 @@ pub const LoadCacheModifierKindAttr = opaque {
         const result = c.mlirCuteNVVMLoadCacheModifierKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) LoadCacheModifierKind {
+    pub fn value(self: *const Self) LoadCacheModifierKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMLoadCacheModifierKindAttrGetValue(self.ptr())));
     }
 };
@@ -1359,7 +1359,7 @@ pub const LoadShapeAttr = opaque {
         const result = c.mlirCuteNVVMLoadShapeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) LoadShape {
+    pub fn value(self: *const Self) LoadShape {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMLoadShapeAttrGetValue(self.ptr())));
     }
 };
@@ -1384,7 +1384,7 @@ pub const LoadSrcFormatAttr = opaque {
         const result = c.mlirCuteNVVMLoadSrcFormatAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) LoadSrcFormat {
+    pub fn value(self: *const Self) LoadSrcFormat {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMLoadSrcFormatAttrGetValue(self.ptr())));
     }
 };
@@ -1409,7 +1409,7 @@ pub const MBarrierLayoutAttr = opaque {
         const result = c.mlirCuteNVVMMBarrierLayoutAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MBarrierLayout {
+    pub fn value(self: *const Self) MBarrierLayout {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMBarrierLayoutAttrGetValue(self.ptr())));
     }
 };
@@ -1434,7 +1434,7 @@ pub const MBarrierPhaseAttr = opaque {
         const result = c.mlirCuteNVVMMBarrierPhaseAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MBarrierPhase {
+    pub fn value(self: *const Self) MBarrierPhase {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMBarrierPhaseAttrGetValue(self.ptr())));
     }
 };
@@ -1459,7 +1459,7 @@ pub const MBarrierScopeKindAttr = opaque {
         const result = c.mlirCuteNVVMMBarrierScopeKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MBarrierScopeKind {
+    pub fn value(self: *const Self) MBarrierScopeKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMBarrierScopeKindAttrGetValue(self.ptr())));
     }
 };
@@ -1484,7 +1484,7 @@ pub const MBarrierSpaceKindAttr = opaque {
         const result = c.mlirCuteNVVMMBarrierSpaceKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MBarrierSpaceKind {
+    pub fn value(self: *const Self) MBarrierSpaceKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMBarrierSpaceKindAttrGetValue(self.ptr())));
     }
 };
@@ -1509,7 +1509,7 @@ pub const MBarrierTxnKindAttr = opaque {
         const result = c.mlirCuteNVVMMBarrierTxnKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MBarrierTxnKind {
+    pub fn value(self: *const Self) MBarrierTxnKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMBarrierTxnKindAttrGetValue(self.ptr())));
     }
 };
@@ -1534,7 +1534,7 @@ pub const MBarrierWaitKindAttr = opaque {
         const result = c.mlirCuteNVVMMBarrierWaitKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MBarrierWaitKind {
+    pub fn value(self: *const Self) MBarrierWaitKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMBarrierWaitKindAttrGetValue(self.ptr())));
     }
 };
@@ -1559,7 +1559,7 @@ pub const MMAB1OpAttr = opaque {
         const result = c.mlirCuteNVVMMMAB1OpAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MMAB1Op {
+    pub fn value(self: *const Self) MMAB1Op {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMMAB1OpAttrGetValue(self.ptr())));
     }
 };
@@ -1584,7 +1584,7 @@ pub const MMABlockScaleKindAttr = opaque {
         const result = c.mlirCuteNVVMMMABlockScaleKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MMABlockScaleKind {
+    pub fn value(self: *const Self) MMABlockScaleKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMMABlockScaleKindAttrGetValue(self.ptr())));
     }
 };
@@ -1609,7 +1609,7 @@ pub const MMACtaCountAttr = opaque {
         const result = c.mlirCuteNVVMMMACtaCountAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MMACtaCount {
+    pub fn value(self: *const Self) MMACtaCount {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMMACtaCountAttrGetValue(self.ptr())));
     }
 };
@@ -1634,7 +1634,7 @@ pub const MMAFragAttr = opaque {
         const result = c.mlirCuteNVVMMMAFragAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MMAFrag {
+    pub fn value(self: *const Self) MMAFrag {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMMAFragAttrGetValue(self.ptr())));
     }
 };
@@ -1659,7 +1659,7 @@ pub const MMAIntOverflowAttr = opaque {
         const result = c.mlirCuteNVVMMMAIntOverflowAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MMAIntOverflow {
+    pub fn value(self: *const Self) MMAIntOverflow {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMMAIntOverflowAttrGetValue(self.ptr())));
     }
 };
@@ -1684,7 +1684,7 @@ pub const MMAKindAttr = opaque {
         const result = c.mlirCuteNVVMMMAKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MMAKind {
+    pub fn value(self: *const Self) MMAKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMMAKindAttrGetValue(self.ptr())));
     }
 };
@@ -1709,7 +1709,7 @@ pub const MMALayoutAttr = opaque {
         const result = c.mlirCuteNVVMMMALayoutAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MMALayout {
+    pub fn value(self: *const Self) MMALayout {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMMALayoutAttrGetValue(self.ptr())));
     }
 };
@@ -1734,7 +1734,7 @@ pub const MMATypesAttr = opaque {
         const result = c.mlirCuteNVVMMMATypesAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MMATypes {
+    pub fn value(self: *const Self) MMATypes {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMMATypesAttrGetValue(self.ptr())));
     }
 };
@@ -1759,7 +1759,7 @@ pub const MatchSyncKindAttr = opaque {
         const result = c.mlirCuteNVVMMatchSyncKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MatchSyncKind {
+    pub fn value(self: *const Self) MatchSyncKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMatchSyncKindAttrGetValue(self.ptr())));
     }
 };
@@ -1784,7 +1784,7 @@ pub const MemOrderKindAttr = opaque {
         const result = c.mlirCuteNVVMMemOrderKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MemOrderKind {
+    pub fn value(self: *const Self) MemOrderKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMemOrderKindAttrGetValue(self.ptr())));
     }
 };
@@ -1809,7 +1809,7 @@ pub const MemScopeKindAttr = opaque {
         const result = c.mlirCuteNVVMMemScopeKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MemScopeKind {
+    pub fn value(self: *const Self) MemScopeKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMemScopeKindAttrGetValue(self.ptr())));
     }
 };
@@ -1834,7 +1834,7 @@ pub const MulModeAttr = opaque {
         const result = c.mlirCuteNVVMMulModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) MulMode {
+    pub fn value(self: *const Self) MulMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMMulModeAttrGetValue(self.ptr())));
     }
 };
@@ -1859,7 +1859,7 @@ pub const NVVMMemorySpaceAttr = opaque {
         const result = c.mlirCuteNVVMNVVMMemorySpaceAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) NVVMMemorySpace {
+    pub fn value(self: *const Self) NVVMMemorySpace {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMNVVMMemorySpaceAttrGetValue(self.ptr())));
     }
 };
@@ -1884,7 +1884,7 @@ pub const PermuteModeAttr = opaque {
         const result = c.mlirCuteNVVMPermuteModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) PermuteMode {
+    pub fn value(self: *const Self) PermuteMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMPermuteModeAttrGetValue(self.ptr())));
     }
 };
@@ -1909,7 +1909,7 @@ pub const PrefetchCacheLevelAttr = opaque {
         const result = c.mlirCuteNVVMPrefetchCacheLevelAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) PrefetchCacheLevel {
+    pub fn value(self: *const Self) PrefetchCacheLevel {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMPrefetchCacheLevelAttrGetValue(self.ptr())));
     }
 };
@@ -1934,7 +1934,7 @@ pub const ProxyKindAttr = opaque {
         const result = c.mlirCuteNVVMProxyKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ProxyKind {
+    pub fn value(self: *const Self) ProxyKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMProxyKindAttrGetValue(self.ptr())));
     }
 };
@@ -1959,7 +1959,7 @@ pub const ReductionKindAttr = opaque {
         const result = c.mlirCuteNVVMReductionKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ReductionKind {
+    pub fn value(self: *const Self) ReductionKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMReductionKindAttrGetValue(self.ptr())));
     }
 };
@@ -1984,7 +1984,7 @@ pub const ReductionOpAttr = opaque {
         const result = c.mlirCuteNVVMReductionOpAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ReductionOp {
+    pub fn value(self: *const Self) ReductionOp {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMReductionOpAttrGetValue(self.ptr())));
     }
 };
@@ -2009,7 +2009,7 @@ pub const ReductionTypeAttr = opaque {
         const result = c.mlirCuteNVVMReductionTypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ReductionType {
+    pub fn value(self: *const Self) ReductionType {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMReductionTypeAttrGetValue(self.ptr())));
     }
 };
@@ -2034,7 +2034,7 @@ pub const SPCompressElemSizeAttr = opaque {
         const result = c.mlirCuteNVVMSPCompressElemSizeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SPCompressElemSize {
+    pub fn value(self: *const Self) SPCompressElemSize {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSPCompressElemSizeAttrGetValue(self.ptr())));
     }
 };
@@ -2059,7 +2059,7 @@ pub const SPCompressFactorTypeAttr = opaque {
         const result = c.mlirCuteNVVMSPCompressFactorTypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SPCompressFactorType {
+    pub fn value(self: *const Self) SPCompressFactorType {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSPCompressFactorTypeAttrGetValue(self.ptr())));
     }
 };
@@ -2084,7 +2084,7 @@ pub const SPCompressIndexSizeAttr = opaque {
         const result = c.mlirCuteNVVMSPCompressIndexSizeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SPCompressIndexSize {
+    pub fn value(self: *const Self) SPCompressIndexSize {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSPCompressIndexSizeAttrGetValue(self.ptr())));
     }
 };
@@ -2109,7 +2109,7 @@ pub const SPCompressOpKindAttr = opaque {
         const result = c.mlirCuteNVVMSPCompressOpKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SPCompressOpKind {
+    pub fn value(self: *const Self) SPCompressOpKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSPCompressOpKindAttrGetValue(self.ptr())));
     }
 };
@@ -2134,7 +2134,7 @@ pub const SPCompressRepFactorAttr = opaque {
         const result = c.mlirCuteNVVMSPCompressRepFactorAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SPCompressRepFactor {
+    pub fn value(self: *const Self) SPCompressRepFactor {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSPCompressRepFactorAttrGetValue(self.ptr())));
     }
 };
@@ -2159,7 +2159,7 @@ pub const SPDecompressElemSizeAttr = opaque {
         const result = c.mlirCuteNVVMSPDecompressElemSizeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SPDecompressElemSize {
+    pub fn value(self: *const Self) SPDecompressElemSize {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSPDecompressElemSizeAttrGetValue(self.ptr())));
     }
 };
@@ -2184,7 +2184,7 @@ pub const SPDecompressFactorTypeAttr = opaque {
         const result = c.mlirCuteNVVMSPDecompressFactorTypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SPDecompressFactorType {
+    pub fn value(self: *const Self) SPDecompressFactorType {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSPDecompressFactorTypeAttrGetValue(self.ptr())));
     }
 };
@@ -2209,7 +2209,7 @@ pub const SPDecompressIndexSizeAttr = opaque {
         const result = c.mlirCuteNVVMSPDecompressIndexSizeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SPDecompressIndexSize {
+    pub fn value(self: *const Self) SPDecompressIndexSize {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSPDecompressIndexSizeAttrGetValue(self.ptr())));
     }
 };
@@ -2234,7 +2234,7 @@ pub const SPDecompressRepFactorAttr = opaque {
         const result = c.mlirCuteNVVMSPDecompressRepFactorAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SPDecompressRepFactor {
+    pub fn value(self: *const Self) SPDecompressRepFactor {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSPDecompressRepFactorAttrGetValue(self.ptr())));
     }
 };
@@ -2259,7 +2259,7 @@ pub const SaturationModeAttr = opaque {
         const result = c.mlirCuteNVVMSaturationModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SaturationMode {
+    pub fn value(self: *const Self) SaturationMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSaturationModeAttrGetValue(self.ptr())));
     }
 };
@@ -2284,7 +2284,7 @@ pub const SaturationModeKindAttr = opaque {
         const result = c.mlirCuteNVVMSaturationModeKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SaturationModeKind {
+    pub fn value(self: *const Self) SaturationModeKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSaturationModeKindAttrGetValue(self.ptr())));
     }
 };
@@ -2309,7 +2309,7 @@ pub const ScaleVecSizeAttr = opaque {
         const result = c.mlirCuteNVVMScaleVecSizeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ScaleVecSize {
+    pub fn value(self: *const Self) ScaleVecSize {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMScaleVecSizeAttrGetValue(self.ptr())));
     }
 };
@@ -2334,7 +2334,7 @@ pub const SetMaxRegisterActionAttr = opaque {
         const result = c.mlirCuteNVVMSetMaxRegisterActionAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SetMaxRegisterAction {
+    pub fn value(self: *const Self) SetMaxRegisterAction {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSetMaxRegisterActionAttrGetValue(self.ptr())));
     }
 };
@@ -2359,7 +2359,7 @@ pub const SharedSpaceAttr = opaque {
         const result = c.mlirCuteNVVMSharedSpaceAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SharedSpace {
+    pub fn value(self: *const Self) SharedSpace {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSharedSpaceAttrGetValue(self.ptr())));
     }
 };
@@ -2384,7 +2384,7 @@ pub const ShflKindAttr = opaque {
         const result = c.mlirCuteNVVMShflKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ShflKind {
+    pub fn value(self: *const Self) ShflKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMShflKindAttrGetValue(self.ptr())));
     }
 };
@@ -2409,7 +2409,7 @@ pub const SparsityFormatAttr = opaque {
         const result = c.mlirCuteNVVMSparsityFormatAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) SparsityFormat {
+    pub fn value(self: *const Self) SparsityFormat {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMSparsityFormatAttrGetValue(self.ptr())));
     }
 };
@@ -2434,7 +2434,7 @@ pub const StateSpaceAttr = opaque {
         const result = c.mlirCuteNVVMStateSpaceAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) StateSpace {
+    pub fn value(self: *const Self) StateSpace {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMStateSpaceAttrGetValue(self.ptr())));
     }
 };
@@ -2459,7 +2459,7 @@ pub const StoreCacheModifierKindAttr = opaque {
         const result = c.mlirCuteNVVMStoreCacheModifierKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) StoreCacheModifierKind {
+    pub fn value(self: *const Self) StoreCacheModifierKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMStoreCacheModifierKindAttrGetValue(self.ptr())));
     }
 };
@@ -2484,7 +2484,7 @@ pub const StoreShapeAttr = opaque {
         const result = c.mlirCuteNVVMStoreShapeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) StoreShape {
+    pub fn value(self: *const Self) StoreShape {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMStoreShapeAttrGetValue(self.ptr())));
     }
 };
@@ -2509,7 +2509,7 @@ pub const TCBarParamAttr = opaque {
         const result = c.mlirCuteNVVMTCBarParamAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) TCBarParam {
+    pub fn value(self: *const Self) TCBarParam {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTCBarParamAttrGetValue(self.ptr())));
     }
 };
@@ -2534,7 +2534,7 @@ pub const TMALoadModeAttr = opaque {
         const result = c.mlirCuteNVVMTMALoadModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) TMALoadMode {
+    pub fn value(self: *const Self) TMALoadMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTMALoadModeAttrGetValue(self.ptr())));
     }
 };
@@ -2559,7 +2559,7 @@ pub const TMAReduxKindAttr = opaque {
         const result = c.mlirCuteNVVMTMAReduxKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) TMAReduxKind {
+    pub fn value(self: *const Self) TMAReduxKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTMAReduxKindAttrGetValue(self.ptr())));
     }
 };
@@ -2584,7 +2584,7 @@ pub const TMAStoreModeAttr = opaque {
         const result = c.mlirCuteNVVMTMAStoreModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) TMAStoreMode {
+    pub fn value(self: *const Self) TMAStoreMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTMAStoreModeAttrGetValue(self.ptr())));
     }
 };
@@ -2609,7 +2609,7 @@ pub const Tcgen05CpMulticastAttr = opaque {
         const result = c.mlirCuteNVVMTcgen05CpMulticastAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) Tcgen05CpMulticast {
+    pub fn value(self: *const Self) Tcgen05CpMulticast {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTcgen05CpMulticastAttrGetValue(self.ptr())));
     }
 };
@@ -2634,7 +2634,7 @@ pub const Tcgen05CpShapeAttr = opaque {
         const result = c.mlirCuteNVVMTcgen05CpShapeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) Tcgen05CpShape {
+    pub fn value(self: *const Self) Tcgen05CpShape {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTcgen05CpShapeAttrGetValue(self.ptr())));
     }
 };
@@ -2659,7 +2659,7 @@ pub const Tcgen05CpSrcFormatAttr = opaque {
         const result = c.mlirCuteNVVMTcgen05CpSrcFormatAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) Tcgen05CpSrcFormat {
+    pub fn value(self: *const Self) Tcgen05CpSrcFormat {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTcgen05CpSrcFormatAttrGetValue(self.ptr())));
     }
 };
@@ -2684,7 +2684,7 @@ pub const Tcgen05FenceKindAttr = opaque {
         const result = c.mlirCuteNVVMTcgen05FenceKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) Tcgen05FenceKind {
+    pub fn value(self: *const Self) Tcgen05FenceKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTcgen05FenceKindAttrGetValue(self.ptr())));
     }
 };
@@ -2709,7 +2709,7 @@ pub const Tcgen05LdStShapeAttr = opaque {
         const result = c.mlirCuteNVVMTcgen05LdStShapeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) Tcgen05LdStShape {
+    pub fn value(self: *const Self) Tcgen05LdStShape {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTcgen05LdStShapeAttrGetValue(self.ptr())));
     }
 };
@@ -2734,7 +2734,7 @@ pub const Tcgen05MMABlockScaleAttr = opaque {
         const result = c.mlirCuteNVVMTcgen05MMABlockScaleAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) Tcgen05MMABlockScale {
+    pub fn value(self: *const Self) Tcgen05MMABlockScale {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTcgen05MMABlockScaleAttrGetValue(self.ptr())));
     }
 };
@@ -2759,7 +2759,7 @@ pub const Tcgen05MMACollectorBBufferAttr = opaque {
         const result = c.mlirCuteNVVMTcgen05MMACollectorBBufferAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) Tcgen05MMACollectorBBuffer {
+    pub fn value(self: *const Self) Tcgen05MMACollectorBBuffer {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTcgen05MMACollectorBBufferAttrGetValue(self.ptr())));
     }
 };
@@ -2784,7 +2784,7 @@ pub const Tcgen05MMACollectorOpAttr = opaque {
         const result = c.mlirCuteNVVMTcgen05MMACollectorOpAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) Tcgen05MMACollectorOp {
+    pub fn value(self: *const Self) Tcgen05MMACollectorOp {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTcgen05MMACollectorOpAttrGetValue(self.ptr())));
     }
 };
@@ -2809,7 +2809,7 @@ pub const Tcgen05MMAKindAttr = opaque {
         const result = c.mlirCuteNVVMTcgen05MMAKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) Tcgen05MMAKind {
+    pub fn value(self: *const Self) Tcgen05MMAKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTcgen05MMAKindAttrGetValue(self.ptr())));
     }
 };
@@ -2834,7 +2834,7 @@ pub const Tcgen05WaitKindAttr = opaque {
         const result = c.mlirCuteNVVMTcgen05WaitKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) Tcgen05WaitKind {
+    pub fn value(self: *const Self) Tcgen05WaitKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTcgen05WaitKindAttrGetValue(self.ptr())));
     }
 };
@@ -2859,7 +2859,7 @@ pub const TensormapElemtypeAttr = opaque {
         const result = c.mlirCuteNVVMTensormapElemtypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) TensormapElemtype {
+    pub fn value(self: *const Self) TensormapElemtype {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTensormapElemtypeAttrGetValue(self.ptr())));
     }
 };
@@ -2884,7 +2884,7 @@ pub const TensormapFieldAttr = opaque {
         const result = c.mlirCuteNVVMTensormapFieldAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) TensormapField {
+    pub fn value(self: *const Self) TensormapField {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTensormapFieldAttrGetValue(self.ptr())));
     }
 };
@@ -2909,7 +2909,7 @@ pub const TensormapFillModeAttr = opaque {
         const result = c.mlirCuteNVVMTensormapFillModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) TensormapFillMode {
+    pub fn value(self: *const Self) TensormapFillMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTensormapFillModeAttrGetValue(self.ptr())));
     }
 };
@@ -2934,7 +2934,7 @@ pub const TensormapInterleaveLayoutAttr = opaque {
         const result = c.mlirCuteNVVMTensormapInterleaveLayoutAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) TensormapInterleaveLayout {
+    pub fn value(self: *const Self) TensormapInterleaveLayout {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTensormapInterleaveLayoutAttrGetValue(self.ptr())));
     }
 };
@@ -2959,7 +2959,7 @@ pub const TensormapSwizzleAtomicityAttr = opaque {
         const result = c.mlirCuteNVVMTensormapSwizzleAtomicityAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) TensormapSwizzleAtomicity {
+    pub fn value(self: *const Self) TensormapSwizzleAtomicity {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTensormapSwizzleAtomicityAttrGetValue(self.ptr())));
     }
 };
@@ -2984,7 +2984,7 @@ pub const TensormapSwizzleModeAttr = opaque {
         const result = c.mlirCuteNVVMTensormapSwizzleModeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) TensormapSwizzleMode {
+    pub fn value(self: *const Self) TensormapSwizzleMode {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTensormapSwizzleModeAttrGetValue(self.ptr())));
     }
 };
@@ -3009,7 +3009,7 @@ pub const TmemLayoutAttr = opaque {
         const result = c.mlirCuteNVVMTmemLayoutAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) TmemLayout {
+    pub fn value(self: *const Self) TmemLayout {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMTmemLayoutAttrGetValue(self.ptr())));
     }
 };
@@ -3034,7 +3034,7 @@ pub const ValidatePatternAttr = opaque {
         const result = c.mlirCuteNVVMValidatePatternAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ValidatePattern {
+    pub fn value(self: *const Self) ValidatePattern {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMValidatePatternAttrGetValue(self.ptr())));
     }
 };
@@ -3059,7 +3059,7 @@ pub const VoteSyncKindAttr = opaque {
         const result = c.mlirCuteNVVMVoteSyncKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) VoteSyncKind {
+    pub fn value(self: *const Self) VoteSyncKind {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMVoteSyncKindAttrGetValue(self.ptr())));
     }
 };
@@ -3084,7 +3084,7 @@ pub const WGMMAScaleInAttr = opaque {
         const result = c.mlirCuteNVVMWGMMAScaleInAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) WGMMAScaleIn {
+    pub fn value(self: *const Self) WGMMAScaleIn {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMWGMMAScaleInAttrGetValue(self.ptr())));
     }
 };
@@ -3109,7 +3109,7 @@ pub const WGMMAScaleOutAttr = opaque {
         const result = c.mlirCuteNVVMWGMMAScaleOutAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) WGMMAScaleOut {
+    pub fn value(self: *const Self) WGMMAScaleOut {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMWGMMAScaleOutAttrGetValue(self.ptr())));
     }
 };
@@ -3134,7 +3134,7 @@ pub const WGMMATypesAttr = opaque {
         const result = c.mlirCuteNVVMWGMMATypesAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) WGMMATypes {
+    pub fn value(self: *const Self) WGMMATypes {
         return @fromBackingInt(@intCast(c.mlirCuteNVVMWGMMATypesAttrGetValue(self.ptr())));
     }
 };
@@ -3160,10 +3160,10 @@ pub const LdStMatrixShapeAttr = opaque {
         const result = c.mlirCuteNVVMLdStMatrixShapeAttrGet(ctx.ptr(), args.m, args.n);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getM(self: *const Self) c_int {
+    pub fn m(self: *const Self) c_int {
         return c.mlirCuteNVVMLdStMatrixShapeAttrGetM(self.ptr());
     }
-    pub fn getN(self: *const Self) c_int {
+    pub fn n(self: *const Self) c_int {
         return c.mlirCuteNVVMLdStMatrixShapeAttrGetN(self.ptr());
     }
 };
@@ -3190,13 +3190,13 @@ pub const MMAShapeAttr = opaque {
         const result = c.mlirCuteNVVMMMAShapeAttrGet(ctx.ptr(), args.m, args.n, args.k);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getM(self: *const Self) c_int {
+    pub fn m(self: *const Self) c_int {
         return c.mlirCuteNVVMMMAShapeAttrGetM(self.ptr());
     }
-    pub fn getN(self: *const Self) c_int {
+    pub fn n(self: *const Self) c_int {
         return c.mlirCuteNVVMMMAShapeAttrGetN(self.ptr());
     }
-    pub fn getK(self: *const Self) c_int {
+    pub fn k(self: *const Self) c_int {
         return c.mlirCuteNVVMMMAShapeAttrGetK(self.ptr());
     }
 };
@@ -3227,28 +3227,28 @@ pub const TargetAttr = opaque {
         const result = c.mlirCuteNVVMTargetAttrGet(ctx.ptr(), args.O, mlir.stringRef(args.triple), mlir.stringRef(args.chip), mlir.stringRef(args.features), if (args.flags) |v| v.ptr() else .{ .ptr = null }, if (args.link) |v| v.ptr() else .{ .ptr = null }, args.verifyTarget);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getO(self: *const Self) c_int {
+    pub fn o(self: *const Self) c_int {
         return c.mlirCuteNVVMTargetAttrGetO(self.ptr());
     }
-    pub fn getTriple(self: *const Self) []const u8 {
+    pub fn triple(self: *const Self) []const u8 {
         const s = c.mlirCuteNVVMTargetAttrGetTriple(self.ptr());
         return if (s.length == 0) "" else mlir.string(s);
     }
-    pub fn getChip(self: *const Self) []const u8 {
+    pub fn chip(self: *const Self) []const u8 {
         const s = c.mlirCuteNVVMTargetAttrGetChip(self.ptr());
         return if (s.length == 0) "" else mlir.string(s);
     }
-    pub fn getFeatures(self: *const Self) []const u8 {
+    pub fn features(self: *const Self) []const u8 {
         const s = c.mlirCuteNVVMTargetAttrGetFeatures(self.ptr());
         return if (s.length == 0) "" else mlir.string(s);
     }
-    pub fn getFlags(self: *const Self) ?*const mlir.Attribute {
+    pub fn flags(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVVMTargetAttrGetFlags(self.ptr()).ptr);
     }
-    pub fn getLink(self: *const Self) ?*const mlir.Attribute {
+    pub fn link(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteNVVMTargetAttrGetLink(self.ptr()).ptr);
     }
-    pub fn getVerifyTarget(self: *const Self) bool {
+    pub fn verifyTarget(self: *const Self) bool {
         return c.mlirCuteNVVMTargetAttrGetVerifyTarget(self.ptr());
     }
 };

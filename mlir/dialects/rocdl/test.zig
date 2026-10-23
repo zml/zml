@@ -66,7 +66,7 @@ test "all ROCDL enum attributes construct and round-trip every named value" {
         for (std.enums.values(A.Value)) |value| {
             const attribute = try A.get(ctx, .{ .value = value });
             try std.testing.expect(attribute.isA(A) != null);
-            try std.testing.expectEqual(value, attribute.getValue());
+            try std.testing.expectEqual(value, attribute.value());
             try expectAttributeRoundTrip(ctx, attribute.attribute());
         }
     }
@@ -74,7 +74,7 @@ test "all ROCDL enum attributes construct and round-trip every named value" {
     try std.testing.expect(mask.contains(.mfma_wmma));
     try std.testing.expect(!mask.contains(.all_vmem));
     const attribute = try rocdl.SchedGroupMaskAttr.get(ctx, .{ .value = mask });
-    try std.testing.expectEqual(mask, attribute.getValue());
+    try std.testing.expectEqual(mask, attribute.value());
     try expectAttributeRoundTrip(ctx, attribute.attribute());
 }
 

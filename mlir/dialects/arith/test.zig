@@ -27,7 +27,7 @@ test "arith fastmath attribute is built through the C API" {
     };
     for (cases) |case| {
         const attr = try arith.FastMathAttr.get(ctx, .{ .value = case[0] });
-        try std.testing.expectEqual(case[0], attr.getValue());
+        try std.testing.expectEqual(case[0], attr.value());
         try std.testing.expect(attr.attribute().isA(arith.FastMathAttr) != null);
         try expectPrints(case[1], attr);
     }

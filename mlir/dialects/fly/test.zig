@@ -132,15 +132,15 @@ test "types and attributes are built through the C API" {
     const stride = try attributes.IntTupleAttr.getTuple(ctx, &.{ four, one });
     const layout = try types.LayoutType.get(ctx, .{ .attr = try .get(ctx, .{ .shape = shape, .stride = stride }) });
     try expectPrints("!fly.layout<(2,4):(4,1)>", layout);
-    try expectPrints("!fly.int_tuple<(2,4)>", layout.getShape());
-    try std.testing.expectEqual(@as(usize, 2), layout.getShape().getNumElements());
-    try std.testing.expectEqual(types.IntTupleType.Leaf{ .static = 4 }, layout.getShape().getElement(1).getLeaf());
+    try expectPrints("!fly.int_tuple<(2,4)>", layout.shape());
+    try std.testing.expectEqual(@as(usize, 2), layout.shape().numElements());
+    try std.testing.expectEqual(types.IntTupleType.Leaf{ .static = 4 }, layout.shape().element(1).leaf());
 
     const global = try attributes.AddressSpaceAttr.get(ctx, .{ .addressSpace = .global });
     const memref_type = try types.MemRefType.get(ctx, .{
         .elemTy = .float(ctx, .f16),
         .addressSpace = global.attribute(),
-        .layout = layout.getAttr().attribute(),
+        .layout = layout.attr().attribute(),
     });
     try expectPrints("!fly.memref<f16, global, (2,4):(4,1)>", memref_type);
     try expectPrints("!fly.int_tuple<(2,4)>", layoutLikeShape(memref_type.type_()));
@@ -205,9 +205,9 @@ test "atom traits" {
 
     // MFMA 16x16x4 f32 tiled over a (2,2,1) atom layout.
     const tm = expect(try mlir.Type.parse(ctx, "!fly.tiled_mma<!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>, <(2,2,1):(1,2,0)>>"), .tiled_mma);
-    try expectPrints("!fly.int_tuple<(32,32,4)>", tm.getTileSizeMNK());
-    _ = tm.getTiledThrValLayoutA();
-    _ = tm.getThrLayoutVMNK();
+    try expectPrints("!fly.int_tuple<(32,32,4)>", tm.tileSizeMNK());
+    _ = tm.tiledThrValLayoutA();
+    _ = tm.thrLayoutVMNK();
 
     const atom = try types.MmaAtomType.get(ctx, .{ .mmaOp = (try fly_rocdl.MmaOpCDNA3MFMAType.get(ctx, .{
         .m = 16,
@@ -218,8 +218,8 @@ test "atom traits" {
         .elemTyAcc = .float(ctx, .f32),
     })).type_() });
     try expectPrints("!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>", atom);
-    try expectPrints("!fly.int_tuple<(16,16,4)>", atom.getShapeMNK());
-    try expectPrints("!fly.layout<64:1>", atom.getThrLayout());
+    try expectPrints("!fly.int_tuple<(16,16,4)>", atom.shapeMNK());
+    try expectPrints("!fly.layout<64:1>", atom.thrLayout());
 
     const wmma = try types.MmaAtomType.get(ctx, .{ .mmaOp = (try fly_rocdl.MmaOpGFX11WMMAType.get(ctx, .{
         .m = 16,
@@ -229,10 +229,10 @@ test "atom traits" {
         .elemTyB = .float(ctx, .f16),
         .elemTyAcc = .float(ctx, .f32),
     })).type_() });
-    try expectPrints("!fly.layout<32:1>", wmma.getThrLayout());
+    try expectPrints("!fly.layout<32:1>", wmma.thrLayout());
 
     const ca = expect(try mlir.Type.parse(ctx, "!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<32>, 32>"), .copy_atom);
-    _ = ca.getThrValLayoutSrc();
+    _ = ca.thrValLayoutSrc();
 }
 
 test "type kinds" {
@@ -257,13 +257,13 @@ test "structural readers" {
     const ctx = try testContext();
     defer ctx.deinit();
     const it = expect(try mlir.Type.parse(ctx, "!fly.int_tuple<((2,4),?)>"), .int_tuple);
-    try std.testing.expectEqual(@as(usize, 2), it.getNumElements());
+    try std.testing.expectEqual(@as(usize, 2), it.numElements());
     try std.testing.expect(!it.isLeaf());
     try std.testing.expect(!it.isStatic());
-    const inner = it.getElement(0);
-    try std.testing.expectEqual(@as(usize, 2), inner.getNumElements());
-    try std.testing.expectEqual(types.IntTupleType.Leaf{ .static = 4 }, inner.getElement(1).getLeaf());
-    try std.testing.expectEqual(types.IntTupleType.Leaf.dynamic, it.getElement(1).getLeaf());
+    const inner = it.element(0);
+    try std.testing.expectEqual(@as(usize, 2), inner.numElements());
+    try std.testing.expectEqual(types.IntTupleType.Leaf{ .static = 4 }, inner.element(1).leaf());
+    try std.testing.expectEqual(types.IntTupleType.Leaf.dynamic, it.element(1).leaf());
 
     const m = try mlir.Type.parse(ctx, "!fly.memref<bf16, shared, S<3,3,3> o 0 o (64,32):(32,1), align<16>>");
     try expectPrints("!fly.int_tuple<(64,32)>", layoutLikeShape(m));

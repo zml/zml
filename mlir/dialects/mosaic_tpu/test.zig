@@ -30,7 +30,7 @@ fn expectEnumAttr(comptime Attr: type, ctx: *mlir.Context) !void {
     inline for (@typeInfo(Enum).@"enum".field_names) |name| {
         const value: Enum = @field(Enum, name);
         const attr = try Attr.get(ctx, .{ .value = value });
-        try std.testing.expectEqual(value, attr.getValue());
+        try std.testing.expectEqual(value, attr.value());
         try std.testing.expect(attr.attribute().isA(Attr) != null);
         try std.testing.expect(value.attribute(ctx).eql(attr.attribute()));
         try expectPrints("#tpu." ++ Attr.mnemonic ++ "<" ++ name ++ ">", attr);
@@ -159,10 +159,10 @@ test "tpu enum attributes are built through the C API" {
     try expectEnumAttr(mosaic_tpu.MemorySpaceAttr, ctx);
 
     const smem_tc = try mosaic_tpu.MemorySpaceAttr.get(ctx, .{ .value = .smem, .coreType = .sc_scalar_subcore });
-    try std.testing.expectEqual(mosaic_tpu.MemorySpace.smem, smem_tc.getValue());
-    try std.testing.expectEqual(mosaic_tpu.CoreType.sc_scalar_subcore, smem_tc.getCoreType().?);
+    try std.testing.expectEqual(mosaic_tpu.MemorySpace.smem, smem_tc.value());
+    try std.testing.expectEqual(mosaic_tpu.CoreType.sc_scalar_subcore, smem_tc.coreType().?);
     try expectPrints("#tpu.memory_space<smem, sc_scalar_subcore>", smem_tc);
-    try std.testing.expectEqual(null, (try mosaic_tpu.MemorySpaceAttr.get(ctx, .{ .value = .hbm })).getCoreType());
+    try std.testing.expectEqual(null, (try mosaic_tpu.MemorySpaceAttr.get(ctx, .{ .value = .hbm })).coreType());
     // The dialect verifier's pairing rules: no core type on hbm, no scalar subcore on vmem.
     try std.testing.expectError(error.InvalidMlir, mosaic_tpu.MemorySpaceAttr.get(ctx, .{ .value = .hbm, .coreType = .tc }));
     try std.testing.expectError(error.InvalidMlir, mosaic_tpu.MemorySpaceAttr.get(ctx, .{ .value = .vmem, .coreType = .sc_scalar_subcore }));
@@ -173,10 +173,10 @@ test "tpu array attributes are built through the C API" {
     defer ctx.deinit();
 
     const window = try mosaic_tpu.ElementWindowAttr.get(ctx, .{ .padLow = &.{ 0, 2 }, .padHigh = &.{ 1, 3 } });
-    try std.testing.expectEqual(2, window.getNumPadLow());
-    try std.testing.expectEqual(2, window.getPadLow(1));
-    try std.testing.expectEqual(2, window.getNumPadHigh());
-    try std.testing.expectEqual(3, window.getPadHigh(1));
+    try std.testing.expectEqual(2, window.numPadLow());
+    try std.testing.expectEqual(2, window.padLow(1));
+    try std.testing.expectEqual(2, window.numPadHigh());
+    try std.testing.expectEqual(3, window.padHigh(1));
     try expectPrints("#tpu.element_window<[0, 2], [1, 3]>", window);
     try std.testing.expect(mosaic_tpu.elementWindowAttr(ctx, &.{ 0, 2 }, &.{ 1, 3 }).eql(window.attribute()));
 
@@ -191,10 +191,10 @@ test "tpu array attributes are built through the C API" {
         .lhsBatchDims = &.{0},
         .rhsBatchDims = &.{0},
     });
-    try std.testing.expectEqual(0, batched.getNumRhsNonContractingDims());
-    try std.testing.expectEqual(4, batched.getNumOutputDimOrder());
-    try std.testing.expectEqual(1, batched.getOutputDimOrder(3));
-    try std.testing.expectEqual(0, batched.getRhsBatchDims(0));
+    try std.testing.expectEqual(0, batched.numRhsNonContractingDims());
+    try std.testing.expectEqual(4, batched.numOutputDimOrder());
+    try std.testing.expectEqual(1, batched.outputDimOrder(3));
+    try std.testing.expectEqual(0, batched.rhsBatchDims(0));
     try expectPrints("#tpu.dot_dimension_numbers<[2], [1], [1], [], [0, 0, 0, 1], [0], [0]>", batched);
 }
 

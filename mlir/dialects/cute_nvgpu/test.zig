@@ -120,7 +120,7 @@ test "generated types and attributes rebuild from their getters" {
                     inline for (@typeInfo(@FieldType(T.InitArgs, fields[0])).@"enum".field_names) |case| {
                         const case_value = @field(@FieldType(T.InitArgs, fields[0]), case);
                         const attr = try T.get(ctx, .{ .value = case_value });
-                        try std.testing.expectEqual(@backingInt(case_value), @backingInt(attr.getValue()));
+                        try std.testing.expectEqual(@backingInt(case_value), @backingInt(attr.value()));
                         try std.testing.expect((try rebuild(T, ctx, attr)).eql(attr));
                     }
                 }
@@ -135,12 +135,14 @@ fn rebuild(comptime T: type, ctx: *mlir.Context, value: *const T) !*const T {
     var elements: [8]*const mlir.Type = undefined;
     inline for (@typeInfo(T.InitArgs).@"struct".field_names) |field| {
         const name = [_]u8{comptime std.ascii.toUpper(field[0])} ++ field[1..];
+        const noun = [_]u8{comptime std.ascii.toLower(field[0])} ++ field[1..];
+        const accessor = if (@hasDecl(T, noun ++ "_")) noun ++ "_" else noun;
         if (@FieldType(T.InitArgs, field) == []const *const mlir.Type) {
-            const count = @field(T, "getNum" ++ name)(value);
-            for (elements[0..count], 0..) |*element, i| element.* = @field(T, "get" ++ name[0 .. name.len - 1])(value, i);
+            const count = @field(T, "num" ++ name)(value);
+            for (elements[0..count], 0..) |*element, i| element.* = @field(T, noun[0 .. noun.len - 1])(value, i);
             @field(args, field) = elements[0..count];
         } else {
-            @field(args, field) = @field(T, "get" ++ name)(value);
+            @field(args, field) = @field(T, accessor)(value);
         }
     }
     return T.get(ctx, args);

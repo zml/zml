@@ -101,14 +101,14 @@ pub fn layoutLikeShape(ty: *const mlir.Type) *const types.IntTupleType {
 }
 
 pub fn elemType(ty: *const mlir.Type) *const mlir.Type {
-    if (ty.isA(types.MemRefType)) |m| return m.getElemTy();
-    if (ty.isA(types.PointerType)) |p| return p.getElemTy();
+    if (ty.isA(types.MemRefType)) |m| return m.elemTy();
+    if (ty.isA(types.PointerType)) |p| return p.elemTy();
     std.debug.panic("fly: `{f}` has no element type", .{ty});
 }
 
 pub fn addressSpace(ty: *const mlir.Type) *const mlir.Attribute {
-    if (ty.isA(types.MemRefType)) |m| return m.getAddressSpace();
-    if (ty.isA(types.PointerType)) |p| return p.getAddressSpace();
+    if (ty.isA(types.MemRefType)) |m| return m.addressSpace();
+    if (ty.isA(types.PointerType)) |p| return p.addressSpace();
     std.debug.panic("fly: `{f}` has no address space", .{ty});
 }
 
@@ -117,8 +117,8 @@ pub fn ptrWithElem(ctx: *mlir.Context, ptr: *const mlir.Type, elem: *const mlir.
     const p = expect(ptr, .ptr);
     return types.PointerType.get(ctx, .{
         .elemTy = elem,
-        .addressSpace = p.getAddressSpace(),
-        .alignment = p.getAlignment(),
-        .swizzle = p.getSwizzle(),
+        .addressSpace = p.addressSpace(),
+        .alignment = p.alignment(),
+        .swizzle = p.swizzle(),
     });
 }

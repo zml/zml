@@ -827,15 +827,15 @@ pub const Builder = struct {
     /// Arena-allocated.
     pub fn readIntTuple(self: *Builder, tuple_ty: *const fly.types.IntTupleType) IntTuple {
         if (tuple_ty.isLeaf()) {
-            return switch (tuple_ty.getLeaf()) {
+            return switch (tuple_ty.leaf()) {
                 .static => |v| IntTuple.static(v),
                 .dynamic, .basis => IntTuple.dyn,
                 .none => IntTuple.star,
             };
         }
-        const n = tuple_ty.getNumElements();
+        const n = tuple_ty.numElements();
         const elems = self.alloc(IntTuple, n);
-        for (0..n) |i| elems[i] = self.readIntTuple(tuple_ty.getElement(i));
+        for (0..n) |i| elems[i] = self.readIntTuple(tuple_ty.element(i));
         return .{ .tup = elems };
     }
 
@@ -846,8 +846,8 @@ pub const Builder = struct {
     /// The shape and stride of a static `!fly.layout`, as host literals.
     pub fn readLayout(self: *Builder, layout_ty: *const mlir.Type) Layout {
         const lay = fly.expect(layout_ty, .layout);
-        const shape = lay.getShape();
-        const stride = lay.getStride();
+        const shape = lay.shape();
+        const stride = lay.stride();
         if (!shape.isStatic() or !stride.isStatic()) {
             std.debug.panic("fly: `{f}` is not static", .{layout_ty});
         }
@@ -1248,12 +1248,12 @@ pub const Builder = struct {
     pub fn tiledCopyFor(self: *Builder, operand: fly.MmaOperand, copy_atom: Value, tm: TiledMma) TiledCopy {
         const tm_ty = fly.expect(tm.value.type_(), .tiled_mma);
         const layout_tv = self.staticTy((switch (operand) {
-            .a => tm_ty.getTiledThrValLayoutA(),
-            .b => tm_ty.getTiledThrValLayoutB(),
-            .c => tm_ty.getTiledThrValLayoutC(),
+            .a => tm_ty.tiledThrValLayoutA(),
+            .b => tm_ty.tiledThrValLayoutB(),
+            .c => tm_ty.tiledThrValLayoutC(),
             .d => @panic("fly.tiledCopyFor: no D operand copy"),
         }).type_());
-        const tile_size = self.staticTy(tm_ty.getTileSizeMNK().type_());
+        const tile_size = self.staticTy(tm_ty.tileSizeMNK().type_());
         const modes: [2]i32 = switch (operand) {
             .a => .{ 0, 2 },
             .b => .{ 1, 2 },
@@ -1757,7 +1757,7 @@ test "MmaFlavor.atomThreads matches the dialect" {
         const atom = try fly.types.MmaAtomType.get(ctx, .{ .mmaOp = flavor.atomType(ctx) });
         // `mma_atom.thr_layout` is the wavefront an atom occupies; the launch
         // geometry is derived from it, so a wrong table silently corrupts C.
-        const threads = switch (atom.getThrLayout().getShape().getLeaf()) {
+        const threads = switch (atom.thrLayout().shape().leaf()) {
             .static => |v| v,
             else => return error.TestUnexpectedResult,
         };

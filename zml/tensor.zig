@@ -4381,8 +4381,8 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             other.value(),
-            stablehlo.ComparisonDirectionAttr.get(mlirCtx(), .{ .value = direction }).getValue(),
-            getComparisonType(mlirCtx(), self.dtype()).getValue(),
+            stablehlo.ComparisonDirectionAttr.get(mlirCtx(), .{ .value = direction }).value(),
+            getComparisonType(mlirCtx(), self.dtype()).value(),
             currentLoc(),
         ).appendTo(currentBlock());
 

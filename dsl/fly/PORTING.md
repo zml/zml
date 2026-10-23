@@ -36,7 +36,7 @@ runtime must agree on the dialect version. FlyDSL HEAD may differ from both.
 | `fx.make_tiled_copy_tv(atom, thr, val)` | `b.tiledCopyTV(atom, thr, val)` |
 | `fx.make_tiled_copy_A(atom, tiled_mma)` | `b.tiledCopyA(atom, tiled_mma)` |
 | `tiled_copy.tile_mn` | `tc.tileMN()` |
-| `tiled_mma.tile_size_mnk` etc. | `fly.expect(tm.value.type_(), .tiled_mma).getTileSizeMNK()` |
+| `tiled_mma.tile_size_mnk` etc. | `@import("mlir/dialects/fly").expect(tm.value.type_(), .tiled_mma).tileSizeMNK()` |
 | `tiled_copy.get_slice(tid).partition_S(t)` | `tc.getSlice(tid).partitionS(t)` |
 | `thr_copy.retile(t)` | `thr.retile(t)` |
 | `tiled_mma.make_fragment_A(t)` | `tm.makeFragmentA(t)` |

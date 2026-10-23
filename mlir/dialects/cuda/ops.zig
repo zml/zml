@@ -323,7 +323,7 @@ pub const AssumeKernelAttr = opaque {
         const result = c.mlirCudaAssumeKernelAttrGet(ctx.ptr(), args.value);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) bool {
+    pub fn value(self: *const Self) bool {
         return c.mlirCudaAssumeKernelAttrGetValue(self.ptr());
     }
 };
@@ -350,16 +350,16 @@ pub const ComputeTargetAttr = opaque {
         const result = c.mlirCudaComputeTargetAttrGet(ctx.ptr(), @backingInt(args.representation), @backingInt(args.portability), @intCast(args.archs.len), @ptrCast(args.archs.ptr));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getRepresentation(self: *const Self) ExecutableRepresentation {
+    pub fn representation(self: *const Self) ExecutableRepresentation {
         return @fromBackingInt(@intCast(c.mlirCudaComputeTargetAttrGetRepresentation(self.ptr())));
     }
-    pub fn getPortability(self: *const Self) ArchPortability {
+    pub fn portability(self: *const Self) ArchPortability {
         return @fromBackingInt(@intCast(c.mlirCudaComputeTargetAttrGetPortability(self.ptr())));
     }
-    pub fn getNumArchs(self: *const Self) usize {
+    pub fn numArchs(self: *const Self) usize {
         return @intCast(c.mlirCudaComputeTargetAttrGetNumArchs(self.ptr()));
     }
-    pub fn getArch(self: *const Self, pos: usize) GpuArchitecture {
+    pub fn arch(self: *const Self, pos: usize) GpuArchitecture {
         return @fromBackingInt(@intCast(c.mlirCudaComputeTargetAttrGetArchs(self.ptr(), @intCast(pos))));
     }
 };
@@ -405,7 +405,7 @@ pub const DeviceAttributesAttr = opaque {
         const result = c.mlirCudaDeviceAttributesAttrGet(ctx.ptr(), args.values.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValues(self: *const Self) *const mlir.Attribute {
+    pub fn values(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCudaDeviceAttributesAttrGetValues(self.ptr()).ptr.?);
     }
 };
@@ -430,7 +430,7 @@ pub const ExecutableAttr = opaque {
         const result = c.mlirCudaExecutableAttrGet(ctx.ptr(), @backingInt(args.format));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getFormat(self: *const Self) ExecutableFormat {
+    pub fn format_(self: *const Self) ExecutableFormat {
         return @fromBackingInt(@intCast(c.mlirCudaExecutableAttrGetFormat(self.ptr())));
     }
 };
@@ -455,7 +455,7 @@ pub const FuncAttributesAttr = opaque {
         const result = c.mlirCudaFuncAttributesAttrGet(ctx.ptr(), args.values.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValues(self: *const Self) *const mlir.Attribute {
+    pub fn values(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCudaFuncAttributesAttrGetValues(self.ptr()).ptr.?);
     }
 };
@@ -648,7 +648,7 @@ pub const LaunchConfigType = opaque {
         const result = c.mlirCudaLaunchConfigTypeGet(ctx.ptr(), args.maxNumAttrs);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getMaxNumAttrs(self: *const Self) u32 {
+    pub fn maxNumAttrs(self: *const Self) u32 {
         return c.mlirCudaLaunchConfigTypeGetMaxNumAttrs(self.ptr());
     }
 };
