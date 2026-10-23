@@ -3,6 +3,7 @@ const ops = @import("ops.zig");
 
 pub const NVPTXAddressSpace = ops.NVPTXAddressSpace;
 pub const pointerType = ops.pointerType;
+pub const structType = ops.structType;
 pub const inttoptr = ops.inttoptr;
 pub const bitcast = ops.bitcast;
 pub const fmul = ops.fmul;
