@@ -1434,23 +1434,27 @@ pub const Builder = struct {
         return self.trans(src, order);
     }
 
-    /// tt.cat — concatenate along dim 0. Use `catOpts` for can_reorder / dim.
+    /// `tl.cat` along dim 0. Use `catOpts` for can_reorder / dim.
     pub fn cat(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.catOpts(lhs, rhs, .{});
     }
 
-    /// tt.cat with full options. dim != 0 is not yet supported.
+    /// `tl.cat` with full options: `join`, `permute` and `reshape`, as Triton lowers it.
     pub fn catOpts(self: *Builder, lhs: Value, rhs: Value, opts: CatOpts) Value {
-        std.debug.assert(opts.dim == 0); // TODO: dim != 0 requires join+permute+reshape
-        _ = opts.can_reorder; // forwarded to ttir.cat when supported
+        _ = opts.can_reorder;
         const ls = lhs.shape();
         const rs = rhs.shape();
         std.debug.assert(ls.len == rs.len);
-        var out_shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
-        out_shape.appendAssumeCapacity(ls.get(0) + rs.get(0));
-        for (1..ls.len) |i| out_shape.appendAssumeCapacity(ls.get(i));
-        const result_type = mlir.Type.rankedTensor(out_shape.constSlice(), lhs.elemType());
-        return self.emit(ttir.cat(self.ctx, lhs.inner, rhs.inner, result_type, self.loc()));
+        for (0..ls.len) |i| std.debug.assert(ls.get(i) == rs.get(i));
+        const rank: i32 = @intCast(ls.len);
+        const dim: usize = @intCast(if (opts.dim < 0) opts.dim + rank else opts.dim);
+        var order: stdx.BoundedArray(i32, mlir.ShapedType.MAX_RANK) = .empty;
+        for (0..ls.len) |i| order.appendAssumeCapacity(@intCast(i));
+        order.insert(dim, rank) catch unreachable;
+        var new_shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
+        for (0..ls.len) |i| new_shape.appendAssumeCapacity(ls.get(i));
+        new_shape.slice()[dim] = ls.get(dim) + rs.get(dim);
+        return self.reshape(self.permute(self.join(lhs, rhs), order.constSlice()), new_shape.constSlice());
     }
 
     /// `tt.join` — stack two equal-shape tensors along a new minor dim of size 2.

@@ -1608,7 +1608,7 @@ pub const Builder = struct {
 
     // ==================== Vector dialect helpers ====================
     //
-    // The `tpu.*` shape ops (`reshape`, `repeat`, `transpose`,
+    // The `tpu.*` shape ops (`reshape`, `transpose`,
     // `broadcastInSublanes`) are Mosaic-specific layout-aware variants.
 
     /// `vector.broadcast` to `shape`. For Zig scalar literals prefer `splat` (dense-splat fast path).
@@ -1708,8 +1708,11 @@ pub const Builder = struct {
             const d = in_shape.get(i);
             out.appendAssumeCapacity(if (i == @as(usize, @intCast(dimension))) d * times else d);
         }
+        if (times == 1) return src;
         const ty = mlir.Type.vector(out.constSlice(), src.elemType());
-        return self.emit(mosaic_tpu.repeat(self.ctx, src.inner, dimension, times, ty, self.loc()));
+        const sources = self.arena.allocator().alloc(*const mlir.Value, @intCast(times)) catch @panic("OOM");
+        @memset(sources, src.inner);
+        return self.emit(mosaic_tpu.concatenate(self.ctx, sources, dimension, ty, self.loc()));
     }
 
     pub fn concatenate(self: *Builder, sources: []const Value, dimension: i32) Value {
