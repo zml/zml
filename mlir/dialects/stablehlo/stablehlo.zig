@@ -465,7 +465,7 @@ pub const ScatterArgs = struct {
     indices_are_sorted: bool = false,
     unique_indices: bool = false,
 
-    pub fn getScatterDimensionNumbers(self: ScatterArgs, ctx: *mlir.Context) *const mlir.Attribute {
+    pub fn scatterDimensionNumbers(self: ScatterArgs, ctx: *mlir.Context) *const mlir.Attribute {
         return @ptrCast(c.stablehloScatterDimensionNumbersGet(
             ctx.ptr(),
             @intCast(self.update_window_dims.len),
@@ -499,7 +499,7 @@ pub fn scatter(
             .operands = .{ .variadic = &.{ inputs, scatter_indices, updates } },
             .blocks = &.{update_block},
             .attributes = &.{
-                .named(ctx, "scatter_dimension_numbers", args.getScatterDimensionNumbers(ctx)),
+                .named(ctx, "scatter_dimension_numbers", args.scatterDimensionNumbers(ctx)),
                 .named(ctx, "indices_are_sorted", .boolean(ctx, args.indices_are_sorted)),
                 .named(ctx, "unique_indices", .boolean(ctx, args.unique_indices)),
             },
@@ -645,7 +645,7 @@ pub const RngDistributionAttr = opaque {
         return @ptrCast(c.stablehloRngDistributionAttrGet(ctx.ptr(), stringRef(@tagName(args.value))).ptr);
     }
 
-    pub fn getValue(self: *const RngDistributionAttr) Type {
+    pub fn value(self: *const RngDistributionAttr) Type {
         return std.meta.stringToEnum(
             Type,
             mlir.string(c.stablehloRngDistributionAttrGetValue(self.ptr())),
@@ -683,7 +683,7 @@ pub const RngAlgorithmAttr = opaque {
         return @ptrCast(c.stablehloRngAlgorithmAttrGet(ctx.ptr(), stringRef(@tagName(args.value))).ptr);
     }
 
-    pub fn getValue(self: *const RngAlgorithmAttr) Type {
+    pub fn value(self: *const RngAlgorithmAttr) Type {
         return std.meta.stringToEnum(
             Type,
             mlir.string(c.stablehloRngAlgorithmAttrGetValue(self.ptr())),
@@ -1067,35 +1067,35 @@ pub const DotDimensionNumbersAttr = opaque {
         ).ptr);
     }
 
-    pub fn getLhsBatchingDimensionsSize(self: *const DotDimensionNumbersAttr) usize {
+    pub fn lhsBatchingDimensionsSize(self: *const DotDimensionNumbersAttr) usize {
         return @intCast(c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsSize(self.ptr()));
     }
 
-    pub fn getLhsBatchingDimensionsElem(self: *const DotDimensionNumbersAttr, pos: usize) i64 {
+    pub fn lhsBatchingDimensionsElem(self: *const DotDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloDotDimensionNumbersGetLhsBatchingDimensionsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getRhsBatchingDimensionsSize(self: *const DotDimensionNumbersAttr) usize {
+    pub fn rhsBatchingDimensionsSize(self: *const DotDimensionNumbersAttr) usize {
         return @intCast(c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsSize(self.ptr()));
     }
 
-    pub fn getRhsBatchingDimensionsElem(self: *const DotDimensionNumbersAttr, pos: usize) i64 {
+    pub fn rhsBatchingDimensionsElem(self: *const DotDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloDotDimensionNumbersGetRhsBatchingDimensionsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getLhsContractingDimensionsSize(self: *const DotDimensionNumbersAttr) usize {
+    pub fn lhsContractingDimensionsSize(self: *const DotDimensionNumbersAttr) usize {
         return @intCast(c.stablehloDotDimensionNumbersGetLhsContractingDimensionsSize(self.ptr()));
     }
 
-    pub fn getLhsContractingDimensionsElem(self: *const DotDimensionNumbersAttr, pos: usize) i64 {
+    pub fn lhsContractingDimensionsElem(self: *const DotDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloDotDimensionNumbersGetLhsContractingDimensionsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getRhsContractingDimensionsSize(self: *const DotDimensionNumbersAttr) usize {
+    pub fn rhsContractingDimensionsSize(self: *const DotDimensionNumbersAttr) usize {
         return @intCast(c.stablehloDotDimensionNumbersGetRhsContractingDimensionsSize(self.ptr()));
     }
 
-    pub fn getRhsContractingDimensionsElem(self: *const DotDimensionNumbersAttr, pos: usize) i64 {
+    pub fn rhsContractingDimensionsElem(self: *const DotDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloDotDimensionNumbersGetRhsContractingDimensionsElem(self.ptr(), @intCast(pos));
     }
 
@@ -1141,47 +1141,47 @@ pub const GatherDimensionNumbersAttr = opaque {
         ).ptr);
     }
 
-    pub fn getOffsetDimsSize(self: *const GatherDimensionNumbersAttr) usize {
+    pub fn offsetDimsSize(self: *const GatherDimensionNumbersAttr) usize {
         return @intCast(c.stablehloGatherDimensionNumbersGetOffsetDimsSize(self.ptr()));
     }
 
-    pub fn getOffsetDimsElem(self: *const GatherDimensionNumbersAttr, pos: usize) i64 {
+    pub fn offsetDimsElem(self: *const GatherDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloGatherDimensionNumbersGetOffsetDimsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getCollapsedSliceDimsSize(self: *const GatherDimensionNumbersAttr) usize {
+    pub fn collapsedSliceDimsSize(self: *const GatherDimensionNumbersAttr) usize {
         return @intCast(c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsSize(self.ptr()));
     }
 
-    pub fn getCollapsedSliceDimsElem(self: *const GatherDimensionNumbersAttr, pos: usize) i64 {
+    pub fn collapsedSliceDimsElem(self: *const GatherDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloGatherDimensionNumbersGetCollapsedSliceDimsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getStartIndexMapSize(self: *const GatherDimensionNumbersAttr) usize {
+    pub fn startIndexMapSize(self: *const GatherDimensionNumbersAttr) usize {
         return @intCast(c.stablehloGatherDimensionNumbersGetStartIndexMapSize(self.ptr()));
     }
 
-    pub fn getOperandBatchingDimsSize(self: *const GatherDimensionNumbersAttr) usize {
+    pub fn operandBatchingDimsSize(self: *const GatherDimensionNumbersAttr) usize {
         return @intCast(c.stablehloGatherDimensionNumbersGetOperandBatchingDimsSize(self.ptr()));
     }
 
-    pub fn getOperandBatchingDimsElem(self: *const GatherDimensionNumbersAttr, pos: usize) i64 {
+    pub fn operandBatchingDimsElem(self: *const GatherDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloGatherDimensionNumbersGetOperandBatchingDimsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getStartIndicesBatchingDimsSize(self: *const GatherDimensionNumbersAttr) usize {
+    pub fn startIndicesBatchingDimsSize(self: *const GatherDimensionNumbersAttr) usize {
         return @intCast(c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsSize(self.ptr()));
     }
 
-    pub fn getStartIndicesBatchingDimsElem(self: *const GatherDimensionNumbersAttr, pos: usize) i64 {
+    pub fn startIndicesBatchingDimsElem(self: *const GatherDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloGatherDimensionNumbersGetStartIndicesBatchingDimsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getStartIndexMapElem(self: *const GatherDimensionNumbersAttr, pos: usize) i64 {
+    pub fn startIndexMapElem(self: *const GatherDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloGatherDimensionNumbersGetStartIndexMapElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getIndexVectorDim(self: *const GatherDimensionNumbersAttr) usize {
+    pub fn indexVectorDim(self: *const GatherDimensionNumbersAttr) usize {
         return @intCast(c.stablehloGatherDimensionNumbersGetIndexVectorDim(self.ptr()));
     }
 };
@@ -1244,51 +1244,51 @@ pub const ConvDimensionNumbersAttr = opaque {
         ).ptr);
     }
 
-    pub fn getInputBatchDimension(self: *const ConvDimensionNumbersAttr) i64 {
+    pub fn inputBatchDimension(self: *const ConvDimensionNumbersAttr) i64 {
         return c.stablehloConvDimensionNumbersGetInputBatchDimension(self.ptr());
     }
 
-    pub fn getInputFeatureDimension(self: *const ConvDimensionNumbersAttr) i64 {
+    pub fn inputFeatureDimension(self: *const ConvDimensionNumbersAttr) i64 {
         return c.stablehloConvDimensionNumbersGetInputFeatureDimension(self.ptr());
     }
 
-    pub fn getInputSpatialDimensionsSize(self: *const ConvDimensionNumbersAttr) usize {
+    pub fn inputSpatialDimensionsSize(self: *const ConvDimensionNumbersAttr) usize {
         return @intCast(c.stablehloConvDimensionNumbersGetInputSpatialDimensionsSize(self.ptr()));
     }
 
-    pub fn getInputSpatialDimensionsElem(self: *const ConvDimensionNumbersAttr, pos: usize) i64 {
+    pub fn inputSpatialDimensionsElem(self: *const ConvDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloConvDimensionNumbersGetInputSpatialDimensionsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getKernelInputFeatureDimension(self: *const ConvDimensionNumbersAttr) i64 {
+    pub fn kernelInputFeatureDimension(self: *const ConvDimensionNumbersAttr) i64 {
         return c.stablehloConvDimensionNumbersGetKernelInputFeatureDimension(self.ptr());
     }
 
-    pub fn getKernelOutputFeatureDimension(self: *const ConvDimensionNumbersAttr) i64 {
+    pub fn kernelOutputFeatureDimension(self: *const ConvDimensionNumbersAttr) i64 {
         return c.stablehloConvDimensionNumbersGetKernelOutputFeatureDimension(self.ptr());
     }
 
-    pub fn getKernelSpatialDimensionsSize(self: *const ConvDimensionNumbersAttr) usize {
+    pub fn kernelSpatialDimensionsSize(self: *const ConvDimensionNumbersAttr) usize {
         return @intCast(c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsSize(self.ptr()));
     }
 
-    pub fn getKernelSpatialDimensionsElem(self: *const ConvDimensionNumbersAttr, pos: usize) i64 {
+    pub fn kernelSpatialDimensionsElem(self: *const ConvDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloConvDimensionNumbersGetKernelSpatialDimensionsElem(self.ptr(), @intCast(pos));
     }
 
-    pub fn getOutputBatchDimension(self: *const ConvDimensionNumbersAttr) i64 {
+    pub fn outputBatchDimension(self: *const ConvDimensionNumbersAttr) i64 {
         return c.stablehloConvDimensionNumbersGetOutputBatchDimension(self.ptr());
     }
 
-    pub fn getOutputFeatureDimension(self: *const ConvDimensionNumbersAttr) i64 {
+    pub fn outputFeatureDimension(self: *const ConvDimensionNumbersAttr) i64 {
         return c.stablehloConvDimensionNumbersGetOutputFeatureDimension(self.ptr());
     }
 
-    pub fn getOutputSpatialDimensionsSize(self: *const ConvDimensionNumbersAttr) usize {
+    pub fn outputSpatialDimensionsSize(self: *const ConvDimensionNumbersAttr) usize {
         return @intCast(c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsSize(self.ptr()));
     }
 
-    pub fn getOutputSpatialDimensionsElem(self: *const ConvDimensionNumbersAttr, pos: usize) i64 {
+    pub fn outputSpatialDimensionsElem(self: *const ConvDimensionNumbersAttr, pos: usize) i64 {
         return c.stablehloConvDimensionNumbersGetOutputSpatialDimensionsElem(self.ptr(), @intCast(pos));
     }
 
@@ -1357,9 +1357,9 @@ pub const PrecisionAttr = opaque {
         return @ptrCast(c.stablehloPrecisionAttrGet(ctx.ptr(), stringRef(@tagName(args.value))).ptr);
     }
 
-    pub fn getValue(self: *const PrecisionAttr) Precision {
-        const value = mlir.string(c.stablehloPrecisionAttrGetValue(self.ptr()));
-        return std.meta.stringToEnum(Precision, value) orelse unreachable;
+    pub fn value(self: *const PrecisionAttr) Precision {
+        const name = mlir.string(c.stablehloPrecisionAttrGetValue(self.ptr()));
+        return std.meta.stringToEnum(Precision, name) orelse unreachable;
     }
 
     pub fn attribute(self: *const PrecisionAttr) *const mlir.Attribute {
@@ -1396,9 +1396,9 @@ pub const ComparisonDirectionAttr = opaque {
         return @ptrCast(c.stablehloComparisonDirectionAttrGet(ctx.ptr(), mlir.stringRef(@tagName(args.value))).ptr);
     }
 
-    pub fn getValue(self: *const ComparisonDirectionAttr) Direction {
-        const value = mlir.string(c.stablehloComparisonDirectionAttrGetValue(self.ptr()));
-        return std.meta.stringToEnum(Direction, value) orelse unreachable;
+    pub fn value(self: *const ComparisonDirectionAttr) Direction {
+        const name = mlir.string(c.stablehloComparisonDirectionAttrGetValue(self.ptr()));
+        return std.meta.stringToEnum(Direction, name) orelse unreachable;
     }
 
     pub fn attribute(self: *const ComparisonDirectionAttr) *const mlir.Attribute {
@@ -1433,9 +1433,9 @@ pub const CompareTypeAttr = opaque {
         return @ptrCast(c.stablehloComparisonTypeAttrGet(ctx.ptr(), stringRef(@tagName(args.value))).ptr);
     }
 
-    pub fn getValue(self: *const CompareTypeAttr) Type {
-        const value = mlir.string(c.stablehloComparisonTypeAttrGetValue(self.ptr()));
-        return std.meta.stringToEnum(Type, value) orelse unreachable;
+    pub fn value(self: *const CompareTypeAttr) Type {
+        const name = mlir.string(c.stablehloComparisonTypeAttrGetValue(self.ptr()));
+        return std.meta.stringToEnum(Type, name) orelse unreachable;
     }
 
     pub fn attribute(self: *const CompareTypeAttr) *const mlir.Attribute {
@@ -1469,9 +1469,9 @@ pub const TransposeAttr = opaque {
         return @ptrCast(c.stablehloTransposeAttrGet(ctx.ptr(), mlir.stringRef(@tagName(args.value))).ptr);
     }
 
-    pub fn getValue(self: *const TransposeAttr) Type {
-        const value = mlir.string(c.stablehloTransposeAttrGetValue(self.ptr()));
-        return std.meta.stringToEnum(Type, value) orelse unreachable;
+    pub fn value(self: *const TransposeAttr) Type {
+        const name = mlir.string(c.stablehloTransposeAttrGetValue(self.ptr()));
+        return std.meta.stringToEnum(Type, name) orelse unreachable;
     }
 
     pub fn attribute(self: *const TransposeAttr) *const mlir.Attribute {
@@ -1506,9 +1506,9 @@ pub const FftTypeAttr = opaque {
         return @ptrCast(c.stablehloFftTypeAttrGet(ctx.ptr(), mlir.stringRef(@tagName(args.value))).ptr);
     }
 
-    pub fn getValue(self: *const FftTypeAttr) Type {
-        const value = mlir.string(c.stablehloFftTypeAttrGetValue(self.ptr()));
-        return std.meta.stringToEnum(Type, value) orelse unreachable;
+    pub fn value(self: *const FftTypeAttr) Type {
+        const name = mlir.string(c.stablehloFftTypeAttrGetValue(self.ptr()));
+        return std.meta.stringToEnum(Type, name) orelse unreachable;
     }
 
     pub fn attribute(self: *const FftTypeAttr) *const mlir.Attribute {

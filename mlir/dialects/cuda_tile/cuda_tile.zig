@@ -428,16 +428,16 @@ pub const GatherScatterViewType = opaque {
         );
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getTileShape(self: *const Self) *const mlir.DenseArrayAttribute(.i32) {
+    pub fn tileShape(self: *const Self) *const mlir.DenseArrayAttribute(.i32) {
         return @ptrCast(attrFromC(c.mlirCudaTileGatherScatterViewTypeGetTileShape(self.ptr())));
     }
-    pub fn getTensorView(self: *const Self) *const TensorViewType {
+    pub fn tensorView(self: *const Self) *const TensorViewType {
         return @ptrCast(typeFromC(c.mlirCudaTileGatherScatterViewTypeGetTensorView(self.ptr())));
     }
-    pub fn getSparseDim(self: *const Self) u32 {
+    pub fn sparseDim(self: *const Self) u32 {
         return c.mlirCudaTileGatherScatterViewTypeGetSparseDim(self.ptr());
     }
-    pub fn getPaddingValue(self: *const Self) ?PaddingValue {
+    pub fn paddingValue(self: *const Self) ?PaddingValue {
         const attr = c.mlirCudaTileGatherScatterViewTypeGetPaddingValue(self.ptr());
         if (attr.ptr == null) return null;
         const name = c.mlirCudaTilePaddingValueAttrGetValue(attr);
@@ -649,7 +649,7 @@ pub const OptimizationHintsAttr = opaque {
         const result = c.mlirCudaTileOptimizationHintsAttrGet(ctx.ptr(), args.value.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) *const mlir.DictionaryAttribute {
+    pub fn value(self: *const Self) *const mlir.DictionaryAttribute {
         return @ptrCast(attrFromC(c.mlirCudaTileOptimizationHintsAttrGetValue(self.ptr())));
     }
 };
@@ -715,13 +715,13 @@ pub const DivByAttr = opaque {
         );
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getDivisor(self: *const Self) u64 {
+    pub fn divisor(self: *const Self) u64 {
         return c.mlirCudaTileDivByAttrGetDivisor(self.ptr());
     }
-    pub fn getEvery(self: *const Self) ?i64 {
+    pub fn every(self: *const Self) ?i64 {
         return if (c.mlirCudaTileDivByAttrHasEvery(self.ptr())) c.mlirCudaTileDivByAttrGetEvery(self.ptr()) else null;
     }
-    pub fn getAlong(self: *const Self) ?i64 {
+    pub fn along(self: *const Self) ?i64 {
         return if (c.mlirCudaTileDivByAttrHasAlong(self.ptr())) c.mlirCudaTileDivByAttrGetAlong(self.ptr()) else null;
     }
 };
@@ -764,7 +764,7 @@ pub const SameElementsAttr = opaque {
         const result = c.mlirCudaTileSameElementsAttrGet(ctx.ptr(), @intCast(args.values.len), args.values.ptr);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValues(self: *const Self) *const mlir.DenseArrayAttribute(.i64) {
+    pub fn values(self: *const Self) *const mlir.DenseArrayAttribute(.i64) {
         return @ptrCast(attrFromC(c.mlirCudaTileSameElementsAttrGetValues(self.ptr())));
     }
 };
@@ -795,10 +795,10 @@ pub const BoundedAttr = opaque {
         const result = c.mlirCudaTileBoundedAttrGet(ctx.ptr(), args.lb != null, args.lb orelse 0, args.ub != null, args.ub orelse 0);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getLb(self: *const Self) ?i64 {
+    pub fn lb(self: *const Self) ?i64 {
         return if (c.mlirCudaTileBoundedAttrHasLb(self.ptr())) c.mlirCudaTileBoundedAttrGetLb(self.ptr()) else null;
     }
-    pub fn getUb(self: *const Self) ?i64 {
+    pub fn ub(self: *const Self) ?i64 {
         return if (c.mlirCudaTileBoundedAttrHasUb(self.ptr())) c.mlirCudaTileBoundedAttrGetUb(self.ptr()) else null;
     }
 };

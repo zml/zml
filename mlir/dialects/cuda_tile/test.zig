@@ -51,15 +51,15 @@ test "dialect registers and types round-trip" {
     const gsv = cuda_tile.gatherScatterViewType(ctx, &.{ 8, 16 }, gather_tv, 0, .{ .padding = .zero });
     try std.testing.expect(gsv.eql(try mlir.Type.parse(ctx, "!cuda_tile.gather_scatter_view<tile=(8x16), padding_value = zero, tensor_view<64x32xf32, strides=[32,1]>, sparse_dim=0>")));
     const typed_gsv = gsv.isA(cuda_tile.GatherScatterViewType).?;
-    const gsv_tile = typed_gsv.getTileShape();
+    const gsv_tile = typed_gsv.tileShape();
     var gsv_shape: [2]i32 = undefined;
     try std.testing.expectEqual(gsv_shape.len, gsv_tile.numElements());
     for (&gsv_shape, 0..) |*d, i| d.* = gsv_tile.element(i);
     const rebuilt_gsv = try cuda_tile.GatherScatterViewType.get(ctx, .{
         .tileShape = &gsv_shape,
-        .tensorView = typed_gsv.getTensorView(),
-        .sparseDim = typed_gsv.getSparseDim(),
-        .paddingValue = typed_gsv.getPaddingValue(),
+        .tensorView = typed_gsv.tensorView(),
+        .sparseDim = typed_gsv.sparseDim(),
+        .paddingValue = typed_gsv.paddingValue(),
     });
     try std.testing.expect(rebuilt_gsv.eql(typed_gsv));
     try std.testing.expect(cuda_tile.tileTypeOfView(gsv).eql(cuda_tile.tileType(ctx, &.{ 8, 16 }, f32_ty)));
@@ -67,7 +67,7 @@ test "dialect registers and types round-trip" {
         .tileShape = &.{ 8, 16 },
         .tensorView = gather_tv.isA(cuda_tile.TensorViewType).?,
         .sparseDim = 1,
-    })).getPaddingValue() == null);
+    })).paddingValue() == null);
     try std.testing.expectError(error.InvalidMlir, cuda_tile.GatherScatterViewType.get(ctx, .{
         .tileShape = &.{8},
         .tensorView = gather_tv.isA(cuda_tile.TensorViewType).?,
@@ -90,7 +90,7 @@ test "enum and hint attributes" {
     });
     try std.testing.expect(hints.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.optimization_hints<sm_100 = {num_cta_in_cga = 2}, sm_120 = {num_cta_in_cga = 2, occupancy = 2}>")));
     const typed_hints = hints.isA(cuda_tile.OptimizationHintsAttr).?;
-    try std.testing.expect((try cuda_tile.OptimizationHintsAttr.get(ctx, .{ .value = typed_hints.getValue() })).eql(typed_hints));
+    try std.testing.expect((try cuda_tile.OptimizationHintsAttr.get(ctx, .{ .value = typed_hints.value() })).eql(typed_hints));
     const ls_hints = cuda_tile.optimizationHintsAttr(ctx, &[_]cuda_tile.LoadStoreHint{.{ .arch = .sm_100, .allow_tma = false, .latency = 3 }});
     try std.testing.expect(ls_hints.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.optimization_hints<sm_100 = {allow_tma = false, latency = 3}>")));
     const not_a_dict: *const mlir.DictionaryAttribute = @ptrCast(mlir.Attribute.dict(ctx, &.{.named(ctx, "sm_100", .int(ctx, .i64, 1))}));
@@ -103,16 +103,16 @@ test "enum and hint attributes" {
     try std.testing.expect(cuda_tile.divByAttr(ctx, 32, .{ .every = 4 }).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.div_by<32, every 4 along 0>")));
     const typed_div = div_every.isA(cuda_tile.DivByAttr).?;
     try std.testing.expect((try cuda_tile.DivByAttr.get(ctx, .{
-        .divisor = typed_div.getDivisor(),
-        .every = typed_div.getEvery(),
-        .along = typed_div.getAlong(),
+        .divisor = typed_div.divisor(),
+        .every = typed_div.every(),
+        .along = typed_div.along(),
     })).eql(typed_div));
-    try std.testing.expect(div.isA(cuda_tile.DivByAttr).?.getEvery() == null);
+    try std.testing.expect(div.isA(cuda_tile.DivByAttr).?.every() == null);
     try std.testing.expectError(error.InvalidMlir, cuda_tile.DivByAttr.get(ctx, .{ .divisor = 4, .every = 4 }));
 
     const same = cuda_tile.sameElementsAttr(ctx, &.{ 2, 4 });
     try std.testing.expect(same.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.same_elements<[2, 4]>")));
-    const same_values = same.isA(cuda_tile.SameElementsAttr).?.getValues();
+    const same_values = same.isA(cuda_tile.SameElementsAttr).?.values();
     try std.testing.expectEqual(@as(usize, 2), same_values.numElements());
     try std.testing.expectEqual(@as(i64, 4), same_values.element(1));
 
@@ -121,8 +121,8 @@ test "enum and hint attributes" {
     try std.testing.expect(cuda_tile.boundedAttr(ctx, .{ .ub = 7 }).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<?, 7>")));
     try std.testing.expect(cuda_tile.boundedAttr(ctx, .{ .lb = -3, .ub = 7 }).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<-3, 7>")));
     const typed_lower = lower.isA(cuda_tile.BoundedAttr).?;
-    try std.testing.expectEqual(@as(?i64, 0), typed_lower.getLb());
-    try std.testing.expect(typed_lower.getUb() == null);
+    try std.testing.expectEqual(@as(?i64, 0), typed_lower.lb());
+    try std.testing.expect(typed_lower.ub() == null);
 }
 
 test "entry round-trip through print and parse" {

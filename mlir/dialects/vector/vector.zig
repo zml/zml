@@ -103,7 +103,7 @@ pub const CombiningKindAttr = opaque {
         const result = c.mlirVectorCombiningKindAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) CombiningKind {
+    pub fn value(self: *const Self) CombiningKind {
         return @fromBackingInt(@intCast(c.mlirVectorCombiningKindAttrGetValue(self.ptr())));
     }
 };
@@ -128,7 +128,7 @@ pub const IteratorTypeAttr = opaque {
         const result = c.mlirVectorIteratorTypeAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) IteratorType {
+    pub fn value(self: *const Self) IteratorType {
         return @fromBackingInt(@intCast(c.mlirVectorIteratorTypeAttrGetValue(self.ptr())));
     }
 };

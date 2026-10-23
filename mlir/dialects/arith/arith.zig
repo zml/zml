@@ -140,7 +140,7 @@ pub const FastMathAttr = opaque {
         const result = c.mlirArithFastMathAttrGet(ctx.ptr(), @bitCast(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) FastMathFlags {
+    pub fn value(self: *const Self) FastMathFlags {
         return @bitCast(c.mlirArithFastMathAttrGetValue(self.ptr()));
     }
 };

@@ -26,7 +26,7 @@ pub const BufferOOBModeAttr = opaque {
         return @ptrCast(c.mlirROCDLBufferOOBModeAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLBufferOOBModeAttrGetValue(self.ptr())));
     }
 
@@ -54,7 +54,7 @@ pub const BufferOOBModeModuleFlagAttr = opaque {
         return @ptrCast(c.mlirROCDLBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLBufferOOBModeModuleFlagAttrGetValue(self.ptr())));
     }
 
@@ -82,7 +82,7 @@ pub const Gfx12AtomicCachePolicyAttr = opaque {
         return @ptrCast(c.mlirROCDLGfx12AtomicCachePolicyAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLGfx12AtomicCachePolicyAttrGetValue(self.ptr())));
     }
 
@@ -110,7 +110,7 @@ pub const Gfx12CachePolicyAttr = opaque {
         return @ptrCast(c.mlirROCDLGfx12CachePolicyAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLGfx12CachePolicyAttrGetValue(self.ptr())));
     }
 
@@ -138,7 +138,7 @@ pub const Gfx942CachePolicyAttr = opaque {
         return @ptrCast(c.mlirROCDLGfx942CachePolicyAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLGfx942CachePolicyAttrGetValue(self.ptr())));
     }
 
@@ -166,7 +166,7 @@ pub const MFMANegModifierAttr = opaque {
         return @ptrCast(c.mlirROCDLMFMANegModifierAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLMFMANegModifierAttrGetValue(self.ptr())));
     }
 
@@ -194,7 +194,7 @@ pub const MFMAPermBAttr = opaque {
         return @ptrCast(c.mlirROCDLMFMAPermBAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLMFMAPermBAttrGetValue(self.ptr())));
     }
 
@@ -222,7 +222,7 @@ pub const MatrixFormatAttr = opaque {
         return @ptrCast(c.mlirROCDLMatrixFormatAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLMatrixFormatAttrGetValue(self.ptr())));
     }
 
@@ -250,7 +250,7 @@ pub const PreGfx12CachePolicyAttr = opaque {
         return @ptrCast(c.mlirROCDLPreGfx12CachePolicyAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLPreGfx12CachePolicyAttrGetValue(self.ptr())));
     }
 
@@ -278,7 +278,7 @@ pub const SchedGroupMaskAttr = opaque {
         return @ptrCast(c.mlirROCDLSchedGroupMaskAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLSchedGroupMaskAttrGetValue(self.ptr())));
     }
 
@@ -306,7 +306,7 @@ pub const TBufferOOBModeModuleFlagAttr = opaque {
         return @ptrCast(c.mlirROCDLTBufferOOBModeModuleFlagAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLTBufferOOBModeModuleFlagAttrGetValue(self.ptr())));
     }
 
@@ -334,7 +334,7 @@ pub const WMMACModifierAttr = opaque {
         return @ptrCast(c.mlirROCDLWMMACModifierAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLWMMACModifierAttrGetValue(self.ptr())));
     }
 
@@ -362,7 +362,7 @@ pub const WMMAMatrixScaleAttr = opaque {
         return @ptrCast(c.mlirROCDLWMMAMatrixScaleAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLWMMAMatrixScaleAttrGetValue(self.ptr())));
     }
 
@@ -390,7 +390,7 @@ pub const WMMAMatrixScaleFormatAttr = opaque {
         return @ptrCast(c.mlirROCDLWMMAMatrixScaleFormatAttrGet(ctx.ptr(), @backingInt(args.value)).ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const Self) Value {
+    pub fn value(self: *const Self) Value {
         return @fromBackingInt(@intCast(c.mlirROCDLWMMAMatrixScaleFormatAttrGetValue(self.ptr())));
     }
 

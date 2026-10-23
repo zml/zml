@@ -1163,7 +1163,7 @@ pub const Builder = struct {
     pub fn staticCoordinateLayout(self: *Builder, rank: usize, spec: LayoutSpec) View {
         const tensor_type = self.coordTensorType(rank, spec);
         const coords = tensor_type.isA(cute_ir.CoordTensorType) orelse @panic("invalid coordinate tensor type");
-        const result = self.emit(cute_ir.static(self.ctx, coords.getLayout(), self.loc()));
+        const result = self.emit(cute_ir.static(self.ctx, coords.layout(), self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
@@ -1286,10 +1286,10 @@ pub const Builder = struct {
     /// `cute.make_tensor(ptr, layout)`.
     pub fn makeTensor(self: *Builder, ptr: Value, layout: Layout) Tensor {
         const pt = ptr.type_().isA(cute_ir.PtrType) orelse std.debug.panic("makeTensor: {f} is not a !cute.ptr", .{ptr.type_()});
-        const elem = pt.getValueType() orelse @panic("makeTensor: untyped pointer");
+        const elem = pt.valueType() orelse @panic("makeTensor: untyped pointer");
         const memref_ty = (cute_ir.MemRefType.get(self.ctx, .{ .ptr = ptr.type_(), .layout = layout.inner.type_() }) catch @panic("bad memref")).type_();
         const v = self.emit(cute_ir.make_view(self.ctx, ptr.inner, memref_ty, .{ .layout = layout.inner }, self.loc()));
-        return .{ .inner = v.inner, .kernel = self, .layout = layout, .dtype = dtypes.mlirToDType(self.ctx, elem), .space = pt.getAddressSpace() };
+        return .{ .inner = v.inner, .kernel = self, .layout = layout, .dtype = dtypes.mlirToDType(self.ctx, elem), .space = pt.addressSpace() };
     }
 
     fn writeCoord(self: *Builder, writer: *std.Io.Writer, dyn: *stdx.BoundedArray(*const mlir.Value, MAX_RANK), coord: anytype) void {
@@ -1413,7 +1413,7 @@ pub const Builder = struct {
         const source = self.asValue(input);
         const source_type = source.type_().isA(cute_ir.CoordTensorType) orelse
             std.debug.panic("rebuildCoordTensorIterator: expected coordinate tensor, got {f}", .{source.type_()});
-        const source_tuple_type = source_type.getArithTuple();
+        const source_tuple_type = source_type.arithTuple();
         const source_iterator_type = (cute_ir.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = source_tuple_type }) catch
             @panic("invalid source arithmetic tuple iterator")).type_();
         const source_iterator = self.emit(cute_ir.get_iter(self.ctx, source.inner, source_iterator_type, self.loc()));
@@ -1675,16 +1675,16 @@ pub const Builder = struct {
         const layout_value = self.asValue(layout);
         const input_type = value.type_();
         const result_type: *const mlir.Type = if (input_type.isA(cute_ir.MemRefType)) |memref|
-            (cute_ir.MemRefType.get(self.ctx, .{ .ptr = memref.getPtr(), .layout = layout_value.type_() }) catch @panic("invalid regrouped memref")).type_()
+            (cute_ir.MemRefType.get(self.ctx, .{ .ptr = memref.ptr_(), .layout = layout_value.type_() }) catch @panic("invalid regrouped memref")).type_()
         else if (input_type.isA(cute_ir.CoordTensorType)) |coords|
-            (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = coords.getArithTuple(), .layout = layout_value.type_() }) catch @panic("invalid regrouped coordinate tensor")).type_()
+            (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = coords.arithTuple(), .layout = layout_value.type_() }) catch @panic("invalid regrouped coordinate tensor")).type_()
         else
             std.debug.panic("withLayout: expected memref or coordinate tensor, got {f}", .{input_type});
 
         const iterator_type: *const mlir.Type = if (input_type.isA(cute_ir.MemRefType)) |memref|
-            memref.getPtr()
+            memref.ptr_()
         else if (input_type.isA(cute_ir.CoordTensorType)) |coords|
-            (cute_ir.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = coords.getArithTuple() }) catch @panic("invalid arithmetic tuple iterator")).type_()
+            (cute_ir.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = coords.arithTuple() }) catch @panic("invalid arithmetic tuple iterator")).type_()
         else
             unreachable;
         const iterator = self.emit(cute_ir.get_iter(self.ctx, value.inner, iterator_type, self.loc()));

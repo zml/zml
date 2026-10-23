@@ -103,12 +103,12 @@ pub const IntTupleAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const IntTupleAttr {
-        const result = c.mlirCuteIntTupleAttrGet(ctx.ptr(), mlir.stringRef(value));
+    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const IntTupleAttr {
+        const result = c.mlirCuteIntTupleAttrGet(ctx.ptr(), mlir.stringRef(text));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const IntTupleAttr) []const u8 {
+    pub fn value(self: *const IntTupleAttr) []const u8 {
         return mlir.string(c.mlirCuteIntTupleAttrGetValue(self.ptr()));
     }
 
@@ -126,12 +126,12 @@ pub const CoordAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const CoordAttr {
-        const result = c.mlirCuteCoordAttrGet(ctx.ptr(), mlir.stringRef(value));
+    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const CoordAttr {
+        const result = c.mlirCuteCoordAttrGet(ctx.ptr(), mlir.stringRef(text));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const CoordAttr) []const u8 {
+    pub fn value(self: *const CoordAttr) []const u8 {
         return mlir.string(c.mlirCuteCoordAttrGetValue(self.ptr()));
     }
 
@@ -149,12 +149,12 @@ pub const ShapeAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const ShapeAttr {
-        const result = c.mlirCuteShapeAttrGet(ctx.ptr(), mlir.stringRef(value));
+    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const ShapeAttr {
+        const result = c.mlirCuteShapeAttrGet(ctx.ptr(), mlir.stringRef(text));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const ShapeAttr) []const u8 {
+    pub fn value(self: *const ShapeAttr) []const u8 {
         return mlir.string(c.mlirCuteShapeAttrGetValue(self.ptr()));
     }
 
@@ -172,12 +172,12 @@ pub const StrideAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const StrideAttr {
-        const result = c.mlirCuteStrideAttrGet(ctx.ptr(), mlir.stringRef(value));
+    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const StrideAttr {
+        const result = c.mlirCuteStrideAttrGet(ctx.ptr(), mlir.stringRef(text));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const StrideAttr) []const u8 {
+    pub fn value(self: *const StrideAttr) []const u8 {
         return mlir.string(c.mlirCuteStrideAttrGetValue(self.ptr()));
     }
 
@@ -195,12 +195,12 @@ pub const LayoutAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const LayoutAttr {
-        const result = c.mlirCuteLayoutAttrGet(ctx.ptr(), mlir.stringRef(value));
+    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const LayoutAttr {
+        const result = c.mlirCuteLayoutAttrGet(ctx.ptr(), mlir.stringRef(text));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const LayoutAttr) []const u8 {
+    pub fn value(self: *const LayoutAttr) []const u8 {
         return mlir.string(c.mlirCuteLayoutAttrGetValue(self.ptr()));
     }
 
@@ -218,12 +218,12 @@ pub const TileAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const TileAttr {
-        const result = c.mlirCuteTileAttrGet(ctx.ptr(), mlir.stringRef(value));
+    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const TileAttr {
+        const result = c.mlirCuteTileAttrGet(ctx.ptr(), mlir.stringRef(text));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const TileAttr) []const u8 {
+    pub fn value(self: *const TileAttr) []const u8 {
         return mlir.string(c.mlirCuteTileAttrGetValue(self.ptr()));
     }
 
@@ -241,12 +241,12 @@ pub const ComposedLayoutAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const ComposedLayoutAttr {
-        const result = c.mlirCuteComposedLayoutAttrGet(ctx.ptr(), mlir.stringRef(value));
+    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const ComposedLayoutAttr {
+        const result = c.mlirCuteComposedLayoutAttrGet(ctx.ptr(), mlir.stringRef(text));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const ComposedLayoutAttr) []const u8 {
+    pub fn value(self: *const ComposedLayoutAttr) []const u8 {
         return mlir.string(c.mlirCuteComposedLayoutAttrGetValue(self.ptr()));
     }
 
@@ -264,12 +264,12 @@ pub const SwizzleAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, value: []const u8) mlir.Error!*const SwizzleAttr {
-        const result = c.mlirCuteSwizzleAttrGet(ctx.ptr(), mlir.stringRef(value));
+    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const SwizzleAttr {
+        const result = c.mlirCuteSwizzleAttrGet(ctx.ptr(), mlir.stringRef(text));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 
-    pub fn getValue(self: *const SwizzleAttr) []const u8 {
+    pub fn value(self: *const SwizzleAttr) []const u8 {
         return mlir.string(c.mlirCuteSwizzleAttrGetValue(self.ptr()));
     }
 
@@ -344,7 +344,7 @@ pub const ArithTupleIteratorType = opaque {
         const result = c.mlirCuteArithTupleIteratorTypeGet(ctx.ptr(), args.arithTuple.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getArithTuple(self: *const Self) *const mlir.Type {
+    pub fn arithTuple(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteArithTupleIteratorTypeGetArithTuple(self.ptr()).ptr.?);
     }
 };
@@ -369,7 +369,7 @@ pub const ComposedLayoutType = opaque {
         const result = c.mlirCuteComposedLayoutTypeGet(ctx.ptr(), args.attr.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getAttr(self: *const Self) *const mlir.Attribute {
+    pub fn attr(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteComposedLayoutTypeGetAttr(self.ptr()).ptr.?);
     }
 };
@@ -395,13 +395,13 @@ pub const ConstrainedIntType = opaque {
         const result = c.mlirCuteConstrainedIntTypeGet(ctx.ptr(), args.divisibility, args.width, args.isPow2);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getDivisibility(self: *const Self) i64 {
+    pub fn divisibility(self: *const Self) i64 {
         return c.mlirCuteConstrainedIntTypeGetDivisibility(self.ptr());
     }
-    pub fn getWidth(self: *const Self) u32 {
+    pub fn width(self: *const Self) u32 {
         return c.mlirCuteConstrainedIntTypeGetWidth(self.ptr());
     }
-    pub fn getIsPow2(self: *const Self) bool {
+    pub fn isPow2(self: *const Self) bool {
         return c.mlirCuteConstrainedIntTypeGetIsPow2(self.ptr());
     }
 };
@@ -427,10 +427,10 @@ pub const CoordTensorType = opaque {
         const result = c.mlirCuteCoordTensorTypeGet(ctx.ptr(), args.arithTuple.ptr(), args.layout.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getArithTuple(self: *const Self) *const mlir.Type {
+    pub fn arithTuple(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteCoordTensorTypeGetArithTuple(self.ptr()).ptr.?);
     }
-    pub fn getLayout(self: *const Self) *const mlir.Type {
+    pub fn layout(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteCoordTensorTypeGetLayout(self.ptr()).ptr.?);
     }
 };
@@ -455,7 +455,7 @@ pub const CoordType = opaque {
         const result = c.mlirCuteCoordTypeGet(ctx.ptr(), args.attr.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getAttr(self: *const Self) *const mlir.Attribute {
+    pub fn attr(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteCoordTypeGetAttr(self.ptr()).ptr.?);
     }
 };
@@ -481,10 +481,10 @@ pub const FastDivmodDivisorType = opaque {
         const result = c.mlirCuteFastDivmodDivisorTypeGet(ctx.ptr(), args.width, args.isPow2);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getWidth(self: *const Self) u32 {
+    pub fn width(self: *const Self) u32 {
         return c.mlirCuteFastDivmodDivisorTypeGetWidth(self.ptr());
     }
-    pub fn getIsPow2(self: *const Self) bool {
+    pub fn isPow2(self: *const Self) bool {
         return c.mlirCuteFastDivmodDivisorTypeGetIsPow2(self.ptr());
     }
 };
@@ -509,7 +509,7 @@ pub const IntTupleType = opaque {
         const result = c.mlirCuteIntTupleTypeGet(ctx.ptr(), args.attr.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getAttr(self: *const Self) *const mlir.Attribute {
+    pub fn attr(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteIntTupleTypeGetAttr(self.ptr()).ptr.?);
     }
 };
@@ -534,7 +534,7 @@ pub const LayoutType = opaque {
         const result = c.mlirCuteLayoutTypeGet(ctx.ptr(), args.attr.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getAttr(self: *const Self) *const mlir.Attribute {
+    pub fn attr(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteLayoutTypeGetAttr(self.ptr()).ptr.?);
     }
 };
@@ -560,10 +560,10 @@ pub const MemRefType = opaque {
         const result = c.mlirCuteMemRefTypeGet(ctx.ptr(), args.ptr.ptr(), args.layout.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getPtr(self: *const Self) *const mlir.Type {
+    pub fn ptr_(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteMemRefTypeGetPtr(self.ptr()).ptr.?);
     }
-    pub fn getLayout(self: *const Self) *const mlir.Type {
+    pub fn layout(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteMemRefTypeGetLayout(self.ptr()).ptr.?);
     }
 };
@@ -592,19 +592,19 @@ pub const PtrType = opaque {
         const result = c.mlirCutePtrTypeGet(ctx.ptr(), if (args.valueType) |v| v.ptr() else c.MlirType{ .ptr = null }, @backingInt(args.addressSpace), args.alignment, if (args.swizzle) |v| v.ptr() else c.MlirAttribute{ .ptr = null }, if (args.bitlayout) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValueType(self: *const Self) ?*const mlir.Type {
+    pub fn valueType(self: *const Self) ?*const mlir.Type {
         return @ptrCast(c.mlirCutePtrTypeGetValueType(self.ptr()).ptr);
     }
-    pub fn getAddressSpace(self: *const Self) AddressSpace {
+    pub fn addressSpace(self: *const Self) AddressSpace {
         return @fromBackingInt(@intCast(c.mlirCutePtrTypeGetAddressSpace(self.ptr())));
     }
-    pub fn getAlignment(self: *const Self) u64 {
+    pub fn alignment(self: *const Self) u64 {
         return c.mlirCutePtrTypeGetAlignment(self.ptr());
     }
-    pub fn getSwizzle(self: *const Self) ?*const mlir.Attribute {
+    pub fn swizzle(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCutePtrTypeGetSwizzle(self.ptr()).ptr);
     }
-    pub fn getBitlayout(self: *const Self) ?*const mlir.Attribute {
+    pub fn bitlayout(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCutePtrTypeGetBitlayout(self.ptr()).ptr);
     }
 };
@@ -629,7 +629,7 @@ pub const ShapeType = opaque {
         const result = c.mlirCuteShapeTypeGet(ctx.ptr(), args.attr.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getAttr(self: *const Self) *const mlir.Attribute {
+    pub fn attr(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteShapeTypeGetAttr(self.ptr()).ptr.?);
     }
 };
@@ -655,10 +655,10 @@ pub const SparseElemType = opaque {
         const result = c.mlirCuteSparseElemTypeGet(ctx.ptr(), args.numLogical, args.physicalType.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getNumLogical(self: *const Self) c_int {
+    pub fn numLogical(self: *const Self) c_int {
         return c.mlirCuteSparseElemTypeGetNumLogical(self.ptr());
     }
-    pub fn getPhysicalType(self: *const Self) *const mlir.Type {
+    pub fn physicalType(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteSparseElemTypeGetPhysicalType(self.ptr()).ptr.?);
     }
 };
@@ -683,7 +683,7 @@ pub const StrideType = opaque {
         const result = c.mlirCuteStrideTypeGet(ctx.ptr(), args.attr.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getAttr(self: *const Self) *const mlir.Attribute {
+    pub fn attr(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteStrideTypeGetAttr(self.ptr()).ptr.?);
     }
 };
@@ -708,7 +708,7 @@ pub const SwizzleType = opaque {
         const result = c.mlirCuteSwizzleTypeGet(ctx.ptr(), args.attr.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getAttr(self: *const Self) *const mlir.Attribute {
+    pub fn attr(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSwizzleTypeGetAttr(self.ptr()).ptr.?);
     }
 };
@@ -733,7 +733,7 @@ pub const TileType = opaque {
         const result = c.mlirCuteTileTypeGet(ctx.ptr(), args.attr.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getAttr(self: *const Self) *const mlir.Attribute {
+    pub fn attr(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteTileTypeGetAttr(self.ptr()).ptr.?);
     }
 };
@@ -760,16 +760,16 @@ pub const TiledCopyType = opaque {
         const result = c.mlirCuteTiledCopyTypeGet(ctx.ptr(), args.copyAtom.ptr(), args.layoutCopyTv.ptr(), args.tilerMn.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getCopyAtom(self: *const Self) *const mlir.Type {
+    pub fn copyAtom(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteTiledCopyTypeGetCopyAtom(self.ptr()).ptr.?);
     }
-    pub fn getLayoutCopyTv(self: *const Self) *const mlir.Attribute {
+    pub fn layoutCopyTv(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteTiledCopyTypeGetLayoutCopyTv(self.ptr()).ptr.?);
     }
-    pub fn getTilerMn(self: *const Self) *const mlir.Attribute {
+    pub fn tilerMn(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteTiledCopyTypeGetTilerMn(self.ptr()).ptr.?);
     }
-    pub const getAtom = getCopyAtom;
+    pub const atom = copyAtom;
 };
 
 /// `!cute.tiled_copy_v2`: V2 copy atom tiled over threads and values.
@@ -794,13 +794,13 @@ pub const TiledCopyV2Type = opaque {
         const result = c.mlirCuteTiledCopyV2TypeGet(ctx.ptr(), args.copyAtom.ptr(), args.layoutCopyTv.ptr(), args.tilerMn.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getCopyAtom(self: *const Self) *const mlir.Type {
+    pub fn copyAtom(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteTiledCopyV2TypeGetCopyAtom(self.ptr()).ptr.?);
     }
-    pub fn getLayoutCopyTv(self: *const Self) *const mlir.Attribute {
+    pub fn layoutCopyTv(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteTiledCopyV2TypeGetLayoutCopyTv(self.ptr()).ptr.?);
     }
-    pub fn getTilerMn(self: *const Self) *const mlir.Attribute {
+    pub fn tilerMn(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteTiledCopyV2TypeGetTilerMn(self.ptr()).ptr.?);
     }
 };
@@ -827,18 +827,18 @@ pub const TiledMmaType = opaque {
         const result = c.mlirCuteTiledMmaTypeGet(ctx.ptr(), args.mmaAtom.ptr(), args.atomLayoutMNK.ptr(), if (args.permutationMNK) |v| v.ptr() else c.MlirAttribute{ .ptr = null });
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getMmaAtom(self: *const Self) *const mlir.Type {
+    pub fn mmaAtom(self: *const Self) *const mlir.Type {
         return @ptrCast(c.mlirCuteTiledMmaTypeGetMmaAtom(self.ptr()).ptr.?);
     }
-    pub fn getAtomLayoutMNK(self: *const Self) *const mlir.Attribute {
+    pub fn atomLayoutMNK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteTiledMmaTypeGetAtomLayoutMNK(self.ptr()).ptr.?);
     }
-    pub fn getPermutationMNK(self: *const Self) ?*const mlir.Attribute {
+    pub fn permutationMNK(self: *const Self) ?*const mlir.Attribute {
         return @ptrCast(c.mlirCuteTiledMmaTypeGetPermutationMNK(self.ptr()).ptr);
     }
-    pub const getAtom = getMmaAtom;
-    pub const getAtomLayoutMnk = getAtomLayoutMNK;
-    pub const getPermutationMnk = getPermutationMNK;
+    pub const atom = mmaAtom;
+    pub const getAtomLayoutMnk = atomLayoutMNK;
+    pub const getPermutationMnk = permutationMNK;
 };
 
 /// `!cute.tuple`: Non-empty tuple of types.
@@ -861,10 +861,10 @@ pub const TupleType = opaque {
         const result = c.mlirCuteTupleTypeGet(ctx.ptr(), @intCast(args.types.len), @ptrCast(args.types.ptr));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getNumTypes(self: *const Self) usize {
+    pub fn numTypes(self: *const Self) usize {
         return @intCast(c.mlirCuteTupleTypeGetNumTypes(self.ptr()));
     }
-    pub fn getType(self: *const Self, pos: usize) *const mlir.Type {
+    pub fn @"type"(self: *const Self, pos: usize) *const mlir.Type {
         return @ptrCast(c.mlirCuteTupleTypeGetType(self.ptr(), @intCast(pos)).ptr.?);
     }
 };
@@ -889,7 +889,7 @@ pub const BitLayoutAttr = opaque {
         const result = c.mlirCuteBitLayoutAttrGet(ctx.ptr(), args.layout.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getLayout(self: *const Self) *const mlir.Attribute {
+    pub fn layout(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteBitLayoutAttrGetLayout(self.ptr()).ptr.?);
     }
 };
@@ -917,16 +917,16 @@ pub const CopyAtomAttr = opaque {
         const result = c.mlirCuteCopyAtomAttrGet(ctx.ptr(), args.thrId.ptr(), args.layoutSrc.ptr(), args.layoutDst.ptr(), args.layoutRef.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getThrId(self: *const Self) *const mlir.Attribute {
+    pub fn thrId(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteCopyAtomAttrGetThrId(self.ptr()).ptr.?);
     }
-    pub fn getLayoutSrc(self: *const Self) *const mlir.Attribute {
+    pub fn layoutSrc(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteCopyAtomAttrGetLayoutSrc(self.ptr()).ptr.?);
     }
-    pub fn getLayoutDst(self: *const Self) *const mlir.Attribute {
+    pub fn layoutDst(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteCopyAtomAttrGetLayoutDst(self.ptr()).ptr.?);
     }
-    pub fn getLayoutRef(self: *const Self) *const mlir.Attribute {
+    pub fn layoutRef(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteCopyAtomAttrGetLayoutRef(self.ptr()).ptr.?);
     }
 };
@@ -955,19 +955,19 @@ pub const CopyAtomV2Attr = opaque {
         const result = c.mlirCuteCopyAtomV2AttrGet(ctx.ptr(), args.thrId.ptr(), args.layoutSrcTV.ptr(), args.layoutDstTV.ptr(), args.frgSrc.ptr(), args.frgDst.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getThrId(self: *const Self) *const mlir.Attribute {
+    pub fn thrId(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteCopyAtomV2AttrGetThrId(self.ptr()).ptr.?);
     }
-    pub fn getLayoutSrcTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutSrcTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteCopyAtomV2AttrGetLayoutSrcTV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutDstTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutDstTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteCopyAtomV2AttrGetLayoutDstTV(self.ptr()).ptr.?);
     }
-    pub fn getFrgSrc(self: *const Self) *const mlir.Attribute {
+    pub fn frgSrc(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteCopyAtomV2AttrGetFrgSrc(self.ptr()).ptr.?);
     }
-    pub fn getFrgDst(self: *const Self) *const mlir.Attribute {
+    pub fn frgDst(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteCopyAtomV2AttrGetFrgDst(self.ptr()).ptr.?);
     }
 };
@@ -1002,37 +1002,37 @@ pub const MmaAtomAttr = opaque {
         const result = c.mlirCuteMmaAtomAttrGet(ctx.ptr(), args.shapeMNK.ptr(), args.thrId.ptr(), args.layoutATV.ptr(), args.layoutBTV.ptr(), args.layoutCTV.ptr(), args.shapeAMK.ptr(), args.shapeBNK.ptr(), args.shapeCMN.ptr(), args.frgA.ptr(), args.frgB.ptr(), args.frgC.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getShapeMNK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeMNK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMmaAtomAttrGetShapeMNK(self.ptr()).ptr.?);
     }
-    pub fn getThrId(self: *const Self) *const mlir.Attribute {
+    pub fn thrId(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMmaAtomAttrGetThrId(self.ptr()).ptr.?);
     }
-    pub fn getLayoutATV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutATV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMmaAtomAttrGetLayoutATV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutBTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutBTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMmaAtomAttrGetLayoutBTV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutCTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutCTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMmaAtomAttrGetLayoutCTV(self.ptr()).ptr.?);
     }
-    pub fn getShapeAMK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeAMK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMmaAtomAttrGetShapeAMK(self.ptr()).ptr.?);
     }
-    pub fn getShapeBNK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeBNK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMmaAtomAttrGetShapeBNK(self.ptr()).ptr.?);
     }
-    pub fn getShapeCMN(self: *const Self) *const mlir.Attribute {
+    pub fn shapeCMN(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMmaAtomAttrGetShapeCMN(self.ptr()).ptr.?);
     }
-    pub fn getFrgA(self: *const Self) *const mlir.Attribute {
+    pub fn frgA(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMmaAtomAttrGetFrgA(self.ptr()).ptr.?);
     }
-    pub fn getFrgB(self: *const Self) *const mlir.Attribute {
+    pub fn frgB(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMmaAtomAttrGetFrgB(self.ptr()).ptr.?);
     }
-    pub fn getFrgC(self: *const Self) *const mlir.Attribute {
+    pub fn frgC(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMmaAtomAttrGetFrgC(self.ptr()).ptr.?);
     }
 };
@@ -1073,55 +1073,55 @@ pub const MxMmaAtomAttr = opaque {
         const result = c.mlirCuteMxMmaAtomAttrGet(ctx.ptr(), args.shapeMNK.ptr(), args.thrId.ptr(), args.layoutATV.ptr(), args.layoutSFATV.ptr(), args.layoutBTV.ptr(), args.layoutSFBTV.ptr(), args.layoutCTV.ptr(), args.shapeAMK.ptr(), args.shapeSFAMK.ptr(), args.shapeBNK.ptr(), args.shapeSFBNK.ptr(), args.shapeCMN.ptr(), args.frgA.ptr(), args.frgSFA.ptr(), args.frgB.ptr(), args.frgSFB.ptr(), args.frgC.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getShapeMNK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeMNK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetShapeMNK(self.ptr()).ptr.?);
     }
-    pub fn getThrId(self: *const Self) *const mlir.Attribute {
+    pub fn thrId(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetThrId(self.ptr()).ptr.?);
     }
-    pub fn getLayoutATV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutATV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetLayoutATV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutSFATV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutSFATV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetLayoutSFATV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutBTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutBTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetLayoutBTV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutSFBTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutSFBTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetLayoutSFBTV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutCTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutCTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetLayoutCTV(self.ptr()).ptr.?);
     }
-    pub fn getShapeAMK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeAMK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetShapeAMK(self.ptr()).ptr.?);
     }
-    pub fn getShapeSFAMK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeSFAMK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetShapeSFAMK(self.ptr()).ptr.?);
     }
-    pub fn getShapeBNK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeBNK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetShapeBNK(self.ptr()).ptr.?);
     }
-    pub fn getShapeSFBNK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeSFBNK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetShapeSFBNK(self.ptr()).ptr.?);
     }
-    pub fn getShapeCMN(self: *const Self) *const mlir.Attribute {
+    pub fn shapeCMN(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetShapeCMN(self.ptr()).ptr.?);
     }
-    pub fn getFrgA(self: *const Self) *const mlir.Attribute {
+    pub fn frgA(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetFrgA(self.ptr()).ptr.?);
     }
-    pub fn getFrgSFA(self: *const Self) *const mlir.Attribute {
+    pub fn frgSFA(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetFrgSFA(self.ptr()).ptr.?);
     }
-    pub fn getFrgB(self: *const Self) *const mlir.Attribute {
+    pub fn frgB(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetFrgB(self.ptr()).ptr.?);
     }
-    pub fn getFrgSFB(self: *const Self) *const mlir.Attribute {
+    pub fn frgSFB(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetFrgSFB(self.ptr()).ptr.?);
     }
-    pub fn getFrgC(self: *const Self) *const mlir.Attribute {
+    pub fn frgC(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteMxMmaAtomAttrGetFrgC(self.ptr()).ptr.?);
     }
 };
@@ -1146,7 +1146,7 @@ pub const ReductionOpAttr = opaque {
         const result = c.mlirCuteReductionOpAttrGet(ctx.ptr(), @backingInt(args.value));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) ReductionOp {
+    pub fn value(self: *const Self) ReductionOp {
         return @fromBackingInt(@intCast(c.mlirCuteReductionOpAttrGetValue(self.ptr())));
     }
 };
@@ -1184,46 +1184,46 @@ pub const SparseMmaAtomAttr = opaque {
         const result = c.mlirCuteSparseMmaAtomAttrGet(ctx.ptr(), args.shapeMNK.ptr(), args.thrId.ptr(), args.layoutATV.ptr(), args.layoutBTV.ptr(), args.layoutCTV.ptr(), args.layoutETV.ptr(), args.shapeAMK.ptr(), args.shapeBNK.ptr(), args.shapeCMN.ptr(), args.shapeEMK.ptr(), args.frgA.ptr(), args.frgB.ptr(), args.frgC.ptr(), args.frgE.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getShapeMNK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeMNK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetShapeMNK(self.ptr()).ptr.?);
     }
-    pub fn getThrId(self: *const Self) *const mlir.Attribute {
+    pub fn thrId(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetThrId(self.ptr()).ptr.?);
     }
-    pub fn getLayoutATV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutATV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetLayoutATV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutBTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutBTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetLayoutBTV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutCTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutCTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetLayoutCTV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutETV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutETV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetLayoutETV(self.ptr()).ptr.?);
     }
-    pub fn getShapeAMK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeAMK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetShapeAMK(self.ptr()).ptr.?);
     }
-    pub fn getShapeBNK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeBNK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetShapeBNK(self.ptr()).ptr.?);
     }
-    pub fn getShapeCMN(self: *const Self) *const mlir.Attribute {
+    pub fn shapeCMN(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetShapeCMN(self.ptr()).ptr.?);
     }
-    pub fn getShapeEMK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeEMK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetShapeEMK(self.ptr()).ptr.?);
     }
-    pub fn getFrgA(self: *const Self) *const mlir.Attribute {
+    pub fn frgA(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetFrgA(self.ptr()).ptr.?);
     }
-    pub fn getFrgB(self: *const Self) *const mlir.Attribute {
+    pub fn frgB(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetFrgB(self.ptr()).ptr.?);
     }
-    pub fn getFrgC(self: *const Self) *const mlir.Attribute {
+    pub fn frgC(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetFrgC(self.ptr()).ptr.?);
     }
-    pub fn getFrgE(self: *const Self) *const mlir.Attribute {
+    pub fn frgE(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMmaAtomAttrGetFrgE(self.ptr()).ptr.?);
     }
 };
@@ -1267,64 +1267,64 @@ pub const SparseMxMmaAtomAttr = opaque {
         const result = c.mlirCuteSparseMxMmaAtomAttrGet(ctx.ptr(), args.shapeMNK.ptr(), args.thrId.ptr(), args.layoutATV.ptr(), args.layoutSFATV.ptr(), args.layoutBTV.ptr(), args.layoutSFBTV.ptr(), args.layoutCTV.ptr(), args.layoutETV.ptr(), args.shapeAMK.ptr(), args.shapeSFAMK.ptr(), args.shapeBNK.ptr(), args.shapeSFBNK.ptr(), args.shapeCMN.ptr(), args.shapeEMK.ptr(), args.frgA.ptr(), args.frgSFA.ptr(), args.frgB.ptr(), args.frgSFB.ptr(), args.frgC.ptr(), args.frgE.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getShapeMNK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeMNK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetShapeMNK(self.ptr()).ptr.?);
     }
-    pub fn getThrId(self: *const Self) *const mlir.Attribute {
+    pub fn thrId(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetThrId(self.ptr()).ptr.?);
     }
-    pub fn getLayoutATV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutATV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetLayoutATV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutSFATV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutSFATV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetLayoutSFATV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutBTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutBTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetLayoutBTV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutSFBTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutSFBTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetLayoutSFBTV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutCTV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutCTV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetLayoutCTV(self.ptr()).ptr.?);
     }
-    pub fn getLayoutETV(self: *const Self) *const mlir.Attribute {
+    pub fn layoutETV(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetLayoutETV(self.ptr()).ptr.?);
     }
-    pub fn getShapeAMK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeAMK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetShapeAMK(self.ptr()).ptr.?);
     }
-    pub fn getShapeSFAMK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeSFAMK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetShapeSFAMK(self.ptr()).ptr.?);
     }
-    pub fn getShapeBNK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeBNK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetShapeBNK(self.ptr()).ptr.?);
     }
-    pub fn getShapeSFBNK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeSFBNK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetShapeSFBNK(self.ptr()).ptr.?);
     }
-    pub fn getShapeCMN(self: *const Self) *const mlir.Attribute {
+    pub fn shapeCMN(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetShapeCMN(self.ptr()).ptr.?);
     }
-    pub fn getShapeEMK(self: *const Self) *const mlir.Attribute {
+    pub fn shapeEMK(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetShapeEMK(self.ptr()).ptr.?);
     }
-    pub fn getFrgA(self: *const Self) *const mlir.Attribute {
+    pub fn frgA(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetFrgA(self.ptr()).ptr.?);
     }
-    pub fn getFrgSFA(self: *const Self) *const mlir.Attribute {
+    pub fn frgSFA(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetFrgSFA(self.ptr()).ptr.?);
     }
-    pub fn getFrgB(self: *const Self) *const mlir.Attribute {
+    pub fn frgB(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetFrgB(self.ptr()).ptr.?);
     }
-    pub fn getFrgSFB(self: *const Self) *const mlir.Attribute {
+    pub fn frgSFB(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetFrgSFB(self.ptr()).ptr.?);
     }
-    pub fn getFrgC(self: *const Self) *const mlir.Attribute {
+    pub fn frgC(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetFrgC(self.ptr()).ptr.?);
     }
-    pub fn getFrgE(self: *const Self) *const mlir.Attribute {
+    pub fn frgE(self: *const Self) *const mlir.Attribute {
         return @ptrCast(c.mlirCuteSparseMxMmaAtomAttrGetFrgE(self.ptr()).ptr.?);
     }
 };

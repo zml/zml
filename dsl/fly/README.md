@@ -167,8 +167,8 @@ inferred type back on the host; `v.emitShape()` / `v.emitSize()` emit ops.
   types and layout; this call performs no tiled partitioning.
 - `b.bufferTensor(t)` is `fx.rocdl.make_buffer_tensor`: the same tensor over
   a CDNA raw-buffer descriptor, for bounds-checked `buffer_copy` atoms.
-- Derived layouts come off the type: `fly.expect(tm.value.type_(), .tiled_mma)`
-  then `.getTileSizeMNK()`, `.getTiledThrValLayoutA()`, ...
+- Derived layouts come off the type: `@import("mlir/dialects/fly").expect(tm.value.type_(), .tiled_mma)`
+  then `.tileSizeMNK()`, `.tiledThrValLayoutA()`, ...
 
 ## Memory and scalars
 
