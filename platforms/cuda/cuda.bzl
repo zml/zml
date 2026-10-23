@@ -229,7 +229,7 @@ _PLUGINS = {
     },
     "arm64": {
         "sha256": "39a9e8ebb64c4f961e457247e24ed2aa88274b6362c6a2c021ff9251e570a13a",
-        "url": "file:///home/benjamin/github/openxla/xla-ws-cp/bazel-bin/zml/cuda/archive.tar.zst",
+        "url": "file:///tmp/benjamin/llmd-cp-20261023/xla-runtime-fix/validated-39a9-archive.tar.zst",
     },
 }
 
