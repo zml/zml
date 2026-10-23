@@ -207,9 +207,6 @@ verified.
   `ctx` (the C API derives it from the element type).
 - Enum cases whose IR spelling is not an identifier use the C++ symbol
   (rocdl's `volatile_op`), as do the generated cute_nvgpu and ttir enums.
-- `dsl/cute` still builds some types and attributes from text (`parseType`,
-  `parseAttribute` and the text-typed overloads). They predate the bindings
-  and go away as its callers move to the typed forms.
 - fly's attributes and cute_ir's algebra attributes have named constructors
   (`getStatic`, `getDynamic`, `getTuple`, ...); fly's generated builders use
   snake_case parameters.

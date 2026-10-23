@@ -86,7 +86,7 @@ keep region-local values from escaping their scope; the builder's `open` and
 | `cute.arch.griddepcontrol_launch_dependents()` | `b.launchDependents()`                      |
 | `x.to(Float32)`                            | `x.to(.f32)`                                    |
 | `if cond:` / `for i in range(...)`         | `b.openIf(cond)` / `b.openFor(lb, ub, step, .{})` |
-| `cpasync.make_tiled_tma_atom(...)`         | `b.makeTiledTmaLoadAtom(...)` / `...Typed(...)` |
+| `cpasync.make_tiled_tma_atom(...)`         | `b.makeTiledTmaLoadAtom(...)`                   |
 | `cpasync.tma_partition(...)`               | `b.tmaPartition(...)`                           |
 | `cute.copy(atom, src, dst)`                | `b.copy(atom, src, dst, pred)`                  |
 | `cute.make_tiled_mma(atom)`                | `b.makeTiledMma(atom, result_type)`             |
@@ -121,10 +121,10 @@ keep region-local values from escaping their scope; the builder's `open` and
   their layouts in the compiler, so callers spell out the resulting CuTe type
   with `View` instead of relying on Python's dynamic type objects.
 * **Not covered yet:** dynamic tensor shapes and automatic CuTe layout algebra.
-* **Typed variants.** Operations whose result type CuTe derives exist in two
-  forms: one takes the result type as MLIR text (`localTile`, `slice`,
-  `tmaPartition`, ...), the `...Typed` one takes an `*mlir.Type` assembled
-  with `layoutSpec`, `memrefType` and `coordTensorType`.
+* **Typed result types.** Operations whose result type CuTe derives
+  (`localTile`, `slice`, `tmaPartition`, ...) take an `*mlir.Type` assembled
+  with `layoutSpec`, `layoutType`, `memrefType`, `coordTensorType`,
+  `smemDescViewType` or `tiledCopyType`; nothing is parsed from text.
 * **Architecture sections.** `Builder` groups TMA (`cute.nvgpu.cpasync`,
   SM90+) and tcgen05 / tensor memory (`cute.nvgpu.tcgen05`, SM100) in their
   own sections; mbarriers, fences and bulk-copy groups sit with `cute.arch`.

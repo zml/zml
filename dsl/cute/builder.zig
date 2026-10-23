@@ -445,21 +445,6 @@ pub const Atom = struct {
     }
 };
 
-/// Attribute payload accepted by target-specific CuTe operations.
-pub const Attr = union(enum) {
-    str: []const u8,
-    text: []const u8,
-    raw: *const mlir.Attribute,
-
-    pub fn get(self: Attr, ctx: *mlir.Context) *const mlir.Attribute {
-        return switch (self) {
-            .str => |s| .string(ctx, s),
-            .text => |s| mlir.Attribute.parse(ctx, s) catch std.debug.panic("invalid MLIR attribute: {s}", .{s}),
-            .raw => |a| a,
-        };
-    }
-};
-
 pub const TmaDescriptor = struct {
     atom: Atom,
     tensor: View,
@@ -486,7 +471,6 @@ pub const TmaConfig = struct {
     coordinate_layout: LayoutSpec,
     coordinate_rank: u8,
     format: TmaFormat = .default,
-    num_multicast: u32 = 1,
 };
 
 pub const BlockScaledMma = struct {
@@ -503,50 +487,22 @@ pub const BlockScaledMmaConfig = struct {
     vec_size: u8 = 32,
 };
 
-fn dtypeName(dtype: DType) []const u8 {
-    return switch (dtype) {
-        .i1 => "i1",
-        .i8 => "i8",
-        .i16 => "i16",
-        .i32 => "i32",
-        .i64 => "i64",
-        .f16 => "f16",
-        .bf16 => "bf16",
-        .f32 => "f32",
-        .f64 => "f64",
-        .f4e2m1fn => "f4E2M1FN",
-        .f8e4m3fn => "f8E4M3FN",
-        .f8e5m2 => "f8E5M2",
-        .f8e8m0fnu => "f8E8M0FNU",
-    };
-}
-
-fn formatName(format: TmaFormat, dtype: DType) []const u8 {
+fn tmaDataFormat(format: TmaFormat, dtype: DType) cute_nvgpu.TmaDataFormat {
     return switch (format) {
-        .u4_unpack_u8 => "U4_UNPACK_U8",
-        .u16 => "U16",
+        .u4_unpack_u8 => .U4_UNPACK_U8,
+        .u16 => .U16,
         .default => switch (dtype) {
-            .f8e4m3fn => "U8",
-            .f32 => "F32_RN",
+            .f8e4m3fn => .U8,
+            .f32 => .F32_RN,
             else => @panic("TMA format must be specified for this dtype"),
         },
     };
 }
 
-fn tmaFormatAttribute(b: *Builder, format: TmaFormat) ?*const mlir.Attribute {
-    return switch (format) {
-        .default => null,
-        .u4_unpack_u8 => b.parseAttribute("#cute_nvgpu.tma_data_format<U4_UNPACK_U8>"),
-        .u16 => b.parseAttribute("#cute_nvgpu.tma_data_format<U16>"),
-    };
-}
-
-fn blockScaledPayload(b: *Builder, cfg: BlockScaledMmaConfig) []const u8 {
-    return std.fmt.allocPrint(
-        b.arena.allocator(),
-        "<{d}x{d}x{d}, num_cta = {d}, ab_major = (k, k), elem_type = (f4E2M1FN, f8E4M3FN, f32), sf_type = f8E8M0FNU, frag_kind = ss, vec_size = {d}>",
-        .{ cfg.m, cfg.n, cfg.k, cfg.num_cta, cfg.vec_size },
-    ) catch @panic("OOM");
+fn tmaFormatAttribute(b: *Builder, config: TmaConfig) ?*const mlir.Attribute {
+    if (config.format == .default) return null;
+    const attr = cute_nvgpu.TmaDataFormatAttr.get(b.ctx, .{ .value = tmaDataFormat(config.format, config.dtype) }) catch @panic("invalid TMA format");
+    return attr.attribute();
 }
 
 pub const Index3 = struct { x: Value, y: Value, z: Value };
@@ -572,17 +528,10 @@ pub const ArgSpec = struct {
         tensor: TensorSpec,
         /// A type constructed through a dialect/type API.
         mlir_type: MlirTypeSpec,
-        /// A by-value kernel ABI argument such as a CUDA tensor-map atom.
-        raw: RawSpec,
     };
 
     pub const MlirTypeSpec = struct {
         type_: *const mlir.Type,
-        grid_constant: bool = false,
-    };
-
-    pub const RawSpec = struct {
-        type_text: []const u8,
         grid_constant: bool = false,
     };
 
@@ -693,10 +642,6 @@ pub const Builder = struct {
                     .type_ = inner.type_,
                     .grid_constant = if (@hasField(@TypeOf(inner), "grid_constant")) inner.grid_constant else false,
                 } },
-                .raw => .{ .raw = .{
-                    .type_text = inner.type_text,
-                    .grid_constant = if (@hasField(@TypeOf(inner), "grid_constant")) inner.grid_constant else false,
-                } },
             } };
         }
         try self.declareArgsLow(arg_specs);
@@ -734,7 +679,6 @@ pub const Builder = struct {
                 .ptr => |dt| self.ptrTy(dt, .gmem, 16),
                 .tensor => |t| self.ptrTy(t.dtype, .gmem, t.alignment),
                 .mlir_type => |typed| typed.type_,
-                .raw => |raw| self.parseType(raw.type_text),
             } catch return error.InvalidMlir;
             l.* = self.loc();
         }
@@ -746,9 +690,6 @@ pub const Builder = struct {
         for (arg_attrs, args) |*attr, a| {
             attr.* = switch (a.kind) {
                 .mlir_type => |typed| if (typed.grid_constant) .dict(ctx, &.{
-                    .named(ctx, "cute_nvgpu.grid_constant", .unit(ctx)),
-                }) else empty_dict,
-                .raw => |raw| if (raw.grid_constant) .dict(ctx, &.{
                     .named(ctx, "cute_nvgpu.grid_constant", .unit(ctx)),
                 }) else empty_dict,
                 else => empty_dict,
@@ -807,7 +748,6 @@ pub const Builder = struct {
                     .stride = spec.stride orelse self.rowMajor(spec.shape),
                 })),
                 .mlir_type => null,
-                .raw => null,
             };
         }
     }
@@ -889,6 +829,12 @@ pub const Builder = struct {
         return .unknown(self.ctx);
     }
 
+    /// `#cuda.dev_max_shared_memory_optin`, the device's opt-in maximum of
+    /// shared memory per block, for a kernel's `cu_attrs`.
+    pub fn devMaxSharedMemoryOptin(self: *Builder) *const mlir.Attribute {
+        return (cuda.ops.DevMaxSharedMemoryOptinAttr.get(self.ctx, .{}) catch @panic("invalid CUDA attribute")).attribute();
+    }
+
     pub fn setFunctionAttribute(self: *Builder, name: []const u8, attribute: *const mlir.Attribute) void {
         const function = self.func_op orelse @panic("setFunctionAttribute called before declareArgs");
         function.setAttributeByName(name, attribute);
@@ -896,12 +842,16 @@ pub const Builder = struct {
 
     // ==================== cuda host launch ====================
 
+    /// `@kernels::@<kernel_name>`, a kernel of the nested GPU module.
+    fn kernelSymbol(self: *Builder, kernel_name: []const u8) *const mlir.Attribute {
+        return .symbolRef(self.ctx, "kernels", &.{.init(self.ctx, kernel_name)});
+    }
+
     pub fn kernelSmemSize(self: *Builder, kernel_name: []const u8) Value {
-        const symbol = std.fmt.allocPrint(self.arena.allocator(), "@kernels::@{s}", .{kernel_name}) catch @panic("OOM");
         return self.emit(cute_ir.kernel_smem_size(
             self.ctx,
             .int(self.ctx, .i64),
-            self.parseAttribute(symbol),
+            self.kernelSymbol(kernel_name),
             self.loc(),
         ));
     }
@@ -946,11 +896,10 @@ pub const Builder = struct {
     /// actual launch on its stream.
     pub fn launchEx(self: *Builder, kernel_name: []const u8, config: LaunchConfig, arguments: anytype) Value {
         const values = self.innerSlice(arguments);
-        const symbol = std.fmt.allocPrint(self.arena.allocator(), "@kernels::@{s}", .{kernel_name}) catch @panic("OOM");
         return self.emit(cuda.launch_ex(self.ctx, .{
             .config = config.inner,
             .inputs = values,
-            .callee = self.parseAttribute(symbol),
+            .callee = self.kernelSymbol(kernel_name),
             .assume_kernel_attr = cuda.assumeKernelAttr(self.ctx, true),
             .location = self.loc(),
         }));
@@ -1048,18 +997,6 @@ pub const Builder = struct {
     pub fn recastSwizzledPointer(self: *Builder, pointer: anytype, dt: DType, space: MemorySpace, alignment: u64, swizzle: Swizzle) Value {
         const result_type = self.swizzledPtrTy(dt, space, alignment, swizzle) catch @panic("invalid swizzled pointer type");
         return self.emit(cute_ir.recast_iter(self.ctx, self.asValue(pointer).inner, result_type, self.loc()));
-    }
-
-    /// Parse a CuTe/CuTe-NVGPU type that has no compact C-API constructor.
-    /// This is primarily used for architecture-specific atom and descriptor
-    /// types whose complete layout is part of the type itself.
-    pub fn parseType(self: *Builder, text: []const u8) *const mlir.Type {
-        return mlir.Type.parse(self.ctx, text) catch std.debug.panic("invalid MLIR type: {s}", .{text});
-    }
-
-    /// Parse a target-specific MLIR attribute.
-    pub fn parseAttribute(self: *Builder, text: []const u8) *const mlir.Attribute {
-        return mlir.Attribute.parse(self.ctx, text) catch std.debug.panic("invalid MLIR attribute: {s}", .{text});
     }
 
     /// The scalar of a single extent, otherwise the tuple of `dims`.
@@ -1162,8 +1099,36 @@ pub const Builder = struct {
         return (cute_ir.MemRefType.get(self.ctx, .{ .ptr = pointer, .layout = layout_type }) catch @panic("invalid CuTe memref type")).type_();
     }
 
+    pub fn smemDescType(self: *Builder) *const mlir.Type {
+        return (cute_nvgpu.SmemDescType.get(self.ctx, .{}) catch @panic("invalid shared-memory descriptor")).type_();
+    }
+
+    /// `!cute_nvgpu.smem_desc_view` of a shared-memory descriptor over `layout`.
+    pub fn smemDescViewType(self: *Builder, layout: LayoutSpec) *const mlir.Type {
+        return (cute_nvgpu.SmemDescViewType.get(self.ctx, .{
+            .desc = self.smemDescType(),
+            .layout = self.layoutAttr(layout).attribute(),
+        }) catch @panic("invalid shared-memory descriptor view")).type_();
+    }
+
+    /// `!cute.tiled_copy` of `copy_atom` over `layout_copy_tv`, tiled by the
+    /// modes of `tiler_mn`.
+    pub fn tiledCopyType(self: *Builder, copy_atom: *const mlir.Type, layout_copy_tv: LayoutSpec, tiler_mn: []const LayoutSpec) *const mlir.Type {
+        return (cute_ir.TiledCopyType.get(self.ctx, .{
+            .copyAtom = copy_atom,
+            .layoutCopyTv = self.layoutAttr(layout_copy_tv).attribute(),
+            .tilerMn = self.tileAttr(tiler_mn).attribute(),
+        }) catch @panic("invalid tiled copy")).type_();
+    }
+
     pub fn memrefTypeFromPointer(self: *Builder, pointer_type: *const mlir.Type, layout_type: *const mlir.Type) *const mlir.Type {
         return (cute_ir.MemRefType.get(self.ctx, .{ .ptr = pointer_type, .layout = layout_type }) catch @panic("invalid CuTe memref type")).type_();
+    }
+
+    /// `cute.static` of an integer tuple such as `128` or `.{ 0, 4 }`.
+    pub fn staticIntTuple(self: *Builder, value: anytype) View {
+        const result = self.emit(cute_ir.static(self.ctx, self.intTupleType(self.expr(value)), self.loc()));
+        return .{ .inner = result.inner, .kernel = self };
     }
 
     pub fn staticLayout(self: *Builder, spec: LayoutSpec) View {
@@ -1237,16 +1202,6 @@ pub const Builder = struct {
 
     // ==================== cute.core ====================
 
-    /// Materialize a value whose complete static CuTe type is already known.
-    ///
-    /// Nested layouts and integer tuples produced by CuTe's layout algebra
-    /// cannot be represented by the flat `Layout` helper.  Keeping this
-    /// escape hatch typed still lets MLIR verify every consumer.
-    pub fn staticValue(self: *Builder, type_text: []const u8) View {
-        const result = self.emit(cute_ir.static(self.ctx, self.parseType(type_text), self.loc()));
-        return .{ .inner = result.inner, .kernel = self };
-    }
-
     /// `cute.make_layout(shape, stride=...)`, static only.
     pub fn makeLayout(self: *Builder, shape: []const i64, opts: LayoutOpts) Layout {
         if (shape.len == 0 or shape.len > MAX_RANK) std.debug.panic("makeLayout: rank {d} not in 1..{d}", .{ shape.len, MAX_RANK });
@@ -1316,8 +1271,7 @@ pub const Builder = struct {
     /// `cute.add_offset`, need that to keep the operand's alignment.
     pub fn makeIntTupleDivBy(self: *Builder, value: anytype, comptime divisor: u32) View {
         const constrained = self.assumeDivBy(value, divisor);
-        const payload = std.fmt.allocPrint(self.arena.allocator(), "!cute.int_tuple<\"?{{div={d}}}\">", .{divisor}) catch @panic("OOM");
-        const tuple = self.emit(cute_ir.make_int_tuple(self.ctx, &.{constrained.inner}, self.parseType(payload), self.loc()));
+        const tuple = self.emit(cute_ir.make_int_tuple(self.ctx, &.{constrained.inner}, self.intTupleType(.{ .dynamic = divisor }), self.loc()));
         return .{ .inner = tuple.inner, .kernel = self };
     }
 
@@ -1325,23 +1279,8 @@ pub const Builder = struct {
     /// derives while slicing a tiled coordinate tensor.
     pub fn assumeDivBy(self: *Builder, value: anytype, comptime divisor: u32) Value {
         if (divisor == 0) @compileError("assumeDivBy divisor must be non-zero");
-        const type_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.i32<divby {d}>", .{divisor}) catch @panic("OOM");
-        return self.emit(cute_ir.assume(self.ctx, self.lift(value).to(.i32).inner, self.parseType(type_text), self.loc()));
-    }
-
-    /// Build a coordinate tensor with an explicit dependent arithmetic-tuple
-    /// type. This is the source-level equivalent of the tuple produced by
-    /// `slice` after TMA partitioning (for example `?{div=128}`).
-    pub fn makeCoordTensorWithTuple(self: *Builder, values: anytype, tuple_payload: []const u8, layout: anytype) View {
-        const tuple_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.int_tuple<\"{s}\">", .{tuple_payload}) catch @panic("OOM");
-        const tuple_type = self.parseType(tuple_text);
-        const tuple = self.emit(cute_ir.make_int_tuple(self.ctx, self.innerSlice(values), tuple_type, self.loc()));
-        const iterator_type = (cute_ir.ArithTupleIteratorType.get(self.ctx, .{ .arithTuple = tuple_type }) catch @panic("invalid arithmetic tuple iterator")).type_();
-        const iterator = self.emit(cute_ir.make_arith_tuple_iter(self.ctx, iterator_type, .{ .value_ = tuple.inner }, self.loc()));
-        const layout_value = self.asValue(layout);
-        const result_type = (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple_type, .layout = layout_value.type_() }) catch @panic("invalid coordinate tensor")).type_();
-        const result = self.emit(cute_ir.make_view(self.ctx, iterator.inner, result_type, .{ .layout = layout_value.inner }, self.loc()));
-        return .{ .inner = result.inner, .kernel = self };
+        const constrained = cute_ir.constrainedIntType(self.ctx, .i32, divisor) catch @panic("invalid CuTe constrained integer");
+        return self.emit(cute_ir.assume(self.ctx, self.lift(value).to(.i32).inner, constrained, self.loc()));
     }
 
     /// Build a coordinate tensor from a runtime origin and a static layout.
@@ -1423,21 +1362,15 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    /// A coordinate made only of CuTe placeholders, such as `(_,_,_)`.
-    /// Placeholders select every element of a mode and therefore cannot be
-    /// represented by Zig integer values passed to `makeCoord`.
-    pub fn staticCoord(self: *Builder, payload: []const u8) View {
-        const type_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.coord<\"{s}\">", .{payload}) catch @panic("OOM");
-        const result = self.emit(cute_ir.make_coord(self.ctx, &.{}, self.parseType(type_text), self.loc()));
-        return .{ .inner = result.inner, .kernel = self };
+    /// `!cute.shape` of a CuTe algebra value such as `.{ .{ 128, 16 }, 1, 1, 2 }`
+    /// or `.{ AlgebraToken.dynamic, AlgebraToken.dynamic }`.
+    pub fn shapeType(self: *Builder, shape: anytype) *const mlir.Type {
+        return (cute_ir.ShapeType.get(self.ctx, .{ .attr = self.algebraAttr(cute_ir.ShapeAttr, self.expr(shape)).attribute() }) catch @panic("invalid CuTe shape")).type_();
     }
 
-    /// Static `cute.make_shape`; `payload` is CuTe algebra such as
-    /// `((128,16),1,1,2)`. Dynamic leaves can be added when a kernel needs
-    /// them, but all current SM100 instruction tiles are static.
-    pub fn makeShape(self: *Builder, payload: []const u8) View {
-        const ty_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.shape<\"{s}\">", .{payload}) catch @panic("OOM");
-        const value = self.emit(cute_ir.make_shape(self.ctx, &.{}, self.parseType(ty_text), self.loc()));
+    /// Static `cute.make_shape` of a CuTe algebra value.
+    pub fn makeShape(self: *Builder, shape: anytype) View {
+        const value = self.emit(cute_ir.make_shape(self.ctx, &.{}, self.shapeType(shape), self.loc()));
         return .{ .inner = value.inner, .kernel = self };
     }
 
@@ -1450,7 +1383,7 @@ pub const Builder = struct {
         return .{ .inner = value.inner, .kernel = self };
     }
 
-    pub fn tileToShapeTyped(self: *Builder, input: anytype, shape: anytype, order: View, result_type: *const mlir.Type) View {
+    pub fn tileToShape(self: *Builder, input: anytype, shape: anytype, order: View, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.tile_to_shape(
             self.ctx,
             self.asValue(input).inner,
@@ -1464,40 +1397,37 @@ pub const Builder = struct {
 
     /// Static `cute.make_tile` from mode extents.
     pub fn makeTile(self: *Builder, shape: []const i64) View {
-        var payload: std.Io.Writer.Allocating = .init(self.arena.allocator());
-        payload.writer.writeByte('[') catch @panic("OOM");
-        for (shape, 0..) |extent, i| {
-            if (i != 0) payload.writer.writeByte(';') catch @panic("OOM");
-            payload.writer.print("{d}:1", .{extent}) catch @panic("OOM");
-        }
-        payload.writer.writeByte(']') catch @panic("OOM");
-        const ty_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.tile<\"{s}\">", .{payload.written()}) catch @panic("OOM");
-        const value = self.emit(cute_ir.make_tile(self.ctx, &.{}, self.parseType(ty_text), self.loc()));
+        const modes = self.arena.allocator().alloc(LayoutSpec, shape.len) catch @panic("OOM");
+        for (shape, modes) |extent, *mode| mode.* = .{ .shape = .{ .static = extent }, .stride = .{ .static = 1 } };
+        const value = self.emit(cute_ir.make_tile(self.ctx, &.{}, self.tileType(modes), self.loc()));
         return .{ .inner = value.inner, .kernel = self };
+    }
+
+    /// `!cute.tile` whose modes are `layouts`, such as `[512:1;1:0;4:1]`.
+    pub fn tileType(self: *Builder, layouts: []const LayoutSpec) *const mlir.Type {
+        return (cute_ir.TileType.get(self.ctx, .{ .attr = self.tileAttr(layouts).attribute() }) catch @panic("invalid CuTe tile")).type_();
+    }
+
+    fn tileAttr(self: *Builder, layouts: []const LayoutSpec) *const cute_ir.TileAttr {
+        const modes = self.arena.allocator().alloc(*const cute_ir.TileAttr, layouts.len) catch @panic("OOM");
+        for (layouts, modes) |layout, *mode| mode.* = cute_ir.TileAttr.getLayout(self.ctx, self.layoutAttr(layout)) catch @panic("invalid CuTe tile mode");
+        return cute_ir.TileAttr.getTuple(self.ctx, modes) catch @panic("invalid CuTe tile");
     }
 
     /// Construct a target atom whose complete architecture payload is
     /// encoded in `atom_type` (for example `!cute_nvgpu.sm100.mma_bs<...>`).
-    pub fn makeAtom(self: *Builder, atom_type: []const u8, values: anytype) Atom {
-        const result = self.emit(cute_ir.make_atom(self.ctx, self.innerSlice(values), self.parseType(atom_type), self.loc()));
+    pub fn makeAtom(self: *Builder, atom_type: *const mlir.Type, values: anytype) Atom {
+        const result = self.emit(cute_ir.make_atom(self.ctx, self.innerSlice(values), atom_type, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn makeTiledMma(self: *Builder, atom: Atom, result_type: []const u8) Atom {
-        const result = self.emit(cute_ir.make_tiled_mma(self.ctx, atom.inner, self.parseType(result_type), self.loc()));
+    pub fn makeTiledMma(self: *Builder, atom: Atom, result_type: *const mlir.Type) Atom {
+        const result = self.emit(cute_ir.make_tiled_mma(self.ctx, atom.inner, result_type, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    /// Allocate a statically typed shared-memory tensor. This is used for
-    /// swizzled layouts which cannot be represented by `Layout` alone.
-    pub fn allocSmemView(self: *Builder, memref_type: []const u8) View {
-        const result = self.emit(cute_ir.memref_alloc_smem(self.ctx, self.parseType(memref_type), self.loc()));
-        return .{ .inner = result.inner, .kernel = self };
-    }
-
-    /// Allocate shared memory with a type assembled by the Zig DSL.  This is
-    /// the non-string counterpart of `allocSmemView` used by source kernels.
-    pub fn allocSmemTyped(self: *Builder, dtype: DType, alignment: u64, layout_type: *const mlir.Type) View {
+    /// Allocate shared memory with a type assembled by the Zig DSL.
+    pub fn allocSmemView(self: *Builder, dtype: DType, alignment: u64, layout_type: *const mlir.Type) View {
         const memref_type = self.memrefType(dtype, .smem, alignment, layout_type);
         const result = self.emit(cute_ir.memref_alloc_smem(self.ctx, memref_type, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
@@ -1531,49 +1461,26 @@ pub const Builder = struct {
 
     /// Allocate a register-memory tensor whose layout is represented by a
     /// normal CuTe layout value.
-    pub fn allocRmemTyped(self: *Builder, dtype: DType, alignment: u64, layout: anytype) View {
+    pub fn allocRmem(self: *Builder, dtype: DType, alignment: u64, layout: anytype) View {
         const layout_value = self.asValue(layout);
         const memref_type = self.memrefType(dtype, .rmem, alignment, layout_value.type_());
         const result = self.emit(cute_ir.memref_alloca(self.ctx, memref_type, .{ .layout = layout_value.inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn makeView(self: *Builder, pointer: anytype, layout: anytype, result_type: []const u8) View {
-        const result = self.emit(cute_ir.make_view(
-            self.ctx,
-            self.asValue(pointer).inner,
-            self.parseType(result_type),
-            .{ .layout = self.asValue(layout).inner },
-            self.loc(),
-        ));
-        return .{ .inner = result.inner, .kernel = self };
-    }
-
-    pub fn makeViewTyped(self: *Builder, pointer: anytype, layout: anytype, result_type: *const mlir.Type) View {
+    pub fn makeView(self: *Builder, pointer: anytype, layout: anytype, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.make_view(self.ctx, self.asValue(pointer).inner, result_type, .{ .layout = self.asValue(layout).inner }, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn makeViewNoLayout(self: *Builder, pointer: anytype, result_type: []const u8) View {
-        const result = self.emit(cute_ir.make_view(self.ctx, self.asValue(pointer).inner, self.parseType(result_type), .{}, self.loc()));
+    pub fn makeViewNoLayout(self: *Builder, pointer: anytype, result_type: *const mlir.Type) View {
+        const result = self.emit(cute_ir.make_view(self.ctx, self.asValue(pointer).inner, result_type, .{}, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn localTile(self: *Builder, input: anytype, tile: anytype, coord: anytype, result_type: []const u8, projection: ?Attr) View {
-        const coord_value = if (@TypeOf(coord) == View) coord.inner else self.makeCoord(coord);
-        const result = self.emit(cute_ir.local_tile(
-            self.ctx,
-            self.asValue(input).inner,
-            self.asValue(tile).inner,
-            coord_value,
-            self.parseType(result_type),
-            .{ .proj = if (projection) |p| p.get(self.ctx) else null },
-            self.loc(),
-        ));
-        return .{ .inner = result.inner, .kernel = self };
-    }
-
-    pub fn localTileTyped(self: *Builder, input: anytype, tile: anytype, coord: anytype, result_type: *const mlir.Type, projection: ?Attr) View {
+    /// `projection`, like Python's `proj`, selects the modes of `tile` that
+    /// apply, such as `b.expr(.{ 1, AlgebraToken.all, 1 })`.
+    pub fn localTile(self: *Builder, input: anytype, tile: anytype, coord: anytype, result_type: *const mlir.Type, projection: ?AlgebraExpr) View {
         const coord_value = if (@TypeOf(coord) == View) coord.inner else self.makeCoord(coord);
         const result = self.emit(cute_ir.local_tile(
             self.ctx,
@@ -1581,39 +1488,25 @@ pub const Builder = struct {
             self.asValue(tile).inner,
             coord_value,
             result_type,
-            .{ .proj = if (projection) |p| p.get(self.ctx) else null },
+            .{ .proj = if (projection) |p| self.algebraAttr(cute_ir.CoordAttr, p).attribute() else null },
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn localPartition(self: *Builder, input: anytype, tiler: anytype, index: anytype, result_type: []const u8) View {
+    pub fn localPartition(self: *Builder, input: anytype, tiler: anytype, index: anytype, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.local_partition(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(tiler).inner,
             self.makeCoord(index),
-            self.parseType(result_type),
+            result_type,
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    /// Apply CuTe layout algebra while keeping the compiler-derived result
-    /// type explicit.  These operations are the building blocks used between
-    /// TMA partitioning and the block-scaled MMA fragments.
-    pub fn slice(self: *Builder, input: anytype, coord: anytype, result_type: []const u8) View {
-        const result = self.emit(cute_ir.slice(
-            self.ctx,
-            self.asValue(input).inner,
-            self.makeCoord(coord),
-            self.parseType(result_type),
-            self.loc(),
-        ));
-        return .{ .inner = result.inner, .kernel = self };
-    }
-
-    pub fn sliceTyped(self: *Builder, input: anytype, coord: anytype, result_type: *const mlir.Type) View {
+    pub fn slice(self: *Builder, input: anytype, coord: anytype, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.slice(
             self.ctx,
             self.asValue(input).inner,
@@ -1651,11 +1544,11 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn groupModes(self: *Builder, input: anytype, begin: u32, end: u32, result_type: []const u8) View {
+    pub fn groupModes(self: *Builder, input: anytype, begin: u32, end: u32, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.group_modes(
             self.ctx,
             self.asValue(input).inner,
-            self.parseType(result_type),
+            result_type,
             .int(self.ctx, .i32, begin),
             .int(self.ctx, .i32, end),
             self.loc(),
@@ -1663,84 +1556,67 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn tiledDivide(self: *Builder, input: anytype, tiler: anytype, result_type: []const u8) View {
+    pub fn tiledDivide(self: *Builder, input: anytype, tiler: anytype, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.tiled_divide(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(tiler).inner,
-            self.parseType(result_type),
+            result_type,
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn flatDivide(self: *Builder, input: anytype, tiler: anytype, result_type: []const u8) View {
+    pub fn flatDivide(self: *Builder, input: anytype, tiler: anytype, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.flat_divide(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(tiler).inner,
-            self.parseType(result_type),
+            result_type,
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn coalesce(self: *Builder, input: anytype, target_profile: ?View, result_type: []const u8) View {
+    pub fn coalesce(self: *Builder, input: anytype, target_profile: ?View, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.coalesce(
             self.ctx,
             self.asValue(input).inner,
-            self.parseType(result_type),
+            result_type,
             .{ .target_profile = if (target_profile) |target| target.inner else null },
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn filterZeros(self: *Builder, input: anytype, target_profile: ?View, result_type: []const u8) View {
+    pub fn filterZeros(self: *Builder, input: anytype, target_profile: ?View, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.filter_zeros(
             self.ctx,
             self.asValue(input).inner,
-            self.parseType(result_type),
+            result_type,
             .{ .target_profile = if (target_profile) |target| target.inner else null },
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn getLayout(self: *Builder, input: anytype, result_type: []const u8) View {
-        const result = self.emit(cute_ir.get_layout(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
+    pub fn getLayout(self: *Builder, input: anytype, result_type: *const mlir.Type) View {
+        const result = self.emit(cute_ir.get_layout(self.ctx, self.asValue(input).inner, result_type, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn getIter(self: *Builder, input: anytype, result_type: []const u8) View {
-        const result = self.emit(cute_ir.get_iter(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
-        return .{ .inner = result.inner, .kernel = self };
-    }
-
-    /// Typed form of `cute.get_iter`, used when the pointer type is already
-    /// available through the CuTe C API and no textual type is necessary.
-    pub fn getIterTyped(self: *Builder, input: anytype, result_type: *const mlir.Type) View {
+    /// `cute.get_iter`: the iterator of `input`, of type `result_type`.
+    pub fn getIter(self: *Builder, input: anytype, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.get_iter(self.ctx, self.asValue(input).inner, result_type, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn getShape(self: *Builder, input: anytype, result_type: []const u8) View {
-        const result = self.emit(cute_ir.get_shape(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
+    pub fn getShape(self: *Builder, input: anytype, result_type: *const mlir.Type) View {
+        const result = self.emit(cute_ir.get_shape(self.ctx, self.asValue(input).inner, result_type, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn addOffset(self: *Builder, input: anytype, offset: anytype, result_type: []const u8) View {
-        const result = self.emit(cute_ir.add_offset(
-            self.ctx,
-            self.asValue(input).inner,
-            self.asValue(offset).inner,
-            self.parseType(result_type),
-            self.loc(),
-        ));
-        return .{ .inner = result.inner, .kernel = self };
-    }
-
-    pub fn addOffsetTyped(self: *Builder, input: anytype, offset: anytype, result_type: *const mlir.Type) View {
+    pub fn addOffset(self: *Builder, input: anytype, offset: anytype, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.add_offset(
             self.ctx,
             self.asValue(input).inner,
@@ -1751,62 +1627,49 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn recastIter(self: *Builder, input: anytype, result_type: []const u8) View {
-        const result = self.emit(cute_ir.recast_iter(self.ctx, self.asValue(input).inner, self.parseType(result_type), self.loc()));
+    pub fn recastIter(self: *Builder, input: anytype, result_type: *const mlir.Type) View {
+        const result = self.emit(cute_ir.recast_iter(self.ctx, self.asValue(input).inner, result_type, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn appendToRank(self: *Builder, input: anytype, element: anytype, rank: u32, result_type: []const u8) View {
+    pub fn appendToRank(self: *Builder, input: anytype, element: anytype, rank: u32, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.append_to_rank(
             self.ctx,
             self.asValue(input).inner,
             self.asValue(element).inner,
-            self.parseType(result_type),
+            result_type,
             .int(self.ctx, .i32, rank),
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn makeTiledCopy(self: *Builder, atom: Atom, result_type: []const u8) Atom {
-        const result = self.emit(cute_ir.make_tiled_copy(self.ctx, atom.inner, self.parseType(result_type), self.loc()));
+    pub fn makeTiledCopy(self: *Builder, atom: Atom, result_type: *const mlir.Type) Atom {
+        const result = self.emit(cute_ir.make_tiled_copy(self.ctx, atom.inner, result_type, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn tiledCopyPartition(self: *Builder, tiled: Atom, input: anytype, coord: anytype, destination: bool, result_type: []const u8) View {
+    pub fn tiledCopyPartition(self: *Builder, tiled: Atom, input: anytype, coord: anytype, destination: bool, result_type: *const mlir.Type) View {
         const op = if (destination)
-            cute_ir.tiled_copy_partition_D(self.ctx, tiled.inner, self.asValue(input).inner, self.makeCoord(coord), self.parseType(result_type), self.loc())
+            cute_ir.tiled_copy_partition_D(self.ctx, tiled.inner, self.asValue(input).inner, self.makeCoord(coord), result_type, self.loc())
         else
-            cute_ir.tiled_copy_partition_S(self.ctx, tiled.inner, self.asValue(input).inner, self.makeCoord(coord), self.parseType(result_type), self.loc());
+            cute_ir.tiled_copy_partition_S(self.ctx, tiled.inner, self.asValue(input).inner, self.makeCoord(coord), result_type, self.loc());
         const result = self.emit(op);
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn tiledCopyRetile(self: *Builder, tiled: Atom, input: anytype, result_type: []const u8) View {
+    pub fn tiledCopyRetile(self: *Builder, tiled: Atom, input: anytype, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.tiled_copy_retile(
             self.ctx,
             tiled.inner,
             self.asValue(input).inner,
-            self.parseType(result_type),
+            result_type,
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn tiledMmaPartition(self: *Builder, tiled: Atom, input: anytype, coord: anytype, operand_id: u2, result_type: []const u8) View {
-        const result = self.emit(cute_ir.tiled_mma_partition(
-            self.ctx,
-            tiled.inner,
-            self.asValue(input).inner,
-            self.makeCoord(coord),
-            self.parseType(result_type),
-            .int(self.ctx, .i32, operand_id),
-            self.loc(),
-        ));
-        return .{ .inner = result.inner, .kernel = self };
-    }
-
-    pub fn tiledMmaPartitionTyped(self: *Builder, tiled: Atom, input: anytype, coord: anytype, operand_id: u2, result_type: *const mlir.Type) View {
+    pub fn tiledMmaPartition(self: *Builder, tiled: Atom, input: anytype, coord: anytype, operand_id: u2, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.tiled_mma_partition(
             self.ctx,
             tiled.inner,
@@ -1819,12 +1682,12 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn mmaMakeFragment(self: *Builder, tiled: Atom, input: anytype, operand_id: u2, result_type: []const u8) View {
+    pub fn mmaMakeFragment(self: *Builder, tiled: Atom, input: anytype, operand_id: u2, result_type: *const mlir.Type) View {
         const result = self.emit(cute_ir.mma_make_fragment(
             self.ctx,
             tiled.inner,
             self.asValue(input).inner,
-            self.parseType(result_type),
+            result_type,
             .int(self.ctx, .i32, operand_id),
             self.loc(),
         ));
@@ -1863,38 +1726,9 @@ pub const Builder = struct {
     // the kernel receives them as grid-constant arguments and makes them
     // executable before issuing copies.
 
-    pub const TmaLoadOptions = struct {
-        atom_type: []const u8,
-        tensor_type: []const u8,
-        kind: Attr = .{ .str = "tma_load" },
-        num_multicast: u32 = 1,
-        tma_format: ?Attr = null,
-    };
-
-    /// Build the host-visible TMA descriptor and its coordinate tensor. The
-    /// result types are supplied explicitly because they depend on CuTe's
-    /// layout algebra and may contain divisibility constraints.
-    pub fn makeTiledTmaLoadAtom(self: *Builder, gmem: anytype, smem_layout: anytype, cta_map: anytype, opts: TmaLoadOptions) TmaDescriptor {
-        const results = self.emitResults(2, cute_nvgpu.atom_make_non_exec_tiled_tma_load(
-            self.ctx,
-            self.asValue(gmem).inner,
-            self.asValue(smem_layout).inner,
-            self.asValue(cta_map).inner,
-            self.parseType(opts.atom_type),
-            self.parseType(opts.tensor_type),
-            opts.kind.get(self.ctx),
-            .{ .num_multicast = .int(self.ctx, .i32, opts.num_multicast), .tma_format = if (opts.tma_format) |format| format.get(self.ctx) else null },
-            self.loc(),
-        ));
-        return .{
-            .atom = .{ .inner = results[0].inner, .kernel = self },
-            .tensor = .{ .inner = results[1].inner, .kernel = self },
-        };
-    }
-
-    /// Typed counterpart of `makeTiledTmaLoadAtom`: the atom and coordinate
-    /// tensor types are assembled from `config`.
-    pub fn makeTiledTmaLoadAtomTyped(self: *Builder, gmem: anytype, smem_layout: anytype, cta_map: anytype, config: TmaConfig) TmaDescriptor {
+    /// Build the host-visible TMA descriptor and its coordinate tensor, whose
+    /// types are assembled from `config`.
+    pub fn makeTiledTmaLoadAtom(self: *Builder, gmem: anytype, smem_layout: anytype, cta_map: anytype, config: TmaConfig) TmaDescriptor {
         const results = self.emitResults(2, cute_nvgpu.atom_make_non_exec_tiled_tma_load(
             self.ctx,
             self.asValue(gmem).inner,
@@ -1902,8 +1736,8 @@ pub const Builder = struct {
             self.asValue(cta_map).inner,
             self.tmaLoadAtomType(config),
             self.coordTensorType(config.coordinate_rank, config.coordinate_layout),
-            self.parseAttribute("#cute_nvgpu.tiled_tma_load<sm_90>"),
-            .{ .num_multicast = .int(self.ctx, .i32, config.num_multicast), .tma_format = tmaFormatAttribute(self, config.format) },
+            (cute_nvgpu.TiledTmaLoadAttr.get(self.ctx, .{ .value = .sm_90 }) catch @panic("invalid tiled TMA load")).attribute(),
+            .{ .num_multicast = .int(self.ctx, .i32, 1), .tma_format = tmaFormatAttribute(self, config) },
             self.loc(),
         ));
         return .{
@@ -1911,33 +1745,9 @@ pub const Builder = struct {
             .tensor = .{ .inner = results[1].inner, .kernel = self },
         };
     }
-
-    pub const TmaStoreOptions = struct {
-        atom_type: []const u8,
-        tensor_type: []const u8,
-        tma_format: ?Attr = null,
-    };
 
     /// Host-visible tiled TMA store atom and its coordinate tensor.
-    pub fn makeTiledTmaStoreAtom(self: *Builder, gmem: anytype, smem_layout: anytype, cta_map: anytype, opts: TmaStoreOptions) TmaDescriptor {
-        const results = self.emitResults(2, cute_nvgpu.atom_make_non_exec_tiled_tma_store(
-            self.ctx,
-            self.asValue(gmem).inner,
-            self.asValue(smem_layout).inner,
-            self.asValue(cta_map).inner,
-            self.parseType(opts.atom_type),
-            self.parseType(opts.tensor_type),
-            .{ .tma_format = if (opts.tma_format) |format| format.get(self.ctx) else null },
-            self.loc(),
-        ));
-        return .{
-            .atom = .{ .inner = results[0].inner, .kernel = self },
-            .tensor = .{ .inner = results[1].inner, .kernel = self },
-        };
-    }
-
-    /// Typed counterpart of `makeTiledTmaStoreAtom`.
-    pub fn makeTiledTmaStoreAtomTyped(self: *Builder, gmem: anytype, smem_layout: anytype, cta_map: anytype, config: TmaConfig) TmaDescriptor {
+    pub fn makeTiledTmaStoreAtom(self: *Builder, gmem: anytype, smem_layout: anytype, cta_map: anytype, config: TmaConfig) TmaDescriptor {
         const results = self.emitResults(2, cute_nvgpu.atom_make_non_exec_tiled_tma_store(
             self.ctx,
             self.asValue(gmem).inner,
@@ -1945,7 +1755,7 @@ pub const Builder = struct {
             self.asValue(cta_map).inner,
             self.tmaStoreAtomType(config),
             self.coordTensorType(config.coordinate_rank, config.coordinate_layout),
-            .{ .tma_format = tmaFormatAttribute(self, config.format) },
+            .{ .tma_format = tmaFormatAttribute(self, config) },
             self.loc(),
         ));
         return .{
@@ -1956,52 +1766,60 @@ pub const Builder = struct {
 
     /// Host-side tiled TMA load atom type described by `config`.
     pub fn tmaLoadAtomType(self: *Builder, config: TmaConfig) *const mlir.Type {
-        return self.parseType(std.fmt.allocPrint(
-            self.arena.allocator(),
-            "!cute_nvgpu.atom.non_exec_tiled_tma_load<sm_90, {s}, copy_bits = {d}, tma_gbasis = <\"{s}\">, tma_format = {s}>",
-            .{ dtypeName(config.dtype), config.copy_bits, self.layoutAttr(config.global_basis).value(), formatName(config.format, config.dtype) },
-        ) catch @panic("OOM"));
+        return (cute_nvgpu.CopyAtomNonExecTiledTmaLoadType.get(self.ctx, .{
+            .kind = .sm_90,
+            .valType = config.dtype.toMlir(self.ctx),
+            .copyBits = @intCast(config.copy_bits),
+            .tmaGbasis = self.layoutType(config.global_basis),
+            .tmaFormat = tmaDataFormat(config.format, config.dtype),
+        }) catch @panic("invalid TMA load atom")).type_();
     }
 
     /// Executable device-side form of a tiled TMA load atom. `make_exec_tma`
     /// preserves the tensor-map payload and adds the launch mode used by
     /// `copy`.
     pub fn tmaLoadExecAtomType(self: *Builder, config: TmaConfig) *const mlir.Type {
-        return self.parseType(std.fmt.allocPrint(
-            self.arena.allocator(),
-            "!cute_nvgpu.atom.tma_load<{s}, copy_bits = {d}, mode = tiled, num_cta = {d}, g_stride = <\"()\"> tma_gbasis = <\"{s}\">>",
-            .{ dtypeName(config.dtype), config.copy_bits, config.num_multicast, self.layoutAttr(config.global_basis).value() },
-        ) catch @panic("OOM"));
+        return (cute_nvgpu.CopyAtomTmaLoadType.get(self.ctx, .{
+            .valType = config.dtype.toMlir(self.ctx),
+            .copyBits = @intCast(config.copy_bits),
+            .mode = .tiled,
+            .numCta = 1,
+            .gStride = self.emptyStrideType(),
+            .tmaGbasis = self.layoutType(config.global_basis),
+        }) catch @panic("invalid TMA load atom")).type_();
     }
 
     /// Host-side tiled TMA store atom type described by `config`.
     pub fn tmaStoreAtomType(self: *Builder, config: TmaConfig) *const mlir.Type {
-        return self.parseType(std.fmt.allocPrint(
-            self.arena.allocator(),
-            "!cute_nvgpu.atom.non_exec_tiled_tma_store<{s}, copy_bits = {d}, tma_gbasis = <\"{s}\">, tma_format = {s}>",
-            .{ dtypeName(config.dtype), config.copy_bits, self.layoutAttr(config.global_basis).value(), formatName(config.format, config.dtype) },
-        ) catch @panic("OOM"));
+        return (cute_nvgpu.CopyAtomNonExecTiledTmaStoreType.get(self.ctx, .{
+            .valType = config.dtype.toMlir(self.ctx),
+            .copyBits = @intCast(config.copy_bits),
+            .tmaGbasis = self.layoutType(config.global_basis),
+            .tmaFormat = tmaDataFormat(config.format, config.dtype),
+        }) catch @panic("invalid TMA store atom")).type_();
     }
 
     /// Executable device-side form of a tiled TMA store atom.
     pub fn tmaStoreExecAtomType(self: *Builder, config: TmaConfig) *const mlir.Type {
-        return self.parseType(std.fmt.allocPrint(
-            self.arena.allocator(),
-            "!cute_nvgpu.atom.tma_store<{s}, copy_bits = {d}, mode = tiled, g_stride = <\"()\"> tma_gbasis = <\"{s}\">>",
-            .{ dtypeName(config.dtype), config.copy_bits, self.layoutAttr(config.global_basis).value() },
-        ) catch @panic("OOM"));
+        return (cute_nvgpu.CopyAtomTmaStoreType.get(self.ctx, .{
+            .valType = config.dtype.toMlir(self.ctx),
+            .copyBits = @intCast(config.copy_bits),
+            .mode = .tiled,
+            .gStride = self.emptyStrideType(),
+            .tmaGbasis = self.layoutType(config.global_basis),
+        }) catch @panic("invalid TMA store atom")).type_();
+    }
+
+    /// The `()` global stride of tiled TMA atoms.
+    fn emptyStrideType(self: *Builder) *const mlir.Type {
+        return (cute_ir.StrideType.get(self.ctx, .{ .attr = self.algebraAttr(cute_ir.StrideAttr, .{ .tuple = &.{} }).attribute() }) catch @panic("invalid CuTe stride")).type_();
     }
 
     pub fn prefetchTmaDesc(self: *Builder, descriptor: Atom) void {
         self.emitVoid(cute_nvgpu.prefetch_tma_desc(self.ctx, descriptor.inner, self.loc()));
     }
 
-    pub fn makeExecTma(self: *Builder, descriptor: Atom, result_type: []const u8) Atom {
-        const result = self.emit(cute_nvgpu.atom_make_exec_tma(self.ctx, descriptor.inner, self.parseType(result_type), .{}, self.loc()));
-        return .{ .inner = result.inner, .kernel = self };
-    }
-
-    pub fn makeExecTmaTyped(self: *Builder, descriptor: Atom, result_type: *const mlir.Type) Atom {
+    pub fn makeExecTma(self: *Builder, descriptor: Atom, result_type: *const mlir.Type) Atom {
         const result = self.emit(cute_nvgpu.atom_make_exec_tma(self.ctx, descriptor.inner, result_type, .{}, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
@@ -2013,45 +1831,15 @@ pub const Builder = struct {
             atom.inner,
             barrier.inner,
             atom.type_(),
-            self.parseAttribute("#cute_nvgpu.atom_copy_field_tmaload<tma_bar>"),
+            (cute_nvgpu.AtomCopyFieldTmaLoadAttr.get(self.ctx, .{ .value = .tma_bar }) catch @panic("invalid TMA load field")).attribute(),
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
+    /// Partition `smem` and `targets` for the TMA atom `descriptor`; the
+    /// dependent result types are built by the caller.
     pub fn tmaPartition(
-        self: *Builder,
-        descriptor: Atom,
-        cta_coord: anytype,
-        cta_layout: anytype,
-        smem: anytype,
-        targets: anytype,
-        smem_type: []const u8,
-        target_types: []const []const u8,
-    ) TmaPartition {
-        if (targets.len != target_types.len) @panic("tmaPartition: target count does not match result type count");
-        const result_types = self.arena.allocator().alloc(*const mlir.Type, target_types.len) catch @panic("OOM");
-        const views = self.arena.allocator().alloc(View, target_types.len) catch @panic("OOM");
-        for (target_types, result_types) |type_text, *ty| ty.* = self.parseType(type_text);
-        const op = cute_nvgpu.atom_tma_partition(
-            self.ctx,
-            descriptor.inner,
-            self.makeCoord(cta_coord),
-            self.asValue(cta_layout).inner,
-            self.asValue(smem).inner,
-            self.innerSlice(targets),
-            self.parseType(smem_type),
-            result_types,
-            self.loc(),
-        );
-        _ = op.appendTo(self.currentBlock());
-        for (views, 0..) |*view, i| view.* = .{ .inner = op.result(i + 1), .kernel = self };
-        return .{ .smem = .{ .inner = op.result(0), .kernel = self }, .targets = views };
-    }
-
-    /// Typed form of `tmaPartition`.  The dependent result types are built by
-    /// the Zig CuTe DSL instead of being round-tripped through textual MLIR.
-    pub fn tmaPartitionTyped(
         self: *Builder,
         descriptor: Atom,
         cta_coord: anytype,
@@ -2061,7 +1849,7 @@ pub const Builder = struct {
         smem_type: *const mlir.Type,
         target_types: []const *const mlir.Type,
     ) TmaPartition {
-        if (targets.len != target_types.len) @panic("tmaPartitionTyped: target count does not match result type count");
+        if (targets.len != target_types.len) @panic("tmaPartition: target count does not match result type count");
         const views = self.arena.allocator().alloc(View, target_types.len) catch @panic("OOM");
         const op = cute_nvgpu.atom_tma_partition(
             self.ctx,
@@ -2083,11 +1871,26 @@ pub const Builder = struct {
 
     /// Tiled MMA type of the SM100 block-scaled MXFP4 x MXFP8 atom.
     pub fn blockScaledMmaType(self: *Builder, cfg: BlockScaledMmaConfig) *const mlir.Type {
-        return self.parseType(std.fmt.allocPrint(
-            self.arena.allocator(),
-            "!cute.tiled_mma<!cute_nvgpu.sm100.mma_bs{s}, atom_layout_MNK = <\"(1,1,1):(0,0,0)\">, permutation_MNK = <\"[_;_;_]\">>",
-            .{blockScaledPayload(self, cfg)},
-        ) catch @panic("OOM"));
+        return (cute_ir.TiledMmaType.get(self.ctx, .{
+            .mmaAtom = self.blockScaledAtomType(cfg),
+            .atomLayoutMNK = self.layoutAttr(self.layoutSpec(.{ 1, 1, 1 }, .{ 0, 0, 0 })).attribute(),
+            .permutationMNK = self.algebraAttr(cute_ir.TileAttr, self.expr(.{ AlgebraToken.all, AlgebraToken.all, AlgebraToken.all })).attribute(),
+        }) catch @panic("invalid block-scaled tiled MMA")).type_();
+    }
+
+    fn blockScaledAtomType(self: *Builder, cfg: BlockScaledMmaConfig) *const mlir.Type {
+        return (cute_nvgpu.MmaAtomSM100UMMABlockScaledType.get(self.ctx, .{
+            .shapeMnk = self.algebraAttr(cute_ir.ShapeAttr, self.expr(.{ cfg.m, cfg.n, cfg.k })).attribute(),
+            .numCta = cfg.num_cta,
+            .aMajor = .k,
+            .bMajor = .k,
+            .aType = DType.f4e2m1fn.toMlir(self.ctx),
+            .bType = DType.f8e4m3fn.toMlir(self.ctx),
+            .cType = DType.f32.toMlir(self.ctx),
+            .sfType = DType.f8e8m0fnu.toMlir(self.ctx),
+            .aFragKind = .smem_desc,
+            .vecSize = cfg.vec_size,
+        }) catch @panic("invalid block-scaled MMA atom")).type_();
     }
 
     /// SS, K-major MXFP4 x MXFP8 block-scaled atom and its tiled MMA, as the
@@ -2098,8 +1901,7 @@ pub const Builder = struct {
             std.debug.panic("unsupported SM100 block-scaled MMA shape {d}x{d}x{d}", .{ cfg.m, cfg.n, cfg.k });
         }
         const disabled = self.cst(.i1, false);
-        const atom_type = std.fmt.allocPrint(self.arena.allocator(), "!cute_nvgpu.sm100.mma_bs{s}", .{blockScaledPayload(self, cfg)}) catch @panic("OOM");
-        const atom = self.makeAtom(atom_type, .{ disabled, disabled, disabled, scale_ptr, scale_ptr });
+        const atom = self.makeAtom(self.blockScaledAtomType(cfg), .{ disabled, disabled, disabled, scale_ptr, scale_ptr });
         const tiled = self.emit(cute_ir.make_tiled_mma(self.ctx, atom.inner, self.blockScaledMmaType(cfg), self.loc()));
         return .{ .atom = atom, .tiled = .{ .inner = tiled.inner, .kernel = self } };
     }
@@ -2111,7 +1913,7 @@ pub const Builder = struct {
             mma.inner,
             enabled.inner,
             mma.type_(),
-            self.parseAttribute("#cute_nvgpu.atom_mma_field_sm100_block_scaled<accum_c>"),
+            (cute_nvgpu.AtomMmaFieldSM100BlockScaledAttr.get(self.ctx, .{ .value = .accum_c }) catch @panic("invalid block-scaled MMA field")).attribute(),
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -2166,11 +1968,11 @@ pub const Builder = struct {
         pack_16: bool = false,
     };
 
-    pub fn tmemLoad(self: *Builder, src: anytype, result_type: []const u8, opts: TmemLoadOptions) View {
+    pub fn tmemLoad(self: *Builder, src: anytype, result_type: *const mlir.Type, opts: TmemLoadOptions) View {
         const result = self.emit(cute_nvgpu.arch_copy_SM100_tmem_load(
             self.ctx,
             self.asValue(src).inner,
-            self.parseType(result_type),
+            result_type,
             .int(self.ctx, .i32, opts.num_dp),
             .int(self.ctx, .i32, opts.num_b),
             .int(self.ctx, .i32, opts.num_rep),
@@ -2198,34 +2000,52 @@ pub const Builder = struct {
         ));
     }
 
-    pub fn makeS2tCopy(self: *Builder, atom: Atom, tmem: anytype, result_type: []const u8) Atom {
+    pub const S2tCopyConfig = struct {
+        num_dp: i32,
+        num_bit: i32,
+        num_cta: i32 = 1,
+        broadcast: cute_nvgpu.CopyS2TBroadcast = .none,
+    };
+
+    /// `!cute_nvgpu.atom.s2t_copy`, a `tcgen05.cp` atom moving `dtype`.
+    pub fn s2tCopyAtomType(self: *Builder, dtype: DType, cfg: S2tCopyConfig) *const mlir.Type {
+        return (cute_nvgpu.CopyAtomSM100CopyS2TType.get(self.ctx, .{
+            .valType = dtype.toMlir(self.ctx),
+            .numDp = cfg.num_dp,
+            .numBit = cfg.num_bit,
+            .numCta = cfg.num_cta,
+            .broadcast = cfg.broadcast,
+        }) catch @panic("invalid S2T copy atom")).type_();
+    }
+
+    pub fn makeS2tCopy(self: *Builder, atom: Atom, tmem: anytype, result_type: *const mlir.Type) Atom {
         const result = self.emit(cute_nvgpu.atom_make_s2t_copy(
             self.ctx,
             atom.inner,
             self.asValue(tmem).inner,
-            self.parseType(result_type),
+            result_type,
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn makeTmemCopy(self: *Builder, atom: Atom, tmem: anytype, result_type: []const u8) Atom {
+    pub fn makeTmemCopy(self: *Builder, atom: Atom, tmem: anytype, result_type: *const mlir.Type) Atom {
         const result = self.emit(cute_nvgpu.atom_make_tmem_copy(
             self.ctx,
             atom.inner,
             self.asValue(tmem).inner,
-            self.parseType(result_type),
+            result_type,
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    pub fn s2tSmemDescriptor(self: *Builder, atom: Atom, input: anytype, result_type: []const u8) View {
+    pub fn s2tSmemDescriptor(self: *Builder, atom: Atom, input: anytype, result_type: *const mlir.Type) View {
         const result = self.emit(cute_nvgpu.atom_get_copy_s2t_smem_desc_view(
             self.ctx,
             atom.inner,
             self.asValue(input).inner,
-            self.parseType(result_type),
+            result_type,
             self.loc(),
         ));
         return .{ .inner = result.inner, .kernel = self };
@@ -2355,7 +2175,7 @@ pub const Builder = struct {
         return self.emit(cute_ir.fast_divmod_create_divisor(
             self.ctx,
             divisor.inner,
-            self.parseType("!cute.fast_divmod_divisor<32>"),
+            (cute_ir.FastDivmodDivisorType.get(self.ctx, .{ .width = 32, .isPow2 = false }) catch @panic("invalid fast divmod divisor")).type_(),
             self.loc(),
         ));
     }
@@ -3253,10 +3073,14 @@ test "SM100 block-scaled MMA atoms use the CuTe DSL instruction shapes" {
 
     var b = try Builder.open(std.testing.allocator, ctx, "sm100_blockscaled_atoms");
     defer b.deinit();
-    _ = try b.declareArgs(.{ .descriptor = .{ .raw = .{
-        .type_text = "!cute_nvgpu.atom.non_exec_tiled_tma_load<sm_90, f8E4M3FN, copy_bits = 16384, tma_gbasis = <\"(128,16,1):(1@1,1@0,1@2)\">, tma_format = U8>",
-        .grid_constant = true,
-    } } });
+    const descriptor = try cute_nvgpu.CopyAtomNonExecTiledTmaLoadType.get(ctx, .{
+        .kind = .sm_90,
+        .valType = DType.f8e4m3fn.toMlir(ctx),
+        .copyBits = 16384,
+        .tmaGbasis = b.layoutType(b.layoutSpec(.{ 128, 16, 1 }, .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), b.basis(1, 1, .{2}) })),
+        .tmaFormat = .U8,
+    });
+    _ = try b.declareArgs(.{ .descriptor = .{ .mlir_type = .{ .type_ = descriptor.type_(), .grid_constant = true } } });
 
     const sf_ptr = b.intToPtr(0, .f8e8m0fnu, .tmem, 1);
     _ = b.makeBlockScaledMma(.{ .n = 16 }, sf_ptr);
