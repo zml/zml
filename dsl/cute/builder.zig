@@ -46,10 +46,15 @@ pub const Dims = stdx.BoundedArray(i64, MAX_RANK);
 pub const MemorySpace = cute_ir.MemorySpace;
 
 /// A CuTe algebra expression assembled from Zig values. Kernel authors use
-/// `Builder.expr`, `Builder.basis`, and `Builder.layoutSpec`; only this DSL
-/// layer serializes the expression required by CuTe's C API.
-pub const AlgebraExpr = struct {
-    text: []const u8,
+/// `Builder.expr`, `Builder.basis`, and `Builder.layoutSpec`; the DSL builds
+/// the algebra attribute of the kind each use needs.
+pub const AlgebraExpr = union(enum) {
+    static: i64,
+    /// A dynamic leaf known to be a multiple of this, 1 when nothing is known.
+    dynamic: i64,
+    all,
+    basis: ScaledBasis,
+    tuple: []const AlgebraExpr,
 };
 
 pub const AlgebraToken = enum {
@@ -76,10 +81,6 @@ pub const ConstrainedDynamic = struct {
 pub const LayoutSpec = struct {
     shape: AlgebraExpr,
     stride: AlgebraExpr,
-
-    pub fn payload(self: LayoutSpec, b: *Builder) []const u8 {
-        return std.fmt.allocPrint(b.arena.allocator(), "{s}:{s}", .{ self.shape.text, self.stride.text }) catch @panic("OOM");
-    }
 };
 
 /// A scalar SSA value (`Int32`, `Float32`, ... in the Python DSL).
@@ -1009,14 +1010,20 @@ pub const Builder = struct {
     }
 
     pub fn swizzledPtrTy(self: *Builder, dt: DType, space: MemorySpace, alignment: u64, swizzle: Swizzle) !*const mlir.Type {
-        const text = std.fmt.allocPrint(self.arena.allocator(), "S<{d},{d},{d}>", .{ swizzle.bits, swizzle.base, swizzle.shift }) catch @panic("OOM");
-        const attr = try cute_ir.SwizzleAttr.get(self.ctx, text);
         return (try cute_ir.PtrType.get(self.ctx, .{
             .valueType = dt.toMlir(self.ctx),
             .addressSpace = space,
             .alignment = alignment,
-            .swizzle = attr.attribute(),
+            .swizzle = (try self.swizzleAttr(swizzle)).attribute(),
         })).type_();
+    }
+
+    fn swizzleAttr(self: *Builder, swizzle: Swizzle) !*const cute_ir.SwizzleAttr {
+        return cute_ir.SwizzleAttr.get(self.ctx, .{
+            .bits = std.math.cast(u32, swizzle.bits) orelse return error.InvalidMlir,
+            .base = std.math.cast(u32, swizzle.base) orelse return error.InvalidMlir,
+            .shift = std.math.cast(i32, swizzle.shift) orelse return error.InvalidMlir,
+        });
     }
 
     pub fn intToPtr(self: *Builder, address: anytype, dt: DType, space: MemorySpace, alignment: u64) Value {
@@ -1055,69 +1062,74 @@ pub const Builder = struct {
         return mlir.Attribute.parse(self.ctx, text) catch std.debug.panic("invalid MLIR attribute: {s}", .{text});
     }
 
-    fn algebra(self: *Builder, dims: []const i64) []const u8 {
-        var out: std.Io.Writer.Allocating = .init(self.arena.allocator());
-        if (dims.len == 1) {
-            out.writer.print("{d}", .{dims[0]}) catch @panic("OOM");
-        } else {
-            out.writer.writeByte('(') catch @panic("OOM");
-            for (dims, 0..) |d, i| {
-                if (i > 0) out.writer.writeByte(',') catch @panic("OOM");
-                out.writer.print("{d}", .{d}) catch @panic("OOM");
-            }
-            out.writer.writeByte(')') catch @panic("OOM");
-        }
-        return out.written();
+    /// The scalar of a single extent, otherwise the tuple of `dims`.
+    fn dimsExpr(self: *Builder, dims: []const i64) AlgebraExpr {
+        if (dims.len == 1) return .{ .static = dims[0] };
+        const elements = self.arena.allocator().alloc(AlgebraExpr, dims.len) catch @panic("OOM");
+        for (dims, elements) |d, *e| e.* = .{ .static = d };
+        return .{ .tuple = elements };
     }
 
-    fn writeAlgebra(self: *Builder, writer: *std.Io.Writer, value: anytype) void {
+    /// Build a CuTe algebra expression from integers, nested Zig tuples,
+    /// `AlgebraToken`s, `ConstrainedDynamic`s and `ScaledBasis` values.
+    pub fn expr(self: *Builder, value: anytype) AlgebraExpr {
         const T = @TypeOf(value);
-        if (T == AlgebraExpr) {
-            writer.writeAll(value.text) catch @panic("OOM");
-            return;
-        }
-        if (T == AlgebraToken) {
-            writer.writeByte(switch (value) {
-                .all => '_',
-                .dynamic => '?',
-            }) catch @panic("OOM");
-            return;
-        }
-        if (T == ScaledBasis) {
-            writer.print("{d}", .{value.numerator}) catch @panic("OOM");
-            if (value.denominator != 1) writer.print("/{d}", .{value.denominator}) catch @panic("OOM");
-            for (value.modes[0..value.mode_count]) |mode| writer.print("@{d}", .{mode}) catch @panic("OOM");
-            return;
-        }
+        if (T == AlgebraExpr) return value;
+        if (T == AlgebraToken) return switch (value) {
+            .all => .all,
+            .dynamic => .{ .dynamic = 1 },
+        };
+        if (T == ScaledBasis) return .{ .basis = value };
         if (T == ConstrainedDynamic) {
             if (value.divisible_by == 0) @panic("CuTe constrained dynamic divisor must be positive");
-            writer.print("?{{div={d}}}", .{value.divisible_by}) catch @panic("OOM");
-            return;
+            return .{ .dynamic = @intCast(value.divisible_by) };
         }
         switch (@typeInfo(T)) {
-            .comptime_int, .int => writer.print("{d}", .{value}) catch @panic("OOM"),
+            .comptime_int, .int => return .{ .static = @intCast(value) },
             .@"struct" => |info| {
-                writer.writeByte('(') catch @panic("OOM");
-                inline for (info.field_names, 0..) |field, i| {
-                    if (i != 0) writer.writeByte(',') catch @panic("OOM");
-                    self.writeAlgebra(writer, @field(value, field));
-                }
-                writer.writeByte(')') catch @panic("OOM");
+                const elements = self.arena.allocator().alloc(AlgebraExpr, info.field_names.len) catch @panic("OOM");
+                inline for (info.field_names, 0..) |field, i| elements[i] = self.expr(@field(value, field));
+                return .{ .tuple = elements };
             },
             else => @compileError("unsupported CuTe algebra value " ++ @typeName(T)),
         }
     }
 
-    /// Build a CuTe algebra expression from integers, nested Zig tuples,
-    /// `AlgebraToken`s and `ScaledBasis` values.
-    pub fn expr(self: *Builder, value: anytype) AlgebraExpr {
-        var out: std.Io.Writer.Allocating = .init(self.arena.allocator());
-        self.writeAlgebra(&out.writer, value);
-        return .{ .text = out.written() };
+    /// The algebra attribute `A` (`cute_ir.IntTupleAttr`, `ShapeAttr`, ...)
+    /// of `e`.
+    fn algebraAttr(self: *Builder, comptime A: type, e: AlgebraExpr) *const A {
+        const result = switch (e) {
+            .static => |v| if (@hasDecl(A, "getStatic")) A.getStatic(self.ctx, v) else std.debug.panic("{s} has no integer leaf", .{@typeName(A)}),
+            .dynamic => |divisibility| if (@hasDecl(A, "getDynamic")) A.getDynamic(self.ctx, 32, divisibility) else std.debug.panic("{s} has no dynamic leaf", .{@typeName(A)}),
+            .all => if (@hasDecl(A, "getUnderscore")) A.getUnderscore(self.ctx) else std.debug.panic("{s} has no `_` leaf", .{@typeName(A)}),
+            .basis => |b| if (@hasDecl(A, "getBasis")) blk: {
+                const modes = self.arena.allocator().alloc(i32, b.mode_count) catch @panic("OOM");
+                for (modes, b.modes[0..b.mode_count]) |*mode, m| mode.* = m;
+                break :blk A.getBasis(self.ctx, b.numerator, b.denominator, modes);
+            } else std.debug.panic("{s} has no scaled-basis leaf", .{@typeName(A)}),
+            .tuple => |elements| blk: {
+                const attrs = self.arena.allocator().alloc(*const A, elements.len) catch @panic("OOM");
+                for (elements, attrs) |element, *attr| attr.* = self.algebraAttr(A, element);
+                break :blk A.getTuple(self.ctx, attrs);
+            },
+        };
+        return result catch std.debug.panic("invalid CuTe algebra for {s}", .{@typeName(A)});
     }
 
-    /// `coefficient @ mode...`, including rational coefficients such as
-    /// `1/2@0`. The mode path maps a coordinate into a nested CuTe mode.
+    fn layoutAttr(self: *Builder, spec: LayoutSpec) *const cute_ir.LayoutAttr {
+        return cute_ir.LayoutAttr.get(self.ctx, .{
+            .shape = self.algebraAttr(cute_ir.ShapeAttr, spec.shape),
+            .stride = self.algebraAttr(cute_ir.StrideAttr, spec.stride),
+        }) catch @panic("invalid CuTe layout");
+    }
+
+    fn intTupleType(self: *Builder, e: AlgebraExpr) *const mlir.Type {
+        return (cute_ir.IntTupleType.get(self.ctx, .{ .attr = self.algebraAttr(cute_ir.IntTupleAttr, e).attribute() }) catch @panic("invalid CuTe integer tuple")).type_();
+    }
+
+    /// `numerator/denominator` along `modes`, the mode path outermost first like
+    /// Python's `ScaledBasis(value, modes)`. CuTe prints it innermost first:
+    /// `basis(1, 2, .{ 0, 1 })` is `1/2@1@0`.
     pub fn basis(self: *Builder, numerator: i64, denominator: i64, modes: anytype) ScaledBasis {
         _ = self;
         if (denominator <= 0) @panic("CuTe scaled-basis denominator must be positive");
@@ -1133,16 +1145,16 @@ pub const Builder = struct {
     }
 
     pub fn layoutType(self: *Builder, spec: LayoutSpec) *const mlir.Type {
-        return cute_ir.algebraType(self.ctx, .layout, spec.payload(self)) catch @panic("invalid CuTe layout");
+        return (cute_ir.LayoutType.get(self.ctx, .{ .attr = self.layoutAttr(spec).attribute() }) catch @panic("invalid CuTe layout")).type_();
     }
 
     pub fn composedLayoutType(self: *Builder, swizzle: Swizzle, offset: anytype, outer: LayoutSpec) *const mlir.Type {
-        const payload = std.fmt.allocPrint(
-            self.arena.allocator(),
-            "S<{d},{d},{d}> o {s} o {s}",
-            .{ swizzle.bits, swizzle.base, swizzle.shift, self.expr(offset).text, outer.payload(self) },
-        ) catch @panic("OOM");
-        return cute_ir.algebraType(self.ctx, .composed_layout, payload) catch @panic("invalid CuTe composed layout");
+        const attr = cute_ir.ComposedLayoutAttr.get(self.ctx, .{
+            .inner = .{ .swizzle = self.swizzleAttr(swizzle) catch @panic("invalid CuTe swizzle") },
+            .offset = self.algebraAttr(cute_ir.IntTupleAttr, self.expr(offset)),
+            .outer = self.layoutAttr(outer),
+        }) catch @panic("invalid CuTe composed layout");
+        return (cute_ir.ComposedLayoutType.get(self.ctx, .{ .attr = attr.attribute() }) catch @panic("invalid CuTe composed layout")).type_();
     }
 
     pub fn memrefType(self: *Builder, dtype: DType, space: MemorySpace, alignment: u64, layout_type: *const mlir.Type) *const mlir.Type {
@@ -1159,23 +1171,11 @@ pub const Builder = struct {
         return .{ .inner = result.inner, .kernel = self };
     }
 
-    /// Materialize a rational scaled-basis layout used by block-scale TMA.
-    /// The local standalone LayoutAttr constructor only accepts integer
-    /// strides, while CoordTensorType owns the more general coordinate
-    /// algebra. Recovering its layout through the typed C API avoids exposing
-    /// that parser distinction to kernel code.
-    pub fn staticCoordinateLayout(self: *Builder, rank: usize, spec: LayoutSpec) View {
-        const tensor_type = self.coordTensorType(rank, spec);
-        const coords = tensor_type.isA(cute_ir.CoordTensorType) orelse @panic("invalid coordinate tensor type");
-        const result = self.emit(cute_ir.static(self.ctx, coords.layout(), self.loc()));
-        return .{ .inner = result.inner, .kernel = self };
-    }
-
     pub const Swizzle = struct { bits: i64, base: i64, shift: i64 };
 
     pub fn staticSwizzle(self: *Builder, spec: Swizzle) View {
-        const payload = std.fmt.allocPrint(self.arena.allocator(), "S<{d},{d},{d}>", .{ spec.bits, spec.base, spec.shift }) catch @panic("OOM");
-        const ty = cute_ir.algebraType(self.ctx, .swizzle, payload) catch @panic("invalid CuTe swizzle");
+        const attr = self.swizzleAttr(spec) catch @panic("invalid CuTe swizzle");
+        const ty = (cute_ir.SwizzleType.get(self.ctx, .{ .attr = attr.attribute() }) catch @panic("invalid CuTe swizzle")).type_();
         const result = self.emit(cute_ir.static(self.ctx, ty, self.loc()));
         return .{ .inner = result.inner, .kernel = self };
     }
@@ -1183,9 +1183,7 @@ pub const Builder = struct {
     /// Construct `swizzle o offset o outer_layout` through the CuTe dialect.
     pub fn makeComposedLayout(self: *Builder, swizzle: Swizzle, offset: anytype, outer: LayoutSpec) View {
         const inner = self.staticSwizzle(swizzle);
-        const offset_expr = self.expr(offset);
-        const offset_ty = cute_ir.algebraType(self.ctx, .int_tuple, offset_expr.text) catch @panic("invalid CuTe composed-layout offset");
-        const offset_value = self.emit(cute_ir.make_int_tuple(self.ctx, &.{}, offset_ty, self.loc()));
+        const offset_value = self.emit(cute_ir.make_int_tuple(self.ctx, &.{}, self.intTupleType(self.expr(offset)), self.loc()));
         const outer_value = self.staticLayout(outer);
         const result_ty = self.composedLayoutType(swizzle, offset, outer);
         const result = self.emit(cute_ir.make_composed_layout(self.ctx, inner.inner, offset_value.inner, outer_value.inner, result_ty, self.loc()));
@@ -1204,42 +1202,16 @@ pub const Builder = struct {
 
     pub fn coordTensorType(self: *Builder, rank: usize, layout: LayoutSpec) *const mlir.Type {
         if (rank == 0 or rank > MAX_RANK) @panic("coordTensorType rank must be in 1..MAX_RANK");
-        var zeros: std.Io.Writer.Allocating = .init(self.arena.allocator());
-        if (rank > 1) zeros.writer.writeByte('(') catch @panic("OOM");
-        for (0..rank) |i| {
-            if (i != 0) zeros.writer.writeByte(',') catch @panic("OOM");
-            zeros.writer.writeByte('0') catch @panic("OOM");
-        }
-        if (rank > 1) zeros.writer.writeByte(')') catch @panic("OOM");
-        const tuple = cute_ir.algebraType(self.ctx, .int_tuple, zeros.written()) catch @panic("invalid coordinate tuple");
-        const payload = layout.payload(self);
-        // The standalone LayoutAttr C API intentionally restricts scaled
-        // basis coefficients to integers. CoordTensorType additionally
-        // accepts the rational basis used by block-scaled scale-factor maps.
-        // Keep that parser workaround inside the DSL type constructor.
-        if (std.mem.indexOfScalar(u8, payload, '/') != null) {
-            const type_text = std.fmt.allocPrint(self.arena.allocator(), "!cute.coord_tensor<\"{s}\", \"{s}\">", .{ zeros.written(), payload }) catch @panic("OOM");
-            return self.parseType(type_text);
-        }
-        return (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple, .layout = self.layoutType(layout) }) catch @panic("invalid coordinate tensor")).type_();
+        const zeros: [MAX_RANK]i64 = @splat(0);
+        return self.coordTensorTypeWithTuple(self.dimsExpr(zeros[0..rank]), layout);
     }
 
-    /// Coordinate-tensor type whose coordinate tuple contains dynamic and
-    /// static leaves. `tuple_payload` is CuTe algebra such as `(0,?,?)`;
-    /// layouts remain structured `LayoutSpec` values in Zig.
-    pub fn coordTensorTypePayload(self: *Builder, tuple_payload: []const u8, layout: LayoutSpec) *const mlir.Type {
-        const attr = cute_ir.IntTupleAttr.get(self.ctx, tuple_payload) catch std.debug.panic("invalid coordinate tuple {s}", .{tuple_payload});
-        const tuple = (cute_ir.IntTupleType.get(self.ctx, .{ .attr = attr.attribute() }) catch @panic("invalid coordinate tuple type")).type_();
-        return (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple, .layout = self.layoutType(layout) }) catch @panic("invalid coordinate tensor")).type_();
-    }
-
-    /// Coordinate-tensor type with an explicit arithmetic-tuple expression.
+    /// Coordinate-tensor type with an explicit arithmetic-tuple expression,
+    /// such as `.{ 0, ConstrainedDynamic{ .divisible_by = 128 }, AlgebraToken.dynamic }`.
     /// This represents the divisibility information produced by CuTe tiling
     /// without requiring kernel code to spell textual MLIR types.
     pub fn coordTensorTypeWithTuple(self: *Builder, tuple: anytype, layout: LayoutSpec) *const mlir.Type {
-        const tuple_text = self.expr(tuple).text;
-        const tuple_type = cute_ir.algebraType(self.ctx, .int_tuple, tuple_text) catch std.debug.panic("invalid coordinate tuple {s}", .{tuple_text});
-        return (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = tuple_type, .layout = self.layoutType(layout) }) catch @panic("invalid coordinate tensor")).type_();
+        return (cute_ir.CoordTensorType.get(self.ctx, .{ .arithTuple = self.intTupleType(self.expr(tuple)), .layout = self.layoutType(layout) }) catch @panic("invalid coordinate tensor")).type_();
     }
 
     fn rowMajor(self: *Builder, shape: []const i64) []const i64 {
@@ -1280,10 +1252,8 @@ pub const Builder = struct {
         if (shape.len == 0 or shape.len > MAX_RANK) std.debug.panic("makeLayout: rank {d} not in 1..{d}", .{ shape.len, MAX_RANK });
         const stride = opts.stride orelse self.leftMost(shape);
         if (stride.len != shape.len) std.debug.panic("makeLayout: stride rank {d} != shape rank {d}", .{ stride.len, shape.len });
-        const ctx = self.ctx;
-        const text = std.fmt.allocPrint(self.arena.allocator(), "{s}:{s}", .{ self.algebra(shape), self.algebra(stride) }) catch @panic("OOM");
-        const layout_ty = cute_ir.algebraType(ctx, .layout, text) catch @panic("bad layout");
-        const l = self.emit(cute_ir.static(ctx, layout_ty, self.loc()));
+        const layout_ty = self.layoutType(.{ .shape = self.dimsExpr(shape), .stride = self.dimsExpr(stride) });
+        const l = self.emit(cute_ir.static(self.ctx, layout_ty, self.loc()));
         return .{ .inner = l.inner, .shape = Dims.fromSlice(shape) catch unreachable, .stride = Dims.fromSlice(stride) catch unreachable };
     }
 
@@ -1296,30 +1266,26 @@ pub const Builder = struct {
         return .{ .inner = v.inner, .kernel = self, .layout = layout, .dtype = dtypes.mlirToDType(self.ctx, elem), .space = pt.addressSpace() };
     }
 
-    fn writeCoord(self: *Builder, writer: *std.Io.Writer, dyn: *stdx.BoundedArray(*const mlir.Value, MAX_RANK), coord: anytype) void {
+    /// The algebra of a coordinate whose `Value` leaves are dynamic and
+    /// appended to `dyn`. A one-element tuple is its element.
+    fn coordExpr(self: *Builder, dyn: *stdx.BoundedArray(*const mlir.Value, MAX_RANK), coord: anytype) AlgebraExpr {
         const T = @TypeOf(coord);
         if (T == Value) {
-            writer.writeByte('?') catch @panic("OOM");
             dyn.append(self.lift(coord).to(.i32).inner) catch @panic("makeCoord: too many dynamic leaves");
-            return;
+            return .{ .dynamic = 1 };
         }
-        if (T == AlgebraToken) {
-            writer.writeByte(switch (coord) {
-                .all => '_',
-                .dynamic => @panic("makeCoord: AlgebraToken.dynamic needs an SSA value"),
-            }) catch @panic("OOM");
-            return;
-        }
+        if (T == AlgebraToken) return switch (coord) {
+            .all => .all,
+            .dynamic => @panic("makeCoord: AlgebraToken.dynamic needs an SSA value"),
+        };
         switch (@typeInfo(T)) {
-            .comptime_int, .int => writer.print("{d}", .{coord}) catch @panic("OOM"),
+            .comptime_int, .int => return .{ .static = @intCast(coord) },
             .@"struct" => |info| {
                 if (info.field_names.len == 0) @compileError("makeCoord: empty tuple");
-                if (info.field_names.len > 1) writer.writeByte('(') catch @panic("OOM");
-                inline for (info.field_names, 0..) |field, i| {
-                    if (i != 0) writer.writeByte(',') catch @panic("OOM");
-                    self.writeCoord(writer, dyn, @field(coord, field));
-                }
-                if (info.field_names.len > 1) writer.writeByte(')') catch @panic("OOM");
+                if (info.field_names.len == 1) return self.coordExpr(dyn, @field(coord, info.field_names[0]));
+                const elements = self.arena.allocator().alloc(AlgebraExpr, info.field_names.len) catch @panic("OOM");
+                inline for (info.field_names, 0..) |field, i| elements[i] = self.coordExpr(dyn, @field(coord, field));
+                return .{ .tuple = elements };
             },
             else => @compileError("makeCoord: unsupported coordinate leaf " ++ @typeName(T)),
         }
@@ -1329,10 +1295,9 @@ pub const Builder = struct {
     /// placeholders. Integer leaves stay static in the dependent CuTe type.
     pub fn makeCoord(self: *Builder, coord: anytype) *const mlir.Value {
         if (@TypeOf(coord) == Value) return self.makeCoord(.{coord});
-        var text: std.Io.Writer.Allocating = .init(self.arena.allocator());
         var dyn: stdx.BoundedArray(*const mlir.Value, MAX_RANK) = .empty;
-        self.writeCoord(&text.writer, &dyn, coord);
-        const ty = cute_ir.algebraType(self.ctx, .coord, text.written()) catch @panic("bad coord");
+        const attr = self.algebraAttr(cute_ir.CoordAttr, self.coordExpr(&dyn, coord));
+        const ty = (cute_ir.CoordType.get(self.ctx, .{ .attr = attr.attribute() }) catch @panic("bad coord")).type_();
         return self.emit(cute_ir.make_coord(self.ctx, dyn.constSlice(), ty, self.loc())).inner;
     }
 
@@ -1340,10 +1305,8 @@ pub const Builder = struct {
     /// tensor and shared memory. It accepts the same nested Zig values as a
     /// coordinate, but preserves integer-tuple semantics.
     pub fn makeIntTuple(self: *Builder, values: anytype) View {
-        var text: std.Io.Writer.Allocating = .init(self.arena.allocator());
         var dyn: stdx.BoundedArray(*const mlir.Value, MAX_RANK) = .empty;
-        self.writeCoord(&text.writer, &dyn, values);
-        const ty = cute_ir.algebraType(self.ctx, .int_tuple, text.written()) catch @panic("bad integer tuple");
+        const ty = self.intTupleType(self.coordExpr(&dyn, values));
         const value = self.emit(cute_ir.make_int_tuple(self.ctx, dyn.constSlice(), ty, self.loc()));
         return .{ .inner = value.inner, .kernel = self };
     }
@@ -1409,7 +1372,7 @@ pub const Builder = struct {
         self: *Builder,
         comptime leaf_count: usize,
         input: anytype,
-        tuple_payload: []const u8,
+        tuple: anytype,
         comptime leaf_divisibility: [leaf_count]u32,
         layout: anytype,
     ) View {
@@ -1432,14 +1395,7 @@ pub const Builder = struct {
         // 0 marks a leaf the producer knows to be statically zero, 1 a leaf
         // with no known divisibility.
         inline for (leaf_divisibility, 0..) |divisor, i| {
-            const leaf_payload = if (divisor == 0)
-                "0"
-            else if (divisor == 1)
-                "?"
-            else
-                std.fmt.allocPrint(self.arena.allocator(), "?{{div={d}}}", .{divisor}) catch @panic("OOM");
-            leaf_types[i] = cute_ir.algebraType(self.ctx, .int_tuple, leaf_payload) catch
-                std.debug.panic("invalid dynamic integer tuple leaf {s}", .{leaf_payload});
+            leaf_types[i] = self.intTupleType(if (divisor == 0) .{ .static = 0 } else .{ .dynamic = divisor });
         }
         const leaves = self.emitResults(leaf_count, cute_ir.get_leaves(
             self.ctx,
@@ -1448,8 +1404,7 @@ pub const Builder = struct {
             self.loc(),
         ));
 
-        const rebuilt_tuple_type = cute_ir.algebraType(self.ctx, .int_tuple, tuple_payload) catch
-            std.debug.panic("invalid rebuilt coordinate tuple {s}", .{tuple_payload});
+        const rebuilt_tuple_type = self.intTupleType(self.expr(tuple));
         const rebuilt_tuple = self.emit(cute_ir.make_int_tuple(
             self.ctx,
             self.innerSlice(leaves[0..]),
@@ -2004,7 +1959,7 @@ pub const Builder = struct {
         return self.parseType(std.fmt.allocPrint(
             self.arena.allocator(),
             "!cute_nvgpu.atom.non_exec_tiled_tma_load<sm_90, {s}, copy_bits = {d}, tma_gbasis = <\"{s}\">, tma_format = {s}>",
-            .{ dtypeName(config.dtype), config.copy_bits, config.global_basis.payload(self), formatName(config.format, config.dtype) },
+            .{ dtypeName(config.dtype), config.copy_bits, self.layoutAttr(config.global_basis).value(), formatName(config.format, config.dtype) },
         ) catch @panic("OOM"));
     }
 
@@ -2015,7 +1970,7 @@ pub const Builder = struct {
         return self.parseType(std.fmt.allocPrint(
             self.arena.allocator(),
             "!cute_nvgpu.atom.tma_load<{s}, copy_bits = {d}, mode = tiled, num_cta = {d}, g_stride = <\"()\"> tma_gbasis = <\"{s}\">>",
-            .{ dtypeName(config.dtype), config.copy_bits, config.num_multicast, config.global_basis.payload(self) },
+            .{ dtypeName(config.dtype), config.copy_bits, config.num_multicast, self.layoutAttr(config.global_basis).value() },
         ) catch @panic("OOM"));
     }
 
@@ -2024,7 +1979,7 @@ pub const Builder = struct {
         return self.parseType(std.fmt.allocPrint(
             self.arena.allocator(),
             "!cute_nvgpu.atom.non_exec_tiled_tma_store<{s}, copy_bits = {d}, tma_gbasis = <\"{s}\">, tma_format = {s}>",
-            .{ dtypeName(config.dtype), config.copy_bits, config.global_basis.payload(self), formatName(config.format, config.dtype) },
+            .{ dtypeName(config.dtype), config.copy_bits, self.layoutAttr(config.global_basis).value(), formatName(config.format, config.dtype) },
         ) catch @panic("OOM"));
     }
 
@@ -2033,7 +1988,7 @@ pub const Builder = struct {
         return self.parseType(std.fmt.allocPrint(
             self.arena.allocator(),
             "!cute_nvgpu.atom.tma_store<{s}, copy_bits = {d}, mode = tiled, g_stride = <\"()\"> tma_gbasis = <\"{s}\">>",
-            .{ dtypeName(config.dtype), config.copy_bits, config.global_basis.payload(self) },
+            .{ dtypeName(config.dtype), config.copy_bits, self.layoutAttr(config.global_basis).value() },
         ) catch @panic("OOM"));
     }
 

@@ -7,6 +7,9 @@
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 #include "mlir/CAPI/Support.h"
+#include "llvm/ADT/STLExtras.h"
+
+#include <optional>
 
 // Registration
 
@@ -16,129 +19,6 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Cute, cute,
 // Attributes
 
 namespace cute = mlir::cutlass_compiler::cute;
-
-template <typename Attr>
-static MlirAttribute getAlgebraAttribute(MlirContext context,
-                                         MlirStringRef value) {
-  auto *ctx = unwrap(context);
-  if (!ctx || (!value.data && value.length))
-    return {nullptr};
-  auto algebra =
-      cutegen::from_string<typename Attr::algebra_t>(unwrap(value).str());
-  if (!algebra)
-    return {nullptr};
-  ctx->getOrLoadDialect<cute::CuteDialect>();
-  return wrap(Attr::get(ctx, std::move(*algebra)));
-}
-
-template <typename Attr>
-static MlirStringRef getAlgebraValue(MlirAttribute attr) {
-  auto value = llvm::cast<Attr>(unwrap(attr));
-  // Intern the serialization so the returned view outlives this function.
-  auto text = mlir::StringAttr::get(value.getContext(),
-                                    cutegen::to_string(value.getRef()));
-  return wrap(text.getValue());
-}
-
-MlirAttribute mlirCuteIntTupleAttrGet(MlirContext context,
-                                      MlirStringRef value) {
-  return getAlgebraAttribute<cute::IntTupleAttr>(context, value);
-}
-
-bool mlirAttributeIsACuteIntTuple(MlirAttribute attr) {
-  return llvm::isa_and_nonnull<cute::IntTupleAttr>(unwrap(attr));
-}
-
-MlirStringRef mlirCuteIntTupleAttrGetValue(MlirAttribute attr) {
-  return getAlgebraValue<cute::IntTupleAttr>(attr);
-}
-
-MlirAttribute mlirCuteCoordAttrGet(MlirContext context, MlirStringRef value) {
-  return getAlgebraAttribute<cute::CoordAttr>(context, value);
-}
-
-bool mlirAttributeIsACuteCoord(MlirAttribute attr) {
-  return llvm::isa_and_nonnull<cute::CoordAttr>(unwrap(attr));
-}
-
-MlirStringRef mlirCuteCoordAttrGetValue(MlirAttribute attr) {
-  return getAlgebraValue<cute::CoordAttr>(attr);
-}
-
-MlirAttribute mlirCuteShapeAttrGet(MlirContext context, MlirStringRef value) {
-  return getAlgebraAttribute<cute::ShapeAttr>(context, value);
-}
-
-bool mlirAttributeIsACuteShape(MlirAttribute attr) {
-  return llvm::isa_and_nonnull<cute::ShapeAttr>(unwrap(attr));
-}
-
-MlirStringRef mlirCuteShapeAttrGetValue(MlirAttribute attr) {
-  return getAlgebraValue<cute::ShapeAttr>(attr);
-}
-
-MlirAttribute mlirCuteStrideAttrGet(MlirContext context, MlirStringRef value) {
-  return getAlgebraAttribute<cute::StrideAttr>(context, value);
-}
-
-bool mlirAttributeIsACuteStride(MlirAttribute attr) {
-  return llvm::isa_and_nonnull<cute::StrideAttr>(unwrap(attr));
-}
-
-MlirStringRef mlirCuteStrideAttrGetValue(MlirAttribute attr) {
-  return getAlgebraValue<cute::StrideAttr>(attr);
-}
-
-MlirAttribute mlirCuteLayoutAttrGet(MlirContext context, MlirStringRef value) {
-  return getAlgebraAttribute<cute::LayoutAttr>(context, value);
-}
-
-bool mlirAttributeIsACuteLayout(MlirAttribute attr) {
-  return llvm::isa_and_nonnull<cute::LayoutAttr>(unwrap(attr));
-}
-
-MlirStringRef mlirCuteLayoutAttrGetValue(MlirAttribute attr) {
-  return getAlgebraValue<cute::LayoutAttr>(attr);
-}
-
-MlirAttribute mlirCuteTileAttrGet(MlirContext context, MlirStringRef value) {
-  return getAlgebraAttribute<cute::TileAttr>(context, value);
-}
-
-bool mlirAttributeIsACuteTile(MlirAttribute attr) {
-  return llvm::isa_and_nonnull<cute::TileAttr>(unwrap(attr));
-}
-
-MlirStringRef mlirCuteTileAttrGetValue(MlirAttribute attr) {
-  return getAlgebraValue<cute::TileAttr>(attr);
-}
-
-MlirAttribute mlirCuteComposedLayoutAttrGet(MlirContext context,
-                                            MlirStringRef value) {
-  return getAlgebraAttribute<cute::ComposedLayoutAttr>(context, value);
-}
-
-bool mlirAttributeIsACuteComposedLayout(MlirAttribute attr) {
-  return llvm::isa_and_nonnull<cute::ComposedLayoutAttr>(unwrap(attr));
-}
-
-MlirStringRef mlirCuteComposedLayoutAttrGetValue(MlirAttribute attr) {
-  return getAlgebraValue<cute::ComposedLayoutAttr>(attr);
-}
-
-MlirAttribute mlirCuteSwizzleAttrGet(MlirContext context, MlirStringRef value) {
-  return getAlgebraAttribute<cute::SwizzleAttr>(context, value);
-}
-
-bool mlirAttributeIsACuteSwizzle(MlirAttribute attr) {
-  return llvm::isa_and_nonnull<cute::SwizzleAttr>(unwrap(attr));
-}
-
-MlirStringRef mlirCuteSwizzleAttrGetValue(MlirAttribute attr) {
-  return getAlgebraValue<cute::SwizzleAttr>(attr);
-}
-
-// Compiler attributes
 
 // Unwraps `handle` into `out`: false when it is of another context or not a
 // T, or when it is null and not optional.
@@ -152,6 +32,278 @@ static bool unwrapAs(mlir::MLIRContext *ctx, H handle, bool optional, T &out) {
   out = llvm::dyn_cast<T>(value);
   return static_cast<bool>(out);
 }
+
+template <typename Attr>
+static MlirAttribute getAlgebraAttr(MlirContext context,
+                                    typename Attr::algebra_t algebra) {
+  auto *ctx = unwrap(context);
+  if (!ctx)
+    return {nullptr};
+  ctx->getOrLoadDialect<cute::CuteDialect>();
+  return wrap(Attr::get(ctx, std::move(algebra)));
+}
+
+template <typename Attr>
+static MlirAttribute getStaticAttr(MlirContext context, int64_t value) {
+  return getAlgebraAttr<Attr>(
+      context, typename Attr::algebra_t(cutegen::static_int_t(value)));
+}
+
+template <typename Attr>
+static MlirAttribute getDynamicAttr(MlirContext context, int32_t width,
+                                    int64_t divisibility) {
+  if (!llvm::is_contained({1, 8, 16, 32, 64}, width) || divisibility <= 0)
+    return {nullptr};
+  return getAlgebraAttr<Attr>(
+      context, typename Attr::algebra_t(cutegen::mlir_dynamic_t(
+                   cutegen::dynamic_int_properties_t(width, divisibility))));
+}
+
+template <typename Attr>
+static MlirAttribute getUnderscoreAttr(MlirContext context) {
+  return getAlgebraAttr<Attr>(
+      context, typename Attr::algebra_t(cutegen::underscore_t()));
+}
+
+template <typename Attr>
+static MlirAttribute getTupleAttr(MlirContext context, intptr_t numElements,
+                                  MlirAttribute const *elements) {
+  auto *ctx = unwrap(context);
+  if (!ctx || numElements < 0 || (numElements > 0 && !elements))
+    return {nullptr};
+  typename Attr::algebra_t::vector_t children;
+  children.reserve(numElements);
+  for (intptr_t i = 0; i < numElements; ++i) {
+    Attr element;
+    if (!unwrapAs(ctx, elements[i], /*optional=*/false, element))
+      return {nullptr};
+    children.push_back(element.getRef());
+  }
+  return getAlgebraAttr<Attr>(context,
+                              typename Attr::algebra_t(std::move(children)));
+}
+
+template <typename Attr>
+static MlirStringRef getAlgebraValue(MlirAttribute attr) {
+  auto value = llvm::cast<Attr>(unwrap(attr));
+  // Intern the serialization so the returned view outlives this function.
+  auto text = mlir::StringAttr::get(value.getContext(),
+                                    cutegen::to_string(value.getRef()));
+  return wrap(text.getValue());
+}
+
+MlirAttribute mlirCuteIntTupleAttrStaticGet(MlirContext context,
+                                            int64_t value) {
+  return getStaticAttr<cute::IntTupleAttr>(context, value);
+}
+
+MlirAttribute mlirCuteIntTupleAttrDynamicGet(MlirContext context, int32_t width,
+                                             int64_t divisibility) {
+  return getDynamicAttr<cute::IntTupleAttr>(context, width, divisibility);
+}
+
+MlirAttribute mlirCuteIntTupleAttrTupleGet(MlirContext context,
+                                           intptr_t numElements,
+                                           MlirAttribute const *elements) {
+  return getTupleAttr<cute::IntTupleAttr>(context, numElements, elements);
+}
+
+bool mlirAttributeIsACuteIntTuple(MlirAttribute attr) {
+  return llvm::isa_and_nonnull<cute::IntTupleAttr>(unwrap(attr));
+}
+
+MlirStringRef mlirCuteIntTupleAttrGetValue(MlirAttribute attr) {
+  return getAlgebraValue<cute::IntTupleAttr>(attr);
+}
+
+MlirAttribute mlirCuteCoordAttrStaticGet(MlirContext context, int64_t value) {
+  return getStaticAttr<cute::CoordAttr>(context, value);
+}
+
+MlirAttribute mlirCuteCoordAttrDynamicGet(MlirContext context, int32_t width,
+                                          int64_t divisibility) {
+  return getDynamicAttr<cute::CoordAttr>(context, width, divisibility);
+}
+
+MlirAttribute mlirCuteCoordAttrUnderscoreGet(MlirContext context) {
+  return getUnderscoreAttr<cute::CoordAttr>(context);
+}
+
+MlirAttribute mlirCuteCoordAttrTupleGet(MlirContext context,
+                                        intptr_t numElements,
+                                        MlirAttribute const *elements) {
+  return getTupleAttr<cute::CoordAttr>(context, numElements, elements);
+}
+
+bool mlirAttributeIsACuteCoord(MlirAttribute attr) {
+  return llvm::isa_and_nonnull<cute::CoordAttr>(unwrap(attr));
+}
+
+MlirStringRef mlirCuteCoordAttrGetValue(MlirAttribute attr) {
+  return getAlgebraValue<cute::CoordAttr>(attr);
+}
+
+MlirAttribute mlirCuteShapeAttrStaticGet(MlirContext context, int64_t value) {
+  return getStaticAttr<cute::ShapeAttr>(context, value);
+}
+
+MlirAttribute mlirCuteShapeAttrDynamicGet(MlirContext context, int32_t width,
+                                          int64_t divisibility) {
+  return getDynamicAttr<cute::ShapeAttr>(context, width, divisibility);
+}
+
+MlirAttribute mlirCuteShapeAttrTupleGet(MlirContext context,
+                                        intptr_t numElements,
+                                        MlirAttribute const *elements) {
+  return getTupleAttr<cute::ShapeAttr>(context, numElements, elements);
+}
+
+bool mlirAttributeIsACuteShape(MlirAttribute attr) {
+  return llvm::isa_and_nonnull<cute::ShapeAttr>(unwrap(attr));
+}
+
+MlirStringRef mlirCuteShapeAttrGetValue(MlirAttribute attr) {
+  return getAlgebraValue<cute::ShapeAttr>(attr);
+}
+
+MlirAttribute mlirCuteStrideAttrStaticGet(MlirContext context, int64_t value) {
+  return getStaticAttr<cute::StrideAttr>(context, value);
+}
+
+MlirAttribute mlirCuteStrideAttrDynamicGet(MlirContext context, int32_t width,
+                                           int64_t divisibility) {
+  return getDynamicAttr<cute::StrideAttr>(context, width, divisibility);
+}
+
+MlirAttribute mlirCuteStrideAttrBasisGet(MlirContext context, int64_t numerator,
+                                         int64_t denominator, intptr_t numModes,
+                                         int32_t const *modes) {
+  if (denominator <= 0 || numModes <= 0 || !modes)
+    return {nullptr};
+  cutegen::scaled_basis::vector_t path(modes, modes + numModes);
+  auto basis =
+      denominator == 1
+          ? cutegen::scaled_basis(std::move(path), numerator)
+          : cutegen::scaled_basis(std::move(path),
+                                  cutegen::ratio(numerator, denominator));
+  return getAlgebraAttr<cute::StrideAttr>(context,
+                                          cutegen::stride(std::move(basis)));
+}
+
+MlirAttribute mlirCuteStrideAttrTupleGet(MlirContext context,
+                                         intptr_t numElements,
+                                         MlirAttribute const *elements) {
+  return getTupleAttr<cute::StrideAttr>(context, numElements, elements);
+}
+
+bool mlirAttributeIsACuteStride(MlirAttribute attr) {
+  return llvm::isa_and_nonnull<cute::StrideAttr>(unwrap(attr));
+}
+
+MlirStringRef mlirCuteStrideAttrGetValue(MlirAttribute attr) {
+  return getAlgebraValue<cute::StrideAttr>(attr);
+}
+
+MlirAttribute mlirCuteLayoutAttrGet(MlirContext context, MlirAttribute shape,
+                                    MlirAttribute stride) {
+  auto *ctx = unwrap(context);
+  cute::ShapeAttr shapeAttr;
+  cute::StrideAttr strideAttr;
+  if (!ctx || !unwrapAs(ctx, shape, /*optional=*/false, shapeAttr) ||
+      !unwrapAs(ctx, stride, /*optional=*/false, strideAttr))
+    return {nullptr};
+  cutegen::layout layout(shapeAttr.getRef(), strideAttr.getRef());
+  if (cutegen::has_error(layout))
+    return {nullptr};
+  return getAlgebraAttr<cute::LayoutAttr>(context, std::move(layout));
+}
+
+bool mlirAttributeIsACuteLayout(MlirAttribute attr) {
+  return llvm::isa_and_nonnull<cute::LayoutAttr>(unwrap(attr));
+}
+
+MlirStringRef mlirCuteLayoutAttrGetValue(MlirAttribute attr) {
+  return getAlgebraValue<cute::LayoutAttr>(attr);
+}
+
+MlirAttribute mlirCuteTileAttrLayoutGet(MlirContext context,
+                                        MlirAttribute layout) {
+  auto *ctx = unwrap(context);
+  cute::LayoutAttr layoutAttr;
+  if (!ctx || !unwrapAs(ctx, layout, /*optional=*/false, layoutAttr))
+    return {nullptr};
+  return getAlgebraAttr<cute::TileAttr>(context,
+                                        cutegen::tile(layoutAttr.getRef()));
+}
+
+MlirAttribute mlirCuteTileAttrUnderscoreGet(MlirContext context) {
+  return getUnderscoreAttr<cute::TileAttr>(context);
+}
+
+MlirAttribute mlirCuteTileAttrTupleGet(MlirContext context,
+                                       intptr_t numElements,
+                                       MlirAttribute const *elements) {
+  return getTupleAttr<cute::TileAttr>(context, numElements, elements);
+}
+
+bool mlirAttributeIsACuteTile(MlirAttribute attr) {
+  return llvm::isa_and_nonnull<cute::TileAttr>(unwrap(attr));
+}
+
+MlirStringRef mlirCuteTileAttrGetValue(MlirAttribute attr) {
+  return getAlgebraValue<cute::TileAttr>(attr);
+}
+
+MlirAttribute mlirCuteComposedLayoutAttrGet(MlirContext context,
+                                            MlirAttribute inner,
+                                            MlirAttribute offset,
+                                            MlirAttribute outer) {
+  auto *ctx = unwrap(context);
+  cute::IntTupleAttr offsetAttr;
+  cute::LayoutAttr outerAttr;
+  if (!ctx || !unwrapAs(ctx, offset, /*optional=*/false, offsetAttr) ||
+      !unwrapAs(ctx, outer, /*optional=*/false, outerAttr))
+    return {nullptr};
+  cute::SwizzleAttr swizzleAttr;
+  cute::LayoutAttr layoutAttr;
+  std::optional<cutegen::composed_layout> composed;
+  if (unwrapAs(ctx, inner, /*optional=*/false, swizzleAttr))
+    composed.emplace(swizzleAttr.getRef(), offsetAttr.getRef(),
+                     outerAttr.getRef());
+  else if (unwrapAs(ctx, inner, /*optional=*/false, layoutAttr))
+    composed.emplace(layoutAttr.getRef(), offsetAttr.getRef(),
+                     outerAttr.getRef());
+  if (!composed || cutegen::has_error(*composed))
+    return {nullptr};
+  return getAlgebraAttr<cute::ComposedLayoutAttr>(context,
+                                                  std::move(*composed));
+}
+
+bool mlirAttributeIsACuteComposedLayout(MlirAttribute attr) {
+  return llvm::isa_and_nonnull<cute::ComposedLayoutAttr>(unwrap(attr));
+}
+
+MlirStringRef mlirCuteComposedLayoutAttrGetValue(MlirAttribute attr) {
+  return getAlgebraValue<cute::ComposedLayoutAttr>(attr);
+}
+
+MlirAttribute mlirCuteSwizzleAttrGet(MlirContext context, uint32_t bits,
+                                     uint32_t base, int32_t shift) {
+  auto swizzle = cutegen::swizzle::get(bits, base, shift);
+  if (!swizzle)
+    return {nullptr};
+  return getAlgebraAttr<cute::SwizzleAttr>(context, *swizzle);
+}
+
+bool mlirAttributeIsACuteSwizzle(MlirAttribute attr) {
+  return llvm::isa_and_nonnull<cute::SwizzleAttr>(unwrap(attr));
+}
+
+MlirStringRef mlirCuteSwizzleAttrGetValue(MlirAttribute attr) {
+  return getAlgebraValue<cute::SwizzleAttr>(attr);
+}
+
+// Compiler attributes
 
 bool mlirAttributeIsACuteBitLayout(MlirAttribute attr) {
   return llvm::isa_and_nonnull<cute::BitLayoutAttr>(unwrap(attr));

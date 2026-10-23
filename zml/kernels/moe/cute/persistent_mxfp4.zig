@@ -390,7 +390,7 @@ fn Layouts(comptime tile: Tile) type {
         fn sfBasis(b: *B) cute.LayoutSpec {
             return b.layoutSpec(
                 .{ .{ 2, 4, 32 }, 1, 1, 1 },
-                .{ .{ b.basis(1, 1, .{ 1, 0, 1 }), b.basis(1, 1, .{ 1, 0, 0 }), b.basis(1, 1, .{ 0, 0, 0 }) }, b.basis(1, 1, .{ 1, 0 }), b.basis(1, 1, .{ 1, 1 }), b.basis(1, 1, .{ 1, 2 }) },
+                .{ .{ b.basis(1, 1, .{ 1, 0, 1 }), b.basis(1, 1, .{ 0, 0, 1 }), b.basis(1, 1, .{ 0, 0, 0 }) }, b.basis(1, 1, .{ 0, 1 }), b.basis(1, 1, .{ 1, 1 }), b.basis(1, 1, .{ 2, 1 }) },
             );
         }
         fn tmaA(b: *B, cfg: Config) cute.TmaConfig {
@@ -681,6 +681,9 @@ fn issueTmaStage(
 ) void {
     const n = tile.n;
     const all = cute.AlgebraToken.all;
+    const dynamic = cute.AlgebraToken.dynamic;
+    const div_128: cute.ConstrainedDynamic = .{ .divisible_by = 128 };
+    const div_n: cute.ConstrainedDynamic = .{ .divisible_by = @intCast(n) };
     const a_copy_layout = b.staticLayout(b.layoutSpec(
         .{ .{ .{ 128, 128 }, 1 }, .{1} },
         .{ .{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0 }, .{0} },
@@ -700,7 +703,7 @@ fn issueTmaStage(
     const a_tile_k = b.sliceTyped(
         partitioned_a_target,
         .{ all, tile_m, all, expert },
-        b.coordTensorTypePayload("(0,?{div=128},?)", b.layoutSpec(
+        b.coordTensorTypeWithTuple(.{ 0, div_128, dynamic }, b.layoutSpec(
             .{ .{ .{ 128, 128 }, 1 }, reduction_tiles },
             .{ .{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0 }, b.basis(128, 1, .{0}) },
         )),
@@ -708,12 +711,12 @@ fn issueTmaStage(
     const a_tile = b.sliceTyped(
         a_tile_k,
         .{ all, k_tile },
-        b.coordTensorTypePayload("(?{div=128},?{div=128},?)", b.layoutSpec(
+        b.coordTensorTypeWithTuple(.{ div_128, div_128, dynamic }, b.layoutSpec(
             .{.{ .{ 128, 128 }, 1 }},
             .{.{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0 }},
         )),
     );
-    const a_source = b.rebuildCoordTensorIterator(3, a_tile, "(?{div=128},?{div=128},?)", .{ 128, 128, 1 }, a_copy_layout);
+    const a_source = b.rebuildCoordTensorIterator(3, a_tile, .{ div_128, div_128, dynamic }, .{ 128, 128, 1 }, a_copy_layout);
     // B's tile spans all of a group's rows, so its N-tile index is zero. Pass
     // it as a value rather than a literal: a statically zero leaf collapses out
     // of the coordinate tuple, and the TMA lowering then shifts the remaining
@@ -722,7 +725,7 @@ fn issueTmaStage(
     const b_tile_k = b.sliceTyped(
         partitioned_b_target,
         .{ all, b_tile_n, all, group },
-        b.coordTensorTypePayload(fmt(b, "(0,?{{div={d}}},?)", .{n}), b.layoutSpec(
+        b.coordTensorTypeWithTuple(.{ 0, div_n, dynamic }, b.layoutSpec(
             .{ .{ .{ 128, n }, 1 }, reduction_tiles },
             .{ .{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0 }, b.basis(128, 1, .{0}) },
         )),
@@ -730,14 +733,14 @@ fn issueTmaStage(
     const b_tile = b.sliceTyped(
         b_tile_k,
         .{ all, k_tile },
-        b.coordTensorTypePayload(fmt(b, "(?{{div=128}},?{{div={d}}},?)", .{n}), b.layoutSpec(
+        b.coordTensorTypeWithTuple(.{ div_128, div_n, dynamic }, b.layoutSpec(
             .{.{ .{ 128, n }, 1 }},
             .{.{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0 }},
         )),
     );
-    const b_source = b.rebuildCoordTensorIterator(3, b_tile, fmt(b, "(?{{div=128}},?{{div={d}}},?)", .{n}), .{ 128, n, 1 }, b_copy_layout);
-    const sfa_source = b.makeCoordTensor(.{ 0, tile_m, k_tile, expert }, b.staticCoordinateLayout(4, sf_copy_spec));
-    const sfb_source = b.makeCoordTensor(.{ 0, b.cst(.i32, 0), k_tile, group }, b.staticCoordinateLayout(4, sf_copy_spec));
+    const b_source = b.rebuildCoordTensorIterator(3, b_tile, .{ div_128, div_n, dynamic }, .{ 128, n, 1 }, b_copy_layout);
+    const sfa_source = b.makeCoordTensor(.{ 0, tile_m, k_tile, expert }, b.staticLayout(sf_copy_spec));
+    const sfb_source = b.makeCoordTensor(.{ 0, b.cst(.i32, 0), k_tile, group }, b.staticLayout(sf_copy_spec));
 
     var elected = b.openIf(b.electSync());
     b.mbarrierArriveExpectTx(stage.load_barrier, tile.transactionBytes());
@@ -1952,7 +1955,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const b_map = b.staticLayout(b.layoutSpec(.{ .{ n, 32 }, 1, 4 }, .{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0, b.basis(32, 1, .{1}) }));
     const sf_map = b.staticLayout(b.layoutSpec(
         .{ .{ .{ 32, 4 }, 32 }, 1, 4 },
-        .{ .{ .{ b.basis(1, 1, .{ 0, 0, 0 }), b.basis(1, 1, .{ 1, 0, 0 }) }, b.basis(1, 1, .{ 0, 0, 1 }) }, 0, b.basis(1, 1, .{ 1, 0, 1 }) },
+        .{ .{ .{ b.basis(1, 1, .{ 0, 0, 0 }), b.basis(1, 1, .{ 0, 0, 1 }) }, b.basis(1, 1, .{ 1, 0, 0 }) }, 0, b.basis(1, 1, .{ 1, 0, 1 }) },
     ));
 
     const tma_a = b.makeTiledTmaLoadAtomTyped(gA.value(), a_smem.value(), a_map.value(), L.tmaA(b, cfg));
