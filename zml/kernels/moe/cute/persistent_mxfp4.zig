@@ -507,7 +507,10 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
     b.setFunctionAttribute("nvvm.minctasm", .int(b.ctx, .i32, 1));
     b.setFunctionAttribute("smem.partition_num", .int(b.ctx, .i32, 2));
     b.setFunctionAttribute("smem.hint_smem_base_uniform", .unit(b.ctx));
-    b.setFunctionAttribute("cu_attrs", b.parseAttribute("{max_dynamic_shared_size_bytes = #cuda.dev_max_shared_memory_optin, non_portable_cluster_size_allowed = 1 : i32}"));
+    b.setFunctionAttribute("cu_attrs", .dict(b.ctx, &.{
+        .named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin()),
+        .named(b.ctx, "non_portable_cluster_size_allowed", .int(b.ctx, .i32, 1)),
+    }));
 
     // Prefetch every tensor-map descriptor before the specialized warps begin
     // the persistent pipeline. This is the work PDL buys us: it runs while the
@@ -612,18 +615,18 @@ fn HostArgs(comptime epilogue: Epilogue) type {
 /// consumers see them.  Per-stage views are slices of these.
 fn stagedOperands(b: *B, comptime tile: Tile, storage: StageStorage) StagedOperands {
     const L = Layouts(tile);
-    const a_full = b.makeViewTyped(
+    const a_full = b.makeView(
         b.recastSwizzledPointer(storage.a, .i8, .smem, 1024, L.ab_swizzle),
         b.staticLayout(L.aSmem(b, true)),
         b.memrefTypeFromPointer(b.swizzledPtrTy(.i8, .smem, 1024, L.ab_swizzle) catch @panic("bad A shared pointer"), b.layoutType(L.aSmem(b, true))),
     );
-    const b_full = b.makeViewTyped(
+    const b_full = b.makeView(
         b.recastSwizzledPointer(storage.b, .f8e4m3fn, .smem, 1024, L.ab_swizzle),
         b.staticLayout(L.bSmem(b, true)),
         b.memrefTypeFromPointer(b.swizzledPtrTy(.f8e4m3fn, .smem, 1024, L.ab_swizzle) catch @panic("bad B shared pointer"), b.layoutType(L.bSmem(b, true))),
     );
-    const sfa_full = b.makeViewTyped(storage.sfa, b.staticLayout(L.sfSmem(b, true)), b.memrefType(.f8e8m0fnu, .smem, 1024, b.layoutType(L.sfSmem(b, true))));
-    const sfb_full = b.makeViewTyped(storage.sfb, b.staticLayout(L.sfSmem(b, true)), b.memrefType(.f8e8m0fnu, .smem, 1024, b.layoutType(L.sfSmem(b, true))));
+    const sfa_full = b.makeView(storage.sfa, b.staticLayout(L.sfSmem(b, true)), b.memrefType(.f8e8m0fnu, .smem, 1024, b.layoutType(L.sfSmem(b, true))));
+    const sfb_full = b.makeView(storage.sfb, b.staticLayout(L.sfSmem(b, true)), b.memrefType(.f8e8m0fnu, .smem, 1024, b.layoutType(L.sfSmem(b, true))));
     return .{ .a = a_full, .b = b_full, .sfa = sfa_full, .sfb = sfb_full };
 }
 
@@ -635,13 +638,13 @@ fn stageBuffersAt(b: *B, comptime tile: Tile, storage: StageStorage, stage_index
     // pointer loses the staged descriptor semantics at ring wrap.
     const full = stagedOperands(b, tile, storage);
     const all = cute.AlgebraToken.all;
-    const a = b.sliceTyped(full.a, .{ all, all, all, stage_index }, b.memrefTypeFromPointer(b.swizzledPtrTy(.i8, .smem, 1024, L.ab_swizzle) catch @panic("bad A stage pointer"), b.layoutType(L.aSmem(b, false))));
-    const rhs = b.sliceTyped(full.b, .{ all, all, all, stage_index }, b.memrefTypeFromPointer(b.swizzledPtrTy(.f8e4m3fn, .smem, 1024, L.ab_swizzle) catch @panic("bad B stage pointer"), b.layoutType(L.bSmem(b, false))));
+    const a = b.slice(full.a, .{ all, all, all, stage_index }, b.memrefTypeFromPointer(b.swizzledPtrTy(.i8, .smem, 1024, L.ab_swizzle) catch @panic("bad A stage pointer"), b.layoutType(L.aSmem(b, false))));
+    const rhs = b.slice(full.b, .{ all, all, all, stage_index }, b.memrefTypeFromPointer(b.swizzledPtrTy(.f8e4m3fn, .smem, 1024, L.ab_swizzle) catch @panic("bad B stage pointer"), b.layoutType(L.bSmem(b, false))));
     // One scale stage is 512 bytes, so slicing a stage out of the ring keeps
     // that alignment, not the array's.
     const sf_stage_align = Tile.sf_stage_bytes;
-    const sfa = b.sliceTyped(full.sfa, .{ all, all, all, stage_index }, b.memrefType(.f8e8m0fnu, .smem, sf_stage_align, b.layoutType(L.sfSmem(b, false))));
-    const sfb = b.sliceTyped(full.sfb, .{ all, all, all, stage_index }, b.memrefType(.f8e8m0fnu, .smem, sf_stage_align, b.layoutType(L.sfSmem(b, false))));
+    const sfa = b.slice(full.sfa, .{ all, all, all, stage_index }, b.memrefType(.f8e8m0fnu, .smem, sf_stage_align, b.layoutType(L.sfSmem(b, false))));
+    const sfb = b.slice(full.sfb, .{ all, all, all, stage_index }, b.memrefType(.f8e8m0fnu, .smem, sf_stage_align, b.layoutType(L.sfSmem(b, false))));
 
     // `tma_partition` preserves a singleton CTA mode. Keep it in the copy
     // views: it is part of the executable TMA atom's expected algebra even
@@ -700,7 +703,7 @@ fn issueTmaStage(
     // partitioning produces a tensor over (tile, M, K, expert/group); first
     // select the output tile and expert/group, then select the K stage. The
     // remaining iterator carries the tensor-map coordinates needed by copy.
-    const a_tile_k = b.sliceTyped(
+    const a_tile_k = b.slice(
         partitioned_a_target,
         .{ all, tile_m, all, expert },
         b.coordTensorTypeWithTuple(.{ 0, div_128, dynamic }, b.layoutSpec(
@@ -708,7 +711,7 @@ fn issueTmaStage(
             .{ .{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0 }, b.basis(128, 1, .{0}) },
         )),
     );
-    const a_tile = b.sliceTyped(
+    const a_tile = b.slice(
         a_tile_k,
         .{ all, k_tile },
         b.coordTensorTypeWithTuple(.{ div_128, div_128, dynamic }, b.layoutSpec(
@@ -722,7 +725,7 @@ fn issueTmaStage(
     // of the coordinate tuple, and the TMA lowering then shifts the remaining
     // tensor-map coordinates, silently reading group zero for every group.
     const b_tile_n = b.cst(.i32, 0);
-    const b_tile_k = b.sliceTyped(
+    const b_tile_k = b.slice(
         partitioned_b_target,
         .{ all, b_tile_n, all, group },
         b.coordTensorTypeWithTuple(.{ 0, div_n, dynamic }, b.layoutSpec(
@@ -730,7 +733,7 @@ fn issueTmaStage(
             .{ .{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0 }, b.basis(128, 1, .{0}) },
         )),
     );
-    const b_tile = b.sliceTyped(
+    const b_tile = b.slice(
         b_tile_k,
         .{ all, k_tile },
         b.coordTensorTypeWithTuple(.{ div_128, div_n, dynamic }, b.layoutSpec(
@@ -752,7 +755,7 @@ fn issueTmaStage(
 }
 
 fn barrierAt(b: *B, base: V, stage: V) V {
-    return b.addOffsetTyped(
+    return b.addOffset(
         base,
         b.makeIntTuple(.{stage}),
         b.ptrTy(.i64, .smem, 8) catch @panic("bad pipeline barrier pointer"),
@@ -875,7 +878,7 @@ fn peekBarrierIfRemaining(b: *B, base: V, count: V, limit: usize, state: Pipelin
 fn accumulatorTmemAt(b: *B, comptime tile: Tile, tmem: V, stage: V) V {
     // The stage offset is a whole tile width, which `cute.add_offset` needs to
     // know: it derives the result alignment from what it knows of the offset.
-    return b.addOffsetTyped(
+    return b.addOffset(
         tmem,
         b.makeIntTupleDivBy(stage.mul(tile.n), @intCast(tile.n)),
         b.ptrTy(.f32, .tmem, 16) catch @panic("bad accumulator TMEM pointer"),
@@ -894,7 +897,7 @@ fn sharedPointerAt(
 ) V {
     const moved = comptime movedAlignment(byte_offset);
     comptime std.debug.assert(moved >= alignment);
-    const byte_ptr = b.addOffsetTyped(
+    const byte_ptr = b.addOffset(
         base,
         b.makeIntTuple(.{byte_offset}),
         b.ptrTy(.i8, .smem, moved) catch @panic("bad shared byte pointer"),
@@ -1100,44 +1103,45 @@ const StagedMxfp4Mainloop = struct {
 
     pub fn atStage(self: StagedMxfp4Mainloop, b: *B, index: V, accumulator_tmem: V) Mxfp4Mainloop {
         const all = cute.AlgebraToken.all;
-        const a = b.sliceTyped(
+        const a = b.slice(
             self.a,
             .{ all, all, all, index },
-            b.parseType("!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, \"(1,1,4):(0,0,2)\">"),
+            b.smemDescViewType(b.layoutSpec(.{ 1, 1, 4 }, .{ 0, 0, 2 })),
         );
-        const rhs = b.sliceTyped(
+        const rhs = b.slice(
             self.b,
             .{ all, all, all, index },
-            b.parseType("!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, \"(1,1,4):(0,0,2)\">"),
+            b.smemDescViewType(b.layoutSpec(.{ 1, 1, 4 }, .{ 0, 0, 2 })),
         );
-        const sfa_stage = b.sliceTyped(
+        const sfa_stage = b.slice(
             self.sfa_source,
             .{ all, all, all, all, index },
-            b.parseType("!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, \"(((32,1,1,4),1),1,1,1):(((1,1,1,0),0),0,0,0)\">"),
+            b.smemDescViewType(b.layoutSpec(.{ .{ .{ 32, 1, 1, 4 }, 1 }, 1, 1, 1 }, .{ .{ .{ 1, 1, 1, 0 }, 0 }, 0, 0, 0 })),
         );
-        const sfb_stage = b.sliceTyped(
+        const sfb_stage = b.slice(
             self.sfb_source,
             .{ all, all, all, all, index },
-            b.parseType("!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, \"(((32,1,1,4),1),1,1,1):(((1,1,1,0),0),0,0,0)\">"),
+            b.smemDescViewType(b.layoutSpec(.{ .{ .{ 32, 1, 1, 4 }, 1 }, 1, 1, 1 }, .{ .{ .{ 1, 1, 1, 0 }, 0 }, 0, 0, 0 })),
         );
-        const source_grouped_layout = b.staticValue("!cute.layout<\"(((32,1,1,4),1),(1,1,1)):(((1,1,1,0),0),(0,0,0))\">");
-        const source_grouped_ty = "!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, \"(((32,1,1,4),1),(1,1,1)):(((1,1,1,0),0),(0,0,0))\">";
+        const source_grouped_spec = b.layoutSpec(.{ .{ .{ 32, 1, 1, 4 }, 1 }, .{ 1, 1, 1 } }, .{ .{ .{ 1, 1, 1, 0 }, 0 }, .{ 0, 0, 0 } });
+        const source_grouped_layout = b.staticLayout(source_grouped_spec);
+        const source_grouped_ty = b.smemDescViewType(source_grouped_spec);
         const sfa_source = b.makeView(
-            b.getIter(sfa_stage, "!cute_nvgpu.smem_desc"),
+            b.getIter(sfa_stage, b.smemDescType()),
             source_grouped_layout,
             source_grouped_ty,
         );
         const sfb_source = b.makeView(
-            b.getIter(sfb_stage, "!cute_nvgpu.smem_desc"),
+            b.getIter(sfb_stage, b.smemDescType()),
             source_grouped_layout,
             source_grouped_ty,
         );
-        const acc_payload = fmt(b, "((128,{d}),1,1):((65536,1),0,0)", .{self.n});
-        const acc_layout = b.staticValue(fmt(b, "!cute.layout<\"{s}\">", .{acc_payload}));
+        const acc_spec = b.layoutSpec(.{ .{ 128, self.n }, 1, 1 }, .{ .{ 65536, 1 }, 0, 0 });
+        const acc_layout = b.staticLayout(acc_spec);
         const accumulator = b.makeView(
             accumulator_tmem,
             acc_layout,
-            fmt(b, "!cute.memref<f32, tmem, align<16>, \"{s}\">", .{acc_payload}),
+            b.memrefType(.f32, .tmem, 16, b.layoutType(acc_spec)),
         );
         return .{
             .a = a.value(),
@@ -1176,51 +1180,78 @@ fn makeMxfp4StagedMainloop(
         tiled_mma,
         smem_a,
         0,
-        fmt(b, "!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, \"(1,1,4,{d}):(0,0,2,1024)\">", .{stages}),
+        b.smemDescViewType(b.layoutSpec(.{ 1, 1, 4, stages }, .{ 0, 0, 2, 1024 })),
     );
     const frag_b = b.mmaMakeFragment(
         tiled_mma,
         smem_b,
         1,
-        fmt(b, "!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, \"(1,1,4,{d}):(0,0,2,{d})\">", .{ stages, n * 8 }),
+        b.smemDescViewType(b.layoutSpec(.{ 1, 1, 4, stages }, .{ 0, 0, 2, n * 8 })),
     );
 
     // TMEM columns: two N-wide accumulator stages, then 16 SFA and 16 SFB
     // columns, matching num_accumulator_tmem_cols/num_sfa_tmem_cols in Python.
-    const sf_layout = b.staticValue("!cute.layout<\"((((32,4),4),(32,1)),1,4):((((262144,4),8388608),(0,0)),0,1)\">");
-    const sfa_col = b.addOffset(scale_tmem, b.staticValue(fmt(b, "!cute.int_tuple<\"{d}\">", .{2 * n})), "!cute.ptr<f32, tmem, align<16>>");
-    const sfb_col = b.addOffset(scale_tmem, b.staticValue(fmt(b, "!cute.int_tuple<\"{d}\">", .{2 * n + 16})), "!cute.ptr<f32, tmem, align<16>>");
-    const sfa_ptr = b.recastIter(sfa_col, "!cute.ptr<f8E8M0FNU, tmem, align<16>>");
-    const sfb_ptr = b.recastIter(sfb_col, "!cute.ptr<f8E8M0FNU, tmem, align<16>>");
-    const sf_memref = "!cute.memref<f8E8M0FNU, tmem, align<16>, \"((((32,4),4),(32,1)),1,4):((((262144,4),8388608),(0,0)),0,1)\">";
+    const sf_spec = b.layoutSpec(.{ .{ .{ .{ 32, 4 }, 4 }, .{ 32, 1 } }, 1, 4 }, .{ .{ .{ .{ 262144, 4 }, 8388608 }, .{ 0, 0 } }, 0, 1 });
+    const sf_layout = b.staticLayout(sf_spec);
+    const tmem_f32_ptr = b.ptrTy(.f32, .tmem, 16) catch @panic("bad scale-factor TMEM pointer");
+    const tmem_sf_ptr = b.ptrTy(.f8e8m0fnu, .tmem, 16) catch @panic("bad scale-factor TMEM pointer");
+    const sfa_col = b.addOffset(scale_tmem, b.staticIntTuple(2 * n), tmem_f32_ptr);
+    const sfb_col = b.addOffset(scale_tmem, b.staticIntTuple(2 * n + 16), tmem_f32_ptr);
+    const sfa_ptr = b.recastIter(sfa_col, tmem_sf_ptr);
+    const sfb_ptr = b.recastIter(sfb_col, tmem_sf_ptr);
+    const sf_memref = b.memrefType(.f8e8m0fnu, .tmem, 16, b.layoutType(sf_spec));
     const sfa = b.makeView(sfa_ptr, sf_layout, sf_memref);
     const sfb = b.makeView(sfb_ptr, sf_layout, sf_memref);
 
-    const smem_filtered_ty = fmt(b, "!cute.memref<f8E8M0FNU, smem, align<1024>, \"((((32,4),1),(1,1)),1,4,{d}):((((16,4),0),(0,0)),0,1,512)\">", .{stages});
-    const tmem_filtered_ty = "!cute.memref<f8E8M0FNU, tmem, align<16>, \"((((32,4),4),(1,1)),1,4):((((262144,4),8388608),(0,0)),0,1)\">";
+    const smem_filtered_ty = b.memrefType(.f8e8m0fnu, .smem, 1024, b.layoutType(b.layoutSpec(
+        .{ .{ .{ .{ 32, 4 }, 1 }, .{ 1, 1 } }, 1, 4, stages },
+        .{ .{ .{ .{ 16, 4 }, 0 }, .{ 0, 0 } }, 0, 1, 512 },
+    )));
+    const tmem_filtered_ty = b.memrefType(.f8e8m0fnu, .tmem, 16, b.layoutType(b.layoutSpec(
+        .{ .{ .{ .{ 32, 4 }, 4 }, .{ 1, 1 } }, 1, 4 },
+        .{ .{ .{ .{ 262144, 4 }, 8388608 }, .{ 0, 0 } }, 0, 1 },
+    )));
     const sfa_smem_filtered = b.filterZeros(smem_sfa, null, smem_filtered_ty);
     const sfb_smem_filtered = b.filterZeros(smem_sfb, null, smem_filtered_ty);
     const sfa_tmem_filtered = b.filterZeros(sfa, null, tmem_filtered_ty);
     const sfb_tmem_filtered = b.filterZeros(sfb, null, tmem_filtered_ty);
 
-    const copy_atom = b.makeAtom("!cute_nvgpu.atom.s2t_copy<f8E8M0FNU, 32 DP, 128 bit, 1 cta, x4>", .{});
-    const copy_ty = "!cute.tiled_copy<!cute_nvgpu.atom.s2t_copy<f8E8M0FNU, 32 DP, 128 bit, 1 cta, x4>, layout_copy_tv = <\"(1,(32,(4,4),4)):(0,(1,(512,32),128))\">, tiler_mn = <\"[512:1;1:0;4:1]\">>";
+    const copy_atom_ty = b.s2tCopyAtomType(.f8e8m0fnu, .{ .num_dp = 32, .num_bit = 128, .broadcast = .x4 });
+    const copy_atom = b.makeAtom(copy_atom_ty, .{});
+    const copy_ty = b.tiledCopyType(
+        copy_atom_ty,
+        b.layoutSpec(.{ 1, .{ 32, .{ 4, 4 }, 4 } }, .{ 0, .{ 1, .{ 512, 32 }, 128 } }),
+        &.{ b.layoutSpec(512, 1), b.layoutSpec(1, 0), b.layoutSpec(4, 1) },
+    );
     const sfa_copy = b.makeS2tCopy(copy_atom, sfa_tmem_filtered, copy_ty);
     const sfb_copy = b.makeS2tCopy(copy_atom, sfb_tmem_filtered, copy_ty);
 
-    const source_partition_ty = fmt(b, "!cute.memref<f8E8M0FNU, smem, align<1024>, \"(((32,4,4,4),1),1,1,1,{d}):(((16,1,4,0),0),0,0,0,512)\">", .{stages});
-    const source_desc_ty = fmt(b, "!cute_nvgpu.smem_desc_view<!cute_nvgpu.smem_desc, \"(((32,1,1,4),1),1,1,1,{d}):(((1,1,1,0),0),0,0,0,32)\">", .{stages});
-    const target_partition_ty = "!cute.memref<f8E8M0FNU, tmem, align<16>, \"(((32,4,(4,4)),1),1,1,1):(((262144,1,(4,8388608)),0),0,0,0)\">";
-    const target_grouped_ty = "!cute.memref<f8E8M0FNU, tmem, align<16>, \"(((32,4,(4,4)),1),(1,1,1)):(((262144,1,(4,8388608)),0),(0,0,0))\">";
+    const source_partition_ty = b.memrefType(.f8e8m0fnu, .smem, 1024, b.layoutType(b.layoutSpec(
+        .{ .{ .{ 32, 4, 4, 4 }, 1 }, 1, 1, 1, stages },
+        .{ .{ .{ 16, 1, 4, 0 }, 0 }, 0, 0, 0, 512 },
+    )));
+    const source_desc_ty = b.smemDescViewType(b.layoutSpec(
+        .{ .{ .{ 32, 1, 1, 4 }, 1 }, 1, 1, 1, stages },
+        .{ .{ .{ 1, 1, 1, 0 }, 0 }, 0, 0, 0, 32 },
+    ));
+    const target_partition_ty = b.memrefType(.f8e8m0fnu, .tmem, 16, b.layoutType(b.layoutSpec(
+        .{ .{ .{ 32, 4, .{ 4, 4 } }, 1 }, 1, 1, 1 },
+        .{ .{ .{ 262144, 1, .{ 4, 8388608 } }, 0 }, 0, 0, 0 },
+    )));
+    const target_grouped_spec = b.layoutSpec(
+        .{ .{ .{ 32, 4, .{ 4, 4 } }, 1 }, .{ 1, 1, 1 } },
+        .{ .{ .{ 262144, 1, .{ 4, 8388608 } }, 0 }, .{ 0, 0, 0 } },
+    );
+    const target_grouped_ty = b.memrefType(.f8e8m0fnu, .tmem, 16, b.layoutType(target_grouped_spec));
     const sfa_src_partition = b.tiledCopyPartition(sfa_copy, sfa_smem_filtered, .{0}, false, source_partition_ty);
     const sfb_src_partition = b.tiledCopyPartition(sfb_copy, sfb_smem_filtered, .{0}, false, source_partition_ty);
     const sfa_desc = b.s2tSmemDescriptor(sfa_copy, sfa_src_partition, source_desc_ty);
     const sfb_desc = b.s2tSmemDescriptor(sfb_copy, sfb_src_partition, source_desc_ty);
     const sfa_dst_partition = b.tiledCopyPartition(sfa_copy, sfa_tmem_filtered, .{0}, true, target_partition_ty);
     const sfb_dst_partition = b.tiledCopyPartition(sfb_copy, sfb_tmem_filtered, .{0}, true, target_partition_ty);
-    const target_grouped_layout = b.staticValue("!cute.layout<\"(((32,4,(4,4)),1),(1,1,1)):(((262144,1,(4,8388608)),0),(0,0,0))\">");
-    const sfa_dst = b.makeView(b.getIter(sfa_dst_partition, "!cute.ptr<f8E8M0FNU, tmem, align<16>>"), target_grouped_layout, target_grouped_ty);
-    const sfb_dst = b.makeView(b.getIter(sfb_dst_partition, "!cute.ptr<f8E8M0FNU, tmem, align<16>>"), target_grouped_layout, target_grouped_ty);
+    const target_grouped_layout = b.staticLayout(target_grouped_spec);
+    const sfa_dst = b.makeView(b.getIter(sfa_dst_partition, tmem_sf_ptr), target_grouped_layout, target_grouped_ty);
+    const sfb_dst = b.makeView(b.getIter(sfb_dst_partition, tmem_sf_ptr), target_grouped_layout, target_grouped_ty);
 
     return .{
         .a = frag_a,
@@ -1235,10 +1266,6 @@ fn makeMxfp4StagedMainloop(
         .sfb_target = sfb_dst.value(),
         .n = n,
     };
-}
-
-fn fmt(b: *B, comptime format: []const u8, args: anytype) []const u8 {
-    return std.fmt.allocPrint(b.arena.allocator(), format, args) catch @panic("OOM");
 }
 
 /// Warp 4 drains the A/B ring into one of two independent accumulator stages.
@@ -1470,7 +1497,7 @@ fn runEpilogue(
     b.mbarrierTryWaitParity(barrierAt(b, storage.accumulator_full_barriers, stage), accumulator_state.phase, 10_000_000);
 
     const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, stage);
-    const warp_tmem = b.addOffsetTyped(
+    const warp_tmem = b.addOffset(
         accumulator_tmem,
         b.makeIntTupleDivBy(warp.mul(32 * 65536), 4),
         b.ptrTy(.f32, .tmem, 16) catch @panic("bad epilogue TMEM pointer"),
@@ -1481,7 +1508,7 @@ fn runEpilogue(
     const chunk_rows: usize = comptime @intCast(tile.chunkRows());
     const tile_chunks = comptime tile.chunks();
     inline for (0..tile_chunks) |chunk| {
-        const chunk_tmem = if (chunk == 0) warp_tmem else b.addOffsetTyped(
+        const chunk_tmem = if (chunk == 0) warp_tmem else b.addOffset(
             warp_tmem,
             b.makeIntTuple(.{@as(i32, @intCast(chunk * chunk_rows))}),
             b.ptrTy(.f32, .tmem, offsetAlignment(16, @intCast(chunk * chunk_rows), 4)) catch @panic("bad epilogue TMEM pointer"),
@@ -1602,7 +1629,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
     const f32_type = cute.DType.f32.toMlir(b.ctx);
     // The TMA C staging buffer is unused by this epilogue.
     const scratch_layout = b.layoutSpec(.{ 4, n }, .{ n, 1 });
-    const scratch = b.makeViewTyped(storage.c, b.staticLayout(scratch_layout), b.memrefType(.f32, .smem, 1024, b.layoutType(scratch_layout)));
+    const scratch = b.makeView(storage.c, b.staticLayout(scratch_layout), b.memrefType(.f32, .smem, 1024, b.layoutType(scratch_layout)));
     const row_chunks = std.math.divCeil(usize, live, swiglu_chunk) catch unreachable;
 
     var activations: [@intCast(n)]V = undefined;
@@ -1722,7 +1749,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         1,
         tile.fields(b),
     );
-    const shared_base = b.getIterTyped(
+    const shared_base = b.getIter(
         shared,
         b.ptrTy(.i8, .smem, 1024) catch @panic("bad shared base pointer"),
     ).value();
@@ -1762,8 +1789,8 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}), 0, b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
     const all_tiles = .{ cute.AlgebraToken.all, cute.AlgebraToken.all, cute.AlgebraToken.all };
-    const tiled_a = b.localTileTyped(d.gA, b.makeTile(&.{ 128, 128 }), all_tiles, b.coordTensorType(3, a_local_spec), null);
-    const tiled_b = b.localTileTyped(d.gB, b.makeTile(&.{ n, 128 }), all_tiles, b.coordTensorType(3, b_local_spec), null);
+    const tiled_a = b.localTile(d.gA, b.makeTile(&.{ 128, 128 }), all_tiles, b.coordTensorType(3, a_local_spec), null);
+    const tiled_b = b.localTile(d.gB, b.makeTile(&.{ n, 128 }), all_tiles, b.coordTensorType(3, b_local_spec), null);
 
     const a_mma_spec = b.layoutSpec(
         .{ .{ 128, 32 }, 1, 4, m_tiles, k_tiles, cfg.experts },
@@ -1773,8 +1800,8 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         .{ .{ n, 32 }, 1, 4, 1, k_tiles, cfg.groups },
         .{ .{ b.basis(1, 1, .{1}), b.basis(1, 1, .{0}) }, 0, b.basis(32, 1, .{0}), 0, b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
-    const mma_a = b.tiledMmaPartitionTyped(tiled_mma, tiled_a, .{0}, 0, b.coordTensorType(3, a_mma_spec));
-    const mma_b = b.tiledMmaPartitionTyped(tiled_mma, tiled_b, .{0}, 1, b.coordTensorType(3, b_mma_spec));
+    const mma_a = b.tiledMmaPartition(tiled_mma, tiled_a, .{0}, 0, b.coordTensorType(3, a_mma_spec));
+    const mma_b = b.tiledMmaPartition(tiled_mma, tiled_b, .{0}, 1, b.coordTensorType(3, b_mma_spec));
 
     const a_grouped_layout = b.staticLayout(b.layoutSpec(
         .{ .{ .{ 128, 32 }, 1, 4 }, m_tiles, k_tiles, cfg.experts },
@@ -1804,7 +1831,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         .{ .{ .{ 128, n }, 1 }, 1, k_tiles, cfg.groups },
         .{ .{ .{ b.basis(1, 1, .{0}), b.basis(1, 1, .{1}) }, 0 }, b.basis(n, 1, .{1}), b.basis(128, 1, .{0}), b.basis(1, 1, .{2}) },
     );
-    const partitioned_a = b.tmaPartitionTyped(
+    const partitioned_a = b.tmaPartition(
         .{ .inner = d.tma_a.inner, .kernel = b },
         .{0},
         one_cta,
@@ -1813,7 +1840,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         b.memrefTypeFromPointer(b.swizzledPtrTy(.i8, .smem, 1024, L.ab_swizzle) catch @panic("bad smem pointer"), b.layoutType(a_partition_layout)),
         &.{b.coordTensorType(3, a_target_layout)},
     );
-    const partitioned_b = b.tmaPartitionTyped(
+    const partitioned_b = b.tmaPartition(
         .{ .inner = d.tma_b.inner, .kernel = b },
         .{0},
         one_cta,
@@ -1823,10 +1850,10 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         &.{b.coordTensorType(3, b_target_layout)},
     );
 
-    const exec_a = b.makeExecTmaTyped(.{ .inner = d.tma_a.inner, .kernel = b }, b.tmaLoadExecAtomType(L.tmaA(b, cfg)));
-    const exec_b = b.makeExecTmaTyped(.{ .inner = d.tma_b.inner, .kernel = b }, b.tmaLoadExecAtomType(L.tmaB(b, cfg)));
-    const exec_sfa = b.makeExecTmaTyped(.{ .inner = d.tma_sfa.inner, .kernel = b }, b.tmaLoadExecAtomType(L.tmaSf(b)));
-    const exec_sfb = b.makeExecTmaTyped(.{ .inner = d.tma_sfb.inner, .kernel = b }, b.tmaLoadExecAtomType(L.tmaSf(b)));
+    const exec_a = b.makeExecTma(.{ .inner = d.tma_a.inner, .kernel = b }, b.tmaLoadExecAtomType(L.tmaA(b, cfg)));
+    const exec_b = b.makeExecTma(.{ .inner = d.tma_b.inner, .kernel = b }, b.tmaLoadExecAtomType(L.tmaB(b, cfg)));
+    const exec_sfa = b.makeExecTma(.{ .inner = d.tma_sfa.inner, .kernel = b }, b.tmaLoadExecAtomType(L.tmaSf(b)));
+    const exec_sfb = b.makeExecTma(.{ .inner = d.tma_sfb.inner, .kernel = b }, b.tmaLoadExecAtomType(L.tmaSf(b)));
 
     const expert_ids: cute.View = .{ .inner = d.expert_ids.inner, .kernel = b };
     const active_count: cute.View = .{ .inner = d.active_count.inner, .kernel = b };
@@ -1920,7 +1947,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     // `schedule` is `[group experts | group sizes | active count]`.
     const schedule = b.arg(host_arg.schedule);
     const ids = b.makeTensorView(schedule, b.staticLayout(b.layoutSpec(cfg.groups, 1)));
-    const active_ptr = b.addOffsetTyped(
+    const active_ptr = b.addOffset(
         schedule,
         b.makeIntTuple(.{2 * cfg.groups}),
         b.ptrTy(.i32, .gmem, offsetAlignment(16, 2 * cfg.groups, 4)) catch @panic("bad active count pointer"),
@@ -1937,10 +1964,10 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     // The Zig dialect binding exposes the zero-based form of Python CuTe's
     // `(2, 1, 3)` tile-to-shape order.
     const sf_order = b.makeIntTuple(.{ 1, 0, 2 });
-    const sfa_shape = b.makeShapeValues(.{ b.arg(host_arg.problem_m), b.arg(host_arg.problem_k), b.arg(host_arg.expert_count) }, b.parseType("!cute.shape<\"(?,?,?)\">"));
-    const sfb_shape = b.makeShapeValues(.{ b.arg(host_arg.problem_n), b.arg(host_arg.problem_k), b.arg(host_arg.problem_l) }, b.parseType("!cute.shape<\"(?,?,?)\">"));
-    const dynamic_sfa_layout = b.tileToShapeTyped(sf_atom_layout, sfa_shape, sf_order, b.layoutType(dynamic_sf_layout));
-    const dynamic_sfb_layout = b.tileToShapeTyped(sf_atom_layout, sfb_shape, sf_order, b.layoutType(dynamic_sf_layout));
+    const sfa_shape = b.makeShapeValues(.{ b.arg(host_arg.problem_m), b.arg(host_arg.problem_k), b.arg(host_arg.expert_count) }, b.shapeType(.{ cute.AlgebraToken.dynamic, cute.AlgebraToken.dynamic, cute.AlgebraToken.dynamic }));
+    const sfb_shape = b.makeShapeValues(.{ b.arg(host_arg.problem_n), b.arg(host_arg.problem_k), b.arg(host_arg.problem_l) }, b.shapeType(.{ cute.AlgebraToken.dynamic, cute.AlgebraToken.dynamic, cute.AlgebraToken.dynamic }));
+    const dynamic_sfa_layout = b.tileToShape(sf_atom_layout, sfa_shape, sf_order, b.layoutType(dynamic_sf_layout));
+    const dynamic_sfb_layout = b.tileToShape(sf_atom_layout, sfb_shape, sf_order, b.layoutType(dynamic_sf_layout));
     const gSFA = b.makeTensorView(b.recastPointer(b.arg(host_arg.weight_scale), .f8e8m0fnu, .gmem, 16), dynamic_sfa_layout);
     const gSFB = b.makeTensorView(b.recastPointer(b.arg(host_arg.input_scale), .f8e8m0fnu, .gmem, 16), dynamic_sfb_layout);
 
@@ -1958,10 +1985,10 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         .{ .{ .{ b.basis(1, 1, .{ 0, 0, 0 }), b.basis(1, 1, .{ 0, 0, 1 }) }, b.basis(1, 1, .{ 1, 0, 0 }) }, 0, b.basis(1, 1, .{ 1, 0, 1 }) },
     ));
 
-    const tma_a = b.makeTiledTmaLoadAtomTyped(gA.value(), a_smem.value(), a_map.value(), L.tmaA(b, cfg));
-    const tma_b = b.makeTiledTmaLoadAtomTyped(gB.value(), b_smem.value(), b_map.value(), L.tmaB(b, cfg));
-    const tma_sfa = b.makeTiledTmaLoadAtomTyped(gSFA.value(), sf_smem.value(), sf_map.value(), L.tmaSf(b));
-    const tma_sfb = b.makeTiledTmaLoadAtomTyped(gSFB.value(), sf_smem.value(), sf_map.value(), L.tmaSf(b));
+    const tma_a = b.makeTiledTmaLoadAtom(gA.value(), a_smem.value(), a_map.value(), L.tmaA(b, cfg));
+    const tma_b = b.makeTiledTmaLoadAtom(gB.value(), b_smem.value(), b_map.value(), L.tmaB(b, cfg));
+    const tma_sfa = b.makeTiledTmaLoadAtom(gSFA.value(), sf_smem.value(), sf_map.value(), L.tmaSf(b));
+    const tma_sfb = b.makeTiledTmaLoadAtom(gSFB.value(), sf_smem.value(), sf_map.value(), L.tmaSf(b));
 
     const one = b.cst(.i32, 1);
     const tiles_m = b.cst(.i32, @divExact(cfg.m, 128));
@@ -1980,7 +2007,7 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     };
     const activations = @divExact(cfg.m, 2);
     const group_sizes = b.makeTensorView(
-        b.addOffsetTyped(schedule, b.makeIntTuple(.{cfg.groups}), b.ptrTy(.i32, .gmem, offsetAlignment(16, cfg.groups, 4)) catch @panic("bad group size pointer")),
+        b.addOffset(schedule, b.makeIntTuple(.{cfg.groups}), b.ptrTy(.i32, .gmem, offsetAlignment(16, cfg.groups, 4)) catch @panic("bad group size pointer")),
         b.staticLayout(b.layoutSpec(cfg.groups, 1)),
     );
     const launch = switch (epilogue) {
