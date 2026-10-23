@@ -73,7 +73,7 @@ fix the consumer, not the constraint.
 
 ## NVIDIA's `nvvm` and `cuda` dialects
 
-The kernels the CuTe builder emits (`kernels/cute`) use two more dialects of
+The kernels the CuTe builder emits (`dsl/cute`) use two more dialects of
 the compiler: `nvvm` (special registers, mbarriers, tcgen05, ...) and `cuda`
 (kernels, launch configurations, host runtime calls). Both have sibling packages
 and must be regenerated with every release, like `cute` and `cute_nvgpu`.
@@ -317,7 +317,7 @@ A change is done when all of these hold:
    tests of every consumer found above (kernel emitters, host tools, language
    bindings), built with the tree's usual Bazel configuration.
 5. **NVIDIA's compiler reads what the kernels emit.** Dump the IR of every
-   kernel the repository's tests emit through `kernels/cute`: the builder's
+   kernel the repository's tests emit through `dsl/cute`: the builder's
    own tests and the CuTe kernels under `zml/kernels/moe/cute`,
    `zml/kernels/flash_attention/cute` and `zml/kernels/paged_attention/cute`.
    Dump both with the previous definitions and with the new ones. In the

@@ -7,7 +7,7 @@ call; ZML never links a GPU compiler.
 
 Two layers define the surface:
 
-- **Low layer** — `kernels/fly/builder.zig`: `Builder`, `Value`, `TiledCopy`,
+- **Low layer** — `dsl/fly/builder.zig`: `Builder`, `Value`, `TiledCopy`,
   `TiledMma`, the comptime layout literals in `layout.zig`, and `DType`.
   `Builder.open` takes an `*mlir.Context` from `zml.kernel.fly.newContext()`.
 - **High layer** — `zml.kernel.fly.Kernel(Config, spec)`: names the kernel's
@@ -212,7 +212,7 @@ Use `workgroup` scope for LDS pointers and `agent` scope for global
 pointers. The ordering is monotonic; callers provide barriers or kernel
 dependencies before consuming completed counters.
 
-Control flow uses `kernels/common`: `b.openFor(lo, hi, step, .{ inits })`
+Control flow uses `dsl/common`: `b.openFor(lo, hi, step, .{ inits })`
 with `.yield(.{ ... })`, `b.openIf(cond)` with `.yieldThen(.{})`,
 `b.openIfElse(cond, .{ types })` with `.yieldThen` / `.yieldElse`.
 `openWhile` has separate condition and body regions: `before_carried`
@@ -240,6 +240,6 @@ runtime. Straight-line kernels can still use `rmemTensor`,
 
 - A failing `inferReturnTypes` panics with the op name and every operand type
   (`fly.make_tiled_copy: cannot create operation ... operand 1: !fly.layout<...>`).
-- `Kernel.emit` returns the module text; `bazel test //kernels/fly:test`
+- `Kernel.emit` returns the module text; `bazel test //dsl/fly:test`
   builds the example kernels on any host, no GPU needed.
 - On the device side, `--xla_dump_to=<dir>` dumps the module the plugin saw.

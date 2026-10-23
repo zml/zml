@@ -1,10 +1,10 @@
 # CuTe DSL kernels in Zig
 
-`kernels/cute` is a Zig front end for NVIDIA's CuTe DSL, shaped after the
+`dsl/cute` is a Zig front end for NVIDIA's CuTe DSL, shaped after the
 Python `cutlass.cute` API: a kernel takes tensors, indexes them with
 coordinates, and reads `thread_idx()` and friends from `cute.arch`. It is the
-fourth instance of the `kernels/triton` / `kernels/mosaic_tpu` /
-`kernels/cuda_tile` pattern: a `Builder` that owns an MLIR module and appends
+fourth instance of the `dsl/triton` / `dsl/mosaic_tpu` /
+`dsl/cuda_tile` pattern: a `Builder` that owns an MLIR module and appends
 ops to a block stack, a `Value` with fluent scalar arithmetic, and a
 `zml.kernel.cute.Kernel` wrapper that turns a `run` function into a
 `stablehlo.custom_call` XLA compiles in process with `libcute_compiler.so`.
@@ -72,7 +72,7 @@ accessible afterward. The braces make the generated control flow visible and
 keep region-local values from escaping their scope; the builder's `open` and
 `yield` calls still create and close the actual IR regions.
 
-| `cutlass.cute`                             | `kernels/cute`                                  |
+| `cutlass.cute`                             | `dsl/cute`                                      |
 |--------------------------------------------|-------------------------------------------------|
 | `gA: cute.Tensor` kernel argument          | `.gA = .{ .tensor = .{ .dtype, .shape } }`      |
 | `gA[mi, ni]` / `gC[mi, ni] = v`            | `gA.get(.{ mi, ni })` / `gC.set(.{ mi, ni }, v)`|
@@ -165,15 +165,15 @@ To see what XLA received, run with `--xla_dump_to=<dir>`: it writes
 
 ```sh
 # the DSL: Value's fluent methods (add, mul, lt, to, exp, ...)
-awk '/^pub const Value = struct/,/^};/' kernels/cute/builder.zig | grep 'pub fn '
+awk '/^pub const Value = struct/,/^};/' dsl/cute/builder.zig | grep 'pub fn '
 
 # the DSL: everything on Tensor and Builder
-awk '/^pub const Tensor = struct/,/^};/' kernels/cute/builder.zig | grep 'pub fn '
-awk '/^pub const Builder = struct/,0' kernels/cute/builder.zig | grep '    pub fn '
+awk '/^pub const Tensor = struct/,/^};/' dsl/cute/builder.zig | grep 'pub fn '
+awk '/^pub const Builder = struct/,0' dsl/cute/builder.zig | grep '    pub fn '
 
 # every bound op of the dialect
 grep -n '^pub fn ' mlir/dialects/cute_ir/cute_ir.zig mlir/dialects/cute_nvgpu/cute_nvgpu.zig
 ```
 
-`grep -n '^test "' kernels/cute/builder.zig` lists the tests; each prints a
+`grep -n '^test "' dsl/cute/builder.zig` lists the tests; each prints a
 kernel that round-trips through the verifier.

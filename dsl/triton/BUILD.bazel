@@ -1,34 +1,29 @@
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
-    name = "cute_builder",
+    name = "triton_builder",
     srcs = [
         "dtype.zig",
     ],
-    import_name = "kernels/cute/builder",
+    import_name = "dsl/triton/builder",
     main = "builder.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
-        "//kernels/common",
+        "//dsl/common",
         "//mlir",
         "//mlir/dialects/arith",
         "//mlir/dialects/cf",
-        "//mlir/dialects/cuda",
-        "//mlir/dialects/cute_ir",
-        "//mlir/dialects/cute_nvgpu",
         "//mlir/dialects/func",
-        "//mlir/dialects/gpu",
         "//mlir/dialects/llvm",
         "//mlir/dialects/math",
-        "//mlir/dialects/nvvm",
         "//mlir/dialects/scf",
-        "//mlir/dialects/vector",
+        "//mlir/dialects/ttir",
         "//stdx",
     ],
 )
 
 zig_test(
     name = "test",
-    deps = [":cute_builder"],
+    deps = [":triton_builder"],
 )

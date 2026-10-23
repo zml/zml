@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const arith = @import("mlir/dialects/arith");
-const dsl = @import("kernels/common");
+const dsl = @import("dsl/common");
 const fly = @import("mlir/dialects/fly");
 const gpu = @import("mlir/dialects/gpu");
 const llvm = @import("mlir/dialects/llvm");

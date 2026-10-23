@@ -76,11 +76,11 @@ dialect today; when one appears, extend the generator and this file.
 ## Checks
 
 - `zig fmt` the generated files.
-- `bazel test //mlir/dialects/fly:test //kernels/fly:test`: every name in
+- `bazel test //mlir/dialects/fly:test //dsl/fly:test`: every name in
   `ops.operation_names` and `fly_rocdl.ops.operation_names` must be a registered operation.
 - Callers that no longer compile are the point of generating: an operation
   whose signature changed in FlyDSL now fails at the call site. Fix them in
-  the same change (`kernels/fly/builder.zig`, `zml/*/fly_kernels`).
+  the same change (`dsl/fly/builder.zig`, `zml/*/fly_kernels`).
 - Emit the IR of the fly kernels before and after (for instance
   `sparse_mla.Main2D.emit` and its siblings with representative configs) and
   diff it: a regeneration without an upstream change must be byte-identical.

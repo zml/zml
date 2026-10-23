@@ -1,29 +1,32 @@
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
-    name = "triton_builder",
+    name = "mosaic_tpu_builder",
     srcs = [
         "dtype.zig",
+        "pipeline.zig",
     ],
-    import_name = "kernels/triton/builder",
+    import_name = "dsl/mosaic_tpu/builder",
     main = "builder.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
-        "//kernels/common",
+        "//dsl/common",
         "//mlir",
+        "//mlir/dialects/affine",
         "//mlir/dialects/arith",
         "//mlir/dialects/cf",
         "//mlir/dialects/func",
-        "//mlir/dialects/llvm",
         "//mlir/dialects/math",
+        "//mlir/dialects/memref",
+        "//mlir/dialects/mosaic_tpu",
         "//mlir/dialects/scf",
-        "//mlir/dialects/ttir",
+        "//mlir/dialects/vector",
         "//stdx",
     ],
 )
 
 zig_test(
     name = "test",
-    deps = [":triton_builder"],
+    deps = [":mosaic_tpu_builder"],
 )

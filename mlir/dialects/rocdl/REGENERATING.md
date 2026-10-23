@@ -59,7 +59,7 @@ the bindings and this file.
 - Format with the Zig toolchain Bazel uses (CI runs its `zig fmt --check`); an
   older `zig fmt` leaves builtins that 0.17 rewrites. The C API follows
   `mlir/.clang-format`.
-- `bazel test //mlir/dialects/rocdl:test //kernels/fly:test //zml:test`: every
+- `bazel test //mlir/dialects/rocdl:test //dsl/fly:test //zml:test`: every
   generated declaration is referenced, the operation list is compared to the
   native registry, and attribute tests exercise every named enum case, named
   bit groups and combined bitfields. Add fixtures when a change introduces a
