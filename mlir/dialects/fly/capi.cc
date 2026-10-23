@@ -71,14 +71,14 @@ FLY_TYPE_ISA(CopyOpUniversalCopy, CopyOpUniversalCopyType)
 
 #undef FLY_TYPE_ISA
 
-MlirAttribute mlirFlyIntAttrGetStatic(MlirContext context, int32_t value) {
+MlirAttribute mlirFlyIntAttrStaticGet(MlirContext context, int32_t value) {
   mlir::MLIRContext *ctx = loadFly(context);
   if (!ctx)
     return {nullptr};
   return wrap(static_cast<mlir::Attribute>(IntAttr::getStatic(ctx, value)));
 }
 
-MlirAttribute mlirFlyIntAttrGetDynamic(MlirContext context, int32_t width,
+MlirAttribute mlirFlyIntAttrDynamicGet(MlirContext context, int32_t width,
                                        int32_t divisibility) {
   mlir::MLIRContext *ctx = loadFly(context);
   if (!ctx)
@@ -87,7 +87,7 @@ MlirAttribute mlirFlyIntAttrGetDynamic(MlirContext context, int32_t width,
       IntAttr::getDynamic(ctx, width, divisibility)));
 }
 
-MlirAttribute mlirFlyIntAttrGetNone(MlirContext context) {
+MlirAttribute mlirFlyIntAttrNoneGet(MlirContext context) {
   mlir::MLIRContext *ctx = loadFly(context);
   if (!ctx)
     return {nullptr};
@@ -102,7 +102,7 @@ MlirAttribute mlirFlyIntTupleAttrGet(MlirContext context, MlirAttribute value) {
   return wrap(static_cast<mlir::Attribute>(IntTupleAttr::get(ctx, inner)));
 }
 
-MlirAttribute mlirFlyIntTupleAttrGetBasis(MlirContext context,
+MlirAttribute mlirFlyIntTupleAttrBasisGet(MlirContext context,
                                           MlirAttribute value, intptr_t nModes,
                                           const int32_t *modes) {
   mlir::MLIRContext *ctx = loadFly(context);
@@ -115,7 +115,7 @@ MlirAttribute mlirFlyIntTupleAttrGetBasis(MlirContext context,
       IntTupleAttr::get(intValue, llvm::ArrayRef<int32_t>(modes, nModes))));
 }
 
-MlirAttribute mlirFlyIntTupleAttrGetTuple(MlirContext context,
+MlirAttribute mlirFlyIntTupleAttrTupleGet(MlirContext context,
                                           intptr_t nElements,
                                           MlirAttribute const *elements) {
   mlir::MLIRContext *ctx = loadFly(context);
@@ -154,7 +154,7 @@ MlirAttribute mlirFlyTileAttrGet(MlirContext context, MlirAttribute value) {
   return wrap(static_cast<mlir::Attribute>(TileAttr::get(ctx, inner)));
 }
 
-MlirAttribute mlirFlyTileAttrGetModes(MlirContext context, intptr_t nModes,
+MlirAttribute mlirFlyTileAttrModesGet(MlirContext context, intptr_t nModes,
                                       MlirAttribute const *modes) {
   mlir::MLIRContext *ctx = loadFly(context);
   if (!ctx || (nModes > 0 && !modes))

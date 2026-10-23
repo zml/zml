@@ -128,7 +128,8 @@ Every dep a source includes or imports is listed directly. Format with
   of the file or a builder local, takes a trailing underscore (`for_`,
   `return_`, `ptr_()`, `format_()`). It is quoted only when that name is taken
   too (`TupleType.@"type"(i)`, next to the `type_()` upcast).
-- Alternative constructors are `get<Form>(ctx, ...)`.
+- Alternative constructors are `mlir<C>NameAttr<Form>Get` in C, as MLIR's
+  `mlirDenseElementsAttrSplatGet`, and `get<Form>(ctx, ...)` in Zig.
 
 ### Zig API
 

@@ -15,15 +15,15 @@ pub const IntAttr = opaque {
     }
 
     pub fn getStatic(ctx: *mlir.Context, value: i32) mlir.Error!*const Self {
-        return @ptrCast(c.mlirFlyIntAttrGetStatic(ctx.ptr(), value).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirFlyIntAttrStaticGet(ctx.ptr(), value).ptr orelse return error.InvalidMlir);
     }
 
     pub fn getDynamic(ctx: *mlir.Context, width: i32, divisibility: i32) mlir.Error!*const Self {
-        return @ptrCast(c.mlirFlyIntAttrGetDynamic(ctx.ptr(), width, divisibility).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirFlyIntAttrDynamicGet(ctx.ptr(), width, divisibility).ptr orelse return error.InvalidMlir);
     }
 
     pub fn getNone(ctx: *mlir.Context) mlir.Error!*const Self {
-        return @ptrCast(c.mlirFlyIntAttrGetNone(ctx.ptr()).ptr orelse return error.InvalidMlir);
+        return @ptrCast(c.mlirFlyIntAttrNoneGet(ctx.ptr()).ptr orelse return error.InvalidMlir);
     }
 };
 
@@ -61,12 +61,12 @@ pub const IntTupleAttr = opaque {
     }
 
     pub fn getBasis(ctx: *mlir.Context, value: *const IntAttr, modes: []const i32) mlir.Error!*const Self {
-        const result = c.mlirFlyIntTupleAttrGetBasis(ctx.ptr(), value.ptr(), @intCast(modes.len), modes.ptr);
+        const result = c.mlirFlyIntTupleAttrBasisGet(ctx.ptr(), value.ptr(), @intCast(modes.len), modes.ptr);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 
     pub fn getTuple(ctx: *mlir.Context, elements: []const *const Self) mlir.Error!*const Self {
-        const result = c.mlirFlyIntTupleAttrGetTuple(ctx.ptr(), @intCast(elements.len), @ptrCast(elements.ptr));
+        const result = c.mlirFlyIntTupleAttrTupleGet(ctx.ptr(), @intCast(elements.len), @ptrCast(elements.ptr));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 };
@@ -117,7 +117,7 @@ pub const TileAttr = opaque {
     }
 
     pub fn getModes(ctx: *mlir.Context, modes: []const *const mlir.Attribute) mlir.Error!*const Self {
-        const result = c.mlirFlyTileAttrGetModes(ctx.ptr(), @intCast(modes.len), @ptrCast(modes.ptr));
+        const result = c.mlirFlyTileAttrModesGet(ctx.ptr(), @intCast(modes.len), @ptrCast(modes.ptr));
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 };
