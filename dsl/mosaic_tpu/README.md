@@ -14,7 +14,7 @@ its C API come from the pinned XLA repository.
 
 Two layers define the surface:
 
-- **Low layer** — `kernels/mosaic_tpu/builder.zig`: the IR builder primitives.
+- **Low layer** — `dsl/mosaic_tpu/builder.zig`: the IR builder primitives.
   `Builder.open(allocator, ctx, name)` → `b.declareArgsOpts(spec, results, opts)`
   → body via `b.*` helpers → `b.finishOpts(results, .{ .canonicalize = true })`
   for the final IR string. Pass `Builder.open` / `Builder.init` a

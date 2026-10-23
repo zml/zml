@@ -1,15 +1,15 @@
 const std = @import("std");
 
-const cuda_tile_builder = @import("kernels/cuda_tile/builder");
-const cute_builder = @import("kernels/cute/builder");
-const fly_builder = @import("kernels/fly/builder");
+const cuda_tile_builder = @import("dsl/cuda_tile/builder");
+const cute_builder = @import("dsl/cute/builder");
+const fly_builder = @import("dsl/fly/builder");
 const func = @import("mlir/dialects/func");
 const mlir = @import("mlir");
-const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
+const mosaic_tpu_builder = @import("dsl/mosaic_tpu/builder");
 const mosaic_tpu_dialect = @import("mlir/dialects/mosaic_tpu");
 const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
-const triton_builder = @import("kernels/triton/builder");
+const triton_builder = @import("dsl/triton/builder");
 
 const Compiler = @import("Compiler.zig");
 const DataType = @import("dtype.zig").DataType;

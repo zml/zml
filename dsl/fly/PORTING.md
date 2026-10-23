@@ -70,7 +70,7 @@ runtime must agree on the dialect version. FlyDSL HEAD may differ from both.
    `b.copyAtomLoad` returns vectors, `b.mmaAtomCall` returns the accumulator,
    and `b.copyAtomStore` writes vectors. Carry accumulator values through
    `openFor`; do not put mutable register tensors across control-flow regions.
-3. `bazel test //kernels/fly:test` (or a `K.emit` test): the module must
+3. `bazel test //dsl/fly:test` (or a `K.emit` test): the module must
    verify and re-parse. A panic from `fly.<op>: cannot create operation`
    lists the operand types; compare them with the Python trace.
 4. Run on the ROCm box against a host reference

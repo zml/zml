@@ -677,9 +677,9 @@ Once the LLIR matches *and* the visual-transparency pass is done:
 
 | Problem                                           | File                                         |
 |---------------------------------------------------|----------------------------------------------|
-| "How do I express `tl.X(...)` in Zig?"           | `kernels/triton/README.md` (Python ↔ Zig table) |
-| "What does `b.declareArgs(...)` accept?"          | `kernels/triton/README.md` (Argument specs)     |
-| "How do I call this kernel from `forward`?"       | `kernels/triton/README.md` (`K.call(...)`)      |
+| "How do I express `tl.X(...)` in Zig?"           | `dsl/triton/README.md` (Python ↔ Zig table)     |
+| "What does `b.declareArgs(...)` accept?"          | `dsl/triton/README.md` (Argument specs)         |
+| "How do I call this kernel from `forward`?"       | `dsl/triton/README.md` (`K.call(...)`)          |
 | "My kernel diverges from Python at LLIR"          | This file (Phase 3)                         |
 | "How do I add a kernel to the comparison harness?"| Phase 1 above + `examples/triton_emitter/`  |
 | "I want to inspect raw TTIR ops"                  | `mlir/dialects/ttir/ttir.zig` (escape hatch) |
@@ -708,7 +708,7 @@ If a divergence resists all the standard fixes:
 ## Before "fixing" the DSL
 
 Every time a divergence makes you suspect the DSL itself is buggy and you
-reach for `kernels/triton/builder.zig` — **verify against the Triton sources
+reach for `dsl/triton/builder.zig` — **verify against the Triton sources
 first** at `/Users/raph/Documents/Git-Repos/triton`. The DSL exists to
 mirror what Python's frontend emits; the source of truth is the Python
 trace, not what the rule "looks like" or what feels symmetric.

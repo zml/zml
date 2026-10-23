@@ -2,16 +2,16 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "cuda_tile_builder",
-    tags = ["manual"],
     srcs = [
         "control_flow.zig",
         "dtype.zig",
     ],
-    import_name = "kernels/cuda_tile/builder",
+    import_name = "dsl/cuda_tile/builder",
     main = "builder.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
-        "//kernels/common",
+        "//dsl/common",
         "//mlir",
         "//mlir/dialects/cuda_tile",
         "//stdx",

@@ -6,7 +6,7 @@ zig_library(
         "args.zig",
         "control_flow.zig",
     ],
-    import_name = "kernels/common",
+    import_name = "dsl/common",
     main = "dsl.zig",
     visibility = ["//visibility:public"],
     deps = [

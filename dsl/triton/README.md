@@ -7,7 +7,7 @@ Triton kernels from a ZML model.
 
 Two layers define the surface:
 
-- **Low layer** — `kernels/triton/builder.zig`: the IR builder primitives.
+- **Low layer** — `dsl/triton/builder.zig`: the IR builder primitives.
   `Builder`, `Value`, `DType`, `ArgSpec`. Use these directly when you need
   full control (custom op insertion, dynamic-arity arg lists, escape hatches).
   `Builder.open` / `Builder.init` take an `*mlir.Context` — pass them a

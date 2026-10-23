@@ -1,8 +1,8 @@
 # CUDA Tile IR kernels in Zig
 
-`kernels/cuda_tile` is a Zig DSL that emits NVIDIA's `cuda_tile` MLIR dialect
-(CUDA Tile IR). It is the third instance of the `kernels/triton` /
-`kernels/mosaic_tpu` pattern: a `Builder` that owns an MLIR module and appends
+`dsl/cuda_tile` is a Zig DSL that emits NVIDIA's `cuda_tile` MLIR dialect
+(CUDA Tile IR). It is the third instance of the `dsl/triton` /
+`dsl/mosaic_tpu` pattern: a `Builder` that owns an MLIR module and appends
 ops to a block stack, a `Value` with fluent arithmetic, and a
 `zml.kernel.cuda_tile.Kernel` wrapper that turns a `run` function into a
 `stablehlo.custom_call` XLA compiles with `tileiras`.
@@ -110,23 +110,23 @@ grep -n '^pub fn ' mlir/dialects/cuda_tile/cuda_tile.zig
 grep -n '^pub const ' mlir/dialects/cuda_tile/cuda_tile.zig
 
 # the DSL: Value's fluent methods (add, mul, lt, to, sum, reshape, ...)
-awk '/^pub const Value = struct/,/^};/' kernels/cuda_tile/builder.zig | grep 'pub fn '
+awk '/^pub const Value = struct/,/^};/' dsl/cuda_tile/builder.zig | grep 'pub fn '
 
 # the DSL: everything on Builder (views, load/store, math, casts, reductions,
 # atomics, control flow) -- the `*Opts` variant of a call takes the options
-awk '/^pub const Builder = struct/,0' kernels/cuda_tile/builder.zig | grep '    pub fn '
+awk '/^pub const Builder = struct/,0' dsl/cuda_tile/builder.zig | grep '    pub fn '
 
 # what each option struct holds, and its defaults
-grep -n '^pub const [A-Za-z]*Opts = struct' -A 8 kernels/cuda_tile/builder.zig
+grep -n '^pub const [A-Za-z]*Opts = struct' -A 8 dsl/cuda_tile/builder.zig
 
 # for / if / loop scopes and their terminators
-grep -n 'pub fn ' kernels/cuda_tile/control_flow.zig
+grep -n 'pub fn ' dsl/cuda_tile/control_flow.zig
 
 # element types
-grep -n 'pub const DType = enum' -A 30 kernels/cuda_tile/dtype.zig
+grep -n 'pub const DType = enum' -A 30 dsl/cuda_tile/dtype.zig
 ```
 
-Every op also has a test: `grep -n '^test "' kernels/cuda_tile/builder.zig`
+Every op also has a test: `grep -n '^test "' dsl/cuda_tile/builder.zig`
 lists them, and each one prints IR that round-trips through the verifier, so
 they double as usage examples. A worked, runnable example (saxpy, softmax,
 gemm, in-place relu) lives in `examples/cuda_tile`.

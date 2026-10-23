@@ -1,10 +1,10 @@
-//! `cuda_tile` scope wrappers, like `kernels/common/control_flow.zig` but with
+//! `cuda_tile` scope wrappers, like `dsl/common/control_flow.zig` but with
 //! the dialect's terminators: `continue` ends a `for`/`loop` body, `yield` an
 //! `if`, `break` leaves a `loop`. An already-terminated branch is left alone.
 
 const std = @import("std");
 const cuda_tile = @import("mlir/dialects/cuda_tile");
-const dsl = @import("kernels/common");
+const dsl = @import("dsl/common");
 const mlir = @import("mlir");
 
 pub const tupleArity = dsl.tupleArity;

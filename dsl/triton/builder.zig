@@ -2,7 +2,7 @@ const std = @import("std");
 
 const arith = @import("mlir/dialects/arith");
 const cf = @import("mlir/dialects/cf");
-const dsl = @import("kernels/common");
+const dsl = @import("dsl/common");
 const math = @import("mlir/dialects/math");
 const scf = @import("mlir/dialects/scf");
 const ttir = @import("mlir/dialects/ttir");
