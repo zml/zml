@@ -149,6 +149,7 @@ zig_library(
         "//dsl/cute:cute_builder",
         "//dsl/fly:fly_builder",
         "//dsl/mosaic_tpu:mosaic_tpu_builder",
+        "//dsl/tcl:tcl_builder",
         "//dsl/triton:triton_builder",
         "//ffi:zig",
         "//mlir",
