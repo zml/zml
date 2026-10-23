@@ -3,6 +3,8 @@ const std = @import("std");
 const arith = @import("mlir/dialects/arith");
 const cf = @import("mlir/dialects/cf");
 const dsl = @import("dsl/common");
+const func = @import("mlir/dialects/func");
+const llvm = @import("mlir/dialects/llvm");
 const math = @import("mlir/dialects/math");
 const scf = @import("mlir/dialects/scf");
 const ttir = @import("mlir/dialects/ttir");
@@ -455,7 +457,9 @@ pub fn ScanArgs(comptime CtxT: type) type {
     };
 }
 
-pub const dialects_needed = [_][]const u8{ "func", "tt", "arith", "scf", "math", "cf", "llvm" };
+pub fn registerDialects(registry: *mlir.DialectRegistry) void {
+    inline for (.{ func, ttir, arith, scf, math, cf, llvm }) |dialect| dialect.registerDialect(registry);
+}
 
 pub const Builder = struct {
     allocator: std.mem.Allocator,

@@ -20,8 +20,8 @@ dialects, with a small C API for what upstream lacks).
   with a string literal, where `<handle>` is the second argument of
   `MLIR_DECLARE_CAPI_DIALECT_REGISTRATION`. Tests and consumers register
   through `<pkg>.registerDialect`, never through raw strings or
-  `DialectHandle.fromString`. Only the `dsl/` builders keep their own
-  `dialects_needed` lists.
+  `DialectHandle.fromString`. A DSL exposes `registerDialects(registry)`,
+  which calls the `registerDialect` of each package it emits.
 - **Operation list.** A package that builds operations exports a sorted
   `pub const operation_names: []const []const u8` naming every operation its
   builders create. `test "every bound operation is registered"` checks each
@@ -262,6 +262,6 @@ if grep -rqF --include='*.zig' '.make(' "$d"; then
   grep -qF 'pub const operation_names' "$d"/*.zig || echo "missing: operation_names"
   grep -qF 'test "every bound operation is registered"' "$d/test.zig" || echo "missing: registration test"
 fi
-git grep -n 'DialectHandle.fromString' -- zml examples | grep -v zml/kernel.zig
+git grep -n 'DialectHandle.fromString' -- dsl zml examples
 exit 0
 ```

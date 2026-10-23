@@ -7,7 +7,9 @@
 
 const std = @import("std");
 
+const affine = @import("mlir/dialects/affine");
 const arith = @import("mlir/dialects/arith");
+const cf = @import("mlir/dialects/cf");
 const func = @import("mlir/dialects/func");
 const math = @import("mlir/dialects/math");
 const memref = @import("mlir/dialects/memref");
@@ -443,7 +445,9 @@ pub const MinMaxOpts = struct {
 // Builder — the main DSL builder.
 // =============================================================================
 
-pub const dialects_needed = [_][]const u8{ "func", "tpu", "arith", "scf", "math", "cf", "memref", "vector", "affine" };
+pub fn registerDialects(registry: *mlir.DialectRegistry) void {
+    inline for (.{ func, mosaic_tpu, arith, scf, math, cf, memref, vector, affine }) |dialect| dialect.registerDialect(registry);
+}
 
 /// The main DSL builder. Create with `init`, populate the body with helpers,
 /// then call `finish` to get the IR string.
@@ -2316,7 +2320,7 @@ test {
 test "static rotate uses the current dynamic rotate operation" {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    inline for (dialects_needed) |dialect| registry.registerDialect(dialect);
+    registerDialects(registry);
     func.registerExtensions(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();

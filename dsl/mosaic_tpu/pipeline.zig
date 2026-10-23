@@ -1107,7 +1107,7 @@ test {
 test "trivial input-output ref is copied in and out" {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    inline for (builder.dialects_needed) |dialect| registry.registerDialect(dialect);
+    builder.registerDialects(registry);
     func.registerExtensions(registry);
 
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
