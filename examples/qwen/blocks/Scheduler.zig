@@ -17,8 +17,6 @@ max_shift: f32 = 0.9,
 sigmas: []f32 = undefined,
 timesteps: []f32 = undefined,
 
-step_index: usize = 0,
-
 pub fn deinit(self: *FlowMatchEulerScheduler, allocator: std.mem.Allocator) void {
     allocator.free(self.timesteps);
     allocator.free(self.sigmas);
@@ -45,18 +43,23 @@ pub fn init_timesteps(self: *FlowMatchEulerScheduler, allocator: std.mem.Allocat
     return self.timesteps;
 }
 
-pub fn step(self: *FlowMatchEulerScheduler, model_output: zml.Tensor, sample_: zml.Tensor) zml.Tensor {
+/// Euler step. `sigmas` is the {.step = steps + 1} f32 tensor from `sigmasTensor` and `step_index` a runtime
+/// scalar, so the step can be traced once inside a `zml.ops.while`.
+pub fn step(sigmas: zml.Tensor, step_index: zml.Tensor, model_output: zml.Tensor, sample_: zml.Tensor) zml.Tensor {
     const sample = sample_.convert(.f32);
 
-    const sigma = self.sigmas[self.step_index];
-    const sigma_next = self.sigmas[self.step_index + 1];
-    const delta = sigma_next - sigma;
+    const sigma = sigmas.slice(.step, .dynSingle(step_index));
+    const sigma_next = sigmas.slice(.step, .dynSingle(step_index.addConstant(1)));
+    const delta = sigma_next.sub(sigma);
 
-    const prev_sample = sample.add(zml.Tensor.scalar(delta, .f32).broad(model_output.shape()).mul(model_output.convert(.f32))).convert(model_output.dtype());
-
-    self.step_index += 1;
+    const prev_sample = sample.add(delta.broad(model_output.shape()).mul(model_output.convert(.f32))).convert(model_output.dtype());
 
     return prev_sample;
+}
+
+/// Embeds the sigmas computed by `init_timesteps` in the graph, as {.step = steps + 1} f32.
+pub fn sigmasTensor(self: FlowMatchEulerScheduler) zml.Tensor {
+    return .constantTensor(.init(.{ .step = self.sigmas.len }, .f32), std.mem.sliceAsBytes(self.sigmas));
 }
 
 fn calculate_shift(self: FlowMatchEulerScheduler, image_seq_len: f32) f32 {

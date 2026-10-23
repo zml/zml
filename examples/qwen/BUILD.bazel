@@ -19,6 +19,7 @@ zig_binary(
     ] + glob(["blocks/*.zig"]) + glob(["blocks/generation/*.zig"]) + glob(["blocks/language/*.zig"]) + glob(["blocks/vae/*.zig"]) + glob(["store/*.zig"]),
     main = "torch2zml.zig",
     deps = [
+        "@stb",
         "@zml//stdx",
         "@zml//zml",
     ],

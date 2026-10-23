@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
         .height = 2048,
 
         .in_channels = 64,
-        .num_inference_steps = 4,
+        .num_inference_steps = 40,
         .vae_scale_factor = 16,
 
         .seq_len = 16415,

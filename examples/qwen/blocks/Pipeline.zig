@@ -1,6 +1,7 @@
 const std = @import("std");
 const stdx = @import("stdx");
 const zml = @import("zml");
+const c = @import("c");
 
 const tokenizer = @import("./tokenizer.zig");
 const Scheduler = @import("./Scheduler.zig");
@@ -97,14 +98,16 @@ pub fn run_once(
     const latents_mean_slice = try zml.Slice.alloc(self.allocator, latents_mean_shape);
     defer latents_mean_slice.free(self.allocator);
     @memcpy(latents_mean_slice.items(f32)[0..latents_mean_data.len], &latents_mean_data.*);
-    const latents_mean_buffer = try zml.Buffer.fromSlice(self.io, self.platform, latents_mean_slice, .replicated);
+    var latents_mean_buffer = try zml.Buffer.fromSlice(self.io, self.platform, latents_mean_slice, .replicated);
+    defer latents_mean_buffer.deinit();
     const latents_mean_tensor = zml.Tensor.init(latents_mean_shape, .f32);
 
     const latents_std_shape = zml.shape.Shape.init(.{ .bs = 1, .c = latents_std_data.len, .t = 1, .kx = 1, .ky = 1 }, .f32);
     const latents_std_slice = try zml.Slice.alloc(self.allocator, latents_std_shape);
     defer latents_std_slice.free(self.allocator);
     @memcpy(latents_std_slice.items(f32)[0..latents_std_data.len], &latents_std_data.*);
-    const latents_std_buffer = try zml.Buffer.fromSlice(self.io, self.platform, latents_std_slice, .replicated);
+    var latents_std_buffer = try zml.Buffer.fromSlice(self.io, self.platform, latents_std_slice, .replicated);
+    defer latents_std_buffer.deinit();
     const latents_std_tensor = zml.Tensor.init(latents_std_shape, .f32);
 
     std.debug.print("\n\nStart compile\n\n", .{});
@@ -165,11 +168,60 @@ pub fn run_once(
     defer self.allocator.free(results);
 
     exe_results.fill(.{results});
-    std.debug.print("results[0]._shape: {f}\n", .{results[0]._shape});
+    const image = results[0];
+    const slice = try image.toSliceAlloc(self.allocator, self.io);
+    defer slice.free(self.allocator);
+    std.debug.print("results[0]._shape: {f}\n", .{image._shape});
+
+    const path: [:0]const u8 = "/home/erwan/zml/examples/qwen/pytorch/skusku.png";
+    const shape = image.shape();
+    const res = c.stbi_write_png(path.ptr, @intCast(shape.dim(.ky)), @intCast(shape.dim(.kx)), @intCast(shape.dim(.c)), @constCast(slice.bytes.ptr), 0);
+    if (res != 0) {
+        std.debug.print("Image {s} saved\n", .{path});
+    } else {
+        std.debug.print("Image could not be saved\n", .{});
+    }
 }
 
 // This value is the start of the system prompt
 const DROP_IDX = 14;
+
+/// One denoising step per iteration: transformer forward then the scheduler's Euler step.
+const Denoise = struct {
+    transformer_model: blocks.QwenImage21Transformer2DModel,
+    args: CompileArgs,
+    prompt_embeds: zml.Tensor,
+    timesteps: zml.Tensor, // {.step}, bf16
+    sigmas: zml.Tensor, // {.step = timesteps + 1}, f32
+
+    pub const State = struct {
+        step: zml.Tensor,
+        latents: zml.Tensor,
+    };
+
+    pub fn cond(self: Denoise, state: State) zml.Tensor {
+        return state.step.cmp(.LT, zml.Tensor.scalar(self.timesteps.dim(.step), .i32));
+    }
+
+    pub fn body(self: Denoise, state: State) State {
+        const latents = state.latents;
+        const timestep = self.timesteps.slice(.step, .dynSingle(state.step)).broad(.init(.{ .bs = latents.dim(0) }, .bf16));
+        const noise_pred = self.transformer_model.forward(
+            latents,
+            self.prompt_embeds,
+            timestep,
+            zml.Tensor.zeroes(.init(.{ .bs = 1 }, .f32)), // unused
+            self.args,
+        )
+            // The size after the forward is [1, TextSeqLen + ImgSeqLen, 64] we only care about [1, ImgSeqLen, 64] so we skip TextSeqLen
+            .slice(1, .{ .start = self.prompt_embeds.dim(.seq_len) });
+
+        return .{
+            .step = state.step.addConstant(1),
+            .latents = Scheduler.step(self.sigmas, state.step, noise_pred, latents),
+        };
+    }
+};
 
 const PipelineWrapper = struct {
     lang_model: blocks.Qwen3VLModel,
@@ -190,29 +242,44 @@ const PipelineWrapper = struct {
 
         const latent_w = 2 * self.args.width / (self.args.vae_scale_factor * 2);
         const latent_h = 2 * self.args.height / (self.args.vae_scale_factor * 2);
-        var latents = self.rng.bitGenerator(.init(.{ .bs = 1, .seq_len = latent_w * latent_h, .d = self.args.in_channels }, .bf16))[1];
+        // Standard normal noise like `randn` (Box-Muller). bitGenerator only returns raw bits, not floats.
+        const noise_shape: zml.Shape = .init(.{ .bs = 1, .seq_len = latent_w * latent_h, .d = self.args.in_channels }, .f32);
+        const rng, const uniform_a = self.rng.uniform(noise_shape, .{});
+        _, const uniform_b = rng.uniform(noise_shape, .{});
+        // uniform is in [0, 1), so 1 - u is in (0, 1] and the log stays finite.
+        const radius = uniform_a.scale(-1).addConstant(1).log().scale(-2).sqrt();
+        var latents = radius.mul(uniform_b.scale(2 * std.math.pi).cos()).convert(.bf16);
 
-        for (self.timesteps) |t| {
-            const timestep = zml.Tensor.scalar(t, .bf16).broad(.init(.{ .bs = latents.dim(0) }, .bf16));
-            const noise_pred = self.transformer_model.forward(
-                latents,
-                prompt_embeds,
-                timestep,
-                zml.Tensor.zeroes(.init(.{ .bs = 1 }, .f32)), // unused
-                self.args,
-            )
-                // The size after the forward is [1, TextSeqLen + ImgSeqLen, 64] we only care about [1, ImgSeqLen, 64] so we skip TextSeqLen
-                .slice(1, .{ .start = prompt_embeds.dim(.seq_len) });
-
-            latents = self.scheduler.step(noise_pred, latents);
-        }
+        // A `stablehlo.while` traces the transformer once instead of unrolling one copy per timestep.
+        const timesteps: zml.Tensor = .constantTensor(.init(.{ .step = self.timesteps.len }, .f32), std.mem.sliceAsBytes(self.timesteps));
+        latents = zml.ops.@"while"(Denoise, .{
+            .transformer_model = self.transformer_model,
+            .args = self.args,
+            .prompt_embeds = prompt_embeds,
+            .timesteps = timesteps.convert(.bf16),
+            .sigmas = self.scheduler.sigmasTensor(),
+        }, .{
+            .step = .scalar(0, .i32),
+            .latents = latents,
+        }).latents;
 
         const unpacked = self._unpack_latents(latents).convert(.f32);
         const std_mean = unpacked.mul(latents_std.broad(unpacked.shape())).add(latents_mean.broad(unpacked.shape()));
         const img = self.vae_model.forward(std_mean);
         stdx.debug.assert(img.dim(.t) == 1, "Expected only one temporal dimension, got {}", .{img.dim(.t)});
 
-        return img;
+        // std.debug.print("img: {f}\n", .{img.shape()}); // img: {bs=1,c=4,t=1,kx=2048,ky=2048,f32}
+        const normalized = img.scale(0.5).addConstant(0.5).clamp(
+            zml.Tensor.scalar(0, .f32).broad(img.shape()),
+            zml.Tensor.scalar(1, .f32).broad(img.shape()),
+        );
+        // std.debug.print("normalized: {f} {}\n", .{ normalized.shape(), normalized.dtype() }); // normalized: {bs=1,c=4,t=1,kx=2048,ky=2048,f32} .f32
+        const numpy = normalized.squeeze(.bs).transpose(.{ .t, .kx, .ky, .c });
+        // std.debug.print("numpy: {f} {}\n", .{ numpy.shape(), numpy.dtype() }); // numpy: {t=1,kx=2048,ky=2048,c=4,f32} .f32
+        const pil = numpy.scale(255).round().convert(.u8);
+        // std.debug.print("pil: {f} {}\n", .{ pil.shape(), pil.dtype() }); // pil: {t=1,kx=2048,ky=2048,c=4,u8} .u8
+
+        return pil;
     }
 
     // The python impl does nothing more since we don't have images in the prompt
