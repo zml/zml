@@ -150,6 +150,7 @@ zig_library(
         "//dsl/cuda_tile:builder",
         "//dsl/cute:builder",
         "//dsl/fly:builder",
+        "//dsl/metal:builder",
         "//dsl/mosaic_tpu:builder",
         "//dsl/tcl:builder",
         "//dsl/triton:builder",

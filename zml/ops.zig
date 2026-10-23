@@ -1360,6 +1360,69 @@ pub fn tcl(inputs: anytype, outputs: anytype, opts: TclOps) [outputs.len]Tensor 
     return outputs_;
 }
 
+pub const MetalOps = struct {
+    /// The kernel symbol.
+    name: []const u8,
+    /// The kernel's module, in the AIR dialect.
+    ir: []const u8,
+    /// Threadgroups per grid.
+    grid: [3]u32,
+    /// Threads per threadgroup.
+    threadgroup: [3]u32,
+    /// Bytes of `[[threadgroup(0)]]` memory.
+    threadgroup_memory: u64 = 0,
+    /// What each `[[buffer(n)]]` binds: `k >= 0` the XLA buffer `k` (the
+    /// operands, then the results), `k < 0` the constant `-1 - k`.
+    arguments: []const i32,
+    /// The bytes of the constant arguments.
+    constants: []const []const u8 = &.{},
+    output_operand_aliases: []const stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+};
+
+/// A `__gpu$xla.gpu.air` custom call: XLA lowers `ir` to AIR, compiles it to
+/// a metallib and launches `name`.
+pub fn metal(inputs: anytype, outputs: anytype, opts: MetalOps) [outputs.len]Tensor {
+    const compiler = Compiler.current();
+    const mlir_ctx = compiler.mlir_ctx;
+
+    var values: [inputs.len]*const mlir.Value = undefined;
+    inline for (0..inputs.len) |i| values[i] = inputs[i].value();
+
+    var res_types: [outputs.len]*const mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| res_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output);
+
+    const allocator = compiler.allocator;
+    const constant_attrs = allocator.alloc(*const mlir.Attribute, opts.constants.len) catch @panic("OOM");
+    defer allocator.free(constant_attrs);
+    for (opts.constants, constant_attrs) |bytes, *attribute| attribute.* = .denseArray(mlir_ctx, .i8, @as([]const i8, @ptrCast(bytes)));
+
+    const sizes = [2][3]u32{ opts.grid, opts.threadgroup };
+    var dims: [2][3]*const mlir.Attribute = undefined;
+    for (&dims, sizes) |*elems, dim| {
+        for (elems, dim) |*e, size| e.* = .int(mlir_ctx, .i32, size);
+    }
+    const backend_config: *const mlir.Attribute = .dict(mlir_ctx, &.{
+        .named(mlir_ctx, "name", .string(mlir_ctx, opts.name)),
+        .named(mlir_ctx, "ir", .string(mlir_ctx, opts.ir)),
+        .named(mlir_ctx, "grid", .array(mlir_ctx, &dims[0])),
+        .named(mlir_ctx, "threadgroup", .array(mlir_ctx, &dims[1])),
+        .named(mlir_ctx, "threadgroup_memory", .int(mlir_ctx, .i64, @as(i64, @intCast(opts.threadgroup_memory)))),
+        .named(mlir_ctx, "arguments", .denseArray(mlir_ctx, .i32, opts.arguments)),
+        .named(mlir_ctx, "constants", .array(mlir_ctx, constant_attrs)),
+    });
+
+    const op = stablehlo.custom_call(mlir_ctx, &values, &res_types, .{
+        .call_target_name = "__gpu$xla.gpu.air",
+        .backend_config = .{ .typed_ffi = backend_config },
+        .has_side_effect = false,
+        .output_operand_aliases = opts.output_operand_aliases,
+    }, compiler.location).appendTo(compiler.currentScope().block);
+
+    var outputs_: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| outputs_[i] = Tensor._result(output, op.result(i));
+    return outputs_;
+}
+
 pub const CuteOps = struct {
     /// The kernel symbol.
     name: []const u8,
