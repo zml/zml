@@ -27,8 +27,8 @@ belongs to the bindings.
 Names, builder parameters, `opts`, wrappers, C API names and comments follow
 `mlir/dialects/README.md`. Specific to ROCDL:
 
-- `ops.zig`: `operation_names` and one builder per operation. Follow argument
-  constraints through `Arg` wrappers.
+- `ops.zig`: one builder per operation, listed in `test.zig`'s
+  `operation_names`. Follow argument constraints through `Arg` wrappers.
 - `enums.zig`: one enum per ROCDL enum, with its bit width and values. Unlike
   the README rule, a case whose IR spelling is not an identifier or is a
   keyword takes the C++ symbol (`volatile` → `volatile_op`). Bit enums are

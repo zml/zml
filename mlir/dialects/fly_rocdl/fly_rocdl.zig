@@ -7,8 +7,6 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("fly_rocdl");
 }
 
-pub const operation_names = ops.operation_names;
-
 /// `#fly_rocdl.buffer_desc`, an address space for buffer-descriptor pointers.
 pub const BufferDescAddressAttr = opaque {
     const Self = @This();

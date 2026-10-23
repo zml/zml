@@ -22,11 +22,11 @@ dialects, with a small C API for what upstream lacks).
   through `<pkg>.registerDialect`, never through raw strings or
   `DialectHandle.fromString`. A DSL exposes `registerDialects(registry)`,
   which calls the `registerDialect` of each package it emits.
-- **Operation list.** A package that builds operations exports a sorted
-  `pub const operation_names: []const []const u8` naming every operation its
-  builders create. `test "every bound operation is registered"` checks each
-  name against the registry, and checks that unregistered dialects are not
-  allowed. A builder for an operation the pinned dialect does not register
+- **Operation list.** A package that builds operations has, in its
+  `test.zig`, a sorted `const operation_names: []const []const u8` naming
+  every operation its builders create. `test "every bound operation is
+  registered"` checks each name against the registry, and checks that
+  unregistered dialects are not allowed. A builder for an operation the pinned dialect does not register
   does not exist; a DSL method builds it from the operations the Python DSL
   lowers it to instead.
 - **Bindings, not text.** A dialect package builds attributes and types
@@ -222,8 +222,8 @@ verified.
    lacks: per attribute and type, a predicate, a `Get` and the parameter
    getters.
 4. Bind in `<pkg>.zig`, or generate `ops.zig`: `registerDialect`, enums,
-   wrappers, helpers, builders, `operation_names`.
-5. Write `test.zig`.
+   wrappers, helpers, builders.
+5. Write `test.zig`, with the `operation_names` list.
 6. If anything is generated, add a `REGENERATING.md`.
 7. Make consumers depend on `//mlir/dialects/<pkg>` and call
    `<pkg>.registerDialect(registry)`.
@@ -255,7 +255,7 @@ grep -rnE --include='*.zig' --exclude=test.zig '(Type|Attribute)\.parse\(' "$d"
 grep -rln --include='*.zig' --exclude=test.zig '^test ' "$d"
 grep -rqF --include='*.zig' 'pub fn registerDialect' "$d" || echo "missing: registerDialect"
 if grep -rqF --include='*.zig' '.make(' "$d"; then
-  grep -qF 'pub const operation_names' "$d"/*.zig || echo "missing: operation_names"
+  grep -qF 'const operation_names' "$d/test.zig" || echo "missing: operation_names"
   grep -qF 'test "every bound operation is registered"' "$d/test.zig" || echo "missing: registration test"
 fi
 git grep -n 'DialectHandle.fromString' -- dsl zml examples

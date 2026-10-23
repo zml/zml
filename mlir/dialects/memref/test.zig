@@ -3,6 +3,33 @@ const std = @import("std");
 const memref = @import("mlir/dialects/memref");
 const mlir = @import("mlir");
 
+const operation_names: []const []const u8 = &.{
+    "memref.alloc",
+    "memref.alloca",
+    "memref.assume_alignment",
+    "memref.atomic_rmw",
+    "memref.cast",
+    "memref.collapse_shape",
+    "memref.copy",
+    "memref.dealloc",
+    "memref.dim",
+    "memref.expand_shape",
+    "memref.extract_aligned_pointer_as_index",
+    "memref.get_global",
+    "memref.global",
+    "memref.load",
+    "memref.memory_space_cast",
+    "memref.prefetch",
+    "memref.rank",
+    "memref.realloc",
+    "memref.reinterpret_cast",
+    "memref.reshape",
+    "memref.store",
+    "memref.subview",
+    "memref.transpose",
+    "memref.view",
+};
+
 test {
     @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(memref);
@@ -19,7 +46,7 @@ test "every bound operation is registered" {
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
-    for (memref.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }
 

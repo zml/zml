@@ -15,8 +15,6 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("fly");
 }
 
-pub const operation_names = ops.operation_names;
-
 /// `Operation.make` that names the op and its operand types on failure: a
 /// rejected `inferReturnTypes` otherwise panics with nothing to go on.
 pub fn make(ctx: *mlir.Context, name: []const u8, args: mlir.Operation.MakeArgs) *mlir.Operation {

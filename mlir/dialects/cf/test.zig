@@ -3,6 +3,13 @@ const std = @import("std");
 const cf = @import("mlir/dialects/cf");
 const mlir = @import("mlir");
 
+const operation_names: []const []const u8 = &.{
+    "cf.assert",
+    "cf.br",
+    "cf.cond_br",
+    "cf.switch",
+};
+
 test {
     @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(cf);
@@ -19,6 +26,6 @@ test "every bound operation is registered" {
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
-    for (cf.operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    for (operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }

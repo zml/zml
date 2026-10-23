@@ -8,42 +8,6 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("vector");
 }
 
-pub const operation_names: []const []const u8 = &.{
-    "vector.bitcast",
-    "vector.broadcast",
-    "vector.compressstore",
-    "vector.constant_mask",
-    "vector.contract",
-    "vector.create_mask",
-    "vector.deinterleave",
-    "vector.expandload",
-    "vector.extract",
-    "vector.extract_strided_slice",
-    "vector.fma",
-    "vector.from_elements",
-    "vector.gather",
-    "vector.insert",
-    "vector.insert_strided_slice",
-    "vector.interleave",
-    "vector.load",
-    "vector.maskedload",
-    "vector.maskedstore",
-    "vector.multi_reduction",
-    "vector.reduction",
-    "vector.scatter",
-    "vector.shape_cast",
-    "vector.shuffle",
-    "vector.step",
-    "vector.store",
-    "vector.to_elements",
-    "vector.transfer_read",
-    "vector.transfer_write",
-    "vector.transpose",
-    "vector.type_cast",
-    "vector.vscale",
-    "vector.yield",
-};
-
 // =============================================================================
 // Enum attributes
 // =============================================================================

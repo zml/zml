@@ -67,7 +67,8 @@ dialect today; when one appears, extend the generator and this file.
 
 - Format and run the conformance checks of `mlir/dialects/README.md`.
 - `bazel test //mlir/dialects/fly:test //dsl/fly:test`, which includes the
-  registration tests of `fly.operation_names` and `fly_rocdl.operation_names`.
+  registration tests of the `operation_names` lists in both packages'
+  `test.zig`.
 - Callers that no longer compile are the point of generating: an operation
   whose signature changed in FlyDSL now fails at the call site. Fix them in
   the same change (`dsl/fly/builder.zig`, `zml/kernel.zig`, `zml/kernels/*/fly/`,

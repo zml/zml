@@ -11,8 +11,6 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("cuda");
 }
 
-pub const operation_names = ops.operation_names;
-
 pub fn streamType(ctx: *mlir.Context) *const mlir.Type {
     return (ops.StreamType.get(ctx, .{}) catch unreachable).type_();
 }
