@@ -29,6 +29,12 @@ pub fn pointerType(ctx: *mlir.Context, space: anytype) *const mlir.Type {
     return @ptrCast(c.mlirLLVMPointerTypeGet(ctx.ptr(), @intCast(@backingInt(space))).ptr);
 }
 
+/// `!llvm.struct<(fields...)>`, a literal struct.
+pub fn structType(ctx: *mlir.Context, fields: []const *const mlir.Type) *const mlir.Type {
+    _ = c.mlirContextGetOrLoadDialect(ctx.ptr(), mlir.stringRef("llvm"));
+    return @ptrCast(c.mlirLLVMStructTypeLiteralGet(ctx.ptr(), @intCast(fields.len), @ptrCast(fields), false).ptr);
+}
+
 // =============================================================================
 // Casts and arithmetic
 // =============================================================================

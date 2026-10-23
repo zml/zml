@@ -32,3 +32,13 @@ test "every bound operation is registered" {
     for (operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }
+
+test "literal struct types build from their fields" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    llvm.registerDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    const struct_type = llvm.structType(ctx, &.{ .int(ctx, .i32), .float(ctx, .f32) });
+    try std.testing.expect(struct_type.eql(try mlir.Type.parse(ctx, "!llvm.struct<(i32, f32)>")));
+}
