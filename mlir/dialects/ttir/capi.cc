@@ -15,6 +15,13 @@
 // TritonDialect.td).
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Triton, tt, mlir::triton::TritonDialect)
 
+static mlir::MLIRContext *loadTriton(MlirContext context) {
+  mlir::MLIRContext *ctx = unwrap(context);
+  if (ctx)
+    ctx->getOrLoadDialect<mlir::triton::TritonDialect>();
+  return ctx;
+}
+
 using mlir::cast;
 using mlir::isa;
 
@@ -55,70 +62,106 @@ bool mlirTypeIsATritonTensorDesc(MlirType type) {
 
 MlirAttribute mlirTritonProgramIDDimAttrGet(MlirContext context,
                                             int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::ProgramIDDimAttr::get(
-      unwrap(context), static_cast<mlir::triton::ProgramIDDim>(value)));
+      ctx, static_cast<mlir::triton::ProgramIDDim>(value)));
 }
 
 MlirAttribute mlirTritonCacheModifierAttrGet(MlirContext context,
                                              int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::CacheModifierAttr::get(
-      unwrap(context), static_cast<mlir::triton::CacheModifier>(value)));
+      ctx, static_cast<mlir::triton::CacheModifier>(value)));
 }
 
 MlirAttribute mlirTritonEvictionPolicyAttrGet(MlirContext context,
                                               int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::EvictionPolicyAttr::get(
-      unwrap(context), static_cast<mlir::triton::EvictionPolicy>(value)));
+      ctx, static_cast<mlir::triton::EvictionPolicy>(value)));
 }
 
 MlirAttribute mlirTritonPaddingOptionAttrGet(MlirContext context,
                                              int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::PaddingOptionAttr::get(
-      unwrap(context), static_cast<mlir::triton::PaddingOption>(value)));
+      ctx, static_cast<mlir::triton::PaddingOption>(value)));
 }
 
 MlirAttribute mlirTritonRoundingModeAttrGet(MlirContext context,
                                             int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::RoundingModeAttr::get(
-      unwrap(context), static_cast<mlir::triton::RoundingMode>(value)));
+      ctx, static_cast<mlir::triton::RoundingMode>(value)));
 }
 
 MlirAttribute mlirTritonInputPrecisionAttrGet(MlirContext context,
                                               int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::InputPrecisionAttr::get(
-      unwrap(context), static_cast<mlir::triton::InputPrecision>(value)));
+      ctx, static_cast<mlir::triton::InputPrecision>(value)));
 }
 
 MlirAttribute mlirTritonRMWOpAttrGet(MlirContext context, int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::RMWOpAttr::get(
-      unwrap(context), static_cast<mlir::triton::RMWOp>(value)));
+      ctx, static_cast<mlir::triton::RMWOp>(value)));
 }
 
 MlirAttribute mlirTritonMemSemanticAttrGet(MlirContext context, int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::MemSemanticAttr::get(
-      unwrap(context), static_cast<mlir::triton::MemSemantic>(value)));
+      ctx, static_cast<mlir::triton::MemSemantic>(value)));
 }
 
 MlirAttribute mlirTritonMemSyncScopeAttrGet(MlirContext context,
                                             int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::MemSyncScopeAttr::get(
-      unwrap(context), static_cast<mlir::triton::MemSyncScope>(value)));
+      ctx, static_cast<mlir::triton::MemSyncScope>(value)));
 }
 
 MlirAttribute mlirTritonPropagateNanAttrGet(MlirContext context,
                                             int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::PropagateNanAttr::get(
-      unwrap(context), static_cast<mlir::triton::PropagateNan>(value)));
+      ctx, static_cast<mlir::triton::PropagateNan>(value)));
 }
 
 MlirAttribute mlirTritonScaleDotElemTypeAttrGet(MlirContext context,
                                                 int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::ScaleDotElemTypeAttr::get(
-      unwrap(context), static_cast<mlir::triton::ScaleDotElemType>(value)));
+      ctx, static_cast<mlir::triton::ScaleDotElemType>(value)));
 }
 
 MlirAttribute mlirTritonDescriptorReduceKindAttrGet(MlirContext context,
                                                     int32_t value) {
+  mlir::MLIRContext *ctx = loadTriton(context);
+  if (!ctx)
+    return {nullptr};
   return wrap(mlir::triton::DescriptorReduceKindAttr::get(
-      unwrap(context), static_cast<mlir::triton::DescriptorReduceKind>(value)));
+      ctx, static_cast<mlir::triton::DescriptorReduceKind>(value)));
 }

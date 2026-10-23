@@ -11,7 +11,12 @@ fn expectPrints(expected: []const u8, value: anytype) !void {
 }
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(arith);
+    inline for (comptime std.meta.declarations(arith)) |decl| {
+        const T = @field(arith, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test "arith fastmath attribute is built through the C API" {

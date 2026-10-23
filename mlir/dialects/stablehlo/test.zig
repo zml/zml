@@ -4,7 +4,12 @@ const mlir = @import("mlir");
 const stablehlo = @import("mlir/dialects/stablehlo");
 
 test {
+    @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(stablehlo);
+    inline for (comptime std.meta.declarations(stablehlo)) |decl| {
+        const T = @field(stablehlo, decl);
+        if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
+    }
 }
 
 test "every bound operation is registered" {

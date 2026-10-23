@@ -235,9 +235,9 @@ pub const DotPrecision = union(enum) {
         };
     }
 
-    pub fn algorithmAttr(self: DotPrecision, ctx: *mlir.Context, operand_type: mlir.RankedTensorType) ?mlir.Attribute {
+    pub fn algorithmAttr(self: DotPrecision, ctx: *mlir.Context, element_type: *const mlir.Type) ?*const mlir.Attribute {
         return switch (self) {
-            .algorithm => |algo| algo.asAttr(ctx, operand_type),
+            .algorithm => |algo| dotAlgorithmAttr(ctx, algo, element_type),
             else => null,
         };
     }
@@ -1114,7 +1114,7 @@ pub const GatherDimensionNumbersAttr = opaque {
     pub const isAFn = c.stablehloAttributeIsAGatherDimensionNumbers;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
-    pub const format = M.eql(c.mlirAttributePrint);
+    pub const format = M.format(c.mlirAttributePrint);
 
     pub fn get(
         ctx: *mlir.Context,
