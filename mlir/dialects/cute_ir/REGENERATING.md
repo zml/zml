@@ -6,7 +6,8 @@ to check the result. How to get there is left to you: combine the sources as
 you see fit, write throwaway scripts, probe the compiler. Scripts and
 intermediate tables are not committed; only the definitions are.
 
-Paths below are relative to this directory (the one holding this file).
+Bare file names are in this directory, `../<pkg>` are the sibling packages,
+and other paths are relative to the repository root.
 
 ## Goal
 
@@ -55,11 +56,8 @@ without it, and so that anything built here is accepted by it unchanged.
   (`llvm-tblgen --dump-json` gives them all; do not regex the `.td` files).
   When a class changes shape (opaque to parametric, merged, split, renamed
   accessors), change the bindings to match, and keep the existing
-  convenience helpers working where it costs little.
-  Keep required arguments positional and group nullable operands, result types,
-  and attributes in an `opts` struct immediately before `location`. Each
-  optional field defaults to `null`, so callers can pass `.{}` to omit all of
-  them. Extend an existing options struct when one is already present.
+  convenience helpers working where it costs little. Names, builder
+  parameters and `opts` follow `mlir/dialects/README.md`.
 
 Consumers outside this directory use the dialect classes and must keep
 compiling: search the repository for the dialect namespaces
@@ -96,8 +94,7 @@ and must be regenerated with every release, like `cute` and `cute_nvgpu`.
   in the compiler, so a registry holds this `nvvm` or upstream's, never both;
   upstream's NVVM C++ is linked into the tree and must stay unregistered where
   this one is. The C dialect handles are `cute_nvvm` and `cuda`, and the C API
-  of `nvvm` is prefixed `CuteNVVM` (`mlirAttributeIsACuteNVVM<Name>`,
-  `mlirCuteNVVM<Name>AttrGet`) so that neither collides with upstream's
+  of `nvvm` is prefixed `CuteNVVM` so that neither collides with upstream's
   `mlirGetDialectHandle__nvvm__` or a future upstream NVVM C API; `cuda`'s is
   prefixed `Cuda`.
 - **`llvm` is upstream's.** NVVM operands are `!llvm.ptr<N>` and LLVM
@@ -148,10 +145,10 @@ Sources specific to them, besides those in the table below:
 
 The bindings follow the cute ones: the C API and the Zig enums, typed
 attribute and type wrappers and operation builders are generated from
-`llvm-tblgen --dump-json` of the generated `.td` files, then formatted with
-`zig fmt` and `clang-format` (`mlir/.clang-format`, which every C and C++ source follows). Builders of operations with regions, and of terminators, do not
-verify on creation (their blocks are filled, or their block is completed,
-afterwards). `mlir/dialects/nvvm/nvvm.zig` and `mlir/dialects/cuda/cuda.zig` are the
+`llvm-tblgen --dump-json` of the generated `.td` files, following
+`mlir/dialects/README.md` (names, wrappers, comments, formatting). Builders of
+operations with regions, and of terminators, do not verify on creation (their
+blocks are filled, or their block is completed, afterwards). `mlir/dialects/nvvm/nvvm.zig` and `mlir/dialects/cuda/cuda.zig` are the
 hand-written convenience layer the builder calls; they fix the attributes the
 kernels do not choose and must keep building no text.
 
@@ -216,8 +213,7 @@ The round-trip corpus: run every example of the archive's
 `examples/python/CuTeDSL` with `CUTE_DSL_KEEP=ir-debug`, which keeps each
 compiled module's IR; set `CUTE_DSL_ARCH` for the architecture-restricted
 ones. This gives hundreds of real modules covering far more operations than
-the fixtures in the repository (the testdata under `tools/` and the kernels'
-fixtures), which are added to it.
+the kernels' fixtures in the repository, which are added to it.
 
 When sources disagree, the live compiler wins; record the disagreement in a
 comment.

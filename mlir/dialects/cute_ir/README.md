@@ -50,13 +50,7 @@ const memref = try cute.MemRefType.get(ctx, .{
 const alloc = cute.memref_alloc_smem(ctx, memref.type_(), loc).appendTo(block);
 ```
 
-Type and attribute constructors call the C++ `get`/`getChecked` functions,
-not a parser. `InitArgs` fields are the ODS parameter names in lower camel
-case; accessors are the C++ accessor names as nouns, without the `get` prefix. Optional and defaulted parameters have defaults in `InitArgs`. Enums
-are Zig enums with the compiler's values (the C API takes the integer value).
-`get` returns `error.InvalidMlir` for invalid parameters or mismatched contexts.
-`type_()` converts a typed wrapper to `*const mlir.Type` for operation builders.
-Algebra types take an algebra attribute, `cute.LayoutType.get(ctx, .{ .attr =
+The bindings follow `mlir/dialects/README.md`. Algebra types take an algebra attribute, `cute.LayoutType.get(ctx, .{ .attr =
 layout_attr })`; algebra attribute constructors call the C++ algebra parser
 with the raw expression and `value()` returns the canonical text. NVGPU atom
 types take their typed parameters, such as `.valType` and `.copyBits`;
