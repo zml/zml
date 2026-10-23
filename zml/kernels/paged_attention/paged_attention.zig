@@ -16,6 +16,8 @@ test {
     std.testing.refAllDecls(Options);
     std.testing.refAllDecls(Parameters);
     std.testing.refAllDecls(KvCache);
+
+    std.testing.refAllDecls(@This());
 }
 
 pub const Backend = enum {
