@@ -3,10 +3,14 @@ const std = @import("std");
 const arith = @import("mlir/dialects/arith");
 const dsl = @import("dsl/common");
 const fly = @import("mlir/dialects/fly");
+const func = @import("mlir/dialects/func");
 const gpu = @import("mlir/dialects/gpu");
 const llvm = @import("mlir/dialects/llvm");
 const math = @import("mlir/dialects/math");
+const memref = @import("mlir/dialects/memref");
 const rocdl = @import("mlir/dialects/rocdl");
+const scf = @import("mlir/dialects/scf");
+const ub = @import("mlir/dialects/ub");
 const vector = @import("mlir/dialects/vector");
 const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
@@ -27,7 +31,9 @@ pub const colMajor = layout.colMajor;
 pub const ordered = layout.ordered;
 pub const tile = layout.tile;
 
-pub const dialects_needed = [_][]const u8{ "func", "arith", "scf", "math", "vector", "memref", "llvm", "gpu", "rocdl", "ub", "fly", "fly_rocdl" };
+pub fn registerDialects(registry: *mlir.DialectRegistry) void {
+    inline for (.{ func, arith, scf, math, vector, memref, llvm, gpu, rocdl, ub, fly, fly_rocdl }) |dialect| dialect.registerDialect(registry);
+}
 
 pub const FinishError = error{ InvalidMlir, OutOfMemory } || std.Io.Writer.Error;
 
@@ -1480,7 +1486,7 @@ pub const Builder = struct {
 fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    inline for (dialects_needed) |name| registry.registerDialect(name);
+    registerDialects(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;

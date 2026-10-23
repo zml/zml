@@ -33,7 +33,9 @@ test {
     std.testing.refAllDecls(Value);
 }
 
-pub const dialects_needed = [_][]const u8{"cuda_tile"};
+pub fn registerDialects(registry: *mlir.DialectRegistry) void {
+    inline for (.{cuda_tile}) |dialect| dialect.registerDialect(registry);
+}
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -1782,7 +1784,7 @@ pub const Builder = struct {
 fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    inline for (dialects_needed) |d| mlir.DialectHandle.fromString(d).insertDialect(registry);
+    registerDialects(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
     return ctx;

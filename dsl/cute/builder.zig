@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const arith = @import("mlir/dialects/arith");
+const cf = @import("mlir/dialects/cf");
 const cuda = @import("mlir/dialects/cuda");
 const cute_ir = @import("mlir/dialects/cute_ir");
 const cute_nvgpu = @import("mlir/dialects/cute_nvgpu");
@@ -10,6 +11,7 @@ const gpu = @import("mlir/dialects/gpu");
 const llvm = @import("mlir/dialects/llvm");
 const math = @import("mlir/dialects/math");
 const nvvm = @import("mlir/dialects/nvvm");
+const scf = @import("mlir/dialects/scf");
 const vector = @import("mlir/dialects/vector");
 const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
@@ -32,7 +34,9 @@ test {
 /// `nvvm` and `cuda` are NVIDIA's (`nvvm.ops`, `cuda.ops`, handles `cute_nvvm`
 /// and `cuda`); `llvm` is upstream's, whose types and operations NVIDIA's
 /// compiler reads as its own.
-pub const dialects_needed = [_][]const u8{ "func", "gpu", "cute", "cute_nvgpu", nvvm.ops.dialect_handle, cuda.ops.dialect_handle, "llvm", "arith", "scf", "math", "cf", "vector" };
+pub fn registerDialects(registry: *mlir.DialectRegistry) void {
+    inline for (.{ func, gpu, cute_ir, cute_nvgpu, nvvm, cuda, llvm, arith, scf, math, cf, vector }) |dialect| dialect.registerDialect(registry);
+}
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -3076,7 +3080,7 @@ pub const Builder = struct {
 fn testContext() !*mlir.Context {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    inline for (dialects_needed) |d| mlir.DialectHandle.fromString(d).insertDialect(registry);
+    registerDialects(registry);
     func.registerExtensions(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     ctx.loadAllAvailableDialects();
@@ -3286,7 +3290,7 @@ test "complete program emits a Zig-built CUDA host launch" {
 test "SM100 block-scaled MMA atoms use the CuTe DSL instruction shapes" {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
-    inline for (dialects_needed) |dialect| mlir.DialectHandle.fromString(dialect).insertDialect(registry);
+    registerDialects(registry);
     func.registerExtensions(registry);
     const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();

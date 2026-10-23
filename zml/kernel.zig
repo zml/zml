@@ -26,15 +26,13 @@ fn StructOf(comptime names: []const [:0]const u8, comptime FieldT: type) type {
     return @Struct(.auto, null, &name_slices, &@splat(FieldT), &@splat(.{}));
 }
 
-fn makeKernelContext(comptime dialects_needed: []const []const u8) std.mem.Allocator.Error!*mlir.Context {
+fn makeKernelContext(comptime registerDialects: fn (*mlir.DialectRegistry) void) std.mem.Allocator.Error!*mlir.Context {
     mlir.registerPasses("Transforms");
 
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
 
-    inline for (dialects_needed) |d| {
-        mlir.DialectHandle.fromString(d).insertDialect(registry);
-    }
+    registerDialects(registry);
 
     func.registerExtensions(registry);
 
@@ -69,7 +67,7 @@ pub const triton = struct {
     pub const FinishError = triton_builder.FinishError;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
-        return makeKernelContext(&triton_builder.dialects_needed);
+        return makeKernelContext(triton_builder.registerDialects);
     }
 
     pub fn from(dt: DataType) DType {
@@ -182,7 +180,7 @@ pub const mosaic_tpu = struct {
     const FinishError = mosaic_tpu_builder.FinishError;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
-        return makeKernelContext(&mosaic_tpu_builder.dialects_needed);
+        return makeKernelContext(mosaic_tpu_builder.registerDialects);
     }
 
     pub fn from(dt: DataType) DType {
@@ -415,7 +413,7 @@ pub const cuda_tile = struct {
     pub const Arch = cuda_tile_builder.Arch;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
-        return makeKernelContext(&cuda_tile_builder.dialects_needed);
+        return makeKernelContext(cuda_tile_builder.registerDialects);
     }
 
     pub fn from(dt: DataType) DType {
@@ -528,7 +526,7 @@ pub const cute = struct {
     pub const BlockScaledMmaConfig = cute_builder.BlockScaledMmaConfig;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
-        return makeKernelContext(&cute_builder.dialects_needed);
+        return makeKernelContext(cute_builder.registerDialects);
     }
 
     pub fn from(dt: DataType) DType {
@@ -761,7 +759,7 @@ pub const fly = struct {
     pub const it = fly_builder.it;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
-        return makeKernelContext(&fly_builder.dialects_needed);
+        return makeKernelContext(fly_builder.registerDialects);
     }
 
     pub fn from(dt: DataType) DType {
