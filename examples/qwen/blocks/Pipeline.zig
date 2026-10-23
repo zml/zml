@@ -208,7 +208,7 @@ const PipelineWrapper = struct {
         }
 
         const unpacked = self._unpack_latents(latents).convert(.f32);
-        const std_mean = unpacked.add(latents_mean.broad(unpacked.shape())).add(latents_std.broad(unpacked.shape()));
+        const std_mean = unpacked.mul(latents_std.broad(unpacked.shape())).add(latents_mean.broad(unpacked.shape()));
         const img = self.vae_model.forward(std_mean);
         stdx.debug.assert(img.dim(.t) == 1, "Expected only one temporal dimension, got {}", .{img.dim(.t)});
 
