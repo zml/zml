@@ -224,12 +224,12 @@ _UBUNTU_PACKAGES = {
 
 _PLUGINS = {
     "amd64": {
-        "sha256": "5c55c538cba73e730914a728566f5cebd750d9a66db81745794461a1794cd977",
-        "url": "https://mirror.zml.ai/plugins/202610221239.279.1.0774b841188b/zml-cuda-linux-amd64.tar.zst",
+        "sha256": "7cb4372aeb73126fdedccfbc5ed7628f84f23c8340921b5e4f4f378079486dbf",
+        "url": "https://mirror.zml.ai/plugins/202610231441.290.1.a3a89b67baa7/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "39a9e8ebb64c4f961e457247e24ed2aa88274b6362c6a2c021ff9251e570a13a",
-        "url": "file:///tmp/benjamin/llmd-cp-20261023/xla-runtime-fix/validated-39a9-archive.tar.zst",
+        "sha256": "f8a97954697b94b893d1e8502e754bc47b1f357927f7eaac58321c9006619a5f",
+        "url": "https://mirror.zml.ai/plugins/202610231441.290.1.a3a89b67baa7/zml-cuda-linux-arm64.tar.zst",
     },
 }
 
