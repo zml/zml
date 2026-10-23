@@ -1,4 +1,4 @@
-//===- NVVMDialect.h - NVIDIA's nvvm dialect of the CuTe DSL ------*- C++ -*-===//
+//===- NVVMDialect.h - NVIDIA's nvvm dialect of the CuTe DSL ----*- C++ -*-===//
 
 #ifndef MLIR_DIALECTS_NVVM_NVVMDIALECT_H
 #define MLIR_DIALECTS_NVVM_NVVMDIALECT_H

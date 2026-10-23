@@ -1,3 +1,5 @@
+//===- CuteTypes.cpp - parsers, printers and verifiers of cute types ------===//
+
 // clang-format off
 /***************************************************************************************************
  * Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -52,8 +54,7 @@ namespace cg = cutegen;
 // The compiler's parser of the algebra types reads `<"text">` leniently: a
 // missing or unreadable payload, including a bare mnemonic, gives the default
 // value (`()`, `():()`, `[]`, `S<0,4,3>`) instead of an error.
-template <typename T>
-static T parseLenientPayload(mlir::AsmParser &parser) {
+template <typename T> static T parseLenientPayload(mlir::AsmParser &parser) {
   std::string str;
   if (succeeded(parser.parseOptionalLess()) &&
       succeeded(parser.parseOptionalString(&str)) &&
@@ -198,9 +199,10 @@ void CuteDialect::registerCuteTypes(CuteDialect *dialect) {
 //===----------------------------------------------------------------------===//
 
 mlir::Type IntTupleType::parse(mlir::AsmParser &parser) {
-  return get(parser.getContext(),
-             IntTupleAttr::get(parser.getContext(),
-                      parseLenientPayload<cutegen::int_tuple>(parser)));
+  return get(
+      parser.getContext(),
+      IntTupleAttr::get(parser.getContext(),
+                        parseLenientPayload<cutegen::int_tuple>(parser)));
 }
 
 void IntTupleType::print(mlir::AsmPrinter &printer) const {
@@ -285,7 +287,7 @@ IntTupleType::verifyEntries(mlir::DataLayoutEntryListRef entries,
 mlir::Type CoordType::parse(mlir::AsmParser &parser) {
   return get(parser.getContext(),
              CoordAttr::get(parser.getContext(),
-                      parseLenientPayload<cutegen::coord>(parser)));
+                            parseLenientPayload<cutegen::coord>(parser)));
 }
 
 void CoordType::print(mlir::AsmPrinter &printer) const {
@@ -364,7 +366,7 @@ CoordType::verifyEntries(mlir::DataLayoutEntryListRef entries,
 mlir::Type ShapeType::parse(mlir::AsmParser &parser) {
   return get(parser.getContext(),
              ShapeAttr::get(parser.getContext(),
-                      parseLenientPayload<cutegen::shape>(parser)));
+                            parseLenientPayload<cutegen::shape>(parser)));
 }
 
 void ShapeType::print(mlir::AsmPrinter &printer) const {
@@ -443,7 +445,7 @@ ShapeType::verifyEntries(mlir::DataLayoutEntryListRef entries,
 mlir::Type StrideType::parse(mlir::AsmParser &parser) {
   auto loc = parser.getCurrentLocation();
   auto attr = StrideAttr::get(parser.getContext(),
-                      parseLenientPayload<cutegen::stride>(parser));
+                              parseLenientPayload<cutegen::stride>(parser));
   return getChecked([&] { return parser.emitError(loc); }, parser.getContext(),
                     attr);
 }
@@ -533,7 +535,7 @@ StrideType::verifyEntries(mlir::DataLayoutEntryListRef entries,
 mlir::Type LayoutType::parse(mlir::AsmParser &parser) {
   auto loc = parser.getCurrentLocation();
   auto attr = LayoutAttr::get(parser.getContext(),
-                      parseLenientPayload<cutegen::layout>(parser));
+                              parseLenientPayload<cutegen::layout>(parser));
   return getChecked([&] { return parser.emitError(loc); }, parser.getContext(),
                     attr);
 }
@@ -640,7 +642,7 @@ LayoutType::verifyEntries(mlir::DataLayoutEntryListRef entries,
 mlir::Type TileType::parse(mlir::AsmParser &parser) {
   auto loc = parser.getCurrentLocation();
   auto attr = TileAttr::get(parser.getContext(),
-                      parseLenientPayload<cutegen::tile>(parser));
+                            parseLenientPayload<cutegen::tile>(parser));
   return getChecked([&] { return parser.emitError(loc); }, parser.getContext(),
                     attr);
 }
@@ -898,7 +900,7 @@ ComposedLayoutType::verifyEntries(mlir::DataLayoutEntryListRef entries,
 mlir::Type SwizzleType::parse(mlir::AsmParser &parser) {
   auto loc = parser.getCurrentLocation();
   auto attr = SwizzleAttr::get(parser.getContext(),
-                      parseLenientPayload<cutegen::swizzle>(parser));
+                               parseLenientPayload<cutegen::swizzle>(parser));
   return getChecked([&] { return parser.emitError(loc); }, parser.getContext(),
                     attr);
 }
@@ -1112,8 +1114,9 @@ static std::optional<int64_t> chunkBits(const cutegen::layout &layout) {
   return bits;
 }
 
-LogicalResult BitLayoutAttr::verify(function_ref<InFlightDiagnostic()> emitError,
-                                    LayoutAttr layout) {
+LogicalResult
+BitLayoutAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                      LayoutAttr layout) {
   const cutegen::layout &l = layout.getRef();
   if (!cutegen::is_static(l))
     return emitError() << "bitlayout must be fully static but got " << layout;
@@ -1240,13 +1243,13 @@ static FailureOr<PtrFields> parsePtrFields(AsmParser &parser, Type *layout) {
       return failure();
     }
     first = false;
-    if (auto space = symbolizeAddressSpace(keyword);
-        space && next <= kSpace) {
+    if (auto space = symbolizeAddressSpace(keyword); space && next <= kSpace) {
       fields.space = *space;
       next = kAlign;
     } else if (keyword == "align" && next <= kAlign) {
       uint64_t alignment;
-      if (failed(parser.parseLess()) || failed(parser.parseInteger(alignment)) ||
+      if (failed(parser.parseLess()) ||
+          failed(parser.parseInteger(alignment)) ||
           failed(parser.parseGreater()))
         return failure();
       fields.alignment = alignment;
@@ -1260,7 +1263,8 @@ static FailureOr<PtrFields> parsePtrFields(AsmParser &parser, Type *layout) {
         return failure();
       next = kDone;
     } else {
-      parser.emitError(parser.getCurrentLocation(), "unexpected pointer field `")
+      parser.emitError(parser.getCurrentLocation(),
+                       "unexpected pointer field `")
           << keyword << "`";
       return failure();
     }
@@ -1272,8 +1276,8 @@ static FailureOr<PtrFields> parsePtrFields(AsmParser &parser, Type *layout) {
 
 // Defaults are left out: they are what the parser fills in.
 static PtrType buildPtr(AsmParser &parser, const PtrFields &fields) {
-  SwizzleAttr swizzle = isIdentitySwizzle(fields.swizzle) ? SwizzleAttr()
-                                                          : fields.swizzle;
+  SwizzleAttr swizzle =
+      isIdentitySwizzle(fields.swizzle) ? SwizzleAttr() : fields.swizzle;
   BitLayoutAttr bitlayout = fields.bitlayout;
   if (bitlayout &&
       bitlayout == PtrType::getDefaultBitLayout(fields.valueType, fields.space))
@@ -1364,7 +1368,7 @@ static bool isDenseForSparsity(const cutegen::layout &layout,
     return false;
   auto shape = cutegen::flatten(layout.shape());
   auto stride = cutegen::flatten(layout.stride());
-  std::vector<std::pair<int64_t, int64_t>> modes;  // (stride, extent)
+  std::vector<std::pair<int64_t, int64_t>> modes; // (stride, extent)
   auto add = [&](const auto &extent, const auto &step) {
     if (extent.as_int64() != 1 && step.as_int64() != 0)
       modes.emplace_back(step.as_int64(), extent.as_int64());
@@ -1409,8 +1413,9 @@ Type mlir::cutlass_compiler::cute::MemRefType::parse(AsmParser &parser) {
   PtrType ptr = buildPtr(parser, *fields);
   if (!ptr)
     return {};
-  return getChecked([&] { return parser.emitError(parser.getCurrentLocation()); },
-                    parser.getContext(), ptr, layout);
+  return getChecked(
+      [&] { return parser.emitError(parser.getCurrentLocation()); },
+      parser.getContext(), ptr, layout);
 }
 
 void mlir::cutlass_compiler::cute::MemRefType::print(
@@ -1432,9 +1437,9 @@ LogicalResult mlir::cutlass_compiler::cute::MemRefType::verify(
   Type valueType = ptr.getValueType();
   if (!valueType || !(valueType.isIntOrIndexOrFloat() ||
                       llvm::isa<PtrType, SparseElemType>(valueType)))
-    return emitError()
-           << "expects value type to be int, float, ptr or sparse_elem, but got '"
-           << valueType << "'";
+    return emitError() << "expects value type to be int, float, ptr or "
+                          "sparse_elem, but got '"
+                       << valueType << "'";
   if (auto sparse = llvm::dyn_cast<SparseElemType>(valueType)) {
     int64_t sparsity = sparse.getNumLogical();
     bool dense;
@@ -1447,15 +1452,16 @@ LogicalResult mlir::cutlass_compiler::cute::MemRefType::verify(
               c.offset().as_int64() % sparsity == 0 &&
               isDenseForSparsity(c.layout_b(), sparsity);
     } else {
-      dense = isDenseForSparsity(llvm::cast<LayoutType>(layout).getRef(),
-                                 sparsity);
+      dense =
+          isDenseForSparsity(llvm::cast<LayoutType>(layout).getRef(), sparsity);
     }
     if (!dense)
       return emitError()
              << "layout must be dense but cannot be divided by sparsity";
   }
   if (auto composed = llvm::dyn_cast<ComposedLayoutType>(layout)) {
-    if (!isIdentitySwizzle(ptr.getSwizzle()) && composed.getRef().is_a_swizzle() &&
+    if (!isIdentitySwizzle(ptr.getSwizzle()) &&
+        composed.getRef().is_a_swizzle() &&
         !composed.getRef().swizzle_a().is_identity())
       return emitError() << "cannot have both a swizzle on the pointer and a "
                             "non-identity swizzle in the layout";
@@ -1497,10 +1503,10 @@ Type CoordTensorType::parse(AsmParser &parser) {
   if (failed(parser.parseComma()) || !(layout = parseLayoutPayload(parser)) ||
       failed(parser.parseGreater()))
     return {};
-  return getChecked([&] { return parser.emitError(parser.getCurrentLocation()); },
-                    parser.getContext(),
-                    IntTupleType::get(parser.getContext(), std::move(*tuple)),
-                    layout);
+  return getChecked(
+      [&] { return parser.emitError(parser.getCurrentLocation()); },
+      parser.getContext(),
+      IntTupleType::get(parser.getContext(), std::move(*tuple)), layout);
 }
 
 void CoordTensorType::print(AsmPrinter &printer) const {
@@ -1511,9 +1517,9 @@ void CoordTensorType::print(AsmPrinter &printer) const {
   printer << '>';
 }
 
-LogicalResult CoordTensorType::verify(
-    function_ref<InFlightDiagnostic()> emitError, IntTupleType arithTuple,
-    Type layout) {
+LogicalResult
+CoordTensorType::verify(function_ref<InFlightDiagnostic()> emitError,
+                        IntTupleType arithTuple, Type layout) {
   if (!arithTuple)
     return emitError() << "expects an arithmetic tuple";
   if (!llvm::isa<LayoutType, ComposedLayoutType>(layout))
@@ -1571,9 +1577,9 @@ void FastDivmodDivisorType::print(AsmPrinter &printer) const {
   printer << '>';
 }
 
-LogicalResult SparseElemType::verify(
-    function_ref<InFlightDiagnostic()> emitError, int numLogical,
-    Type physicalType) {
+LogicalResult
+SparseElemType::verify(function_ref<InFlightDiagnostic()> emitError,
+                       int numLogical, Type physicalType) {
   if (numLogical <= 0)
     return emitError() << "sparse element type logical count must be > 0";
   Type element = physicalType;

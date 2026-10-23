@@ -1,4 +1,4 @@
-//===- NVVMDialect.td - NVIDIA's NVVM dialect of the CuTe DSL -*- tablegen -*-===//
+//===- NVVMDialect.td - NVVM dialect of the CuTe DSL -------*- tablegen -*-===//
 
 #ifndef MLIR_DIALECTS_NVVM_NVVMDIALECT_TD
 #define MLIR_DIALECTS_NVVM_NVVMDIALECT_TD

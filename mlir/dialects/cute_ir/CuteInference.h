@@ -1,4 +1,4 @@
-//===- CuteInference.h - result types the compiler infers --------*- C++ -*-===//
+//===- CuteInference.h - result types the compiler infers -------*- C++ -*-===//
 
 #ifndef MLIR_DIALECTS_CUTE_IR_CUTEINFERENCE_H
 #define MLIR_DIALECTS_CUTE_IR_CUTEINFERENCE_H
@@ -12,13 +12,13 @@ Type tiledCopyD(Type atom, TiledCopyType tiled);
 
 // Result types of operations the compiler does not infer (their builders
 // take the type): what the DSL passes, or null when not computable here.
-Type makeLayoutResultType(Type shape, Type stride);  // stride may be null
+Type makeLayoutResultType(Type shape, Type stride); // stride may be null
 Type makeViewResultType(Type iter, Type layout);
 Type getResultType(Type input, ArrayRef<int32_t> mode);
 Type assumeResultType(Type src);
 Type makeArithTupleIterResultType(Type tuple);
 Type fastDivmodCreateDivisorResultType(Type divisor);
-Type fastDivmodComputeResultType(Type divisor);  // both results
+Type fastDivmodComputeResultType(Type divisor); // both results
 } // namespace mlir::cutlass_compiler::cute
 
 #endif // MLIR_DIALECTS_CUTE_IR_CUTEINFERENCE_H

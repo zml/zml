@@ -1,4 +1,4 @@
-//===- CudaTypes.td - CUDA host types of the CuTe DSL -----*- tablegen -*-===//
+//===- CudaTypes.td - CUDA host types of the CuTe DSL ------*- tablegen -*-===//
 //
 // Generated for nvidia-cutlass-dsl 4.8.0 from the DSL compiler (its typed
 // Python type classes, its mnemonics, `_cutlass_ir.cu13` parser messages and

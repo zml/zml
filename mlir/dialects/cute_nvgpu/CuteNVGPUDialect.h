@@ -1,4 +1,4 @@
-//===- CuteNVGPUDialect.h - CuTe NVIDIA GPU dialect ------------*- C++ -*-===//
+//===- CuteNVGPUDialect.h - CuTe NVIDIA GPU dialect -------------*- C++ -*-===//
 
 #ifndef MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUDIALECT_H
 #define MLIR_DIALECTS_CUTE_NVGPU_CUTENVGPUDIALECT_H
@@ -24,7 +24,7 @@ FailureOr<bool> parseBool(AsmParser &parser);
 /// The TMA data format a non-executable TMA atom takes for an element type
 /// when none is given, if there is one.
 std::optional<TmaDataFormat> defaultTmaDataFormat(Type elementType);
-}  // namespace mlir::cutlass_compiler::cute_nvgpu
+} // namespace mlir::cutlass_compiler::cute_nvgpu
 
 #define GET_ATTRDEF_CLASSES
 #include "mlir/dialects/cute_nvgpu/CuteNVGPUAttrs.h.inc"

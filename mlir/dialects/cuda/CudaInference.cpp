@@ -1,4 +1,4 @@
-//===- CudaInference.cpp - result types the compiler infers ------------===//
+//===- CudaInference.cpp - result types the compiler infers ---------------===//
 //
 // Generated from the nvidia-cutlass-dsl 4.8.0 compiler (its inference
 // probed by varying operand types); do not edit. An operation without a

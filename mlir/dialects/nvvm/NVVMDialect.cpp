@@ -1,4 +1,4 @@
-//===- NVVMDialect.cpp - NVIDIA's nvvm dialect of the CuTe DSL -----------===//
+//===- NVVMDialect.cpp - NVIDIA's nvvm dialect of the CuTe DSL ------------===//
 
 #include "mlir/dialects/nvvm/NVVMDialect.h"
 
@@ -33,14 +33,19 @@ void NVVMDialect::initialize() {
 // The compiler's rules and messages.
 LogicalResult TargetAttr::verify(function_ref<InFlightDiagnostic()> emitError,
                                  int O, StringRef triple, StringRef chip,
-                                 StringRef, DictionaryAttr, ArrayAttr link, bool) {
+                                 StringRef, DictionaryAttr, ArrayAttr link,
+                                 bool) {
   if (O < 0 || O > 3)
-    return emitError() << "The optimization level must be a number between 0 and 3.";
+    return emitError()
+           << "The optimization level must be a number between 0 and 3.";
   if (triple.empty())
     return emitError() << "The target triple cannot be empty.";
   if (chip.empty())
     return emitError() << "The target chip cannot be empty.";
-  if (link && !llvm::all_of(link, [](Attribute attr) { return attr && isa<StringAttr>(attr); }))
-    return emitError() << "All the elements in the `link` array must be strings.";
+  if (link && !llvm::all_of(link, [](Attribute attr) {
+        return attr && isa<StringAttr>(attr);
+      }))
+    return emitError()
+           << "All the elements in the `link` array must be strings.";
   return success();
 }

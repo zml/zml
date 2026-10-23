@@ -1,4 +1,4 @@
-//===- CudaDialect.cpp - NVIDIA's cuda dialect of the CuTe DSL -----------===//
+//===- CudaDialect.cpp - NVIDIA's cuda dialect of the CuTe DSL ------------===//
 
 #include "mlir/dialects/cuda/CudaDialect.h"
 
