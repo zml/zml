@@ -1,4 +1,4 @@
-//===- CudaAttrs.td - CUDA host attributes of the CuTe DSL --*- tablegen -*-===//
+//===- CudaAttrs.td - CUDA host attributes of the CuTe DSL -*- tablegen -*-===//
 //
 // Generated for nvidia-cutlass-dsl 4.8.0 from the DSL compiler
 // (`_cutlass_ir.cu13` parser messages, its mnemonics, and probing its

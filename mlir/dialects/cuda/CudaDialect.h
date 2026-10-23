@@ -1,4 +1,4 @@
-//===- CudaDialect.h - NVIDIA's cuda dialect of the CuTe DSL ------*- C++ -*-===//
+//===- CudaDialect.h - NVIDIA's cuda dialect of the CuTe DSL ----*- C++ -*-===//
 
 #ifndef MLIR_DIALECTS_CUDA_CUDADIALECT_H
 #define MLIR_DIALECTS_CUDA_CUDADIALECT_H

@@ -1,4 +1,4 @@
-//===- CudaDialect.td - NVIDIA's CUDA host dialect of the CuTe DSL -*- tablegen -*-===//
+//===- CudaDialect.td - CUDA host dialect of the CuTe DSL --*- tablegen -*-===//
 
 #ifndef MLIR_DIALECTS_CUDA_CUDADIALECT_TD
 #define MLIR_DIALECTS_CUDA_CUDADIALECT_TD
