@@ -211,6 +211,12 @@ verified.
 - fly's attributes and cute_ir's algebra attributes have named constructors
   (`getStatic`, `getDynamic`, `getTuple`, ...); fly's generated builders use
   snake_case parameters.
+- tcl mirrors the Furiosa plugin's file names and C++ style. One
+  `graph(op)` builder covers the 17 `tcl.graph.*` operations that share a
+  shape, and `loop`, `yield` and `copy` build `tcl.graph.for`, `yield` and
+  `copy`. Its `Tactic` and `ReduceMode` enums map to string attribute values,
+  its C API covers what ZML emits, and its operations are verified through
+  `dsl/tcl`'s tests.
 
 ## Porting checklist
 
