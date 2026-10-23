@@ -55,9 +55,12 @@ A tensor is placed by its shape. `View.createTensor(subkey, tags, .tp,
 partitioning)` places the checkpoint tensor on the mesh named `.tp` among the
 store's `meshes` (`View.mesh(.tp)` returns it), each tag of `partitioning`
 naming the mesh axis that splits it; `createReplicatedTensor` puts it whole
-on every device. It lands in default device memory, unless
-`View.setMemory(tensor, .host_pinned)`, called after binding, names another
-memory kind.
+on every device. It lands in default device memory, unless `View.setMemory`,
+called after binding, names a host kind (`TensorStore.Memory`):
+`.host_pinned` gives buffers in pinned host memory, and `.host_mapped` gives
+device buffers that are views of pinned host memory, which kernels read in
+place. The second suits a table too large for device memory, of which each
+step reads a few rows; the memory goes with the last view.
 
 ```zig
 const tp = try platform.registerMesh("tp", .mesh(.{ .model = .high_bandwidth }));
@@ -66,7 +69,7 @@ const view = store.view();
 const w = view.createTensor("w", .{ .out, .in }, .tp, .{ .out = .model });
 const b = view.createReplicatedTensor("b", .{.out});
 const rows = view.createReplicatedTensor("rows", .{ .row, .d });
-view.setMemory(rows, .host_pinned);
+view.setMemory(rows, .host_mapped);
 ```
 
 `View.get(subkey)` returns the registry's entry for a key, or null, and

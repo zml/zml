@@ -14,7 +14,7 @@ const stdx = @import("stdx");
 
 const Compiler = @import("../Compiler.zig");
 const Exe = @import("../exe.zig").Exe;
-const Memory = @import("../platform.zig").Memory;
+const MemorySpace = @import("../platform.zig").Memory.Kind;
 const Platform = @import("../platform.zig").Platform;
 const Quantization = @import("../quantization.zig").Quantization;
 const safetensors = @import("../safetensors.zig");
@@ -23,6 +23,36 @@ const Sharding = @import("../Sharding.zig");
 const Tensor = @import("../tensor.zig").Tensor;
 
 const TensorStore = @This();
+
+/// Where the loader delivers a loaded tensor, on every device of its mesh
+/// (`View.setMemory`). The destination is allocated once per device
+/// whatever its pieces; the host kinds take no device memory.
+pub const Memory = enum {
+    /// Device memory.
+    default,
+    /// Buffers in each device's pinned host memory space. An executable
+    /// that takes them as device inputs copies them to the device first.
+    host_pinned,
+    /// Pinned host memory that executables read in place: each device's
+    /// buffer is a device-kind view of it (`createViewOfDeviceBuffer`),
+    /// and the memory goes with the last view. For a table too large for
+    /// device memory, of which a step reads a few rows. XLA counts the
+    /// views against device memory (`Compiler.Options.extra_device_memory_bytes`).
+    host_mapped,
+
+    /// Whether the bytes live in host memory, written by the CPU.
+    pub fn isHost(self: Memory) bool {
+        return self != .default;
+    }
+
+    /// The memory space of each device's delivered buffer.
+    pub fn space(self: Memory) MemorySpace {
+        return switch (self) {
+            .default, .host_mapped => .default,
+            .host_pinned => .host_pinned,
+        };
+    }
+};
 
 /// What the loader reads of a bound tensor (`bindingOf`): the source
 /// it fills the tensor from, or the program that computes it.
@@ -36,11 +66,8 @@ pub const Binding = union(enum) {
 
     pub const Load = struct {
         source: Source.Bound,
-        /// Memory space the loader must deliver this tensor into, on every
-        /// device of its mesh (`View.setMemory`). The destination is
-        /// allocated once per device whatever its pieces; a host kind takes
-        /// no device memory.
-        memory: Memory.Kind = .default,
+        /// Where the loader delivers this tensor (`View.setMemory`).
+        memory: Memory = .default,
     };
 
     pub const Compute = struct {
@@ -343,11 +370,11 @@ pub const View = struct {
         return self.createTensor(subkey, tags, .replicated, .{});
     }
 
-    /// Changes the memory space the loader delivers `tensor` into (see
-    /// `Binding.Load.memory`), for a decision made after the tensor was bound.
-    /// `tensor` must be bound in this store, and not computed by a program:
-    /// a program's output lands in default device memory.
-    pub fn setMemory(self: View, tensor: Tensor, kind: Memory.Kind) void {
+    /// Changes where the loader delivers `tensor` (`Memory`), for a
+    /// decision made after the tensor was bound. `tensor` must be bound in
+    /// this store, and not computed by a program: a program's output lands
+    /// in default device memory.
+    pub fn setMemory(self: View, tensor: Tensor, kind: Memory) void {
         const binding = self.store.id_to_sources.getPtr(tensor.id) orelse
             stdx.debug.panic("Tensor {} {f} has no binding in this store", .{ tensor.id, tensor.shape() });
         switch (binding.*) {
@@ -490,7 +517,7 @@ test "placed shapes on different meshes or partitionings differ" {
     try std.testing.expect(!samePlacedShape(first, first.withPartitioning(first._sharding.mesh.?, .{ .qout = .open })));
 }
 
-test "setMemory changes the memory space of a bound tensor's binding" {
+test "setMemory changes where the loader delivers a bound tensor" {
     var store: TensorStore = store: {
         var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
         errdefer registry.deinit();
@@ -501,9 +528,9 @@ test "setMemory changes the memory space of a bound tensor's binding" {
 
     const view_ = store.view();
     const tensor = view_.createReplicatedTensor("table", null);
-    try std.testing.expectEqual(Memory.Kind.default, store.bindingOf(tensor.id).?.load.memory);
-    view_.setMemory(tensor, .host_pinned);
-    try std.testing.expectEqual(Memory.Kind.host_pinned, store.bindingOf(tensor.id).?.load.memory);
+    try std.testing.expectEqual(Memory.default, store.bindingOf(tensor.id).?.load.memory);
+    view_.setMemory(tensor, .host_mapped);
+    try std.testing.expectEqual(Memory.host_mapped, store.bindingOf(tensor.id).?.load.memory);
     view_.setMemory(tensor, .default);
-    try std.testing.expectEqual(Memory.Kind.default, store.bindingOf(tensor.id).?.load.memory);
+    try std.testing.expectEqual(Memory.default, store.bindingOf(tensor.id).?.load.memory);
 }

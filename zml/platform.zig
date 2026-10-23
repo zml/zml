@@ -64,15 +64,6 @@ pub const Memory = struct {
         host_unpinned,
         host_pinned,
         device,
-
-        /// Whether `kind` is a host memory space, which takes no device
-        /// memory.
-        pub fn isHost(self: Kind) bool {
-            return switch (self) {
-                .default, .device => false,
-                .host_pinned, .host_unpinned => true,
-            };
-        }
     };
 
     pjrt_memory: *const pjrt.Memory,

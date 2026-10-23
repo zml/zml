@@ -238,10 +238,10 @@ pub fn main(init: std.process.Init) !void {
             const tensors = try allocator.alloc(zml.Tensor, tensor_count);
             defer allocator.free(tensors);
 
-            // `ZML_LOAD_MEMORY=host_pinned` binds every tensor into host
-            // pinned memory instead of device memory.
-            const load_memory = std.meta.stringToEnum(zml.Memory.Kind, init.environ_map.get("ZML_LOAD_MEMORY") orelse "default") orelse {
-                log.err("ZML_LOAD_MEMORY must be default, host_pinned, host_unpinned or device", .{});
+            // `ZML_LOAD_MEMORY=host_pinned` (or `host_mapped`) binds every
+            // tensor into pinned host memory instead of device memory.
+            const load_memory = std.meta.stringToEnum(zml.io.TensorStore.Memory, init.environ_map.get("ZML_LOAD_MEMORY") orelse "default") orelse {
+                log.err("ZML_LOAD_MEMORY must be default, host_pinned or host_mapped", .{});
                 return error.InvalidArgument;
             };
 

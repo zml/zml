@@ -200,8 +200,8 @@ have no governor traffic) and need no repeat.
 
 ## What the llmd migration needs from this API (do not remove)
 
-Done: llmd runs on the reworked API (thirty-fourth to forty-seventh passes,
-`LOADER_API_REVIEW.md` R1-R15 but R12). It calls `Loader.init(allocator, io,
+Done: llmd runs on the reworked API (thirty-fourth to fifty-first passes,
+`LOADER_API_REVIEW.md` R1-R16). It calls `Loader.init(allocator, io,
 platform, .{ .checkpoint = model })`, which resolves the read sizing through
 the VFS (was `.load_profile = try vfs.loadProfile(model)`), then
 `start`/`wait` and `deinit` (were `load`, multi-binding `loadExecute`,

@@ -12,10 +12,10 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
 const Buffer = @import("../buffer.zig").Buffer;
-const Memory = @import("../platform.zig").Memory;
 const Platform = @import("../platform.zig").Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
+const TensorStore = @import("TensorStore.zig");
 const backend = @import("backend.zig");
 const load_testing = @import("testing.zig");
 const LoadPart = backend.LoadPart;
@@ -214,6 +214,9 @@ pub const Loader = struct {
             lattice.copyRuns(0, lattice.runs(), @intFromPtr(tensor.ptr), @intFromPtr(source.ptr) -% @as(usize, @intCast(current.src_offset)));
         }
         stage.* = "transfer";
+        // The front end asks no views of host memory of this backend
+        // (`backend.supportsMemory`).
+        std.debug.assert(spec.memory != .host_mapped);
         // The shape's sharding places the bytes; a shape without a mesh is
         // replicated, as `Buffer.from` places it.
         spec.output.* = try Buffer.from(
@@ -221,7 +224,7 @@ pub const Loader = struct {
             self.platform,
             spec.shape,
             tensor,
-            .{ .wait = true, .memory = spec.memory },
+            .{ .wait = true, .memory = spec.memory.space() },
         );
     }
 
@@ -682,7 +685,7 @@ test "buffered loader assembles a composite destination in reused staging" {
 
     const loader = try Loader.create(allocator, io, platform, .{ .read_parallelism = 2 });
     defer loader.destroy();
-    for ([_]Memory.Kind{ .default, .host_pinned }) |memory| {
+    for ([_]TensorStore.Memory{ .default, .host_pinned }) |memory| {
         // A whole tensor first, so the composite reuses its staging buffer
         // and only the zeroing keeps its bytes out of the gaps.
         var first: Buffer = undefined;
@@ -709,10 +712,10 @@ test "buffered loader assembles a composite destination in reused staging" {
 }
 
 /// Every shard of `buffer` is in its device's `memory` space.
-fn expectMemory(platform: *const Platform, buffer: *const Buffer, memory: Memory.Kind) !void {
+fn expectMemory(platform: *const Platform, buffer: *const Buffer, memory: TensorStore.Memory) !void {
     const devices = platform.placedShape(buffer.shape())._sharding.mesh.?.devicesInCanonicalOrder();
     try std.testing.expectEqual(devices.len, buffer._shards.len);
     for (devices, buffer._shards.constSlice()) |device, shard| {
-        try std.testing.expect(shard.memory(platform.pjrt_api) == platform.devices[device.id].memory(memory).?.pjrt_memory);
+        try std.testing.expect(shard.memory(platform.pjrt_api) == platform.devices[device.id].memory(memory.space()).?.pjrt_memory);
     }
 }

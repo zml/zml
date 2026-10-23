@@ -64,7 +64,6 @@ const Buffer = @import("../buffer.zig").Buffer;
 const pjrtx = @import("../pjrtx.zig");
 const platform_mod = @import("../platform.zig");
 const CreateOptions = platform_mod.CreateOptions;
-const Memory = platform_mod.Memory;
 const Platform = platform_mod.Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
@@ -74,6 +73,7 @@ const BackendOptions = backend.Options;
 const LoadPart = backend.LoadPart;
 const LoadSpec = backend.LoadSpec;
 const ShardGrid = @import("ShardGrid.zig");
+const Memory = @import("TensorStore.zig").Memory;
 const dma_calibration = @import("dma_calibration.zig");
 const host_memory = @import("host_memory.zig");
 const load_log = @import("log.zig").load;
@@ -1125,8 +1125,8 @@ const Destination = struct {
     placed_shape: Shape,
     /// Where `placed_shape`'s logical bytes land on its devices.
     grid: ShardGrid,
-    /// The memory space of every destination buffer.
-    memory: Memory.Kind = .default,
+    /// Where its bytes go (`TensorStore.Memory`).
+    memory: Memory = .default,
     output: *Buffer,
     /// What fills it, in ascending, disjoint destination order
     /// (`backend.LoadSpec`): a slice of the batch's parts. Bytes no part
@@ -1145,7 +1145,7 @@ const Destination = struct {
     progress: std.Progress.Node = .none,
     state: LazyOnce(TensorTransfer, InitContext, TransferInitError, initTransfer) = .{},
 
-    /// In a host memory space: written by the CPU, not by DMA.
+    /// In host memory (`Memory.isHost`): written by the CPU, not by DMA.
     fn hostResident(self: *const Destination) bool {
         return self.memory.isHost();
     }
@@ -1293,9 +1293,9 @@ const TensorTransfer = struct {
     /// per destination (`LazyOnce`), however many parts feed it, on the
     /// allocation task or the worker that first reads or fills for it,
     /// which also counts the allocation once.
-    /// A destination in a host memory space (`Memory.Kind.host_pinned`)
-    /// is created on that space of each device and takes no device memory,
-    /// so it is not counted in `allocated_bytes`.
+    /// A host destination (`Memory.isHost`) is created in each device's
+    /// pinned host memory space and takes no device memory, so it is not
+    /// counted in `allocated_bytes`.
     fn init(direct: *Loader, destination: *const Destination) TransferInitError!TensorTransfer {
         if (destination.hostResident()) return initHost(direct, destination);
         const allocator = direct.allocator;
@@ -1317,8 +1317,7 @@ const TensorTransfer = struct {
             pjrtx.bufferTypeFromDtype(packed_placement.shape.dtype()),
         );
         for (ordered_devices, 0..) |device, i| {
-            // The front end only submits kinds every device exposes.
-            const memory = platform.devices[device.id].memory(destination.memory) orelse return error.UnsupportedMemoryKind;
+            const memory = platform.devices[device.id].memory(.default) orelse return error.UnsupportedMemoryKind;
             const manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
                 .shape_specs = &.{shape_spec},
                 .memory = memory.pjrt_memory,
@@ -1346,7 +1345,9 @@ const TensorTransfer = struct {
     /// (`ShardGrid.writers`) share one allocation: every device's shard is
     /// a view of it, and the allocation lives until the last view is gone
     /// (`SharedHostAllocation`). A transfer is then written once, through
-    /// its first writer's shard (`hostLanding`). Every direct target lets a
+    /// its first writer's shard (`hostLanding`). A `host_mapped` shard is
+    /// always such a view, on the device's default memory space, so
+    /// kernels read the allocation in place. Every direct target lets a
     /// host allocation of one device back a view on another, for transfers
     /// and kernels alike: CPU, CUDA and ROCm allocate portable pinned memory
     /// (`Buffer.HostAccessible.init`), and on oneAPI the four B70 of the test
@@ -1388,16 +1389,18 @@ const TensorTransfer = struct {
         var pjrt_buffers: Buffer.Shards = .empty;
         errdefer for (pjrt_buffers.constSlice()) |buffer| buffer.deinit(api);
         for (ordered_devices, shards, 0..) |device, *shard, index| {
-            // The front end only submits kinds every device exposes.
-            const memory = (platform.devices[device.id].memory(destination.memory) orelse return error.UnsupportedMemoryKind).pjrt_memory;
-            if (grid.replicas() > 1) {
+            // The front end only submits host kinds when every device has
+            // a pinned host space.
+            const host = (platform.devices[device.id].memory(.host_pinned) orelse return error.UnsupportedMemoryKind).pjrt_memory;
+            if (grid.replicas() > 1 or destination.memory == .host_mapped) {
                 const first: usize = @ctz(box_writers[index]);
-                if (first == index) shared[index] = try .create(direct.io, platform, dims, element_type, layout, memory);
+                if (first == index) shared[index] = try .create(direct.io, platform, dims, element_type, layout, host);
                 const allocation = shared[first].?;
-                pjrt_buffers.appendAssumeCapacity(try allocation.view(platform, dims, element_type, layout, memory));
+                const space = (platform.devices[device.id].memory(destination.memory.space()) orelse return error.UnsupportedMemoryKind).pjrt_memory;
+                pjrt_buffers.appendAssumeCapacity(try allocation.view(platform, dims, element_type, layout, space));
                 shard.* = allocation.data;
             } else {
-                const buffer = try createHostBuffer(direct.io, platform, dims, element_type, layout, memory);
+                const buffer = try createHostBuffer(direct.io, platform, dims, element_type, layout, host);
                 pjrt_buffers.appendAssumeCapacity(buffer);
                 shard.* = @ptrCast(try buffer.opaqueDeviceMemoryDataPointer(api));
             }
@@ -1434,13 +1437,14 @@ const TensorTransfer = struct {
 };
 
 /// One host allocation that the devices of a region read through views of
-/// it: the owner buffer is not a shard, every view holds a reference that its
-/// deletion callback drops, and the last drop destroys the owner. PJRT runs
-/// a view's callback once the view's memory is out of use, after any
-/// execution still reading it, so the allocation outlives its readers
-/// whatever order the shards are freed in, including views of the shards
-/// (`Buffer.createView`) that their owner outlives. On the process heap: the
-/// last view may go long after the loader.
+/// it, in their pinned host memory space or, for `host_mapped`, their
+/// default one: the owner buffer is not a shard, every view holds a
+/// reference that its deletion callback drops, and the last drop destroys
+/// the owner. PJRT runs a view's callback once the view's memory is out of
+/// use, after any execution still reading it, so the allocation outlives
+/// its readers whatever order the shards are freed in, including views of
+/// the shards (`Buffer.createView`) that their owner outlives. On the
+/// process heap: the last view may go long after the loader.
 /// Writing through one view shows on every device, so a shard of a
 /// replicated host-resident destination must not be donated to an
 /// execution that writes it, as with `Buffer.HostAccessible.init(.undonatable)`.
@@ -1477,7 +1481,9 @@ const SharedHostAllocation = struct {
         return self;
     }
 
-    /// A shard on `memory`'s device, holding a reference.
+    /// A shard in `memory`, holding a reference: the host space of its
+    /// device, or the default one, where kernels read the allocation in
+    /// place. Every device can read it.
     fn view(
         self: *SharedHostAllocation,
         platform: *const Platform,
@@ -1493,8 +1499,6 @@ const SharedHostAllocation = struct {
             .dims = dims,
             .element_type = element_type,
             .layout = layout,
-            // The view belongs to this device's host memory space; the
-            // allocation is accessible from every device.
             .memory = memory,
             .on_delete_callback = &onViewDeleted,
             .on_delete_callback_arg = self,
@@ -1513,6 +1517,13 @@ const SharedHostAllocation = struct {
         if (builtin.is_test) _ = live.fetchSub(1, .monotonic);
     }
 };
+
+/// Shared host allocations not released yet, in tests: the front end's
+/// tests count the ones their views keep.
+pub fn liveHostAllocations() usize {
+    comptime std.debug.assert(builtin.is_test);
+    return SharedHostAllocation.live.load(.acquire);
+}
 
 /// An uninitialized buffer in a host memory space, once its allocation
 /// completed: its host pointer is valid only then.
@@ -3864,8 +3875,9 @@ test "loader failures clean up before publication, after publication and during 
 
     const Failure = enum { before_publication, after_publication, reading };
     // Device memory goes through blocks and DMA; host memory is written in
-    // place by the workers. Both clean up the same way.
-    for ([_]Memory.Kind{ .default, .host_pinned }) |memory| for (std.enums.values(Failure)) |failure| {
+    // place by the workers, into views of it for `host_mapped`. All clean
+    // up the same way.
+    for ([_]Memory{ .default, .host_pinned, .host_mapped }) |memory| for (std.enums.values(Failure)) |failure| {
         var sources = [_]safetensors.Tensor{
             .{ .file_uri = path, .name = "first", .shape = .init(.{4}, .u8), .offset = 0 },
             .{ .file_uri = later_path, .name = "later", .shape = .init(.{4}, .u8), .offset = 0 },
@@ -4936,7 +4948,7 @@ const CompositeTest = struct {
     /// without `alignment`, through its slot's blocks with it. A DMA job is
     /// staged where it saves `staging_gain` submissions; the replay lays
     /// its blocks out as its worker would (`jobBlocks`).
-    fn run(platform: *const Platform, shape: Shape, block_size: usize, request_size: usize, memory: Memory.Kind, alignment: usize, staging_gain: usize, expect_cross_part_piece: bool) !void {
+    fn run(platform: *const Platform, shape: Shape, block_size: usize, request_size: usize, memory: Memory, alignment: usize, staging_gain: usize, expect_cross_part_piece: bool) !void {
         const allocator = std.testing.allocator;
         var first_bytes: [96]u8 = undefined;
         for (&first_bytes, 0..) |*byte, i| byte.* = @as(u8, @truncate(i *% 31 +% 7)) | 1;
@@ -5278,7 +5290,7 @@ test "host-resident and DMA parts never share a job, and overlapping host parts 
         .{ .source = &sources[0], .source_slot = &slot, .destination = &destinations[2], .width = 64 },
         .{ .source = &sources[2], .source_slot = &slot, .destination = &destinations[3], .width = 64 },
     };
-    const memories = [_]Memory.Kind{ .host_pinned, .default, .host_pinned, .host_pinned };
+    const memories = [_]Memory{ .host_pinned, .default, .host_pinned, .host_pinned };
     for (&destinations, &outputs, &parts, memories) |*destination, *output, *part, memory| {
         destination.* = .{ .shape = shape, .placed_shape = platform.placedShape(shape).packedShape(), .grid = try .init(platform.placedShape(shape).packedShape()), .memory = memory, .output = output, .parts = @as(*[1]Part, part), .unread_bytes = .init(64) };
     }
@@ -5525,7 +5537,8 @@ const HostResidentTest = struct {
             Shape.init(.{ .row = 32, .col = 4 }, .u8).withPartitioning(&mesh, .{}),
             Shape.init(.{ .row = 32, .col = 4 }, .u8).withPartitioning(&mesh, .{ .row = .model }),
         };
-        const memories = [_]Memory.Kind{ .host_pinned, .default, .host_pinned, .host_pinned, .host_pinned, .host_pinned };
+        // `rows` as views of pinned memory in the devices' default space.
+        const memories = [_]Memory{ .host_mapped, .default, .host_pinned, .host_pinned, .host_pinned, .host_pinned };
         const globals = [_][]const u8{ &rows, &dev, &cols, &rep, &twice, &twice };
         var parts: [names.len]LoadPart = undefined;
         var specs: [names.len]LoadSpec = undefined;
@@ -5547,12 +5560,12 @@ const HostResidentTest = struct {
             // Every credit, with its blocks, came back.
             try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
 
-            // Host shards in each device's host memory; the replicated ones
-            // one allocation.
+            // Host shards in each device's host memory, or its default
+            // memory for views; the replicated ones one allocation.
             for (outputs, memories) |output, memory| {
                 const ordered = platform.placedShape(output.shape())._sharding.mesh.?.devicesInCanonicalOrder();
                 for (ordered, output._shards.constSlice()) |device, shard| {
-                    try std.testing.expect(shard.memory(platform.pjrt_api) == platform.devices[device.id].memory(memory).?.pjrt_memory);
+                    try std.testing.expect(shard.memory(platform.pjrt_api) == platform.devices[device.id].memory(memory.space()).?.pjrt_memory);
                 }
             }
             for (outputs[3..5]) |output| {
@@ -5563,7 +5576,8 @@ const HostResidentTest = struct {
                     try std.testing.expect(pointer == first);
                 }
             }
-            try std.testing.expectEqual(live_before + 2, SharedHostAllocation.live.load(.acquire));
+            // The two replicated outputs, and one per device of `rows`.
+            try std.testing.expectEqual(live_before + 2 + outputs[0]._shards.len, SharedHostAllocation.live.load(.acquire));
             // Shards may be freed in any order: free one replicated output's
             // last first; its allocation goes with its last view.
             std.mem.reverse(*pjrt.Buffer, outputs[3]._shards.slice());

@@ -3,10 +3,10 @@ const std = @import("std");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
-const Memory = @import("../platform.zig").Memory;
 const Platform = @import("../platform.zig").Platform;
 const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
+const Memory = @import("TensorStore.zig").Memory;
 const constants = @import("../constants.zig");
 const buffered_loader = @import("buffered_loader.zig");
 const direct_loader = @import("direct_loader.zig");
@@ -62,10 +62,9 @@ pub const LoadSpec = struct {
     /// sharding places the bytes on the devices; a shape without a mesh is
     /// replicated over every device (`Platform.placedShape`).
     shape: Shape,
-    /// The memory space of each device that receives the bytes, from the
-    /// source's `TensorStore` binding. The front end only submits kinds
-    /// `supportsMemory` accepts.
-    memory: Memory.Kind = .default,
+    /// Where the bytes go, from the source's `TensorStore` binding. The
+    /// front end only submits kinds `supportsMemory` accepts.
+    memory: Memory = .default,
     /// Written whole once the destination's buffers exist, and not touched
     /// before: a failure leaves it as it was or holding those buffers.
     output: *Buffer,
@@ -394,16 +393,16 @@ fn loadsDirect(platform: *const Platform) bool {
     };
 }
 
-/// Whether the loader can deliver into `kind` on `platform`: every device
-/// must expose that memory space, and host-pinned delivery needs the direct
-/// pipeline, as on master, where TPU, neuron, metal and furiosa refused it.
-/// CPU takes the direct pipeline here, so it accepts `.host_pinned` (its
-/// plugin resolves every kind to its one memory space).
-pub fn supportsMemory(platform: *const Platform, kind: Memory.Kind) bool {
+/// Whether the loader can deliver into `kind` on `platform`. The host
+/// kinds need the direct pipeline, as on master, where TPU, neuron, metal
+/// and furiosa refused host-pinned delivery, and a pinned host memory space
+/// on every device. CPU takes the direct pipeline here, so it accepts them
+/// (its plugin resolves every kind to its one memory space).
+pub fn supportsMemory(platform: *const Platform, kind: Memory) bool {
     if (kind == .default) return true;
-    if (kind == .host_pinned and !loadsDirect(platform)) return false;
+    if (!loadsDirect(platform)) return false;
     for (platform.devices) |*device| {
-        if (device.memory(kind) == null) return false;
+        if (device.memory(.host_pinned) == null) return false;
     }
     return true;
 }
