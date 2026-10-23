@@ -1504,7 +1504,7 @@ pub const Tensor = struct {
     /// are considered "batching axes".
     pub fn dot(lhs: Tensor, rhs: Tensor, args: anytype) Tensor {
         const dot_axes = lhs.dotAxes(rhs, args);
-        return lhs.dotGeneral(rhs, dot_axes.contracting.constSlice(), dot_axes.batching.constSlice());
+        return lhs.dotGeneral(rhs, dot_axes.contracting.constSlice(), dot_axes.batching.constSlice(), lhs.dtype());
     }
 
     pub const DotAxes = struct {
@@ -1603,19 +1603,21 @@ pub const Tensor = struct {
 
     /// Generalized matrix multiplication of two tensors along the specified axes.
     /// In this version batching dimensions need to be explicitly specified.
-    /// The result shape is made of (batching_axes ++ lhs_result_axes ++ rhs_result_axes.
+    /// The result element type is `result_dtype`.
+    /// The result shape is made of batching_axes ++ lhs_result_axes ++ rhs_result_axes.
     /// Where "result axes" are non-contracting, non-batching axes of each input tensor.
     pub fn dotGeneral(
         lhs: Tensor,
         rhs: Tensor,
         contracting_axes: []const [2]i8,
         batching_axes: []const [2]i8,
+        result_dtype: DataType,
     ) Tensor {
         stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
 
         const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
-        var res_shape: Shape = .scalar(lhs.dtype());
+        var res_shape: Shape = .scalar(result_dtype);
         // Validate batching axes
         var lhs_batching_axes: Axes = .empty;
         var rhs_batching_axes: Axes = .empty;
