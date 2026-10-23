@@ -8082,7 +8082,110 @@ Checks:
   and writes nothing; to a local `notes:copy.txt` it copies.
 - `zig fmt` on scratch copies: no diff.
 
+## Fifty-first pass: host_mapped (R12) and the rework on GB300 (2026-10-23, gb300-1)
+
+R12, the last move of `LOADER_API_REVIEW.md`, and the first GPU runs of
+the reworked loader and llmd. zml `zoyytxpt`, monorepo `zllzwuwx`.
+
+R12:
+- `TensorStore.Memory` (`default`, `host_pinned`, `host_mapped`) is where
+  the loader delivers a loaded tensor. It replaces the PJRT memory kind
+  on bindings, `LoadSpec` and `setMemory`; `host_unpinned` and `device`
+  are no longer loader targets. `supportsMemory` takes the host kinds on
+  the direct pipeline only, where every device has a pinned host space.
+  `Memory.space` names a delivered buffer's memory space;
+  `Memory.Kind.isHost` is gone.
+- A `host_mapped` destination is written like a `host_pinned` one,
+  through `SharedHostAllocation`, but every shard is a view of the
+  allocation in the device's default memory space, replicated or not.
+  The loader keeps no owner: the allocation goes with the last view's
+  deletion callback. The buffered backend never receives it.
+- llmd: deepseek41's engram tables and qwen4's offloaded n-grams bind
+  `.host_mapped`. `swapEngramHostPinnedBuffers`, `engram_host_buffers`,
+  deepseek41's `finalizeLoadedBuffers`, qwen4's `createView` swap and
+  `State.ngram_host_buffers` are gone. `extra_device_memory_bytes`
+  stays: XLA still counts the views as device memory.
+- The Part 3 precondition (a device view of loader-owned pinned memory
+  whose deletion outlives its readers) holds on CUDA. The engram-style
+  table test frees the table while a gather queued behind eight
+  4096x4096 products still has to read it, then allocates pinned decoys
+  of the table's size: on two and on four GB300 the gather was still
+  pending at the release, in both placements, and returned the right
+  rows; the shared allocations were released once it was done.
+- The test's residency checks count device allocations (`num_allocs`)
+  after `awaitSetup`. Bytes in use did not work on CUDA: the plugin
+  reports its pool (`bytes_in_use` = `pool_bytes` = `bytes_reserved`),
+  which freed memory leaves room in, and the set-up's DMA calibration
+  allocates about 512 MiB on its device after `Loader.init` returns.
+  Both made the old checks fail on four GPUs.
+
+zml suite on CUDA (`bazel run --//platforms:cuda=true //zml:test`,
+gb300-1, four GB300): 352 tests, 322 OK. All io tests on the GPUs pass,
+the host-resident test included (its `rows` destination is
+`host_mapped`). Failing, outside the rework:
+- tests that build CPU devices: the CPU PJRT plugin ships for x86 Linux
+  and macOS only, not aarch64 Linux (`FileNotFound`, or skipped);
+- `moe.tests`: the FlashInfer matrix fails `MoeComplianceFailed`; the
+  specialized Triton MXFP4 matrix panics in `validateInputs` ("Invalid
+  MXFP4 tensor layout") and the CuTe MXFP4 one in MLIR verification of
+  `make_non_exec_tiled_tma_load`. Each panic aborts the binary; the run
+  that reached 352 skipped both by hand on gb300-1 only.
+
+llmd on gb300-1, saved binaries with one frozen runfiles tree
+(`~/phase7/bin/{pre,new,base}/llmd`, `~/phase7/runfiles`,
+`~/phase7/run8.sh`, `series8.sh`, `parse9.py`): `new` is
+`zoyytxpt`+`zllzwuwx`; `pre` is the commit before the API rework (zml
+`kskxyxur`, monorepo `kvklzrov`); `base` is zml `omuqxqpu`, monorepo
+`rwqvkpqy`, 58 commits back, before the load work of passes 29-33.
+- DeepSeek-V4.1-Flash, GPUs 2,3, engram tables `host_mapped`: answers
+  "Paris" and "391" on every run. Load over five interleaved pairs:
+  `pre` 10.13-10.63 s (median 10.45), `new` 9.99-13.08 s (median 10.55,
+  13.08 once); `new` slower in 4 pairs of 5, median +0.22 s (+2%), which
+  five pairs cannot resolve (the thirty-third pass needed 15). Decode at
+  batch 1: 6.07-6.13 ms per step on `pre`, 6.14-6.21 on `new`; 512
+  tokens in 3.12-3.28 s on every tree, `base` included, so R9's newly
+  swizzled projections change nothing measurable. `base` loads in
+  1m27-1m30 (before passes 29-33).
+- Qwen3.8-Flash-Next (BF16), GPUs 0,1, `--cache-memory-fraction=0.6`:
+  47.68 GiB of n-grams offloaded as `host_mapped`; 329.58 GiB in
+  18.6 s; answers "Paris" and "391".
+- Qwen3.8-27B-FP8 with the z-lab DFlash2 drafter (R8's store), GPUs
+  0,1: 33.40 GiB in 1.1-1.4 s on every tree; a decode step costs
+  36.5-37.3 ms on `new` and `pre` alike. Wall time for 512 tokens
+  (5.1-7.4 s) follows the accepted drafts per step (2.77-3.22).
+- At temperature 0 the generated text is fixed within a process but
+  changes between processes of the same binary, on every tree, so text
+  hashes cannot compare trees; the decode metrics (`/metrics` deltas)
+  can.
+
+- `finalizeLoadedBuffers` is only qwen4's weight baking now;
+  `buffers_loaded` stays as models.zig's assert.
+
+Found, not fixed:
+- Qwen3.8-Flash-Next-FP8 does not load on any tree: qwen4 picks its MoE
+  backend from `experts.gate_up_proj` (`weights.moeBackend`, before
+  that `expertsFormat`), and that checkpoint stores per-expert
+  `gate_proj` and `up_proj`. The other models ask with `down_proj`.
+
+Checks:
+- CPU: `bazel test //zml:test //vfs:test`, `bazel build //examples/...`,
+  `bazel test --config=localzml //llmd/...` (7/7) and `bazel build
+  --config=localzml //llmd:llmd` pass. `zig fmt` on scratch copies: only
+  its rewrite of deprecated builtins elsewhere.
+- GPU: above. Not run: MI300 (R9's FNUZ accuracy), a remote checkpoint.
+
 ## Open work
+
+- 2026-10-23 host_mapped and the rework on GB300 (fifty-first pass, zml
+  zoyytxpt and monorepo zllzwuwx): R12 done, so every move of
+  `LOADER_API_REVIEW.md` is in. A table the GPU reads in place loads as
+  `host_mapped`; deepseek41's and qwen4's swaps and owner lists are gone.
+  On gb300-1: the CUDA precondition holds (a view freed under a pending
+  gather), the io tests pass on four GB300, and DeepSeek-V4.1-Flash,
+  Qwen3.8-Flash-Next and Qwen3.8-27B-FP8 with DFlash2 load and answer.
+  Load and decode match the commit before the rework within noise.
+  Open: Qwen3.8-Flash-Next-FP8 (qwen4 asks for `gate_up_proj`), the MoE
+  kernel tests on GB300, MI300.
 
 - 2026-10-22 VFS fixes and the rest of Moves 1 and 4 (fiftieth pass, zml
   lxltkwot): the audit's items 3, 5 and 8. A failed streaming read is
