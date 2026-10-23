@@ -249,6 +249,70 @@ test "generated types and attributes rebuild from their getters" {
     }
 }
 
+test "algebra attributes build from their leaves and tuples" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    const int_tuple = try cute_ir.IntTupleAttr.getTuple(ctx, &.{
+        try .getStatic(ctx, 0),
+        try .getDynamic(ctx, 32, 1),
+        try .getDynamic(ctx, 32, 16),
+        try .getTuple(ctx, &.{ try .getStatic(ctx, 4), try .getDynamic(ctx, 64, 1) }),
+    });
+    try expectType(ctx, "!cute.int_tuple<\"(0,?,?{div=16},(4,?{i64}))\">", (try IntTupleType.get(ctx, .{ .attr = int_tuple.attribute() })).type_());
+    try expectType(ctx, "!cute.int_tuple<\"()\">", (try IntTupleType.get(ctx, .{ .attr = (try cute_ir.IntTupleAttr.getTuple(ctx, &.{})).attribute() })).type_());
+
+    const coord = try cute_ir.CoordAttr.getTuple(ctx, &.{
+        try .getUnderscore(ctx),
+        try .getStatic(ctx, 1),
+        try .getTuple(ctx, &.{ try .getDynamic(ctx, 32, 1), try .getUnderscore(ctx) }),
+    });
+    try expectType(ctx, "!cute.coord<\"(_,1,(?,_))\">", (try CoordType.get(ctx, .{ .attr = coord.attribute() })).type_());
+
+    const shape = try cute_ir.ShapeAttr.getTuple(ctx, &.{
+        try .getTuple(ctx, &.{ try .getStatic(ctx, 512), try .getStatic(ctx, 1) }),
+        try .getStatic(ctx, 1),
+    });
+    const stride = try cute_ir.StrideAttr.getTuple(ctx, &.{
+        try .getTuple(ctx, &.{ try .getBasis(ctx, 1, 2, &.{0}), try .getStatic(ctx, 0) }),
+        try .getBasis(ctx, 3, 1, &.{ 0, 1 }),
+    });
+    const layout = try cute_ir.LayoutAttr.get(ctx, .{ .shape = shape, .stride = stride });
+    try expectType(ctx, "!cute.layout<\"((512,1),1):((1/2@0,0),3@1@0)\">", (try LayoutType.get(ctx, .{ .attr = layout.attribute() })).type_());
+    try std.testing.expectError(error.InvalidMlir, cute_ir.LayoutAttr.get(ctx, .{ .shape = shape, .stride = try .getStatic(ctx, 1) }));
+
+    const row = try cute_ir.LayoutAttr.get(ctx, .{
+        .shape = try .getTuple(ctx, &.{ try .getStatic(ctx, 8), try .getStatic(ctx, 64) }),
+        .stride = try .getTuple(ctx, &.{ try .getStatic(ctx, 64), try .getDynamic(ctx, 32, 8) }),
+    });
+    try expectType(ctx, "!cute.layout<\"(8,64):(64,?{div=8})\">", (try LayoutType.get(ctx, .{ .attr = row.attribute() })).type_());
+
+    const tile = try cute_ir.TileAttr.getTuple(ctx, &.{ try .getLayout(ctx, row), try .getUnderscore(ctx) });
+    try expectType(ctx, "!cute.tile<\"[(8,64):(64,?{div=8});_]\">", (try TileType.get(ctx, .{ .attr = tile.attribute() })).type_());
+
+    const swizzle = try cute_ir.SwizzleAttr.get(ctx, .{ .bits = 3, .base = 4, .shift = 3 });
+    try expectType(ctx, "!cute.swizzle<\"S<3,4,3>\">", (try SwizzleType.get(ctx, .{ .attr = swizzle.attribute() })).type_());
+
+    const outer = try cute_ir.LayoutAttr.get(ctx, .{
+        .shape = try .getTuple(ctx, &.{ try .getStatic(ctx, 8), try .getStatic(ctx, 64) }),
+        .stride = try .getTuple(ctx, &.{ try .getStatic(ctx, 64), try .getStatic(ctx, 1) }),
+    });
+    const composed = try cute_ir.ComposedLayoutAttr.get(ctx, .{ .inner = .{ .swizzle = swizzle }, .offset = try .getStatic(ctx, 0), .outer = outer });
+    try expectType(ctx, "!cute.composed_layout<\"S<3,4,3> o 0 o (8,64):(64,1)\">", (try ComposedLayoutType.get(ctx, .{ .attr = composed.attribute() })).type_());
+
+    try std.testing.expectError(error.InvalidMlir, cute_ir.IntTupleAttr.getDynamic(ctx, 7, 1));
+    try std.testing.expectError(error.InvalidMlir, cute_ir.StrideAttr.getBasis(ctx, 1, 1, &.{}));
+    try std.testing.expectError(error.InvalidMlir, cute_ir.SwizzleAttr.get(ctx, .{ .bits = 5, .base = 4, .shift = 3 }));
+}
+
+fn expectType(ctx: *mlir.Context, expected: []const u8, actual: *const mlir.Type) !void {
+    const parsed = try mlir.Type.parse(ctx, expected);
+    if (!parsed.eql(actual)) {
+        std.debug.print("expected {s}, built {f}\n", .{ expected, actual });
+        return error.TestUnexpectedResult;
+    }
+}
+
 fn rebuild(comptime T: type, ctx: *mlir.Context, value: *const T) !*const T {
     var args: T.InitArgs = undefined;
     var elements: [8]*const mlir.Type = undefined;

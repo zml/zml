@@ -4,8 +4,6 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-pub const AttributeKind = enum { int_tuple, coord, shape, stride, layout, tile, composed_layout, swizzle };
-
 pub const CuteType = opaque {
     const M = mlir.Methods(CuteType, c.MlirType);
 
@@ -18,47 +16,6 @@ pub const CuteType = opaque {
 
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("cute");
-}
-
-pub const AlgebraKind = AttributeKind;
-
-/// Constructs the algebra attribute and type through their C APIs.
-/// Existing attributes can be passed directly to LayoutType.get, etc.
-pub fn algebraType(ctx: *mlir.Context, kind: AlgebraKind, expression: []const u8) !*const mlir.Type {
-    return switch (kind) {
-        inline else => |k| blk: {
-            const T = switch (k) {
-                .int_tuple => IntTupleType,
-                .coord => CoordType,
-                .shape => ShapeType,
-                .stride => StrideType,
-                .layout => LayoutType,
-                .tile => TileType,
-                .composed_layout => ComposedLayoutType,
-                .swizzle => SwizzleType,
-            };
-            const attr = try algebraAttr(ctx, @field(AttributeKind, @tagName(k)), expression);
-            break :blk (try T.get(ctx, .{ .attr = attr })).type_();
-        },
-    };
-}
-
-pub fn algebraAttr(ctx: *mlir.Context, kind: AttributeKind, expression: []const u8) !*const mlir.Attribute {
-    return switch (kind) {
-        inline else => |k| blk: {
-            const A = switch (k) {
-                .int_tuple => IntTupleAttr,
-                .coord => CoordAttr,
-                .shape => ShapeAttr,
-                .stride => StrideAttr,
-                .layout => LayoutAttr,
-                .tile => TileAttr,
-                .composed_layout => ComposedLayoutAttr,
-                .swizzle => SwizzleAttr,
-            };
-            break :blk (try A.get(ctx, expression)).attribute();
-        },
-    };
 }
 
 /// The address space of a pointer or memref.
@@ -90,8 +47,10 @@ pub fn constrainedIntType(ctx: *mlir.Context, width: enum { i32, i64 }, divisibl
     })).type_();
 }
 
-/// Constructors take raw CuTe algebra expressions. Getter strings are owned by
-/// the MLIR context and remain valid until that context is destroyed.
+/// Algebra attributes are built bottom up from leaves and tuples of the same
+/// kind. A dynamic leaf has `width` bits (1, 8, 16, 32 or 64) and is known to
+/// be a multiple of `divisibility`. Getter strings are owned by the MLIR
+/// context and remain valid until that context is destroyed.
 pub const IntTupleAttr = opaque {
     const M = mlir.Methods(IntTupleAttr, c.MlirAttribute);
 
@@ -101,9 +60,16 @@ pub const IntTupleAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const IntTupleAttr {
-        const result = c.mlirCuteIntTupleAttrGet(ctx.ptr(), mlir.stringRef(text));
-        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    pub fn getStatic(ctx: *mlir.Context, value_: i64) mlir.Error!*const IntTupleAttr {
+        return @ptrCast(c.mlirCuteIntTupleAttrStaticGet(ctx.ptr(), value_).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn getDynamic(ctx: *mlir.Context, width: i32, divisibility: i64) mlir.Error!*const IntTupleAttr {
+        return @ptrCast(c.mlirCuteIntTupleAttrDynamicGet(ctx.ptr(), width, divisibility).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn getTuple(ctx: *mlir.Context, elements: []const *const IntTupleAttr) mlir.Error!*const IntTupleAttr {
+        return @ptrCast(c.mlirCuteIntTupleAttrTupleGet(ctx.ptr(), @intCast(elements.len), @ptrCast(elements)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const IntTupleAttr) []const u8 {
@@ -124,9 +90,20 @@ pub const CoordAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const CoordAttr {
-        const result = c.mlirCuteCoordAttrGet(ctx.ptr(), mlir.stringRef(text));
-        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    pub fn getStatic(ctx: *mlir.Context, value_: i64) mlir.Error!*const CoordAttr {
+        return @ptrCast(c.mlirCuteCoordAttrStaticGet(ctx.ptr(), value_).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn getDynamic(ctx: *mlir.Context, width: i32, divisibility: i64) mlir.Error!*const CoordAttr {
+        return @ptrCast(c.mlirCuteCoordAttrDynamicGet(ctx.ptr(), width, divisibility).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn getUnderscore(ctx: *mlir.Context) mlir.Error!*const CoordAttr {
+        return @ptrCast(c.mlirCuteCoordAttrUnderscoreGet(ctx.ptr()).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn getTuple(ctx: *mlir.Context, elements: []const *const CoordAttr) mlir.Error!*const CoordAttr {
+        return @ptrCast(c.mlirCuteCoordAttrTupleGet(ctx.ptr(), @intCast(elements.len), @ptrCast(elements)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const CoordAttr) []const u8 {
@@ -147,9 +124,16 @@ pub const ShapeAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const ShapeAttr {
-        const result = c.mlirCuteShapeAttrGet(ctx.ptr(), mlir.stringRef(text));
-        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    pub fn getStatic(ctx: *mlir.Context, value_: i64) mlir.Error!*const ShapeAttr {
+        return @ptrCast(c.mlirCuteShapeAttrStaticGet(ctx.ptr(), value_).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn getDynamic(ctx: *mlir.Context, width: i32, divisibility: i64) mlir.Error!*const ShapeAttr {
+        return @ptrCast(c.mlirCuteShapeAttrDynamicGet(ctx.ptr(), width, divisibility).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn getTuple(ctx: *mlir.Context, elements: []const *const ShapeAttr) mlir.Error!*const ShapeAttr {
+        return @ptrCast(c.mlirCuteShapeAttrTupleGet(ctx.ptr(), @intCast(elements.len), @ptrCast(elements)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const ShapeAttr) []const u8 {
@@ -170,9 +154,22 @@ pub const StrideAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const StrideAttr {
-        const result = c.mlirCuteStrideAttrGet(ctx.ptr(), mlir.stringRef(text));
-        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    pub fn getStatic(ctx: *mlir.Context, value_: i64) mlir.Error!*const StrideAttr {
+        return @ptrCast(c.mlirCuteStrideAttrStaticGet(ctx.ptr(), value_).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn getDynamic(ctx: *mlir.Context, width: i32, divisibility: i64) mlir.Error!*const StrideAttr {
+        return @ptrCast(c.mlirCuteStrideAttrDynamicGet(ctx.ptr(), width, divisibility).ptr orelse return error.InvalidMlir);
+    }
+
+    /// `numerator/denominator` along `modes`, the mode path outermost first;
+    /// CuTe prints it innermost first, so `1@1@0` is modes `{ 0, 1 }`.
+    pub fn getBasis(ctx: *mlir.Context, numerator: i64, denominator: i64, modes: []const i32) mlir.Error!*const StrideAttr {
+        return @ptrCast(c.mlirCuteStrideAttrBasisGet(ctx.ptr(), numerator, denominator, @intCast(modes.len), modes.ptr).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn getTuple(ctx: *mlir.Context, elements: []const *const StrideAttr) mlir.Error!*const StrideAttr {
+        return @ptrCast(c.mlirCuteStrideAttrTupleGet(ctx.ptr(), @intCast(elements.len), @ptrCast(elements)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const StrideAttr) []const u8 {
@@ -193,8 +190,13 @@ pub const LayoutAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const LayoutAttr {
-        const result = c.mlirCuteLayoutAttrGet(ctx.ptr(), mlir.stringRef(text));
+    pub const InitArgs = struct {
+        shape: *const ShapeAttr,
+        stride: *const StrideAttr,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const LayoutAttr {
+        const result = c.mlirCuteLayoutAttrGet(ctx.ptr(), args.shape.ptr(), args.stride.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 
@@ -216,9 +218,16 @@ pub const TileAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const TileAttr {
-        const result = c.mlirCuteTileAttrGet(ctx.ptr(), mlir.stringRef(text));
-        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    pub fn getLayout(ctx: *mlir.Context, layout: *const LayoutAttr) mlir.Error!*const TileAttr {
+        return @ptrCast(c.mlirCuteTileAttrLayoutGet(ctx.ptr(), layout.ptr()).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn getUnderscore(ctx: *mlir.Context) mlir.Error!*const TileAttr {
+        return @ptrCast(c.mlirCuteTileAttrUnderscoreGet(ctx.ptr()).ptr orelse return error.InvalidMlir);
+    }
+
+    pub fn getTuple(ctx: *mlir.Context, elements: []const *const TileAttr) mlir.Error!*const TileAttr {
+        return @ptrCast(c.mlirCuteTileAttrTupleGet(ctx.ptr(), @intCast(elements.len), @ptrCast(elements)).ptr orelse return error.InvalidMlir);
     }
 
     pub fn value(self: *const TileAttr) []const u8 {
@@ -239,8 +248,21 @@ pub const ComposedLayoutAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const ComposedLayoutAttr {
-        const result = c.mlirCuteComposedLayoutAttrGet(ctx.ptr(), mlir.stringRef(text));
+    /// `inner ∘ offset ∘ outer`.
+    pub const InitArgs = struct {
+        inner: union(enum) {
+            swizzle: *const SwizzleAttr,
+            layout: *const LayoutAttr,
+        },
+        offset: *const IntTupleAttr,
+        outer: *const LayoutAttr,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const ComposedLayoutAttr {
+        const inner = switch (args.inner) {
+            inline else => |attr| attr.ptr(),
+        };
+        const result = c.mlirCuteComposedLayoutAttrGet(ctx.ptr(), inner, args.offset.ptr(), args.outer.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 
@@ -262,8 +284,15 @@ pub const SwizzleAttr = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, text: []const u8) mlir.Error!*const SwizzleAttr {
-        const result = c.mlirCuteSwizzleAttrGet(ctx.ptr(), mlir.stringRef(text));
+    /// `S<bits,base,shift>`.
+    pub const InitArgs = struct {
+        bits: u32,
+        base: u32,
+        shift: i32,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const SwizzleAttr {
+        const result = c.mlirCuteSwizzleAttrGet(ctx.ptr(), args.bits, args.base, args.shift);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
 

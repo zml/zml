@@ -210,8 +210,9 @@ verified.
 - `dsl/cute` still builds some types and attributes from text (`parseType`,
   `parseAttribute` and the text-typed overloads). They predate the bindings
   and go away as its callers move to the typed forms.
-- fly's attributes have named constructors (`getStatic`, `getDynamic`, ...)
-  and its generated builders use snake_case parameters.
+- fly's attributes and cute_ir's algebra attributes have named constructors
+  (`getStatic`, `getDynamic`, `getTuple`, ...); fly's generated builders use
+  snake_case parameters.
 
 ## Porting checklist
 

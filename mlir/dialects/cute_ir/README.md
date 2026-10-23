@@ -41,7 +41,10 @@ const pointer = try cute.PtrType.get(ctx, .{
     .addressSpace = .smem,
     .alignment = 16,
 });
-const layout_attr = try cute.LayoutAttr.get(ctx, "4:1");
+const layout_attr = try cute.LayoutAttr.get(ctx, .{
+    .shape = try .getStatic(ctx, 4),
+    .stride = try .getStatic(ctx, 1),
+});
 const layout = try cute.LayoutType.get(ctx, .{ .attr = layout_attr.attribute() });
 const memref = try cute.MemRefType.get(ctx, .{
     .ptr = pointer.type_(),
@@ -50,13 +53,17 @@ const memref = try cute.MemRefType.get(ctx, .{
 const alloc = cute.memref_alloc_smem(ctx, memref.type_(), loc).appendTo(block);
 ```
 
-The bindings follow `mlir/dialects/README.md`. Algebra types take an algebra attribute, `cute.LayoutType.get(ctx, .{ .attr =
-layout_attr })`; algebra attribute constructors call the C++ algebra parser
-with the raw expression and `value()` returns the canonical text. NVGPU atom
-types take their typed parameters, such as `.valType` and `.copyBits`;
-`cute_nvgpu.typeFromPayload(T, ctx, "<f32>")` (from
-`@import("mlir/dialects/cute_nvgpu")`) parses one from the text after its
-mnemonic. For reading existing IR use MLIR's generic `Type.parse`.
+The bindings follow `mlir/dialects/README.md`. Algebra types take an algebra
+attribute, `cute.LayoutType.get(ctx, .{ .attr = layout_attr.attribute() })`.
+Algebra attributes are built bottom up with named constructors: integer
+tuples, coordinates, shapes and strides from `getStatic`, `getDynamic`,
+`getBasis` (strides) or `getUnderscore` (coordinates) leaves and `getTuple`;
+layouts from a shape and a stride; tiles from `getLayout`, `getUnderscore` and
+`getTuple`; swizzles from their three parameters and composed layouts from an
+inner swizzle or layout, an offset and an outer layout. `value()` returns the
+canonical text. NVGPU atom types take their typed parameters, such
+as `.valType` and `.copyBits`. For reading existing IR use MLIR's generic
+`Type.parse`.
 
 Operation builders take the operands, then the result types, then the
 attributes, then the location, and call `mlir.Operation.make`. Parameters

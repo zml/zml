@@ -15,51 +15,85 @@ MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Cute, cute);
 
 // Attributes
 
-// Constructors accept raw algebra expressions, not MLIR attribute assembly.
-// For example, LayoutAttrGet accepts "(16,32):(32,1)". Invalid expressions
-// return a null attribute. GetValue returns canonical algebra text owned by
-// the attribute's context; callers must not free it. Getters require an
+// Algebra attributes are built bottom up. A leaf is a static integer, a
+// dynamic integer of `width` bits (1, 8, 16, 32 or 64) known to be a multiple
+// of `divisibility`, a scaled basis (strides) or an underscore (coordinates
+// and tiles); a tuple groups attributes of the same kind. A basis `modes` is
+// its mode path, outermost first, which CuTe prints innermost first:
+// `1@1@0` is modes {0, 1}. Constructors return null for invalid parameters or
+// handles of another context. GetValue returns canonical algebra text owned
+// by the attribute's context; callers must not free it. Getters require an
 // attribute accepted by the corresponding IsA predicate.
 
-MLIR_CAPI_EXPORTED MlirAttribute mlirCuteIntTupleAttrGet(MlirContext context,
-                                                         MlirStringRef value);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCuteIntTupleAttrStaticGet(MlirContext context, int64_t value);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteIntTupleAttrDynamicGet(
+    MlirContext context, int32_t width, int64_t divisibility);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteIntTupleAttrTupleGet(
+    MlirContext context, intptr_t numElements, MlirAttribute const *elements);
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACuteIntTuple(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirStringRef
 mlirCuteIntTupleAttrGetValue(MlirAttribute attr);
 
-MLIR_CAPI_EXPORTED MlirAttribute mlirCuteCoordAttrGet(MlirContext context,
-                                                      MlirStringRef value);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteCoordAttrStaticGet(MlirContext context,
+                                                            int64_t value);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteCoordAttrDynamicGet(
+    MlirContext context, int32_t width, int64_t divisibility);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCuteCoordAttrUnderscoreGet(MlirContext context);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteCoordAttrTupleGet(
+    MlirContext context, intptr_t numElements, MlirAttribute const *elements);
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACuteCoord(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirStringRef mlirCuteCoordAttrGetValue(MlirAttribute attr);
 
-MLIR_CAPI_EXPORTED MlirAttribute mlirCuteShapeAttrGet(MlirContext context,
-                                                      MlirStringRef value);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteShapeAttrStaticGet(MlirContext context,
+                                                            int64_t value);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteShapeAttrDynamicGet(
+    MlirContext context, int32_t width, int64_t divisibility);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteShapeAttrTupleGet(
+    MlirContext context, intptr_t numElements, MlirAttribute const *elements);
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACuteShape(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirStringRef mlirCuteShapeAttrGetValue(MlirAttribute attr);
 
-MLIR_CAPI_EXPORTED MlirAttribute mlirCuteStrideAttrGet(MlirContext context,
-                                                       MlirStringRef value);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCuteStrideAttrStaticGet(MlirContext context, int64_t value);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteStrideAttrDynamicGet(
+    MlirContext context, int32_t width, int64_t divisibility);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteStrideAttrBasisGet(
+    MlirContext context, int64_t numerator, int64_t denominator,
+    intptr_t numModes, int32_t const *modes);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteStrideAttrTupleGet(
+    MlirContext context, intptr_t numElements, MlirAttribute const *elements);
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACuteStride(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirStringRef mlirCuteStrideAttrGetValue(MlirAttribute attr);
 
 MLIR_CAPI_EXPORTED MlirAttribute mlirCuteLayoutAttrGet(MlirContext context,
-                                                       MlirStringRef value);
+                                                       MlirAttribute shape,
+                                                       MlirAttribute stride);
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACuteLayout(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirStringRef mlirCuteLayoutAttrGetValue(MlirAttribute attr);
 
-MLIR_CAPI_EXPORTED MlirAttribute mlirCuteTileAttrGet(MlirContext context,
-                                                     MlirStringRef value);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCuteTileAttrLayoutGet(MlirContext context, MlirAttribute layout);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirCuteTileAttrUnderscoreGet(MlirContext context);
+MLIR_CAPI_EXPORTED MlirAttribute mlirCuteTileAttrTupleGet(
+    MlirContext context, intptr_t numElements, MlirAttribute const *elements);
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACuteTile(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirStringRef mlirCuteTileAttrGetValue(MlirAttribute attr);
 
+// `inner` is a swizzle or a layout attribute.
 MLIR_CAPI_EXPORTED MlirAttribute
-mlirCuteComposedLayoutAttrGet(MlirContext context, MlirStringRef value);
+mlirCuteComposedLayoutAttrGet(MlirContext context, MlirAttribute inner,
+                              MlirAttribute offset, MlirAttribute outer);
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACuteComposedLayout(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirStringRef
 mlirCuteComposedLayoutAttrGetValue(MlirAttribute attr);
 
 MLIR_CAPI_EXPORTED MlirAttribute mlirCuteSwizzleAttrGet(MlirContext context,
-                                                        MlirStringRef value);
+                                                        uint32_t bits,
+                                                        uint32_t base,
+                                                        int32_t shift);
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACuteSwizzle(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirStringRef
 mlirCuteSwizzleAttrGetValue(MlirAttribute attr);
