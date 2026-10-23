@@ -33,5 +33,5 @@ pub fn forward(self: QwenImage21AttentionBlock, x: zml.Tensor) zml.Tensor {
     const attn = scores.softmax(-1);
 
     const pre_out = v.rename(.{ .n = .m }).dot(attn, .m).transpose(.{ .bs, .c, .t, .n });
-    return self.proj.forward(pre_out).unflatten(.n, 8).withTags(.{ .bs, .c, .t, .kx, .ky }).add(x);
+    return self.proj.forward(pre_out).unflatten(.n, x.dim(.kx)).withTags(.{ .bs, .c, .t, .kx, .ky }).add(x);
 }

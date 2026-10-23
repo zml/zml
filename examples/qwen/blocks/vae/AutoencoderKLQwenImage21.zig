@@ -55,8 +55,7 @@ const decoder_base_dim = 144;
 const max_tiles = 16;
 const Tiles = [max_tiles][max_tiles]zml.Tensor;
 
-pub fn forward(self: AutoencoderKLQwenImage21, input_ids: zml.Tensor, args: CompileArgs) zml.Tensor {
-    _ = args; // autofix
+pub fn forward(self: AutoencoderKLQwenImage21, input_ids: zml.Tensor) zml.Tensor {
     const height = input_ids.dim(.kx);
     const width = input_ids.dim(.ky);
 
@@ -82,12 +81,13 @@ pub fn forward(self: AutoencoderKLQwenImage21, input_ids: zml.Tensor, args: Comp
             const tile = input_ids
                 .slice(.kx, .{ .start = i, .end = @min(i + tile_latent_min_height, height) })
                 .slice(.ky, .{ .start = j, .end = @min(j + tile_latent_min_width, width) });
-            // const post_quant = self.post_quant_conv.forward(tile);
-            tiles[x][y] = self.decoder.forward(tile);
+            const post_quant = self.post_quant_conv.forward(tile);
+
+            tiles[x][y] = self.decoder.forward(post_quant);
         }
     }
 
-    return stitch(&tiles, rows_count, per_row, .{
+    const dec = stitch(&tiles, rows_count, per_row, .{
         .blend_height = tile_sample_min_height - tile_sample_stride_height,
         .blend_width = tile_sample_min_width - tile_sample_stride_width,
         .stride_height = tile_sample_stride_height,
@@ -95,10 +95,10 @@ pub fn forward(self: AutoencoderKLQwenImage21, input_ids: zml.Tensor, args: Comp
         .sample_height = height * spatial_compression_ratio,
         .sample_width = width * spatial_compression_ratio,
     });
-    // return dec.clamp(
-    //     zml.Tensor.scalar(-1, dec.dtype()).broad(dec.shape()),
-    //     zml.Tensor.scalar(1, dec.dtype()).broad(dec.shape()),
-    // );
+    return dec.clamp(
+        zml.Tensor.scalar(-1, dec.dtype()).broad(dec.shape()),
+        zml.Tensor.scalar(1, dec.dtype()).broad(dec.shape()),
+    );
 }
 
 const StitchArgs = struct {

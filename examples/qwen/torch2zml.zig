@@ -174,8 +174,9 @@ const VaeWrapper = struct {
         self: VaeWrapper,
         x: zml.Tensor,
     ) zml.Tensor {
+        // For this to work, comment post_quant_conv.forward and the dec.clamp
         const tagged = x.withTags(.{ .bs, .c, .t, .kx, .ky });
-        return self.model.forward(tagged, self.args);
+        return self.model.forward(tagged);
     }
 };
 
