@@ -11,8 +11,6 @@ pub const AddressSpace = attributes.AddressSpace;
 pub const GemmTraversalOrder = attributes.GemmTraversalOrder;
 pub const MmaOperand = attributes.MmaOperand;
 
-pub const dialect_namespace = "fly";
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("fly");
 }

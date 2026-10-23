@@ -4,8 +4,6 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-pub const dialect_namespace = "cute";
-
 pub const AttributeKind = enum { int_tuple, coord, shape, stride, layout, tile, composed_layout, swizzle };
 
 pub const CuteType = opaque {

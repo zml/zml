@@ -6,8 +6,6 @@ const stdx = @import("stdx");
 
 const cute_ir = @import("mlir/dialects/cute_ir");
 
-pub const dialect_namespace = "cute_nvgpu";
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("cute_nvgpu");
 }

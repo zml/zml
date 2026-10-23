@@ -8,7 +8,7 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-pub const dialect_namespace = "cuda_tile";
+const dialect_namespace = "cuda_tile";
 
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("cuda_tile");

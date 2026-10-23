@@ -5,8 +5,6 @@ const mlir = @import("mlir");
 const stringRef = mlir.stringRef;
 const stdx = @import("stdx");
 
-pub const dialect_namespace = "stablehlo";
-
 pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("stablehlo");
 }
