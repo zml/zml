@@ -8174,7 +8174,38 @@ Checks:
   its rewrite of deprecated builtins elsewhere.
 - GPU: above. Not run: MI300 (R9's FNUZ accuracy), a remote checkpoint.
 
+## Fifty-second pass: Qwen3.8-Flash-Next-FP8 loads (2026-10-24, gb300-1)
+
+monorepo `oxtrzwyy`, on zml `zoyytxpt`. The fifty-first pass found that
+the FP8 checkpoint did not load on any tree.
+- qwen4 read its MoE kernel from `experts.gate_up_proj`; the FP8
+  checkpoint stores `gate_proj` and `up_proj` per expert. It reads
+  `down_proj` now, like the other models (`weights.experts` already
+  combines split projections; CUDA picks Triton for `fp8_block128`).
+- Loaded, it generated "!!!!". `NgramEmbedding` ignored
+  `ngram_embedding.weight_scale`: the FP8 checkpoint stores the n-gram
+  tables as e4m3 values times one BF16 per-tensor scale (its rows equal
+  the BF16 checkpoint's times 0.000199). `lookup` returns the gathered
+  rows times the scale, in f32, then the scale's dtype. It is the
+  checkpoint's only per-tensor scale; the rest is block-FP8
+  `weight_scale_inv`.
+- Tests: the expert-layout test reads the kernel from each layout's down
+  projection and finds no fused one in a split checkpoint; a new qwen4
+  test looks up an FP8 table's rows on two CPU devices (fails without
+  the scale: 1.75 for 0.4375).
+- gb300-1, GPUs 2,3: 169.41 GiB in 3.8-4.3 s; "Paris", "391" and a
+  coherent long answer; 11.65 ms per decode step at batch 1, 13.55 with
+  the n-grams offloaded as `host_mapped` (23.84 GiB per device,
+  `--cache-memory-fraction=0.3`).
+- `bazel test --config=localzml //llmd/...` 7/7 and `bazel build
+  --config=localzml //llmd:llmd` pass.
+
 ## Open work
+
+- 2026-10-24 Qwen3.8-Flash-Next-FP8 loads (fifty-second pass, monorepo
+  oxtrzwyy): qwen4 reads its MoE kernel from `down_proj` and scales its
+  FP8 n-gram rows by `weight_scale`. It loads and answers on two GB300,
+  n-grams resident or `host_mapped`.
 
 - 2026-10-23 host_mapped and the rework on GB300 (fifty-first pass, zml
   zoyytxpt and monorepo zllzwuwx): R12 done, so every move of
@@ -8184,8 +8215,8 @@ Checks:
   gather), the io tests pass on four GB300, and DeepSeek-V4.1-Flash,
   Qwen3.8-Flash-Next and Qwen3.8-27B-FP8 with DFlash2 load and answer.
   Load and decode match the commit before the rework within noise.
-  Open: Qwen3.8-Flash-Next-FP8 (qwen4 asks for `gate_up_proj`), the MoE
-  kernel tests on GB300, MI300.
+  Open: the MoE kernel tests on GB300, MI300. Qwen3.8-Flash-Next-FP8
+  loads since the fifty-second pass.
 
 - 2026-10-22 VFS fixes and the rest of Moves 1 and 4 (fiftieth pass, zml
   lxltkwot): the audit's items 3, 5 and 8. A failed streaming read is
