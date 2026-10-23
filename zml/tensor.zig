@@ -299,9 +299,7 @@ pub const Tensor = struct {
             ctx.location,
         ).appendTo(currentBlock());
 
-        var res = _result(self._shape, op.result(0));
-        // Memory placement does not change the tensor's sharding declaration.
-        res._shape = self._shape;
+        const res = _result(self._shape, op.result(0));
         ctx.currentScope().id_to_memory.putNoClobber(ctx.currentScope().arena.allocator(), res.id, kind) catch @panic("OOM");
         return res;
     }
