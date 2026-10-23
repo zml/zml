@@ -1,3 +1,5 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
 package(default_visibility = ["//zml:__pkg__"])
 
 filegroup(
@@ -7,5 +9,24 @@ filegroup(
         "moe.zig",
         "mxfp4.zig",
         "persistent_mxfp4.zig",
+    ],
+)
+
+zig_binary(
+    name = "tune",
+    main = "tune.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+        "//zml/kernels/moe/bench:lib",
+    ],
+)
+
+zig_test(
+    name = "tune_test",
+    main = "tune.zig",
+    deps = [
+        "//zml",
+        "//zml/kernels/moe/bench:lib",
     ],
 )

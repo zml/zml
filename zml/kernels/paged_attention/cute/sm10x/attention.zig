@@ -323,7 +323,7 @@ fn produce(t: Tile) void {
             const id = tiles.iv.mul(c.features() * 2).add(@as(i32, @intCast(stage)));
             var reuse = b.openIf(id.ge(c.buffers()));
             {
-                b.mbarrierWait(t.released(id), t.phase(id).bitXor(1));
+                b.mbarrierWait(t.released(id), t.phase(id).bitXor(1), .cta);
                 reuse.yieldThen(.{});
             }
             const source = if (stage < c.features()) t.k else t.v;
@@ -345,7 +345,7 @@ fn multiply(t: Tile, tile: V, comptime qk: bool) void {
     {
         for (0..@as(usize, @intCast(c.features()))) |part| {
             const id = tile.mul(c.features() * 2).add(@as(i64, @intCast(part)) + if (qk) @as(i64, 0) else c.features());
-            b.mbarrierWait(t.ready(id), t.phase(id));
+            b.mbarrierWait(t.ready(id), t.phase(id), .cta);
             b.tcgen05Fence(.after);
             const kv = descriptor(b, t.shared.add(id.rem(c.buffers()).mul(c.kvBytes())), if (qk) 16 else c.keys() * 128);
             const qp = descriptor(b, t.shared.add(if (qk) c.qBase() else c.pBase()), 16);
@@ -359,12 +359,12 @@ fn multiply(t: Tile, tile: V, comptime qk: bool) void {
                 const accumulate = if (qk) b.cst(.i32, @intFromBool(part > 0 or step > 0)).ne(0) else tile.gt(0).bitOr(b.cst(.i32, @intFromBool(step > 0)).ne(0));
                 b.tcgen05MmaF16(t.tmem.add(column), left, right, b.cst(.i32, @as(i32, @bitCast(instruction(c, qk)))), accumulate);
             }
-            b.tcgen05Commit(t.released(id));
+            b.tcgen05Commit(t.released(id), .{});
         }
-        b.tcgen05Commit(t.shared.add(c.completion()));
+        b.tcgen05Commit(t.shared.add(c.completion()), .{});
         leader.yieldThen(.{});
     }
-    b.mbarrierWait(t.shared.add(c.completion()), b.cst(.i32, if (qk) 0 else 1));
+    b.mbarrierWait(t.shared.add(c.completion()), b.cst(.i32, if (qk) 0 else 1), .cta);
     b.tcgen05Fence(.after);
     // A fast warp must not wrap completion parity before every consumer has
     // observed the preceding PV completion.
