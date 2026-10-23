@@ -79,3 +79,7 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor
     // [total_q_tokens, num_heads, head_dim] -> {.b, .hkv, .hg, .hd} (q's order)
     return out.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = .auto }).transpose(q.shape());
 }
+
+test {
+    _ = @import("paged_attn.zig");
+}
