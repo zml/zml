@@ -88,6 +88,40 @@ pub const FastMathAttr = opaque {
     }
 };
 
+/// `mlir::arith::IntegerOverflowFlags`, one bit per flag.
+pub const IntegerOverflowFlags = packed struct(u32) {
+    nsw: bool = false,
+    nuw: bool = false,
+    _padding: u30 = 0,
+
+    pub const none: IntegerOverflowFlags = .{};
+};
+
+/// `#arith.overflow<...>`.
+pub const IntegerOverflowAttr = opaque {
+    const Self = @This();
+    const M = mlir.Methods(Self, c.MlirAttribute);
+    pub const isAFn = c.mlirAttributeIsAArithIntegerOverflow;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+    pub const isA = M.isA;
+    pub const mnemonic = "overflow";
+    pub fn attribute(self: *const Self) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+    pub const InitArgs = struct {
+        value: IntegerOverflowFlags,
+    };
+    pub fn get(ctx: *mlir.Context, args: InitArgs) mlir.Error!*const Self {
+        const result = c.mlirArithIntegerOverflowAttrGet(ctx.ptr(), @bitCast(args.value));
+        return @ptrCast(result.ptr orelse return error.InvalidMlir);
+    }
+    pub fn value(self: *const Self) IntegerOverflowFlags {
+        return @bitCast(c.mlirArithIntegerOverflowAttrGetValue(self.ptr()));
+    }
+};
+
 // =============================================================================
 // Constants
 // =============================================================================
