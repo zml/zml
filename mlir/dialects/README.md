@@ -199,8 +199,8 @@ verified.
   adds what upstream's leaves out (loop annotations).
 - Hand-written builders with many parameters take an `<Op>Args` struct
   (`func.func`, `gpu.func`, `ttir.func`, `cuda.kernel`, `cuda_tile.entry`,
-  `memref.subview`, `vector.transfer_read`, ...); function-like ones carry
-  `location` inside it.
+  `air.kernel`, `memref.subview`, `vector.transfer_read`, ...);
+  function-like ones carry `location` inside it.
 - Some hand-written `Opts` hold required or non-null defaulted fields where
   named arguments read better (`stablehlo.PadOpts`,
   `mosaic_tpu.LoadOpts.sublane_mask`, `affine.ForOpts.step`).
