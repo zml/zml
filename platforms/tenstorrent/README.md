@@ -39,3 +39,17 @@ bazel run \
 Host transfers use buffered copies. Pinned host memory, external device pointers,
 and GPU attention kernels are not used by this integration. Model execution is
 subject to the operation and dtype coverage of the experimental XLA backend.
+
+## Integration results
+
+Tested with the native Bazel plugin on Blackhole hardware:
+
+- `//examples/mnist` completed compilation, weight transfer, execution, and host
+  readback with CPU disabled. The sampled image was recognized as digit 5.
+- `//examples/llm` with `/var/models/meta-llama/Llama-3.1-8B-Instruct`, StableHLO
+  attention, sequence length 64, and top-k 1 loaded the model metadata and
+  tokenizer, then failed prefill compilation with
+  `Tenstorrent entry has an unsupported element type: ui64`. The Llama program
+  carries `Tensor.Rng`'s `u64[2]` state even for greedy decoding. No tokens were
+  generated; removing this blocker may expose further unsupported operations.
+- The existing CPU `//zml:test` suite passed: 261 passed, 14 skipped, 0 failed.
