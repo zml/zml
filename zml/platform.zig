@@ -38,7 +38,7 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         return error.MissingDevices;
     }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa, .tenstorrent => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
                 return error.InvalidDeviceCount;
@@ -87,7 +87,7 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
-            .cuda, .rocm, .oneapi, .tpu, .furiosa => {
+            .cuda, .rocm, .oneapi, .tpu, .furiosa, .tenstorrent => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
                     "pinned_host".len => .host_pinned,
@@ -223,7 +223,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .furiosa, .tenstorrent => device.id(),
     };
 }
 
@@ -255,6 +255,7 @@ pub const State = union(Target) {
     oneapi: void,
     metal: void,
     furiosa: void,
+    tenstorrent: void,
 
     pub const CudaState = struct {
         fi_cutlass_moe_runners: ?*zml.moe.cutlass_flashinfer.Runners = null,
@@ -277,6 +278,7 @@ pub const State = union(Target) {
             .oneapi => .{ .oneapi = {} },
             .metal => .{ .metal = {} },
             .furiosa => .{ .furiosa = {} },
+            .tenstorrent => .{ .tenstorrent = {} },
         };
     }
 
@@ -313,13 +315,24 @@ pub const Platform = struct {
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
-        const pjrt_devices = pjrt_client.addressableDevices(api);
+        errdefer pjrt_client.deinit(api);
+        const all_pjrt_devices = pjrt_client.addressableDevices(api);
+        // This backend currently compiles one-device executables. Select the
+        // device before constructing meshes and resolving memory ownership.
+        const pjrt_devices = if (target == .tenstorrent) blk: {
+            const index = options.tenstorrent.device_index;
+            if (index >= all_pjrt_devices.len) return error.InvalidDeviceIndex;
+            break :blk all_pjrt_devices[index .. index + 1];
+        } else all_pjrt_devices;
         try validateDeviceCount(target, pjrt_devices.len);
         if (pjrt_devices.len > MAX_NUM_DEVICES) {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
         }
 
-        const pjrt_memories = pjrt_client.addressableMemories(api);
+        const pjrt_memories = if (target == .tenstorrent)
+            pjrt_devices[0].addressableMemories(api)
+        else
+            pjrt_client.addressableMemories(api);
 
         // Note: Platform is a self-owning struct. It contains the arena that created it in the first place
         // But it does mean we have to be careful to pass the arena state that contains the node
@@ -417,6 +430,7 @@ pub const Platform = struct {
             .oneapi,
             .metal,
             .furiosa,
+            .tenstorrent,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -697,7 +711,7 @@ pub const Platform = struct {
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal => .{
+            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal, .tenstorrent => .{
                 // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
@@ -732,6 +746,10 @@ pub const CreateOptions = struct {
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     furiosa: Furiosa = .{},
+    tenstorrent: struct {
+        /// Index in the PJRT client's addressable devices; execution is single-device.
+        device_index: usize = 0,
+    } = .{},
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
     io_impl: Platform.IoImpl = .threaded,
@@ -824,6 +842,7 @@ pub const CreateOptions = struct {
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
             .furiosa => self.furiosa.writeNamedValues(&values),
+            .tenstorrent => {}, // Device selection is handled by Platform.init.
             .cuda => self.cuda.writeNamedValues(target, &values),
             .rocm => self.rocm.writeNamedValues(target, &values),
             .oneapi => self.oneapi.writeNamedValues(target, &values),

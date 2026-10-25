@@ -23,7 +23,7 @@ pub const DmaAllocator = union(enum) {
         return switch (device.platform.target) {
             .cuda => .{ .dmam = .init(parent, device.platform) },
             .rocm, .oneapi, .tpu, .furiosa => .{ .uib = .init(device.memory(.host_pinned).?) },
-            .cpu, .neuron, .metal => .{ .passthrough = parent },
+            .cpu, .neuron, .metal, .tenstorrent => .{ .passthrough = parent },
         };
     }
 
