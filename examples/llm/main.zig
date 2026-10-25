@@ -142,7 +142,8 @@ pub fn main(init: std.process.Init) !void {
     //
     // We're ready to go! Let's start a chat...
     //
-    try printZmlLogo(io, init.environ_map);
+    // Standard streams are native handles, not files opened through the VFS.
+    try printZmlLogo(init.io, init.environ_map);
 
     const interactive = args.prompt == null;
     const prompt = if (args.prompt) |prompt_arg| b: {
@@ -158,7 +159,7 @@ pub fn main(init: std.process.Init) !void {
 
     var llm_chat = try chat.Chat.init(
         allocator,
-        io,
+        init.io,
         platform,
         tokenizer,
         compiled_model,
