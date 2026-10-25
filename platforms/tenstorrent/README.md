@@ -47,9 +47,13 @@ Tested with the native Bazel plugin on Blackhole hardware:
 - `//examples/mnist` completed compilation, weight transfer, execution, and host
   readback with CPU disabled. The sampled image was recognized as digit 5.
 - `//examples/llm` with `/var/models/meta-llama/Llama-3.1-8B-Instruct`, StableHLO
-  attention, sequence length 64, and top-k 1 loaded the model metadata and
-  tokenizer, then failed prefill compilation with
-  `Tenstorrent entry has an unsupported element type: ui64`. The Llama program
-  carries `Tensor.Rng`'s `u64[2]` state even for greedy decoding. No tokens were
-  generated; removing this blocker may expose further unsupported operations.
-- The existing CPU `//zml:test` suite passed: 261 passed, 14 skipped, 0 failed.
+  attention, sequence length 64, and top-k 1 generated `Hello!` and stopped for
+  `--prompt="Say hello in one short sentence."`, matching the CPU reference.
+  Both prefill and decode execute on device 0, with the CPU platform disabled.
+  The plugin includes the unsigned cache-index fix from XLA commit
+  `1a3c9a68dc`; without it, decode corrupts the KV cache.
+- This is an initial correctness check, not a performance result. The short run
+  reported 0.5 tok/s including first-use work; longer, warmed measurements and
+  optimization are still needed. Sampling with top-k greater than 1 still
+  requires unsupported `u64` RNG state. Greedy Llama omits that state.
+- The CPU `//zml:test` suite passed: 262 passed, 14 skipped, 0 failed.
