@@ -697,3 +697,40 @@ test "FnExe runner replaces unchanged donated buffers" {
         try std.testing.expectEqual([2]i32{ 1, 2 }, try value_buffer.getValue([2]i32, io));
     }
 }
+
+test "FnExe runner executes with absent and present optional state" {
+    const platform = @import("testing.zig").env();
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const Functions = struct {
+        fn forward(input: struct { value: Tensor, state: ?Tensor }) struct { value: Tensor, state: ?Tensor } {
+            return .{
+                .value = input.value.addConstant(1).reuseBuffer(input.value),
+                .state = if (input.state) |state| state.addConstant(2).reuseBuffer(state) else null,
+            };
+        }
+    };
+    const Model = FnExe(Functions.forward);
+    const value: Tensor = .init(.{2}, .i32);
+    for ([_]bool{ false, true }) |with_state| {
+        const state: ?Tensor = if (with_state) .init(.{2}, .i32) else null;
+        const exe = try Model.compile(allocator, io, platform, .{}, .{.{ .value = value, .state = state }});
+        defer exe.deinit();
+        var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), std.mem.asBytes(&[2]i32{ 1, 2 }));
+        defer value_buffer.deinit();
+        var state_buffer: ?Buffer = if (state) |s| try Buffer.fromBytes(io, platform, s.shape(), std.mem.asBytes(&[2]i32{ 10, 20 })) else null;
+        defer if (state_buffer) |*s| s.deinit();
+        var runner = try exe.runner(allocator);
+        defer runner.deinit(allocator);
+        runner.run(io, .{
+            .inputs = .{ .value = value_buffer, .state = state_buffer },
+            .outputs = .{ .value = &value_buffer, .state = &state_buffer },
+        }, .{ .wait = true });
+        try std.testing.expectEqual([2]i32{ 2, 3 }, try value_buffer.getValue([2]i32, io));
+        if (state_buffer) |s| {
+            try std.testing.expectEqual([2]i32{ 12, 22 }, try s.getValue([2]i32, io));
+        } else {
+            try std.testing.expect(!with_state);
+        }
+    }
+}

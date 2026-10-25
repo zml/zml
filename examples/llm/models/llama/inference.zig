@@ -13,7 +13,7 @@ pub const CompilationParameters = struct {
     decode_tokens: zml.Tensor,
     token_index: zml.Tensor,
     kv_cache: model.KvCache,
-    rng: zml.Tensor.Rng,
+    rng: ?zml.Tensor.Rng,
     attention_metadata: zml.attention.Metadata,
     prefill_attention_parameters: zml.attention.Parameters,
     decode_attention_parameters: zml.attention.Parameters,
@@ -33,7 +33,7 @@ pub const CompilationParameters = struct {
                 .h = config.num_key_value_heads,
                 .hd = head_dim,
             }, mdl.model.embed_tokens.weight.dtype()), meshes.model),
-            .rng = .init(),
+            .rng = if (mdl.gen_opts.topk > 1) zml.Tensor.Rng.init() else null,
             .attention_metadata = .init(.fromBackend(backend)),
             .prefill_attention_parameters = .init(.fromBackend(backend)),
             .decode_attention_parameters = .init(.fromBackend(backend)),
@@ -52,7 +52,7 @@ pub const Args = struct {
     token_index_buf: *zml.Buffer,
     active_length_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
-    rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
+    rng_buffers: *?zml.Bufferized(zml.Tensor.Rng),
     attention_metadata_buffers: *const zml.Bufferized(zml.attention.Metadata),
 };
 
@@ -98,7 +98,7 @@ const Forward = struct {
         token_index: zml.Tensor,
         active_length: zml.Tensor,
         kv_cache: model.KvCache,
-        rng: zml.Tensor.Rng,
+        rng: ?zml.Tensor.Rng,
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
     };
@@ -106,7 +106,7 @@ const Forward = struct {
     pub const Output = struct {
         tokens: zml.Tensor,
         kv_cache: model.KvCache,
-        rng: zml.Tensor.Rng,
+        rng: ?zml.Tensor.Rng,
     };
 
     pub fn forward(input: Input) Output {
@@ -133,12 +133,14 @@ const Forward = struct {
             .lm_head = .init(input.weights),
             .hidden = hidden,
             .active_length = input.active_length,
-            .rng = input.rng,
+            // Greedy decoding never reads RNG state. Keep it out of the
+            // executable signature and allocate it only for sampling.
+            .rng = input.rng orelse zml.Tensor.Rng.init(),
         });
         return .{
             .tokens = if (input.tokens.dim(.s) == 1) result.tokens.reuseBuffer(input.tokens) else result.tokens,
             .kv_cache = kv_cache.reuseBuffer(input.kv_cache),
-            .rng = .{ ._state = result.rng._state.reuseBuffer(input.rng._state) },
+            .rng = if (input.rng) |rng| .{ ._state = result.rng._state.reuseBuffer(rng._state) } else null,
         };
     }
 };

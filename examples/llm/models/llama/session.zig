@@ -14,7 +14,7 @@ pub const Session = struct {
     decode: inference.KernelRunner,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
     token_index_buffers: []zml.Buffer,
-    rng_buffers: zml.Bufferized(zml.Tensor.Rng),
+    rng_buffers: ?zml.Bufferized(zml.Tensor.Rng),
     tokenizer: zml.tokenizer.Tokenizer,
     config: *const model.Config,
     seqlen: u32,
@@ -48,8 +48,8 @@ pub const Session = struct {
         const conversation_id: u64 = @bitCast(std.Io.Clock.now(.real, io).toMicroseconds());
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
-        var rng_buffers = try zml.Tensor.Rng.init().initBuffer(io, platform, seed);
-        errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
+        var rng_buffers = if (compiled_model.params.rng) |rng| try rng.initBuffer(io, platform, seed) else null;
+        errdefer if (rng_buffers) |*rng| zml.Tensor.Rng.deinitBuffer(rng);
 
         var prefill = try inference.KernelRunner.init(allocator, &compiled_model.prefill, model_buffers);
         errdefer prefill.deinit(allocator);
@@ -80,7 +80,7 @@ pub const Session = struct {
             token_index_buffer.deinit();
         }
         self.allocator.free(self.token_index_buffers);
-        zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
+        if (self.rng_buffers) |*rng| zml.Tensor.Rng.deinitBuffer(rng);
     }
 
     pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
