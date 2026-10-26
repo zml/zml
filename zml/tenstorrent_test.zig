@@ -243,3 +243,56 @@ test "two-card TTIR attention preserves GQA head partitions" {
     try checkDecodeAttention(2, 16, 4, 64, 1024, true);
     try checkDecodeAttention(1, 24, 4, 256, 128, true);
 }
+
+test "Tenstorrent rotary fusion preserves head values and BF16 rotation" {
+    if (comptime !zml.Target.tenstorrent.isEnabled()) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = try zml.Platform.init(allocator, io, .tenstorrent, .{ .tenstorrent = .{ .device_index = 0 } });
+    defer platform.deinit(allocator, io);
+    const bf16 = zml.DataType.bf16.toZigType();
+    inline for (.{ 8, 32 }) |heads| {
+        const x: zml.Tensor = .init(.{ .s = 1, .h = heads, .hd = 128 }, .bf16);
+        const pos: zml.Tensor = .init(.{ .s = 1 }, .u32);
+        const Rotation = struct {
+            fn run(input: zml.Tensor, position: zml.Tensor) zml.Tensor {
+                return zml.nn.rope(input, position, .{ .layout = .real_im_pass });
+            }
+        };
+        const exe = try platform.compileFn(allocator, io, Rotation.run, .{ x, pos }, .{});
+        defer exe.deinit();
+        var values: [heads * 128]bf16 = undefined;
+        for (&values, 0..) |*value, i| value.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast(i % 29)) - 14)) / 8);
+        var xb = try zml.Buffer.fromBytes(io, platform, x.shape(), std.mem.asBytes(&values));
+        defer xb.deinit();
+        for ([_]u32{ 0, 1, 31, 32, 127, 1023 }) |position| {
+            var positions = [_]u32{position};
+            var pb = try zml.Buffer.fromBytes(io, platform, pos.shape(), std.mem.asBytes(&positions));
+            defer pb.deinit();
+            var result = try exe.eval(allocator, io, .{ xb, pb });
+            defer result.deinit();
+            const actual = try result.toSliceAlloc(allocator, io);
+            defer actual.free(allocator);
+            for (actual.items(bf16), 0..) |value, i| {
+                const d = i % 128;
+                const frequency = @exp(-@log(@as(f32, 10000)) * @as(f32, @floatFromInt(d % 64)) / 64);
+                const angle = @as(f32, @floatFromInt(position)) * frequency;
+                const c = bf16.fromF32(@cos(angle)).toF32();
+                const s = bf16.fromF32(@sin(angle)).toF32();
+                const real = values[(i / 128) * 128 + d % 64].toF32();
+                const imag = values[(i / 128) * 128 + d % 64 + 64].toF32();
+                const expected = if (d < 64)
+                    bf16.fromF32(bf16.fromF32(real * c).toF32() - bf16.fromF32(imag * s).toF32()).toF32()
+                else
+                    bf16.fromF32(bf16.fromF32(real * s).toF32() + bf16.fromF32(imag * c).toF32()).toF32();
+                const observed = value.toF32();
+                try std.testing.expect(std.math.isFinite(observed));
+                const tolerance = 0.016 + 0.008 * @abs(expected);
+                if (@abs(observed - expected) > tolerance) {
+                    std.debug.print("rotary heads={d} position={d} element={d}: expected {d}, got {d}\n", .{ heads, position, i, expected, observed });
+                    return error.TestExpectedApproxEqAbs;
+                }
+            }
+        }
+    }
+}
