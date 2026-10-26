@@ -89,6 +89,18 @@ chunks, uses the measured DRAM-sharded matrix schedule with FP32 partial sums,
 and trims the final vocabulary output. It tracks weight versions and preserves
 prefill's original preprocessing cache.
 
+The subsequent native attention schedule uses 128-token chunks and one core
+per KV head for this length-128 Llama case, preserving HiFi4 and FP32
+accumulation. With the vocabulary split enabled, a paired run measured
+**2.684 s / 27.2 tokens/s** with `XLA_TT_EXPERIMENTAL_ATTENTION_SCHEDULE=0`
+and **2.673 s / 27.3 tokens/s** with selection enabled. BF8 measured
+**2.031 s / 35.9 tokens/s**. All responses were correct, and timings follow
+one discarded warm-up; kernel changes caused startup/warm-up JIT misses.
+The attention oracle suite passes with tracing off and on, including the
+1024-token-cache schedule. The plugin also fixes an SDK softmax correction
+that used five destination tiles when FP32 half synchronization permits four;
+a native regression fails before the fix and passes afterward.
+
 The confirmed minimum is 29.4 tokens/s with **BF16** weights, with approximately
 33 tokens/s as the performance objective; BF8 is expected to exceed that.
 The BF16 target remains unmet. XLA now selects DRAM-sharded
