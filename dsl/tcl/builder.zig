@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const arith = @import("mlir/dialects/arith");
+const common = @import("dsl/common/builder");
 const func = @import("mlir/dialects/func");
 const mlir = @import("mlir");
 const tcl = @import("mlir/dialects/tcl");
@@ -606,7 +607,7 @@ pub const Builder = struct {
     /// Arguments `update` writes back into, by argument number.
     updated: std.ArrayList(usize) = .empty,
     /// Blocks being built inside the entry block (loop bodies), innermost last.
-    block_stack: std.ArrayList(*mlir.Block) = .empty,
+    block_stack: common.BlockStack = .{},
 
     pub fn open(allocator: std.mem.Allocator, ctx: *mlir.Context, name: []const u8) !Builder {
         _ = tcl.symbolAttr(ctx, name) catch std.debug.panic("tcl: `{s}` is not a TCL function name", .{name});
@@ -1033,7 +1034,7 @@ pub const Builder = struct {
         if (self.compiler_config) |c| f.setAttributeByName("tcl.compiler_config", c);
         if (self.auto_config) |c| f.setAttributeByName("tcl.auto_config", c);
         if (self.fusible) f.setAttributeByName("tcl.fusible", .unit(ctx));
-        if (!self.module.operation().verify()) return error.InvalidMlir;
+        try common.verify(self.module, "dsl/tcl");
 
         var printed: std.Io.Writer.Allocating = .init(self.allocator);
         defer printed.deinit();
@@ -1054,15 +1055,15 @@ pub const Builder = struct {
     }
 
     pub fn pushBlock(self: *Builder, block: *mlir.Block) void {
-        self.block_stack.append(self.arena.allocator(), block) catch @panic("OOM");
+        self.block_stack.push(self.arena.allocator(), block);
     }
 
     pub fn popBlock(self: *Builder) void {
-        _ = self.block_stack.pop();
+        self.block_stack.pop();
     }
 
     pub fn currentBlock(self: *const Builder) *mlir.Block {
-        return self.block_stack.getLastOrNull() orelse self.entryBlock();
+        return self.block_stack.current(self.entryBlock());
     }
 
     pub fn axisAttr(self: *const Builder, a: Axis) *const mlir.Attribute {

@@ -463,7 +463,7 @@ pub const Builder = struct {
     /// Entry block for the `func.func`. `null` between `open` and the first
     /// `declareArgs` call; populated thereafter.
     entry_block: ?*mlir.Block,
-    block_stack: std.ArrayList(*mlir.Block),
+    block_stack: common.BlockStack = .{},
     /// Cached `arith.constant 0 : index` Value (and the block it lives
     /// in) so repeat no-index loads / stores share an SSA value. See
     /// `zeroIndex` for the lookup logic.
@@ -587,7 +587,7 @@ pub const Builder = struct {
             .name = name,
             .func_op = null,
             .entry_block = null,
-            .block_stack = .empty,
+            .block_stack = .{},
         };
     }
 
@@ -858,18 +858,15 @@ pub const Builder = struct {
     }
 
     pub fn pushBlock(self: *Builder, b: *mlir.Block) void {
-        self.block_stack.append(self.arena.allocator(), b) catch @panic("Builder.pushBlock OOM");
+        self.block_stack.push(self.arena.allocator(), b);
     }
 
     pub fn popBlock(self: *Builder) void {
-        _ = self.block_stack.pop();
+        self.block_stack.pop();
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        if (self.block_stack.items.len > 0) {
-            return self.block_stack.items[self.block_stack.items.len - 1];
-        }
-        return self.entry_block orelse @panic("Builder has no current block — call declareArgs first");
+        return self.block_stack.current(self.entry_block);
     }
 
     /// Unpack a slice of `Value`s into an arena-allocated slice of raw MLIR
@@ -2102,9 +2099,7 @@ pub const Builder = struct {
 
         if (self.emit_transform_stubs) self.appendTransformStubs();
 
-        if (!self.module.operation().verify()) {
-            return error.InvalidMlir;
-        }
+        try common.verify(self.module, "dsl/mosaic_tpu");
 
         if (opts.canonicalize) {
             const pm = mlir.PassManager.init(self.ctx);

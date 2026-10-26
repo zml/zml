@@ -450,7 +450,7 @@ pub const Builder = struct {
     func_op: ?*mlir.Operation,
     entry_block: ?*mlir.Block,
     exit_block: ?*mlir.Block = null,
-    block_stack: std.ArrayList(*mlir.Block),
+    block_stack: common.BlockStack = .{},
 
     /// `noinline` is a Zig keyword — write `.{ .@"noinline" = true }`.
     pub const Opts = struct {
@@ -499,7 +499,7 @@ pub const Builder = struct {
             .name = name,
             .func_op = null,
             .entry_block = null,
-            .block_stack = .empty,
+            .block_stack = .{},
         };
     }
 
@@ -621,18 +621,15 @@ pub const Builder = struct {
     }
 
     pub fn pushBlock(self: *Builder, b: *mlir.Block) void {
-        self.block_stack.append(self.arena.allocator(), b) catch @panic("Builder.pushBlock OOM");
+        self.block_stack.push(self.arena.allocator(), b);
     }
 
     pub fn popBlock(self: *Builder) void {
-        _ = self.block_stack.pop();
+        self.block_stack.pop();
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        if (self.block_stack.items.len > 0) {
-            return self.block_stack.items[self.block_stack.items.len - 1];
-        }
-        return self.entry_block orelse @panic("Builder has no current block — call declareArgs first");
+        return self.block_stack.current(self.entry_block);
     }
 
     fn innerSlice(self: *Builder, values: []const Value) []const *const mlir.Value {
@@ -2063,11 +2060,7 @@ pub const Builder = struct {
     /// Continues in `block`, the fall-through of an early return, in place of
     /// the current block.
     fn continueIn(self: *Builder, block: *mlir.Block) void {
-        if (self.block_stack.items.len == 0) {
-            self.pushBlock(block);
-        } else {
-            self.block_stack.items[self.block_stack.items.len - 1] = block;
-        }
+        self.block_stack.replaceTop(self.arena.allocator(), block);
     }
 
     pub fn openReturnIf(self: *Builder, cond: Value) ReturnIfScope {
@@ -2132,9 +2125,7 @@ pub const Builder = struct {
             _ = ttir.return_(self.ctx, &.{}, self.loc()).appendTo(current);
         }
 
-        if (!self.module.operation().verify()) {
-            return error.InvalidMlir;
-        }
+        try common.verify(self.module, "dsl/triton");
 
         var al: std.Io.Writer.Allocating = .init(self.allocator);
         defer al.deinit();

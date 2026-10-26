@@ -459,7 +459,7 @@ pub const Builder = struct {
     name: []const u8,
     func_op: ?*mlir.Operation,
     entry_block: ?*mlir.Block,
-    block_stack: std.ArrayList(*mlir.Block),
+    block_stack: common.BlockStack = .{},
     ct_module: ?*mlir.Operation = null,
     ct_body: ?*mlir.Block = null,
     refined_args: []?Value = &.{},
@@ -506,7 +506,7 @@ pub const Builder = struct {
             .name = name,
             .func_op = null,
             .entry_block = null,
-            .block_stack = .empty,
+            .block_stack = .{},
         };
     }
 
@@ -609,18 +609,15 @@ pub const Builder = struct {
     }
 
     pub fn pushBlock(self: *Builder, b: *mlir.Block) void {
-        self.block_stack.append(self.arena.allocator(), b) catch @panic("Builder.pushBlock OOM");
+        self.block_stack.push(self.arena.allocator(), b);
     }
 
     pub fn popBlock(self: *Builder) void {
-        _ = self.block_stack.pop();
+        self.block_stack.pop();
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        if (self.block_stack.items.len > 0) {
-            return self.block_stack.items[self.block_stack.items.len - 1];
-        }
-        return self.entry_block orelse @panic("Builder has no current block — call declareArgs first");
+        return self.block_stack.current(self.entry_block);
     }
 
     fn innerSlice(self: *Builder, values: []const Value) []const *const mlir.Value {
@@ -1764,9 +1761,7 @@ pub const Builder = struct {
             _ = cuda_tile.return_(self.ctx, &.{}, self.loc()).appendTo(current);
         }
 
-        if (!self.module.operation().verify()) {
-            return error.InvalidMlir;
-        }
+        try common.verify(self.module, "dsl/cuda_tile");
 
         var al: std.Io.Writer.Allocating = .init(self.allocator);
         defer al.deinit();

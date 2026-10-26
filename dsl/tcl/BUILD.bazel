@@ -10,6 +10,7 @@ zig_library(
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
+        "//dsl/common:builder",
         "//mlir",
         "//mlir/dialects/arith",
         "//mlir/dialects/func",

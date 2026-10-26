@@ -574,7 +574,7 @@ pub const Builder = struct {
     function_kind: FunctionKind = .func_only_kernel,
     func_op: ?*mlir.Operation = null,
     entry_block: ?*mlir.Block = null,
-    block_stack: std.ArrayList(*mlir.Block) = .empty,
+    block_stack: common.BlockStack = .{},
     args: []const ArgSpec = &.{},
     tensors: []?Tensor = &.{},
 
@@ -757,18 +757,15 @@ pub const Builder = struct {
     }
 
     pub fn pushBlock(self: *Builder, b: *mlir.Block) void {
-        self.block_stack.append(self.arena.allocator(), b) catch @panic("Builder.pushBlock OOM");
+        self.block_stack.push(self.arena.allocator(), b);
     }
 
     pub fn popBlock(self: *Builder) void {
-        _ = self.block_stack.pop();
+        self.block_stack.pop();
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        if (self.block_stack.items.len > 0) {
-            return self.block_stack.items[self.block_stack.items.len - 1];
-        }
-        return self.entry_block orelse @panic("Builder has no current block; call declareArgs first");
+        return self.block_stack.current(self.entry_block);
     }
 
     pub fn emit(self: *Builder, op: *mlir.Operation) Value {
@@ -929,14 +926,14 @@ pub const Builder = struct {
         }
         self.func_op = null;
         self.entry_block = null;
-        self.block_stack.clearRetainingCapacity();
+        self.block_stack.clear();
         self.args = &.{};
         self.tensors = &.{};
     }
 
     pub fn finishProgram(self: *Builder) FinishError![:0]const u8 {
         std.debug.assert(self.entry_block == null and self.func_op == null);
-        if (!self.module.operation().verify()) return error.InvalidMlir;
+        try common.verify(self.module, "dsl/cute");
         return self.renderModule();
     }
 
@@ -2807,7 +2804,7 @@ pub const Builder = struct {
         }
         const func_op = self.func_op orelse return error.InvalidMlir;
         func_op.setAttributeByName("nvvm.reqntid", .denseArray(self.ctx, .i32, &block));
-        if (!self.module.operation().verify()) return error.InvalidMlir;
+        try common.verify(self.module, "dsl/cute");
 
         return self.renderModule();
     }

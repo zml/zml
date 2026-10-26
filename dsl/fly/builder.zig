@@ -718,7 +718,7 @@ pub const Builder = struct {
     name: []const u8,
     func_op: ?*mlir.Operation = null,
     entry_block: ?*mlir.Block = null,
-    block_stack: std.ArrayList(*mlir.Block) = .empty,
+    block_stack: common.BlockStack = .{},
     arg_specs: []const ArgSpec = &.{},
     /// The `!fly.memref` view for tensor arguments, the raw `!fly.ptr` otherwise.
     arg_values: []Value = &.{},
@@ -832,18 +832,15 @@ pub const Builder = struct {
     }
 
     pub fn pushBlock(self: *Builder, b: *mlir.Block) void {
-        self.block_stack.append(self.arena.allocator(), b) catch @panic("Builder.pushBlock OOM");
+        self.block_stack.push(self.arena.allocator(), b);
     }
 
     pub fn popBlock(self: *Builder) void {
-        _ = self.block_stack.pop();
+        self.block_stack.pop();
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        if (self.block_stack.items.len > 0) {
-            return self.block_stack.items[self.block_stack.items.len - 1];
-        }
-        return self.entry_block orelse @panic("Builder has no current block; call declareArgs first");
+        return self.block_stack.current(self.entry_block);
     }
 
     pub fn loc(self: *const Builder) *const mlir.Location {
@@ -1461,10 +1458,7 @@ pub const Builder = struct {
     pub fn finish(self: *Builder) FinishError![:0]const u8 {
         _ = gpu.return_(self.ctx, &.{}, self.loc()).appendTo(self.currentBlock());
 
-        if (!self.module.operation().verify()) {
-            std.log.err("fly: module failed to verify:\n{f}", .{self.module.operation().fmt(.{ .debug_info = false })});
-            return error.InvalidMlir;
-        }
+        try common.verify(self.module, "dsl/fly");
 
         var al: std.Io.Writer.Allocating = .init(self.allocator);
         defer al.deinit();

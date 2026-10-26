@@ -1,13 +1,46 @@
-//! `scf` scope wrappers, generic over the frontend's `BuilderT` and `ValueT`.
+//! `scf` scope wrappers, generic over the frontend's `BuilderT` and `ValueT`,
+//! and `BlockStack`, the blocks a builder emits into.
 //!
-//! `BuilderT` must expose `ctx`, `loc()`, `pushBlock`, `popBlock`,
-//! `currentBlock`; the openers also call `lift` on literal inits and
-//! `scalarTy` on dtype result types.
+//! `BuilderT` must expose `ctx`, `loc()`, `pushBlock`, `popBlock` and
+//! `currentBlock`. The openers also call its `lift` on literal inits and its
+//! `scalarTy` on dtype result types, and `forBounds` its `constantLike` on
+//! literal bounds.
 //! `ValueT` must have an `inner: *const mlir.Value` field and a `kernel: ?*BuilderT` field.
 
 const std = @import("std");
 const mlir = @import("mlir");
 const scf = @import("mlir/dialects/scf");
+
+/// The blocks a builder emits into: the innermost scope's on top of the
+/// function's entry block.
+pub const BlockStack = struct {
+    blocks: std.ArrayList(*mlir.Block) = .empty,
+
+    pub fn push(self: *BlockStack, allocator: std.mem.Allocator, block: *mlir.Block) void {
+        self.blocks.append(allocator, block) catch @panic("BlockStack.push: out of memory");
+    }
+
+    pub fn pop(self: *BlockStack) void {
+        _ = self.blocks.pop();
+    }
+
+    /// Drops every block, keeping the memory for the next function.
+    pub fn clear(self: *BlockStack) void {
+        self.blocks.clearRetainingCapacity();
+    }
+
+    /// The innermost block, else `entry`.
+    pub fn current(self: *const BlockStack, entry: ?*mlir.Block) *mlir.Block {
+        return self.blocks.getLastOrNull() orelse entry orelse @panic("BlockStack.current: no block, call declareArgs first");
+    }
+
+    /// Continues in `block` in place of the innermost block, or of the entry
+    /// block when no scope is open.
+    pub fn replaceTop(self: *BlockStack, allocator: std.mem.Allocator, block: *mlir.Block) void {
+        if (self.blocks.items.len == 0) return self.push(allocator, block);
+        self.blocks.items[self.blocks.items.len - 1] = block;
+    }
+};
 
 /// The length of `T`, a tuple like `.{ v1, v2 }` or an array.
 pub fn arity(comptime T: type, comptime what: []const u8) comptime_int {
