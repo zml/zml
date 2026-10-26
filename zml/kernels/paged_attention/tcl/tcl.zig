@@ -56,7 +56,7 @@ pub const paged = struct {
             last_pe != null and last_pe.? == .int64 and last_pe.?.int64 == 7, "TCL attention requires a complete 8-PE RNGD chip", .{});
         if (q.dim(.b) == 0) return Tensor.zeroes(q.shape());
         const page = k_cache.dim(.k_chunk);
-        // The 2026.4 compiler has no DPE tactic for 32-key attention. Pad to
+        // TCC 2026.5 has no DPE tactic for 32-key attention. Pad to
         // at least 64 keys; the extra pages remain invalid and contribute zero.
         const keys = @max(parameters.block_table.dim(.p), std.math.divCeil(i64, 64, page) catch unreachable) * page;
         // Chunks hold whole pages and a multiple of 64 keys: TCC 2026.5 fails
@@ -86,13 +86,10 @@ pub const paged = struct {
             .is_causal = opts.mask.isCausal(),
             .window = @intCast(opts.mask.slidingWindow() orelse 0),
         };
-        // TCC 2026.5 fails on the decode metadata for some page counts (257,
-        // 320): round them up to a power of two.
-        const decode_width = @as(i64, @intCast(std.math.ceilPowerOfTwo(u64, @intCast(@divExact(keys, page))) catch unreachable)) * page;
-        if (decode and !cfg.use_sink and cfg.window == 0 and decode_width <= decode_keys) {
+        if (decode and !cfg.use_sink and cfg.window == 0 and keys <= decode_keys) {
             return decodeAttention(parameters, q, k_cache, v_cache, .{
                 .t = cfg.tokens,
-                .a = decode_width,
+                .a = keys,
                 .hkv = cfg.hkv,
                 .g = cfg.g,
                 .d = cfg.d,
@@ -318,9 +315,6 @@ fn configure(b: *tcl.Builder, cfg: Cfg) void {
         .scheduler_beam_search = true,
         .allow_reduce_by_ve_cluster_chip_reduce = false,
         .allow_reduce_by_ve_cluster_chip_reduce_base_population = false,
-        // tcc's fused attention kernel fails on some llmd shapes ("Vrf output
-        // tensor of pass chunk cannot be segmented").
-        .use_attention_kernel = false,
         .propagate_sparse_axis_from_op = "Gather",
         .tactic_hint = .{ .ForLlmModelIOBound = 200 },
         .num_transaction_simulation_per_pe = 1024,
@@ -336,7 +330,6 @@ fn configure(b: *tcl.Builder, cfg: Cfg) void {
         .scheduler_beam_search = true,
         .allow_reduce_by_ve_cluster_chip_reduce = false,
         .allow_reduce_by_ve_cluster_chip_reduce_base_population = false,
-        .use_attention_kernel = false,
         .tactic_hint = .{ .ForLlmModelComputeBound = 200 },
         .dma_preference = 1.2,
     });
@@ -944,6 +937,18 @@ test "tcl paged attention single decode row needs no rearrangement" {
         .{ .prefill = false, .seqs = &.{ .{ 1, 251 }, .{ 0, 0 }, .{ 0, 0 }, .{ 0, 0 } } },
         .{ .prefill = false, .seqs = &@as([4][2]i32, @splat(.{ 0, 0 })), .padding = 1 },
     }, .{ .batch = 1 });
+    inline for (.{ 257, 320 }) |max_pages| {
+        try runCases(max_pages, 2 * max_pages, &.{.{
+            .prefill = false,
+            .seqs = &.{ .{ 1, @intCast(max_pages * 16 - 1) }, .{ 0, 0 }, .{ 0, 0 }, .{ 0, 0 } },
+        }}, .{ .batch = 1, .hkv = 8, .g = 4, .d = 128 });
+    }
+    inline for (.{ 5, 1025 }) |max_pages| {
+        try runCases(max_pages, 2 * max_pages, &.{.{
+            .prefill = false,
+            .seqs = &.{ .{ 1, @intCast(max_pages * 48 - 1) }, .{ 0, 0 }, .{ 0, 0 }, .{ 0, 0 } },
+        }}, .{ .batch = 1, .hkv = 1, .g = 1, .d = 32, .page = 48 });
+    }
 }
 
 test "tcl paged attention packs inactive leading sequences and odd batches" {

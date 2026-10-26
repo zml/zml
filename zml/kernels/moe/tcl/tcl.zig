@@ -105,7 +105,7 @@ fn gated(b: *tcl.Builder, a: Axes, h: builder.Tensor, batch: []const tcl.Axis, w
     const f = flat[0 .. batch.len + 1];
     const gate = try b.reshape(try b.slice(h, a.S2, 0, s, .{}), f, .{});
     const up = try b.reshape(try b.slice(h, a.S2, 1, s, .{}), f, .{});
-    // An `Interleaving` guess fails tcc's checks inside loops.
+    // Interleaving requires one binary instruction; SwiGLU chains several.
     const op = b.tensorOperation(.{ .tactic = .elementwise });
     const g = op.fetch(gate, .{});
     var v = g.sigmoid().mulf(g).mulf(op.fetch(up, .{}));
