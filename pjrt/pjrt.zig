@@ -1751,7 +1751,7 @@ pub const Ffi = extern struct {
             .type_id = 0, // let the plugin assign a unique type ID
             .type_info = @ptrCast(@constCast(type_info)),
         };
-        const result = self.inner.type_register.?(&ret);
+        const result = self.inner.type_register.?(@ptrCast(&ret));
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
             return pjrt_error.getCode(api).toApiError();
@@ -1765,7 +1765,7 @@ pub const Ffi = extern struct {
             .context = @ptrCast(context),
             .user_data = user_data.toCStruct(),
         };
-        const result = self.inner.user_data_add.?(&ret);
+        const result = self.inner.user_data_add.?(@ptrCast(&ret));
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
             log.err("addUserData error: {s}", .{pjrt_error.getMessage(api)});
