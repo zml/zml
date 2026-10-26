@@ -20,6 +20,7 @@ const Args = struct {
     topk: u32 = 4,
     backend: ?enum { stablehlo, cute, nki, metal } = null,
     profile: bool = false,
+    tt_devices: enum { single, all } = .single,
 
     pub const help =
         \\ Use llm --model=<path> [options]
@@ -33,6 +34,7 @@ const Args = struct {
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([stablehlo, cute, nki, metal], default: auto-selection)
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
+        \\   --tt-devices=<text> Tenstorrent devices to use ([single, all], default: single)
         \\
     ;
 };
@@ -81,7 +83,9 @@ pub fn main(init: std.process.Init) !void {
     //
     // Platform and Backend Selection
     //
-    const platform: *zml.Platform = try .auto(allocator, io, .{});
+    const platform: *zml.Platform = try .auto(allocator, io, .{
+        .tenstorrent = .{ .device_index = if (args.tt_devices == .all) null else 0 },
+    });
     defer platform.deinit(allocator, io);
 
     log.info("\n{f}", .{platform.fmtVerbose()});

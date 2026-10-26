@@ -317,19 +317,21 @@ pub const Platform = struct {
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
         errdefer pjrt_client.deinit(api);
         const all_pjrt_devices = pjrt_client.addressableDevices(api);
-        // This backend currently compiles one-device executables. Select the
-        // device before constructing meshes and resolving memory ownership.
+        // Select a single card or the full Tenstorrent mesh before resolving
+        // memory ownership and constructing logical meshes.
         const pjrt_devices = if (target == .tenstorrent) blk: {
-            const index = options.tenstorrent.device_index;
-            if (index >= all_pjrt_devices.len) return error.InvalidDeviceIndex;
-            break :blk all_pjrt_devices[index .. index + 1];
+            if (options.tenstorrent.device_index) |index| {
+                if (index >= all_pjrt_devices.len) return error.InvalidDeviceIndex;
+                break :blk all_pjrt_devices[index .. index + 1];
+            }
+            break :blk all_pjrt_devices;
         } else all_pjrt_devices;
         try validateDeviceCount(target, pjrt_devices.len);
         if (pjrt_devices.len > MAX_NUM_DEVICES) {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
         }
 
-        const pjrt_memories = if (target == .tenstorrent)
+        const pjrt_memories = if (target == .tenstorrent and options.tenstorrent.device_index != null)
             pjrt_devices[0].addressableMemories(api)
         else
             pjrt_client.addressableMemories(api);
@@ -747,8 +749,8 @@ pub const CreateOptions = struct {
     neuron: struct {} = .{},
     furiosa: Furiosa = .{},
     tenstorrent: struct {
-        /// Index in the PJRT client's addressable devices; execution is single-device.
-        device_index: usize = 0,
+        /// Select one addressable device, or null to use all local cards as a mesh.
+        device_index: ?usize = 0,
     } = .{},
     oneapi: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     metal: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.90 } } },
