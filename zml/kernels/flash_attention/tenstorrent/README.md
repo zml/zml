@@ -62,6 +62,23 @@ accumulation, which failed a long-dot numerical regression. Trace replay is
 disabled in these measurements. These are short application
 smoke tests, not model-quality evaluations.
 
+With `--warmup-runs=1` and `XLA_TT_EXPERIMENTAL_TRACE=1`, a complete discarded
+generation warms the executables and weights before a fresh session is timed.
+Using the same counting prompt, sequence length 128, and top-k 1:
+
+| Weights | XLA layout optimization | Decode time (73 tokens) | Throughput | Kernel-cache hits |
+| --- | --- | ---: | ---: | ---: |
+| BF16 | Level 1 (default) | 2.713 s | 26.9 tokens/s | 518/518 |
+| BF16 | Level 2 (experimental) | 2.763 s | 26.4 tokens/s | 918/918 |
+| BF8 | Level 1 (default) | 2.049 s | 35.6 tokens/s | 531/531 |
+
+All responses are correct. These warm-generation rates include token transfer,
+text decoding, and output, and use a different warm-up/trace configuration from
+the preceding table. The XLA plugin's level-2 option is
+`XLA_TT_EXPERIMENTAL_L1_LAYOUT=1`. Its bounded layout search, FP32 scheduling,
+and measured decode schedules now compile and run this model, but level 1
+remains faster and compiles much more quickly, so it remains the default.
+
 The confirmed minimum is 29.4 tokens/s with **BF16** weights, with approximately
 33 tokens/s as the performance objective; BF8 is expected to exceed that.
 The BF16 target remains unmet. XLA now selects DRAM-sharded
