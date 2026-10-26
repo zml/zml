@@ -390,7 +390,7 @@ pub const FusedMoe = struct {
         // Loop bounds stay i64 because `k_block` is i64. iter_args order
         // matches Python's TTIR for the matrix and accumulator state.
         const num_k_iters = k_block.cdiv(block_size_k);
-        var loop = b.openFor(@as(i64, 0), num_k_iters, @as(i64, 1), .{ a_ptrs_init, b_ptrs_init, acc_init });
+        var loop = b.openFor(0, num_k_iters, 1, .{ a_ptrs_init, b_ptrs_init, acc_init });
         {
             const k_iter = loop.iv;
             const a_ptrs = loop.carried[0];

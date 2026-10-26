@@ -2002,6 +2002,8 @@ pub const Builder = struct {
 
     // ==================== SCF regions ====================
 
+    /// `for iv in [lower, upper) step` carrying `inits`. Literal bounds take the
+    /// type of a Value bound, else `lower` is lifted (`i32` when it fits).
     pub fn openFor(
         self: *Builder,
         lower: anytype,
@@ -2009,10 +2011,7 @@ pub const Builder = struct {
         step: anytype,
         inits: anytype,
     ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
-        const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.lift(lower);
-        const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constMatching(upper, lb_v.type_());
-        const step_v: Value = if (@TypeOf(step) == Value) step else self.constMatching(step, lb_v.type_());
-        return dsl.openFor(self, Value, .{ lb_v, ub_v, step_v }, inits, .{});
+        return dsl.openFor(self, Value, dsl.forBounds(self, Value, lower, upper, step, Builder.lift), inits, .{});
     }
 
     pub fn returnIf(self: *Builder, cond: Value) void {

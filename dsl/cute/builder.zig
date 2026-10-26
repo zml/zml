@@ -2757,7 +2757,8 @@ pub const Builder = struct {
         return dsl.openIfElse(self, Value, cond, result_types);
     }
 
-    /// `for iv in range(lower, upper, step)` with loop-carried `inits`.
+    /// `for iv in range(lower, upper, step)` with loop-carried `inits`. Literal
+    /// bounds take the type of a Value bound, else `lower` is lifted (`i32`).
     pub fn openFor(
         self: *Builder,
         lower: anytype,
@@ -2765,10 +2766,7 @@ pub const Builder = struct {
         step: anytype,
         inits: anytype,
     ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
-        const lb_v = self.lift(lower);
-        const ub_v = self.constant(lb_v.dtype(), upper);
-        const step_v = self.constant(lb_v.dtype(), step);
-        return dsl.openFor(self, Value, .{ lb_v, ub_v, step_v }, inits, .{});
+        return dsl.openFor(self, Value, dsl.forBounds(self, Value, lower, upper, step, Builder.lift), inits, .{});
     }
 
     /// `scf.while` with explicit loop-carried values. The before region sees

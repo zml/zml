@@ -205,6 +205,30 @@ pub fn WhileScope(comptime BuilderT: type, comptime ValueT: type, comptime N: us
     };
 }
 
+/// `openFor`'s bounds as values. A bound that isn't a value takes the type of
+/// the first one that is (`kernel.constantLike`); with none, `lower` becomes
+/// `defaultLower(kernel, lower)` and the others take its type.
+pub fn forBounds(
+    kernel: anytype,
+    comptime ValueT: type,
+    lower: anytype,
+    upper: anytype,
+    step: anytype,
+    comptime defaultLower: anytype,
+) [3]ValueT {
+    const bounds: [3]ValueT = if (@TypeOf(lower) != ValueT and @TypeOf(upper) != ValueT and @TypeOf(step) != ValueT) blk: {
+        const lb = defaultLower(kernel, lower);
+        break :blk .{ lb, kernel.constantLike(upper, lb), kernel.constantLike(step, lb) };
+    } else blk: {
+        const first: ValueT = if (@TypeOf(lower) == ValueT) lower else if (@TypeOf(upper) == ValueT) upper else step;
+        break :blk .{ kernel.constantLike(lower, first), kernel.constantLike(upper, first), kernel.constantLike(step, first) };
+    };
+    const t = bounds[0].inner.type_();
+    if (!bounds[1].inner.type_().eql(t) or !bounds[2].inner.type_().eql(t))
+        std.debug.panic("openFor: bounds of types {f}, {f} and {f}", .{ t, bounds[1].inner.type_(), bounds[2].inner.type_() });
+    return bounds;
+}
+
 /// Opens `for iv in [bounds[0], bounds[1]) step bounds[2]` carrying `inits`,
 /// values or literals `kernel.lift` takes.
 pub fn openFor(

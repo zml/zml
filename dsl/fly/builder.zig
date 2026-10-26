@@ -1368,8 +1368,8 @@ pub const Builder = struct {
         return dsl.WhileScope(Builder, Value, N, M);
     }
 
-    /// Loop-carried `inits`; the induction variable is `index` unless
-    /// `lower` is a Value.
+    /// Loop-carried `inits`. Literal bounds take the type of a Value bound,
+    /// else they are `index`.
     pub fn openFor(
         self: *Builder,
         lower: anytype,
@@ -1377,10 +1377,7 @@ pub const Builder = struct {
         step: anytype,
         inits: anytype,
     ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
-        const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.constIndex(lower);
-        const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constantLike(upper, lb_v);
-        const step_v: Value = if (@TypeOf(step) == Value) step else self.constantLike(step, lb_v);
-        return dsl.openFor(self, Value, .{ lb_v, ub_v, step_v }, inits, .{});
+        return dsl.openFor(self, Value, dsl.forBounds(self, Value, lower, upper, step, Builder.constIndex), inits, .{});
     }
 
     /// `value` as a scalar constant of `like`'s element type (`index` for an

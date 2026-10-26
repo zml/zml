@@ -821,6 +821,10 @@ pub const Builder = struct {
         return self.constMatching(value, like.type_());
     }
 
+    fn i32Bound(self: *Builder, value: anytype) Value {
+        return self.constant(.i32, value);
+    }
+
     fn constMatching(self: *Builder, value: anytype, ref: *const mlir.Type) Value {
         const elem = if (ref.isA(cuda_tile.TileType)) |t| t.elementType() else ref;
         return self.constant(self.mlirElemToDType(elem), value);
@@ -1649,15 +1653,9 @@ pub const Builder = struct {
     ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
         const N = comptime dsl.arity(@TypeOf(inits), "openFor: inits");
 
-        // Literals take the type of the first bound that is a Value; all
-        // three must agree (`AllTypesMatch` on the op).
-        const ref_ty: *const mlir.Type = if (@TypeOf(lower) == Value) lower.type_() else if (@TypeOf(upper) == Value) upper.type_() else if (@TypeOf(step) == Value) step.type_() else self.scalarTy(.i32);
-        const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.constMatching(lower, ref_ty);
-        const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constMatching(upper, ref_ty);
-        const step_v: Value = if (@TypeOf(step) == Value) step else self.constMatching(step, ref_ty);
-        if (!lb_v.type_().eql(ub_v.type_()) or !lb_v.type_().eql(step_v.type_())) {
-            std.debug.panic("Builder.openFor: bounds must share one type, got {f}, {f}, {f}", .{ lb_v.type_(), ub_v.type_(), step_v.type_() });
-        }
+        // Literals take the type of the first bound that is a Value, else
+        // `i32`; all three must agree (`AllTypesMatch` on the op).
+        const lb_v, const ub_v, const step_v = dsl.forBounds(self, Value, lower, upper, step, i32Bound);
 
         var block_types: [N + 1]*const mlir.Type = undefined;
         block_types[0] = lb_v.type_();

@@ -657,9 +657,9 @@ const final_b_h = loop.results[0];
 ```
 
 - `lower` / `upper` / `step` are `anytype`: pass Values, comptime ints, or
-  runtime Zig ints. Use `i32` constants (`b.constant(.i32, 0)`) when you
-  want the loop counter to be `i32` (matching Pallas's `scf.for ... : i32`).
-  The default for `index`-typed counters is `b.constIndex(N)`.
+  runtime Zig ints. A bound that isn't a Value takes the type of the first one
+  that is; with none, all three are `index`. Pass `b.constant(.i32, 0)` as
+  `lower` for an `i32` counter (matching Pallas's `scf.for ... : i32`).
 - `inits` is a tuple `.{v1, v2, ...}` or an array. Arity is comptime —
   `carried`, `results`, and the `yield(...)` values (also a tuple or an
   array) all have the same length.

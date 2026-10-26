@@ -201,7 +201,7 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
             });
             const table = a.block_tables_ptr.addPtr(seq.to(.i64).mul(cfg.block_table_stride));
             const offsets = k.arange(0, cfg.tile_size, .i32);
-            var loop = k.openFor(k.constant(.i32, 0), k.constant(.i32, @as(i32, @intCast(partition.tiles_per_segment))), 1, .{ initial_max, initial_sum, initial_acc });
+            var loop = k.openFor(0, partition.tiles_per_segment, 1, .{ initial_max, initial_sum, initial_acc });
             {
                 const selected = segment_start.add(loop.iv.mul(@as(i32, @intCast(cfg.tile_size)))).add(offsets);
                 const position = k.loadOpts(indices_row.addPtr(selected.to(.i64).mul(cfg.indices_strides[1])), .{

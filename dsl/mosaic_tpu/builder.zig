@@ -959,6 +959,10 @@ pub const Builder = struct {
     }
 
     /// Constant `index`-typed value (for memref / loop bounds).
+    fn indexBound(self: *Builder, value: anytype) Value {
+        return self.constIndex(@intCast(value));
+    }
+
     pub fn constIndex(self: *Builder, value: i64) Value {
         return self.emit(arith.constant_index(self.ctx, value, self.loc()));
     }
@@ -2033,8 +2037,8 @@ pub const Builder = struct {
 
     // ==================== SCF regions ====================
 
-    /// Open a scoped `scf.for`. `lower`/`upper`/`step` accept Values, comptime
-    /// ints, or runtime Zig ints — coerced to `index`. `inits` is `.{v1, v2, ...}`.
+    /// Open a scoped `scf.for`. Literal bounds take the type of a Value bound,
+    /// else they are `index`. `inits` is `.{v1, v2, ...}` or an array.
     pub fn openFor(
         self: *Builder,
         lower: anytype,
@@ -2042,11 +2046,7 @@ pub const Builder = struct {
         step: anytype,
         inits: anytype,
     ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
-        // scf.for bounds default to `index`.
-        const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.constIndex(@intCast(lower));
-        const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constIndex(@intCast(upper));
-        const step_v: Value = if (@TypeOf(step) == Value) step else self.constIndex(@intCast(step));
-        return dsl.openFor(self, Value, .{ lb_v, ub_v, step_v }, inits, .{});
+        return dsl.openFor(self, Value, dsl.forBounds(self, Value, lower, upper, step, indexBound), inits, .{});
     }
 
     pub fn openIf(self: *Builder, cond: Value) IfOnlyScope {

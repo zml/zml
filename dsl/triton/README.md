@@ -763,8 +763,9 @@ const total = loop.results[0];
 ```
 
 - `lower`/`upper`/`step` are `anytype`: pass Values, comptime ints, or runtime
-  Zig ints. Comptime literals adapt to the first operand's type; cast explicitly
-  to force a specific width (e.g. `@as(i32, @intCast(config.block))`).
+  Zig ints. A bound that isn't a Value takes the type of the first one that is;
+  with none, `lower` is lifted (`i32` when it fits) and the others follow it.
+  Pass a typed constant (`b.constant(.i64, 0)`) to pick another width.
 - `inits` is a tuple `.{v1, v2, ...}` or an array. Arity is comptime —
   `carried`, `results`, and the `yield(...)` values (also a tuple or an array)
   all have the same length.
