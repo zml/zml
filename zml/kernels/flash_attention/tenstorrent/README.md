@@ -53,6 +53,15 @@ accumulation, which failed a long-dot numerical regression. Trace replay is
 disabled in these measurements. These are short application
 smoke tests, not model-quality evaluations.
 
+The target is approximately 33 tokens/s with **BF16** weights; BF8 is expected
+to exceed that. Neither target has been reached. The optional XLA experiment
+`XLA_TT_EXPERIMENTAL_DRAM_WEIGHTS=1` shards BF16 FFN weights and keeps their
+activation chain in L1. It reduces median steady execution from 43.641 ms to
+40.780 ms, but increases first-decode preprocessing from 159.767 ms to
+701.376 ms. The same short counting run therefore regresses to 3.636 s
+(20.1 tokens/s). It remains disabled by default pending preprocessing reuse
+and end-to-end performance improvements.
+
 At initial integration, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
 decoding completed in 4.489 seconds (16.3 tokens/s), versus 4.778 seconds
 (15.3 tokens/s) for StableHLO attention on the same build. Both runs produced the
