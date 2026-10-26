@@ -7,11 +7,13 @@ const cute = @import("cute/cute.zig");
 const metal = @import("metal/metal.zig");
 const tpu = @import("mosaic_tpu/mosaic_tpu.zig");
 const triton = @import("triton/triton.zig");
+pub const tcl = @import("tcl/tcl.zig");
 const stablehlo = @import("stablehlo/stablehlo.zig");
 
 const PagedAttention = @This();
 
 test {
+    _ = tcl;
     std.testing.refAllDecls(Backend);
     std.testing.refAllDecls(Options);
     std.testing.refAllDecls(Parameters);
@@ -24,6 +26,7 @@ pub const Backend = enum {
     mosaic_tpu,
     metal,
     stablehlo,
+    tcl,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -32,7 +35,8 @@ pub const Backend = enum {
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
             .metal => .metal,
-            .cpu, .furiosa => .stablehlo,
+            .cpu => .stablehlo,
+            .furiosa => .tcl,
             .neuron => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }
@@ -41,7 +45,8 @@ pub const Backend = enum {
         return switch (backend) {
             .cute => cute.isAvailable(platform),
             .stablehlo => true,
-            .triton => platform.target != .cpu,
+            .tcl => platform.target == .furiosa,
+            .triton => platform.target != .cpu and platform.target != .furiosa,
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
         };
@@ -54,6 +59,7 @@ pub const Options = union(Backend) {
     mosaic_tpu: tpu.mosaic_tpu.Options,
     metal: metal.Options,
     stablehlo: triton.paged.Options,
+    tcl: tcl.paged.Options,
 
     const Args = struct {
         backend: Backend,
@@ -84,7 +90,7 @@ pub const Options = union(Backend) {
                     .head_dim = args.head_dim,
                 },
             },
-            inline .cute, .triton, .metal, .stablehlo => |t| @unionInit(Options, @tagName(t), .{
+            inline .cute, .triton, .metal, .stablehlo, .tcl => |t| @unionInit(Options, @tagName(t), .{
                 .batch_size = args.batch_size,
                 .max_num_pages = args.max_num_pages,
                 .max_seqlen_q = args.max_seqlen_q,
@@ -112,6 +118,7 @@ pub const Parameters = union(Backend) {
     mosaic_tpu: tpu.mosaic_tpu.Parameters,
     metal: metal.Parameters,
     stablehlo: triton.paged.Parameters,
+    tcl: tcl.paged.Parameters,
 
     pub fn init(options_: Options) Parameters {
         return switch (options_) {
@@ -196,7 +203,7 @@ pub const KvCache = union(enum) {
 
         const kv: KvCache = switch (self) {
             .split => |split| switch (backend) {
-                .cute, .triton, .mosaic_tpu, .metal, .stablehlo => .{
+                .cute, .triton, .mosaic_tpu, .metal, .stablehlo, .tcl => .{
                     .split = .{
                         .k = split.k.scatterSlices(
                             .{ .page = page_index, .k_chunk = offset },
@@ -258,6 +265,10 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
         .stablehlo => |params| stablehlo.pagedAttention(params, q, kv_cache, opts),
+        .tcl => |params| switch (kv_cache) {
+            .split => |split| tcl.paged.pagedAttention(params, q, split.k, split.v, opts),
+            .dense => std.debug.panic("TCL paged attention takes separate K and V pages", .{}),
+        },
     };
 }
 
@@ -299,6 +310,7 @@ test "Backend.auto selects triton on oneAPI" {
 
 test pagedAttention {
     const platform = zml.testing.env();
+    if (!Backend.triton.isAvailable(platform)) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var arena_state: std.heap.ArenaAllocator = .init(allocator);
@@ -400,7 +412,7 @@ test pagedAttention {
     const all_backends = std.enums.values(Backend);
     // stablehlo ignores these options, mosaic_tpu requires a dense
     // KV cache instead of the split cache used by this test.
-    const option_sensitive_backends = [_]Backend{ .triton, .cute, .metal };
+    const option_sensitive_backends = [_]Backend{ .triton, .cute, .metal, .tcl };
     const test_cases = [_]struct {
         name: []const u8,
         attention_options: AttentionOptions,
@@ -453,14 +465,14 @@ test pagedAttention {
 
             const parameters_d: zml.Bufferized(Parameters) = switch (parameters) {
                 .triton => triton_parameters_d,
-                inline .cute, .metal, .mosaic_tpu, .stablehlo => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
+                inline .cute, .metal, .mosaic_tpu, .stablehlo, .tcl => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
                     .block_table = triton_parameters_d.triton.block_table,
                     .seq_lens = triton_parameters_d.triton.seq_lens,
                     .query_start_len = triton_parameters_d.triton.query_start_len,
                 }),
             };
 
-            var output_d = try exe.eval(allocator, io, .{ parameters_d, q, new_k, new_v, kv_cache_d, .{} });
+            var output_d = try exe.eval(allocator, io, .{ parameters_d, q, new_k, new_v, kv_cache_d, .{ .mask = .{ .standard = {} }, .sink = null } });
             defer output_d.deinit();
             results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
         }
