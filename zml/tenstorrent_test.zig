@@ -396,4 +396,7 @@ test "TTIR flash prefill matches scalar causal attention" {
     try checkPrefillAttention(2, 4, 4, 256, 3, 65, true, true);
     try checkPrefillAttention(1, 4, 1, 512, 33, 97, true, false);
     try checkPrefillAttention(1, 4, 1, 80, 7, 35, true, true);
+    try checkPrefillAttention(1, 4, 1, 80, 17, 17, true, false);
+    try checkPrefillAttention(1, 4, 1, 80, 1, 35, true, false);
+    try checkPrefillAttention(32, 8, 2, 64, 8, 64, false, false);
 }

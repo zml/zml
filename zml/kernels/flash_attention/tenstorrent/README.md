@@ -44,6 +44,8 @@ stable FP64 softmax reference, repeats execution, and verifies input preservatio
 It covers full prefill at lengths 128/1024, offset prefill at the beginning,
 middle, and end of a larger KV buffer, MHA/GQA/MQA, per-batch/scalar positions,
 transposed tags, partial query/key/head tiles, and widths 64/80/128/256/512.
+Additional cases cover batch 32, partial full prefill, and a single query with
+partial cache/head tiles. Hardware tests run serially on device zero.
 Both this target and `//zml:tenstorrent_decode_attention_test` pass with trace
 replay enabled; prefill also passes with replay disabled. These are single-card
 checks; the new prefill path has not yet been validated on two cards.
@@ -125,12 +127,16 @@ The attention oracle suite passes with tracing off and on, including the
 that used five destination tiles when FP32 half synchronization permits four;
 a native regression fails before the fix and passes afterward.
 
-The full BF16 model at sequence length 1024 currently fails device-memory
-allocation in the warm-up/fresh-session workflow. Disabling vocabulary
-splitting or tracing individually still fails on the fresh prefill after
-warm-up; these checks also disabled the attention schedule. There is no valid
-1024-length full-model throughput result yet, despite the passing attention
-oracle tests at that length.
+Native prefill removes the large decomposed-attention temporary responsible for
+the earlier length-1024 allocation failure. With one discarded warm-up, trace
+replay, level 1, the vocabulary split, and the same 73-token counting response,
+the full BF16 model now completes warm-up and a fresh session at length 1024:
+**2.844 s / 25.7 tokens/s**. Length-128 runs measure **2.664 s / 27.4 tokens/s**
+BF16 and **2.038 s / 35.8 tokens/s** BF8. These are batch-1 application timings;
+all responses are correct. A separate operation profile confirms exactly 32
+native prefill SDPA calls and native attention in every decode layer. Kernel counts dropped with native prefill (442 for
+BF16 length 128, 453 for BF8, and 462 for BF16 length 1024); misses occurred
+during startup/discarded warm-up in the BF16 runs.
 
 The confirmed minimum is 29.4 tokens/s with **BF16** weights, with approximately
 33 tokens/s as the performance objective; BF8 is expected to exceed that.
