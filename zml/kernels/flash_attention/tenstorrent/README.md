@@ -42,8 +42,8 @@ counting smoke test at sequence length 128 measured:
 
 | Weights | Decode time (73 tokens) | Throughput | Kernel cache hits |
 | --- | ---: | ---: | ---: |
-| BF16 | 2.974 s | 24.5 tokens/s | 486/486 |
-| BF8 | 2.186 s | 33.4 tokens/s | 501/501 |
+| BF16 | 2.892 s | 25.2 tokens/s | 488/488 |
+| BF8 | 2.177 s | 33.5 tokens/s | 501/501 |
 
 Both runs produced the correct count from 1 to 20. Before the layout change,
 the corresponding BF16/BF8 runs measured 18.0/24.2 tokens/s; the layout alone
@@ -80,6 +80,15 @@ head-splitting benchmark checks every Q/K/V value exactly and measures 23.2
 microseconds from those shards, versus 64.0 microseconds from DRAM. XLA's
 integration regression checks the projection-plus-head-split graph, input and
 weight preservation, changing inputs, and the compiled L1 layout.
+
+Spreading the BF16 FFN gate/up outputs, SiLU, and multiply over 64 L1 shards
+raises the warm run from 24.5 to 25.2 tokens/s. The projections keep their
+16-shard inputs, eight DRAM reader cores, and FP32 arithmetic; the down projection
+reshards back to 16 cores. The unchanged BF8 schedule repeated at 33.5 tokens/s,
+consistent with 33.4 previously. XLA's seven default single-card suites and
+focused BF16/BF8 trace/cache/donation regressions pass with this layout. A separate
+BF16 trace execution profile measured 228.343 ms for first decode and 36.801 ms
+median steady calls, versus 38.737 ms before this change.
 
 At initial integration, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
 decoding completed in 4.489 seconds (16.3 tokens/s), versus 4.778 seconds
