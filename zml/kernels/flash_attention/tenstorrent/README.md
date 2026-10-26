@@ -36,19 +36,21 @@ prefills and one-token updates at positions 0, 31, 32, and 63, including both
 layers, untouched positions, and preservation of update inputs.
 
 With this layout, XLA's tuned BF8 down-projection, and eight-core RMS
-normalization, the single-card Llama
+normalization, and FP32 matrix accumulation, the single-card Llama
 3.1 8B counting smoke test at sequence length 128 measured:
 
 | Weights | Decode time (73 tokens) | Throughput | Kernel cache hits |
 | --- | ---: | ---: | ---: |
-| BF16 | 3.287 s | 22.2 tokens/s | 474/474 |
-| BF8 | 2.216 s | 32.9 tokens/s | 500/500 |
+| BF16 | 3.318 s | 22.0 tokens/s | 474/474 |
+| BF8 | 2.275 s | 32.1 tokens/s | 500/500 |
 
 Both runs produced the correct count from 1 to 20. Before the layout change,
 the corresponding BF16/BF8 runs measured 18.0/24.2 tokens/s; the layout alone
 raised them to 20.2/28.3 tokens/s. BF8 is enabled by
 `XLA_TT_EXPERIMENTAL_BF8_WEIGHTS=1`; activations and KV caches remain BF16.
-Trace replay is disabled in these measurements. These are short application
+These measurements supersede the earlier 22.2/32.9 tokens/s results with BF16
+accumulation, which failed a long-dot numerical regression. Trace replay is
+disabled in these measurements. These are short application
 smoke tests, not model-quality evaluations.
 
 At initial integration, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
