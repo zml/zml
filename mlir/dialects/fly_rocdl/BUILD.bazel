@@ -1,0 +1,43 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+cc_library(
+    name = "capi",
+    srcs = [
+        "capi.cc",
+    ],
+    hdrs = [
+        "capi.h",
+    ],
+    tags = ["manual"],
+    deps = [
+        "@flydsl//:FlyROCDLDialect",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+)
+
+zig_library(
+    name = "fly_rocdl",
+    srcs = [
+        "ops.zig",
+    ],
+    import_name = "mlir/dialects/fly_rocdl",
+    main = "fly_rocdl.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":capi",
+        "//mlir",
+        "//mlir/dialects/fly",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    main = "test.zig",
+    deps = [
+        ":fly_rocdl",
+        "//mlir",
+    ],
+)

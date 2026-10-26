@@ -4,6 +4,10 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("tt");
+}
+
 // =============================================================================
 // Types — !tt.ptr<T, addr_space>
 // =============================================================================
@@ -11,14 +15,19 @@ const stdx = @import("stdx");
 pub const PointerType = opaque {
     const M = mlir.Methods(PointerType, c.MlirType);
 
-    pub const isAFn = c.mlirTritonTypeIsAPointer;
+    pub const isAFn = c.mlirTypeIsATritonPointer;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
     pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
 
-    pub fn get(pointee_type: *const mlir.Type, address_space: i32) *const PointerType {
-        return @ptrCast(c.mlirTritonPointerTypeGet(pointee_type.ptr(), address_space).ptr);
+    pub const InitArgs = struct {
+        pointee_type: *const mlir.Type,
+        address_space: i32,
+    };
+
+    pub fn get(args: InitArgs) *const PointerType {
+        return @ptrCast(c.mlirTritonPointerTypeGet(args.pointee_type.ptr(), args.address_space).ptr);
     }
 
     pub fn pointee(self: *const PointerType) *const mlir.Type {
@@ -28,11 +37,15 @@ pub const PointerType = opaque {
     pub fn addressSpace(self: *const PointerType) i32 {
         return c.mlirTritonPointerTypeGetAddressSpace(self.ptr());
     }
+
+    pub fn type_(self: *const PointerType) *const mlir.Type {
+        return @ptrCast(self);
+    }
 };
 
 /// Convenience alias: `!tt.ptr<T, addr_space>` as a plain *const mlir.Type.
 pub fn pointerType(pointee_type: *const mlir.Type, address_space: i32) *const mlir.Type {
-    return @ptrCast(PointerType.get(pointee_type, address_space));
+    return @ptrCast(PointerType.get(.{ .pointee_type = pointee_type, .address_space = address_space }));
 }
 
 // -----------------------------------------------------------------------------
@@ -42,34 +55,42 @@ pub fn pointerType(pointee_type: *const mlir.Type, address_space: i32) *const ml
 pub const TensorDescType = opaque {
     const M = mlir.Methods(TensorDescType, c.MlirType);
 
-    pub const isAFn = c.mlirTritonTypeIsATensorDesc;
+    pub const isAFn = c.mlirTypeIsATritonTensorDesc;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
     pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
 
-    /// `shared_layout` may be null for an unlayout'd descriptor.
-    pub fn get(
+    pub const InitArgs = struct {
         shape: []const i64,
         element_type: *const mlir.Type,
-        shared_layout: ?*const mlir.Attribute,
-    ) *const TensorDescType {
-        const attr_ptr = if (shared_layout) |a| a.ptr() else c.MlirAttribute{ .ptr = null };
+        /// May be null for an unlayout'd descriptor.
+        shared_layout: ?*const mlir.Attribute = null,
+    };
+
+    pub fn get(args: InitArgs) *const TensorDescType {
+        const attr_ptr = if (args.shared_layout) |a| a.ptr() else c.MlirAttribute{ .ptr = null };
         return @ptrCast(c.mlirTritonTensorDescTypeGet(
-            @intCast(shape.len),
-            shape.ptr,
-            element_type.ptr(),
+            @intCast(args.shape.len),
+            args.shape.ptr,
+            args.element_type.ptr(),
             attr_ptr,
         ).ptr);
+    }
+
+    pub fn type_(self: *const TensorDescType) *const mlir.Type {
+        return @ptrCast(self);
     }
 };
 
 pub fn tensorDescType(
     shape: []const i64,
     element_type: *const mlir.Type,
-    shared_layout: ?*const mlir.Attribute,
+    opts: struct {
+        shared_layout: ?*const mlir.Attribute = null,
+    },
 ) *const mlir.Type {
-    return @ptrCast(TensorDescType.get(shape, element_type, shared_layout));
+    return @ptrCast(TensorDescType.get(.{ .shape = shape, .element_type = element_type, .shared_layout = opts.shared_layout }));
 }
 
 // =============================================================================
@@ -85,9 +106,9 @@ pub const InputPrecision = enum(i32) { tf32 = 0, tf32x3 = 1, ieee = 2, bf16x3 = 
 
 /// Atomic read-modify-write operations.
 pub const RMWOp = enum(i32) {
-    and_ = 1,
-    or_ = 2,
-    xor_ = 3,
+    @"and" = 1,
+    @"or" = 2,
+    xor = 3,
     add = 4,
     fadd = 5,
     max = 6,
@@ -136,57 +157,57 @@ pub const DescriptorReduceKind = enum(i32) {
     max = 3,
     inc = 4,
     dec = 5,
-    and_ = 6,
-    or_ = 7,
-    xor_ = 8,
+    @"and" = 6,
+    @"or" = 7,
+    xor = 8,
 };
 
-pub fn programDim(ctx: *mlir.Context, v: ProgramIDDim) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonProgramDimGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn programDimAttr(ctx: *mlir.Context, v: ProgramIDDim) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonProgramIDDimAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn cacheModifier(ctx: *mlir.Context, v: CacheModifier) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonCacheModifierGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn cacheModifierAttr(ctx: *mlir.Context, v: CacheModifier) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonCacheModifierAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn evictionPolicy(ctx: *mlir.Context, v: EvictionPolicy) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonEvictionPolicyGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn evictionPolicyAttr(ctx: *mlir.Context, v: EvictionPolicy) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonEvictionPolicyAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn paddingOption(ctx: *mlir.Context, v: PaddingOption) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonPaddingOptionGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn paddingOptionAttr(ctx: *mlir.Context, v: PaddingOption) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonPaddingOptionAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn roundingMode(ctx: *mlir.Context, v: RoundingMode) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonRoundingModeGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn roundingModeAttr(ctx: *mlir.Context, v: RoundingMode) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonRoundingModeAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn inputPrecision(ctx: *mlir.Context, v: InputPrecision) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonInputPrecisionGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn inputPrecisionAttr(ctx: *mlir.Context, v: InputPrecision) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonInputPrecisionAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn rmwOp(ctx: *mlir.Context, v: RMWOp) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonRMWOpGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn rmwOpAttr(ctx: *mlir.Context, v: RMWOp) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonRMWOpAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn memSemantic(ctx: *mlir.Context, v: MemSemantic) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonMemSemanticGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn memSemanticAttr(ctx: *mlir.Context, v: MemSemantic) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonMemSemanticAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn memSyncScope(ctx: *mlir.Context, v: MemSyncScope) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonMemSyncScopeGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn memSyncScopeAttr(ctx: *mlir.Context, v: MemSyncScope) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonMemSyncScopeAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn propagateNan(ctx: *mlir.Context, v: PropagateNan) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonPropagateNanGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn propagateNanAttr(ctx: *mlir.Context, v: PropagateNan) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonPropagateNanAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn scaleDotElemType(ctx: *mlir.Context, v: ScaleDotElemType) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonScaleDotElemTypeGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn scaleDotElemTypeAttr(ctx: *mlir.Context, v: ScaleDotElemType) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonScaleDotElemTypeAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
-pub fn descriptorReduceKind(ctx: *mlir.Context, v: DescriptorReduceKind) *const mlir.Attribute {
-    return @ptrCast(c.mlirTritonDescriptorReduceKindGet(ctx.ptr(), @backingInt(v)).ptr);
+pub fn descriptorReduceKindAttr(ctx: *mlir.Context, v: DescriptorReduceKind) *const mlir.Attribute {
+    return @ptrCast(c.mlirTritonDescriptorReduceKindAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
 // =============================================================================
@@ -272,7 +293,7 @@ pub fn get_program_id(ctx: *mlir.Context, axis: ProgramIDDim, location: *const m
     return .make(ctx, "tt.get_program_id", .{
         .results = .{ .flat = &.{.int(ctx, .i32)} },
         .attributes = &.{
-            .named(ctx, "axis", programDim(ctx, axis)),
+            .named(ctx, "axis", programDimAttr(ctx, axis)),
         },
         .location = location,
     });
@@ -282,7 +303,7 @@ pub fn get_num_programs(ctx: *mlir.Context, axis: ProgramIDDim, location: *const
     return .make(ctx, "tt.get_num_programs", .{
         .results = .{ .flat = &.{.int(ctx, .i32)} },
         .attributes = &.{
-            .named(ctx, "axis", programDim(ctx, axis)),
+            .named(ctx, "axis", programDimAttr(ctx, axis)),
         },
         .location = location,
     });
@@ -420,20 +441,22 @@ pub fn load(
     ctx: *mlir.Context,
     ptr_val: *const mlir.Value,
     result_type: *const mlir.Type,
-    mask: ?*const mlir.Value,
-    other: ?*const mlir.Value,
     cache: CacheModifier,
     evict: EvictionPolicy,
     is_volatile: bool,
+    opts: struct {
+        mask: ?*const mlir.Value = null,
+        other: ?*const mlir.Value = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     operands_buf.appendAssumeCapacity(ptr_val);
-    const mask_len: i32 = if (mask) |m| blk: {
+    const mask_len: i32 = if (opts.mask) |m| blk: {
         operands_buf.appendAssumeCapacity(m);
         break :blk 1;
     } else 0;
-    const other_len: i32 = if (other) |o| blk: {
+    const other_len: i32 = if (opts.other) |o| blk: {
         operands_buf.appendAssumeCapacity(o);
         break :blk 1;
     } else 0;
@@ -444,8 +467,8 @@ pub fn load(
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
             .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
-            .named(ctx, "cache", cacheModifier(ctx, cache)),
-            .named(ctx, "evict", evictionPolicy(ctx, evict)),
+            .named(ctx, "cache", cacheModifierAttr(ctx, cache)),
+            .named(ctx, "evict", evictionPolicyAttr(ctx, evict)),
             .named(ctx, "isVolatile", .boolean(ctx, is_volatile)),
         },
         .location = location,
@@ -457,19 +480,21 @@ pub fn store(
     ctx: *mlir.Context,
     ptr_val: *const mlir.Value,
     value: *const mlir.Value,
-    mask: ?*const mlir.Value,
     cache: CacheModifier,
     evict: EvictionPolicy,
+    opts: struct {
+        mask: ?*const mlir.Value = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     buf.appendSliceAssumeCapacity(&.{ ptr_val, value });
-    if (mask) |m| buf.appendAssumeCapacity(m);
+    if (opts.mask) |m| buf.appendAssumeCapacity(m);
     return .make(ctx, "tt.store", .{
         .operands = .{ .flat = buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "cache", cacheModifier(ctx, cache)),
-            .named(ctx, "evict", evictionPolicy(ctx, evict)),
+            .named(ctx, "cache", cacheModifierAttr(ctx, cache)),
+            .named(ctx, "evict", evictionPolicyAttr(ctx, evict)),
         },
         .location = location,
     });
@@ -493,7 +518,7 @@ pub fn dot(
         .operands = .{ .flat = &.{ a, b, c_acc } },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "inputPrecision", inputPrecision(ctx, input_precision_)),
+            .named(ctx, "inputPrecision", inputPrecisionAttr(ctx, input_precision_)),
             .named(ctx, "maxNumImpreciseAcc", .int(ctx, .i32, max_num_imprecise_acc)),
         },
         .location = location,
@@ -587,12 +612,14 @@ pub fn fp_to_fp(
     ctx: *mlir.Context,
     src: *const mlir.Value,
     result_type: *const mlir.Type,
-    rounding: ?RoundingMode,
+    opts: struct {
+        rounding: ?RoundingMode = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
-    if (rounding) |rm| {
-        attrs.appendAssumeCapacity(.named(ctx, "rounding", roundingMode(ctx, rm)));
+    if (opts.rounding) |rm| {
+        attrs.appendAssumeCapacity(.named(ctx, "rounding", roundingModeAttr(ctx, rm)));
     }
     return .make(ctx, "tt.fp_to_fp", .{
         .operands = .{ .flat = &.{src} },
@@ -619,7 +646,7 @@ pub fn clampf(
         .operands = .{ .flat = &.{ x, min, max } },
         .results = .{ .flat = &.{x.type_()} },
         .attributes = &.{
-            .named(ctx, "propagateNan", propagateNan(ctx, propagate_nan)),
+            .named(ctx, "propagateNan", propagateNanAttr(ctx, propagate_nan)),
         },
         .location = location,
     });
@@ -679,21 +706,6 @@ pub fn unsplat(
 ) *mlir.Operation {
     return .make(ctx, "tt.unsplat", .{
         .operands = .{ .flat = &.{src} },
-        .results = .{ .flat = &.{result_type} },
-        .location = location,
-    });
-}
-
-/// tt.cat — concatenate two tensors; may reorder elements.
-pub fn cat(
-    ctx: *mlir.Context,
-    lhs: *const mlir.Value,
-    rhs: *const mlir.Value,
-    result_type: *const mlir.Type,
-    location: *const mlir.Location,
-) *mlir.Operation {
-    return .make(ctx, "tt.cat", .{
-        .operands = .{ .flat = &.{ lhs, rhs } },
         .results = .{ .flat = &.{result_type} },
         .location = location,
     });
@@ -760,13 +772,15 @@ pub fn gather(
 pub fn histogram(
     ctx: *mlir.Context,
     src: *const mlir.Value,
-    mask: ?*const mlir.Value,
     result_type: *const mlir.Type,
+    opts: struct {
+        mask: ?*const mlir.Value = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var buf: stdx.BoundedArray(*const mlir.Value, 2) = .empty;
     buf.appendAssumeCapacity(src);
-    if (mask) |m| buf.appendAssumeCapacity(m);
+    if (opts.mask) |m| buf.appendAssumeCapacity(m);
     return .make(ctx, "tt.histogram", .{
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
@@ -823,22 +837,24 @@ pub fn atomic_rmw(
     rmw: RMWOp,
     ptr_val: *const mlir.Value,
     val: *const mlir.Value,
-    mask: ?*const mlir.Value,
     sem: MemSemantic,
     scope: MemSyncScope,
+    opts: struct {
+        mask: ?*const mlir.Value = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     operands_buf.appendSliceAssumeCapacity(&.{ ptr_val, val });
-    if (mask) |m| operands_buf.appendAssumeCapacity(m);
+    if (opts.mask) |m| operands_buf.appendAssumeCapacity(m);
 
     return .make(ctx, "tt.atomic_rmw", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{val.type_()} },
         .attributes = &.{
-            .named(ctx, "atomic_rmw_op", rmwOp(ctx, rmw)),
-            .named(ctx, "sem", memSemantic(ctx, sem)),
-            .named(ctx, "scope", memSyncScope(ctx, scope)),
+            .named(ctx, "atomic_rmw_op", rmwOpAttr(ctx, rmw)),
+            .named(ctx, "sem", memSemanticAttr(ctx, sem)),
+            .named(ctx, "scope", memSyncScopeAttr(ctx, scope)),
         },
         .location = location,
     });
@@ -858,8 +874,8 @@ pub fn atomic_cas(
         .operands = .{ .flat = &.{ ptr_val, cmp, val } },
         .results = .{ .flat = &.{val.type_()} },
         .attributes = &.{
-            .named(ctx, "sem", memSemantic(ctx, sem)),
-            .named(ctx, "scope", memSyncScope(ctx, scope)),
+            .named(ctx, "sem", memSemanticAttr(ctx, sem)),
+            .named(ctx, "scope", memSyncScopeAttr(ctx, scope)),
         },
         .location = location,
     });
@@ -890,22 +906,25 @@ pub fn assert_(
 // =============================================================================
 
 /// tt.call — direct call to another tt.func in the same module.
-/// arg_attrs / res_attrs propagate hints like tt.divisibility; pass null to omit.
+/// `opts.arg_attrs` / `opts.res_attrs` propagate hints like tt.divisibility;
+/// leave them unset to omit them.
 pub fn call(
     ctx: *mlir.Context,
     callee: []const u8,
     operands: []const *const mlir.Value,
     result_types: []const *const mlir.Type,
-    arg_attrs: ?[]const *const mlir.Attribute,
-    res_attrs: ?[]const *const mlir.Attribute,
+    opts: struct {
+        arg_attrs: ?[]const *const mlir.Attribute = null,
+        res_attrs: ?[]const *const mlir.Attribute = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 3) = .empty;
     attrs.appendAssumeCapacity(.named(ctx, "callee", .flatSymbolRef(ctx, callee)));
-    if (arg_attrs) |aa| {
+    if (opts.arg_attrs) |aa| {
         attrs.appendAssumeCapacity(.named(ctx, "arg_attrs", .array(ctx, aa)));
     }
-    if (res_attrs) |ra| {
+    if (opts.res_attrs) |ra| {
         attrs.appendAssumeCapacity(.named(ctx, "res_attrs", .array(ctx, ra)));
     }
     return .make(ctx, "tt.call", .{
@@ -927,23 +946,25 @@ pub fn dot_scaled(
     a: *const mlir.Value,
     b: *const mlir.Value,
     c_acc: *const mlir.Value,
-    a_scale: ?*const mlir.Value,
-    b_scale: ?*const mlir.Value,
     a_elem_type: ScaleDotElemType,
     b_elem_type: ScaleDotElemType,
     result_type: *const mlir.Type,
     fast_math: bool,
     lhs_k_pack: bool,
     rhs_k_pack: bool,
+    opts: struct {
+        a_scale: ?*const mlir.Value = null,
+        b_scale: ?*const mlir.Value = null,
+    },
     location: *const mlir.Location,
 ) *mlir.Operation {
     var buf: stdx.BoundedArray(*const mlir.Value, 5) = .empty;
     buf.appendSliceAssumeCapacity(&.{ a, b, c_acc });
-    const a_scale_len: i32 = if (a_scale) |s| blk: {
+    const a_scale_len: i32 = if (opts.a_scale) |s| blk: {
         buf.appendAssumeCapacity(s);
         break :blk 1;
     } else 0;
-    const b_scale_len: i32 = if (b_scale) |s| blk: {
+    const b_scale_len: i32 = if (opts.b_scale) |s| blk: {
         buf.appendAssumeCapacity(s);
         break :blk 1;
     } else 0;
@@ -954,8 +975,8 @@ pub fn dot_scaled(
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
             .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
-            .named(ctx, "a_elem_type", scaleDotElemType(ctx, a_elem_type)),
-            .named(ctx, "b_elem_type", scaleDotElemType(ctx, b_elem_type)),
+            .named(ctx, "a_elem_type", scaleDotElemTypeAttr(ctx, a_elem_type)),
+            .named(ctx, "b_elem_type", scaleDotElemTypeAttr(ctx, b_elem_type)),
             .named(ctx, "fastMath", .boolean(ctx, fast_math)),
             .named(ctx, "lhs_k_pack", .boolean(ctx, lhs_k_pack)),
             .named(ctx, "rhs_k_pack", .boolean(ctx, rhs_k_pack)),
@@ -1042,7 +1063,7 @@ pub fn make_tensor_descriptor(
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "padding", paddingOption(ctx, padding)),
+            .named(ctx, "padding", paddingOptionAttr(ctx, padding)),
         },
         .location = location,
     });
@@ -1064,8 +1085,8 @@ pub fn descriptor_load(
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "cache", cacheModifier(ctx, cache)),
-            .named(ctx, "evict", evictionPolicy(ctx, evict)),
+            .named(ctx, "cache", cacheModifierAttr(ctx, cache)),
+            .named(ctx, "evict", evictionPolicyAttr(ctx, evict)),
         },
         .location = location,
     });
@@ -1101,7 +1122,7 @@ pub fn descriptor_reduce(
     return .make(ctx, "tt.descriptor_reduce", .{
         .operands = .{ .flat = buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "kind", descriptorReduceKind(ctx, kind)),
+            .named(ctx, "kind", descriptorReduceKindAttr(ctx, kind)),
         },
         .location = location,
     });
@@ -1201,91 +1222,4 @@ pub fn elementwise_inline_asm(
         },
         .location = location,
     });
-}
-
-test {
-    std.testing.refAllDecls(@This());
-}
-
-test "tt.func round-trip" {
-    // Build: module { tt.func public @id(%arg0: !tt.ptr<f32>) { tt.return } }
-    // by constructing it with the Zig wrappers, printing to string, and re-parsing.
-
-    const registry = try mlir.DialectRegistry.init();
-    defer registry.deinit();
-    inline for (.{ "func", "arith", "scf", "math", "tt" }) |d| {
-        mlir.DialectHandle.fromString(d).insertDialect(registry);
-    }
-
-    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
-    defer ctx.deinit();
-    ctx.loadAllAvailableDialects();
-
-    try std.testing.expect(ctx.isRegisteredOperation("tt.func"));
-    try std.testing.expect(ctx.isRegisteredOperation("tt.return"));
-    try std.testing.expect(ctx.isRegisteredOperation("tt.load"));
-    try std.testing.expect(ctx.isRegisteredOperation("tt.store"));
-    try std.testing.expect(ctx.isRegisteredOperation("tt.get_program_id"));
-    try std.testing.expect(ctx.isRegisteredOperation("tt.splat"));
-    try std.testing.expect(ctx.isRegisteredOperation("tt.addptr"));
-    try std.testing.expect(ctx.isRegisteredOperation("scf.for"));
-    try std.testing.expect(ctx.isRegisteredOperation("arith.constant"));
-
-    const loc: *const mlir.Location = .unknown(ctx);
-    const module: *mlir.Module = .init(loc);
-    defer module.deinit();
-
-    const f32_ty = mlir.Type.float(ctx, .f32);
-    const ptr_ty = pointerType(f32_ty, 1);
-
-    const entry = mlir.Block.init(&.{ ptr_ty, ptr_ty }, &.{ loc, loc });
-
-    const arg0 = entry.argument(0);
-    const arg1 = entry.argument(1);
-
-    // %0 = tt.load %arg0 : !tt.ptr<f32>
-    const loaded = load(ctx, arg0, f32_ty, null, null, .none, .normal, false, loc);
-    _ = loaded.appendTo(entry);
-
-    // %1 = arith.constant 1.0 : f32 — built with Operation.make to avoid cross-dialect import
-    const one_attr: *const mlir.Attribute = .float(ctx, .f32, 1.0);
-    const one = mlir.Operation.make(ctx, "arith.constant", .{
-        .results = .{ .flat = &.{f32_ty} },
-        .attributes = &.{.named(ctx, "value", one_attr)},
-        .location = loc,
-    });
-    _ = one.appendTo(entry);
-
-    // %2 = arith.addf %0, %1 : f32
-    const summed = mlir.Operation.make(ctx, "arith.addf", .{
-        .operands = .{ .flat = &.{ loaded.result(0), one.result(0) } },
-        .result_type_inference = true,
-        .location = loc,
-    });
-    _ = summed.appendTo(entry);
-
-    // tt.store %arg1, %2
-    _ = store(ctx, arg1, summed.result(0), null, .none, .normal, loc).appendTo(entry);
-
-    // tt.return
-    _ = return_(ctx, &.{}, loc).appendTo(entry);
-
-    const f = func(ctx, .{
-        .name = "add_one",
-        .block = entry,
-        .location = loc,
-    });
-    _ = f.appendTo(module.body());
-
-    // Verify the operation.
-    try std.testing.expect(module.operation().verify());
-
-    // Print IR and re-parse it to confirm it's valid text.
-    var al: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer al.deinit();
-    try al.writer.print("{f}", .{module.operation()});
-
-    const parsed = try mlir.Module.parse(ctx, al.written());
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
 }

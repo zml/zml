@@ -1,0 +1,192 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "capi",
+    srcs = ["capi.cc"],
+    hdrs = ["capi.h"],
+    tags = ["manual"],
+    deps = [
+        ":dialect",
+        ":headers",
+        "//mlir/dialects/cute_ir:dialect",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+)
+
+zig_library(
+    name = "cute_nvgpu",
+    import_name = "mlir/dialects/cute_nvgpu",
+    main = "cute_nvgpu.zig",
+    tags = ["manual"],
+    deps = [
+        ":capi",
+        "//mlir",
+        "//mlir/dialects/cute_ir",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    main = "test.zig",
+    deps = [
+        ":cute_nvgpu",
+        "//mlir",
+        "//mlir/dialects/cute_ir",
+    ],
+)
+
+td_library(
+    name = "td_files",
+    srcs = [
+        "CuteNVGPUAttrs.td",
+        "CuteNVGPUDialect.td",
+        "CuteNVGPUEnums.td",
+        "CuteNVGPUOps.td",
+        "CuteNVGPUTypes.td",
+    ],
+    includes = ["/"],
+    deps = [
+        "//mlir/dialects/cute_ir:td_files",
+        "@cute_ir//:cute_ir_dialect_td",
+        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "dialect_inc_gen",
+    tbl_outs = [
+        (
+            [
+                "-gen-dialect-decls",
+                "-dialect=cute_nvgpu",
+            ],
+            "CuteNVGPUDialect.h.inc",
+        ),
+        (
+            [
+                "-gen-dialect-defs",
+                "-dialect=cute_nvgpu",
+            ],
+            "CuteNVGPUDialect.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteNVGPUDialect.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "types_inc_gen",
+    tbl_outs = [
+        (
+            [
+                "-gen-typedef-decls",
+                "-typedefs-dialect=cute_nvgpu",
+            ],
+            "CuteNVGPUTypes.h.inc",
+        ),
+        (
+            [
+                "-gen-typedef-defs",
+                "-typedefs-dialect=cute_nvgpu",
+            ],
+            "CuteNVGPUTypes.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteNVGPUTypes.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "enums_inc_gen",
+    tbl_outs = [
+        (
+            ["-gen-enum-decls"],
+            "CuteNVGPUEnums.h.inc",
+        ),
+        (
+            ["-gen-enum-defs"],
+            "CuteNVGPUEnums.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteNVGPUEnums.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "attrs_inc_gen",
+    tbl_outs = [
+        (
+            [
+                "-gen-attrdef-decls",
+                "-attrdefs-dialect=cute_nvgpu",
+            ],
+            "CuteNVGPUAttrs.h.inc",
+        ),
+        (
+            [
+                "-gen-attrdef-defs",
+                "-attrdefs-dialect=cute_nvgpu",
+            ],
+            "CuteNVGPUAttrs.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteNVGPUAttrs.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ops_inc_gen",
+    tbl_outs = [
+        (
+            ["-gen-op-decls"],
+            "CuteNVGPUOps.h.inc",
+        ),
+        (
+            ["-gen-op-defs"],
+            "CuteNVGPUOps.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "CuteNVGPUOps.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "headers",
+    hdrs = ["CuteNVGPUDialect.h"],
+    deps = [
+        ":attrs_inc_gen",
+        ":dialect_inc_gen",
+        ":enums_inc_gen",
+        ":ops_inc_gen",
+        ":types_inc_gen",
+        "//mlir/dialects/cute_ir:headers",
+        "@llvm-project//mlir:BytecodeOpInterface",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:SideEffectInterfaces",
+    ],
+)
+
+cc_library(
+    name = "dialect",
+    srcs = ["CuteNVGPUDialect.cpp"],
+    deps = [
+        ":headers",
+        "//mlir/dialects/cute_ir:headers",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:AsmParser",
+        "@llvm-project//mlir:IR",
+    ],
+)

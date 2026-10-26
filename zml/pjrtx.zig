@@ -1,8 +1,8 @@
 const std = @import("std");
 
-const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
+const stablehlo = @import("mlir/dialects/stablehlo");
 
 pub const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
@@ -17,9 +17,9 @@ pub const Client = opaque {
     pub fn compile(client: *const pjrt.Client, api: *const pjrt.Api, allocator: std.mem.Allocator, io: std.Io, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*pjrt.LoadedExecutable {
         const stablehlo_version = blk: {
             if (api.stablehloCurrentVersion()) |requested_version| {
-                break :blk dialects.stablehlo.smallerVersion(requested_version, dialects.stablehlo.currentVersion());
+                break :blk stablehlo.smallerVersion(requested_version, stablehlo.currentVersion());
             }
-            break :blk dialects.stablehlo.minimumVersion();
+            break :blk stablehlo.minimumVersion();
         };
 
         const cloned_op = module.operation().clone();
@@ -29,7 +29,7 @@ pub const Client = opaque {
         var serialized_buffer: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
         defer serialized_buffer.deinit();
 
-        dialects.stablehlo.serializePortableArtifact2(cloned_module, stablehlo_version, &serialized_buffer.writer) catch |err| {
+        stablehlo.serializePortableArtifact2(cloned_module, stablehlo_version, &serialized_buffer.writer) catch |err| {
             log.err("failed to serialize to portable artifact: {}", .{err});
             return switch (err) {
                 std.Io.Writer.Error.WriteFailed => error.OutOfMemory,

@@ -2,10 +2,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const dialects = @import("mlir/dialects");
+const func = @import("mlir/dialects/func");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const platforms = @import("platforms");
+const shardy = @import("mlir/dialects/shardy");
 const stdx = @import("stdx");
 
 const Platform = @import("platform.zig").Platform;
@@ -194,11 +195,11 @@ pub fn sdyPerValueShardingAttr(
     shapes: []const Shape,
     mesh: *const Mesh,
 ) error{OutOfMemory}!*const mlir.Attribute {
-    const meshe_attrs = try allocator.alloc(*const dialects.shardy.TensorShardingAttribute, shapes.len);
+    const meshe_attrs = try allocator.alloc(*const shardy.TensorShardingAttr, shapes.len);
     for (meshe_attrs, shapes) |*attr, shape| {
         attr.* = try mesh.sdyShardingAttrForShape(allocator, ctx, shape);
     }
-    return dialects.shardy.TensorShardingPerValueAttribute.init(ctx, meshe_attrs).asAttr();
+    return shardy.TensorShardingPerValueAttr.get(ctx, meshe_attrs).attribute();
 }
 
 pub fn sdyManualAxesAttr(
@@ -250,7 +251,7 @@ pub fn sdyManualAxesAttr(
         axes[i] = mlir.StringAttribute.init(ctx, axis_name);
     }
 
-    return dialects.shardy.ManualAxesAttribute.init(ctx, axes).asAttr();
+    return shardy.ManualAxesAttr.get(ctx, axes).attribute();
 }
 
 pub const Partitioning = packed struct {
@@ -1636,25 +1637,20 @@ pub const Mesh = struct {
         return @divExact(self.numDevices(), self.numPartitions());
     }
 
-    pub fn sdyMeshAttr(self: *const Mesh, allocator: std.mem.Allocator) ![]const u8 {
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        errdefer out.deinit();
-
-        try out.writer.writeAll("#sdy.mesh<[");
+    pub fn sdyMeshAttr(self: *const Mesh, ctx: *mlir.Context) *const mlir.Attribute {
+        var axes: stdx.BoundedArray(*const shardy.MeshAxisAttr, MAX_MESH_RANK + 1) = .empty;
         var tile_count: usize = 1;
         for (self.logical.axes.slice(), 0..) |axis, i| {
-            if (i > 0) try out.writer.writeAll(", ");
             const size = self.grid.axis_sizes[i];
             tile_count *= size;
-            try out.writer.print("\"{s}\"={d}", .{ std.mem.span(axis), size });
+            axes.appendAssumeCapacity(.get(ctx, .{ .name = std.mem.span(axis), .size = @intCast(size) }));
         }
         const replicas = @divExact(self.grid.device_count, tile_count);
         if (replicas > 1) {
-            try out.writer.print(", \"{s}\"={d}", .{ self.sdyReplicaAxis(), replicas });
+            axes.appendAssumeCapacity(.get(ctx, .{ .name = self.sdyReplicaAxis(), .size = @intCast(replicas) }));
         }
-        try out.writer.writeAll("], device_ids=[");
         var replica_indices: [Platform.MAX_NUM_DEVICES]usize = @splat(0);
-        var ids: [Platform.MAX_NUM_DEVICES]usize = undefined;
+        var ids: [Platform.MAX_NUM_DEVICES]i64 = undefined;
         for (0..self.grid.device_count) |partition_index| {
             const coords: [MAX_MESH_RANK]u8 = self.grid.logical_coords[partition_index];
             var tile_index: usize = 0;
@@ -1662,15 +1658,10 @@ pub const Mesh = struct {
                 tile_index = tile_index * self.grid.axis_sizes[axis] + coords[axis];
             }
             // Device IDs here are executable partition indices, not PJRT device IDs.
-            ids[tile_index * replicas + replica_indices[tile_index]] = partition_index;
+            ids[tile_index * replicas + replica_indices[tile_index]] = @intCast(partition_index);
             replica_indices[tile_index] += 1;
         }
-        for (ids[0..self.grid.device_count], 0..) |id, i| {
-            if (i > 0) try out.writer.writeAll(", ");
-            try out.writer.print("{d}", .{id});
-        }
-        try out.writer.writeAll("]>");
-        return try out.toOwnedSlice();
+        return shardy.meshAttr(ctx, .{ .axes = axes.constSlice(), .device_ids = ids[0..self.grid.device_count] });
     }
 
     fn sdyReplicaAxis(self: *const Mesh) []const u8 {
@@ -1690,11 +1681,11 @@ pub const Mesh = struct {
         parent_allocator: std.mem.Allocator,
         ctx: *mlir.Context,
         shape: Shape,
-    ) error{OutOfMemory}!*const dialects.shardy.TensorShardingAttribute {
+    ) error{OutOfMemory}!*const shardy.TensorShardingAttr {
         var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
         defer arena.deinit();
         const allocator = arena.allocator();
-        const dimensions = try allocator.alloc(*const dialects.shardy.DimensionShardingAttribute, shape.rank());
+        const dimensions = try allocator.alloc(*const shardy.DimensionShardingAttr, shape.rank());
         var used: [MAX_MESH_RANK]bool = @splat(false);
         for (0.., dimensions) |ax, *d| {
             d.* = switch (shape.partition(ax)) {
@@ -1709,7 +1700,7 @@ pub const Mesh = struct {
             };
         }
 
-        var replicated_axes: stdx.BoundedArray(*const dialects.shardy.AxisRefAttribute, MAX_MESH_RANK + 1) = .empty;
+        var replicated_axes: stdx.BoundedArray(*const shardy.AxisRefAttr, MAX_MESH_RANK + 1) = .empty;
         var tile_count: usize = 1;
         for (data.logical.axes.slice(), 0..) |axis, i| {
             tile_count *= data.grid.axis_sizes[i];
@@ -1719,7 +1710,7 @@ pub const Mesh = struct {
             replicated_axes.appendAssumeCapacity(.named(ctx, data.sdyReplicaAxis()));
         }
 
-        return .init(ctx, .{ .mesh = data.name, .dimensions = dimensions, .replicated_axes = replicated_axes.slice() });
+        return .get(ctx, .{ .mesh = data.name, .dimensions = dimensions, .replicated_axes = replicated_axes.slice() });
     }
 
     pub fn gspmdShardingAttrForShape(self: *const Mesh, parent_allocator: std.mem.Allocator, ctx: *mlir.Context, shape: Shape) !*const mlir.Attribute {
@@ -2447,8 +2438,8 @@ const ShardingTest = struct {
             errdefer std.log.warn("Expected shardy annotation failed", .{});
             const registry: *mlir.DialectRegistry = try .init();
             defer registry.deinit();
-            registry.registerDialect("sdy");
-            mlir.registerFuncExtensions(registry);
+            shardy.registerDialect(registry);
+            func.registerExtensions(registry);
 
             var ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
             defer ctx.deinit();
@@ -2457,7 +2448,7 @@ const ShardingTest = struct {
             const actual_attr = try mesh.sdyShardingAttrForShape(self.allocator, ctx, s.shape);
             var writer: std.Io.Writer.Allocating = .init(self.allocator);
             defer writer.deinit();
-            try actual_attr.asAttr().format(&writer.writer);
+            try actual_attr.attribute().format(&writer.writer);
             try std.testing.expectEqualStrings(expected_attr, writer.written());
         }
 
@@ -3075,15 +3066,16 @@ test "Shardy meshes preserve logical order and unused physical replicas" {
     const mesh_ = try Mesh.init("logical", &physical, .mesh(.{ .batch = .balanced, .model = .balanced }), .parseBindings(.{ .batch = .link_z, .model = .link_x }));
     const registry: *mlir.DialectRegistry = try .init();
     defer registry.deinit();
-    registry.registerDialect("sdy");
+    shardy.registerDialect(registry);
     const ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
-    const mesh_attr = try mesh_.sdyMeshAttr(allocator);
-    _ = try mlir.Attribute.parse(ctx, mesh_attr);
+    var text: std.Io.Writer.Allocating = .init(allocator);
+    defer text.deinit();
+    try text.writer.print("{f}", .{mesh_.sdyMeshAttr(ctx)});
     try std.testing.expectEqualStrings(
         "#sdy.mesh<[\"batch\"=2, \"model\"=2, \"__replica_0\"=2], device_ids=[0, 2, 4, 6, 1, 3, 5, 7]>",
-        mesh_attr,
+        text.written(),
     );
 }
 

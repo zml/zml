@@ -1,8 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
+const shardy = @import("mlir/dialects/shardy");
+const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 
 const zml = struct {
@@ -181,7 +182,7 @@ noinline fn manualComputationInternal(
                 .location = compiler.location,
             }).appendTo(manual_block);
 
-            const out_mesh_attrs = try arena.alloc(*const dialects.shardy.TensorShardingAttribute, global_output_shapes.len);
+            const out_mesh_attrs = try arena.alloc(*const shardy.TensorShardingAttr, global_output_shapes.len);
             for (out_mesh_attrs, global_output_shapes) |*attr, shape| {
                 attr.* = try mesh.sdyShardingAttrForShape(arena, mlir_ctx, shape);
             }
@@ -192,7 +193,7 @@ noinline fn manualComputationInternal(
                 .blocks = &.{manual_block},
                 .attributes = &.{
                     .named(mlir_ctx, "in_shardings", try Sharding.sdyPerValueShardingAttr(arena, mlir_ctx, global_input_shapes, mesh)),
-                    .named(mlir_ctx, "out_shardings", dialects.shardy.attr.shardingsPerValue(mlir_ctx, out_mesh_attrs)),
+                    .named(mlir_ctx, "out_shardings", shardy.shardingsPerValueAttr(mlir_ctx, out_mesh_attrs)),
                     .named(mlir_ctx, "manual_axes", try Sharding.sdyManualAxesAttr(arena, mlir_ctx, global_input_shapes, global_output_shapes, mesh)),
                 },
                 .verify = true,
@@ -210,7 +211,7 @@ noinline fn manualComputationInternal(
                 global_values[i], global_types[i] = try gspmd.localToGlobal(compiler, arena, global_scope, local_output_values[i], global_shape);
             }
 
-            break :op dialects.stablehlo.optimizationBarrier(
+            break :op stablehlo.optimizationBarrier(
                 mlir_ctx,
                 global_values,
                 global_types,
@@ -299,21 +300,21 @@ test collectManualAxes {
 
     const registry: *mlir.DialectRegistry = try .init();
     defer registry.deinit();
-    registry.registerDialect("sdy");
+    shardy.registerDialect(registry);
     const ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
     defer ctx.deinit();
     ctx.loadAllAvailableDialects();
-    const expected = dialects.shardy.ManualAxesAttribute.init(ctx, &.{
+    const expected = shardy.ManualAxesAttr.get(ctx, &.{
         .init(ctx, "data"),
         .init(ctx, "model"),
-    }).asAttr();
-    try std.testing.expect(shardy.manualAxesAttr(ctx, axes.constSlice()).eql(expected));
+    }).attribute();
+    try std.testing.expect(shardy_.manualAxesAttr(ctx, axes.constSlice()).eql(expected));
 }
 
 const gspmd = struct {
     fn globalToLocal(mlir_ctx: *mlir.Context, scope: *Compiler.Scope, local_tensor: Tensor, local_shape: Shape, location: *const mlir.Location) Tensor {
         const local_type = mlirx.Type.rankedTensor(mlir_ctx, local_shape);
-        const full_to_shard = dialects.stablehlo.custom_call(
+        const full_to_shard = stablehlo.custom_call(
             mlir_ctx,
             &.{scope.value(local_tensor)},
             &.{local_type},
@@ -334,7 +335,7 @@ const gspmd = struct {
         const gspmd_attr = try compiler.tensorShardingAttr(arena, global_shape);
         const global_type = mlirx.Type.rankedTensor(compiler.mlir_ctx, global_shape);
 
-        const shard_to_full = dialects.stablehlo.custom_call(
+        const shard_to_full = stablehlo.custom_call(
             compiler.mlir_ctx,
             &.{local_value},
             &.{global_type},
@@ -352,11 +353,11 @@ const gspmd = struct {
     }
 };
 
-const shardy = struct {
+const shardy_ = struct {
     pub fn manualAxesAttr(mlir_ctx: *mlir.Context, axes: []const Shape.Tag) *const mlir.Attribute {
         var attrs: stdx.BoundedArray(*const mlir.StringAttribute, Sharding.MAX_MESH_RANK) = .empty;
         for (axes) |axis| attrs.appendAssumeCapacity(.init(mlir_ctx, std.mem.span(axis)));
-        return dialects.shardy.ManualAxesAttribute.init(mlir_ctx, attrs.constSlice()).asAttr();
+        return shardy.ManualAxesAttr.get(mlir_ctx, attrs.constSlice()).attribute();
     }
 };
 

@@ -1,6 +1,6 @@
 //! Zig bindings for NVIDIA's `cuda_tile` MLIR dialect (CUDA Tile IR): one
 //! function per op in `Ops.td` order. Types and attributes go through the
-//! dialect's C API, completed by `cuda_tile_capi.h` where it has no getter.
+//! dialect's C API, completed by `capi.h` where it has no getter.
 
 const std = @import("std");
 
@@ -8,7 +8,11 @@ const c = @import("c");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-pub const dialect_namespace = "cuda_tile";
+const dialect_namespace = "cuda_tile";
+
+pub fn registerDialect(registry: *mlir.DialectRegistry) void {
+    registry.registerDialect("cuda_tile");
+}
 
 fn stringRef(s: []const u8) c.MlirStringRef {
     return .{ .data = s.ptr, .length = s.len };
@@ -41,6 +45,10 @@ pub const PointerType = opaque {
     pub fn pointee(self: *const PointerType) *const mlir.Type {
         return typeFromC(c.mlirCudaTilePointerTypeGetPointeeType(self.ptr()));
     }
+
+    pub fn type_(self: *const PointerType) *const mlir.Type {
+        return @ptrCast(self);
+    }
 };
 
 pub fn pointerType(ctx: *mlir.Context, pointee_type: *const mlir.Type) *const mlir.Type {
@@ -58,8 +66,13 @@ pub const TileType = opaque {
     pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
 
-    pub fn get(ctx: *mlir.Context, shape: []const i64, elem: *const mlir.Type) *const TileType {
-        return @ptrCast(typeFromC(c.mlirCudaTileTileTypeGet(ctx.ptr(), @intCast(shape.len), shape.ptr, elem.ptr())));
+    pub const InitArgs = struct {
+        shape: []const i64,
+        elem: *const mlir.Type,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) *const TileType {
+        return @ptrCast(typeFromC(c.mlirCudaTileTileTypeGet(ctx.ptr(), @intCast(args.shape.len), args.shape.ptr, args.elem.ptr())));
     }
 
     pub fn elementType(self: *const TileType) *const mlir.Type {
@@ -73,10 +86,14 @@ pub const TileType = opaque {
     pub fn dimension(self: *const TileType, i: usize) i64 {
         return c.mlirCudaTileTileTypeGetDimSize(self.ptr(), @intCast(i));
     }
+
+    pub fn type_(self: *const TileType) *const mlir.Type {
+        return @ptrCast(self);
+    }
 };
 
 pub fn tileType(ctx: *mlir.Context, shape: []const i64, elem: *const mlir.Type) *const mlir.Type {
-    return @ptrCast(TileType.get(ctx, shape, elem));
+    return @ptrCast(TileType.get(ctx, .{ .shape = shape, .elem = elem }));
 }
 
 /// `!cuda_tile.token` — the ordering token every `*_tko` op produces.
@@ -91,6 +108,10 @@ pub const TokenType = opaque {
 
     pub fn get(ctx: *mlir.Context) *const TokenType {
         return @ptrCast(typeFromC(c.mlirCudaTileTokenTypeGet(ctx.ptr())));
+    }
+
+    pub fn type_(self: *const TokenType) *const mlir.Type {
+        return @ptrCast(self);
     }
 };
 
@@ -113,10 +134,18 @@ pub const TensorViewType = opaque {
         return c.mlirCudaTileTensorViewTypeGetDynamicSize();
     }
 
-    pub fn get(ctx: *mlir.Context, elem: *const mlir.Type, shape: []const i64, strides: []const i64) *const TensorViewType {
+    pub const InitArgs = struct {
+        elem: *const mlir.Type,
+        shape: []const i64,
+        strides: []const i64,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) *const TensorViewType {
+        const shape = args.shape;
+        const strides = args.strides;
         return @ptrCast(typeFromC(c.mlirCudaTileTensorViewTypeGet(
             ctx.ptr(),
-            elem.ptr(),
+            args.elem.ptr(),
             @intCast(shape.len),
             shape.ptr,
             @intCast(strides.len),
@@ -139,10 +168,14 @@ pub const TensorViewType = opaque {
     pub fn stride(self: *const TensorViewType, i: usize) i64 {
         return c.mlirCudaTileTensorViewTypeGetStride(self.ptr(), @intCast(i));
     }
+
+    pub fn type_(self: *const TensorViewType) *const mlir.Type {
+        return @ptrCast(self);
+    }
 };
 
 pub fn tensorViewType(ctx: *mlir.Context, elem: *const mlir.Type, shape: []const i64, strides: []const i64) *const mlir.Type {
-    return @ptrCast(TensorViewType.get(ctx, elem, shape, strides));
+    return @ptrCast(TensorViewType.get(ctx, .{ .elem = elem, .shape = shape, .strides = strides }));
 }
 
 const DimMap = stdx.BoundedArray(i32, mlir.ShapedType.MAX_RANK);
@@ -171,13 +204,17 @@ pub const PartitionViewType = opaque {
 
     /// An empty `dim_map` is the identity; the type requires one entry per
     /// tile dimension.
-    pub fn get(
-        ctx: *mlir.Context,
+    pub const InitArgs = struct {
         tile_shape: []const i32,
         tensor_view: *const mlir.Type,
-        dim_map: []const i32,
-        padding: ?PaddingValue,
-    ) *const PartitionViewType {
+        dim_map: []const i32 = &.{},
+        padding: ?PaddingValue = null,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) *const PartitionViewType {
+        const tile_shape = args.tile_shape;
+        const tensor_view = args.tensor_view;
+        const dim_map = args.dim_map;
         const tile_attr: *const mlir.Attribute = .denseArray(ctx, .i32, tile_shape);
         const map = identityDimMap(dim_map, tile_shape.len);
         return @ptrCast(typeFromC(c.mlirCudaTilePartitionViewTypeGet(
@@ -186,7 +223,7 @@ pub const PartitionViewType = opaque {
             tensor_view.ptr(),
             @intCast(map.len),
             map.constSlice().ptr,
-            if (padding) |p| p.attribute(ctx).ptr() else null_attr,
+            if (args.padding) |p| p.attribute(ctx).ptr() else null_attr,
         )));
     }
 
@@ -201,6 +238,10 @@ pub const PartitionViewType = opaque {
     pub fn viewIndexRank(self: *const PartitionViewType) usize {
         return @intCast(c.mlirCudaTilePartitionViewTypeGetViewIndexRank(self.ptr()));
     }
+
+    pub fn type_(self: *const PartitionViewType) *const mlir.Type {
+        return @ptrCast(self);
+    }
 };
 
 /// `!cuda_tile.strided_view<tile=(...), strides=(...), ...>` (13.3).
@@ -213,14 +254,19 @@ pub const StridedViewType = opaque {
     pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
 
-    pub fn get(
-        ctx: *mlir.Context,
+    pub const InitArgs = struct {
         tile_shape: []const i32,
         traversal_strides: []const i32,
         tensor_view: *const mlir.Type,
-        dim_map: []const i32,
-        padding: ?PaddingValue,
-    ) *const StridedViewType {
+        dim_map: []const i32 = &.{},
+        padding: ?PaddingValue = null,
+    };
+
+    pub fn get(ctx: *mlir.Context, args: InitArgs) *const StridedViewType {
+        const tile_shape = args.tile_shape;
+        const traversal_strides = args.traversal_strides;
+        const tensor_view = args.tensor_view;
+        const dim_map = args.dim_map;
         const tile_attr: *const mlir.Attribute = .denseArray(ctx, .i32, tile_shape);
         const strides_attr: *const mlir.Attribute = .denseArray(ctx, .i32, traversal_strides);
         const map = identityDimMap(dim_map, tile_shape.len);
@@ -231,7 +277,7 @@ pub const StridedViewType = opaque {
             tensor_view.ptr(),
             @intCast(map.len),
             map.constSlice().ptr,
-            if (padding) |p| p.attribute(ctx).ptr() else null_attr,
+            if (args.padding) |p| p.attribute(ctx).ptr() else null_attr,
         )));
     }
 
@@ -241,6 +287,10 @@ pub const StridedViewType = opaque {
 
     pub fn viewIndexRank(self: *const StridedViewType) usize {
         return @intCast(c.mlirCudaTileStridedViewTypeGetViewIndexRank(self.ptr()));
+    }
+
+    pub fn type_(self: *const StridedViewType) *const mlir.Type {
+        return @ptrCast(self);
     }
 };
 
@@ -252,11 +302,9 @@ pub const GatherScatterViewType = opaque {
     pub const isAFn = c.mlirTypeIsACudaTileGatherScatterView;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
     pub const isA = M.isA;
     pub const mnemonic = "gather_scatter_view";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.type_().format(writer);
-    }
     pub fn type_(self: *const Self) *const mlir.Type {
         return @ptrCast(self);
     }
@@ -277,16 +325,16 @@ pub const GatherScatterViewType = opaque {
         );
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getTileShape(self: *const Self) *const mlir.DenseArrayAttribute(.i32) {
+    pub fn tileShape(self: *const Self) *const mlir.DenseArrayAttribute(.i32) {
         return @ptrCast(attrFromC(c.mlirCudaTileGatherScatterViewTypeGetTileShape(self.ptr())));
     }
-    pub fn getTensorView(self: *const Self) *const TensorViewType {
+    pub fn tensorView(self: *const Self) *const TensorViewType {
         return @ptrCast(typeFromC(c.mlirCudaTileGatherScatterViewTypeGetTensorView(self.ptr())));
     }
-    pub fn getSparseDim(self: *const Self) u32 {
+    pub fn sparseDim(self: *const Self) u32 {
         return c.mlirCudaTileGatherScatterViewTypeGetSparseDim(self.ptr());
     }
-    pub fn getPaddingValue(self: *const Self) ?PaddingValue {
+    pub fn paddingValue(self: *const Self) ?PaddingValue {
         const attr = c.mlirCudaTileGatherScatterViewTypeGetPaddingValue(self.ptr());
         if (attr.ptr == null) return null;
         const name = c.mlirCudaTilePaddingValueAttrGetValue(attr);
@@ -299,7 +347,9 @@ pub fn gatherScatterViewType(
     tile_shape: []const i64,
     tensor_view: *const mlir.Type,
     sparse_dim: u32,
-    padding: ?PaddingValue,
+    opts: struct {
+        padding: ?PaddingValue = null,
+    },
 ) *const mlir.Type {
     var shape: stdx.BoundedArray(i32, mlir.ShapedType.MAX_RANK) = .empty;
     for (tile_shape) |d| shape.appendAssumeCapacity(@intCast(d));
@@ -307,13 +357,13 @@ pub fn gatherScatterViewType(
         .tileShape = shape.constSlice(),
         .tensorView = tensor_view.isA(TensorViewType) orelse std.debug.panic("cuda_tile: {f} is not a tensor_view", .{tensor_view}),
         .sparseDim = sparse_dim,
-        .paddingValue = padding,
+        .paddingValue = opts.padding,
     }) catch std.debug.panic("cuda_tile: invalid gather_scatter_view over {f}", .{tensor_view});
     return view.type_();
 }
 
 /// The `tile<...>` type a load through `view` yields, for any view kind —
-/// through the dialect's `TileView` type interface (`cuda_tile_capi.cc`), so
+/// through the dialect's `TileView` type interface (`capi.cc`), so
 /// the gather/scatter view, which has no getters in NVIDIA's C API, works too.
 pub fn tileTypeOfView(view: *const mlir.Type) *const mlir.Type {
     if (!c.mlirTypeIsACudaTileTileView(view.ptr())) std.debug.panic("cuda_tile: {f} is not a tiled view", .{view});
@@ -483,11 +533,9 @@ pub const OptimizationHintsAttr = opaque {
     pub const isAFn = c.mlirCudaTileAttributeIsAOptimizationHintsAttr;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "optimization_hints";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -498,7 +546,7 @@ pub const OptimizationHintsAttr = opaque {
         const result = c.mlirCudaTileOptimizationHintsAttrGet(ctx.ptr(), args.value.ptr());
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValue(self: *const Self) *const mlir.DictionaryAttribute {
+    pub fn value(self: *const Self) *const mlir.DictionaryAttribute {
         return @ptrCast(attrFromC(c.mlirCudaTileOptimizationHintsAttrGetValue(self.ptr())));
     }
 };
@@ -523,7 +571,7 @@ fn hintDictionary(ctx: *mlir.Context, hint: anytype) *const mlir.Attribute {
 
 /// `#cuda_tile.optimization_hints` from a slice of `EntryHint`,
 /// `LoadStoreHint` or `PtrLoadStoreHint`.
-pub fn optimizationHints(ctx: *mlir.Context, hints: anytype) *const mlir.Attribute {
+pub fn optimizationHintsAttr(ctx: *mlir.Context, hints: anytype) *const mlir.Attribute {
     var entries: stdx.BoundedArray(mlir.NamedAttribute, std.meta.fieldNames(Arch).len) = .empty;
     for (hints) |h| entries.appendAssumeCapacity(.named(ctx, @tagName(h.arch), hintDictionary(ctx, h)));
     const value: *const mlir.DictionaryAttribute = @ptrCast(mlir.Attribute.dict(ctx, entries.constSlice()));
@@ -542,11 +590,9 @@ pub const DivByAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaTileDivBy;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "div_by";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -566,23 +612,30 @@ pub const DivByAttr = opaque {
         );
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getDivisor(self: *const Self) u64 {
+    pub fn divisor(self: *const Self) u64 {
         return c.mlirCudaTileDivByAttrGetDivisor(self.ptr());
     }
-    pub fn getEvery(self: *const Self) ?i64 {
+    pub fn every(self: *const Self) ?i64 {
         return if (c.mlirCudaTileDivByAttrHasEvery(self.ptr())) c.mlirCudaTileDivByAttrGetEvery(self.ptr()) else null;
     }
-    pub fn getAlong(self: *const Self) ?i64 {
+    pub fn along(self: *const Self) ?i64 {
         return if (c.mlirCudaTileDivByAttrHasAlong(self.ptr())) c.mlirCudaTileDivByAttrGetAlong(self.ptr()) else null;
     }
 };
 
 /// `along` defaults to 0 when only `every` is given.
-pub fn divBy(ctx: *mlir.Context, divisor: u64, every: ?i64, along: ?i64) *const mlir.Attribute {
+pub fn divByAttr(
+    ctx: *mlir.Context,
+    divisor: u64,
+    opts: struct {
+        every: ?i64 = null,
+        along: ?i64 = null,
+    },
+) *const mlir.Attribute {
     const attr = DivByAttr.get(ctx, .{
         .divisor = divisor,
-        .every = every,
-        .along = if (every != null) along orelse 0 else null,
+        .every = opts.every,
+        .along = if (opts.every != null) opts.along orelse 0 else null,
     }) catch unreachable;
     return attr.attribute();
 }
@@ -595,11 +648,9 @@ pub const SameElementsAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaTileSameElements;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "same_elements";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -610,12 +661,12 @@ pub const SameElementsAttr = opaque {
         const result = c.mlirCudaTileSameElementsAttrGet(ctx.ptr(), @intCast(args.values.len), args.values.ptr);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getValues(self: *const Self) *const mlir.DenseArrayAttribute(.i64) {
+    pub fn values(self: *const Self) *const mlir.DenseArrayAttribute(.i64) {
         return @ptrCast(attrFromC(c.mlirCudaTileSameElementsAttrGetValues(self.ptr())));
     }
 };
 
-pub fn sameElements(ctx: *mlir.Context, values: []const i64) *const mlir.Attribute {
+pub fn sameElementsAttr(ctx: *mlir.Context, values: []const i64) *const mlir.Attribute {
     const attr = SameElementsAttr.get(ctx, .{ .values = values }) catch unreachable;
     return attr.attribute();
 }
@@ -627,11 +678,9 @@ pub const BoundedAttr = opaque {
     pub const isAFn = c.mlirAttributeIsACudaTileBounded;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
     pub const mnemonic = "bounded";
-    pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.attribute().format(writer);
-    }
     pub fn attribute(self: *const Self) *const mlir.Attribute {
         return @ptrCast(self);
     }
@@ -643,16 +692,22 @@ pub const BoundedAttr = opaque {
         const result = c.mlirCudaTileBoundedAttrGet(ctx.ptr(), args.lb != null, args.lb orelse 0, args.ub != null, args.ub orelse 0);
         return @ptrCast(result.ptr orelse return error.InvalidMlir);
     }
-    pub fn getLb(self: *const Self) ?i64 {
+    pub fn lb(self: *const Self) ?i64 {
         return if (c.mlirCudaTileBoundedAttrHasLb(self.ptr())) c.mlirCudaTileBoundedAttrGetLb(self.ptr()) else null;
     }
-    pub fn getUb(self: *const Self) ?i64 {
+    pub fn ub(self: *const Self) ?i64 {
         return if (c.mlirCudaTileBoundedAttrHasUb(self.ptr())) c.mlirCudaTileBoundedAttrGetUb(self.ptr()) else null;
     }
 };
 
-pub fn bounded(ctx: *mlir.Context, lb: ?i64, ub: ?i64) *const mlir.Attribute {
-    const attr = BoundedAttr.get(ctx, .{ .lb = lb, .ub = ub }) catch unreachable;
+pub fn boundedAttr(
+    ctx: *mlir.Context,
+    opts: struct {
+        lb: ?i64 = null,
+        ub: ?i64 = null,
+    },
+) *const mlir.Attribute {
+    const attr = BoundedAttr.get(ctx, .{ .lb = opts.lb, .ub = opts.ub }) catch unreachable;
     return attr.attribute();
 }
 
@@ -662,11 +717,11 @@ pub fn splatAttr(tile_ty: *const mlir.Type, elem_attr: *const mlir.Attribute) *c
     return attrFromC(c.mlirDenseElementsAttrSplatGet(tile_ty.ptr(), elem_attr.ptr()));
 }
 
-pub fn intElem(elem_ty: *const mlir.Type, value: i64) *const mlir.Attribute {
+pub fn intElemAttr(elem_ty: *const mlir.Type, value: i64) *const mlir.Attribute {
     return attrFromC(c.mlirIntegerAttrGet(elem_ty.ptr(), value));
 }
 
-pub fn floatElem(ctx: *mlir.Context, elem_ty: *const mlir.Type, value: f64) *const mlir.Attribute {
+pub fn floatElemAttr(ctx: *mlir.Context, elem_ty: *const mlir.Type, value: f64) *const mlir.Attribute {
     return attrFromC(c.mlirFloatAttrDoubleGet(ctx.ptr(), elem_ty.ptr(), value));
 }
 
@@ -806,9 +861,16 @@ pub fn atan2(ctx: *mlir.Context, x: *const mlir.Value, y: *const mlir.Value, loc
 }
 
 /// `rounding` null keeps the op's default (13.3 attribute).
-pub fn exp(ctx: *mlir.Context, source: *const mlir.Value, rounding: ?RoundingMode, location: *const mlir.Location) *mlir.Operation {
+pub fn exp(
+    ctx: *mlir.Context,
+    source: *const mlir.Value,
+    opts: struct {
+        rounding: ?RoundingMode = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attrs: Attrs = .empty;
-    if (rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding_mode", r.attribute(ctx)));
+    if (opts.rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding_mode", r.attribute(ctx)));
     return unary(ctx, "exp", source, attrs, location);
 }
 
@@ -855,9 +917,16 @@ pub fn cosh(ctx: *mlir.Context, source: *const mlir.Value, location: *const mlir
 /// `rounding` null keeps the op's default (13.2 attribute). Only `approx`
 /// and `full` are legal; the upstream verifier reports the others without
 /// failing, so they are refused here.
-pub fn tanh(ctx: *mlir.Context, source: *const mlir.Value, rounding: ?RoundingMode, location: *const mlir.Location) *mlir.Operation {
+pub fn tanh(
+    ctx: *mlir.Context,
+    source: *const mlir.Value,
+    opts: struct {
+        rounding: ?RoundingMode = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attrs: Attrs = .empty;
-    if (rounding) |r| {
+    if (opts.rounding) |r| {
         switch (r) {
             .approx, .full => {},
             else => std.debug.panic("cuda_tile.tanh: rounding mode {s} is not allowed (only approx or full)", .{@tagName(r)}),
@@ -928,10 +997,19 @@ pub fn mulhii(ctx: *mlir.Context, x: *const mlir.Value, y: *const mlir.Value, lo
 }
 
 /// `rounding` null keeps the op's default (truncation).
-pub fn divi(ctx: *mlir.Context, lhs: *const mlir.Value, rhs: *const mlir.Value, signedness: Signedness, rounding: ?RoundingMode, location: *const mlir.Location) *mlir.Operation {
+pub fn divi(
+    ctx: *mlir.Context,
+    lhs: *const mlir.Value,
+    rhs: *const mlir.Value,
+    signedness: Signedness,
+    opts: struct {
+        rounding: ?RoundingMode = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attrs: Attrs = .empty;
     attrs.appendAssumeCapacity(.named(ctx, "signedness", signedness.attribute(ctx)));
-    if (rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding", r.attribute(ctx)));
+    if (opts.rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding", r.attribute(ctx)));
     return binary(ctx, "divi", lhs, rhs, attrs, location);
 }
 
@@ -1012,9 +1090,17 @@ pub fn trunci(ctx: *mlir.Context, from: *const mlir.Value, to: *const mlir.Type,
 }
 
 /// `rounding` null keeps the op's default (nearest_even).
-pub fn ftof(ctx: *mlir.Context, from: *const mlir.Value, to: *const mlir.Type, rounding: ?RoundingMode, location: *const mlir.Location) *mlir.Operation {
+pub fn ftof(
+    ctx: *mlir.Context,
+    from: *const mlir.Value,
+    to: *const mlir.Type,
+    opts: struct {
+        rounding: ?RoundingMode = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     var attrs: Attrs = .empty;
-    if (rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding_mode", r.attribute(ctx)));
+    if (opts.rounding) |r| attrs.appendAssumeCapacity(.named(ctx, "rounding_mode", r.attribute(ctx)));
     return convert(ctx, "ftof", from, to, attrs, location);
 }
 
@@ -1243,7 +1329,16 @@ pub fn for_(ctx: *mlir.Context, lower: *const mlir.Value, upper: *const mlir.Val
 
 /// `if %cond -> (types) { ... } else { ... }`. Branches end with `yield`
 /// (or `continue`/`break`/`return` when they leave the enclosing scope).
-pub fn if_(ctx: *mlir.Context, cond: *const mlir.Value, result_types: []const *const mlir.Type, then_block: *mlir.Block, else_block: ?*mlir.Block, location: *const mlir.Location) *mlir.Operation {
+pub fn if_(
+    ctx: *mlir.Context,
+    cond: *const mlir.Value,
+    result_types: []const *const mlir.Type,
+    then_block: *mlir.Block,
+    opts: struct {
+        else_block: ?*mlir.Block = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
     _ = ctx;
     var state: mlir.OperationState = .init(opName("if"), location);
     state.addOperands(&.{cond});
@@ -1251,7 +1346,7 @@ pub fn if_(ctx: *mlir.Context, cond: *const mlir.Value, result_types: []const *c
     const then_region = mlir.Region.init();
     then_region.appendOwnedBlock(then_block);
     const else_region = mlir.Region.init();
-    if (else_block) |b| else_region.appendOwnedBlock(b);
+    if (opts.else_block) |b| else_region.appendOwnedBlock(b);
     state.addOwnedRegions(&.{ then_region, else_region });
     return mlir.Operation.init(&state) catch @panic("Failed to create cuda_tile.if");
 }
@@ -1626,8 +1721,16 @@ pub fn join_tokens(ctx: *mlir.Context, tokens: []const *const mlir.Value, locati
 }
 
 /// Device-side printf. One result: the token.
-pub fn print_tko(ctx: *mlir.Context, str: []const u8, args: []const *const mlir.Value, token: ?*const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-    const tok = optional(token);
+pub fn print_tko(
+    ctx: *mlir.Context,
+    str: []const u8,
+    args: []const *const mlir.Value,
+    opts: struct {
+        token: ?*const mlir.Value = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
+    const tok = optional(opts.token);
     var segs: Segments = .{};
     segs.add(args);
     segs.add(tok.slice());
@@ -1642,270 +1745,3 @@ pub fn print_tko(ctx: *mlir.Context, str: []const u8, args: []const *const mlir.
 // =============================================================================
 // Tests
 // =============================================================================
-
-test {
-    std.testing.refAllDecls(@This());
-}
-
-fn testContext() !*mlir.Context {
-    const registry = try mlir.DialectRegistry.init();
-    defer registry.deinit();
-    mlir.DialectHandle.fromString(dialect_namespace).insertDialect(registry);
-    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
-    ctx.loadAllAvailableDialects();
-    return ctx;
-}
-
-test "dialect registers and types round-trip" {
-    const ctx = try testContext();
-    defer ctx.deinit();
-
-    try std.testing.expect(ctx.isRegisteredOperation("cuda_tile.entry"));
-    try std.testing.expect(ctx.isRegisteredOperation("cuda_tile.load_view_tko"));
-    try std.testing.expect(ctx.isRegisteredOperation("cuda_tile.mmaf"));
-
-    const f32_ty = mlir.Type.float(ctx, .f32);
-    const tile = tileType(ctx, &.{ 64, 64 }, f32_ty);
-    try std.testing.expect(tile.eql(try mlir.Type.parse(ctx, "!cuda_tile.tile<64x64xf32>")));
-    try std.testing.expectEqual(@as(usize, 2), tile.isA(TileType).?.rank());
-    try std.testing.expectEqual(@as(i64, 64), tile.isA(TileType).?.dimension(1));
-
-    const ptr = pointerType(ctx, f32_ty);
-    try std.testing.expect(ptr.eql(try mlir.Type.parse(ctx, "!cuda_tile.ptr<f32>")));
-    try std.testing.expect(ptr.isA(PointerType).?.pointee().eql(f32_ty));
-
-    const dyn = TensorViewType.dynamic();
-    const tv = tensorViewType(ctx, f32_ty, &.{ dyn, 32 }, &.{ dyn, 1 });
-    try std.testing.expect(tv.eql(try mlir.Type.parse(ctx, "!cuda_tile.tensor_view<?x32xf32, strides=[?,1]>")));
-
-    const static_tv = tensorViewType(ctx, f32_ty, &.{16}, &.{1});
-    const pv: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{2}, static_tv, &.{}, .zero));
-    try std.testing.expect(pv.eql(try mlir.Type.parse(ctx, "!cuda_tile.partition_view<tile=(2), padding_value = zero, tensor_view<16xf32, strides=[1]>>")));
-    try std.testing.expect(tileTypeOfView(pv).eql(tileType(ctx, &.{2}, f32_ty)));
-    try std.testing.expectEqual(@as(usize, 1), indexRankOfView(pv));
-
-    try std.testing.expect(tokenType(ctx).eql(try mlir.Type.parse(ctx, "!cuda_tile.token")));
-
-    const gather_tv = tensorViewType(ctx, f32_ty, &.{ 64, 32 }, &.{ 32, 1 });
-    const gsv = gatherScatterViewType(ctx, &.{ 8, 16 }, gather_tv, 0, .zero);
-    try std.testing.expect(gsv.eql(try mlir.Type.parse(ctx, "!cuda_tile.gather_scatter_view<tile=(8x16), padding_value = zero, tensor_view<64x32xf32, strides=[32,1]>, sparse_dim=0>")));
-    const typed_gsv = gsv.isA(GatherScatterViewType).?;
-    const gsv_tile = typed_gsv.getTileShape();
-    var gsv_shape: [2]i32 = undefined;
-    try std.testing.expectEqual(gsv_shape.len, gsv_tile.numElements());
-    for (&gsv_shape, 0..) |*d, i| d.* = gsv_tile.element(i);
-    const rebuilt_gsv = try GatherScatterViewType.get(ctx, .{
-        .tileShape = &gsv_shape,
-        .tensorView = typed_gsv.getTensorView(),
-        .sparseDim = typed_gsv.getSparseDim(),
-        .paddingValue = typed_gsv.getPaddingValue(),
-    });
-    try std.testing.expect(rebuilt_gsv.eql(typed_gsv));
-    try std.testing.expect(tileTypeOfView(gsv).eql(tileType(ctx, &.{ 8, 16 }, f32_ty)));
-    try std.testing.expect((try GatherScatterViewType.get(ctx, .{
-        .tileShape = &.{ 8, 16 },
-        .tensorView = gather_tv.isA(TensorViewType).?,
-        .sparseDim = 1,
-    })).getPaddingValue() == null);
-    try std.testing.expectError(error.InvalidMlir, GatherScatterViewType.get(ctx, .{
-        .tileShape = &.{8},
-        .tensorView = gather_tv.isA(TensorViewType).?,
-        .sparseDim = 0,
-    }));
-}
-
-test "enum and hint attributes" {
-    const ctx = try testContext();
-    defer ctx.deinit();
-
-    try std.testing.expect(RoundingMode.nearest_even.attribute(ctx).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.rounding<nearest_even>")));
-    const padding = PaddingValue.neg_inf.attribute(ctx);
-    const padding_text = c.mlirCudaTilePaddingValueAttrGetValue(padding.ptr());
-    try std.testing.expectEqualStrings("neg_inf", padding_text.data[0..padding_text.length]);
-
-    const hints = optimizationHints(ctx, &[_]EntryHint{
-        .{ .arch = .sm_100, .num_cta_in_cga = 2 },
-        .{ .arch = .sm_120, .num_cta_in_cga = 2, .occupancy = 2 },
-    });
-    try std.testing.expect(hints.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.optimization_hints<sm_100 = {num_cta_in_cga = 2}, sm_120 = {num_cta_in_cga = 2, occupancy = 2}>")));
-    const typed_hints = hints.isA(OptimizationHintsAttr).?;
-    try std.testing.expect((try OptimizationHintsAttr.get(ctx, .{ .value = typed_hints.getValue() })).eql(typed_hints));
-    const ls_hints = optimizationHints(ctx, &[_]LoadStoreHint{.{ .arch = .sm_100, .allow_tma = false, .latency = 3 }});
-    try std.testing.expect(ls_hints.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.optimization_hints<sm_100 = {allow_tma = false, latency = 3}>")));
-    const not_a_dict: *const mlir.DictionaryAttribute = @ptrCast(mlir.Attribute.dict(ctx, &.{.named(ctx, "sm_100", .int(ctx, .i64, 1))}));
-    try std.testing.expectError(error.InvalidMlir, OptimizationHintsAttr.get(ctx, .{ .value = not_a_dict }));
-
-    const div = divBy(ctx, 16, null, null);
-    try std.testing.expect(div.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.div_by<16>")));
-    const div_every = divBy(ctx, 4, 4, 1);
-    try std.testing.expect(div_every.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.div_by<4, every 4 along 1>")));
-    try std.testing.expect(divBy(ctx, 32, 4, null).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.div_by<32, every 4 along 0>")));
-    const typed_div = div_every.isA(DivByAttr).?;
-    try std.testing.expect((try DivByAttr.get(ctx, .{
-        .divisor = typed_div.getDivisor(),
-        .every = typed_div.getEvery(),
-        .along = typed_div.getAlong(),
-    })).eql(typed_div));
-    try std.testing.expect(div.isA(DivByAttr).?.getEvery() == null);
-    try std.testing.expectError(error.InvalidMlir, DivByAttr.get(ctx, .{ .divisor = 4, .every = 4 }));
-
-    const same = sameElements(ctx, &.{ 2, 4 });
-    try std.testing.expect(same.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.same_elements<[2, 4]>")));
-    const same_values = same.isA(SameElementsAttr).?.getValues();
-    try std.testing.expectEqual(@as(usize, 2), same_values.numElements());
-    try std.testing.expectEqual(@as(i64, 4), same_values.element(1));
-
-    const lower = bounded(ctx, 0, null);
-    try std.testing.expect(lower.eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<0, ?>")));
-    try std.testing.expect(bounded(ctx, null, 7).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<?, 7>")));
-    try std.testing.expect(bounded(ctx, -3, 7).eql(try mlir.Attribute.parse(ctx, "#cuda_tile.bounded<-3, 7>")));
-    const typed_lower = lower.isA(BoundedAttr).?;
-    try std.testing.expectEqual(@as(?i64, 0), typed_lower.getLb());
-    try std.testing.expect(typed_lower.getUb() == null);
-}
-
-test "entry round-trip through print and parse" {
-    const ctx = try testContext();
-    defer ctx.deinit();
-
-    const loc: *const mlir.Location = .unknown(ctx);
-    const module_op: *mlir.Module = .init(loc);
-    defer module_op.deinit();
-
-    const f32_ty = mlir.Type.float(ctx, .f32);
-    const ptr_tile = tileType(ctx, &.{}, pointerType(ctx, f32_ty));
-    const block = mlir.Block.init(&.{ ptr_tile, ptr_tile }, &.{ loc, loc });
-
-    // out[i] = in[i] + 1 over 128 elements, the shape of cuda-tile's README example.
-    const idx_ty = tileType(ctx, &.{128}, .int(ctx, .i32));
-    const offsets = iota(ctx, idx_ty, loc).appendTo(block);
-    const ptr1 = tileType(ctx, &.{1}, pointerType(ctx, f32_ty));
-    const ptr128 = tileType(ctx, &.{128}, pointerType(ctx, f32_ty));
-    const in_r = reshape(ctx, block.argument(0), ptr1, loc).appendTo(block);
-    const in_b = broadcast(ctx, in_r.result(0), ptr128, loc).appendTo(block);
-    const in_p = offset(ctx, in_b.result(0), offsets.result(0), loc).appendTo(block);
-    const f32_128 = tileType(ctx, &.{128}, f32_ty);
-    const loaded = load_ptr_tko(ctx, in_p.result(0), f32_128, .{}, loc).appendTo(block);
-    const one = constant(ctx, splatAttr(f32_128, floatElem(ctx, f32_ty, 1.0)), f32_128, loc).appendTo(block);
-    const sum = addf(ctx, loaded.result(0), one.result(0), .nearest_even, false, loc).appendTo(block);
-    const out_r = reshape(ctx, block.argument(1), ptr1, loc).appendTo(block);
-    const out_b = broadcast(ctx, out_r.result(0), ptr128, loc).appendTo(block);
-    const out_p = offset(ctx, out_b.result(0), offsets.result(0), loc).appendTo(block);
-    _ = store_ptr_tko(ctx, out_p.result(0), sum.result(0), .{ .mem = .{ .token = loaded.result(1) } }, loc).appendTo(block);
-    _ = return_(ctx, &.{}, loc).appendTo(block);
-
-    const ct_body = mlir.Block.init(&.{}, &.{});
-    _ = entry(ctx, .{ .name = "add_one", .block = block, .location = loc }).appendTo(ct_body);
-    _ = module(ctx, "m", ct_body, loc).appendTo(module_op.body());
-
-    try std.testing.expect(module_op.operation().verify());
-
-    var al: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer al.deinit();
-    try al.writer.print("{f}", .{module_op.operation()});
-    const text = al.written();
-    try std.testing.expect(std.mem.indexOf(u8, text, "cuda_tile.module @m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "entry @add_one(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "load_ptr_tko weak") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "addf") != null);
-
-    const parsed = try mlir.Module.parse(ctx, text);
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-test "views, control flow and mma verify" {
-    const ctx = try testContext();
-    defer ctx.deinit();
-
-    const loc: *const mlir.Location = .unknown(ctx);
-    const module_op: *mlir.Module = .init(loc);
-    defer module_op.deinit();
-
-    const bf16_ty = mlir.Type.float(ctx, .bf16);
-    const f32_ty = mlir.Type.float(ctx, .f32);
-    const i32_ty = mlir.Type.int(ctx, .i32);
-    const bf16_ptr = tileType(ctx, &.{}, pointerType(ctx, bf16_ty));
-    const f32_ptr = tileType(ctx, &.{}, pointerType(ctx, f32_ty));
-    const block = mlir.Block.init(&.{ bf16_ptr, bf16_ptr, f32_ptr }, &.{ loc, loc, loc });
-
-    // C[128x128] = A[128x64] @ B[64x128] in 64-wide K tiles.
-    const tv_a = make_tensor_view(ctx, block.argument(0), &.{}, &.{}, tensorViewType(ctx, bf16_ty, &.{ 128, 64 }, &.{ 64, 1 }), loc).appendTo(block);
-    const tv_b = make_tensor_view(ctx, block.argument(1), &.{}, &.{}, tensorViewType(ctx, bf16_ty, &.{ 64, 128 }, &.{ 128, 1 }), loc).appendTo(block);
-    const tv_c = make_tensor_view(ctx, block.argument(2), &.{}, &.{}, tensorViewType(ctx, f32_ty, &.{ 128, 128 }, &.{ 128, 1 }), loc).appendTo(block);
-    const pv_a: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{ 64, 64 }, tv_a.result(0).type_(), &.{}, .zero));
-    const pv_b: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{ 64, 64 }, tv_b.result(0).type_(), &.{}, .zero));
-    const pv_c: *const mlir.Type = @ptrCast(PartitionViewType.get(ctx, &.{ 64, 64 }, tv_c.result(0).type_(), &.{}, null));
-    const va = make_partition_view(ctx, tv_a.result(0), pv_a, loc).appendTo(block);
-    const vb = make_partition_view(ctx, tv_b.result(0), pv_b, loc).appendTo(block);
-    const vc = make_partition_view(ctx, tv_c.result(0), pv_c, loc).appendTo(block);
-
-    const bid = get_tile_block_id(ctx, loc).appendTo(block);
-    const i32_tile = tileType(ctx, &.{}, i32_ty);
-    const zero = constant(ctx, splatAttr(i32_tile, intElem(i32_ty, 0)), i32_tile, loc).appendTo(block);
-    const one = constant(ctx, splatAttr(i32_tile, intElem(i32_ty, 1)), i32_tile, loc).appendTo(block);
-    const acc_ty = tileType(ctx, &.{ 64, 64 }, f32_ty);
-    const acc0 = constant(ctx, splatAttr(acc_ty, floatElem(ctx, f32_ty, 0.0)), acc_ty, loc).appendTo(block);
-
-    const body = mlir.Block.init(&.{ i32_tile, acc_ty }, &.{ loc, loc });
-    const at = load_view_tko(ctx, va.result(0), &.{ bid.result(0), body.argument(0) }, .{}, loc).appendTo(body);
-    const bt = load_view_tko(ctx, vb.result(0), &.{ body.argument(0), bid.result(1) }, .{}, loc).appendTo(body);
-    try std.testing.expect(at.attributeByName("inbounds").?.eql(.denseArray(ctx, .bool, &.{ 0, 0 })));
-    const acc = mmaf(ctx, at.result(0), bt.result(0), body.argument(1), false, loc).appendTo(body);
-    _ = continue_(ctx, &.{acc.result(0)}, loc).appendTo(body);
-    const loop_op = for_(ctx, zero.result(0), one.result(0), one.result(0), &.{acc0.result(0)}, body, false, loc).appendTo(block);
-
-    // if %cond -> (tile<f32>) { yield } else { yield }
-    const cond = cmpi(ctx, .equal, .signed, bid.result(0), zero.result(0), loc).appendTo(block);
-    const then_block = mlir.Block.init(&.{}, &.{});
-    _ = yield(ctx, &.{loop_op.result(0)}, loc).appendTo(then_block);
-    const else_block = mlir.Block.init(&.{}, &.{});
-    _ = yield(ctx, &.{acc0.result(0)}, loc).appendTo(else_block);
-    const if_op = if_(ctx, cond.result(0), &.{acc_ty}, then_block, else_block, loc).appendTo(block);
-
-    const store = store_view_tko(ctx, if_op.result(0), vc.result(0), &.{ bid.result(0), bid.result(1) }, .{}, loc).appendTo(block);
-    try std.testing.expect(store.attributeByName("inbounds").?.eql(.denseArray(ctx, .bool, &.{ 0, 0 })));
-    _ = return_(ctx, &.{}, loc).appendTo(block);
-
-    const ct_body = mlir.Block.init(&.{}, &.{});
-    _ = entry(ctx, .{
-        .name = "gemm",
-        .block = block,
-        .optimization_hints = optimizationHints(ctx, &[_]EntryHint{.{ .arch = .sm_120, .num_worker_warps_per_cta = 4 }}),
-        .location = loc,
-    }).appendTo(ct_body);
-    _ = module(ctx, "m", ct_body, loc).appendTo(module_op.body());
-
-    try std.testing.expect(module_op.operation().verify());
-
-    var al: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer al.deinit();
-    try al.writer.print("{f}", .{module_op.operation()});
-    const text = al.written();
-    try std.testing.expect(std.mem.indexOf(u8, text, "optimization_hints=<sm_120 = {num_worker_warps_per_cta = 4}>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "load_view_tko weak") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "continue ") != null);
-
-    const parsed = try mlir.Module.parse(ctx, text);
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-test "the verifier rejects what the dialect forbids" {
-    const ctx = try testContext();
-    defer ctx.deinit();
-    const loc: *const mlir.Location = .unknown(ctx);
-    const f32_ty = mlir.Type.float(ctx, .f32);
-
-    // An entry with a rank-1 argument. (Per-op negatives go through
-    // `Operation.try_make`, whose logged error the test runner counts as a
-    // failure, so the module-level verifier is the oracle here.)
-    const module_op: *mlir.Module = .init(loc);
-    defer module_op.deinit();
-    const block = mlir.Block.init(&.{tileType(ctx, &.{4}, f32_ty)}, &.{loc});
-    _ = return_(ctx, &.{}, loc).appendTo(block);
-    const ct_body = mlir.Block.init(&.{}, &.{});
-    _ = entry(ctx, .{ .name = "bad", .block = block, .location = loc }).appendTo(ct_body);
-    _ = module(ctx, "m", ct_body, loc).appendTo(module_op.body());
-    try std.testing.expect(!module_op.operation().verify());
-}
