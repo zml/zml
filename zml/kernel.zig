@@ -513,6 +513,7 @@ pub const cuda_tile = struct {
 
 pub const cute = struct {
     pub const Builder = cute_builder.Builder;
+    pub const CuteTensor = cute_builder.Tensor;
     pub const ArgSpec = cute_builder.ArgSpec;
     pub const Value = cute_builder.Value;
     pub const View = cute_builder.View;
@@ -549,18 +550,9 @@ pub const cute = struct {
         };
     }
 
-    fn Spec(comptime Config: type) type {
-        return struct {
-            name: [:0]const u8,
-            inputs: []const [:0]const u8,
-            outputs: []const [:0]const u8,
-            run: *const fn (*Builder, Config) FinishError!void,
-        };
-    }
-
     pub fn Kernel(
         comptime ConfigT: type,
-        comptime spec: Spec(ConfigT),
+        comptime spec: anytype,
     ) type {
         return struct {
             pub const name: [:0]const u8 = spec.name;
@@ -598,6 +590,52 @@ pub const cute = struct {
                 return b.finish(block);
             }
 
+            /// Declare CuTe tensors from the shapes passed to `call2`, in
+            /// input-then-output order, before building the kernel body.
+            pub fn emit2(allocator: std.mem.Allocator, cfg: ConfigT, block: [3]i32, shapes: []const Shape) ![:0]const u8 {
+                std.debug.assert(shapes.len == spec.inputs.len + spec.outputs.len);
+
+                const ctx = try newContext();
+                defer ctx.deinit();
+
+                var b = try cute_builder.Builder.open(allocator, ctx, name);
+                defer b.deinit();
+
+                const input_names: []const [:0]const u8 = spec.inputs;
+                const output_names: []const [:0]const u8 = spec.outputs;
+                const arg_names = input_names ++ output_names;
+                const TensorArg = struct { tensor: ArgSpec.TensorSpec };
+                var declarations: StructOf(arg_names, TensorArg) = undefined;
+                inline for (arg_names, 0..) |fname, i| {
+                    @field(declarations, fname) = .{ .tensor = .{
+                        .dtype = from(shapes[i].dtype()),
+                        .shape = shapes[i].dims(),
+                    } };
+                }
+
+                const declared = try b.declareArgs(declarations);
+                var args: @Tuple(&@as([arg_names.len]type, @splat(CuteTensor))) = undefined;
+                inline for (arg_names, 0..) |fname, i| args[i] = @field(declared, fname);
+
+                const run_type = @TypeOf(spec.run);
+                const run_info = switch (@typeInfo(run_type)) {
+                    .@"fn" => |info| info,
+                    .pointer => |pointer| @typeInfo(pointer.child).@"fn",
+                    else => @compileError("cute.Kernel.run must be a function"),
+                };
+                if (comptime run_info.param_types.len == arg_names.len + 1) {
+                    const result = @call(.auto, spec.run, .{&b} ++ args);
+                    if (comptime @typeInfo(@TypeOf(result)) == .error_union) try result;
+                } else if (comptime run_info.param_types.len == arg_names.len + 2) {
+                    const result = @call(.auto, spec.run, .{ &b, cfg } ++ args);
+                    if (comptime @typeInfo(@TypeOf(result)) == .error_union) try result;
+                } else {
+                    @compileError("cute.Kernel.call2 run must take the builder, optional config, and one CuTe tensor per input and output");
+                }
+
+                return b.finish(block);
+            }
+
             pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
                 const cur = Compiler.current();
 
@@ -613,6 +651,38 @@ pub const cute = struct {
 
                 const aliases = resolveOutputOperandAliases(opts.output_operand_aliases, 0);
 
+                const tensor_results = ops.cute(inputs_arr, outputs_arr, .{
+                    .name = name,
+                    .ir = ir,
+                    .grid = opts.grid,
+                    .block = opts.block,
+                    .zeroed_outputs = opts.zeroed_outputs,
+                    .output_operand_aliases = aliases.constSlice(),
+                });
+
+                var results: Results = undefined;
+                inline for (spec.outputs, 0..) |fname, i| @field(results, fname) = tensor_results[i];
+                return results;
+            }
+
+            pub fn call2(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
+                const cur = Compiler.current();
+
+                var inputs_arr: [spec.inputs.len]Tensor = undefined;
+                inline for (spec.inputs, 0..) |fname, i| inputs_arr[i] = @field(inputs, fname);
+
+                var outputs_arr: [spec.outputs.len]Shape = undefined;
+                inline for (spec.outputs, 0..) |fname, i| outputs_arr[i] = @field(outputs, fname);
+
+                var shapes: [spec.inputs.len + spec.outputs.len]Shape = undefined;
+                inline for (0..spec.inputs.len) |i| shapes[i] = inputs_arr[i].shape();
+                inline for (0..spec.outputs.len) |i| shapes[spec.inputs.len + i] = outputs_arr[i];
+
+                const ir = emit2(cur.allocator, opts.cfg, opts.block, &shapes) catch |err|
+                    std.debug.panic("zml.kernel.cute.Kernel({s}).call2: emit failed: {}", .{ name, err });
+                defer cur.allocator.free(ir);
+
+                const aliases = resolveOutputOperandAliases(opts.output_operand_aliases, 0);
                 const tensor_results = ops.cute(inputs_arr, outputs_arr, .{
                     .name = name,
                     .ir = ir,
@@ -1282,6 +1352,35 @@ test "cute kernel emits the module the CuTe compiler takes" {
     try std.testing.expect(std.mem.indexOf(u8, ir, "nvvm.reqntid = array<i32: 128, 1, 1>") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "cute.memref.load") != null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "gpu.module") == null);
+}
+
+test "cute emit2 declares tensors from call shapes" {
+    const Cfg = struct {};
+    const Add = cute.Kernel(Cfg, .{
+        .name = "add_from_shapes",
+        .inputs = &.{ "x", "y" },
+        .outputs = &.{"out"},
+        .run = struct {
+            fn run(b: *cute.Builder, x: cute.CuteTensor, y: cute.CuteTensor, out: cute.CuteTensor) void {
+                std.debug.assert(x.dim(0) == 17 and y.dim(0) == 17 and out.dim(0) == 17);
+                const i = b.blockIdx().x.mul(b.blockDim().x).add(b.threadIdx().x);
+                var guard = b.openIf(i.lt(17));
+                out.set(.{i}, x.get(.{i}).add(y.get(.{i})));
+                guard.yieldThen(.{});
+            }
+        }.run,
+    });
+
+    const shapes = [_]Shape{
+        Shape.init(.{17}, .f16),
+        Shape.init(.{17}, .f16),
+        Shape.init(.{17}, .f16),
+    };
+    const ir = try Add.emit2(std.testing.allocator, .{}, .{ 128, 1, 1 }, &shapes);
+    defer std.testing.allocator.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "sym_name = \"add_from_shapes\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "cute.memref.load") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "cute.memref.store") != null);
 }
 
 test "cuda_tile kernel emits a module XLA can parse" {
