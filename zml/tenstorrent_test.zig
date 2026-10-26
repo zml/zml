@@ -296,7 +296,11 @@ test "Tenstorrent rotary fusion preserves head values and BF16 rotation" {
         }
     }
 }
-fn checkPrefillAttention(comptime batch: usize, comptime heads: usize, comptime kv_heads: usize, comptime dim: usize, comptime queries: usize, comptime keys: usize, comptime scalar_position: bool, comptime transposed: bool) !void {
+fn checkPrefillAttention(comptime batch: usize, comptime heads: usize, comptime kv_heads: usize, comptime dim: usize, comptime queries: usize, comptime keys: usize, comptime options: struct { scalar_position: bool = true, transposed: bool = false, unbatched: bool = false }) !void {
+    const scalar_position = options.scalar_position;
+    const transposed = options.transposed;
+    const unbatched = options.unbatched;
+    comptime std.debug.assert(!unbatched or (batch == 1 and scalar_position));
     if (comptime !zml.Target.tenstorrent.isEnabled()) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -309,15 +313,18 @@ fn checkPrefillAttention(comptime batch: usize, comptime heads: usize, comptime 
     const pos: zml.Tensor = if (scalar_position) .init(.{}, .u32) else .init(.{ .b = batch }, .u32);
     const Attention = struct {
         fn run(query: zml.Tensor, key: zml.Tensor, value: zml.Tensor, position: zml.Tensor) zml.Tensor {
+            const q_local = if (unbatched) query.reshape(.{ .q = queries, .h = heads, .hd = dim }) else query;
+            const k_local = if (unbatched) key.reshape(.{ .k = keys, .h = kv_heads, .hd = dim }) else key;
+            const v_local = if (unbatched) value.reshape(.{ .k = keys, .h = kv_heads, .hd = dim }) else value;
             const result = zml.attention.attention(
-                if (transposed) query.transpose(.{ .h, .b, .hd, .q }) else query,
-                if (transposed) key.transpose(.{ .hd, .k, .b, .h }) else key,
-                if (transposed) value.transpose(.{ .hd, .k, .b, .h }) else value,
+                if (!transposed) q_local else if (unbatched) q_local.transpose(.{ .h, .hd, .q }) else q_local.transpose(.{ .h, .b, .hd, .q }),
+                if (!transposed) k_local else if (unbatched) k_local.transpose(.{ .hd, .k, .h }) else k_local.transpose(.{ .hd, .k, .b, .h }),
+                if (!transposed) v_local else if (unbatched) v_local.transpose(.{ .hd, .k, .h }) else v_local.transpose(.{ .hd, .k, .b, .h }),
                 position,
                 .{ .flash_attention = .{ .tenstorrent = {} } },
                 .{ .flash_attention = .{ .tenstorrent = {} } },
             );
-            return result.transpose(query.shape());
+            return result.transpose(q_local.shape()).reshape(query.shape());
         }
     };
     const exe = try platform.compileFn(allocator, io, Attention.run, .{ q, k, v, pos }, .{});
@@ -390,13 +397,19 @@ fn checkPrefillAttention(comptime batch: usize, comptime heads: usize, comptime 
 }
 
 test "TTIR flash prefill matches scalar causal attention" {
-    try checkPrefillAttention(1, 8, 2, 128, 128, 128, true, false);
-    try checkPrefillAttention(1, 4, 1, 64, 1024, 1024, true, false);
-    try checkPrefillAttention(2, 8, 2, 64, 8, 64, false, false);
-    try checkPrefillAttention(2, 4, 4, 256, 3, 65, true, true);
-    try checkPrefillAttention(1, 4, 1, 512, 33, 97, true, false);
-    try checkPrefillAttention(1, 4, 1, 80, 7, 35, true, true);
-    try checkPrefillAttention(1, 4, 1, 80, 17, 17, true, false);
-    try checkPrefillAttention(1, 4, 1, 80, 1, 35, true, false);
-    try checkPrefillAttention(32, 8, 2, 64, 8, 64, false, false);
+    try checkPrefillAttention(1, 8, 2, 128, 128, 128, .{});
+    try checkPrefillAttention(1, 4, 1, 64, 1024, 1024, .{});
+    try checkPrefillAttention(2, 8, 2, 64, 8, 64, .{ .scalar_position = false });
+    try checkPrefillAttention(2, 4, 4, 256, 3, 65, .{ .transposed = true });
+    try checkPrefillAttention(1, 4, 1, 512, 33, 97, .{});
+    try checkPrefillAttention(1, 4, 1, 80, 7, 35, .{ .transposed = true });
+    try checkPrefillAttention(1, 4, 1, 80, 17, 17, .{});
+    try checkPrefillAttention(1, 4, 1, 80, 1, 35, .{});
+    try checkPrefillAttention(32, 8, 2, 64, 8, 64, .{ .scalar_position = false });
+}
+
+test "TTIR flash prefill preserves unbatched tagged layouts" {
+    try checkPrefillAttention(1, 4, 1, 80, 17, 17, .{ .unbatched = true });
+    try checkPrefillAttention(1, 8, 2, 80, 7, 35, .{ .transposed = true, .unbatched = true });
+    try checkPrefillAttention(1, 4, 1, 80, 1, 35, .{ .transposed = true, .unbatched = true });
 }

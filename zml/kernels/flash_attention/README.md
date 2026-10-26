@@ -265,6 +265,17 @@ are not uniformly supported by the current kernels; an existing prefill path
 requires equal query/key lengths and assumes positions begin at zero. Treat
 these as current conformance gaps, not alternative definitions of causality.
 
+The Tenstorrent backend lowers BF16 initial and offset prefill to TT-MLIR's native
+scaled dot-product attention operation. It preserves explicit `token_index`
+alignment, contiguous GQA/MQA groups, scalar and per-batch positions, and the
+original head-dimension scale when padding partial tiles. Tile-aligned
+single-query inputs use the native decode operation. Other floating-point dtypes
+use the reference path without conversion to BF16. The dedicated
+[`tenstorrent_prefill_attention_test`](../../tenstorrent_test.zig) checks every
+output element against an independent FP64 host calculation, checks that Q/K/V
+remain unchanged, and exercises both batched and unbatched tagged layouts on one
+card. Multi-card prefill is not covered by these tests.
+
 The tests in [flash_attention.zig](flash_attention.zig) compare results
 against `sdpa` with the gathered causal mask. The original shared cases cover
 `D = 64`, MHA and GQA,
