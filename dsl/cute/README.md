@@ -89,11 +89,17 @@ keep region-local values from escaping their scope; the builder's `open` and
 | `cpasync.make_tiled_tma_atom(...)`         | `b.makeTiledTmaLoadAtom(...)`                   |
 | `cpasync.tma_partition(...)`               | `b.tmaPartition(...)`                           |
 | `cute.copy(atom, src, dst)`                | `b.copy(atom, src, dst, pred)`                  |
+| `cute.autovec_copy(src, dst)`               | `b.autovecCopy(src, dst, .{})`                  |
 | `cute.make_tiled_mma(atom)`                | `b.makeTiledMma(atom, result_type)`             |
 | `tiled_mma.make_fragment_A/B/C(...)`       | `b.mmaMakeFragment(...)`                        |
 | `cute.gemm(...)`                           | `b.gemm(...)`                                   |
 | `cute.arch.alloc_tmem(...)`                | `b.allocTmem(...)`                              |
 | `cute.arch.retrieve_tmem_ptr(...)`         | `b.retrieveTmemPtr(...)`                        |
+
+`autovecCopy` currently accepts static, one-dimensional `Tensor` or `View`
+layouts, including a slice such as `a[None, tidx, bidx]`. It chooses a SIMT
+copy width from the common contiguous extent and pointer alignment, up to
+256 bits. Nested layouts and swizzled pointers are not supported yet.
 
 * **Layouts are static.** `makeLayout` takes Zig slices and emits one
   `cute.static`; the tensor keeps its shape and stride in Zig, so `dim`,

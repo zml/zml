@@ -549,6 +549,24 @@ pub const LayoutOpts = struct {
     stride: ?[]const i64 = null,
 };
 
+pub const AutoVecCopyOptions = struct {
+    l1CacheEvictPriority: cute_nvgpu.CacheEvictionPriority = .EVICT_NORMAL,
+};
+
+const FlatCopyLayout = struct { extent: i64, stride: i64 };
+
+fn flatCopyLayout(layout_type: *const mlir.Type) ?FlatCopyLayout {
+    const layout = layout_type.isA(cute_ir.LayoutType) orelse return null;
+    const attr = layout.attr().isA(cute_ir.LayoutAttr) orelse return null;
+    const value = attr.value();
+    const colon = std.mem.indexOfScalar(u8, value, ':') orelse return null;
+    const extent_text = std.mem.trim(u8, value[0..colon], " ()");
+    const stride_text = std.mem.trim(u8, value[colon + 1 ..], " ()");
+    const extent = std.fmt.parseInt(i64, extent_text, 10) catch return null;
+    const stride = std.fmt.parseInt(i64, stride_text, 10) catch return null;
+    return .{ .extent = extent, .stride = stride };
+}
+
 pub const IfOnlyScope = dsl.IfOnlyScope(Builder, Value);
 
 pub fn IfScope(comptime N: usize) type {
@@ -1696,6 +1714,79 @@ pub const Builder = struct {
 
     pub fn copy(self: *Builder, atom: Atom, src: anytype, dst: anytype, pred: ?Value) void {
         self.emitVoid(cute_ir.copy(self.ctx, atom.inner, self.innerSlice(src), self.innerSlice(dst), .{ .pred = if (pred) |p| p.inner else null }, self.loc()));
+    }
+
+    /// Copy a statically sized, one-dimensional tensor with the widest safe
+    /// SIMT instruction. This covers slices such as `a[None, tidx, bidx]`.
+    /// The general CuTe policy also handles nested layouts; those require
+    /// layout algebra that is not yet exposed by this builder.
+    pub fn autovecCopy(self: *Builder, src: anytype, dst: anytype, opts: AutoVecCopyOptions) void {
+        const src_value = self.asValue(src);
+        const dst_value = self.asValue(dst);
+        const src_memref = src_value.type_().isA(cute_ir.MemRefType) orelse @panic("autovecCopy: source must be a tensor");
+        const dst_memref = dst_value.type_().isA(cute_ir.MemRefType) orelse @panic("autovecCopy: destination must be a tensor");
+        const src_ptr = src_memref.ptr_().isA(cute_ir.PtrType) orelse unreachable;
+        const dst_ptr = dst_memref.ptr_().isA(cute_ir.PtrType) orelse unreachable;
+        const src_element = src_ptr.valueType() orelse @panic("autovecCopy: untyped source pointer");
+        const dst_element = dst_ptr.valueType() orelse @panic("autovecCopy: untyped destination pointer");
+        const src_bits = dtypeBitwidth(dtypes.mlirToDType(self.ctx, src_element));
+        const dst_bits = dtypeBitwidth(dtypes.mlirToDType(self.ctx, dst_element));
+        if (src_bits != dst_bits) @panic("autovecCopy: element widths differ");
+        if (src_ptr.swizzle() != null or dst_ptr.swizzle() != null or src_ptr.bitlayout() != null or dst_ptr.bitlayout() != null)
+            @panic("autovecCopy: swizzled and bit layouts are not supported");
+
+        const src_layout = flatCopyLayout(src_memref.layout()) orelse @panic("autovecCopy: source layout must be static and one-dimensional");
+        const dst_layout = flatCopyLayout(dst_memref.layout()) orelse @panic("autovecCopy: destination layout must be static and one-dimensional");
+        if (src_layout.extent != dst_layout.extent or src_layout.extent <= 0) @panic("autovecCopy: tensor sizes differ or are empty");
+
+        const contiguous: u64 = if (src_layout.stride == 1 and dst_layout.stride == 1) @intCast(src_layout.extent) else 1;
+        const aligned_bits = std.math.gcd(src_ptr.alignment() * 8, dst_ptr.alignment() * 8);
+        const available_bits = std.math.gcd(contiguous * @as(u64, @intCast(src_bits)), aligned_bits);
+        const copy_bits: u64 = std.math.gcd(available_bits, 256);
+        const elements: i64 = @intCast(@max(1, copy_bits / src_bits));
+
+        const atom_type: *const mlir.Type = switch (src_ptr.addressSpace()) {
+            .gmem => switch (dst_ptr.addressSpace()) {
+                .rmem => (cute_nvgpu.CopyAtomG2RType.get(self.ctx, .{
+                    .valType = src_element,
+                    .copyBits = @intCast(copy_bits),
+                    .l1CacheEvictPriority = opts.l1CacheEvictPriority,
+                }) catch @panic("autovecCopy: invalid gmem-to-rmem atom")).type_(),
+                else => self.universalCopyAtom(src_element, copy_bits, src_ptr.addressSpace(), dst_ptr.addressSpace(), opts),
+            },
+            .rmem => switch (dst_ptr.addressSpace()) {
+                .gmem => (cute_nvgpu.CopyAtomR2GType.get(self.ctx, .{
+                    .valType = src_element,
+                    .copyBits = @intCast(copy_bits),
+                    .l1CacheEvictPriority = opts.l1CacheEvictPriority,
+                }) catch @panic("autovecCopy: invalid rmem-to-gmem atom")).type_(),
+                else => self.universalCopyAtom(src_element, copy_bits, src_ptr.addressSpace(), dst_ptr.addressSpace(), opts),
+            },
+            else => self.universalCopyAtom(src_element, copy_bits, src_ptr.addressSpace(), dst_ptr.addressSpace(), opts),
+        };
+        const atom = self.makeAtom(atom_type, .{});
+        const tiler = self.makeLayout(&.{elements}, .{});
+        const src_type = self.memrefTypeFromPointer(src_memref.ptr_(), self.layoutType(self.layoutSpec(
+            .{ elements, @divExact(src_layout.extent, elements) },
+            .{ if (elements == 1) 0 else src_layout.stride, if (src_layout.extent == elements) 0 else src_layout.stride * elements },
+        )));
+        const dst_type = self.memrefTypeFromPointer(dst_memref.ptr_(), self.layoutType(self.layoutSpec(
+            .{ elements, @divExact(dst_layout.extent, elements) },
+            .{ if (elements == 1) 0 else dst_layout.stride, if (dst_layout.extent == elements) 0 else dst_layout.stride * elements },
+        )));
+        const tiled_src: View = .{ .inner = self.emit(cute_ir.logical_divide(self.ctx, src_value.inner, tiler.inner, src_type, self.loc())).inner, .kernel = self };
+        const tiled_dst: View = .{ .inner = self.emit(cute_ir.logical_divide(self.ctx, dst_value.inner, tiler.inner, dst_type, self.loc())).inner, .kernel = self };
+        self.copy(atom, .{tiled_src}, .{tiled_dst}, null);
+    }
+
+    fn universalCopyAtom(self: *Builder, element: *const mlir.Type, bits: u64, src_space: MemorySpace, dst_space: MemorySpace, opts: AutoVecCopyOptions) *const mlir.Type {
+        if (opts.l1CacheEvictPriority != .EVICT_NORMAL) @panic("autovecCopy: cache eviction priority requires a specialized copy atom");
+        return (cute_nvgpu.CopyAtomSIMTSyncCopyType.get(self.ctx, .{
+            .valType = element,
+            .copyBits = @intCast(bits),
+            .srcSpace = src_space,
+            .dstSpace = dst_space,
+        }) catch @panic("autovecCopy: invalid universal copy atom")).type_();
     }
 
     pub fn gemm(self: *Builder, tiled: Atom, d: anytype, a: anytype, rhs: anytype, c: anytype) void {
@@ -2906,6 +2997,67 @@ test "naive elementwise add matches the Python notebook kernel" {
     const parsed = try mlir.Module.parse(ctx, ir);
     defer parsed.deinit();
     try std.testing.expect(parsed.operation().verify());
+}
+
+test "autovecCopy emits a vector gmem-to-rmem copy" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "autovec_copy_kernel");
+    defer b.deinit();
+    const args = try b.declareArgs(.{
+        .src = .{ .tensor = .{ .dtype = .f16, .shape = &.{24} } },
+    });
+    const dst = b.allocRmem(.f16, 16, b.makeLayout(&.{24}, .{}));
+    b.autovecCopy(args.src, dst, .{});
+
+    const ir = try b.finish(.{ 1, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "cute.logical_divide");
+    try expectContains(ir, "cute.copy");
+    try expectContains(ir, "atom.g2r<f16 copy_bits = 128>");
+    try expectContains(ir, "(8,3):(1,8)");
+}
+
+test "autovecCopy accepts a one-dimensional tensor slice" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "autovec_slice_kernel");
+    defer b.deinit();
+    const args = try b.declareArgs(.{
+        .src = .{ .tensor = .{ .dtype = .f16, .shape = &.{ 8, 2, 2 }, .stride = &.{ 1, 8, 16 } } },
+    });
+    const src = b.slice(args.src, .{ AlgebraToken.all, b.threadIdx().x, b.blockIdx().x }, b.memrefType(
+        .f16,
+        .gmem,
+        16,
+        b.layoutType(b.layoutSpec(.{8}, .{1})),
+    ));
+    const dst = b.allocRmem(.f16, 16, b.makeLayout(&.{8}, .{}));
+    b.autovecCopy(src, dst, .{});
+
+    const ir = try b.finish(.{ 1, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "cute.slice");
+    try expectContains(ir, "atom.g2r<f16 copy_bits = 128>");
+}
+
+test "autovecCopy uses scalar copy for a strided source" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "autovec_strided_kernel");
+    defer b.deinit();
+    const args = try b.declareArgs(.{
+        .src = .{ .tensor = .{ .dtype = .f16, .shape = &.{8}, .stride = &.{2} } },
+    });
+    const dst = b.allocRmem(.f16, 16, b.makeLayout(&.{8}, .{}));
+    b.autovecCopy(args.src, dst, .{});
+
+    const ir = try b.finish(.{ 1, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "atom.g2r<f16 copy_bits = 16>");
 }
 
 test "guard, shared memory, sync, layouts, for loop" {
