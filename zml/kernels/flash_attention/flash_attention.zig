@@ -5,6 +5,7 @@ const stdx = @import("stdx");
 pub const cute = @import("cute/cute.zig");
 pub const metal = @import("metal/metal.zig");
 pub const nki = @import("nki/nki.zig");
+pub const tenstorrent = @import("tenstorrent/tenstorrent.zig");
 const zml = @import("../../zml.zig");
 
 test {
@@ -16,7 +17,8 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
         .neuron => true,
         .metal => true,
         .cuda => if (cute.isAvailable(platform)) true else false,
-        .cpu, .rocm, .tpu, .oneapi, .furiosa, .tenstorrent => false,
+        .tenstorrent => tenstorrent.isAvailable(platform),
+        .cpu, .rocm, .tpu, .oneapi, .furiosa => false,
     };
 }
 
@@ -24,13 +26,15 @@ pub const Backend = enum {
     cute,
     nki,
     metal,
+    tenstorrent,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
             .neuron => .nki,
             .metal => .metal,
             .cuda => .cute,
-            .cpu, .rocm, .tpu, .oneapi, .furiosa, .tenstorrent => stdx.debug.panic("Flash attention is not available on the {} platform", .{platform.target}),
+            .tenstorrent => .tenstorrent,
+            .cpu, .rocm, .tpu, .oneapi, .furiosa => stdx.debug.panic("Flash attention is not available on the {} platform", .{platform.target}),
         };
     }
 
@@ -39,6 +43,7 @@ pub const Backend = enum {
             .cute => cute.isAvailable(platform),
             .nki => platform.target == .neuron,
             .metal => platform.target == .metal,
+            .tenstorrent => tenstorrent.isAvailable(platform),
         };
     }
 };
@@ -47,17 +52,20 @@ pub const Parameters = union(Backend) {
     cute: void,
     nki: nki.Parameters,
     metal: void,
+    tenstorrent: void,
 
     pub const InitOptions = union(Backend) {
         cute: void,
         nki: nki.Parameters,
         metal: void,
+        tenstorrent: void,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .cute => .{ .cute = {} },
                 .nki => .{ .nki = .init() },
                 .metal => .{ .metal = {} },
+                .tenstorrent => .{ .tenstorrent = {} },
             };
         }
     };
@@ -67,6 +75,7 @@ pub const Parameters = union(Backend) {
             .cute => .{ .cute = {} },
             .nki => |v| .{ .nki = v },
             .metal => .{ .metal = {} },
+            .tenstorrent => .{ .tenstorrent = {} },
         };
     }
 };
@@ -75,17 +84,20 @@ pub const Metadata = union(Backend) {
     cute: void,
     nki: void,
     metal: metal.Metadata,
+    tenstorrent: void,
 
     pub const InitOptions = union(Backend) {
         cute: void,
         nki: void,
         metal: void,
+        tenstorrent: void,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .cute => .{ .cute = {} },
                 .nki => .{ .nki = {} },
                 .metal => .{ .metal = {} },
+                .tenstorrent => .{ .tenstorrent = {} },
             };
         }
     };
@@ -95,6 +107,7 @@ pub const Metadata = union(Backend) {
             .cute => .{ .cute = {} },
             .nki => .{ .nki = {} },
             .metal => .{ .metal = .init() },
+            .tenstorrent => .{ .tenstorrent = {} },
         };
     }
 
@@ -102,6 +115,7 @@ pub const Metadata = union(Backend) {
         return switch (self) {
             .cute => .{ .cute = {} },
             .nki => .{ .nki = {} },
+            .tenstorrent => .{ .tenstorrent = {} },
             inline else => |v, tag| @unionInit(zml.Bufferized(Metadata), @tagName(tag), try v.initBuffer(io, platform)),
         };
     }
@@ -110,6 +124,7 @@ pub const Metadata = union(Backend) {
         switch (self.*) {
             .cute => {},
             .nki => {},
+            .tenstorrent => {},
             .metal => |*v| metal.Metadata.deinitBuffer(v),
         }
     }
@@ -129,6 +144,7 @@ pub const Metadata = union(Backend) {
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
     return switch (parameters) {
         .cute => cute.attention(q, k, v, token_index),
+        .tenstorrent => tenstorrent.attention(q, k, v, token_index),
         .nki => nki.attention(q, k, v, token_index, parameters.nki),
         .metal => metal.attention(q, k, v, token_index, metadata.metal),
     };

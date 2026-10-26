@@ -147,6 +147,9 @@ pub const Builder = struct {
         std.debug.assert(on_true.type_().eql(on_false.type_()));
         return self.emit(ttir.where(self.ctx, predicate.inner, on_true.inner, on_false.inner, on_true.type_(), self.loc()));
     }
+    pub fn attentionDecode(self: *Builder, q: Value, k: Value, v: Value, position: Value) Value {
+        return self.emit(ttir.attentionDecode(self.ctx, q.inner, k.inner, v.inner, position.inner, self.loc()));
+    }
     /// `value` is the storage representation of one element (u16 for bf16).
     pub fn splat(self: *Builder, tensor_type: *const mlir.Type, value: anytype) Value {
         const attr = mlir.Attribute.denseElements(tensor_type.isA(mlir.ShapedType).?, &[_]@TypeOf(value){value});

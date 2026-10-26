@@ -112,6 +112,7 @@ zig_library(
         "//zml/kernels/flash_attention/cute",
         "//zml/kernels/flash_attention/metal",
         "//zml/kernels/flash_attention/nki",
+        "//zml/kernels/flash_attention/tenstorrent",
         "//zml/kernels/moe/cute",
         "//zml/kernels/moe/cutlass_flashinfer",
         "//zml/kernels/moe/fly",

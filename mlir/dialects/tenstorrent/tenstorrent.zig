@@ -88,6 +88,19 @@ pub fn where(ctx: *mlir.Context, predicate: *const mlir.Value, on_true: *const m
     });
 }
 
+/// Causal decode: q=[1,B,Hq,D], k/v=[B,Hkv,S,D], position=[B].
+pub fn attentionDecode(ctx: *mlir.Context, q: *const mlir.Value, k: *const mlir.Value, v: *const mlir.Value, position: *const mlir.Value, loc: *const mlir.Location) *mlir.Operation {
+    return .make(ctx, "ttir.scaled_dot_product_attention_decode", .{
+        .operands = .{ .flat = &.{ q, k, v, position } },
+        .results = .{ .flat = &.{q.type_()} },
+        .attributes = &.{
+            .named(ctx, "is_causal", .boolean(ctx, true)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &.{ 1, 1, 1, 0, 1, 0 })),
+        },
+        .location = loc,
+    });
+}
+
 test "registered TTIR verifies tensor operations" {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();

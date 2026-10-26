@@ -18,7 +18,7 @@ const Args = struct {
     prompt: ?[]const u8 = null,
     seqlen: u32 = 2048,
     topk: u32 = 4,
-    backend: ?enum { stablehlo, cute, nki, metal } = null,
+    backend: ?enum { stablehlo, cute, nki, metal, tenstorrent } = null,
     profile: bool = false,
     tt_devices: enum { single, all } = .single,
 
@@ -95,6 +95,7 @@ pub fn main(init: std.process.Init) !void {
         .cute => .{ .flash_attention = .cute },
         .nki => .{ .flash_attention = .nki },
         .metal => .{ .flash_attention = .metal },
+        .tenstorrent => .{ .flash_attention = .tenstorrent },
     } else zml.attention.Backend.auto(platform);
     log.info("Selected backend: {}", .{backend});
 
