@@ -316,6 +316,8 @@ use_repo(
     "org_swig_swig",
     "stb",
     "translate-c",
+    "tt_mlir",
+    "tt_flatbuffers",
     "uucode",
     "xla",
     "zigimg",

@@ -1,0 +1,324 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_filegroup", "td_library")
+
+package(default_visibility = ["//visibility:public"])
+
+td_library(
+    name = "td_files",
+    srcs = glob(["include/**/*.td"]),
+    includes = ["include"],
+    deps = ["@llvm-project//mlir:BuiltinDialectTdFiles", "@llvm-project//mlir:BuiltinDialectBytecodeTdFiles", "@llvm-project//mlir:FunctionInterfacesTdFiles", "@llvm-project//mlir:IndexingMapOpInterfaceTdFiles", "@llvm-project//mlir:RelayoutOpInterfaceTdFiles", "@llvm-project//mlir:AlignmentAttrInterfaceTdFiles", "@llvm-project//mlir:PythonBindingsTdFiles", "@llvm-project//mlir:AttrTdFiles", "@llvm-project//mlir:OpBaseTdFiles", "@llvm-project//mlir:BytecodeTdFiles", "@llvm-project//mlir:CallInterfacesTdFiles", "@llvm-project//mlir:CastInterfacesTdFiles", "@llvm-project//mlir:ControlFlowInterfacesTdFiles", "@llvm-project//mlir:BytecodeOpInterfaceTdFiles", "@llvm-project//mlir:DerivedAttributeOpInterfaceTdFiles", "@llvm-project//mlir:DestinationStyleOpInterfaceTdFiles", "@llvm-project//mlir:DialectFoldInterfaceTdFiles", "@llvm-project//mlir:InferIntDivisibilityOpInterfaceTdFiles", "@llvm-project//mlir:InferIntRangeInterfaceTdFiles", "@llvm-project//mlir:InferStridedMetadataInterfaceTdFiles", "@llvm-project//mlir:InferTypeOpInterfaceTdFiles", "@llvm-project//mlir:LoopLikeInterfaceTdFiles", "@llvm-project//mlir:MemorySlotInterfacesTdFiles", "@llvm-project//mlir:ShapedOpInterfacesTdFiles", "@llvm-project//mlir:ParallelCombiningOpInterfaceTdFiles", "@llvm-project//mlir:QuantStorageTypeInterfaceTdFiles", "@llvm-project//mlir:RuntimeVerifiableOpInterfaceTdFiles", "@llvm-project//mlir:SideEffectInterfacesTdFiles", "@llvm-project//mlir:TilingInterfaceTdFiles", "@llvm-project//mlir:VectorInterfacesTdFiles", "@llvm-project//mlir:ViewLikeInterfaceTdFiles", "@llvm-project//mlir:ReducerTdFiles", "@llvm-project//mlir:PassBaseTdFiles", "@llvm-project//mlir:RewritePassBaseTdFiles", "@llvm-project//mlir:AffineOpsTdFiles", "@llvm-project//mlir:AffineTransformOpsTdFiles", "@llvm-project//mlir:AMDGPUTdFiles", "@llvm-project//mlir:EmitCTdFiles", "@llvm-project//mlir:AsyncOpsTdFiles", "@llvm-project//mlir:ArmNeonTdFiles", "@llvm-project//mlir:ArmSMETdFiles", "@llvm-project//mlir:ArmSVETdFiles", "@llvm-project//mlir:X86TdFiles", "@llvm-project//mlir:X86TransformOpsTdFiles", "@llvm-project//mlir:IRDLTdFiles", "@llvm-project//mlir:SCFTdFiles", "@llvm-project//mlir:SCFTransformOpsTdFiles", "@llvm-project//mlir:SparseTensorTdFiles", "@llvm-project//mlir:SparseTensorTransformOpsTdFiles", "@llvm-project//mlir:ShardTdFiles", "@llvm-project//mlir:NVGPUTdFiles", "@llvm-project//mlir:NVGPUTypesTdFiles", "@llvm-project//mlir:NVGPUOpsTdFiles", "@llvm-project//mlir:NVGPUTransformOpsTdFiles", "@llvm-project//mlir:WasmSSATdFiles", "@llvm-project//mlir:XeGPUTdFiles", "@llvm-project//mlir:XeGPUAttrTdFiles", "@llvm-project//mlir:XeGPUTransformOpsTdFiles", "@llvm-project//mlir:FuncTdFiles", "@llvm-project//mlir:DialectUtilsTdFiles", "@llvm-project//mlir:ShapeOpsTdFiles", "@llvm-project//mlir:ControlFlowOpsTdFiles", "@llvm-project//mlir:FuncTransformOpsTdFiles", "@llvm-project//mlir:VectorTransformsTdFiles", "@llvm-project//mlir:GPUOpsTdFiles", "@llvm-project//mlir:GPUTransformOpsTdFiles", "@llvm-project//mlir:LLVMOpsTdFiles", "@llvm-project//mlir:LLVMDialectBytecodeTdFiles", "@llvm-project//mlir:BasicPtxBuilderIntTdFiles", "@llvm-project//mlir:NVVMRequiresSMTraitsTdFiles", "@llvm-project//mlir:NVVMOpsTdFiles", "@llvm-project//mlir:ROCDLOpsTdFiles", "@llvm-project//mlir:PDLDialectTdFiles", "@llvm-project//mlir:PDLInterpOpsTdFiles", "@llvm-project//mlir:PtrTdFiles", "@llvm-project//mlir:SMTTdFiles", "@llvm-project//mlir:SPIRVImageInterfacesTdFiles", "@llvm-project//mlir:SPIRVOpsTdFiles", "@llvm-project//mlir:TensorOpsTdFiles", "@llvm-project//mlir:TensorTransformOpsTdFiles", "@llvm-project//mlir:DataLayoutInterfacesTdFiles", "@llvm-project//mlir:AtomicInterfacesTdFiles", "@llvm-project//mlir:OpenAccOpsTdFiles", "@llvm-project//mlir:OpenMPOpsTdFiles", "@llvm-project//mlir:QuantizationOpsTdFiles", "@llvm-project//mlir:IndexOpsTdFiles", "@llvm-project//mlir:LinalgOpsTdFiles", "@llvm-project//mlir:LinalgTransformOpsTdFiles", "@llvm-project//mlir:LinalgStructuredOpsTdFiles", "@llvm-project//mlir:BufferizableOpInterfaceTdFiles", "@llvm-project//mlir:BufferDeallocationOpInterfaceTdFiles", "@llvm-project//mlir:BufferViewFlowOpInterfaceTdFiles", "@llvm-project//mlir:SubsetOpInterfaceTdFiles", "@llvm-project//mlir:LinalgDocTdFiles", "@llvm-project//mlir:ValueBoundsOpInterfaceTdFiles", "@llvm-project//mlir:MaskingOpInterfaceTdFiles", "@llvm-project//mlir:MaskableOpInterfaceTdFiles", "@llvm-project//mlir:VectorOpsTdFiles", "@llvm-project//mlir:VectorTransformOpsTdFiles", "@llvm-project//mlir:TosaDialectTdFiles", "@llvm-project//mlir:TransformInterfacesTdFiles", "@llvm-project//mlir:TransformDialectTdFiles", "@llvm-project//mlir:TransformPDLExtensionTdFiles", "@llvm-project//mlir:TransformTuneExtensionTdFiles", "@llvm-project//mlir:TransformSMTExtensionOpsTdFiles", "@llvm-project//mlir:TransformDebugExtensionTdFiles", "@llvm-project//mlir:TransformLoopExtensionTdFiles", "@llvm-project//mlir:TransformDialectTransformsTdFiles", "@llvm-project//mlir:ComplexOpsTdFiles", "@llvm-project//mlir:ArithOpsTdFiles", "@llvm-project//mlir:ArithOpsInterfacesTdFiles", "@llvm-project//mlir:MathOpsTdFiles", "@llvm-project//mlir:MemOpInterfacesTdFiles", "@llvm-project//mlir:MemoryAccessOpInterfacesTdFiles", "@llvm-project//mlir:MemRefOpsTdFiles", "@llvm-project//mlir:MemRefTransformOpsTdFiles", "@llvm-project//mlir:MLProgramOpsTdFiles", "@llvm-project//mlir:MPITdFiles", "@llvm-project//mlir:AllocationOpInterfaceTdFiles", "@llvm-project//mlir:BufferizationOpsTdFiles", "@llvm-project//mlir:BufferizationEnumsTdFiles", "@llvm-project//mlir:BufferizationTypeInterfacesTdFiles", "@llvm-project//mlir:BufferizationTransformOpsTdFiles", "@llvm-project//mlir:DLTIDialectTdFiles", "@llvm-project//mlir:DLTITransformTdFiles", "@llvm-project//mlir:UBDialectTdFiles", "@llvm-project//mlir:VCIXTdFiles", "@llvm-project//mlir:XeVMTdFiles", "@stablehlo//:stablehlo_ops_td_files", "@shardy//shardy/dialect/sdy/ir:sdy_td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_17",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTCore/IR/TTCoreOps.td",
+    includes = ["include/ttmlir/Dialect/TTCore/IR"],
+    tbl_outs = [(["-gen-op-decls"], "include/ttmlir/Dialect/TTCore/IR/TTCoreOps.h.inc"), (["-gen-op-defs"], "include/ttmlir/Dialect/TTCore/IR/TTCoreOps.cpp.inc"), (["-gen-dialect-decls", "-dialect=ttcore"], "include/ttmlir/Dialect/TTCore/IR/TTCoreOpsDialect.h.inc"), (["-gen-dialect-defs", "-dialect=ttcore"], "include/ttmlir/Dialect/TTCore/IR/TTCoreOpsDialect.cpp.inc"), (["-gen-attrdef-decls"], "include/ttmlir/Dialect/TTCore/IR/TTCoreOpsAttrDefs.h.inc"), (["-gen-attrdef-defs"], "include/ttmlir/Dialect/TTCore/IR/TTCoreOpsAttrDefs.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_18",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTCore/IR/TTCoreAttrInterfaces.td",
+    includes = ["include/ttmlir/Dialect/TTCore/IR"],
+    tbl_outs = [(["-gen-attr-interface-decls"], "include/ttmlir/Dialect/TTCore/IR/TTCoreAttrInterfaces.h.inc"), (["-gen-attr-interface-defs"], "include/ttmlir/Dialect/TTCore/IR/TTCoreAttrInterfaces.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_19",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTCore/IR/TTCoreOpsEnums.td",
+    includes = ["include/ttmlir/Dialect/TTCore/IR"],
+    tbl_outs = [(["-gen-enum-decls"], "include/ttmlir/Dialect/TTCore/IR/TTCoreOpsEnums.h.inc"), (["-gen-enum-defs"], "include/ttmlir/Dialect/TTCore/IR/TTCoreOpsEnums.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_20",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTCore/Transforms/Passes.td",
+    includes = ["include/ttmlir/Dialect/TTCore/Transforms"],
+    tbl_outs = [(["--gen-pass-decls"], "include/ttmlir/Dialect/TTCore/Transforms/Passes.h.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_21",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTIR/IR/TTIROps.td",
+    includes = ["include/ttmlir/Dialect/TTIR/IR"],
+    tbl_outs = [(["-gen-op-decls"], "include/ttmlir/Dialect/TTIR/IR/TTIROps.h.inc"), (["-gen-op-defs"], "include/ttmlir/Dialect/TTIR/IR/TTIROps.cpp.inc"), (["-gen-dialect-decls", "-dialect=ttir"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsDialect.h.inc"), (["-gen-dialect-defs", "-dialect=ttir"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsDialect.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_22",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTIR/IR/TTIROpsAttrs.td",
+    includes = ["include/ttmlir/Dialect/TTIR/IR"],
+    tbl_outs = [(["-gen-attrdef-decls"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsAttrs.h.inc"), (["-gen-attrdef-defs"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsAttrs.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_23",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTIR/IR/TTIROpsTypes.td",
+    includes = ["include/ttmlir/Dialect/TTIR/IR"],
+    tbl_outs = [(["-gen-typedef-decls"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsTypeDefs.h.inc"), (["-gen-typedef-defs"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsTypeDefs.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_24",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTIR/IR/TTIROpsEnums.td",
+    includes = ["include/ttmlir/Dialect/TTIR/IR"],
+    tbl_outs = [(["-gen-enum-decls"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsEnums.h.inc"), (["-gen-enum-defs"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsEnums.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_25",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTIR/IR/TTIROpsInterfaces.td",
+    includes = ["include/ttmlir/Dialect/TTIR/IR"],
+    tbl_outs = [(["-gen-op-interface-decls"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsInterfaces.h.inc"), (["-gen-op-interface-defs"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsInterfaces.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_26",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTIR/Transforms/Passes.td",
+    includes = ["include/ttmlir/Dialect/TTIR/Transforms"],
+    tbl_outs = [(["--gen-pass-decls"], "include/ttmlir/Dialect/TTIR/Transforms/Passes.h.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_36",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/IR/TTNNOps.td",
+    includes = ["include/ttmlir/Dialect/TTNN/IR"],
+    tbl_outs = [(["-gen-op-decls"], "include/ttmlir/Dialect/TTNN/IR/TTNNOps.h.inc"), (["-gen-op-defs"], "include/ttmlir/Dialect/TTNN/IR/TTNNOps.cpp.inc"), (["-gen-dialect-decls", "-dialect=ttnn"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsDialect.h.inc"), (["-gen-dialect-defs", "-dialect=ttnn"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsDialect.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_37",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/IR/TTNNOpsEnums.td",
+    includes = ["include/ttmlir/Dialect/TTNN/IR"],
+    tbl_outs = [(["-gen-enum-decls"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsEnums.h.inc"), (["-gen-enum-defs"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsEnums.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_38",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.td",
+    includes = ["include/ttmlir/Dialect/TTNN/IR"],
+    tbl_outs = [(["-gen-attrdef-decls"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsAttrDefs.h.inc"), (["-gen-attrdef-defs"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsAttrDefs.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_39",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/IR/TTNNOpsTypes.td",
+    includes = ["include/ttmlir/Dialect/TTNN/IR"],
+    tbl_outs = [(["-gen-typedef-decls"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsTypeDefs.h.inc"), (["-gen-typedef-defs"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsTypeDefs.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_40",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/IR/TTNNOpsInterfaces.td",
+    includes = ["include/ttmlir/Dialect/TTNN/IR"],
+    tbl_outs = [(["-gen-op-interface-decls"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsInterfaces.h.inc"), (["-gen-op-interface-defs"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsInterfaces.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_41",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/Interfaces/TTNNKernelInterface.td",
+    includes = ["include/ttmlir/Dialect/TTNN/Interfaces"],
+    tbl_outs = [(["-gen-attr-interface-decls"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNKernelInterface.h.inc"), (["-gen-attr-interface-defs"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNKernelInterface.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "gen_42",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/Transforms/Passes.td",
+    includes = ["include/ttmlir/Dialect/TTNN/Transforms"],
+    tbl_outs = [(["--gen-pass-decls"], "include/ttmlir/Dialect/TTNN/Transforms/Passes.h.inc")],
+    deps = [":td_files"],
+)
+
+genrule(
+    name = "include_ttmlir_Target_Common_system_desc",
+    srcs = glob(["include/**/*.fbs", "runtime/include/**/*.fbs"]),
+    outs = ["include/ttmlir/Target/Common/system_desc_generated.h", "include/ttmlir/Target/Common/system_desc_bfbs_generated.h"],
+    tools = ["@tt_flatbuffers//:flatc"],
+    cmd = "$(location @tt_flatbuffers//:flatc) -I $$(dirname $(location include/ttmlir/Target/Common/types.fbs))/../../.. -I $$(dirname $(location runtime/include/tt/runtime/flatbuffer/types.fbs))/../../.. --bfbs-gen-embed --cpp --cpp-std c++17 --scoped-enums --keep-prefix --gen-name-strings --gen-object-api -o $(@D)/include/ttmlir/Target/Common $(location include/ttmlir/Target/Common/system_desc.fbs)",
+)
+
+genrule(
+    name = "include_ttmlir_Target_Common_system_desc_hash",
+    srcs = ["include/ttmlir/Target/Common/system_desc_bfbs_generated.h"],
+    outs = ["include/ttmlir/Target/Common/system_desc_bfbs_hash_generated.h"],
+    tools = ["tools/scripts/sha256-include-gen.py"],
+    cmd = "python3 $(location tools/scripts/sha256-include-gen.py) tt::target::common system_desc_bfbs_schema_hash $(location include/ttmlir/Target/Common/system_desc_bfbs_generated.h) $@",
+)
+
+genrule(
+    name = "include_ttmlir_Target_Common_debug_info",
+    srcs = glob(["include/**/*.fbs", "runtime/include/**/*.fbs"]),
+    outs = ["include/ttmlir/Target/Common/debug_info_generated.h", "include/ttmlir/Target/Common/debug_info_bfbs_generated.h"],
+    tools = ["@tt_flatbuffers//:flatc"],
+    cmd = "$(location @tt_flatbuffers//:flatc) -I $$(dirname $(location include/ttmlir/Target/Common/types.fbs))/../../.. -I $$(dirname $(location runtime/include/tt/runtime/flatbuffer/types.fbs))/../../.. --bfbs-gen-embed --cpp --cpp-std c++17 --scoped-enums --keep-prefix --gen-name-strings --gen-object-api -o $(@D)/include/ttmlir/Target/Common $(location include/ttmlir/Target/Common/debug_info.fbs)",
+)
+
+genrule(
+    name = "include_ttmlir_Target_Common_debug_info_hash",
+    srcs = ["include/ttmlir/Target/Common/debug_info_bfbs_generated.h"],
+    outs = ["include/ttmlir/Target/Common/debug_info_bfbs_hash_generated.h"],
+    tools = ["tools/scripts/sha256-include-gen.py"],
+    cmd = "python3 $(location tools/scripts/sha256-include-gen.py) tt::target::common debug_info_bfbs_schema_hash $(location include/ttmlir/Target/Common/debug_info_bfbs_generated.h) $@",
+)
+
+genrule(
+    name = "include_ttmlir_Target_Common_version",
+    srcs = glob(["include/**/*.fbs", "runtime/include/**/*.fbs"]),
+    outs = ["include/ttmlir/Target/Common/version_generated.h", "include/ttmlir/Target/Common/version_bfbs_generated.h"],
+    tools = ["@tt_flatbuffers//:flatc"],
+    cmd = "$(location @tt_flatbuffers//:flatc) -I $$(dirname $(location include/ttmlir/Target/Common/types.fbs))/../../.. -I $$(dirname $(location runtime/include/tt/runtime/flatbuffer/types.fbs))/../../.. --bfbs-gen-embed --cpp --cpp-std c++17 --scoped-enums --keep-prefix --gen-name-strings --gen-object-api -o $(@D)/include/ttmlir/Target/Common $(location include/ttmlir/Target/Common/version.fbs)",
+)
+
+genrule(
+    name = "include_ttmlir_Target_Common_version_hash",
+    srcs = ["include/ttmlir/Target/Common/version_bfbs_generated.h"],
+    outs = ["include/ttmlir/Target/Common/version_bfbs_hash_generated.h"],
+    tools = ["tools/scripts/sha256-include-gen.py"],
+    cmd = "python3 $(location tools/scripts/sha256-include-gen.py) tt::target::common version_bfbs_schema_hash $(location include/ttmlir/Target/Common/version_bfbs_generated.h) $@",
+)
+
+genrule(
+    name = "include_ttmlir_Target_Common_types",
+    srcs = glob(["include/**/*.fbs", "runtime/include/**/*.fbs"]),
+    outs = ["include/ttmlir/Target/Common/types_generated.h", "include/ttmlir/Target/Common/types_bfbs_generated.h"],
+    tools = ["@tt_flatbuffers//:flatc"],
+    cmd = "$(location @tt_flatbuffers//:flatc) -I $$(dirname $(location include/ttmlir/Target/Common/types.fbs))/../../.. -I $$(dirname $(location runtime/include/tt/runtime/flatbuffer/types.fbs))/../../.. --bfbs-gen-embed --cpp --cpp-std c++17 --scoped-enums --keep-prefix --gen-name-strings --gen-object-api -o $(@D)/include/ttmlir/Target/Common $(location include/ttmlir/Target/Common/types.fbs)",
+)
+
+genrule(
+    name = "include_ttmlir_Target_Common_types_hash",
+    srcs = ["include/ttmlir/Target/Common/types_bfbs_generated.h"],
+    outs = ["include/ttmlir/Target/Common/types_bfbs_hash_generated.h"],
+    tools = ["tools/scripts/sha256-include-gen.py"],
+    cmd = "python3 $(location tools/scripts/sha256-include-gen.py) tt::target::common types_bfbs_schema_hash $(location include/ttmlir/Target/Common/types_bfbs_generated.h) $@",
+)
+
+gentbl_filegroup(
+    name = "TTNNDistributedOpInterface",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/Interfaces/TTNNDistributedOpInterface.td",
+    tbl_outs = [(["-gen-op-interface-decls"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNDistributedOpInterface.h.inc"), (["-gen-op-interface-defs"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNDistributedOpInterface.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "TTNNDeviceOperandInterface",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/Interfaces/TTNNDeviceOperandInterface.td",
+    tbl_outs = [(["-gen-op-interface-decls"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNDeviceOperandInterface.h.inc"), (["-gen-op-interface-defs"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNDeviceOperandInterface.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "TTNNOpModelInterface",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/Interfaces/TTNNOpModelInterface.td",
+    tbl_outs = [(["-gen-op-interface-decls"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNOpModelInterface.h.inc"), (["-gen-op-interface-defs"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNOpModelInterface.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "TTNNWorkaroundInterface",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/Interfaces/TTNNWorkaroundInterface.td",
+    tbl_outs = [(["-gen-op-interface-decls"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNWorkaroundInterface.h.inc"), (["-gen-op-interface-defs"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNWorkaroundInterface.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "TTNNTensorSpecInterface",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/Interfaces/TTNNTensorSpecInterface.td",
+    tbl_outs = [(["-gen-op-interface-decls"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNTensorSpecInterface.h.inc"), (["-gen-op-interface-defs"], "include/ttmlir/Dialect/TTNN/Interfaces/TTNNTensorSpecInterface.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "TTNNOps_types",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTNN/IR/TTNNOps.td",
+    includes = ["include/ttmlir/Dialect/EmitPy/Interfaces"],
+    tbl_outs = [(["-gen-typedef-decls", "-typedefs-dialect=ttnn"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsTypes.h.inc"), (["-gen-typedef-defs", "-typedefs-dialect=ttnn"], "include/ttmlir/Dialect/TTNN/IR/TTNNOpsTypes.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "TTCoreOps_types",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTCore/IR/TTCoreOps.td",
+    includes = ["include/ttmlir/Dialect/EmitPy/Interfaces"],
+    tbl_outs = [(["-gen-typedef-decls", "-typedefs-dialect=ttcore"], "include/ttmlir/Dialect/TTCore/IR/TTCoreOpsTypes.h.inc"), (["-gen-typedef-defs", "-typedefs-dialect=ttcore"], "include/ttmlir/Dialect/TTCore/IR/TTCoreOpsTypes.cpp.inc")],
+    deps = [":td_files"],
+)
+
+gentbl_filegroup(
+    name = "TTIROps_types",
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/ttmlir/Dialect/TTIR/IR/TTIROps.td",
+    includes = ["include/ttmlir/Dialect/EmitPy/Interfaces"],
+    tbl_outs = [(["-gen-typedef-decls", "-typedefs-dialect=ttir"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsTypes.h.inc"), (["-gen-typedef-defs", "-typedefs-dialect=ttir"], "include/ttmlir/Dialect/TTIR/IR/TTIROpsTypes.cpp.inc")],
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "ttir",
+    srcs = glob([
+        "lib/Dialect/TTCore/IR/*.cpp",
+        "lib/Dialect/TTIR/IR/*.cpp",
+        "lib/Dialect/TTIR/Utils/*.cpp",
+    ]),
+    hdrs = glob(["include/**/*.h"]) + [":gen_17", ":gen_18", ":gen_19", ":gen_20", ":gen_21", ":gen_22", ":gen_23", ":gen_24", ":gen_25", ":gen_26", ":gen_36", ":gen_37", ":gen_38", ":gen_39", ":gen_40", ":gen_41", ":gen_42", ":include_ttmlir_Target_Common_system_desc", ":include_ttmlir_Target_Common_system_desc_hash", ":include_ttmlir_Target_Common_debug_info", ":include_ttmlir_Target_Common_debug_info_hash", ":include_ttmlir_Target_Common_version", ":include_ttmlir_Target_Common_version_hash", ":include_ttmlir_Target_Common_types", ":include_ttmlir_Target_Common_types_hash", ":TTNNDistributedOpInterface", ":TTNNDeviceOperandInterface", ":TTNNOpModelInterface", ":TTNNWorkaroundInterface", ":TTNNTensorSpecInterface", ":TTNNOps_types", ":TTCoreOps_types", ":TTIROps_types"],
+    includes = ["include"],
+    copts = ["-std=c++20"],
+    deps = [
+        "@tt_flatbuffers//:runtime_cc",
+        "@llvm-project//mlir:AffineUtils",
+        "@llvm-project//mlir:AffineToStandard",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:BufferizationTransforms",
+        "@llvm-project//mlir:ControlFlowDialect",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:CAPIIR",
+        "@llvm-project//mlir:LinalgDialect",
+        "@llvm-project//mlir:MemRefDialect",
+        "@llvm-project//mlir:QuantOps",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:TensorDialect",
+        "@llvm-project//mlir:TransformUtils",
+    ],
+)

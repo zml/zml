@@ -1,0 +1,76 @@
+diff --git a/lib/Dialect/TTIR/IR/TTIROps.cpp b/lib/Dialect/TTIR/IR/TTIROps.cpp
+--- a/lib/Dialect/TTIR/IR/TTIROps.cpp
++++ b/lib/Dialect/TTIR/IR/TTIROps.cpp
+@@ -4521,12 +4521,16 @@
+ 
+   const bool inputIsTTNNTensor =
+       maybeInputTensor &&
+-      (mlir::isa<mlir::tt::ttnn::TTNNLayoutAttr>(maybeInputAttr) ||
+-       mlir::isa<mlir::tt::ttnn::TTNNNDLayoutAttr>(maybeInputAttr));
++      ((maybeInputAttr && maybeInputAttr.getAbstractAttribute().getName() ==
++           mlir::tt::ttnn::TTNNLayoutAttr::name) ||
++       (maybeInputAttr && maybeInputAttr.getAbstractAttribute().getName() ==
++           mlir::tt::ttnn::TTNNNDLayoutAttr::name));
+   const bool outputIsTTNNTensor =
+       maybeOutputTensor &&
+-      (mlir::isa<mlir::tt::ttnn::TTNNLayoutAttr>(maybeOutputAttr) ||
+-       mlir::isa<mlir::tt::ttnn::TTNNNDLayoutAttr>(maybeOutputAttr));
++      ((maybeOutputAttr && maybeOutputAttr.getAbstractAttribute().getName() ==
++           mlir::tt::ttnn::TTNNLayoutAttr::name) ||
++       (maybeOutputAttr && maybeOutputAttr.getAbstractAttribute().getName() ==
++           mlir::tt::ttnn::TTNNNDLayoutAttr::name));
+ 
+   const bool inputIsMetalTensor =
+       maybeInputTensor &&
+@@ -4630,8 +4634,10 @@
+   if (mlir::isa<mlir::tt::ttcore::MetalLayoutAttr>(inputEncoding)) {
+     // metal_layout -> ttnn_layout becomes memref -> ttnn_layout
+     bool isTTNNLayout =
+-        mlir::isa<mlir::tt::ttnn::TTNNLayoutAttr>(outputEncoding) ||
+-        mlir::isa<mlir::tt::ttnn::TTNNNDLayoutAttr>(outputEncoding);
++        (outputEncoding && outputEncoding.getAbstractAttribute().getName() ==
++           mlir::tt::ttnn::TTNNLayoutAttr::name) ||
++        (outputEncoding && outputEncoding.getAbstractAttribute().getName() ==
++           mlir::tt::ttnn::TTNNNDLayoutAttr::name);
+     TT_assertv(isTTNNLayout,
+                "Output tensor must have ttnn_layout or ttnn_nd_layout");
+     auto maybeInputBuf =
+@@ -4645,8 +4651,10 @@
+   } else if (mlir::isa<mlir::tt::ttcore::MetalLayoutAttr>(outputEncoding)) {
+     // ttnn_layout -> metal_layout becomes ttnn_layout -> memref
+     bool isTTNNLayout =
+-        mlir::isa<mlir::tt::ttnn::TTNNLayoutAttr>(inputEncoding) ||
+-        mlir::isa<mlir::tt::ttnn::TTNNNDLayoutAttr>(inputEncoding);
++        (inputEncoding && inputEncoding.getAbstractAttribute().getName() ==
++           mlir::tt::ttnn::TTNNLayoutAttr::name) ||
++        (inputEncoding && inputEncoding.getAbstractAttribute().getName() ==
++           mlir::tt::ttnn::TTNNNDLayoutAttr::name);
+     TT_assertv(isTTNNLayout,
+                "Input tensor must have ttnn_layout or ttnn_nd_layout");
+     ::llvm::SmallVector<mlir::Value> dummy;
+diff --git a/lib/Dialect/TTCore/IR/TTCoreDialect.cpp b/lib/Dialect/TTCore/IR/TTCoreDialect.cpp
+--- a/lib/Dialect/TTCore/IR/TTCoreDialect.cpp
++++ b/lib/Dialect/TTCore/IR/TTCoreDialect.cpp
+@@ -5,7 +5,8 @@
+ #include "ttmlir/Dialect/TTCore/IR/TTCore.h"
+ 
+ #include "mlir/IR/DialectImplementation.h"
+-#include "mlir/InitAllDialects.h"
++#include "mlir/Dialect/MemRef/IR/MemRef.h"
++#include "mlir/Dialect/Quant/IR/Quant.h"
+ #include "ttmlir/Dialect/TTCore/IR/TTCoreOps.h"
+ #include "ttmlir/Dialect/TTCore/IR/TTCoreOpsTypes.h"
+ #include "llvm/ADT/TypeSwitch.h"
+diff --git a/lib/Dialect/TTIR/IR/TTIRDialect.cpp b/lib/Dialect/TTIR/IR/TTIRDialect.cpp
+--- a/lib/Dialect/TTIR/IR/TTIRDialect.cpp
++++ b/lib/Dialect/TTIR/IR/TTIRDialect.cpp
+@@ -12,7 +12,8 @@
+ #include "mlir/Dialect/SCF/IR/SCF.h"
+ #include "mlir/Dialect/Tensor/IR/Tensor.h"
+ #include "mlir/IR/DialectImplementation.h"
+-#include "mlir/InitAllDialects.h"
++#include "mlir/Dialect/Arith/IR/Arith.h"
++#include "mlir/Dialect/Func/IR/FuncOps.h"
+ #include "mlir/Interfaces/FoldInterfaces.h"
+ #include "mlir/Transforms/InliningUtils.h"
+ #include "llvm/ADT/StringSet.h"

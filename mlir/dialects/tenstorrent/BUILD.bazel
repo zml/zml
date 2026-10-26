@@ -1,0 +1,31 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+cc_library(
+    name = "capi",
+    srcs = ["tenstorrent_capi.cc"],
+    hdrs = ["tenstorrent_capi.h"],
+    strip_include_prefix = ".",
+    deps = [
+        "@llvm-project//mlir:CAPIIR",
+        "@tt_mlir//:ttir",
+    ],
+    alwayslink = True,
+)
+
+zig_library(
+    name = "tenstorrent",
+    import_name = "mlir/dialects/tenstorrent",
+    main = "tenstorrent.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":capi",
+        "//mlir",
+        "//mlir:c",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":tenstorrent"],
+)
