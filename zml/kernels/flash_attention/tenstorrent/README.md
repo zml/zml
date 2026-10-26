@@ -35,7 +35,7 @@ tagged update path handles prefill and decode and preserves buffer donation.
 prefills and one-token updates at positions 0, 31, 32, and 63, including both
 layers, untouched positions, and preservation of update inputs.
 
-With this layout, XLA's tuned BF8 down-projection, eight-core RMS
+With this layout, XLA's tuned BF8 down-projection and output head, eight-core RMS
 normalization, FP32 matrix accumulation, and cached DRAM-sharded BF16 FFN/QKV
 weights with SiLU on the L1 output shards, the single-card Llama 3.1 8B
 counting smoke test at sequence length 128 measured:
@@ -43,7 +43,7 @@ counting smoke test at sequence length 128 measured:
 | Weights | Decode time (73 tokens) | Throughput | Kernel cache hits |
 | --- | ---: | ---: | ---: |
 | BF16 | 3.037 s | 24.0 tokens/s | 486/486 |
-| BF8 | 2.241 s | 32.6 tokens/s | 500/500 |
+| BF8 | 2.232 s | 32.7 tokens/s | 501/501 |
 
 Both runs produced the correct count from 1 to 20. Before the layout change,
 the corresponding BF16/BF8 runs measured 18.0/24.2 tokens/s; the layout alone
@@ -69,8 +69,9 @@ so the complete run improves from 22.0 to 22.9 tokens/s. Running SiLU separately
 on the 16 L1 output shards instead of fusing it onto the eight DRAM reader
 cores improves BF16 further to 23.8 tokens/s; QKV sharding raises it to 24.0.
 With both changes, a separate execution profile measured 233.100 ms for first
-decode and 38.813 ms median steady calls. BF8 measured 32.2–32.6 tokens/s
-across the latest runs; its schedule is unchanged.
+decode and 38.813 ms median steady calls. Tuning BF8's output head reduced
+its isolated kernel time from 1.763 to 1.546 ms; the full counting run measured
+32.7 tokens/s versus the prior 32.6. That application-level difference is small.
 
 At initial integration, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
 decoding completed in 4.489 seconds (16.3 tokens/s), versus 4.778 seconds
