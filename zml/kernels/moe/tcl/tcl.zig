@@ -11,7 +11,7 @@
 //! route and weighted.
 const std = @import("std");
 
-const builder = @import("kernels/tcl/builder");
+const builder = @import("dsl/tcl/builder");
 
 const stdx = @import("stdx");
 
@@ -115,7 +115,9 @@ fn gated(b: *tcl.Builder, a: Axes, h: builder.Tensor, batch: []const tcl.Axis, w
 
 /// Furiosa's compiler configuration for MoE kernels (`qwen3_moe/config.py`):
 /// IO-bound tactics for activation stationary, compute-bound for blockwise.
-fn configure(b: *tcl.Builder, cfg: Cfg, blockwise: bool) void {
+/// Keep the compiler's default lowering mode and omit the adaptive-einsum and
+/// half-VRF settings removed in TCC 2026.5.
+fn configure(b: *tcl.Builder, blockwise: bool) void {
     if (blockwise) b.compilerConfig(.{
         .enable_einsum_fusion = true,
         .padding_policy = .{ .Small = 1.1 },
@@ -128,7 +130,6 @@ fn configure(b: *tcl.Builder, cfg: Cfg, blockwise: bool) void {
         .allow_reduce_by_ve_cluster_chip_reduce = false,
         .allow_reduce_by_ve_cluster_chip_reduce_base_population = false,
         .tactic_hint = .{ .ForLlmModelComputeBound = 200 },
-        .apply_adaptive_einsum_by_pattern = true,
         .dma_preference = 1.2,
         .propagate_sparse_axis_from_op = "None",
     }) else b.compilerConfig(.{
@@ -142,12 +143,9 @@ fn configure(b: *tcl.Builder, cfg: Cfg, blockwise: bool) void {
         .scheduler_beam_search = true,
         .allow_reduce_by_ve_cluster_chip_reduce = false,
         .allow_reduce_by_ve_cluster_chip_reduce_base_population = false,
-        .lowering_mode = if (cfg.t < 8) "Optimal" else "Heuristic",
         .tactic_hint = .{ .ForLlmModelIOBound = 200 },
-        .apply_adaptive_einsum_by_pattern = true,
         .num_transaction_simulation_per_pe = 1024,
         .dma_preference = 0.8,
-        .enable_vrf_half_mode = true,
         .propagate_sparse_axis_from_op = "None",
     });
 }
@@ -158,7 +156,7 @@ pub const ActivationStationary = tcl.Kernel(Cfg, .{
     .outputs = &.{"y"},
     .run = struct {
         fn run(b: *tcl.Builder, cfg: Cfg) tcl.FinishError!void {
-            configure(b, cfg, false);
+            configure(b, false);
             const a: Axes = .init(b, cfg);
             const in = try args(b, a);
             const gate_up = try b.reshape(in.gate_up, &.{ a.E, a.S2, a.I, a.D }, .{});
@@ -190,7 +188,7 @@ pub const Blockwise = tcl.Kernel(Cfg, .{
     .outputs = &.{"y"},
     .run = struct {
         fn run(b: *tcl.Builder, cfg: Cfg) tcl.FinishError!void {
-            configure(b, cfg, true);
+            configure(b, true);
             const a: Axes = .init(b, cfg);
             const in = try args(b, a);
             const bb = blockRows(cfg);

@@ -17,7 +17,7 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
-const builder = @import("kernels/tcl/builder");
+const builder = @import("dsl/tcl/builder");
 
 const zml = @import("../../../zml.zig");
 const Tensor = zml.Tensor;
