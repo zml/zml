@@ -129,7 +129,7 @@ pub const triton = struct {
 
                 try spec.run(&b, cfg);
 
-                return b.finish(&.{});
+                return b.finish();
             }
 
             pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {

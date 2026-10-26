@@ -444,7 +444,7 @@ fn kernelUnifiedAttention2d(
 
     // Python: if q_block_local_idx * BLOCK_Q >= cur_batch_query_len: return
     const out_of_range = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q))).ge(cur_batch_query_len);
-    k.returnIf(out_of_range, .{});
+    k.returnIf(out_of_range);
 
     const offs_m = k.arange(0, BLOCK_M, .i32);
     const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);
@@ -750,14 +750,14 @@ fn kernelUnifiedAttention3d(
     const cur_batch_query_len = cur_batch_in_all_stop_index.sub(cur_batch_in_all_start_index);
 
     const q_out_of_range = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q))).ge(cur_batch_query_len);
-    k.returnIf(q_out_of_range, .{});
+    k.returnIf(q_out_of_range);
 
     const seq_len = k.load(seq_lens_ptr.addPtr(seq_idx));
     const tiles_per_segment = cdivFn(seq_len, @as(i32, @intCast(NUM_SEGMENTS_PER_SEQ * TILE_SIZE)));
 
     const segm_lo = segm_idx.mul(tiles_per_segment).mul(@as(i32, @intCast(TILE_SIZE)));
     const segm_out_of_range = segm_lo.ge(seq_len);
-    k.returnIf(segm_out_of_range, .{});
+    k.returnIf(segm_out_of_range);
 
     const offs_m = k.arange(0, BLOCK_M, .i32);
     const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);

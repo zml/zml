@@ -145,14 +145,14 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
             const num_seqs = k.liftAs(cfg.num_seqs, .i32);
             if (!cfg.decode_sequence_grid) {
                 const active_queries = k.load(a.query_start_len_ptr.addPtr(num_seqs));
-                k.returnIf(program.ge(active_queries), .{});
+                k.returnIf(program.ge(active_queries));
             }
 
             const seq = if (cfg.decode_sequence_grid) program else findSeqIdx(k, a.query_start_len_ptr, program, num_seqs, 1, false);
             const seq_len = k.load(a.seq_lens_ptr.addPtr(seq));
             const query_start = k.load(a.query_start_len_ptr.addPtr(seq));
             const query_end = k.load(a.query_start_len_ptr.addPtr(seq).addPtr(1));
-            if (cfg.decode_sequence_grid) k.returnIf(query_start.eq(query_end), .{});
+            if (cfg.decode_sequence_grid) k.returnIf(query_start.eq(query_end));
             const query = if (cfg.decode_sequence_grid) query_start else program;
             const kv_head = if (cfg.num_query_heads == cfg.num_queries_per_kv) k.liftAs(0, .i32) else k.programId(.y);
 
@@ -189,7 +189,7 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
                 storeResult(k, cfg, a, query, head, head_mask, segment, dims, dim_mask, initial_max, initial_sum, initial_acc);
                 branch.elseBranch();
                 branch.close();
-                k.returnIf(empty, .{});
+                k.returnIf(empty);
             }
 
             const q_offset = query.to(.i64).mul(cfg.query_strides[0])
@@ -291,7 +291,7 @@ pub const SparseReducePtr = struct {
             .output_ptr = .{ .ptr = cfg.dtype },
         });
         const query = k.programId(.x);
-        k.returnIf(query.ge(k.load(a.query_start_len_ptr.addPtr(cfg.num_seqs))), .{});
+        k.returnIf(query.ge(k.load(a.query_start_len_ptr.addPtr(cfg.num_seqs))));
         const head = k.programId(.y);
         const segments = k.arange(0, cfg.num_segments, .i32);
         const segment_mask = segments.lt(cfg.launched_segments);

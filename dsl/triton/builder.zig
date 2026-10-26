@@ -383,45 +383,23 @@ pub fn ForScope(comptime N: usize) type {
     return dsl.ForScope(Builder, Value, N);
 }
 
+/// `if (cond) { ...; return; }`: `close` returns at the end of the body,
+/// then the kernel continues after it.
 pub const ReturnIfScope = struct {
     kernel: *Builder,
     ret_block: *mlir.Block,
     cont_block: *mlir.Block,
-    inline_return: bool = false,
+    opts: ReturnIfOpts,
 
-    pub fn yieldReturn(self: *ReturnIfScope, values: anytype) void {
+    pub fn close(self: *ReturnIfScope) void {
         const k = self.kernel;
-        const info = @typeInfo(@TypeOf(values)).@"struct";
-
-        if (self.inline_return) {
-            var ret_operands: [info.field_names.len]*const mlir.Value = undefined;
-            inline for (info.field_names, info.field_types, 0..) |field_name, Field, i| {
-                if (Field != Value)
-                    @compileError("ReturnIfScope.yieldReturn: every value must be a Value");
-                ret_operands[i] = @field(values, field_name).inner;
-            }
-            _ = ttir.return_(k.ctx, &ret_operands, k.loc()).appendTo(self.ret_block);
+        if (self.opts.inline_return) {
+            _ = ttir.return_(k.ctx, &.{}, k.loc()).appendTo(self.ret_block);
         } else {
-            if (k.exit_block == null) {
-                k.exit_block = mlir.Block.init(&.{}, &.{});
-
-                var ret_operands: [info.field_names.len]*const mlir.Value = undefined;
-                inline for (info.field_names, info.field_types, 0..) |field_name, Field, i| {
-                    if (Field != Value)
-                        @compileError("ReturnIfScope.yieldReturn: every value must be a Value");
-                    ret_operands[i] = @field(values, field_name).inner;
-                }
-                _ = ttir.return_(k.ctx, &ret_operands, k.loc()).appendTo(k.exit_block.?);
-            }
-            _ = cf.br(k.ctx, k.exit_block.?, &.{}, k.loc()).appendTo(self.ret_block);
+            _ = cf.br(k.ctx, k.exitBlock(), &.{}, k.loc()).appendTo(self.ret_block);
         }
         k.popBlock();
-
-        if (k.block_stack.items.len == 0) {
-            k.pushBlock(self.cont_block);
-        } else {
-            k.block_stack.items[k.block_stack.items.len - 1] = self.cont_block;
-        }
+        k.continueIn(self.cont_block);
     }
 };
 
@@ -481,9 +459,8 @@ pub const Builder = struct {
         ctx: *mlir.Context,
         name: []const u8,
         args: []const ArgSpec,
-        result_types: []const *const mlir.Type,
     ) !Builder {
-        return initOpts(allocator, ctx, name, args, result_types, .{});
+        return initOpts(allocator, ctx, name, args, .{});
     }
 
     pub fn initOpts(
@@ -491,12 +468,11 @@ pub const Builder = struct {
         ctx: *mlir.Context,
         name: []const u8,
         args: []const ArgSpec,
-        result_types: []const *const mlir.Type,
         opts: Opts,
     ) !Builder {
         var b = try open(allocator, ctx, name);
         errdefer b.deinit();
-        try b.declareArgsLowOpts(args, result_types, opts);
+        try b.declareArgsLowOpts(args, opts);
         return b;
     }
 
@@ -525,13 +501,12 @@ pub const Builder = struct {
     }
 
     pub fn declareArgs(self: *Builder, spec: anytype) !dsl.NamedArgs(@TypeOf(spec), Value) {
-        return self.declareArgsOpts(spec, &.{}, .{});
+        return self.declareArgsOpts(spec, .{});
     }
 
     pub fn declareArgsOpts(
         self: *Builder,
         spec: anytype,
-        result_types: []const *const mlir.Type,
         opts: Opts,
     ) !dsl.NamedArgs(@TypeOf(spec), Value) {
         const Spec = @TypeOf(spec);
@@ -562,7 +537,7 @@ pub const Builder = struct {
             arg_specs[i] = .{ .name = field_name, .kind = kind };
         }
 
-        try self.declareArgsLowOpts(&arg_specs, result_types, opts);
+        try self.declareArgsLowOpts(&arg_specs, opts);
 
         var named: dsl.NamedArgs(Spec, Value) = undefined;
         inline for (field_names, 0..) |field_name, i| {
@@ -574,7 +549,6 @@ pub const Builder = struct {
     fn declareArgsLowOpts(
         self: *Builder,
         args: []const ArgSpec,
-        result_types: []const *const mlir.Type,
         opts: Opts,
     ) !void {
         std.debug.assert(self.entry_block == null);
@@ -622,7 +596,7 @@ pub const Builder = struct {
             .name = self.name,
             .args = arg_types,
             .args_attributes = if (any_arg_attr) arg_attrs else null,
-            .results = result_types,
+            .results = &.{},
             .block = entry,
             .location = unknown_loc,
             .no_inline = opts.@"noinline",
@@ -2031,48 +2005,52 @@ pub const Builder = struct {
         return dsl.openFor(self, Value, .{ lb_v, ub_v, step_v }, inits, .{});
     }
 
-    pub fn returnIf(self: *Builder, cond: Value, values: anytype) void {
-        self.returnIfOpts(cond, values, .{});
+    pub fn returnIf(self: *Builder, cond: Value) void {
+        self.returnIfOpts(cond, .{});
     }
 
-    pub fn returnIfOpts(self: *Builder, cond: Value, values: anytype, opts: ReturnIfOpts) void {
+    pub fn returnIfOpts(self: *Builder, cond: Value, opts: ReturnIfOpts) void {
         const current = self.currentBlock();
         const region = current.parentRegion();
         const cont_block = mlir.Block.init(&.{}, &.{});
 
-        const info = @typeInfo(@TypeOf(values)).@"struct";
-        var ret_operands: [info.field_names.len]*const mlir.Value = undefined;
-        inline for (info.field_names, info.field_types, 0..) |field_name, Field, i| {
-            if (Field != Value)
-                @compileError("returnIfOpts: every value must be a Value");
-            ret_operands[i] = @field(values, field_name).inner;
-        }
-
         const ret_target: *mlir.Block = if (opts.inline_return) blk: {
             const rb = mlir.Block.init(&.{}, &.{});
-            _ = ttir.return_(self.ctx, &ret_operands, self.loc()).appendTo(rb);
+            _ = ttir.return_(self.ctx, &.{}, self.loc()).appendTo(rb);
             region.appendOwnedBlock(rb);
             break :blk rb;
-        } else blk: {
-            if (self.exit_block == null) {
-                self.exit_block = mlir.Block.init(&.{}, &.{});
-                _ = ttir.return_(self.ctx, &ret_operands, self.loc()).appendTo(self.exit_block.?);
-            }
-            break :blk self.exit_block.?;
-        };
+        } else self.exitBlock();
 
         region.appendOwnedBlock(cont_block);
 
         _ = cf.cond_br(self.ctx, cond.inner, ret_target, &.{}, cont_block, &.{}, .{}, self.loc()).appendTo(current);
+        self.continueIn(cont_block);
+    }
 
+    /// The block every non-inline return branches to, which `finish` appends.
+    fn exitBlock(self: *Builder) *mlir.Block {
+        if (self.exit_block == null) {
+            self.exit_block = mlir.Block.init(&.{}, &.{});
+            _ = ttir.return_(self.ctx, &.{}, self.loc()).appendTo(self.exit_block.?);
+        }
+        return self.exit_block.?;
+    }
+
+    /// Continues in `block`, the fall-through of an early return, in place of
+    /// the current block.
+    fn continueIn(self: *Builder, block: *mlir.Block) void {
         if (self.block_stack.items.len == 0) {
-            self.pushBlock(cont_block);
+            self.pushBlock(block);
         } else {
-            self.block_stack.items[self.block_stack.items.len - 1] = cont_block;
+            self.block_stack.items[self.block_stack.items.len - 1] = block;
         }
     }
 
     pub fn openReturnIf(self: *Builder, cond: Value) ReturnIfScope {
+        return self.openReturnIfOpts(cond, .{});
+    }
+
+    pub fn openReturnIfOpts(self: *Builder, cond: Value, opts: ReturnIfOpts) ReturnIfScope {
         const current = self.currentBlock();
         const region = current.parentRegion();
 
@@ -2089,6 +2067,7 @@ pub const Builder = struct {
             .kernel = self,
             .ret_block = ret_block,
             .cont_block = cont_block,
+            .opts = opts,
         };
     }
 
@@ -2110,10 +2089,11 @@ pub const Builder = struct {
 
     // ==================== finalization ====================
 
-    /// Append `tt.return` with the given results, verify the module, and
-    /// serialize to a NUL-terminated TTIR string owned by the kernel's
-    /// allocator (passed to `init`). Caller must `defer allocator.free(ir)`.
-    pub fn finish(self: *Builder, results: []const Value) FinishError![:0]const u8 {
+    /// Append the final `tt.return` (kernels return nothing), verify the
+    /// module, and serialize to a NUL-terminated TTIR string owned by the
+    /// kernel's allocator (passed to `init`). Caller must
+    /// `defer allocator.free(ir)`.
+    pub fn finish(self: *Builder) FinishError![:0]const u8 {
         // After any `returnIf` call, the entry block already has a
         // `cf.cond_br` terminator; the fall-through block sits on the stack
         // as the new insertion point. `currentBlock()` returns that block
@@ -2125,7 +2105,7 @@ pub const Builder = struct {
             region.appendOwnedBlock(exit);
             _ = cf.br(self.ctx, exit, &.{}, self.loc()).appendTo(current);
         } else {
-            _ = ttir.return_(self.ctx, self.innerSlice(results), self.loc()).appendTo(current);
+            _ = ttir.return_(self.ctx, &.{}, self.loc()).appendTo(current);
         }
 
         if (!self.module.operation().verify()) {
