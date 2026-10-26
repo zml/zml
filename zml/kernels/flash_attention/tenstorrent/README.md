@@ -38,12 +38,13 @@ layers, untouched positions, and preservation of update inputs.
 With this layout, XLA's tuned BF8 down-projection and output head, eight-core RMS
 normalization, FP32 matrix accumulation, and cached DRAM-sharded BF16 FFN/QKV
 weights with SiLU and QKV head splitting on L1 shards, the single-card Llama 3.1 8B
-counting smoke test at sequence length 128 measured:
+counting smoke test at sequence length 128, including the cache-update fixes
+described below, measured:
 
 | Weights | Decode time (73 tokens) | Throughput | Kernel cache hits |
 | --- | ---: | ---: | ---: |
-| BF16 | 2.892 s | 25.2 tokens/s | 488/488 |
-| BF8 | 2.177 s | 33.5 tokens/s | 501/501 |
+| BF16 | 2.892 s | 25.2 tokens/s | 518/518 |
+| BF8 | 2.162 s | 33.8 tokens/s | 531/531 |
 
 Both runs produced the correct count from 1 to 20. Before the layout change,
 the corresponding BF16/BF8 runs measured 18.0/24.2 tokens/s; the layout alone
@@ -98,6 +99,16 @@ All seven default single-card suites pass. The BF16 counting run after this fix
 measured 2.912 seconds / 25.1 tokens/s with all 488 kernels cached, close to the
 25.2 result above. BF8 repeated correctly at 2.168 seconds / 33.7 tokens/s
 with 501/501 kernel-cache hits.
+
+XLA now preserves the computed, clamped cache position and combines eligible
+K/V updates into the native fused cache kernel. It retargets K's existing layout
+conversion to a separate core, avoiding an extra reshard. Llama emits 31 fused
+updates; the last pair retains separate writes because a K-cache observer lies
+between them. The latest unprofiled warm runs are in the table above, with all
+kernel artifacts already materialized and correct counts. Separate execution
+profiles measured BF16 steady calls of 36.748 ms with fusion and 36.877 ms without
+it. Trace replay measured 36.345 ms steady and 25.5 tokens/s overall with profiling
+enabled, a small improvement that does not close the BF16 performance gap.
 
 At initial integration, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
 decoding completed in 4.489 seconds (16.3 tokens/s), versus 4.778 seconds
