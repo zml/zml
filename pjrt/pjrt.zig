@@ -32,6 +32,7 @@ pub const meta = struct {
     }
 
     pub fn Struct(comptime T: type) type {
+        @setEvalBranchQuota(10_000);
         const info = @typeInfo(T).@"struct";
         var names: [info.field_names.len][]const u8 = undefined;
         var types: [info.field_names.len]type = undefined;

@@ -120,11 +120,11 @@ zig_library(
         "//zml/kernels/moe/mosaic_tpu",
         "//zml/kernels/moe/stablehlo",
         "//zml/kernels/moe/triton",
+        "//zml/kernels/paged_attention/cute",
         "//zml/kernels/paged_attention/metal",
         "//zml/kernels/paged_attention/mosaic_tpu",
         "//zml/kernels/paged_attention/stablehlo",
         "//zml/kernels/paged_attention/triton",
-        "//zml/kernels/paged_attention/cute",
     ],
     data = select({
         "//platforms:neuron.enabled": [
@@ -151,8 +151,8 @@ zig_library(
         "//kernels/cute:cute_builder",
         "//kernels/fly:fly_builder",
         "//kernels/mosaic_tpu:mosaic_tpu_builder",
-        "//kernels/triton:triton_builder",
         "//kernels/tenstorrent:builder",
+        "//kernels/triton:triton_builder",
         "//mlir",
         "//mlir/dialects",
         "//mlir/dialects/cuda_tile",
@@ -209,5 +209,16 @@ zig_test(
 zig_test(
     name = "tenstorrent_test",
     main = "tenstorrent_test.zig",
+    deps = [":zml"],
+)
+
+# Run native decode attention on device zero independently of mesh coverage.
+zig_test(
+    name = "tenstorrent_decode_attention_test",
+    main = "tenstorrent_test.zig",
+    zigopts = [
+        "--test-filter",
+        "TTIR decode attention",
+    ],
     deps = [":zml"],
 )
