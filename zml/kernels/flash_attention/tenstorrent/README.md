@@ -36,13 +36,13 @@ prefills and one-token updates at positions 0, 31, 32, and 63, including both
 layers, untouched positions, and preservation of update inputs.
 
 With this layout, XLA's tuned BF8 down-projection, eight-core RMS
-normalization, FP32 matrix accumulation, and cached DRAM-sharded BF16 FFN
+normalization, FP32 matrix accumulation, and cached DRAM-sharded BF16 FFN/QKV
 weights with SiLU on the L1 output shards, the single-card Llama 3.1 8B
 counting smoke test at sequence length 128 measured:
 
 | Weights | Decode time (73 tokens) | Throughput | Kernel cache hits |
 | --- | ---: | ---: | ---: |
-| BF16 | 3.072 s | 23.8 tokens/s | 485/485 |
+| BF16 | 3.037 s | 24.0 tokens/s | 486/486 |
 | BF8 | 2.241 s | 32.6 tokens/s | 500/500 |
 
 Both runs produced the correct count from 1 to 20. Before the layout change,
@@ -56,8 +56,8 @@ smoke tests, not model-quality evaluations.
 
 The target is approximately 33 tokens/s with **BF16** weights; BF8 is expected
 to exceed that. Neither target has been reached. XLA now selects DRAM-sharded
-BF16 FFN weights by default for this card and keeps the activation chain in
-L1. Sharding consumes prefill's cached preprocessing in a separate cache
+BF16 FFN/QKV weights by default for this card and keeps the FFN activation
+chain in L1. Sharding consumes prefill's cached preprocessing in a separate cache
 entry, preserving reuse while tracking weight-buffer versions. Set
 `XLA_TT_EXPERIMENTAL_DRAM_WEIGHTS=0` to compare with the interleaved schedule.
 
@@ -67,7 +67,9 @@ prefill preprocessing, pushing first decode to 701.376 ms and regressing the
 short run to 20.1 tokens/s. The layered cache reduces first decode to 224.658 ms,
 so the complete run improves from 22.0 to 22.9 tokens/s. Running SiLU separately
 on the 16 L1 output shards instead of fusing it onto the eight DRAM reader
-cores improves BF16 further to 23.8 tokens/s. BF8 measured 32.2–32.6 tokens/s
+cores improves BF16 further to 23.8 tokens/s; QKV sharding raises it to 24.0.
+With both changes, a separate execution profile measured 233.100 ms for first
+decode and 38.813 ms median steady calls. BF8 measured 32.2–32.6 tokens/s
 across the latest runs; its schedule is unchanged.
 
 At initial integration, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
