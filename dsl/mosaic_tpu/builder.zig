@@ -959,12 +959,13 @@ pub const Builder = struct {
     }
 
     /// Constant `index`-typed value (for memref / loop bounds).
-    fn indexBound(self: *Builder, value: anytype) Value {
-        return self.constIndex(@intCast(value));
-    }
-
     pub fn constIndex(self: *Builder, value: i64) Value {
         return self.emit(arith.constant_index(self.ctx, value, self.loc()));
+    }
+
+    /// `openFor`'s default lower bound, an `index` constant.
+    fn indexBound(self: *Builder, value: anytype) Value {
+        return self.constIndex(intBits(value, 64, "index"));
     }
 
     /// Lift a Zig scalar (or pass-through Value) to a DSL constant.
@@ -2046,7 +2047,19 @@ pub const Builder = struct {
         step: anytype,
         inits: anytype,
     ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
-        return dsl.openFor(self, Value, dsl.forBounds(self, Value, lower, upper, step, indexBound), inits, .{});
+        return self.openForOpts(lower, upper, step, inits, .{});
+    }
+
+    /// `openFor` with `scf.for` options.
+    pub fn openForOpts(
+        self: *Builder,
+        lower: anytype,
+        upper: anytype,
+        step: anytype,
+        inits: anytype,
+        opts: dsl.ForOpts,
+    ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
+        return dsl.openFor(self, Value, dsl.forBounds(self, Value, lower, upper, step, indexBound), inits, opts);
     }
 
     pub fn openIf(self: *Builder, cond: Value) IfOnlyScope {

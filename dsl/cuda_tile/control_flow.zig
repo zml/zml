@@ -18,7 +18,13 @@ fn terminate(comptime ValueT: type, comptime N: usize, kernel: anytype, block: *
     _ = op.appendTo(block);
 }
 
-/// `for %iv in (lb to ub, step) iter_values(...)`; `yield` closes it.
+pub const ForOpts = struct {
+    /// Compare the induction variable unsigned.
+    unsigned_cmp: bool = false,
+};
+
+/// `for %iv in (lb to ub, step) iter_values(...)`; `yield` closes it, or
+/// `close()` when it carries nothing.
 pub fn ForScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usize) type {
     return struct {
         kernel: *BuilderT,
@@ -30,7 +36,7 @@ pub fn ForScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usiz
         iv: ValueT,
         carried: [N]ValueT,
         results: [N]ValueT = undefined,
-        unsigned_cmp: bool = false,
+        opts: ForOpts = .{},
 
         const Self = @This();
 
@@ -55,7 +61,7 @@ pub fn ForScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usiz
             const k = self.kernel;
             terminate(ValueT, N, k, self.body, .continue_, values, "ForScope.yield");
             k.popBlock();
-            const for_op = cuda_tile.for_(k.ctx, self.lb_inner, self.ub_inner, self.step_inner, &self.inits_inner, self.body, self.unsigned_cmp, k.loc());
+            const for_op = cuda_tile.for_(k.ctx, self.lb_inner, self.ub_inner, self.step_inner, &self.inits_inner, self.body, self.opts.unsigned_cmp, k.loc());
             _ = for_op.appendTo(k.currentBlock());
             for (0..N) |i| self.results[i] = .{ .inner = for_op.result(i), .kernel = k };
         }

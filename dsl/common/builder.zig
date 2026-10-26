@@ -1,10 +1,13 @@
 const std = @import("std");
 
+const scf = @import("mlir/dialects/scf");
+
 pub const control_flow = @import("control_flow.zig");
 pub const args = @import("args.zig");
 
 pub const arity = control_flow.arity;
 pub const forBounds = control_flow.forBounds;
+pub const ForOpts = scf.ForOpts;
 pub const openFor = control_flow.openFor;
 pub const openIf = control_flow.openIf;
 pub const openIfElse = control_flow.openIfElse;

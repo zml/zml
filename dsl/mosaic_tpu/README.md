@@ -664,6 +664,8 @@ const final_b_h = loop.results[0];
   `carried`, `results`, and the `yield(...)` values (also a tuple or an
   array) all have the same length.
 - Empty loops: `b.openFor(0, N, 1, .{})` + `loop.close()`.
+- `b.openForOpts(lower, upper, step, inits, .{ .unsigned_cmp = true })` sets
+  the loop's options.
 
 ### `openIf` — scf.if without else (side-effects only)
 

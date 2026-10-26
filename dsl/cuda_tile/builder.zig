@@ -389,6 +389,8 @@ pub fn ForScope(comptime N: usize) type {
     return cf.ForScope(Builder, Value, N);
 }
 
+pub const ForOpts = cf.ForOpts;
+
 pub const IfOnlyScope = cf.IfOnlyScope(Builder, Value);
 
 pub fn IfScope(comptime N: usize) type {
@@ -1651,6 +1653,18 @@ pub const Builder = struct {
         step: anytype,
         inits: anytype,
     ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
+        return self.openForOpts(lower, upper, step, inits, .{});
+    }
+
+    /// `openFor` with `cuda_tile.for` options.
+    pub fn openForOpts(
+        self: *Builder,
+        lower: anytype,
+        upper: anytype,
+        step: anytype,
+        inits: anytype,
+        opts: ForOpts,
+    ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
         const N = comptime dsl.arity(@TypeOf(inits), "openFor: inits");
 
         // Literals take the type of the first bound that is a Value, else
@@ -1681,6 +1695,7 @@ pub const Builder = struct {
             .inits_inner = inits_inner,
             .iv = .{ .inner = body.argument(0), .kernel = self },
             .carried = carried,
+            .opts = opts,
         };
     }
 

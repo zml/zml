@@ -117,7 +117,8 @@ awk '/^pub const Value = struct/,/^};/' dsl/cuda_tile/builder.zig | grep 'pub fn
 awk '/^pub const Builder = struct/,0' dsl/cuda_tile/builder.zig | grep '    pub fn '
 
 # what each option struct holds, and its defaults
-grep -n '^pub const [A-Za-z]*Opts = struct' -A 8 dsl/cuda_tile/builder.zig
+grep -n '^pub const [A-Za-z]*Opts = struct' -A 8 dsl/cuda_tile/builder.zig \
+    dsl/cuda_tile/control_flow.zig
 
 # for / if / loop scopes and their terminators
 grep -n 'pub fn ' dsl/cuda_tile/control_flow.zig

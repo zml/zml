@@ -451,7 +451,7 @@ in all of these — drop it:
 | `v_f32.mul(1.0 / config.fp8_max)`        | already-f32 expression → f32 const    |
 | `v_i64.lt(NUM_QUERY_HEADS)` (Zig i64)    | runtime i64 → i64 const               |
 | `v_i32.add(pad_term)` (Zig i32)          | runtime i32 → i32 const               |
-| `b.splat(-1, shape)` / `b.openFor(0, N, 1, ...)` | comptime → matches elem / lower |
+| `b.splat(-1, shape)` / `b.openFor(0, N, 1, ...)` | comptime → matches elem / the first Value bound |
 | `b.constant(.i32, 0)`                    | constant takes anytype — wrap nothing |
 
 `@as(...)` **is** required exactly when you're narrowing a runtime Zig int
@@ -672,7 +672,8 @@ Pairs in place today: `load` / `loadOpts`, `store` / `storeOpts`,
 `deviceAssert` / `deviceAssertOpts`,
 `maximum` / `maximumOpts`, `minimum` / `minimumOpts`,
 `sum` / `sumOpts`, `max` / `maxOpts`, `min` / `minOpts`,
-`cumsum` / `cumsumOpts`, `cumprod` / `cumprodOpts`.
+`cumsum` / `cumsumOpts`, `cumprod` / `cumprodOpts`,
+`openFor` / `openForOpts` (`tl.range(..., num_stages=...)`).
 
 DSL-only pairs (no Python kwarg counterpart — `.inline_return` is about IR
 block layout, see the `returnIf` / `returnIfOpts` section under Control flow):
@@ -770,6 +771,8 @@ const total = loop.results[0];
   `carried`, `results`, and the `yield(...)` values (also a tuple or an array)
   all have the same length.
 - Empty loops: `b.openFor(0, N, S, .{})` + `loop.close()` (no iter_args).
+- `b.openForOpts(lower, upper, step, inits, .{ .num_stages = 3 })` sets the
+  loop's options (`tt.num_stages`, `.unsigned_cmp`).
 
 ### `openIf` — scf.if without else (side-effects only)
 
