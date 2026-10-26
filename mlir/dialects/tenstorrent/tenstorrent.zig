@@ -75,7 +75,7 @@ pub fn concat(ctx: *mlir.Context, inputs: []const *const mlir.Value, axis: i32, 
     return .make(ctx, "ttir.concat", .{
         .operands = .{ .flat = inputs },
         .results = .{ .flat = &.{result} },
-        .attributes = &.{.named(ctx, "dim", .int(ctx, .i32, axis))},
+        .attributes = &.{.named(ctx, "dim", .int(ctx, .si32, axis))},
         .location = loc,
     });
 }

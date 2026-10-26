@@ -885,6 +885,31 @@ fn fromMlirOperationWithTags(op: *const mlir.Operation, base: anytype) @TypeOf(b
     return res;
 }
 
+/// Import a pure TTIR tensor program before Tenstorrent layout selection.
+pub fn tenstorrent(inputs: anytype, outputs: anytype, name: []const u8, ir: []const u8) [outputs.len]Tensor {
+    const compiler = Compiler.current();
+    const ctx = compiler.mlir_ctx;
+    stdx.debug.assert(compiler.platform.target == .tenstorrent, "TTIR kernels require the Tenstorrent backend", .{});
+    var values: [inputs.len]*const mlir.Value = undefined;
+    inline for (inputs, 0..) |input, i| values[i] = input.value();
+    var types: [outputs.len]*const mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| types[i] = mlirx.Type.rankedTensor(ctx, output);
+    const config: *const mlir.Attribute = .dict(ctx, &.{
+        .named(ctx, "version", .int(ctx, .i64, 1)),
+        .named(ctx, "dialect", .string(ctx, "ttir")),
+        .named(ctx, "name", .string(ctx, name)),
+        .named(ctx, "ir", .string(ctx, ir)),
+    });
+    const op = dialects.stablehlo.custom_call(ctx, &values, &types, .{
+        .call_target_name = "__tt$ttmlir",
+        .backend_config = .{ .typed_ffi = config },
+        .has_side_effect = false,
+    }, compiler.location).appendTo(compiler.currentScope().block);
+    var results: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| results[i] = Tensor._result(output, op.result(i));
+    return results;
+}
+
 pub const TritonOps = struct {
     debug: bool = false,
     name: []const u8,

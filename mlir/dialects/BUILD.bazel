@@ -33,7 +33,6 @@ zig_library(
         "arith.zig",
         "cf.zig",
         "cuda.zig",
-        "func.zig",
         "gpu.zig",
         "llvm_dialect.zig",
         "math.zig",
@@ -49,6 +48,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         ":capi",
+        ":func",
         "//mlir",
         "//mlir:c",
         "//mlir/dialects/cuda_tile",
@@ -67,5 +67,17 @@ zig_test(
     name = "test",
     deps = [
         ":dialects",
+    ],
+)
+
+# Tensor kernel builders need function construction without every GPU dialect.
+zig_library(
+    name = "func",
+    import_name = "mlir/dialects/func",
+    main = "func.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//stdx",
     ],
 )

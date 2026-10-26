@@ -1756,6 +1756,46 @@ pub const GatedDeltaNet = struct {
         };
     }
 
+    const TenstorrentKernel = zml.kernel.tenstorrent.Kernel(void, .{
+        .name = "gated_delta_net",
+        .inputs = &.{ "q", "k", "v", "alpha", "beta", "state", "active_length" },
+        .outputs = &.{ "state", "outputs" },
+        .run = zml.kernel.tenstorrent.gated_delta_net.run,
+    });
+
+    fn forwardTenstorrent(gdn: GatedDeltaNet, initial_state: Input) Output {
+        const batched = gdn.queries.shape().hasTag(.b) != null;
+        const batch = if (batched) gdn.queries.dim(.b) else 1;
+        const seq = gdn.queries.dim(.s);
+        const heads = gdn.queries.dim(.h);
+        const key_dim = gdn.queries.dim(.k);
+        const value_dim = gdn.values.dim(.v);
+        const q = if (batched) gdn.queries.transpose(.{ .s, .b, .h, .k }) else gdn.queries.transpose(.{ .s, .h, .k });
+        const k = if (batched) gdn.keys.transpose(.{ .s, .b, .h, .k }) else gdn.keys.transpose(.{ .s, .h, .k });
+        const v = if (batched) gdn.values.transpose(.{ .s, .b, .h, .v }) else gdn.values.transpose(.{ .s, .h, .v });
+        const alpha = if (batched) gdn.alphas.transpose(.{ .s, .b, .h }) else gdn.alphas.transpose(.{ .s, .h });
+        const beta = if (batched) gdn.betas.transpose(.{ .s, .b, .h }) else gdn.betas.transpose(.{ .s, .h });
+        const state = if (batched) initial_state.s.transpose(.{ .b, .h, .v, .k }) else initial_state.s.transpose(.{ .h, .v, .k });
+        const result = TenstorrentKernel.call(.{
+            .q = q.convert(.f32).reshape(.{ seq, batch * heads, key_dim }),
+            .k = k.convert(.f32).reshape(.{ seq, batch * heads, key_dim }),
+            .v = v.convert(.f32).reshape(.{ seq, batch * heads, value_dim }),
+            .alpha = alpha.convert(.f32).reshape(.{ seq, batch * heads }),
+            .beta = beta.convert(.f32).reshape(.{ seq, batch * heads }),
+            .state = state.convert(.f32).reshape(.{ batch * heads, value_dim, key_dim }),
+            .active_length = gdn.active_length.convert(.i32).maximum(.scalar(0, .i32)).minimum(.scalar(seq, .i32)),
+        }, .{
+            .state = .init(.{ batch * heads, value_dim, key_dim }, .f32),
+            .outputs = .init(.{ seq, batch * heads, value_dim }, .f32),
+        }, {});
+        const result_state = if (batched) result.state.reshape(.{ .b = batch, .h = heads, .v = value_dim, .k = key_dim }) else result.state.reshape(.{ .h = heads, .v = value_dim, .k = key_dim });
+        const outputs = if (batched) result.outputs.reshape(.{ .s = seq, .b = batch, .h = heads, .v = value_dim }) else result.outputs.reshape(.{ .s = seq, .h = heads, .v = value_dim });
+        return .{
+            .state = .{ .s = result_state.transpose(initial_state.s.shape().tags()).convert(initial_state.s.dtype()) },
+            .outputs = outputs.transpose(gdn.values.shape().tags()).convert(gdn.values.dtype()),
+        };
+    }
+
     /// Processes a sequence with Gated Delta Net recurrence using `stablehlo.while`.
     ///
     /// Shapes:
@@ -1787,6 +1827,9 @@ pub const GatedDeltaNet = struct {
             .outputs = .zeroes(values.shape()),
         };
         validateInitialState(gdn, state);
+        if (zml.Compiler.current().platform.target == .tenstorrent) {
+            return forwardTenstorrent(gdn, initial_state);
+        }
 
         const final_state = if (queries.dim(.s) == 1) blk: {
             // avoids a `stablehlo.while`, which costs a host sync per call on GPU.

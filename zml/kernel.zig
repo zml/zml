@@ -8,6 +8,7 @@ const mlir = @import("mlir");
 const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
 const stdx = @import("stdx");
 const tpu_dialect = @import("mlir/dialects/mosaic_tpu");
+const tenstorrent_builder = @import("kernels/tenstorrent/builder");
 const triton_builder = @import("kernels/triton/builder");
 
 const Compiler = @import("Compiler.zig");
@@ -170,6 +171,66 @@ pub const triton = struct {
                 var results: Results = undefined;
                 inline for (spec.outputs, 0..) |fname, i| @field(results, fname) = triton_results[i];
                 return results;
+            }
+        };
+    }
+};
+
+pub const tenstorrent = struct {
+    pub const Builder = tenstorrent_builder.Builder;
+    pub const gated_delta_net = tenstorrent_builder.gated_delta_net;
+    pub const Value = tenstorrent_builder.Value;
+    pub const FinishError = tenstorrent_builder.FinishError;
+
+    pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
+        return makeKernelContext(&tenstorrent_builder.dialects_needed);
+    }
+
+    pub fn Spec(comptime Config: type) type {
+        return struct {
+            name: [:0]const u8,
+            inputs: []const [:0]const u8,
+            outputs: []const [:0]const u8,
+            run: *const fn (*Builder, Config) FinishError!void,
+        };
+    }
+
+    pub fn Kernel(comptime ConfigT: type, comptime spec: Spec(ConfigT)) type {
+        return struct {
+            pub const Inputs = StructOf(spec.inputs, Tensor);
+            pub const Outputs = StructOf(spec.outputs, Shape);
+            pub const Results = StructOf(spec.outputs, Tensor);
+
+            pub fn emit(allocator: std.mem.Allocator, inputs: [spec.inputs.len]Shape, outputs: [spec.outputs.len]Shape, cfg: ConfigT) ![:0]const u8 {
+                const ctx = try newContext();
+                defer ctx.deinit();
+                var input_types: [spec.inputs.len]*const mlir.Type = undefined;
+                for (inputs, 0..) |shape, i| input_types[i] = mlirx.Type.rankedTensor(ctx, shape);
+                var output_types: [spec.outputs.len]*const mlir.Type = undefined;
+                for (outputs, 0..) |shape, i| output_types[i] = mlirx.Type.rankedTensor(ctx, shape);
+                var b = try Builder.init(allocator, ctx, spec.name, &input_types, &output_types);
+                defer b.deinit();
+                try spec.run(&b, cfg);
+                return b.serialize();
+            }
+
+            pub fn call(inputs: Inputs, outputs: Outputs, cfg: ConfigT) Results {
+                const compiler = Compiler.current();
+                var values: [spec.inputs.len]Tensor = undefined;
+                var input_shapes: [spec.inputs.len]Shape = undefined;
+                inline for (spec.inputs, 0..) |name, i| {
+                    values[i] = @field(inputs, name);
+                    input_shapes[i] = values[i].shape();
+                }
+                var output_shapes: [spec.outputs.len]Shape = undefined;
+                inline for (spec.outputs, 0..) |name, i| output_shapes[i] = @field(outputs, name);
+                const ir = emit(compiler.allocator, input_shapes, output_shapes, cfg) catch |err|
+                    std.debug.panic("TTIR kernel {s}: {}", .{ spec.name, err });
+                defer compiler.allocator.free(ir);
+                const values_out = ops.tenstorrent(values, output_shapes, spec.name, ir);
+                var result: Results = undefined;
+                inline for (spec.outputs, 0..) |name, i| @field(result, name) = values_out[i];
+                return result;
             }
         };
     }
