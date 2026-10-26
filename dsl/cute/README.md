@@ -101,6 +101,16 @@ layouts, including a slice such as `a[None, tidx, bidx]`. It chooses a SIMT
 copy width from the common contiguous extent and pointer alignment, up to
 256 bits. Nested layouts and swizzled pointers are not supported yet.
 
+Register fragments also support whole-fragment vector arithmetic:
+
+```zig
+frgC.store(frgA.load().add(frgB.load()));
+```
+
+`load` returns a 1D vector ordered by logical coordinates; `store` accepts a
+vector with the fragment's element type and number of elements. Both methods
+require a static register-memory layout.
+
 * **Layouts are static.** `makeLayout` takes Zig slices and emits one
   `cute.static`; the tensor keeps its shape and stride in Zig, so `dim`,
   `size` and coordinates need no MLIR queries. Coordinates are tuples of

@@ -97,11 +97,14 @@ pub const Value = struct {
     }
 
     pub fn dtype(self: Value) DType {
-        return dtypes.mlirToDType(self.kern().ctx, self.type_());
+        const ty = self.type_();
+        const element = if (ty.isA(mlir.VectorType)) |v| v.shaped().elementType() else ty;
+        return dtypes.mlirToDType(self.kern().ctx, element);
     }
 
     pub fn isFloat(self: Value) bool {
-        const t = self.type_();
+        const ty = self.type_();
+        const t = if (ty.isA(mlir.VectorType)) |v| v.shaped().elementType() else ty;
         inline for (@typeInfo(mlir.FloatTypes).@"enum".field_names) |f| {
             if (t.isA(mlir.FloatType(@field(mlir.FloatTypes, f))) != null) return true;
         }
@@ -109,7 +112,9 @@ pub const Value = struct {
     }
 
     pub fn isInt(self: Value) bool {
-        return self.type_().isA(mlir.IntegerType) != null;
+        const ty = self.type_();
+        const t = if (ty.isA(mlir.VectorType)) |v| v.shaped().elementType() else ty;
+        return t.isA(mlir.IntegerType) != null;
     }
 
     pub fn isPtr(self: Value) bool {
@@ -388,6 +393,14 @@ pub const Tensor = struct {
     pub fn value(self: Tensor) Value {
         return .{ .inner = self.inner, .kernel = self.kernel };
     }
+
+    pub fn load(self: Tensor) Value {
+        return self.view().load();
+    }
+
+    pub fn store(self: Tensor, value_: Value) void {
+        self.view().store(value_);
+    }
 };
 
 /// A CuTe tensor or pointer with a layout derived by the CuTe compiler.
@@ -410,6 +423,31 @@ pub const View = struct {
 
     pub fn set(self: View, coord: anytype, value_: Value) void {
         self.kernel.emitVoid(cute_ir.memref_store(self.kernel.ctx, self.inner, self.kernel.makeCoord(coord), value_.inner, self.kernel.loc()));
+    }
+
+    /// Load every element of a static register fragment into a 1D SSA vector.
+    pub fn load(self: View) Value {
+        const k = self.kernel;
+        const memref = self.type_().isA(cute_ir.MemRefType) orelse @panic("View.load: expected a CuTe tensor");
+        const ptr = memref.ptr_().isA(cute_ir.PtrType) orelse unreachable;
+        if (ptr.addressSpace() != .rmem) @panic("View.load: expected register memory");
+        const element = ptr.valueType() orelse @panic("View.load: untyped pointer");
+        const count = staticLayoutSize(memref.layout()) orelse @panic("View.load: expected a static layout");
+        return k.emit(cute_ir.memref_load_vec(k.ctx, self.inner, mlir.Type.vector(&.{count}, element), .{}, k.loc()));
+    }
+
+    /// Store a 1D SSA vector into every element of a static register fragment.
+    pub fn store(self: View, value_: Value) void {
+        const k = self.kernel;
+        const memref = self.type_().isA(cute_ir.MemRefType) orelse @panic("View.store: expected a CuTe tensor");
+        const ptr = memref.ptr_().isA(cute_ir.PtrType) orelse unreachable;
+        if (ptr.addressSpace() != .rmem) @panic("View.store: expected register memory");
+        const element = ptr.valueType() orelse @panic("View.store: untyped pointer");
+        const count = staticLayoutSize(memref.layout()) orelse @panic("View.store: expected a static layout");
+        const vector_type = value_.type_().isA(mlir.VectorType) orelse @panic("View.store: expected a vector");
+        if (vector_type.rank() != 1 or vector_type.dimension(0) != count or !vector_type.shaped().elementType().eql(element))
+            @panic("View.store: vector shape or element type does not match fragment");
+        k.emitVoid(cute_ir.memref_store_vec(k.ctx, value_.inner, self.inner, .{}, k.loc()));
     }
 };
 
@@ -554,6 +592,23 @@ pub const AutoVecCopyOptions = struct {
 };
 
 const FlatCopyLayout = struct { extent: i64, stride: i64 };
+
+fn staticLayoutSize(layout_type: *const mlir.Type) ?i64 {
+    const layout = layout_type.isA(cute_ir.LayoutType) orelse return null;
+    const attr = layout.attr().isA(cute_ir.LayoutAttr) orelse return null;
+    const value = attr.value();
+    const colon = std.mem.indexOfScalar(u8, value, ':') orelse return null;
+    var dims = std.mem.tokenizeAny(u8, value[0..colon], "(), ");
+    var count: i64 = 1;
+    var found = false;
+    while (dims.next()) |text_| {
+        const dim = std.fmt.parseInt(i64, text_, 10) catch return null;
+        if (dim <= 0) return null;
+        count = std.math.mul(i64, count, dim) catch return null;
+        found = true;
+    }
+    return if (found) count else null;
+}
 
 fn flatCopyLayout(layout_type: *const mlir.Type) ?FlatCopyLayout {
     const layout = layout_type.isA(cute_ir.LayoutType) orelse return null;
@@ -3058,6 +3113,45 @@ test "autovecCopy uses scalar copy for a strided source" {
     const ir = try b.finish(.{ 1, 1, 1 });
     defer std.testing.allocator.free(ir);
     try expectContains(ir, "atom.g2r<f16 copy_bits = 16>");
+}
+
+test "register fragments load add and store as vectors" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "fragment_add_kernel");
+    defer b.deinit();
+    _ = try b.declareArgs(.{});
+    const layout = b.makeLayout(&.{8}, .{});
+    const a = b.allocRmem(.f16, 16, layout);
+    const rhs = b.allocRmem(.f16, 16, layout);
+    const result = b.allocRmem(.f16, 16, layout);
+    result.store(a.load().add(rhs.load()));
+
+    const ir = try b.finish(.{ 1, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "cute.memref.load_vec");
+    try expectContains(ir, "arith.addf");
+    try expectContains(ir, "cute.memref.store_vec");
+    try expectContains(ir, "vector<8xf16>");
+}
+
+test "nested register fragment loads all logical elements" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "nested_fragment_kernel");
+    defer b.deinit();
+    _ = try b.declareArgs(.{});
+    const layout = b.staticLayout(b.layoutSpec(.{ .{ 2, 2 }, 2 }, .{ .{ 1, 2 }, 4 }));
+    const a = b.allocRmem(.f32, 16, layout);
+    const dst = b.allocRmem(.f32, 16, layout);
+    dst.store(a.load());
+
+    const ir = try b.finish(.{ 1, 1, 1 });
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, "vector<8xf32>");
+    try expectContains(ir, "cute.memref.store_vec");
 }
 
 test "guard, shared memory, sync, layouts, for loop" {
