@@ -2,10 +2,10 @@ const std = @import("std");
 
 const arith = @import("mlir/dialects/arith");
 const cf = @import("mlir/dialects/cf");
+const common = @import("dsl/common/builder");
 const cuda = @import("mlir/dialects/cuda");
 const cute_ir = @import("mlir/dialects/cute_ir");
 const cute_nvgpu = @import("mlir/dialects/cute_nvgpu");
-const dsl = @import("dsl/common/builder");
 const func = @import("mlir/dialects/func");
 const gpu = @import("mlir/dialects/gpu");
 const llvm = @import("mlir/dialects/llvm");
@@ -548,18 +548,18 @@ pub const LayoutOpts = struct {
     stride: ?[]const i64 = null,
 };
 
-pub const IfOnlyScope = dsl.IfOnlyScope(Builder, Value);
+pub const IfOnlyScope = common.IfOnlyScope(Builder, Value);
 
 pub fn IfScope(comptime N: usize) type {
-    return dsl.IfScope(Builder, Value, N);
+    return common.IfScope(Builder, Value, N);
 }
 
 pub fn ForScope(comptime N: usize) type {
-    return dsl.ForScope(Builder, Value, N);
+    return common.ForScope(Builder, Value, N);
 }
 
 pub fn WhileScope(comptime N: usize, comptime M: usize) type {
-    return dsl.WhileScope(Builder, Value, N, M);
+    return common.WhileScope(Builder, Value, N, M);
 }
 
 pub const Builder = struct {
@@ -2750,11 +2750,11 @@ pub const Builder = struct {
     }
 
     pub fn openIf(self: *Builder, cond: Value) IfOnlyScope {
-        return dsl.openIf(self, Value, cond);
+        return common.openIf(self, Value, cond);
     }
 
-    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(dsl.arity(@TypeOf(result_types), "openIfElse: result_types")) {
-        return dsl.openIfElse(self, Value, cond, result_types);
+    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(common.arity(@TypeOf(result_types), "openIfElse: result_types")) {
+        return common.openIfElse(self, Value, cond, result_types);
     }
 
     /// `for iv in range(lower, upper, step)` with loop-carried `inits`. Literal
@@ -2766,7 +2766,7 @@ pub const Builder = struct {
         upper: anytype,
         step: anytype,
         inits: anytype,
-    ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
         return self.openForOpts(lower, upper, step, inits, .{});
     }
 
@@ -2777,9 +2777,9 @@ pub const Builder = struct {
         upper: anytype,
         step: anytype,
         inits: anytype,
-        opts: dsl.ForOpts,
-    ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
-        return dsl.openFor(self, Value, dsl.forBounds(self, Value, lower, upper, step, Builder.lift), inits, opts);
+        opts: common.ForOpts,
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
+        return common.openFor(self, Value, common.forBounds(self, Value, lower, upper, step, Builder.lift), inits, opts);
     }
 
     /// `scf.while` with explicit loop-carried values. The before region sees
@@ -2790,8 +2790,8 @@ pub const Builder = struct {
         self: *Builder,
         inits: anytype,
         after_types: anytype,
-    ) WhileScope(dsl.arity(@TypeOf(inits), "openWhile: inits"), dsl.arity(@TypeOf(after_types), "openWhile: after_types")) {
-        return dsl.openWhile(self, Value, inits, after_types);
+    ) WhileScope(common.arity(@TypeOf(inits), "openWhile: inits"), common.arity(@TypeOf(after_types), "openWhile: after_types")) {
+        return common.openWhile(self, Value, inits, after_types);
     }
 
     // ==================== module ====================

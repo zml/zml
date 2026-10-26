@@ -2,14 +2,14 @@
 //! the dialect's terminators: `continue` ends a `for`/`loop` body, `yield` an
 //! `if`, `break` leaves a `loop`. An already-terminated branch is left alone.
 
+const common = @import("dsl/common/builder");
 const std = @import("std");
 const cuda_tile = @import("mlir/dialects/cuda_tile");
-const dsl = @import("dsl/common/builder");
 const mlir = @import("mlir");
 
 fn terminate(comptime ValueT: type, comptime N: usize, kernel: anytype, block: *mlir.Block, comptime mnemonic: enum { yield, continue_, break_ }, values: anytype, comptime what: []const u8) void {
     if (block.terminator() != null) return;
-    const buf = dsl.innerValues(ValueT, N, values, what);
+    const buf = common.innerValues(ValueT, N, values, what);
     const op = switch (mnemonic) {
         .yield => cuda_tile.yield(kernel.ctx, &buf, kernel.loc()),
         .continue_ => cuda_tile.continue_(kernel.ctx, &buf, kernel.loc()),

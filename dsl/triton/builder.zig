@@ -2,7 +2,7 @@ const std = @import("std");
 
 const arith = @import("mlir/dialects/arith");
 const cf = @import("mlir/dialects/cf");
-const dsl = @import("dsl/common/builder");
+const common = @import("dsl/common/builder");
 const func = @import("mlir/dialects/func");
 const llvm = @import("mlir/dialects/llvm");
 const math = @import("mlir/dialects/math");
@@ -383,7 +383,7 @@ pub const ReturnIfOpts = struct {
 };
 
 pub fn ForScope(comptime N: usize) type {
-    return dsl.ForScope(Builder, Value, N);
+    return common.ForScope(Builder, Value, N);
 }
 
 /// `if (cond) { ...; return; }`: `close` returns at the end of the body,
@@ -406,14 +406,14 @@ pub const ReturnIfScope = struct {
     }
 };
 
-pub const IfOnlyScope = dsl.IfOnlyScope(Builder, Value);
+pub const IfOnlyScope = common.IfOnlyScope(Builder, Value);
 
 pub fn IfScope(comptime N: usize) type {
-    return dsl.IfScope(Builder, Value, N);
+    return common.IfScope(Builder, Value, N);
 }
 
 pub fn WhileScope(comptime N: usize, comptime M: usize) type {
-    return dsl.WhileScope(Builder, Value, N, M);
+    return common.WhileScope(Builder, Value, N, M);
 }
 
 pub fn ReduceArgs(comptime CtxT: type) type {
@@ -503,7 +503,7 @@ pub const Builder = struct {
         };
     }
 
-    pub fn declareArgs(self: *Builder, spec: anytype) !dsl.NamedArgs(@TypeOf(spec), Value) {
+    pub fn declareArgs(self: *Builder, spec: anytype) !common.NamedArgs(@TypeOf(spec), Value) {
         return self.declareArgsOpts(spec, .{});
     }
 
@@ -511,7 +511,7 @@ pub const Builder = struct {
         self: *Builder,
         spec: anytype,
         opts: Opts,
-    ) !dsl.NamedArgs(@TypeOf(spec), Value) {
+    ) !common.NamedArgs(@TypeOf(spec), Value) {
         const Spec = @TypeOf(spec);
         const field_names = @typeInfo(Spec).@"struct".field_names;
 
@@ -542,7 +542,7 @@ pub const Builder = struct {
 
         try self.declareArgsLowOpts(&arg_specs, opts);
 
-        var named: dsl.NamedArgs(Spec, Value) = undefined;
+        var named: common.NamedArgs(Spec, Value) = undefined;
         inline for (field_names, 0..) |field_name, i| {
             @field(named, field_name) = self.arg(i);
         }
@@ -2013,7 +2013,7 @@ pub const Builder = struct {
         upper: anytype,
         step: anytype,
         inits: anytype,
-    ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
         return self.openForOpts(lower, upper, step, inits, .{});
     }
 
@@ -2024,9 +2024,9 @@ pub const Builder = struct {
         upper: anytype,
         step: anytype,
         inits: anytype,
-        opts: dsl.ForOpts,
-    ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
-        return dsl.openFor(self, Value, dsl.forBounds(self, Value, lower, upper, step, Builder.lift), inits, opts);
+        opts: common.ForOpts,
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
+        return common.openFor(self, Value, common.forBounds(self, Value, lower, upper, step, Builder.lift), inits, opts);
     }
 
     pub fn returnIf(self: *Builder, cond: Value) void {
@@ -2096,19 +2096,19 @@ pub const Builder = struct {
     }
 
     pub fn openIf(self: *Builder, cond: Value) IfOnlyScope {
-        return dsl.openIf(self, Value, cond);
+        return common.openIf(self, Value, cond);
     }
 
-    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(dsl.arity(@TypeOf(result_types), "openIfElse: result_types")) {
-        return dsl.openIfElse(self, Value, cond, result_types);
+    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(common.arity(@TypeOf(result_types), "openIfElse: result_types")) {
+        return common.openIfElse(self, Value, cond, result_types);
     }
 
     pub fn openWhile(
         self: *Builder,
         inits: anytype,
         after_types: anytype,
-    ) WhileScope(dsl.arity(@TypeOf(inits), "openWhile: inits"), dsl.arity(@TypeOf(after_types), "openWhile: after_types")) {
-        return dsl.openWhile(self, Value, inits, after_types);
+    ) WhileScope(common.arity(@TypeOf(inits), "openWhile: inits"), common.arity(@TypeOf(after_types), "openWhile: after_types")) {
+        return common.openWhile(self, Value, inits, after_types);
     }
 
     // ==================== finalization ====================

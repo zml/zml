@@ -1,7 +1,7 @@
 const std = @import("std");
 
+const common = @import("dsl/common/builder");
 const cuda_tile = @import("mlir/dialects/cuda_tile");
-const dsl = @import("dsl/common/builder");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
@@ -510,11 +510,11 @@ pub const Builder = struct {
         };
     }
 
-    pub fn declareArgs(self: *Builder, spec: anytype) !dsl.NamedArgs(@TypeOf(spec), Value) {
+    pub fn declareArgs(self: *Builder, spec: anytype) !common.NamedArgs(@TypeOf(spec), Value) {
         return self.declareArgsOpts(spec, .{});
     }
 
-    pub fn declareArgsOpts(self: *Builder, spec: anytype, opts: Opts) !dsl.NamedArgs(@TypeOf(spec), Value) {
+    pub fn declareArgsOpts(self: *Builder, spec: anytype, opts: Opts) !common.NamedArgs(@TypeOf(spec), Value) {
         const Spec = @TypeOf(spec);
         const field_names = @typeInfo(Spec).@"struct".field_names;
 
@@ -538,7 +538,7 @@ pub const Builder = struct {
 
         try self.declareArgsLowOpts(&arg_specs, opts);
 
-        var named: dsl.NamedArgs(Spec, Value) = undefined;
+        var named: common.NamedArgs(Spec, Value) = undefined;
         inline for (0.., field_names) |i, field_name| {
             @field(named, field_name) = self.arg(i);
         }
@@ -1656,7 +1656,7 @@ pub const Builder = struct {
         upper: anytype,
         step: anytype,
         inits: anytype,
-    ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
         return self.openForOpts(lower, upper, step, inits, .{});
     }
 
@@ -1668,12 +1668,12 @@ pub const Builder = struct {
         step: anytype,
         inits: anytype,
         opts: ForOpts,
-    ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
-        const N = comptime dsl.arity(@TypeOf(inits), "openFor: inits");
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
+        const N = comptime common.arity(@TypeOf(inits), "openFor: inits");
 
         // Literals take the type of the first bound that is a Value, else
         // `i32`; all three must agree (`AllTypesMatch` on the op).
-        const lb_v, const ub_v, const step_v = dsl.forBounds(self, Value, lower, upper, step, i32Bound);
+        const lb_v, const ub_v, const step_v = common.forBounds(self, Value, lower, upper, step, i32Bound);
 
         var block_types: [N + 1]*const mlir.Type = undefined;
         block_types[0] = lb_v.type_();
@@ -1709,7 +1709,7 @@ pub const Builder = struct {
         return .{ .kernel = self, .cond_inner = cond.inner, .then_block = then_block };
     }
 
-    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(dsl.arity(@TypeOf(result_types), "openIfElse: result_types")) {
+    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(common.arity(@TypeOf(result_types), "openIfElse: result_types")) {
         const then_block = mlir.Block.init(&.{}, &.{});
         const else_block = mlir.Block.init(&.{}, &.{});
         self.pushBlock(then_block);
@@ -1718,15 +1718,15 @@ pub const Builder = struct {
             .cond_inner = cond.inner,
             .then_block = then_block,
             .else_block = else_block,
-            .result_types = dsl.resultTypes(self, Value, result_types, "openIfElse: result_types"),
+            .result_types = common.resultTypes(self, Value, result_types, "openIfElse: result_types"),
         };
     }
 
     /// An unstructured loop carrying `inits` (`scope.close()` ends a body that
     /// carries nothing, in place of `scope.yield`); leave with `scope.breakWith`
     /// inside an `if`, and close the body with `scope.yield`.
-    pub fn openLoop(self: *Builder, inits: anytype) LoopScope(dsl.arity(@TypeOf(inits), "openLoop: inits")) {
-        const N = comptime dsl.arity(@TypeOf(inits), "openLoop: inits");
+    pub fn openLoop(self: *Builder, inits: anytype) LoopScope(common.arity(@TypeOf(inits), "openLoop: inits")) {
+        const N = comptime common.arity(@TypeOf(inits), "openLoop: inits");
         var block_types: [N]*const mlir.Type = undefined;
         var inits_inner: [N]*const mlir.Value = undefined;
         inline for (0..N) |i| {
