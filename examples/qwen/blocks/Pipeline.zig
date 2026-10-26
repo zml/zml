@@ -69,7 +69,7 @@ pub fn run_once(
     defer tokenized.deinit(self.allocator);
 
     var scheduler = Scheduler{
-        .num_train_steps = @floatFromInt(params.compile_args.num_inference_steps),
+        .num_train_steps = @intCast(params.compile_args.num_inference_steps),
         .base_seq_len = @floatFromInt(params.compile_args.base_image_seq_len orelse 256),
         .max_seq_len = @floatFromInt(params.compile_args.max_image_seq_len orelse 4096),
         .base_shift = params.compile_args.base_shift orelse 0.5,
@@ -77,7 +77,6 @@ pub fn run_once(
     };
     const timesteps = try scheduler.init_timesteps(
         self.allocator,
-        @intCast(params.compile_args.num_inference_steps),
         @floatFromInt(params.compile_args.head_dim * params.compile_args.head_dim),
     );
     defer scheduler.deinit(self.allocator);

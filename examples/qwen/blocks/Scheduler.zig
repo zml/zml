@@ -4,7 +4,7 @@ const Tensor = zml.Tensor;
 
 pub const FlowMatchEulerScheduler = @This();
 
-num_train_steps: f32,
+num_train_steps: usize,
 num_train_timesteps: f32 = 1000.0,
 shift: f32 = 1.0,
 shift_terminal: f32 = 0.02,
@@ -22,20 +22,23 @@ pub fn deinit(self: *FlowMatchEulerScheduler, allocator: std.mem.Allocator) void
     allocator.free(self.sigmas);
 }
 
-pub fn init_timesteps(self: *FlowMatchEulerScheduler, allocator: std.mem.Allocator, steps: usize, latent_size: f32) ![]f32 {
+pub fn init_timesteps(self: *FlowMatchEulerScheduler, allocator: std.mem.Allocator, latent_size: f32) ![]f32 {
+    const steps = self.num_train_steps;
     const mu = self.calculate_shift(latent_size);
 
-    var sigmas = try allocator.alloc(f32, steps + 1);
+    var sigmas = try allocator.alloc(f32, steps);
     for (0..steps) |i| {
         sigmas[i] = 1.0 - 1.0 / @as(f32, @floatFromInt(steps)) * @as(f32, @floatFromInt(i));
     }
-    time_shift(mu, sigmas[0..steps]);
-    stretch_shift_to_terminal(self.shift_terminal, sigmas[0..steps]);
-    sigmas[steps] = 0;
 
-    const timesteps = try allocator.alloc(f32, steps);
+    const timesteps = try allocator.alloc(f32, steps); // + 1
+    @memcpy(timesteps[0..steps], sigmas);
+    time_shift(mu, timesteps[0..steps]);
+    stretch_shift_to_terminal(self.shift_terminal, timesteps[0..steps]);
+    // timesteps[steps] = 0;
+
     for (0..steps) |i| {
-        timesteps[i] = sigmas[i] * self.num_train_timesteps;
+        timesteps[i] = timesteps[i] * self.num_train_timesteps;
     }
 
     self.sigmas = sigmas;
@@ -86,5 +89,21 @@ fn stretch_shift_to_terminal(shift_terminal: f32, sigmas: []f32) void {
     const scale_factor = (1 - sigmas[sigmas.len - 1]) / (1 - shift_terminal);
     for (sigmas) |*s| {
         s.* = 1 - ((1 - s.*) / scale_factor);
+    }
+}
+
+test "sigmas 4" {
+    var scheduler = FlowMatchEulerScheduler{ .num_train_steps = 4 };
+    _ = try scheduler.init_timesteps(std.testing.allocator, 128 * 128);
+    defer scheduler.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 0.75, 0.5, 0.25 }, scheduler.sigmas);
+}
+
+test "init_timesteps 4" {
+    var scheduler = FlowMatchEulerScheduler{ .num_train_steps = 4 };
+    _ = try scheduler.init_timesteps(std.testing.allocator, 128 * 128);
+    defer scheduler.deinit(std.testing.allocator);
+    for (&[_]f32{ 1000.0000, 819.4198, 534.8256, 20.0000 }, scheduler.timesteps) |a, b| {
+        try std.testing.expectApproxEqRel(a, b, 1e-3);
     }
 }
