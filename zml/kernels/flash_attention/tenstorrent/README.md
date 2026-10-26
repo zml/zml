@@ -90,6 +90,15 @@ focused BF16/BF8 trace/cache/donation regressions pass with this layout. A separ
 BF16 trace execution profile measured 228.343 ms for first decode and 36.801 ms
 median steady calls, versus 38.737 ms before this change.
 
+XLA also guards TT-MLIR's in-place cache lowering: only private partial slices
+may be mutated, while shared cache values and input buffers keep functional
+scatter semantics. A regression returns both the original and updated cache,
+checking preservation with donation enabled and disabled and with trace replay.
+All seven default single-card suites pass. The BF16 counting run after this fix
+measured 2.912 seconds / 25.1 tokens/s with all 488 kernels cached, close to the
+25.2 result above. BF8 repeated correctly at 2.168 seconds / 33.7 tokens/s
+with 501/501 kernel-cache hits.
+
 At initial integration, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
 decoding completed in 4.489 seconds (16.3 tokens/s), versus 4.778 seconds
 (15.3 tokens/s) for StableHLO attention on the same build. Both runs produced the
