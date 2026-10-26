@@ -147,20 +147,34 @@ test "two-card tensor-parallel matmul and donated shards" {
     for (try indices.getValue([32]i32, io)) |index| try std.testing.expectEqual(@as(i32, 32), index);
 }
 
-fn checkDecodeAttention(comptime batch: usize, comptime heads: usize, comptime kv_heads: usize, comptime dim: usize, comptime seq: usize) !void {
+fn checkDecodeAttention(comptime batch: usize, comptime heads: usize, comptime kv_heads: usize, comptime dim: usize, comptime seq: usize, comptime mesh_execution: bool) !void {
     if (comptime !zml.Target.tenstorrent.isEnabled()) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    const platform = try zml.Platform.init(allocator, io, .tenstorrent, .{});
+    const platform = try zml.Platform.init(allocator, io, .tenstorrent, .{ .tenstorrent = .{ .device_index = if (mesh_execution) null else 0 } });
     defer platform.deinit(allocator, io);
     const bf16 = zml.DataType.bf16.toZigType();
-    const q: zml.Tensor = if (batch == 1) .init(.{ .q = 1, .h = heads, .hd = dim }, .bf16) else .init(.{ .b = batch, .q = 1, .h = heads, .hd = dim }, .bf16);
-    const k: zml.Tensor = if (batch == 1) .init(.{ .k = seq, .h = kv_heads, .hd = dim }, .bf16) else .init(.{ .b = batch, .k = seq, .h = kv_heads, .hd = dim }, .bf16);
-    const v: zml.Tensor = .init(k.shape(), .bf16);
+    var q: zml.Tensor = if (batch == 1) .init(.{ .q = 1, .h = heads, .hd = dim }, .bf16) else .init(.{ .b = batch, .q = 1, .h = heads, .hd = dim }, .bf16);
+    var k: zml.Tensor = if (batch == 1) .init(.{ .k = seq, .h = kv_heads, .hd = dim }, .bf16) else .init(.{ .b = batch, .k = seq, .h = kv_heads, .hd = dim }, .bf16);
+    var v: zml.Tensor = .init(k.shape(), .bf16);
+    if (mesh_execution) {
+        const mesh = try platform.registerMesh("attention_heads", .mesh(.{ .model = .high_bandwidth }));
+        q = q.withPartitioning(mesh, .{ .h = .model });
+        k = k.withPartitioning(mesh, .{ .h = .model });
+        v = v.withPartitioning(mesh, .{ .h = .model });
+    }
     const pos: zml.Tensor = if (batch == 1) .init(.{}, .u32) else .init(.{ .b = batch }, .u32);
     const metadata: zml.attention.Metadata = .{ .flash_attention = .{ .tenstorrent = {} } };
     const parameters: zml.attention.Parameters = .{ .flash_attention = .{ .tenstorrent = {} } };
-    const exe = try platform.compileFn(allocator, io, zml.attention.attention, .{ q, k, v, pos, metadata, parameters }, .{});
+    const Attention = struct {
+        fn run(query: zml.Tensor, key: zml.Tensor, value: zml.Tensor, position: zml.Tensor, meta: zml.attention.Metadata, params: zml.attention.Parameters) zml.Tensor {
+            // Elementwise results leave shard dimensions open, as do Llama's
+            // cache slices. The round trip preserves these BF16 values exactly.
+            const computed_key = if (batch > 1) key.convert(.f32).convert(.bf16) else key;
+            return zml.attention.attention(query, computed_key, value, position, meta, params);
+        }
+    };
+    const exe = try platform.compileFn(allocator, io, Attention.run, .{ q, k, v, pos, metadata, parameters }, .{ .meshes = platform.meshes.values() });
     defer exe.deinit();
     var q_data: [batch * heads * dim]bf16 = undefined;
     var k_data: [batch * seq * kv_heads * dim]bf16 = undefined;
@@ -218,8 +232,14 @@ fn checkDecodeAttention(comptime batch: usize, comptime heads: usize, comptime k
 }
 
 test "TTIR decode attention matches scalar causal GQA" {
-    try checkDecodeAttention(1, 32, 8, 128, 128);
-    try checkDecodeAttention(1, 32, 8, 128, 1024);
-    try checkDecodeAttention(2, 16, 4, 64, 128);
-    try checkDecodeAttention(1, 24, 4, 256, 128);
+    try checkDecodeAttention(1, 32, 8, 128, 128, false);
+    try checkDecodeAttention(1, 32, 8, 128, 1024, false);
+    try checkDecodeAttention(2, 16, 4, 64, 128, false);
+    try checkDecodeAttention(1, 24, 4, 256, 128, false);
+}
+
+test "two-card TTIR attention preserves GQA head partitions" {
+    try checkDecodeAttention(1, 32, 8, 128, 128, true);
+    try checkDecodeAttention(2, 16, 4, 64, 1024, true);
+    try checkDecodeAttention(1, 24, 4, 256, 128, true);
 }
