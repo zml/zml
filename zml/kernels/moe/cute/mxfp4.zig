@@ -167,8 +167,8 @@ fn groupedQuantizeKernel(b: *B, cfg: GroupedQuantConfig) cute.FinishError!void {
             .add(row_in_group.div(32).mul(4))
             .add(scale_col.rem(4));
         a.s.set(.{ scale_row, swizzled_col }, exponent.to(.i8));
-        leader.yieldThen(.{});
-        if (scheduled) |*s| s.yieldThen(.{});
+        leader.close();
+        if (scheduled) |*s| s.close();
     }
     // Only now are the rows this CTA owns complete: release the persistent
     // GEMM, which waits on this signal before its first TMA read.
@@ -231,7 +231,7 @@ fn combineKernel(b: *B, cfg: CombineConfig) cute.FinishError!void {
         const low_bits = low.to(.bf16).to(.f32).bitCast(.i32).shrLogical(16);
         const high_bits = high.to(.bf16).to(.f32).bitCast(.i32).bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000))));
         a.y.set(.{ token, pair }, low_bits.bitOr(high_bits));
-        in_bounds.yieldThen(.{});
+        in_bounds.close();
     }
     b.launchDependents();
 }

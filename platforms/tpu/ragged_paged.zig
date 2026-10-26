@@ -551,9 +551,9 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
         {
             var nonempty = k.openIf(k.cmpi(.slt, first_seq_idx, num_seqs));
             createKvAsyncCopyDescriptors(k, cfg, a, a.heads_blk_idx, first_seq_idx, k.lift(@as(i32, 0)), init_buf_idx);
-            nonempty.yieldThen(.{});
+            nonempty.close();
         }
-        i.yieldThen(.{});
+        i.close();
     }
 
     // Empty rows skip flashAttention, so their accumulator must already be zero.
@@ -617,7 +617,7 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
             {
                 var ii = k.openIf(k.cmpi(.slt, next_heads_blk_idx, k.lift(@as(i32, @intCast(cfg.numHeadsBlks())))));
                 createKvAsyncCopyDescriptors(k, cfg, a, next_heads_blk_idx, next_seq_idx, next_kv_blk, next_buf);
-                ii.yieldThen(.{});
+                ii.close();
             }
 
             waitKvDma(k, cfg, a, a.heads_blk_idx, cur_seq_idx, kv_blk, cur_buf);

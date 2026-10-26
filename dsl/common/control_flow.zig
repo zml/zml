@@ -52,6 +52,16 @@ pub fn ForScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usiz
         const Self = @This();
 
         pub fn yield(self: *Self, values: anytype) void {
+            if (N == 0) @compileError("ForScope.yield: the loop carries nothing, end it with close()");
+            self.end(values);
+        }
+
+        pub fn close(self: *Self) void {
+            if (N != 0) @compileError("ForScope.close: the loop carries values, end it with yield()");
+            self.end(.{});
+        }
+
+        fn end(self: *Self, values: anytype) void {
             const k = self.kernel;
             emitScfYield(ValueT, k, self.body, N, values, "ForScope.yield");
             k.popBlock();
@@ -79,9 +89,9 @@ pub fn IfOnlyScope(comptime BuilderT: type, comptime ValueT: type) type {
 
         const Self = @This();
 
-        pub fn yieldThen(self: *Self, values: anytype) void {
+        pub fn close(self: *Self) void {
             const k = self.kernel;
-            emitScfYield(ValueT, k, self.then_block, 0, values, "IfOnlyScope.yieldThen");
+            emitScfYield(ValueT, k, self.then_block, 0, .{}, "IfOnlyScope.close");
             k.popBlock();
             const if_op = scf.if_(k.ctx, self.cond_inner, &.{}, self.then_block, .{}, k.loc());
             _ = if_op.appendTo(k.currentBlock());
@@ -101,13 +111,33 @@ pub fn IfScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usize
         const Self = @This();
 
         pub fn yieldThen(self: *Self, values: anytype) void {
+            if (N == 0) @compileError("IfScope.yieldThen: the if has no results, switch branches with elseBranch()");
+            self.endThen(values);
+        }
+
+        pub fn yieldElse(self: *Self, values: anytype) void {
+            if (N == 0) @compileError("IfScope.yieldElse: the if has no results, end it with close()");
+            self.endElse(values);
+        }
+
+        pub fn elseBranch(self: *Self) void {
+            if (N != 0) @compileError("IfScope.elseBranch: the if has results, switch branches with yieldThen()");
+            self.endThen(.{});
+        }
+
+        pub fn close(self: *Self) void {
+            if (N != 0) @compileError("IfScope.close: the if has results, end it with yieldElse()");
+            self.endElse(.{});
+        }
+
+        fn endThen(self: *Self, values: anytype) void {
             const k = self.kernel;
             emitScfYield(ValueT, k, self.then_block, N, values, "IfScope.yieldThen");
             k.popBlock();
             k.pushBlock(self.else_block);
         }
 
-        pub fn yieldElse(self: *Self, values: anytype) void {
+        fn endElse(self: *Self, values: anytype) void {
             const k = self.kernel;
             emitScfYield(ValueT, k, self.else_block, N, values, "IfScope.yieldElse");
             k.popBlock();

@@ -694,7 +694,7 @@ pub const MoeAlignBlockSize = struct {
                     b.splat(numel, &.{hist_block}),
                     .{ .mask = mask },
                 );
-                fill_loop.yield(.{});
+                fill_loop.close();
             }
             fill_branch.yieldReturn(.{});
         }
@@ -742,7 +742,7 @@ pub const MoeAlignBlockSize = struct {
             const block_ids = starts.div(block_size_m).add(scatter.iv);
             const mask = expert_mask.bitAnd(block_counts.gt(scatter.iv));
             b.storeOpts(a.expert_ids_ptr.addPtr(block_ids), expert_offs, .{ .mask = mask });
-            scatter.yield(.{});
+            scatter.close();
         }
     }
 };
@@ -1001,7 +1001,7 @@ pub const Schedule = struct {
         const starts = ts.cumsum().sub(ts);
         var first = b.openIf(b.programId(.x).eq(0));
         b.store(a.sched.addPtr(2 * nt), ts.sum());
-        first.yieldThen(.{});
+        first.close();
         const live = p.lt(cfg.tokens * cfg.topk).bitAnd(e.ge(0)).bitAnd(e.lt(cfg.experts));
         const safe = e.maximum(0).minimum(pow2(cfg.experts) - 1);
         const pos = ld(b, a.pos.addPtr(p), live, .i32, 0);
@@ -1169,5 +1169,5 @@ fn gemm(b: *Builder, c: GemmConfig, comptime projection: Projection) tri.FinishE
         const scale_cols = block.mul(@divExact(columns, 32)).add(ar(b, @divExact(columns, 32)));
         b.store(a.ms.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(@divTrunc(c.intermediate, 32)).add(scale_cols.expandDims(0))), q.s);
     } else b.store(a.d.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(c.hidden).add(m.expandDims(0))), acc);
-    live.yieldThen(.{});
+    live.close();
 }

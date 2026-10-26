@@ -82,8 +82,8 @@ pub const Align = struct {
         var fill = b.openIfElse(b.blockId(.x).cmp(.ne, 0), .{});
         var positions = b.openFor(tid64, cfg.capacity, 512, .{});
         args.sorted_token_ids.set(positions.iv, b.constant(.i32, cfg.routes));
-        positions.yield(.{});
-        fill.yieldThen(.{});
+        positions.close();
+        fill.elseBranch();
 
         counts.set(tid, zero);
         b.barrier();
@@ -91,8 +91,8 @@ pub const Align = struct {
         const id = args.ids.at(routes.iv);
         var valid_id = b.openIf(id.cmp(.ge, 0).bitAnd(id.cmp(.lt, cfg.experts)));
         _ = b.ptrAtomicAdd(counts.emitIter().addOffset(id), one, .workgroup);
-        valid_id.yieldThen(.{});
-        routes.yield(.{});
+        valid_id.close();
+        routes.close();
         b.barrier();
 
         const padded = counts.at(tid).add(cfg.padding).divUnsigned(cfg.block_size).mul(cfg.block_size);
@@ -105,7 +105,7 @@ pub const Align = struct {
         }
         var last_lane = b.openIf(lane.cmp(.eq, 63));
         waves.set(wave, prefix);
-        last_lane.yieldThen(.{});
+        last_lane.close();
         b.barrier();
 
         var sums = b.openFor(zero, 8, 1, .{ zero, zero });
@@ -118,11 +118,11 @@ pub const Align = struct {
         ends.set(tid, end);
         var has_expert = b.openIf(tid.cmpUnsigned(.lt, cfg.experts));
         args.cumsum.set(tid64, start);
-        has_expert.yieldThen(.{});
+        has_expert.close();
         var first = b.openIf(tid.cmp(.eq, 0));
         args.cumsum.set(b.constant(.i64, cfg.experts), sums.results[1]);
         args.num_tokens_post_pad.set(b.constant(.i64, 0), sums.results[1]);
-        first.yieldThen(.{});
+        first.close();
         b.barrier();
 
         var blocks = b.openFor(tid64, cfg.blocks, 512, .{});
@@ -139,8 +139,8 @@ pub const Align = struct {
         block_expert.yieldThen(.{bounds.results[0]});
         block_expert.yieldElse(.{b.constant(.i32, -1)});
         args.expert_ids.set(blocks.iv, block_expert.results[0]);
-        blocks.yield(.{});
-        fill.yieldElse(.{});
+        blocks.close();
+        fill.close();
     }
 };
 
@@ -197,8 +197,8 @@ pub const Sort = struct {
         const cursor = args.cumsum.emitIter().addOffset(id.to(.i64));
         const rank = b.ptrAtomicAdd(cursor, b.constant(.i32, 1), .agent);
         args.sorted_token_ids.set(rank.to(.i64), routes.iv.to(.i32));
-        valid.yieldThen(.{});
-        routes.yield(.{});
+        valid.close();
+        routes.close();
     }
 };
 
@@ -449,8 +449,8 @@ pub const Mfma = struct {
         inline for (0..4) |i| {
             storeRow(b, args.output, args.sorted, block_m, route_start, k_lane.mul(4).add(i + 16), out_n, sums.results[1].extract(i), cfg);
         }
-        store_second.yieldThen(.{});
-        block.yieldThen(.{});
+        store_second.close();
+        block.close();
     }
 
     fn routeForRow(b: *Builder, sorted: Value, block: Value, start: Value, row: Value, naive: bool) Value {
@@ -461,7 +461,7 @@ pub const Mfma = struct {
         const route = routeForRow(b, sorted, block, start, row, cfg.naive != 0);
         var valid = b.openIf(route.cmp(.ge, 0).bitAnd(route.cmp(.lt, cfg.routes)));
         output.set(.{ route.to(.i64), col }, value.to(.bf16));
-        valid.yieldThen(.{});
+        valid.close();
     }
 
     fn vectorView(tensor: Value, offset: Value, comptime n: i64) Value {
@@ -492,7 +492,7 @@ pub const Mfma = struct {
             self.storeActivation(b, self.a_base, self.a_valid, k, self.a_store.add(write_base));
             var second = b.openIf(self.second_active);
             self.storeActivation(b, self.a_base_g1, self.a_valid_g1, k, self.a_store.add(write_base).add(2048));
-            second.yieldThen(.{});
+            second.close();
             const offset = self.b_base.add(k.divUnsigned(8)).add(self.k_lane.mul(4));
             const words = b.copyAtomLoad(self.load_b, vectorView(self.weight, offset, 4));
             const byte = self.scales.at(.{ self.expert, self.out_n, k.divUnsigned(32).add(self.k_lane) });
@@ -655,7 +655,7 @@ const Gemv = struct {
         sum.yieldElse(.{fzero});
         var store = b.openIf(lane.cmp(.eq, 0).bitAnd(inrow));
         args.output.set(.{ route, row }, sum.results[0].to(.bf16));
-        store.yieldThen(.{});
+        store.close();
     }
 
     fn decodeScale(b: *Builder, byte: Value) Value {

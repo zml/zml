@@ -741,7 +741,8 @@ closure for `combine` and give you full control.
 SCF regions are built with **scope-based** builders — `b.openFor(...)`,
 `b.openIf(...)` / `b.openIfElse(...)`, `b.openWhile(...)` return a typed scope
 value. You emit body ops into a bare `{}` block, terminate with `yield` /
-`yieldThen` / `yieldAfter`, and read results from `scope.results` afterward.
+`yieldThen` / `yieldAfter` (or `close()` for a scope without values), and read
+results from `scope.results` afterward.
 No `ctx` struct, no function literal, no `kk`/`k` split — lexical scope
 carries captures because everything runs in the same function.
 
@@ -766,7 +767,7 @@ const total = loop.results[0];
 - `inits` is a tuple literal `.{v1, v2, ...}`. Arity is comptime — `carried`,
   `results`, and the `yield(...)` call are all fixed-size arrays of the same
   length.
-- Empty loops: `b.openFor(0, N, S, .{})` + `loop.yield(.{})` (no iter_args).
+- Empty loops: `b.openFor(0, N, S, .{})` + `loop.close()` (no iter_args).
 
 ### `openIf` — scf.if without else (side-effects only)
 
@@ -774,11 +775,11 @@ const total = loop.results[0];
 var i = b.openIf(cond);
 {
     // then body
-    i.yieldThen(.{});   // closes scope, builds scf.if with empty else
+    i.close();   // closes scope, builds scf.if with empty else
 }
 ```
 
-Use for conditional side-effects (no results). There is no `yieldElse` — the
+Use for conditional side-effects (no results). There is no else branch — the
 else block is auto-built empty.
 
 ### `openIfElse` — scf.if with else and optional results
@@ -798,7 +799,7 @@ const r = i.results[0];
 
 - `result_types` is a tuple of `*const mlir.Type` — use `b.scalarTy(dtype)` or
   `b.tensorTy(shape, dtype)`. Pass `.{}` for an if/else with no results but
-  distinct then/else bodies.
+  distinct then/else bodies, then end them with `elseBranch()` and `close()`.
 - `yieldThen` swaps to the else block; `yieldElse` builds the `scf.if` op.
 - Both branches must yield arity-matching tuples.
 
@@ -908,7 +909,7 @@ Same restrictions as `returnIf`: top-level `tt.func` body only.
 |----------------------------------------|-------|---------------------------------|
 | `if cond: return`                      | `cf`  | `b.returnIf(cond, .{})`         |
 | `if cond: <side-effects>; return`      | `cf`  | `var s = b.openReturnIf(cond); {...; s.yieldReturn(.{})}` |
-| `if cond: <side-effects>`              | `scf` | `b.openIf(cond) {...; yieldThen(.{})}` |
+| `if cond: <side-effects>`              | `scf` | `b.openIf(cond) {...; close()}` |
 | `if cond: x=A else: x=B` (value-carrying) | `scf` | `b.openIfElse(cond, .{ty}) {...; yieldThen(.{a})} {...; yieldElse(.{b})}` |
 | `for i in range(...)`                  | `scf` | `b.openFor(lo, hi, step, .{inits})` |
 | `while cond:`                          | `scf` | `b.openWhile(.{inits}, .{after_types})` |
@@ -935,7 +936,8 @@ built-in reductions cover the common cases.
 - Scopes stack naturally: `openFor { openIf { openFor { ... } } }` all just
   push/pop the kernel's current-block stack (same for `openIfElse` /
   `openWhile`).
-- Empty yields are legal: `loop.yield(.{})`, `i.yieldThen(.{})`, etc.
+- Scopes without values end with `close()`: `loop.close()`, `i.close()`, and
+  `elseBranch()` then `close()` for an if/else.
 - After any `yield*`, the scope's `.results` field holds the scf op's results
   as a `[N]Value`.
 
@@ -1078,7 +1080,7 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
 | `tl.extern_elementwise(...)`                  | `b.externElementwise(srcs, shape, dtype, lib, path, sym)`          |
 | `for i in range(0, N, S): ...`                | `var loop = b.openFor(0, N, S, .{inits...}); { ...; loop.yield(.{...}); }`                 |
 | `while cond: ...`                             | `var w = b.openWhile(.{inits}, .{after_types}); { ...; w.yieldBefore(cond, .{...}); }; { ...; w.yieldAfter(.{...}); }` |
-| `if cond: ...` (side-effects, no else)        | `var i = b.openIf(cond); { ...; i.yieldThen(.{}); }`                                         |
+| `if cond: ...` (side-effects, no else)        | `var i = b.openIf(cond); { ...; i.close(); }`                                                |
 | `if cond: ... else: ...`                      | `var i = b.openIfElse(cond, .{result_types}); { ...; i.yieldThen(.{...}); }; { ...; i.yieldElse(.{...}); }` |
 | `if cond: return` (early exit)                | `b.returnIf(cond, .{});` — emits `cf.cond_br` + `tt.return`, continues in fall-through block (add `b.returnIfOpts(cond, .{}, .{ .inline_return = true })` when matching a Python source that has literal `return`s) |
 | `if cond: <stores>; return` (early exit, with side-effects) | `var s = b.openReturnIf(cond); { ...; s.yieldReturn(.{}); }` — single `cf.cond_br`; body emits into `^ret` before the `tt.return` (set `s.inline_return = true` to match, alongside `returnIfOpts`) |
@@ -1126,5 +1128,5 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
    `yieldAfter`) with a tuple of Values matching the scope's declared arity.
    Scopes with results (`openFor`, `openIfElse`, `openWhile`) store the scf
    op's results in `scope.results` as a fixed-size `[N]Value` array. `openIf`
-   has no results — `yieldThen(.{})` closes and builds scf.if with an empty
+   has no results — `close()` closes and builds scf.if with an empty
    else block in one step.

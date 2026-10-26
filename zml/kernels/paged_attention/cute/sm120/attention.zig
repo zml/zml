@@ -163,7 +163,7 @@ const TileContext = struct {
                     const offset = base.add(row.to(.i64).mul(c.kv_heads * c.head_dim)).add(col.to(.i64));
                     b.cpAsync16(t.shared.add(c.kvBase()).add(swizzle(pages.iv.add(row), col, c.head_dim)), source.add(offset.mul(2)), first_key.add(row).lt(t.klen));
                 }
-                pages.yield(.{});
+                pages.close();
             }
             return;
         }
@@ -177,7 +177,7 @@ const TileContext = struct {
             const page = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(safe_key.div(c.page_size)));
             const offset = page.to(.i64).mul(c.page_size).add(safe_key.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(col.to(.i64));
             b.cpAsync16(t.shared.add(c.kvBase()).add(swizzle(row, col, c.head_dim)), source.add(offset.mul(2)), valid);
-            copy.yield(.{});
+            copy.close();
         }
     }
 
@@ -189,7 +189,7 @@ const TileContext = struct {
         var leader = b.openIf(t.lane.rem(4).eq(0));
         {
             b.storeWords(1, address, .shared, .{v.bitCast(.i32)});
-            leader.yieldThen(.{});
+            leader.close();
         }
         // Callers synchronize once both row halves have been published.
     }
@@ -270,7 +270,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             const token = start.add(b.select(valid, packed_row.div(c.group), b.cst(.i32, 0)));
             const offset = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(packed_row.rem(c.group).to(.i64)).mul(d).add(col.to(.i64));
             b.cpAsync16(t.shared.add(swizzle(row, col, d)), t.q.add(offset.mul(2)), valid);
-            copy_q.yield(.{});
+            copy_q.close();
         }
         const first_pos = t.klen.sub(qlen).add(first_row.div(c.group));
         const last_pos = t.klen.sub(qlen).add(first_row.add(c.rows() - 1).div(c.group).minimum(qlen.sub(1)));
@@ -404,13 +404,13 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
                     {
                         t.store(row, b.cst(.i32, d), m);
                         t.store(row, b.cst(.i32, d + 1), l);
-                        leader.yieldThen(.{});
+                        leader.close();
                     }
                 }
-                valid.yieldThen(.{});
+                valid.close();
             }
         }
-        active.yieldThen(.{});
+        active.close();
     }
 }
 
@@ -450,8 +450,8 @@ fn merge(b: *B, c: Config) cute.FinishError!void {
                 });
             }
             a.out.set(.{ token, head, dims.iv }, sum.results[0].mul(b.select(sum.results[1].gt(0), b.rcpApprox(sum.results[1]), zero)).to(c.dtype));
-            dims.yield(.{});
+            dims.close();
         }
-        valid.yieldThen(.{});
+        valid.close();
     }
 }

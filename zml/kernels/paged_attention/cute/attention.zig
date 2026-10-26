@@ -118,6 +118,6 @@ fn runDim(b: *cute.Builder, c: Config, comptime chunks: usize) cute.FinishError!
         }
         const norm = b.select(keys.results[1].gt(0), b.rcpApprox(keys.results[1]), zero);
         for (0..chunks) |i| a.out.set(.{ token, head, lane.add(i * 32) }, keys.results[i + 2].mul(norm).to(c.dtype));
-        active.yieldThen(.{});
+        active.close();
     }
 }

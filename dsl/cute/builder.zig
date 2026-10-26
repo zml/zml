@@ -2340,7 +2340,7 @@ pub const Builder = struct {
         const ready = self.mbarrierWaitParity(barrier, phase);
         var pending = self.openIf(ready.eq(false));
         self.mbarrierTryWaitParity(barrier, phase, 10_000_000);
-        pending.yieldThen(.{});
+        pending.close();
     }
 
     /// Make mbarrier initialization visible to the async proxy (SM90+).
@@ -2933,7 +2933,7 @@ test "guard, shared memory, sync, layouts, for loop" {
     var acc = b.openFor(0, 4, 1, .{b.cst(.f32, 0.0)});
     acc.yield(.{acc.carried[0].add(smem.get(.{j}).mul(acc.iv.to(.f32)))});
     a.out.set(.{i}, acc.results[0]);
-    guard.yieldThen(.{});
+    guard.close();
 
     const kernel = try b.finish(.{ 128, 1, 1 });
     defer std.testing.allocator.free(kernel);

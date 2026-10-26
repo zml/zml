@@ -256,13 +256,13 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
             }
             b.mbarrierInit(shared.add(c.completion()), 1);
             b.fenceMbarrierInit();
-            leader.yieldThen(.{});
+            leader.close();
         }
         var alloc = b.openIf(tid.lt(32));
         {
             b.tmemAllocAt(shared.add(c.holder()), c.columns());
             b.relinquishTmemAllocPermit(.{});
-            alloc.yieldThen(.{});
+            alloc.close();
         }
         var queries = b.openFor(tid, c.rows() * @divExact(c.paddedDim(), 8), 256, .{});
         {
@@ -273,7 +273,7 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
             const token = start.add(b.select(valid, packed_row.div(c.group), b.cst(.i32, 0)));
             const offset = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(packed_row.rem(c.group).to(.i64)).mul(c.head_dim).add(col.to(.i64));
             b.cpAsync16(shared.add(c.qBase()).add(swizzle(row, col, c.rows())), t.q.add(offset.mul(2)), valid);
-            queries.yield(.{});
+            queries.close();
         }
         b.cpAsyncWaitAll();
         b.syncThreads();
@@ -282,23 +282,23 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
         var producer = b.openIf(tid.ge(128));
         {
             produce(t);
-            producer.yieldThen(.{});
+            producer.close();
         }
         var consumer = b.openIf(tid.lt(128));
         {
             if (c.decode) {
                 if (c.group <= 2) decode(t, 2) else if (c.group <= 4) decode(t, 4) else if (c.group <= 8) decode(t, 8) else decode(t, 16);
             } else prefill(t);
-            consumer.yieldThen(.{});
+            consumer.close();
         }
         b.tcgen05Fence(.before);
         b.syncThreads();
         var free = b.openIf(tid.lt(32));
         {
             b.tmemDeallocAt(t.tmem, c.columns());
-            free.yieldThen(.{});
+            free.close();
         }
-        active.yieldThen(.{});
+        active.close();
     }
 }
 
@@ -324,7 +324,7 @@ fn produce(t: Tile) void {
             var reuse = b.openIf(id.ge(c.buffers()));
             {
                 b.mbarrierWait(t.released(id), t.phase(id).bitXor(1));
-                reuse.yieldThen(.{});
+                reuse.close();
             }
             const source = if (stage < c.features()) t.k else t.v;
             const feature_offset: i64 = @mod(@as(i64, @intCast(stage)), c.features()) * 256;
@@ -334,7 +334,7 @@ fn produce(t: Tile) void {
             }
             b.cpAsyncMbarrierArrive(t.ready(id), true);
         }
-        tiles.yield(.{});
+        tiles.close();
     }
 }
 
@@ -362,7 +362,7 @@ fn multiply(t: Tile, tile: V, comptime qk: bool) void {
             b.tcgen05Commit(t.released(id));
         }
         b.tcgen05Commit(t.shared.add(c.completion()));
-        leader.yieldThen(.{});
+        leader.close();
     }
     b.mbarrierWait(t.shared.add(c.completion()), b.cst(.i32, if (qk) 0 else 1));
     b.tcgen05Fence(.after);
@@ -396,7 +396,7 @@ fn reduceHeads(t: Tile, comptime heads: usize, values: [heads]V, comptime maximu
         var leader = b.openIf(t.lane.eq(0));
         {
             b.storeWords(1, t.shared.add(t.c.reductions()).add(t.warp.mul(64)).add(@as(i32, @intCast(h * 4))), .shared, .{reduced.bitCast(.i32)});
-            leader.yieldThen(.{});
+            leader.close();
         }
     }
     b.barrierSync(1, 128);
@@ -459,7 +459,7 @@ fn decode(t: Tile, comptime heads: usize) void {
                 b.tmemStore32x32b(heads, addr, out);
             }
             b.fenceTmemStore();
-            rescale.yieldThen(.{});
+            rescale.close();
         }
         publishProbabilities(t);
         multiply(t, tiles.iv, false);
@@ -477,17 +477,17 @@ fn decode(t: Tile, comptime heads: usize) void {
                 {
                     const value = b.select(tiles.results[heads + h].gt(0), out[h].bitCast(.f32).mul(t.norm(row, tiles.results[h], tiles.results[heads + h])), zero);
                     t.put(row, dim, value);
-                    feature.yieldThen(.{});
+                    feature.close();
                 }
                 if (c.splits > 1 and part == 0) {
                     var stats = b.openIf(t.tid.eq(0));
                     {
                         t.put(row, b.cst(.i32, c.head_dim), tiles.results[h]);
                         t.put(row, b.cst(.i32, c.head_dim + 1), tiles.results[heads + h]);
-                        stats.yieldThen(.{});
+                        stats.close();
                     }
                 }
-                valid.yieldThen(.{});
+                valid.close();
             }
         }
     }
@@ -562,7 +562,7 @@ fn prefill(t: Tile) void {
         var write = b.openIf(owns);
         {
             for (0..64) |i| t.putProbability(local_row, b.cst(.i32, @as(i32, @intCast(i))), probabilities[i]);
-            write.yieldThen(.{});
+            write.close();
         }
         var rescale = b.openIf(tiles.iv.gt(0));
         {
@@ -578,7 +578,7 @@ fn prefill(t: Tile) void {
                 b.tmemStore32x32b(64, address.add(c.scoreColumn()), saved);
             }
             b.fenceTmemStore();
-            rescale.yieldThen(.{});
+            rescale.close();
         }
         publishProbabilities(t);
         multiply(t, tiles.iv, false);
@@ -598,7 +598,7 @@ fn prefill(t: Tile) void {
                 t.put(row, b.cst(.i32, c.head_dim), tiles.results[0]);
                 t.put(row, b.cst(.i32, c.head_dim + 1), tiles.results[1]);
             }
-            valid.yieldThen(.{});
+            valid.close();
         }
     }
 }
@@ -652,9 +652,9 @@ fn merge(b: *B, c: Config) cute.FinishError!void {
             }
             const norm = b.select(sum.results[1].gt(0), b.rcpApprox(sum.results[1]), zero);
             a.out.set(.{ token, head, dims.iv }, sum.results[0].mul(norm).to(c.dtype));
-            dims.yield(.{});
+            dims.close();
         }
-        active.yieldThen(.{});
+        active.close();
     }
 }
 

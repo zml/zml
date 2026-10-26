@@ -636,9 +636,9 @@ For multi-core / async DMA orchestration:
 SCF regions are built with **scope-based** builders — `b.openFor(...)`,
 `b.openIf(...)` / `b.openIfElse(...)`, `b.openWhile(...)` return a typed
 scope value. You emit body ops into a bare `{}` block, terminate with
-`yield` / `yieldThen` / `yieldAfter`, and read results from `scope.results`
-afterward. No `ctx` struct, no function literal — lexical scope carries
-captures.
+`yield` / `yieldThen` / `yieldAfter` (or `close()` for a scope without
+values), and read results from `scope.results` afterward. No `ctx` struct,
+no function literal — lexical scope carries captures.
 
 ### `openFor` — scf.for with iter_args
 
@@ -662,7 +662,7 @@ const final_b_h = loop.results[0];
 - `inits` is a tuple literal `.{v1, v2, ...}`. Arity is comptime — `carried`,
   `results`, and the `yield(...)` call are all fixed-size arrays of the
   same length.
-- Empty loops: `b.openFor(0, N, 1, .{})` + `loop.yield(.{})`.
+- Empty loops: `b.openFor(0, N, 1, .{})` + `loop.close()`.
 
 ### `openIf` — scf.if without else (side-effects only)
 
@@ -670,7 +670,7 @@ const final_b_h = loop.results[0];
 var i = k.openIf(cond);
 {
     // then body — store, increment, etc.
-    i.yieldThen(.{});
+    i.close();
 }
 ```
 
@@ -692,7 +692,8 @@ const r = i.results[0];
 
 - `result_types` is a tuple of `*const mlir.Type` — use `k.scalarTy(dtype)`
   / `k.vectorTy(shape, dtype)` / `k.memRefTy(shape, dtype, mem_space)`.
-  Pass `.{}` for an if/else with no results.
+  Pass `.{}` for an if/else with no results, then end its branches with
+  `elseBranch()` and `close()`.
 
 ### `openWhile` — scf.while
 
@@ -719,7 +720,8 @@ const r = w.results[0];
 
 - Scopes stack naturally: `openFor { openIf { openFor { ... } } }` all just
   push/pop the kernel's current-block stack.
-- Empty yields are legal: `loop.yield(.{})`, `i.yieldThen(.{})`, etc.
+- Scopes without values end with `close()`: `loop.close()`, `i.close()`, and
+  `elseBranch()` then `close()` for an if/else.
 - After any `yield*`, the scope's `.results` holds the scf op's results as
   a `[N]Value`.
 
@@ -769,7 +771,7 @@ is the manual form.
 | `b_h * jnp.exp(b_g)` (broadcast to <BK,BV>)           | `k.mulf(b_h, k.broadcastTo(exp_g, &.{BK, BV}))`              |
 | `b_beta * (b_v - predicted_v)`                        | `k.mulf(k.broadcastTo(b_beta, &.{BV}), k.subf(b_v, predicted_v))` |
 | `lax.fori_loop(0, T, body, init)`                     | `var loop = k.openFor(c0_i32, T, c1_i32, .{init}); { …; loop.yield(.{…}); }` |
-| `if cond: …` (side-effects only)                      | `var i = k.openIf(cond); { …; i.yieldThen(.{}); }`           |
+| `if cond: …` (side-effects only)                      | `var i = k.openIf(cond); { …; i.close(); }`                  |
 | `if cond: x = a else: x = b`                          | `var i = k.openIfElse(cond, .{ty}); { …; i.yieldThen(.{a}); }; { …; i.yieldElse(.{b}); }` |
 | `while cond:`                                         | `var w = k.openWhile(.{inits}, .{after_types}); { …; w.yieldBefore(cond, .{…}); }; { …; w.yieldAfter(.{…}); }` |
 | `pltpu.MemorySpace.SMEM`                              | `.memory_space = .smem` on the `RefSpec`                     |

@@ -1632,7 +1632,8 @@ pub const Builder = struct {
     }
 
     /// `for iv in [lower, upper) step` carrying `inits`; close with
-    /// `scope.yield(.{...})`, then read `scope.results`.
+    /// `scope.yield(.{...})` (`scope.close()` without inits), then read
+    /// `scope.results`.
     pub fn openFor(
         self: *Builder,
         lower: anytype,
@@ -1722,7 +1723,8 @@ pub const Builder = struct {
         };
     }
 
-    /// An unstructured loop carrying `inits`; leave with `scope.breakWith`
+    /// An unstructured loop carrying `inits` (`scope.close()` ends a body that
+    /// carries nothing, in place of `scope.yield`); leave with `scope.breakWith`
     /// inside an `if`, and close the body with `scope.yield`.
     pub fn openLoop(self: *Builder, inits: anytype) LoopScope(tupleArity(@TypeOf(inits), "openLoop: inits")) {
         const N = comptime tupleArity(@TypeOf(inits), "openLoop: inits");
@@ -1971,7 +1973,7 @@ test "if, if-else, loop with break, reduce, scan, cast, select" {
     const is_first = bid.x.eq(0);
     var only = b.openIf(is_first);
     _ = b.store(picked, v, &.{ bid.x, bid.y });
-    only.yieldThen(.{});
+    only.close();
 
     var branch = b.openIfElse(is_first, .{b.tileTy(&.{ 8, 64 }, .f32)});
     branch.yieldThen(.{picked});
@@ -1984,10 +1986,19 @@ test "if, if-else, loop with break, reduce, scan, cast, select" {
         const i = lp.carried[0];
         var done = b.openIf(i.ge(n));
         lp.breakWith(.{i});
-        done.yieldThen(.{});
+        done.close();
         lp.yield(.{i.add(1)});
     }
     _ = lp.results[0];
+
+    // a loop carrying nothing ends with close().
+    var once = b.openLoop(.{});
+    {
+        var first = b.openIf(is_first);
+        once.breakWith(.{});
+        first.close();
+        once.close();
+    }
 
     // for with an early `continue` inside an `if`, and i64 bounds from a Value.
     var skip = b.openFor(b.cst(.i64, 0), 16, 1, .{b.cst(.i64, 0)});
@@ -1995,7 +2006,7 @@ test "if, if-else, loop with break, reduce, scan, cast, select" {
         const acc = skip.carried[0];
         var odd = b.openIf(skip.iv.bitAnd(1).eq(1));
         skip.continueWith(.{acc});
-        odd.yieldThen(.{});
+        odd.close();
         skip.yield(.{acc.add(skip.iv)});
     }
     try std.testing.expect(skip.results[0].isScalar());

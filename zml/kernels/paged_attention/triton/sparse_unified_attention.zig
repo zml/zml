@@ -187,8 +187,8 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
                 const empty = k.sum(scan_mask.bitAnd(positions.ge(0)).bitAnd(positions.lt(seq_len)).to(.i32)).eq(0);
                 var branch = k.openIfElse(empty, .{});
                 storeResult(k, cfg, a, query, head, head_mask, segment, dims, dim_mask, initial_max, initial_sum, initial_acc);
-                branch.yieldThen(.{});
-                branch.yieldElse(.{});
+                branch.elseBranch();
+                branch.close();
                 k.returnIf(empty, .{});
             }
 

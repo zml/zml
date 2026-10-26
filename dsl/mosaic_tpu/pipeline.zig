@@ -251,7 +251,7 @@ pub fn emitPipeline(
             for (brefs.items) |*br| sched_fin.finalize(b, br);
             for (brefs.items) |*br| if (br.is_trivial and (br.buffer_type == .output or br.buffer_type == .input_output)) br.syncCopyOut(b);
 
-            when.yieldThen(.{});
+            when.close();
         }
     }
 
@@ -920,7 +920,7 @@ const Scheduler = struct {
             var when = b.openIf(pred);
             {
                 br.copyIn(b, fetch_indices, br.copy_in_slot.?, false);
-                when.yieldThen(.{});
+                when.close();
             }
         }
         br.copy_in_slot = advance(b, br.copy_in_slot.?, pred);
@@ -937,7 +937,7 @@ const Scheduler = struct {
                 self.namedScope(b, "ep_copy_in");
                 br.copyIn(b, self.fetchIndices(br.buffer_count - 1), br.copy_in_slot.?, false);
                 self.endScope(b);
-                when.yieldThen(.{});
+                when.close();
             }
         }
         br.copy_in_slot = advance(b, br.copy_in_slot.?, pred);
@@ -952,7 +952,7 @@ const Scheduler = struct {
                 self.namedScope(b, "ep_wait_in");
                 if (br.buffer_type == .input or br.buffer_type == .input_output) br.waitIn(b, self.indices());
                 self.endScope(b);
-                when.yieldThen(.{});
+                when.close();
             }
         }
     }
@@ -966,7 +966,7 @@ const Scheduler = struct {
                 self.namedScope(b, "ep_copy_out");
                 if (br.buffer_type == .output or br.buffer_type == .input_output) br.copyOut(b, self.indices());
                 self.endScope(b);
-                when.yieldThen(.{});
+                when.close();
             }
         }
         br.copy_out_slot = advance(b, br.copy_out_slot.?, pred);
@@ -982,7 +982,7 @@ const Scheduler = struct {
                 // copy_out was issued the previous iteration.
                 if (br.buffer_type == .output or br.buffer_type == .input_output) br.waitOut(b, self.prevIndices());
                 self.endScope(b);
-                when.yieldThen(.{});
+                when.close();
             }
         }
         br.wait_out_slot = advance(b, br.wait_out_slot.?, pred);
@@ -995,7 +995,7 @@ const Scheduler = struct {
             self.namedScope(b, "ep_finalize");
             br.waitOut(b, self.indices());
             self.endScope(b);
-            when.yieldThen(.{});
+            when.close();
         }
     }
 

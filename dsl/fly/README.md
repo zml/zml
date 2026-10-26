@@ -213,8 +213,9 @@ pointers. The ordering is monotonic; callers provide barriers or kernel
 dependencies before consuming completed counters.
 
 Control flow uses `dsl/common`: `b.openFor(lo, hi, step, .{ inits })`
-with `.yield(.{ ... })`, `b.openIf(cond)` with `.yieldThen(.{})`,
-`b.openIfElse(cond, .{ types })` with `.yieldThen` / `.yieldElse`.
+with `.yield(.{ ... })` (`.close()` without inits), `b.openIf(cond)` with
+`.close()`, `b.openIfElse(cond, .{ types })` with `.yieldThen` / `.yieldElse`
+(`.elseBranch()` / `.close()` without types).
 `openWhile` has separate condition and body regions: `before_carried`
 feeds `yieldBefore`, `after_carried` feeds `yieldAfter`, and `results`
 contains the values returned when the condition becomes false.

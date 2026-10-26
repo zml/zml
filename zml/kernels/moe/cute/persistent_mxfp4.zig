@@ -521,7 +521,7 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
         const descriptor: cute.Atom = .{ .inner = value.inner, .kernel = b };
         b.prefetchTmaDesc(descriptor);
     }
-    tma_warp.yieldThen(.{});
+    tma_warp.close();
     // Everything below reads the schedule and the quantized activations the
     // preceding grid produces, so the whole block waits here.
     b.waitForDependency();
@@ -747,7 +747,7 @@ fn issueTmaStage(
 
     var elected = b.openIf(b.electSync());
     b.mbarrierArriveExpectTx(stage.load_barrier, tile.transactionBytes());
-    elected.yieldThen(.{});
+    elected.close();
     b.copy(b.setTmaBarrier(exec_a, stage.load_barrier), .{a_source}, .{stage.a_destination}, null);
     b.copy(b.setTmaBarrier(exec_b, stage.load_barrier), .{b_source}, .{stage.b_destination}, null);
     b.copy(b.setTmaBarrier(exec_sfa, stage.load_barrier), .{sfa_source}, .{stage.sfa_destination}, null);
@@ -982,7 +982,7 @@ fn runTmaProducer(
     const buffers = stageBuffersAt(b, tile, storage, state.index);
     var pending = b.openIf(stages.carried[0].eq(false));
     b.mbarrierTryWaitParity(buffers.mma_barrier, state.phase, 10_000_000);
-    pending.yieldThen(.{});
+    pending.close();
     issueTmaStage(b, tile, k_tiles, partitioned_a_target, partitioned_b_target, buffers, k, tile_m, group, expert, exec_a, exec_b, exec_sfa, exec_sfb);
     const next_count = stages.carried[1].add(1);
     const next_state = advancePipeline(b, state.index, state.phase, tile.stages);
@@ -1344,7 +1344,7 @@ fn runMmaConsumer(
     const state: PipelinePosition = .{ .index = stages.carried[3], .phase = stages.carried[4] };
     var pending = b.openIf(stages.carried[0].eq(false));
     b.mbarrierTryWaitParity(barrierAt(b, storage.load_barriers, state.index), state.phase, 10_000_000);
-    pending.yieldThen(.{});
+    pending.close();
     const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, accumulator_stage);
     const mainloop = staged_mainloop.atStage(b, state.index, accumulator_tmem);
     mainloop.copyScales(b);
@@ -1359,7 +1359,7 @@ fn runMmaConsumer(
     );
     var commit_lane = b.openIf(b.electSync());
     b.tcgen05Commit(barrierAt(b, storage.mma_barriers, state.index));
-    commit_lane.yieldThen(.{});
+    commit_lane.close();
     const next_count = stages.carried[2].add(1);
     const next_state = advancePipeline(b, state.index, state.phase, tile.stages);
     const next_ready = peekBarrierIfRemaining(b, storage.load_barriers, next_count, k_tiles, next_state);
@@ -1367,7 +1367,7 @@ fn runMmaConsumer(
 
     var full_lane = b.openIf(b.electSync());
     b.tcgen05Commit(barrierAt(b, storage.accumulator_full_barriers, accumulator_stage));
-    full_lane.yieldThen(.{});
+    full_lane.close();
     const next_accumulator_state = advancePipeline(b, accumulator_state.index, accumulator_state.phase, accumulator_stages);
     const next_acc_count = tiles.after_carried[8].add(1);
     const next_work = advancePersistentWork(
@@ -1546,11 +1546,11 @@ fn runEpilogue(
     var release_warp = b.openIf(warp.eq(0));
     // Permit release and deallocation are warp collective as well.
     b.relinquishTmemAllocPermit(.{});
-    release_warp.yieldThen(.{});
+    release_warp.close();
     b.namedBarrier(1, 128);
     var dealloc_warp = b.openIf(warp.eq(0));
     b.deallocTmem(tmem, tile.tmem_columns, .{});
-    dealloc_warp.yieldThen(.{});
+    dealloc_warp.close();
 }
 
 /// E8M0 exponent of the power-of-two MX scale for a block maximum, rounded
@@ -1682,7 +1682,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
     }
     var owner = b.openIf(lane.lt(@as(i32, @intCast(n))));
     scratch.set(.{ warp, lane }, lane_maximum);
-    owner.yieldThen(.{});
+    owner.close();
     b.namedBarrier(1, 128);
 
     // Lane `c` turns the two half-block maxima of column `c` into its scale.
@@ -1704,8 +1704,8 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
             const quantized = activation.mul(inverse).maximum(-448.0).minimum(448.0).to(.f8e4m3fn);
             operands.q.?.set(.{ first_row.add(chunk_first + @as(i32, @intCast(column))), activation_index }, quantized);
         }
-        gate_lane.yieldThen(.{});
-        if (guard) |*g| g.yieldThen(.{});
+        gate_lane.close();
+        if (guard) |*g| g.close();
     }
 
     // Warps 0 and 2 each own one 32-activation block of this tile.
@@ -1713,7 +1713,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
     const block = tile_m.mul(2).add(warp.div(2));
     const swizzled = block.div(4).mul(512).add(lane.mul(16)).add(chunk * 4).add(block.rem(4));
     operands.s.?.set(.{ group, swizzled }, scale.exponent.to(.i8));
-    scale_lane.yieldThen(.{});
+    scale_lane.close();
 }
 
 /// Python `down_epilogue`: store each live routed row at its token/top-k
@@ -1730,7 +1730,7 @@ fn storeTileRows(b: *B, comptime tile: Tile, operands: EpilogueOperands, routed:
     for (columns, routes[0..columns.len], 0..) |value, route, column| {
         var live: ?@TypeOf(b.openIf(routed.count)) = if (column == 0 and chunk == 0) null else b.openIf(routed.count.gt(chunk_first + @as(i32, @intCast(column))));
         operands.rows.?.set(.{ route, output_column }, value.to(.bf16));
-        if (live) |*l| l.yieldThen(.{});
+        if (live) |*l| l.close();
     }
 }
 
@@ -1877,10 +1877,10 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         inline for (0..array[1]) |stage| {
             b.mbarrierInit(barrierAt(b, array[0], b.cst(.i32, stage)), array[2]);
         }
-        lane.yieldThen(.{});
+        lane.close();
     }
     b.fenceMbarrierInit();
-    init_warp.yieldThen(.{});
+    init_warp.close();
     b.syncThreads();
 
     // Each role walks the same persistent tile sequence independently. The
@@ -1890,7 +1890,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         inline 16, 18, 32, 40 => |kt| runTmaProducer(b, tile, kt, storage, active, d.tiles_m, expert_ids, direct, partitioned_a.targets[0], partitioned_b.targets[0], exec_a, exec_b, exec_sfa, exec_sfb),
         else => std.debug.panic("unsupported MXFP4 reduction tile count {d}", .{k_tiles}),
     }
-    tma_warp.yieldThen(.{});
+    tma_warp.close();
 
     var mma_warp = b.openIf(warp.eq(4));
     // Python's MMA role reaches its own TmemAllocator.wait_for_alloc site.
@@ -1899,14 +1899,14 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
         inline 16, 18, 32, 40 => |kt| runMmaConsumer(b, tile, kt, storage, tiled_mma, tmem_holding, active, d.tiles_m),
         else => unreachable,
     }
-    mma_warp.yieldThen(.{});
+    mma_warp.close();
 
     var epilogue_warps = b.openIf(warp.lt(4));
     // TmemAllocator.allocate is issued collectively by warp 0.  The four
     // epilogue warps then meet the MMA warp at named barrier 2.
     var alloc_warp = b.openIf(warp.eq(0));
     b.allocTmem(tile.tmem_columns, tmem_holding, .{});
-    alloc_warp.yieldThen(.{});
+    alloc_warp.close();
     b.namedBarrier(2, 160);
     switch (epilogue) {
         .swiglu_mxfp8 => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, direct, .{
@@ -1926,7 +1926,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
             .direct = cfg.direct,
         }),
     }
-    epilogue_warps.yieldThen(.{});
+    epilogue_warps.close();
 }
 
 fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: Epilogue) cute.FinishError!void {

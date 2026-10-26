@@ -56,7 +56,7 @@ runtime must agree on the dialect version. FlyDSL HEAD may differ from both.
 | `x * rrms` (vector × scalar) | `x.mul(rrms)` |
 | `fmath.rsqrt(x, fastmath=fast)` | `b.setFastMath(true); b.rsqrt(x)` |
 | `lane < RED_SLOTS`, `cond.select(a, b)` | `lane.cmp(.lt, n)`, `cond.select(a, b)` |
-| `if tid == 0: ...` | `var s = b.openIf(tid.cmp(.eq, 0)); ...; s.yieldThen(.{});` |
+| `if tid == 0: ...` | `var s = b.openIf(tid.cmp(.eq, 0)); ...; s.close();` |
 | `for i in range_constexpr(n)` | a plain Zig `for (0..n)` (unrolled at emit time) |
 | `for i in range(lo, hi)` with carried values | `b.openFor(lo, hi, 1, .{ init })` + `.yield(.{ ... })` |
 | `launch(grid=..., block=(256,1,1))` | `K.call(inputs, outputs, .{ .grid = ..., .threads = 256 })` |

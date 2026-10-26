@@ -186,7 +186,7 @@ fn runSized(b: *B, cfg: Config, comptime fragments: usize) cute.FinishError!void
     valid_load.yieldElse(.{ zero.to(cfg.dtype), zero.to(cfg.dtype) });
     keys.set(.{ tile_key, d }, valid_load.results[0]);
     values.set(.{ tile_key, d }, valid_load.results[1]);
-    copy.yield(.{});
+    copy.close();
     b.syncThreads();
 
     // Each lane keeps one score; dot products reduce across the feature lanes.
@@ -232,13 +232,13 @@ fn runSized(b: *B, cfg: Config, comptime fragments: usize) cute.FinishError!void
         } else {
             a.out.set(.{ batch, query, head, col }, tiles.results[f + 2].div(tiles.results[1]));
         }
-        valid_store.yieldThen(.{});
+        valid_store.close();
     }
     if (split) {
         var stats = b.openIf(row.lt(cfg.query_length * group).bitAnd(lane.eq(0)));
         a.out.set(.{ batch, b.blockIdx().z, query, head, cfg.head_dim }, tiles.results[0]);
         a.out.set(.{ batch, b.blockIdx().z, query, head, cfg.head_dim + 1 }, tiles.results[1]);
-        stats.yieldThen(.{});
+        stats.close();
     }
 }
 
@@ -270,7 +270,7 @@ fn merge(b: *B, cfg: Config) cute.FinishError!void {
     const weights = b.makeTensor(b.allocSmem(.f32, cfg.splits, 16), b.makeLayout(&.{cfg.splits}, .{}));
     var stats = b.openFor(b.threadIdx().x, cfg.splits, 128, .{});
     weights.set(.{stats.iv}, b.exp2Approx(a.partials.get(.{ batch, stats.iv, head, cfg.head_dim }).sub(maximum)));
-    stats.yield(.{});
+    stats.close();
     b.syncThreads();
     var features = b.openFor(b.threadIdx().x, cfg.head_dim, 128, .{});
     var sum = b.openFor(b.cst(.i32, 0), cfg.splits, 1, .{ zero, zero });
@@ -280,7 +280,7 @@ fn merge(b: *B, cfg: Config) cute.FinishError!void {
         sum.carried[1].add(weight.mul(a.partials.get(.{ batch, sum.iv, head, cfg.head_dim + 1 }))),
     });
     a.out.set(.{ batch, head, features.iv }, sum.results[0].div(sum.results[1]));
-    features.yield(.{});
+    features.close();
 }
 
 test "CuTe attention emits tiled online softmax through head dimension 512" {
