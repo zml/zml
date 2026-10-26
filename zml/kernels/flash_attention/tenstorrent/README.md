@@ -79,6 +79,16 @@ the preceding table. The XLA plugin's level-2 option is
 and measured decode schedules now compile and run this model, but level 1
 remains faster and compiles much more quickly, so it remains the default.
 
+XLA's subsequent cached vocabulary split improves the paired level-1 BF16
+comparison to **2.678 s / 27.3 tokens/s** (520/520 kernel-cache hits), versus
+**2.712 s / 26.9 tokens/s** with `XLA_TT_EXPERIMENTAL_CHUNKED_HEAD=0` in the
+same build. Both generate the correct 73-token response with the warm-up/trace
+settings above. BF8 retains its original schedule and repeats at **2.049 s /
+35.6 tokens/s** (531/531 hits). The split pads and caches eight BF16 weight
+chunks, uses the measured DRAM-sharded matrix schedule with FP32 partial sums,
+and trims the final vocabulary output. It tracks weight versions and preserves
+prefill's original preprocessing cache.
+
 The confirmed minimum is 29.4 tokens/s with **BF16** weights, with approximately
 33 tokens/s as the performance objective; BF8 is expected to exceed that.
 The BF16 target remains unmet. XLA now selects DRAM-sharded
