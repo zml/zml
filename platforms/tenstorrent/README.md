@@ -59,10 +59,15 @@ Tested with the native Bazel plugin on Blackhole hardware:
   a single-card measurement, including first-use work, with operation profiling
   disabled. TT-MLIR optimization level 1 is enabled; cache scatters preserve
   parallel rows instead of flattening the entire cache into one row.
+  Repeating the run with allocation reuse enabled at XLA commit `647d6977c4`
+  completed correctly in 14.036 seconds, also 5.2 tok/s.
 - The plugin honors `reuseBuffer` donation: successful execution invalidates
   the input PJRT contents, and ZML destroys the old handle when installing the
-  result. Non-donatable inputs remain readable. General in-place allocation reuse
-  is still pending; HLO `must-alias` is rejected.
+  result. Non-donatable inputs remain readable. The plugin reuses matching,
+  exclusively owned device allocations by copying completed graph results into
+  them. It preserves separately live views. This still needs a temporary result
+  and a final device copy; individual cache updates are not yet in place.
+  HLO `must-alias` remains unsupported because reuse is not guaranteed.
 - Sampling with top-k greater than 1 still requires unsupported `u64` RNG
   state. Greedy Llama omits that state.
 - The CPU `//zml:test` suite passed: 262 passed, 14 skipped, 0 failed.
@@ -73,7 +78,8 @@ and without waiting, unchanged donated outputs, and optional state. With the
 plugin and runtime asset environment variables above exported, run:
 
 ```sh
-bazel test --@zml//platforms:tenstorrent=true --@zml//platforms:cpu=false \
+bazel test --nocache_test_results \
+  --@zml//platforms:tenstorrent=true --@zml//platforms:cpu=false \
   --test_env=HOME --test_env=ZML_TENSTORRENT_PLUGIN_PATH \
   --test_env=TT_METAL_RUNTIME_ROOT //zml:exe_test
 ```
