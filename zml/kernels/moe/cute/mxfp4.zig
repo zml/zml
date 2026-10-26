@@ -48,10 +48,10 @@ const combine_kernel_name = "mxfp4_cute_combine_kernel";
 
 /// Host launch of a boundary kernel: forward the buffer pointers, with PDL.
 fn launchBoundary(b: *B, kernel_name: [:0]const u8, grid: [3]i32, args: anytype) cute.FinishError!void {
-    const one = b.cst(.i32, 1);
+    const one = b.constant(.i32, 1);
     const config = b.makeLaunchConfig(.{
-        .grid = .{ b.cst(.i32, grid[0]), b.cst(.i32, grid[1]), b.cst(.i32, grid[2]) },
-        .block = .{ b.cst(.i32, 128), one, one },
+        .grid = .{ b.constant(.i32, grid[0]), b.constant(.i32, grid[1]), b.constant(.i32, grid[2]) },
+        .block = .{ b.constant(.i32, 128), one, one },
         .dynamic_smem = b.kernelSmemSize(kernel_name),
         .stream = b.cudaStream(),
         .cluster = .{ one, one, one },
@@ -148,7 +148,7 @@ fn groupedQuantizeKernel(b: *B, cfg: GroupedQuantConfig) cute.FinishError!void {
     }
     const raw_bits = maximum.maximum(1e-4).mul(1.0 / 448.0).bitCast(.i32);
     const exponent = raw_bits.shrLogical(23).add(raw_bits.bitAnd(0x7fffff).ne(0).to(.i32));
-    const inverse_scale = b.cst(.i32, 254).sub(exponent).shl(23).bitCast(.f32);
+    const inverse_scale = b.constant(.i32, 254).sub(exponent).shl(23).bitCast(.f32);
     const packed_word = b.packFp8x4(x[0].mul(inverse_scale), x[1].mul(inverse_scale), x[2].mul(inverse_scale), x[3].mul(inverse_scale));
 
     const scale_col = word.div(8);
@@ -213,8 +213,8 @@ fn combineKernel(b: *B, cfg: CombineConfig) cute.FinishError!void {
     for (0..@intCast(@divExact(pairs_per_cta, 128))) |chunk| {
         const pair = first_pair.add(chunk * 128);
         var in_bounds = b.openIf(pair.lt(pairs));
-        var low = b.cst(.f32, 0);
-        var high = b.cst(.f32, 0);
+        var low = b.constant(.f32, 0);
+        var high = b.constant(.f32, 0);
         for (0..@intCast(cfg.topk)) |slot| {
             const route = token.mul(cfg.topk).add(slot);
             // Routes of other expert-parallel ranks were never written.

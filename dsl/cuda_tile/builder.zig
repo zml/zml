@@ -711,27 +711,33 @@ pub const Builder = struct {
             };
             return cuda_tile.floatElemAttr(self.ctx, elem, v);
         }
-        const v: i64 = switch (@typeInfo(T)) {
-            .comptime_int => blk: {
-                if (value >= std.math.minInt(i64) and value <= std.math.maxInt(i64))
-                    break :blk @intCast(value);
-                if (value >= 0 and value <= std.math.maxInt(u64))
-                    break :blk @bitCast(@as(u64, value));
-                @compileError("Builder: integer literal out of 64-bit range");
-            },
-            .int => |info| if (info.signedness == .signed) @intCast(value) else @bitCast(@as(u64, @intCast(value))),
+        const v: i128 = switch (@typeInfo(T)) {
+            .comptime_int, .int => value,
             .bool => @intFromBool(value),
             .comptime_float, .float => @intFromFloat(value),
             else => @compileError("Builder: unsupported scalar " ++ @typeName(T)),
         };
-        return cuda_tile.intElemAttr(elem, v);
+        return cuda_tile.intElemAttr(elem, intBits(v, @intCast(intBitwidth(dtype)), @tagName(dtype)));
+    }
+
+    /// `value` as the `i64` an integer constant of `bits` bits is built from.
+    /// It may be signed or an unsigned bit pattern, so it must lie in
+    /// [-2^(bits-1), 2^bits).
+    fn intBits(value: i128, bits: u7, dtype: []const u8) i64 {
+        if (value < -(@as(i128, 1) << (bits - 1)) or value >= @as(i128, 1) << bits)
+            std.debug.panic("Builder: {d} does not fit {s}", .{ value, dtype });
+        return @truncate(value);
     }
 
     fn splat(self: *Builder, tile_ty: *const mlir.Type, dtype: DType, value: anytype) Value {
         return self.emit(cuda_tile.constant(self.ctx, cuda_tile.splatAttr(tile_ty, self.elemAttr(dtype, value)), tile_ty, self.loc()));
     }
 
-    pub fn cst(self: *Builder, dtype: DType, value: anytype) Value {
+    /// `value` as a rank-0 constant of `dtype`; a Value passes through. An
+    /// integer is signed or an unsigned bit pattern of `dtype`'s width;
+    /// anything else panics.
+    pub fn constant(self: *Builder, dtype: DType, value: anytype) Value {
+        if (@TypeOf(value) == Value) return value;
         return self.splat(self.scalarTy(dtype), dtype, value);
     }
 
@@ -777,46 +783,47 @@ pub const Builder = struct {
     }
 
     /// Lift a Zig scalar to a rank-0 constant. Dtype follows the source type;
-    /// unsigned ints are bit-cast. Use `liftAs` for an explicit dtype.
+    /// unsigned ints are bit-cast. Use `constant` for an explicit dtype.
     pub fn lift(self: *Builder, value: anytype) Value {
         const T = @TypeOf(value);
         if (T == Value) return value;
         return switch (@typeInfo(T)) {
             .comptime_int => blk: {
                 if (value >= std.math.minInt(i32) and value <= std.math.maxInt(i32))
-                    break :blk self.cst(.i32, value);
-                break :blk self.cst(.i64, value);
+                    break :blk self.constant(.i32, value);
+                break :blk self.constant(.i64, value);
             },
-            .int => |info| if (info.bits > 32) self.cst(.i64, value) else self.cst(.i32, value),
-            .bool => self.cst(.i1, value),
-            .comptime_float => self.cst(.f32, value),
+            .int => |info| if (info.bits > 32) self.constant(.i64, value) else self.constant(.i32, value),
+            .bool => self.constant(.i1, value),
+            .comptime_float => self.constant(.f32, value),
             .float => |info| switch (info.bits) {
-                16 => self.cst(.f16, value),
-                32 => self.cst(.f32, value),
-                64 => self.cst(.f64, value),
+                16 => self.constant(.f16, value),
+                32 => self.constant(.f32, value),
+                64 => self.constant(.f64, value),
                 else => @compileError("Builder.lift: unsupported float bitwidth"),
             },
             else => @compileError("Builder.lift: unsupported type " ++ @typeName(T)),
         };
     }
 
-    pub fn liftAs(self: *Builder, value: anytype, dtype: DType) Value {
-        if (@TypeOf(value) == Value) return value;
-        return self.cst(dtype, value);
-    }
-
     fn liftMatching(self: *Builder, value: anytype, ref_elem: *const mlir.Type) Value {
         const T = @TypeOf(value);
         if (T == Value) return value;
         return switch (@typeInfo(T)) {
-            .comptime_int, .comptime_float => self.liftAs(value, self.mlirElemToDType(ref_elem)),
+            .comptime_int, .comptime_float => self.constant(self.mlirElemToDType(ref_elem), value),
             else => self.lift(value),
         };
     }
 
+    /// `value` as a constant of `like`'s element type; a Value passes through.
+    pub fn constantLike(self: *Builder, value: anytype, like: Value) Value {
+        if (@TypeOf(value) == Value) return value;
+        return self.constMatching(value, like.type_());
+    }
+
     fn constMatching(self: *Builder, value: anytype, ref: *const mlir.Type) Value {
         const elem = if (ref.isA(cuda_tile.TileType)) |t| t.elementType() else ref;
-        return self.liftAs(value, self.mlirElemToDType(elem));
+        return self.constant(self.mlirElemToDType(elem), value);
     }
 
     pub fn broadcastLike(self: *Builder, value: anytype, ref: Value) Value {
@@ -1951,7 +1958,7 @@ test "if, if-else, loop with break, reduce, scan, cast, select" {
     const chosen = branch.results[0];
 
     // loop: count up to n, break when reached.
-    var lp = b.openLoop(.{b.cst(.i32, 0)});
+    var lp = b.openLoop(.{b.constant(.i32, 0)});
     {
         const i = lp.carried[0];
         var done = b.openIf(i.ge(n));
@@ -1971,7 +1978,7 @@ test "if, if-else, loop with break, reduce, scan, cast, select" {
     }
 
     // for with an early `continue` inside an `if`, and i64 bounds from a Value.
-    var skip = b.openFor(b.cst(.i64, 0), 16, 1, .{b.cst(.i64, 0)});
+    var skip = b.openFor(b.constant(.i64, 0), 16, 1, .{b.constant(.i64, 0)});
     {
         const acc = skip.carried[0];
         var odd = b.openIf(skip.iv.bitAnd(1).eq(1));
@@ -2014,7 +2021,7 @@ test "atomics, print, globals, alloca, dynamic views, strided view, tokens" {
     const tiles = b.indexSpaceShape(v);
     try std.testing.expectEqual(@as(usize, 2), tiles.len);
     const sv = b.stridedView(tv, &.{ 8, 64 }, &.{ 2, 1 }, .{});
-    _ = b.load(sv, &.{ b.cst(.i32, 0), b.cst(.i32, 0) });
+    _ = b.load(sv, &.{ b.constant(.i32, 0), b.constant(.i32, 0) });
 
     const bid = b.tileBlockId();
     const loaded = b.loadOpts(v, &.{ bid.x, bid.y }, .{ .hints = &.{.{ .arch = .sm_120, .allow_tma = true }} });
@@ -2031,10 +2038,10 @@ test "atomics, print, globals, alloca, dynamic views, strided view, tokens" {
 
     // A gather/scatter view: the sparse index is a rank-1 tile of row ids.
     const gsv = b.gatherScatterView(tv, &.{ 8, 64 }, 0, .zero);
-    const gathered = b.load(gsv, &.{ b.iota(8, .i32), b.cst(.i32, 0) });
+    const gathered = b.load(gsv, &.{ b.iota(8, .i32), b.constant(.i32, 0) });
     try std.testing.expectEqual(@as(i64, 8), gathered.dim(0));
     try std.testing.expectEqual(@as(i64, 64), gathered.dim(1));
-    _ = b.store(gathered, gsv, &.{ b.iota(8, .i32), b.cst(.i32, 0) });
+    _ = b.store(gathered, gsv, &.{ b.iota(8, .i32), b.constant(.i32, 0) });
 
     const lut = b.getGlobal("lut", .f32);
     const scratch = b.alloca(.f32, 64, .{});
@@ -2161,7 +2168,7 @@ test "every remaining elementwise op verifies" {
     _ = b.cat(f, g, 0);
     _ = b.permute(f, &.{ 1, 0 });
     _ = b.transpose(f);
-    _ = b.extract(f, &.{ b.cst(.i32, 0), b.cst(.i32, 1) }, &.{ 4, 4 });
+    _ = b.extract(f, &.{ b.constant(.i32, 0), b.constant(.i32, 1) }, &.{ 4, 4 });
     _ = b.expandDims(f, 0);
     _ = b.reshape(f, &.{32});
     _ = b.cumprod(f, 0);

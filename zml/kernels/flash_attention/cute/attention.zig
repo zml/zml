@@ -149,10 +149,10 @@ fn runSized(b: *B, cfg: Config, comptime fragments: usize) cute.FinishError!void
     // Partition the live cache, rather than its capacity, so decode uses all
     // blocks even when only a prefix of the cache is populated.
     const chunk = causal_end.add(cfg.splits - 1).div(cfg.splits);
-    const begin = if (split) b.blockIdx().z.mul(chunk) else b.cst(.i32, 0);
+    const begin = if (split) b.blockIdx().z.mul(chunk) else b.constant(.i32, 0);
     const end = if (split) begin.add(chunk).minimum(causal_end) else causal_end;
-    const zero = b.cst(.f32, 0);
-    const neg_inf = b.cst(.f32, -std.math.inf(f32));
+    const zero = b.constant(.f32, 0);
+    const neg_inf = b.constant(.f32, -std.math.inf(f32));
 
     var queries: [fragments]Value = undefined;
     inline for (0..fragments) |f| {
@@ -184,7 +184,7 @@ fn runSized(b: *B, cfg: Config, comptime fragments: usize) cute.FinishError!void
     b.syncThreads();
 
     // Each lane keeps one score; dot products reduce across the feature lanes.
-    var scores = b.openFor(b.cst(.i32, 0), tile_keys, 1, .{neg_inf});
+    var scores = b.openFor(b.constant(.i32, 0), tile_keys, 1, .{neg_inf});
     var dot = zero;
     inline for (0..fragments) |f| {
         dot = dot.add(queries[f].mul(keys.get(.{ scores.iv, lane.add(f * 32) }).to(.f32)));
@@ -204,7 +204,7 @@ fn runSized(b: *B, cfg: Config, comptime fragments: usize) cute.FinishError!void
 
     var accumulators: [fragments]Value = undefined;
     inline for (0..fragments) |f| accumulators[f] = tiles.carried[f + 2].mul(rescale);
-    var weighted = b.openFor(b.cst(.i32, 0), tile_keys, 1, accumulators);
+    var weighted = b.openFor(b.constant(.i32, 0), tile_keys, 1, accumulators);
     const weight = b.shuffleIdx(probability, weighted.iv);
     inline for (0..fragments) |f| {
         accumulators[f] = weighted.carried[f].add(weight.mul(values.get(.{ weighted.iv, lane.add(f * 32) }).to(.f32)));
@@ -253,8 +253,8 @@ fn merge(b: *B, cfg: Config) cute.FinishError!void {
     const batch = b.blockIdx().y;
     const head = b.blockIdx().x;
     const lane = b.threadIdx().x.rem(32);
-    const zero = b.cst(.f32, 0);
-    const neg_inf = b.cst(.f32, -std.math.inf(f32));
+    const zero = b.constant(.f32, 0);
+    const neg_inf = b.constant(.f32, -std.math.inf(f32));
     // Every warp reduces the partition statistics, then independently handles
     // a contiguous range of output features.
     var maxima = b.openFor(lane, cfg.splits, 32, .{neg_inf});
@@ -267,7 +267,7 @@ fn merge(b: *B, cfg: Config) cute.FinishError!void {
     stats.close();
     b.syncThreads();
     var features = b.openFor(b.threadIdx().x, cfg.head_dim, 128, .{});
-    var sum = b.openFor(b.cst(.i32, 0), cfg.splits, 1, .{ zero, zero });
+    var sum = b.openFor(b.constant(.i32, 0), cfg.splits, 1, .{ zero, zero });
     const weight = weights.get(.{sum.iv});
     sum.yield(.{
         sum.carried[0].add(weight.mul(a.partials.get(.{ batch, sum.iv, head, features.iv }))),

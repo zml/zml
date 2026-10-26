@@ -147,7 +147,7 @@ const TileContext = struct {
             {
                 const first_key = key_base.add(pages.iv);
                 const page_valid = first_key.lt(t.klen);
-                const logical_page = b.select(page_valid, first_key.div(16), b.cst(.i32, 0));
+                const logical_page = b.select(page_valid, first_key.div(16), b.constant(.i32, 0));
                 const page = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(logical_page));
                 const base = page.to(.i64).mul(16 * c.kv_heads * c.head_dim).add(t.head.to(.i64).mul(c.head_dim));
                 for (0..@as(usize, @intCast(@divExact(c.head_dim, 64)))) |i| {
@@ -167,7 +167,7 @@ const TileContext = struct {
             const col = copy.iv.rem(@divExact(c.head_dim, 8)).mul(8);
             const key = key_base.add(row);
             const valid = key.lt(t.klen);
-            const safe_key = b.select(valid, key, b.cst(.i32, 0));
+            const safe_key = b.select(valid, key, b.constant(.i32, 0));
             const page = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(safe_key.div(c.page_size)));
             const offset = page.to(.i64).mul(c.page_size).add(safe_key.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(col.to(.i64));
             b.cpAsync16(t.shared.add(c.kvBase()).add(swizzle(row, col, c.head_dim)), source.add(offset.mul(2)), valid);
@@ -261,14 +261,14 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             const col = copy_q.iv.rem(d / 8).mul(8);
             const packed_row = first_row.add(row);
             const valid = packed_row.lt(qlen.mul(c.group));
-            const token = start.add(b.select(valid, packed_row.div(c.group), b.cst(.i32, 0)));
+            const token = start.add(b.select(valid, packed_row.div(c.group), b.constant(.i32, 0)));
             const offset = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(packed_row.rem(c.group).to(.i64)).mul(d).add(col.to(.i64));
             b.cpAsync16(t.shared.add(swizzle(row, col, d)), t.q.add(offset.mul(2)), valid);
             copy_q.close();
         }
         const first_pos = t.klen.sub(qlen).add(first_row.div(c.group));
         const last_pos = t.klen.sub(qlen).add(first_row.add(c.rows() - 1).div(c.group).minimum(qlen.sub(1)));
-        const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.cst(.i32, 0);
+        const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.constant(.i32, 0);
         const end = if (c.causal) last_pos.add(1).minimum(t.klen) else t.klen;
         const first_tile = begin.div(n);
         const tiles = end.add(n - 1).div(n).sub(first_tile).maximum(0);
@@ -279,8 +279,8 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
         const dim_part = t.warp.rem(w).mul(d / w);
         const row0 = t.lane.div(4);
         const col0 = t.lane.rem(4).mul(2);
-        const zero = b.cst(.f32, 0);
-        const neg_inf = b.cst(.f32, -std.math.inf(f32));
+        const zero = b.constant(.f32, 0);
+        const neg_inf = b.constant(.f32, -std.math.inf(f32));
         const nf = n / w / 8;
         const of = d / w / 8;
         const count = 4 + of;
@@ -396,8 +396,8 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
                 if (c.splits > 1) {
                     var leader = b.openIf(t.warp.rem(w).eq(0).bitAnd(t.lane.rem(4).eq(0)));
                     {
-                        t.store(row, b.cst(.i32, d), m);
-                        t.store(row, b.cst(.i32, d + 1), l);
+                        t.store(row, b.constant(.i32, d), m);
+                        t.store(row, b.constant(.i32, d + 1), l);
                         leader.close();
                     }
                 }
@@ -426,8 +426,8 @@ fn merge(b: *B, c: Config) cute.FinishError!void {
     const head = b.blockIdx().y;
     var valid = b.openIf(token.lt(a.starts.get(.{c.batch})));
     {
-        const zero = b.cst(.f32, 0);
-        const sink = if (c.sink) a.sink.get(.{head}).mul(std.math.log2e) else b.cst(.f32, -std.math.inf(f32));
+        const zero = b.constant(.f32, 0);
+        const sink = if (c.sink) a.sink.get(.{head}).mul(std.math.log2e) else b.constant(.f32, -std.math.inf(f32));
         var maximum = b.openFor(0, c.splits, 1, .{sink});
         {
             maximum.yield(.{maximum.carried[0].maximum(a.partials.get(.{ maximum.iv, token, head, c.head_dim }))});

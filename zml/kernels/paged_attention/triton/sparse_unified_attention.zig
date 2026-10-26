@@ -56,7 +56,7 @@ fn findSeqIdx(
     block_q: i64,
     use_q_block_mode: bool,
 ) Value {
-    const left_init = k.liftAs(0, .i32);
+    const left_init = k.constant(.i32, 0);
 
     var w = k.openWhile(.{ left_init, num_seqs }, .{ .i32, .i32 });
     {
@@ -142,7 +142,7 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
 
             const partition = SparseSegments.init(cfg.indices_count, cfg.num_segments, cfg.tile_size);
             const program = k.programId(.x);
-            const num_seqs = k.liftAs(cfg.num_seqs, .i32);
+            const num_seqs = k.constant(.i32, cfg.num_seqs);
             if (!cfg.decode_sequence_grid) {
                 const active_queries = k.load(a.query_start_len_ptr.addPtr(num_seqs));
                 k.returnIf(program.ge(active_queries));
@@ -154,11 +154,11 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
             const query_end = k.load(a.query_start_len_ptr.addPtr(seq).addPtr(1));
             if (cfg.decode_sequence_grid) k.returnIf(query_start.eq(query_end));
             const query = if (cfg.decode_sequence_grid) query_start else program;
-            const kv_head = if (cfg.num_query_heads == cfg.num_queries_per_kv) k.liftAs(0, .i32) else k.programId(.y);
+            const kv_head = if (cfg.num_query_heads == cfg.num_queries_per_kv) k.constant(.i32, 0) else k.programId(.y);
 
             // Launch the partial tail first, without launching unused capacity.
-            const slot = if (split_k) k.programId(.z) else k.liftAs(0, .i32);
-            const segment = if (split_k) k.where(slot.eq(0), k.liftAs(@as(i32, @intCast(partition.launched - 1)), .i32), slot.sub(1)) else slot;
+            const slot = if (split_k) k.programId(.z) else k.constant(.i32, 0);
+            const segment = if (split_k) k.where(slot.eq(0), k.constant(.i32, partition.launched - 1), slot.sub(1)) else slot;
             const segment_start = segment.mul(@as(i32, @intCast(partition.span)));
             const heads = k.arange(0, cfg.block_m, .i32);
             const head = kv_head.mul(@as(i32, @intCast(cfg.num_queries_per_kv))).add(heads);
@@ -201,7 +201,7 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
             });
             const table = a.block_tables_ptr.addPtr(seq.to(.i64).mul(cfg.block_table_stride));
             const offsets = k.arange(0, cfg.tile_size, .i32);
-            var loop = k.openFor(k.liftAs(0, .i32), k.liftAs(@as(i32, @intCast(partition.tiles_per_segment)), .i32), 1, .{ initial_max, initial_sum, initial_acc });
+            var loop = k.openFor(k.constant(.i32, 0), k.constant(.i32, @as(i32, @intCast(partition.tiles_per_segment))), 1, .{ initial_max, initial_sum, initial_acc });
             {
                 const selected = segment_start.add(loop.iv.mul(@as(i32, @intCast(cfg.tile_size)))).add(offsets);
                 const position = k.loadOpts(indices_row.addPtr(selected.to(.i64).mul(cfg.indices_strides[1])), .{
@@ -210,7 +210,7 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
                 });
                 const valid = selected.lt(cfg.indices_count).bitAnd(position.ge(0)).bitAnd(position.lt(seq_len));
                 // A bounded single-tile segment was already checked above.
-                const nonempty = if (partition.tiles_per_segment == 1 and partition.span <= 256) k.liftAs(1, .i1) else k.sum(valid.to(.i32)).gt(0);
+                const nonempty = if (partition.tiles_per_segment == 1 and partition.span <= 256) k.constant(.i1, 1) else k.sum(valid.to(.i32)).gt(0);
                 var branch = k.openIfElse(nonempty, .{ k.tensorTy(&.{cfg.block_m}, .f32), k.tensorTy(&.{cfg.block_m}, .f32), k.tensorTy(&.{ cfg.block_m, cfg.head_size_padded }, .f32) });
                 const safe_position = k.where(valid, position, k.zeros(&.{cfg.tile_size}, .i32));
                 const page = k.loadOpts(table.addPtr(safe_position.div(@as(i32, @intCast(cfg.block_size)))), .{
@@ -302,7 +302,7 @@ pub const SparseReducePtr = struct {
         const sums = k.loadOpts(a.segm_expsum_ptr.addPtr(stats), .{ .mask = segment_mask, .other = k.zeros(&.{cfg.num_segments}, .f32) });
         const nonempty = segment_mask.bitAnd(sums.gt(0.0));
         const maximum = k.max(k.where(nonempty, maxima, k.full(&.{cfg.num_segments}, -std.math.inf(f32), .f32)));
-        const safe_maximum = k.where(maximum.gt(-std.math.inf(f32)), maximum, k.liftAs(0.0, .f32));
+        const safe_maximum = k.where(maximum.gt(-std.math.inf(f32)), maximum, k.constant(.f32, 0.0));
         const rescale = k.exp2(maxima.sub(safe_maximum));
         const denominator = k.sum(sums.mul(rescale));
         const offset = query.to(.i64).mul(cfg.num_query_heads).add(head.to(.i64)).mul(cfg.num_segments).add(segments.to(.i64)).mul(cfg.head_size_padded).expandDims(1).add(dims.to(.i64).expandDims(0));
@@ -311,7 +311,7 @@ pub const SparseReducePtr = struct {
             .other = k.zeros(&.{ cfg.num_segments, cfg.head_tile }, .f32),
         });
         const numerator = k.sumOpts(partial.mul(rescale.expandDims(1)), .{ .axis = 0 });
-        const output = numerator.div(k.where(denominator.gt(0.0), denominator, k.liftAs(1.0, .f32)));
+        const output = numerator.div(k.where(denominator.gt(0.0), denominator, k.constant(.f32, 1.0)));
         const output_offset = query.to(.i64).mul(cfg.output_strides[0]).add(head.to(.i64).mul(cfg.output_strides[1])).add(dims.to(.i64).mul(cfg.output_strides[2]));
         k.storeOpts(a.output_ptr.addPtr(output_offset), output.to(cfg.dtype), .{ .mask = dim_mask });
     }

@@ -841,11 +841,11 @@ fn ar(b: *Builder, n: i64) Value {
 }
 
 fn ld(b: *Builder, p: Value, mask: Value, dt: tri.DType, other: i64) Value {
-    return b.loadOpts(p, .{ .mask = mask, .other = if (p.isTensor()) b.full(p.shape().constSlice(), other, dt) else b.liftAs(other, dt) });
+    return b.loadOpts(p, .{ .mask = mask, .other = if (p.isTensor()) b.full(p.shape().constSlice(), other, dt) else b.constant(dt, other) });
 }
 
 fn ci(b: *Builder, n: i64) Value {
-    return b.liftAs(n, .i32);
+    return b.constant(.i32, n);
 }
 
 fn quant32(b: *Builder, x: Value) struct { q: Value, s: Value } {
@@ -1116,7 +1116,7 @@ fn gemm(b: *Builder, c: GemmConfig, comptime projection: Projection) tri.FinishE
     const k = ar(b, c.bk);
     const ks = ar(b, @divExact(c.bk, 32));
     const row = if (is_up) pair.div(c.topk) else tile.mul(c.bn).add(n);
-    const wd = b.makeTensorDescriptor(a.w.addPtr(expert.to(.i64).mul(@divTrunc(rows * ksize, 2))), &.{ ci(b, rows), ci(b, @divTrunc(ksize, 2)) }, &.{ b.liftAs(@divTrunc(ksize, 2), .i64), b.liftAs(1, .i64) }, .pad_zero, &.{ width, @divExact(c.bk, 2) }, .i8);
+    const wd = b.makeTensorDescriptor(a.w.addPtr(expert.to(.i64).mul(@divTrunc(rows * ksize, 2))), &.{ ci(b, rows), ci(b, @divTrunc(ksize, 2)) }, &.{ b.constant(.i64, @divTrunc(ksize, 2)), b.constant(.i64, 1) }, .pad_zero, &.{ width, @divExact(c.bk, 2) }, .i8);
     var loop = b.openFor(0, @divTrunc(ksize + c.bk - 1, c.bk), 1, .{b.zeros(&.{ width, c.bn }, .f32)});
     const sk = loop.iv.mul(@divExact(c.bk, 32)).add(ks);
     const kk = loop.iv.mul(c.bk).add(k);

@@ -121,7 +121,7 @@ pub const Value = struct {
 
     fn binary(self: Value, comptime build: anytype, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.lift(rhs);
+        const r = k.toStatic(rhs);
         return k.emit(build(k.ctx, self.inner, r.inner, k.loc()));
     }
 
@@ -306,7 +306,7 @@ pub const Value = struct {
     /// Broadcast a scalar against a vector operand.
     fn coerceArith(self: Value, rhs: anytype) struct { Value, Value } {
         const k = self.kern();
-        const r: Value = if (@TypeOf(rhs) == Value) rhs else k.constLike(rhs, self);
+        const r: Value = if (@TypeOf(rhs) == Value) rhs else k.constantLike(rhs, self);
         if (self.type_().eql(r.type_())) return .{ self, r };
         if (self.type_().isA(mlir.VectorType) != null and r.type_().isA(mlir.VectorType) == null)
             return .{ self, k.emit(vector.broadcast(k.ctx, r.inner, self.type_(), k.loc())) };
@@ -502,7 +502,7 @@ pub const Value = struct {
     /// Signed integer comparison against a Value or an integer literal.
     pub fn cmp(self: Value, pred: Cmp, rhs: anytype) Value {
         const k = self.kern();
-        const r: Value = if (@TypeOf(rhs) == Value) rhs else k.constLike(rhs, self);
+        const r: Value = if (@TypeOf(rhs) == Value) rhs else k.constantLike(rhs, self);
         const p: arith.CmpIPredicate = switch (pred) {
             .eq => .eq,
             .ne => .ne,
@@ -932,8 +932,9 @@ pub const Builder = struct {
         return self.static(Layout{ .shape = .{ .tup = shape }, .stride = .{ .tup = stride } });
     }
 
-    /// A Value passes through; a bare tuple literal (`.{ 64, 8 }`) is a tile.
-    pub fn lift(self: *Builder, v: anytype) Value {
+    /// A Value passes through; a layout literal becomes a `fly.static`, and a
+    /// bare tuple literal (`.{ 64, 8 }`) is a tile.
+    pub fn toStatic(self: *Builder, v: anytype) Value {
         const T = @TypeOf(v);
         if (T == Value) return v;
         if (T == Layout or T == Tile or T == IntTuple) return self.static(v);
@@ -981,10 +982,13 @@ pub const Builder = struct {
 
     // ---------------------------------------------------------------- scalars & ids
 
-    /// Only the representation `dtype` needs is computed: a float constant
-    /// outside i64 range (inf, floatMax) must not be forced through
+    /// `value` as a constant of `dtype`; a Value passes through. An integer is
+    /// signed or an unsigned bit pattern of `dtype`'s width; anything else
+    /// panics. Only the representation `dtype` needs is computed: a float
+    /// constant outside i64 range (inf, floatMax) must not be forced through
     /// `@intFromFloat`, which traps.
     pub fn constant(self: *Builder, dtype: DType, value: anytype) Value {
+        if (@TypeOf(value) == Value) return value;
         const is_float_lit = switch (@typeInfo(@TypeOf(value))) {
             .float, .comptime_float => true,
             else => false,
@@ -1000,10 +1004,39 @@ pub const Builder = struct {
                 });
             },
             .i1, .i8, .i16, .i32, .i64 => blk: {
-                const i: i64 = if (is_float_lit) @intFromFloat(value) else @intCast(value);
-                break :blk self.emit(arith.constant_int(self.ctx, i, dtype.toMlir(self.ctx), self.loc()));
+                const i: i128 = if (is_float_lit) @intFromFloat(value) else value;
+                break :blk self.emit(arith.constant_int(self.ctx, intBits(i, @intCast(dtype.bitWidth()), @tagName(dtype)), dtype.toMlir(self.ctx), self.loc()));
             },
             else => std.debug.panic("fly.constant: no constant for {s}", .{@tagName(dtype)}),
+        };
+    }
+
+    /// `value` as the `i64` an integer constant of `bits` bits is built from.
+    /// It may be signed or an unsigned bit pattern, so it must lie in
+    /// [-2^(bits-1), 2^bits).
+    fn intBits(value: i128, bits: u7, dtype: []const u8) i64 {
+        if (value < -(@as(i128, 1) << (bits - 1)) or value >= @as(i128, 1) << bits)
+            std.debug.panic("Builder.constant: {d} does not fit {s}", .{ value, dtype });
+        return @truncate(value);
+    }
+
+    /// A Zig scalar as a constant: a comptime int is `i32`, or `i64` when it
+    /// doesn't fit; a runtime int is `i64` past 32 bits, else `i32`; a float
+    /// keeps its width, and a comptime float is `f32`. A Value passes through.
+    pub fn lift(self: *Builder, value: anytype) Value {
+        const T = @TypeOf(value);
+        if (T == Value) return value;
+        return switch (@typeInfo(T)) {
+            .comptime_int => self.constant(if (value >= std.math.minInt(i32) and value <= std.math.maxInt(i32)) .i32 else .i64, value),
+            .int => |info| self.constant(if (info.bits > 32) .i64 else .i32, value),
+            .comptime_float => self.constant(.f32, value),
+            .float => |info| switch (info.bits) {
+                16 => self.constant(.f16, value),
+                32 => self.constant(.f32, value),
+                64 => self.constant(.f64, value),
+                else => @compileError("Builder.lift: unsupported float bitwidth"),
+            },
+            else => @compileError("Builder.lift: unsupported type " ++ @typeName(T)),
         };
     }
 
@@ -1224,8 +1257,8 @@ pub const Builder = struct {
     }
 
     pub fn tiledCopy(self: *Builder, atom: Value, layout_tv: anytype, tile_mn: anytype) TiledCopy {
-        const tv = self.lift(layout_tv);
-        const tl = self.lift(tile_mn);
+        const tv = self.toStatic(layout_tv);
+        const tl = self.toStatic(tile_mn);
         const v = self.emit(fly.ops.make_tiled_copy(self.ctx, atom.inner, tv.inner, tl.inner, self.loc()));
         return .{ .value = v, .tile = tl };
     }
@@ -1305,7 +1338,7 @@ pub const Builder = struct {
     }
 
     pub fn tiledMma(self: *Builder, atom: Value, atom_layout: anytype, permutation: ?Value) TiledMma {
-        const al = self.lift(atom_layout);
+        const al = self.toStatic(atom_layout);
         const v = self.emit(fly.ops.make_tiled_mma(self.ctx, atom.inner, al.inner, .{ .permutation = if (permutation) |p| p.inner else null }, self.loc()));
         return .{ .value = v };
     }
@@ -1345,18 +1378,21 @@ pub const Builder = struct {
         inits: anytype,
     ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
         const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.constIndex(lower);
-        const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constLike(upper, lb_v);
-        const step_v: Value = if (@TypeOf(step) == Value) step else self.constLike(step, lb_v);
+        const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constantLike(upper, lb_v);
+        const step_v: Value = if (@TypeOf(step) == Value) step else self.constantLike(step, lb_v);
         return dsl.openFor(self, Value, .{ lb_v, ub_v, step_v }, inits, .{});
     }
 
-    pub fn constLike(self: *Builder, value: anytype, like: Value) Value {
+    /// `value` as a scalar constant of `like`'s element type (`index` for an
+    /// `index` Value); a Value passes through.
+    pub fn constantLike(self: *Builder, value: anytype, like: Value) Value {
+        if (@TypeOf(value) == Value) return value;
         if (like.type_().isA(mlir.IndexType) != null) {
-            const i: i64 = switch (@typeInfo(@TypeOf(value))) {
+            const i: i128 = switch (@typeInfo(@TypeOf(value))) {
                 .float, .comptime_float => @intFromFloat(value),
-                else => @intCast(value),
+                else => value,
             };
-            return self.constIndex(i);
+            return self.constIndex(intBits(i, 64, "index"));
         }
         return self.constant(like.scalarDType(), value);
     }
@@ -1749,6 +1785,9 @@ test "scalar conversions and constants" {
     // A `.bool` argument keeps its storage element type end to end.
     try std.testing.expectEqual(DType.i8, a.p.elemDType());
     try std.testing.expectEqual(DType.f16, a.x.elemDType());
+    // Literal inits are lifted, and an integer constant may be a bit pattern.
+    var loop = b.openFor(0, 4, 1, .{ 0, 0.5 });
+    loop.yield(.{ loop.carried[0].bitXor(b.constant(.i32, 0xd4d0ccc8)), loop.carried[1].mul(2.0) });
 
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
@@ -1758,6 +1797,8 @@ test "scalar conversions and constants" {
         "arith.convertf",
         "arith.constant 0xFF800000 : f32",
         "!fly.memref<i8, global, 16:1>",
+        "-> (i32, f32)",
+        "arith.constant -724513592 : i32",
     }) |needle| {
         if (std.mem.indexOf(u8, ir, needle) == null) {
             std.debug.print("missing `{s}` in:\n{s}\n", .{ needle, ir });

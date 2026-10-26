@@ -44,7 +44,7 @@ fn findSeqIdx(
     block_q: i64,
     use_q_block_mode: bool,
 ) Value {
-    const left_init = k.liftAs(0, .i32);
+    const left_init = k.constant(.i32, 0);
 
     var w = k.openWhile(.{ left_init, num_seqs }, .{ .i32, .i32 });
     {
@@ -169,12 +169,12 @@ pub const KernelUnifiedAttention3dPtr = struct {
         const query_stride_0 = b.load(a.query_stride_0_ptr);
         const query_stride_1 = b.load(a.query_stride_1_ptr);
         const qq_bias_stride_0 = b.load(a.qq_bias_stride_0_ptr);
-        const stride_k_cache_0 = b.liftAs(cfg.stride_k_cache_0, .i64);
-        const stride_k_cache_1 = b.liftAs(cfg.stride_k_cache_1, .i64);
-        const stride_k_cache_2 = b.liftAs(cfg.stride_k_cache_2, .i64);
-        const stride_v_cache_0 = b.liftAs(cfg.stride_v_cache_0, .i64);
-        const stride_v_cache_1 = b.liftAs(cfg.stride_v_cache_1, .i64);
-        const stride_v_cache_2 = b.liftAs(cfg.stride_v_cache_2, .i64);
+        const stride_k_cache_0 = b.constant(.i64, cfg.stride_k_cache_0);
+        const stride_k_cache_1 = b.constant(.i64, cfg.stride_k_cache_1);
+        const stride_k_cache_2 = b.constant(.i64, cfg.stride_k_cache_2);
+        const stride_v_cache_0 = b.constant(.i64, cfg.stride_v_cache_0);
+        const stride_v_cache_1 = b.constant(.i64, cfg.stride_v_cache_1);
+        const stride_v_cache_2 = b.constant(.i64, cfg.stride_v_cache_2);
         const num_seqs = b.load(a.num_seqs_ptr);
 
         kernelUnifiedAttention3d(

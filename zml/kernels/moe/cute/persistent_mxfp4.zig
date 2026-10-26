@@ -724,7 +724,7 @@ fn issueTmaStage(
     // it as a value rather than a literal: a statically zero leaf collapses out
     // of the coordinate tuple, and the TMA lowering then shifts the remaining
     // tensor-map coordinates, silently reading group zero for every group.
-    const b_tile_n = b.cst(.i32, 0);
+    const b_tile_n = b.constant(.i32, 0);
     const b_tile_k = b.slice(
         partitioned_b_target,
         .{ all, b_tile_n, all, group },
@@ -743,7 +743,7 @@ fn issueTmaStage(
     );
     const b_source = b.rebuildCoordTensorIterator(3, b_tile, .{ div_128, div_n, dynamic }, .{ 128, n, 1 }, b_copy_layout);
     const sfa_source = b.makeCoordTensor(.{ 0, tile_m, k_tile, expert }, b.staticLayout(sf_copy_spec));
-    const sfb_source = b.makeCoordTensor(.{ 0, b.cst(.i32, 0), k_tile, group }, b.staticLayout(sf_copy_spec));
+    const sfb_source = b.makeCoordTensor(.{ 0, b.constant(.i32, 0), k_tile, group }, b.staticLayout(sf_copy_spec));
 
     var elected = b.openIf(b.electSync());
     b.mbarrierArriveExpectTx(stage.load_barrier, tile.transactionBytes());
@@ -790,25 +790,25 @@ const DirectRoutes = struct {
     routes: usize,
 
     fn count(self: DirectRoutes, b: *B) V {
-        var valid = b.cst(.i32, 0);
+        var valid = b.constant(.i32, 0);
         for (0..self.routes) |r| valid = valid.add(self.expertAt(b, r).ge(0).to(.i32));
         return valid;
     }
 
     /// Route of the `k`-th valid route.
     fn nth(self: DirectRoutes, b: *B, k: V) V {
-        var seen = b.cst(.i32, 0);
-        var route = b.cst(.i32, 0);
+        var seen = b.constant(.i32, 0);
+        var route = b.constant(.i32, 0);
         for (0..self.routes) |r| {
             const valid = self.expertAt(b, r).ge(0);
-            route = b.select(valid.bitAnd(seen.eq(k)), b.cst(.i32, @as(i32, @intCast(r))), route);
+            route = b.select(valid.bitAnd(seen.eq(k)), b.constant(.i32, r), route);
             seen = seen.add(valid.to(.i32));
         }
         return route;
     }
 
     fn expertAt(self: DirectRoutes, b: *B, r: usize) V {
-        return self.expert_ids.get(.{b.cst(.i32, @as(i32, @intCast(r)))}, .i32);
+        return self.expert_ids.get(.{b.constant(.i32, r)}, .i32);
     }
 };
 
@@ -871,7 +871,7 @@ fn advancePipeline(b: *B, index: V, phase: V, comptime stages: usize) PipelinePo
 fn peekBarrierIfRemaining(b: *B, base: V, count: V, limit: usize, state: PipelinePosition) V {
     var peek = b.openIfElse(count.lt(limit), .{.i1});
     peek.yieldThen(.{b.mbarrierWaitParity(barrierAt(b, base, state.index), state.phase)});
-    peek.yieldElse(.{b.cst(.i1, true)});
+    peek.yieldElse(.{b.constant(.i1, true)});
     return peek.results[0];
 }
 
@@ -938,16 +938,16 @@ fn runTmaProducer(
     exec_sfa: cute.Atom,
     exec_sfb: cute.Atom,
 ) void {
-    const initial_index = b.cst(.i32, 0);
-    const initial_phase = b.cst(.i32, 1);
-    const initial_count = b.cst(.i32, 0);
+    const initial_index = b.constant(.i32, 0);
+    const initial_phase = b.constant(.i32, 1);
+    const initial_count = b.constant(.i32, 0);
     const persistent_clusters = b.gridDim().z;
     const cta_m = b.blockIdx().x;
     const cta_n = b.blockIdx().y;
-    const cta_l = b.cst(.i32, 0);
+    const cta_l = b.constant(.i32, 0);
     const div_m = b.fastDivmodCreate(tiles_m);
     const div_n = b.fastDivmodCreate(1);
-    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.cst(.i32, 0), active, tiles_m, div_m, div_n, direct);
+    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.constant(.i32, 0), active, tiles_m, div_m, div_n, direct);
     const carried = .{
         initial_work.m,        initial_work.n, initial_work.group, initial_work.valid,
         initial_count,         initial_index,  initial_phase,      persistent_clusters,
@@ -972,7 +972,7 @@ fn runTmaProducer(
         0,
         k_tiles,
         1,
-        .{ first_ready, b.cst(.i32, 0), first_state.index, first_state.phase },
+        .{ first_ready, b.constant(.i32, 0), first_state.index, first_state.phase },
     );
     const k = stages.carried[1];
     const state: PipelinePosition = .{
@@ -1276,13 +1276,13 @@ fn runMmaConsumer(
     const div_m = b.fastDivmodCreate(tiles_m);
     const div_n = b.fastDivmodCreate(1);
     // The MMA warp never reads the group, only the tile count.
-    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.cst(.i32, 0), active, tiles_m, div_m, div_n, null);
+    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.constant(.i32, 0), active, tiles_m, div_m, div_n, null);
     const carried = .{
-        initial_work.m,        initial_work.n, initial_work.group, initial_work.valid,
-        b.cst(.i32, 0),        b.cst(.i32, 0), b.cst(.i32, 0),     tiled_mma.value(),
-        b.cst(.i32, 0),        b.cst(.i32, 0), b.cst(.i32, 1),     persistent_clusters,
-        initial_work.linear,   b.blockIdx().x, b.blockIdx().y,     b.cst(.i32, 0),
-        initial_work.executed, tiles_m,        active,             div_m,
+        initial_work.m,        initial_work.n,      initial_work.group,  initial_work.valid,
+        b.constant(.i32, 0),   b.constant(.i32, 0), b.constant(.i32, 0), tiled_mma.value(),
+        b.constant(.i32, 0),   b.constant(.i32, 0), b.constant(.i32, 1), persistent_clusters,
+        initial_work.linear,   b.blockIdx().x,      b.blockIdx().y,      b.constant(.i32, 0),
+        initial_work.executed, tiles_m,             active,              div_m,
         div_n,
     };
     var tiles = b.openWhile(carried, carried);
@@ -1307,7 +1307,7 @@ fn runMmaConsumer(
     b.mbarrierTryWaitParity(accumulator_empty, accumulator_state.phase, 10_000_000);
 
     const persistent_mma: cute.Atom = .{ .inner = tiles.after_carried[7].inner, .kernel = b };
-    const initial_mma = b.setMmaAccumulate(persistent_mma, b.cst(.i1, false));
+    const initial_mma = b.setMmaAccumulate(persistent_mma, b.constant(.i1, false));
     var stages = b.openFor(
         0,
         k_tiles,
@@ -1315,7 +1315,7 @@ fn runMmaConsumer(
         // Match PipelineTmaUmma's Python loop-carried ABI exactly.  The
         // software-pipeline pass recognizes the leading try-wait token and
         // keeps the MMA atom immediately after it.
-        .{ first_ready, initial_mma.value(), b.cst(.i32, 0), first_state.index, first_state.phase },
+        .{ first_ready, initial_mma.value(), b.constant(.i32, 0), first_state.index, first_state.phase },
     );
     const k = stages.carried[2];
     const state: PipelinePosition = .{ .index = stages.carried[3], .phase = stages.carried[4] };
@@ -1438,10 +1438,10 @@ fn runEpilogue(
 
     const div_m = b.fastDivmodCreate(tiles_m);
     const div_n = b.fastDivmodCreate(1);
-    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.cst(.i32, 0), active, tiles_m, div_m, div_n, direct);
+    const initial_work = persistentWorkAt(b, b.blockIdx().z, b.constant(.i32, 0), active, tiles_m, div_m, div_n, direct);
     const carried = .{
-        initial_work.m,        initial_work.n, initial_work.group, initial_work.valid,
-        b.cst(.i32, 0),        b.cst(.i32, 0), b.cst(.i32, 0),     initial_work.linear,
+        initial_work.m,        initial_work.n,      initial_work.group,  initial_work.valid,
+        b.constant(.i32, 0),   b.constant(.i32, 0), b.constant(.i32, 0), initial_work.linear,
         initial_work.executed,
     };
     var tiles = b.openWhile(carried, .{
@@ -1535,7 +1535,7 @@ fn runEpilogue(
 fn mxScale(b: *B, maximum: V) struct { exponent: V, inverse: V } {
     const raw_bits = maximum.maximum(1e-4).mul(1.0 / 448.0).bitCast(.i32);
     const exponent = raw_bits.shrLogical(23).add(raw_bits.bitAnd(0x7fffff).ne(0).to(.i32));
-    return .{ .exponent = exponent, .inverse = b.cst(.i32, 254).sub(exponent).shl(23).bitCast(.f32) };
+    return .{ .exponent = exponent, .inverse = b.constant(.i32, 254).sub(exponent).shl(23).bitCast(.f32) };
 }
 
 /// Per-row routing data of one expert group, spread across a warp: lane `l`
@@ -1552,7 +1552,7 @@ fn routedLanes(b: *B, comptime tile: Tile, operands: EpilogueOperands, group: V,
     // Only the up projection applies routing weights.
     const weights = operands.routing_weights;
     if (operands.direct) return .{
-        .count = b.cst(.i32, 1),
+        .count = b.constant(.i32, 1),
         .route = group,
         .weight = if (weights) |w| w.get(.{group}, .f32) else null,
     };
@@ -1561,11 +1561,11 @@ fn routedLanes(b: *B, comptime tile: Tile, operands: EpilogueOperands, group: V,
     // Lanes past the tile width alias row 0, which is always live. Wide tiles
     // run one 32-row chunk at a time, so lane `l` holds row `32 * chunk + l`.
     const chunk_rows = comptime tile.chunkRows();
-    const in_chunk = b.select(lane.lt(@as(i32, @intCast(chunk_rows))), lane, b.cst(.i32, 0));
+    const in_chunk = b.select(lane.lt(@as(i32, @intCast(chunk_rows))), lane, b.constant(.i32, 0));
     const row_in_group = if (chunk == 0) in_chunk else in_chunk.add(@as(i32, @intCast(@as(i64, @intCast(chunk)) * chunk_rows)));
     const live = row_in_group.lt(count);
     const inverse = operands.route_inverse.get(.{group.mul(tile.n).add(row_in_group)}, .i32);
-    const route = b.select(live, inverse, b.cst(.i32, 0));
+    const route = b.select(live, inverse, b.constant(.i32, 0));
     const weight = if (weights) |w| w.get(.{route}, .f32) else null;
     return .{ .count = count, .route = route, .weight = weight };
 }
@@ -1611,7 +1611,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
 
     var activations: [@intCast(n)]V = undefined;
     // Lane `c` collects the warp maximum of column `c`.
-    var lane_maximum = b.cst(.f32, 0);
+    var lane_maximum = b.constant(.f32, 0);
     for (0..row_chunks) |row_chunk| {
         const first = row_chunk * swiglu_chunk;
         const last = @min(first + swiglu_chunk, live);
@@ -1638,7 +1638,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
             var result = up_value.mul(gate).mul(b.unaryF32("rcp.approx.ftz.f32", exp_neg.add(1.0)));
             result = result.mul(b.shuffleIdx(routed.weight.?, c)).to(.bf16).to(.f32);
             // Odd threads hold no activation and must not raise the maxima.
-            activation.* = b.select(is_gate, result, b.cst(.f32, 0));
+            activation.* = b.select(is_gate, result, b.constant(.f32, 0));
             const maximum = b.warpMaxNonNegative(activation.*.abs());
             chunk_maximum = b.select(lane.eq(c), maximum, chunk_maximum);
         }
@@ -1648,7 +1648,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
             g.yieldThen(then_values);
             // Padding chunk: zero activations, maxima unchanged. The zero is
             // emitted in the else block, where it is used.
-            var else_values: [swiglu_chunk + 1]V = @splat(b.cst(.f32, 0));
+            var else_values: [swiglu_chunk + 1]V = @splat(b.constant(.f32, 0));
             else_values[swiglu_chunk] = lane_maximum;
             g.yieldElse(else_values);
             for (activations[first..last], g.results[0 .. last - first]) |*activation, result| activation.* = result;
@@ -1664,7 +1664,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
 
     // Lane `c` turns the two half-block maxima of column `c` into its scale.
     const pair = warp.bitAnd(~@as(i32, 1));
-    const lane_column = b.select(lane.lt(@as(i32, @intCast(n))), lane, b.cst(.i32, 0));
+    const lane_column = b.select(lane.lt(@as(i32, @intCast(n))), lane, b.constant(.i32, 0));
     const scale = mxScale(b, scratch.get(.{ pair, lane_column }, .f32).maximum(scratch.get(.{ pair.add(1), lane_column }, .f32)));
     // The next tile reuses the scratch maxima.
     b.namedBarrier(1, 128);
@@ -1852,7 +1852,7 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     inline for (barrier_arrays) |array| {
         var lane = b.openIf(b.electSync());
         inline for (0..array[1]) |stage| {
-            b.mbarrierInit(barrierAt(b, array[0], b.cst(.i32, stage)), array[2]);
+            b.mbarrierInit(barrierAt(b, array[0], b.constant(.i32, stage)), array[2]);
         }
         lane.close();
     }
@@ -1967,12 +1967,12 @@ fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     const tma_sfa = b.makeTiledTmaLoadAtom(gSFA.value(), sf_smem.value(), sf_map.value(), L.tmaSf(b));
     const tma_sfb = b.makeTiledTmaLoadAtom(gSFB.value(), sf_smem.value(), sf_map.value(), L.tmaSf(b));
 
-    const one = b.cst(.i32, 1);
-    const tiles_m = b.cst(.i32, @divExact(cfg.m, 128));
-    const grid_z = b.cst(.i32, @min(@divExact(cfg.m, 128) * cfg.groups, cfg.persistent_ctas));
+    const one = b.constant(.i32, 1);
+    const tiles_m = b.constant(.i32, @divExact(cfg.m, 128));
+    const grid_z = b.constant(.i32, @min(@divExact(cfg.m, 128) * cfg.groups, cfg.persistent_ctas));
     const config = b.makeLaunchConfig(.{
         .grid = .{ one, one, grid_z },
-        .block = .{ b.cst(.i32, 192), one, one },
+        .block = .{ b.constant(.i32, 192), one, one },
         .dynamic_smem = b.kernelSmemSize(deviceName(epilogue)),
         .stream = b.cudaStream(),
         .cluster = .{ one, one, one },

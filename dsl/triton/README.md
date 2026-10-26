@@ -452,7 +452,7 @@ in all of these — drop it:
 | `v_i64.lt(NUM_QUERY_HEADS)` (Zig i64)    | runtime i64 → i64 const               |
 | `v_i32.add(pad_term)` (Zig i32)          | runtime i32 → i32 const               |
 | `b.splat(-1, shape)` / `b.openFor(0, N, 1, ...)` | comptime → matches elem / lower |
-| `b.liftAs(0, .i32)`                      | liftAs takes anytype — wrap nothing   |
+| `b.constant(.i32, 0)`                    | constant takes anytype — wrap nothing |
 
 `@as(...)` **is** required exactly when you're narrowing a runtime Zig int
 to a smaller width that `lift` won't pick on its own. The idiom is
@@ -470,16 +470,16 @@ Python's `.to(tl.int64)` style but costs two extra Value-level casts; prefer
 the narrowing `@as` or a pre-declared `const FOO_I32: i32 = @intCast(FOO);`
 when the same width cast recurs.
 
-### When do you need `b.lift` / `b.liftAs`?
+### When do you need `b.lift` / `b.constant`?
 
 Almost never. The DSL auto-lifts rhs for every fluent binop, `b.splat`,
 `b.full`, `b.openFor` bounds, `.addPtr` offsets, etc. Reach for `b.lift` /
-`b.liftAs` **only** when the DSL surface demands an existing `Value` and
+`b.constant` **only** when the DSL surface demands an existing `Value` and
 there's no binop sibling to match against — typically:
 
 - Loop seeds for `openWhile(.{inits}, ...)` where you start with a raw
-  comptime literal: `const left_init = b.liftAs(0, .i32);`.
-- Mutable `var x: Value = b.liftAs(0, .i32);` that a later branch may
+  comptime literal: `const left_init = b.constant(.i32, 0);`.
+- Mutable `var x: Value = b.constant(.i32, 0);` that a later branch may
   reassign — the var needs an initial Value even if the comptime path would
   work on its own.
 
@@ -583,7 +583,8 @@ const offs = b.arange(BLOCK, .i64);
 | `b.expandDims(v, axis)` / `v.expandDims(axis)` | `tt.expand_dims` — insert a size-1 axis. Mirrors `v[:, None]` (`axis=1`) / `v[None, :]` (`axis=0`). |
 | `b.mask2d(cond_m, cond_n, _, _)`       | `cond_m[:, None] & cond_n[None, :]` — emits the `(m,1) & (1,n)` form; auto-broadcast at the next consumer. |
 | `b.lift(value)`                        | Wrap a Zig scalar as a DSL Value; dtype inferred from source. |
-| `b.liftAs(value, dtype)`               | Wrap a Zig scalar as a DSL Value of a specific `DType`. |
+| `b.constant(dtype, value)`             | Wrap a Zig scalar as a DSL Value of a specific `DType`. |
+| `b.constantLike(value, like)`          | Wrap a Zig scalar as a DSL Value of `like`'s element type. |
 
 ---
 

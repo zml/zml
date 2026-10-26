@@ -763,7 +763,7 @@ pub const Builder = struct {
     }
 
     /// Lift a Zig scalar to a DSL constant. Dtype follows the source type;
-    /// unsigned ints are bit-cast (signless MLIR). Use `liftAs` for explicit dtype.
+    /// unsigned ints are bit-cast (signless MLIR). Use `constant` for an explicit dtype.
     pub fn lift(self: *Builder, value: anytype) Value {
         const T = @TypeOf(value);
         if (T == Value) return value;
@@ -881,35 +881,45 @@ pub const Builder = struct {
         @panic("element type not a recognized DSL DType");
     }
 
-    /// Lift a Zig scalar to a DSL constant of `dtype`. Unsigned ints are bit-cast.
-    pub fn liftAs(self: *Builder, value: anytype, dtype: DType) Value {
+    /// `value` as a constant of `dtype`; a Value passes through. An integer is
+    /// signed or an unsigned bit pattern of `dtype`'s width; anything else
+    /// panics.
+    pub fn constant(self: *Builder, dtype: DType, value: anytype) Value {
         const T = @TypeOf(value);
         if (T == Value) return value;
         if (isFloatDtype(dtype)) {
             const v_f64: f64 = switch (@typeInfo(T)) {
                 .comptime_int, .int => @floatFromInt(value),
                 .comptime_float, .float => @floatCast(value),
-                else => @compileError("Builder.liftAs: unsupported scalar " ++ @typeName(T)),
+                else => @compileError("Builder.constant: unsupported scalar " ++ @typeName(T)),
             };
             return self.emitFloat(dtype, v_f64);
         }
-        const v_i64: i64 = switch (@typeInfo(T)) {
-            .comptime_int => blk: {
-                if (value >= std.math.minInt(i64) and value <= std.math.maxInt(i64))
-                    break :blk @intCast(value);
-                if (value >= 0 and value <= std.math.maxInt(u64))
-                    break :blk @bitCast(@as(u64, value));
-                @compileError("Builder.liftAs: integer literal out of 64-bit range");
-            },
-            .int => |info| if (info.signedness == .signed) @intCast(value) else @bitCast(@as(u64, @intCast(value))),
+        const v: i128 = switch (@typeInfo(T)) {
+            .comptime_int, .int => value,
             .comptime_float, .float => @intFromFloat(value),
-            else => @compileError("Builder.liftAs: unsupported scalar " ++ @typeName(T)),
+            else => @compileError("Builder.constant: unsupported scalar " ++ @typeName(T)),
         };
-        return self.emitInt(dtype, v_i64);
+        return self.emitInt(dtype, intBits(v, @intCast(intBitwidth(dtype)), @tagName(dtype)));
+    }
+
+    /// `value` as the `i64` an integer constant of `bits` bits is built from.
+    /// It may be signed or an unsigned bit pattern, so it must lie in
+    /// [-2^(bits-1), 2^bits).
+    fn intBits(value: i128, bits: u7, dtype: []const u8) i64 {
+        if (value < -(@as(i128, 1) << (bits - 1)) or value >= @as(i128, 1) << bits)
+            std.debug.panic("Builder.constant: {d} does not fit {s}", .{ value, dtype });
+        return @truncate(value);
+    }
+
+    /// `value` as a constant of `like`'s element type; a Value passes through.
+    pub fn constantLike(self: *Builder, value: anytype, like: Value) Value {
+        if (@TypeOf(value) == Value) return value;
+        return self.constMatching(value, like.elemType());
     }
 
     fn constMatching(self: *Builder, value: anytype, elem: *const mlir.Type) Value {
-        return self.liftAs(value, self.mlirElemToDType(elem));
+        return self.constant(self.mlirElemToDType(elem), value);
     }
 
     pub fn zeros(self: *Builder, shape: []const i64, dtype: DType) Value {
@@ -921,7 +931,7 @@ pub const Builder = struct {
     }
 
     pub fn full(self: *Builder, shape: []const i64, value: anytype, dtype: DType) Value {
-        return self.splat(self.liftAs(value, dtype), shape);
+        return self.splat(self.constant(dtype, value), shape);
     }
 
     /// 2-D mask `(m, 1) & (1, n)` — auto-broadcasts to `(m, n)`.

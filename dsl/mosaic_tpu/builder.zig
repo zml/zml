@@ -959,7 +959,7 @@ pub const Builder = struct {
     }
 
     /// Constant `index`-typed value (for memref / loop bounds).
-    pub fn cIndex(self: *Builder, value: i64) Value {
+    pub fn constIndex(self: *Builder, value: i64) Value {
         return self.emit(arith.constant_index(self.ctx, value, self.loc()));
     }
 
@@ -997,39 +997,48 @@ pub const Builder = struct {
         };
     }
 
-    /// Lift `value` and pin its dtype to `dtype`. Unsigned ints bit-cast
-    /// preserving the source bit-pattern.
-    pub fn liftAs(self: *Builder, value: anytype, dtype: DType) Value {
+    /// `value` as a constant of `dtype`; a Value passes through. An integer is
+    /// signed or an unsigned bit pattern of `dtype`'s width; anything else
+    /// panics.
+    pub fn constant(self: *Builder, dtype: DType, value: anytype) Value {
         const T = @TypeOf(value);
         if (T == Value) return value;
         if (isFloatDtype(dtype)) {
             const v_f64: f64 = switch (@typeInfo(T)) {
                 .comptime_int, .int => @floatFromInt(value),
                 .comptime_float, .float => @floatCast(value),
-                else => @compileError("Builder.liftAs: unsupported scalar " ++ @typeName(T)),
+                else => @compileError("Builder.constant: unsupported scalar " ++ @typeName(T)),
             };
             return self.emitFloat(dtype, v_f64);
         }
-        const v_i64: i64 = switch (@typeInfo(T)) {
-            .comptime_int => blk: {
-                if (value >= std.math.minInt(i64) and value <= std.math.maxInt(i64))
-                    break :blk @intCast(value);
-                if (value >= 0 and value <= std.math.maxInt(u64))
-                    break :blk @bitCast(@as(u64, value));
-                @compileError("Builder.liftAs: integer literal out of 64-bit range");
-            },
-            .int => |info| if (info.signedness == .signed) @intCast(value) else @bitCast(@as(u64, @intCast(value))),
+        const v: i128 = switch (@typeInfo(T)) {
+            .comptime_int, .int => value,
             .comptime_float, .float => @intFromFloat(value),
-            else => @compileError("Builder.liftAs: unsupported scalar " ++ @typeName(T)),
+            else => @compileError("Builder.constant: unsupported scalar " ++ @typeName(T)),
         };
-        return self.emitInt(dtype, v_i64);
+        return self.emitInt(dtype, intBits(v, @intCast(intBitwidth(dtype)), @tagName(dtype)));
+    }
+
+    /// `value` as the `i64` an integer constant of `bits` bits is built from.
+    /// It may be signed or an unsigned bit pattern, so it must lie in
+    /// [-2^(bits-1), 2^bits).
+    fn intBits(value: i128, bits: u7, dtype: []const u8) i64 {
+        if (value < -(@as(i128, 1) << (bits - 1)) or value >= @as(i128, 1) << bits)
+            std.debug.panic("Builder.constant: {d} does not fit {s}", .{ value, dtype });
+        return @truncate(value);
+    }
+
+    /// `value` as a constant of `like`'s element type; a Value passes through.
+    pub fn constantLike(self: *Builder, value: anytype, like: Value) Value {
+        if (@TypeOf(value) == Value) return value;
+        return self.constMatching(value, like.elemType());
     }
 
     /// Build an arith.constant of the given MLIR element type from a Zig
     /// numeric. Used for matching the type of an existing reference value.
-    pub fn constMatching(self: *Builder, value: anytype, elem: *const mlir.Type) Value {
-        if (elem.eql(.index(self.ctx))) return self.cIndex(@intCast(value));
-        return self.liftAs(value, self.mlirElemToDType(elem));
+    fn constMatching(self: *Builder, value: anytype, elem: *const mlir.Type) Value {
+        if (elem.eql(.index(self.ctx))) return self.constIndex(intBits(value, 64, "index"));
+        return self.constant(self.mlirElemToDType(elem), value);
     }
 
     fn liftMatching(self: *Builder, value: anytype, ref_elem: *const mlir.Type) Value {
@@ -1372,7 +1381,7 @@ pub const Builder = struct {
     /// + `arith.mulf x, ln2` + `math.exp`. For the raw `math.exp2` op
     /// (post-2025-07-26 cloud TPUs), use `mathExp2`.
     pub fn exp2(self: *Builder, x: Value) Value {
-        const ln2 = self.liftAs(@as(f64, 0.6931471805599453), self.mlirElemToDType(x.elemType()));
+        const ln2 = self.constant(self.mlirElemToDType(x.elemType()), @as(f64, 0.6931471805599453));
         const ln2_bc = if (x.isShaped()) self.broadcastTo(ln2, x.shape().constSlice()) else ln2;
         return self.exp(self.mulf(x, ln2_bc));
     }
@@ -1521,7 +1530,7 @@ pub const Builder = struct {
         if (self.zero_index) |z| {
             if (self.zero_index_block == block) return z;
         }
-        const z = self.cIndex(0);
+        const z = self.constIndex(0);
         self.zero_index = z;
         self.zero_index_block = block;
         return z;
@@ -1745,7 +1754,7 @@ pub const Builder = struct {
     }
 
     pub fn rotate(self: *Builder, value: Value, opts: RotateOpts) Value {
-        const amount = self.lift(@as(i32, opts.amount));
+        const amount = self.constant(.i32, opts.amount);
         return self.emit(mosaic_tpu.dynamic_rotate(self.ctx, value.inner, amount.inner, .{
             .dimension = opts.dimension,
             .stride = opts.stride,
@@ -1888,7 +1897,7 @@ pub const Builder = struct {
     /// Convenience: 1-sided range mask `(0 <= idx < limit)` — emits two
     /// `index` constants and a `tpu.create_mask`.
     pub fn rangeMask(self: *Builder, limits: []const Value, shape: []const i64) Value {
-        const zero = self.cIndex(0);
+        const zero = self.constIndex(0);
         const lows = self.arena.allocator().alloc(Value, limits.len) catch @panic("rangeMask OOM");
         for (lows) |*l| l.* = zero;
         return self.createMask(lows, limits, shape);
@@ -2034,9 +2043,9 @@ pub const Builder = struct {
         inits: anytype,
     ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
         // scf.for bounds default to `index`.
-        const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.cIndex(@intCast(lower));
-        const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.cIndex(@intCast(upper));
-        const step_v: Value = if (@TypeOf(step) == Value) step else self.cIndex(@intCast(step));
+        const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.constIndex(@intCast(lower));
+        const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constIndex(@intCast(upper));
+        const step_v: Value = if (@TypeOf(step) == Value) step else self.constIndex(@intCast(step));
         return dsl.openFor(self, Value, .{ lb_v, ub_v, step_v }, inits, .{});
     }
 

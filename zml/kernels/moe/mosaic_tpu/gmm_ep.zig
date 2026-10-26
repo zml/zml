@@ -14,7 +14,7 @@ fn alignTo(x: i64, y: i64) i64 {
 }
 
 fn floorModI32(b: *mtt.Builder, x: mtt.Value, y: mtt.Value) mtt.Value {
-    const c0 = b.lift(@as(i32, 0));
+    const c0 = b.constant(.i32, 0);
     const r = b.remsi(x, y);
     const r_nz = b.cmpi(.ne, r, c0);
     const r_neg = b.cmpi(.slt, r, c0);
@@ -22,8 +22,8 @@ fn floorModI32(b: *mtt.Builder, x: mtt.Value, y: mtt.Value) mtt.Value {
 }
 
 fn floorDivPosI32(b: *mtt.Builder, x: mtt.Value, y: mtt.Value) mtt.Value {
-    const c0 = b.lift(@as(i32, 0));
-    const c1 = b.lift(@as(i32, 1));
+    const c0 = b.constant(.i32, 0);
+    const c1 = b.constant(.i32, 1);
     const q = b.divsi(x, y);
     const sign = b.subi(
         b.extui(b.cmpi(.sgt, x, c0), .i32),
@@ -35,7 +35,7 @@ fn floorDivPosI32(b: *mtt.Builder, x: mtt.Value, y: mtt.Value) mtt.Value {
 }
 
 fn ceilDivPosI32(b: *mtt.Builder, x: mtt.Value, y: mtt.Value) mtt.Value {
-    return b.divsi(b.addi(x, b.subi(y, b.lift(@as(i32, 1)))), y);
+    return b.divsi(b.addi(x, b.subi(y, b.constant(.i32, 1))), y);
 }
 
 pub const Cfg = struct {
@@ -129,7 +129,7 @@ fn winRef(b: *mtt.Builder, rw: pipeline.RefWindow, shape: []const i64) mtt.Value
     base[0] = slot;
     result_shape[0] = 1;
     for (shape, 0..) |d, i| {
-        base[i + 1] = b.lift(@as(i32, 0));
+        base[i + 1] = b.constant(.i32, 0);
         result_shape[i + 1] = d;
     }
     const sliced = b.memRefSlice(buf, base, result_shape, &.{});
@@ -147,15 +147,15 @@ fn lhsIndexMap(b: *mtt.Builder, indices: []const mtt.Value, ctx_opaque: ?*anyopa
     const k_id = indices[2];
 
     const m_start = metaLoad(b, ctx.meta.m_offset, gm_id);
-    const m_end = metaLoad(b, ctx.meta.m_offset, b.addi(gm_id, b.lift(@as(i32, 1))));
-    const sublane = b.lift(@as(i32, @intCast(cfg.size_lhs_sublane)));
+    const m_end = metaLoad(b, ctx.meta.m_offset, b.addi(gm_id, b.constant(.i32, 1)));
+    const sublane = b.constant(.i32, cfg.size_lhs_sublane);
     const row_start = floorDivPosI32(b, m_start, sublane);
     const row_end = ceilDivPosI32(b, m_end, sublane);
     const row_size = b.subi(row_end, row_start);
 
     const out = b.arena.allocator().alloc(pipeline.BlockIndex, 3) catch @panic("gmm_ep lhsIndexMap OOM");
     out[0] = .{ .slice = .{ .start = row_start, .size = row_size } };
-    out[1] = .{ .scalar = b.lift(@as(i32, 0)) };
+    out[1] = .{ .scalar = b.constant(.i32, 0) };
     out[2] = .{ .scalar = k_id };
     return out;
 }
@@ -177,13 +177,13 @@ fn outIndexMap(b: *mtt.Builder, indices: []const mtt.Value, ctx_opaque: ?*anyopa
     const n_id = indices[0];
 
     const m_start = metaLoad(b, ctx.meta.m_offset, gm_id);
-    const m_end = metaLoad(b, ctx.meta.m_offset, b.addi(gm_id, b.lift(@as(i32, 1))));
-    const sublane = b.lift(@as(i32, @intCast(cfg.size_lhs_sublane)));
+    const m_end = metaLoad(b, ctx.meta.m_offset, b.addi(gm_id, b.constant(.i32, 1)));
+    const sublane = b.constant(.i32, cfg.size_lhs_sublane);
     const row_start = floorDivPosI32(b, m_start, sublane);
     const capped_row_end = floorDivPosI32(b, m_end, sublane);
     const last_row_end = ceilDivPosI32(b, m_end, sublane);
     const row_end = b.select(
-        b.cmpi(.eq, gm_id, b.subi(ctx.num_gm, b.lift(@as(i32, 1)))),
+        b.cmpi(.eq, gm_id, b.subi(ctx.num_gm, b.constant(.i32, 1))),
         last_row_end,
         capped_row_end,
     );
@@ -191,16 +191,16 @@ fn outIndexMap(b: *mtt.Builder, indices: []const mtt.Value, ctx_opaque: ?*anyopa
 
     const out = b.arena.allocator().alloc(pipeline.BlockIndex, 3) catch @panic("gmm_ep outIndexMap OOM");
     out[0] = .{ .slice = .{ .start = row_start, .size = row_size } };
-    out[1] = .{ .scalar = b.lift(@as(i32, 0)) };
+    out[1] = .{ .scalar = b.constant(.i32, 0) };
     out[2] = .{ .scalar = n_id };
     return out;
 }
 
 fn indices1DTo3D(b: *mtt.Builder, indices: []const mtt.Value) []const mtt.Value {
     const out = b.arena.allocator().alloc(mtt.Value, 3) catch @panic("gmm_ep indices1DTo3D OOM");
-    out[0] = b.lift(@as(i32, 0));
+    out[0] = b.constant(.i32, 0);
     out[1] = indices[0];
-    out[2] = b.lift(@as(i32, 0));
+    out[2] = b.constant(.i32, 0);
     return out;
 }
 
@@ -217,11 +217,11 @@ fn outIndexMap1D(b: *mtt.Builder, indices: []const mtt.Value, ctx_opaque: ?*anyo
 }
 
 fn fillMetadata(b: *mtt.Builder, cfg: Cfg, a: anytype) mtt.Value {
-    const c0 = b.lift(@as(i32, 0));
-    const c1 = b.lift(@as(i32, 1));
-    const group_offset = b.scalarLoad(a.group_offset, &.{b.cIndex(0)});
-    const max_num_group = b.addi(group_offset, b.lift(@as(i32, @intCast(cfg.size_group))));
-    b.scalarStore(a.metadata_m_offset, c0, &.{b.cIndex(0)});
+    const c0 = b.constant(.i32, 0);
+    const c1 = b.constant(.i32, 1);
+    const group_offset = b.scalarLoad(a.group_offset, &.{b.constIndex(0)});
+    const max_num_group = b.addi(group_offset, b.constant(.i32, cfg.size_group));
+    b.scalarStore(a.metadata_m_offset, c0, &.{b.constIndex(0)});
 
     var outer = b.openFor(c0, max_num_group, c1, .{ c0, c0 });
     {
@@ -232,10 +232,10 @@ fn fillMetadata(b: *mtt.Builder, cfg: Cfg, a: anytype) mtt.Value {
         const group_id = b.subi(lhs_group_id, group_offset);
         const group_size = b.scalarLoad(a.group_sizes, &.{b.toIndex(lhs_group_id)});
         const end_m_offset = b.addi(start_m_offset, group_size);
-        const sublane = b.lift(@as(i32, @intCast(cfg.size_lhs_sublane)));
+        const sublane = b.constant(.i32, cfg.size_lhs_sublane);
         const local_offset = floorModI32(b, start_m_offset, sublane);
         const aligned_group_size = b.addi(group_size, local_offset);
-        const tile_m = b.lift(@as(i32, @intCast(cfg.tile_m)));
+        const tile_m = b.constant(.i32, cfg.tile_m);
         var curr_num_gm = b.divsi(b.addi(aligned_group_size, b.subi(tile_m, c1)), tile_m);
         const should_process = b.andi(b.cmpi(.sgt, group_size, c0), b.cmpi(.sge, group_id, c0));
         curr_num_gm = b.select(should_process, curr_num_gm, c0);
@@ -407,7 +407,7 @@ fn innerBody(
     const lhs = b.refLoad(lhs_ref_2d);
     const rhs_slot = b.toIndex(refs[1].slot.?);
     var rhs = b.shapeCast(
-        b.vectorLoadShape(refs[1].buf.?, &.{ rhs_slot, b.cIndex(0), b.cIndex(0) }, &.{ 1, cfg.tile_k, rhs_tile_n }),
+        b.vectorLoadShape(refs[1].buf.?, &.{ rhs_slot, b.constIndex(0), b.constIndex(0) }, &.{ 1, cfg.tile_k, rhs_tile_n }),
         &.{ cfg.tile_k, rhs_tile_n },
     );
     const valid_k = @mod(cfg.size_k, cfg.tile_k);
@@ -420,8 +420,8 @@ fn innerBody(
     acc = applyFuseAct(b, cfg, acc);
 
     const m_start = metaLoad(b, ctx.meta.m_offset, gm_id);
-    const m_end = metaLoad(b, ctx.meta.m_offset, b.addi(gm_id, b.lift(@as(i32, 1))));
-    const sublane = b.lift(@as(i32, @intCast(cfg.size_lhs_sublane)));
+    const m_end = metaLoad(b, ctx.meta.m_offset, b.addi(gm_id, b.constant(.i32, 1)));
+    const sublane = b.constant(.i32, cfg.size_lhs_sublane);
     const m_offset = b.subi(m_start, floorModI32(b, m_start, sublane));
     const m_start_local = b.subi(m_start, m_offset);
     const m_end_local = b.subi(m_end, m_offset);
@@ -437,7 +437,7 @@ fn innerBody(
     b.vectorStoreAt(
         refs[2].buf.?,
         b.shapeCast(b.shapeCast(acc, out_shape).to(cfg.out_dtype), &.{ 1, cdiv(cfg.tile_m, cfg.size_lhs_sublane), cfg.size_lhs_sublane, cfg.tile_n }),
-        &.{ out_slot, b.cIndex(0), b.cIndex(0), b.cIndex(0) },
+        &.{ out_slot, b.constIndex(0), b.constIndex(0), b.constIndex(0) },
     );
 
     const out_ref = winRef(b, refs[2], out_shape);
@@ -445,7 +445,7 @@ fn innerBody(
         const out_value = b.shapeCast(b.refLoad(out_ref), &.{ cfg.tile_m, cfg.tile_n });
         const partial_zero = b.zeros(&.{ cfg.tile_m, cfg.tile_n }, cfg.out_dtype);
         const partial_prev = b.select(
-            b.cmpi(.eq, gm_id, b.lift(@as(i32, 0))),
+            b.cmpi(.eq, gm_id, b.constant(.i32, 0)),
             partial_zero,
             b.refLoad(scratches[0]),
         );
@@ -454,12 +454,12 @@ fn innerBody(
         b.refStore(out_ref_for_store, b.shapeCast(out_accum, out_shape));
     } else {
         const first_row = b.shapeCast(
-            b.vectorLoadShape(out_ref, &.{ b.cIndex(0), b.cIndex(0), b.cIndex(0) }, &.{ 1, cfg.size_lhs_sublane, cfg.tile_n }),
+            b.vectorLoadShape(out_ref, &.{ b.constIndex(0), b.constIndex(0), b.constIndex(0) }, &.{ 1, cfg.size_lhs_sublane, cfg.tile_n }),
             &.{ cfg.size_lhs_sublane, cfg.tile_n },
         );
         const partial_zero = b.zeros(&.{ cfg.size_lhs_sublane, cfg.tile_n }, cfg.out_dtype);
         const partial_prev = b.select(
-            b.cmpi(.eq, gm_id, b.lift(@as(i32, 0))),
+            b.cmpi(.eq, gm_id, b.constant(.i32, 0)),
             partial_zero,
             b.refLoad(scratches[0]),
         );
@@ -468,13 +468,13 @@ fn innerBody(
         b.vectorStoreAt(
             out_ref_for_store,
             b.shapeCast(out_accum, &.{ 1, cfg.size_lhs_sublane, cfg.tile_n }),
-            &.{ b.cIndex(0), b.cIndex(0), b.cIndex(0) },
+            &.{ b.constIndex(0), b.constIndex(0), b.constIndex(0) },
         );
     }
 
     const last_row = floorDivPosI32(b, m_end_local, sublane);
     const m_end_mod = floorModI32(b, m_end_local, sublane);
-    const partial_complete = b.cmpi(.eq, m_end_mod, b.lift(@as(i32, 0)));
+    const partial_complete = b.cmpi(.eq, m_end_mod, b.constant(.i32, 0));
     const out_ref_for_partial = winRef(b, refs[2], out_shape);
     const partial_shape = if (cfg.tile_m == cfg.size_lhs_sublane)
         &.{ cfg.tile_m, cfg.tile_n }
@@ -482,7 +482,7 @@ fn innerBody(
         &.{ cfg.size_lhs_sublane, cfg.tile_n };
     const partial_zero = b.zeros(partial_shape, cfg.out_dtype);
     const partial_row = b.shapeCast(
-        b.vectorLoadShape(out_ref_for_partial, &.{ b.toIndex(last_row), b.cIndex(0), b.cIndex(0) }, &.{ 1, cfg.size_lhs_sublane, cfg.tile_n }),
+        b.vectorLoadShape(out_ref_for_partial, &.{ b.toIndex(last_row), b.constIndex(0), b.constIndex(0) }, &.{ 1, cfg.size_lhs_sublane, cfg.tile_n }),
         partial_shape,
     );
     b.refStore(scratches[0], b.select(partial_complete, partial_zero, partial_row));
@@ -518,8 +518,8 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
         .scratch_operands = 4,
     });
 
-    const num_k = b.lift(@as(i32, @intCast(cdiv(cfg.size_k, cfg.tile_k))));
-    const num_n = b.lift(@as(i32, @intCast(cdiv(cfg.alignedN(), cfg.tile_n))));
+    const num_k = b.constant(.i32, cdiv(cfg.size_k, cfg.tile_k));
+    const num_n = b.constant(.i32, cdiv(cfg.alignedN(), cfg.tile_n));
     const num_gm = fillMetadata(b, cfg, a);
 
     const ctx = b.arena.allocator().create(PipeCtx) catch @panic("gmm_ep PipeCtx OOM");

@@ -347,7 +347,7 @@ fn findSeqIdx(
     block_q: i64,
     use_q_block_mode: bool,
 ) Value {
-    const left_init = k.liftAs(0, .i32);
+    const left_init = k.constant(.i32, 0);
 
     var w = k.openWhile(.{ left_init, num_seqs }, .{ .i32, .i32 });
     {
@@ -418,12 +418,12 @@ fn kernelUnifiedAttention2d(
     const NUM_QUERIES_PER_KV: i64 = config.num_queries_per_kv;
     const NUM_QUERY_HEADS: i64 = config.num_query_heads;
     const SLIDING_WINDOW: i64 = config.sliding_window;
-    const stride_k_cache_0 = k.liftAs(config.k_strides[0], .i64);
-    const stride_k_cache_1 = k.liftAs(config.k_strides[1], .i64);
-    const stride_k_cache_2 = k.liftAs(config.k_strides[2], .i64);
-    const stride_v_cache_0 = k.liftAs(config.v_strides[0], .i64);
-    const stride_v_cache_1 = k.liftAs(config.v_strides[1], .i64);
-    const stride_v_cache_2 = k.liftAs(config.v_strides[2], .i64);
+    const stride_k_cache_0 = k.constant(.i64, config.k_strides[0]);
+    const stride_k_cache_1 = k.constant(.i64, config.k_strides[1]);
+    const stride_k_cache_2 = k.constant(.i64, config.k_strides[2]);
+    const stride_v_cache_0 = k.constant(.i64, config.v_strides[0]);
+    const stride_v_cache_1 = k.constant(.i64, config.v_strides[1]);
+    const stride_v_cache_2 = k.constant(.i64, config.v_strides[2]);
 
     const kv_head_idx = k.programId(.x);
     const q_block_global_idx = k.programId(.y);
@@ -526,7 +526,7 @@ fn kernelUnifiedAttention2d(
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
     // Sliding-window tile pruning — comptime branch.
-    var tile_start: Value = k.liftAs(0, .i32);
+    var tile_start: Value = k.constant(.i32, 0);
     var tile_end: Value = num_tiles;
     if (SLIDING_WINDOW > 0) {
         const qpos_lo = q_local_bq;
@@ -725,12 +725,12 @@ fn kernelUnifiedAttention3d(
     const NUM_QUERY_HEADS: i64 = config.num_query_heads;
     const NUM_SEGMENTS_PER_SEQ: i64 = config.num_segments_per_seq;
     const SLIDING_WINDOW: i64 = config.sliding_window;
-    const stride_k_cache_0 = k.liftAs(config.k_strides[0], .i64);
-    const stride_k_cache_1 = k.liftAs(config.k_strides[1], .i64);
-    const stride_k_cache_2 = k.liftAs(config.k_strides[2], .i64);
-    const stride_v_cache_0 = k.liftAs(config.v_strides[0], .i64);
-    const stride_v_cache_1 = k.liftAs(config.v_strides[1], .i64);
-    const stride_v_cache_2 = k.liftAs(config.v_strides[2], .i64);
+    const stride_k_cache_0 = k.constant(.i64, config.k_strides[0]);
+    const stride_k_cache_1 = k.constant(.i64, config.k_strides[1]);
+    const stride_k_cache_2 = k.constant(.i64, config.k_strides[2]);
+    const stride_v_cache_0 = k.constant(.i64, config.v_strides[0]);
+    const stride_v_cache_1 = k.constant(.i64, config.v_strides[1]);
+    const stride_v_cache_2 = k.constant(.i64, config.v_strides[2]);
 
     const q_block_global_idx = k.programId(.x);
     const kv_head_idx = k.programId(.y);

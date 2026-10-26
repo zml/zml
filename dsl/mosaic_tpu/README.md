@@ -390,18 +390,19 @@ lift rule:
 If you need to force a specific width for a runtime variable, cast at the
 call site: `pid.mul(@as(i32, @intCast(block_size)))`.
 
-### When do you need `b.lift` / `b.liftAs` / `b.cIndex`?
+### When do you need `b.lift` / `b.constant` / `b.constIndex`?
 
 | Helper                         | Effect                                                   |
 |--------------------------------|----------------------------------------------------------|
 | `b.lift(value)`                | Wrap a Zig scalar; dtype inferred from source.           |
-| `b.liftAs(value, dtype)`       | Wrap a Zig scalar as a specific `DType`.                 |
-| `b.cIndex(value)`              | `arith.constant N : index` — for memref offsets.         |
+| `b.constant(dtype, value)`     | Wrap a Zig scalar as a specific `DType`.                 |
+| `b.constantLike(value, like)`  | Wrap a Zig scalar as `like`'s element type.              |
+| `b.constIndex(value)`          | `arith.constant N : index` — for memref offsets.         |
 
 Reach for these when the DSL surface demands an existing `Value` and there's
 no binop sibling to match against — typically loop seeds for
 `openWhile(.{inits}, ...)`, `openFor(0, N, 1, .{init})`, or `var x: Value =
-b.liftAs(0, .i32);` that a later branch may reassign.
+b.constant(.i32, 0);` that a later branch may reassign.
 
 If the constant flows through any `.add` / `.mul` / `splat` etc., skip the
 lift and let auto-lift do it.
@@ -656,9 +657,9 @@ const final_b_h = loop.results[0];
 ```
 
 - `lower` / `upper` / `step` are `anytype`: pass Values, comptime ints, or
-  runtime Zig ints. Use `i32` constants (`b.lift(@as(i32, 0))`) when you
+  runtime Zig ints. Use `i32` constants (`b.constant(.i32, 0)`) when you
   want the loop counter to be `i32` (matching Pallas's `scf.for ... : i32`).
-  The default for `index`-typed counters is `b.cIndex(N)`.
+  The default for `index`-typed counters is `b.constIndex(N)`.
 - `inits` is a tuple `.{v1, v2, ...}` or an array. Arity is comptime —
   `carried`, `results`, and the `yield(...)` values (also a tuple or an
   array) all have the same length.

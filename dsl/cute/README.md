@@ -105,7 +105,7 @@ the actual IR regions.
   compact left-most stride like `cute.make_layout`; a `tensor` argument
   defaults to XLA's row-major layout, which is what the buffer holds.
 * **Scalars are `i32` and `f32` by default**, like `Int32`/`Float32`;
-  `cst(dtype, v)` picks another type and `coerce` lifts literals to the other
+  `constant(dtype, v)` picks another type and `coerce` lifts literals to the other
   operand's type.
 * **`nvvm` and `cuda` are the compiler's.** The context registers NVIDIA's
   `nvvm` and `cuda` dialects (`nvvm.ops`, `cuda.ops`, from the
