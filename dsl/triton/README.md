@@ -39,7 +39,7 @@ Two layers define the surface:
 11. [Reductions and scans](#reductions-and-scans)
 12. [Control flow](#control-flow)
 13. [Escape hatches](#escape-hatches)
-14. [Lower layer — `Builder.build`](#lower-layer--builderbuild)
+14. [Lower layer — `Builder.open`](#lower-layer--builderopen)
 15. [Python Triton ↔ Zig DSL cheat-sheet](#python-triton--zig-dsl-cheat-sheet)
 16. [Pitfalls](#pitfalls)
 
@@ -216,7 +216,7 @@ Signature: `Kernel.call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Result
 | `.grid`                   | `[3]i32`              | Triton launch grid `(grid_x, grid_y, grid_z)`. |
 | `.num_warps`              | `i32`                 | Triton launch param.                     |
 | `.num_stages`             | `i32`                 | Triton launch param.                     |
-| `.output_operand_aliases` | `[]const ...` (default `&.{}`) | For in-place updates (still indexed by output position — `.{ .output_index = 0, .operand_index = 1 }`). |
+| `.output_operand_aliases` | `?zml.ops.CustomCallOutputOperandAliases(Inputs, Outputs)` (default `null`) | For in-place updates: each output field names the input it aliases — `.{ .out = .x_ptr }`. |
 | `.debug`                  | `bool` (default false)| Emit `tt.debug = true` on the custom call. |
 
 Returns `Kernel.Results` — a struct of `Tensor` named like `spec.outputs`.
@@ -361,27 +361,13 @@ between fp64 / fp32 / fp16 / bf16 lowers to `arith.truncf` (rank-independent
 fp8 is on either side or the caller requested a non-default
 `fp_downcast_rounding`.
 
-### Constant hoisting and CSE
+### Constants
 
-Every `arith.constant` emitted by the DSL — whether through `lift`, `splat`
-of a comptime literal, `zeros` / `ones` / `full`, or any internal helper —
-is deduped against a per-`Builder` cache keyed by `<type>:<value>`. On a hit
-the existing SSA value is reused; on a miss the new op is inserted at the
-*top* of the entry block (before any non-constant op already there) so the
-final IR has all constants gathered above the function body, in roughly
-first-use order.
-
-This mirrors what Triton's Python frontend produces and keeps the
-`make_ttgir` layout pass from seeing duplicate constants — duplicates can
-change the layout-slot assignment for kernels with `tt.dot`, since layout
-inference walks the IR and the *first* tensor it sees with a given shape
-gets `#blocked`, the second gets `#blocked2`, etc.
-
-`zeros(shape, dtype)`, `ones(shape, dtype)`, and `full(shape, value, dtype)`
-emit a single `arith.constant dense<value>:tensor<...>` (instead of the
-old scalar-const + `tt.splat` two-op pattern); same for `splat(comptime,
-shape)`. `splat(Value, shape)` still emits `tt.splat` since the operand is
-a runtime value, not a literal.
+There is no constant cache and no hoisting: every lifted literal emits its
+own `arith.constant` where it is used (see Pitfall 5). `zeros(shape, dtype)`,
+`ones(shape, dtype)`, `full(shape, value, dtype)` and `splat` of a literal
+emit a scalar `arith.constant` and a `tt.splat`; `splat(Value, shape)` emits
+the `tt.splat` alone.
 
 ### Shape / pointer helpers
 
@@ -458,7 +444,7 @@ in all of these — drop it:
 to a smaller width that `lift` won't pick on its own. The idiom is
 `@as(i32, @intCast(X_i64))` — you need the `@as` because `@intCast` has no
 target type to infer, and without the narrowing `lift` would emit an i64
-constant that mismatches the i32 lhs:
+constant, which widens the i32 lhs and the result to i64:
 
 ```zig
 // BLOCK_Q is a Zig i64 (from config). lhs is i32. Must narrow.
@@ -491,8 +477,8 @@ where such names are required.
 ### Scalar ↔ tensor auto-broadcast
 
 Fluent arithmetic and comparison ops (`.add`, `.sub`, `.mul`, `.div`, `.rem`,
-`.cdiv`, `.bitAnd`, `.bitOr`, `.min`, `.max`, `.lt`, `.le`, `.gt`, `.ge`,
-`.eq`, `.ne`) are symmetric: if one operand is a tensor and the other a
+`.cdiv`, `.bitAnd`, `.bitOr`, `.minimum`, `.maximum`, `.lt`, `.le`, `.gt`,
+`.ge`, `.eq`, `.ne`) are symmetric: if one operand is a tensor and the other a
 scalar, the scalar is splatted to match. Either direction works:
 
 ```zig
@@ -531,7 +517,7 @@ pointer or scalar offset) against a tensor partner, a pre-emptive
 
 ```zig
 // redundant
-pid_n.mul(N).splatTo(shape).add(b.arange(0, N, .i64)).rem(n_blocb.splatTo(shape))
+pid_n.mul(N).splatTo(shape).add(b.arange(0, N, .i64)).rem(n_block.splatTo(shape))
 // equivalent — scalars auto-splat against the tensor sibling
 pid_n.mul(N).add(b.arange(0, N, .i64)).rem(n_block)
 ```
@@ -554,7 +540,7 @@ the same `extsi` + `muli` pair Python would.
 For the rare case where you want explicit control, you can still cast
 yourself; the auto-promotion is a no-op when widths already agree.
 
-Recurring example from `triton_kernels.zig`:
+Recurring example from `zml/kernels/moe/triton/moe.zig`:
 
 ```zig
 // pid (i32) vs block (i64 because it came from a usize config)
@@ -567,7 +553,7 @@ For pointer math it is often cleaner to promote everything to i64 up front:
 
 ```zig
 const pid = b.programId(.x).to(.i64);
-const offs = b.arange(BLOCK, .i64);
+const offs = b.arange(0, BLOCK, .i64);
 ```
 
 ---
@@ -632,7 +618,7 @@ so user code never constructs `*const mlir.Type` manually:
 | `b.dot(a, b, acc)` / `b.dotOpts(a, b, acc, opts)`   | `acc.type_()`.                              |
 | `b.dotScaled(...)` / `b.dotScaledOpts(...)`         | `acc.type_()`.                              |
 | `b.reshape(src, new_shape)` / `b.reshapeOpts(...)`  | `new_shape` + `src` element type.           |
-| `b.gather(src, indices, axis)` / `b.gatherOpts(...)`| `indices` shape + `src` element type.       |
+| `b.gather(src, indices, axis)`                      | `indices` shape + `src` element type.       |
 | `b.histogram(src, num_bins)` / `b.histogramOpts(...)` | `tensor<num_bins x i32>`.                 |
 | `b.fpToFp(src, out_dtype)` / `b.fpToFpOpts(...)`    | `src` shape + `out_dtype`.                  |
 | `b.convertf(src, out_dtype)` / `b.convertfOpts(...)`| `src` shape + `out_dtype`.                  |
@@ -967,12 +953,11 @@ is the manual form.
 
 ---
 
-## Lower layer — `Builder.build`
+## Lower layer — `Builder.open`
 
 The declarative `zml.kernel.triton.Kernel(Config, spec)` form covers most
-cases. For existing code, dynamic-arity arg lists, or escape-hatch scenarios
-where you want to drive the IR construction yourself, the lower-layer
-`Builder.build` API is still available:
+cases. For dynamic-arity arg lists, or escape-hatch scenarios where you want
+to drive the IR construction yourself, use the `Builder` directly:
 
 ```zig
 const Builder = tri.Builder;
@@ -982,38 +967,32 @@ pub fn fusedMoeKernel(
     ctx: *mlir.Context,
     config: GenerationConfig,
 ) ![:0]const u8 {
-    var spec = try Builder.build(allocator, ctx, "fused_moe_kernel", .{
+    var b = try Builder.open(allocator, ctx, "fused_moe_kernel");
+    defer b.deinit();
+    const a = try b.declareArgs(.{
         .a_ptr = .{ .ptr = config.a_dtype },
         .b_ptr = .{ .ptr = config.b_dtype },
         // ...
-    }, &.{});
-    defer spec.deinit();
-    const b = &spec.kernel;
-    const a = spec.args;
+    });
 
     // ... emit body via b.* helpers; same DSL as inside `Kernel(...)` ...
 
-    return b.finish(&.{});
+    return b.finish();
 }
 ```
 
-`Builder.build(allocator, ctx, name, spec, result_types)` returns a
-heap-allocated `*Built(Spec)`:
-
-- `spec.kernel` — the runtime `Builder`; pass `&spec.kernel` to helpers.
-- `spec.args` — the same `NamedArgs(Spec)` struct that the declarative
-  `b.declareArgs(...)` returns.
-- `spec.deinit()` — frees the module + bundle.
-- `b.finish(results)` — terminates with `tt.return`, verifies, serializes
-  to `[:0]const u8`. Pass `&.{}` for kernels with no return values.
+- `Builder.open(allocator, ctx, name)` creates an empty builder, and
+  `b.declareArgs(spec)` creates the `tt.func` and returns its arguments as
+  the same `NamedArgs(Spec)` struct as inside `Kernel(...)` — exactly what
+  `zml.kernel.triton.Kernel(...)` does internally.
+  `b.declareArgsOpts(spec, .{ .@"noinline" = true })` sets the function's
+  options.
+- `b.finish()` terminates with `tt.return`, verifies, and serializes to a
+  `[:0]const u8` owned by `allocator`. `b.deinit()` frees the module.
 
 For dynamic-arg-count construction, `Builder.init(allocator, ctx, name,
-args: []const ArgSpec, result_types)` takes a runtime slice of arg specs
-instead of a comptime struct literal; you grab block args with `b.arg(i)`.
-
-You can also use `Builder.open(allocator, ctx, name)` to create an empty
-builder and call `b.declareArgs(spec)` mid-stream — that's exactly what
-`zml.kernel.triton.Kernel(...)` does internally.
+args)` takes a runtime `[]const ArgSpec` instead of a comptime struct
+literal; you grab block args with `b.arg(i)`.
 
 Pass these constructors a `zml.kernel.triton.newContext()`, not a
 `Compilation`'s `mlir_ctx`; `defer ctx.deinit()` once you have the IR
@@ -1033,7 +1012,7 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
 | `x.to(tl.int64)`                              | `x.to(.i64)`                                                       |
 | `a + b`, `a * b`, `a // b`                    | `a.add(b)`, `a.mul(b)`, `a.div(b)`                                 |
 | `a < b`                                       | `a.lt(b)`                                                          |
-| `mask & other`                                | `masb.bitAnd(other)`                                               |
+| `mask & other`                                | `mask.bitAnd(other)`                                               |
 | `tl.where(c, a, b)`                           | `b.where(c, a, b)` (alias of `b.select`)                           |
 | `vec[:, None]`                                | `vec.expandDims(1)`                                                |
 | `vec[None, :]`                                | `vec.expandDims(0)`                                                |
@@ -1093,10 +1072,11 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
 
 ## Pitfalls
 
-1. **Width mismatches between runtime operands.** `v_i32.mul(v_i64)` will hit
-   `arith.muli requires the same type` at verify time. Either cast one with
-   `.to(...)` or reshape the kernel to stay within a single int width. Comptime
-   literals adapt automatically — runtime values don't.
+1. **Mixed integer widths widen.** `v_i32.mul(v_i64)` is an i64 multiply
+   with an `arith.extsi` on the i32 side, and so is `v_i32.mul(x)` for a
+   runtime Zig `i64` `x`. Narrow with `@as(i32, @intCast(x))` or `.to(.i32)`
+   when the result must stay i32. Comptime literals take the other operand's
+   type instead.
 
 2. **Tensor-of-pointers via `.addPtr`.** Auto-splats either side: scalar
    `!tt.ptr<T>` + tensor offset (`x_ptr.addPtr(tensor_offs)`) and tensor
@@ -1105,7 +1085,7 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
 
 3. **Scope-based control flow — no closures needed.** `openFor` / `openIf` /
    `openIfElse` / `openWhile` push a block onto the kernel's insertion stack;
-   body ops emitted in the bare `{}` that follows go into that blocb. Captures
+   body ops emitted in the bare `{}` that follows go into that block. Captures
    are plain lexical scope, so you can reference outer Values, sizes, etc.
    directly — no `ctx` struct, no function literal.
 
@@ -1122,9 +1102,9 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
    constant or a hundred. Optimize for readability at the builder level.
 
 6. **`finish()` verifies before serializing.** A verifier
-   failure here almost always means an operand-type mismatch (see #1) or a
+   failure here almost always means an operand-type mismatch or a
    missing block terminator — a common one is forgetting that `scf.yield`
-   operand count must match the loop's result types.
+   operand types must match the loop's result types.
 
 7. **Yielding from loop / if / while bodies.** Inside a scope (`openFor`,
    `openIf`, `openIfElse`, `openWhile`), you *don't* return values — you call

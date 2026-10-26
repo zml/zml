@@ -2,7 +2,8 @@
 
 A Zig builder for Mosaic TPU IR (the `tpu` dialect in XLA) that tries
 to read like `pallas.tpu` Python while staying in pure Zig. Used by
-`examples/mosaic_gdn` and by anything else that wants to emit a TPU kernel
+`zml/kernels/moe/mosaic_tpu/`, `zml/kernels/paged_attention/mosaic_tpu/`
+and `platforms/tpu/`, and by anything else that wants to emit a TPU kernel
 op-for-op against what `pallas_call` produces.
 
 The DSL talks to the `tpu` dialect through `mlir.Operation.make(ctx, "tpu.<op>", …)`.
@@ -20,9 +21,7 @@ Two layers define the surface:
   for the final IR string. Pass `Builder.open` / `Builder.init` a
   `zml.kernel.mosaic_tpu.newContext()` (a throwaway context with the dialects
   the DSL emits), `defer ctx.deinit()` once you have the string — not a
-  `Compilation`'s `mlir_ctx`. (`Builder.buildOpts(...)` is a convenience
-  that bundles `open + declareArgs` into one call and returns a heap-allocated
-  `*Built(Spec)`; reach for it in escape-hatch code that drives the lifecycle manually.)
+  `Compilation`'s `mlir_ctx`.
 - **High layer** — `zml.kernel.mosaic_tpu.Kernel(Config, spec)`: the
   declarative kernel form, mirroring the Triton DSL. Bundles a config
   type, a typed spec literal (name + named `inputs` / `outputs` + a typed
@@ -170,9 +169,9 @@ updates).
 
 ## Argument specs
 
-Each field passed to `b.declareArgsOpts(...)` (or to the lower-layer
-`Builder.buildOpts(...)`) is an `ArgSpec.Kind` tagged-union literal. The
-four kinds mirror what a Mosaic `func.func` can carry:
+Each field passed to `b.declareArgs(...)` / `b.declareArgsOpts(...)` is an
+`ArgSpec.Kind` tagged-union literal. The four kinds mirror what a Mosaic
+`func.func` can carry:
 
 | Kind literal                                           | MLIR type                            | Use case                                |
 |--------------------------------------------------------|--------------------------------------|-----------------------------------------|
@@ -496,10 +495,12 @@ Use these for SMEM args (e.g. `cu_seqlens`) where Pallas emits scalar
 
 ### Auto-broadcast
 
-There is **no implicit auto-broadcast** in the Mosaic DSL. Mosaic kernels run
-inside the TPU's tile semantics and the layout pass is strict about
-`vector<…>` ranks/shapes — surprise-broadcasts would be footguns. Build the
-broadcasts you need explicitly with `shapeCast` + `broadcastTo`:
+The fluent binary ops and comparisons (`add` … `maximum`, `lt` … `ne`),
+`b.where`, `b.maximum` and `b.minimum` splat a scalar operand against a
+vector one (`vector.broadcast`) and widen the narrower integer side. Nothing
+else broadcasts: Mosaic kernels run inside the TPU's tile semantics and the
+layout pass is strict about `vector<…>` ranks/shapes, so build rank changes
+and size-1 expansions explicitly with `shapeCast` + `broadcastTo`:
 
 ```zig
 // b_k[:, None] broadcast to <BK x BV>
@@ -507,8 +508,9 @@ const bk_2d = k.shapeCast(b_k, &.{ BK, 1 });
 const bk_bc = k.broadcastTo(bk_2d, &.{ BK, BV });
 ```
 
-For scalar→vector splatting, use `b.broadcastTo(scalar, shape)` (it routes
-through `vector.broadcast`) or `b.full / b.splat` for comptime constants.
+For a vector made from a scalar outside a binary op, use
+`b.broadcastTo(scalar, shape)` (it routes through `vector.broadcast`) or
+`b.full / b.splat` for comptime constants.
 
 ---
 
@@ -767,7 +769,7 @@ is the manual form.
 | `o_k < KEY_DIM`                                       | `k.cmpi(.slt, o_k, dim_splat)` / `o_k.lt(dim_splat)`         |
 | `mask_k[:, None] & mask_v[None, :]`                   | `k.andi(k.broadcastTo(k.shapeCast(mask_k, &.{BK,1}), &.{BK,BV}), k.broadcastTo(mask_v, &.{BK,BV}))` |
 | `jnp.where(mask, x, 0.0)`                             | `k.select(mask, x, k.zeros(shape, dtype))`                   |
-| `q_ref[0, t, h, :].astype(jnp.float32)`               | `k.vectorLoadShape(a.q, &.{c0, t_idx, h_idx, c0}, &.{1,1,1,BK})` then `.shapeCast(&.{BK})` then `.to(.f32)` |
+| `q_ref[0, t, h, :].astype(jnp.float32)`               | `k.vectorLoadShape(a.q, &.{c0, t_idx, h_idx, c0}, &.{1,1,1,BK})` then `k.shapeCast(v, &.{BK})` then `.to(.f32)` |
 | `q_ref[0, t, h, :] = b_o.astype(o_ref.dtype)`         | `k.vectorStoreAt(a.q, k.shapeCast(b_o, &.{1,1,1,BK}), &.{c0, t_idx, h_idx, c0})` |
 | `jnp.sqrt(jnp.sum(b_q * b_q) + 1e-6)`                 | `k.sqrt(k.addf(k.reduceToScalar(.add, k.mulf(b_q, b_q), cst_zero_1), cst_eps))` |
 | `jnp.exp(b_g)`                                        | `k.exp(b_g)`                                                 |
