@@ -8,7 +8,7 @@ pub const Binary = enum { add, subtract, multiply, divide, maximum, minimum, gt,
 
 pub fn binary(ctx: *mlir.Context, op: Binary, lhs: *const mlir.Value, rhs: *const mlir.Value, result: *const mlir.Type, loc: *const mlir.Location) *mlir.Operation {
     return switch (op) {
-        inline else => |kind| .make(ctx, "ttir." ++ @tagName(kind), .{
+        inline else => |kind| .make(ctx, "ttir." ++ (if (kind == .divide) "div" else @tagName(kind)), .{
             .operands = .{ .flat = &.{ lhs, rhs } },
             .results = .{ .flat = &.{result} },
             .location = loc,
@@ -110,4 +110,26 @@ test "registered TTIR verifies tensor operations" {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "every binary wrapper names a registered TTIR operation" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    inline for (dialects_needed) |name| mlir.DialectHandle.fromString(name).insertDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    const loc = mlir.Location.unknown(ctx);
+    const input = mlir.Type.rankedTensor(&.{32}, mlir.Type.float(ctx, .f32));
+    const predicate = mlir.Type.rankedTensor(&.{32}, mlir.Type.int(ctx, .i1));
+    const block = mlir.Block.init(&.{ input, input }, &.{ loc, loc });
+    defer block.deinit();
+    inline for (std.meta.tags(Binary)) |kind| {
+        const result = switch (kind) {
+            .gt, .ge, .lt, .le, .eq, .ne => predicate,
+            else => input,
+        };
+        const op = binary(ctx, kind, block.argument(0), block.argument(1), result, loc).appendTo(block);
+        try std.testing.expect(op.verify());
+    }
 }
