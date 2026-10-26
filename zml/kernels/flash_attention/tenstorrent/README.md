@@ -35,14 +35,15 @@ tagged update path handles prefill and decode and preserves buffer donation.
 prefills and one-token updates at positions 0, 31, 32, and 63, including both
 layers, untouched positions, and preservation of update inputs.
 
-With this layout, XLA's tuned BF8 down-projection, and eight-core RMS
-normalization, and FP32 matrix accumulation, the single-card Llama
-3.1 8B counting smoke test at sequence length 128 measured:
+With this layout, XLA's tuned BF8 down-projection, eight-core RMS
+normalization, FP32 matrix accumulation, and cached DRAM-sharded BF16 FFN
+weights, the single-card Llama 3.1 8B counting smoke test at sequence length
+128 measured:
 
 | Weights | Decode time (73 tokens) | Throughput | Kernel cache hits |
 | --- | ---: | ---: | ---: |
-| BF16 | 3.318 s | 22.0 tokens/s | 474/474 |
-| BF8 | 2.275 s | 32.1 tokens/s | 500/500 |
+| BF16 | 3.184 s | 22.9 tokens/s | 486/486 |
+| BF8 | 2.265 s | 32.2 tokens/s | 500/500 |
 
 Both runs produced the correct count from 1 to 20. Before the layout change,
 the corresponding BF16/BF8 runs measured 18.0/24.2 tokens/s; the layout alone
@@ -54,13 +55,18 @@ disabled in these measurements. These are short application
 smoke tests, not model-quality evaluations.
 
 The target is approximately 33 tokens/s with **BF16** weights; BF8 is expected
-to exceed that. Neither target has been reached. The optional XLA experiment
-`XLA_TT_EXPERIMENTAL_DRAM_WEIGHTS=1` shards BF16 FFN weights and keeps their
-activation chain in L1. It reduces median steady execution from 43.641 ms to
-40.780 ms, but increases first-decode preprocessing from 159.767 ms to
-701.376 ms. The same short counting run therefore regresses to 3.636 s
-(20.1 tokens/s). It remains disabled by default pending preprocessing reuse
-and end-to-end performance improvements.
+to exceed that. Neither target has been reached. XLA now selects DRAM-sharded
+BF16 FFN weights by default for this card and keeps the activation chain in
+L1. Sharding consumes prefill's cached preprocessing in a separate cache
+entry, preserving reuse while tracking weight-buffer versions. Set
+`XLA_TT_EXPERIMENTAL_DRAM_WEIGHTS=0` to compare with the interleaved schedule.
+
+Separate execution-stage profiles measured median steady calls of 40.737 ms
+versus 43.641 ms before sharding. The original sharding experiment repeated
+prefill preprocessing, pushing first decode to 701.376 ms and regressing the
+short run to 20.1 tokens/s. The layered cache reduces first decode to 224.658 ms,
+so the complete run now improves from 22.0 to 22.9 tokens/s. BF8's change from
+32.1 to 32.2 tokens/s is run-to-run variation; its schedule is unchanged.
 
 At initial integration, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
 decoding completed in 4.489 seconds (16.3 tokens/s), versus 4.778 seconds
