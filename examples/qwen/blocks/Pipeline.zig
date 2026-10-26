@@ -204,7 +204,9 @@ const Denoise = struct {
 
     pub fn body(self: Denoise, state: State) State {
         const latents = state.latents;
-        const timestep = self.timesteps.slice(.step, .dynSingle(state.step)).broad(.init(.{ .bs = latents.dim(0) }, .bf16));
+        const timestep = self.timesteps.slice(.step, .dynSingle(state.step))
+            .divByConst(1000)
+            .broad(.init(.{ .bs = latents.dim(0) }, .bf16));
         const noise_pred = self.transformer_model.forward(
             latents,
             self.prompt_embeds,
