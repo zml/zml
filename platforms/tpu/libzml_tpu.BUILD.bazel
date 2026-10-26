@@ -1,5 +1,6 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@zml//bazel:runtime_groups.bzl", "runtime_group")
 
 copy_file(
     name = "libzml_tpu.so",
@@ -28,8 +29,14 @@ copy_to_directory(
     },
 )
 
+runtime_group(
+    name = "runtime_group",
+    group = "tpu",
+)
+
 cc_library(
     name = "libzml_tpu",
+    aspect_hints = [":runtime_group"],
     data = [":sandbox"],
     visibility = ["@zml//platforms/tpu:__subpackages__"],
 )

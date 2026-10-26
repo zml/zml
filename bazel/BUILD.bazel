@@ -21,3 +21,8 @@ zig_library(
         "@rules_zig//zig/runfiles",
     ],
 )
+
+exports_files(
+    ["runtime_groups.bzl"],
+    visibility = ["//visibility:public"],
+)
