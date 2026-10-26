@@ -140,7 +140,7 @@ fn groupedQuantizeKernel(b: *B, cfg: GroupedQuantConfig) cute.FinishError!void {
     const token = b.blockIdx().y;
     const word = b.blockIdx().x.mul(128).add(tid);
     var x: [4]cute.Value = undefined;
-    for (&x, 0..) |*value, i| value.* = a.x.get(.{ token, word.mul(4).add(@as(i32, @intCast(i))) }).to(.f32);
+    for (&x, 0..) |*value, i| value.* = a.x.get(.{ token, word.mul(4).add(i) }).to(.f32);
 
     var maximum = x[0].abs().maximum(x[1].abs()).maximum(x[2].abs().maximum(x[3].abs()));
     inline for (.{ 1, 2, 4 }) |offset| {

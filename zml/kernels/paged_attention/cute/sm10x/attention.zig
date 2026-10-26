@@ -307,14 +307,14 @@ fn produce(t: Tile) void {
         var offsets: [16]V = undefined;
         var valid: [16]V = undefined;
         for (0..@as(usize, @intCast(@divExact(c.keys(), 8)))) |i| {
-            const key = t.first_key_tile.add(tiles.iv).mul(c.keys()).add(row0).add(@as(i32, @intCast(i * 8)));
+            const key = t.first_key_tile.add(tiles.iv).mul(c.keys()).add(row0).add(i * 8);
             valid[i] = key.lt(t.klen).bitAnd(col.lt(c.head_dim));
             const safe = b.select(key.lt(t.klen), key, b.constant(.i32, 0));
             const page = loadInt(b, t.table, t.seq.mul(c.pages_per_seq).add(safe.div(c.page_size)));
             offsets[i] = page.to(.i64).mul(c.page_size).add(safe.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(col.to(.i64)).mul(2);
         }
         for (0..@as(usize, @intCast(c.features() * 2))) |stage| {
-            const id = tiles.iv.mul(c.features() * 2).add(@as(i32, @intCast(stage)));
+            const id = tiles.iv.mul(c.features() * 2).add(stage);
             var reuse = b.openIf(id.ge(c.buffers()));
             {
                 b.mbarrierWait(t.released(id), t.phase(id).bitXor(1));
@@ -323,7 +323,7 @@ fn produce(t: Tile) void {
             const source = if (stage < c.features()) t.k else t.v;
             const feature_offset: i64 = @mod(@as(i64, @intCast(stage)), c.features()) * 256;
             for (0..@as(usize, @intCast(@divExact(c.keys(), 8)))) |i| {
-                const row = row0.add(@as(i32, @intCast(i * 8)));
+                const row = row0.add(i * 8);
                 b.cpAsync16(t.shared.add(id.rem(c.buffers()).mul(c.kvBytes())).add(swizzle(row, col, c.keys())), source.add(offsets[i]).add(feature_offset), valid[i]);
             }
             b.cpAsyncMbarrierArrive(t.ready(id), true);
@@ -389,7 +389,7 @@ fn reduceHeads(t: Tile, comptime heads: usize, values: [heads]V, comptime maximu
         inline for (.{ 16, 8, 4, 2, 1 }) |step| reduced = if (maximum) reduced.maximum(b.shuffleXor(reduced, step)) else reduced.add(b.shuffleXor(reduced, step));
         var leader = b.openIf(t.lane.eq(0));
         {
-            b.storeWords(1, t.shared.add(t.c.reductions()).add(t.warp.mul(64)).add(@as(i32, @intCast(h * 4))), .shared, .{reduced.bitCast(.i32)});
+            b.storeWords(1, t.shared.add(t.c.reductions()).add(t.warp.mul(64)).add(h * 4), .shared, .{reduced.bitCast(.i32)});
             leader.close();
         }
     }
@@ -426,7 +426,7 @@ fn decode(t: Tile, comptime heads: usize) void {
         b.fenceTmemLoad();
         const key = t.first_key_tile.add(tiles.iv).mul(c.keys()).add(key_row);
         var scores: [heads]V = undefined;
-        for (0..heads) |h| scores[h] = b.select(t.valid(t.first_row.add(@as(i32, @intCast(h))), key), raw[h].bitCast(.f32).mul(c.scale * std.math.log2e), neg_inf);
+        for (0..heads) |h| scores[h] = b.select(t.valid(t.first_row.add(h), key), raw[h].bitCast(.f32).mul(c.scale * std.math.log2e), neg_inf);
         const maxima = reduceHeads(t, heads, scores, true);
         var next: [2 * heads]V = undefined;
         var alpha: [heads]V = undefined;
@@ -462,9 +462,9 @@ fn decode(t: Tile, comptime heads: usize) void {
     for (0..@as(usize, @intCast(c.features()))) |part| {
         const out = b.tmemLoad32x32b(heads, address.add(@as(i64, @intCast(part)) * c.rows()));
         b.fenceTmemLoad();
-        const dim = key_row.add(@as(i32, @intCast(part * 128)));
+        const dim = key_row.add(part * 128);
         for (0..heads) |h| {
-            const row = t.first_row.add(@as(i32, @intCast(h)));
+            const row = t.first_row.add(h);
             var valid = b.openIf(row.lt(t.qlen.mul(c.group)));
             {
                 var feature = b.openIf(dim.lt(c.head_dim));
@@ -533,7 +533,7 @@ fn prefill(t: Tile) void {
         // use them; page tails and mask boundaries reduce post-mask values.
         const full = owns.bitAnd(t.valid(row, key0)).bitAnd(t.valid(row, key0.add(63)));
         for (0..64) |i| {
-            scores[i] = b.select(owns.bitAnd(t.valid(row, key0.add(@as(i32, @intCast(i))))), scores[i].mul(c.scale * std.math.log2e), neg_inf);
+            scores[i] = b.select(owns.bitAnd(t.valid(row, key0.add(i))), scores[i].mul(c.scale * std.math.log2e), neg_inf);
         }
         const tile_max = if (c.architecture == .sm103 and c.scale > 0) blk: {
             var choose = b.openIfElse(full, .{zero});
@@ -561,7 +561,7 @@ fn prefill(t: Tile) void {
         var rescale = b.openIf(tiles.iv.gt(0));
         {
             for (0..@as(usize, @intCast(@divExact(if (c.head_dim == 512) c.scoreColumn() else c.paddedDim(), 32)))) |chunk| {
-                const addr = address.add(@as(i32, @intCast(chunk * 32)));
+                const addr = address.add(chunk * 32);
                 var out = b.tmemLoad32x32b(32, addr);
                 b.fenceTmemLoad();
                 for (&out) |*value| value.* = value.bitCast(.f32).mul(alpha).bitCast(.i32);
@@ -580,7 +580,7 @@ fn prefill(t: Tile) void {
     }
     const norm = t.norm(row, tiles.results[0], tiles.results[1]);
     for (0..@as(usize, @intCast(@divExact(c.paddedDim(), 32)))) |chunk| {
-        const out = b.tmemLoad32x32b(32, address.add(@as(i32, @intCast(chunk * 32))));
+        const out = b.tmemLoad32x32b(32, address.add(chunk * 32));
         b.fenceTmemLoad();
         var valid = b.openIf(owns.bitAnd(row.lt(t.qlen.mul(c.group))));
         {

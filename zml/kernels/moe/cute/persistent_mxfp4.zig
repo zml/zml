@@ -1561,8 +1561,8 @@ fn routedLanes(b: *B, comptime tile: Tile, operands: EpilogueOperands, group: V,
     // Lanes past the tile width alias row 0, which is always live. Wide tiles
     // run one 32-row chunk at a time, so lane `l` holds row `32 * chunk + l`.
     const chunk_rows = comptime tile.chunkRows();
-    const in_chunk = b.select(lane.lt(@as(i32, @intCast(chunk_rows))), lane, b.constant(.i32, 0));
-    const row_in_group = if (chunk == 0) in_chunk else in_chunk.add(@as(i32, @intCast(@as(i64, @intCast(chunk)) * chunk_rows)));
+    const in_chunk = b.select(lane.lt(chunk_rows), lane, b.constant(.i32, 0));
+    const row_in_group = if (chunk == 0) in_chunk else in_chunk.add(@as(i64, @intCast(chunk)) * chunk_rows);
     const live = row_in_group.lt(count);
     const inverse = operands.route_inverse.get(.{group.mul(tile.n).add(row_in_group)}, .i32);
     const route = b.select(live, inverse, b.constant(.i32, 0));
@@ -1657,14 +1657,14 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
             lane_maximum = chunk_maximum;
         }
     }
-    var owner = b.openIf(lane.lt(@as(i32, @intCast(n))));
+    var owner = b.openIf(lane.lt(n));
     scratch.set(.{ warp, lane }, lane_maximum);
     owner.close();
     b.namedBarrier(1, 128);
 
     // Lane `c` turns the two half-block maxima of column `c` into its scale.
     const pair = warp.bitAnd(~@as(i32, 1));
-    const lane_column = b.select(lane.lt(@as(i32, @intCast(n))), lane, b.constant(.i32, 0));
+    const lane_column = b.select(lane.lt(n), lane, b.constant(.i32, 0));
     const scale = mxScale(b, scratch.get(.{ pair, lane_column }, .f32).maximum(scratch.get(.{ pair.add(1), lane_column }, .f32)));
     // The next tile reuses the scratch maxima.
     b.namedBarrier(1, 128);
