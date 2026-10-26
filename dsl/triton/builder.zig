@@ -2,7 +2,7 @@ const std = @import("std");
 
 const arith = @import("mlir/dialects/arith");
 const cf = @import("mlir/dialects/cf");
-const dsl = @import("dsl/common");
+const dsl = @import("dsl/common/builder");
 const func = @import("mlir/dialects/func");
 const llvm = @import("mlir/dialects/llvm");
 const math = @import("mlir/dialects/math");

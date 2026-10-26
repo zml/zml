@@ -1,7 +1,7 @@
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
-    name = "triton_builder",
+    name = "builder",
     srcs = [
         "dtype.zig",
     ],
@@ -10,7 +10,7 @@ zig_library(
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
-        "//dsl/common",
+        "//dsl/common:builder",
         "//mlir",
         "//mlir/dialects/arith",
         "//mlir/dialects/cf",
@@ -25,5 +25,5 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = [":triton_builder"],
+    deps = [":builder"],
 )

@@ -1,7 +1,7 @@
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
-    name = "mosaic_tpu_builder",
+    name = "builder",
     srcs = [
         "dtype.zig",
         "pipeline.zig",
@@ -11,7 +11,7 @@ zig_library(
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
-        "//dsl/common",
+        "//dsl/common:builder",
         "//mlir",
         "//mlir/dialects/affine",
         "//mlir/dialects/arith",
@@ -28,5 +28,5 @@ zig_library(
 
 zig_test(
     name = "test",
-    deps = [":mosaic_tpu_builder"],
+    deps = [":builder"],
 )

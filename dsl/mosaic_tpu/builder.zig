@@ -18,7 +18,7 @@ const vector = @import("mlir/dialects/vector");
 /// `vector`-dialect enums re-exported for convenience.
 /// Used by `vectorReduction` / `multiReduction`.
 pub const CombiningKind = vector.CombiningKind;
-const dsl = @import("dsl/common");
+const dsl = @import("dsl/common/builder");
 const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
 const stdx = @import("stdx");

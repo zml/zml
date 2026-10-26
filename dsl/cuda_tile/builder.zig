@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const cuda_tile = @import("mlir/dialects/cuda_tile");
-const dsl = @import("dsl/common");
+const dsl = @import("dsl/common/builder");
 const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
 const stdx = @import("stdx");
