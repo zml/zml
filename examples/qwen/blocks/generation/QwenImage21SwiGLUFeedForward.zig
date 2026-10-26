@@ -15,7 +15,8 @@ pub fn unloadBuffers(self: *zml.Bufferized(QwenImage21SwiGLUFeedForward)) void {
 
 pub fn forward(self: QwenImage21SwiGLUFeedForward, x: zml.Tensor) zml.Tensor {
     // It seems like I need to tag again after the silu(?)
-    const left = self.gate_layer.forward(x, x.dtype()).silu().withTags(.{ .bs, .d, .dup });
+    // 0.4286152 -> 0.43063986
+    const left = self.gate_layer.forward(x, x.dtype()).convert(.f32).silu().convert(x.dtype()).withTags(.{ .bs, .d, .dup });
     const right = self.proj.forward(x, x.dtype());
     const dot = left.mul(right).withTags(.{ .bs, .dup, .d });
     return self.out.forward(dot, x.dtype());
