@@ -32,3 +32,9 @@ decoding completed in 4.489 seconds (16.3 tokens/s), versus 4.778 seconds
 (15.3 tokens/s) for StableHLO attention on the same build. Both runs produced the
 same answer and hit all 495 cached device kernels. The first native-attention run
 had six cache misses and took 5.423 seconds; compare warm runs for throughput.
+
+The two-card Llama run with head partitions and KV-cache donation completed in
+3.503 seconds (20.8 tokens/s), hitting all 541 cached kernels. Its first run took
+3.709 seconds (19.7 tokens/s), with two kernel compiles. The preceding two-card
+StableHLO-attention run measured 3.889 seconds (18.8 tokens/s). These are
+individual smoke-test measurements with the same prompt and decoding settings.
