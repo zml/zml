@@ -29,8 +29,8 @@ pub fn init_timesteps(self: *FlowMatchEulerScheduler, allocator: std.mem.Allocat
     for (0..steps) |i| {
         sigmas[i] = 1.0 - 1.0 / @as(f32, @floatFromInt(steps)) * @as(f32, @floatFromInt(i));
     }
-    sigmas = time_shift(mu, sigmas);
-    sigmas = stretch_shift_to_terminal(self.shift_terminal, sigmas);
+    time_shift(mu, sigmas[0..steps]);
+    stretch_shift_to_terminal(self.shift_terminal, sigmas[0..steps]);
     sigmas[steps] = 0;
 
     const timesteps = try allocator.alloc(f32, steps);
@@ -74,19 +74,17 @@ fn calculate_shift(self: FlowMatchEulerScheduler, image_seq_len: f32) f32 {
 
 // Overwrites sigmas to reuse buffers
 // Uses self.config.time_shift_type == "exponential"
-fn time_shift(mu: f32, sigmas: []f32) []f32 {
+fn time_shift(mu: f32, sigmas: []f32) void {
     const e_mu = std.math.exp(mu);
     for (sigmas) |*s| {
         s.* = e_mu / (e_mu + (1 / s.* - 1));
     }
-    return sigmas;
 }
 
 // Overwrites sigmas to reuse buffers
-fn stretch_shift_to_terminal(shift_terminal: f32, sigmas: []f32) []f32 {
+fn stretch_shift_to_terminal(shift_terminal: f32, sigmas: []f32) void {
     const scale_factor = (1 - sigmas[sigmas.len - 1]) / (1 - shift_terminal);
     for (sigmas) |*s| {
         s.* = 1 - ((1 - s.*) / scale_factor);
     }
-    return sigmas;
 }
