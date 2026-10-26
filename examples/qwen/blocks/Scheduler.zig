@@ -27,19 +27,22 @@ pub fn init_timesteps(self: *FlowMatchEulerScheduler, allocator: std.mem.Allocat
     const mu = self.calculate_shift(latent_size);
 
     var sigmas = try allocator.alloc(f32, steps);
+    errdefer allocator.free(sigmas);
     for (0..steps) |i| {
         sigmas[i] = 1.0 - 1.0 / @as(f32, @floatFromInt(steps)) * @as(f32, @floatFromInt(i));
     }
 
-    const timesteps = try allocator.alloc(f32, steps); // + 1
-    @memcpy(timesteps[0..steps], sigmas);
-    time_shift(mu, timesteps[0..steps]);
-    stretch_shift_to_terminal(self.shift_terminal, timesteps[0..steps]);
-    // timesteps[steps] = 0;
+    time_shift(mu, sigmas[0..steps]);
+    stretch_shift_to_terminal(self.shift_terminal, sigmas[0..steps]);
 
+    const timesteps = try allocator.alloc(f32, steps); // + 1
+    errdefer allocator.free(timesteps);
     for (0..steps) |i| {
-        timesteps[i] = timesteps[i] * self.num_train_timesteps;
+        timesteps[i] = sigmas[i] * self.num_train_timesteps;
     }
+
+    sigmas = try allocator.realloc(sigmas, steps + 1);
+    sigmas[steps] = 0;
 
     self.sigmas = sigmas;
     self.timesteps = timesteps;
