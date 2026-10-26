@@ -22,17 +22,23 @@ pub const CompilationParameters = struct {
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, meshes: common.Meshes) CompilationParameters {
         const head_dim = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads);
+        var kv_shape: zml.Shape = .init(.{
+            .layer = mdl.model.layers.len,
+            .k = seqlen,
+            .h = config.num_key_value_heads,
+            .hd = head_dim,
+        }, mdl.model.embed_tokens.weight.dtype());
+        // Native TT decode attention consumes head-major cache tensors. Store
+        // that order persistently so each token avoids full-cache permutations.
+        if (backend == .flash_attention and backend.flash_attention == .tenstorrent) {
+            kv_shape = kv_shape.transpose(.{ .layer, .h, .k, .hd });
+        }
 
         return .{
             .prefill_tokens = .init(.{ .s = seqlen }, .u32),
             .decode_tokens = .init(.{ .s = 1 }, .u32),
             .token_index = .init(.{}, .u32),
-            .kv_cache = .init(.init(.{
-                .layer = mdl.model.layers.len,
-                .k = seqlen,
-                .h = config.num_key_value_heads,
-                .hd = head_dim,
-            }, mdl.model.embed_tokens.weight.dtype()), meshes.model),
+            .kv_cache = .init(kv_shape, meshes.model),
             .rng = if (mdl.gen_opts.topk > 1) zml.Tensor.Rng.init() else null,
             .attention_metadata = .init(.fromBackend(backend)),
             .prefill_attention_parameters = .init(.fromBackend(backend)),

@@ -27,7 +27,29 @@ attention and no all-gathers within these kernels.
 Select it explicitly with `//examples/llm -- --backend=tenstorrent`; it is also
 selected automatically for one or two Tenstorrent cards.
 
-On the P150a, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
+Llama stores its Tenstorrent KV cache in `[layer, head, sequence, head_dim]`
+order. Keeping the attention kernel's order across tokens removes full-cache
+permutations and avoids padding the eight KV heads to a 32-row tile. The same
+tagged update path handles prefill and decode and preserves buffer donation.
+`//examples/llm:llama_cache_test` checks every cache element after 32-token
+prefills and one-token updates at positions 0, 31, 32, and 63, including both
+layers, untouched positions, and preservation of update inputs.
+
+With this layout and XLA's tuned BF8 down-projection, the single-card Llama
+3.1 8B counting smoke test at sequence length 128 measured:
+
+| Weights | Decode time (73 tokens) | Throughput | Kernel cache hits |
+| --- | ---: | ---: | ---: |
+| BF16 | 3.618 s | 20.2 tokens/s | 462/462 |
+| BF8 | 2.574 s | 28.3 tokens/s | 488/488 |
+
+Both runs produced the correct count from 1 to 20. Before the layout change,
+the corresponding BF16/BF8 runs measured 18.0/24.2 tokens/s. BF8 is enabled by
+`XLA_TT_EXPERIMENTAL_BF8_WEIGHTS=1`; activations and KV caches remain BF16.
+Trace replay is disabled in these measurements. These are short application
+smoke tests, not model-quality evaluations.
+
+At initial integration, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
 decoding completed in 4.489 seconds (16.3 tokens/s), versus 4.778 seconds
 (15.3 tokens/s) for StableHLO attention on the same build. Both runs produced the
 same answer and hit all 495 cached device kernels. The first native-attention run
