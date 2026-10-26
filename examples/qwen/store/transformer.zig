@@ -86,7 +86,15 @@ pub fn load_tensors(
             .norm_k = .init(attn_view.createTensor("norm_k.weight", .{.dim}, .replicated), null, .hd),
             .norm_q = .init(attn_view.createTensor("norm_q.weight", .{.dim}, .replicated), null, .hd),
             .to_k = .init(attn_view.createTensor("to_k.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
-            .to_out = .init(attn_view.createTensor("to_out.0.weight", .{ .dup, .d }, .{ .d = .model }), null, .d),
+            // Changing from .d sharding to .replicated improved accuracy of the following blocks:
+            // ❌  93.509%     transformer.transformer_blocks.0
+            // ❌  99.450%     transformer.transformer_blocks.0.attn.to_out.0
+            // ❌  99.393%     transformer.transformer_blocks.0.attn
+            // From the above to the following
+            // ❌  98.446%     transformer.transformer_blocks.0
+            // ✅ 100.000%     transformer.transformer_blocks.0.attn.to_out.0
+            // ✅  99.942%     transformer.transformer_blocks.0.attn
+            .to_out = .init(attn_view.createTensor("to_out.0.weight", .{ .dup, .d }, .replicated), null, .d),
             .to_q = .init(attn_view.createTensor("to_q.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
             .to_v = .init(attn_view.createTensor("to_v.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
         };
