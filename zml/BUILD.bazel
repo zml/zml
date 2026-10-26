@@ -196,3 +196,10 @@ zig_test(
     name = "test",
     deps = ["//zml"],
 )
+
+# Keep execution and donation checks independently runnable on new backends.
+zig_test(
+    name = "exe_test",
+    test_runner = "exe_test_runner.zig",
+    deps = ["//zml"],
+)

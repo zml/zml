@@ -52,8 +52,31 @@ Tested with the native Bazel plugin on Blackhole hardware:
   Both prefill and decode execute on device 0, with the CPU platform disabled.
   The plugin includes the unsigned cache-index fix from XLA commit
   `1a3c9a68dc`; without it, decode corrupts the KV cache.
-- This is an initial correctness check, not a performance result. The short run
-  reported 0.5 tok/s including first-use work; longer, warmed measurements and
-  optimization are still needed. Sampling with top-k greater than 1 still
-  requires unsupported `u64` RNG state. Greedy Llama omits that state.
+- With XLA commit `32711c00e6`, the counting prompt
+  `Count from 1 to 20, separated by commas.` at sequence length 128 and top-k 1
+  generated the correct sequence and stopped: 14.025 seconds of decode,
+  5.2 tok/s, versus 179.331 seconds and 0.4 tok/s before optimization. This is
+  a single-card measurement, including first-use work, with operation profiling
+  disabled. TT-MLIR optimization level 1 is enabled; cache scatters preserve
+  parallel rows instead of flattening the entire cache into one row.
+- The plugin honors `reuseBuffer` donation: successful execution invalidates
+  the input PJRT contents, and ZML destroys the old handle when installing the
+  result. Non-donatable inputs remain readable. General in-place allocation reuse
+  is still pending; HLO `must-alias` is rejected.
+- Sampling with top-k greater than 1 still requires unsupported `u64` RNG
+  state. Greedy Llama omits that state.
 - The CPU `//zml:test` suite passed: 262 passed, 14 skipped, 0 failed.
+
+The focused execution suite also passes on Tenstorrent with CPU disabled: all
+five existing execution tests, including raw donation, runner replacement with
+and without waiting, unchanged donated outputs, and optional state. With the
+plugin and runtime asset environment variables above exported, run:
+
+```sh
+bazel test --@zml//platforms:tenstorrent=true --@zml//platforms:cpu=false \
+  --test_env=HOME --test_env=ZML_TENSTORRENT_PLUGIN_PATH \
+  --test_env=TT_METAL_RUNTIME_ROOT //zml:exe_test
+```
+
+The full core suite is not yet supported on Tenstorrent: it includes RNG and
+pinned-host-memory paths that this backend does not implement.
