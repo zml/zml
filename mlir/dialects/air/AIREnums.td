@@ -22,7 +22,8 @@ def AIR_Builtin : I32EnumAttr<"Builtin", "Kernel argument builtin", [
   let genSpecializedAttr = 0;
 }
 
-def AIR_AddressSpace : I32EnumAttr<"AddressSpace", "Buffer address space", [
+def AIR_AddressSpace : I32EnumAttr<"AddressSpace", "Address space", [
+  I32EnumAttrCase<"thread", 0>,
   I32EnumAttrCase<"device", 1>,
   I32EnumAttrCase<"constant", 2>,
   I32EnumAttrCase<"threadgroup", 3>,

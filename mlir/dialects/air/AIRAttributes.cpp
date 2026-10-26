@@ -98,6 +98,8 @@ LogicalResult BufferAttr::verify(
     AddressSpace addressSpace, Access access, Type elementType,
     StringRef typeName, uint64_t typeSize, uint64_t typeAlignment,
     uint64_t bufferSize, bool noalias, ArrayRef<StructFieldAttr> fields) {
+  if (addressSpace == AddressSpace::thread)
+    return emitError() << "buffers are not in thread memory";
   if (addressSpace == AddressSpace::constant && access != Access::read)
     return emitError() << "constant buffers are read-only";
   if (addressSpace == AddressSpace::threadgroup && access != Access::read_write)

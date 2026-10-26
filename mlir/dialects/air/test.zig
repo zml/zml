@@ -194,6 +194,9 @@ test "AIR attributes use the C API" {
     invalid.access = .read_write;
     try std.testing.expectError(error.InvalidMlir, air.BufferAttr.get(ctx, invalid));
     invalid = device;
+    invalid.addressSpace = .thread;
+    try std.testing.expectError(error.InvalidMlir, air.BufferAttr.get(ctx, invalid));
+    invalid = device;
     invalid.addressSpace = .threadgroup;
     try std.testing.expectError(error.InvalidMlir, air.BufferAttr.get(ctx, invalid));
     invalid = device;
