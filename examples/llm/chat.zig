@@ -64,6 +64,7 @@ pub const Chat = struct {
 
     pub const RunOnceOptions = struct {
         profile: bool = false,
+        output: ?*std.Io.Writer = null,
     };
 
     pub fn runOnce(self: *Chat, prompt: []const u8, opts: RunOnceOptions) !void {
@@ -71,6 +72,7 @@ pub const Chat = struct {
         defer self.allocator.free(prompt_tokens);
 
         var stdout = std.Io.File.stdout().writerStreaming(self.io, &.{});
+        const output = opts.output orelse &stdout.interface;
         var profiler: ?zml.Platform.Profiler = null;
         defer if (profiler) |*p| p.deinit();
 
@@ -87,11 +89,11 @@ pub const Chat = struct {
             try profiler.?.start();
         }
 
-        try self.runPrefill(prompt_tokens, &stdout.interface);
-        try self.runDecodeTurn(&stdout.interface);
+        try self.runPrefill(prompt_tokens, output);
+        try self.runDecodeTurn(output);
         _ = if (profiler) |*p| try p.stop() else null;
 
-        try stdout.interface.flush();
+        try output.flush();
     }
 
     pub fn runInteractive(self: *Chat, initial_prompt: []const u8) !void {

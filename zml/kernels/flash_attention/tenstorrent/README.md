@@ -24,8 +24,15 @@ The two-card cases cover 27 position/shape combinations, including computed
 inputs whose partitioning is open. An operation trace confirms native decode
 attention and no all-gathers within these kernels.
 
-Select it explicitly with `//examples/llm -- --backend=tenstorrent`; it is also
-selected automatically for one or two Tenstorrent cards.
+Build the example with the Tenstorrent platform enabled:
+
+```sh
+bazel build //examples/llm --@zml//platforms:tenstorrent=true --@zml//platforms:cpu=false
+```
+
+Select attention explicitly with `--backend=tenstorrent`; it is also selected
+automatically for one or two Tenstorrent cards. The attention flag alone does
+not enable the platform in a CPU-only build.
 
 Llama stores its Tenstorrent KV cache in `[layer, head, sequence, head_dim]`
 order. Keeping the attention kernel's order across tokens removes full-cache
@@ -55,8 +62,9 @@ accumulation, which failed a long-dot numerical regression. Trace replay is
 disabled in these measurements. These are short application
 smoke tests, not model-quality evaluations.
 
-The target is approximately 33 tokens/s with **BF16** weights; BF8 is expected
-to exceed that. The BF16 target remains unmet. XLA now selects DRAM-sharded
+The confirmed minimum is 29.4 tokens/s with **BF16** weights, with approximately
+33 tokens/s as the performance objective; BF8 is expected to exceed that.
+The BF16 target remains unmet. XLA now selects DRAM-sharded
 BF16 FFN/QKV weights by default for this card and keeps the FFN activation
 chain in L1. Sharding consumes prefill's cached preprocessing in a separate cache
 entry, preserving reuse while tracking weight-buffer versions. Set

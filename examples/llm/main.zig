@@ -20,6 +20,7 @@ const Args = struct {
     topk: u32 = 4,
     backend: ?enum { stablehlo, cute, nki, metal, tenstorrent } = null,
     profile: bool = false,
+    warmup_runs: u32 = 0,
     tt_devices: enum { single, all } = .single,
 
     pub const help =
@@ -34,6 +35,7 @@ const Args = struct {
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([stablehlo, cute, nki, metal], default: auto-selection)
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
+        \\   --warmup-runs=<n>    Generate n discarded responses before timing a fresh session (requires --prompt; default: 0)
         \\   --tt-devices=<text> Tenstorrent devices to use ([single, all], default: single)
         \\
     ;
@@ -51,6 +53,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const args = stdx.flags.parse(init.minimal.args, Args);
+    if (args.warmup_runs != 0 and args.prompt == null) {
+        log.err("--warmup-runs requires --prompt", .{});
+        return error.InvalidWarmupArguments;
+    }
 
     //
     // Virtual File Systems
@@ -161,6 +167,25 @@ pub fn main(init: std.process.Init) !void {
         break :b try allocator.dupe(u8, std.mem.sliceTo(line, 0));
     };
     defer allocator.free(prompt);
+
+    // Share compiled executables and immutable weights, but reset conversation,
+    // KV caches, recurrent state, and RNG by creating a session for each run.
+    for (0..args.warmup_runs) |iteration| {
+        log.info("Warm-up run {d}/{d}...", .{ iteration + 1, args.warmup_runs });
+        var warmup_chat = try chat.Chat.init(
+            allocator,
+            init.io,
+            platform,
+            tokenizer,
+            compiled_model,
+            &model_buffers,
+        );
+        defer warmup_chat.deinit();
+        var discarded: std.Io.Writer.Discarding = .init(&.{});
+        const start: std.Io.Timestamp = .now(init.io, .awake);
+        try warmup_chat.runOnce(prompt, .{ .output = &discarded.writer });
+        log.info("Warm-up completed [{f}]", .{start.untilNow(init.io, .awake)});
+    }
 
     var llm_chat = try chat.Chat.init(
         allocator,
