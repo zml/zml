@@ -1,0 +1,179 @@
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "capi",
+    srcs = ["capi.cc"],
+    hdrs = ["capi.h"],
+    tags = ["manual"],
+    deps = [
+        ":dialect",
+        ":headers",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+)
+
+zig_library(
+    name = "air",
+    import_name = "mlir/dialects/air",
+    main = "air.zig",
+    tags = ["manual"],
+    deps = [
+        ":capi",
+        "//mlir",
+        "//mlir/dialects/arith",
+        "//mlir/dialects/func",
+    ],
+)
+
+zig_test(
+    name = "test",
+    main = "test.zig",
+    deps = [
+        ":air",
+        "//mlir",
+        "//mlir/dialects/arith",
+        "//mlir/dialects/func",
+        "//mlir/dialects/llvm",
+    ],
+)
+
+td_library(
+    name = "td_files",
+    srcs = [
+        "AIRAttributes.td",
+        "AIRDialect.td",
+        "AIREnums.td",
+        "AIROps.td",
+    ],
+    includes = ["/"],
+    deps = [
+        "@llvm-project//mlir:ArithOpsInterfacesTdFiles",
+        "@llvm-project//mlir:ArithOpsTdFiles",
+        "@llvm-project//mlir:InferTypeOpInterfaceTdFiles",
+        "@llvm-project//mlir:LLVMOpsTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+        "@llvm-project//mlir:SideEffectInterfacesTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "dialect_inc_gen",
+    tbl_outs = [
+        (
+            [
+                "-gen-dialect-decls",
+                "-dialect=air",
+            ],
+            "AIRDialect.h.inc",
+        ),
+        (
+            [
+                "-gen-dialect-defs",
+                "-dialect=air",
+            ],
+            "AIRDialect.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "AIRDialect.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "enums_inc_gen",
+    tbl_outs = [
+        (
+            ["-gen-enum-decls"],
+            "AIREnums.h.inc",
+        ),
+        (
+            ["-gen-enum-defs"],
+            "AIREnums.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "AIREnums.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "attrs_inc_gen",
+    tbl_outs = [
+        (
+            [
+                "-gen-attrdef-decls",
+                "-attrdefs-dialect=air",
+            ],
+            "AIRAttributes.h.inc",
+        ),
+        (
+            [
+                "-gen-attrdef-defs",
+                "-attrdefs-dialect=air",
+            ],
+            "AIRAttributes.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "AIRAttributes.td",
+    deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "ops_inc_gen",
+    tbl_outs = [
+        (
+            ["-gen-op-decls"],
+            "AIROps.h.inc",
+        ),
+        (
+            ["-gen-op-defs"],
+            "AIROps.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "AIROps.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "headers",
+    hdrs = [
+        "AIRAttributes.h",
+        "AIRDialect.h",
+        "AIREnums.h",
+        "AIROps.h",
+    ],
+    deps = [
+        ":attrs_inc_gen",
+        ":dialect_inc_gen",
+        ":enums_inc_gen",
+        ":ops_inc_gen",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:InferTypeOpInterface",
+        "@llvm-project//mlir:LLVMDialect",
+        "@llvm-project//mlir:SideEffectInterfaces",
+    ],
+)
+
+cc_library(
+    name = "dialect",
+    srcs = [
+        "AIRAttributes.cpp",
+        "AIRDialect.cpp",
+        "AIROps.cpp",
+    ],
+    deps = [
+        ":headers",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:FunctionInterfaces",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:LLVMDialect",
+    ],
+)

@@ -94,6 +94,24 @@ test "arith fastmath attribute is built through the C API" {
     try std.testing.expectError(error.InvalidMlir, arith.FastMathAttr.get(ctx, .{ .value = .{ ._padding = 1 } }));
 }
 
+test "arith overflow attribute is built through the C API" {
+    const ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+
+    const cases = [_]struct { arith.IntegerOverflowFlags, []const u8 }{
+        .{ .none, "#arith.overflow<none>" },
+        .{ .{ .nsw = true }, "#arith.overflow<nsw>" },
+        .{ .{ .nsw = true, .nuw = true }, "#arith.overflow<nsw, nuw>" },
+    };
+    for (cases) |case| {
+        const attr = try arith.IntegerOverflowAttr.get(ctx, .{ .value = case[0] });
+        try std.testing.expectEqual(case[0], attr.value());
+        try std.testing.expect(attr.attribute().isA(arith.IntegerOverflowAttr) != null);
+        try expectPrints(case[1], attr);
+    }
+    try std.testing.expectError(error.InvalidMlir, arith.IntegerOverflowAttr.get(ctx, .{ .value = .{ ._padding = 1 } }));
+}
+
 test "every bound operation is registered" {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();

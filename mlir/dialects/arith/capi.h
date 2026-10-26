@@ -19,6 +19,13 @@ MLIR_CAPI_EXPORTED MlirAttribute mlirArithFastMathAttrGet(MlirContext context,
                                                           uint32_t value);
 MLIR_CAPI_EXPORTED uint32_t mlirArithFastMathAttrGetValue(MlirAttribute attr);
 
+MLIR_CAPI_EXPORTED bool
+mlirAttributeIsAArithIntegerOverflow(MlirAttribute attr);
+MLIR_CAPI_EXPORTED MlirAttribute
+mlirArithIntegerOverflowAttrGet(MlirContext context, uint32_t value);
+MLIR_CAPI_EXPORTED uint32_t
+mlirArithIntegerOverflowAttrGetValue(MlirAttribute attr);
+
 #ifdef __cplusplus
 }
 #endif

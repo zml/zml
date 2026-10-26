@@ -194,12 +194,13 @@ verified.
   `cute_ir/REGENERATING.md`, `fly_rocdl/` through `fly/REGENERATING.md`.
 - `cute_ir:capi` and `cute_nvgpu:capi` each depend on the other's `:dialect`:
   their C++ sources use each other's types.
-- `cf`, `llvm`, `math`, `memref`, `scf`, `shardy` and `stablehlo` have no
-  `capi` of their own and bind upstream's C API target directly.
+- `cf`, `math`, `memref`, `scf`, `shardy` and `stablehlo` have no `capi` of
+  their own and bind upstream's C API target directly; `llvm`'s `capi` only
+  adds what upstream's leaves out (loop annotations).
 - Hand-written builders with many parameters take an `<Op>Args` struct
   (`func.func`, `gpu.func`, `ttir.func`, `cuda.kernel`, `cuda_tile.entry`,
-  `memref.subview`, `vector.transfer_read`, ...); function-like ones carry
-  `location` inside it.
+  `air.kernel`, `memref.subview`, `vector.transfer_read`, ...);
+  function-like ones carry `location` inside it.
 - Some hand-written `Opts` hold required or non-null defaulted fields where
   named arguments read better (`stablehlo.PadOpts`,
   `mosaic_tpu.LoadOpts.sublane_mask`, `affine.ForOpts.step`).
