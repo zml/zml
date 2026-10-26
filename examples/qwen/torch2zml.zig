@@ -183,4 +183,5 @@ const VaeWrapper = struct {
 test {
     _ = @import("./blocks/tokenizer.zig");
     _ = @import("./blocks/vae/AutoencoderKLQwenImage21.zig");
+    _ = @import("./blocks/TorchGenerator.zig");
 }

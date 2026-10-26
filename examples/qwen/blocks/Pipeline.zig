@@ -5,6 +5,7 @@ const c = @import("c");
 
 const tokenizer = @import("./tokenizer.zig");
 const Scheduler = @import("./Scheduler.zig");
+const TorchGenerator = @import("./TorchGenerator.zig");
 const CompileArgs = @import("../compiler.zig").CompileArgs;
 const blocks = @import("../blocks.zig");
 const store = @import("../store.zig");
@@ -57,6 +58,8 @@ const Params = struct {
     seq_len: usize,
     compile_args: CompileArgs,
     compile_args_buffers: zml.Bufferized(CompileArgs),
+    /// Same noise as diffusers with `generator=torch.Generator("cpu").manual_seed(seed)`
+    seed: u64 = 42,
 };
 
 pub fn run_once(
@@ -82,13 +85,11 @@ pub fn run_once(
     defer scheduler.deinit(self.allocator);
 
     // Compile the model
-    const rng = zml.Tensor.Rng.init();
     const wrapper = PipelineWrapper{
         .lang_model = self.language_model_store.model,
         .transformer_model = self.transformer_model_store.model,
         .vae_model = self.vae_model_store.model,
         .args = params.compile_args,
-        .rng = rng,
         .timesteps = timesteps,
         .scheduler = &scheduler,
     };
@@ -109,6 +110,17 @@ pub fn run_once(
     defer latents_std_buffer.deinit();
     const latents_std_tensor = zml.Tensor.init(latents_std_shape, .f32);
 
+    // diffusers' prepare_latents: randn((bs, 1, C, H, W)) in f32 on the CPU generator, flattened to (bs, C, H * W)
+    const latent_h = 2 * (params.compile_args.height / (params.compile_args.vae_scale_factor * 2));
+    const latent_w = 2 * (params.compile_args.width / (params.compile_args.vae_scale_factor * 2));
+    const noise_shape = zml.Shape.init(.{ .bs = 1, .d = params.compile_args.in_channels, .seq_len = latent_h * latent_w }, .f32);
+    var generator: TorchGenerator = .init(params.seed);
+    const noise_data = try generator.randn(self.allocator, @intCast(noise_shape.count()));
+    defer self.allocator.free(noise_data);
+    var noise_buffer = try zml.Buffer.fromBytes(self.io, self.platform, noise_shape, .replicated, std.mem.sliceAsBytes(noise_data));
+    defer noise_buffer.deinit();
+    const noise_tensor: zml.Tensor = .fromShape(noise_shape);
+
     std.debug.print("\n\nStart compile\n\n", .{});
 
     const input_tensor = zml.Tensor.init(.{ .bs = 1, .seq_len = tokenized.tokens.len }, .u32);
@@ -117,7 +129,7 @@ pub fn run_once(
         self.io,
         wrapper,
         .forward,
-        .{ input_tensor, latents_mean_tensor, latents_std_tensor },
+        .{ input_tensor, noise_tensor, latents_mean_tensor, latents_std_tensor },
         .{ .shardings = self.platform.shardings.values() },
     );
     defer exe.deinit();
@@ -142,19 +154,16 @@ pub fn run_once(
     var exe_results = try exe.results(self.allocator);
     defer exe_results.deinit(self.allocator);
 
-    var rng_buffer = try zml.Tensor.Rng.initBuffer(self.io, self.platform, .replicated, 43);
-    defer zml.Tensor.Rng.deinitBuffer(&rng_buffer);
-
     exe_args.set(.{
         .{
             .lang_model = self.language_model_store.model_buffer,
             .transformer_model = self.transformer_model_store.model_buffer,
             .vae_model = self.vae_model_store.model_buffer,
             .args = params.compile_args_buffers,
-            .rng = rng_buffer,
             .timesteps = timesteps,
         },
         bufferized.input_ids,
+        noise_buffer,
         latents_mean_buffer,
         latents_std_buffer,
     });
@@ -229,27 +238,21 @@ const PipelineWrapper = struct {
     transformer_model: blocks.QwenImage21Transformer2DModel,
     vae_model: blocks.AutoencoderKLQwenImage21,
     args: CompileArgs,
-    rng: zml.Tensor.Rng,
     timesteps: []f32,
     scheduler: *Scheduler,
 
     pub fn forward(
         self: PipelineWrapper,
         input_ids: zml.Tensor,
+        noise: zml.Tensor,
         latents_mean: zml.Tensor,
         latents_std: zml.Tensor,
     ) zml.Tensor {
         const prompt_embeds = self.encode_prompt(input_ids);
 
-        const latent_w = 2 * self.args.width / (self.args.vae_scale_factor * 2);
-        const latent_h = 2 * self.args.height / (self.args.vae_scale_factor * 2);
-        // Standard normal noise like `randn` (Box-Muller). bitGenerator only returns raw bits, not floats.
-        const noise_shape: zml.Shape = .init(.{ .bs = 1, .seq_len = latent_w * latent_h, .d = self.args.in_channels }, .f32);
-        const rng, const uniform_a = self.rng.uniform(noise_shape, .{});
-        _, const uniform_b = rng.uniform(noise_shape, .{});
-        // uniform is in [0, 1), so 1 - u is in (0, 1] and the log stays finite.
-        const radius = uniform_a.scale(-1).addConstant(1).log().scale(-2).sqrt();
-        var latents = radius.mul(uniform_b.scale(2 * std.math.pi).cos()).convert(.bf16);
+        // `noise` is {bs, d, seq_len} f32 from TorchGenerator. diffusers' _pack_latents transposes it to
+        // {bs, seq_len, d}, and torch's bf16 randn is the f32 sample rounded to nearest-even, like convert.
+        var latents = noise.transpose(.{ .bs, .seq_len, .d }).convert(.bf16);
 
         // A `stablehlo.while` traces the transformer once instead of unrolling one copy per timestep.
         const timesteps: zml.Tensor = .constantTensor(.init(.{ .step = self.timesteps.len }, .f32), std.mem.sliceAsBytes(self.timesteps));
