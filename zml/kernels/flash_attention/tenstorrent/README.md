@@ -37,13 +37,13 @@ layers, untouched positions, and preservation of update inputs.
 
 With this layout, XLA's tuned BF8 down-projection and output head, eight-core RMS
 normalization, FP32 matrix accumulation, and cached DRAM-sharded BF16 FFN/QKV
-weights with SiLU on the L1 output shards, the single-card Llama 3.1 8B
+weights with SiLU and QKV head splitting on L1 shards, the single-card Llama 3.1 8B
 counting smoke test at sequence length 128 measured:
 
 | Weights | Decode time (73 tokens) | Throughput | Kernel cache hits |
 | --- | ---: | ---: | ---: |
-| BF16 | 3.037 s | 24.0 tokens/s | 486/486 |
-| BF8 | 2.232 s | 32.7 tokens/s | 501/501 |
+| BF16 | 2.974 s | 24.5 tokens/s | 486/486 |
+| BF8 | 2.186 s | 33.4 tokens/s | 501/501 |
 
 Both runs produced the correct count from 1 to 20. Before the layout change,
 the corresponding BF16/BF8 runs measured 18.0/24.2 tokens/s; the layout alone
@@ -55,7 +55,7 @@ disabled in these measurements. These are short application
 smoke tests, not model-quality evaluations.
 
 The target is approximately 33 tokens/s with **BF16** weights; BF8 is expected
-to exceed that. Neither target has been reached. XLA now selects DRAM-sharded
+to exceed that. The BF16 target remains unmet. XLA now selects DRAM-sharded
 BF16 FFN/QKV weights by default for this card and keeps the FFN activation
 chain in L1. Sharding consumes prefill's cached preprocessing in a separate cache
 entry, preserving reuse while tracking weight-buffer versions. Set
@@ -72,6 +72,14 @@ With both changes, a separate execution profile measured 233.100 ms for first
 decode and 38.813 ms median steady calls. Tuning BF8's output head reduced
 its isolated kernel time from 1.763 to 1.546 ms; the full counting run measured
 32.7 tokens/s versus the prior 32.6. That application-level difference is small.
+
+Keeping BF16 QKV projections in eight L1 width shards through head splitting
+raises the warm run to 24.5 tokens/s. The BF8 path stages the small BF16
+projection into L1 before splitting and measures 33.4 tokens/s. The native
+head-splitting benchmark checks every Q/K/V value exactly and measures 23.2
+microseconds from those shards, versus 64.0 microseconds from DRAM. XLA's
+integration regression checks the projection-plus-head-split graph, input and
+weight preservation, changing inputs, and the compiled L1 layout.
 
 At initial integration, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
 decoding completed in 4.489 seconds (16.3 tokens/s), versus 4.778 seconds
