@@ -145,6 +145,10 @@ pub const ShapeAttr = opaque {
         return mlir.string(c.mlirCuteShapeAttrGetValue(self.ptr()));
     }
 
+    pub fn rank(self: *const ShapeAttr) usize {
+        return @intCast(c.mlirCuteShapeAttrGetRank(self.ptr()));
+    }
+
     pub fn attribute(self: *const ShapeAttr) *const mlir.Attribute {
         return @ptrCast(self);
     }

@@ -54,6 +54,7 @@ MLIR_CAPI_EXPORTED MlirAttribute mlirCuteShapeAttrTupleGet(
     MlirContext context, intptr_t numElements, MlirAttribute const *elements);
 MLIR_CAPI_EXPORTED bool mlirAttributeIsACuteShape(MlirAttribute attr);
 MLIR_CAPI_EXPORTED MlirStringRef mlirCuteShapeAttrGetValue(MlirAttribute attr);
+MLIR_CAPI_EXPORTED intptr_t mlirCuteShapeAttrGetRank(MlirAttribute attr);
 
 MLIR_CAPI_EXPORTED MlirAttribute
 mlirCuteStrideAttrStaticGet(MlirContext context, int64_t value);

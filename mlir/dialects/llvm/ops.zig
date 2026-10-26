@@ -234,6 +234,15 @@ pub fn inttoptr(ctx: *mlir.Context, address: *const mlir.Value, result_type: *co
     });
 }
 
+/// llvm.ptrtoint — the integer address of an LLVM pointer.
+pub fn ptrtoint(ctx: *mlir.Context, pointer: *const mlir.Value, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.ptrtoint", .{
+        .operands = .{ .flat = &.{pointer} },
+        .results = .{ .flat = &.{result_type} },
+        .location = location,
+    });
+}
+
 /// llvm.bitcast — reinterpret `value` as `result_type` (same bit width).
 pub fn bitcast(ctx: *mlir.Context, value: *const mlir.Value, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "llvm.bitcast", .{

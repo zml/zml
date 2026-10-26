@@ -138,7 +138,7 @@ pub fn advancePipeline(b: *B, index: V, phase: V, comptime stages: usize) Pipeli
 pub fn peekBarrierIfRemaining(b: *B, base: V, count: V, limit: usize, state: PipelinePosition) V {
     var peek = b.openIfElse(count.lt(limit), .{.i1});
     {
-        peek.yieldThen(.{b.mbarrierWaitParity(barrierAt(b, base, state.index), state.phase)});
+        peek.yieldThen(.{b.mbarrierTryWait(barrierAt(b, base, state.index), state.phase, .{ .scope = .cta })});
     }
     {
         peek.yieldElse(.{b.constant(.i1, true)});
