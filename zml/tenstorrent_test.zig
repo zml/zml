@@ -99,6 +99,9 @@ test "two-card tensor-parallel matmul and donated shards" {
         fn update(value: zml.Tensor) zml.Tensor {
             return value.addConstant(1).reuseBuffer(value);
         }
+        fn argmax(value: zml.Tensor) zml.Tensor {
+            return value.argMax(.k).indices.replicate();
+        }
     };
     const a = zml.Tensor.init(.{ .m = 32, .k = 64 }, .f32).withPartitioning(mesh, .{ .k = .model });
     const b = zml.Tensor.init(.{ .k = 64, .n = 32 }, .f32).withPartitioning(mesh, .{ .k = .model });
@@ -137,4 +140,9 @@ test "two-card tensor-parallel matmul and donated shards" {
         }
     }
     try std.testing.expectEqual(b_data, try bb.getValue([64][32]f32, io));
+    const argmax = try platform.compileFn(allocator, io, Functions.argmax, .{a}, .{ .meshes = &.{mesh} });
+    defer argmax.deinit();
+    var indices = try argmax.eval(allocator, io, .{ab});
+    defer indices.deinit();
+    for (try indices.getValue([32]i32, io)) |index| try std.testing.expectEqual(@as(i32, 32), index);
 }

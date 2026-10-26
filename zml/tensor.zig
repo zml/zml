@@ -3617,9 +3617,14 @@ pub const Tensor = struct {
     pub fn argMax(x: Tensor, axis_: anytype) ArgMaxRes {
         const a = x.axis(axis_);
         const dt: DataType = if (x.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
+        // TT-MLIR recognizes argmax with a local zero-based iota. Sharding
+        // that iota introduces collectives and global offsets that its reducer
+        // lowering cannot yet match. Replicate before reducing on a TT mesh.
+        const platform = Compiler.current().platform;
+        const input = if (platform.target == .tenstorrent and platform.devices.len > 1) x.replicate() else x;
 
         const values, const indices = ops.reduce(
-            .{ x, Tensor.arange(.{ .end = x.dim(axis_) }, dt).broadcast(x.shape(), &.{a}) },
+            .{ input, Tensor.arange(.{ .end = x.dim(axis_) }, dt).broadcast(input.shape(), &.{a}) },
             .{ Tensor.constant(x.dtype().minValue()), Tensor.constant(dt.zero()) },
             &.{a},
             ArgMaxRes.cmp,
