@@ -2,7 +2,9 @@
 
 load("@rules_runfiles_group//runfiles_group:providers.bzl", "RunfilesGroupInfo")
 
+# Holds the runtime group name declared by an annotation
 _RuntimeGroup = provider(fields = ["name"])
+# For one target, holds the groups mappings to runfiles collected by the aspect
 _RuntimeGroups = provider(fields = ["groups"])
 
 runtime_group = rule(
@@ -27,26 +29,27 @@ def _collect_impl(target, ctx):
     hints = [h for h in getattr(ctx.rule.attr, "aspect_hints", []) if _RuntimeGroup in h]
     if len(hints) > 1:
         fail("Only one runtime group annotation is allowed on " + str(target.label))
+
+    # hints contains only this target annotations, not its dependencies
+    # LLMD (no annotation): receives dependency groups via `else`
+    # └── ROCm Zig library (no annotation): forwards rocm via `else`
+    #     └── libzml_rocm (annotated): defines rocm via if hints
+    # Groups propagate upward
     if hints:
-        # An annotation defines a boundary after any transformation/assembly.
-        # Ignore groups below it; only the producer's resulting runfiles belong.
+        # Use this annotated target runfiles (replacing any groups from its dependencies)
         groups = {hints[0][_RuntimeGroup].name: target[DefaultInfo].default_runfiles}
     else:
-        # hints contains only this target annotations, not its dependencies.
-        # LLMD (no annotation): receives dependency groups via `else`
-        # └── ROCm Zig library (no annotation): forwards rocm via `else`
-        #     └── libzml_rocm (annotated): defines rocm via if hints
-        # The annotation stays on libzml_rocm. Its group propagates upward.
-        # Merge contributions with the same group name at unannotated targets.
         groups = {}
         for edge in dir(ctx.rule.attr):
             for dep in _targets(getattr(ctx.rule.attr, edge)):
                 if _RuntimeGroups in dep:
                     for name, runfiles in dep[_RuntimeGroups].groups.items():
                         groups.setdefault(name, []).append(runfiles)
+        # Merge contributions with the same group name at unannotated targets.
         groups = {name: ctx.runfiles().merge_all(parts) for name, parts in groups.items()}
     return [_RuntimeGroups(groups = groups)]
 
+# To be used on the consumer side to collect runtime groups from dependencies
 runtime_groups_aspect = aspect(
     implementation = _collect_impl,
     attr_aspects = ["*"],
@@ -54,7 +57,7 @@ runtime_groups_aspect = aspect(
 )
 
 def _entries(runfiles):
-    # Runfiles contain file artifacts, workspace-relative aliases, root-level aliases, and synthetic empty-file paths.
+    """ Index runfile entries so assigned group entries can be removed when computing shared. Runfiles depsets are immutable """
     return {
         "files": {f: f for f in runfiles.files.to_list()},
         "symlinks": {(s.path, s.target_file): s for s in runfiles.symlinks.to_list()},
