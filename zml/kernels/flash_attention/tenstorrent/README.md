@@ -101,6 +101,13 @@ The attention oracle suite passes with tracing off and on, including the
 that used five destination tiles when FP32 half synchronization permits four;
 a native regression fails before the fix and passes afterward.
 
+The full BF16 model at sequence length 1024 currently fails device-memory
+allocation in the warm-up/fresh-session workflow. Disabling vocabulary
+splitting or tracing individually still fails on the fresh prefill after
+warm-up; these checks also disabled the attention schedule. There is no valid
+1024-length full-model throughput result yet, despite the passing attention
+oracle tests at that length.
+
 The confirmed minimum is 29.4 tokens/s with **BF16** weights, with approximately
 33 tokens/s as the performance objective; BF8 is expected to exceed that.
 The BF16 target remains unmet. XLA now selects DRAM-sharded
