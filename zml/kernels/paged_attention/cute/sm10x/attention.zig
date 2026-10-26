@@ -317,7 +317,7 @@ fn produce(t: Tile) void {
             const id = tiles.iv.mul(c.features() * 2).add(stage);
             var reuse = b.openIf(id.ge(c.buffers()));
             {
-                b.mbarrierWait(t.released(id), t.phase(id).bitXor(1));
+                b.mbarrierWait(t.released(id), t.phase(id).bitXor(1), .cta);
                 reuse.close();
             }
             const source = if (stage < c.features()) t.k else t.v;
@@ -339,7 +339,7 @@ fn multiply(t: Tile, tile: V, comptime qk: bool) void {
     {
         for (0..@as(usize, @intCast(c.features()))) |part| {
             const id = tile.mul(c.features() * 2).add(@as(i64, @intCast(part)) + if (qk) @as(i64, 0) else c.features());
-            b.mbarrierWait(t.ready(id), t.phase(id));
+            b.mbarrierWait(t.ready(id), t.phase(id), .cta);
             b.tcgen05Fence(.after);
             const kv = descriptor(b, t.shared.add(id.rem(c.buffers()).mul(c.kvBytes())), if (qk) 16 else c.keys() * 128);
             const qp = descriptor(b, t.shared.add(if (qk) c.qBase() else c.pBase()), 16);
@@ -353,22 +353,22 @@ fn multiply(t: Tile, tile: V, comptime qk: bool) void {
                 const accumulate = if (qk) b.constant(.i32, @intFromBool(part > 0 or step > 0)).ne(0) else tile.gt(0).bitOr(b.constant(.i32, @intFromBool(step > 0)).ne(0));
                 b.tcgen05MmaF16(t.tmem.add(column), left, right, b.constant(.i32, @as(i32, @bitCast(instruction(c, qk)))), accumulate);
             }
-            b.tcgen05Commit(t.released(id));
+            b.tcgen05Commit(t.released(id), .{});
         }
-        b.tcgen05Commit(t.shared.add(c.completion()));
+        b.tcgen05Commit(t.shared.add(c.completion()), .{});
         leader.close();
     }
-    b.mbarrierWait(t.shared.add(c.completion()), b.constant(.i32, if (qk) 0 else 1));
+    b.mbarrierWait(t.shared.add(c.completion()), b.constant(.i32, if (qk) 0 else 1), .cta);
     b.tcgen05Fence(.after);
     // A fast warp must not wrap completion parity before every consumer has
     // observed the preceding PV completion.
-    if (!qk) b.barrierSync(1, 128);
+    if (!qk) b.barrierCtaSyncAligned(1, 128);
 }
 
 fn publishProbabilities(t: Tile) void {
     t.b.fenceProxyAsyncShared();
     t.b.tcgen05Fence(.before);
-    t.b.barrierSync(1, 128);
+    t.b.barrierCtaSyncAligned(1, 128);
     t.b.tcgen05Fence(.after);
 }
 
@@ -393,7 +393,7 @@ fn reduceHeads(t: Tile, comptime heads: usize, values: [heads]V, comptime maximu
             leader.close();
         }
     }
-    b.barrierSync(1, 128);
+    b.barrierCtaSyncAligned(1, 128);
     var result: [heads]V = undefined;
     for (0..heads) |h| {
         var value = b.loadWords(1, t.shared.add(t.c.reductions() + @as(i64, @intCast(h * 4))), .shared, .{})[0].bitCast(.f32);
@@ -403,7 +403,7 @@ fn reduceHeads(t: Tile, comptime heads: usize, values: [heads]V, comptime maximu
         }
         result[h] = value;
     }
-    b.barrierSync(1, 128);
+    b.barrierCtaSyncAligned(1, 128);
     return result;
 }
 
@@ -514,7 +514,7 @@ fn prefill(t: Tile) void {
                 preserve.yieldElse(@as([64]V, @splat(zero)));
             }
             @memcpy(&saved, &preserve.results);
-            b.barrierSync(1, 128);
+            b.barrierCtaSyncAligned(1, 128);
         }
         multiply(t, tiles.iv, true);
         var scores: [64]V = undefined;
