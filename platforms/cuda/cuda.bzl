@@ -228,8 +228,8 @@ _PLUGINS = {
         "url": "https://mirror.zml.ai/plugins/202610231441.290.1.a3a89b67baa7/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "f8a97954697b94b893d1e8502e754bc47b1f357927f7eaac58321c9006619a5f",
-        "url": "https://mirror.zml.ai/plugins/202610231441.290.1.a3a89b67baa7/zml-cuda-linux-arm64.tar.zst",
+        "sha256": "3e68acc44829a4afe695146b5e9b98cabc24b530d1dab74f3ed438bbe33d0fbd",
+        "url": "file:///tmp/benjamin/llmd-cp-20261023/followup-candidates/cp-transport-review/commit-partition/clean-plugin/archive.tar.zst",
     },
 }
 
