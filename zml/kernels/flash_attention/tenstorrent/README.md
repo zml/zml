@@ -18,3 +18,9 @@ beyond the cache including the largest u32. Bounds clamp before signed conversio
 
 Select it explicitly with `//examples/llm -- --backend=tenstorrent`; it is also
 selected automatically for a single Tenstorrent card.
+
+On the P150a, Llama 3.1 8B's counting prompt with sequence length 128 and greedy
+decoding completed in 4.489 seconds (16.3 tokens/s), versus 4.778 seconds
+(15.3 tokens/s) for StableHLO attention on the same build. Both runs produced the
+same answer and hit all 495 cached device kernels. The first native-attention run
+had six cache misses and took 5.423 seconds; compare warm runs for throughput.
