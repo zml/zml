@@ -787,7 +787,7 @@ pub const CountAndSortExpertTokens = struct {
         const token_start_init = pid.mul(block_i32);
 
         // while token_start < NUMEL:
-        var w = b.openWhile(.{token_start_init}, .{b.scalarTy(.i32)});
+        var w = b.openWhile(.{token_start_init}, .{.i32});
         {
             const ts = w.before_carried[0];
             w.yieldBefore(ts.lt(numel), .{ts});

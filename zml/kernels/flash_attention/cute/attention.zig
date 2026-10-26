@@ -119,12 +119,6 @@ fn run(b: *B, cfg: Config) cute.FinishError!void {
     unreachable;
 }
 
-fn tupleOf(array: anytype) @Tuple(&@as([array.len]type, @splat(Value))) {
-    var result: @Tuple(&@as([array.len]type, @splat(Value))) = undefined;
-    inline for (0..array.len) |i| result[i] = array[i];
-    return result;
-}
-
 /// Four warps own four (query position, query head) rows sharing one KV head.
 /// Only a KV tile lives in shared memory; maxima, sums, and outputs stay in
 /// registers. All lanes participate in shuffles, including padded rows/features.
@@ -163,7 +157,7 @@ fn runSized(b: *B, cfg: Config, comptime fragments: usize) cute.FinishError!void
     var queries: [fragments]Value = undefined;
     inline for (0..fragments) |f| {
         const d = lane.add(f * 32);
-        var valid = b.openIfElse(d.lt(cfg.head_dim), .{cute.DType.f32.toMlir(b.ctx)});
+        var valid = b.openIfElse(d.lt(cfg.head_dim), .{.f32});
         valid.yieldThen(.{a.q.get(.{ batch, query, head, d }).to(.f32)});
         valid.yieldElse(.{zero});
         queries[f] = valid.results[0];
@@ -174,14 +168,14 @@ fn runSized(b: *B, cfg: Config, comptime fragments: usize) cute.FinishError!void
     const values = b.makeTensor(b.allocSmem(cfg.dtype, tile_keys * padded_dim, 16), layout);
     var initial: [fragments + 2]Value = @splat(zero);
     initial[0] = neg_inf;
-    var tiles = b.openFor(begin, end, tile_keys, tupleOf(initial));
+    var tiles = b.openFor(begin, end, tile_keys, initial);
 
     // Zero-fill partial tiles and feature padding before the CTA-wide barrier.
     var copy = b.openFor(tid, tile_keys * padded_dim, 128, .{});
     const tile_key = copy.iv.div(padded_dim);
     const d = copy.iv.rem(padded_dim);
     const key = tiles.iv.add(tile_key);
-    var valid_load = b.openIfElse(key.lt(end).bitAnd(d.lt(cfg.head_dim)), .{ cfg.dtype.toMlir(b.ctx), cfg.dtype.toMlir(b.ctx) });
+    var valid_load = b.openIfElse(key.lt(end).bitAnd(d.lt(cfg.head_dim)), .{ cfg.dtype, cfg.dtype });
     valid_load.yieldThen(.{ a.k.get(.{ batch, key, kv_head, d }), a.v.get(.{ batch, key, kv_head, d }) });
     valid_load.yieldElse(.{ zero.to(cfg.dtype), zero.to(cfg.dtype) });
     keys.set(.{ tile_key, d }, valid_load.results[0]);
@@ -210,19 +204,19 @@ fn runSized(b: *B, cfg: Config, comptime fragments: usize) cute.FinishError!void
 
     var accumulators: [fragments]Value = undefined;
     inline for (0..fragments) |f| accumulators[f] = tiles.carried[f + 2].mul(rescale);
-    var weighted = b.openFor(b.cst(.i32, 0), tile_keys, 1, tupleOf(accumulators));
+    var weighted = b.openFor(b.cst(.i32, 0), tile_keys, 1, accumulators);
     const weight = b.shuffleIdx(probability, weighted.iv);
     inline for (0..fragments) |f| {
         accumulators[f] = weighted.carried[f].add(weight.mul(values.get(.{ weighted.iv, lane.add(f * 32) }).to(.f32)));
     }
-    weighted.yield(tupleOf(accumulators));
+    weighted.yield(accumulators);
     // No warp may overwrite the tile before every warp has consumed it.
     b.syncThreads();
     var next: [fragments + 2]Value = undefined;
     next[0] = maximum;
     next[1] = sum;
     inline for (0..fragments) |f| next[f + 2] = weighted.results[f];
-    tiles.yield(tupleOf(next));
+    tiles.yield(next);
 
     inline for (0..fragments) |f| {
         const col = lane.add(f * 32);

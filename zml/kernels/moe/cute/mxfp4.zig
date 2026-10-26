@@ -218,7 +218,7 @@ fn combineKernel(b: *B, cfg: CombineConfig) cute.FinishError!void {
         for (0..@intCast(cfg.topk)) |slot| {
             const route = token.mul(cfg.topk).add(slot);
             // Routes of other expert-parallel ranks were never written.
-            var computed = b.openIfElse(a.routes.get(.{route}).ge(0), .{ cute.DType.f32.toMlir(b.ctx), cute.DType.f32.toMlir(b.ctx) });
+            var computed = b.openIfElse(a.routes.get(.{route}).ge(0), .{ .f32, .f32 });
             const word = a.d.get(.{ route, pair });
             computed.yieldThen(.{
                 low.add(word.shl(16).bitCast(.f32)),

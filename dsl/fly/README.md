@@ -215,7 +215,8 @@ dependencies before consuming completed counters.
 Control flow uses `dsl/common`: `b.openFor(lo, hi, step, .{ inits })`
 with `.yield(.{ ... })` (`.close()` without inits), `b.openIf(cond)` with
 `.close()`, `b.openIfElse(cond, .{ types })` with `.yieldThen` / `.yieldElse`
-(`.elseBranch()` / `.close()` without types).
+(`.elseBranch()` / `.close()` without types). Types are dtypes, Values for
+their types, or MLIR types; tuples can also be arrays.
 `openWhile` has separate condition and body regions: `before_carried`
 feeds `yieldBefore`, `after_carried` feeds `yieldAfter`, and `results`
 contains the values returned when the condition becomes false.

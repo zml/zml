@@ -643,9 +643,9 @@ a `new_shape`, a `num_bins`, an `out_dtype`, a TMA tile descriptor. The DSL
 never asks you to restate information it can read off a `Value`.
 
 `b.scalarTy(dtype)` / `b.tensorTy(shape, dtype)` are still available but only
-needed by `openIf.result_types` / `openWhile.after_types` (where block-arg
-types can be arbitrary) and by the raw `externElementwise` /
-`inlineAsmElementwise` escape hatches.
+needed for tensor result types in `openIfElse` / `openWhile` (scalar ones are
+plain dtypes) and by the raw `externElementwise` / `inlineAsmElementwise`
+escape hatches.
 
 ### `fn X / fn XOpts` pattern
 
@@ -764,9 +764,9 @@ const total = loop.results[0];
 - `lower`/`upper`/`step` are `anytype`: pass Values, comptime ints, or runtime
   Zig ints. Comptime literals adapt to the first operand's type; cast explicitly
   to force a specific width (e.g. `@as(i32, @intCast(config.block))`).
-- `inits` is a tuple literal `.{v1, v2, ...}`. Arity is comptime — `carried`,
-  `results`, and the `yield(...)` call are all fixed-size arrays of the same
-  length.
+- `inits` is a tuple `.{v1, v2, ...}` or an array. Arity is comptime —
+  `carried`, `results`, and the `yield(...)` values (also a tuple or an array)
+  all have the same length.
 - Empty loops: `b.openFor(0, N, S, .{})` + `loop.close()` (no iter_args).
 
 ### `openIf` — scf.if without else (side-effects only)
@@ -785,7 +785,7 @@ else block is auto-built empty.
 ### `openIfElse` — scf.if with else and optional results
 
 ```zig
-var i = b.openIfElse(cond, .{ b.scalarTy(.f32) });   // result types
+var i = b.openIfElse(cond, .{.f32});   // result types
 {
     // then body
     i.yieldThen(.{ x });
@@ -797,16 +797,17 @@ var i = b.openIfElse(cond, .{ b.scalarTy(.f32) });   // result types
 const r = i.results[0];
 ```
 
-- `result_types` is a tuple of `*const mlir.Type` — use `b.scalarTy(dtype)` or
-  `b.tensorTy(shape, dtype)`. Pass `.{}` for an if/else with no results but
-  distinct then/else bodies, then end them with `elseBranch()` and `close()`.
+- `result_types` is a tuple or array of dtypes (`.f32`), Values (for their
+  types) or `*const mlir.Type`s such as `b.tensorTy(shape, dtype)`. Pass
+  `.{}` for an if/else with no results but distinct then/else bodies, then
+  end them with `elseBranch()` and `close()`.
 - `yieldThen` swaps to the else block; `yieldElse` builds the `scf.if` op.
 - Both branches must yield arity-matching tuples.
 
 ### `openWhile` — scf.while
 
 ```zig
-var w = b.openWhile(.{ i0 }, .{ b.scalarTy(.i32) });
+var w = b.openWhile(.{ i0 }, .{.i32});
 {
     // before region (condition)
     const s = w.before_carried[0];
@@ -820,9 +821,10 @@ var w = b.openWhile(.{ i0 }, .{ b.scalarTy(.i32) });
 const r = w.results[0];
 ```
 
-- `inits` — tuple of `Value`s; before-region arg types = their types.
-- `after_types` — tuple of `*const mlir.Type`; after-region arg types + the
-  scf.while's result types.
+- `inits` — a tuple or array of `Value`s; before-region arg types = their types.
+- `after_types` — a tuple or array of dtypes (`.f32`), Values (for their
+  types) or `*const mlir.Type`s; after-region arg types + the scf.while's
+  result types.
 - `yieldBefore(cond, forwarded)` — `forwarded` arity must match `after_types`.
 - `yieldAfter(values)` — arity must match `inits`.
 

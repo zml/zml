@@ -127,9 +127,9 @@ pub const Align = struct {
 
         var blocks = b.openFor(tid64, cfg.blocks, 512, .{});
         const offset = blocks.iv.to(.i32).mul(cfg.block_size);
-        var block_expert = b.openIfElse(offset.cmpUnsigned(.lt, sums.results[1]), .{zero.type_()});
+        var block_expert = b.openIfElse(offset.cmpUnsigned(.lt, sums.results[1]), .{zero});
         // Upper bound of inclusive expert ends handles empty experts without a scan.
-        var bounds = b.openWhile(.{ zero, experts }, .{ zero.type_(), zero.type_() });
+        var bounds = b.openWhile(.{ zero, experts }, .{ zero, zero });
         bounds.yieldBefore(bounds.before_carried[0].cmpUnsigned(.lt, bounds.before_carried[1]), .{ bounds.before_carried[0], bounds.before_carried[1] });
         const lo = bounds.after_carried[0];
         const hi = bounds.after_carried[1];
@@ -325,7 +325,7 @@ pub const Mfma = struct {
         const route_start = block_m.mul(cfg.native_m);
         const has_rows = if (cfg.naive != 0) b.constant(.i1, 1) else blk: {
             const padded = args.padded.at(b.constant(.i64, 0)).to(.i64);
-            var has_block = b.openIfElse(route_start.cmpUnsigned(.lt, padded), .{b.constant(.i1, 0).type_()});
+            var has_block = b.openIfElse(route_start.cmpUnsigned(.lt, padded), .{.i1});
             has_block.yieldThen(.{args.sorted.at(route_start).cmp(.ne, cfg.routes)});
             has_block.yieldElse(.{b.constant(.i1, 0)});
             break :blk has_block.results[0];
@@ -346,14 +346,14 @@ pub const Mfma = struct {
             break :blk first.cmp(.ge, 0).bitAnd(first.cmp(.lt, cfg.routes));
         } else b.constant(.i1, 0);
 
-        var sums = b.openIfElse(valid_expert, .{ zeros.type_(), zeros.type_() });
+        var sums = b.openIfElse(valid_expert, .{ zeros, zeros });
         const expert = eid.to(.i64);
         const load_row = thread.divUnsigned(16);
         const load_chunk = thread.remUnsigned(16);
         const a_route = routeForRow(b, args.sorted, block_m, route_start, load_row, cfg.naive != 0);
         const a_valid = a_route.cmp(.ge, 0).bitAnd(a_route.cmp(.lt, cfg.routes));
         const a_base = a_route.to(.i64).divUnsigned(cfg.topk).mul(cfg.ka);
-        var second_route = b.openIfElse(second_active, .{zero.type_()});
+        var second_route = b.openIfElse(second_active, .{zero});
         second_route.yieldThen(.{args.sorted.at(route_start.add(load_row).add(16))});
         second_route.yieldElse(.{b.constant(.i32, -1)});
         const a_route_g1 = second_route.results[0];
@@ -407,14 +407,14 @@ pub const Mfma = struct {
         inline for (0..4) |u| {
             const offset = read_base.add(mn_lane.mul(128)).add(k_lane.mul(4).add(u).bitXor(mn_lane).mul(8)).add(2048);
             const azero = b.constant(.i16, 0).splat(8);
-            var second = b.openIfElse(second_active, .{azero.type_()});
+            var second = b.openIfElse(second_active, .{azero});
             second.yieldThen(.{b.copyAtomLoad(copy_shared, vectorView(shared, offset, 8))});
             second.yieldElse(.{azero});
             a_fragments_g1[u] = second.results[0];
         }
         // Prefetch the other LDS region only after all current A fragments are read.
         const next_k = k.iv.add(128);
-        var next = b.openIfElse(next_k.cmpUnsigned(.lt, cfg.k), .{ initial.words.type_(), initial.scale.type_() });
+        var next = b.openIfElse(next_k.cmpUnsigned(.lt, cfg.k), .{ initial.words, initial.scale });
         const next_tile = loader.load(b, next_k, write_base);
         next.yieldThen(.{ next_tile.words, next_tile.scale });
         next.yieldElse(.{ b.constant(.i32, 0).splat(4), fzero });
@@ -428,7 +428,7 @@ pub const Mfma = struct {
             const w1 = decoded.shuffleVector(decoded, &.{ 4, 5, 6, 7 });
             acc = b.mmaAtomCall(atom, a0, w0, acc);
             acc = b.mmaAtomCall(atom, a1, w1, acc);
-            var second = b.openIfElse(second_active, .{zeros.type_()});
+            var second = b.openIfElse(second_active, .{zeros});
             const a0_g1 = a_fragments_g1[u].shuffleVector(a_fragments_g1[u], &.{ 0, 1, 2, 3 }).bitcast(.bf16);
             const a1_g1 = a_fragments_g1[u].shuffleVector(a_fragments_g1[u], &.{ 4, 5, 6, 7 }).bitcast(.bf16);
             const first_acc = b.mmaAtomCall(atom, a0_g1, w0, acc_g1);
@@ -503,7 +503,7 @@ pub const Mfma = struct {
 
         fn storeActivation(self: TileLoader, b: *Builder, base: Value, valid: Value, k: Value, destination: Value) void {
             const zeros = b.constant(.i64, 0).splat(2);
-            var guarded = b.openIfElse(valid, .{zeros.type_()});
+            var guarded = b.openIfElse(valid, .{zeros});
             const offset = base.add(k.divUnsigned(4)).add(self.a_col);
             guarded.yieldThen(.{b.copyAtomLoad(self.load_a, vectorView(self.a, offset, 2))});
             guarded.yieldElse(.{zeros});
@@ -609,12 +609,12 @@ const Gemv = struct {
         const local = expert32.cmp(.ge, 0).bitAnd(expert32.cmp(.lt, cfg.experts));
         const inrow = row.cmpUnsigned(.lt, cfg.n);
         const fzero = b.constant(.f32, 0.0);
-        var sum = b.openIfElse(local.bitAnd(inrow), .{fzero.type_()});
+        var sum = b.openIfElse(local.bitAnd(inrow), .{fzero});
         var k = b.openFor(lane, cfg.k_words, cfg.stride, .{fzero});
         var carried = k.carried[0];
         for (0..cfg.unroll) |u| {
             const pos = k.iv.add(u * cfg.lanes);
-            var inbounds = b.openIfElse(pos.cmpUnsigned(.lt, cfg.k_words), .{fzero.type_()});
+            var inbounds = b.openIfElse(pos.cmpUnsigned(.lt, cfg.k_words), .{fzero});
             const word = args.b.at(.{ expert, row, pos });
             const scale8 = args.scales.at(.{ expert, row, pos.divUnsigned(4) });
             const scale = decodeScale(b, scale8);

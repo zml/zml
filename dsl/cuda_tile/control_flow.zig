@@ -7,26 +7,9 @@ const cuda_tile = @import("mlir/dialects/cuda_tile");
 const dsl = @import("dsl/common/builder");
 const mlir = @import("mlir");
 
-pub const tupleArity = dsl.tupleArity;
-
-fn collect(comptime ValueT: type, comptime N: usize, values: anytype, comptime what: []const u8) [N]*const mlir.Value {
-    const info = @typeInfo(@TypeOf(values));
-    if (info != .@"struct" or !info.@"struct".is_tuple)
-        @compileError(what ++ " expects a tuple literal");
-    if (info.@"struct".field_names.len != N)
-        @compileError(what ++ ": arity must match the scope's declared arity");
-    var buf: [N]*const mlir.Value = undefined;
-    inline for (info.@"struct".field_names, 0..) |f, i| {
-        if (@FieldType(@TypeOf(values), f) != ValueT)
-            @compileError(what ++ ": every tuple element must be a Value");
-        buf[i] = @field(values, f).inner;
-    }
-    return buf;
-}
-
 fn terminate(comptime ValueT: type, comptime N: usize, kernel: anytype, block: *mlir.Block, comptime mnemonic: enum { yield, continue_, break_ }, values: anytype, comptime what: []const u8) void {
     if (block.terminator() != null) return;
-    const buf = collect(ValueT, N, values, what);
+    const buf = dsl.innerValues(ValueT, N, values, what);
     const op = switch (mnemonic) {
         .yield => cuda_tile.yield(kernel.ctx, &buf, kernel.loc()),
         .continue_ => cuda_tile.continue_(kernel.ctx, &buf, kernel.loc()),

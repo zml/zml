@@ -559,7 +559,7 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
     // Empty rows skip flashAttention, so their accumulator must already be zero.
     k.vectorStoreAt(a.acc_ref, k.zeros(&.{ cfg.numQPerBlk(), cfg.numQHeadsPerBlk(), cfg.head_dim }, .f32), &.{ k.cIndex(0), k.cIndex(0), k.cIndex(0) });
 
-    var q_loop = k.openWhile(.{ k.lift(@as(i32, 0)), init_seq_idx, init_buf_idx }, .{ k.scalarTy(.i32), k.scalarTy(.i32), k.scalarTy(.i32) });
+    var q_loop = k.openWhile(.{ k.lift(@as(i32, 0)), init_seq_idx, init_buf_idx }, .{ .i32, .i32, .i32 });
     {
         const done = q_loop.before_carried[0];
         const cur_seq_idx = q_loop.before_carried[1];
@@ -582,7 +582,7 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
         const q_len = k.subi(q_end, q_start);
         const kv_len = k.scalarLoad(a.kv_lens, &.{k.toIndex(cur_seq_idx)});
 
-        var kv_loop = k.openWhile(.{ k.lift(@as(i32, 0)), cur_buf_idx }, .{ k.scalarTy(.i32), k.scalarTy(.i32) });
+        var kv_loop = k.openWhile(.{ k.lift(@as(i32, 0)), cur_buf_idx }, .{ .i32, .i32 });
         {
             const kv_blk = kv_loop.before_carried[0];
             const buf = kv_loop.before_carried[1];
@@ -599,7 +599,7 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
             const cur_seq_end = k.cmpi(.sle, q_end, q_len_end);
             const next_nonempty_seq = blk: {
                 // Only sequence transitions need to scan for empty KV rows.
-                var next_seq = k.openIfElse(k.andi(is_last_kv, cur_seq_end), .{k.scalarTy(.i32)});
+                var next_seq = k.openIfElse(k.andi(is_last_kv, cur_seq_end), .{.i32});
                 {
                     const start_seq_idx = k.addi(cur_seq_idx, k.lift(@as(i32, 1)));
                     next_seq.yieldThen(.{nextNonemptyKvSequence(k, cfg, a, start_seq_idx, num_seqs)});
@@ -686,7 +686,7 @@ fn nextNonemptyKvSequence(
     start_seq_idx: mtt.Value,
     num_seqs: mtt.Value,
 ) mtt.Value {
-    var loop = k.openWhile(.{start_seq_idx}, .{k.scalarTy(.i32)});
+    var loop = k.openWhile(.{start_seq_idx}, .{.i32});
     {
         const seq_idx = loop.before_carried[0];
         // The terminal index can equal the metadata array length.

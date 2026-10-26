@@ -862,14 +862,14 @@ fn advancePipeline(b: *B, index: V, phase: V, comptime stages: usize) PipelinePo
     const advanced = index.add(1);
     const wraps = advanced.eq(stages);
     const next_index = b.select(wraps, 0, advanced);
-    var next_phase = b.openIfElse(wraps, .{phase.type_()});
+    var next_phase = b.openIfElse(wraps, .{phase});
     next_phase.yieldThen(.{phase.bitXor(1)});
     next_phase.yieldElse(.{phase});
     return .{ .index = next_index, .phase = next_phase.results[0] };
 }
 
 fn peekBarrierIfRemaining(b: *B, base: V, count: V, limit: usize, state: PipelinePosition) V {
-    var peek = b.openIfElse(count.lt(limit), .{cute.DType.i1.toMlir(b.ctx)});
+    var peek = b.openIfElse(count.lt(limit), .{.i1});
     peek.yieldThen(.{b.mbarrierWaitParity(barrierAt(b, base, state.index), state.phase)});
     peek.yieldElse(.{b.cst(.i1, true)});
     return peek.results[0];
@@ -955,8 +955,8 @@ fn runTmaProducer(
         initial_work.executed, tiles_m,        active,             div_m,
         div_n,
     };
-    var tiles = b.openWhile(carried, typesOf(carried));
-    tiles.yieldBefore(tiles.before_carried[3], tupleOf(tiles.before_carried));
+    var tiles = b.openWhile(carried, carried);
+    tiles.yieldBefore(tiles.before_carried[3], tiles.before_carried);
     const tile_m = tiles.after_carried[0];
     const group = tiles.after_carried[2];
     const expert = expert_ids.get(.{group}, .i32);
@@ -1035,29 +1035,6 @@ fn runTmaProducer(
             tail_state = advancePipeline(b, tail_state.index, tail_state.phase, tile.stages);
         }
     }
-}
-
-fn Tuple(comptime T: type, comptime len: usize) type {
-    return @Tuple(&@as([len]type, @splat(T)));
-}
-
-fn arity(comptime T: type) usize {
-    return @typeInfo(T).@"struct".field_names.len;
-}
-
-/// The MLIR types of a tuple of values, as `openWhile` expects them.
-fn typesOf(values: anytype) Tuple(*const mlir.Type, arity(@TypeOf(values))) {
-    const len = comptime arity(@TypeOf(values));
-    var out: Tuple(*const mlir.Type, len) = undefined;
-    inline for (0..len) |i| out[i] = values[i].type_();
-    return out;
-}
-
-/// Forward a whole loop-carried array, as `yieldBefore` expects a tuple.
-fn tupleOf(array: anytype) Tuple(@TypeOf(array[0]), array.len) {
-    var out: Tuple(@TypeOf(array[0]), array.len) = undefined;
-    inline for (0..array.len) |i| out[i] = array[i];
-    return out;
 }
 
 /// SM100 MXFP4 mainloop objects of one pipeline stage, produced by
@@ -1308,8 +1285,8 @@ fn runMmaConsumer(
         initial_work.executed, tiles_m,        active,             div_m,
         div_n,
     };
-    var tiles = b.openWhile(carried, typesOf(carried));
-    tiles.yieldBefore(tiles.before_carried[3], tupleOf(tiles.before_carried));
+    var tiles = b.openWhile(carried, carried);
+    tiles.yieldBefore(tiles.before_carried[3], tiles.before_carried);
     // Python peeks the first AB-full token before it blocks on an available
     // accumulator stage. Preserve that ordering so the two independent
     // pipelines enter the K loop with the same outstanding operations.
@@ -1468,14 +1445,14 @@ fn runEpilogue(
         initial_work.executed,
     };
     var tiles = b.openWhile(carried, .{
-        initial_work.m.type_(),
-        initial_work.n.type_(),
-        initial_work.group.type_(),
-        cute.DType.i32.toMlir(b.ctx),
-        cute.DType.i32.toMlir(b.ctx),
-        cute.DType.i32.toMlir(b.ctx),
-        initial_work.linear.type_(),
-        initial_work.executed.type_(),
+        initial_work.m,
+        initial_work.n,
+        initial_work.group,
+        .i32,
+        .i32,
+        .i32,
+        initial_work.linear,
+        initial_work.executed,
     });
     tiles.yieldBefore(tiles.before_carried[3], .{
         tiles.before_carried[0],
@@ -1642,7 +1619,7 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
         const guarded = skip_padding and (row_chunk > 0 or chunk > 0);
         const types: [swiglu_chunk + 1]*const mlir.Type = @splat(f32_type);
         // `@TypeOf` does not evaluate its operand.
-        var guard: ?@TypeOf(b.openIfElse(routed.count, tupleOf(types))) = if (guarded) b.openIfElse(routed.count.gt(chunk_first + @as(i32, @intCast(first))), tupleOf(types)) else null;
+        var guard: ?@TypeOf(b.openIfElse(routed.count, types)) = if (guarded) b.openIfElse(routed.count.gt(chunk_first + @as(i32, @intCast(first))), types) else null;
         var chunk_maximum = lane_maximum;
         for (columns[first..last], activations[first..last], first..) |value, *activation, column| {
             const c: i32 = @intCast(column);
@@ -1668,12 +1645,12 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
         if (guard) |*g| {
             var then_values: [swiglu_chunk + 1]V = @splat(chunk_maximum);
             for (activations[first..last], then_values[0 .. last - first]) |activation, *t| t.* = activation;
-            g.yieldThen(tupleOf(then_values));
+            g.yieldThen(then_values);
             // Padding chunk: zero activations, maxima unchanged. The zero is
             // emitted in the else block, where it is used.
             var else_values: [swiglu_chunk + 1]V = @splat(b.cst(.f32, 0));
             else_values[swiglu_chunk] = lane_maximum;
-            g.yieldElse(tupleOf(else_values));
+            g.yieldElse(else_values);
             for (activations[first..last], g.results[0 .. last - first]) |*activation, result| activation.* = result;
             lane_maximum = g.results[swiglu_chunk];
         } else {

@@ -46,7 +46,7 @@ fn findSeqIdx(
 ) Value {
     const left_init = k.liftAs(0, .i32);
 
-    var w = k.openWhile(.{ left_init, num_seqs }, .{ k.scalarTy(.i32), k.scalarTy(.i32) });
+    var w = k.openWhile(.{ left_init, num_seqs }, .{ .i32, .i32 });
     {
         const left = w.before_carried[0];
         const right = w.before_carried[1];
@@ -62,7 +62,7 @@ fn findSeqIdx(
         else
             val;
 
-        var i = k.openIfElse(mid_val.le(target_idx), .{ k.scalarTy(.i32), k.scalarTy(.i32) });
+        var i = k.openIfElse(mid_val.le(target_idx), .{ .i32, .i32 });
         {
             i.yieldThen(.{ mid.add(1), right });
         }

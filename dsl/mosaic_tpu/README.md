@@ -659,9 +659,9 @@ const final_b_h = loop.results[0];
   runtime Zig ints. Use `i32` constants (`b.lift(@as(i32, 0))`) when you
   want the loop counter to be `i32` (matching Pallas's `scf.for ... : i32`).
   The default for `index`-typed counters is `b.cIndex(N)`.
-- `inits` is a tuple literal `.{v1, v2, ...}`. Arity is comptime — `carried`,
-  `results`, and the `yield(...)` call are all fixed-size arrays of the
-  same length.
+- `inits` is a tuple `.{v1, v2, ...}` or an array. Arity is comptime —
+  `carried`, `results`, and the `yield(...)` values (also a tuple or an
+  array) all have the same length.
 - Empty loops: `b.openFor(0, N, 1, .{})` + `loop.close()`.
 
 ### `openIf` — scf.if without else (side-effects only)
@@ -680,7 +680,7 @@ empty.
 ### `openIfElse` — scf.if with else and optional results
 
 ```zig
-var i = k.openIfElse(cond, .{ k.scalarTy(.f32) });
+var i = k.openIfElse(cond, .{.f32});
 {
     i.yieldThen(.{ x });
 }
@@ -690,15 +690,15 @@ var i = k.openIfElse(cond, .{ k.scalarTy(.f32) });
 const r = i.results[0];
 ```
 
-- `result_types` is a tuple of `*const mlir.Type` — use `k.scalarTy(dtype)`
-  / `k.vectorTy(shape, dtype)` / `k.memRefTy(shape, dtype, mem_space)`.
-  Pass `.{}` for an if/else with no results, then end its branches with
-  `elseBranch()` and `close()`.
+- `result_types` is a tuple or array of dtypes (`.f32`), Values (for their
+  types) or `*const mlir.Type`s such as `k.vectorTy(shape, dtype)` /
+  `k.memRefTy(shape, dtype, mem_space)`. Pass `.{}` for an if/else with no
+  results, then end its branches with `elseBranch()` and `close()`.
 
 ### `openWhile` — scf.while
 
 ```zig
-var w = k.openWhile(.{ i0 }, .{ k.scalarTy(.i32) });
+var w = k.openWhile(.{ i0 }, .{.i32});
 {
     const s = w.before_carried[0];
     w.yieldBefore(s.lt(10), .{ s });
@@ -710,9 +710,10 @@ var w = k.openWhile(.{ i0 }, .{ k.scalarTy(.i32) });
 const r = w.results[0];
 ```
 
-- `inits` — tuple of `Value`s; before-region arg types = their types.
-- `after_types` — tuple of `*const mlir.Type`; after-region arg types + the
-  scf.while's result types.
+- `inits` — a tuple or array of `Value`s; before-region arg types = their types.
+- `after_types` — a tuple or array of dtypes (`.f32`), Values (for their
+  types) or `*const mlir.Type`s; after-region arg types + the scf.while's
+  result types.
 - `yieldBefore(cond, forwarded)` — `forwarded` arity must match `after_types`.
 - `yieldAfter(values)` — arity must match `inits`.
 
@@ -743,7 +744,7 @@ book-keeping layer, not a walled garden:
   `kernel` field populated.
 - `b.scalarTy(dtype)` / `b.vectorTy(shape, dtype)` /
   `b.memRefTy(shape, dtype, mem_space)` — type constructors used by raw
-  ops and by `openIfElse.result_types` / `openWhile.after_types`.
+  ops and by non-scalar `openIfElse.result_types` / `openWhile.after_types`.
 
 When you drop to raw ops, remember to still **append them to the current
 block** — `b.emit(...)` does that for you; `_ = op.appendTo(b.currentBlock())`

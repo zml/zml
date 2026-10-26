@@ -128,5 +128,4 @@ grep -n 'pub const DType = enum' -A 30 dsl/cuda_tile/dtype.zig
 
 Every op also has a test: `grep -n '^test "' dsl/cuda_tile/builder.zig`
 lists them, and each one prints IR that round-trips through the verifier, so
-they double as usage examples. A worked, runnable example (saxpy, softmax,
-gemm, in-place relu) lives in `examples/cuda_tile`.
+they double as usage examples.

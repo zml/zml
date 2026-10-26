@@ -2,7 +2,6 @@ const std = @import("std");
 
 const cuda_tile = @import("mlir/dialects/cuda_tile");
 const dsl = @import("dsl/common/builder");
-const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
@@ -1640,9 +1639,8 @@ pub const Builder = struct {
         upper: anytype,
         step: anytype,
         inits: anytype,
-    ) ForScope(tupleArity(@TypeOf(inits), "openFor: inits")) {
-        const N = comptime tupleArity(@TypeOf(inits), "openFor: inits");
-        const fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
+    ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
+        const N = comptime dsl.arity(@TypeOf(inits), "openFor: inits");
 
         // Literals take the type of the first bound that is a Value; all
         // three must agree (`AllTypesMatch` on the op).
@@ -1655,18 +1653,14 @@ pub const Builder = struct {
         }
 
         var block_types: [N + 1]*const mlir.Type = undefined;
-        var block_locs: [N + 1]*const mlir.Location = undefined;
         block_types[0] = lb_v.type_();
-        block_locs[0] = self.loc();
         var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (fields, 0..) |f, i| {
-            const raw = @field(inits, f);
-            const v: Value = if (@FieldType(@TypeOf(inits), f) == Value) raw else self.lift(raw);
+        inline for (0..N) |i| {
+            const v: Value = if (@TypeOf(inits[i]) == Value) inits[i] else self.lift(inits[i]);
             block_types[i + 1] = v.type_();
-            block_locs[i + 1] = self.loc();
             inits_inner[i] = v.inner;
         }
-
+        const block_locs: [N + 1]*const mlir.Location = @splat(self.loc());
         const body = mlir.Block.init(&block_types, &block_locs);
         self.pushBlock(body);
 
@@ -1688,59 +1682,35 @@ pub const Builder = struct {
     pub fn openIf(self: *Builder, cond: Value) IfOnlyScope {
         const then_block = mlir.Block.init(&.{}, &.{});
         self.pushBlock(then_block);
-        return .{
-            .kernel = self,
-            .cond_inner = cond.inner,
-            .then_block = then_block,
-        };
+        return .{ .kernel = self, .cond_inner = cond.inner, .then_block = then_block };
     }
 
-    pub fn openIfElse(
-        self: *Builder,
-        cond: Value,
-        result_types: anytype,
-    ) IfScope(tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
-        const N = comptime tupleArity(@TypeOf(result_types), "openIfElse: result_types");
-        const fields = @typeInfo(@TypeOf(result_types)).@"struct".field_names;
-
-        var types: [N]*const mlir.Type = undefined;
-        inline for (fields, 0..) |f, i| {
-            if (@FieldType(@TypeOf(result_types), f) != *const mlir.Type)
-                @compileError("openIfElse: every result_type must be *const mlir.Type (use b.scalarTy/tileTy)");
-            types[i] = @field(result_types, f);
-        }
-
+    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(dsl.arity(@TypeOf(result_types), "openIfElse: result_types")) {
         const then_block = mlir.Block.init(&.{}, &.{});
         const else_block = mlir.Block.init(&.{}, &.{});
         self.pushBlock(then_block);
-
         return .{
             .kernel = self,
             .cond_inner = cond.inner,
             .then_block = then_block,
             .else_block = else_block,
-            .result_types = types,
+            .result_types = dsl.resultTypes(self, Value, result_types, "openIfElse: result_types"),
         };
     }
 
     /// An unstructured loop carrying `inits` (`scope.close()` ends a body that
     /// carries nothing, in place of `scope.yield`); leave with `scope.breakWith`
     /// inside an `if`, and close the body with `scope.yield`.
-    pub fn openLoop(self: *Builder, inits: anytype) LoopScope(tupleArity(@TypeOf(inits), "openLoop: inits")) {
-        const N = comptime tupleArity(@TypeOf(inits), "openLoop: inits");
-        const fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
-
+    pub fn openLoop(self: *Builder, inits: anytype) LoopScope(dsl.arity(@TypeOf(inits), "openLoop: inits")) {
+        const N = comptime dsl.arity(@TypeOf(inits), "openLoop: inits");
         var block_types: [N]*const mlir.Type = undefined;
-        var block_locs: [N]*const mlir.Location = undefined;
         var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (fields, 0..) |f, i| {
-            const raw = @field(inits, f);
-            const v: Value = if (@FieldType(@TypeOf(inits), f) == Value) raw else self.lift(raw);
+        inline for (0..N) |i| {
+            const v: Value = if (@TypeOf(inits[i]) == Value) inits[i] else self.lift(inits[i]);
             block_types[i] = v.type_();
-            block_locs[i] = self.loc();
             inits_inner[i] = v.inner;
         }
-
+        const block_locs: [N]*const mlir.Location = @splat(self.loc());
         const body = mlir.Block.init(&block_types, &block_locs);
         self.pushBlock(body);
 

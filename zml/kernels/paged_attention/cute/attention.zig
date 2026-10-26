@@ -29,12 +29,6 @@ pub const Kernel = cute.Kernel(Config, .{
     .run = run,
 });
 
-fn tuple(comptime T: type, comptime n: usize, values: [n]T) @Tuple(&@as([n]type, @splat(T))) {
-    var result: @Tuple(&@as([n]type, @splat(T))) = undefined;
-    inline for (0..n) |i| result[i] = values[i];
-    return result;
-}
-
 fn run(b: *cute.Builder, c: Config) cute.FinishError!void {
     switch (c.head_dim) {
         32 => try runDim(b, c, 1),
@@ -87,13 +81,13 @@ fn runDim(b: *cute.Builder, c: Config, comptime chunks: usize) cute.FinishError!
         var initial: [chunks + 2]V = @splat(zero);
         initial[0] = if (c.sink) a.sink.get(.{head}).mul(std.math.log2e) else b.cst(.f32, -std.math.inf(f32));
         initial[1] = if (c.sink) b.cst(.f32, 1) else zero;
-        var keys = b.openFor(if (c.indexed) b.cst(.i32, 0) else begin, if (c.indexed) b.cst(.i32, c.topk) else end, 1, tuple(V, chunks + 2, initial));
+        var keys = b.openFor(if (c.indexed) b.cst(.i32, 0) else begin, if (c.indexed) b.cst(.i32, c.topk) else end, 1, initial);
         {
             const key = if (c.indexed) a.indices.get(.{ token, keys.iv }) else keys.iv;
             const valid = key.ge(0).bitAnd(key.lt(len));
             // Invalid indexed entries must not load the page table, K, or V. Duplicates
             // deliberately contribute once per occurrence, as independent softmax entries.
-            var entry = b.openIfElse(valid, tuple(@TypeOf(zero.type_()), chunks + 2, @splat(zero.type_())));
+            var entry = b.openIfElse(valid, @as([chunks + 2]V, @splat(zero)));
             {
                 const page = a.table.get(.{ seq, key.div(c.page_size) });
                 const offset = key.rem(c.page_size);
@@ -109,12 +103,12 @@ fn runDim(b: *cute.Builder, c: Config, comptime chunks: usize) cute.FinishError!
                 next[0] = maximum;
                 next[1] = keys.carried[1].mul(alpha).add(weight);
                 for (0..chunks) |i| next[i + 2] = keys.carried[i + 2].mul(alpha).add(weight.mul(a.v.get(.{ page, offset, kv_head, lane.add(i * 32) }).to(.f32)));
-                entry.yieldThen(tuple(V, chunks + 2, next));
+                entry.yieldThen(next);
             }
             {
-                entry.yieldElse(tuple(V, chunks + 2, keys.carried));
+                entry.yieldElse(keys.carried);
             }
-            keys.yield(tuple(V, chunks + 2, entry.results));
+            keys.yield(entry.results);
         }
         const norm = b.select(keys.results[1].gt(0), b.rcpApprox(keys.results[1]), zero);
         for (0..chunks) |i| a.out.set(.{ token, head, lane.add(i * 32) }, keys.results[i + 2].mul(norm).to(c.dtype));

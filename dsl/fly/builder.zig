@@ -12,7 +12,6 @@ const rocdl = @import("mlir/dialects/rocdl");
 const scf = @import("mlir/dialects/scf");
 const ub = @import("mlir/dialects/ub");
 const vector = @import("mlir/dialects/vector");
-const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
@@ -866,6 +865,10 @@ pub const Builder = struct {
         return result catch |err| std.debug.panic("fly: cannot build type ({})", .{err});
     }
 
+    pub fn scalarTy(self: *const Builder, dtype: DType) *const mlir.Type {
+        return dtype.toMlir(self.ctx);
+    }
+
     pub fn intTupleType(self: *Builder, t: IntTuple) *const mlir.Type {
         return must(fly.types.IntTupleType.get(self.ctx, .{ .attr = must(t.toAttr(self.ctx)) })).type_();
     }
@@ -1340,43 +1343,11 @@ pub const Builder = struct {
         upper: anytype,
         step: anytype,
         inits: anytype,
-    ) ForScope(tupleArity(@TypeOf(inits), "openFor: inits")) {
-        const N = comptime tupleArity(@TypeOf(inits), "openFor: inits");
-        const fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
-
+    ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
         const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.constIndex(lower);
         const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constLike(upper, lb_v);
         const step_v: Value = if (@TypeOf(step) == Value) step else self.constLike(step, lb_v);
-
-        var block_types: [N + 1]*const mlir.Type = undefined;
-        var block_locs: [N + 1]*const mlir.Location = undefined;
-        block_types[0] = lb_v.type_();
-        block_locs[0] = self.loc();
-        var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (fields, 0..) |f, i| {
-            if (@TypeOf(@field(inits, f)) != Value) @compileError("openFor: every init must be a Value");
-            const v: Value = @field(inits, f);
-            block_types[i + 1] = v.type_();
-            block_locs[i + 1] = self.loc();
-            inits_inner[i] = v.inner;
-        }
-
-        const body = mlir.Block.init(&block_types, &block_locs);
-        self.pushBlock(body);
-
-        var carried: [N]Value = undefined;
-        for (0..N) |i| carried[i] = .{ .inner = body.argument(i + 1), .kernel = self };
-
-        return .{
-            .kernel = self,
-            .body = body,
-            .lb_inner = lb_v.inner,
-            .ub_inner = ub_v.inner,
-            .step_inner = step_v.inner,
-            .inits_inner = inits_inner,
-            .iv = .{ .inner = body.argument(0), .kernel = self },
-            .carried = carried,
-        };
+        return dsl.openFor(self, Value, .{ lb_v, ub_v, step_v }, inits, .{});
     }
 
     pub fn constLike(self: *Builder, value: anytype, like: Value) Value {
@@ -1391,73 +1362,19 @@ pub const Builder = struct {
     }
 
     pub fn openIf(self: *Builder, cond: Value) IfOnlyScope {
-        const then_block = mlir.Block.init(&.{}, &.{});
-        self.pushBlock(then_block);
-        return .{ .kernel = self, .cond_inner = cond.inner, .then_block = then_block };
+        return dsl.openIf(self, Value, cond);
     }
 
-    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
-        const N = comptime tupleArity(@TypeOf(result_types), "openIfElse: result_types");
-        const fields = @typeInfo(@TypeOf(result_types)).@"struct".field_names;
-        var types: [N]*const mlir.Type = undefined;
-        inline for (fields, 0..) |f, i| {
-            if (@TypeOf(@field(result_types, f)) != *const mlir.Type) @compileError("openIfElse: every result_type must be *const mlir.Type");
-            types[i] = @field(result_types, f);
-        }
-        const then_block = mlir.Block.init(&.{}, &.{});
-        const else_block = mlir.Block.init(&.{}, &.{});
-        self.pushBlock(then_block);
-        return .{ .kernel = self, .cond_inner = cond.inner, .then_block = then_block, .else_block = else_block, .result_types = types };
+    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(dsl.arity(@TypeOf(result_types), "openIfElse: result_types")) {
+        return dsl.openIfElse(self, Value, cond, result_types);
     }
 
     pub fn openWhile(
         self: *Builder,
         inits: anytype,
         after_types: anytype,
-    ) WhileScope(
-        tupleArity(@TypeOf(inits), "openWhile: inits"),
-        tupleArity(@TypeOf(after_types), "openWhile: after_types"),
-    ) {
-        const N = comptime tupleArity(@TypeOf(inits), "openWhile: inits");
-        const M = comptime tupleArity(@TypeOf(after_types), "openWhile: after_types");
-        const init_fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
-        const type_fields = @typeInfo(@TypeOf(after_types)).@"struct".field_names;
-
-        var before_types: [N]*const mlir.Type = undefined;
-        var before_locs: [N]*const mlir.Location = undefined;
-        var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (init_fields, 0..) |f, i| {
-            if (@TypeOf(@field(inits, f)) != Value)
-                @compileError("openWhile: every init must be a Value");
-            const v: Value = @field(inits, f);
-            before_types[i] = v.type_();
-            before_locs[i] = self.loc();
-            inits_inner[i] = v.inner;
-        }
-        const before_block = mlir.Block.init(&before_types, &before_locs);
-
-        var after_tys: [M]*const mlir.Type = undefined;
-        var after_locs: [M]*const mlir.Location = undefined;
-        inline for (type_fields, 0..) |f, i| {
-            if (@TypeOf(@field(after_types, f)) != *const mlir.Type)
-                @compileError("openWhile: every after_type must be *const mlir.Type");
-            after_tys[i] = @field(after_types, f);
-            after_locs[i] = self.loc();
-        }
-        const after_block = mlir.Block.init(&after_tys, &after_locs);
-
-        self.pushBlock(before_block);
-        var before_carried: [N]Value = undefined;
-        for (0..N) |i| before_carried[i] = .{ .inner = before_block.argument(i), .kernel = self };
-
-        return .{
-            .kernel = self,
-            .before_block = before_block,
-            .after_block = after_block,
-            .inits_inner = inits_inner,
-            .after_types = after_tys,
-            .before_carried = before_carried,
-        };
+    ) WhileScope(dsl.arity(@TypeOf(inits), "openWhile: inits"), dsl.arity(@TypeOf(after_types), "openWhile: after_types")) {
+        return dsl.openWhile(self, Value, inits, after_types);
     }
 
     // ---------------------------------------------------------------- finalization

@@ -84,12 +84,6 @@ pub const Attention = cute.Kernel(Config, .{
     .run = attention,
 });
 
-fn tuple(comptime T: type, comptime n: usize, values: [n]T) @Tuple(&@as([n]type, @splat(T))) {
-    var result: @Tuple(&@as([n]type, @splat(T))) = undefined;
-    inline for (0..n) |i| result[i] = values[i];
-    return result;
-}
-
 fn loadInt(b: *B, pointer: V, index: V) V {
     return b.loadWords(1, pointer.add(index.to(.i64).mul(4)), .global, .{})[0];
 }
@@ -425,7 +419,7 @@ fn decode(t: Tile, comptime heads: usize) void {
         initial[h] = neg_inf;
         initial[heads + h] = zero;
     }
-    var tiles = b.openFor(0, t.tiles, 1, tuple(V, 2 * heads, initial));
+    var tiles = b.openFor(0, t.tiles, 1, initial);
     {
         multiply(t, tiles.iv, true);
         const raw = b.tmemLoad32x32b(heads, address.add(c.scoreColumn()));
@@ -463,7 +457,7 @@ fn decode(t: Tile, comptime heads: usize) void {
         }
         publishProbabilities(t);
         multiply(t, tiles.iv, false);
-        tiles.yield(tuple(V, 2 * heads, next));
+        tiles.yield(next);
     }
     for (0..@as(usize, @intCast(c.features()))) |part| {
         const out = b.tmemLoad32x32b(heads, address.add(@as(i64, @intCast(part)) * c.rows()));
@@ -508,16 +502,16 @@ fn prefill(t: Tile) void {
         // while QK reuses them for scores, avoiding duplicate QK/softmax CTAs.
         var saved: [64]V = undefined;
         if (c.head_dim == 512) {
-            var preserve = b.openIfElse(tiles.iv.gt(0), tuple(@TypeOf(zero.type_()), 64, @splat(zero.type_())));
+            var preserve = b.openIfElse(tiles.iv.gt(0), @as([64]V, @splat(zero)));
             {
                 const tail = b.tmemLoad32x32b(64, address.add(c.scoreColumn()));
                 b.fenceTmemLoad();
                 var words: [64]V = undefined;
                 for (tail, 0..) |value, i| words[i] = value.bitCast(.f32);
-                preserve.yieldThen(tuple(V, 64, words));
+                preserve.yieldThen(words);
             }
             {
-                preserve.yieldElse(tuple(V, 64, @as([64]V, @splat(zero))));
+                preserve.yieldElse(@as([64]V, @splat(zero)));
             }
             @memcpy(&saved, &preserve.results);
             b.barrierSync(1, 128);
@@ -542,7 +536,7 @@ fn prefill(t: Tile) void {
             scores[i] = b.select(owns.bitAnd(t.valid(row, key0.add(@as(i32, @intCast(i))))), scores[i].mul(c.scale * std.math.log2e), neg_inf);
         }
         const tile_max = if (c.architecture == .sm103 and c.scale > 0) blk: {
-            var choose = b.openIfElse(full, .{zero.type_()});
+            var choose = b.openIfElse(full, .{zero});
             {
                 choose.yieldThen(.{hardware_max.mul(c.scale * std.math.log2e)});
             }

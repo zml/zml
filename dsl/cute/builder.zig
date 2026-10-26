@@ -13,7 +13,6 @@ const math = @import("mlir/dialects/math");
 const nvvm = @import("mlir/dialects/nvvm");
 const scf = @import("mlir/dialects/scf");
 const vector = @import("mlir/dialects/vector");
-const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
@@ -2734,56 +2733,30 @@ pub const Builder = struct {
 
     // ==================== scf ====================
 
-    pub fn openIf(self: *Builder, cond: Value) IfOnlyScope {
-        const then_block = mlir.Block.init(&.{}, &.{});
-        self.pushBlock(then_block);
-        return .{ .kernel = self, .cond_inner = cond.inner, .then_block = then_block };
+    pub fn scalarTy(self: *const Builder, dtype: DType) *const mlir.Type {
+        return dtype.toMlir(self.ctx);
     }
 
-    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
-        const N = comptime tupleArity(@TypeOf(result_types), "openIfElse: result_types");
-        var types: [N]*const mlir.Type = undefined;
-        inline for (@typeInfo(@TypeOf(result_types)).@"struct".field_names, 0..) |f, i| {
-            types[i] = @field(result_types, f);
-        }
-        const then_block = mlir.Block.init(&.{}, &.{});
-        const else_block = mlir.Block.init(&.{}, &.{});
-        self.pushBlock(then_block);
-        return .{ .kernel = self, .cond_inner = cond.inner, .then_block = then_block, .else_block = else_block, .result_types = types };
+    pub fn openIf(self: *Builder, cond: Value) IfOnlyScope {
+        return dsl.openIf(self, Value, cond);
+    }
+
+    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(dsl.arity(@TypeOf(result_types), "openIfElse: result_types")) {
+        return dsl.openIfElse(self, Value, cond, result_types);
     }
 
     /// `for iv in range(lower, upper, step)` with loop-carried `inits`.
-    pub fn openFor(self: *Builder, lower: anytype, upper: anytype, step: anytype, inits: anytype) ForScope(tupleArity(@TypeOf(inits), "openFor: inits")) {
-        const N = comptime tupleArity(@TypeOf(inits), "openFor: inits");
-        const lb = self.lift(lower);
-        const ub = self.liftAs(upper, lb.dtype());
-        const st = self.liftAs(step, lb.dtype());
-
-        var block_types: [N + 1]*const mlir.Type = undefined;
-        var block_locs: [N + 1]*const mlir.Location = undefined;
-        block_types[0] = lb.type_();
-        block_locs[0] = self.loc();
-        var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (@typeInfo(@TypeOf(inits)).@"struct".field_names, 0..) |f, i| {
-            const v = self.lift(@field(inits, f));
-            block_types[i + 1] = v.type_();
-            block_locs[i + 1] = self.loc();
-            inits_inner[i] = v.inner;
-        }
-        const body = mlir.Block.init(&block_types, &block_locs);
-        self.pushBlock(body);
-        var carried: [N]Value = undefined;
-        for (0..N) |i| carried[i] = .{ .inner = body.argument(i + 1), .kernel = self };
-        return .{
-            .kernel = self,
-            .body = body,
-            .lb_inner = lb.inner,
-            .ub_inner = ub.inner,
-            .step_inner = st.inner,
-            .inits_inner = inits_inner,
-            .iv = .{ .inner = body.argument(0), .kernel = self },
-            .carried = carried,
-        };
+    pub fn openFor(
+        self: *Builder,
+        lower: anytype,
+        upper: anytype,
+        step: anytype,
+        inits: anytype,
+    ) ForScope(dsl.arity(@TypeOf(inits), "openFor: inits")) {
+        const lb_v = self.lift(lower);
+        const ub_v = self.liftAs(upper, lb_v.dtype());
+        const step_v = self.liftAs(step, lb_v.dtype());
+        return dsl.openFor(self, Value, .{ lb_v, ub_v, step_v }, inits, .{});
     }
 
     /// `scf.while` with explicit loop-carried values. The before region sees
@@ -2794,43 +2767,8 @@ pub const Builder = struct {
         self: *Builder,
         inits: anytype,
         after_types: anytype,
-    ) WhileScope(
-        tupleArity(@TypeOf(inits), "openWhile: inits"),
-        tupleArity(@TypeOf(after_types), "openWhile: after_types"),
-    ) {
-        const N = comptime tupleArity(@TypeOf(inits), "openWhile: inits");
-        const M = comptime tupleArity(@TypeOf(after_types), "openWhile: after_types");
-
-        var init_types: [N]*const mlir.Type = undefined;
-        var init_locs: [N]*const mlir.Location = undefined;
-        var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (@typeInfo(@TypeOf(inits)).@"struct".field_names, 0..) |f, i| {
-            const v = self.lift(@field(inits, f));
-            init_types[i] = v.type_();
-            init_locs[i] = self.loc();
-            inits_inner[i] = v.inner;
-        }
-
-        var result_types: [M]*const mlir.Type = undefined;
-        var result_locs: [M]*const mlir.Location = undefined;
-        inline for (@typeInfo(@TypeOf(after_types)).@"struct".field_names, 0..) |f, i| {
-            result_types[i] = @field(after_types, f);
-            result_locs[i] = self.loc();
-        }
-
-        const before = mlir.Block.init(&init_types, &init_locs);
-        const after = mlir.Block.init(&result_types, &result_locs);
-        self.pushBlock(before);
-        var before_carried: [N]Value = undefined;
-        for (0..N) |i| before_carried[i] = .{ .inner = before.argument(i), .kernel = self };
-        return .{
-            .kernel = self,
-            .before_block = before,
-            .after_block = after,
-            .inits_inner = inits_inner,
-            .after_types = result_types,
-            .before_carried = before_carried,
-        };
+    ) WhileScope(dsl.arity(@TypeOf(inits), "openWhile: inits"), dsl.arity(@TypeOf(after_types), "openWhile: after_types")) {
+        return dsl.openWhile(self, Value, inits, after_types);
     }
 
     // ==================== module ====================
@@ -2998,7 +2936,7 @@ test "casts, select, if-else, integer widening" {
     try std.testing.expectEqual(DType.i32, bound.to(.i32).dtype());
 
     const picked = b.select(bound, shuffled, 2.0);
-    var scope = b.openIfElse(tid.lt(4), .{DType.f16.toMlir(ctx)});
+    var scope = b.openIfElse(tid.lt(4), .{.f16});
     scope.yieldThen(.{picked.to(.f16)});
     scope.yieldElse(.{b.cst(.f16, 1)});
     a.p.set(.{tid}, scope.results[0]);

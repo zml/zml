@@ -53,12 +53,6 @@ pub const Kernel = cute.Kernel(Config, .{
     .run = run,
 });
 
-fn tuple(comptime n: usize, values: [n]V) @Tuple(&@as([n]type, @splat(V))) {
-    var result: @Tuple(&@as([n]type, @splat(V))) = undefined;
-    inline for (0..n) |i| result[i] = values[i];
-    return result;
-}
-
 fn flatten(comptime n: usize, values: [n][4]V) [n * 4]V {
     var result: [n * 4]V = undefined;
     for (0..n) |i| @memcpy(result[i * 4 ..][0..4], &values[i]);
@@ -296,7 +290,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
         for (initial[4..]) |*v| v.* = packAcc(b, .{ zero, zero, zero, zero });
         b.cpAsyncWaitAll();
         b.syncThreads();
-        var loop = b.openFor(lo, hi, 1, tuple(count, initial));
+        var loop = b.openFor(lo, hi, 1, initial);
         {
             const key_base = loop.iv.mul(n);
             t.loadKV(t.k, key_base);
@@ -305,14 +299,14 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             var scores: [nf][4]V = @splat(@splat(zero));
             // Keep only MMA operands live in registers; Q remains in shared
             // memory so D512 does not consume the entire per-thread register file.
-            var qk = b.openFor(0, d, 16, tuple(nf * 4, @splat(zero)));
+            var qk = b.openFor(0, d, 16, @as([nf * 4]V, @splat(zero)));
             {
                 const qa = matrixLoad(b, 4, false, t.shared.add(swizzle(row_base.add(t.lane.rem(16)), qk.iv.add(t.lane.div(16).mul(8)), d)));
                 for (0..nf) |i| {
                     const kb = matrixLoad(b, 2, false, t.shared.add(c.kvBase()).add(swizzle(key_part.add(i * 8).add(t.lane.rem(8)), qk.iv.add(t.lane.div(8).rem(2).mul(8)), d)));
                     scores[i] = mma(b, dt, qa, kb, qk.carried[i * 4 ..][0..4].*);
                 }
-                qk.yield(tuple(nf * 4, flatten(nf, scores)));
+                qk.yield(flatten(nf, scores));
             }
             for (0..nf) |i| scores[i] = qk.results[i * 4 ..][0..4].*;
             var local_max: [2]V = @splat(neg_inf);
@@ -366,7 +360,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             };
             var packed_acc: [of]V = undefined;
             for (0..of) |i| packed_acc[i] = packAcc(b, acc[i]);
-            var pv = b.openFor(0, n, 16, tuple(of, packed_acc));
+            var pv = b.openFor(0, n, 16, packed_acc);
             {
                 const pa = matrixLoad(b, 4, false, t.shared.add(c.pBase()).add(swizzle(row_base.add(t.lane.rem(16)), pv.iv.add(t.lane.div(16).mul(8)), n)));
                 for (0..of) |i| {
@@ -376,11 +370,11 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
                     acc[i] = mma(b, dt, pa, vb, prev);
                     packed_acc[i] = packAcc(b, acc[i]);
                 }
-                pv.yield(tuple(of, packed_acc));
+                pv.yield(packed_acc);
             }
             @memcpy(next[4..], &pv.results);
             b.syncThreads();
-            loop.yield(tuple(count, next));
+            loop.yield(next);
         }
         for (0..2) |h| {
             const row = first_row.add(row_base).add(row0).add(h * 8);
