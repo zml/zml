@@ -296,3 +296,104 @@ test "Tenstorrent rotary fusion preserves head values and BF16 rotation" {
         }
     }
 }
+fn checkPrefillAttention(comptime batch: usize, comptime heads: usize, comptime kv_heads: usize, comptime dim: usize, comptime queries: usize, comptime keys: usize, comptime scalar_position: bool, comptime transposed: bool) !void {
+    if (comptime !zml.Target.tenstorrent.isEnabled()) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = try zml.Platform.init(allocator, io, .tenstorrent, .{ .tenstorrent = .{ .device_index = 0 } });
+    defer platform.deinit(allocator, io);
+    const bf16 = zml.DataType.bf16.toZigType();
+    const q: zml.Tensor = .init(.{ .b = batch, .q = queries, .h = heads, .hd = dim }, .bf16);
+    const k: zml.Tensor = .init(.{ .b = batch, .k = keys, .h = kv_heads, .hd = dim }, .bf16);
+    const v: zml.Tensor = .init(k.shape(), .bf16);
+    const pos: zml.Tensor = if (scalar_position) .init(.{}, .u32) else .init(.{ .b = batch }, .u32);
+    const Attention = struct {
+        fn run(query: zml.Tensor, key: zml.Tensor, value: zml.Tensor, position: zml.Tensor) zml.Tensor {
+            const result = zml.attention.attention(
+                if (transposed) query.transpose(.{ .h, .b, .hd, .q }) else query,
+                if (transposed) key.transpose(.{ .hd, .k, .b, .h }) else key,
+                if (transposed) value.transpose(.{ .hd, .k, .b, .h }) else value,
+                position,
+                .{ .flash_attention = .{ .tenstorrent = {} } },
+                .{ .flash_attention = .{ .tenstorrent = {} } },
+            );
+            return result.transpose(query.shape());
+        }
+    };
+    const exe = try platform.compileFn(allocator, io, Attention.run, .{ q, k, v, pos }, .{});
+    defer exe.deinit();
+    const q_data = try allocator.alloc(bf16, batch * queries * heads * dim);
+    defer allocator.free(q_data);
+    const k_data = try allocator.alloc(bf16, batch * keys * kv_heads * dim);
+    defer allocator.free(k_data);
+    const v_data = try allocator.alloc(bf16, k_data.len);
+    defer allocator.free(v_data);
+    for (q_data, 0..) |*x, i| x.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast(i % 13)) - 6)) / 16);
+    for (k_data, v_data, 0..) |*ki, *vi, i| {
+        ki.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast(i % 19)) - 9)) / 16);
+        vi.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast(i % 23)) - 11)) / 8);
+    }
+    var qb = try zml.Buffer.fromBytes(io, platform, q.shape(), std.mem.sliceAsBytes(q_data));
+    defer qb.deinit();
+    var kb = try zml.Buffer.fromBytes(io, platform, k.shape(), std.mem.sliceAsBytes(k_data));
+    defer kb.deinit();
+    var vb = try zml.Buffer.fromBytes(io, platform, k.shape(), std.mem.sliceAsBytes(v_data));
+    defer vb.deinit();
+    const offsets: []const u32 = if (queries == keys) &.{0} else &.{ 0, @min(31, keys - queries), keys - queries };
+    for (offsets) |offset| {
+        var positions: [if (scalar_position) 1 else batch]u32 = undefined;
+        for (&positions, 0..) |*position, b| position.* = offset -| @as(u32, @intCast(3 * b));
+        var pb = try zml.Buffer.fromBytes(io, platform, pos.shape(), std.mem.asBytes(&positions));
+        defer pb.deinit();
+        // Repeat identical inputs to exercise native program/trace replay.
+        for (0..2) |_| {
+            var actual = try exe.eval(allocator, io, .{ qb, kb, vb, pb });
+            defer actual.deinit();
+            const host = try actual.toSliceAlloc(allocator, io);
+            defer host.free(allocator);
+            for (0..batch) |b| {
+                for (0..queries) |row| {
+                    const last = positions[if (scalar_position) 0 else b] + row;
+                    for (0..heads) |h| {
+                        var scores: [keys]f64 = undefined;
+                        var maximum: f64 = -std.math.inf(f64);
+                        for (0..last + 1) |s| {
+                            var dot: f64 = 0;
+                            for (0..dim) |d| dot += @as(f64, q_data[((b * queries + row) * heads + h) * dim + d].toF32()) * k_data[((b * keys + s) * kv_heads + h / (heads / kv_heads)) * dim + d].toF32();
+                            scores[s] = dot / @sqrt(@as(f64, dim));
+                            maximum = @max(maximum, scores[s]);
+                        }
+                        var denominator: f64 = 0;
+                        for (scores[0 .. last + 1]) |*score| {
+                            score.* = @exp(score.* - maximum);
+                            denominator += score.*;
+                        }
+                        for (0..dim) |d| {
+                            var expected: f64 = 0;
+                            for (0..last + 1) |s| expected += scores[s] / denominator * v_data[((b * keys + s) * kv_heads + h / (heads / kv_heads)) * dim + d].toF32();
+                            const observed: f64 = host.items(bf16)[((b * queries + row) * heads + h) * dim + d].toF32();
+                            if (!std.math.isFinite(observed) or @abs(expected - observed) > 5e-3 + 1e-2 * @abs(expected)) {
+                                std.debug.print("prefill B={} H={}/{} D={} Q={} K={} t={} b={} row={} h={} d={}: expected {d}, got {d}\n", .{ batch, heads, kv_heads, dim, queries, keys, offset, b, row, h, d, expected, observed });
+                                return error.TestExpectedApproxEqAbs;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    inline for (.{ .{ qb, q_data }, .{ kb, k_data }, .{ vb, v_data } }) |input| {
+        const host = try input[0].toSliceAlloc(allocator, io);
+        defer host.free(allocator);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(input[1]), std.mem.sliceAsBytes(host.items(bf16)));
+    }
+}
+
+test "TTIR flash prefill matches scalar causal attention" {
+    try checkPrefillAttention(1, 8, 2, 128, 128, 128, true, false);
+    try checkPrefillAttention(1, 4, 1, 64, 1024, 1024, true, false);
+    try checkPrefillAttention(2, 8, 2, 64, 8, 64, false, false);
+    try checkPrefillAttention(2, 4, 4, 256, 3, 65, true, true);
+    try checkPrefillAttention(1, 4, 1, 512, 33, 97, true, false);
+    try checkPrefillAttention(1, 4, 1, 80, 7, 35, true, true);
+}

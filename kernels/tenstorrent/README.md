@@ -13,6 +13,13 @@ serializes the function into the `__tt$ttmlir` custom call. No launch grid or de
 pointer arguments are needed. The XLA plugin imports TTIR before its layout and
 optimization passes, so the payload participates in the surrounding graph.
 
+`b.attention(q, k, v, mask, options)` emits FlashAttention-2 with tensors in
+`[B,H,S,D]` order. A missing mask and `is_causal=true` select square causal
+prefill; an optional `[1|B,1|Hq,Sq,Sk]` mask requires `is_causal=false`. An explicit
+scale supports padded head widths. `b.attentionDecode` provides the specialized
+one-query path. The public attention wrapper constructs offset-aware masks,
+pads tiles, and restores tagged layouts according to its shared contract.
+
 The payload must remain pure and single-block. Buffer donation is expressed on
 the surrounding PJRT executable, rather than through custom-call operand aliases.
 

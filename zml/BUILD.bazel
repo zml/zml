@@ -222,3 +222,13 @@ zig_test(
     ],
     deps = [":zml"],
 )
+
+zig_test(
+    name = "tenstorrent_prefill_attention_test",
+    main = "tenstorrent_test.zig",
+    zigopts = [
+        "--test-filter",
+        "TTIR flash prefill",
+    ],
+    deps = [":zml"],
+)

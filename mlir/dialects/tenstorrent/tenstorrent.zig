@@ -88,6 +88,28 @@ pub fn where(ctx: *mlir.Context, predicate: *const mlir.Value, on_true: *const m
     });
 }
 
+pub const AttentionOptions = struct {
+    is_causal: bool = true,
+    scale: ?f32 = null,
+};
+
+/// FlashAttention-2: q=[B,Hq,Sq,D], k/v=[B,Hkv,Sk,D].
+/// A mask broadcasts over batch/heads and requires is_causal=false.
+pub fn attention(ctx: *mlir.Context, q: *const mlir.Value, k: *const mlir.Value, v: *const mlir.Value, mask: ?*const mlir.Value, options: AttentionOptions, loc: *const mlir.Location) *mlir.Operation {
+    const operands = [_]*const mlir.Value{ q, k, v, mask orelse q };
+    const attributes = [_]mlir.NamedAttribute{
+        .named(ctx, "is_causal", .boolean(ctx, options.is_causal)),
+        .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &.{ 1, 1, 1, if (mask != null) 1 else 0, 0 })),
+        .named(ctx, "scale", .float(ctx, .f32, options.scale orelse 1)),
+    };
+    return .make(ctx, "ttir.scaled_dot_product_attention", .{
+        .operands = .{ .flat = operands[0..if (mask != null) 4 else 3] },
+        .results = .{ .flat = &.{q.type_()} },
+        .attributes = attributes[0..if (options.scale != null) 3 else 2],
+        .location = loc,
+    });
+}
+
 /// Causal decode: q=[1,B,Hq,D], k/v=[B,Hkv,S,D], position=[B].
 pub fn attentionDecode(ctx: *mlir.Context, q: *const mlir.Value, k: *const mlir.Value, v: *const mlir.Value, position: *const mlir.Value, loc: *const mlir.Location) *mlir.Operation {
     return .make(ctx, "ttir.scaled_dot_product_attention_decode", .{

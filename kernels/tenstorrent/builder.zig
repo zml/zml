@@ -147,6 +147,9 @@ pub const Builder = struct {
         std.debug.assert(on_true.type_().eql(on_false.type_()));
         return self.emit(ttir.where(self.ctx, predicate.inner, on_true.inner, on_false.inner, on_true.type_(), self.loc()));
     }
+    pub fn attention(self: *Builder, q: Value, k: Value, v: Value, mask: ?Value, options: ttir.AttentionOptions) Value {
+        return self.emit(ttir.attention(self.ctx, q.inner, k.inner, v.inner, if (mask) |m| m.inner else null, options, self.loc()));
+    }
     pub fn attentionDecode(self: *Builder, q: Value, k: Value, v: Value, position: Value) Value {
         return self.emit(ttir.attentionDecode(self.ctx, q.inner, k.inner, v.inner, position.inner, self.loc()));
     }
@@ -223,5 +226,33 @@ test "gated DeltaNet emission round-trips for decode and prefill" {
         try std.testing.expect(parsed.operation().verify());
         try std.testing.expect(std.mem.indexOf(u8, ir, "ttir.where") != null);
         if (seq > 1) try std.testing.expect(std.mem.indexOf(u8, ir, "ttir.concat") != null);
+    }
+}
+
+test "FlashAttention emission verifies causal and offset-prefill signatures" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    inline for (dialects_needed) |name| mlir.DialectHandle.fromString(name).insertDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    const bf16 = mlir.Type.float(ctx, .bf16);
+    inline for (.{ false, true }) |masked| {
+        const q = mlir.Type.rankedTensor(&.{ 2, 8, if (masked) 32 else 128, 128 }, bf16);
+        const kv = mlir.Type.rankedTensor(&.{ 2, 2, 128, 128 }, bf16);
+        const mask = mlir.Type.rankedTensor(&.{ 2, 1, 32, 128 }, bf16);
+        const inputs = [_]*const mlir.Type{ q, kv, kv, mask };
+        var b = try Builder.init(std.testing.allocator, ctx, "flash_attention", inputs[0..if (masked) 4 else 3], &.{q});
+        defer b.deinit();
+        const output = b.attention(b.arg(0), b.arg(1), b.arg(2), if (masked) b.arg(3) else null, .{
+            .is_causal = !masked,
+            .scale = 0.125,
+        });
+        const ir = try b.finish(&.{output});
+        defer std.testing.allocator.free(ir);
+        const parsed = try mlir.Module.parse(ctx, ir);
+        defer parsed.deinit();
+        try std.testing.expect(parsed.operation().verify());
+        try std.testing.expect(std.mem.indexOf(u8, ir, "ttir.scaled_dot_product_attention") != null);
     }
 }

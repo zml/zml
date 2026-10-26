@@ -1,9 +1,24 @@
 # Tenstorrent attention
 
-The backend emits `ttir.scaled_dot_product_attention_decode` through
-the TT-MLIR custom-call builder. It supports causal BF16 decode with one query,
-grouped query heads, optional batches, and head/cache dimensions divisible by 32.
-Prefill and other shapes use the general StableHLO implementation.
+The backend emits TT-MLIR FlashAttention operations through the native
+custom-call builder. BF16 prefill uses `ttir.scaled_dot_product_attention`,
+which lowers to TTNN's tiled FlashAttention-2 kernel without materializing the
+score or probability matrices. Tile-aligned one-query decode uses
+`ttir.scaled_dot_product_attention_decode`.
+
+The causal rule follows the [shared contract](../README.md): key `j` is visible
+to query `i` exactly when `j <= token_index + i`. Full prefill uses native causal
+masking. Offset/chunked prefill uses a mask broadcast over heads, including
+independent per-batch positions or a scalar position shared by the batch.
+It supports contiguous MHA/GQA/MQA groups and restores the query's tagged layout.
+Query/key tails and head widths are padded to 32 and cropped afterward; the
+scale remains `1 / sqrt(original_head_width)`, and padded keys are masked.
+Padded query rows reuse the last real row's mask to avoid empty softmax rows.
+As in the shared contract, callers must provide valid nonnegative positions
+with `token_index + query_length <= key_length`.
+
+Native FlashAttention uses BF16 inputs. Other input dtypes retain the reference
+StableHLO path instead of silently converting them to BF16.
 
 On two cards, a manual computation partitions query and KV heads together,
 keeping each GQA group local. Computed cache slices with open partitioning use
@@ -23,6 +38,15 @@ beyond the cache including the largest u32. Bounds clamp before signed conversio
 The two-card cases cover 27 position/shape combinations, including computed
 inputs whose partitioning is open. An operation trace confirms native decode
 attention and no all-gathers within these kernels.
+
+`//zml:tenstorrent_prefill_attention_test` checks every output against a
+stable FP64 softmax reference, repeats execution, and verifies input preservation.
+It covers full prefill at lengths 128/1024, offset prefill at the beginning,
+middle, and end of a larger KV buffer, MHA/GQA/MQA, per-batch/scalar positions,
+transposed tags, partial query/key/head tiles, and widths 64/80/128/256/512.
+Both this target and `//zml:tenstorrent_decode_attention_test` pass with trace
+replay enabled; prefill also passes with replay disabled. These are single-card
+checks; the new prefill path has not yet been validated on two cards.
 
 Build the example with the Tenstorrent platform enabled:
 
