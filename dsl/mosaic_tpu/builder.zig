@@ -209,8 +209,8 @@ pub const Value = struct {
     }
 
     /// `tpu.bitcast` — same-bitwidth element-type swap.
-    pub fn bitcast(self: Value, dtype: DType) Value {
-        return self.kern().bitcastTo(self, dtype);
+    pub fn bitCast(self: Value, dtype: DType) Value {
+        return self.kern().bitCast(self, dtype);
     }
 
     /// Absolute value (float→absf, int→absi).
@@ -1318,7 +1318,7 @@ pub const Builder = struct {
     // ==================== TPU casts ====================
 
     /// `tpu.bitcast` — same-bitwidth element-type swap. Shape preserved.
-    pub fn bitcastTo(self: *Builder, src: Value, dt: DType) Value {
+    pub fn bitCast(self: *Builder, src: Value, dt: DType) Value {
         return self.emit(mosaic_tpu.bitcast(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
     }
     pub fn extf(self: *Builder, src: Value, dt: DType) Value {
@@ -1349,7 +1349,7 @@ pub const Builder = struct {
         return self.castOpts(src, dt, .{});
     }
     pub fn castOpts(self: *Builder, src: Value, dt: DType, opts: CastOpts) Value {
-        if (opts.bitcast) return self.bitcastTo(src, dt);
+        if (opts.bitcast) return self.bitCast(src, dt);
         const cur_elem = src.elemType();
         const tgt_elem = dt.toMlir(self.ctx);
         if (cur_elem.eql(tgt_elem)) return src;

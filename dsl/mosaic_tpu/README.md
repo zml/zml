@@ -355,7 +355,7 @@ default; ordered float predicates for floats.
 | Method                | Effect                                              |
 |-----------------------|-----------------------------------------------------|
 | `.to(dtype)`          | Numeric cast preserving shape; auto-dispatches int↔float.    |
-| `.bitcast(dtype)`     | `tpu.bitcast` — same-bitwidth element-type swap.    |
+| `.bitCast(dtype)`     | `tpu.bitcast` — same-bitwidth element-type swap.    |
 | `.abs()`              | `math.absf` (float) / `math.absi` (int).            |
 
 `.to(...)` chooses the right MLIR op based on the source vs target kind:

@@ -213,6 +213,10 @@ pub const Value = struct {
         return self.kern().cast(self, dtype);
     }
 
+    pub fn bitCast(self: Value, dtype: DType) Value {
+        return self.kern().bitCast(self, dtype);
+    }
+
     pub fn reshape(self: Value, shape_: []const i64) Value {
         return self.kern().reshape(self, shape_);
     }
@@ -1357,7 +1361,7 @@ pub const Builder = struct {
         return self.select(cv, xv, yv);
     }
 
-    pub fn bitcast(self: *Builder, src: Value, dtype: DType) Value {
+    pub fn bitCast(self: *Builder, src: Value, dtype: DType) Value {
         return self.emit(cuda_tile.bitcast(self.ctx, src.inner, self.tileLike(src, dtype.toMlir(self.ctx)), self.loc()));
     }
     pub fn exti(self: *Builder, src: Value, dtype: DType, signedness: Signedness) Value {
@@ -1427,7 +1431,7 @@ pub const Builder = struct {
         const tgt_bw = dtypeBitwidth(dtype);
         if (tgt_bw > cur_bw) return self.exti(src, dtype, if (cur_dtype == .i1) .unsigned else .signed);
         if (tgt_bw < cur_bw) return self.trunci(src, dtype);
-        return self.bitcast(src, dtype);
+        return self.bitCast(src, dtype);
     }
 
     pub fn reshape(self: *Builder, src: Value, shape: []const i64) Value {
@@ -2157,7 +2161,7 @@ test "every remaining elementwise op verifies" {
     _ = b.xori(i, j);
     _ = b.cmpi(.not_equal, i, j, .unsigned);
 
-    _ = b.bitcast(f, .i32);
+    _ = f.bitCast(.i32);
     _ = b.exti(i, .i64, .unsigned);
     _ = b.trunci(i, .i16);
     _ = b.ftof(f, .bf16);

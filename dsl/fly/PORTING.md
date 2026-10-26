@@ -55,8 +55,8 @@ runtime must agree on the dialect version. FlyDSL HEAD may differ from both.
 | `v.to(fx.Float32)` | `v.to(.f32)` |
 | `x * rrms` (vector × scalar) | `x.mul(rrms)` |
 | `fmath.rsqrt(x, fastmath=fast)` | `b.setFastMath(true); b.rsqrt(x)` |
-| `lane < RED_SLOTS`, `cond.select(a, b)` | `lane.cmp(.lt, n)`, `cond.select(a, b)` |
-| `if tid == 0: ...` | `var s = b.openIf(tid.cmp(.eq, 0)); ...; s.close();` |
+| `lane < RED_SLOTS`, `cond.select(a, b)` | `lane.lt(n)`, `cond.select(a, b)` |
+| `if tid == 0: ...` | `var s = b.openIf(tid.eq(0)); ...; s.close();` |
 | `for i in range_constexpr(n)` | a plain Zig `for (0..n)` (unrolled at emit time) |
 | `for i in range(lo, hi)` with carried values | `b.openFor(lo, hi, 1, .{ init })` + `.yield(.{ ... })` |
 | `launch(grid=..., block=(256,1,1))` | `K.call(inputs, outputs, .{ .grid = ..., .threads = 256 })` |
@@ -82,7 +82,7 @@ runtime must agree on the dialect version. FlyDSL HEAD may differ from both.
   kernel `Config`; branch on it with plain `if` in `run`.
 - Python lists of vectors across an unrolled loop are Zig arrays of `Value`.
   `v.insert(i, x)` returns a new vector; `v.extract(i)` reads an element.
-  `v.bitcast(dtype)` preserves total bits and adjusts vector length.
+  `v.bitCast(dtype)` preserves total bits and adjusts vector length.
 - Keep unsigned semantics explicit for packed bytes and offsets with
   `toUnsigned`, `divUnsigned`, `remUnsigned` and `cmpUnsigned`.
 - `v.shuffleVector(rhs, indices)` rearranges vector elements within a thread;

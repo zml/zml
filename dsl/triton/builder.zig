@@ -176,6 +176,9 @@ pub const Value = struct {
     pub fn to(self: Value, dtype: DType) Value {
         return self.kern().cast(self, dtype);
     }
+    pub fn bitCast(self: Value, dtype: DType) Value {
+        return self.kern().bitCast(self, dtype);
+    }
     pub fn toOpts(self: Value, dtype: DType, opts: CastOpts) Value {
         return self.kern().castOpts(self, dtype, opts);
     }
@@ -1290,7 +1293,7 @@ pub const Builder = struct {
     // ==================== Triton-specific ops ====================
 
     /// tt.bitcast — same-bitwidth cast. Shape preserved from src.
-    pub fn bitcast(self: *Builder, src: Value, out_dtype: DType) Value {
+    pub fn bitCast(self: *Builder, src: Value, out_dtype: DType) Value {
         return self.emit(ttir.bitcast(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
 
@@ -1305,7 +1308,7 @@ pub const Builder = struct {
     ///   - other fp↔fp wide: extf.
     ///   - i1→fp: uitofp. int↔int: extsi/trunci/bitcast by width.
     pub fn castOpts(self: *Builder, src: Value, dtype: DType, opts: CastOpts) Value {
-        if (opts.bitcast) return self.bitcast(src, dtype);
+        if (opts.bitcast) return self.bitCast(src, dtype);
         const cur_elem = src.elemType();
         const tgt_elem = dtype.toMlir(self.ctx);
         if (cur_elem.eql(tgt_elem)) return src;

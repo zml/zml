@@ -116,10 +116,10 @@ pub const PerTokenGroupQuantFp8 = struct {
                 // It is unclear whether power-of-two scaling is best for this kernel,
                 // but it keeps activation quantization consistent with that function.
                 // Round up from the FP32 bits, including values just above a power of two.
-                const bits = b.bitcast(scale_raw, .i32);
+                const bits = scale_raw.bitCast(.i32);
                 const exponent = bits.div(0x800000);
                 const fractional = bits.bitAnd(0x7fffff).ne(0).to(.i32);
-                const scale = b.bitcast(exponent.add(fractional).mul(0x800000), .f32);
+                const scale = exponent.add(fractional).mul(0x800000).bitCast(.f32);
                 break :blk .{ scale, scale.to(scale_dt) };
             },
             .mxfp4, .nvfp4 => unreachable,
@@ -861,12 +861,12 @@ fn quant32(b: *Builder, x: Value) struct { q: Value, s: Value } {
         // SM89 lowers FP32 -> FP8 through FP16 with truncation. Round to odd at
         // FP16 precision first so that this intermediate cannot turn a value just
         // above an FP8 midpoint into an exact tie. Direct FP8 conversion is unchanged.
-        const scaled_bits = b.bitcast(scaled, .i32);
+        const scaled_bits = scaled.bitCast(.i32);
         const sticky = b.select(scaled_bits.bitAnd(0x1fff).ne(0), b.full(scaled.shape().constSlice(), 0x2000, .i32), b.zeros(scaled.shape().constSlice(), .i32));
-        const prepared = b.bitcast(scaled_bits.bitAnd(-0x2000).bitOr(sticky), .f32);
+        const prepared = scaled_bits.bitAnd(-0x2000).bitOr(sticky).bitCast(.f32);
         break :b prepared.to(.f8e4m3fn);
     };
-    const bits = b.shrui(b.bitcast(sf, .i32), b.full(sf.shape().constSlice(), 23, .i32)).bitAnd(255).to(.i8);
+    const bits = b.shrui(sf.bitCast(.i32), b.full(sf.shape().constSlice(), 23, .i32)).bitAnd(255).to(.i8);
     return .{ .q = b.reshape(q, &.{ rows, cols }), .s = b.reshape(bits, &.{ rows, groups }) };
 }
 

@@ -306,8 +306,8 @@ fn stridedLoadKv(
     if (cfg.kv_dtype == .bf16) {
         const bk = k.shli(b, k.splat(@as(i32, 16), splat_shape, .i32));
         const bv = k.andi(b, k.splat(@as(i32, @bitCast(@as(u32, 0xFFFF0000))), splat_shape, .i32));
-        const k_v = k.arithTruncf(k.bitcastTo(bk, .f32), cfg.kv_dtype);
-        const v_v = k.arithTruncf(k.bitcastTo(bv, .f32), cfg.kv_dtype);
+        const k_v = k.arithTruncf(bk.bitCast(.f32), cfg.kv_dtype);
+        const v_v = k.arithTruncf(bv.bitCast(.f32), cfg.kv_dtype);
         const result = k.arena.allocator().alloc(KvPair, 1) catch @panic("stridedLoadKv OOM");
         result[0] = .{ .k = k_v, .v = v_v };
         return result;
@@ -330,8 +330,8 @@ fn stridedLoadKv(
         const bk_trunc = k.trunci(bk, trunc_dtype);
         const bv_trunc = k.trunci(bv, trunc_dtype);
         result[i] = .{
-            .k = k.bitcastTo(bk_trunc, cfg.kv_dtype),
-            .v = k.bitcastTo(bv_trunc, cfg.kv_dtype),
+            .k = bk_trunc.bitCast(cfg.kv_dtype),
+            .v = bv_trunc.bitCast(cfg.kv_dtype),
         };
     }
     return result;

@@ -432,7 +432,7 @@ pub const Value = struct {
     }
 
     /// Preserve total bits, adjusting vector length to the destination element.
-    pub fn bitcast(self: Value, dtype: DType) Value {
+    pub fn bitCast(self: Value, dtype: DType) Value {
         const k = self.kern();
         const src = self.scalarDType();
         if (self.type_().isA(mlir.VectorType)) |vec| {
@@ -499,10 +499,11 @@ pub const Value = struct {
 
     pub const Cmp = enum { eq, ne, lt, le, gt, ge };
 
-    /// Signed integer comparison against a Value or an integer literal.
+    /// Signed integer comparison against a Value or an integer literal; a
+    /// scalar broadcasts against a vector.
     pub fn cmp(self: Value, pred: Cmp, rhs: anytype) Value {
         const k = self.kern();
-        const r: Value = if (@TypeOf(rhs) == Value) rhs else k.constantLike(rhs, self);
+        const l, const r = self.coerceArith(rhs);
         const p: arith.CmpIPredicate = switch (pred) {
             .eq => .eq,
             .ne => .ne,
@@ -511,7 +512,7 @@ pub const Value = struct {
             .gt => .sgt,
             .ge => .sge,
         };
-        return k.emit(arith.cmpi(k.ctx, p, self.inner, r.inner, k.loc()));
+        return k.emit(arith.cmpi(k.ctx, p, l.inner, r.inner, k.loc()));
     }
 
     /// Ordered.
@@ -526,6 +527,37 @@ pub const Value = struct {
             .ge => .oge,
         };
         return k.emit(arith.cmpf(k.ctx, p, self.inner, rhs.inner, k.loc()));
+    }
+
+    pub fn lt(self: Value, rhs: anytype) Value {
+        return self.compare(.lt, rhs);
+    }
+
+    pub fn le(self: Value, rhs: anytype) Value {
+        return self.compare(.le, rhs);
+    }
+
+    pub fn gt(self: Value, rhs: anytype) Value {
+        return self.compare(.gt, rhs);
+    }
+
+    pub fn ge(self: Value, rhs: anytype) Value {
+        return self.compare(.ge, rhs);
+    }
+
+    pub fn eq(self: Value, rhs: anytype) Value {
+        return self.compare(.eq, rhs);
+    }
+
+    pub fn ne(self: Value, rhs: anytype) Value {
+        return self.compare(.ne, rhs);
+    }
+
+    /// `cmpf` for floats, `cmp` (signed) for integers, `index` included.
+    fn compare(self: Value, pred: Cmp, rhs: anytype) Value {
+        if (!self.isFloatElem()) return self.cmp(pred, rhs);
+        const l, const r = self.coerceArith(rhs);
+        return l.cmpf(pred, r);
     }
 
     pub fn select(self: Value, a: Value, b: Value) Value {
@@ -1783,7 +1815,7 @@ test "scalar conversions and constants" {
     });
 
     // A predicate is unsigned: `true` must convert to 1, never -1.
-    const pred = b.constant(.i32, 3).cmp(.lt, 7);
+    const pred = b.constant(.i32, 3).lt(7);
     _ = pred.to(.f32);
     _ = pred.to(.i32);
     // Equal-width float pairs are neither ext nor trunc.
@@ -1918,4 +1950,41 @@ test "SSA matrix atom builds, verifies and re-parses" {
     const reparsed = try mlir.Module.parse(ctx, ir);
     defer reparsed.deinit();
     try std.testing.expect(reparsed.operation().verify());
+}
+
+test "comparisons take index ivs and vectors" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "compare");
+    defer b.deinit();
+    _ = try b.declareArgs(.{});
+
+    // Literal bounds make an `index` loop.
+    var loop = b.openFor(0, 4, 1, .{});
+    _ = loop.iv.lt(2);
+    loop.close();
+    // A literal or a scalar broadcasts against a vector.
+    const v = b.constant(.f32, 1.0).splat(4);
+    _ = v.lt(0.5);
+    _ = v.ge(b.constant(.f32, 2.0));
+    _ = b.constant(.i32, 3).splat(4).eq(3);
+
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+    for ([_][2][]const u8{
+        .{ "arith.cmpi slt", ": index" },
+        .{ "arith.cmpf olt", ": vector<4xf32>" },
+        .{ "arith.cmpf oge", ": vector<4xf32>" },
+        .{ "arith.cmpi eq", ": vector<4xi32>" },
+    }) |needles| {
+        var lines = std.mem.splitScalar(u8, ir, '\n');
+        const found = while (lines.next()) |line| {
+            if (std.mem.indexOf(u8, line, needles[0]) != null and std.mem.endsWith(u8, line, needles[1])) break true;
+        } else false;
+        if (!found) {
+            std.debug.print("no `{s} ... {s}` in:\n{s}\n", .{ needles[0], needles[1], ir });
+            return error.TestUnexpectedResult;
+        }
+    }
 }
