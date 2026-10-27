@@ -53,6 +53,13 @@ fn toSlice(allocator: std.mem.Allocator, io: std.Io, slice_or_buffer: anytype) !
 /// Testing utility. Accepts both zml.Buffer and zml.HostBuffer but zml.Buffer will be copied to the
 /// host for comparison !
 pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, opts: CompareOpts) !void {
+    const report = try compareClose(io, left_, right_, opts);
+    if (!report.ok(opts)) return error.TestUnexpectedResult;
+}
+
+/// Compares the two slices / buffers, prints the report and returns it.
+/// Only fails (error.TestUnexpectedResult) when the shapes or dtypes don't match.
+pub fn compareClose(io: std.Io, left_: anytype, right_: anytype, opts: CompareOpts) !CompareOpts.Report {
     const allocator = if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
     var left: Slice, const should_free_left = try toSlice(allocator, io, left_);
     defer if (should_free_left) left.free(allocator);
@@ -105,10 +112,7 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, opts: CompareOpt
                     const R = rt.toZigType();
                     const report: CompareOpts.Report = try .compareSlices(true, allocator, L, R, left, right, opts);
                     try w.print("{f}\n", .{report});
-                    if (!report.ok(opts)) {
-                        return error.TestUnexpectedResult;
-                    }
-                    return;
+                    return report;
                 },
                 else => unreachable,
             }
@@ -116,13 +120,19 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, opts: CompareOpt
         inline .bool, .u2, .u4, .u8, .u16, .u32, .u64, .i2, .i4, .i8, .i16, .i32, .i64 => |t| {
             const T = t.toZigType();
             const report: CompareOpts.Report = try .compareSlices(false, allocator, T, T, left, right, opts);
-            if (!report.ok(opts)) {
-                try w.print("{f}\n", .{report});
-                return error.TestUnexpectedResult;
-            }
-            return;
+            if (!report.ok(opts)) try w.print("{f}\n", .{report});
+            return report;
         },
-        .c64, .c128 => @panic("TODO: support comparison of complex"),
+        inline .c64, .c128 => |t| {
+            // Compare the (real, imaginary) pairs as floats.
+            const F = if (t == .c64) f32 else f64;
+            const float_shape = zml.Shape.init(.{ left.shape.count(), 2 }, if (t == .c64) .f32 else .f64);
+            const left_floats = Slice.init(float_shape, left.constData());
+            const right_floats = Slice.init(float_shape, right.constData());
+            const report: CompareOpts.Report = try .compareSlices(true, allocator, F, F, left_floats, right_floats, opts);
+            try w.print("{f}\n", .{report});
+            return report;
+        },
     }
 }
 
@@ -437,6 +447,27 @@ pub fn testLayer(
     layer: anytype,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
 ) !void {
+    _ = try testLayerReport(allocator, io, platform, name, activation_store, layer, layer_weights);
+}
+
+/// Outcome of `testLayerReport`, summarizing all the outputs of the layer.
+pub const LayerResult = struct {
+    ok: bool,
+    /// Report of the output with the lowest close fraction
+    worst: CompareOpts.Report,
+    opts: CompareOpts,
+};
+
+/// Same as `testLayer`, but returns the comparison result instead of only logging it.
+pub fn testLayerReport(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    name: []const u8,
+    activation_store: *zml.io.TensorStore,
+    layer: anytype,
+    layer_weights: zml.Bufferized(@TypeOf(layer)),
+) !LayerResult {
     const shardings: []const zml.Sharding = platform.shardings.values();
     const opts: CompareOpts = .{};
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -491,7 +522,8 @@ pub fn testLayer(
     defer exe_results.deinit(allocator);
 
     var args_buffers = try zml.mem.bufferize(allocator, @TypeOf(args), &args);
-    // errdefer unloadBuffers(&args_buffers);
+    // The activations are freed after each test so that several tests can run in the same process
+    defer zml.Buffer.deinitAll(ArgsT, &args_buffers);
 
     var loader: zml.io.Loader = try .init(allocator, platform, .default);
     defer loader.deinit();
@@ -509,8 +541,10 @@ pub fn testLayer(
     defer allocator.free(results);
 
     exe_results.fill(.{results});
+    defer for (results) |*result| result.deinit();
 
     var failed: bool = false;
+    var worst: ?CompareOpts.Report = null;
     var reader_buffer: [4096]u8 = undefined;
     for (0..output_count) |i| {
         const expected_slice = s: {
@@ -529,17 +563,26 @@ pub fn testLayer(
         const output_slice = try results[i].toSliceAlloc(allocator, io);
         defer output_slice.free(allocator);
 
-        expectClose(io, expected_slice, output_slice, opts) catch |err| switch (err) {
+        const report = compareClose(io, expected_slice, output_slice, opts) catch |err| switch (err) {
             error.TestUnexpectedResult => {
                 const stderr = std.debug.lockStderr(&.{});
                 defer std.debug.unlockStderr();
                 const w = &stderr.file_writer.interface;
-                try w.print("{s}.{d} doesn't match !\n", .{ output_name, i });
+                try w.print("{s}.{d} doesn't match (shape or dtype) !\n", .{ output_name, i });
+                // Shape or dtype mismatch: nothing is close
                 failed = true;
+                worst = .{ .nan_or_inf = false, .max_absolute_error = std.math.nan(f32), .mean_absolute_error = std.math.nan(f32), .rmse = std.math.nan(f32), .close_fraction = 0 };
                 continue;
             },
             else => return err,
         };
+        if (!report.ok(opts)) {
+            const stderr = std.debug.lockStderr(&.{});
+            defer std.debug.unlockStderr();
+            try stderr.file_writer.interface.print("{s}.{d} doesn't match !\n", .{ output_name, i });
+            failed = true;
+        }
+        if (worst == null or report.close_fraction < worst.?.close_fraction or report.nan_or_inf) worst = report;
     }
 
     if (failed) {
@@ -547,6 +590,7 @@ pub fn testLayer(
     } else {
         log.info("✅ all good for {s} ! (absolute tolerance: {e} - relative tolerance: {e} - minimum_close_fraction: {d:0>3})", .{ name, opts.absolute_tolerance, opts.relative_tolerance, opts.minimum_close_fraction });
     }
+    return .{ .ok = !failed, .worst = worst orelse return error.NoOutputToCompare, .opts = opts };
 }
 
 fn center(slice: anytype, i: usize) @TypeOf(slice) {
