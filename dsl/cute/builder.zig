@@ -877,6 +877,7 @@ pub const Builder = struct {
         return switch (@TypeOf(value_)) {
             Value => value_,
             Tensor => value_.value(),
+            *Tensor => value_.*.value(),
             View => value_.value(),
             Atom => value_.value(),
             LaunchConfig => value_.value(),
