@@ -1269,8 +1269,10 @@ test "cute kernel emits the module the CuTe compiler takes" {
                 });
                 const i = b.blockIdx().x.mul(b.blockDim().x).add(b.threadIdx().x);
                 var guard = b.openIf(i.lt(cfg.n));
-                a.out.set(.{i}, a.x.get(.{i}).add(1.0));
-                guard.close();
+                {
+                    a.out.set(.{i}, a.x.get(.{i}).add(1.0));
+                    guard.close();
+                }
             }
         }.run,
     });

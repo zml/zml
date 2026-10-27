@@ -80,67 +80,94 @@ pub const Align = struct {
         const ends = b.sharedArray(.i32, 512, 16);
         const waves = b.sharedArray(.i32, 8, 16);
         var fill = b.openIfElse(b.blockId(.x).ne(0), .{});
-        var positions = b.openFor(tid64, cfg.capacity, 512, .{});
-        args.sorted_token_ids.set(positions.iv, b.constant(.i32, cfg.routes));
-        positions.close();
-        fill.elseBranch();
-
-        counts.set(tid, zero);
-        b.barrier();
-        var routes = b.openFor(tid64, cfg.routes, 512, .{});
-        const id = args.ids.at(routes.iv);
-        var valid_id = b.openIf(id.ge(0).bitAnd(id.lt(cfg.experts)));
-        _ = b.ptrAtomicAdd(counts.emitIter().addOffset(id), one, .workgroup);
-        valid_id.close();
-        routes.close();
-        b.barrier();
-
-        const padded = counts.at(tid).add(cfg.padding).divUnsigned(cfg.block_size).mul(cfg.block_size);
-        const lane = tid.remUnsigned(64);
-        const wave = tid.divUnsigned(64);
-        var prefix = padded;
-        inline for (.{ 1, 2, 4, 8, 16, 32 }) |shift| {
-            const peer = prefix.shuffle(.up, shift, 64);
-            prefix = prefix.add(lane.cmpUnsigned(.ge, shift).select(peer, zero));
+        {
+            var positions = b.openFor(tid64, cfg.capacity, 512, .{});
+            {
+                args.sorted_token_ids.set(positions.iv, b.constant(.i32, cfg.routes));
+                positions.close();
+            }
+            fill.elseBranch();
         }
-        var last_lane = b.openIf(lane.eq(63));
-        waves.set(wave, prefix);
-        last_lane.close();
-        b.barrier();
+        {
+            counts.set(tid, zero);
+            b.barrier();
+            var routes = b.openFor(tid64, cfg.routes, 512, .{});
+            {
+                const id = args.ids.at(routes.iv);
+                var valid_id = b.openIf(id.ge(0).bitAnd(id.lt(cfg.experts)));
+                {
+                    _ = b.ptrAtomicAdd(counts.emitIter().addOffset(id), one, .workgroup);
+                    valid_id.close();
+                }
+                routes.close();
+            }
+            b.barrier();
 
-        var sums = b.openFor(zero, 8, 1, .{ zero, zero });
-        const value = waves.at(sums.iv);
-        const preceding = sums.carried[0].add(sums.iv.cmpUnsigned(.lt, wave).select(value, zero));
-        const total = sums.carried[1].add(value);
-        sums.yield(.{ preceding, total });
-        const end = sums.results[0].add(prefix);
-        const start = end.sub(padded);
-        ends.set(tid, end);
-        var has_expert = b.openIf(tid.cmpUnsigned(.lt, cfg.experts));
-        args.cumsum.set(tid64, start);
-        has_expert.close();
-        var first = b.openIf(tid.eq(0));
-        args.cumsum.set(b.constant(.i64, cfg.experts), sums.results[1]);
-        args.num_tokens_post_pad.set(b.constant(.i64, 0), sums.results[1]);
-        first.close();
-        b.barrier();
+            const padded = counts.at(tid).add(cfg.padding).divUnsigned(cfg.block_size).mul(cfg.block_size);
+            const lane = tid.remUnsigned(64);
+            const wave = tid.divUnsigned(64);
+            var prefix = padded;
+            inline for (.{ 1, 2, 4, 8, 16, 32 }) |shift| {
+                const peer = prefix.shuffle(.up, shift, 64);
+                prefix = prefix.add(lane.cmpUnsigned(.ge, shift).select(peer, zero));
+            }
+            var last_lane = b.openIf(lane.eq(63));
+            {
+                waves.set(wave, prefix);
+                last_lane.close();
+            }
+            b.barrier();
 
-        var blocks = b.openFor(tid64, cfg.blocks, 512, .{});
-        const offset = blocks.iv.to(.i32).mul(cfg.block_size);
-        var block_expert = b.openIfElse(offset.cmpUnsigned(.lt, sums.results[1]), .{zero});
-        // Upper bound of inclusive expert ends handles empty experts without a scan.
-        var bounds = b.openWhile(.{ zero, experts }, .{ zero, zero });
-        bounds.yieldBefore(bounds.before_carried[0].cmpUnsigned(.lt, bounds.before_carried[1]), .{ bounds.before_carried[0], bounds.before_carried[1] });
-        const lo = bounds.after_carried[0];
-        const hi = bounds.after_carried[1];
-        const mid = lo.add(hi).shrU(1);
-        const advance = ends.at(mid).cmpUnsigned(.le, offset);
-        bounds.yieldAfter(.{ advance.select(mid.add(1), lo), advance.select(hi, mid) });
-        block_expert.yieldThen(.{bounds.results[0]});
-        block_expert.yieldElse(.{b.constant(.i32, -1)});
-        args.expert_ids.set(blocks.iv, block_expert.results[0]);
-        blocks.close();
-        fill.close();
+            var sums = b.openFor(zero, 8, 1, .{ zero, zero });
+            {
+                const value = waves.at(sums.iv);
+                const preceding = sums.carried[0].add(sums.iv.cmpUnsigned(.lt, wave).select(value, zero));
+                const total = sums.carried[1].add(value);
+                sums.yield(.{ preceding, total });
+            }
+            const end = sums.results[0].add(prefix);
+            const start = end.sub(padded);
+            ends.set(tid, end);
+            var has_expert = b.openIf(tid.cmpUnsigned(.lt, cfg.experts));
+            {
+                args.cumsum.set(tid64, start);
+                has_expert.close();
+            }
+            var first = b.openIf(tid.eq(0));
+            {
+                args.cumsum.set(b.constant(.i64, cfg.experts), sums.results[1]);
+                args.num_tokens_post_pad.set(b.constant(.i64, 0), sums.results[1]);
+                first.close();
+            }
+            b.barrier();
+
+            var blocks = b.openFor(tid64, cfg.blocks, 512, .{});
+            {
+                const offset = blocks.iv.to(.i32).mul(cfg.block_size);
+                var block_expert = b.openIfElse(offset.cmpUnsigned(.lt, sums.results[1]), .{zero});
+                {
+                    // Upper bound of inclusive expert ends handles empty experts without a scan.
+                    var bounds = b.openWhile(.{ zero, experts }, .{ zero, zero });
+                    {
+                        bounds.yieldBefore(bounds.before_carried[0].cmpUnsigned(.lt, bounds.before_carried[1]), .{ bounds.before_carried[0], bounds.before_carried[1] });
+                    }
+                    {
+                        const lo = bounds.after_carried[0];
+                        const hi = bounds.after_carried[1];
+                        const mid = lo.add(hi).shrU(1);
+                        const advance = ends.at(mid).cmpUnsigned(.le, offset);
+                        bounds.yieldAfter(.{ advance.select(mid.add(1), lo), advance.select(hi, mid) });
+                    }
+                    block_expert.yieldThen(.{bounds.results[0]});
+                }
+                {
+                    block_expert.yieldElse(.{b.constant(.i32, -1)});
+                }
+                args.expert_ids.set(blocks.iv, block_expert.results[0]);
+                blocks.close();
+            }
+            fill.close();
+        }
     }
 };
 
@@ -192,13 +219,17 @@ pub const Sort = struct {
         const args = Kernel.args(b);
         const start = b.blockId(.x).to(.i64).mul(256).add(b.threadId(.x).to(.i64));
         var routes = b.openFor(start, cfg.routes, cfg.step, .{});
-        const id = args.ids.at(routes.iv);
-        var valid = b.openIf(id.ge(0).bitAnd(id.lt(cfg.experts)));
-        const cursor = args.cumsum.emitIter().addOffset(id.to(.i64));
-        const rank = b.ptrAtomicAdd(cursor, b.constant(.i32, 1), .agent);
-        args.sorted_token_ids.set(rank.to(.i64), routes.iv.to(.i32));
-        valid.close();
-        routes.close();
+        {
+            const id = args.ids.at(routes.iv);
+            var valid = b.openIf(id.ge(0).bitAnd(id.lt(cfg.experts)));
+            {
+                const cursor = args.cumsum.emitIter().addOffset(id.to(.i64));
+                const rank = b.ptrAtomicAdd(cursor, b.constant(.i32, 1), .agent);
+                args.sorted_token_ids.set(rank.to(.i64), routes.iv.to(.i32));
+                valid.close();
+            }
+            routes.close();
+        }
     }
 };
 
@@ -326,131 +357,161 @@ pub const Mfma = struct {
         const has_rows = if (cfg.naive != 0) b.constant(.i1, 1) else blk: {
             const padded = args.padded.at(b.constant(.i64, 0)).to(.i64);
             var has_block = b.openIfElse(route_start.cmpUnsigned(.lt, padded), .{.i1});
-            has_block.yieldThen(.{args.sorted.at(route_start).ne(cfg.routes)});
-            has_block.yieldElse(.{b.constant(.i1, 0)});
+            {
+                has_block.yieldThen(.{args.sorted.at(route_start).ne(cfg.routes)});
+            }
+            {
+                has_block.yieldElse(.{b.constant(.i1, 0)});
+            }
             break :blk has_block.results[0];
         };
         var block = b.openIf(has_rows);
-        const expert_block = if (cfg.naive != 0) block_m else block_m.divUnsigned(cfg.subtiles);
-        const eid = args.experts.at(expert_block);
-        const valid_expert = eid.ge(0).bitAnd(eid.lt(cfg.experts));
-        const thread = b.threadId(.x).to(.i64);
-        const lane = thread.remUnsigned(64);
-        const wave = thread.divUnsigned(64);
-        const mn_lane = lane.remUnsigned(16);
-        const k_lane = lane.divUnsigned(16);
-        const out_n = block_n.mul(64).add(wave.mul(16)).add(mn_lane);
-        // Each expert has a contiguous real prefix before route-count padding.
-        const second_active = if (cfg.wide != 0) blk: {
-            const first = args.sorted.at(route_start.add(16));
-            break :blk first.ge(0).bitAnd(first.lt(cfg.routes));
-        } else b.constant(.i1, 0);
+        {
+            const expert_block = if (cfg.naive != 0) block_m else block_m.divUnsigned(cfg.subtiles);
+            const eid = args.experts.at(expert_block);
+            const valid_expert = eid.ge(0).bitAnd(eid.lt(cfg.experts));
+            const thread = b.threadId(.x).to(.i64);
+            const lane = thread.remUnsigned(64);
+            const wave = thread.divUnsigned(64);
+            const mn_lane = lane.remUnsigned(16);
+            const k_lane = lane.divUnsigned(16);
+            const out_n = block_n.mul(64).add(wave.mul(16)).add(mn_lane);
+            // Each expert has a contiguous real prefix before route-count padding.
+            const second_active = if (cfg.wide != 0) blk: {
+                const first = args.sorted.at(route_start.add(16));
+                break :blk first.ge(0).bitAnd(first.lt(cfg.routes));
+            } else b.constant(.i1, 0);
 
-        var sums = b.openIfElse(valid_expert, .{ zeros, zeros });
-        const expert = eid.to(.i64);
-        const load_row = thread.divUnsigned(16);
-        const load_chunk = thread.remUnsigned(16);
-        const a_route = routeForRow(b, args.sorted, block_m, route_start, load_row, cfg.naive != 0);
-        const a_valid = a_route.ge(0).bitAnd(a_route.lt(cfg.routes));
-        const a_base = a_route.to(.i64).divUnsigned(cfg.topk).mul(cfg.ka);
-        var second_route = b.openIfElse(second_active, .{zero});
-        second_route.yieldThen(.{args.sorted.at(route_start.add(load_row).add(16))});
-        second_route.yieldElse(.{b.constant(.i32, -1)});
-        const a_route_g1 = second_route.results[0];
-        const a_valid_g1 = a_route_g1.ge(0).bitAnd(a_route_g1.lt(cfg.routes));
-        const a_base_g1 = a_route_g1.to(.i64).divUnsigned(cfg.topk).mul(cfg.ka);
+            var sums = b.openIfElse(valid_expert, .{ zeros, zeros });
+            {
+                const expert = eid.to(.i64);
+                const load_row = thread.divUnsigned(16);
+                const load_chunk = thread.remUnsigned(16);
+                const a_route = routeForRow(b, args.sorted, block_m, route_start, load_row, cfg.naive != 0);
+                const a_valid = a_route.ge(0).bitAnd(a_route.lt(cfg.routes));
+                const a_base = a_route.to(.i64).divUnsigned(cfg.topk).mul(cfg.ka);
+                var second_route = b.openIfElse(second_active, .{zero});
+                {
+                    second_route.yieldThen(.{args.sorted.at(route_start.add(load_row).add(16))});
+                }
+                {
+                    second_route.yieldElse(.{b.constant(.i32, -1)});
+                }
+                const a_route_g1 = second_route.results[0];
+                const a_valid_g1 = a_route_g1.ge(0).bitAnd(a_route_g1.lt(cfg.routes));
+                const a_base_g1 = a_route_g1.to(.i64).divUnsigned(cfg.topk).mul(cfg.ka);
 
-        // One allocation, two disjoint ping-pong regions; never two identical leaves.
-        const shared = b.sharedArray(.i16, cfg.shared_elements, 16);
-        const load_a = b.copyAtom(.{ .universal = 128 }, .i64);
-        const load_b = b.copyAtom(.{ .universal = 128 }, .i32);
-        const copy_shared = b.copyAtom(.{ .universal = 128 }, .i16);
-        const loader: TileLoader = .{
-            .a = args.a,
-            .weight = args.b,
-            .scales = args.scales,
-            .shared = shared,
-            .load_a = load_a,
-            .load_b = load_b,
-            .copy_shared = copy_shared,
-            .a_base = a_base,
-            .a_base_g1 = a_base_g1,
-            .a_valid = a_valid,
-            .a_valid_g1 = a_valid_g1,
-            .second_active = second_active,
-            .a_col = load_chunk.mul(2),
-            .a_store = load_row.mul(128).add(load_chunk.bitXor(load_row).mul(8)),
-            .b_base = expert.mul(cfg.n * cfg.kb).add(out_n.mul(cfg.kb)),
-            .expert = expert,
-            .out_n = out_n,
-            .k_lane = k_lane,
-        };
-        const initial = loader.load(b, b.constant(.i64, 0), b.constant(.i64, 0));
-        b.barrier();
-        const atom = b.mmaAtom((fly.fly_rocdl.MmaOpCDNA3MFMAType.get(b.ctx, .{
-            .m = 16,
-            .n = 16,
-            .k = 16,
-            .elemTyA = fly.DType.bf16.toMlir(b.ctx),
-            .elemTyB = fly.DType.bf16.toMlir(b.ctx),
-            .elemTyAcc = fly.DType.f32.toMlir(b.ctx),
-        }) catch return error.InvalidMlir).type_());
-        var k = b.openFor(b.constant(.i64, 0), cfg.k, 128, .{ zeros, zeros, initial.words, initial.scale });
-        const read_base = k.iv.divUnsigned(128).bitAnd(1).mul(cfg.stage_elements);
-        const write_base = k.iv.divUnsigned(128).bitAnd(1).bitXor(1).mul(cfg.stage_elements);
-        var a_fragments: [4]Value = undefined;
-        var a_fragments_g1: [4]Value = undefined;
-        inline for (0..4) |u| {
-            const offset = read_base.add(mn_lane.mul(128)).add(k_lane.mul(4).add(u).bitXor(mn_lane).mul(8));
-            a_fragments[u] = b.copyAtomLoad(copy_shared, vectorView(shared, offset, 8));
-        }
-        inline for (0..4) |u| {
-            const offset = read_base.add(mn_lane.mul(128)).add(k_lane.mul(4).add(u).bitXor(mn_lane).mul(8)).add(2048);
-            const azero = b.constant(.i16, 0).splat(8);
-            var second = b.openIfElse(second_active, .{azero});
-            second.yieldThen(.{b.copyAtomLoad(copy_shared, vectorView(shared, offset, 8))});
-            second.yieldElse(.{azero});
-            a_fragments_g1[u] = second.results[0];
-        }
-        // Prefetch the other LDS region only after all current A fragments are read.
-        const next_k = k.iv.add(128);
-        var next = b.openIfElse(next_k.cmpUnsigned(.lt, cfg.k), .{ initial.words, initial.scale });
-        const next_tile = loader.load(b, next_k, write_base);
-        next.yieldThen(.{ next_tile.words, next_tile.scale });
-        next.yieldElse(.{ b.constant(.i32, 0).splat(4), fzero });
-        var acc = k.carried[0];
-        var acc_g1 = k.carried[1];
-        inline for (0..4) |u| {
-            const decoded = decodeWeight(b, k.carried[2].extract(u), k.carried[3]);
-            const a0 = a_fragments[u].shuffleVector(a_fragments[u], &.{ 0, 1, 2, 3 }).bitCast(.bf16);
-            const a1 = a_fragments[u].shuffleVector(a_fragments[u], &.{ 4, 5, 6, 7 }).bitCast(.bf16);
-            const w0 = decoded.shuffleVector(decoded, &.{ 0, 1, 2, 3 });
-            const w1 = decoded.shuffleVector(decoded, &.{ 4, 5, 6, 7 });
-            acc = b.mmaAtomCall(atom, a0, w0, acc);
-            acc = b.mmaAtomCall(atom, a1, w1, acc);
-            var second = b.openIfElse(second_active, .{zeros});
-            const a0_g1 = a_fragments_g1[u].shuffleVector(a_fragments_g1[u], &.{ 0, 1, 2, 3 }).bitCast(.bf16);
-            const a1_g1 = a_fragments_g1[u].shuffleVector(a_fragments_g1[u], &.{ 4, 5, 6, 7 }).bitCast(.bf16);
-            const first_acc = b.mmaAtomCall(atom, a0_g1, w0, acc_g1);
-            second.yieldThen(.{b.mmaAtomCall(atom, a1_g1, w1, first_acc)});
-            second.yieldElse(.{acc_g1});
-            acc_g1 = second.results[0];
-        }
-        // All current reads finish before a later iteration reuses this LDS region.
-        b.barrier();
-        k.yield(.{ acc, acc_g1, next.results[0], next.results[1] });
-        sums.yieldThen(.{ k.results[0], k.results[1] });
-        sums.yieldElse(.{ zeros, zeros });
+                // One allocation, two disjoint ping-pong regions; never two identical leaves.
+                const shared = b.sharedArray(.i16, cfg.shared_elements, 16);
+                const load_a = b.copyAtom(.{ .universal = 128 }, .i64);
+                const load_b = b.copyAtom(.{ .universal = 128 }, .i32);
+                const copy_shared = b.copyAtom(.{ .universal = 128 }, .i16);
+                const loader: TileLoader = .{
+                    .a = args.a,
+                    .weight = args.b,
+                    .scales = args.scales,
+                    .shared = shared,
+                    .load_a = load_a,
+                    .load_b = load_b,
+                    .copy_shared = copy_shared,
+                    .a_base = a_base,
+                    .a_base_g1 = a_base_g1,
+                    .a_valid = a_valid,
+                    .a_valid_g1 = a_valid_g1,
+                    .second_active = second_active,
+                    .a_col = load_chunk.mul(2),
+                    .a_store = load_row.mul(128).add(load_chunk.bitXor(load_row).mul(8)),
+                    .b_base = expert.mul(cfg.n * cfg.kb).add(out_n.mul(cfg.kb)),
+                    .expert = expert,
+                    .out_n = out_n,
+                    .k_lane = k_lane,
+                };
+                const initial = loader.load(b, b.constant(.i64, 0), b.constant(.i64, 0));
+                b.barrier();
+                const atom = b.mmaAtom((fly.fly_rocdl.MmaOpCDNA3MFMAType.get(b.ctx, .{
+                    .m = 16,
+                    .n = 16,
+                    .k = 16,
+                    .elemTyA = fly.DType.bf16.toMlir(b.ctx),
+                    .elemTyB = fly.DType.bf16.toMlir(b.ctx),
+                    .elemTyAcc = fly.DType.f32.toMlir(b.ctx),
+                }) catch return error.InvalidMlir).type_());
+                var k = b.openFor(b.constant(.i64, 0), cfg.k, 128, .{ zeros, zeros, initial.words, initial.scale });
+                {
+                    const read_base = k.iv.divUnsigned(128).bitAnd(1).mul(cfg.stage_elements);
+                    const write_base = k.iv.divUnsigned(128).bitAnd(1).bitXor(1).mul(cfg.stage_elements);
+                    var a_fragments: [4]Value = undefined;
+                    var a_fragments_g1: [4]Value = undefined;
+                    inline for (0..4) |u| {
+                        const offset = read_base.add(mn_lane.mul(128)).add(k_lane.mul(4).add(u).bitXor(mn_lane).mul(8));
+                        a_fragments[u] = b.copyAtomLoad(copy_shared, vectorView(shared, offset, 8));
+                    }
+                    inline for (0..4) |u| {
+                        const offset = read_base.add(mn_lane.mul(128)).add(k_lane.mul(4).add(u).bitXor(mn_lane).mul(8)).add(2048);
+                        const azero = b.constant(.i16, 0).splat(8);
+                        var second = b.openIfElse(second_active, .{azero});
+                        {
+                            second.yieldThen(.{b.copyAtomLoad(copy_shared, vectorView(shared, offset, 8))});
+                        }
+                        {
+                            second.yieldElse(.{azero});
+                        }
+                        a_fragments_g1[u] = second.results[0];
+                    }
+                    // Prefetch the other LDS region only after all current A fragments are read.
+                    const next_k = k.iv.add(128);
+                    var next = b.openIfElse(next_k.cmpUnsigned(.lt, cfg.k), .{ initial.words, initial.scale });
+                    {
+                        const next_tile = loader.load(b, next_k, write_base);
+                        next.yieldThen(.{ next_tile.words, next_tile.scale });
+                    }
+                    {
+                        next.yieldElse(.{ b.constant(.i32, 0).splat(4), fzero });
+                    }
+                    var acc = k.carried[0];
+                    var acc_g1 = k.carried[1];
+                    inline for (0..4) |u| {
+                        const decoded = decodeWeight(b, k.carried[2].extract(u), k.carried[3]);
+                        const a0 = a_fragments[u].shuffleVector(a_fragments[u], &.{ 0, 1, 2, 3 }).bitCast(.bf16);
+                        const a1 = a_fragments[u].shuffleVector(a_fragments[u], &.{ 4, 5, 6, 7 }).bitCast(.bf16);
+                        const w0 = decoded.shuffleVector(decoded, &.{ 0, 1, 2, 3 });
+                        const w1 = decoded.shuffleVector(decoded, &.{ 4, 5, 6, 7 });
+                        acc = b.mmaAtomCall(atom, a0, w0, acc);
+                        acc = b.mmaAtomCall(atom, a1, w1, acc);
+                        var second = b.openIfElse(second_active, .{zeros});
+                        {
+                            const a0_g1 = a_fragments_g1[u].shuffleVector(a_fragments_g1[u], &.{ 0, 1, 2, 3 }).bitCast(.bf16);
+                            const a1_g1 = a_fragments_g1[u].shuffleVector(a_fragments_g1[u], &.{ 4, 5, 6, 7 }).bitCast(.bf16);
+                            const first_acc = b.mmaAtomCall(atom, a0_g1, w0, acc_g1);
+                            second.yieldThen(.{b.mmaAtomCall(atom, a1_g1, w1, first_acc)});
+                        }
+                        {
+                            second.yieldElse(.{acc_g1});
+                        }
+                        acc_g1 = second.results[0];
+                    }
+                    // All current reads finish before a later iteration reuses this LDS region.
+                    b.barrier();
+                    k.yield(.{ acc, acc_g1, next.results[0], next.results[1] });
+                }
+                sums.yieldThen(.{ k.results[0], k.results[1] });
+            }
+            {
+                sums.yieldElse(.{ zeros, zeros });
+            }
 
-        inline for (0..4) |i| {
-            storeRow(b, args.output, args.sorted, block_m, route_start, k_lane.mul(4).add(i), out_n, sums.results[0].extract(i), cfg);
+            inline for (0..4) |i| {
+                storeRow(b, args.output, args.sorted, block_m, route_start, k_lane.mul(4).add(i), out_n, sums.results[0].extract(i), cfg);
+            }
+            var store_second = b.openIf(second_active);
+            {
+                inline for (0..4) |i| {
+                    storeRow(b, args.output, args.sorted, block_m, route_start, k_lane.mul(4).add(i + 16), out_n, sums.results[1].extract(i), cfg);
+                }
+                store_second.close();
+            }
+            block.close();
         }
-        var store_second = b.openIf(second_active);
-        inline for (0..4) |i| {
-            storeRow(b, args.output, args.sorted, block_m, route_start, k_lane.mul(4).add(i + 16), out_n, sums.results[1].extract(i), cfg);
-        }
-        store_second.close();
-        block.close();
     }
 
     fn routeForRow(b: *Builder, sorted: Value, block: Value, start: Value, row: Value, naive: bool) Value {
@@ -460,8 +521,10 @@ pub const Mfma = struct {
     fn storeRow(b: *Builder, output: Value, sorted: Value, block: Value, start: Value, row: Value, col: Value, value: Value, cfg: Config) void {
         const route = routeForRow(b, sorted, block, start, row, cfg.naive != 0);
         var valid = b.openIf(route.ge(0).bitAnd(route.lt(cfg.routes)));
-        output.set(.{ route.to(.i64), col }, value.to(.bf16));
-        valid.close();
+        {
+            output.set(.{ route.to(.i64), col }, value.to(.bf16));
+            valid.close();
+        }
     }
 
     fn vectorView(tensor: Value, offset: Value, comptime n: i64) Value {
@@ -491,8 +554,10 @@ pub const Mfma = struct {
         fn load(self: TileLoader, b: *Builder, k: Value, write_base: Value) struct { words: Value, scale: Value } {
             self.storeActivation(b, self.a_base, self.a_valid, k, self.a_store.add(write_base));
             var second = b.openIf(self.second_active);
-            self.storeActivation(b, self.a_base_g1, self.a_valid_g1, k, self.a_store.add(write_base).add(2048));
-            second.close();
+            {
+                self.storeActivation(b, self.a_base_g1, self.a_valid_g1, k, self.a_store.add(write_base).add(2048));
+                second.close();
+            }
             const offset = self.b_base.add(k.divUnsigned(8)).add(self.k_lane.mul(4));
             const words = b.copyAtomLoad(self.load_b, vectorView(self.weight, offset, 4));
             const byte = self.scales.at(.{ self.expert, self.out_n, k.divUnsigned(32).add(self.k_lane) });
@@ -504,9 +569,13 @@ pub const Mfma = struct {
         fn storeActivation(self: TileLoader, b: *Builder, base: Value, valid: Value, k: Value, destination: Value) void {
             const zeros = b.constant(.i64, 0).splat(2);
             var guarded = b.openIfElse(valid, .{zeros});
-            const offset = base.add(k.divUnsigned(4)).add(self.a_col);
-            guarded.yieldThen(.{b.copyAtomLoad(self.load_a, vectorView(self.a, offset, 2))});
-            guarded.yieldElse(.{zeros});
+            {
+                const offset = base.add(k.divUnsigned(4)).add(self.a_col);
+                guarded.yieldThen(.{b.copyAtomLoad(self.load_a, vectorView(self.a, offset, 2))});
+            }
+            {
+                guarded.yieldElse(.{zeros});
+            }
             b.copyAtomStore(self.copy_shared, guarded.results[0].bitCast(.i16), vectorView(self.shared, destination, 8));
         }
     };
@@ -610,52 +679,64 @@ const Gemv = struct {
         const inrow = row.cmpUnsigned(.lt, cfg.n);
         const fzero = b.constant(.f32, 0.0);
         var sum = b.openIfElse(local.bitAnd(inrow), .{fzero});
-        var k = b.openFor(lane, cfg.k_words, cfg.stride, .{fzero});
-        var carried = k.carried[0];
-        for (0..cfg.unroll) |u| {
-            const pos = k.iv.add(u * cfg.lanes);
-            var inbounds = b.openIfElse(pos.cmpUnsigned(.lt, cfg.k_words), .{fzero});
-            const word = args.b.at(.{ expert, row, pos });
-            const scale8 = args.scales.at(.{ expert, row, pos.divUnsigned(4) });
-            const scale = decodeScale(b, scale8);
-            const low = word.bitAnd(0x07070707);
-            const high = word.shrU(4).bitAnd(0x07070707);
-            const even_bits = b.perm(b.constant(.i32, 0xd4d0ccc8), b.constant(.i32, 0xc4c0b800), low);
-            const odd_bits = b.perm(b.constant(.i32, 0xd4d0ccc8), b.constant(.i32, 0xc4c0b800), high);
-            const even = even_bits.bitAnd(word.shl(4).bitOr(0x7f7f7f7f));
-            const odd = odd_bits.bitAnd(word.bitOr(0x7f7f7f7f));
-            // Retain the scalar decoder and its FP32 scale -> BF16 -> FP32 boundary.
-            const weights = [_]Value{
-                b.cvtPkF32Fp8(even, false).mul(scale).to(.bf16).to(.f32),
-                b.cvtPkF32Fp8(odd, false).mul(scale).to(.bf16).to(.f32),
-                b.cvtPkF32Fp8(even, true).mul(scale).to(.bf16).to(.f32),
-                b.cvtPkF32Fp8(odd, true).mul(scale).to(.bf16).to(.f32),
-            };
-            var partial = fzero;
-            inline for (0..4) |pair| {
-                const x = args.a.at(.{ token, pos.mul(4).add(pair) });
-                const xlo = x.to(.i16).bitCast(.bf16).to(.f32);
-                const xhi = x.shrU(16).to(.i16).bitCast(.bf16).to(.f32);
-                const wlo = weights[(pair / 2) * 2].extract(pair % 2);
-                const whi = weights[(pair / 2) * 2 + 1].extract(pair % 2);
-                // Odd then even FMA, followed by one add to the K-loop accumulator.
-                partial = b.fma(xlo, wlo, b.fma(xhi, whi, partial));
+        {
+            var k = b.openFor(lane, cfg.k_words, cfg.stride, .{fzero});
+            {
+                var carried = k.carried[0];
+                for (0..cfg.unroll) |u| {
+                    const pos = k.iv.add(u * cfg.lanes);
+                    var inbounds = b.openIfElse(pos.cmpUnsigned(.lt, cfg.k_words), .{fzero});
+                    {
+                        const word = args.b.at(.{ expert, row, pos });
+                        const scale8 = args.scales.at(.{ expert, row, pos.divUnsigned(4) });
+                        const scale = decodeScale(b, scale8);
+                        const low = word.bitAnd(0x07070707);
+                        const high = word.shrU(4).bitAnd(0x07070707);
+                        const even_bits = b.perm(b.constant(.i32, 0xd4d0ccc8), b.constant(.i32, 0xc4c0b800), low);
+                        const odd_bits = b.perm(b.constant(.i32, 0xd4d0ccc8), b.constant(.i32, 0xc4c0b800), high);
+                        const even = even_bits.bitAnd(word.shl(4).bitOr(0x7f7f7f7f));
+                        const odd = odd_bits.bitAnd(word.bitOr(0x7f7f7f7f));
+                        // Retain the scalar decoder and its FP32 scale -> BF16 -> FP32 boundary.
+                        const weights = [_]Value{
+                            b.cvtPkF32Fp8(even, false).mul(scale).to(.bf16).to(.f32),
+                            b.cvtPkF32Fp8(odd, false).mul(scale).to(.bf16).to(.f32),
+                            b.cvtPkF32Fp8(even, true).mul(scale).to(.bf16).to(.f32),
+                            b.cvtPkF32Fp8(odd, true).mul(scale).to(.bf16).to(.f32),
+                        };
+                        var partial = fzero;
+                        inline for (0..4) |pair| {
+                            const x = args.a.at(.{ token, pos.mul(4).add(pair) });
+                            const xlo = x.to(.i16).bitCast(.bf16).to(.f32);
+                            const xhi = x.shrU(16).to(.i16).bitCast(.bf16).to(.f32);
+                            const wlo = weights[(pair / 2) * 2].extract(pair % 2);
+                            const whi = weights[(pair / 2) * 2 + 1].extract(pair % 2);
+                            // Odd then even FMA, followed by one add to the K-loop accumulator.
+                            partial = b.fma(xlo, wlo, b.fma(xhi, whi, partial));
+                        }
+                        inbounds.yieldThen(.{partial.add(carried)});
+                    }
+                    {
+                        inbounds.yieldElse(.{carried});
+                    }
+                    carried = inbounds.results[0];
+                }
+                k.yield(.{carried});
             }
-            inbounds.yieldThen(.{partial.add(carried)});
-            inbounds.yieldElse(.{carried});
-            carried = inbounds.results[0];
+            var reduced = k.results[0];
+            var shift: i32 = 1;
+            while (shift < @as(i32, @intCast(cfg.lanes))) : (shift *= 2) {
+                reduced = reduced.add(reduced.shuffleXor(shift, 64));
+            }
+            sum.yieldThen(.{reduced});
         }
-        k.yield(.{carried});
-        var reduced = k.results[0];
-        var shift: i32 = 1;
-        while (shift < @as(i32, @intCast(cfg.lanes))) : (shift *= 2) {
-            reduced = reduced.add(reduced.shuffleXor(shift, 64));
+        {
+            sum.yieldElse(.{fzero});
         }
-        sum.yieldThen(.{reduced});
-        sum.yieldElse(.{fzero});
         var store = b.openIf(lane.eq(0).bitAnd(inrow));
-        args.output.set(.{ route, row }, sum.results[0].to(.bf16));
-        store.close();
+        {
+            args.output.set(.{ route, row }, sum.results[0].to(.bf16));
+            store.close();
+        }
     }
 
     fn decodeScale(b: *Builder, byte: Value) Value {

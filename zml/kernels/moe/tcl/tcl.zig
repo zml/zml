@@ -236,16 +236,18 @@ pub const Blockwise = tcl.Kernel(Cfg, .{
             const gate_up = try b.reshape(in.gate_up, &.{ E, a.S2, I, D }, .{});
 
             var loop = b.openFor(used, .{try b.scratchpad(.bf16, &.{ Go, BGi, BB, D })});
-            const chunk = try b.indexRead(rows, loop.iv);
-            const ids = try b.indexRead(chunk_experts, loop.iv);
-            const gu = try b.gather(gate_up, ids, E, &.{ BGi, a.S2, I, D }, .{});
-            const dn = try b.gather(in.down, ids, E, &.{ BGi, D, I }, .{});
-            op = b.tensorOperation(.{});
-            const h = try op.commit(op.contract(chunk, gu, &.{ BGi, BB, a.S2, I }), .{});
-            const act = try gated(b, a, h, &.{ BGi, BB }, null);
-            op = b.tensorOperation(.{});
-            const y = try op.commit(op.contract(act, dn, &.{ BGi, BB, D }), .{ .dtype = .bf16 });
-            try loop.yield(.{try b.indexWrite(loop.carried[0], loop.iv, y)});
+            {
+                const chunk = try b.indexRead(rows, loop.iv);
+                const ids = try b.indexRead(chunk_experts, loop.iv);
+                const gu = try b.gather(gate_up, ids, E, &.{ BGi, a.S2, I, D }, .{});
+                const dn = try b.gather(in.down, ids, E, &.{ BGi, D, I }, .{});
+                op = b.tensorOperation(.{});
+                const h = try op.commit(op.contract(chunk, gu, &.{ BGi, BB, a.S2, I }), .{});
+                const act = try gated(b, a, h, &.{ BGi, BB }, null);
+                op = b.tensorOperation(.{});
+                const y = try op.commit(op.contract(act, dn, &.{ BGi, BB, D }), .{ .dtype = .bf16 });
+                try loop.yield(.{try b.indexWrite(loop.carried[0], loop.iv, y)});
+            }
             const out = loop.results[0];
 
             const per_route = try b.gather(try b.reshape(out, &.{ GB, D }, .{}), slot, GB, &.{ T, K, D }, .{});

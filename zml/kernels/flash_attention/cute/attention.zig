@@ -158,8 +158,12 @@ fn runSized(b: *B, cfg: Config, comptime fragments: usize) cute.FinishError!void
     inline for (0..fragments) |f| {
         const d = lane.add(f * 32);
         var valid = b.openIfElse(d.lt(cfg.head_dim), .{.f32});
-        valid.yieldThen(.{a.q.get(.{ batch, query, head, d }).to(.f32)});
-        valid.yieldElse(.{zero});
+        {
+            valid.yieldThen(.{a.q.get(.{ batch, query, head, d }).to(.f32)});
+        }
+        {
+            valid.yieldElse(.{zero});
+        }
         queries[f] = valid.results[0];
     }
 
@@ -169,70 +173,86 @@ fn runSized(b: *B, cfg: Config, comptime fragments: usize) cute.FinishError!void
     var initial: [fragments + 2]Value = @splat(zero);
     initial[0] = neg_inf;
     var tiles = b.openFor(begin, end, tile_keys, initial);
+    {
 
-    // Zero-fill partial tiles and feature padding before the CTA-wide barrier.
-    var copy = b.openFor(tid, tile_keys * padded_dim, 128, .{});
-    const tile_key = copy.iv.div(padded_dim);
-    const d = copy.iv.rem(padded_dim);
-    const key = tiles.iv.add(tile_key);
-    var valid_load = b.openIfElse(key.lt(end).bitAnd(d.lt(cfg.head_dim)), .{ cfg.dtype, cfg.dtype });
-    valid_load.yieldThen(.{ a.k.get(.{ batch, key, kv_head, d }), a.v.get(.{ batch, key, kv_head, d }) });
-    valid_load.yieldElse(.{ zero.to(cfg.dtype), zero.to(cfg.dtype) });
-    keys.set(.{ tile_key, d }, valid_load.results[0]);
-    values.set(.{ tile_key, d }, valid_load.results[1]);
-    copy.close();
-    b.syncThreads();
+        // Zero-fill partial tiles and feature padding before the CTA-wide barrier.
+        var copy = b.openFor(tid, tile_keys * padded_dim, 128, .{});
+        {
+            const tile_key = copy.iv.div(padded_dim);
+            const d = copy.iv.rem(padded_dim);
+            const key = tiles.iv.add(tile_key);
+            var valid_load = b.openIfElse(key.lt(end).bitAnd(d.lt(cfg.head_dim)), .{ cfg.dtype, cfg.dtype });
+            {
+                valid_load.yieldThen(.{ a.k.get(.{ batch, key, kv_head, d }), a.v.get(.{ batch, key, kv_head, d }) });
+            }
+            {
+                valid_load.yieldElse(.{ zero.to(cfg.dtype), zero.to(cfg.dtype) });
+            }
+            keys.set(.{ tile_key, d }, valid_load.results[0]);
+            values.set(.{ tile_key, d }, valid_load.results[1]);
+            copy.close();
+        }
+        b.syncThreads();
 
-    // Each lane keeps one score; dot products reduce across the feature lanes.
-    var scores = b.openFor(0, tile_keys, 1, .{neg_inf});
-    var dot = zero;
-    inline for (0..fragments) |f| {
-        dot = dot.add(queries[f].mul(keys.get(.{ scores.iv, lane.add(f * 32) }).to(.f32)));
+        // Each lane keeps one score; dot products reduce across the feature lanes.
+        var scores = b.openFor(0, tile_keys, 1, .{neg_inf});
+        {
+            var dot = zero;
+            inline for (0..fragments) |f| {
+                dot = dot.add(queries[f].mul(keys.get(.{ scores.iv, lane.add(f * 32) }).to(.f32)));
+            }
+            inline for (.{ 16, 8, 4, 2, 1 }) |offset| dot = dot.add(b.shuffleXor(dot, offset));
+            const scale = std.math.log2e / std.math.sqrt(@as(f32, @floatFromInt(cfg.head_dim)));
+            const score = b.select(tiles.iv.add(scores.iv).le(position).bitAnd(tiles.iv.add(scores.iv).lt(end)), dot.mul(scale), neg_inf);
+            scores.yield(.{b.select(lane.eq(scores.iv), score, scores.carried[0])});
+        }
+        var maximum = scores.results[0];
+        inline for (.{ 16, 8, 4, 2, 1 }) |offset| maximum = maximum.maximum(b.shuffleXor(maximum, offset));
+        maximum = maximum.maximum(tiles.carried[0]);
+        const rescale = b.exp2Approx(tiles.carried[0].sub(maximum));
+        const probability = b.exp2Approx(scores.results[0].sub(maximum));
+        var sum = probability;
+        inline for (.{ 16, 8, 4, 2, 1 }) |offset| sum = sum.add(b.shuffleXor(sum, offset));
+        sum = sum.add(tiles.carried[1].mul(rescale));
+
+        var accumulators: [fragments]Value = undefined;
+        inline for (0..fragments) |f| accumulators[f] = tiles.carried[f + 2].mul(rescale);
+        var weighted = b.openFor(0, tile_keys, 1, accumulators);
+        {
+            const weight = b.shuffleIdx(probability, weighted.iv);
+            inline for (0..fragments) |f| {
+                accumulators[f] = weighted.carried[f].add(weight.mul(values.get(.{ weighted.iv, lane.add(f * 32) }).to(.f32)));
+            }
+            weighted.yield(accumulators);
+        }
+        // No warp may overwrite the tile before every warp has consumed it.
+        b.syncThreads();
+        var next: [fragments + 2]Value = undefined;
+        next[0] = maximum;
+        next[1] = sum;
+        inline for (0..fragments) |f| next[f + 2] = weighted.results[f];
+        tiles.yield(next);
     }
-    inline for (.{ 16, 8, 4, 2, 1 }) |offset| dot = dot.add(b.shuffleXor(dot, offset));
-    const scale = std.math.log2e / std.math.sqrt(@as(f32, @floatFromInt(cfg.head_dim)));
-    const score = b.select(tiles.iv.add(scores.iv).le(position).bitAnd(tiles.iv.add(scores.iv).lt(end)), dot.mul(scale), neg_inf);
-    scores.yield(.{b.select(lane.eq(scores.iv), score, scores.carried[0])});
-    var maximum = scores.results[0];
-    inline for (.{ 16, 8, 4, 2, 1 }) |offset| maximum = maximum.maximum(b.shuffleXor(maximum, offset));
-    maximum = maximum.maximum(tiles.carried[0]);
-    const rescale = b.exp2Approx(tiles.carried[0].sub(maximum));
-    const probability = b.exp2Approx(scores.results[0].sub(maximum));
-    var sum = probability;
-    inline for (.{ 16, 8, 4, 2, 1 }) |offset| sum = sum.add(b.shuffleXor(sum, offset));
-    sum = sum.add(tiles.carried[1].mul(rescale));
-
-    var accumulators: [fragments]Value = undefined;
-    inline for (0..fragments) |f| accumulators[f] = tiles.carried[f + 2].mul(rescale);
-    var weighted = b.openFor(0, tile_keys, 1, accumulators);
-    const weight = b.shuffleIdx(probability, weighted.iv);
-    inline for (0..fragments) |f| {
-        accumulators[f] = weighted.carried[f].add(weight.mul(values.get(.{ weighted.iv, lane.add(f * 32) }).to(.f32)));
-    }
-    weighted.yield(accumulators);
-    // No warp may overwrite the tile before every warp has consumed it.
-    b.syncThreads();
-    var next: [fragments + 2]Value = undefined;
-    next[0] = maximum;
-    next[1] = sum;
-    inline for (0..fragments) |f| next[f + 2] = weighted.results[f];
-    tiles.yield(next);
 
     inline for (0..fragments) |f| {
         const col = lane.add(f * 32);
         var valid_store = b.openIf(row.lt(cfg.query_length * group).bitAnd(col.lt(cfg.head_dim)));
-        if (split) {
-            a.out.set(.{ batch, b.blockIdx().z, query, head, col }, tiles.results[f + 2]);
-        } else {
-            a.out.set(.{ batch, query, head, col }, tiles.results[f + 2].div(tiles.results[1]));
+        {
+            if (split) {
+                a.out.set(.{ batch, b.blockIdx().z, query, head, col }, tiles.results[f + 2]);
+            } else {
+                a.out.set(.{ batch, query, head, col }, tiles.results[f + 2].div(tiles.results[1]));
+            }
+            valid_store.close();
         }
-        valid_store.close();
     }
     if (split) {
         var stats = b.openIf(row.lt(cfg.query_length * group).bitAnd(lane.eq(0)));
-        a.out.set(.{ batch, b.blockIdx().z, query, head, cfg.head_dim }, tiles.results[0]);
-        a.out.set(.{ batch, b.blockIdx().z, query, head, cfg.head_dim + 1 }, tiles.results[1]);
-        stats.close();
+        {
+            a.out.set(.{ batch, b.blockIdx().z, query, head, cfg.head_dim }, tiles.results[0]);
+            a.out.set(.{ batch, b.blockIdx().z, query, head, cfg.head_dim + 1 }, tiles.results[1]);
+            stats.close();
+        }
     }
 }
 
@@ -258,23 +278,31 @@ fn merge(b: *B, cfg: Config) cute.FinishError!void {
     // Every warp reduces the partition statistics, then independently handles
     // a contiguous range of output features.
     var maxima = b.openFor(lane, cfg.splits, 32, .{neg_inf});
-    maxima.yield(.{maxima.carried[0].maximum(a.partials.get(.{ batch, maxima.iv, head, cfg.head_dim }))});
+    {
+        maxima.yield(.{maxima.carried[0].maximum(a.partials.get(.{ batch, maxima.iv, head, cfg.head_dim }))});
+    }
     var maximum = maxima.results[0];
     inline for (.{ 16, 8, 4, 2, 1 }) |offset| maximum = maximum.maximum(b.shuffleXor(maximum, offset));
     const weights = b.makeTensor(b.allocSmem(.f32, cfg.splits, 16), b.makeLayout(&.{cfg.splits}, .{}));
     var stats = b.openFor(b.threadIdx().x, cfg.splits, 128, .{});
-    weights.set(.{stats.iv}, b.exp2Approx(a.partials.get(.{ batch, stats.iv, head, cfg.head_dim }).sub(maximum)));
-    stats.close();
+    {
+        weights.set(.{stats.iv}, b.exp2Approx(a.partials.get(.{ batch, stats.iv, head, cfg.head_dim }).sub(maximum)));
+        stats.close();
+    }
     b.syncThreads();
     var features = b.openFor(b.threadIdx().x, cfg.head_dim, 128, .{});
-    var sum = b.openFor(0, cfg.splits, 1, .{ zero, zero });
-    const weight = weights.get(.{sum.iv});
-    sum.yield(.{
-        sum.carried[0].add(weight.mul(a.partials.get(.{ batch, sum.iv, head, features.iv }))),
-        sum.carried[1].add(weight.mul(a.partials.get(.{ batch, sum.iv, head, cfg.head_dim + 1 }))),
-    });
-    a.out.set(.{ batch, head, features.iv }, sum.results[0].div(sum.results[1]));
-    features.close();
+    {
+        var sum = b.openFor(0, cfg.splits, 1, .{ zero, zero });
+        {
+            const weight = weights.get(.{sum.iv});
+            sum.yield(.{
+                sum.carried[0].add(weight.mul(a.partials.get(.{ batch, sum.iv, head, features.iv }))),
+                sum.carried[1].add(weight.mul(a.partials.get(.{ batch, sum.iv, head, cfg.head_dim + 1 }))),
+            });
+        }
+        a.out.set(.{ batch, head, features.iv }, sum.results[0].div(sum.results[1]));
+        features.close();
+    }
 }
 
 test "CuTe attention emits tiled online softmax through head dimension 512" {

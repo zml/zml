@@ -1388,9 +1388,11 @@ test "loop over a device-computed trip count with index reads and writes" {
     // Running sums of the rows up to the longest length.
     const n = try b.symExpr(.add, try b.reduceMaxI32(t.lens), 0);
     var loop = b.openFor(n, .{ t.s, try b.scratchpad(.f32, &.{ T, D }) });
-    const op = b.tensorOperation(.{});
-    const sum = try op.commit(op.fetch(try b.indexRead(t.x, loop.iv), .{}).addf(op.fetch(loop.carried[0], .{})), .{});
-    try loop.yield(.{ sum, try b.indexWrite(loop.carried[1], loop.iv, sum) });
+    {
+        const op = b.tensorOperation(.{});
+        const sum = try op.commit(op.fetch(try b.indexRead(t.x, loop.iv), .{}).addf(op.fetch(loop.carried[0], .{})), .{});
+        try loop.yield(.{ sum, try b.indexWrite(loop.carried[1], loop.iv, sum) });
+    }
     b.ret(&loop.results);
 
     const ir = try b.finish();

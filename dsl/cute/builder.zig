@@ -2335,8 +2335,10 @@ pub const Builder = struct {
     pub fn mbarrierWait(self: *Builder, barrier: Value, phase: Value) void {
         const ready = self.mbarrierWaitParity(barrier, phase);
         var pending = self.openIf(ready.eq(false));
-        self.mbarrierTryWaitParity(barrier, phase, 10_000_000);
-        pending.close();
+        {
+            self.mbarrierTryWaitParity(barrier, phase, 10_000_000);
+            pending.close();
+        }
     }
 
     /// Make mbarrier initialization visible to the async proxy (SM90+).
@@ -2888,10 +2890,14 @@ test "guard, shared memory, sync, layouts, for loop" {
     b.waitForDependency();
     const j = b.constant(.i32, 127).sub(tid);
     var guard = b.openIf(i.lt(4096));
-    var acc = b.openFor(0, 4, 1, .{b.constant(.f32, 0.0)});
-    acc.yield(.{acc.carried[0].add(smem.get(.{j}).mul(acc.iv.to(.f32)))});
-    a.out.set(.{i}, acc.results[0]);
-    guard.close();
+    {
+        var acc = b.openFor(0, 4, 1, .{b.constant(.f32, 0.0)});
+        {
+            acc.yield(.{acc.carried[0].add(smem.get(.{j}).mul(acc.iv.to(.f32)))});
+        }
+        a.out.set(.{i}, acc.results[0]);
+        guard.close();
+    }
 
     const kernel = try b.finish(.{ 128, 1, 1 });
     defer std.testing.allocator.free(kernel);
@@ -2957,8 +2963,12 @@ test "casts, select, if-else, integer widening" {
 
     const picked = b.select(bound, shuffled, 2.0);
     var scope = b.openIfElse(tid.lt(4), .{.f16});
-    scope.yieldThen(.{picked.to(.f16)});
-    scope.yieldElse(.{b.constant(.f16, 1)});
+    {
+        scope.yieldThen(.{picked.to(.f16)});
+    }
+    {
+        scope.yieldElse(.{b.constant(.f16, 1)});
+    }
     a.p.set(.{tid}, scope.results[0]);
 
     const kernel = try b.finish(.{ 1, 1, 1 });

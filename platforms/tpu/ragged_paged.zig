@@ -545,11 +545,11 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
     const q_len_start = k.muli(a.q_blk_idx, k.constant(.i32, cfg.numQPerBlk()));
     const q_len_end = k.addi(q_len_start, k.constant(.i32, cfg.numQPerBlk()));
 
+    var i = k.openIf(k.cmpi(.eq, k.addi(a.heads_blk_idx, a.q_blk_idx), k.constant(.i32, 0)));
     {
-        var i = k.openIf(k.cmpi(.eq, k.addi(a.heads_blk_idx, a.q_blk_idx), k.constant(.i32, 0)));
         const first_seq_idx = nextNonemptyKvSequence(k, cfg, a, init_seq_idx, num_seqs);
+        var nonempty = k.openIf(k.cmpi(.slt, first_seq_idx, num_seqs));
         {
-            var nonempty = k.openIf(k.cmpi(.slt, first_seq_idx, num_seqs));
             createKvAsyncCopyDescriptors(k, cfg, a, a.heads_blk_idx, first_seq_idx, k.constant(.i32, 0), init_buf_idx);
             nonempty.close();
         }
@@ -614,8 +614,8 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
             const next_heads_blk_idx = k.select(is_last_seq, k.addi(a.heads_blk_idx, k.constant(.i32, 1)), a.heads_blk_idx);
             const next_buf = k.extui(k.cmpi(.eq, cur_buf, k.constant(.i32, 0)), .i32);
 
+            var ii = k.openIf(k.cmpi(.slt, next_heads_blk_idx, k.constant(.i32, cfg.numHeadsBlks())));
             {
-                var ii = k.openIf(k.cmpi(.slt, next_heads_blk_idx, k.constant(.i32, cfg.numHeadsBlks())));
                 createKvAsyncCopyDescriptors(k, cfg, a, next_heads_blk_idx, next_seq_idx, next_kv_blk, next_buf);
                 ii.close();
             }

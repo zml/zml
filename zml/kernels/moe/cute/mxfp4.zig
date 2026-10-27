@@ -160,14 +160,16 @@ fn groupedQuantizeKernel(b: *B, cfg: GroupedQuantConfig) cute.FinishError!void {
         a.q.set(.{ row, word }, packed_word);
 
         var leader = b.openIf(tid.rem(8).eq(0));
-        const scale_row = row.div(cfg.group_size);
-        const row_in_group = row.rem(cfg.group_size);
-        const swizzled_col = scale_col.div(4).mul(512)
-            .add(row_in_group.rem(32).mul(16))
-            .add(row_in_group.div(32).mul(4))
-            .add(scale_col.rem(4));
-        a.s.set(.{ scale_row, swizzled_col }, exponent.to(.i8));
-        leader.close();
+        {
+            const scale_row = row.div(cfg.group_size);
+            const row_in_group = row.rem(cfg.group_size);
+            const swizzled_col = scale_col.div(4).mul(512)
+                .add(row_in_group.rem(32).mul(16))
+                .add(row_in_group.div(32).mul(4))
+                .add(scale_col.rem(4));
+            a.s.set(.{ scale_row, swizzled_col }, exponent.to(.i8));
+            leader.close();
+        }
         if (scheduled) |*s| s.close();
     }
     // Only now are the rows this CTA owns complete: release the persistent
@@ -213,25 +215,31 @@ fn combineKernel(b: *B, cfg: CombineConfig) cute.FinishError!void {
     for (0..@intCast(@divExact(pairs_per_cta, 128))) |chunk| {
         const pair = first_pair.add(chunk * 128);
         var in_bounds = b.openIf(pair.lt(pairs));
-        var low = b.constant(.f32, 0);
-        var high = b.constant(.f32, 0);
-        for (0..@intCast(cfg.topk)) |slot| {
-            const route = token.mul(cfg.topk).add(slot);
-            // Routes of other expert-parallel ranks were never written.
-            var computed = b.openIfElse(a.routes.get(.{route}).ge(0), .{ .f32, .f32 });
-            const word = a.d.get(.{ route, pair });
-            computed.yieldThen(.{
-                low.add(word.shl(16).bitCast(.f32)),
-                high.add(word.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32)),
-            });
-            computed.yieldElse(.{ low, high });
-            low = computed.results[0];
-            high = computed.results[1];
+        {
+            var low = b.constant(.f32, 0);
+            var high = b.constant(.f32, 0);
+            for (0..@intCast(cfg.topk)) |slot| {
+                const route = token.mul(cfg.topk).add(slot);
+                // Routes of other expert-parallel ranks were never written.
+                var computed = b.openIfElse(a.routes.get(.{route}).ge(0), .{ .f32, .f32 });
+                {
+                    const word = a.d.get(.{ route, pair });
+                    computed.yieldThen(.{
+                        low.add(word.shl(16).bitCast(.f32)),
+                        high.add(word.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32)),
+                    });
+                }
+                {
+                    computed.yieldElse(.{ low, high });
+                }
+                low = computed.results[0];
+                high = computed.results[1];
+            }
+            const low_bits = low.to(.bf16).to(.f32).bitCast(.i32).shrLogical(16);
+            const high_bits = high.to(.bf16).to(.f32).bitCast(.i32).bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000))));
+            a.y.set(.{ token, pair }, low_bits.bitOr(high_bits));
+            in_bounds.close();
         }
-        const low_bits = low.to(.bf16).to(.f32).bitCast(.i32).shrLogical(16);
-        const high_bits = high.to(.bf16).to(.f32).bitCast(.i32).bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000))));
-        a.y.set(.{ token, pair }, low_bits.bitOr(high_bits));
-        in_bounds.close();
     }
     b.launchDependents();
 }

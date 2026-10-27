@@ -235,6 +235,13 @@ keep their register state in SSA values:
   and `results`. Branches and while loops also return SSA values through
   their scope objects.
 
+Put each scope's body in a Zig `{ ... }` block right after `openFor`,
+`openIf` or `openWhile`, ending with its `yield` (or `close()` for a scope
+without values). `openIfElse` and `openWhile` get one block per region, ending
+with `yieldThen`/`yieldElse` (`elseBranch()`/`close()` without results) and
+`yieldBefore`/`yieldAfter`. The scope variable stays outside, so its `results`
+stay readable after the blocks.
+
 The MoE and sparse-MLA kernels linked above use this path with the published
 runtime. Straight-line kernels can still use `rmemTensor`,
 `makeFragmentLike`, `fill` and `gemm`.

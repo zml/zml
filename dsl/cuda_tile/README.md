@@ -48,6 +48,11 @@ const out = AddOne.call(.{ .x = x }, .{ .out = x.shape() }, .{
 }).out;
 ```
 
+Put each scope's body in a Zig `{ ... }` block right after `openFor`, `openIf`
+or `openLoop`, ending with its `yield` (or `close()`). `openIfElse` gets one
+block per branch, ending with `yieldThen`/`yieldElse` (`elseBranch()`/`close()`
+without results).
+
 ## What is different from the Triton DSL
 
 * **Rank 0 is the scalar.** Every value is a `tile<...>`; `entry` parameters

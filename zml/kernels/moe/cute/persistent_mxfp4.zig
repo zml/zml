@@ -517,11 +517,13 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
     // producing grid is still writing the operands.
     const warp = b.makeWarpUniform(b.makeWarpUniform(b.threadIdx().x.div(32)));
     var tma_warp = b.openIf(warp.eq(5));
-    inline for (.{ d.tma_a, d.tma_b, d.tma_sfa, d.tma_sfb }) |value| {
-        const descriptor: cute.Atom = .{ .inner = value.inner, .kernel = b };
-        b.prefetchTmaDesc(descriptor);
+    {
+        inline for (.{ d.tma_a, d.tma_b, d.tma_sfa, d.tma_sfb }) |value| {
+            const descriptor: cute.Atom = .{ .inner = value.inner, .kernel = b };
+            b.prefetchTmaDesc(descriptor);
+        }
+        tma_warp.close();
     }
-    tma_warp.close();
     // Everything below reads the schedule and the quantized activations the
     // preceding grid produces, so the whole block waits here.
     b.waitForDependency();
@@ -746,8 +748,10 @@ fn issueTmaStage(
     const sfb_source = b.makeCoordTensor(.{ 0, b.constant(.i32, 0), k_tile, group }, b.staticLayout(sf_copy_spec));
 
     var elected = b.openIf(b.electSync());
-    b.mbarrierArriveExpectTx(stage.load_barrier, tile.transactionBytes());
-    elected.close();
+    {
+        b.mbarrierArriveExpectTx(stage.load_barrier, tile.transactionBytes());
+        elected.close();
+    }
     b.copy(b.setTmaBarrier(exec_a, stage.load_barrier), .{a_source}, .{stage.a_destination}, null);
     b.copy(b.setTmaBarrier(exec_b, stage.load_barrier), .{b_source}, .{stage.b_destination}, null);
     b.copy(b.setTmaBarrier(exec_sfa, stage.load_barrier), .{sfa_source}, .{stage.sfa_destination}, null);
@@ -863,15 +867,23 @@ fn advancePipeline(b: *B, index: V, phase: V, comptime stages: usize) PipelinePo
     const wraps = advanced.eq(stages);
     const next_index = b.select(wraps, 0, advanced);
     var next_phase = b.openIfElse(wraps, .{phase});
-    next_phase.yieldThen(.{phase.bitXor(1)});
-    next_phase.yieldElse(.{phase});
+    {
+        next_phase.yieldThen(.{phase.bitXor(1)});
+    }
+    {
+        next_phase.yieldElse(.{phase});
+    }
     return .{ .index = next_index, .phase = next_phase.results[0] };
 }
 
 fn peekBarrierIfRemaining(b: *B, base: V, count: V, limit: usize, state: PipelinePosition) V {
     var peek = b.openIfElse(count.lt(limit), .{.i1});
-    peek.yieldThen(.{b.mbarrierWaitParity(barrierAt(b, base, state.index), state.phase)});
-    peek.yieldElse(.{b.constant(.i1, true)});
+    {
+        peek.yieldThen(.{b.mbarrierWaitParity(barrierAt(b, base, state.index), state.phase)});
+    }
+    {
+        peek.yieldElse(.{b.constant(.i1, true)});
+    }
     return peek.results[0];
 }
 
@@ -956,68 +968,76 @@ fn runTmaProducer(
         div_n,
     };
     var tiles = b.openWhile(carried, carried);
-    tiles.yieldBefore(tiles.before_carried[3], tiles.before_carried);
-    const tile_m = tiles.after_carried[0];
-    const group = tiles.after_carried[2];
-    const expert = expert_ids.get(.{group}, .i32);
-    const first_state: PipelinePosition = .{
-        .index = tiles.after_carried[5],
-        .phase = tiles.after_carried[6],
-    };
-    const first_ready = b.mbarrierWaitParity(
-        barrierAt(b, storage.mma_barriers, first_state.index),
-        first_state.phase,
-    );
-    var stages = b.openFor(
-        0,
-        k_tiles,
-        1,
-        .{ first_ready, b.constant(.i32, 0), first_state.index, first_state.phase },
-    );
-    const k = stages.carried[1];
-    const state: PipelinePosition = .{
-        .index = stages.carried[2],
-        .phase = stages.carried[3],
-    };
-    const buffers = stageBuffersAt(b, tile, storage, state.index);
-    var pending = b.openIf(stages.carried[0].eq(false));
-    b.mbarrierTryWaitParity(buffers.mma_barrier, state.phase, 10_000_000);
-    pending.close();
-    issueTmaStage(b, tile, k_tiles, partitioned_a_target, partitioned_b_target, buffers, k, tile_m, group, expert, exec_a, exec_b, exec_sfa, exec_sfb);
-    const next_count = stages.carried[1].add(1);
-    const next_state = advancePipeline(b, state.index, state.phase, tile.stages);
-    const next_ready = peekBarrierIfRemaining(b, storage.mma_barriers, next_count, k_tiles, next_state);
-    stages.yield(.{ next_ready, next_count, next_state.index, next_state.phase });
-    const next_work = advancePersistentWork(
-        b,
-        tiles.after_carried[8],
-        tiles.after_carried[12],
-        tiles.after_carried[7],
-        tiles.after_carried[14],
-        tiles.after_carried[13],
-        tiles.after_carried[15],
-        tiles.after_carried[16],
-        direct,
-    );
-    tiles.yieldAfter(.{
-        next_work.m,
-        next_work.n,
-        next_work.group,
-        next_work.valid,
-        stages.results[1],
-        stages.results[2],
-        stages.results[3],
-        tiles.after_carried[7],
-        next_work.linear,
-        tiles.after_carried[9],
-        tiles.after_carried[10],
-        tiles.after_carried[11],
-        next_work.executed,
-        tiles.after_carried[13],
-        tiles.after_carried[14],
-        tiles.after_carried[15],
-        tiles.after_carried[16],
-    });
+    {
+        tiles.yieldBefore(tiles.before_carried[3], tiles.before_carried);
+    }
+    {
+        const tile_m = tiles.after_carried[0];
+        const group = tiles.after_carried[2];
+        const expert = expert_ids.get(.{group}, .i32);
+        const first_state: PipelinePosition = .{
+            .index = tiles.after_carried[5],
+            .phase = tiles.after_carried[6],
+        };
+        const first_ready = b.mbarrierWaitParity(
+            barrierAt(b, storage.mma_barriers, first_state.index),
+            first_state.phase,
+        );
+        var stages = b.openFor(
+            0,
+            k_tiles,
+            1,
+            .{ first_ready, b.constant(.i32, 0), first_state.index, first_state.phase },
+        );
+        {
+            const k = stages.carried[1];
+            const state: PipelinePosition = .{
+                .index = stages.carried[2],
+                .phase = stages.carried[3],
+            };
+            const buffers = stageBuffersAt(b, tile, storage, state.index);
+            var pending = b.openIf(stages.carried[0].eq(false));
+            {
+                b.mbarrierTryWaitParity(buffers.mma_barrier, state.phase, 10_000_000);
+                pending.close();
+            }
+            issueTmaStage(b, tile, k_tiles, partitioned_a_target, partitioned_b_target, buffers, k, tile_m, group, expert, exec_a, exec_b, exec_sfa, exec_sfb);
+            const next_count = stages.carried[1].add(1);
+            const next_state = advancePipeline(b, state.index, state.phase, tile.stages);
+            const next_ready = peekBarrierIfRemaining(b, storage.mma_barriers, next_count, k_tiles, next_state);
+            stages.yield(.{ next_ready, next_count, next_state.index, next_state.phase });
+        }
+        const next_work = advancePersistentWork(
+            b,
+            tiles.after_carried[8],
+            tiles.after_carried[12],
+            tiles.after_carried[7],
+            tiles.after_carried[14],
+            tiles.after_carried[13],
+            tiles.after_carried[15],
+            tiles.after_carried[16],
+            direct,
+        );
+        tiles.yieldAfter(.{
+            next_work.m,
+            next_work.n,
+            next_work.group,
+            next_work.valid,
+            stages.results[1],
+            stages.results[2],
+            stages.results[3],
+            tiles.after_carried[7],
+            next_work.linear,
+            tiles.after_carried[9],
+            tiles.after_carried[10],
+            tiles.after_carried[11],
+            next_work.executed,
+            tiles.after_carried[13],
+            tiles.after_carried[14],
+            tiles.after_carried[15],
+            tiles.after_carried[16],
+        });
+    }
 
     // PipelineTmaUmma.producer_tail: drain every empty barrier before the TMA
     // warp exits so no outstanding tcgen05 arrival outlives the CTA.
@@ -1286,101 +1306,113 @@ fn runMmaConsumer(
         div_n,
     };
     var tiles = b.openWhile(carried, carried);
-    tiles.yieldBefore(tiles.before_carried[3], tiles.before_carried);
-    // Python peeks the first AB-full token before it blocks on an available
-    // accumulator stage. Preserve that ordering so the two independent
-    // pipelines enter the K loop with the same outstanding operations.
-    const first_state: PipelinePosition = .{
-        .index = tiles.after_carried[5],
-        .phase = tiles.after_carried[6],
-    };
-    const first_ready = b.mbarrierWaitParity(
-        barrierAt(b, storage.load_barriers, first_state.index),
-        first_state.phase,
-    );
-    const accumulator_state: PipelinePosition = .{
-        .index = tiles.after_carried[9],
-        .phase = tiles.after_carried[10],
-    };
-    const accumulator_stage = accumulator_state.index;
-    const accumulator_empty = barrierAt(b, storage.accumulator_empty_barriers, accumulator_stage);
-    b.mbarrierTryWaitParity(accumulator_empty, accumulator_state.phase, 10_000_000);
+    {
+        tiles.yieldBefore(tiles.before_carried[3], tiles.before_carried);
+    }
+    {
+        // Python peeks the first AB-full token before it blocks on an available
+        // accumulator stage. Preserve that ordering so the two independent
+        // pipelines enter the K loop with the same outstanding operations.
+        const first_state: PipelinePosition = .{
+            .index = tiles.after_carried[5],
+            .phase = tiles.after_carried[6],
+        };
+        const first_ready = b.mbarrierWaitParity(
+            barrierAt(b, storage.load_barriers, first_state.index),
+            first_state.phase,
+        );
+        const accumulator_state: PipelinePosition = .{
+            .index = tiles.after_carried[9],
+            .phase = tiles.after_carried[10],
+        };
+        const accumulator_stage = accumulator_state.index;
+        const accumulator_empty = barrierAt(b, storage.accumulator_empty_barriers, accumulator_stage);
+        b.mbarrierTryWaitParity(accumulator_empty, accumulator_state.phase, 10_000_000);
 
-    const persistent_mma: cute.Atom = .{ .inner = tiles.after_carried[7].inner, .kernel = b };
-    const initial_mma = b.setMmaAccumulate(persistent_mma, b.constant(.i1, false));
-    var stages = b.openFor(
-        0,
-        k_tiles,
-        1,
-        // Match PipelineTmaUmma's Python loop-carried ABI exactly.  The
-        // software-pipeline pass recognizes the leading try-wait token and
-        // keeps the MMA atom immediately after it.
-        .{ first_ready, initial_mma.value(), b.constant(.i32, 0), first_state.index, first_state.phase },
-    );
-    const k = stages.carried[2];
-    const state: PipelinePosition = .{ .index = stages.carried[3], .phase = stages.carried[4] };
-    var pending = b.openIf(stages.carried[0].eq(false));
-    b.mbarrierTryWaitParity(barrierAt(b, storage.load_barriers, state.index), state.phase, 10_000_000);
-    pending.close();
-    const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, accumulator_stage);
-    const mainloop = staged_mainloop.atStage(b, state.index, accumulator_tmem);
-    mainloop.copyScales(b);
-    const loop_mma: cute.Atom = .{ .inner = stages.carried[1].inner, .kernel = b };
-    const mma = b.setMmaAccumulate(loop_mma, k.ne(0));
-    b.gemm(
-        mma,
-        mainloop.accumulator,
-        .{ mainloop.a, mainloop.sfa },
-        .{ mainloop.b, mainloop.sfb },
-        mainloop.accumulator,
-    );
-    var commit_lane = b.openIf(b.electSync());
-    b.tcgen05Commit(barrierAt(b, storage.mma_barriers, state.index));
-    commit_lane.close();
-    const next_count = stages.carried[2].add(1);
-    const next_state = advancePipeline(b, state.index, state.phase, tile.stages);
-    const next_ready = peekBarrierIfRemaining(b, storage.load_barriers, next_count, k_tiles, next_state);
-    stages.yield(.{ next_ready, mma.value(), next_count, next_state.index, next_state.phase });
+        const persistent_mma: cute.Atom = .{ .inner = tiles.after_carried[7].inner, .kernel = b };
+        const initial_mma = b.setMmaAccumulate(persistent_mma, b.constant(.i1, false));
+        var stages = b.openFor(
+            0,
+            k_tiles,
+            1,
+            // Match PipelineTmaUmma's Python loop-carried ABI exactly.  The
+            // software-pipeline pass recognizes the leading try-wait token and
+            // keeps the MMA atom immediately after it.
+            .{ first_ready, initial_mma.value(), b.constant(.i32, 0), first_state.index, first_state.phase },
+        );
+        {
+            const k = stages.carried[2];
+            const state: PipelinePosition = .{ .index = stages.carried[3], .phase = stages.carried[4] };
+            var pending = b.openIf(stages.carried[0].eq(false));
+            {
+                b.mbarrierTryWaitParity(barrierAt(b, storage.load_barriers, state.index), state.phase, 10_000_000);
+                pending.close();
+            }
+            const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, accumulator_stage);
+            const mainloop = staged_mainloop.atStage(b, state.index, accumulator_tmem);
+            mainloop.copyScales(b);
+            const loop_mma: cute.Atom = .{ .inner = stages.carried[1].inner, .kernel = b };
+            const mma = b.setMmaAccumulate(loop_mma, k.ne(0));
+            b.gemm(
+                mma,
+                mainloop.accumulator,
+                .{ mainloop.a, mainloop.sfa },
+                .{ mainloop.b, mainloop.sfb },
+                mainloop.accumulator,
+            );
+            var commit_lane = b.openIf(b.electSync());
+            {
+                b.tcgen05Commit(barrierAt(b, storage.mma_barriers, state.index));
+                commit_lane.close();
+            }
+            const next_count = stages.carried[2].add(1);
+            const next_state = advancePipeline(b, state.index, state.phase, tile.stages);
+            const next_ready = peekBarrierIfRemaining(b, storage.load_barriers, next_count, k_tiles, next_state);
+            stages.yield(.{ next_ready, mma.value(), next_count, next_state.index, next_state.phase });
+        }
 
-    var full_lane = b.openIf(b.electSync());
-    b.tcgen05Commit(barrierAt(b, storage.accumulator_full_barriers, accumulator_stage));
-    full_lane.close();
-    const next_accumulator_state = advancePipeline(b, accumulator_state.index, accumulator_state.phase, accumulator_stages);
-    const next_acc_count = tiles.after_carried[8].add(1);
-    const next_work = advancePersistentWork(
-        b,
-        tiles.after_carried[12],
-        tiles.after_carried[16],
-        tiles.after_carried[11],
-        tiles.after_carried[18],
-        tiles.after_carried[17],
-        tiles.after_carried[19],
-        tiles.after_carried[20],
-        null,
-    );
-    tiles.yieldAfter(.{
-        next_work.m,
-        next_work.n,
-        next_work.group,
-        next_work.valid,
-        stages.results[2],
-        stages.results[3],
-        stages.results[4],
-        stages.results[1],
-        next_acc_count,
-        next_accumulator_state.index,
-        next_accumulator_state.phase,
-        tiles.after_carried[11],
-        next_work.linear,
-        tiles.after_carried[13],
-        tiles.after_carried[14],
-        tiles.after_carried[15],
-        next_work.executed,
-        tiles.after_carried[17],
-        tiles.after_carried[18],
-        tiles.after_carried[19],
-        tiles.after_carried[20],
-    });
+        var full_lane = b.openIf(b.electSync());
+        {
+            b.tcgen05Commit(barrierAt(b, storage.accumulator_full_barriers, accumulator_stage));
+            full_lane.close();
+        }
+        const next_accumulator_state = advancePipeline(b, accumulator_state.index, accumulator_state.phase, accumulator_stages);
+        const next_acc_count = tiles.after_carried[8].add(1);
+        const next_work = advancePersistentWork(
+            b,
+            tiles.after_carried[12],
+            tiles.after_carried[16],
+            tiles.after_carried[11],
+            tiles.after_carried[18],
+            tiles.after_carried[17],
+            tiles.after_carried[19],
+            tiles.after_carried[20],
+            null,
+        );
+        tiles.yieldAfter(.{
+            next_work.m,
+            next_work.n,
+            next_work.group,
+            next_work.valid,
+            stages.results[2],
+            stages.results[3],
+            stages.results[4],
+            stages.results[1],
+            next_acc_count,
+            next_accumulator_state.index,
+            next_accumulator_state.phase,
+            tiles.after_carried[11],
+            next_work.linear,
+            tiles.after_carried[13],
+            tiles.after_carried[14],
+            tiles.after_carried[15],
+            next_work.executed,
+            tiles.after_carried[17],
+            tiles.after_carried[18],
+            tiles.after_carried[19],
+            tiles.after_carried[20],
+        });
+    }
 
     // Match PipelineUmmaAsync.producer_tail.  The state points at the next
     // accumulator slot; advance to the last slot used by this producer and
@@ -1454,80 +1486,88 @@ fn runEpilogue(
         initial_work.linear,
         initial_work.executed,
     });
-    tiles.yieldBefore(tiles.before_carried[3], .{
-        tiles.before_carried[0],
-        tiles.before_carried[1],
-        tiles.before_carried[2],
-        tiles.before_carried[4],
-        tiles.before_carried[5],
-        tiles.before_carried[6],
-        tiles.before_carried[7],
-        tiles.before_carried[8],
-    });
-    const tile_m = tiles.after_carried[0];
-    const group = tiles.after_carried[2];
-    const accumulator_state: PipelinePosition = .{
-        .index = tiles.after_carried[4],
-        .phase = tiles.after_carried[5],
-    };
-    const stage = accumulator_state.index;
-    b.mbarrierTryWaitParity(barrierAt(b, storage.accumulator_full_barriers, stage), accumulator_state.phase, 10_000_000);
-
-    const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, stage);
-    const warp_tmem = b.addOffset(
-        accumulator_tmem,
-        b.makeIntTupleDivBy(warp.mul(32 * 65536), 4),
-        b.ptrTy(.f32, .tmem, 16) catch @panic("bad epilogue TMEM pointer"),
-    ).value();
-    // A warp lane holds one routed row, so tiles wider than a warp are drained
-    // 32 rows at a time. The accumulator stage is released once its last chunk
-    // is in registers.
-    const chunk_rows: usize = comptime @intCast(tile.chunkRows());
-    const tile_chunks = comptime tile.chunks();
-    inline for (0..tile_chunks) |chunk| {
-        const chunk_tmem = if (chunk == 0) warp_tmem else b.addOffset(
-            warp_tmem,
-            b.makeIntTuple(.{@as(i32, @intCast(chunk * chunk_rows))}),
-            b.ptrTy(.f32, .tmem, offsetAlignment(16, @intCast(chunk * chunk_rows), 4)) catch @panic("bad epilogue TMEM pointer"),
-        ).value();
-        // Route metadata does not depend on the accumulator.
-        const routed = routedLanes(b, tile, operands, group, chunk);
-        const values = b.tmemLoadVector(chunk_tmem, @intCast(chunk_rows), .{ .num_dp = 32, .num_b = 32, .num_rep = @intCast(chunk_rows) });
-        b.fenceTmemLoad();
-        if (chunk + 1 == tile_chunks) {
-            // Registers now own the accumulator values, so all 128 epilogue
-            // threads release this TMEM stage before the stores.
-            b.mbarrierArrive(barrierAt(b, storage.accumulator_empty_barriers, stage), 1);
-        }
-        var columns: [@intCast(@min(n, 32))]V = undefined;
-        inline for (&columns, 0..) |*column, i| column.* = b.vectorExtract(values, i, .i32).bitCast(.f32);
-        switch (epilogue) {
-            .swiglu_mxfp8 => storeTileSwiglu(b, tile, storage, operands, routed, tile_m, group, &columns, chunk),
-            .route_rows => storeTileRows(b, tile, operands, routed, tile_m, &columns, chunk),
-        }
+    {
+        tiles.yieldBefore(tiles.before_carried[3], .{
+            tiles.before_carried[0],
+            tiles.before_carried[1],
+            tiles.before_carried[2],
+            tiles.before_carried[4],
+            tiles.before_carried[5],
+            tiles.before_carried[6],
+            tiles.before_carried[7],
+            tiles.before_carried[8],
+        });
     }
-    const next_accumulator_state = advancePipeline(b, accumulator_state.index, accumulator_state.phase, accumulator_stages);
-    const next_work = advancePersistentWork(b, tiles.after_carried[6], tiles.after_carried[7], b.gridDim().z, active, tiles_m, div_m, div_n, direct);
-    tiles.yieldAfter(.{
-        next_work.m,
-        next_work.n,
-        next_work.group,
-        next_work.valid,
-        tiles.after_carried[3].add(1),
-        next_accumulator_state.index,
-        next_accumulator_state.phase,
-        next_work.linear,
-        next_work.executed,
-    });
+    {
+        const tile_m = tiles.after_carried[0];
+        const group = tiles.after_carried[2];
+        const accumulator_state: PipelinePosition = .{
+            .index = tiles.after_carried[4],
+            .phase = tiles.after_carried[5],
+        };
+        const stage = accumulator_state.index;
+        b.mbarrierTryWaitParity(barrierAt(b, storage.accumulator_full_barriers, stage), accumulator_state.phase, 10_000_000);
+
+        const accumulator_tmem = accumulatorTmemAt(b, tile, tmem, stage);
+        const warp_tmem = b.addOffset(
+            accumulator_tmem,
+            b.makeIntTupleDivBy(warp.mul(32 * 65536), 4),
+            b.ptrTy(.f32, .tmem, 16) catch @panic("bad epilogue TMEM pointer"),
+        ).value();
+        // A warp lane holds one routed row, so tiles wider than a warp are drained
+        // 32 rows at a time. The accumulator stage is released once its last chunk
+        // is in registers.
+        const chunk_rows: usize = comptime @intCast(tile.chunkRows());
+        const tile_chunks = comptime tile.chunks();
+        inline for (0..tile_chunks) |chunk| {
+            const chunk_tmem = if (chunk == 0) warp_tmem else b.addOffset(
+                warp_tmem,
+                b.makeIntTuple(.{@as(i32, @intCast(chunk * chunk_rows))}),
+                b.ptrTy(.f32, .tmem, offsetAlignment(16, @intCast(chunk * chunk_rows), 4)) catch @panic("bad epilogue TMEM pointer"),
+            ).value();
+            // Route metadata does not depend on the accumulator.
+            const routed = routedLanes(b, tile, operands, group, chunk);
+            const values = b.tmemLoadVector(chunk_tmem, @intCast(chunk_rows), .{ .num_dp = 32, .num_b = 32, .num_rep = @intCast(chunk_rows) });
+            b.fenceTmemLoad();
+            if (chunk + 1 == tile_chunks) {
+                // Registers now own the accumulator values, so all 128 epilogue
+                // threads release this TMEM stage before the stores.
+                b.mbarrierArrive(barrierAt(b, storage.accumulator_empty_barriers, stage), 1);
+            }
+            var columns: [@intCast(@min(n, 32))]V = undefined;
+            inline for (&columns, 0..) |*column, i| column.* = b.vectorExtract(values, i, .i32).bitCast(.f32);
+            switch (epilogue) {
+                .swiglu_mxfp8 => storeTileSwiglu(b, tile, storage, operands, routed, tile_m, group, &columns, chunk),
+                .route_rows => storeTileRows(b, tile, operands, routed, tile_m, &columns, chunk),
+            }
+        }
+        const next_accumulator_state = advancePipeline(b, accumulator_state.index, accumulator_state.phase, accumulator_stages);
+        const next_work = advancePersistentWork(b, tiles.after_carried[6], tiles.after_carried[7], b.gridDim().z, active, tiles_m, div_m, div_n, direct);
+        tiles.yieldAfter(.{
+            next_work.m,
+            next_work.n,
+            next_work.group,
+            next_work.valid,
+            tiles.after_carried[3].add(1),
+            next_accumulator_state.index,
+            next_accumulator_state.phase,
+            next_work.linear,
+            next_work.executed,
+        });
+    }
 
     var release_warp = b.openIf(warp.eq(0));
-    // Permit release and deallocation are warp collective as well.
-    b.relinquishTmemAllocPermit(.{});
-    release_warp.close();
+    {
+        // Permit release and deallocation are warp collective as well.
+        b.relinquishTmemAllocPermit(.{});
+        release_warp.close();
+    }
     b.namedBarrier(1, 128);
     var dealloc_warp = b.openIf(warp.eq(0));
-    b.deallocTmem(tmem, tile.tmem_columns, .{});
-    dealloc_warp.close();
+    {
+        b.deallocTmem(tmem, tile.tmem_columns, .{});
+        dealloc_warp.close();
+    }
 }
 
 /// E8M0 exponent of the power-of-two MX scale for a block maximum, rounded
@@ -1658,8 +1698,10 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
         }
     }
     var owner = b.openIf(lane.lt(n));
-    scratch.set(.{ warp, lane }, lane_maximum);
-    owner.close();
+    {
+        scratch.set(.{ warp, lane }, lane_maximum);
+        owner.close();
+    }
     b.namedBarrier(1, 128);
 
     // Lane `c` turns the two half-block maxima of column `c` into its scale.
@@ -1677,20 +1719,24 @@ fn swigluRows(b: *B, comptime tile: Tile, storage: StageStorage, operands: Epilo
         var inverses: [swiglu_chunk]V = undefined;
         for (inverses[0 .. last - first], first..) |*inverse, column| inverse.* = b.shuffleIdx(scale.inverse, @as(i32, @intCast(column)));
         var gate_lane = b.openIf(is_gate);
-        for (activations[first..last], inverses[0 .. last - first], first..) |activation, inverse, column| {
-            const quantized = activation.mul(inverse).maximum(-448.0).minimum(448.0).to(.f8e4m3fn);
-            operands.q.?.set(.{ first_row.add(chunk_first + @as(i32, @intCast(column))), activation_index }, quantized);
+        {
+            for (activations[first..last], inverses[0 .. last - first], first..) |activation, inverse, column| {
+                const quantized = activation.mul(inverse).maximum(-448.0).minimum(448.0).to(.f8e4m3fn);
+                operands.q.?.set(.{ first_row.add(chunk_first + @as(i32, @intCast(column))), activation_index }, quantized);
+            }
+            gate_lane.close();
         }
-        gate_lane.close();
         if (guard) |*g| g.close();
     }
 
     // Warps 0 and 2 each own one 32-activation block of this tile.
     var scale_lane = b.openIf(warp.rem(2).eq(0).bitAnd(lane.add(chunk_first).lt(routed.count)));
-    const block = tile_m.mul(2).add(warp.div(2));
-    const swizzled = block.div(4).mul(512).add(lane.mul(16)).add(chunk * 4).add(block.rem(4));
-    operands.s.?.set(.{ group, swizzled }, scale.exponent.to(.i8));
-    scale_lane.close();
+    {
+        const block = tile_m.mul(2).add(warp.div(2));
+        const swizzled = block.div(4).mul(512).add(lane.mul(16)).add(chunk * 4).add(block.rem(4));
+        operands.s.?.set(.{ group, swizzled }, scale.exponent.to(.i8));
+        scale_lane.close();
+    }
 }
 
 /// Python `down_epilogue`: store each live routed row at its token/top-k
@@ -1843,67 +1889,79 @@ fn buildUmmaDevice(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: E
     // every lane races on the same shared state and breaks the first phase
     // transition when the A/B ring wraps.
     var init_warp = b.openIf(warp.eq(0));
-    const barrier_arrays = .{
-        .{ storage.load_barriers, stages, 1 },
-        .{ storage.mma_barriers, stages, 1 },
-        .{ storage.accumulator_full_barriers, accumulator_stages, 1 },
-        .{ storage.accumulator_empty_barriers, accumulator_stages, 128 },
-    };
-    inline for (barrier_arrays) |array| {
-        var lane = b.openIf(b.electSync());
-        inline for (0..array[1]) |stage| {
-            b.mbarrierInit(barrierAt(b, array[0], b.constant(.i32, stage)), array[2]);
+    {
+        const barrier_arrays = .{
+            .{ storage.load_barriers, stages, 1 },
+            .{ storage.mma_barriers, stages, 1 },
+            .{ storage.accumulator_full_barriers, accumulator_stages, 1 },
+            .{ storage.accumulator_empty_barriers, accumulator_stages, 128 },
+        };
+        inline for (barrier_arrays) |array| {
+            var lane = b.openIf(b.electSync());
+            {
+                inline for (0..array[1]) |stage| {
+                    b.mbarrierInit(barrierAt(b, array[0], b.constant(.i32, stage)), array[2]);
+                }
+                lane.close();
+            }
         }
-        lane.close();
+        b.fenceMbarrierInit();
+        init_warp.close();
     }
-    b.fenceMbarrierInit();
-    init_warp.close();
     b.syncThreads();
 
     // Each role walks the same persistent tile sequence independently. The
     // AB and accumulator mbarriers carry all cross-warp dependencies.
     var tma_warp = b.openIf(warp.eq(5));
-    switch (k_tiles) {
-        inline 16, 18, 32, 40 => |kt| runTmaProducer(b, tile, kt, storage, active, d.tiles_m, expert_ids, direct, partitioned_a.targets[0], partitioned_b.targets[0], exec_a, exec_b, exec_sfa, exec_sfb),
-        else => std.debug.panic("unsupported MXFP4 reduction tile count {d}", .{k_tiles}),
+    {
+        switch (k_tiles) {
+            inline 16, 18, 32, 40 => |kt| runTmaProducer(b, tile, kt, storage, active, d.tiles_m, expert_ids, direct, partitioned_a.targets[0], partitioned_b.targets[0], exec_a, exec_b, exec_sfa, exec_sfb),
+            else => std.debug.panic("unsupported MXFP4 reduction tile count {d}", .{k_tiles}),
+        }
+        tma_warp.close();
     }
-    tma_warp.close();
 
     var mma_warp = b.openIf(warp.eq(4));
-    // Python's MMA role reaches its own TmemAllocator.wait_for_alloc site.
-    b.namedBarrier(2, 160);
-    switch (k_tiles) {
-        inline 16, 18, 32, 40 => |kt| runMmaConsumer(b, tile, kt, storage, tiled_mma, tmem_holding, active, d.tiles_m),
-        else => unreachable,
+    {
+        // Python's MMA role reaches its own TmemAllocator.wait_for_alloc site.
+        b.namedBarrier(2, 160);
+        switch (k_tiles) {
+            inline 16, 18, 32, 40 => |kt| runMmaConsumer(b, tile, kt, storage, tiled_mma, tmem_holding, active, d.tiles_m),
+            else => unreachable,
+        }
+        mma_warp.close();
     }
-    mma_warp.close();
 
     var epilogue_warps = b.openIf(warp.lt(4));
-    // TmemAllocator.allocate is issued collectively by warp 0.  The four
-    // epilogue warps then meet the MMA warp at named barrier 2.
-    var alloc_warp = b.openIf(warp.eq(0));
-    b.allocTmem(tile.tmem_columns, tmem_holding, .{});
-    alloc_warp.close();
-    b.namedBarrier(2, 160);
-    switch (epilogue) {
-        .swiglu_mxfp8 => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, direct, .{
-            .group_sizes = view(b, d.group_sizes),
-            .route_inverse = view(b, d.route_inverse),
-            .routing_weights = view(b, d.routing_weights),
-            .q = view(b, d.q),
-            .s = view(b, d.s),
-            .direct = cfg.direct,
-            .group_rows = cfg.groupRows(),
-            .swiglu_limit = cfg.swiglu_limit,
-        }),
-        .route_rows => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, direct, .{
-            .group_sizes = view(b, d.group_sizes),
-            .route_inverse = view(b, d.route_inverse),
-            .rows = view(b, d.rows),
-            .direct = cfg.direct,
-        }),
+    {
+        // TmemAllocator.allocate is issued collectively by warp 0.  The four
+        // epilogue warps then meet the MMA warp at named barrier 2.
+        var alloc_warp = b.openIf(warp.eq(0));
+        {
+            b.allocTmem(tile.tmem_columns, tmem_holding, .{});
+            alloc_warp.close();
+        }
+        b.namedBarrier(2, 160);
+        switch (epilogue) {
+            .swiglu_mxfp8 => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, direct, .{
+                .group_sizes = view(b, d.group_sizes),
+                .route_inverse = view(b, d.route_inverse),
+                .routing_weights = view(b, d.routing_weights),
+                .q = view(b, d.q),
+                .s = view(b, d.s),
+                .direct = cfg.direct,
+                .group_rows = cfg.groupRows(),
+                .swiglu_limit = cfg.swiglu_limit,
+            }),
+            .route_rows => runEpilogue(b, tile, epilogue, storage, tmem_holding, active, d.tiles_m, direct, .{
+                .group_sizes = view(b, d.group_sizes),
+                .route_inverse = view(b, d.route_inverse),
+                .rows = view(b, d.rows),
+                .direct = cfg.direct,
+            }),
+        }
+        epilogue_warps.close();
     }
-    epilogue_warps.close();
 }
 
 fn buildHostLaunch(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue: Epilogue) cute.FinishError!void {

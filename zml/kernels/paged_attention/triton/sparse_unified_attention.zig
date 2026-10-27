@@ -186,9 +186,13 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
                 });
                 const empty = k.sum(scan_mask.bitAnd(positions.ge(0)).bitAnd(positions.lt(seq_len)).to(.i32)).eq(0);
                 var branch = k.openIfElse(empty, .{});
-                storeResult(k, cfg, a, query, head, head_mask, segment, dims, dim_mask, initial_max, initial_sum, initial_acc);
-                branch.elseBranch();
-                branch.close();
+                {
+                    storeResult(k, cfg, a, query, head, head_mask, segment, dims, dim_mask, initial_max, initial_sum, initial_acc);
+                    branch.elseBranch();
+                }
+                {
+                    branch.close();
+                }
                 k.returnIf(empty);
             }
 
@@ -212,34 +216,38 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
                 // A bounded single-tile segment was already checked above.
                 const nonempty = if (partition.tiles_per_segment == 1 and partition.span <= 256) k.constant(.i1, 1) else k.sum(valid.to(.i32)).gt(0);
                 var branch = k.openIfElse(nonempty, .{ k.tensorTy(&.{cfg.block_m}, .f32), k.tensorTy(&.{cfg.block_m}, .f32), k.tensorTy(&.{ cfg.block_m, cfg.head_size_padded }, .f32) });
-                const safe_position = k.where(valid, position, k.zeros(&.{cfg.tile_size}, .i32));
-                const page = k.loadOpts(table.addPtr(safe_position.div(@as(i32, @intCast(cfg.block_size)))), .{
-                    .mask = valid,
-                    .other = k.zeros(&.{cfg.tile_size}, .i32),
-                }).to(.i64);
-                const in_page = safe_position.rem(@as(i32, @intCast(cfg.block_size))).to(.i64);
-                const key_offset = page.mul(cfg.key_strides[0]).add(in_page.mul(cfg.key_strides[1])).add(kv_head.to(.i64).mul(cfg.key_strides[2])).expandDims(0)
-                    .add(dims.to(.i64).mul(cfg.key_strides[3]).expandDims(1));
-                const value_offset = page.mul(cfg.value_strides[0]).add(in_page.mul(cfg.value_strides[1])).add(kv_head.to(.i64).mul(cfg.value_strides[2])).expandDims(1)
-                    .add(dims.to(.i64).mul(cfg.value_strides[3]).expandDims(0));
-                const K = k.loadOpts(a.key_ptr.addPtr(key_offset), .{
-                    .mask = k.mask2d(dim_mask, valid, cfg.head_size_padded, cfg.tile_size),
-                    .other = k.zeros(&.{ cfg.head_size_padded, cfg.tile_size }, cfg.dtype),
-                });
-                const V = k.loadOpts(a.value_ptr.addPtr(value_offset), .{
-                    .mask = k.mask2d(valid, dim_mask, cfg.tile_size, cfg.head_size_padded),
-                    .other = k.zeros(&.{ cfg.tile_size, cfg.head_size_padded }, cfg.dtype),
-                });
-                const scores = k.dot(Q, K, k.zeros(&.{ cfg.block_m, cfg.tile_size }, .f32)).mul(cfg.scale * RCP_LN2);
-                const S = k.where(k.mask2d(head_mask, valid, cfg.block_m, cfg.tile_size), scores, k.full(&.{ cfg.block_m, cfg.tile_size }, -std.math.inf(f32), .f32));
-                const max_score = loop.carried[0].maximum(k.maxOpts(S, .{ .axis = 1 }));
-                const next_max = k.where(max_score.gt(-std.math.inf(f32)), max_score, k.zeros(&.{cfg.block_m}, .f32));
-                const alpha = k.exp2(loop.carried[0].sub(next_max));
-                const P = k.exp2(S.sub(next_max.expandDims(1)));
-                const sum = loop.carried[1].mul(alpha).add(k.sumOpts(P, .{ .axis = 1 }));
-                const acc = k.dot(P.to(cfg.dtype), V, loop.carried[2].mul(alpha.expandDims(1)));
-                branch.yieldThen(.{ next_max, sum, acc });
-                branch.yieldElse(.{ loop.carried[0], loop.carried[1], loop.carried[2] });
+                {
+                    const safe_position = k.where(valid, position, k.zeros(&.{cfg.tile_size}, .i32));
+                    const page = k.loadOpts(table.addPtr(safe_position.div(@as(i32, @intCast(cfg.block_size)))), .{
+                        .mask = valid,
+                        .other = k.zeros(&.{cfg.tile_size}, .i32),
+                    }).to(.i64);
+                    const in_page = safe_position.rem(@as(i32, @intCast(cfg.block_size))).to(.i64);
+                    const key_offset = page.mul(cfg.key_strides[0]).add(in_page.mul(cfg.key_strides[1])).add(kv_head.to(.i64).mul(cfg.key_strides[2])).expandDims(0)
+                        .add(dims.to(.i64).mul(cfg.key_strides[3]).expandDims(1));
+                    const value_offset = page.mul(cfg.value_strides[0]).add(in_page.mul(cfg.value_strides[1])).add(kv_head.to(.i64).mul(cfg.value_strides[2])).expandDims(1)
+                        .add(dims.to(.i64).mul(cfg.value_strides[3]).expandDims(0));
+                    const K = k.loadOpts(a.key_ptr.addPtr(key_offset), .{
+                        .mask = k.mask2d(dim_mask, valid, cfg.head_size_padded, cfg.tile_size),
+                        .other = k.zeros(&.{ cfg.head_size_padded, cfg.tile_size }, cfg.dtype),
+                    });
+                    const V = k.loadOpts(a.value_ptr.addPtr(value_offset), .{
+                        .mask = k.mask2d(valid, dim_mask, cfg.tile_size, cfg.head_size_padded),
+                        .other = k.zeros(&.{ cfg.tile_size, cfg.head_size_padded }, cfg.dtype),
+                    });
+                    const scores = k.dot(Q, K, k.zeros(&.{ cfg.block_m, cfg.tile_size }, .f32)).mul(cfg.scale * RCP_LN2);
+                    const S = k.where(k.mask2d(head_mask, valid, cfg.block_m, cfg.tile_size), scores, k.full(&.{ cfg.block_m, cfg.tile_size }, -std.math.inf(f32), .f32));
+                    const max_score = loop.carried[0].maximum(k.maxOpts(S, .{ .axis = 1 }));
+                    const next_max = k.where(max_score.gt(-std.math.inf(f32)), max_score, k.zeros(&.{cfg.block_m}, .f32));
+                    const alpha = k.exp2(loop.carried[0].sub(next_max));
+                    const P = k.exp2(S.sub(next_max.expandDims(1)));
+                    const sum = loop.carried[1].mul(alpha).add(k.sumOpts(P, .{ .axis = 1 }));
+                    const acc = k.dot(P.to(cfg.dtype), V, loop.carried[2].mul(alpha.expandDims(1)));
+                    branch.yieldThen(.{ next_max, sum, acc });
+                }
+                {
+                    branch.yieldElse(.{ loop.carried[0], loop.carried[1], loop.carried[2] });
+                }
                 loop.yield(.{ branch.results[0], branch.results[1], branch.results[2] });
             }
 

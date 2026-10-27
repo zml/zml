@@ -1822,7 +1822,9 @@ test "scalar conversions and constants" {
     try std.testing.expectEqual(DType.f16, a.x.elemDType());
     // Literal inits are lifted, and an integer constant may be a bit pattern.
     var loop = b.openFor(0, 4, 1, .{ 0, 0.5 });
-    loop.yield(.{ loop.carried[0].bitXor(b.constant(.i32, 0xd4d0ccc8)), loop.carried[1].mul(2.0) });
+    {
+        loop.yield(.{ loop.carried[0].bitXor(b.constant(.i32, 0xd4d0ccc8)), loop.carried[1].mul(2.0) });
+    }
 
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
@@ -1956,8 +1958,10 @@ test "comparisons take index ivs and vectors" {
 
     // Literal bounds make an `index` loop.
     var loop = b.openFor(0, 4, 1, .{});
-    _ = loop.iv.lt(2);
-    loop.close();
+    {
+        _ = loop.iv.lt(2);
+        loop.close();
+    }
     // A literal or a scalar broadcasts against a vector.
     const v = b.constant(.f32, 1.0).splat(4);
     _ = v.lt(0.5);

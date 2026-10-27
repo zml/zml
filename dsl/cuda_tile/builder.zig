@@ -1961,12 +1961,18 @@ test "if, if-else, loop with break, reduce, scan, cast, select" {
     // if / if-else carrying a value.
     const is_first = bid.x.eq(0);
     var only = b.openIf(is_first);
-    _ = b.store(picked, v, &.{ bid.x, bid.y });
-    only.close();
+    {
+        _ = b.store(picked, v, &.{ bid.x, bid.y });
+        only.close();
+    }
 
     var branch = b.openIfElse(is_first, .{b.tileTy(&.{ 8, 64 }, .f32)});
-    branch.yieldThen(.{picked});
-    branch.yieldElse(.{t});
+    {
+        branch.yieldThen(.{picked});
+    }
+    {
+        branch.yieldElse(.{t});
+    }
     const chosen = branch.results[0];
 
     // loop: count up to n, break when reached.
@@ -1974,8 +1980,10 @@ test "if, if-else, loop with break, reduce, scan, cast, select" {
     {
         const i = lp.carried[0];
         var done = b.openIf(i.ge(n));
-        lp.breakWith(.{i});
-        done.close();
+        {
+            lp.breakWith(.{i});
+            done.close();
+        }
         lp.yield(.{i.add(1)});
     }
     _ = lp.results[0];
@@ -1984,8 +1992,10 @@ test "if, if-else, loop with break, reduce, scan, cast, select" {
     var once = b.openLoop(.{});
     {
         var first = b.openIf(is_first);
-        once.breakWith(.{});
-        first.close();
+        {
+            once.breakWith(.{});
+            first.close();
+        }
         once.close();
     }
 
@@ -1994,8 +2004,10 @@ test "if, if-else, loop with break, reduce, scan, cast, select" {
     {
         const acc = skip.carried[0];
         var odd = b.openIf(skip.iv.bitAnd(1).eq(1));
-        skip.continueWith(.{acc});
-        odd.close();
+        {
+            skip.continueWith(.{acc});
+            odd.close();
+        }
         skip.yield(.{acc.add(skip.iv)});
     }
     try std.testing.expect(skip.results[0].isScalar());
