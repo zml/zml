@@ -58,8 +58,11 @@ const Params = struct {
     seq_len: usize,
     compile_args: CompileArgs,
     compile_args_buffers: zml.Bufferized(CompileArgs),
-    /// Same noise as diffusers with `generator=torch.Generator("cpu").manual_seed(seed)`
+    /// Same noise as diffusers with `generator=torch.Generator("cpu").manual_seed(seed)`, unused with `noise_path`
     seed: u64 = 42,
+    /// safetensors file holding the initial noise of a diffusers run under the `noise` key, {bs, C, H * W} f32.
+    /// Written by the patched `prepare_latents`, needed for `torch.Generator("cuda")` which TorchGenerator can't replay.
+    noise_path: ?[]const u8 = null,
 };
 
 pub fn run_once(
@@ -110,14 +113,22 @@ pub fn run_once(
     defer latents_std_buffer.deinit();
     const latents_std_tensor = zml.Tensor.init(latents_std_shape, .f32);
 
-    // diffusers' prepare_latents: randn((bs, 1, C, H, W)) in f32 on the CPU generator, flattened to (bs, C, H * W)
+    // diffusers' prepare_latents: randn((bs, 1, C, H, W)), flattened to (bs, C, H * W)
     const latent_h = 2 * (params.compile_args.height / (params.compile_args.vae_scale_factor * 2));
     const latent_w = 2 * (params.compile_args.width / (params.compile_args.vae_scale_factor * 2));
     const noise_shape = zml.Shape.init(.{ .bs = 1, .d = params.compile_args.in_channels, .seq_len = latent_h * latent_w }, .f32);
-    var generator: TorchGenerator = .init(params.seed);
-    const noise_data = try generator.randn(self.allocator, @intCast(noise_shape.count()));
-    defer self.allocator.free(noise_data);
-    var noise_buffer = try zml.Buffer.fromBytes(self.io, self.platform, noise_shape, .replicated, std.mem.sliceAsBytes(noise_data));
+    const noise_slice = if (params.noise_path) |path|
+        try loadNoise(self.allocator, self.io, path, noise_shape)
+    else b: {
+        var generator: TorchGenerator = .init(params.seed);
+        const noise_data = try generator.randn(self.allocator, @intCast(noise_shape.count()));
+        defer self.allocator.free(noise_data);
+        const slice = try zml.Slice.alloc(self.allocator, noise_shape);
+        @memcpy(slice.items(f32), noise_data);
+        break :b slice;
+    };
+    defer noise_slice.free(self.allocator);
+    var noise_buffer = try zml.Buffer.fromSlice(self.io, self.platform, noise_slice, .replicated);
     defer noise_buffer.deinit();
     const noise_tensor: zml.Tensor = .fromShape(noise_shape);
 
@@ -191,6 +202,32 @@ pub fn run_once(
     }
 }
 
+/// Reads the `noise` tensor of `path` into a new slice of `shape`. Only the element count has to match: the saved
+/// tensor may keep diffusers' (bs, 1, C, H, W) layout, which is the same memory as {bs, C, H * W}.
+fn loadNoise(allocator: std.mem.Allocator, io: std.Io, path: []const u8, shape: zml.Shape) !zml.Slice {
+    var registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, path);
+    defer registry.deinit();
+    var tensor_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    defer tensor_store.deinit();
+
+    const saved_shape = tensor_store.getShape("noise") orelse {
+        std.log.err("No `noise` tensor in {s}", .{path});
+        return error.NotFound;
+    };
+    if (saved_shape.dtype() != shape.dtype() or saved_shape.count() != shape.count()) {
+        std.log.err("Expected the noise in {s} to be {f}, got {f}", .{ path, shape, saved_shape });
+        return error.InvalidNoiseShape;
+    }
+
+    const slice = try zml.Slice.alloc(allocator, shape);
+    errdefer slice.free(allocator);
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = try tensor_store.getReader("noise", io, &reader_buffer);
+    defer reader.deinit();
+    try reader.interface.readSliceAll(slice.data());
+    return slice;
+}
+
 // This value is the start of the system prompt
 const DROP_IDX = 14;
 
@@ -233,7 +270,7 @@ const Denoise = struct {
     }
 };
 
-const PipelineWrapper = struct {
+pub const PipelineWrapper = struct {
     lang_model: blocks.Qwen3VLModel,
     transformer_model: blocks.QwenImage21Transformer2DModel,
     vae_model: blocks.AutoencoderKLQwenImage21,
@@ -252,38 +289,10 @@ const PipelineWrapper = struct {
 
         // `noise` is {bs, d, seq_len} f32 from TorchGenerator. diffusers' _pack_latents transposes it to
         // {bs, seq_len, d}, and torch's bf16 randn is the f32 sample rounded to nearest-even, like convert.
-        var latents = noise.transpose(.{ .bs, .seq_len, .d }).convert(.bf16);
+        const latents = noise.transpose(.{ .bs, .seq_len, .d }).convert(.bf16);
 
-        // A `stablehlo.while` traces the transformer once instead of unrolling one copy per timestep.
-        const timesteps: zml.Tensor = .constantTensor(.init(.{ .step = self.timesteps.len }, .f32), std.mem.sliceAsBytes(self.timesteps));
-        latents = zml.ops.@"while"(Denoise, .{
-            .transformer_model = self.transformer_model,
-            .args = self.args,
-            .prompt_embeds = prompt_embeds,
-            .timesteps = timesteps.convert(.bf16),
-            .sigmas = self.scheduler.sigmasTensor(),
-        }, .{
-            .step = .scalar(0, .i32),
-            .latents = latents,
-        }).latents;
-
-        const unpacked = self._unpack_latents(latents).convert(.f32);
-        const std_mean = unpacked.mul(latents_std.broad(unpacked.shape())).add(latents_mean.broad(unpacked.shape()));
-        const img = self.vae_model.forward(std_mean);
-        stdx.debug.assert(img.dim(.t) == 1, "Expected only one temporal dimension, got {}", .{img.dim(.t)});
-
-        // std.debug.print("img: {f}\n", .{img.shape()}); // img: {bs=1,c=4,t=1,kx=2048,ky=2048,f32}
-        const normalized = img.scale(0.5).addConstant(0.5).clamp(
-            zml.Tensor.scalar(0, .f32).broad(img.shape()),
-            zml.Tensor.scalar(1, .f32).broad(img.shape()),
-        );
-        // std.debug.print("normalized: {f} {}\n", .{ normalized.shape(), normalized.dtype() }); // normalized: {bs=1,c=4,t=1,kx=2048,ky=2048,f32} .f32
-        const numpy = normalized.squeeze(.bs).transpose(.{ .t, .kx, .ky, .c });
-        // std.debug.print("numpy: {f} {}\n", .{ numpy.shape(), numpy.dtype() }); // numpy: {t=1,kx=2048,ky=2048,c=4,f32} .f32
-        const pil = numpy.scale(255).round().convert(.u8);
-        // std.debug.print("pil: {f} {}\n", .{ pil.shape(), pil.dtype() }); // pil: {t=1,kx=2048,ky=2048,c=4,u8} .u8
-
-        return pil;
+        const img = generate(self.transformer_model, self.vae_model, self.args, self.scheduler, prompt_embeds, latents, latents_mean, latents_std);
+        return to_pixels(img);
     }
 
     // The python impl does nothing more since we don't have images in the prompt
@@ -306,13 +315,70 @@ const PipelineWrapper = struct {
         const b = base_shift - m * base_seq_len;
         return image_seq_len * m + b;
     }
-
-    fn _unpack_latents(self: PipelineWrapper, latents: zml.Tensor) zml.Tensor {
-        // const w = self.args.width / (self.args.vae_scale_factor * 2);
-        const h: i64 = @intCast(self.args.height / (self.args.vae_scale_factor * 2));
-        return latents.transpose(.{ .bs, .d, .seq_len }).unflatten(.seq_len, h * 2).withTags(.{ .bs, .c, .kx, .ky }).insertAxes(.kx, .{.t});
-    }
 };
 
-const latents_mean_data: *const [64]f32 = &.{ 0.5126, 0.7721, -0.0631, 1.3506, -0.7855, -2.1025, -0.3458, 1.3722, 1.8873, -1.7177, -0.651, 0.2732, 0.7562, -0.6163, -1.0277, 3.8363, 2.021, 0.0472, 0.932, 2.0087, 2.4954, -0.1391, -1.4249, 1.8464, -0.5236, 1.2826, 3.7046, -1.3035, 2.7286, -1.4518, -1.9036, -1.9955, -0.0342, -1.0265, -0.7636, 3.0555, 0.0746, -3.0751, -0.1076, 1.7376, -1.0914, -1.9435, -0.2784, -1.368, 0.4809, -0.4433, 0.3764, 0.5729, -2.0595, 1.096, -1.326, -2.0211, -5.0179, 0.5275, 4.0162, 1.8505, 0.3026, 1.9373, 1.4937, 0.2632, 0.5547, -1.7121, -0.1562, 0.0304 };
-const latents_std_data: *const [64]f32 = &.{ 3.2001, 3.2936, 3.4321, 3.0091, 3.1061, 4.0379, 4.0705, 3.791, 3.0785, 3.65, 3.9308, 3.0904, 2.8778, 3.7675, 3.732, 5.0756, 3.2864, 4.0397, 3.1317, 4.0443, 2.9249, 3.9454, 3.0988, 4.2489, 3.4896, 3.8513, 3.9323, 3.4719, 3.7498, 4.283, 3.5694, 4.2467, 3.9037, 3.2947, 5.077, 3.5075, 3.27, 3.4767, 2.8063, 5.1125, 3.5327, 4.7833, 3.1286, 4.1819, 3.8527, 3.8312, 3.5605, 4.3875, 3.9624, 4.0168, 3.5643, 4.055, 5.5614, 4.2963, 4.408, 3.4959, 3.8747, 3.7608, 3.5735, 3.149, 3.7662, 3.6746, 3.4563, 3.8161 };
+/// Denoises `latents` ({bs, seq_len, d} bf16, packed like diffusers' `prepare_latents`) conditioned on
+/// `prompt_embeds`, then decodes them. Returns the VAE output `vae.decode(latents)[0][:, :, 0]`:
+/// {bs, c, kx, ky} f32 in [-1, 1].
+pub fn generate(
+    transformer_model: blocks.QwenImage21Transformer2DModel,
+    vae_model: blocks.AutoencoderKLQwenImage21,
+    args: CompileArgs,
+    scheduler: *const Scheduler,
+    prompt_embeds: zml.Tensor,
+    latents: zml.Tensor,
+    latents_mean: zml.Tensor,
+    latents_std: zml.Tensor,
+) zml.Tensor {
+    const vae_input = denoise(transformer_model, args, scheduler, prompt_embeds, latents, latents_mean, latents_std);
+    const img = vae_model.forward(vae_input);
+    stdx.debug.assert(img.dim(.t) == 1, "Expected only one temporal dimension, got {}", .{img.dim(.t)});
+    return img.squeeze(.t);
+}
+
+/// Runs the denoising loop and un-normalizes the result. Returns the VAE input
+/// ({bs, c, t = 1, kx, ky} f32), `latents * latents_std + latents_mean` in diffusers.
+pub fn denoise(
+    transformer_model: blocks.QwenImage21Transformer2DModel,
+    args: CompileArgs,
+    scheduler: *const Scheduler,
+    prompt_embeds: zml.Tensor,
+    latents_: zml.Tensor,
+    latents_mean: zml.Tensor,
+    latents_std: zml.Tensor,
+) zml.Tensor {
+    // A `stablehlo.while` traces the transformer once instead of unrolling one copy per timestep.
+    const timesteps: zml.Tensor = .constantTensor(.init(.{ .step = scheduler.timesteps.len }, .f32), std.mem.sliceAsBytes(scheduler.timesteps));
+    const latents = zml.ops.@"while"(Denoise, .{
+        .transformer_model = transformer_model,
+        .args = args,
+        .prompt_embeds = prompt_embeds,
+        .timesteps = timesteps.convert(.bf16),
+        .sigmas = scheduler.sigmasTensor(),
+    }, .{
+        .step = .scalar(0, .i32),
+        .latents = latents_,
+    }).latents;
+
+    const unpacked = unpackLatents(args, latents).convert(.f32);
+    return unpacked.mul(latents_std.broad(unpacked.shape())).add(latents_mean.broad(unpacked.shape()));
+}
+
+/// {bs, seq_len, d} -> {bs, c, t = 1, kx, ky}, same as diffusers' `_unpack_latents` (2.1 latents are not patched).
+fn unpackLatents(args: CompileArgs, latents: zml.Tensor) zml.Tensor {
+    const h: i64 = @intCast(2 * (args.height / (args.vae_scale_factor * 2)));
+    return latents.transpose(.{ .bs, .d, .seq_len }).unflatten(.seq_len, h).withTags(.{ .bs, .c, .kx, .ky }).insertAxes(.kx, .{.t});
+}
+
+/// Same as diffusers' `VaeImageProcessor.postprocess` to PIL: [-1, 1] -> [0, 255] u8, channels last.
+/// {bs = 1, c, kx, ky} f32 -> {kx, ky, c} u8, ready for stb.
+fn to_pixels(img: zml.Tensor) zml.Tensor {
+    const normalized = img.scale(0.5).addConstant(0.5).clamp(
+        zml.Tensor.scalar(0, .f32).broad(img.shape()),
+        zml.Tensor.scalar(1, .f32).broad(img.shape()),
+    );
+    return normalized.squeeze(.bs).transpose(.{ .kx, .ky, .c }).scale(255).round().convert(.u8);
+}
+
+pub const latents_mean_data: *const [64]f32 = &.{ 0.5126, 0.7721, -0.0631, 1.3506, -0.7855, -2.1025, -0.3458, 1.3722, 1.8873, -1.7177, -0.651, 0.2732, 0.7562, -0.6163, -1.0277, 3.8363, 2.021, 0.0472, 0.932, 2.0087, 2.4954, -0.1391, -1.4249, 1.8464, -0.5236, 1.2826, 3.7046, -1.3035, 2.7286, -1.4518, -1.9036, -1.9955, -0.0342, -1.0265, -0.7636, 3.0555, 0.0746, -3.0751, -0.1076, 1.7376, -1.0914, -1.9435, -0.2784, -1.368, 0.4809, -0.4433, 0.3764, 0.5729, -2.0595, 1.096, -1.326, -2.0211, -5.0179, 0.5275, 4.0162, 1.8505, 0.3026, 1.9373, 1.4937, 0.2632, 0.5547, -1.7121, -0.1562, 0.0304 };
+pub const latents_std_data: *const [64]f32 = &.{ 3.2001, 3.2936, 3.4321, 3.0091, 3.1061, 4.0379, 4.0705, 3.791, 3.0785, 3.65, 3.9308, 3.0904, 2.8778, 3.7675, 3.732, 5.0756, 3.2864, 4.0397, 3.1317, 4.0443, 2.9249, 3.9454, 3.0988, 4.2489, 3.4896, 3.8513, 3.9323, 3.4719, 3.7498, 4.283, 3.5694, 4.2467, 3.9037, 3.2947, 5.077, 3.5075, 3.27, 3.4767, 2.8063, 5.1125, 3.5327, 4.7833, 3.1286, 4.1819, 3.8527, 3.8312, 3.5605, 4.3875, 3.9624, 4.0168, 3.5643, 4.055, 5.5614, 4.2963, 4.408, 3.4959, 3.8747, 3.7608, 3.5735, 3.149, 3.7662, 3.6746, 3.4563, 3.8161 };

@@ -62,7 +62,12 @@ pub fn main(init: std.process.Init) !void {
 
         var pipeline = try block.Pipeline.init(allocator, io, platform, cli_args.folder);
         const prompt = "A neon shop sign that reads \"QWEN IMAGE 2.1\", rainy night, reflections on wet pavement";
-        try pipeline.run_once(prompt, .{ .seq_len = 16415, .compile_args = compile_args, .compile_args_buffers = compile_args_buffers });
+        try pipeline.run_once(prompt, .{
+            .seq_len = 16415,
+            .compile_args = compile_args,
+            .compile_args_buffers = compile_args_buffers,
+            .noise_path = "/home/erwan/zml/examples/qwen/pytorch/gpu_noise.safetensors",
+        });
         return;
     }
 
@@ -179,53 +184,6 @@ const VaeWrapper = struct {
         return self.model.forward(tagged);
     }
 };
-
-// /// Denoising + VAE decode, with the prompt embeddings and initial noise taken from the PyTorch run
-// /// so that the outputs are comparable.
-// const AllWrapper = struct {
-//     transformer_model: block.QwenImage21Transformer2DModel,
-//     vae_model: block.AutoencoderKLQwenImage21,
-//     args: CompileArgs,
-//     scheduler: *const Scheduler,
-//     latents_only: bool,
-
-//     pub fn forward(
-//         self: AllWrapper,
-//         prompt_embeds: zml.Tensor,
-//         latents: zml.Tensor,
-//     ) zml.Tensor {
-//         const stats_shape: zml.Shape = .init(.{ .bs = 1, .c = latents_mean_data.len, .t = 1, .kx = 1, .ky = 1 }, .f32);
-//         const latents_mean: zml.Tensor = .constantTensor(stats_shape, std.mem.sliceAsBytes(latents_mean_data));
-//         const latents_std: zml.Tensor = .constantTensor(stats_shape, std.mem.sliceAsBytes(latents_std_data));
-
-//         if (self.latents_only) {
-//             const vae_input = denoisePipeline(
-//                 self.transformer_model,
-//                 self.args,
-//                 self.scheduler,
-//                 prompt_embeds.withTags(.{ .bs, .seq_len, .d }),
-//                 latents.withTags(.{ .bs, .seq_len, .d }),
-//                 latents_mean,
-//                 latents_std,
-//             );
-//             // diffusers' tiled decode calls post_quant_conv last on the bottom-right tile (starts at 10 * 12 latents)
-//             return vae_input.slice(.kx, .{ .start = 120 }).slice(.ky, .{ .start = 120 }).convert(latents.dtype());
-//         }
-
-//         const img = generatePipeline(
-//             self.transformer_model,
-//             self.vae_model,
-//             self.args,
-//             self.scheduler,
-//             prompt_embeds.withTags(.{ .bs, .seq_len, .d }),
-//             latents.withTags(.{ .bs, .seq_len, .d }),
-//             latents_mean,
-//             latents_std,
-//         );
-//         // The reference is decoded by the bf16 VAE
-//         return img.convert(latents.dtype());
-//     }
-// };
 
 test {
     _ = @import("./blocks/tokenizer.zig");
