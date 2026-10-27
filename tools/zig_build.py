@@ -23,6 +23,11 @@ bazel run //tools:zig_build -- \
 To leverage incremental compilation you need to pass `--config=debug` (implying `--strategy=ZigBuildLib=local`)
 to Bazel so that Bazel uses the files from your local checkout instead of files in the sandbox.
 This will give you feedback based on your latest changes to your files.
+
+On Linux, `-Dzig-linker=true` uses a ZML-specific development path: a Bazel LLD
+action collapses the native XLA/PJRT/tokenizer graph into one shared image, then
+Zig incrementally rebuilds its archive and performs a thin final link. Restart
+this tool after adding a new Zig-to-native symbol reference or changing Bazel deps.
 """
 
 from __future__ import annotations
@@ -291,6 +296,7 @@ def action_config(graph: dict[str, object], execroot: str, label: str) -> dict[s
         "linker": link_arguments[0],
         "link_args": rewritten_link_args,
         "link_env": link.get("environmentVariables", []),
+        "native_prelink": None,
         "zig_link": parse_zig_link(link_arguments, archive),
         "runfiles_dir": f"{output_path}.runfiles",
         "runfiles_manifest": f"{output_path}.runfiles_manifest",
@@ -583,6 +589,17 @@ def uses_llvm_static_runtime(config: dict[str, object]) -> bool:
     )
 
 
+def zig_bool_option(arguments: list[str], name: str) -> bool:
+    prefix = f"-D{name}="
+    value: str | None = None
+    for argument in arguments:
+        if argument == f"-D{name}":
+            value = "true"
+        elif argument.startswith(prefix):
+            value = argument.removeprefix(prefix)
+    return value == "true"
+
+
 def parse_cli(argv: list[str]) -> tuple[str, list[str], list[str]]:
     parser = argparse.ArgumentParser(
         description="Build a rules_zig target with Bazel and export it to build.zig",
@@ -615,7 +632,15 @@ def main() -> int:
     safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_")
     config_path = Path("/tmp") / "zig-bazel" / safe_label / "config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    if uses_llvm_static_runtime(config):
+    use_zig_linker = zig_bool_option(zig_args, "zig-linker")
+    output_groups = ["zig_build_inputs"]
+    if use_zig_linker:
+        target = config["zig_link"]["target"]  # type: ignore[index]
+        if not isinstance(target, str) or not target.endswith("-linux-gnu"):
+            raise RuntimeError(f"ZML's native prelink currently supports Linux GNU targets, got {target}")
+        output_groups.append("zig_native_prelink")
+
+    if not use_zig_linker and uses_llvm_static_runtime(config):
         # HACK: These archives are implicit inputs of LLVM's CppLink action, so
         # rules_zig's zig_build_inputs output group does not materialize them.
         # This tool is ZML-specific and experimental, so build LLVM's runtime
@@ -629,7 +654,25 @@ def main() -> int:
                 "@llvm//runtimes/cxxstdlib:static_runtime_lib",
             ],
         )
-    bazel(workspace, ["build", "--show_result=0", *bazel_flags, "--output_groups=zig_build_inputs", label])
+    if use_zig_linker:
+        print("\nPrelinking ZML's native dependencies with LLD inside Bazel...\n", flush=True)
+    bazel(
+        workspace,
+        ["build", "--show_result=0", *bazel_flags, f"--output_groups={','.join(output_groups)}", label],
+    )
+
+    if use_zig_linker:
+        outputs = bazel(
+            workspace,
+            ["cquery", *bazel_flags, "--output=files", "--output_groups=zig_native_prelink", label],
+            capture=True,
+        ).splitlines()
+        if len(outputs) != 1:
+            raise RuntimeError(f"expected one zig_native_prelink output for {label}, got {outputs}")
+        native_prelink = Path(execroot_absolute(execroot, outputs[0]))
+        if not native_prelink.exists():
+            raise RuntimeError(f"Bazel native prelink was not materialized: {native_prelink}")
+        config["native_prelink"] = str(native_prelink)
 
     target_run_info = run_info(workspace, bazel_flags, label, config_path.parent)
     runfiles_dir = config_path.parent / "runfiles"
@@ -688,7 +731,10 @@ def main() -> int:
     ]
     print("\nBazel dependencies and configuration are ready. Running:\n")
     print("  " + shlex.join(command), flush=True)
-    return subprocess.run(command, cwd=workspace).returncode
+    try:
+        return subprocess.run(command, cwd=workspace).returncode
+    except KeyboardInterrupt:
+        return 130
 
 
 if __name__ == "__main__":
