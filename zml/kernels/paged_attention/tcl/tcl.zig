@@ -26,6 +26,7 @@ const paged_attention = @import("../paged_attention.zig");
 const triton = @import("../triton/triton.zig");
 
 const chunk_keys = 4096;
+const flash_chunk_pairs = 512 * chunk_keys;
 const prefill_block = 32;
 
 pub const paged = struct {
@@ -63,15 +64,21 @@ pub const paged = struct {
         // to allocate a chunk of 4080 keys (85 pages of 48).
         const key_alignment = @divExact(page, @as(i64, @intCast(std.math.gcd(@as(u64, @intCast(page)), 64)))) * 64;
         const alignment = if (key_alignment <= chunk_keys) key_alignment else page;
-        const chunk = if (keys <= chunk_keys) keys else @min(keys, @max(1, @divTrunc(chunk_keys, alignment)) * alignment);
         const decode = !parameters.options_.is_prefill and q.dim(.b) == parameters.seq_lens.dim(.b);
         const blocks = (std.math.divCeil(i64, q.dim(.b), prefill_block) catch unreachable) + parameters.seq_lens.dim(.b);
         // Regular block capacities limit layout-search cost for the fused graph.
         // Extra blocks retain zero valid lengths and invalid query positions.
+        const block_count: i64 = if (decode) q.dim(.b) else @intCast(std.math.ceilPowerOfTwo(u64, @intCast(blocks)) catch unreachable);
+        const rows = block_count * @as(i64, if (decode) 1 else prefill_block);
+        // TCC 2026.5 compiles flash chunks of 512 query rows by 4096 keys or
+        // 2048 rows by 1024 keys in minutes, but not 2048 rows by 4096 keys in
+        // 50 minutes: bound the pairs.
+        const chunk_limit = @max(1, @divTrunc(@min(chunk_keys, @divTrunc(flash_chunk_pairs, rows)), alignment)) * alignment;
+        const chunk = if (keys <= chunk_keys) keys else @min(keys, chunk_limit);
         const cfg: Cfg = .{
             .tokens = q.dim(.b),
             .sequences = parameters.seq_lens.dim(.b),
-            .b = if (decode) q.dim(.b) else @intCast(std.math.ceilPowerOfTwo(u64, @intCast(blocks)) catch unreachable),
+            .b = block_count,
             .i = if (decode) 1 else prefill_block,
             .a = (std.math.divCeil(i64, keys, chunk) catch unreachable) * chunk,
             .chunk = chunk,
@@ -390,11 +397,21 @@ fn declareInputs(b: *tcl.Builder, a: Axes) tcl.FinishError!NativeInputs {
 
 const Prepared = struct {
     q: builder.Tensor,
+    /// Page table rows: one per block for decode, one per sequence for
+    /// prefill, whose blocks select their sequence's row with `pick`.
     pages: builder.Tensor,
+    pick: ?builder.Tensor,
     qpos: builder.Tensor,
     kvlen: builder.Tensor,
     row: builder.Tensor,
     active: builder.Tensor,
+
+    /// The pages of each block. TCC 2026.5 has no tactic for selecting
+    /// whole rows of 8192 pages: flash attention selects them per chunk.
+    fn blockPages(self: Prepared, b: *tcl.Builder, a: Axes, pages: builder.Tensor) tcl.FinishError!builder.Tensor {
+        const pick = self.pick orelse return pages;
+        return selectMetadata(b, pages, pick, a.S);
+    }
 };
 
 fn countBefore(b: *tcl.Builder, ends: builder.Tensor, positions: builder.Tensor, axis: tcl.Axis) tcl.FinishError!builder.Tensor {
@@ -453,6 +470,7 @@ fn prepareQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, t: NativeInputs) tcl.Finis
         return .{
             .q = try b.reshape(q, &.{ a.B, a.I, a.Hkv, a.G, a.D }, .{}),
             .pages = try b.reshape(t.pages, &.{ a.B, a.AP }, .{}),
+            .pick = null,
             .qpos = try b.reshape(qpos, &.{ a.B, a.I }, .{}),
             .kvlen = try b.reshape(lengths, &.{a.B}, .{}),
             .row = token_seq,
@@ -500,14 +518,13 @@ fn prepareQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, t: NativeInputs) tcl.Finis
     const qpos = try op.commit(op.where(live, .ne, 0, op.fetch(pos, .{}), -1), .{});
     op = b.tensorOperation(.{});
     const kvlen = try op.commit(op.fetch(key_length, .{}).muli(op.fetch(live_block, .{})), .{});
-    const table = try selectMetadata(b, t.pages, pick, a.S);
 
     const token_pick = try selector(b, token_seq, a.S, cfg.sequences);
     const token_begin = try selectMetadata(b, starts, token_pick, a.S);
     const token_block = try selectMetadata(b, block_start, token_pick, a.S);
     op = b.tensorOperation(.{});
     const row = try op.commit(op.fetch(token_block, .{}).muli(prefill_block).addi(op.fetch(tokens, .{})).subi(op.fetch(token_begin, .{})).binary(.maxi, 0).binary(.mini, cfg.b * cfg.i - 1), .{});
-    return .{ .q = q, .pages = table, .qpos = qpos, .kvlen = kvlen, .row = row, .active = active };
+    return .{ .q = q, .pages = t.pages, .pick = pick, .qpos = qpos, .kvlen = kvlen, .row = row, .active = active };
 }
 
 fn restoreQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, prepared: Prepared, output: builder.Tensor) tcl.FinishError!builder.Tensor {
@@ -622,7 +639,7 @@ const OneShot = tcl.Kernel(Cfg, .{
             const prepared = try prepareQueries(b, cfg, a, t);
             const kc = try b.reshape(t.k_cache, &.{ Nb, a.Hkv, a.D }, .{});
             const vc = try b.reshape(t.v_cache, &.{ Nb, a.Hkv, a.D }, .{});
-            const page_indices = try validIndices(b, prepared.pages, cfg.pages);
+            const page_indices = try validIndices(b, try prepared.blockPages(b, a, prepared.pages), cfg.pages);
             const within_page = try b.arange(cfg.pg, .i32, &.{a.PG}, .{});
             var slot_op = b.tensorOperation(.{ .tactic = .einsum_by_ve });
             const flat_slots = try slot_op.commit(slot_op.fetch(page_indices.safe, .{}).muli(cfg.pg).addi(slot_op.fetch(within_page, .{})), .{});
@@ -695,9 +712,10 @@ const Flash = tcl.Kernel(Cfg, .{
             const Cp = b.axis("Cp", @divExact(cfg.chunk, cfg.pg));
             const t = try declareInputs(b, a);
             const prepared = try prepareQueries(b, cfg, a, t);
-            const by_batch = try b.reshape(prepared.pages, &.{ a.B, C, Cp }, .{});
+            const rows = prepared.pages.axes[0];
+            const by_row = try b.reshape(prepared.pages, &.{ rows, C, Cp }, .{});
             const page_op = b.tensorOperation(.{});
-            const pages = try page_op.commit(page_op.fetch(by_batch, .{}), .{ .axes = &.{ C, a.B, Cp } });
+            const pages = try page_op.commit(page_op.fetch(by_row, .{}), .{ .axes = &.{ C, rows, Cp } });
             const stats = &.{ a.Hkv, a.G, a.B, a.I };
             const out_axes = &.{ a.B, a.I, a.Hkv, a.G, a.D };
             var op = b.tensorOperation(.{});
@@ -705,7 +723,7 @@ const Flash = tcl.Kernel(Cfg, .{
             var loop = b.openFor(n, .{ try b.full(0, .f32, stats), try b.full(0, .f32, out_axes), try b.full(score_min, .f32, stats) });
             {
                 const sum_acc, const qkv_acc, const max_acc = loop.carried;
-                const indices = try validIndices(b, try b.indexRead(pages, loop.iv), cfg.pages);
+                const indices = try validIndices(b, try prepared.blockPages(b, a, try b.indexRead(pages, loop.iv)), cfg.pages);
                 const idx = indices.safe;
                 op = b.tensorOperation(.{});
                 const valid_pages = try op.commit(op.fetch(indices.valid, .{ .broadcast_to = &.{ a.B, Cp, a.PG } }), .{});
