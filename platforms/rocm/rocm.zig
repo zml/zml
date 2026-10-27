@@ -32,6 +32,12 @@ fn setupRocmEnv(rocm_data_dir: []const u8) !void {
     _ = c.setenv("GPU_MAX_HW_QUEUES", "1", 0);
     // Disable rocprofiler queue interposition to avoid its dispatch overhead outside profiling.
     _ = c.setenv("ROCPROFILER_QUEUE_INTERPOSITION", "0", 0);
+
+    if (c.getenv("ROCPROFILER_LOG_LEVEL") == null) {
+        // rocprofiler defaults to the `warning` log level, which can produce unnecessary log output.
+        // Set the log level to `fatal` to suppress all but fatal error messages.
+        _ = c.setenv("ROCPROFILER_LOG_LEVEL", "error", 0);
+    }
 }
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
