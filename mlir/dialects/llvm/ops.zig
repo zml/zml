@@ -104,15 +104,57 @@ pub const Linkage = enum(c_uint) {
 /// `#llvm.linkage<linkage>`; `llvm.linkage` on a `func.func` sets its
 /// linkage once lowered to LLVM. Loads the LLVM dialect into `ctx`, which
 /// must have it registered.
-pub fn linkageAttr(ctx: *mlir.Context, linkage: Linkage) *const mlir.Attribute {
+pub fn linkageAttr(ctx: *mlir.Context, value: Linkage) *const mlir.Attribute {
     _ = c.mlirContextGetOrLoadDialect(ctx.ptr(), mlir.stringRef("llvm"));
-    return @ptrCast(c.mlirLLVMLinkageAttrGet(ctx.ptr(), @backingInt(linkage)).ptr);
+    return @ptrCast(c.mlirLLVMLinkageAttrGet(ctx.ptr(), @backingInt(value)).ptr);
 }
 
 /// `llvm.emit_c_interface`: has the lowering of a `func.func` emit a
 /// `_mlir_ciface_` wrapper that takes its memrefs by pointer.
 pub fn emitCInterface(ctx: *mlir.Context) mlir.NamedAttribute {
     return .named(ctx, "llvm.emit_c_interface", .unit(ctx));
+}
+
+/// `llvm.linkage = #llvm.linkage<linkage>` on a `func.func`.
+pub fn linkage(ctx: *mlir.Context, value: Linkage) mlir.NamedAttribute {
+    return .named(ctx, "llvm.linkage", linkageAttr(ctx, value));
+}
+
+/// `llvm.inline_hint` on a `func.func`: `inlinehint` once lowered.
+pub fn inlineHint(ctx: *mlir.Context) mlir.NamedAttribute {
+    return .named(ctx, "llvm.inline_hint", .unit(ctx));
+}
+
+/// `llvm.noundef` on an argument: never undef or poison.
+pub fn noundef(ctx: *mlir.Context) mlir.NamedAttribute {
+    return .named(ctx, "llvm.noundef", .unit(ctx));
+}
+
+/// `llvm.zeroext` on an argument: a narrow integer passed zero-extended.
+pub fn zeroext(ctx: *mlir.Context) mlir.NamedAttribute {
+    return .named(ctx, "llvm.zeroext", .unit(ctx));
+}
+
+/// `llvm.signext` on an argument: a narrow integer passed sign-extended.
+pub fn signext(ctx: *mlir.Context) mlir.NamedAttribute {
+    return .named(ctx, "llvm.signext", .unit(ctx));
+}
+
+/// `llvm.align = bytes` on a pointer argument.
+pub fn alignment(ctx: *mlir.Context, bytes: u64) mlir.NamedAttribute {
+    return .named(ctx, "llvm.align", .int(ctx, .i64, @as(i64, @intCast(bytes))));
+}
+
+/// `llvm.dereferenceable = bytes` on a pointer argument: that many bytes are
+/// readable.
+pub fn dereferenceable(ctx: *mlir.Context, bytes: u64) mlir.NamedAttribute {
+    return .named(ctx, "llvm.dereferenceable", .int(ctx, .i64, @as(i64, @intCast(bytes))));
+}
+
+/// `llvm.elementtype = type` on a pointer argument: its pointee, which
+/// typed-pointer IR prints.
+pub fn elementtype(ctx: *mlir.Context, pointee: *const mlir.Type) mlir.NamedAttribute {
+    return .named(ctx, "llvm.elementtype", .typeAttr(pointee));
 }
 
 /// The operation of `llvm.atomicrmw`, as the LLVM dialect numbers it.
@@ -240,8 +282,8 @@ pub const LoadOpts = struct {
 /// llvm.load — a value of type `result_type` through `pointer`.
 pub fn load(ctx: *mlir.Context, pointer: *const mlir.Value, result_type: *const mlir.Type, opts: LoadOpts, location: *const mlir.Location) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
-    if (opts.alignment) |alignment| {
-        attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, alignment)));
+    if (opts.alignment) |bytes| {
+        attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, bytes)));
     }
     if (opts.invariant) {
         attrs.appendAssumeCapacity(.named(ctx, "invariant", .unit(ctx)));
@@ -262,8 +304,8 @@ pub const StoreOpts = struct {
 /// llvm.store — `value` through `pointer`.
 pub fn store(ctx: *mlir.Context, value: *const mlir.Value, pointer: *const mlir.Value, opts: StoreOpts, location: *const mlir.Location) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
-    if (opts.alignment) |alignment| {
-        attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, alignment)));
+    if (opts.alignment) |bytes| {
+        attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, bytes)));
     }
     return mlir.Operation.make(ctx, "llvm.store", .{
         .operands = .{ .flat = &.{ value, pointer } },
@@ -323,7 +365,7 @@ pub fn alloca(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
     attrs.appendAssumeCapacity(.named(ctx, "elem_type", .typeAttr(elem_type)));
-    if (opts.alignment) |alignment| attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, alignment)));
+    if (opts.alignment) |bytes| attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, bytes)));
     return mlir.Operation.make(ctx, "llvm.alloca", .{
         .operands = .{ .flat = &.{array_size} },
         .results = .{ .flat = &.{result_type} },
@@ -354,7 +396,7 @@ pub fn atomicrmw(
         .named(ctx, "ordering", .int(ctx, .i64, @backingInt(ordering))),
     });
     if (opts.syncscope) |syncscope| attrs.appendAssumeCapacity(.named(ctx, "syncscope", .string(ctx, syncscope)));
-    if (opts.alignment) |alignment| attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, alignment)));
+    if (opts.alignment) |bytes| attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, bytes)));
     return mlir.Operation.make(ctx, "llvm.atomicrmw", .{
         .operands = .{ .flat = &.{ ptr, val } },
         .results = .{ .flat = &.{val.type_()} },
@@ -377,6 +419,87 @@ pub fn intr_assume(ctx: *mlir.Context, cond: *const mlir.Value, location: *const
         },
         .location = location,
     });
+}
+
+pub fn intr_lifetime_start(ctx: *mlir.Context, ptr: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.intr.lifetime.start", .{
+        .operands = .{ .flat = &.{ptr} },
+        .location = location,
+    });
+}
+
+pub fn intr_lifetime_end(ctx: *mlir.Context, ptr: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.intr.lifetime.end", .{
+        .operands = .{ .flat = &.{ptr} },
+        .location = location,
+    });
+}
+
+pub fn extractelement(ctx: *mlir.Context, vector: *const mlir.Value, position: *const mlir.Value, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.extractelement", .{
+        .operands = .{ .flat = &.{ vector, position } },
+        .results = .{ .flat = &.{result_type} },
+        .location = location,
+    });
+}
+
+pub fn insertelement(ctx: *mlir.Context, vector: *const mlir.Value, value: *const mlir.Value, position: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.insertelement", .{
+        .operands = .{ .flat = &.{ vector, value, position } },
+        .results = .{ .flat = &.{vector.type_()} },
+        .location = location,
+    });
+}
+
+pub fn shufflevector(ctx: *mlir.Context, v1: *const mlir.Value, v2: *const mlir.Value, result_type: *const mlir.Type, mask: []const i32, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.shufflevector", .{
+        .operands = .{ .flat = &.{ v1, v2 } },
+        .results = .{ .flat = &.{result_type} },
+        .attributes = &.{.named(ctx, "mask", .denseArray(ctx, .i32, mask))},
+        .location = location,
+    });
+}
+
+pub fn mlir_undef(ctx: *mlir.Context, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.mlir.undef", .{
+        .results = .{ .flat = &.{result_type} },
+        .location = location,
+    });
+}
+
+pub fn mlir_poison(ctx: *mlir.Context, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.mlir.poison", .{
+        .results = .{ .flat = &.{result_type} },
+        .location = location,
+    });
+}
+
+pub fn freeze(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.freeze", .{
+        .operands = .{ .flat = &.{value} },
+        .results = .{ .flat = &.{value.type_()} },
+        .location = location,
+    });
+}
+
+pub const BrOpts = struct {
+    loop_annotation: ?*const LoopAnnotationAttr = null,
+};
+
+/// `llvm.br`. Not verified: a terminator only verifies inside its block.
+pub fn br(ctx: *mlir.Context, dest: *mlir.Block, dest_operands: []const *const mlir.Value, opts: BrOpts, location: *const mlir.Location) *mlir.Operation {
+    var state: mlir.OperationState = .init("llvm.br", location);
+    state.addOperands(dest_operands);
+    var successors: [1]*const mlir.Block = .{dest};
+    state.addSuccessors(&successors);
+    if (opts.loop_annotation) |annotation| state.addAttributes(&.{.named(ctx, "loop_annotation", annotation.attribute())});
+    return mlir.Operation.init(&state) catch @panic("llvm.br: failed to create the operation");
+}
+
+/// `llvm.unreachable`. Not verified: a terminator only verifies inside its
+/// block.
+pub fn unreachable_(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.unreachable", .{ .location = location, .verify = false });
 }
 
 /// llvm.call_intrinsic — call the LLVM intrinsic `name` (e.g. `llvm.nvvm.*`), with an
