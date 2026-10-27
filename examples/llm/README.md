@@ -40,7 +40,9 @@ bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/
 - `--seqlen=<number>`: Optional. Maximum sequence length. Defaults to `2048`.
 - `--backend=<stablehlo|cute|nki|metal>`: Optional. Attention backend. `cute` uses CuTe flash attention on CUDA GPUs with compute capability 8.0 or newer. If omitted, the program auto-selects one for the current platform, including `cute` on supported CUDA GPUs.
 
-- `--warmup-runs=<n>`: Optional. With `--prompt`, generate and discard `n` responses before the measured run. Defaults to `0`. Each run gets a fresh conversation and cache state while sharing compiled executables and loaded weights. Warm-up durations are logged separately; only the final response and decode rate are printed.
+- `--warmup-runs=<n>`: Optional. With `--prompt`, generate and discard `n` responses before the measured run. Defaults to `0`. Each run gets a fresh conversation and cache state while sharing compiled executables and loaded weights. Warm-up durations are logged separately; only measured responses and decode rates are printed.
+
+- `--benchmark-runs=<n>`: Optional. Generate and time `n` fresh sessions after warm-up, printing each response and decode rate. Defaults to `1`; must be positive, and requires `--prompt` for multiple runs. Executables and weights are reused, while conversation, cache, recurrent state, and RNG are reset for every session. Use, for example, `--warmup-runs=1 --benchmark-runs=5 --topk=1` to measure repeated greedy generations.
 
 For a warm generation measurement, use `--warmup-runs=1` with a fixed prompt,
 sequence length, and sampling strategy. Compilation, weight loading, prefill,

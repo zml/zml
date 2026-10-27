@@ -21,6 +21,7 @@ const Args = struct {
     backend: ?enum { stablehlo, cute, nki, metal, tenstorrent } = null,
     profile: bool = false,
     warmup_runs: u32 = 0,
+    benchmark_runs: u32 = 1,
     tt_devices: enum { single, all } = .single,
 
     pub const help =
@@ -36,6 +37,7 @@ const Args = struct {
         \\   --backend=<text>    Attention backend to use ([stablehlo, cute, nki, metal], default: auto-selection)
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\   --warmup-runs=<n>    Generate n discarded responses before timing a fresh session (requires --prompt; default: 0)
+        \\   --benchmark-runs=<n> Time n fresh sessions after warm-up (requires --prompt when n > 1; default: 1)
         \\   --tt-devices=<text> Tenstorrent devices to use ([single, all], default: single)
         \\
     ;
@@ -56,6 +58,10 @@ pub fn main(init: std.process.Init) !void {
     if (args.warmup_runs != 0 and args.prompt == null) {
         log.err("--warmup-runs requires --prompt", .{});
         return error.InvalidWarmupArguments;
+    }
+    if (args.benchmark_runs == 0 or (args.benchmark_runs != 1 and args.prompt == null)) {
+        log.err("--benchmark-runs must be positive and requires --prompt for multiple runs", .{});
+        return error.InvalidBenchmarkArguments;
     }
 
     //
@@ -187,22 +193,27 @@ pub fn main(init: std.process.Init) !void {
         log.info("Warm-up completed [{f}]", .{start.untilNow(init.io, .awake)});
     }
 
-    var llm_chat = try chat.Chat.init(
-        allocator,
-        init.io,
-        platform,
-        tokenizer,
-        compiled_model,
-        &model_buffers,
-    );
-    defer llm_chat.deinit();
+    for (0..args.benchmark_runs) |iteration| {
+        if (args.benchmark_runs > 1) {
+            log.info("Measured run {d}/{d}...", .{ iteration + 1, args.benchmark_runs });
+        }
+        var llm_chat = try chat.Chat.init(
+            allocator,
+            init.io,
+            platform,
+            tokenizer,
+            compiled_model,
+            &model_buffers,
+        );
+        defer llm_chat.deinit();
 
-    if (interactive) {
-        try llm_chat.runInteractive(prompt);
-    } else {
-        try llm_chat.runOnce(prompt, .{
-            .profile = args.profile,
-        });
+        if (interactive) {
+            try llm_chat.runInteractive(prompt);
+        } else {
+            try llm_chat.runOnce(prompt, .{
+                .profile = args.profile,
+            });
+        }
     }
 }
 
