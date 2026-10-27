@@ -407,14 +407,14 @@ const TestCase = struct {
         var seq_lens: [3]i32 = undefined;
         var query_start_len: [4]i32 = .{ 0, 0, 0, 0 };
         var block_table: [3][3]i32 = @splat(@splat(-1));
-        // Keep physical pages out of sequence order and leave page zero unused.
-        const pages: [3][3]usize = .{ .{ 3, 1, 7 }, .{ 8, 2, 6 }, .{ 5, 9, 4 } };
+        // Populate active block-table entries with shuffled physical page IDs; page zero stays unused.
+        const physical_page_ids: [3][3]usize = .{ .{ 3, 1, 7 }, .{ 8, 2, 6 }, .{ 5, 9, 4 } };
         for (self.query_counts, self.context_lengths, 0..) |query_count, context_length, seq| {
             const seq_len = context_length + query_count;
             seq_lens[seq] = @intCast(seq_len);
             query_start_len[seq + 1] = query_start_len[seq] + @as(i32, @intCast(query_count));
             for (0..seq_len) |pos| {
-                const page = pages[seq][pos / page_size];
+                const page = physical_page_ids[seq][pos / page_size];
                 block_table[seq][pos / page_size] = @intCast(page);
                 k_data[page][pos % page_size] = PagedAttentionTestData.k[pos];
                 v_data[page][pos % page_size] = PagedAttentionTestData.v[seq][pos];
