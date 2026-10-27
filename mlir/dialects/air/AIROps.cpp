@@ -30,6 +30,10 @@ static LogicalResult verifyConvert(Operation *op, bool toOrFromInteger) {
   bool resultInt = isa<IntegerType>(getElementTypeOrSelf(result));
   if (!toOrFromInteger && (inputInt || resultInt || input == result))
     return op->emitOpError("converts between distinct float types");
+  if (!toOrFromInteger && !isa<VectorType>(input) &&
+      (input.isF32() || result.isF32()))
+    return op->emitOpError("scalar f32 conversions are LLVM casts in Apple's "
+                           "compiler");
   if (toOrFromInteger && inputInt == resultInt)
     return op->emitOpError("converts between an integer and a float type");
   if (resultInt && cast<arith::ArithFastMathInterface>(op)

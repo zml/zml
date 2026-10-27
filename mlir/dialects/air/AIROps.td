@@ -10,19 +10,18 @@ include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/dialects/air/AIRAttributes.td"
 
+class AIR_VectorOf<list<Type> types>
+    : FixedVectorOfRankAndLengthAndType<[1], [2, 3, 4], types>;
 class AIR_ScalarOrVectorOf<list<Type> types>
-    : AnyTypeOf<!listconcat(types,
-                            [FixedVectorOfLengthAndType<[2, 3, 4], types>])>;
+    : AnyTypeOf<!listconcat(types, [AIR_VectorOf<types>])>;
 
 def AIR_FloatLike : AIR_ScalarOrVectorOf<[F16, F32]>;
 def AIR_F32Like : AIR_ScalarOrVectorOf<[F32]>;
 def AIR_IntLike : AIR_ScalarOrVectorOf<[I16, I32, I64]>;
 def AIR_SimdIntLike : AIR_ScalarOrVectorOf<[I16, I32]>;
 def AIR_ConvertLike : AIR_ScalarOrVectorOf<[F16, BF16, F32, I16, I32, I64]>;
-def AIR_Matrix : VectorOfLengthAndType<[64], [F16, BF16, F32]>;
-def AIR_MatrixVector : VectorOfLengthAndType<[2], [I64]> {
-  let builderCall = "::mlir::VectorType::get({2}, $_builder.getI64Type())";
-}
+def AIR_Matrix : FixedVectorOfRankAndLengthAndType<[1], [64], [F16, BF16, F32]>;
+def AIR_MatrixVector : FixedVectorOfShapeAndType<[2], I64>;
 def AIR_MatrixPointer : AnyTypeOf<[LLVM_PointerInAddressSpace<1>,
                                    LLVM_PointerInAddressSpace<3>]>;
 
@@ -133,8 +132,7 @@ def AIR_DotOp : AIR_Op<"dot", [Pure, AllTypesMatch<["x", "y"]>,
     DeclareOpInterfaceMethods<ArithFastMathInterface>]> {
   let summary = "Dot product of two float vectors";
   let description = "Calls `@air.dot.<vector type>`.";
-  let arguments = (ins FixedVectorOfLengthAndType<[2, 3, 4], [F16, F32]>:$x,
-                       FixedVectorOfLengthAndType<[2, 3, 4], [F16, F32]>:$y,
+  let arguments = (ins AIR_VectorOf<[F16, F32]>:$x, AIR_VectorOf<[F16, F32]>:$y,
                        AIR_FastMath:$fastmath);
   let results = (outs AnyTypeOf<[F16, F32]>:$result);
   let assemblyFormat = [{

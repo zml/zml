@@ -33,11 +33,13 @@ static bool isValidName(StringRef name) {
 }
 
 // The size of a Metal scalar or vector, where 3-element vectors take the
-// space of 4.
+// space of 4. A bool vector is an i8 vector in memory, as LLVM packs i1
+// vectors into bits.
 static std::optional<uint64_t> metalSize(Type type) {
   uint64_t elements = 1;
   if (auto vector = dyn_cast<VectorType>(type)) {
-    if (vector.isScalable() || vector.getRank() != 1)
+    if (vector.isScalable() || vector.getRank() != 1 ||
+        vector.getElementType().isInteger(1))
       return std::nullopt;
     elements = vector.getNumElements();
     if (elements < 2 || elements > 4)
@@ -46,7 +48,10 @@ static std::optional<uint64_t> metalSize(Type type) {
       elements = 4;
     type = vector.getElementType();
   }
-  if (!type.isIntOrFloat())
+  // bool, char, short, int, long, half, bfloat and float.
+  if (!type.isInteger(1) && !type.isInteger(8) && !type.isInteger(16) &&
+      !type.isInteger(32) && !type.isInteger(64) && !type.isF16() &&
+      !type.isBF16() && !type.isF32())
     return std::nullopt;
   return elements * llvm::divideCeil(type.getIntOrFloatBitWidth(), 8);
 }
