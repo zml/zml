@@ -188,6 +188,15 @@ test "every bound operation is registered" {
     try std.testing.expect(!ctx.allowUnregisteredDialects());
 }
 
+test "kernel is a unit attribute of the cute dialect" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print("{f}", .{mlir.Attribute.dict(ctx, &.{cute_ir.kernel(ctx)})});
+    try std.testing.expectEqualStrings("{cute.kernel}", w.buffered());
+}
+
 test "generated types and attributes rebuild from their getters" {
     @setEvalBranchQuota(100_000);
     const ctx = try testContext();

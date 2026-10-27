@@ -88,6 +88,12 @@ pub const FastMathAttr = opaque {
     }
 };
 
+/// `fastmath = #arith.fastmath<flags>`: the fast-math flags of a float
+/// operation.
+pub fn fastmath(ctx: *mlir.Context, flags: FastMathFlags) mlir.Error!mlir.NamedAttribute {
+    return .named(ctx, "fastmath", (try FastMathAttr.get(ctx, .{ .value = flags })).attribute());
+}
+
 /// `mlir::arith::IntegerOverflowFlags`, one bit per flag.
 pub const IntegerOverflowFlags = packed struct(u32) {
     nsw: bool = false,

@@ -597,7 +597,7 @@ pub const Builder = struct {
     /// `cuda.launch_ex`.
     pub fn openProgram(allocator: std.mem.Allocator, ctx: *mlir.Context, name: []const u8) !Builder {
         var self = try open(allocator, ctx, name);
-        self.module.operation().setAttributeByName("gpu.container_module", .unit(ctx));
+        self.module.operation().setAttribute(gpu.containerModule(ctx));
         const body = mlir.Block.init(&.{}, &.{});
         const gpu_module = gpu.module(ctx, "kernels", body, self.loc());
         _ = gpu_module.appendTo(self.module.body());
@@ -688,9 +688,7 @@ pub const Builder = struct {
         var any_arg_attr = false;
         for (arg_attrs, args) |*attr, a| {
             attr.* = switch (a.kind) {
-                .mlir_type => |typed| if (typed.grid_constant) .dict(ctx, &.{
-                    .named(ctx, "cute_nvgpu.grid_constant", .unit(ctx)),
-                }) else empty_dict,
+                .mlir_type => |typed| if (typed.grid_constant) .dict(ctx, &.{cute_nvgpu.gridConstant(ctx)}) else empty_dict,
                 else => empty_dict,
             };
             if (attr.* != empty_dict) any_arg_attr = true;
@@ -705,8 +703,8 @@ pub const Builder = struct {
                 .location = self.loc(),
                 .verify = false,
                 .extra_attributes = &.{
-                    .named(ctx, "cute.kernel", .unit(ctx)),
-                    .named(ctx, "gpu.kernel", .unit(ctx)),
+                    cute_ir.kernel(ctx),
+                    gpu.kernel(ctx),
                 },
             }),
             .cuda_kernel => cuda.kernel(ctx, .{
@@ -715,8 +713,8 @@ pub const Builder = struct {
                 .body = entry,
                 .arg_attrs = .array(ctx, arg_attrs),
                 .extra_attributes = &.{
-                    .named(ctx, "cute.kernel", .unit(ctx)),
-                    .named(ctx, "gpu.kernel", .unit(ctx)),
+                    cute_ir.kernel(ctx),
+                    gpu.kernel(ctx),
                 },
                 .location = self.loc(),
             }),
@@ -727,7 +725,7 @@ pub const Builder = struct {
                 .results = &.{.int(ctx, .i32)},
                 .location = self.loc(),
                 .verify = false,
-                .extra_attributes = &.{.named(ctx, "llvm.emit_c_interface", .unit(ctx))},
+                .extra_attributes = &.{llvm.emitCInterface(ctx)},
             }),
         };
         _ = func_op.appendTo(if (self.function_kind == .cuda_kernel)
@@ -832,9 +830,9 @@ pub const Builder = struct {
         return (cuda.ops.DevMaxSharedMemoryOptinAttr.get(self.ctx, .{}) catch @panic("invalid CUDA attribute")).attribute();
     }
 
-    pub fn setFunctionAttribute(self: *Builder, name: []const u8, attribute: *const mlir.Attribute) void {
+    pub fn setFunctionAttribute(self: *Builder, attribute: mlir.NamedAttribute) void {
         const function = self.func_op orelse @panic("setFunctionAttribute called before declareArgs");
-        function.setAttributeByName(name, attribute);
+        function.setAttribute(attribute);
     }
 
     // ==================== cuda host launch ====================
@@ -923,7 +921,7 @@ pub const Builder = struct {
         }
         if (block) |dims| {
             const function = self.func_op orelse @panic("endFunction before declareArgs");
-            function.setAttributeByName("nvvm.reqntid", .denseArray(self.ctx, .i32, &dims));
+            function.setAttribute(nvvm.reqntid(self.ctx, dims));
         }
         self.func_op = null;
         self.entry_block = null;
@@ -2295,11 +2293,7 @@ pub const Builder = struct {
     /// shared-memory pointer or a raw `i32` shared-memory address.
     fn sharedBarrierPtr(self: *Builder, barrier: Value) Value {
         if (barrier.isInt()) return self.addressPtr(barrier, .shared);
-        return self.emit(mlir.Operation.make(self.ctx, "builtin.unrealized_conversion_cast", .{
-            .operands = .{ .flat = &.{barrier.inner} },
-            .results = .{ .flat = &.{llvm.pointerType(self.ctx, NVPTXAddressSpace.shared)} },
-            .location = self.loc(),
-        }));
+        return self.emit(mlir.unrealized_conversion_cast(self.ctx, &.{barrier.inner}, &.{llvm.pointerType(self.ctx, NVPTXAddressSpace.shared)}, self.loc()));
     }
 
     /// Initialize a shared-memory mbarrier expecting `arrivals` per phase.
@@ -2806,7 +2800,7 @@ pub const Builder = struct {
             _ = func.returns(self.ctx, &.{}, self.loc()).appendTo(current);
         }
         const func_op = self.func_op orelse return error.InvalidMlir;
-        func_op.setAttributeByName("nvvm.reqntid", .denseArray(self.ctx, .i32, &block));
+        func_op.setAttribute(nvvm.reqntid(self.ctx, block));
         try common.verify(self.module, "dsl/cute");
 
         return self.renderModule();

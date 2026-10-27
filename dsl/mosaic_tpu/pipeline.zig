@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const func = @import("mlir/dialects/func");
+const memref = @import("mlir/dialects/memref");
 const mlir = @import("mlir");
 const scf = @import("mlir/dialects/scf");
 const builder = @import("builder.zig");
@@ -1014,23 +1015,12 @@ const Scheduler = struct {
     }
 };
 
-/// `verify = false`: `AutomaticAllocationScope` requirement is only satisfied
-/// once it's inside `func.func`; full verify at `Builder.finish`.
 pub fn memRefAlloca(b: *Builder, ty: *const mlir.Type) Value {
-    return b.emit(mlir.Operation.make(b.ctx, "memref.alloca", .{
-        .results = .{ .flat = &.{ty} },
-        .attributes = &.{.named(b.ctx, "operandSegmentSizes", .denseArray(b.ctx, .i32, &.{ 0, 0 }))},
-        .verify = false,
-        .location = b.loc(),
-    }));
+    return b.emit(memref.alloca(b.ctx, ty, &.{}, &.{}, .{}, b.loc()));
 }
 
 pub fn semAllocOp(b: *Builder, ty: *const mlir.Type) Value {
-    return b.emit(mlir.Operation.make(b.ctx, "tpu.sem_alloc", .{
-        .results = .{ .flat = &.{ty} },
-        .verify = false,
-        .location = b.loc(),
-    }));
+    return b.emit(mosaic_tpu.sem_alloc(b.ctx, ty, b.loc()));
 }
 
 /// `pl.SemaphoreType.DMA((n,))`, or rank-0 for `n == null`.

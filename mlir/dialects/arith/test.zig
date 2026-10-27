@@ -94,6 +94,15 @@ test "arith fastmath attribute is built through the C API" {
     try std.testing.expectError(error.InvalidMlir, arith.FastMathAttr.get(ctx, .{ .value = .{ ._padding = 1 } }));
 }
 
+test "fastmath names the attribute of a float operation" {
+    const ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print("{f}", .{mlir.Attribute.dict(ctx, &.{try arith.fastmath(ctx, .fast)})});
+    try std.testing.expectEqualStrings("{fastmath = #arith.fastmath<fast>}", w.buffered());
+}
+
 test "arith overflow attribute is built through the C API" {
     const ctx = try mlir.Context.init(.{});
     defer ctx.deinit();

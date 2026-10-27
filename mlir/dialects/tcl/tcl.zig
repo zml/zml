@@ -120,6 +120,28 @@ pub fn dramMappingAttr(ctx: *mlir.Context, chip: []const *const mlir.Attribute, 
     ));
 }
 
+/// Discardable TCL attributes of a `func.func`.
+pub const FunctionOpts = struct {
+    /// `tcl.updated_inputs`: per result, the argument it updates in place, or -1.
+    updated_inputs: ?[]const i64 = null,
+    /// `tcl.compiler_config`, a `configAttr`.
+    compiler_config: ?*const mlir.Attribute = null,
+    /// `tcl.auto_config`, a `configAttr`.
+    auto_config: ?*const mlir.Attribute = null,
+    /// `tcl.fusible`: the plugin may compile the function into the unit around it.
+    fusible: bool = false,
+};
+
+/// Sets `tcl.axes`, each axis's size or definition by name, and the
+/// attributes of `opts` on `function`.
+pub fn annotateFunction(ctx: *mlir.Context, function: *mlir.Operation, axes: []const mlir.NamedAttribute, opts: FunctionOpts) void {
+    if (opts.updated_inputs) |inputs| function.setAttributeByName("tcl.updated_inputs", .denseArray(ctx, .i64, inputs));
+    function.setAttributeByName("tcl.axes", .dict(ctx, axes));
+    if (opts.compiler_config) |config| function.setAttributeByName("tcl.compiler_config", config);
+    if (opts.auto_config) |config| function.setAttributeByName("tcl.auto_config", config);
+    if (opts.fusible) function.setAttributeByName("tcl.fusible", .unit(ctx));
+}
+
 // =============================================================================
 // Types
 // =============================================================================

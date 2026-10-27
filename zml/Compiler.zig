@@ -529,19 +529,7 @@ fn addPartitionerOperations(ctx: *Compiler) !void {
         },
         .shardy => {
             for (ctx.meshes) |shd| {
-                const name = shd.name;
-                const mesh_attr = shd.sdyMeshAttr(mlir_ctx);
-
-                const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
-                    .attributes = &.{
-                        .named(mlir_ctx, "sym_name", .string(mlir_ctx, name)),
-                        .named(mlir_ctx, "mesh", mesh_attr),
-                    },
-                    .location = .unknown(mlir_ctx),
-                    .verify = false,
-                });
-
-                _ = mesh_op.appendTo(module.body());
+                _ = shardy.mesh(mlir_ctx, shd.name, shd.sdyMeshAttr(mlir_ctx), .unknown(mlir_ctx)).appendTo(module.body());
             }
         },
     }
@@ -566,11 +554,10 @@ pub const TensorInfo = struct {
 
         const mlir_ctx = compiler.mlir_ctx;
         const mesh_attr = try compiler.tensorShardingAttr(arena, info.shape);
-        const name = switch (compiler.partitioner) {
-            .gspmd => "mhlo.sharding",
-            .shardy => "sdy.sharding",
-        };
-        attrs.appendAssumeCapacity(.named(mlir_ctx, name, mesh_attr));
+        attrs.appendAssumeCapacity(switch (compiler.partitioner) {
+            .gspmd => .named(mlir_ctx, "mhlo.sharding", mesh_attr),
+            .shardy => shardy.shardingNamedAttr(mlir_ctx, mesh_attr.isA(shardy.TensorShardingAttr).?),
+        });
 
         const memory = scope.id_to_memory.get(info.id) orelse .device;
         if (memory != .device) {

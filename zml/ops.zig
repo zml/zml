@@ -204,10 +204,7 @@ fn AllReduceReturnType(comptime InputsT: type) type {
 
 pub fn partitionId() Tensor {
     const ctx = Compiler.current();
-    const op = mlir.Operation.make(ctx.mlir_ctx, "stablehlo.partition_id", .{
-        .results = .{ .flat = &.{mlirx.Type.rankedTensor(ctx.mlir_ctx, Shape.scalar(.u32))} },
-        .location = ctx.location,
-    }).appendTo(ctx.currentScope().block);
+    const op = stablehlo.partition_id(ctx.mlir_ctx, ctx.location).appendTo(ctx.currentScope().block);
     return Tensor._result(.init(.{}, .u32), op.result(0));
 }
 
@@ -268,16 +265,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
     var init_values: [inputs.len]*const mlir.Value = undefined;
     inline for (0..inits.len) |i| init_values[i] = inits[i].value();
 
-    const reduce_op = mlir.Operation.make(mlir_ctx, "stablehlo.reduce", .{
-        .operands = .{ .variadic = &.{ &input_values, &init_values } },
-        .result_type_inference = true,
-        .blocks = &.{reduce_block},
-        .attributes = &.{
-            .named(mlir_ctx, "dimensions", .denseArray(mlir_ctx, .i64, axes_)),
-        },
-        .verify = true,
-        .location = compiler.location,
-    }).appendTo(caller_scope.block);
+    const reduce_op = stablehlo.reduce(mlir_ctx, &input_values, &init_values, reduce_block, axes_, compiler.location).appendTo(caller_scope.block);
 
     // `stablehlo.reduce` drops axes. We want to avoid that to propagate tags.
     // So we need to broadcast the output of `stablehlo.reduce` to the input shapes.
@@ -376,24 +364,12 @@ pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: 
     var init_values: [inputs.len]*const mlir.Value = undefined;
     inline for (0..inits.len) |i| init_values[i] = inits[i].value();
 
-    const reduce_op = mlir.Operation.make(mlir_ctx, "stablehlo.reduce_window", .{
-        .operands = .{ .variadic = &.{ &input_values, &init_values } },
-        .result_type_inference = true,
-        .blocks = &.{reduce_block},
-        .attributes = &.{
-            .named(mlir_ctx, "window_dimensions", .denseArray(mlir_ctx, .i64, opts.window_dimensions)),
-            .named(mlir_ctx, "window_strides", .denseArray(mlir_ctx, .i64, opts.window_strides)),
-            .named(mlir_ctx, "base_dilations", .denseArray(mlir_ctx, .i64, opts.base_dilations)),
-            .named(mlir_ctx, "window_dilations", .denseArray(mlir_ctx, .i64, opts.window_dilations)),
-            // Cast the [][2]i64 to []i64 (safe)
-            .named(mlir_ctx, "padding", .denseElements(
-                .rankedTensor(&.{ @intCast(opts.padding.len), 2 }, .int(mlir_ctx, .i64)),
-                @as([]const i64, @ptrCast(opts.padding)),
-            )),
-        },
-        .verify = true,
-        .location = compiler.location,
-    }).appendTo(compiler.currentScope().block);
+    const reduce_op = stablehlo.reduce_window(mlir_ctx, &input_values, &init_values, reduce_block, opts.window_dimensions, .{
+        .window_strides = opts.window_strides,
+        .base_dilations = opts.base_dilations,
+        .window_dilations = opts.window_dilations,
+        .padding = opts.padding,
+    }, compiler.location).appendTo(compiler.currentScope().block);
 
     inline for (0..result.len) |i| {
         result[i] = Tensor.fromMlirValue(reduce_op.result(i)).withTags(inputs[i].shape());
@@ -448,17 +424,10 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func_: anytype, context: anyty
         input_values[i] = inputs[i].value();
     }
 
-    const sort_op = mlir.Operation.make(mlir_ctx, "stablehlo.sort", .{
-        .operands = .{ .variadic = &.{&input_values} },
-        .result_type_inference = true,
-        .blocks = &.{sort_block},
-        .attributes = &.{
-            .named(mlir_ctx, "dimension", .int(mlir_ctx, .i64, axis_)),
-            .named(mlir_ctx, "is_stable", .boolean(mlir_ctx, is_stable)),
-        },
-        .verify = true,
-        .location = compiler.location,
-    }).appendTo(compiler.currentScope().block);
+    const sort_op = stablehlo.sort(mlir_ctx, &input_values, sort_block, .{
+        .dimension = axis_,
+        .is_stable = is_stable,
+    }, compiler.location).appendTo(compiler.currentScope().block);
 
     var result: [inputs.len]Tensor = undefined;
     inline for (0..inputs.len) |i| {
@@ -737,14 +706,7 @@ pub fn @"if"(
     // TODO check that false branch values matches right branch
     _ = false_branch;
 
-    const op = mlir.Operation.make(mlir_ctx, "stablehlo.if", .{
-        .operands = .{ .flat = &.{pred.asScalar().value()} },
-        .result_type_inference = true,
-        .blocks = &.{ true_branch_block, false_branch_block },
-        // We can't verify right away, cause the weights captured by the if haven't been added yet.
-        .verify = false,
-        .location = loc,
-    });
+    const op = stablehlo.if_(mlir_ctx, pred.asScalar().value(), true_branch_block, false_branch_block, loc);
     _ = op.appendTo(Compiler.current().currentScope().block);
 
     return fromMlirOperationWithTags(op, true_branch);
@@ -825,13 +787,7 @@ pub fn if2(
         break :b block;
     };
 
-    const op = mlir.Operation.make(mlir_ctx, "stablehlo.if", .{
-        .operands = .{ .flat = &.{pred.asScalar().value()} },
-        .result_type_inference = true,
-        .blocks = &.{ true_branch_block, false_branch_block },
-        .location = loc,
-        .verify = false,
-    });
+    const op = stablehlo.if_(mlir_ctx, pred.asScalar().value(), true_branch_block, false_branch_block, loc);
     _ = op.appendTo(compiler.currentScope().block);
 
     return fromMlirOperationWithTags(op, on_true);

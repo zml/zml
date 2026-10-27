@@ -71,6 +71,17 @@ pub const ShuffleModeAttr = opaque {
     }
 };
 
+/// `gpu.container_module`: marks a module whose `gpu.module`s hold the kernels
+/// it launches.
+pub fn containerModule(ctx: *mlir.Context) mlir.NamedAttribute {
+    return .named(ctx, "gpu.container_module", .unit(ctx));
+}
+
+/// `gpu.kernel`: marks a function as a kernel entry point.
+pub fn kernel(ctx: *mlir.Context) mlir.NamedAttribute {
+    return .named(ctx, "gpu.kernel", .unit(ctx));
+}
+
 pub fn module(ctx: *mlir.Context, name: []const u8, body: *mlir.Block, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "gpu.module", .{
         .blocks = &.{body},
@@ -98,7 +109,7 @@ pub fn func(ctx: *mlir.Context, args: FuncArgs) *mlir.Operation {
         .named(ctx, "sym_name", .string(ctx, args.name)),
         .named(ctx, "function_type", .typeAttr(.function(ctx, args.args, &.{}))),
     });
-    if (args.kernel) attrs.appendAssumeCapacity(.named(ctx, "gpu.kernel", .unit(ctx)));
+    if (args.kernel) attrs.appendAssumeCapacity(kernel(ctx));
     attrs.appendSliceAssumeCapacity(args.extra_attributes);
     return mlir.Operation.make(ctx, "gpu.func", .{
         .blocks = &.{args.block},

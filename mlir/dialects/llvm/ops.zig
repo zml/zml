@@ -109,6 +109,50 @@ pub fn linkageAttr(ctx: *mlir.Context, linkage: Linkage) *const mlir.Attribute {
     return @ptrCast(c.mlirLLVMLinkageAttrGet(ctx.ptr(), @backingInt(linkage)).ptr);
 }
 
+/// `llvm.emit_c_interface`: has the lowering of a `func.func` emit a
+/// `_mlir_ciface_` wrapper that takes its memrefs by pointer.
+pub fn emitCInterface(ctx: *mlir.Context) mlir.NamedAttribute {
+    return .named(ctx, "llvm.emit_c_interface", .unit(ctx));
+}
+
+/// The operation of `llvm.atomicrmw`, as the LLVM dialect numbers it.
+pub const AtomicBinOp = enum(i64) {
+    xchg = 0,
+    add = 1,
+    sub = 2,
+    _and = 3,
+    nand = 4,
+    _or = 5,
+    _xor = 6,
+    max = 7,
+    min = 8,
+    umax = 9,
+    umin = 10,
+    fadd = 11,
+    fsub = 12,
+    fmax = 13,
+    fmin = 14,
+    uinc_wrap = 15,
+    udec_wrap = 16,
+    usub_cond = 17,
+    usub_sat = 18,
+    fmaximum = 19,
+    fminimum = 20,
+    fmaximumnum = 21,
+    fminimumnum = 22,
+};
+
+/// The memory ordering of an atomic operation, as the LLVM dialect numbers it.
+pub const AtomicOrdering = enum(i64) {
+    not_atomic = 0,
+    unordered = 1,
+    monotonic = 2,
+    acquire = 4,
+    release = 5,
+    acq_rel = 6,
+    seq_cst = 7,
+};
+
 /// `#llvm.loop_annotation`: the `llvm.loop` metadata of a loop.
 pub const LoopAnnotationAttr = opaque {
     const Self = @This();
@@ -162,6 +206,21 @@ pub fn fmul(ctx: *mlir.Context, lhs: *const mlir.Value, rhs: *const mlir.Value, 
     return mlir.Operation.make(ctx, "llvm.fmul", .{
         .operands = .{ .flat = &.{ lhs, rhs } },
         .results = .{ .flat = &.{result_type} },
+        .location = location,
+    });
+}
+
+// =============================================================================
+// Aggregates
+// =============================================================================
+
+/// llvm.extractvalue — the element of type `result_type` at `position` in the
+/// struct or array `container`.
+pub fn extractvalue(ctx: *mlir.Context, container: *const mlir.Value, result_type: *const mlir.Type, position: []const i64, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.extractvalue", .{
+        .operands = .{ .flat = &.{container} },
+        .results = .{ .flat = &.{result_type} },
+        .attributes = &.{.named(ctx, "position", .denseArray(ctx, .i64, position))},
         .location = location,
     });
 }
@@ -273,9 +332,52 @@ pub fn alloca(
     });
 }
 
+/// llvm.atomicrmw — combine `val` into the value at `ptr` with `bin_op`,
+/// atomically; the result is the previous value, of `val`'s type.
+pub fn atomicrmw(
+    ctx: *mlir.Context,
+    ptr: *const mlir.Value,
+    val: *const mlir.Value,
+    bin_op: AtomicBinOp,
+    ordering: AtomicOrdering,
+    opts: struct {
+        /// Synchronization scope, e.g. `"agent"` (none: the whole system).
+        syncscope: ?[]const u8 = null,
+        /// Alignment in bytes (none: the natural alignment of the type).
+        alignment: ?u64 = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 4) = .empty;
+    attrs.appendSliceAssumeCapacity(&.{
+        .named(ctx, "bin_op", .int(ctx, .i64, @backingInt(bin_op))),
+        .named(ctx, "ordering", .int(ctx, .i64, @backingInt(ordering))),
+    });
+    if (opts.syncscope) |syncscope| attrs.appendAssumeCapacity(.named(ctx, "syncscope", .string(ctx, syncscope)));
+    if (opts.alignment) |alignment| attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, alignment)));
+    return mlir.Operation.make(ctx, "llvm.atomicrmw", .{
+        .operands = .{ .flat = &.{ ptr, val } },
+        .results = .{ .flat = &.{val.type_()} },
+        .attributes = attrs.constSlice(),
+        .location = location,
+    });
+}
+
 // =============================================================================
 // Intrinsics and inline assembly
 // =============================================================================
+
+/// llvm.intr.assume — let the optimizer assume that `cond` (i1) holds.
+pub fn intr_assume(ctx: *mlir.Context, cond: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "llvm.intr.assume", .{
+        .operands = .{ .flat = &.{cond} },
+        .attributes = &.{
+            .named(ctx, "op_bundle_sizes", .denseArray(ctx, .i32, &.{})),
+            .named(ctx, "op_bundle_tags", .array(ctx, &.{})),
+        },
+        .location = location,
+    });
+}
 
 /// llvm.call_intrinsic — call the LLVM intrinsic `name` (e.g. `llvm.nvvm.*`), with an
 /// optional result of type `result_type`.

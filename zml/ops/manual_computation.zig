@@ -176,29 +176,23 @@ noinline fn manualComputationInternal(
     const op: *const mlir.Operation = switch (compiler.partitioner) {
         .shardy => op: {
             // Shardy creates a sdy.manual_computation block.
-            _ = mlir.Operation.make(mlir_ctx, "sdy.return", .{
-                .operands = .{ .flat = local_output_values },
-                .verify = false,
-                .location = compiler.location,
-            }).appendTo(manual_block);
+            _ = shardy.return_(mlir_ctx, local_output_values, compiler.location).appendTo(manual_block);
 
             const out_mesh_attrs = try arena.alloc(*const shardy.TensorShardingAttr, global_output_shapes.len);
             for (out_mesh_attrs, global_output_shapes) |*attr, shape| {
                 attr.* = try mesh.sdyShardingAttrForShape(arena, mlir_ctx, shape);
             }
 
-            break :op mlir.Operation.make(mlir_ctx, "sdy.manual_computation", .{
-                .operands = .{ .flat = input_values },
-                .results = .{ .flat = global_output_types },
-                .blocks = &.{manual_block},
-                .attributes = &.{
-                    .named(mlir_ctx, "in_shardings", try Sharding.sdyPerValueShardingAttr(arena, mlir_ctx, global_input_shapes, mesh)),
-                    .named(mlir_ctx, "out_shardings", shardy.shardingsPerValueAttr(mlir_ctx, out_mesh_attrs)),
-                    .named(mlir_ctx, "manual_axes", try Sharding.sdyManualAxesAttr(arena, mlir_ctx, global_input_shapes, global_output_shapes, mesh)),
-                },
-                .verify = true,
-                .location = compiler.location,
-            }).appendTo(global_scope.block);
+            break :op shardy.manual_computation(
+                mlir_ctx,
+                input_values,
+                global_output_types,
+                manual_block,
+                try Sharding.sdyPerValueShardingAttr(arena, mlir_ctx, global_input_shapes, mesh),
+                .get(mlir_ctx, out_mesh_attrs),
+                try Sharding.sdyManualAxesAttr(arena, mlir_ctx, global_input_shapes, global_output_shapes, mesh),
+                compiler.location,
+            ).appendTo(global_scope.block);
         },
         .gspmd => op: {
             // Gspmd calls SPMDShardToFullShape and wrap into an optimizationBarrier

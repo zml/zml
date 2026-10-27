@@ -28,12 +28,7 @@ pub fn loadScores(b: *cute.Builder, address: cute.Value) Scores {
     const result = b.emit(llvm.inline_asm(b.ctx, asm_parts[0], &.{address.inner}, .{ .result_type = llvm.structType(b.ctx, &@as([65]*const mlir.Type, @splat(.float(b.ctx, .f32)))), .constraints = asm_parts[1], .has_side_effects = true }, b.loc()));
     var scores: Scores = undefined;
     for (0..65) |i| {
-        const value = b.emit(mlir.Operation.make(b.ctx, "llvm.extractvalue", .{
-            .operands = .{ .flat = &.{result.inner} },
-            .results = .{ .flat = &.{cute.DType.f32.toMlir(b.ctx)} },
-            .attributes = &.{.named(b.ctx, "position", .denseArray(b.ctx, .i64, &.{@intCast(i)}))},
-            .location = b.loc(),
-        }));
+        const value = b.emit(llvm.extractvalue(b.ctx, result.inner, cute.DType.f32.toMlir(b.ctx), &.{@intCast(i)}, b.loc()));
         if (i < 64) scores.values[i] = value else scores.maximum = value;
     }
     b.fenceTmemLoad();

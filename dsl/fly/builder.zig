@@ -737,7 +737,7 @@ pub const Builder = struct {
         const loc_: *const mlir.Location = .unknown(ctx);
         const module: *mlir.Module = .init(loc_);
         errdefer module.deinit();
-        module.operation().setAttributeByName("gpu.container_module", .unit(ctx));
+        module.operation().setAttribute(gpu.containerModule(ctx));
 
         const gpu_body = mlir.Block.init(&.{}, &.{});
         const gpu_module = gpu.module(ctx, gpu_module_name, gpu_body, loc_);
@@ -1103,8 +1103,7 @@ pub const Builder = struct {
 
     pub fn emitFast(self: *Builder, op: *mlir.Operation) Value {
         if (self.fast_math and op.numResults() > 0 and (Value{ .inner = op.result(0), .kernel = self }).isFloatElem()) {
-            const fast = arith.FastMathAttr.get(self.ctx, .{ .value = .fast }) catch unreachable;
-            op.setAttributeByName("fastmath", fast.attribute());
+            op.setAttribute(arith.fastmath(self.ctx, .fast) catch unreachable);
         }
         return self.emit(op);
     }
@@ -1159,17 +1158,7 @@ pub const Builder = struct {
             .agent => 1,
         };
         const llvm_ptr = self.emit(fly.ops.to_llvm_ptr(self.ctx, ptr.inner, .int(self.ctx, .i32, space), self.loc()));
-        return self.emit(fly.make(self.ctx, "llvm.atomicrmw", .{
-            .operands = .{ .flat = &.{ llvm_ptr.inner, value.inner } },
-            .results = .{ .flat = &.{value.type_()} },
-            .attributes = &.{
-                .named(self.ctx, "bin_op", .int(self.ctx, .i64, 1)), // LLVM AtomicBinOp::add.
-                .named(self.ctx, "ordering", .int(self.ctx, .i64, 2)), // LLVM AtomicOrdering::monotonic.
-                .named(self.ctx, "syncscope", .string(self.ctx, @tagName(scope))),
-                .named(self.ctx, "alignment", .int(self.ctx, .i64, 4)),
-            },
-            .location = self.loc(),
-        }));
+        return self.emit(llvm.atomicrmw(self.ctx, llvm_ptr.inner, value.inner, .add, .monotonic, .{ .syncscope = @tagName(scope), .alignment = 4 }, self.loc()));
     }
 
     /// Static LDS, as an `n:1` tensor in shared memory. Each call is its own

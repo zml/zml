@@ -41,7 +41,7 @@ pub const KernelArgs = struct {
 /// `cuda.kernel`; `body` is filled afterwards.
 pub fn kernel(ctx: *mlir.Context, args: KernelArgs) *mlir.Operation {
     const op = ops.kernel(ctx, .string(ctx, args.name), .typeAttr(args.function_type), .{args.body}, .{ .arg_attrs = args.arg_attrs }, args.location);
-    for (args.extra_attributes) |attr| op.setAttributeByName(attr.name().str(), attr.attribute());
+    for (args.extra_attributes) |attr| op.setAttribute(attr);
     return op;
 }
 

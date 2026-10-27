@@ -579,15 +579,13 @@ pub const Builder = struct {
         var any_arg_attr = false;
         for (arg_attrs, args) |*attr, a| {
             attr.* = switch (a.kind) {
-                .ptr => .dict(ctx, &.{
-                    .named(ctx, "tt.divisibility", .int(ctx, .i32, 16)),
-                }),
+                .ptr => .dict(ctx, &.{ttir.divisibility(ctx, 16)}),
                 .ptr_opts => |p| if (p.divisibility) |v|
-                    .dict(ctx, &.{.named(ctx, "tt.divisibility", .int(ctx, .i32, v))})
+                    .dict(ctx, &.{ttir.divisibility(ctx, v)})
                 else
                     empty_dict,
                 .scalar_opts => |s| if (s.divisibility) |v|
-                    .dict(ctx, &.{.named(ctx, "tt.divisibility", .int(ctx, .i32, v))})
+                    .dict(ctx, &.{ttir.divisibility(ctx, v)})
                 else
                     empty_dict,
                 else => empty_dict,
@@ -708,15 +706,7 @@ pub const Builder = struct {
     }
 
     pub fn assume(self: *Builder, cond: Value) void {
-        const op = mlir.Operation.make(self.ctx, "llvm.intr.assume", .{
-            .operands = .{ .flat = &.{cond.inner} },
-            .attributes = &.{
-                .named(self.ctx, "op_bundle_sizes", .denseArray(self.ctx, .i32, &.{})),
-                .named(self.ctx, "op_bundle_tags", .array(self.ctx, &.{})),
-            },
-            .location = self.loc(),
-        });
-        _ = op.appendTo(self.currentBlock());
+        _ = llvm.intr_assume(self.ctx, cond.inner, self.loc()).appendTo(self.currentBlock());
     }
 
     // ==================== constants ====================

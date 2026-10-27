@@ -6,7 +6,8 @@ to read like `pallas.tpu` Python while staying in pure Zig. Used by
 and `platforms/tpu/`, and by anything else that wants to emit a TPU kernel
 op-for-op against what `pallas_call` produces.
 
-The DSL talks to the `tpu` dialect through `mlir.Operation.make(ctx, "tpu.<op>", …)`.
+The DSL builds `tpu` operations and attributes through the bindings in
+`mlir/dialects/mosaic_tpu`.
 A Mosaic kernel is a pure IR generator: it builds its MLIR in a throwaway
 context, canonicalizes it, serializes it to a string, and hands that to a
 `stablehlo.custom_call` targeting `tpu_custom_call` — it never touches ZML's

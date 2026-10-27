@@ -696,7 +696,7 @@ pub const Builder = struct {
                 .iter => |io| {
                     if (io.semantics) |sem| {
                         arg_attrs[i] = .dict(ctx, &.{
-                            .named(ctx, "tpu.dimension_semantics", sem.attribute(ctx)),
+                            mosaic_tpu.dimensionSemanticsNamedAttr(ctx, sem),
                         });
                         any_arg_attr = true;
                     } else {
@@ -730,7 +730,7 @@ pub const Builder = struct {
         }
         extra_attrs.appendAssumeCapacity(.named(ctx, "scratch_operands", .int(ctx, .i64, opts.scratch_operands)));
         if (opts.core_type) |ct| {
-            extra_attrs.appendAssumeCapacity(.named(ctx, "tpu.core_type", ct.attribute(ctx)));
+            extra_attrs.appendAssumeCapacity(mosaic_tpu.coreTypeNamedAttr(ctx, ct));
         }
 
         // Snapshot the ref args for `finish`-time stub emission. Only

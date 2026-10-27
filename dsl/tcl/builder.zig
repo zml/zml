@@ -1025,16 +1025,17 @@ pub const Builder = struct {
         const arg_types = try scratch.alloc(*const mlir.Type, entry.numArguments());
         for (arg_types, 0..) |*t, i| t.* = entry.argument(i).type_();
         f.setAttributeByName("function_type", .typeAttr(.function(ctx, arg_types, result_types.items)));
-        if (self.updated.items.len > 0) f.setAttributeByName("tcl.updated_inputs", .denseArray(ctx, .i64, updated_inputs));
 
         const axes = try scratch.alloc(mlir.NamedAttribute, self.axes.items.len);
         for (axes, self.axes.items) |*dst, d| {
             dst.* = .named(ctx, d.axis.name, if (d.def) |e| self.exprAttr(e) else .int(ctx, .i64, d.axis.size));
         }
-        f.setAttributeByName("tcl.axes", .dict(ctx, axes));
-        if (self.compiler_config) |c| f.setAttributeByName("tcl.compiler_config", c);
-        if (self.auto_config) |c| f.setAttributeByName("tcl.auto_config", c);
-        if (self.fusible) f.setAttributeByName("tcl.fusible", .unit(ctx));
+        tcl.annotateFunction(ctx, f, axes, .{
+            .updated_inputs = if (self.updated.items.len > 0) updated_inputs else null,
+            .compiler_config = self.compiler_config,
+            .auto_config = self.auto_config,
+            .fusible = self.fusible,
+        });
         try common.verify(self.module, "dsl/tcl");
 
         var printed: std.Io.Writer.Allocating = .init(self.allocator);
