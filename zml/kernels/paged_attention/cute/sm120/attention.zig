@@ -74,12 +74,7 @@ fn swizzle(row: V, col: V, width: i64) V {
 
 fn unpackStruct(b: *B, comptime n: usize, value: V, dtype: cute.DType) [n]V {
     var result: [n]V = undefined;
-    for (&result, 0..) |*r, i| r.* = b.emit(mlir.Operation.make(b.ctx, "llvm.extractvalue", .{
-        .operands = .{ .flat = &.{value.inner} },
-        .results = .{ .flat = &.{dtype.toMlir(b.ctx)} },
-        .attributes = &.{.named(b.ctx, "position", .denseArray(b.ctx, .i64, &.{@intCast(i)}))},
-        .location = b.loc(),
-    }));
+    for (&result, 0..) |*r, i| r.* = b.emit(llvm.extractvalue(b.ctx, value.inner, dtype.toMlir(b.ctx), &.{@intCast(i)}, b.loc()));
     return result;
 }
 
@@ -225,7 +220,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
         .sink = .{ .ptr = cute.DType.f32 },
         .out = .{ .ptr = if (c.splits > 1) cute.DType.f32 else dt },
     });
-    b.setFunctionAttribute("cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin())}));
+    b.setFunctionAttribute(.named(b.ctx, "cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin())})));
     const seq = b.blockIdx().x.div(c.queryTiles());
     const first_row = b.blockIdx().x.rem(c.queryTiles()).mul(c.rows());
     const starts = b.ptrToInt(a.starts, .i64);

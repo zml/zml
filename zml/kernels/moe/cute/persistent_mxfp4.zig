@@ -12,6 +12,7 @@
 //! drain the accumulator from tensor memory into one of the two epilogues.
 const std = @import("std");
 const mlir = @import("mlir");
+const nvvm = @import("mlir/dialects/nvvm");
 
 const zml = @import("../../../zml.zig");
 const cute = zml.kernel.cute;
@@ -504,13 +505,13 @@ fn buildTiledProgram(b: *B, cfg: Config, comptime tile: Tile, comptime epilogue:
             .tiles_m = typed(i32_type),
         },
     });
-    b.setFunctionAttribute("nvvm.minctasm", .int(b.ctx, .i32, 1));
-    b.setFunctionAttribute("smem.partition_num", .int(b.ctx, .i32, 2));
-    b.setFunctionAttribute("smem.hint_smem_base_uniform", .unit(b.ctx));
-    b.setFunctionAttribute("cu_attrs", .dict(b.ctx, &.{
+    b.setFunctionAttribute(nvvm.minctasm(b.ctx, 1));
+    b.setFunctionAttribute(.named(b.ctx, "smem.partition_num", .int(b.ctx, .i32, 2)));
+    b.setFunctionAttribute(.named(b.ctx, "smem.hint_smem_base_uniform", .unit(b.ctx)));
+    b.setFunctionAttribute(.named(b.ctx, "cu_attrs", .dict(b.ctx, &.{
         .named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin()),
         .named(b.ctx, "non_portable_cluster_size_allowed", .int(b.ctx, .i32, 1)),
-    }));
+    })));
 
     // Prefetch every tensor-map descriptor before the specialized warps begin
     // the persistent pipeline. This is the work PDL buys us: it runs while the

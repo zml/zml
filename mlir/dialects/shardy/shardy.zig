@@ -71,14 +71,6 @@ pub fn return_(ctx: *mlir.Context, results: []const *const mlir.Value, location:
     });
 }
 
-pub fn meshAttr(ctx: *mlir.Context, args: MeshAttr.InitArgs) *const mlir.Attribute {
-    return MeshAttr.get(ctx, args).attribute();
-}
-
-pub fn shardingsPerValueAttr(ctx: *mlir.Context, shardings: []const *const TensorShardingAttr) *const mlir.Attribute {
-    return TensorShardingPerValueAttr.get(ctx, shardings).attribute();
-}
-
 pub const MeshAxisAttr = opaque {
     const M = mlir.Methods(MeshAxisAttr, c.MlirAttribute);
 

@@ -120,12 +120,12 @@ zig_library(
         "//zml/kernels/moe/stablehlo",
         "//zml/kernels/moe/tcl",
         "//zml/kernels/moe/triton",
+        "//zml/kernels/paged_attention/cute",
         "//zml/kernels/paged_attention/metal",
         "//zml/kernels/paged_attention/mosaic_tpu",
         "//zml/kernels/paged_attention/stablehlo",
         "//zml/kernels/paged_attention/tcl",
         "//zml/kernels/paged_attention/triton",
-        "//zml/kernels/paged_attention/cute",
     ],
     data = select({
         "//platforms:neuron.enabled": [
@@ -158,6 +158,7 @@ zig_library(
         "//mlir/dialects/func",
         "//mlir/dialects/llvm",
         "//mlir/dialects/mosaic_tpu",
+        "//mlir/dialects/nvvm",
         "//mlir/dialects/shardy",
         "//mlir/dialects/stablehlo",
         "//mlir/dialects/ttir",

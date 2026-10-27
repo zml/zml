@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const mlir = @import("mlir");
+const shardy = @import("mlir/dialects/shardy");
 const stablehlo = @import("mlir/dialects/stablehlo");
 const stdx = @import("stdx");
 
@@ -194,14 +195,12 @@ pub const Tensor = struct {
 
         const op_result = switch (ctx.partitioner) {
             .shardy => blk: {
-                const op = mlir.Operation.make(ctx.mlir_ctx, "sdy.sharding_constraint", .{
-                    .operands = .{ .flat = &.{self.value()} },
-                    .results = .{ .flat = &.{self.value().type_()} },
-                    .attributes = &.{
-                        .named(ctx.mlir_ctx, "sharding", attr),
-                    },
-                    .location = ctx.location,
-                }).appendTo(currentBlock());
+                const op = shardy.sharding_constraint(
+                    ctx.mlir_ctx,
+                    self.value(),
+                    attr.isA(shardy.TensorShardingAttr).?,
+                    ctx.location,
+                ).appendTo(currentBlock());
                 break :blk op.result(0);
             },
             .gspmd => blk: {

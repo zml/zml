@@ -194,12 +194,12 @@ pub fn sdyPerValueShardingAttr(
     ctx: *mlir.Context,
     shapes: []const Shape,
     mesh: *const Mesh,
-) error{OutOfMemory}!*const mlir.Attribute {
+) error{OutOfMemory}!*const shardy.TensorShardingPerValueAttr {
     const meshe_attrs = try allocator.alloc(*const shardy.TensorShardingAttr, shapes.len);
     for (meshe_attrs, shapes) |*attr, shape| {
         attr.* = try mesh.sdyShardingAttrForShape(allocator, ctx, shape);
     }
-    return shardy.TensorShardingPerValueAttr.get(ctx, meshe_attrs).attribute();
+    return .get(ctx, meshe_attrs);
 }
 
 pub fn sdyManualAxesAttr(
@@ -208,7 +208,7 @@ pub fn sdyManualAxesAttr(
     in_shapes: []const Shape,
     out_shapes: []const Shape,
     mesh: *const Mesh,
-) error{OutOfMemory}!*const mlir.Attribute {
+) error{OutOfMemory}!*const shardy.ManualAxesAttr {
     var axis_names = std.ArrayList([]const u8).empty;
     defer axis_names.deinit(allocator);
 
@@ -251,7 +251,7 @@ pub fn sdyManualAxesAttr(
         axes[i] = mlir.StringAttribute.init(ctx, axis_name);
     }
 
-    return shardy.ManualAxesAttr.get(ctx, axes).attribute();
+    return .get(ctx, axes);
 }
 
 pub const Partitioning = packed struct {
@@ -1637,7 +1637,7 @@ pub const Mesh = struct {
         return @divExact(self.numDevices(), self.numPartitions());
     }
 
-    pub fn sdyMeshAttr(self: *const Mesh, ctx: *mlir.Context) *const mlir.Attribute {
+    pub fn sdyMeshAttr(self: *const Mesh, ctx: *mlir.Context) *const shardy.MeshAttr {
         var axes: stdx.BoundedArray(*const shardy.MeshAxisAttr, MAX_MESH_RANK + 1) = .empty;
         var tile_count: usize = 1;
         for (self.logical.axes.slice(), 0..) |axis, i| {
@@ -1661,7 +1661,7 @@ pub const Mesh = struct {
             ids[tile_index * replicas + replica_indices[tile_index]] = @intCast(partition_index);
             replica_indices[tile_index] += 1;
         }
-        return shardy.meshAttr(ctx, .{ .axes = axes.constSlice(), .device_ids = ids[0..self.grid.device_count] });
+        return .get(ctx, .{ .axes = axes.constSlice(), .device_ids = ids[0..self.grid.device_count] });
     }
 
     fn sdyReplicaAxis(self: *const Mesh) []const u8 {

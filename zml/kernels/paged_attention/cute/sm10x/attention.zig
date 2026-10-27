@@ -202,7 +202,7 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
         .out = .{ .ptr = if (c.splits > 1) cute.DType.f32 else c.dtype },
     });
     std.debug.assert(c.sharedBytes() <= 227 * 1024);
-    b.setFunctionAttribute("cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin())}));
+    b.setFunctionAttribute(.named(b.ctx, "cu_attrs", .dict(b.ctx, &.{.named(b.ctx, "max_dynamic_shared_size_bytes", b.devMaxSharedMemoryOptin())})));
     const seq = b.blockIdx().x.div(c.queryTiles());
     const first_row = b.blockIdx().x.rem(c.queryTiles()).mul(c.rows());
     const starts = b.ptrToInt(a.starts, .i64);
