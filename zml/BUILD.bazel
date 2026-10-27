@@ -212,6 +212,16 @@ zig_test(
     deps = [":zml"],
 )
 
+zig_test(
+    name = "tenstorrent_gated_delta_net_test",
+    main = "tenstorrent_test.zig",
+    zigopts = [
+        "--test-filter",
+        "DeltaNet",
+    ],
+    deps = [":zml"],
+)
+
 # Run native decode attention on device zero independently of mesh coverage.
 zig_test(
     name = "tenstorrent_decode_attention_test",

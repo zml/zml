@@ -1763,7 +1763,52 @@ pub const GatedDeltaNet = struct {
         .run = zml.kernel.tenstorrent.gated_delta_net.run,
     });
 
+    const LocalTenstorrent = struct {
+        gdn: GatedDeltaNet,
+        initial_state: Input,
+
+        const OutputShapes = struct { state: struct { s: Shape }, outputs: Shape };
+
+        fn run(self: @This(), _: OutputShapes) Output {
+            return forwardTenstorrentLocal(self.gdn, self.initial_state);
+        }
+    };
+
     fn forwardTenstorrent(gdn: GatedDeltaNet, initial_state: Input) Output {
+        const compiler = zml.Compiler.current();
+        if (compiler.platform.devices.len == 1 or compiler.manual_computation_depth > 0)
+            return forwardTenstorrentLocal(gdn, initial_state);
+        const mesh = initial_state.s.shape()._sharding.mesh orelse
+            gdn.queries.shape()._sharding.mesh orelse
+            return forwardTenstorrentLocal(gdn, initial_state);
+        var heads = initial_state.s.shape().partition(.h);
+        if (!heads.isSharded()) heads = gdn.queries.shape().partition(.h);
+        if (heads == .open) {
+            const axis = mesh.resolveLogicalAxis(Shape.toTag(.model)) orelse
+                return forwardTenstorrentLocal(gdn, initial_state);
+            heads = .sharded(@intCast(axis));
+        }
+        if (!heads.isSharded()) return forwardTenstorrentLocal(gdn, initial_state);
+
+        // Build the TTIR's static slices and reshapes from local head counts.
+        // The recurrence is independent across heads; active_length is shared.
+        var local_inputs = gdn;
+        inline for (.{ "queries", "keys", "values", "alphas", "betas" }) |field| {
+            const tensor = @field(local_inputs, field);
+            @field(local_inputs, field) = tensor.withPartitioning(mesh, zml.Sharding.Partitioning.replicated(tensor.rank()).set(tensor.shape().axis(.h), heads));
+        }
+        local_inputs.active_length = gdn.active_length.withPartitioning(mesh, zml.Sharding.Partitioning.replicated(gdn.active_length.rank()));
+        const state = initial_state.s.withPartitioning(mesh, zml.Sharding.Partitioning.replicated(initial_state.s.rank()).set(initial_state.s.shape().axis(.h), heads));
+        return ops.manualComputation(LocalTenstorrent.run, .{
+            .gdn = local_inputs,
+            .initial_state = .{ .s = state },
+        }, .{
+            .state = .{ .s = state.shape() },
+            .outputs = local_inputs.values.shape(),
+        });
+    }
+
+    fn forwardTenstorrentLocal(gdn: GatedDeltaNet, initial_state: Input) Output {
         const batched = gdn.queries.shape().hasTag(.b) != null;
         const batch = if (batched) gdn.queries.dim(.b) else 1;
         const seq = gdn.queries.dim(.s);

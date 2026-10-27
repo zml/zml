@@ -413,3 +413,149 @@ test "TTIR flash prefill preserves unbatched tagged layouts" {
     try checkPrefillAttention(1, 8, 2, 80, 7, 35, .{ .transposed = true, .unbatched = true });
     try checkPrefillAttention(1, 4, 1, 80, 1, 35, .{ .transposed = true, .unbatched = true });
 }
+
+fn checkQwenDeltaNet(comptime seq: usize, comptime mesh_execution: bool) !void {
+    if (comptime !zml.Target.tenstorrent.isEnabled()) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = try zml.Platform.init(allocator, io, .tenstorrent, .{
+        .tenstorrent = .{ .device_index = if (mesh_execution) null else 0 },
+    });
+    defer platform.deinit(allocator, io);
+    if (mesh_execution) try std.testing.expectEqual(@as(usize, 2), platform.devices.len);
+    const bf16 = zml.DataType.bf16.toZigType();
+    const heads = 48;
+    const dim = 128;
+    var q = zml.Tensor.init(.{ .s = seq, .h = heads, .k = dim }, .bf16);
+    var k = zml.Tensor.init(q.shape(), .bf16);
+    var v = zml.Tensor.init(.{ .s = seq, .h = heads, .v = dim }, .bf16);
+    var alpha = zml.Tensor.init(.{ .s = seq, .h = heads }, .f32);
+    var beta = zml.Tensor.init(alpha.shape(), .f32);
+    var state = zml.Tensor.init(.{ .h = heads, .v = dim, .k = dim }, .f32);
+    if (mesh_execution) {
+        const mesh = try platform.registerMesh("delta_heads", .mesh(.{ .model = .high_bandwidth }));
+        q = q.withPartitioning(mesh, .{ .h = .model });
+        k = k.withPartitioning(mesh, .{ .h = .model });
+        v = v.withPartitioning(mesh, .{ .h = .model });
+        alpha = alpha.withPartitioning(mesh, .{ .h = .model });
+        beta = beta.withPartitioning(mesh, .{ .h = .model });
+        state = state.withPartitioning(mesh, .{ .h = .model });
+    }
+    const Functions = struct {
+        fn forward(query: zml.Tensor, key: zml.Tensor, value: zml.Tensor, decay: zml.Tensor, update: zml.Tensor, initial: zml.Tensor, length: zml.Tensor) zml.nn.GatedDeltaNet.Output {
+            // Model projections and cache slices leave partitioning open.
+            // Exercise inference of the common head partition from the mesh.
+            var result = zml.nn.GatedDeltaNet.forward(query.addConstant(0), key.addConstant(0), value.addConstant(0), decay, update, .{ .s = initial.addConstant(0) }, length);
+            result.state.s = result.state.s.reuseBuffer(initial);
+            if (value.shape()._sharding.mesh) |mesh| {
+                result.outputs = result.outputs.withPartitioning(mesh, value.shape()._sharding.partition);
+            }
+            return result;
+        }
+    };
+    const exe = try platform.compileFn(allocator, io, Functions.forward, .{ q, k, v, alpha, beta, state, zml.Tensor.init(.{}, .i32) }, .{ .meshes = platform.meshes.values() });
+    defer exe.deinit();
+    try std.testing.expectEqualSlices(u32, &.{5}, exe.donated_input_indices);
+    var runner = try exe.runner(allocator);
+    defer runner.deinit(allocator);
+    const q_data = try allocator.alloc(bf16, seq * heads * dim);
+    defer allocator.free(q_data);
+    const k_data = try allocator.alloc(bf16, q_data.len);
+    defer allocator.free(k_data);
+    const v_data = try allocator.alloc(bf16, q_data.len);
+    defer allocator.free(v_data);
+    const initial = try allocator.alloc(f32, heads * dim * dim);
+    defer allocator.free(initial);
+    const expected_state = try allocator.alloc(f64, initial.len);
+    defer allocator.free(expected_state);
+    const state_values = try allocator.alloc(f32, initial.len);
+    defer allocator.free(state_values);
+    const expected_output = try allocator.alloc(bf16, v_data.len);
+    defer allocator.free(expected_output);
+    var alpha_data: [seq * heads]f32 = undefined;
+    var beta_data: [seq * heads]f32 = undefined;
+    for (q_data, k_data, v_data, 0..) |*qi, *ki, *vi, i| {
+        qi.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast(i % 17)) - 8)) / 64);
+        ki.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast(i % 13)) - 6)) / 128);
+        vi.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast(i % 19)) - 9)) / 32);
+    }
+    for (initial, expected_state, 0..) |*si, *ei, i| {
+        si.* = @as(f32, @floatFromInt(@as(i32, @intCast(i % 23)) - 11)) / 512;
+        ei.* = si.*;
+    }
+    for (&alpha_data, &beta_data, 0..) |*ai, *bi, i| {
+        ai.* = 0.5 + @as(f32, @floatFromInt(i % 4)) / 8;
+        bi.* = 0.25 + @as(f32, @floatFromInt(i % 3)) / 8;
+    }
+    var qb = try zml.Buffer.fromBytes(io, platform, q.shape(), std.mem.sliceAsBytes(q_data));
+    defer qb.deinit();
+    var kb = try zml.Buffer.fromBytes(io, platform, k.shape(), std.mem.sliceAsBytes(k_data));
+    defer kb.deinit();
+    var vb = try zml.Buffer.fromBytes(io, platform, v.shape(), std.mem.sliceAsBytes(v_data));
+    defer vb.deinit();
+    var ab = try zml.Buffer.fromBytes(io, platform, alpha.shape(), std.mem.asBytes(&alpha_data));
+    defer ab.deinit();
+    var bb = try zml.Buffer.fromBytes(io, platform, beta.shape(), std.mem.asBytes(&beta_data));
+    defer bb.deinit();
+    var sb = try zml.Buffer.fromBytes(io, platform, state.shape(), std.mem.sliceAsBytes(initial));
+    defer sb.deinit();
+    var retained: ?zml.Buffer = null;
+    defer if (retained) |*buffer| buffer.deinit();
+    var retained_values: ?[]bf16 = null;
+    defer if (retained_values) |values| allocator.free(values);
+    for ([_]i32{ 2, 0, 3, -1, 1, seq + 2 }) |active| {
+        @memset(expected_output, bf16.fromF32(0));
+        for (0..@intCast(@max(0, @min(active, seq)))) |t| {
+            for (0..heads) |h| {
+                const token_head = t * heads + h;
+                for (0..dim) |row| {
+                    const base = (h * dim + row) * dim;
+                    var prediction: f64 = 0;
+                    for (0..dim) |col| prediction += expected_state[base + col] * k_data[token_head * dim + col].toF32();
+                    const delta = (v_data[token_head * dim + row].toF32() - prediction * alpha_data[token_head]) * beta_data[token_head];
+                    var output: f64 = 0;
+                    for (0..dim) |col| {
+                        expected_state[base + col] = expected_state[base + col] * alpha_data[token_head] + delta * k_data[token_head * dim + col].toF32();
+                        output += expected_state[base + col] * q_data[token_head * dim + col].toF32();
+                    }
+                    expected_output[token_head * dim + row] = .fromF32(@floatCast(output));
+                }
+            }
+        }
+        for (state_values, expected_state) |*value, expected| value.* = @floatCast(expected);
+        var length = try zml.Buffer.scalar(io, platform, active, .i32);
+        defer length.deinit();
+        var result: zml.Bufferized(zml.nn.GatedDeltaNet.Output) = undefined;
+        runner.run(io, .{ qb, kb, vb, ab, bb, sb, length }, .{&result}, .{ .wait = true });
+        sb = result.state.s;
+        try zml.testing.expectClose(io, zml.Slice.init(state.shape(), std.mem.sliceAsBytes(state_values)), sb, .{ .absolute_tolerance = 1e-4, .relative_tolerance = 1e-4 });
+        try zml.testing.expectClose(io, zml.Slice.init(v.shape(), std.mem.sliceAsBytes(expected_output)), result.outputs, .{ .absolute_tolerance = 1e-3, .relative_tolerance = 1e-2 });
+        if (retained) |buffer| {
+            defer result.outputs.deinit();
+            try zml.testing.expectClose(io, zml.Slice.init(v.shape(), std.mem.sliceAsBytes(retained_values.?)), buffer, .{ .absolute_tolerance = 1e-3, .relative_tolerance = 1e-2 });
+        } else {
+            retained = result.outputs;
+            retained_values = try allocator.dupe(bf16, expected_output);
+        }
+    }
+    inline for (.{ .{ qb, q_data }, .{ kb, k_data }, .{ vb, v_data } }) |input| {
+        const host = try input[0].toSliceAlloc(allocator, io);
+        defer host.free(allocator);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(input[1]), std.mem.sliceAsBytes(host.items(bf16)));
+    }
+    inline for (.{ .{ ab, &alpha_data }, .{ bb, &beta_data } }) |input| {
+        const host = try input[0].toSliceAlloc(allocator, io);
+        defer host.free(allocator);
+        try std.testing.expectEqualSlices(f32, input[1], host.items(f32));
+    }
+}
+
+test "Qwen-sized BF16 DeltaNet preserves donated state" {
+    try checkQwenDeltaNet(1, false);
+    try checkQwenDeltaNet(3, false);
+}
+
+test "two-card Qwen-sized BF16 DeltaNet preserves head partitions and donated state" {
+    try checkQwenDeltaNet(1, true);
+    try checkQwenDeltaNet(3, true);
+}

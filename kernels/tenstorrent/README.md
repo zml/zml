@@ -30,6 +30,15 @@ positions to preserve state and produce zero outputs. ZML normalizes tagged
 batched/unbatched tensor layouts before the call and restores the original tags
 and dtypes afterward.
 
+For head-partitioned execution across cards, the wrapper builds TTIR inside a
+local manual computation. Queries, keys, values, gates, and state share the
+head partition; the active length is replicated. This makes static slices and
+reshapes use the local head count. Emitting a global 48-head payload before
+partitioning previously left slice bounds at 48 after inputs became 24 heads
+per card, causing compilation to fail. Computed inputs with open partitioning
+resolve the model axis before entering the local computation. Donation stays
+on the enclosing executable.
+
 Sequence positions are currently unrolled into TTIR. This is a functional
 prefill/decode implementation, not a chunk-parallel prefill algorithm or a
 single fused Tensix kernel. Large-prefill compilation and kernel fusion remain
@@ -43,3 +52,15 @@ Validation:
   recurrence, with one/three tokens, one/two batches, and negative, zero, partial,
   full, and oversized active lengths. State and outputs use 1e-4 absolute and
   relative tolerances.
+
+`//zml:tenstorrent_gated_delta_net_test` runs the recurrence tests independently
+of attention. Additional Qwen-sized cases use 48 heads of width 128 with BF16
+queries/keys/values and FP32 gates/state, on one and two P150a cards. One-token
+decode and three-token prefill each perform six donated state updates with
+negative, zero, partial, full, and oversized active lengths. Every state element
+is compared with an independent f64 scalar recurrence; BF16 outputs, retained
+outputs, and unchanged query/key/value/gate inputs are checked as well. Tests
+verify the executable's state-donation index and pass with tracing enabled and
+disabled. The two-card three-token operation trace contains no all-gather,
+all-reduce, or reduce-scatter operations. These kernel tests do not establish
+full Qwen 27B weight loading, generation correctness, or model throughput.
