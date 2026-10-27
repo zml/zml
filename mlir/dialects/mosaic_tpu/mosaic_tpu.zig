@@ -576,6 +576,20 @@ pub const DotDimensionNumbersAttr = opaque {
 };
 
 // =============================================================================
+// Discardable attributes — tpu.core_type, tpu.dimension_semantics
+// =============================================================================
+
+/// `tpu.core_type`, on a kernel's `func.func`: the core it runs on.
+pub fn coreTypeNamedAttr(ctx: *mlir.Context, value: CoreType) mlir.NamedAttribute {
+    return .named(ctx, "tpu.core_type", value.attribute(ctx));
+}
+
+/// `tpu.dimension_semantics`, on a kernel's iteration index argument.
+pub fn dimensionSemanticsNamedAttr(ctx: *mlir.Context, value: DimensionSemantics) mlir.NamedAttribute {
+    return .named(ctx, "tpu.dimension_semantics", value.attribute(ctx));
+}
+
+// =============================================================================
 // Reductions / scan / sort
 // =============================================================================
 

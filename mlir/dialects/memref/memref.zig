@@ -55,6 +55,7 @@ pub fn alloc(
 }
 
 /// memref.alloca — stack allocation; same operand/attribute layout as alloc.
+/// Unverified: it only verifies inside an `AutomaticAllocationScope`.
 pub fn alloca(
     ctx: *mlir.Context,
     result_type: *const mlir.Type,
@@ -78,6 +79,7 @@ pub fn alloca(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = attrs.constSlice(),
+        .verify = false,
         .location = location,
     });
 }

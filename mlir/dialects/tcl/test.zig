@@ -96,6 +96,28 @@ test "filter_compaction verifies inside a kernel" {
     try std.testing.expect(!(try compactionKernel(ctx, entry, try tcl.symbolAttr(ctx, "Missing"))).verify());
 }
 
+test "function attributes carry their tcl names" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    const loc: *const mlir.Location = .unknown(ctx);
+    const entry = mlir.Block.init(&.{}, &.{});
+    _ = func.returns(ctx, &.{}, loc).appendTo(entry);
+    const function = func.func(ctx, .{ .name = "f", .block = entry, .location = loc });
+    defer function.deinit();
+    const config = try tcl.configAttr(ctx, &.{.named(ctx, "lowering_mode", .string(ctx, "Heuristic"))});
+    tcl.annotateFunction(ctx, function, &.{.named(ctx, "A", .int(ctx, .i64, 4))}, .{
+        .updated_inputs = &.{-1},
+        .compiler_config = config,
+        .auto_config = config,
+        .fusible = true,
+    });
+    try std.testing.expect(function.verify());
+    var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer text.deinit();
+    try text.writer.print("{f}", .{function});
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "attributes {tcl.auto_config = #tcl.config<{lowering_mode = \"Heuristic\"}>, tcl.axes = {A = 4 : i64}, tcl.compiler_config = #tcl.config<{lowering_mode = \"Heuristic\"}>, tcl.fusible, tcl.updated_inputs = array<i64: -1>}") != null);
+}
+
 test "attributes and types print and reparse" {
     const ctx = try testContext();
     defer ctx.deinit();

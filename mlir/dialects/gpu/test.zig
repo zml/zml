@@ -50,6 +50,15 @@ test "gpu enum attributes are built through the C API" {
     }
 }
 
+test "container_module and kernel are unit attributes of the gpu dialect" {
+    const ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print("{f}", .{mlir.Attribute.dict(ctx, &.{ gpu.containerModule(ctx), gpu.kernel(ctx) })});
+    try std.testing.expectEqualStrings("{gpu.container_module, gpu.kernel}", w.buffered());
+}
+
 test "every bound operation is registered" {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();

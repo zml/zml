@@ -440,6 +440,15 @@ test "nvvm types and attributes print as the compiler does" {
     }
 }
 
+test "reqntid and minctasm are kernel attributes of the nvvm dialect" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var buf: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print("{f}", .{mlir.Attribute.dict(ctx, &.{ nvvm.reqntid(ctx, .{ 128, 1, 1 }), nvvm.minctasm(ctx, 1) })});
+    try std.testing.expectEqualStrings("{nvvm.minctasm = 1 : i32, nvvm.reqntid = array<i32: 128, 1, 1>}", w.buffered());
+}
+
 test "nvvm target rejects what the compiler rejects" {
     const ctx = try testContext();
     defer ctx.deinit();

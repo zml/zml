@@ -8,6 +8,13 @@ const ManualAxesAttr = shardy.ManualAxesAttr;
 const TensorShardingAttr = shardy.TensorShardingAttr;
 const TensorShardingPerValueAttr = shardy.TensorShardingPerValueAttr;
 
+const operation_names: []const []const u8 = &.{
+    "sdy.manual_computation",
+    "sdy.mesh",
+    "sdy.return",
+    "sdy.sharding_constraint",
+};
+
 test {
     @setEvalBranchQuota(100_000);
     std.testing.refAllDecls(shardy);
@@ -15,6 +22,17 @@ test {
         const T = @field(shardy, decl);
         if (@TypeOf(T) == type and @typeInfo(T) == .@"opaque") std.testing.refAllDecls(T);
     }
+}
+
+test "every bound operation is registered" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    shardy.registerDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    for (operation_names) |name| try std.testing.expect(ctx.isRegisteredOperation(name));
+    try std.testing.expect(!ctx.allowUnregisteredDialects());
 }
 
 test TensorShardingAttr {

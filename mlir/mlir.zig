@@ -42,6 +42,17 @@ test "variadic operation groups preserve order and dense array segment sizes" {
     try std.testing.expect(op.attributeByName("resultSegmentSizes").?.eql(.denseArray(ctx, .i32, &.{ 0, 2, 1 })));
 }
 
+test "unrealized_conversion_cast builds a verified operation" {
+    const ctx = try Context.init(.{});
+    defer ctx.deinit();
+    const loc = Location.unknown(ctx);
+    const block = Block.init(&.{Type.int(ctx, .i32)}, &.{loc});
+    defer block.deinit();
+    const cast = unrealized_conversion_cast(ctx, &.{block.argument(0)}, &.{Type.index(ctx)}, loc).appendTo(block);
+    try std.testing.expect(cast.verify());
+    try std.testing.expect(cast.result(0).type_().eql(Type.index(ctx)));
+}
+
 test "nested symbol references print their path" {
     const ctx = try Context.init(.{});
     defer ctx.deinit();
@@ -1301,6 +1312,11 @@ pub const Operation = opaque {
         c.mlirOperationSetAttributeByName(self.ptr(), stringRef(name_), attribute.ptr());
     }
 
+    /// Sets `attribute` under its name, as a dialect's attribute helper names it.
+    pub fn setAttribute(self: *Operation, attribute: NamedAttribute) void {
+        self.setAttributeByName(attribute.name().str(), attribute.attribute());
+    }
+
     pub fn attributeByName(self: *const Operation, name_: []const u8) ?*const Attribute {
         const attr = c.mlirOperationGetAttributeByName(self.ptr(), stringRef(name_));
         return if (attr.ptr == null) null else @ptrCast(attr.ptr);
@@ -1531,6 +1547,16 @@ pub const Operation = opaque {
         } };
     }
 };
+
+/// builtin.unrealized_conversion_cast — `inputs` as values of `outputs_types`,
+/// a cast between type systems that a later conversion resolves.
+pub fn unrealized_conversion_cast(ctx: *Context, inputs: []const *const Value, outputs_types: []const *const Type, location: *const Location) *Operation {
+    return Operation.make(ctx, "builtin.unrealized_conversion_cast", .{
+        .operands = .{ .flat = inputs },
+        .results = .{ .flat = outputs_types },
+        .location = location,
+    });
+}
 
 pub const Region = opaque {
     const M = Methods(Region, c.MlirRegion);

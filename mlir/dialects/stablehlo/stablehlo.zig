@@ -690,6 +690,98 @@ pub fn while_(
     return mlir.Operation.init(&state) catch @panic("Failed to create stablehlo.while operation");
 }
 
+/// `stablehlo.if`. Not verified: its branches may use values defined
+/// outside them, which only verify once the operation is in place.
+pub fn if_(
+    ctx: *mlir.Context,
+    pred: *const mlir.Value,
+    true_branch_block: *mlir.Block,
+    false_branch_block: *mlir.Block,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.if", .{
+        .operands = .{ .flat = &.{pred} },
+        .result_type_inference = true,
+        .blocks = &.{ true_branch_block, false_branch_block },
+        .verify = false,
+        .location = location,
+    });
+}
+
+pub fn reduce(
+    ctx: *mlir.Context,
+    inputs: []const *const mlir.Value,
+    init_values: []const *const mlir.Value,
+    body_block: *mlir.Block,
+    dimensions: []const i64,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.reduce", .{
+        .operands = .{ .variadic = &.{ inputs, init_values } },
+        .result_type_inference = true,
+        .blocks = &.{body_block},
+        .attributes = &.{
+            .named(ctx, "dimensions", .denseArray(ctx, .i64, dimensions)),
+        },
+        .location = location,
+    });
+}
+
+pub fn reduce_window(
+    ctx: *mlir.Context,
+    inputs: []const *const mlir.Value,
+    init_values: []const *const mlir.Value,
+    body_block: *mlir.Block,
+    window_dimensions: []const i64,
+    opts: struct {
+        window_strides: ?[]const i64 = null,
+        base_dilations: ?[]const i64 = null,
+        window_dilations: ?[]const i64 = null,
+        /// (low, high) padding of each dimension.
+        padding: ?[]const [2]i64 = null,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 5) = .empty;
+    attrs.appendAssumeCapacity(.named(ctx, "window_dimensions", .denseArray(ctx, .i64, window_dimensions)));
+    if (opts.window_strides) |v| attrs.appendAssumeCapacity(.named(ctx, "window_strides", .denseArray(ctx, .i64, v)));
+    if (opts.base_dilations) |v| attrs.appendAssumeCapacity(.named(ctx, "base_dilations", .denseArray(ctx, .i64, v)));
+    if (opts.window_dilations) |v| attrs.appendAssumeCapacity(.named(ctx, "window_dilations", .denseArray(ctx, .i64, v)));
+    if (opts.padding) |v| attrs.appendAssumeCapacity(.named(ctx, "padding", .denseElements(
+        .rankedTensor(&.{ @intCast(v.len), 2 }, .int(ctx, .i64)),
+        @as([]const i64, @ptrCast(v)),
+    )));
+    return mlir.Operation.make(ctx, "stablehlo.reduce_window", .{
+        .operands = .{ .variadic = &.{ inputs, init_values } },
+        .result_type_inference = true,
+        .blocks = &.{body_block},
+        .attributes = attrs.constSlice(),
+        .location = location,
+    });
+}
+
+pub fn sort(
+    ctx: *mlir.Context,
+    inputs: []const *const mlir.Value,
+    comparator_block: *mlir.Block,
+    opts: struct {
+        dimension: i64 = -1,
+        is_stable: bool = false,
+    },
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.sort", .{
+        .operands = .{ .variadic = &.{inputs} },
+        .result_type_inference = true,
+        .blocks = &.{comparator_block},
+        .attributes = &.{
+            .named(ctx, "dimension", .int(ctx, .i64, opts.dimension)),
+            .named(ctx, "is_stable", .boolean(ctx, opts.is_stable)),
+        },
+        .location = location,
+    });
+}
+
 pub fn get_tuple_element(ctx: *mlir.Context, tuple_value: *const mlir.Value, index: i64, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.get_tuple_element", .{
         .operands = .{ .flat = &.{tuple_value} },

@@ -5,11 +5,14 @@ const mlir = @import("mlir");
 
 const operation_names: []const []const u8 = &.{
     "llvm.alloca",
+    "llvm.atomicrmw",
     "llvm.bitcast",
     "llvm.call_intrinsic",
-    "llvm.getelementptr",
+    "llvm.extractvalue",
     "llvm.fmul",
+    "llvm.getelementptr",
     "llvm.inline_asm",
+    "llvm.intr.assume",
     "llvm.inttoptr",
     "llvm.load",
     "llvm.store",
@@ -75,6 +78,39 @@ test "getelementptr and alloca build verified operations" {
     try std.testing.expect(gep.result(0).type_().eql(ptr));
     const alloca = llvm.alloca(ctx, block.argument(1), llvm.pointerType(ctx, llvm.NVPTXAddressSpace.generic), array, .{ .alignment = 4 }, loc).appendTo(block);
     try std.testing.expect(alloca.verify());
+}
+
+test "extractvalue, atomicrmw and intr.assume build verified operations" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    llvm.registerDialect(registry);
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+    const loc: *const mlir.Location = .unknown(ctx);
+    const pair = llvm.structType(ctx, &.{ .int(ctx, .i32), .float(ctx, .f32) });
+    const block = mlir.Block.init(&.{ pair, llvm.pointerType(ctx, llvm.NVPTXAddressSpace.global), .int(ctx, .i1) }, &.{ loc, loc, loc });
+    defer block.deinit();
+    const first = llvm.extractvalue(ctx, block.argument(0), .int(ctx, .i32), &.{0}, loc).appendTo(block);
+    try std.testing.expect(first.verify());
+    const previous = llvm.atomicrmw(ctx, block.argument(1), first.result(0), .add, .monotonic, .{ .syncscope = "agent", .alignment = 4 }, loc).appendTo(block);
+    try std.testing.expect(previous.verify());
+    try std.testing.expect(previous.result(0).type_().eql(.int(ctx, .i32)));
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try writer.writer.print("{f}", .{previous});
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "llvm.atomicrmw add ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), " monotonic ") != null);
+    try std.testing.expect(llvm.intr_assume(ctx, block.argument(2), loc).appendTo(block).verify());
+}
+
+test "emit_c_interface is a unit attribute of the LLVM dialect" {
+    const ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try writer.writer.print("{f}", .{mlir.Attribute.dict(ctx, &.{llvm.emitCInterface(ctx)})});
+    try std.testing.expectEqualStrings("{llvm.emit_c_interface}", writer.written());
 }
 
 test "loop annotations are built through the C API" {

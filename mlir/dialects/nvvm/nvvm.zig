@@ -39,6 +39,20 @@ pub const ProxyKind = ops.ProxyKind;
 pub const SharedSpace = ops.SharedSpace;
 
 // =============================================================================
+// Kernel attributes
+// =============================================================================
+
+/// `nvvm.reqntid`: the CTA shape (x, y, z) a kernel is always launched with.
+pub fn reqntid(ctx: *mlir.Context, dims: [3]i32) mlir.NamedAttribute {
+    return .named(ctx, "nvvm.reqntid", .denseArray(ctx, .i32, &dims));
+}
+
+/// `nvvm.minctasm`: the number of CTAs a kernel must fit on one SM at once.
+pub fn minctasm(ctx: *mlir.Context, ctas: i32) mlir.NamedAttribute {
+    return .named(ctx, "nvvm.minctasm", .int(ctx, .i32, ctas));
+}
+
+// =============================================================================
 // Special registers and thread synchronization
 // =============================================================================
 

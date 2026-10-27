@@ -10,6 +10,12 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("cute_nvgpu");
 }
 
+/// `cute_nvgpu.grid_constant`: marks a kernel argument passed as a
+/// `__grid_constant__` parameter.
+pub fn gridConstant(ctx: *mlir.Context) mlir.NamedAttribute {
+    return .named(ctx, "cute_nvgpu.grid_constant", .unit(ctx));
+}
+
 pub const NVGPUType = opaque {
     const M = mlir.Methods(NVGPUType, c.MlirType);
 

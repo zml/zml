@@ -257,6 +257,18 @@ test "tpu array attributes are built through the C API" {
     try expectPrints("#tpu.dot_dimension_numbers<[2], [1], [1], [], [0, 0, 0, 1], [0], [0]>", batched);
 }
 
+test "kernel attributes carry their tpu names" {
+    const ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+
+    const core_type = mosaic_tpu.coreTypeNamedAttr(ctx, .sc_vector_subcore);
+    try std.testing.expectEqualStrings("tpu.core_type", core_type.name().str());
+    try std.testing.expect(core_type.attribute().eql(mosaic_tpu.CoreType.sc_vector_subcore.attribute(ctx)));
+    const semantics = mosaic_tpu.dimensionSemanticsNamedAttr(ctx, .arbitrary);
+    try std.testing.expectEqualStrings("tpu.dimension_semantics", semantics.name().str());
+    try std.testing.expect(semantics.attribute().eql(mosaic_tpu.DimensionSemantics.arbitrary.attribute(ctx)));
+}
+
 test "every bound operation is registered" {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();

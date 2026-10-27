@@ -210,6 +210,12 @@ pub fn descriptorReduceKindAttr(ctx: *mlir.Context, v: DescriptorReduceKind) *co
     return @ptrCast(c.mlirTritonDescriptorReduceKindAttrGet(ctx.ptr(), @backingInt(v)).ptr);
 }
 
+/// `tt.divisibility`: an argument attribute promising that the argument (the
+/// address, for a pointer) is a multiple of `divisor`.
+pub fn divisibility(ctx: *mlir.Context, divisor: u32) mlir.NamedAttribute {
+    return .named(ctx, "tt.divisibility", .int(ctx, .i32, divisor));
+}
+
 // =============================================================================
 // Function ops — tt.func / tt.return
 // =============================================================================

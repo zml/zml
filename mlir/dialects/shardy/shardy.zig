@@ -11,6 +11,66 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("sdy");
 }
 
+/// `sdy.sharding`, the sharding of a function argument or result.
+pub fn shardingNamedAttr(ctx: *mlir.Context, sharding: *const TensorShardingAttr) mlir.NamedAttribute {
+    return .named(ctx, "sdy.sharding", sharding.attribute());
+}
+
+/// `sdy.mesh`. Not verified: it only verifies inside a module.
+pub fn mesh(ctx: *mlir.Context, sym_name: []const u8, mesh_: *const MeshAttr, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "sdy.mesh", .{
+        .attributes = &.{
+            .named(ctx, "sym_name", .string(ctx, sym_name)),
+            .named(ctx, "mesh", mesh_.attribute()),
+        },
+        .verify = false,
+        .location = location,
+    });
+}
+
+pub fn sharding_constraint(ctx: *mlir.Context, input: *const mlir.Value, sharding: *const TensorShardingAttr, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "sdy.sharding_constraint", .{
+        .operands = .{ .flat = &.{input} },
+        .results = .{ .flat = &.{input.type_()} },
+        .attributes = &.{
+            .named(ctx, "sharding", sharding.attribute()),
+        },
+        .location = location,
+    });
+}
+
+pub fn manual_computation(
+    ctx: *mlir.Context,
+    tensors: []const *const mlir.Value,
+    result_types: []const *const mlir.Type,
+    body_block: *mlir.Block,
+    in_shardings: *const TensorShardingPerValueAttr,
+    out_shardings: *const TensorShardingPerValueAttr,
+    manual_axes: *const ManualAxesAttr,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "sdy.manual_computation", .{
+        .operands = .{ .flat = tensors },
+        .results = .{ .flat = result_types },
+        .blocks = &.{body_block},
+        .attributes = &.{
+            .named(ctx, "in_shardings", in_shardings.attribute()),
+            .named(ctx, "out_shardings", out_shardings.attribute()),
+            .named(ctx, "manual_axes", manual_axes.attribute()),
+        },
+        .location = location,
+    });
+}
+
+/// `sdy.return`. Not verified: a terminator only verifies inside its parent.
+pub fn return_(ctx: *mlir.Context, results: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "sdy.return", .{
+        .operands = .{ .flat = results },
+        .verify = false,
+        .location = location,
+    });
+}
+
 pub fn meshAttr(ctx: *mlir.Context, args: MeshAttr.InitArgs) *const mlir.Attribute {
     return MeshAttr.get(ctx, args).attribute();
 }
@@ -64,14 +124,14 @@ pub const MeshAttr = opaque {
         device_ids: []const i64 = &.{},
     };
 
-    pub fn get(ctx: *mlir.Context, mesh: InitArgs) *const MeshAttr {
-        const axes: []const c.struct_MlirAttribute = @ptrCast(mesh.axes);
+    pub fn get(ctx: *mlir.Context, args: InitArgs) *const MeshAttr {
+        const axes: []const c.struct_MlirAttribute = @ptrCast(args.axes);
         return @ptrCast(c.sdyMeshAttrGet(
             ctx.ptr(),
             @intCast(axes.len),
             axes.ptr,
-            @intCast(mesh.device_ids.len),
-            mesh.device_ids.ptr,
+            @intCast(args.device_ids.len),
+            args.device_ids.ptr,
         ).ptr);
     }
 

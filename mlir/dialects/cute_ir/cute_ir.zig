@@ -18,6 +18,11 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     registry.registerDialect("cute");
 }
 
+/// `cute.kernel`: marks a function as a CuTe kernel.
+pub fn kernel(ctx: *mlir.Context) mlir.NamedAttribute {
+    return .named(ctx, "cute.kernel", .unit(ctx));
+}
+
 /// The address space of a pointer or memref.
 pub const MemorySpace = AddressSpace;
 

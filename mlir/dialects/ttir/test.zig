@@ -151,6 +151,15 @@ test "tt.func round-trip" {
     try std.testing.expect(parsed.operation().verify());
 }
 
+test "divisibility is an i32 attribute of the tt dialect" {
+    const ctx = try mlir.Context.init(.{});
+    defer ctx.deinit();
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print("{f}", .{mlir.Attribute.dict(ctx, &.{ttir.divisibility(ctx, 16)})});
+    try std.testing.expectEqualStrings("{tt.divisibility = 16 : i32}", w.buffered());
+}
+
 test "every bound operation is registered" {
     const registry = try mlir.DialectRegistry.init();
     defer registry.deinit();
