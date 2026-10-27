@@ -31,12 +31,11 @@ pub fn pagedAttention(
             // Note: we do all partial softmax in f32
             .partial_softmax_prefill = .zeroes(q.shape().setDim(.b, page_size).withDtype(.f32)),
             .partial_softmax_decode = .zeroes(q.shape().setDim(.b, 1).withDtype(.f32)),
-            // Spare rows keep full-page writes in bounds; they are discarded below.
-            .out = .zeroes(q.shape().setDim(.b, q.dim(.b) + page_size - 1)),
+            .out = .zeroes(q.shape()),
         },
     );
 
-    return final_state.out.slice(q.axis(.b), .{ .end = q.dim(.b) });
+    return final_state.out;
 }
 
 const AttentionLoop = struct {
@@ -175,8 +174,9 @@ const AttentionLoop = struct {
     }
 
     pub fn updateState(state: State, valid_slots: zml.Tensor, num_slots: u32, query_has_more_keys: zml.Tensor, sequence_has_more_queries: zml.Tensor, softmax: PartialSoftmax) State {
-        // Writes advance forward, so zeroed padding only touches unprocessed rows.
-        const valid = zml.Tensor.iota(.init(.{ .b = num_slots }, .i32), .b).cmp(.LT, valid_slots);
+        const rows = zml.Tensor.iota(.init(.{ .q_chunk = num_slots }, .i32), .q_chunk);
+        // Scatter drops unused rows instead of shifting a full-page write backward.
+        const indices = rows.cmp(.LT, valid_slots).select(rows.add(state.slot_id), .scalar(std.math.maxInt(i32), .i32));
         return zml.ops.if2(
             query_has_more_keys,
             // If the query has more pages: update partial softmax with attention on current page, delay updating output.
@@ -194,7 +194,11 @@ const AttentionLoop = struct {
                 .k_page_idx = .scalar(0, .i32),
                 .partial_softmax_prefill = if (num_slots == 1) state.partial_softmax_prefill else .reset(softmax),
                 .partial_softmax_decode = if (num_slots == 1) .reset(softmax) else state.partial_softmax_decode,
-                .out = state.out.dynamicUpdateSlice(.{ .b = state.slot_id }, softmax.finalize().convert(state.out.dtype()).mask(valid, 0)),
+                .out = state.out.scatterSlices(
+                    .{ .b = indices },
+                    softmax.finalize().convert(state.out.dtype()).rename(.{ .b = .q_chunk }),
+                    .{ .update_fn = zml.Tensor.ScatterOpts.override },
+                ),
                 .slot_id = state.slot_id.add(valid_slots),
                 // If the sequence has more query chunks: increment q_page_idx, otherwise start over at 0.
                 .q_page_idx = .select(sequence_has_more_queries, state.q_page_idx.addConstant(1), .scalar(0, .i32)),
@@ -266,13 +270,6 @@ pub fn partialSoftmax(self: zml.Tensor, axis: anytype) PartialSoftmax {
     };
 }
 
-// BEGIN GENERATED PAGED ATTENTION REFERENCE
-// Reference outputs generated offline by a Python script using PyTorch 2.8.0:
-// torch.nn.functional.scaled_dot_product_attention (CPU math backend, float64 -> float32).
-// https://docs.pytorch.org/docs/2.8/generated/torch.nn.functional.scaled_dot_product_attention.html
-// PyTorch uses valid dense K/V rows; the fixture packs them into shuffled pages.
-// Explicit causal mask includes cached prefixes; scale=1, dropout_p=0.
-// Expected arrays contain active rows; the fixture checks zeroes in unused output rows.
 const PagedAttentionTestData = struct {
     const q: [9][2]f32 = .{
         .{ 0.125, -0.25 },
@@ -327,49 +324,10 @@ const PagedAttentionTestData = struct {
             .{ 28, -1 },
         },
     };
-    const partial: [6][2]f32 = .{
-        .{ 1, 1 },
-        .{ 1.47657967, 0.0468406975 },
-        .{ 1.90655768, 0.337706238 },
-        .{ 2.5735445, -0.0490297116 },
-        .{ 3.13540077, 0.168398201 },
-        .{ 3.64714932, -0.0468406975 },
-    };
-    const packed_sequences: [9][2]f32 = .{
-        .{ 1, 1 },
-        .{ 1.47657967, 0.0468406975 },
-        .{ 1.90655768, 0.337706238 },
-        .{ 2.5735445, -0.0490297116 },
-        .{ 3.13540077, 0.168398201 },
-        .{ 3.64714932, -0.0468406975 },
-        .{ 11.5117168, -0.0234332103 },
-        .{ 12, 0.333333343 },
-        .{ 21.9687614, 0.333821356 },
-    };
-    const prefix: [2][2]f32 = .{
-        .{ 1.4882834, 0.0234332103 },
-        .{ 1.93759143, 0.335282177 },
-    };
-    const decode: [3][2]f32 = .{
-        .{ 1.96876144, 0.333821356 },
-        .{ 13.0388136, 0.169545963 },
-        .{ 24.7172451, 0.00492759887 },
-    };
-    const complete: [8][2]f32 = .{
-        .{ 1, 1 },
-        .{ 1.47657967, 0.0468406975 },
-        .{ 1.90655768, 0.337706238 },
-        .{ 2.5735445, -0.0490297116 },
-        .{ 11, 1 },
-        .{ 11.4765797, 0.0468406975 },
-        .{ 12.0312386, 0.333821356 },
-        .{ 12.6531963, -0.102130704 },
-    };
 };
-// END GENERATED PAGED ATTENTION REFERENCE
 
 test "StableHLO paged attention handles a partial final query page" {
-    const case: TestCase = .{ .query_counts = .{ 6, 0, 0 }, .capacity = 6, .expected = &PagedAttentionTestData.partial };
+    const case: TestCase = .{ .query_counts = .{ 6, 0, 0 }, .capacity = 6 };
     try case.run();
 }
 
@@ -378,7 +336,6 @@ test "StableHLO paged attention advances between packed sequences" {
         .query_counts = .{ 6, 2, 1 },
         .context_lengths = .{ 0, 1, 2 },
         .capacity = 9,
-        .expected = &PagedAttentionTestData.packed_sequences,
     };
     try case.run();
 }
@@ -388,7 +345,6 @@ test "StableHLO paged attention handles a partial page after a cached prefix" {
         .query_counts = .{ 2, 0, 0 },
         .context_lengths = .{ 1, 0, 0 },
         .capacity = 4,
-        .expected = &PagedAttentionTestData.prefix,
         .check_single_page = true,
     };
     try case.run();
@@ -399,23 +355,22 @@ test "StableHLO paged attention ignores NaNs in unused keys and values during de
         .query_counts = .{ 1, 1, 1 },
         .context_lengths = .{ 2, 4, 7 },
         .capacity = 4,
-        .expected = &PagedAttentionTestData.decode,
     };
     try case.run();
 }
 
 test "StableHLO paged attention zeroes unused output rows" {
-    const case: TestCase = .{ .query_counts = .{ 6, 0, 0 }, .capacity = 10, .expected = &PagedAttentionTestData.partial };
+    const case: TestCase = .{ .query_counts = .{ 6, 0, 0 }, .capacity = 10 };
     try case.run();
 }
 
 test "StableHLO paged attention handles complete query pages" {
-    const case: TestCase = .{ .query_counts = .{ 4, 4, 0 }, .capacity = 8, .expected = &PagedAttentionTestData.complete };
+    const case: TestCase = .{ .query_counts = .{ 4, 4, 0 }, .capacity = 8 };
     try case.run();
 }
 
 test "StableHLO paged attention handles a query buffer smaller than one page" {
-    const case: TestCase = .{ .query_counts = .{ 2, 0, 0 }, .capacity = 2, .expected = PagedAttentionTestData.partial[0..2] };
+    const case: TestCase = .{ .query_counts = .{ 2, 0, 0 }, .capacity = 2 };
     try case.run();
 }
 
@@ -423,7 +378,6 @@ const TestCase = struct {
     query_counts: [3]u32,
     context_lengths: [3]u32 = .{ 0, 0, 0 },
     capacity: u32,
-    expected: []const [2]f32,
     check_single_page: bool = false,
 
     fn run(self: TestCase) !void {
@@ -450,7 +404,6 @@ const TestCase = struct {
         var q_data: [12][2]f32 = @splat(@splat(std.math.nan(f32)));
         var k_data: [10][page_size][2]f32 = @splat(@splat(@splat(std.math.nan(f32))));
         var v_data: [10][page_size][2]f32 = @splat(@splat(@splat(std.math.nan(f32))));
-        var expected: [12][2]f32 = @splat(@splat(0));
         var seq_lens: [3]i32 = undefined;
         var query_start_len: [4]i32 = .{ 0, 0, 0, 0 };
         var block_table: [3][3]i32 = @splat(@splat(-1));
@@ -468,10 +421,9 @@ const TestCase = struct {
             }
         }
         const query_count: usize = @intCast(query_start_len[3]);
-        try std.testing.expectEqual(query_count, self.expected.len);
         try std.testing.expect(query_count <= self.capacity);
         @memcpy(q_data[0..query_count], PagedAttentionTestData.q[0..query_count]);
-        @memcpy(expected[0..query_count], self.expected);
+        const expected = referencePagedAttention(q_data[0..self.capacity], &k_data, &v_data, &block_table, &seq_lens, &query_start_len);
 
         var parameters_d: zml.Bufferized(triton.paged.Parameters) = .{
             .block_table = try .fromBytes(io, platform, parameters.block_table.shape(), std.mem.sliceAsBytes(&block_table)),
@@ -522,3 +474,48 @@ const TestCase = struct {
         }
     }
 };
+
+// Scalar reference reads the actual paged buffers, independently of AttentionLoop.
+fn referencePagedAttention(
+    q: []const [2]f32,
+    k: []const [4][2]f32,
+    v: []const [4][2]f32,
+    block_table: []const [3]i32,
+    seq_lens: []const i32,
+    query_start_len: []const i32,
+) [12][2]f32 {
+    var expected: [12][2]f32 = @splat(@splat(0));
+    for (seq_lens, 0..) |seq_len, seq| {
+        const start: usize = @intCast(query_start_len[seq]);
+        const end: usize = @intCast(query_start_len[seq + 1]);
+        const context_length = @as(usize, @intCast(seq_len)) - (end - start);
+        for (start..end) |slot| {
+            const key_count = context_length + slot - start + 1;
+            var scores: [12]f64 = undefined;
+            var max_score = -std.math.inf(f64);
+            for (scores[0..key_count], 0..) |*score, pos| {
+                const page: usize = @intCast(block_table[seq][pos / 4]);
+                score.* = 0;
+                for (q[slot], k[page][pos % 4]) |query, key| {
+                    score.* += @as(f64, query) * @as(f64, key);
+                }
+                max_score = @max(max_score, score.*);
+            }
+
+            var weight_sum: f64 = 0;
+            var values: [2]f64 = @splat(0);
+            for (scores[0..key_count], 0..) |score, pos| {
+                const page: usize = @intCast(block_table[seq][pos / 4]);
+                const weight = @exp(score - max_score);
+                weight_sum += weight;
+                for (&values, v[page][pos % 4]) |*value, cached_value| {
+                    value.* += weight * @as(f64, cached_value);
+                }
+            }
+            for (&expected[slot], values) |*value, sum| {
+                value.* = @floatCast(sum / weight_sum);
+            }
+        }
+    }
+    return expected;
+}
