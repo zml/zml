@@ -576,6 +576,7 @@ pub const Builder = struct {
 
         self.func_op = func_op;
         self.entry_block = entry;
+        self.block_stack.push(self.arena.allocator(), entry);
         self.ct_module = ct_module;
         self.ct_body = ct_body;
 
@@ -617,7 +618,7 @@ pub const Builder = struct {
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        return self.block_stack.current(self.entry_block);
+        return self.block_stack.current();
     }
 
     fn innerSlice(self: *Builder, values: []const Value) []const *const mlir.Value {

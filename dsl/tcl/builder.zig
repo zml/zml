@@ -710,6 +710,7 @@ pub const Builder = struct {
         _ = func_op.appendTo(self.module.body());
         self.func_op = func_op;
         self.entry = entry;
+        self.block_stack.push(self.arena.allocator(), entry);
         var named: ArgsOf(@TypeOf(spec)) = undefined;
         inline for (fields, 0..) |f, i| {
             args[i].inner = entry.argument(i);
@@ -1063,7 +1064,7 @@ pub const Builder = struct {
     }
 
     pub fn currentBlock(self: *const Builder) *mlir.Block {
-        return self.block_stack.current(self.entryBlock());
+        return self.block_stack.current();
     }
 
     pub fn axisAttr(self: *const Builder, a: Axis) *const mlir.Attribute {

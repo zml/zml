@@ -844,6 +844,7 @@ pub const Builder = struct {
 
         self.func_op = func_op;
         self.entry_block = entry;
+        self.block_stack.push(self.arena.allocator(), entry);
     }
 
     pub fn deinit(self: *Builder) void {
@@ -866,7 +867,7 @@ pub const Builder = struct {
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        return self.block_stack.current(self.entry_block);
+        return self.block_stack.current();
     }
 
     /// Unpack a slice of `Value`s into an arena-allocated slice of raw MLIR

@@ -810,6 +810,7 @@ pub const Builder = struct {
         _ = func_op.appendTo(self.gpu_body);
         self.func_op = func_op;
         self.entry_block = entry;
+        self.block_stack.push(self.arena.allocator(), entry);
 
         // The view keeps the storage element type: recasting a predicate
         // argument back to `!fly.ptr<i1>` would make a copy atom's element
@@ -840,7 +841,7 @@ pub const Builder = struct {
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        return self.block_stack.current(self.entry_block);
+        return self.block_stack.current();
     }
 
     pub fn loc(self: *const Builder) *const mlir.Location {

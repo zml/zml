@@ -608,6 +608,7 @@ pub const Builder = struct {
 
         self.func_op = func_op;
         self.entry_block = entry;
+        self.block_stack.push(self.arena.allocator(), entry);
     }
 
     pub fn deinit(self: *Builder) void {
@@ -629,7 +630,7 @@ pub const Builder = struct {
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        return self.block_stack.current(self.entry_block);
+        return self.block_stack.current();
     }
 
     fn innerSlice(self: *Builder, values: []const Value) []const *const mlir.Value {
@@ -2060,7 +2061,7 @@ pub const Builder = struct {
     /// Continues in `block`, the fall-through of an early return, in place of
     /// the current block.
     fn continueIn(self: *Builder, block: *mlir.Block) void {
-        self.block_stack.replaceTop(self.arena.allocator(), block);
+        self.block_stack.replaceTop(block);
     }
 
     pub fn openReturnIf(self: *Builder, cond: Value) ReturnIfScope {
@@ -2114,7 +2115,7 @@ pub const Builder = struct {
         // After any `returnIf` call, the entry block already has a
         // `cf.cond_br` terminator; the fall-through block sits on the stack
         // as the new insertion point. `currentBlock()` returns that block
-        // (or `entry_block` if no cf was emitted), so the final terminator
+        // (the entry block if no cf was emitted), so the final terminator
         // goes to the correct "tail" block in either case.
         const current = self.currentBlock();
         if (self.exit_block) |exit| {

@@ -11,8 +11,8 @@ const std = @import("std");
 const mlir = @import("mlir");
 const scf = @import("mlir/dialects/scf");
 
-/// The blocks a builder emits into: the innermost scope's on top of the
-/// function's entry block.
+/// The blocks a builder emits into: the function's entry block at the bottom,
+/// the innermost scope's on top.
 pub const BlockStack = struct {
     blocks: std.ArrayList(*mlir.Block) = .empty,
 
@@ -20,7 +20,9 @@ pub const BlockStack = struct {
         self.blocks.append(allocator, block) catch @panic("BlockStack.push: out of memory");
     }
 
+    /// Closes the innermost scope.
     pub fn pop(self: *BlockStack) void {
+        if (self.blocks.items.len < 2) @panic("BlockStack.pop: no scope open"); // the entry block always stays
         _ = self.blocks.pop();
     }
 
@@ -29,15 +31,14 @@ pub const BlockStack = struct {
         self.blocks.clearRetainingCapacity();
     }
 
-    /// The innermost block, else `entry`.
-    pub fn current(self: *const BlockStack, entry: ?*mlir.Block) *mlir.Block {
-        return self.blocks.getLastOrNull() orelse entry orelse @panic("BlockStack.current: no block, call declareArgs first");
+    /// Returns the top block.
+    pub fn current(self: *const BlockStack) *mlir.Block {
+        return self.blocks.getLastOrNull() orelse @panic("BlockStack.current: no block, call declareArgs first");
     }
 
-    /// Continues in `block` in place of the innermost block, or of the entry
-    /// block when no scope is open.
-    pub fn replaceTop(self: *BlockStack, allocator: std.mem.Allocator, block: *mlir.Block) void {
-        if (self.blocks.items.len == 0) return self.push(allocator, block);
+    /// Replaces the top block with `block`.
+    pub fn replaceTop(self: *BlockStack, block: *mlir.Block) void {
+        if (self.blocks.items.len == 0) @panic("BlockStack.replaceTop: no block, call declareArgs first");
         self.blocks.items[self.blocks.items.len - 1] = block;
     }
 };

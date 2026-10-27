@@ -737,6 +737,7 @@ pub const Builder = struct {
 
         self.func_op = func_op;
         self.entry_block = entry;
+        self.block_stack.push(self.arena.allocator(), entry);
         self.args = args;
 
         self.tensors = try scratch.alloc(?Tensor, args.len);
@@ -765,7 +766,7 @@ pub const Builder = struct {
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        return self.block_stack.current(self.entry_block);
+        return self.block_stack.current();
     }
 
     pub fn emit(self: *Builder, op: *mlir.Operation) Value {
