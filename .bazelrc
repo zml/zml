@@ -98,6 +98,16 @@ common:debug    --strategy=ZigBuildLib=local
 common:debug    --strategy=ZigBuildObj=local
 common:debug    --strategy=ZigBuildTestLib=local
 
+# Keep Zig compiler state between builds. See docs/howtos/incremental_builds.md.
+common:incremental --config=debug
+common:incremental --@rules_zig//zig/settings:incremental_worker=//bazel/zig_worker:worker
+# Zig 0.17's self-hosted incremental archives are not accepted by the C linker.
+common:incremental --@rules_zig//zig/settings:zigopt=-fllvm
+build:incremental  --strategy=ZigIncremental=worker
+build:incremental  --worker_max_instances=ZigIncremental=1
+# Zig retains open input directories; they must survive between requests.
+build:incremental  --noworker_sandboxing
+
 # --config=alldebug build everything in debug mode, including the backend.
 common:alldebug --compilation_mode=dbg
 common:alldebug --@rules_zig//zig/settings:mode=debug

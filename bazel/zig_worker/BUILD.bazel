@@ -1,0 +1,21 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+
+py_binary(
+    name = "worker",
+    srcs = ["worker.py"],
+    main = "worker.py",
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "worker_test",
+    srcs = [
+        "worker.py",
+        "worker_test.py",
+    ],
+    args = ["$(ZIG_BIN)"],
+    data = ["@rules_zig//zig:resolved_toolchain"],
+    imports = ["."],
+    main = "worker_test.py",
+    toolchains = ["@rules_zig//zig:resolved_toolchain"],
+)
