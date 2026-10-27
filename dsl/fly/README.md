@@ -178,10 +178,11 @@ coordinate tensor); `t.fill(0)` splats. `b.rmemTensor(layout, dtype)` is
 `fx.make_rmem_tensor`; `b.sharedArray(.f32, n, 16)` is a static LDS array
 (`fx.SharedAllocator().allocate(fx.Array[...])`).
 
-Scalars and vectors: `add/sub/mul/div/rem` (a scalar broadcasts against a
-vector), `to(dtype)`, `cmp(.lt, x)`, `cond.select(a, b)`, `v.reduce(.add)`,
-`v.shuffleXor(off, 64)`, `b.rsqrt(x)`, `b.constant(.f32, 1.0)`,
-`b.threadId(.x)` / `b.blockId(.x)` (already `i32`), `b.barrier()`.
+Scalars and vectors: `add/sub/mul/div/rem` and `lt(x)` (`cmp` for integers,
+`cmpf` for floats; `cmpUnsigned`) broadcast a scalar against a vector;
+`to(dtype)`, `cond.select(a, b)`, `v.reduce(.add)`, `v.shuffleXor(off, 64)`,
+`b.rsqrt(x)`, `b.constant(.f32, 1.0)`, `b.threadId(.x)` / `b.blockId(.x)`
+(already `i32`), `b.barrier()`.
 
 Integer types are signless in MLIR. `div`, `rem`, `cmp` and `to` use signed
 integer semantics, except that `to` treats predicates as unsigned.
@@ -190,7 +191,7 @@ operations explicit. `bitAnd`, `bitOr`, `bitXor`, `shl` and `shrU` operate
 on integer bits.
 
 `splat` creates a vector, including when its length is one. Numeric casts
-preserve vector shape. `bitcast` preserves total bits and adjusts vector
+preserve vector shape. `bitCast` preserves total bits and adjusts vector
 length to the destination element width; scalar bitcasts require equal
 widths. Use `extract` to obtain a scalar, `insert` to replace an element and
 `shuffleVector` to select elements from two vectors. Lane `shuffle`
@@ -213,8 +214,10 @@ pointers. The ordering is monotonic; callers provide barriers or kernel
 dependencies before consuming completed counters.
 
 Control flow uses `dsl/common`: `b.openFor(lo, hi, step, .{ inits })`
-with `.yield(.{ ... })`, `b.openIf(cond)` with `.yieldThen(.{})`,
-`b.openIfElse(cond, .{ types })` with `.yieldThen` / `.yieldElse`.
+with `.yield(.{ ... })` (`.close()` without inits), `b.openIf(cond)` with
+`.close()`, `b.openIfElse(cond, .{ types })` with `.yieldThen` / `.yieldElse`
+(`.elseBranch()` / `.close()` without types). Types are dtypes, Values for
+their types, or MLIR types; tuples can also be arrays.
 `openWhile` has separate condition and body regions: `before_carried`
 feeds `yieldBefore`, `after_carried` feeds `yieldAfter`, and `results`
 contains the values returned when the condition becomes false.
@@ -231,6 +234,13 @@ keep their register state in SSA values:
 - Pass accumulators through `openFor` initial values, `carried`, `yield`
   and `results`. Branches and while loops also return SSA values through
   their scope objects.
+
+Put each scope's body in a Zig `{ ... }` block right after `openFor`,
+`openIf` or `openWhile`, ending with its `yield` (or `close()` for a scope
+without values). `openIfElse` and `openWhile` get one block per region, ending
+with `yieldThen`/`yieldElse` (`elseBranch()`/`close()` without results) and
+`yieldBefore`/`yieldAfter`. The scope variable stays outside, so its `results`
+stay readable after the blocks.
 
 The MoE and sparse-MLA kernels linked above use this path with the published
 runtime. Straight-line kernels can still use `rmemTensor`,

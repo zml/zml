@@ -129,7 +129,7 @@ pub const triton = struct {
 
                 try spec.run(&b, cfg);
 
-                return b.finish(&.{});
+                return b.finish();
             }
 
             pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
@@ -1269,8 +1269,10 @@ test "cute kernel emits the module the CuTe compiler takes" {
                 });
                 const i = b.blockIdx().x.mul(b.blockDim().x).add(b.threadIdx().x);
                 var guard = b.openIf(i.lt(cfg.n));
-                a.out.set(.{i}, a.x.get(.{i}).add(1.0));
-                guard.yieldThen(.{});
+                {
+                    a.out.set(.{i}, a.x.get(.{i}).add(1.0));
+                    guard.close();
+                }
             }
         }.run,
     });

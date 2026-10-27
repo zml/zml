@@ -2,31 +2,14 @@
 //! the dialect's terminators: `continue` ends a `for`/`loop` body, `yield` an
 //! `if`, `break` leaves a `loop`. An already-terminated branch is left alone.
 
+const common = @import("dsl/common/builder");
 const std = @import("std");
 const cuda_tile = @import("mlir/dialects/cuda_tile");
-const dsl = @import("dsl/common");
 const mlir = @import("mlir");
-
-pub const tupleArity = dsl.tupleArity;
-
-fn collect(comptime ValueT: type, comptime N: usize, values: anytype, comptime what: []const u8) [N]*const mlir.Value {
-    const info = @typeInfo(@TypeOf(values));
-    if (info != .@"struct" or !info.@"struct".is_tuple)
-        @compileError(what ++ " expects a tuple literal");
-    if (info.@"struct".field_names.len != N)
-        @compileError(what ++ ": arity must match the scope's declared arity");
-    var buf: [N]*const mlir.Value = undefined;
-    inline for (info.@"struct".field_names, 0..) |f, i| {
-        if (@FieldType(@TypeOf(values), f) != ValueT)
-            @compileError(what ++ ": every tuple element must be a Value");
-        buf[i] = @field(values, f).inner;
-    }
-    return buf;
-}
 
 fn terminate(comptime ValueT: type, comptime N: usize, kernel: anytype, block: *mlir.Block, comptime mnemonic: enum { yield, continue_, break_ }, values: anytype, comptime what: []const u8) void {
     if (block.terminator() != null) return;
-    const buf = collect(ValueT, N, values, what);
+    const buf = common.innerValues(ValueT, N, values, what);
     const op = switch (mnemonic) {
         .yield => cuda_tile.yield(kernel.ctx, &buf, kernel.loc()),
         .continue_ => cuda_tile.continue_(kernel.ctx, &buf, kernel.loc()),
@@ -35,7 +18,13 @@ fn terminate(comptime ValueT: type, comptime N: usize, kernel: anytype, block: *
     _ = op.appendTo(block);
 }
 
-/// `for %iv in (lb to ub, step) iter_values(...)`; `yield` closes it.
+pub const ForOpts = struct {
+    /// Compare the induction variable unsigned.
+    unsigned_cmp: bool = false,
+};
+
+/// `for %iv in (lb to ub, step) iter_values(...)`; `yield` closes it, or
+/// `close()` when it carries nothing.
 pub fn ForScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usize) type {
     return struct {
         kernel: *BuilderT,
@@ -47,7 +36,7 @@ pub fn ForScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usiz
         iv: ValueT,
         carried: [N]ValueT,
         results: [N]ValueT = undefined,
-        unsigned_cmp: bool = false,
+        opts: ForOpts = .{},
 
         const Self = @This();
 
@@ -59,10 +48,20 @@ pub fn ForScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usiz
         }
 
         pub fn yield(self: *Self, values: anytype) void {
+            if (N == 0) @compileError("ForScope.yield: the loop carries nothing, end it with close()");
+            self.end(values);
+        }
+
+        pub fn close(self: *Self) void {
+            if (N != 0) @compileError("ForScope.close: the loop carries values, end it with yield()");
+            self.end(.{});
+        }
+
+        fn end(self: *Self, values: anytype) void {
             const k = self.kernel;
             terminate(ValueT, N, k, self.body, .continue_, values, "ForScope.yield");
             k.popBlock();
-            const for_op = cuda_tile.for_(k.ctx, self.lb_inner, self.ub_inner, self.step_inner, &self.inits_inner, self.body, self.unsigned_cmp, k.loc());
+            const for_op = cuda_tile.for_(k.ctx, self.lb_inner, self.ub_inner, self.step_inner, &self.inits_inner, self.body, self.opts.unsigned_cmp, k.loc());
             _ = for_op.appendTo(k.currentBlock());
             for (0..N) |i| self.results[i] = .{ .inner = for_op.result(i), .kernel = k };
         }
@@ -77,9 +76,9 @@ pub fn IfOnlyScope(comptime BuilderT: type, comptime ValueT: type) type {
 
         const Self = @This();
 
-        pub fn yieldThen(self: *Self, values: anytype) void {
+        pub fn close(self: *Self) void {
             const k = self.kernel;
-            terminate(ValueT, 0, k, self.then_block, .yield, values, "IfOnlyScope.yieldThen");
+            terminate(ValueT, 0, k, self.then_block, .yield, .{}, "IfOnlyScope.close");
             k.popBlock();
             _ = cuda_tile.if_(k.ctx, self.cond_inner, &.{}, self.then_block, .{}, k.loc()).appendTo(k.currentBlock());
         }
@@ -98,13 +97,33 @@ pub fn IfScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usize
         const Self = @This();
 
         pub fn yieldThen(self: *Self, values: anytype) void {
+            if (N == 0) @compileError("IfScope.yieldThen: the if has no results, switch branches with elseBranch()");
+            self.endThen(values);
+        }
+
+        pub fn yieldElse(self: *Self, values: anytype) void {
+            if (N == 0) @compileError("IfScope.yieldElse: the if has no results, end it with close()");
+            self.endElse(values);
+        }
+
+        pub fn elseBranch(self: *Self) void {
+            if (N != 0) @compileError("IfScope.elseBranch: the if has results, switch branches with yieldThen()");
+            self.endThen(.{});
+        }
+
+        pub fn close(self: *Self) void {
+            if (N != 0) @compileError("IfScope.close: the if has results, end it with yieldElse()");
+            self.endElse(.{});
+        }
+
+        fn endThen(self: *Self, values: anytype) void {
             const k = self.kernel;
             terminate(ValueT, N, k, self.then_block, .yield, values, "IfScope.yieldThen");
             k.popBlock();
             k.pushBlock(self.else_block);
         }
 
-        pub fn yieldElse(self: *Self, values: anytype) void {
+        fn endElse(self: *Self, values: anytype) void {
             const k = self.kernel;
             terminate(ValueT, N, k, self.else_block, .yield, values, "IfScope.yieldElse");
             k.popBlock();
@@ -115,8 +134,9 @@ pub fn IfScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usize
     };
 }
 
-/// `loop iter_values(...)`: the body ends with `continue` (`yield`) and leaves
-/// through `break` (`breakWith`, inside an `if`). `results` are the broken.
+/// `loop iter_values(...)`: the body ends with `continue` (`yield`, or
+/// `close()` when it carries nothing) and leaves through `break` (`breakWith`,
+/// inside an `if`). `results` are the broken.
 pub fn LoopScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usize) type {
     return struct {
         kernel: *BuilderT,
@@ -140,6 +160,16 @@ pub fn LoopScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usi
         }
 
         pub fn yield(self: *Self, values: anytype) void {
+            if (N == 0) @compileError("LoopScope.yield: the loop carries nothing, end it with close()");
+            self.end(values);
+        }
+
+        pub fn close(self: *Self) void {
+            if (N != 0) @compileError("LoopScope.close: the loop carries values, end it with yield()");
+            self.end(.{});
+        }
+
+        fn end(self: *Self, values: anytype) void {
             const k = self.kernel;
             terminate(ValueT, N, k, self.body, .continue_, values, "LoopScope.yield");
             k.popBlock();

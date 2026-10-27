@@ -30,7 +30,8 @@ support for every shape or dtype.
 
 ## Sparse attention
 
-`.indices` mask dispatches to a dedicated sparse kernel in `unified_attention.zig`.
+`.indices` mask dispatches to a dedicated sparse kernel in
+`sparse_unified_attention.zig`.
 The `i32` tensor has shape `{ .b = T, .topk = K }`, with one list per packed
 query shared across heads. Each entry is a logical position within that query's
 sequence, including its cached prefix. The kernel translates each selected

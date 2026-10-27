@@ -1,0 +1,35 @@
+const std = @import("std");
+
+const mlir = @import("mlir");
+const scf = @import("mlir/dialects/scf");
+
+pub const control_flow = @import("control_flow.zig");
+pub const args = @import("args.zig");
+
+pub const arity = control_flow.arity;
+pub const BlockStack = control_flow.BlockStack;
+pub const forBounds = control_flow.forBounds;
+pub const ForOpts = scf.ForOpts;
+pub const openFor = control_flow.openFor;
+pub const openIf = control_flow.openIf;
+pub const openIfElse = control_flow.openIfElse;
+pub const openWhile = control_flow.openWhile;
+pub const innerValues = control_flow.innerValues;
+pub const resultTypes = control_flow.resultTypes;
+pub const ForScope = control_flow.ForScope;
+pub const IfOnlyScope = control_flow.IfOnlyScope;
+pub const IfScope = control_flow.IfScope;
+pub const WhileScope = control_flow.WhileScope;
+
+pub const NamedArgs = args.NamedArgs;
+
+/// Verifies `module`, logging it when it fails.
+pub fn verify(module: *mlir.Module, comptime target: []const u8) error{InvalidMlir}!void {
+    if (module.operation().verify()) return;
+    std.log.err(target ++ ": the module does not verify:\n{f}", .{module.operation().fmt(.{ .debug_info = false })});
+    return error.InvalidMlir;
+}
+
+test {
+    std.testing.refAllDecls(@This());
+}

@@ -18,8 +18,7 @@ const vector = @import("mlir/dialects/vector");
 /// `vector`-dialect enums re-exported for convenience.
 /// Used by `vectorReduction` / `multiReduction`.
 pub const CombiningKind = vector.CombiningKind;
-const dsl = @import("dsl/common");
-const tupleArity = dsl.tupleArity;
+const common = @import("dsl/common/builder");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 const mosaic_tpu = @import("mlir/dialects/mosaic_tpu");
@@ -210,8 +209,8 @@ pub const Value = struct {
     }
 
     /// `tpu.bitcast` — same-bitwidth element-type swap.
-    pub fn bitcast(self: Value, dtype: DType) Value {
-        return self.kern().bitcastTo(self, dtype);
+    pub fn bitCast(self: Value, dtype: DType) Value {
+        return self.kern().bitCast(self, dtype);
     }
 
     /// Absolute value (float→absf, int→absi).
@@ -464,7 +463,7 @@ pub const Builder = struct {
     /// Entry block for the `func.func`. `null` between `open` and the first
     /// `declareArgs` call; populated thereafter.
     entry_block: ?*mlir.Block,
-    block_stack: std.ArrayList(*mlir.Block),
+    block_stack: common.BlockStack = .{},
     /// Cached `arith.constant 0 : index` Value (and the block it lives
     /// in) so repeat no-index loads / stores share an SSA value. See
     /// `zeroIndex` for the lookup logic.
@@ -588,13 +587,13 @@ pub const Builder = struct {
             .name = name,
             .func_op = null,
             .entry_block = null,
-            .block_stack = .empty,
+            .block_stack = .{},
         };
     }
 
     /// Declare the kernel's args from a named-field struct literal and
     /// return a `NamedArgs(Spec)`.
-    pub fn declareArgs(self: *Builder, spec: anytype) !dsl.NamedArgs(@TypeOf(spec), Value) {
+    pub fn declareArgs(self: *Builder, spec: anytype) !common.NamedArgs(@TypeOf(spec), Value) {
         return self.declareArgsOpts(spec, &.{}, .{});
     }
 
@@ -603,7 +602,7 @@ pub const Builder = struct {
         spec: anytype,
         result_types: []const *const mlir.Type,
         opts: Opts,
-    ) !dsl.NamedArgs(@TypeOf(spec), Value) {
+    ) !common.NamedArgs(@TypeOf(spec), Value) {
         const Spec = @TypeOf(spec);
         const field_names = @typeInfo(Spec).@"struct".field_names;
 
@@ -639,7 +638,7 @@ pub const Builder = struct {
 
         try self.declareArgsLowOpts(&arg_specs, result_types, opts);
 
-        var named: dsl.NamedArgs(Spec, Value) = undefined;
+        var named: common.NamedArgs(Spec, Value) = undefined;
         inline for (field_names, 0..) |field_name, i| {
             @field(named, field_name) = self.arg(i);
         }
@@ -845,6 +844,7 @@ pub const Builder = struct {
 
         self.func_op = func_op;
         self.entry_block = entry;
+        self.block_stack.push(self.arena.allocator(), entry);
     }
 
     pub fn deinit(self: *Builder) void {
@@ -859,18 +859,15 @@ pub const Builder = struct {
     }
 
     pub fn pushBlock(self: *Builder, b: *mlir.Block) void {
-        self.block_stack.append(self.arena.allocator(), b) catch @panic("Builder.pushBlock OOM");
+        self.block_stack.push(self.arena.allocator(), b);
     }
 
     pub fn popBlock(self: *Builder) void {
-        _ = self.block_stack.pop();
+        self.block_stack.pop();
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        if (self.block_stack.items.len > 0) {
-            return self.block_stack.items[self.block_stack.items.len - 1];
-        }
-        return self.entry_block orelse @panic("Builder has no current block — call declareArgs first");
+        return self.block_stack.current();
     }
 
     /// Unpack a slice of `Value`s into an arena-allocated slice of raw MLIR
@@ -960,8 +957,13 @@ pub const Builder = struct {
     }
 
     /// Constant `index`-typed value (for memref / loop bounds).
-    pub fn cIndex(self: *Builder, value: i64) Value {
+    pub fn constIndex(self: *Builder, value: i64) Value {
         return self.emit(arith.constant_index(self.ctx, value, self.loc()));
+    }
+
+    /// `openFor`'s default lower bound, an `index` constant.
+    fn indexBound(self: *Builder, value: anytype) Value {
+        return self.constIndex(intBits(value, 64, "index"));
     }
 
     /// Lift a Zig scalar (or pass-through Value) to a DSL constant.
@@ -998,39 +1000,48 @@ pub const Builder = struct {
         };
     }
 
-    /// Lift `value` and pin its dtype to `dtype`. Unsigned ints bit-cast
-    /// preserving the source bit-pattern.
-    pub fn liftAs(self: *Builder, value: anytype, dtype: DType) Value {
+    /// `value` as a constant of `dtype`; a Value passes through. An integer is
+    /// signed or an unsigned bit pattern of `dtype`'s width; anything else
+    /// panics.
+    pub fn constant(self: *Builder, dtype: DType, value: anytype) Value {
         const T = @TypeOf(value);
         if (T == Value) return value;
         if (isFloatDtype(dtype)) {
             const v_f64: f64 = switch (@typeInfo(T)) {
                 .comptime_int, .int => @floatFromInt(value),
                 .comptime_float, .float => @floatCast(value),
-                else => @compileError("Builder.liftAs: unsupported scalar " ++ @typeName(T)),
+                else => @compileError("Builder.constant: unsupported scalar " ++ @typeName(T)),
             };
             return self.emitFloat(dtype, v_f64);
         }
-        const v_i64: i64 = switch (@typeInfo(T)) {
-            .comptime_int => blk: {
-                if (value >= std.math.minInt(i64) and value <= std.math.maxInt(i64))
-                    break :blk @intCast(value);
-                if (value >= 0 and value <= std.math.maxInt(u64))
-                    break :blk @bitCast(@as(u64, value));
-                @compileError("Builder.liftAs: integer literal out of 64-bit range");
-            },
-            .int => |info| if (info.signedness == .signed) @intCast(value) else @bitCast(@as(u64, @intCast(value))),
+        const v: i128 = switch (@typeInfo(T)) {
+            .comptime_int, .int => value,
             .comptime_float, .float => @intFromFloat(value),
-            else => @compileError("Builder.liftAs: unsupported scalar " ++ @typeName(T)),
+            else => @compileError("Builder.constant: unsupported scalar " ++ @typeName(T)),
         };
-        return self.emitInt(dtype, v_i64);
+        return self.emitInt(dtype, intBits(v, @intCast(intBitwidth(dtype)), @tagName(dtype)));
+    }
+
+    /// `value` as the `i64` an integer constant of `bits` bits is built from.
+    /// It may be signed or an unsigned bit pattern, so it must lie in
+    /// [-2^(bits-1), 2^bits).
+    fn intBits(value: i128, bits: u7, dtype: []const u8) i64 {
+        if (value < -(@as(i128, 1) << (bits - 1)) or value >= @as(i128, 1) << bits)
+            std.debug.panic("Builder.constant: {d} does not fit {s}", .{ value, dtype });
+        return @truncate(value);
+    }
+
+    /// `value` as a constant of `like`'s element type; a Value passes through.
+    pub fn constantLike(self: *Builder, value: anytype, like: Value) Value {
+        if (@TypeOf(value) == Value) return value;
+        return self.constMatching(value, like.elemType());
     }
 
     /// Build an arith.constant of the given MLIR element type from a Zig
     /// numeric. Used for matching the type of an existing reference value.
-    pub fn constMatching(self: *Builder, value: anytype, elem: *const mlir.Type) Value {
-        if (elem.eql(.index(self.ctx))) return self.cIndex(@intCast(value));
-        return self.liftAs(value, self.mlirElemToDType(elem));
+    fn constMatching(self: *Builder, value: anytype, elem: *const mlir.Type) Value {
+        if (elem.eql(.index(self.ctx))) return self.constIndex(intBits(value, 64, "index"));
+        return self.constant(self.mlirElemToDType(elem), value);
     }
 
     fn liftMatching(self: *Builder, value: anytype, ref_elem: *const mlir.Type) Value {
@@ -1305,7 +1316,7 @@ pub const Builder = struct {
     // ==================== TPU casts ====================
 
     /// `tpu.bitcast` — same-bitwidth element-type swap. Shape preserved.
-    pub fn bitcastTo(self: *Builder, src: Value, dt: DType) Value {
+    pub fn bitCast(self: *Builder, src: Value, dt: DType) Value {
         return self.emit(mosaic_tpu.bitcast(self.ctx, src.inner, self.swapElem(src, dt), self.loc()));
     }
     pub fn extf(self: *Builder, src: Value, dt: DType) Value {
@@ -1336,7 +1347,7 @@ pub const Builder = struct {
         return self.castOpts(src, dt, .{});
     }
     pub fn castOpts(self: *Builder, src: Value, dt: DType, opts: CastOpts) Value {
-        if (opts.bitcast) return self.bitcastTo(src, dt);
+        if (opts.bitcast) return self.bitCast(src, dt);
         const cur_elem = src.elemType();
         const tgt_elem = dt.toMlir(self.ctx);
         if (cur_elem.eql(tgt_elem)) return src;
@@ -1373,7 +1384,7 @@ pub const Builder = struct {
     /// + `arith.mulf x, ln2` + `math.exp`. For the raw `math.exp2` op
     /// (post-2025-07-26 cloud TPUs), use `mathExp2`.
     pub fn exp2(self: *Builder, x: Value) Value {
-        const ln2 = self.liftAs(@as(f64, 0.6931471805599453), self.mlirElemToDType(x.elemType()));
+        const ln2 = self.constant(self.mlirElemToDType(x.elemType()), @as(f64, 0.6931471805599453));
         const ln2_bc = if (x.isShaped()) self.broadcastTo(ln2, x.shape().constSlice()) else ln2;
         return self.exp(self.mulf(x, ln2_bc));
     }
@@ -1522,7 +1533,7 @@ pub const Builder = struct {
         if (self.zero_index) |z| {
             if (self.zero_index_block == block) return z;
         }
-        const z = self.cIndex(0);
+        const z = self.constIndex(0);
         self.zero_index = z;
         self.zero_index_block = block;
         return z;
@@ -1746,7 +1757,7 @@ pub const Builder = struct {
     }
 
     pub fn rotate(self: *Builder, value: Value, opts: RotateOpts) Value {
-        const amount = self.lift(@as(i32, opts.amount));
+        const amount = self.constant(.i32, opts.amount);
         return self.emit(mosaic_tpu.dynamic_rotate(self.ctx, value.inner, amount.inner, .{
             .dimension = opts.dimension,
             .stride = opts.stride,
@@ -1889,7 +1900,7 @@ pub const Builder = struct {
     /// Convenience: 1-sided range mask `(0 <= idx < limit)` — emits two
     /// `index` constants and a `tpu.create_mask`.
     pub fn rangeMask(self: *Builder, limits: []const Value, shape: []const i64) Value {
-        const zero = self.cIndex(0);
+        const zero = self.constIndex(0);
         const lows = self.arena.allocator().alloc(Value, limits.len) catch @panic("rangeMask OOM");
         for (lows) |*l| l.* = zero;
         return self.createMask(lows, limits, shape);
@@ -2025,142 +2036,44 @@ pub const Builder = struct {
 
     // ==================== SCF regions ====================
 
-    /// Open a scoped `scf.for`. `lower`/`upper`/`step` accept Values, comptime
-    /// ints, or runtime Zig ints — coerced to `index`. `inits` is `.{v1, v2, ...}`.
+    /// Open a scoped `scf.for`. Literal bounds take the type of a Value bound,
+    /// else they are `index`. `inits` is `.{v1, v2, ...}` or an array.
     pub fn openFor(
         self: *Builder,
         lower: anytype,
         upper: anytype,
         step: anytype,
         inits: anytype,
-    ) dsl.ForScope(Builder, Value, dsl.tupleArity(@TypeOf(inits), "openFor: inits")) {
-        const N = comptime dsl.tupleArity(@TypeOf(inits), "openFor: inits");
-        const info = @typeInfo(@TypeOf(inits)).@"struct";
-
-        // scf.for bounds default to `index`.
-        const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.cIndex(@intCast(lower));
-        const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.cIndex(@intCast(upper));
-        const step_v: Value = if (@TypeOf(step) == Value) step else self.cIndex(@intCast(step));
-
-        var block_types: [N + 1]*const mlir.Type = undefined;
-        var block_locs: [N + 1]*const mlir.Location = undefined;
-        block_types[0] = lb_v.type_();
-        block_locs[0] = self.loc();
-        var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (info.field_names, info.field_types, 0..) |field_name, Field, i| {
-            const raw = @field(inits, field_name);
-            const v: Value = if (Field == Value) raw else self.lift(raw);
-            block_types[i + 1] = v.type_();
-            block_locs[i + 1] = self.loc();
-            inits_inner[i] = v.inner;
-        }
-
-        const body = mlir.Block.init(&block_types, &block_locs);
-        self.pushBlock(body);
-
-        var carried: [N]Value = undefined;
-        for (0..N) |i| carried[i] = .{ .inner = body.argument(i + 1), .kernel = self };
-
-        return .{
-            .kernel = self,
-            .body = body,
-            .lb_inner = lb_v.inner,
-            .ub_inner = ub_v.inner,
-            .step_inner = step_v.inner,
-            .inits_inner = inits_inner,
-            .iv = .{ .inner = body.argument(0), .kernel = self },
-            .carried = carried,
-        };
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
+        return self.openForOpts(lower, upper, step, inits, .{});
     }
 
-    pub fn openIf(self: *Builder, cond: Value) dsl.IfOnlyScope(Builder, Value) {
-        const then_block = mlir.Block.init(&.{}, &.{});
-        self.pushBlock(then_block);
-        return .{
-            .kernel = self,
-            .cond_inner = cond.inner,
-            .then_block = then_block,
-        };
-    }
-
-    pub fn openIfElse(
+    /// `openFor` with `scf.for` options.
+    pub fn openForOpts(
         self: *Builder,
-        cond: Value,
-        result_types: anytype,
-    ) dsl.IfScope(Builder, Value, dsl.tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
-        const N = comptime dsl.tupleArity(@TypeOf(result_types), "openIfElse: result_types");
-        const info = @typeInfo(@TypeOf(result_types)).@"struct";
+        lower: anytype,
+        upper: anytype,
+        step: anytype,
+        inits: anytype,
+        opts: common.ForOpts,
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
+        return common.openFor(self, Value, common.forBounds(self, Value, lower, upper, step, indexBound), inits, opts);
+    }
 
-        var types: [N]*const mlir.Type = undefined;
-        inline for (info.field_names, info.field_types, 0..) |field_name, Field, i| {
-            if (Field != *const mlir.Type)
-                @compileError("openIfElse: every result_type must be *const mlir.Type (use k.scalarTy/vectorTy)");
-            types[i] = @field(result_types, field_name);
-        }
+    pub fn openIf(self: *Builder, cond: Value) IfOnlyScope {
+        return common.openIf(self, Value, cond);
+    }
 
-        const then_block = mlir.Block.init(&.{}, &.{});
-        const else_block = mlir.Block.init(&.{}, &.{});
-        self.pushBlock(then_block);
-
-        return .{
-            .kernel = self,
-            .cond_inner = cond.inner,
-            .then_block = then_block,
-            .else_block = else_block,
-            .result_types = types,
-        };
+    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(common.arity(@TypeOf(result_types), "openIfElse: result_types")) {
+        return common.openIfElse(self, Value, cond, result_types);
     }
 
     pub fn openWhile(
         self: *Builder,
         inits: anytype,
         after_types: anytype,
-    ) dsl.WhileScope(
-        Builder,
-        Value,
-        dsl.tupleArity(@TypeOf(inits), "openWhile: inits"),
-        dsl.tupleArity(@TypeOf(after_types), "openWhile: after_types"),
-    ) {
-        const N = comptime dsl.tupleArity(@TypeOf(inits), "openWhile: inits");
-        const M = comptime dsl.tupleArity(@TypeOf(after_types), "openWhile: after_types");
-        const init_info = @typeInfo(@TypeOf(inits)).@"struct";
-        const type_info = @typeInfo(@TypeOf(after_types)).@"struct";
-
-        var before_types: [N]*const mlir.Type = undefined;
-        var before_locs: [N]*const mlir.Location = undefined;
-        var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (init_info.field_names, init_info.field_types, 0..) |field_name, Field, i| {
-            if (Field != Value)
-                @compileError("openWhile: every init must be a Value");
-            const v: Value = @field(inits, field_name);
-            before_types[i] = v.type_();
-            before_locs[i] = self.loc();
-            inits_inner[i] = v.inner;
-        }
-        const before_block = mlir.Block.init(&before_types, &before_locs);
-
-        var after_tys: [M]*const mlir.Type = undefined;
-        var after_locs: [M]*const mlir.Location = undefined;
-        inline for (type_info.field_names, type_info.field_types, 0..) |field_name, Field, i| {
-            if (Field != *const mlir.Type)
-                @compileError("openWhile: every after_type must be *const mlir.Type");
-            after_tys[i] = @field(after_types, field_name);
-            after_locs[i] = self.loc();
-        }
-        const after_block = mlir.Block.init(&after_tys, &after_locs);
-
-        self.pushBlock(before_block);
-        var before_carried: [N]Value = undefined;
-        for (0..N) |i| before_carried[i] = .{ .inner = before_block.argument(i), .kernel = self };
-
-        return .{
-            .kernel = self,
-            .before_block = before_block,
-            .after_block = after_block,
-            .inits_inner = inits_inner,
-            .after_types = after_tys,
-            .before_carried = before_carried,
-        };
+    ) WhileScope(common.arity(@TypeOf(inits), "openWhile: inits"), common.arity(@TypeOf(after_types), "openWhile: after_types")) {
+        return common.openWhile(self, Value, inits, after_types);
     }
 
     // ==================== finalization ====================
@@ -2187,9 +2100,7 @@ pub const Builder = struct {
 
         if (self.emit_transform_stubs) self.appendTransformStubs();
 
-        if (!self.module.operation().verify()) {
-            return error.InvalidMlir;
-        }
+        try common.verify(self.module, "dsl/mosaic_tpu");
 
         if (opts.canonicalize) {
             const pm = mlir.PassManager.init(self.ctx);
@@ -2300,17 +2211,17 @@ fn isSkippedWindowSpace(ms: MemorySpace) bool {
 // ==================== scope-type aliases pinned to Mosaic's Builder ====================
 
 pub fn ForScope(comptime N: usize) type {
-    return dsl.ForScope(Builder, Value, N);
+    return common.ForScope(Builder, Value, N);
 }
 
-pub const IfOnlyScope = dsl.IfOnlyScope(Builder, Value);
+pub const IfOnlyScope = common.IfOnlyScope(Builder, Value);
 
 pub fn IfScope(comptime N: usize) type {
-    return dsl.IfScope(Builder, Value, N);
+    return common.IfScope(Builder, Value, N);
 }
 
 pub fn WhileScope(comptime N: usize, comptime M: usize) type {
-    return dsl.WhileScope(Builder, Value, N, M);
+    return common.WhileScope(Builder, Value, N, M);
 }
 
 test {

@@ -56,9 +56,9 @@ fn findSeqIdx(
     block_q: i64,
     use_q_block_mode: bool,
 ) Value {
-    const left_init = k.liftAs(0, .i32);
+    const left_init = k.constant(.i32, 0);
 
-    var w = k.openWhile(.{ left_init, num_seqs }, .{ k.scalarTy(.i32), k.scalarTy(.i32) });
+    var w = k.openWhile(.{ left_init, num_seqs }, .{ .i32, .i32 });
     {
         const left = w.before_carried[0];
         const right = w.before_carried[1];
@@ -74,7 +74,7 @@ fn findSeqIdx(
         else
             val;
 
-        var i = k.openIfElse(mid_val.le(target_idx), .{ k.scalarTy(.i32), k.scalarTy(.i32) });
+        var i = k.openIfElse(mid_val.le(target_idx), .{ .i32, .i32 });
         {
             i.yieldThen(.{ mid.add(1), right });
         }
@@ -142,23 +142,23 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
 
             const partition = SparseSegments.init(cfg.indices_count, cfg.num_segments, cfg.tile_size);
             const program = k.programId(.x);
-            const num_seqs = k.liftAs(cfg.num_seqs, .i32);
+            const num_seqs = k.constant(.i32, cfg.num_seqs);
             if (!cfg.decode_sequence_grid) {
                 const active_queries = k.load(a.query_start_len_ptr.addPtr(num_seqs));
-                k.returnIf(program.ge(active_queries), .{});
+                k.returnIf(program.ge(active_queries));
             }
 
             const seq = if (cfg.decode_sequence_grid) program else findSeqIdx(k, a.query_start_len_ptr, program, num_seqs, 1, false);
             const seq_len = k.load(a.seq_lens_ptr.addPtr(seq));
             const query_start = k.load(a.query_start_len_ptr.addPtr(seq));
             const query_end = k.load(a.query_start_len_ptr.addPtr(seq).addPtr(1));
-            if (cfg.decode_sequence_grid) k.returnIf(query_start.eq(query_end), .{});
+            if (cfg.decode_sequence_grid) k.returnIf(query_start.eq(query_end));
             const query = if (cfg.decode_sequence_grid) query_start else program;
-            const kv_head = if (cfg.num_query_heads == cfg.num_queries_per_kv) k.liftAs(0, .i32) else k.programId(.y);
+            const kv_head = if (cfg.num_query_heads == cfg.num_queries_per_kv) k.constant(.i32, 0) else k.programId(.y);
 
             // Launch the partial tail first, without launching unused capacity.
-            const slot = if (split_k) k.programId(.z) else k.liftAs(0, .i32);
-            const segment = if (split_k) k.where(slot.eq(0), k.liftAs(@as(i32, @intCast(partition.launched - 1)), .i32), slot.sub(1)) else slot;
+            const slot = if (split_k) k.programId(.z) else k.constant(.i32, 0);
+            const segment = if (split_k) k.where(slot.eq(0), k.constant(.i32, partition.launched - 1), slot.sub(1)) else slot;
             const segment_start = segment.mul(@as(i32, @intCast(partition.span)));
             const heads = k.arange(0, cfg.block_m, .i32);
             const head = kv_head.mul(@as(i32, @intCast(cfg.num_queries_per_kv))).add(heads);
@@ -186,10 +186,14 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
                 });
                 const empty = k.sum(scan_mask.bitAnd(positions.ge(0)).bitAnd(positions.lt(seq_len)).to(.i32)).eq(0);
                 var branch = k.openIfElse(empty, .{});
-                storeResult(k, cfg, a, query, head, head_mask, segment, dims, dim_mask, initial_max, initial_sum, initial_acc);
-                branch.yieldThen(.{});
-                branch.yieldElse(.{});
-                k.returnIf(empty, .{});
+                {
+                    storeResult(k, cfg, a, query, head, head_mask, segment, dims, dim_mask, initial_max, initial_sum, initial_acc);
+                    branch.elseBranch();
+                }
+                {
+                    branch.close();
+                }
+                k.returnIf(empty);
             }
 
             const q_offset = query.to(.i64).mul(cfg.query_strides[0])
@@ -201,7 +205,7 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
             });
             const table = a.block_tables_ptr.addPtr(seq.to(.i64).mul(cfg.block_table_stride));
             const offsets = k.arange(0, cfg.tile_size, .i32);
-            var loop = k.openFor(k.liftAs(0, .i32), k.liftAs(@as(i32, @intCast(partition.tiles_per_segment)), .i32), 1, .{ initial_max, initial_sum, initial_acc });
+            var loop = k.openFor(0, partition.tiles_per_segment, 1, .{ initial_max, initial_sum, initial_acc });
             {
                 const selected = segment_start.add(loop.iv.mul(@as(i32, @intCast(cfg.tile_size)))).add(offsets);
                 const position = k.loadOpts(indices_row.addPtr(selected.to(.i64).mul(cfg.indices_strides[1])), .{
@@ -210,36 +214,40 @@ fn KernelSparseAttentionPtr(comptime split_k: bool) type {
                 });
                 const valid = selected.lt(cfg.indices_count).bitAnd(position.ge(0)).bitAnd(position.lt(seq_len));
                 // A bounded single-tile segment was already checked above.
-                const nonempty = if (partition.tiles_per_segment == 1 and partition.span <= 256) k.liftAs(1, .i1) else k.sum(valid.to(.i32)).gt(0);
+                const nonempty = if (partition.tiles_per_segment == 1 and partition.span <= 256) k.constant(.i1, 1) else k.sum(valid.to(.i32)).gt(0);
                 var branch = k.openIfElse(nonempty, .{ k.tensorTy(&.{cfg.block_m}, .f32), k.tensorTy(&.{cfg.block_m}, .f32), k.tensorTy(&.{ cfg.block_m, cfg.head_size_padded }, .f32) });
-                const safe_position = k.where(valid, position, k.zeros(&.{cfg.tile_size}, .i32));
-                const page = k.loadOpts(table.addPtr(safe_position.div(@as(i32, @intCast(cfg.block_size)))), .{
-                    .mask = valid,
-                    .other = k.zeros(&.{cfg.tile_size}, .i32),
-                }).to(.i64);
-                const in_page = safe_position.rem(@as(i32, @intCast(cfg.block_size))).to(.i64);
-                const key_offset = page.mul(cfg.key_strides[0]).add(in_page.mul(cfg.key_strides[1])).add(kv_head.to(.i64).mul(cfg.key_strides[2])).expandDims(0)
-                    .add(dims.to(.i64).mul(cfg.key_strides[3]).expandDims(1));
-                const value_offset = page.mul(cfg.value_strides[0]).add(in_page.mul(cfg.value_strides[1])).add(kv_head.to(.i64).mul(cfg.value_strides[2])).expandDims(1)
-                    .add(dims.to(.i64).mul(cfg.value_strides[3]).expandDims(0));
-                const K = k.loadOpts(a.key_ptr.addPtr(key_offset), .{
-                    .mask = k.mask2d(dim_mask, valid, cfg.head_size_padded, cfg.tile_size),
-                    .other = k.zeros(&.{ cfg.head_size_padded, cfg.tile_size }, cfg.dtype),
-                });
-                const V = k.loadOpts(a.value_ptr.addPtr(value_offset), .{
-                    .mask = k.mask2d(valid, dim_mask, cfg.tile_size, cfg.head_size_padded),
-                    .other = k.zeros(&.{ cfg.tile_size, cfg.head_size_padded }, cfg.dtype),
-                });
-                const scores = k.dot(Q, K, k.zeros(&.{ cfg.block_m, cfg.tile_size }, .f32)).mul(cfg.scale * RCP_LN2);
-                const S = k.where(k.mask2d(head_mask, valid, cfg.block_m, cfg.tile_size), scores, k.full(&.{ cfg.block_m, cfg.tile_size }, -std.math.inf(f32), .f32));
-                const max_score = loop.carried[0].maximum(k.maxOpts(S, .{ .axis = 1 }));
-                const next_max = k.where(max_score.gt(-std.math.inf(f32)), max_score, k.zeros(&.{cfg.block_m}, .f32));
-                const alpha = k.exp2(loop.carried[0].sub(next_max));
-                const P = k.exp2(S.sub(next_max.expandDims(1)));
-                const sum = loop.carried[1].mul(alpha).add(k.sumOpts(P, .{ .axis = 1 }));
-                const acc = k.dot(P.to(cfg.dtype), V, loop.carried[2].mul(alpha.expandDims(1)));
-                branch.yieldThen(.{ next_max, sum, acc });
-                branch.yieldElse(.{ loop.carried[0], loop.carried[1], loop.carried[2] });
+                {
+                    const safe_position = k.where(valid, position, k.zeros(&.{cfg.tile_size}, .i32));
+                    const page = k.loadOpts(table.addPtr(safe_position.div(@as(i32, @intCast(cfg.block_size)))), .{
+                        .mask = valid,
+                        .other = k.zeros(&.{cfg.tile_size}, .i32),
+                    }).to(.i64);
+                    const in_page = safe_position.rem(@as(i32, @intCast(cfg.block_size))).to(.i64);
+                    const key_offset = page.mul(cfg.key_strides[0]).add(in_page.mul(cfg.key_strides[1])).add(kv_head.to(.i64).mul(cfg.key_strides[2])).expandDims(0)
+                        .add(dims.to(.i64).mul(cfg.key_strides[3]).expandDims(1));
+                    const value_offset = page.mul(cfg.value_strides[0]).add(in_page.mul(cfg.value_strides[1])).add(kv_head.to(.i64).mul(cfg.value_strides[2])).expandDims(1)
+                        .add(dims.to(.i64).mul(cfg.value_strides[3]).expandDims(0));
+                    const K = k.loadOpts(a.key_ptr.addPtr(key_offset), .{
+                        .mask = k.mask2d(dim_mask, valid, cfg.head_size_padded, cfg.tile_size),
+                        .other = k.zeros(&.{ cfg.head_size_padded, cfg.tile_size }, cfg.dtype),
+                    });
+                    const V = k.loadOpts(a.value_ptr.addPtr(value_offset), .{
+                        .mask = k.mask2d(valid, dim_mask, cfg.tile_size, cfg.head_size_padded),
+                        .other = k.zeros(&.{ cfg.tile_size, cfg.head_size_padded }, cfg.dtype),
+                    });
+                    const scores = k.dot(Q, K, k.zeros(&.{ cfg.block_m, cfg.tile_size }, .f32)).mul(cfg.scale * RCP_LN2);
+                    const S = k.where(k.mask2d(head_mask, valid, cfg.block_m, cfg.tile_size), scores, k.full(&.{ cfg.block_m, cfg.tile_size }, -std.math.inf(f32), .f32));
+                    const max_score = loop.carried[0].maximum(k.maxOpts(S, .{ .axis = 1 }));
+                    const next_max = k.where(max_score.gt(-std.math.inf(f32)), max_score, k.zeros(&.{cfg.block_m}, .f32));
+                    const alpha = k.exp2(loop.carried[0].sub(next_max));
+                    const P = k.exp2(S.sub(next_max.expandDims(1)));
+                    const sum = loop.carried[1].mul(alpha).add(k.sumOpts(P, .{ .axis = 1 }));
+                    const acc = k.dot(P.to(cfg.dtype), V, loop.carried[2].mul(alpha.expandDims(1)));
+                    branch.yieldThen(.{ next_max, sum, acc });
+                }
+                {
+                    branch.yieldElse(.{ loop.carried[0], loop.carried[1], loop.carried[2] });
+                }
                 loop.yield(.{ branch.results[0], branch.results[1], branch.results[2] });
             }
 
@@ -291,7 +299,7 @@ pub const SparseReducePtr = struct {
             .output_ptr = .{ .ptr = cfg.dtype },
         });
         const query = k.programId(.x);
-        k.returnIf(query.ge(k.load(a.query_start_len_ptr.addPtr(cfg.num_seqs))), .{});
+        k.returnIf(query.ge(k.load(a.query_start_len_ptr.addPtr(cfg.num_seqs))));
         const head = k.programId(.y);
         const segments = k.arange(0, cfg.num_segments, .i32);
         const segment_mask = segments.lt(cfg.launched_segments);
@@ -302,7 +310,7 @@ pub const SparseReducePtr = struct {
         const sums = k.loadOpts(a.segm_expsum_ptr.addPtr(stats), .{ .mask = segment_mask, .other = k.zeros(&.{cfg.num_segments}, .f32) });
         const nonempty = segment_mask.bitAnd(sums.gt(0.0));
         const maximum = k.max(k.where(nonempty, maxima, k.full(&.{cfg.num_segments}, -std.math.inf(f32), .f32)));
-        const safe_maximum = k.where(maximum.gt(-std.math.inf(f32)), maximum, k.liftAs(0.0, .f32));
+        const safe_maximum = k.where(maximum.gt(-std.math.inf(f32)), maximum, k.constant(.f32, 0.0));
         const rescale = k.exp2(maxima.sub(safe_maximum));
         const denominator = k.sum(sums.mul(rescale));
         const offset = query.to(.i64).mul(cfg.num_query_heads).add(head.to(.i64)).mul(cfg.num_segments).add(segments.to(.i64)).mul(cfg.head_size_padded).expandDims(1).add(dims.to(.i64).expandDims(0));
@@ -311,7 +319,7 @@ pub const SparseReducePtr = struct {
             .other = k.zeros(&.{ cfg.num_segments, cfg.head_tile }, .f32),
         });
         const numerator = k.sumOpts(partial.mul(rescale.expandDims(1)), .{ .axis = 0 });
-        const output = numerator.div(k.where(denominator.gt(0.0), denominator, k.liftAs(1.0, .f32)));
+        const output = numerator.div(k.where(denominator.gt(0.0), denominator, k.constant(.f32, 1.0)));
         const output_offset = query.to(.i64).mul(cfg.output_strides[0]).add(head.to(.i64).mul(cfg.output_strides[1])).add(dims.to(.i64).mul(cfg.output_strides[2]));
         k.storeOpts(a.output_ptr.addPtr(output_offset), output.to(cfg.dtype), .{ .mask = dim_mask });
     }

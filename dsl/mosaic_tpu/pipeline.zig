@@ -90,7 +90,7 @@ pub const PipeSpec = struct {
 pub const PipelineOpts = struct {
     body: BodyFn,
     body_ctx: ?*anyopaque = null,
-    /// Dynamic (`i32`) grid bounds. Comptime: pass `b.lift(@as(i32, N))`.
+    /// Dynamic (`i32`) grid bounds. Comptime: pass `b.constant(.i32, N)`.
     grid: []const Value,
     /// One per HBM input ref (slot `null` <-> `None` spec).
     in_specs: []const ?PipeSpec,
@@ -134,8 +134,8 @@ pub fn emitPipeline(
     for (brefs.items) |*br| br.allocate(b);
 
     const num_steps = gridSize(b, opts.grid);
-    const c0_i32 = b.lift(@as(i32, 0));
-    const c1_i32 = b.lift(@as(i32, 1));
+    const c0_i32 = b.constant(.i32, 0);
+    const c1_i32 = b.constant(.i32, 1);
     {
         var when = b.openIf(b.cmpi(.sgt, num_steps, c0_i32));
         {
@@ -206,7 +206,7 @@ pub fn emitPipeline(
                         .input => br.wait_in_slot.?,
                         .output, .input_output => br.copy_out_slot.?,
                     };
-                    current_refs[br.spec_index] = .{ .buf = br.window_ref, .slot = b.remui(active, b.lift(@as(i32, @intCast(br.buffer_count)))) };
+                    current_refs[br.spec_index] = .{ .buf = br.window_ref, .slot = b.remui(active, b.constant(.i32, br.buffer_count)) };
                 }
             }
 
@@ -251,7 +251,7 @@ pub fn emitPipeline(
             for (brefs.items) |*br| sched_fin.finalize(b, br);
             for (brefs.items) |*br| if (br.is_trivial and (br.buffer_type == .output or br.buffer_type == .input_output)) br.syncCopyOut(b);
 
-            when.yieldThen(.{});
+            when.close();
         }
     }
 
@@ -352,13 +352,13 @@ pub const BufferedRef = struct {
     }
 
     fn appendSlotInits(self: *BufferedRef, b: *Builder, out: *std.ArrayList(*const mlir.Value)) void {
-        const c0 = b.lift(@as(i32, 0)).inner;
+        const c0 = b.constant(.i32, 0).inner;
         switch (self.buffer_type) {
             .input => {
                 if (self.is_trivial) {
                     out.appendAssumeCapacity(c0);
                 } else {
-                    out.appendAssumeCapacity((self.copy_in_slot orelse b.lift(@as(i32, 0))).inner);
+                    out.appendAssumeCapacity((self.copy_in_slot orelse b.constant(.i32, 0)).inner);
                     out.appendAssumeCapacity(c0);
                 }
             },
@@ -368,7 +368,7 @@ pub const BufferedRef = struct {
             },
             .input_output => {
                 out.appendAssumeCapacity(
-                    (self.copy_in_slot orelse b.lift(@as(i32, 0))).inner,
+                    (self.copy_in_slot orelse b.constant(.i32, 0)).inner,
                 );
                 out.appendAssumeCapacity(c0);
                 out.appendAssumeCapacity(c0);
@@ -510,7 +510,7 @@ pub const BufferedRef = struct {
                         const tiling: i64 = if (d == bs.len - 1) 128 else if (bs.len >= 2 and d == bs.len - 2) 8 else 1;
                         const clamped = @min(n, dim_size);
                         const sz_const = @divFloor(clamped + tiling - 1, tiling) * tiling;
-                        size[d] = b.emit(mosaic_tpu.assume_multiple(b.ctx, b.lift(@as(i32, @intCast(sz_const))).inner, @as(i32, @intCast(tiling)), b.loc()));
+                        size[d] = b.emit(mosaic_tpu.assume_multiple(b.ctx, b.constant(.i32, sz_const).inner, @as(i32, @intCast(tiling)), b.loc()));
                     }
                 },
                 .bounded_slice => {
@@ -527,18 +527,18 @@ pub const BufferedRef = struct {
                     }
                     // Prologue shortcut: Python-int 0 start ⇒ `_round_up_to_nearest_multiple` folds.
                     if (static_zero_start and sl.start.asConstantInt() == @as(?i64, 0)) {
-                        const is_oob = b.cmpi(.sgt, sl.size, b.lift(@as(i32, @intCast(dim_size))));
-                        const sz = b.select(is_oob, b.lift(@as(i32, @intCast(dim_size))), sl.size);
+                        const is_oob = b.cmpi(.sgt, sl.size, b.constant(.i32, dim_size));
+                        const sz = b.select(is_oob, b.constant(.i32, dim_size), sl.size);
                         size[d] = b.emit(mosaic_tpu.assume_multiple(b.ctx, sz.inner, tiling, b.loc()));
                         continue;
                     }
-                    const is_oob = b.cmpi(.sgt, b.addi(sl.start, sl.size), b.lift(@as(i32, @intCast(dim_size))));
+                    const is_oob = b.cmpi(.sgt, b.addi(sl.start, sl.size), b.constant(.i32, dim_size));
                     const rounded = blk: {
-                        if (tiling == 1) break :blk b.subi(b.lift(@as(i32, @intCast(dim_size + 1))), sl.start);
+                        if (tiling == 1) break :blk b.subi(b.constant(.i32, dim_size + 1), sl.start);
                         // lax sign-fixup for `jnp.remainder`.
                         const m = b.lift(tiling);
-                        const c0 = b.lift(@as(i32, 0));
-                        const rem_arg = b.subi(b.lift(@as(i32, @intCast(dim_size))), sl.start);
+                        const c0 = b.constant(.i32, 0);
+                        const rem_arg = b.subi(b.constant(.i32, dim_size), sl.start);
                         const r = b.remsi(rem_arg, m);
                         const r_nz = b.cmpi(.ne, r, c0);
                         const r_neg = b.cmpi(.slt, r, c0);
@@ -588,7 +588,7 @@ pub const BufferedRef = struct {
     fn sliceWindowAt(self: *const BufferedRef, b: *Builder, slot: Value, dma: DmaSlice) Value {
         const a = b.arena.allocator();
         const bs = self.spec.block_shape.?;
-        const c0 = b.lift(@as(i32, 0));
+        const c0 = b.constant(.i32, 0);
         const nd = 1 + self.block_compact.len;
         var base = a.alloc(Value, nd) catch unreachable;
         var result_shape = a.alloc(i64, nd) catch unreachable;
@@ -621,14 +621,14 @@ pub const BufferedRef = struct {
     fn currentRef(self: *BufferedRef, b: *Builder) Value {
         if (self.is_trivial or !self.isBuffered()) return self.window_ref;
         const slot = switch (self.buffer_type) {
-            .output => b.remui(self.copy_out_slot.?, b.lift(@as(i32, @intCast(self.buffer_count)))),
-            .input => b.remui(self.wait_in_slot.?, b.lift(@as(i32, @intCast(self.buffer_count)))),
+            .output => b.remui(self.copy_out_slot.?, b.constant(.i32, self.buffer_count)),
+            .input => b.remui(self.wait_in_slot.?, b.constant(.i32, self.buffer_count)),
         };
         const a = b.arena.allocator();
         const nd = 1 + self.block_compact.len;
         var base = a.alloc(Value, nd) catch unreachable;
         var result_shape = a.alloc(i64, nd) catch unreachable;
-        const c0 = b.lift(@as(i32, 0));
+        const c0 = b.constant(.i32, 0);
         base[0] = slot;
         result_shape[0] = 1;
         for (self.block_compact, 0..) |n, ci| {
@@ -665,7 +665,7 @@ pub const BufferedRef = struct {
     // before get_dma_slice; wait_in does it after.
 
     fn defaultCopyIn(self: *BufferedRef, b: *Builder, indices: []const Value, slot_cumulative: Value, static_zero_start: bool) void {
-        const slot = b.remui(slot_cumulative, b.lift(@as(i32, @intCast(self.buffer_count))));
+        const slot = b.remui(slot_cumulative, b.constant(.i32, self.buffer_count));
         const dma = self.getDmaSlice(b, indices, static_zero_start);
         const src_sl = self.sliceSrc(b, dma);
         const dst_sl = self.sliceWindowAt(b, slot, dma);
@@ -675,7 +675,7 @@ pub const BufferedRef = struct {
 
     fn defaultWaitIn(self: *BufferedRef, b: *Builder, indices: []const Value) void {
         const dma = self.getDmaSlice(b, indices, false);
-        const slot = b.remui(self.wait_in_slot.?, b.lift(@as(i32, @intCast(self.buffer_count))));
+        const slot = b.remui(self.wait_in_slot.?, b.constant(.i32, self.buffer_count));
         const src_sl = self.sliceSrc(b, dma);
         const dst_sl = self.sliceWindowAt(b, slot, dma);
         const sem = semAt(b, self.sem_recvs.?, slot);
@@ -684,7 +684,7 @@ pub const BufferedRef = struct {
 
     fn defaultCopyOut(self: *BufferedRef, b: *Builder, indices: []const Value) void {
         if (self.buffer_count == 1) @panic("emitPipeline: single-buffered output sync_copy_out unsupported (TODO)");
-        const slot = b.remui(self.copy_out_slot.?, b.lift(@as(i32, @intCast(self.buffer_count))));
+        const slot = b.remui(self.copy_out_slot.?, b.constant(.i32, self.buffer_count));
         const dma = self.getDmaSlice(b, indices, false);
         // Pallas evaluates `src` (VMEM window) before `dst` (HBM).
         const src_sl = self.sliceWindowAt(b, slot, dma);
@@ -695,7 +695,7 @@ pub const BufferedRef = struct {
 
     fn defaultWaitOut(self: *BufferedRef, b: *Builder, indices: []const Value) void {
         if (self.buffer_count <= 1) return;
-        const slot = b.remui(self.wait_out_slot.?, b.lift(@as(i32, @intCast(self.buffer_count))));
+        const slot = b.remui(self.wait_out_slot.?, b.constant(.i32, self.buffer_count));
         const dma = self.getDmaSlice(b, indices, false);
         const src_sl = self.sliceWindowAt(b, slot, dma);
         const dst_sl = self.sliceSrc(b, dma);
@@ -755,11 +755,11 @@ pub const BufferedRef = struct {
     }
 
     pub fn copyInSlot(self: *const BufferedRef, b: *Builder, slot_cumulative: Value) Value {
-        return b.remui(slot_cumulative, b.lift(@as(i32, @intCast(self.buffer_count))));
+        return b.remui(slot_cumulative, b.constant(.i32, self.buffer_count));
     }
 
     pub fn waitInSlot(self: *const BufferedRef, b: *Builder) Value {
-        return b.remui(self.wait_in_slot.?, b.lift(@as(i32, @intCast(self.buffer_count))));
+        return b.remui(self.wait_in_slot.?, b.constant(.i32, self.buffer_count));
     }
 
     pub fn receiveSemaphoreAt(self: *const BufferedRef, b: *Builder, slot: Value) Value {
@@ -803,8 +803,8 @@ const Scheduler = struct {
 
     fn init(b: *Builder, step: Value, grid: []const Value, num_steps: Value, num_stages: usize, trace_scopes: bool) Scheduler {
         if (num_stages + 1 > 8) @panic("emitPipeline: buffer_count > 7 unsupported");
-        const c0 = b.lift(@as(i32, 0));
-        const c1 = b.lift(@as(i32, 1));
+        const c0 = b.constant(.i32, 0);
+        const c1 = b.constant(.i32, 1);
         var s: Scheduler = .{
             .step = step,
             .grid = grid,
@@ -867,7 +867,7 @@ const Scheduler = struct {
     }
 
     fn notFirstStep(self: *Scheduler, b: *Builder) Value {
-        return b.cmpi(.ne, self.step, b.lift(@as(i32, 0)));
+        return b.cmpi(.ne, self.step, b.constant(.i32, 0));
     }
 
     fn indicesDiffer(b: *Builder, br: *const BufferedRef, ai: []const Value, ci: []const Value) Value {
@@ -900,13 +900,13 @@ const Scheduler = struct {
     }
 
     fn advance(b: *Builder, slot: Value, pred: Value) Value {
-        return b.select(pred, b.addi(slot, b.lift(@as(i32, 1))), slot);
+        return b.select(pred, b.addi(slot, b.constant(.i32, 1)), slot);
     }
 
     fn initializeStep(self: *Scheduler, b: *Builder, br: *BufferedRef, step: usize) void {
         if ((br.buffer_type != .input and br.buffer_type != .input_output) or !br.isBuffered() or br.is_trivial) return;
         if (step + 1 >= br.buffer_count) return;
-        if (br.copy_in_slot == null) br.copy_in_slot = b.lift(@as(i32, 0));
+        if (br.copy_in_slot == null) br.copy_in_slot = b.constant(.i32, 0);
 
         const pred = if (step == 0) self.first_step else blk: {
             const block_changed = indicesDiffer(b, br, self.fetchIndices(step), self.fetchIndices(step - 1));
@@ -920,7 +920,7 @@ const Scheduler = struct {
             var when = b.openIf(pred);
             {
                 br.copyIn(b, fetch_indices, br.copy_in_slot.?, false);
-                when.yieldThen(.{});
+                when.close();
             }
         }
         br.copy_in_slot = advance(b, br.copy_in_slot.?, pred);
@@ -937,7 +937,7 @@ const Scheduler = struct {
                 self.namedScope(b, "ep_copy_in");
                 br.copyIn(b, self.fetchIndices(br.buffer_count - 1), br.copy_in_slot.?, false);
                 self.endScope(b);
-                when.yieldThen(.{});
+                when.close();
             }
         }
         br.copy_in_slot = advance(b, br.copy_in_slot.?, pred);
@@ -952,7 +952,7 @@ const Scheduler = struct {
                 self.namedScope(b, "ep_wait_in");
                 if (br.buffer_type == .input or br.buffer_type == .input_output) br.waitIn(b, self.indices());
                 self.endScope(b);
-                when.yieldThen(.{});
+                when.close();
             }
         }
     }
@@ -966,7 +966,7 @@ const Scheduler = struct {
                 self.namedScope(b, "ep_copy_out");
                 if (br.buffer_type == .output or br.buffer_type == .input_output) br.copyOut(b, self.indices());
                 self.endScope(b);
-                when.yieldThen(.{});
+                when.close();
             }
         }
         br.copy_out_slot = advance(b, br.copy_out_slot.?, pred);
@@ -982,7 +982,7 @@ const Scheduler = struct {
                 // copy_out was issued the previous iteration.
                 if (br.buffer_type == .output or br.buffer_type == .input_output) br.waitOut(b, self.prevIndices());
                 self.endScope(b);
-                when.yieldThen(.{});
+                when.close();
             }
         }
         br.wait_out_slot = advance(b, br.wait_out_slot.?, pred);
@@ -995,7 +995,7 @@ const Scheduler = struct {
             self.namedScope(b, "ep_finalize");
             br.waitOut(b, self.indices());
             self.endScope(b);
-            when.yieldThen(.{});
+            when.close();
         }
     }
 
@@ -1047,7 +1047,7 @@ fn gridSize(b: *Builder, grid: []const Value) Value {
 
 fn filterIndices(b: *Builder, indices: []const Value, grid: []const Value) [4]Value {
     var out: [4]Value = undefined;
-    const c0 = b.lift(@as(i32, 0));
+    const c0 = b.constant(.i32, 0);
     for (indices, grid, 0..) |i, g, pos| {
         out[pos] = if (g.asConstantInt() == @as(?i64, 1)) c0 else i;
     }
@@ -1057,12 +1057,12 @@ fn filterIndices(b: *Builder, indices: []const Value, grid: []const Value) [4]Va
 fn nextIndexND(b: *Builder, indices: []const Value, grid: []const Value) []const Value {
     const a = b.arena.allocator();
     const out = a.alloc(Value, indices.len) catch @panic("nextIndexND OOM");
-    const c0 = b.lift(@as(i32, 0));
+    const c0 = b.constant(.i32, 0);
     var carry: Value = b.cmpi(.eq, c0, c0);
     var rev: usize = 0;
     while (rev < indices.len) : (rev += 1) {
         const pos = indices.len - 1 - rev;
-        const inc = b.select(carry, b.addi(indices[pos], b.lift(@as(i32, 1))), indices[pos]);
+        const inc = b.select(carry, b.addi(indices[pos], b.constant(.i32, 1)), indices[pos]);
         carry = b.cmpi(.eq, inc, grid[pos]);
         out[pos] = b.select(carry, c0, inc);
     }
@@ -1074,15 +1074,15 @@ fn nextIndexND(b: *Builder, indices: []const Value, grid: []const Value) []const
 fn prevIndexND(b: *Builder, indices: []const Value, grid: []const Value) []const Value {
     const a = b.arena.allocator();
     const out = a.alloc(Value, indices.len) catch @panic("prevIndexND OOM");
-    const c0 = b.lift(@as(i32, 0));
+    const c0 = b.constant(.i32, 0);
     var borrow: Value = b.cmpi(.eq, c0, c0);
-    const cm1 = b.lift(@as(i32, -1));
+    const cm1 = b.constant(.i32, -1);
     var rev: usize = 0;
     while (rev < indices.len) : (rev += 1) {
         const pos = indices.len - 1 - rev;
-        const dec = b.select(borrow, b.subi(indices[pos], b.lift(@as(i32, 1))), indices[pos]);
+        const dec = b.select(borrow, b.subi(indices[pos], b.constant(.i32, 1)), indices[pos]);
         borrow = b.cmpi(.eq, dec, cm1);
-        out[pos] = b.select(borrow, b.subi(grid[pos], b.lift(@as(i32, 1))), dec);
+        out[pos] = b.select(borrow, b.subi(grid[pos], b.constant(.i32, 1)), dec);
     }
     const filtered = filterIndices(b, out, grid);
     for (0..indices.len) |i| out[i] = filtered[i];
@@ -1138,7 +1138,7 @@ test "trivial input-output ref is copied in and out" {
 
     try emitPipeline(&b, &.{b.arg(0)}, &.{}, .{
         .body = noOpBody,
-        .grid = &.{b.lift(@as(i32, 1))},
+        .grid = &.{b.constant(.i32, 1)},
         .in_specs = &.{.{
             .full_shape = &.{ 8, 128 },
             .dtype = .bf16,

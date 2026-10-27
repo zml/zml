@@ -2,7 +2,8 @@
 
 A Zig builder for Mosaic TPU IR (the `tpu` dialect in XLA) that tries
 to read like `pallas.tpu` Python while staying in pure Zig. Used by
-`examples/mosaic_gdn` and by anything else that wants to emit a TPU kernel
+`zml/kernels/moe/mosaic_tpu/`, `zml/kernels/paged_attention/mosaic_tpu/`
+and `platforms/tpu/`, and by anything else that wants to emit a TPU kernel
 op-for-op against what `pallas_call` produces.
 
 The DSL talks to the `tpu` dialect through `mlir.Operation.make(ctx, "tpu.<op>", …)`.
@@ -20,9 +21,7 @@ Two layers define the surface:
   for the final IR string. Pass `Builder.open` / `Builder.init` a
   `zml.kernel.mosaic_tpu.newContext()` (a throwaway context with the dialects
   the DSL emits), `defer ctx.deinit()` once you have the string — not a
-  `Compilation`'s `mlir_ctx`. (`Builder.buildOpts(...)` is a convenience
-  that bundles `open + declareArgs` into one call and returns a heap-allocated
-  `*Built(Spec)`; reach for it in escape-hatch code that drives the lifecycle manually.)
+  `Compilation`'s `mlir_ctx`.
 - **High layer** — `zml.kernel.mosaic_tpu.Kernel(Config, spec)`: the
   declarative kernel form, mirroring the Triton DSL. Bundles a config
   type, a typed spec literal (name + named `inputs` / `outputs` + a typed
@@ -170,9 +169,9 @@ updates).
 
 ## Argument specs
 
-Each field passed to `b.declareArgsOpts(...)` (or to the lower-layer
-`Builder.buildOpts(...)`) is an `ArgSpec.Kind` tagged-union literal. The
-four kinds mirror what a Mosaic `func.func` can carry:
+Each field passed to `b.declareArgs(...)` / `b.declareArgsOpts(...)` is an
+`ArgSpec.Kind` tagged-union literal. The four kinds mirror what a Mosaic
+`func.func` can carry:
 
 | Kind literal                                           | MLIR type                            | Use case                                |
 |--------------------------------------------------------|--------------------------------------|-----------------------------------------|
@@ -355,7 +354,7 @@ default; ordered float predicates for floats.
 | Method                | Effect                                              |
 |-----------------------|-----------------------------------------------------|
 | `.to(dtype)`          | Numeric cast preserving shape; auto-dispatches int↔float.    |
-| `.bitcast(dtype)`     | `tpu.bitcast` — same-bitwidth element-type swap.    |
+| `.bitCast(dtype)`     | `tpu.bitcast` — same-bitwidth element-type swap.    |
 | `.abs()`              | `math.absf` (float) / `math.absi` (int).            |
 
 `.to(...)` chooses the right MLIR op based on the source vs target kind:
@@ -390,18 +389,19 @@ lift rule:
 If you need to force a specific width for a runtime variable, cast at the
 call site: `pid.mul(@as(i32, @intCast(block_size)))`.
 
-### When do you need `b.lift` / `b.liftAs` / `b.cIndex`?
+### When do you need `b.lift` / `b.constant` / `b.constIndex`?
 
 | Helper                         | Effect                                                   |
 |--------------------------------|----------------------------------------------------------|
 | `b.lift(value)`                | Wrap a Zig scalar; dtype inferred from source.           |
-| `b.liftAs(value, dtype)`       | Wrap a Zig scalar as a specific `DType`.                 |
-| `b.cIndex(value)`              | `arith.constant N : index` — for memref offsets.         |
+| `b.constant(dtype, value)`     | Wrap a Zig scalar as a specific `DType`.                 |
+| `b.constantLike(value, like)`  | Wrap a Zig scalar as `like`'s element type.              |
+| `b.constIndex(value)`          | `arith.constant N : index` — for memref offsets.         |
 
 Reach for these when the DSL surface demands an existing `Value` and there's
 no binop sibling to match against — typically loop seeds for
 `openWhile(.{inits}, ...)`, `openFor(0, N, 1, .{init})`, or `var x: Value =
-b.liftAs(0, .i32);` that a later branch may reassign.
+b.constant(.i32, 0);` that a later branch may reassign.
 
 If the constant flows through any `.add` / `.mul` / `splat` etc., skip the
 lift and let auto-lift do it.
@@ -495,10 +495,12 @@ Use these for SMEM args (e.g. `cu_seqlens`) where Pallas emits scalar
 
 ### Auto-broadcast
 
-There is **no implicit auto-broadcast** in the Mosaic DSL. Mosaic kernels run
-inside the TPU's tile semantics and the layout pass is strict about
-`vector<…>` ranks/shapes — surprise-broadcasts would be footguns. Build the
-broadcasts you need explicitly with `shapeCast` + `broadcastTo`:
+The fluent binary ops and comparisons (`add` … `maximum`, `lt` … `ne`),
+`b.where`, `b.maximum` and `b.minimum` splat a scalar operand against a
+vector one (`vector.broadcast`) and widen the narrower integer side. Nothing
+else broadcasts: Mosaic kernels run inside the TPU's tile semantics and the
+layout pass is strict about `vector<…>` ranks/shapes, so build rank changes
+and size-1 expansions explicitly with `shapeCast` + `broadcastTo`:
 
 ```zig
 // b_k[:, None] broadcast to <BK x BV>
@@ -506,8 +508,9 @@ const bk_2d = k.shapeCast(b_k, &.{ BK, 1 });
 const bk_bc = k.broadcastTo(bk_2d, &.{ BK, BV });
 ```
 
-For scalar→vector splatting, use `b.broadcastTo(scalar, shape)` (it routes
-through `vector.broadcast`) or `b.full / b.splat` for comptime constants.
+For a vector made from a scalar outside a binary op, use
+`b.broadcastTo(scalar, shape)` (it routes through `vector.broadcast`) or
+`b.full / b.splat` for comptime constants.
 
 ---
 
@@ -636,9 +639,9 @@ For multi-core / async DMA orchestration:
 SCF regions are built with **scope-based** builders — `b.openFor(...)`,
 `b.openIf(...)` / `b.openIfElse(...)`, `b.openWhile(...)` return a typed
 scope value. You emit body ops into a bare `{}` block, terminate with
-`yield` / `yieldThen` / `yieldAfter`, and read results from `scope.results`
-afterward. No `ctx` struct, no function literal — lexical scope carries
-captures.
+`yield` / `yieldThen` / `yieldAfter` (or `close()` for a scope without
+values), and read results from `scope.results` afterward. No `ctx` struct,
+no function literal — lexical scope carries captures.
 
 ### `openFor` — scf.for with iter_args
 
@@ -656,13 +659,15 @@ const final_b_h = loop.results[0];
 ```
 
 - `lower` / `upper` / `step` are `anytype`: pass Values, comptime ints, or
-  runtime Zig ints. Use `i32` constants (`b.lift(@as(i32, 0))`) when you
-  want the loop counter to be `i32` (matching Pallas's `scf.for ... : i32`).
-  The default for `index`-typed counters is `b.cIndex(N)`.
-- `inits` is a tuple literal `.{v1, v2, ...}`. Arity is comptime — `carried`,
-  `results`, and the `yield(...)` call are all fixed-size arrays of the
-  same length.
-- Empty loops: `b.openFor(0, N, 1, .{})` + `loop.yield(.{})`.
+  runtime Zig ints. A bound that isn't a Value takes the type of the first one
+  that is; with none, all three are `index`. Pass `b.constant(.i32, 0)` as
+  `lower` for an `i32` counter (matching Pallas's `scf.for ... : i32`).
+- `inits` is a tuple `.{v1, v2, ...}` or an array. Arity is comptime —
+  `carried`, `results`, and the `yield(...)` values (also a tuple or an
+  array) all have the same length.
+- Empty loops: `b.openFor(0, N, 1, .{})` + `loop.close()`.
+- `b.openForOpts(lower, upper, step, inits, .{ .unsigned_cmp = true })` sets
+  the loop's options.
 
 ### `openIf` — scf.if without else (side-effects only)
 
@@ -670,7 +675,7 @@ const final_b_h = loop.results[0];
 var i = k.openIf(cond);
 {
     // then body — store, increment, etc.
-    i.yieldThen(.{});
+    i.close();
 }
 ```
 
@@ -680,7 +685,7 @@ empty.
 ### `openIfElse` — scf.if with else and optional results
 
 ```zig
-var i = k.openIfElse(cond, .{ k.scalarTy(.f32) });
+var i = k.openIfElse(cond, .{.f32});
 {
     i.yieldThen(.{ x });
 }
@@ -690,14 +695,15 @@ var i = k.openIfElse(cond, .{ k.scalarTy(.f32) });
 const r = i.results[0];
 ```
 
-- `result_types` is a tuple of `*const mlir.Type` — use `k.scalarTy(dtype)`
-  / `k.vectorTy(shape, dtype)` / `k.memRefTy(shape, dtype, mem_space)`.
-  Pass `.{}` for an if/else with no results.
+- `result_types` is a tuple or array of dtypes (`.f32`), Values (for their
+  types) or `*const mlir.Type`s such as `k.vectorTy(shape, dtype)` /
+  `k.memRefTy(shape, dtype, mem_space)`. Pass `.{}` for an if/else with no
+  results, then end its branches with `elseBranch()` and `close()`.
 
 ### `openWhile` — scf.while
 
 ```zig
-var w = k.openWhile(.{ i0 }, .{ k.scalarTy(.i32) });
+var w = k.openWhile(.{ i0 }, .{.i32});
 {
     const s = w.before_carried[0];
     w.yieldBefore(s.lt(10), .{ s });
@@ -709,9 +715,10 @@ var w = k.openWhile(.{ i0 }, .{ k.scalarTy(.i32) });
 const r = w.results[0];
 ```
 
-- `inits` — tuple of `Value`s; before-region arg types = their types.
-- `after_types` — tuple of `*const mlir.Type`; after-region arg types + the
-  scf.while's result types.
+- `inits` — a tuple or array of `Value`s; before-region arg types = their types.
+- `after_types` — a tuple or array of dtypes (`.f32`), Values (for their
+  types) or `*const mlir.Type`s; after-region arg types + the scf.while's
+  result types.
 - `yieldBefore(cond, forwarded)` — `forwarded` arity must match `after_types`.
 - `yieldAfter(values)` — arity must match `inits`.
 
@@ -719,7 +726,8 @@ const r = w.results[0];
 
 - Scopes stack naturally: `openFor { openIf { openFor { ... } } }` all just
   push/pop the kernel's current-block stack.
-- Empty yields are legal: `loop.yield(.{})`, `i.yieldThen(.{})`, etc.
+- Scopes without values end with `close()`: `loop.close()`, `i.close()`, and
+  `elseBranch()` then `close()` for an if/else.
 - After any `yield*`, the scope's `.results` holds the scf op's results as
   a `[N]Value`.
 
@@ -741,7 +749,7 @@ book-keeping layer, not a walled garden:
   `kernel` field populated.
 - `b.scalarTy(dtype)` / `b.vectorTy(shape, dtype)` /
   `b.memRefTy(shape, dtype, mem_space)` — type constructors used by raw
-  ops and by `openIfElse.result_types` / `openWhile.after_types`.
+  ops and by non-scalar `openIfElse.result_types` / `openWhile.after_types`.
 
 When you drop to raw ops, remember to still **append them to the current
 block** — `b.emit(...)` does that for you; `_ = op.appendTo(b.currentBlock())`
@@ -761,7 +769,7 @@ is the manual form.
 | `o_k < KEY_DIM`                                       | `k.cmpi(.slt, o_k, dim_splat)` / `o_k.lt(dim_splat)`         |
 | `mask_k[:, None] & mask_v[None, :]`                   | `k.andi(k.broadcastTo(k.shapeCast(mask_k, &.{BK,1}), &.{BK,BV}), k.broadcastTo(mask_v, &.{BK,BV}))` |
 | `jnp.where(mask, x, 0.0)`                             | `k.select(mask, x, k.zeros(shape, dtype))`                   |
-| `q_ref[0, t, h, :].astype(jnp.float32)`               | `k.vectorLoadShape(a.q, &.{c0, t_idx, h_idx, c0}, &.{1,1,1,BK})` then `.shapeCast(&.{BK})` then `.to(.f32)` |
+| `q_ref[0, t, h, :].astype(jnp.float32)`               | `k.vectorLoadShape(a.q, &.{c0, t_idx, h_idx, c0}, &.{1,1,1,BK})` then `k.shapeCast(v, &.{BK})` then `.to(.f32)` |
 | `q_ref[0, t, h, :] = b_o.astype(o_ref.dtype)`         | `k.vectorStoreAt(a.q, k.shapeCast(b_o, &.{1,1,1,BK}), &.{c0, t_idx, h_idx, c0})` |
 | `jnp.sqrt(jnp.sum(b_q * b_q) + 1e-6)`                 | `k.sqrt(k.addf(k.reduceToScalar(.add, k.mulf(b_q, b_q), cst_zero_1), cst_eps))` |
 | `jnp.exp(b_g)`                                        | `k.exp(b_g)`                                                 |
@@ -769,7 +777,7 @@ is the manual form.
 | `b_h * jnp.exp(b_g)` (broadcast to <BK,BV>)           | `k.mulf(b_h, k.broadcastTo(exp_g, &.{BK, BV}))`              |
 | `b_beta * (b_v - predicted_v)`                        | `k.mulf(k.broadcastTo(b_beta, &.{BV}), k.subf(b_v, predicted_v))` |
 | `lax.fori_loop(0, T, body, init)`                     | `var loop = k.openFor(c0_i32, T, c1_i32, .{init}); { …; loop.yield(.{…}); }` |
-| `if cond: …` (side-effects only)                      | `var i = k.openIf(cond); { …; i.yieldThen(.{}); }`           |
+| `if cond: …` (side-effects only)                      | `var i = k.openIf(cond); { …; i.close(); }`                  |
 | `if cond: x = a else: x = b`                          | `var i = k.openIfElse(cond, .{ty}); { …; i.yieldThen(.{a}); }; { …; i.yieldElse(.{b}); }` |
 | `while cond:`                                         | `var w = k.openWhile(.{inits}, .{after_types}); { …; w.yieldBefore(cond, .{…}); }; { …; w.yieldAfter(.{…}); }` |
 | `pltpu.MemorySpace.SMEM`                              | `.memory_space = .smem` on the `RefSpec`                     |

@@ -84,12 +84,6 @@ pub const Attention = cute.Kernel(Config, .{
     .run = attention,
 });
 
-fn tuple(comptime T: type, comptime n: usize, values: [n]T) @Tuple(&@as([n]type, @splat(T))) {
-    var result: @Tuple(&@as([n]type, @splat(T))) = undefined;
-    inline for (0..n) |i| result[i] = values[i];
-    return result;
-}
-
 fn loadInt(b: *B, pointer: V, index: V) V {
     return b.loadWords(1, pointer.add(index.to(.i64).mul(4)), .global, .{})[0];
 }
@@ -102,7 +96,7 @@ fn swizzle(row: V, col: V, rows: i64) V {
 
 fn descriptor(b: *B, address: V, leading_bytes: i64) V {
     const bits: u64 = (64 << 32) | (1 << 46) | (@as(u64, 2) << 61) | (@as(u64, @intCast(@divExact(leading_bytes, 16))) << 16);
-    return address.to(.i64).shrLogical(4).bitAnd(0x3fff).bitOr(b.cst(.i64, @as(i64, @bitCast(bits))));
+    return address.to(.i64).shrLogical(4).bitAnd(0x3fff).bitOr(b.constant(.i64, @as(i64, @bitCast(bits))));
 }
 
 fn instruction(c: Config, qk: bool) u32 {
@@ -121,7 +115,7 @@ const Range = struct { first: V, count: V };
 fn keyRange(b: *B, c: Config, first_row: V, qlen: V, klen: V) Range {
     const first_pos = klen.sub(qlen).add(first_row.div(c.group));
     const last_pos = klen.sub(qlen).add(first_row.add(c.rows() - 1).div(c.group).minimum(qlen.sub(1)));
-    const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.cst(.i32, 0);
+    const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.constant(.i32, 0);
     const end = if (c.causal) last_pos.add(1).minimum(klen) else klen;
     const first = begin.div(c.keys());
     return .{ .first = first, .count = end.add(c.keys() - 1).div(c.keys()).sub(first).maximum(0) };
@@ -187,8 +181,8 @@ const Tile = struct {
     }
     fn norm(t: Tile, row: V, maximum: V, denominator: V) V {
         const b = t.b;
-        if (t.c.splits > 1) return b.cst(.f32, 1);
-        if (!t.c.sink) return b.select(denominator.gt(0), b.rcpApprox(denominator), b.cst(.f32, 0));
+        if (t.c.splits > 1) return b.constant(.f32, 1);
+        if (!t.c.sink) return b.select(denominator.gt(0), b.rcpApprox(denominator), b.constant(.f32, 0));
         const sink = loadInt(b, t.sink, t.head.mul(t.c.group).add(row.rem(t.c.group))).bitCast(.f32).mul(std.math.log2e);
         const reference = maximum.maximum(sink).maximum(-std.math.floatMax(f32));
         const weight = b.exp2Approx(maximum.sub(reference));
@@ -256,13 +250,13 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
             }
             b.mbarrierInit(shared.add(c.completion()), 1);
             b.fenceMbarrierInit();
-            leader.yieldThen(.{});
+            leader.close();
         }
         var alloc = b.openIf(tid.lt(32));
         {
             b.tmemAllocAt(shared.add(c.holder()), c.columns());
             b.relinquishTmemAllocPermit(.{});
-            alloc.yieldThen(.{});
+            alloc.close();
         }
         var queries = b.openFor(tid, c.rows() * @divExact(c.paddedDim(), 8), 256, .{});
         {
@@ -270,10 +264,10 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
             const col = queries.iv.rem(@divExact(c.paddedDim(), 8)).mul(8);
             const packed_row = first_row.add(row);
             const valid = packed_row.lt(qlen.mul(c.group)).bitAnd(col.lt(c.head_dim));
-            const token = start.add(b.select(valid, packed_row.div(c.group), b.cst(.i32, 0)));
+            const token = start.add(b.select(valid, packed_row.div(c.group), b.constant(.i32, 0)));
             const offset = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(packed_row.rem(c.group).to(.i64)).mul(c.head_dim).add(col.to(.i64));
             b.cpAsync16(shared.add(c.qBase()).add(swizzle(row, col, c.rows())), t.q.add(offset.mul(2)), valid);
-            queries.yield(.{});
+            queries.close();
         }
         b.cpAsyncWaitAll();
         b.syncThreads();
@@ -282,23 +276,23 @@ fn attention(b: *B, c: Config) cute.FinishError!void {
         var producer = b.openIf(tid.ge(128));
         {
             produce(t);
-            producer.yieldThen(.{});
+            producer.close();
         }
         var consumer = b.openIf(tid.lt(128));
         {
             if (c.decode) {
                 if (c.group <= 2) decode(t, 2) else if (c.group <= 4) decode(t, 4) else if (c.group <= 8) decode(t, 8) else decode(t, 16);
             } else prefill(t);
-            consumer.yieldThen(.{});
+            consumer.close();
         }
         b.tcgen05Fence(.before);
         b.syncThreads();
         var free = b.openIf(tid.lt(32));
         {
             b.tmemDeallocAt(t.tmem, c.columns());
-            free.yieldThen(.{});
+            free.close();
         }
-        active.yieldThen(.{});
+        active.close();
     }
 }
 
@@ -313,28 +307,28 @@ fn produce(t: Tile) void {
         var offsets: [16]V = undefined;
         var valid: [16]V = undefined;
         for (0..@as(usize, @intCast(@divExact(c.keys(), 8)))) |i| {
-            const key = t.first_key_tile.add(tiles.iv).mul(c.keys()).add(row0).add(@as(i32, @intCast(i * 8)));
+            const key = t.first_key_tile.add(tiles.iv).mul(c.keys()).add(row0).add(i * 8);
             valid[i] = key.lt(t.klen).bitAnd(col.lt(c.head_dim));
-            const safe = b.select(key.lt(t.klen), key, b.cst(.i32, 0));
+            const safe = b.select(key.lt(t.klen), key, b.constant(.i32, 0));
             const page = loadInt(b, t.table, t.seq.mul(c.pages_per_seq).add(safe.div(c.page_size)));
             offsets[i] = page.to(.i64).mul(c.page_size).add(safe.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(col.to(.i64)).mul(2);
         }
         for (0..@as(usize, @intCast(c.features() * 2))) |stage| {
-            const id = tiles.iv.mul(c.features() * 2).add(@as(i32, @intCast(stage)));
+            const id = tiles.iv.mul(c.features() * 2).add(stage);
             var reuse = b.openIf(id.ge(c.buffers()));
             {
                 b.mbarrierWait(t.released(id), t.phase(id).bitXor(1));
-                reuse.yieldThen(.{});
+                reuse.close();
             }
             const source = if (stage < c.features()) t.k else t.v;
             const feature_offset: i64 = @mod(@as(i64, @intCast(stage)), c.features()) * 256;
             for (0..@as(usize, @intCast(@divExact(c.keys(), 8)))) |i| {
-                const row = row0.add(@as(i32, @intCast(i * 8)));
+                const row = row0.add(i * 8);
                 b.cpAsync16(t.shared.add(id.rem(c.buffers()).mul(c.kvBytes())).add(swizzle(row, col, c.keys())), source.add(offsets[i]).add(feature_offset), valid[i]);
             }
             b.cpAsyncMbarrierArrive(t.ready(id), true);
         }
-        tiles.yield(.{});
+        tiles.close();
     }
 }
 
@@ -356,15 +350,15 @@ fn multiply(t: Tile, tile: V, comptime qk: bool) void {
                 const left = if (c.decode) kv.add(@divExact(kv_offset, 16)) else qp.add(@divExact(qp_offset, 16));
                 const right = if (c.decode) qp.add(@divExact(qp_offset, 16)) else kv.add(@divExact(kv_offset, 16));
                 const column: i64 = if (qk) c.scoreColumn() else @as(i64, @intCast(part)) * (if (c.decode) c.rows() else 128);
-                const accumulate = if (qk) b.cst(.i32, @intFromBool(part > 0 or step > 0)).ne(0) else tile.gt(0).bitOr(b.cst(.i32, @intFromBool(step > 0)).ne(0));
-                b.tcgen05MmaF16(t.tmem.add(column), left, right, b.cst(.i32, @as(i32, @bitCast(instruction(c, qk)))), accumulate);
+                const accumulate = if (qk) b.constant(.i32, @intFromBool(part > 0 or step > 0)).ne(0) else tile.gt(0).bitOr(b.constant(.i32, @intFromBool(step > 0)).ne(0));
+                b.tcgen05MmaF16(t.tmem.add(column), left, right, b.constant(.i32, @as(i32, @bitCast(instruction(c, qk)))), accumulate);
             }
             b.tcgen05Commit(t.released(id));
         }
         b.tcgen05Commit(t.shared.add(c.completion()));
-        leader.yieldThen(.{});
+        leader.close();
     }
-    b.mbarrierWait(t.shared.add(c.completion()), b.cst(.i32, if (qk) 0 else 1));
+    b.mbarrierWait(t.shared.add(c.completion()), b.constant(.i32, if (qk) 0 else 1));
     b.tcgen05Fence(.after);
     // A fast warp must not wrap completion parity before every consumer has
     // observed the preceding PV completion.
@@ -395,8 +389,8 @@ fn reduceHeads(t: Tile, comptime heads: usize, values: [heads]V, comptime maximu
         inline for (.{ 16, 8, 4, 2, 1 }) |step| reduced = if (maximum) reduced.maximum(b.shuffleXor(reduced, step)) else reduced.add(b.shuffleXor(reduced, step));
         var leader = b.openIf(t.lane.eq(0));
         {
-            b.storeWords(1, t.shared.add(t.c.reductions()).add(t.warp.mul(64)).add(@as(i32, @intCast(h * 4))), .shared, .{reduced.bitCast(.i32)});
-            leader.yieldThen(.{});
+            b.storeWords(1, t.shared.add(t.c.reductions()).add(t.warp.mul(64)).add(h * 4), .shared, .{reduced.bitCast(.i32)});
+            leader.close();
         }
     }
     b.barrierSync(1, 128);
@@ -418,21 +412,21 @@ fn decode(t: Tile, comptime heads: usize) void {
     const c = t.c;
     const address = t.tmem.add(t.warp.mul(32).shl(16));
     const key_row = t.warp.mul(32).add(t.lane);
-    const zero = b.cst(.f32, 0);
-    const neg_inf = b.cst(.f32, -std.math.inf(f32));
+    const zero = b.constant(.f32, 0);
+    const neg_inf = b.constant(.f32, -std.math.inf(f32));
     var initial: [2 * heads]V = undefined;
     for (0..heads) |h| {
         initial[h] = neg_inf;
         initial[heads + h] = zero;
     }
-    var tiles = b.openFor(0, t.tiles, 1, tuple(V, 2 * heads, initial));
+    var tiles = b.openFor(0, t.tiles, 1, initial);
     {
         multiply(t, tiles.iv, true);
         const raw = b.tmemLoad32x32b(heads, address.add(c.scoreColumn()));
         b.fenceTmemLoad();
         const key = t.first_key_tile.add(tiles.iv).mul(c.keys()).add(key_row);
         var scores: [heads]V = undefined;
-        for (0..heads) |h| scores[h] = b.select(t.valid(t.first_row.add(@as(i32, @intCast(h))), key), raw[h].bitCast(.f32).mul(c.scale * std.math.log2e), neg_inf);
+        for (0..heads) |h| scores[h] = b.select(t.valid(t.first_row.add(h), key), raw[h].bitCast(.f32).mul(c.scale * std.math.log2e), neg_inf);
         const maxima = reduceHeads(t, heads, scores, true);
         var next: [2 * heads]V = undefined;
         var alpha: [heads]V = undefined;
@@ -446,9 +440,9 @@ fn decode(t: Tile, comptime heads: usize) void {
         const sums = reduceHeads(t, heads, probabilities, false);
         for (0..heads) |h| {
             next[heads + h] = tiles.carried[heads + h].mul(alpha[h]).add(sums[h]);
-            t.putProbability(b.cst(.i32, @as(i32, @intCast(h))), key_row, probabilities[h]);
+            t.putProbability(b.constant(.i32, h), key_row, probabilities[h]);
         }
-        for (heads..@as(usize, @intCast(c.rows()))) |h| t.putProbability(b.cst(.i32, @as(i32, @intCast(h))), key_row, zero);
+        for (heads..@as(usize, @intCast(c.rows()))) |h| t.putProbability(b.constant(.i32, h), key_row, zero);
         var rescale = b.openIf(tiles.iv.gt(0));
         {
             for (0..@as(usize, @intCast(c.features()))) |part| {
@@ -459,35 +453,35 @@ fn decode(t: Tile, comptime heads: usize) void {
                 b.tmemStore32x32b(heads, addr, out);
             }
             b.fenceTmemStore();
-            rescale.yieldThen(.{});
+            rescale.close();
         }
         publishProbabilities(t);
         multiply(t, tiles.iv, false);
-        tiles.yield(tuple(V, 2 * heads, next));
+        tiles.yield(next);
     }
     for (0..@as(usize, @intCast(c.features()))) |part| {
         const out = b.tmemLoad32x32b(heads, address.add(@as(i64, @intCast(part)) * c.rows()));
         b.fenceTmemLoad();
-        const dim = key_row.add(@as(i32, @intCast(part * 128)));
+        const dim = key_row.add(part * 128);
         for (0..heads) |h| {
-            const row = t.first_row.add(@as(i32, @intCast(h)));
+            const row = t.first_row.add(h);
             var valid = b.openIf(row.lt(t.qlen.mul(c.group)));
             {
                 var feature = b.openIf(dim.lt(c.head_dim));
                 {
                     const value = b.select(tiles.results[heads + h].gt(0), out[h].bitCast(.f32).mul(t.norm(row, tiles.results[h], tiles.results[heads + h])), zero);
                     t.put(row, dim, value);
-                    feature.yieldThen(.{});
+                    feature.close();
                 }
                 if (c.splits > 1 and part == 0) {
                     var stats = b.openIf(t.tid.eq(0));
                     {
-                        t.put(row, b.cst(.i32, c.head_dim), tiles.results[h]);
-                        t.put(row, b.cst(.i32, c.head_dim + 1), tiles.results[heads + h]);
-                        stats.yieldThen(.{});
+                        t.put(row, b.constant(.i32, c.head_dim), tiles.results[h]);
+                        t.put(row, b.constant(.i32, c.head_dim + 1), tiles.results[heads + h]);
+                        stats.close();
                     }
                 }
-                valid.yieldThen(.{});
+                valid.close();
             }
         }
     }
@@ -500,24 +494,24 @@ fn prefill(t: Tile) void {
     const local_row = t.warp.mul(16).add(t.lane);
     const row = t.first_row.add(local_row);
     const owns = t.lane.lt(16);
-    const zero = b.cst(.f32, 0);
-    const neg_inf = b.cst(.f32, -std.math.inf(f32));
+    const zero = b.constant(.f32, 0);
+    const neg_inf = b.constant(.f32, -std.math.inf(f32));
     var tiles = b.openFor(0, t.tiles, 1, .{ neg_inf, zero });
     {
         // D512 fills TMEM with O. Preserve its last 64 columns in registers
         // while QK reuses them for scores, avoiding duplicate QK/softmax CTAs.
         var saved: [64]V = undefined;
         if (c.head_dim == 512) {
-            var preserve = b.openIfElse(tiles.iv.gt(0), tuple(@TypeOf(zero.type_()), 64, @splat(zero.type_())));
+            var preserve = b.openIfElse(tiles.iv.gt(0), @as([64]V, @splat(zero)));
             {
                 const tail = b.tmemLoad32x32b(64, address.add(c.scoreColumn()));
                 b.fenceTmemLoad();
                 var words: [64]V = undefined;
                 for (tail, 0..) |value, i| words[i] = value.bitCast(.f32);
-                preserve.yieldThen(tuple(V, 64, words));
+                preserve.yieldThen(words);
             }
             {
-                preserve.yieldElse(tuple(V, 64, @as([64]V, @splat(zero))));
+                preserve.yieldElse(@as([64]V, @splat(zero)));
             }
             @memcpy(&saved, &preserve.results);
             b.barrierSync(1, 128);
@@ -539,10 +533,10 @@ fn prefill(t: Tile) void {
         // use them; page tails and mask boundaries reduce post-mask values.
         const full = owns.bitAnd(t.valid(row, key0)).bitAnd(t.valid(row, key0.add(63)));
         for (0..64) |i| {
-            scores[i] = b.select(owns.bitAnd(t.valid(row, key0.add(@as(i32, @intCast(i))))), scores[i].mul(c.scale * std.math.log2e), neg_inf);
+            scores[i] = b.select(owns.bitAnd(t.valid(row, key0.add(i))), scores[i].mul(c.scale * std.math.log2e), neg_inf);
         }
         const tile_max = if (c.architecture == .sm103 and c.scale > 0) blk: {
-            var choose = b.openIfElse(full, .{zero.type_()});
+            var choose = b.openIfElse(full, .{zero});
             {
                 choose.yieldThen(.{hardware_max.mul(c.scale * std.math.log2e)});
             }
@@ -561,13 +555,13 @@ fn prefill(t: Tile) void {
         const denominator = tiles.carried[1].mul(alpha).add(reduceRow(64, probabilities, false));
         var write = b.openIf(owns);
         {
-            for (0..64) |i| t.putProbability(local_row, b.cst(.i32, @as(i32, @intCast(i))), probabilities[i]);
-            write.yieldThen(.{});
+            for (0..64) |i| t.putProbability(local_row, b.constant(.i32, i), probabilities[i]);
+            write.close();
         }
         var rescale = b.openIf(tiles.iv.gt(0));
         {
             for (0..@as(usize, @intCast(@divExact(if (c.head_dim == 512) c.scoreColumn() else c.paddedDim(), 32)))) |chunk| {
-                const addr = address.add(@as(i32, @intCast(chunk * 32)));
+                const addr = address.add(chunk * 32);
                 var out = b.tmemLoad32x32b(32, addr);
                 b.fenceTmemLoad();
                 for (&out) |*value| value.* = value.bitCast(.f32).mul(alpha).bitCast(.i32);
@@ -578,7 +572,7 @@ fn prefill(t: Tile) void {
                 b.tmemStore32x32b(64, address.add(c.scoreColumn()), saved);
             }
             b.fenceTmemStore();
-            rescale.yieldThen(.{});
+            rescale.close();
         }
         publishProbabilities(t);
         multiply(t, tiles.iv, false);
@@ -586,19 +580,19 @@ fn prefill(t: Tile) void {
     }
     const norm = t.norm(row, tiles.results[0], tiles.results[1]);
     for (0..@as(usize, @intCast(@divExact(c.paddedDim(), 32)))) |chunk| {
-        const out = b.tmemLoad32x32b(32, address.add(@as(i32, @intCast(chunk * 32))));
+        const out = b.tmemLoad32x32b(32, address.add(chunk * 32));
         b.fenceTmemLoad();
         var valid = b.openIf(owns.bitAnd(row.lt(t.qlen.mul(c.group))));
         {
             for (0..32) |i| {
                 const dim = chunk * 32 + i;
-                if (dim < c.head_dim) t.put(row, b.cst(.i32, @as(i32, @intCast(dim))), b.select(tiles.results[1].gt(0), out[i].bitCast(.f32).mul(norm), zero));
+                if (dim < c.head_dim) t.put(row, b.constant(.i32, dim), b.select(tiles.results[1].gt(0), out[i].bitCast(.f32).mul(norm), zero));
             }
             if (c.splits > 1 and chunk == 0) {
-                t.put(row, b.cst(.i32, c.head_dim), tiles.results[0]);
-                t.put(row, b.cst(.i32, c.head_dim + 1), tiles.results[1]);
+                t.put(row, b.constant(.i32, c.head_dim), tiles.results[0]);
+                t.put(row, b.constant(.i32, c.head_dim + 1), tiles.results[1]);
             }
-            valid.yieldThen(.{});
+            valid.close();
         }
     }
 }
@@ -622,7 +616,7 @@ fn merge(b: *B, c: Config) cute.FinishError!void {
     const head = b.blockIdx().y;
     var active = b.openIf(token.lt(a.starts.get(.{c.batch})));
     {
-        var find = b.openFor(0, c.batch, 1, .{b.cst(.i32, 0)});
+        var find = b.openFor(0, c.batch, 1, .{b.constant(.i32, 0)});
         {
             const owns = token.ge(a.starts.get(.{find.iv})).bitAnd(token.lt(a.starts.get(.{find.iv.add(1)})));
             find.yield(.{b.select(owns, find.iv, find.carried[0])});
@@ -633,8 +627,8 @@ fn merge(b: *B, c: Config) cute.FinishError!void {
         const row = token.sub(start).mul(c.group).add(head.rem(c.group));
         const range = keyRange(b, c, row.div(c.rows()).mul(c.rows()), qlen, a.lengths.get(.{seq}));
         const splits = liveSplits(c, range.count);
-        const zero = b.cst(.f32, 0);
-        const sink = if (c.sink) a.sink.get(.{head}).mul(std.math.log2e) else b.cst(.f32, -std.math.inf(f32));
+        const zero = b.constant(.f32, 0);
+        const sink = if (c.sink) a.sink.get(.{head}).mul(std.math.log2e) else b.constant(.f32, -std.math.inf(f32));
         var maximum = b.openFor(0, splits, 1, .{sink});
         {
             maximum.yield(.{maximum.carried[0].maximum(a.partials.get(.{ maximum.iv, token, head, c.head_dim }))});
@@ -652,9 +646,9 @@ fn merge(b: *B, c: Config) cute.FinishError!void {
             }
             const norm = b.select(sum.results[1].gt(0), b.rcpApprox(sum.results[1]), zero);
             a.out.set(.{ token, head, dims.iv }, sum.results[0].mul(norm).to(c.dtype));
-            dims.yield(.{});
+            dims.close();
         }
-        active.yieldThen(.{});
+        active.close();
     }
 }
 

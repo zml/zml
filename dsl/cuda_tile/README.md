@@ -48,6 +48,11 @@ const out = AddOne.call(.{ .x = x }, .{ .out = x.shape() }, .{
 }).out;
 ```
 
+Put each scope's body in a Zig `{ ... }` block right after `openFor`, `openIf`
+or `openLoop`, ending with its `yield` (or `close()`). `openIfElse` gets one
+block per branch, ending with `yieldThen`/`yieldElse` (`elseBranch()`/`close()`
+without results).
+
 ## What is different from the Triton DSL
 
 * **Rank 0 is the scalar.** Every value is a `tile<...>`; `entry` parameters
@@ -117,7 +122,8 @@ awk '/^pub const Value = struct/,/^};/' dsl/cuda_tile/builder.zig | grep 'pub fn
 awk '/^pub const Builder = struct/,0' dsl/cuda_tile/builder.zig | grep '    pub fn '
 
 # what each option struct holds, and its defaults
-grep -n '^pub const [A-Za-z]*Opts = struct' -A 8 dsl/cuda_tile/builder.zig
+grep -n '^pub const [A-Za-z]*Opts = struct' -A 8 dsl/cuda_tile/builder.zig \
+    dsl/cuda_tile/control_flow.zig
 
 # for / if / loop scopes and their terminators
 grep -n 'pub fn ' dsl/cuda_tile/control_flow.zig
@@ -128,5 +134,4 @@ grep -n 'pub const DType = enum' -A 30 dsl/cuda_tile/dtype.zig
 
 Every op also has a test: `grep -n '^test "' dsl/cuda_tile/builder.zig`
 lists them, and each one prints IR that round-trips through the verifier, so
-they double as usage examples. A worked, runnable example (saxpy, softmax,
-gemm, in-place relu) lives in `examples/cuda_tile`.
+they double as usage examples.

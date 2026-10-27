@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const arith = @import("mlir/dialects/arith");
-const dsl = @import("dsl/common");
+const common = @import("dsl/common/builder");
 const fly = @import("mlir/dialects/fly");
 const func = @import("mlir/dialects/func");
 const gpu = @import("mlir/dialects/gpu");
@@ -12,7 +12,6 @@ const rocdl = @import("mlir/dialects/rocdl");
 const scf = @import("mlir/dialects/scf");
 const ub = @import("mlir/dialects/ub");
 const vector = @import("mlir/dialects/vector");
-const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
@@ -122,7 +121,7 @@ pub const Value = struct {
 
     fn binary(self: Value, comptime build: anytype, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.lift(rhs);
+        const r = k.toStatic(rhs);
         return k.emit(build(k.ctx, self.inner, r.inner, k.loc()));
     }
 
@@ -307,7 +306,7 @@ pub const Value = struct {
     /// Broadcast a scalar against a vector operand.
     fn coerceArith(self: Value, rhs: anytype) struct { Value, Value } {
         const k = self.kern();
-        const r: Value = if (@TypeOf(rhs) == Value) rhs else k.constLike(rhs, self);
+        const r: Value = if (@TypeOf(rhs) == Value) rhs else k.constantLike(rhs, self);
         if (self.type_().eql(r.type_())) return .{ self, r };
         if (self.type_().isA(mlir.VectorType) != null and r.type_().isA(mlir.VectorType) == null)
             return .{ self, k.emit(vector.broadcast(k.ctx, r.inner, self.type_(), k.loc())) };
@@ -433,7 +432,7 @@ pub const Value = struct {
     }
 
     /// Preserve total bits, adjusting vector length to the destination element.
-    pub fn bitcast(self: Value, dtype: DType) Value {
+    pub fn bitCast(self: Value, dtype: DType) Value {
         const k = self.kern();
         const src = self.scalarDType();
         if (self.type_().isA(mlir.VectorType)) |vec| {
@@ -500,10 +499,11 @@ pub const Value = struct {
 
     pub const Cmp = enum { eq, ne, lt, le, gt, ge };
 
-    /// Signed integer comparison against a Value or an integer literal.
+    /// Signed integer comparison against a Value or an integer literal; a
+    /// scalar broadcasts against a vector.
     pub fn cmp(self: Value, pred: Cmp, rhs: anytype) Value {
         const k = self.kern();
-        const r: Value = if (@TypeOf(rhs) == Value) rhs else k.constLike(rhs, self);
+        const l, const r = self.coerceArith(rhs);
         const p: arith.CmpIPredicate = switch (pred) {
             .eq => .eq,
             .ne => .ne,
@@ -512,7 +512,7 @@ pub const Value = struct {
             .gt => .sgt,
             .ge => .sge,
         };
-        return k.emit(arith.cmpi(k.ctx, p, self.inner, r.inner, k.loc()));
+        return k.emit(arith.cmpi(k.ctx, p, l.inner, r.inner, k.loc()));
     }
 
     /// Ordered.
@@ -527,6 +527,37 @@ pub const Value = struct {
             .ge => .oge,
         };
         return k.emit(arith.cmpf(k.ctx, p, self.inner, rhs.inner, k.loc()));
+    }
+
+    pub fn lt(self: Value, rhs: anytype) Value {
+        return self.compare(.lt, rhs);
+    }
+
+    pub fn le(self: Value, rhs: anytype) Value {
+        return self.compare(.le, rhs);
+    }
+
+    pub fn gt(self: Value, rhs: anytype) Value {
+        return self.compare(.gt, rhs);
+    }
+
+    pub fn ge(self: Value, rhs: anytype) Value {
+        return self.compare(.ge, rhs);
+    }
+
+    pub fn eq(self: Value, rhs: anytype) Value {
+        return self.compare(.eq, rhs);
+    }
+
+    pub fn ne(self: Value, rhs: anytype) Value {
+        return self.compare(.ne, rhs);
+    }
+
+    /// `cmpf` for floats, `cmp` (signed) for integers, `index` included.
+    fn compare(self: Value, pred: Cmp, rhs: anytype) Value {
+        if (!self.isFloatElem()) return self.cmp(pred, rhs);
+        const l, const r = self.coerceArith(rhs);
+        return l.cmpf(pred, r);
     }
 
     pub fn select(self: Value, a: Value, b: Value) Value {
@@ -687,7 +718,7 @@ pub const Builder = struct {
     name: []const u8,
     func_op: ?*mlir.Operation = null,
     entry_block: ?*mlir.Block = null,
-    block_stack: std.ArrayList(*mlir.Block) = .empty,
+    block_stack: common.BlockStack = .{},
     arg_specs: []const ArgSpec = &.{},
     /// The `!fly.memref` view for tensor arguments, the raw `!fly.ptr` otherwise.
     arg_values: []Value = &.{},
@@ -733,7 +764,7 @@ pub const Builder = struct {
 
     /// Arguments by name. Each field is `.{ .ptr = dtype }` or
     /// `.{ .tensor = .{ .dtype = ..., .dims = &.{ ... } } }`.
-    pub fn declareArgs(self: *Builder, spec: anytype) !dsl.NamedArgs(@TypeOf(spec), Value) {
+    pub fn declareArgs(self: *Builder, spec: anytype) !common.NamedArgs(@TypeOf(spec), Value) {
         const Spec = @TypeOf(spec);
         const fields = @typeInfo(Spec).@"struct".field_names;
         var specs: [fields.len]ArgSpec = undefined;
@@ -749,7 +780,7 @@ pub const Builder = struct {
                 @compileError("fly.declareArgs: argument `" ++ f ++ "` must be `.{ .ptr = dtype }` or `.{ .tensor = .{ .dtype, .dims } }`");
         }
         try self.declareArgsLow(&specs);
-        var named: dsl.NamedArgs(Spec, Value) = undefined;
+        var named: common.NamedArgs(Spec, Value) = undefined;
         inline for (fields, 0..) |f, i| @field(named, f) = self.arg(i);
         return named;
     }
@@ -779,6 +810,7 @@ pub const Builder = struct {
         _ = func_op.appendTo(self.gpu_body);
         self.func_op = func_op;
         self.entry_block = entry;
+        self.block_stack.push(self.arena.allocator(), entry);
 
         // The view keeps the storage element type: recasting a predicate
         // argument back to `!fly.ptr<i1>` would make a copy atom's element
@@ -801,18 +833,15 @@ pub const Builder = struct {
     }
 
     pub fn pushBlock(self: *Builder, b: *mlir.Block) void {
-        self.block_stack.append(self.arena.allocator(), b) catch @panic("Builder.pushBlock OOM");
+        self.block_stack.push(self.arena.allocator(), b);
     }
 
     pub fn popBlock(self: *Builder) void {
-        _ = self.block_stack.pop();
+        self.block_stack.pop();
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        if (self.block_stack.items.len > 0) {
-            return self.block_stack.items[self.block_stack.items.len - 1];
-        }
-        return self.entry_block orelse @panic("Builder has no current block; call declareArgs first");
+        return self.block_stack.current();
     }
 
     pub fn loc(self: *const Builder) *const mlir.Location {
@@ -864,6 +893,10 @@ pub const Builder = struct {
     /// a bug in the kernel, not a runtime condition.
     pub fn must(result: anytype) @typeInfo(@TypeOf(result)).error_union.payload {
         return result catch |err| std.debug.panic("fly: cannot build type ({})", .{err});
+    }
+
+    pub fn scalarTy(self: *const Builder, dtype: DType) *const mlir.Type {
+        return dtype.toMlir(self.ctx);
     }
 
     pub fn intTupleType(self: *Builder, t: IntTuple) *const mlir.Type {
@@ -929,8 +962,9 @@ pub const Builder = struct {
         return self.static(Layout{ .shape = .{ .tup = shape }, .stride = .{ .tup = stride } });
     }
 
-    /// A Value passes through; a bare tuple literal (`.{ 64, 8 }`) is a tile.
-    pub fn lift(self: *Builder, v: anytype) Value {
+    /// A Value passes through; a layout literal becomes a `fly.static`, and a
+    /// bare tuple literal (`.{ 64, 8 }`) is a tile.
+    pub fn toStatic(self: *Builder, v: anytype) Value {
         const T = @TypeOf(v);
         if (T == Value) return v;
         if (T == Layout or T == Tile or T == IntTuple) return self.static(v);
@@ -978,10 +1012,13 @@ pub const Builder = struct {
 
     // ---------------------------------------------------------------- scalars & ids
 
-    /// Only the representation `dtype` needs is computed: a float constant
-    /// outside i64 range (inf, floatMax) must not be forced through
+    /// `value` as a constant of `dtype`; a Value passes through. An integer is
+    /// signed or an unsigned bit pattern of `dtype`'s width; anything else
+    /// panics. Only the representation `dtype` needs is computed: a float
+    /// constant outside i64 range (inf, floatMax) must not be forced through
     /// `@intFromFloat`, which traps.
     pub fn constant(self: *Builder, dtype: DType, value: anytype) Value {
+        if (@TypeOf(value) == Value) return value;
         const is_float_lit = switch (@typeInfo(@TypeOf(value))) {
             .float, .comptime_float => true,
             else => false,
@@ -997,10 +1034,39 @@ pub const Builder = struct {
                 });
             },
             .i1, .i8, .i16, .i32, .i64 => blk: {
-                const i: i64 = if (is_float_lit) @intFromFloat(value) else @intCast(value);
-                break :blk self.emit(arith.constant_int(self.ctx, i, dtype.toMlir(self.ctx), self.loc()));
+                const i: i128 = if (is_float_lit) @intFromFloat(value) else value;
+                break :blk self.emit(arith.constant_int(self.ctx, intBits(i, @intCast(dtype.bitWidth()), @tagName(dtype)), dtype.toMlir(self.ctx), self.loc()));
             },
             else => std.debug.panic("fly.constant: no constant for {s}", .{@tagName(dtype)}),
+        };
+    }
+
+    /// `value` as the `i64` an integer constant of `bits` bits is built from.
+    /// It may be signed or an unsigned bit pattern, so it must lie in
+    /// [-2^(bits-1), 2^bits).
+    fn intBits(value: i128, bits: u7, dtype: []const u8) i64 {
+        if (value < -(@as(i128, 1) << (bits - 1)) or value >= @as(i128, 1) << bits)
+            std.debug.panic("Builder.constant: {d} does not fit {s}", .{ value, dtype });
+        return @truncate(value);
+    }
+
+    /// A Zig scalar as a constant: a comptime int is `i32`, or `i64` when it
+    /// doesn't fit; a runtime int is `i64` past 32 bits, else `i32`; a float
+    /// keeps its width, and a comptime float is `f32`. A Value passes through.
+    pub fn lift(self: *Builder, value: anytype) Value {
+        const T = @TypeOf(value);
+        if (T == Value) return value;
+        return switch (@typeInfo(T)) {
+            .comptime_int => self.constant(if (value >= std.math.minInt(i32) and value <= std.math.maxInt(i32)) .i32 else .i64, value),
+            .int => |info| self.constant(if (info.bits > 32) .i64 else .i32, value),
+            .comptime_float => self.constant(.f32, value),
+            .float => |info| switch (info.bits) {
+                16 => self.constant(.f16, value),
+                32 => self.constant(.f32, value),
+                64 => self.constant(.f64, value),
+                else => @compileError("Builder.lift: unsupported float bitwidth"),
+            },
+            else => @compileError("Builder.lift: unsupported type " ++ @typeName(T)),
         };
     }
 
@@ -1221,8 +1287,8 @@ pub const Builder = struct {
     }
 
     pub fn tiledCopy(self: *Builder, atom: Value, layout_tv: anytype, tile_mn: anytype) TiledCopy {
-        const tv = self.lift(layout_tv);
-        const tl = self.lift(tile_mn);
+        const tv = self.toStatic(layout_tv);
+        const tl = self.toStatic(tile_mn);
         const v = self.emit(fly.ops.make_tiled_copy(self.ctx, atom.inner, tv.inner, tl.inner, self.loc()));
         return .{ .value = v, .tile = tl };
     }
@@ -1302,7 +1368,7 @@ pub const Builder = struct {
     }
 
     pub fn tiledMma(self: *Builder, atom: Value, atom_layout: anytype, permutation: ?Value) TiledMma {
-        const al = self.lift(atom_layout);
+        const al = self.toStatic(atom_layout);
         const v = self.emit(fly.ops.make_tiled_mma(self.ctx, atom.inner, al.inner, .{ .permutation = if (permutation) |p| p.inner else null }, self.loc()));
         return .{ .value = v };
     }
@@ -1322,142 +1388,68 @@ pub const Builder = struct {
     // ---------------------------------------------------------------- control flow
 
     pub fn ForScope(comptime N: usize) type {
-        return dsl.ForScope(Builder, Value, N);
+        return common.ForScope(Builder, Value, N);
     }
-    pub const IfOnlyScope = dsl.IfOnlyScope(Builder, Value);
+    pub const IfOnlyScope = common.IfOnlyScope(Builder, Value);
     pub fn IfScope(comptime N: usize) type {
-        return dsl.IfScope(Builder, Value, N);
+        return common.IfScope(Builder, Value, N);
     }
     pub fn WhileScope(comptime N: usize, comptime M: usize) type {
-        return dsl.WhileScope(Builder, Value, N, M);
+        return common.WhileScope(Builder, Value, N, M);
     }
 
-    /// Loop-carried `inits`; the induction variable is `index` unless
-    /// `lower` is a Value.
+    /// Loop-carried `inits`. Literal bounds take the type of a Value bound,
+    /// else they are `index`.
     pub fn openFor(
         self: *Builder,
         lower: anytype,
         upper: anytype,
         step: anytype,
         inits: anytype,
-    ) ForScope(tupleArity(@TypeOf(inits), "openFor: inits")) {
-        const N = comptime tupleArity(@TypeOf(inits), "openFor: inits");
-        const fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
-
-        const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.constIndex(lower);
-        const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constLike(upper, lb_v);
-        const step_v: Value = if (@TypeOf(step) == Value) step else self.constLike(step, lb_v);
-
-        var block_types: [N + 1]*const mlir.Type = undefined;
-        var block_locs: [N + 1]*const mlir.Location = undefined;
-        block_types[0] = lb_v.type_();
-        block_locs[0] = self.loc();
-        var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (fields, 0..) |f, i| {
-            if (@TypeOf(@field(inits, f)) != Value) @compileError("openFor: every init must be a Value");
-            const v: Value = @field(inits, f);
-            block_types[i + 1] = v.type_();
-            block_locs[i + 1] = self.loc();
-            inits_inner[i] = v.inner;
-        }
-
-        const body = mlir.Block.init(&block_types, &block_locs);
-        self.pushBlock(body);
-
-        var carried: [N]Value = undefined;
-        for (0..N) |i| carried[i] = .{ .inner = body.argument(i + 1), .kernel = self };
-
-        return .{
-            .kernel = self,
-            .body = body,
-            .lb_inner = lb_v.inner,
-            .ub_inner = ub_v.inner,
-            .step_inner = step_v.inner,
-            .inits_inner = inits_inner,
-            .iv = .{ .inner = body.argument(0), .kernel = self },
-            .carried = carried,
-        };
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
+        return self.openForOpts(lower, upper, step, inits, .{});
     }
 
-    pub fn constLike(self: *Builder, value: anytype, like: Value) Value {
+    /// `openFor` with `scf.for` options.
+    pub fn openForOpts(
+        self: *Builder,
+        lower: anytype,
+        upper: anytype,
+        step: anytype,
+        inits: anytype,
+        opts: common.ForOpts,
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
+        return common.openFor(self, Value, common.forBounds(self, Value, lower, upper, step, Builder.constIndex), inits, opts);
+    }
+
+    /// `value` as a scalar constant of `like`'s element type (`index` for an
+    /// `index` Value); a Value passes through.
+    pub fn constantLike(self: *Builder, value: anytype, like: Value) Value {
+        if (@TypeOf(value) == Value) return value;
         if (like.type_().isA(mlir.IndexType) != null) {
-            const i: i64 = switch (@typeInfo(@TypeOf(value))) {
+            const i: i128 = switch (@typeInfo(@TypeOf(value))) {
                 .float, .comptime_float => @intFromFloat(value),
-                else => @intCast(value),
+                else => value,
             };
-            return self.constIndex(i);
+            return self.constIndex(intBits(i, 64, "index"));
         }
         return self.constant(like.scalarDType(), value);
     }
 
     pub fn openIf(self: *Builder, cond: Value) IfOnlyScope {
-        const then_block = mlir.Block.init(&.{}, &.{});
-        self.pushBlock(then_block);
-        return .{ .kernel = self, .cond_inner = cond.inner, .then_block = then_block };
+        return common.openIf(self, Value, cond);
     }
 
-    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
-        const N = comptime tupleArity(@TypeOf(result_types), "openIfElse: result_types");
-        const fields = @typeInfo(@TypeOf(result_types)).@"struct".field_names;
-        var types: [N]*const mlir.Type = undefined;
-        inline for (fields, 0..) |f, i| {
-            if (@TypeOf(@field(result_types, f)) != *const mlir.Type) @compileError("openIfElse: every result_type must be *const mlir.Type");
-            types[i] = @field(result_types, f);
-        }
-        const then_block = mlir.Block.init(&.{}, &.{});
-        const else_block = mlir.Block.init(&.{}, &.{});
-        self.pushBlock(then_block);
-        return .{ .kernel = self, .cond_inner = cond.inner, .then_block = then_block, .else_block = else_block, .result_types = types };
+    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(common.arity(@TypeOf(result_types), "openIfElse: result_types")) {
+        return common.openIfElse(self, Value, cond, result_types);
     }
 
     pub fn openWhile(
         self: *Builder,
         inits: anytype,
         after_types: anytype,
-    ) WhileScope(
-        tupleArity(@TypeOf(inits), "openWhile: inits"),
-        tupleArity(@TypeOf(after_types), "openWhile: after_types"),
-    ) {
-        const N = comptime tupleArity(@TypeOf(inits), "openWhile: inits");
-        const M = comptime tupleArity(@TypeOf(after_types), "openWhile: after_types");
-        const init_fields = @typeInfo(@TypeOf(inits)).@"struct".field_names;
-        const type_fields = @typeInfo(@TypeOf(after_types)).@"struct".field_names;
-
-        var before_types: [N]*const mlir.Type = undefined;
-        var before_locs: [N]*const mlir.Location = undefined;
-        var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (init_fields, 0..) |f, i| {
-            if (@TypeOf(@field(inits, f)) != Value)
-                @compileError("openWhile: every init must be a Value");
-            const v: Value = @field(inits, f);
-            before_types[i] = v.type_();
-            before_locs[i] = self.loc();
-            inits_inner[i] = v.inner;
-        }
-        const before_block = mlir.Block.init(&before_types, &before_locs);
-
-        var after_tys: [M]*const mlir.Type = undefined;
-        var after_locs: [M]*const mlir.Location = undefined;
-        inline for (type_fields, 0..) |f, i| {
-            if (@TypeOf(@field(after_types, f)) != *const mlir.Type)
-                @compileError("openWhile: every after_type must be *const mlir.Type");
-            after_tys[i] = @field(after_types, f);
-            after_locs[i] = self.loc();
-        }
-        const after_block = mlir.Block.init(&after_tys, &after_locs);
-
-        self.pushBlock(before_block);
-        var before_carried: [N]Value = undefined;
-        for (0..N) |i| before_carried[i] = .{ .inner = before_block.argument(i), .kernel = self };
-
-        return .{
-            .kernel = self,
-            .before_block = before_block,
-            .after_block = after_block,
-            .inits_inner = inits_inner,
-            .after_types = after_tys,
-            .before_carried = before_carried,
-        };
+    ) WhileScope(common.arity(@TypeOf(inits), "openWhile: inits"), common.arity(@TypeOf(after_types), "openWhile: after_types")) {
+        return common.openWhile(self, Value, inits, after_types);
     }
 
     // ---------------------------------------------------------------- finalization
@@ -1467,10 +1459,7 @@ pub const Builder = struct {
     pub fn finish(self: *Builder) FinishError![:0]const u8 {
         _ = gpu.return_(self.ctx, &.{}, self.loc()).appendTo(self.currentBlock());
 
-        if (!self.module.operation().verify()) {
-            std.log.err("fly: module failed to verify:\n{f}", .{self.module.operation().fmt(.{ .debug_info = false })});
-            return error.InvalidMlir;
-        }
+        try common.verify(self.module, "dsl/fly");
 
         var al: std.Io.Writer.Allocating = .init(self.allocator);
         defer al.deinit();
@@ -1821,7 +1810,7 @@ test "scalar conversions and constants" {
     });
 
     // A predicate is unsigned: `true` must convert to 1, never -1.
-    const pred = b.constant(.i32, 3).cmp(.lt, 7);
+    const pred = b.constant(.i32, 3).lt(7);
     _ = pred.to(.f32);
     _ = pred.to(.i32);
     // Equal-width float pairs are neither ext nor trunc.
@@ -1832,6 +1821,11 @@ test "scalar conversions and constants" {
     // A `.bool` argument keeps its storage element type end to end.
     try std.testing.expectEqual(DType.i8, a.p.elemDType());
     try std.testing.expectEqual(DType.f16, a.x.elemDType());
+    // Literal inits are lifted, and an integer constant may be a bit pattern.
+    var loop = b.openFor(0, 4, 1, .{ 0, 0.5 });
+    {
+        loop.yield(.{ loop.carried[0].bitXor(b.constant(.i32, 0xd4d0ccc8)), loop.carried[1].mul(2.0) });
+    }
 
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
@@ -1841,6 +1835,8 @@ test "scalar conversions and constants" {
         "arith.convertf",
         "arith.constant 0xFF800000 : f32",
         "!fly.memref<i8, global, 16:1>",
+        "-> (i32, f32)",
+        "arith.constant -724513592 : i32",
     }) |needle| {
         if (std.mem.indexOf(u8, ir, needle) == null) {
             std.debug.print("missing `{s}` in:\n{s}\n", .{ needle, ir });
@@ -1951,4 +1947,43 @@ test "SSA matrix atom builds, verifies and re-parses" {
     const reparsed = try mlir.Module.parse(ctx, ir);
     defer reparsed.deinit();
     try std.testing.expect(reparsed.operation().verify());
+}
+
+test "comparisons take index ivs and vectors" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+
+    var b = try Builder.open(std.testing.allocator, ctx, "compare");
+    defer b.deinit();
+    _ = try b.declareArgs(.{});
+
+    // Literal bounds make an `index` loop.
+    var loop = b.openFor(0, 4, 1, .{});
+    {
+        _ = loop.iv.lt(2);
+        loop.close();
+    }
+    // A literal or a scalar broadcasts against a vector.
+    const v = b.constant(.f32, 1.0).splat(4);
+    _ = v.lt(0.5);
+    _ = v.ge(b.constant(.f32, 2.0));
+    _ = b.constant(.i32, 3).splat(4).eq(3);
+
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+    for ([_][2][]const u8{
+        .{ "arith.cmpi slt", ": index" },
+        .{ "arith.cmpf olt", ": vector<4xf32>" },
+        .{ "arith.cmpf oge", ": vector<4xf32>" },
+        .{ "arith.cmpi eq", ": vector<4xi32>" },
+    }) |needles| {
+        var lines = std.mem.splitScalar(u8, ir, '\n');
+        const found = while (lines.next()) |line| {
+            if (std.mem.indexOf(u8, line, needles[0]) != null and std.mem.endsWith(u8, line, needles[1])) break true;
+        } else false;
+        if (!found) {
+            std.debug.print("no `{s} ... {s}` in:\n{s}\n", .{ needles[0], needles[1], ir });
+            return error.TestUnexpectedResult;
+        }
+    }
 }

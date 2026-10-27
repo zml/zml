@@ -127,7 +127,7 @@ fn maskedStoreLM(
     const slot_shape = [_]i64{ 1, shape[0], shape[1] };
     const val_3d = k.shapeCast(val, &slot_shape);
     const mask_3d = k.shapeCast(mask, &slot_shape);
-    k.refStoreOpts(ref, val_3d, &.{ kv_head_idx_idx, k.cIndex(0), k.cIndex(0) }, .{ .mask = mask_3d, .strides = &.{} });
+    k.refStoreOpts(ref, val_3d, &.{ kv_head_idx_idx, k.constIndex(0), k.constIndex(0) }, .{ .mask = mask_3d, .strides = &.{} });
 }
 
 /// `pltpu.store(acc_ref, val, mask=…)` — group=1 so no floor-div.
@@ -144,7 +144,7 @@ fn maskedStoreAcc(
     const ge = k.cmpi(.sge, iota, k.broadcastTo(start, shape));
     const lt = k.cmpi(.slt, iota, k.broadcastTo(end, shape));
     const mask = k.andi(ge, lt);
-    k.refStoreOpts(ref, val, &.{ k.cIndex(0), q_head_offset_idx, k.cIndex(0) }, .{ .mask = mask, .strides = &.{} });
+    k.refStoreOpts(ref, val, &.{ k.constIndex(0), q_head_offset_idx, k.constIndex(0) }, .{ .mask = mask, .strides = &.{} });
 }
 
 /// `MultiPageAsyncCopyDescriptor.__init__` — `tpu.memref_slice → squeeze
@@ -158,23 +158,23 @@ fn createKvAsyncCopyDescriptors(
     kv_blk_idx: mtt.Value, // i32 — the block-relative page index
     buf_idx: mtt.Value, // i32
 ) void {
-    const start_kv_page_idx = k.muli(kv_blk_idx, k.lift(@as(i32, @intCast(cfg.num_kv_pages_per_block))));
+    const start_kv_page_idx = k.muli(kv_blk_idx, k.constant(.i32, cfg.num_kv_pages_per_block));
     const kv_at_seq = k.scalarLoad(a.kv_lens, &.{k.toIndex(seq_idx)});
     const end_kv_page_idx = k.minsi(
-        k.divsi(k.addi(kv_at_seq, k.lift(@as(i32, @intCast(cfg.page_size - 1)))), k.lift(@as(i32, @intCast(cfg.page_size)))),
-        k.lift(@as(i32, @intCast(cfg.pages_per_seq))),
+        k.divsi(k.addi(kv_at_seq, k.constant(.i32, cfg.page_size - 1)), k.constant(.i32, cfg.page_size)),
+        k.constant(.i32, cfg.pages_per_seq),
     );
-    const heads_start = k.muli(heads_blk_idx, k.lift(@as(i32, @intCast(cfg.numCombinedKvHeadsPerBlk()))));
+    const heads_start = k.muli(heads_blk_idx, k.constant(.i32, cfg.numCombinedKvHeadsPerBlk()));
 
     const within = k.cmpi(.slt, start_kv_page_idx, end_kv_page_idx);
-    const page_idx_safe = k.select(within, start_kv_page_idx, k.lift(@as(i32, 0)));
+    const page_idx_safe = k.select(within, start_kv_page_idx, k.constant(.i32, 0));
     const page_table = k.scalarLoad(a.page_indices, &.{ k.toIndex(seq_idx), k.toIndex(page_idx_safe) });
 
-    const src0 = k.memRefSlice(a.kv_pages, &.{ k.lift(@as(i32, 0)), k.lift(@as(i32, 0)), heads_start, k.lift(@as(i32, 0)) }, &.{ cfg.total_num_pages, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
-    const src1 = k.memRefSlice(src0, &.{ page_table, k.lift(@as(i32, 0)), k.lift(@as(i32, 0)), k.lift(@as(i32, 0)) }, &.{ 1, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
+    const src0 = k.memRefSlice(a.kv_pages, &.{ k.constant(.i32, 0), k.constant(.i32, 0), heads_start, k.constant(.i32, 0) }, &.{ cfg.total_num_pages, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
+    const src1 = k.memRefSlice(src0, &.{ page_table, k.constant(.i32, 0), k.constant(.i32, 0), k.constant(.i32, 0) }, &.{ 1, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
     const src = k.memRefSqueeze(src1, &.{ cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim });
 
-    const dst0 = k.memRefSlice(a.kv_bufs, &.{ buf_idx, k.lift(@as(i32, 0)), k.lift(@as(i32, 0)), k.lift(@as(i32, 0)), k.lift(@as(i32, 0)) }, &.{ 1, cfg.num_kv_pages_per_block, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
+    const dst0 = k.memRefSlice(a.kv_bufs, &.{ buf_idx, k.constant(.i32, 0), k.constant(.i32, 0), k.constant(.i32, 0), k.constant(.i32, 0) }, &.{ 1, cfg.num_kv_pages_per_block, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
     const dst1 = k.memRefSqueeze(dst0, &.{ cfg.num_kv_pages_per_block, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim });
     const dst = k.memRefSqueeze(dst1, &.{ cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim });
 
@@ -193,22 +193,22 @@ fn waitKvDma(
     kv_blk_idx: mtt.Value,
     buf_idx: mtt.Value,
 ) void {
-    const start_kv_page_idx = k.muli(kv_blk_idx, k.lift(@as(i32, @intCast(cfg.num_kv_pages_per_block))));
+    const start_kv_page_idx = k.muli(kv_blk_idx, k.constant(.i32, cfg.num_kv_pages_per_block));
     const kv_at_seq = k.scalarLoad(a.kv_lens, &.{k.toIndex(seq_idx)});
     const end_kv_page_idx = k.minsi(
-        k.divsi(k.addi(kv_at_seq, k.lift(@as(i32, @intCast(cfg.page_size - 1)))), k.lift(@as(i32, @intCast(cfg.page_size)))),
-        k.lift(@as(i32, @intCast(cfg.pages_per_seq))),
+        k.divsi(k.addi(kv_at_seq, k.constant(.i32, cfg.page_size - 1)), k.constant(.i32, cfg.page_size)),
+        k.constant(.i32, cfg.pages_per_seq),
     );
-    const heads_start = k.muli(heads_blk_idx, k.lift(@as(i32, @intCast(cfg.numCombinedKvHeadsPerBlk()))));
+    const heads_start = k.muli(heads_blk_idx, k.constant(.i32, cfg.numCombinedKvHeadsPerBlk()));
     const within = k.cmpi(.slt, start_kv_page_idx, end_kv_page_idx);
-    const page_idx_safe = k.select(within, start_kv_page_idx, k.lift(@as(i32, 0)));
+    const page_idx_safe = k.select(within, start_kv_page_idx, k.constant(.i32, 0));
     const page_table = k.scalarLoad(a.page_indices, &.{ k.toIndex(seq_idx), k.toIndex(page_idx_safe) });
 
-    const src0 = k.memRefSlice(a.kv_pages, &.{ k.lift(@as(i32, 0)), k.lift(@as(i32, 0)), heads_start, k.lift(@as(i32, 0)) }, &.{ cfg.total_num_pages, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
-    const src1 = k.memRefSlice(src0, &.{ page_table, k.lift(@as(i32, 0)), k.lift(@as(i32, 0)), k.lift(@as(i32, 0)) }, &.{ 1, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
+    const src0 = k.memRefSlice(a.kv_pages, &.{ k.constant(.i32, 0), k.constant(.i32, 0), heads_start, k.constant(.i32, 0) }, &.{ cfg.total_num_pages, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
+    const src1 = k.memRefSlice(src0, &.{ page_table, k.constant(.i32, 0), k.constant(.i32, 0), k.constant(.i32, 0) }, &.{ 1, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
     const src = k.memRefSqueeze(src1, &.{ cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim });
 
-    const dst0 = k.memRefSlice(a.kv_bufs, &.{ buf_idx, k.lift(@as(i32, 0)), k.lift(@as(i32, 0)), k.lift(@as(i32, 0)), k.lift(@as(i32, 0)) }, &.{ 1, cfg.num_kv_pages_per_block, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
+    const dst0 = k.memRefSlice(a.kv_bufs, &.{ buf_idx, k.constant(.i32, 0), k.constant(.i32, 0), k.constant(.i32, 0), k.constant(.i32, 0) }, &.{ 1, cfg.num_kv_pages_per_block, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
     const dst1 = k.memRefSqueeze(dst0, &.{ cfg.num_kv_pages_per_block, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim });
     const dst = k.memRefSqueeze(dst1, &.{ cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim });
 
@@ -235,15 +235,15 @@ fn loadStridedOrStack(
 ) mtt.Value {
     if (out_last_dim <= 128) {
         if (stride == 1) {
-            return k.vectorLoadShape(ref, &.{ k.cIndex(start_row), k.cIndex(0) }, &.{ out_rows, out_last_dim });
+            return k.vectorLoadShape(ref, &.{ k.constIndex(start_row), k.constIndex(0) }, &.{ out_rows, out_last_dim });
         }
-        return k.stridedLoadShape(ref, &.{ k.cIndex(start_row), k.cIndex(0) }, &.{ stride, 1 }, &.{ out_rows, out_last_dim });
+        return k.stridedLoadShape(ref, &.{ k.constIndex(start_row), k.constIndex(0) }, &.{ stride, 1 }, &.{ out_rows, out_last_dim });
     }
     const rows_count: usize = @intCast(out_rows);
     const rows = k.arena.allocator().alloc(mtt.Value, rows_count) catch @panic("loadStridedOrStack OOM");
     for (0..rows_count) |i| {
         const row_idx: i64 = start_row + @as(i64, @intCast(i)) * @as(i64, stride);
-        rows[i] = k.vectorLoadShape(ref, &.{ k.cIndex(row_idx), k.cIndex(0) }, &.{ 1, out_last_dim });
+        rows[i] = k.vectorLoadShape(ref, &.{ k.constIndex(row_idx), k.constIndex(0) }, &.{ 1, out_last_dim });
     }
     return k.concatenate(rows, 0);
 }
@@ -281,7 +281,7 @@ fn stridedLoadKv(
     const start: i64 = kv_head_chunk_idx * 2;
     const step: i32 = @intCast(cfg.numCombinedKvHeadsPerBlk());
 
-    const dst0 = k.memRefSlice(a.kv_bufs, &.{ buf_idx, k.lift(@as(i32, 0)), k.lift(@as(i32, 0)), k.lift(@as(i32, 0)), k.lift(@as(i32, 0)) }, &.{ 1, cfg.num_kv_pages_per_block, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
+    const dst0 = k.memRefSlice(a.kv_bufs, &.{ buf_idx, k.constant(.i32, 0), k.constant(.i32, 0), k.constant(.i32, 0), k.constant(.i32, 0) }, &.{ 1, cfg.num_kv_pages_per_block, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim }, &.{});
     const dst1 = k.memRefSqueeze(dst0, &.{ cfg.num_kv_pages_per_block, cfg.page_size, cfg.numCombinedKvHeadsPerBlk(), cfg.head_dim });
     const flat = k.memRefReshape(dst1, &.{ cfg.kvFlatRows(), cfg.head_dim });
 
@@ -306,8 +306,8 @@ fn stridedLoadKv(
     if (cfg.kv_dtype == .bf16) {
         const bk = k.shli(b, k.splat(@as(i32, 16), splat_shape, .i32));
         const bv = k.andi(b, k.splat(@as(i32, @bitCast(@as(u32, 0xFFFF0000))), splat_shape, .i32));
-        const k_v = k.arithTruncf(k.bitcastTo(bk, .f32), cfg.kv_dtype);
-        const v_v = k.arithTruncf(k.bitcastTo(bv, .f32), cfg.kv_dtype);
+        const k_v = k.arithTruncf(bk.bitCast(.f32), cfg.kv_dtype);
+        const v_v = k.arithTruncf(bv.bitCast(.f32), cfg.kv_dtype);
         const result = k.arena.allocator().alloc(KvPair, 1) catch @panic("stridedLoadKv OOM");
         result[0] = .{ .k = k_v, .v = v_v };
         return result;
@@ -330,8 +330,8 @@ fn stridedLoadKv(
         const bk_trunc = k.trunci(bk, trunc_dtype);
         const bv_trunc = k.trunci(bv, trunc_dtype);
         result[i] = .{
-            .k = k.bitcastTo(bk_trunc, cfg.kv_dtype),
-            .v = k.bitcastTo(bv_trunc, cfg.kv_dtype),
+            .k = bk_trunc.bitCast(cfg.kv_dtype),
+            .v = bv_trunc.bitCast(cfg.kv_dtype),
         };
     }
     return result;
@@ -367,7 +367,7 @@ fn flashAttention(
     const num_q_per_blk: i64 = cfg.numQPerBlk();
     const num_q_heads_per_kv_head: i64 = cfg.numQHeadsPerKvHead();
 
-    const kv_len_start = k.muli(kv_blk_idx, k.lift(@as(i32, @intCast(cfg.numKvPerBlk()))));
+    const kv_len_start = k.muli(kv_blk_idx, k.constant(.i32, cfg.numKvPerBlk()));
 
     const kv_mask = k.cmpi(
         .slt,
@@ -387,8 +387,8 @@ fn flashAttention(
     k.traceStop();
     var qk = k.mulf(qk_raw, k.splat(cfg.sm_scale, &.{ flash_q, flash_k }, .f32));
 
-    const store_start = k.maxsi(k.subi(q_start, q_len_start), k.lift(@as(i32, 0)));
-    const store_end = k.minsi(k.subi(q_end, q_len_start), k.lift(@as(i32, @intCast(num_q_per_blk))));
+    const store_start = k.maxsi(k.subi(q_start, q_len_start), k.constant(.i32, 0));
+    const store_end = k.minsi(k.subi(q_end, q_len_start), k.constant(.i32, num_q_per_blk));
 
     const row_offset = k.subi(k.addi(k.subi(kv_len, q_len), q_len_start), q_start);
     const row_iota = k.iota(&.{ flash_q, flash_k }, .i32, &.{0});
@@ -439,17 +439,17 @@ fn flashAttention(
     const l_curr_v = k.multiReduction(.add, s_curr, k.zeros(&.{flash_q}, .f32), &.{1});
     const l_curr_bc = k.broadcastTo(k.shapeCast(l_curr_v, &.{ flash_q, 1 }), &.{ flash_q, lm_lane });
 
-    const head_l_ref_idx = k.cIndex(kv_head_idx);
+    const head_l_ref_idx = k.constIndex(kv_head_idx);
     const m_prev_load = k.shapeCast(
-        k.vectorLoadShape(a.m_ref, &.{ head_l_ref_idx, k.cIndex(0), k.cIndex(0) }, &.{ 1, flash_q, lm_lane }),
+        k.vectorLoadShape(a.m_ref, &.{ head_l_ref_idx, k.constIndex(0), k.constIndex(0) }, &.{ 1, flash_q, lm_lane }),
         &.{ flash_q, lm_lane },
     );
-    const m_prev = k.select(k.cmpi(.eq, kv_blk_idx, k.lift(@as(i32, 0))), k.splat(@as(f32, -std.math.inf(f32)), &.{ flash_q, lm_lane }, .f32), m_prev_load);
+    const m_prev = k.select(k.cmpi(.eq, kv_blk_idx, k.constant(.i32, 0)), k.splat(@as(f32, -std.math.inf(f32)), &.{ flash_q, lm_lane }, .f32), m_prev_load);
     const l_prev_load = k.shapeCast(
-        k.vectorLoadShape(a.l_ref, &.{ head_l_ref_idx, k.cIndex(0), k.cIndex(0) }, &.{ 1, flash_q, lm_lane }),
+        k.vectorLoadShape(a.l_ref, &.{ head_l_ref_idx, k.constIndex(0), k.constIndex(0) }, &.{ 1, flash_q, lm_lane }),
         &.{ flash_q, lm_lane },
     );
-    const l_prev = k.select(k.cmpi(.eq, kv_blk_idx, k.lift(@as(i32, 0))), k.zeros(&.{ flash_q, lm_lane }, .f32), l_prev_load);
+    const l_prev = k.select(k.cmpi(.eq, kv_blk_idx, k.constant(.i32, 0)), k.zeros(&.{ flash_q, lm_lane }, .f32), l_prev_load);
 
     const m_next = k.maximumf(m_prev, m_curr_bc);
     maskedStoreLM(k, a.m_ref, m_next, head_l_ref_idx, store_start, store_end, num_q_heads_per_kv_head);
@@ -465,10 +465,10 @@ fn flashAttention(
     );
     maskedStoreLM(k, a.l_ref, l_next_safe, head_l_ref_idx, store_start, store_end, num_q_heads_per_kv_head);
 
-    const q_head_idx_idx = k.cIndex(q_head_idx);
-    const o_curr_3d = k.vectorLoadShape(a.acc_ref, &.{ k.cIndex(0), q_head_idx_idx, k.cIndex(0) }, &.{ num_q_per_blk, num_q_heads_per_kv_head, head_dim });
+    const q_head_idx_idx = k.constIndex(q_head_idx);
+    const o_curr_3d = k.vectorLoadShape(a.acc_ref, &.{ k.constIndex(0), q_head_idx_idx, k.constIndex(0) }, &.{ num_q_per_blk, num_q_heads_per_kv_head, head_dim });
     const o_curr_pre = k.select(
-        k.cmpi(.eq, kv_blk_idx, k.lift(@as(i32, 0))),
+        k.cmpi(.eq, kv_blk_idx, k.constant(.i32, 0)),
         k.zeros(&.{ num_q_per_blk, num_q_heads_per_kv_head, head_dim }, .f32),
         o_curr_3d,
     );
@@ -539,27 +539,27 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
 
     const k = b;
 
-    const num_seqs = k.scalarLoad(a.num_seqs, &.{k.cIndex(0)});
-    const init_seq_idx = k.scalarLoad(a.seq_buf_idx, &.{k.cIndex(0)});
-    const init_buf_idx = k.scalarLoad(a.seq_buf_idx, &.{k.cIndex(1)});
-    const q_len_start = k.muli(a.q_blk_idx, k.lift(@as(i32, @intCast(cfg.numQPerBlk()))));
-    const q_len_end = k.addi(q_len_start, k.lift(@as(i32, @intCast(cfg.numQPerBlk()))));
+    const num_seqs = k.scalarLoad(a.num_seqs, &.{k.constIndex(0)});
+    const init_seq_idx = k.scalarLoad(a.seq_buf_idx, &.{k.constIndex(0)});
+    const init_buf_idx = k.scalarLoad(a.seq_buf_idx, &.{k.constIndex(1)});
+    const q_len_start = k.muli(a.q_blk_idx, k.constant(.i32, cfg.numQPerBlk()));
+    const q_len_end = k.addi(q_len_start, k.constant(.i32, cfg.numQPerBlk()));
 
+    var i = k.openIf(k.cmpi(.eq, k.addi(a.heads_blk_idx, a.q_blk_idx), k.constant(.i32, 0)));
     {
-        var i = k.openIf(k.cmpi(.eq, k.addi(a.heads_blk_idx, a.q_blk_idx), k.lift(@as(i32, 0))));
         const first_seq_idx = nextNonemptyKvSequence(k, cfg, a, init_seq_idx, num_seqs);
+        var nonempty = k.openIf(k.cmpi(.slt, first_seq_idx, num_seqs));
         {
-            var nonempty = k.openIf(k.cmpi(.slt, first_seq_idx, num_seqs));
-            createKvAsyncCopyDescriptors(k, cfg, a, a.heads_blk_idx, first_seq_idx, k.lift(@as(i32, 0)), init_buf_idx);
-            nonempty.yieldThen(.{});
+            createKvAsyncCopyDescriptors(k, cfg, a, a.heads_blk_idx, first_seq_idx, k.constant(.i32, 0), init_buf_idx);
+            nonempty.close();
         }
-        i.yieldThen(.{});
+        i.close();
     }
 
     // Empty rows skip flashAttention, so their accumulator must already be zero.
-    k.vectorStoreAt(a.acc_ref, k.zeros(&.{ cfg.numQPerBlk(), cfg.numQHeadsPerBlk(), cfg.head_dim }, .f32), &.{ k.cIndex(0), k.cIndex(0), k.cIndex(0) });
+    k.vectorStoreAt(a.acc_ref, k.zeros(&.{ cfg.numQPerBlk(), cfg.numQHeadsPerBlk(), cfg.head_dim }, .f32), &.{ k.constIndex(0), k.constIndex(0), k.constIndex(0) });
 
-    var q_loop = k.openWhile(.{ k.lift(@as(i32, 0)), init_seq_idx, init_buf_idx }, .{ k.scalarTy(.i32), k.scalarTy(.i32), k.scalarTy(.i32) });
+    var q_loop = k.openWhile(.{ k.constant(.i32, 0), init_seq_idx, init_buf_idx }, .{ .i32, .i32, .i32 });
     {
         const done = q_loop.before_carried[0];
         const cur_seq_idx = q_loop.before_carried[1];
@@ -569,7 +569,7 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
             k.cmpi(.slt, q_len_start, cu_at_num_seqs),
             k.cmpi(.slt, cur_seq_idx, num_seqs),
         );
-        const cond = k.andi(k.cmpi(.eq, done, k.lift(@as(i32, 0))), should_run);
+        const cond = k.andi(k.cmpi(.eq, done, k.constant(.i32, 0)), should_run);
         q_loop.yieldBefore(cond, .{ done, cur_seq_idx, cur_buf_idx });
     }
     {
@@ -578,30 +578,30 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
         const cur_buf_idx = q_loop.after_carried[2];
 
         const q_start = k.scalarLoad(a.cu_q_lens, &.{k.toIndex(cur_seq_idx)});
-        const q_end = k.scalarLoad(a.cu_q_lens, &.{k.toIndex(k.addi(cur_seq_idx, k.lift(@as(i32, 1))))});
+        const q_end = k.scalarLoad(a.cu_q_lens, &.{k.toIndex(k.addi(cur_seq_idx, k.constant(.i32, 1)))});
         const q_len = k.subi(q_end, q_start);
         const kv_len = k.scalarLoad(a.kv_lens, &.{k.toIndex(cur_seq_idx)});
 
-        var kv_loop = k.openWhile(.{ k.lift(@as(i32, 0)), cur_buf_idx }, .{ k.scalarTy(.i32), k.scalarTy(.i32) });
+        var kv_loop = k.openWhile(.{ k.constant(.i32, 0), cur_buf_idx }, .{ .i32, .i32 });
         {
             const kv_blk = kv_loop.before_carried[0];
             const buf = kv_loop.before_carried[1];
-            const cond = k.cmpi(.slt, k.muli(kv_blk, k.lift(@as(i32, @intCast(cfg.numKvPerBlk())))), kv_len);
+            const cond = k.cmpi(.slt, k.muli(kv_blk, k.constant(.i32, cfg.numKvPerBlk())), kv_len);
             kv_loop.yieldBefore(cond, .{ kv_blk, buf });
         }
         {
             const kv_blk = kv_loop.after_carried[0];
             const cur_buf = kv_loop.after_carried[1];
 
-            const next_kv_blk_raw = k.addi(kv_blk, k.lift(@as(i32, 1)));
-            const is_last_kv = k.cmpi(.sge, k.muli(next_kv_blk_raw, k.lift(@as(i32, @intCast(cfg.numKvPerBlk())))), kv_len);
-            const next_kv_blk = k.select(is_last_kv, k.lift(@as(i32, 0)), next_kv_blk_raw);
+            const next_kv_blk_raw = k.addi(kv_blk, k.constant(.i32, 1));
+            const is_last_kv = k.cmpi(.sge, k.muli(next_kv_blk_raw, k.constant(.i32, cfg.numKvPerBlk())), kv_len);
+            const next_kv_blk = k.select(is_last_kv, k.constant(.i32, 0), next_kv_blk_raw);
             const cur_seq_end = k.cmpi(.sle, q_end, q_len_end);
             const next_nonempty_seq = blk: {
                 // Only sequence transitions need to scan for empty KV rows.
-                var next_seq = k.openIfElse(k.andi(is_last_kv, cur_seq_end), .{k.scalarTy(.i32)});
+                var next_seq = k.openIfElse(k.andi(is_last_kv, cur_seq_end), .{.i32});
                 {
-                    const start_seq_idx = k.addi(cur_seq_idx, k.lift(@as(i32, 1)));
+                    const start_seq_idx = k.addi(cur_seq_idx, k.constant(.i32, 1));
                     next_seq.yieldThen(.{nextNonemptyKvSequence(k, cfg, a, start_seq_idx, num_seqs)});
                 }
                 {
@@ -610,14 +610,14 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
                 break :blk next_seq.results[0];
             };
             const is_last_seq = k.cmpi(.eq, next_nonempty_seq, num_seqs);
-            const next_seq_idx = k.select(is_last_seq, k.lift(@as(i32, 0)), next_nonempty_seq);
-            const next_heads_blk_idx = k.select(is_last_seq, k.addi(a.heads_blk_idx, k.lift(@as(i32, 1))), a.heads_blk_idx);
-            const next_buf = k.extui(k.cmpi(.eq, cur_buf, k.lift(@as(i32, 0))), .i32);
+            const next_seq_idx = k.select(is_last_seq, k.constant(.i32, 0), next_nonempty_seq);
+            const next_heads_blk_idx = k.select(is_last_seq, k.addi(a.heads_blk_idx, k.constant(.i32, 1)), a.heads_blk_idx);
+            const next_buf = k.extui(k.cmpi(.eq, cur_buf, k.constant(.i32, 0)), .i32);
 
+            var ii = k.openIf(k.cmpi(.slt, next_heads_blk_idx, k.constant(.i32, cfg.numHeadsBlks())));
             {
-                var ii = k.openIf(k.cmpi(.slt, next_heads_blk_idx, k.lift(@as(i32, @intCast(cfg.numHeadsBlks())))));
                 createKvAsyncCopyDescriptors(k, cfg, a, next_heads_blk_idx, next_seq_idx, next_kv_blk, next_buf);
-                ii.yieldThen(.{});
+                ii.close();
             }
 
             waitKvDma(k, cfg, a, a.heads_blk_idx, cur_seq_idx, kv_blk, cur_buf);
@@ -651,7 +651,7 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
                     // 2nd-to-last dim is not a multiple of q's packing
                     // factor, cast q to f32 before the trailing-dim reshape
                     // so the layout pass can fold it cleanly.
-                    var q_block = k.vectorLoadShape(a.q, &.{ k.cIndex(0), k.cIndex(q_head_idx), k.cIndex(0) }, &.{ cfg.numQPerBlk(), cfg.numQHeadsPerKvHead(), cfg.head_dim });
+                    var q_block = k.vectorLoadShape(a.q, &.{ k.constIndex(0), k.constIndex(q_head_idx), k.constIndex(0) }, &.{ cfg.numQPerBlk(), cfg.numQHeadsPerKvHead(), cfg.head_dim });
                     if (@mod(cfg.numQHeadsPerKvHead(), cfg.qPackingFactor()) != 0) {
                         q_block = q_block.to(.f32);
                     }
@@ -660,21 +660,21 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
                 }
             }
 
-            kv_loop.yieldAfter(.{ k.addi(kv_blk, k.lift(@as(i32, 1))), next_buf });
+            kv_loop.yieldAfter(.{ k.addi(kv_blk, k.constant(.i32, 1)), next_buf });
         }
         const next_buf_idx = kv_loop.results[1];
 
-        const next_seq_idx_outer = k.select(k.cmpi(.sle, q_end, q_len_end), k.addi(cur_seq_idx, k.lift(@as(i32, 1))), cur_seq_idx);
-        const next_done = k.select(k.cmpi(.slt, q_end, q_len_end), done, k.lift(@as(i32, 1)));
+        const next_seq_idx_outer = k.select(k.cmpi(.sle, q_end, q_len_end), k.addi(cur_seq_idx, k.constant(.i32, 1)), cur_seq_idx);
+        const next_done = k.select(k.cmpi(.slt, q_end, q_len_end), done, k.constant(.i32, 1));
         q_loop.yieldAfter(.{ next_done, next_seq_idx_outer, next_buf_idx });
     }
     const seq_idx_out = q_loop.results[1];
     const buf_idx_out = q_loop.results[2];
 
-    k.scalarStore(a.seq_buf_idx, k.select(k.cmpi(.slt, seq_idx_out, num_seqs), seq_idx_out, k.lift(@as(i32, 0))), &.{k.cIndex(0)});
-    k.scalarStore(a.seq_buf_idx, buf_idx_out, &.{k.cIndex(1)});
+    k.scalarStore(a.seq_buf_idx, k.select(k.cmpi(.slt, seq_idx_out, num_seqs), seq_idx_out, k.constant(.i32, 0)), &.{k.constIndex(0)});
+    k.scalarStore(a.seq_buf_idx, buf_idx_out, &.{k.constIndex(1)});
 
-    k.vectorStoreAt(a.o, k.refLoad(a.acc_ref).to(cfg.q_dtype), &.{ k.cIndex(0), k.cIndex(0), k.cIndex(0) });
+    k.vectorStoreAt(a.o, k.refLoad(a.acc_ref).to(cfg.q_dtype), &.{ k.constIndex(0), k.constIndex(0), k.constIndex(0) });
 }
 
 // Fixed drafter blocks can have query tokens without visible KV tokens.
@@ -686,20 +686,20 @@ fn nextNonemptyKvSequence(
     start_seq_idx: mtt.Value,
     num_seqs: mtt.Value,
 ) mtt.Value {
-    var loop = k.openWhile(.{start_seq_idx}, .{k.scalarTy(.i32)});
+    var loop = k.openWhile(.{start_seq_idx}, .{.i32});
     {
         const seq_idx = loop.before_carried[0];
         // The terminal index can equal the metadata array length.
-        const safe_seq_idx = k.minsi(seq_idx, k.lift(@as(i32, @intCast(cfg.max_num_seqs - 1))));
+        const safe_seq_idx = k.minsi(seq_idx, k.constant(.i32, cfg.max_num_seqs - 1));
         const kv_len = k.scalarLoad(a.kv_lens, &.{k.toIndex(safe_seq_idx)});
         const skip = k.andi(
             k.cmpi(.slt, seq_idx, num_seqs),
-            k.cmpi(.sle, kv_len, k.lift(@as(i32, 0))),
+            k.cmpi(.sle, kv_len, k.constant(.i32, 0)),
         );
         loop.yieldBefore(skip, .{seq_idx});
     }
     {
-        loop.yieldAfter(.{k.addi(loop.after_carried[0], k.lift(@as(i32, 1)))});
+        loop.yieldAfter(.{k.addi(loop.after_carried[0], k.constant(.i32, 1))});
     }
     return loop.results[0];
 }

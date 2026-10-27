@@ -44,9 +44,9 @@ fn findSeqIdx(
     block_q: i64,
     use_q_block_mode: bool,
 ) Value {
-    const left_init = k.liftAs(0, .i32);
+    const left_init = k.constant(.i32, 0);
 
-    var w = k.openWhile(.{ left_init, num_seqs }, .{ k.scalarTy(.i32), k.scalarTy(.i32) });
+    var w = k.openWhile(.{ left_init, num_seqs }, .{ .i32, .i32 });
     {
         const left = w.before_carried[0];
         const right = w.before_carried[1];
@@ -62,7 +62,7 @@ fn findSeqIdx(
         else
             val;
 
-        var i = k.openIfElse(mid_val.le(target_idx), .{ k.scalarTy(.i32), k.scalarTy(.i32) });
+        var i = k.openIfElse(mid_val.le(target_idx), .{ .i32, .i32 });
         {
             i.yieldThen(.{ mid.add(1), right });
         }
@@ -169,12 +169,12 @@ pub const KernelUnifiedAttention3dPtr = struct {
         const query_stride_0 = b.load(a.query_stride_0_ptr);
         const query_stride_1 = b.load(a.query_stride_1_ptr);
         const qq_bias_stride_0 = b.load(a.qq_bias_stride_0_ptr);
-        const stride_k_cache_0 = b.liftAs(cfg.stride_k_cache_0, .i64);
-        const stride_k_cache_1 = b.liftAs(cfg.stride_k_cache_1, .i64);
-        const stride_k_cache_2 = b.liftAs(cfg.stride_k_cache_2, .i64);
-        const stride_v_cache_0 = b.liftAs(cfg.stride_v_cache_0, .i64);
-        const stride_v_cache_1 = b.liftAs(cfg.stride_v_cache_1, .i64);
-        const stride_v_cache_2 = b.liftAs(cfg.stride_v_cache_2, .i64);
+        const stride_k_cache_0 = b.constant(.i64, cfg.stride_k_cache_0);
+        const stride_k_cache_1 = b.constant(.i64, cfg.stride_k_cache_1);
+        const stride_k_cache_2 = b.constant(.i64, cfg.stride_k_cache_2);
+        const stride_v_cache_0 = b.constant(.i64, cfg.stride_v_cache_0);
+        const stride_v_cache_1 = b.constant(.i64, cfg.stride_v_cache_1);
+        const stride_v_cache_2 = b.constant(.i64, cfg.stride_v_cache_2);
         const num_seqs = b.load(a.num_seqs_ptr);
 
         kernelUnifiedAttention3d(
@@ -271,14 +271,14 @@ fn kernelUnifiedAttention3d(
     const cur_batch_query_len = cur_batch_in_all_stop_index.sub(cur_batch_in_all_start_index);
 
     const q_out_of_range = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q))).ge(cur_batch_query_len);
-    k.returnIf(q_out_of_range, .{});
+    k.returnIf(q_out_of_range);
 
     const seq_len = k.load(seq_lens_ptr.addPtr(seq_idx));
     const tiles_per_segment = cdivFn(seq_len, @as(i32, @intCast(NUM_SEGMENTS_PER_SEQ * TILE_SIZE)));
 
     const segm_lo = segm_idx.mul(tiles_per_segment).mul(@as(i32, @intCast(TILE_SIZE)));
     const segm_out_of_range = segm_lo.ge(seq_len);
-    k.returnIf(segm_out_of_range, .{});
+    k.returnIf(segm_out_of_range);
 
     const offs_m = k.arange(0, BLOCK_M, .i32);
     const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);

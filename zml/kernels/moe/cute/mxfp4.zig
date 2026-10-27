@@ -48,10 +48,10 @@ const combine_kernel_name = "mxfp4_cute_combine_kernel";
 
 /// Host launch of a boundary kernel: forward the buffer pointers, with PDL.
 fn launchBoundary(b: *B, kernel_name: [:0]const u8, grid: [3]i32, args: anytype) cute.FinishError!void {
-    const one = b.cst(.i32, 1);
+    const one = b.constant(.i32, 1);
     const config = b.makeLaunchConfig(.{
-        .grid = .{ b.cst(.i32, grid[0]), b.cst(.i32, grid[1]), b.cst(.i32, grid[2]) },
-        .block = .{ b.cst(.i32, 128), one, one },
+        .grid = .{ b.constant(.i32, grid[0]), b.constant(.i32, grid[1]), b.constant(.i32, grid[2]) },
+        .block = .{ b.constant(.i32, 128), one, one },
         .dynamic_smem = b.kernelSmemSize(kernel_name),
         .stream = b.cudaStream(),
         .cluster = .{ one, one, one },
@@ -140,7 +140,7 @@ fn groupedQuantizeKernel(b: *B, cfg: GroupedQuantConfig) cute.FinishError!void {
     const token = b.blockIdx().y;
     const word = b.blockIdx().x.mul(128).add(tid);
     var x: [4]cute.Value = undefined;
-    for (&x, 0..) |*value, i| value.* = a.x.get(.{ token, word.mul(4).add(@as(i32, @intCast(i))) }).to(.f32);
+    for (&x, 0..) |*value, i| value.* = a.x.get(.{ token, word.mul(4).add(i) }).to(.f32);
 
     var maximum = x[0].abs().maximum(x[1].abs()).maximum(x[2].abs().maximum(x[3].abs()));
     inline for (.{ 1, 2, 4 }) |offset| {
@@ -148,7 +148,7 @@ fn groupedQuantizeKernel(b: *B, cfg: GroupedQuantConfig) cute.FinishError!void {
     }
     const raw_bits = maximum.maximum(1e-4).mul(1.0 / 448.0).bitCast(.i32);
     const exponent = raw_bits.shrLogical(23).add(raw_bits.bitAnd(0x7fffff).ne(0).to(.i32));
-    const inverse_scale = b.cst(.i32, 254).sub(exponent).shl(23).bitCast(.f32);
+    const inverse_scale = b.constant(.i32, 254).sub(exponent).shl(23).bitCast(.f32);
     const packed_word = b.packFp8x4(x[0].mul(inverse_scale), x[1].mul(inverse_scale), x[2].mul(inverse_scale), x[3].mul(inverse_scale));
 
     const scale_col = word.div(8);
@@ -160,15 +160,17 @@ fn groupedQuantizeKernel(b: *B, cfg: GroupedQuantConfig) cute.FinishError!void {
         a.q.set(.{ row, word }, packed_word);
 
         var leader = b.openIf(tid.rem(8).eq(0));
-        const scale_row = row.div(cfg.group_size);
-        const row_in_group = row.rem(cfg.group_size);
-        const swizzled_col = scale_col.div(4).mul(512)
-            .add(row_in_group.rem(32).mul(16))
-            .add(row_in_group.div(32).mul(4))
-            .add(scale_col.rem(4));
-        a.s.set(.{ scale_row, swizzled_col }, exponent.to(.i8));
-        leader.yieldThen(.{});
-        if (scheduled) |*s| s.yieldThen(.{});
+        {
+            const scale_row = row.div(cfg.group_size);
+            const row_in_group = row.rem(cfg.group_size);
+            const swizzled_col = scale_col.div(4).mul(512)
+                .add(row_in_group.rem(32).mul(16))
+                .add(row_in_group.div(32).mul(4))
+                .add(scale_col.rem(4));
+            a.s.set(.{ scale_row, swizzled_col }, exponent.to(.i8));
+            leader.close();
+        }
+        if (scheduled) |*s| s.close();
     }
     // Only now are the rows this CTA owns complete: release the persistent
     // GEMM, which waits on this signal before its first TMA read.
@@ -213,25 +215,31 @@ fn combineKernel(b: *B, cfg: CombineConfig) cute.FinishError!void {
     for (0..@intCast(@divExact(pairs_per_cta, 128))) |chunk| {
         const pair = first_pair.add(chunk * 128);
         var in_bounds = b.openIf(pair.lt(pairs));
-        var low = b.cst(.f32, 0);
-        var high = b.cst(.f32, 0);
-        for (0..@intCast(cfg.topk)) |slot| {
-            const route = token.mul(cfg.topk).add(slot);
-            // Routes of other expert-parallel ranks were never written.
-            var computed = b.openIfElse(a.routes.get(.{route}).ge(0), .{ cute.DType.f32.toMlir(b.ctx), cute.DType.f32.toMlir(b.ctx) });
-            const word = a.d.get(.{ route, pair });
-            computed.yieldThen(.{
-                low.add(word.shl(16).bitCast(.f32)),
-                high.add(word.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32)),
-            });
-            computed.yieldElse(.{ low, high });
-            low = computed.results[0];
-            high = computed.results[1];
+        {
+            var low = b.constant(.f32, 0);
+            var high = b.constant(.f32, 0);
+            for (0..@intCast(cfg.topk)) |slot| {
+                const route = token.mul(cfg.topk).add(slot);
+                // Routes of other expert-parallel ranks were never written.
+                var computed = b.openIfElse(a.routes.get(.{route}).ge(0), .{ .f32, .f32 });
+                {
+                    const word = a.d.get(.{ route, pair });
+                    computed.yieldThen(.{
+                        low.add(word.shl(16).bitCast(.f32)),
+                        high.add(word.bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000)))).bitCast(.f32)),
+                    });
+                }
+                {
+                    computed.yieldElse(.{ low, high });
+                }
+                low = computed.results[0];
+                high = computed.results[1];
+            }
+            const low_bits = low.to(.bf16).to(.f32).bitCast(.i32).shrLogical(16);
+            const high_bits = high.to(.bf16).to(.f32).bitCast(.i32).bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000))));
+            a.y.set(.{ token, pair }, low_bits.bitOr(high_bits));
+            in_bounds.close();
         }
-        const low_bits = low.to(.bf16).to(.f32).bitCast(.i32).shrLogical(16);
-        const high_bits = high.to(.bf16).to(.f32).bitCast(.i32).bitAnd(@as(i32, @bitCast(@as(u32, 0xffff0000))));
-        a.y.set(.{ token, pair }, low_bits.bitOr(high_bits));
-        in_bounds.yieldThen(.{});
     }
     b.launchDependents();
 }

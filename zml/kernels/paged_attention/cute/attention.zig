@@ -29,12 +29,6 @@ pub const Kernel = cute.Kernel(Config, .{
     .run = run,
 });
 
-fn tuple(comptime T: type, comptime n: usize, values: [n]T) @Tuple(&@as([n]type, @splat(T))) {
-    var result: @Tuple(&@as([n]type, @splat(T))) = undefined;
-    inline for (0..n) |i| result[i] = values[i];
-    return result;
-}
-
 fn run(b: *cute.Builder, c: Config) cute.FinishError!void {
     switch (c.head_dim) {
         32 => try runDim(b, c, 1),
@@ -61,13 +55,13 @@ fn runDim(b: *cute.Builder, c: Config, comptime chunks: usize) cute.FinishError!
     const token = b.blockIdx().x;
     const head = b.blockIdx().y;
     const lane = b.threadIdx().x;
-    const zero = b.cst(.f32, 0);
+    const zero = b.constant(.f32, 0);
     // One full warp owns a query/head; all control flow is warp-uniform.
     // Also define output for unused capacity at the end of the packed queries.
     for (0..chunks) |i| a.out.set(.{ token, head, lane.add(i * 32) }, zero.to(c.dtype));
     var active = b.openIf(token.lt(a.starts.get(.{c.batch})));
     {
-        var find_seq = b.openFor(0, c.batch, 1, .{b.cst(.i32, 0)});
+        var find_seq = b.openFor(0, c.batch, 1, .{b.constant(.i32, 0)});
         {
             const owns = token.ge(a.starts.get(.{find_seq.iv})).bitAnd(token.lt(a.starts.get(.{find_seq.iv.add(1)})));
             find_seq.yield(.{b.select(owns, find_seq.iv, find_seq.carried[0])});
@@ -77,7 +71,7 @@ fn runDim(b: *cute.Builder, c: Config, comptime chunks: usize) cute.FinishError!
         const qlen = a.starts.get(.{seq.add(1)}).sub(start);
         const len = a.lengths.get(.{seq});
         const position = len.sub(qlen).add(token.sub(start));
-        const begin = if (c.window > 0) position.sub(c.window - 1).maximum(0) else b.cst(.i32, 0);
+        const begin = if (c.window > 0) position.sub(c.window - 1).maximum(0) else b.constant(.i32, 0);
         const end = if (c.causal) position.add(1).minimum(len) else len;
         var query: [chunks]V = undefined;
         for (&query, 0..) |*q, i| q.* = a.q.get(.{ token, head, lane.add(i * 32) }).to(.f32);
@@ -85,15 +79,15 @@ fn runDim(b: *cute.Builder, c: Config, comptime chunks: usize) cute.FinishError!
         // State is running max, normalizer, then each lane's output features.
         // A sink is an initial softmax entry with zero value.
         var initial: [chunks + 2]V = @splat(zero);
-        initial[0] = if (c.sink) a.sink.get(.{head}).mul(std.math.log2e) else b.cst(.f32, -std.math.inf(f32));
-        initial[1] = if (c.sink) b.cst(.f32, 1) else zero;
-        var keys = b.openFor(if (c.indexed) b.cst(.i32, 0) else begin, if (c.indexed) b.cst(.i32, c.topk) else end, 1, tuple(V, chunks + 2, initial));
+        initial[0] = if (c.sink) a.sink.get(.{head}).mul(std.math.log2e) else b.constant(.f32, -std.math.inf(f32));
+        initial[1] = if (c.sink) b.constant(.f32, 1) else zero;
+        var keys = b.openFor(if (c.indexed) b.constant(.i32, 0) else begin, if (c.indexed) b.constant(.i32, c.topk) else end, 1, initial);
         {
             const key = if (c.indexed) a.indices.get(.{ token, keys.iv }) else keys.iv;
             const valid = key.ge(0).bitAnd(key.lt(len));
             // Invalid indexed entries must not load the page table, K, or V. Duplicates
             // deliberately contribute once per occurrence, as independent softmax entries.
-            var entry = b.openIfElse(valid, tuple(@TypeOf(zero.type_()), chunks + 2, @splat(zero.type_())));
+            var entry = b.openIfElse(valid, @as([chunks + 2]V, @splat(zero)));
             {
                 const page = a.table.get(.{ seq, key.div(c.page_size) });
                 const offset = key.rem(c.page_size);
@@ -109,15 +103,15 @@ fn runDim(b: *cute.Builder, c: Config, comptime chunks: usize) cute.FinishError!
                 next[0] = maximum;
                 next[1] = keys.carried[1].mul(alpha).add(weight);
                 for (0..chunks) |i| next[i + 2] = keys.carried[i + 2].mul(alpha).add(weight.mul(a.v.get(.{ page, offset, kv_head, lane.add(i * 32) }).to(.f32)));
-                entry.yieldThen(tuple(V, chunks + 2, next));
+                entry.yieldThen(next);
             }
             {
-                entry.yieldElse(tuple(V, chunks + 2, keys.carried));
+                entry.yieldElse(keys.carried);
             }
-            keys.yield(tuple(V, chunks + 2, entry.results));
+            keys.yield(entry.results);
         }
         const norm = b.select(keys.results[1].gt(0), b.rcpApprox(keys.results[1]), zero);
         for (0..chunks) |i| a.out.set(.{ token, head, lane.add(i * 32) }, keys.results[i + 2].mul(norm).to(c.dtype));
-        active.yieldThen(.{});
+        active.close();
     }
 }

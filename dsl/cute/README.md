@@ -64,13 +64,15 @@ const c = NaiveElementwiseAdd.call(.{ .gA = a, .gB = b }, .{ .gC = a.shape() }, 
 ## Python to Zig
 
 Put each control-flow region in a Zig `{ ... }` block immediately after
-`openFor`, `openIf`, or `openWhile`, with its corresponding `yield` call inside
-the block. For `openIfElse`, use separate blocks ending in `yieldThen` and
-`yieldElse`; likewise, give `openWhile` separate `yieldBefore` and `yieldAfter`
-blocks. Keep the scope variable outside these blocks so its `.results` remain
-accessible afterward. The braces make the generated control flow visible and
-keep region-local values from escaping their scope; the builder's `open` and
-`yield` calls still create and close the actual IR regions.
+`openFor`, `openIf`, or `openWhile`, with its corresponding `yield` call (or
+`close()` for a scope without values) inside the block. For `openIfElse`, use
+separate blocks ending in `yieldThen` and `yieldElse` (`elseBranch()` and
+`close()` when it has no results); likewise, give `openWhile` separate
+`yieldBefore` and `yieldAfter` blocks. Keep the scope variable outside these
+blocks so its `.results` remain accessible afterward. The braces make the
+generated control flow visible and keep region-local values from escaping
+their scope; the builder's `open` and `yield` calls still create and close
+the actual IR regions.
 
 | `cutlass.cute`                             | `dsl/cute`                                      |
 |--------------------------------------------|-------------------------------------------------|
@@ -85,7 +87,7 @@ keep region-local values from escaping their scope; the builder's `open` and
 | `cute.arch.shuffle_sync_bfly(v, lane)`     | `b.shuffleXor(v, lane)`                         |
 | `cute.arch.griddepcontrol_launch_dependents()` | `b.launchDependents()`                      |
 | `x.to(Float32)`                            | `x.to(.f32)`                                    |
-| `if cond:` / `for i in range(...)`         | `b.openIf(cond)` / `b.openFor(lb, ub, step, .{})` |
+| `if cond:` / `for i in range(...)`         | `b.openIf(cond)` / `b.openFor(0, n, 1, .{})`    |
 | `cpasync.make_tiled_tma_atom(...)`         | `b.makeTiledTmaLoadAtom(...)`                   |
 | `cpasync.tma_partition(...)`               | `b.tmaPartition(...)`                           |
 | `cute.copy(atom, src, dst)`                | `b.copy(atom, src, dst, pred)`                  |
@@ -103,7 +105,7 @@ keep region-local values from escaping their scope; the builder's `open` and
   compact left-most stride like `cute.make_layout`; a `tensor` argument
   defaults to XLA's row-major layout, which is what the buffer holds.
 * **Scalars are `i32` and `f32` by default**, like `Int32`/`Float32`;
-  `cst(dtype, v)` picks another type and `coerce` lifts literals to the other
+  `constant(dtype, v)` picks another type and `coerce` lifts literals to the other
   operand's type.
 * **`nvvm` and `cuda` are the compiler's.** The context registers NVIDIA's
   `nvvm` and `cuda` dialects (`nvvm.ops`, `cuda.ops`, from the

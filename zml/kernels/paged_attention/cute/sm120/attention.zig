@@ -53,12 +53,6 @@ pub const Kernel = cute.Kernel(Config, .{
     .run = run,
 });
 
-fn tuple(comptime n: usize, values: [n]V) @Tuple(&@as([n]type, @splat(V))) {
-    var result: @Tuple(&@as([n]type, @splat(V))) = undefined;
-    inline for (0..n) |i| result[i] = values[i];
-    return result;
-}
-
 fn flatten(comptime n: usize, values: [n][4]V) [n * 4]V {
     var result: [n * 4]V = undefined;
     for (0..n) |i| @memcpy(result[i * 4 ..][0..4], &values[i]);
@@ -153,7 +147,7 @@ const TileContext = struct {
             {
                 const first_key = key_base.add(pages.iv);
                 const page_valid = first_key.lt(t.klen);
-                const logical_page = b.select(page_valid, first_key.div(16), b.cst(.i32, 0));
+                const logical_page = b.select(page_valid, first_key.div(16), b.constant(.i32, 0));
                 const page = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(logical_page));
                 const base = page.to(.i64).mul(16 * c.kv_heads * c.head_dim).add(t.head.to(.i64).mul(c.head_dim));
                 for (0..@as(usize, @intCast(@divExact(c.head_dim, 64)))) |i| {
@@ -163,7 +157,7 @@ const TileContext = struct {
                     const offset = base.add(row.to(.i64).mul(c.kv_heads * c.head_dim)).add(col.to(.i64));
                     b.cpAsync16(t.shared.add(c.kvBase()).add(swizzle(pages.iv.add(row), col, c.head_dim)), source.add(offset.mul(2)), first_key.add(row).lt(t.klen));
                 }
-                pages.yield(.{});
+                pages.close();
             }
             return;
         }
@@ -173,11 +167,11 @@ const TileContext = struct {
             const col = copy.iv.rem(@divExact(c.head_dim, 8)).mul(8);
             const key = key_base.add(row);
             const valid = key.lt(t.klen);
-            const safe_key = b.select(valid, key, b.cst(.i32, 0));
+            const safe_key = b.select(valid, key, b.constant(.i32, 0));
             const page = loadI32(b, t.table, t.seq.mul(c.pages_per_seq).add(safe_key.div(c.page_size)));
             const offset = page.to(.i64).mul(c.page_size).add(safe_key.rem(c.page_size).to(.i64)).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.head_dim).add(col.to(.i64));
             b.cpAsync16(t.shared.add(c.kvBase()).add(swizzle(row, col, c.head_dim)), source.add(offset.mul(2)), valid);
-            copy.yield(.{});
+            copy.close();
         }
     }
 
@@ -189,7 +183,7 @@ const TileContext = struct {
         var leader = b.openIf(t.lane.rem(4).eq(0));
         {
             b.storeWords(1, address, .shared, .{v.bitCast(.i32)});
-            leader.yieldThen(.{});
+            leader.close();
         }
         // Callers synchronize once both row halves have been published.
     }
@@ -267,14 +261,14 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             const col = copy_q.iv.rem(d / 8).mul(8);
             const packed_row = first_row.add(row);
             const valid = packed_row.lt(qlen.mul(c.group));
-            const token = start.add(b.select(valid, packed_row.div(c.group), b.cst(.i32, 0)));
+            const token = start.add(b.select(valid, packed_row.div(c.group), b.constant(.i32, 0)));
             const offset = token.to(.i64).mul(c.kv_heads).add(t.head.to(.i64)).mul(c.group).add(packed_row.rem(c.group).to(.i64)).mul(d).add(col.to(.i64));
             b.cpAsync16(t.shared.add(swizzle(row, col, d)), t.q.add(offset.mul(2)), valid);
-            copy_q.yield(.{});
+            copy_q.close();
         }
         const first_pos = t.klen.sub(qlen).add(first_row.div(c.group));
         const last_pos = t.klen.sub(qlen).add(first_row.add(c.rows() - 1).div(c.group).minimum(qlen.sub(1)));
-        const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.cst(.i32, 0);
+        const begin = if (c.window > 0) first_pos.sub(c.window - 1).maximum(0) else b.constant(.i32, 0);
         const end = if (c.causal) last_pos.add(1).minimum(t.klen) else t.klen;
         const first_tile = begin.div(n);
         const tiles = end.add(n - 1).div(n).sub(first_tile).maximum(0);
@@ -285,8 +279,8 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
         const dim_part = t.warp.rem(w).mul(d / w);
         const row0 = t.lane.div(4);
         const col0 = t.lane.rem(4).mul(2);
-        const zero = b.cst(.f32, 0);
-        const neg_inf = b.cst(.f32, -std.math.inf(f32));
+        const zero = b.constant(.f32, 0);
+        const neg_inf = b.constant(.f32, -std.math.inf(f32));
         const nf = n / w / 8;
         const of = d / w / 8;
         const count = 4 + of;
@@ -296,7 +290,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
         for (initial[4..]) |*v| v.* = packAcc(b, .{ zero, zero, zero, zero });
         b.cpAsyncWaitAll();
         b.syncThreads();
-        var loop = b.openFor(lo, hi, 1, tuple(count, initial));
+        var loop = b.openFor(lo, hi, 1, initial);
         {
             const key_base = loop.iv.mul(n);
             t.loadKV(t.k, key_base);
@@ -305,14 +299,14 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             var scores: [nf][4]V = @splat(@splat(zero));
             // Keep only MMA operands live in registers; Q remains in shared
             // memory so D512 does not consume the entire per-thread register file.
-            var qk = b.openFor(0, d, 16, tuple(nf * 4, @splat(zero)));
+            var qk = b.openFor(0, d, 16, @as([nf * 4]V, @splat(zero)));
             {
                 const qa = matrixLoad(b, 4, false, t.shared.add(swizzle(row_base.add(t.lane.rem(16)), qk.iv.add(t.lane.div(16).mul(8)), d)));
                 for (0..nf) |i| {
                     const kb = matrixLoad(b, 2, false, t.shared.add(c.kvBase()).add(swizzle(key_part.add(i * 8).add(t.lane.rem(8)), qk.iv.add(t.lane.div(8).rem(2).mul(8)), d)));
                     scores[i] = mma(b, dt, qa, kb, qk.carried[i * 4 ..][0..4].*);
                 }
-                qk.yield(tuple(nf * 4, flatten(nf, scores)));
+                qk.yield(flatten(nf, scores));
             }
             for (0..nf) |i| scores[i] = qk.results[i * 4 ..][0..4].*;
             var local_max: [2]V = @splat(neg_inf);
@@ -366,7 +360,7 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
             };
             var packed_acc: [of]V = undefined;
             for (0..of) |i| packed_acc[i] = packAcc(b, acc[i]);
-            var pv = b.openFor(0, n, 16, tuple(of, packed_acc));
+            var pv = b.openFor(0, n, 16, packed_acc);
             {
                 const pa = matrixLoad(b, 4, false, t.shared.add(c.pBase()).add(swizzle(row_base.add(t.lane.rem(16)), pv.iv.add(t.lane.div(16).mul(8)), n)));
                 for (0..of) |i| {
@@ -376,11 +370,11 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
                     acc[i] = mma(b, dt, pa, vb, prev);
                     packed_acc[i] = packAcc(b, acc[i]);
                 }
-                pv.yield(tuple(of, packed_acc));
+                pv.yield(packed_acc);
             }
             @memcpy(next[4..], &pv.results);
             b.syncThreads();
-            loop.yield(tuple(count, next));
+            loop.yield(next);
         }
         for (0..2) |h| {
             const row = first_row.add(row_base).add(row0).add(h * 8);
@@ -402,15 +396,15 @@ fn runTile(b: *B, c: Config, comptime d: usize, comptime w: usize, comptime n: u
                 if (c.splits > 1) {
                     var leader = b.openIf(t.warp.rem(w).eq(0).bitAnd(t.lane.rem(4).eq(0)));
                     {
-                        t.store(row, b.cst(.i32, d), m);
-                        t.store(row, b.cst(.i32, d + 1), l);
-                        leader.yieldThen(.{});
+                        t.store(row, b.constant(.i32, d), m);
+                        t.store(row, b.constant(.i32, d + 1), l);
+                        leader.close();
                     }
                 }
-                valid.yieldThen(.{});
+                valid.close();
             }
         }
-        active.yieldThen(.{});
+        active.close();
     }
 }
 
@@ -432,8 +426,8 @@ fn merge(b: *B, c: Config) cute.FinishError!void {
     const head = b.blockIdx().y;
     var valid = b.openIf(token.lt(a.starts.get(.{c.batch})));
     {
-        const zero = b.cst(.f32, 0);
-        const sink = if (c.sink) a.sink.get(.{head}).mul(std.math.log2e) else b.cst(.f32, -std.math.inf(f32));
+        const zero = b.constant(.f32, 0);
+        const sink = if (c.sink) a.sink.get(.{head}).mul(std.math.log2e) else b.constant(.f32, -std.math.inf(f32));
         var maximum = b.openFor(0, c.splits, 1, .{sink});
         {
             maximum.yield(.{maximum.carried[0].maximum(a.partials.get(.{ maximum.iv, token, head, c.head_dim }))});
@@ -450,8 +444,8 @@ fn merge(b: *B, c: Config) cute.FinishError!void {
                 });
             }
             a.out.set(.{ token, head, dims.iv }, sum.results[0].mul(b.select(sum.results[1].gt(0), b.rcpApprox(sum.results[1]), zero)).to(c.dtype));
-            dims.yield(.{});
+            dims.close();
         }
-        valid.yieldThen(.{});
+        valid.close();
     }
 }

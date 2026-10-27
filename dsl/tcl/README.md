@@ -93,6 +93,9 @@ def softmax_kernel(B: Axis = 2, D: Axis = 1024, S: Axis = 16, v0: [B, S, D]/bf16
   uppercase letter. `furiosa-tcc` needs every axis bound. Kernel inputs and
   outputs must match the XLA shapes axis by axis (row-major), which `call`
   checks.
+* **Loops.** Put the body in a Zig `{ ... }` block right after `openFor`,
+  ending with `try loop.yield(...)`. `loop` stays outside, so `loop.results`
+  stays readable after the block.
 * **DRAM tensors.** A `.dram` argument comes back as its `as_logical` view;
   `b.asDram(t, .{...})` returns a result in a DRAM mapping.
 * **Multi-chip kernels.** A kernel that places data or work on chips (a

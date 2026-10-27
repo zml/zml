@@ -5,6 +5,12 @@ to ZML** (port from a Python `@triton.jit` source) and **fixing an existing
 Zig kernel that diverges from Python** (using the comparison harness in
 `examples/triton_emitter/`).
 
+> **The harness is not in this repository.** `examples/triton_emitter/` and
+> its scripts (`run.sh`, `dump_python_ir.py`, `kernels_zig.zig`,
+> `dump_via_xla.zig`, `compare_ir.py`) are not part of ZML; the steps that
+> use them describe the comparison it runs. Writing the kernel and its
+> caller (Steps 1.2 and 1.3) and the porting bugs of Phase 3 don't need it.
+
 ## Goals (in priority order)
 
 1. **Lowered code matches.** The Zig version produces **the same LLVM IR +
@@ -89,21 +95,27 @@ Inside `zml/kernels/moe/triton/` or `zml/kernels/paged_attention/triton/`
 (or whichever production file fits), add:
 
 ```zig
-pub const MyKernel = zml.kernel.triton.Kernel(.{
-    .name = "my_kernel",                          // EXACTLY matches the Python `def my_kernel`
-    .config = struct {
-        // One field per `tl.constexpr` parameter. No defaults — every
-        // field is required at call time. Use the same names Python uses,
-        // converted to snake_case.
+const tri = zml.kernel.triton;
+
+pub const MyKernel = struct {
+    pub const Cfg = struct {
+        // One field per `tl.constexpr` parameter, named as in Python.
         BLOCK_SIZE: usize,
         // ...
-    },
-}, struct {
-    pub fn run(b: *tri.Builder, cfg: anytype) !void {
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "my_kernel", // EXACTLY matches the Python `def my_kernel`
+        // Call-site names, in `tt.func` argument order: inputs, then outputs.
+        .inputs = &.{"x_ptr"},
+        .outputs = &.{"out_ptr"},
+        .run = run,
+    });
+
+    fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             // One field per *runtime* parameter (pointers, dims that
             // arrive as 0-d tensors). Use the same names + order Python
-            // uses; the cheat-sheet's "argument specs" table maps the
+            // uses; the README's "Argument specs" table maps the
             // tagged-union variants.
             .x_ptr = .{ .ptr = .f32 },
             // ...
@@ -113,7 +125,7 @@ pub const MyKernel = zml.kernel.triton.Kernel(.{
         // README's "Python Triton ↔ Zig DSL cheat-sheet" section is
         // your best friend here.
     }
-});
+};
 ```
 
 ### Step 1.3 — Wire the production caller
@@ -121,8 +133,9 @@ pub const MyKernel = zml.kernel.triton.Kernel(.{
 Inside the same `.zig` directory, find the function that launches your
 kernel (e.g. `pagedAttention2d`, `fusedExpertsImpl`). Replace the
 TTIR-emit + `ops.triton(...)` two-step with a single
-`MyKernel.call(inputs, outputs, opts)` — see the [README](./README.md#calling-kernels-from-a-zml-model--kcall)
-for the exact shape.
+`MyKernel.Kernel.call(inputs, outputs, opts)` — see the
+[README](./README.md#calling-kernels-from-a-zml-model--kkernelcall) for the
+exact shape.
 
 If this is a brand-new kernel with no existing caller, write the caller
 fresh.
@@ -155,16 +168,13 @@ bazel build //examples/triton_emitter:dump_zig_ir   # Zig side compiles + verifi
 bazel build //zml:test                              # production side compiles
 ```
 
-If the Zig DSL `b.finish()` rejects your IR, the most common causes are:
-- **Width mismatches** in `arith.muli` / `addi` (e.g. `i32` × `i64`).
-  Cast one operand with `.to(.i64)` so both match.
-- **Tensor-of-pointers `addPtr` requires same shape** — when the offset
-  is a tensor, splat the pointer first (`scalar_ptr.addPtr(tensor_off)`
-  auto-splats; `tensor_ptrs.addPtr(scalar)` doesn't — pass
-  `tensor_ptrs.addPtr(b.splat(s, &.{shape}))`).
-- **`scf.yield` arity** — the tuple you pass to `loop.yield(...)` /
-  `i.yieldThen(...)` must match the loop's `inits` / `result_types`
-  arity exactly.
+If the Zig DSL `b.finish()` rejects your IR, it logs the module. Mixed
+integer widths and scalar/tensor operands are not the cause: the fluent ops
+widen the narrower integer side (`v_i32.mul(v_i64)` is an i64 multiply), and
+`addPtr` splats a scalar pointer or offset against a tensor partner. A common
+cause is an **`scf.yield` type mismatch** — the values you pass to
+`loop.yield(...)` / `i.yieldThen(...)` must have the types of the loop's
+`inits` / the if's `result_types` (their arity is checked at compile time).
 
 ### Step 1.6 — First dump
 
@@ -343,12 +353,12 @@ const y_s_ptr_shifted = a.y_s_ptr.addPtr(pid_i32);  // i32, not g_id
 **Fix:** Match Python's promotion direction. Python implicitly promotes
 the narrower operand to the wider one. If `cols` is i32 and
 `group_size` is i64, Python emits `extsi cols i32→i64` then compares
-at i64. The Zig DSL doesn't auto-promote, so do it explicitly:
+at i64. The fluent ops promote the same way, so compare the two as they
+are; a `trunci` like the one above comes from narrowing one side by hand:
 
 ```zig
-const cols_i32 = b.arange(0, BLOCK, .i32);
-const cols_i64 = cols_i32.to(.i64);
-const mask = cols_i64.lt(group_size);   // both i64, no trunc
+const cols = b.arange(0, BLOCK, .i32);
+const mask = cols.lt(group_size);   // extsi cols to i64, no trunc
 ```
 
 #### 3.2.5 — Op emit order
@@ -709,9 +719,9 @@ If a divergence resists all the standard fixes:
 
 Every time a divergence makes you suspect the DSL itself is buggy and you
 reach for `dsl/triton/builder.zig` — **verify against the Triton sources
-first** at `/Users/raph/Documents/Git-Repos/triton`. The DSL exists to
-mirror what Python's frontend emits; the source of truth is the Python
-trace, not what the rule "looks like" or what feels symmetric.
+first** in a Triton checkout. The DSL exists to mirror what Python's
+frontend emits; the source of truth is the Python trace, not what the rule
+"looks like" or what feels symmetric.
 
 Concretely:
 

@@ -39,7 +39,7 @@ Two layers define the surface:
 11. [Reductions and scans](#reductions-and-scans)
 12. [Control flow](#control-flow)
 13. [Escape hatches](#escape-hatches)
-14. [Lower layer — `Builder.build`](#lower-layer--builderbuild)
+14. [Lower layer — `Builder.open`](#lower-layer--builderopen)
 15. [Python Triton ↔ Zig DSL cheat-sheet](#python-triton--zig-dsl-cheat-sheet)
 16. [Pitfalls](#pitfalls)
 
@@ -216,7 +216,7 @@ Signature: `Kernel.call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Result
 | `.grid`                   | `[3]i32`              | Triton launch grid `(grid_x, grid_y, grid_z)`. |
 | `.num_warps`              | `i32`                 | Triton launch param.                     |
 | `.num_stages`             | `i32`                 | Triton launch param.                     |
-| `.output_operand_aliases` | `[]const ...` (default `&.{}`) | For in-place updates (still indexed by output position — `.{ .output_index = 0, .operand_index = 1 }`). |
+| `.output_operand_aliases` | `?zml.ops.CustomCallOutputOperandAliases(Inputs, Outputs)` (default `null`) | For in-place updates: each output field names the input it aliases — `.{ .out = .x_ptr }`. |
 | `.debug`                  | `bool` (default false)| Emit `tt.debug = true` on the custom call. |
 
 Returns `Kernel.Results` — a struct of `Tensor` named like `spec.outputs`.
@@ -361,27 +361,13 @@ between fp64 / fp32 / fp16 / bf16 lowers to `arith.truncf` (rank-independent
 fp8 is on either side or the caller requested a non-default
 `fp_downcast_rounding`.
 
-### Constant hoisting and CSE
+### Constants
 
-Every `arith.constant` emitted by the DSL — whether through `lift`, `splat`
-of a comptime literal, `zeros` / `ones` / `full`, or any internal helper —
-is deduped against a per-`Builder` cache keyed by `<type>:<value>`. On a hit
-the existing SSA value is reused; on a miss the new op is inserted at the
-*top* of the entry block (before any non-constant op already there) so the
-final IR has all constants gathered above the function body, in roughly
-first-use order.
-
-This mirrors what Triton's Python frontend produces and keeps the
-`make_ttgir` layout pass from seeing duplicate constants — duplicates can
-change the layout-slot assignment for kernels with `tt.dot`, since layout
-inference walks the IR and the *first* tensor it sees with a given shape
-gets `#blocked`, the second gets `#blocked2`, etc.
-
-`zeros(shape, dtype)`, `ones(shape, dtype)`, and `full(shape, value, dtype)`
-emit a single `arith.constant dense<value>:tensor<...>` (instead of the
-old scalar-const + `tt.splat` two-op pattern); same for `splat(comptime,
-shape)`. `splat(Value, shape)` still emits `tt.splat` since the operand is
-a runtime value, not a literal.
+There is no constant cache and no hoisting: every lifted literal emits its
+own `arith.constant` where it is used (see Pitfall 5). `zeros(shape, dtype)`,
+`ones(shape, dtype)`, `full(shape, value, dtype)` and `splat` of a literal
+emit a scalar `arith.constant` and a `tt.splat`; `splat(Value, shape)` emits
+the `tt.splat` alone.
 
 ### Shape / pointer helpers
 
@@ -451,14 +437,14 @@ in all of these — drop it:
 | `v_f32.mul(1.0 / config.fp8_max)`        | already-f32 expression → f32 const    |
 | `v_i64.lt(NUM_QUERY_HEADS)` (Zig i64)    | runtime i64 → i64 const               |
 | `v_i32.add(pad_term)` (Zig i32)          | runtime i32 → i32 const               |
-| `b.splat(-1, shape)` / `b.openFor(0, N, 1, ...)` | comptime → matches elem / lower |
-| `b.liftAs(0, .i32)`                      | liftAs takes anytype — wrap nothing   |
+| `b.splat(-1, shape)` / `b.openFor(0, N, 1, ...)` | comptime → matches elem / the first Value bound |
+| `b.constant(.i32, 0)`                    | constant takes anytype — wrap nothing |
 
 `@as(...)` **is** required exactly when you're narrowing a runtime Zig int
 to a smaller width that `lift` won't pick on its own. The idiom is
 `@as(i32, @intCast(X_i64))` — you need the `@as` because `@intCast` has no
 target type to infer, and without the narrowing `lift` would emit an i64
-constant that mismatches the i32 lhs:
+constant, which widens the i32 lhs and the result to i64:
 
 ```zig
 // BLOCK_Q is a Zig i64 (from config). lhs is i32. Must narrow.
@@ -470,16 +456,16 @@ Python's `.to(tl.int64)` style but costs two extra Value-level casts; prefer
 the narrowing `@as` or a pre-declared `const FOO_I32: i32 = @intCast(FOO);`
 when the same width cast recurs.
 
-### When do you need `b.lift` / `b.liftAs`?
+### When do you need `b.lift` / `b.constant`?
 
 Almost never. The DSL auto-lifts rhs for every fluent binop, `b.splat`,
 `b.full`, `b.openFor` bounds, `.addPtr` offsets, etc. Reach for `b.lift` /
-`b.liftAs` **only** when the DSL surface demands an existing `Value` and
+`b.constant` **only** when the DSL surface demands an existing `Value` and
 there's no binop sibling to match against — typically:
 
 - Loop seeds for `openWhile(.{inits}, ...)` where you start with a raw
-  comptime literal: `const left_init = b.liftAs(0, .i32);`.
-- Mutable `var x: Value = b.liftAs(0, .i32);` that a later branch may
+  comptime literal: `const left_init = b.constant(.i32, 0);`.
+- Mutable `var x: Value = b.constant(.i32, 0);` that a later branch may
   reassign — the var needs an initial Value even if the comptime path would
   work on its own.
 
@@ -491,8 +477,8 @@ where such names are required.
 ### Scalar ↔ tensor auto-broadcast
 
 Fluent arithmetic and comparison ops (`.add`, `.sub`, `.mul`, `.div`, `.rem`,
-`.cdiv`, `.bitAnd`, `.bitOr`, `.min`, `.max`, `.lt`, `.le`, `.gt`, `.ge`,
-`.eq`, `.ne`) are symmetric: if one operand is a tensor and the other a
+`.cdiv`, `.bitAnd`, `.bitOr`, `.minimum`, `.maximum`, `.lt`, `.le`, `.gt`,
+`.ge`, `.eq`, `.ne`) are symmetric: if one operand is a tensor and the other a
 scalar, the scalar is splatted to match. Either direction works:
 
 ```zig
@@ -531,7 +517,7 @@ pointer or scalar offset) against a tensor partner, a pre-emptive
 
 ```zig
 // redundant
-pid_n.mul(N).splatTo(shape).add(b.arange(0, N, .i64)).rem(n_blocb.splatTo(shape))
+pid_n.mul(N).splatTo(shape).add(b.arange(0, N, .i64)).rem(n_block.splatTo(shape))
 // equivalent — scalars auto-splat against the tensor sibling
 pid_n.mul(N).add(b.arange(0, N, .i64)).rem(n_block)
 ```
@@ -554,7 +540,7 @@ the same `extsi` + `muli` pair Python would.
 For the rare case where you want explicit control, you can still cast
 yourself; the auto-promotion is a no-op when widths already agree.
 
-Recurring example from `triton_kernels.zig`:
+Recurring example from `zml/kernels/moe/triton/moe.zig`:
 
 ```zig
 // pid (i32) vs block (i64 because it came from a usize config)
@@ -567,7 +553,7 @@ For pointer math it is often cleaner to promote everything to i64 up front:
 
 ```zig
 const pid = b.programId(.x).to(.i64);
-const offs = b.arange(BLOCK, .i64);
+const offs = b.arange(0, BLOCK, .i64);
 ```
 
 ---
@@ -583,7 +569,8 @@ const offs = b.arange(BLOCK, .i64);
 | `b.expandDims(v, axis)` / `v.expandDims(axis)` | `tt.expand_dims` — insert a size-1 axis. Mirrors `v[:, None]` (`axis=1`) / `v[None, :]` (`axis=0`). |
 | `b.mask2d(cond_m, cond_n, _, _)`       | `cond_m[:, None] & cond_n[None, :]` — emits the `(m,1) & (1,n)` form; auto-broadcast at the next consumer. |
 | `b.lift(value)`                        | Wrap a Zig scalar as a DSL Value; dtype inferred from source. |
-| `b.liftAs(value, dtype)`               | Wrap a Zig scalar as a DSL Value of a specific `DType`. |
+| `b.constant(dtype, value)`             | Wrap a Zig scalar as a DSL Value of a specific `DType`. |
+| `b.constantLike(value, like)`          | Wrap a Zig scalar as a DSL Value of `like`'s element type. |
 
 ---
 
@@ -631,7 +618,7 @@ so user code never constructs `*const mlir.Type` manually:
 | `b.dot(a, b, acc)` / `b.dotOpts(a, b, acc, opts)`   | `acc.type_()`.                              |
 | `b.dotScaled(...)` / `b.dotScaledOpts(...)`         | `acc.type_()`.                              |
 | `b.reshape(src, new_shape)` / `b.reshapeOpts(...)`  | `new_shape` + `src` element type.           |
-| `b.gather(src, indices, axis)` / `b.gatherOpts(...)`| `indices` shape + `src` element type.       |
+| `b.gather(src, indices, axis)`                      | `indices` shape + `src` element type.       |
 | `b.histogram(src, num_bins)` / `b.histogramOpts(...)` | `tensor<num_bins x i32>`.                 |
 | `b.fpToFp(src, out_dtype)` / `b.fpToFpOpts(...)`    | `src` shape + `out_dtype`.                  |
 | `b.convertf(src, out_dtype)` / `b.convertfOpts(...)`| `src` shape + `out_dtype`.                  |
@@ -643,9 +630,9 @@ a `new_shape`, a `num_bins`, an `out_dtype`, a TMA tile descriptor. The DSL
 never asks you to restate information it can read off a `Value`.
 
 `b.scalarTy(dtype)` / `b.tensorTy(shape, dtype)` are still available but only
-needed by `openIf.result_types` / `openWhile.after_types` (where block-arg
-types can be arbitrary) and by the raw `externElementwise` /
-`inlineAsmElementwise` escape hatches.
+needed for tensor result types in `openIfElse` / `openWhile` (scalar ones are
+plain dtypes) and by the raw `externElementwise` / `inlineAsmElementwise`
+escape hatches.
 
 ### `fn X / fn XOpts` pattern
 
@@ -671,11 +658,12 @@ Pairs in place today: `load` / `loadOpts`, `store` / `storeOpts`,
 `deviceAssert` / `deviceAssertOpts`,
 `maximum` / `maximumOpts`, `minimum` / `minimumOpts`,
 `sum` / `sumOpts`, `max` / `maxOpts`, `min` / `minOpts`,
-`cumsum` / `cumsumOpts`, `cumprod` / `cumprodOpts`.
+`cumsum` / `cumsumOpts`, `cumprod` / `cumprodOpts`,
+`openFor` / `openForOpts` (`tl.range(..., num_stages=...)`).
 
-DSL-only pair (no Python kwarg counterpart — `.inline_return` is about IR
+DSL-only pairs (no Python kwarg counterpart — `.inline_return` is about IR
 block layout, see the `returnIf` / `returnIfOpts` section under Control flow):
-`returnIf` / `returnIfOpts`.
+`returnIf` / `returnIfOpts`, `openReturnIf` / `openReturnIfOpts`.
 
 Ops with no kwargs in Python (pure positional): `gather(src, indices, axis)`,
 `trans(src, order)`, `permute(src, order)`, `cat(lhs, rhs)` (dim=0 default),
@@ -741,7 +729,8 @@ closure for `combine` and give you full control.
 SCF regions are built with **scope-based** builders — `b.openFor(...)`,
 `b.openIf(...)` / `b.openIfElse(...)`, `b.openWhile(...)` return a typed scope
 value. You emit body ops into a bare `{}` block, terminate with `yield` /
-`yieldThen` / `yieldAfter`, and read results from `scope.results` afterward.
+`yieldThen` / `yieldAfter` (or `close()` for a scope without values), and read
+results from `scope.results` afterward.
 No `ctx` struct, no function literal, no `kk`/`k` split — lexical scope
 carries captures because everything runs in the same function.
 
@@ -761,12 +750,15 @@ const total = loop.results[0];
 ```
 
 - `lower`/`upper`/`step` are `anytype`: pass Values, comptime ints, or runtime
-  Zig ints. Comptime literals adapt to the first operand's type; cast explicitly
-  to force a specific width (e.g. `@as(i32, @intCast(config.block))`).
-- `inits` is a tuple literal `.{v1, v2, ...}`. Arity is comptime — `carried`,
-  `results`, and the `yield(...)` call are all fixed-size arrays of the same
-  length.
-- Empty loops: `b.openFor(0, N, S, .{})` + `loop.yield(.{})` (no iter_args).
+  Zig ints. A bound that isn't a Value takes the type of the first one that is;
+  with none, `lower` is lifted (`i32` when it fits) and the others follow it.
+  Pass a typed constant (`b.constant(.i64, 0)`) to pick another width.
+- `inits` is a tuple `.{v1, v2, ...}` or an array. Arity is comptime —
+  `carried`, `results`, and the `yield(...)` values (also a tuple or an array)
+  all have the same length.
+- Empty loops: `b.openFor(0, N, S, .{})` + `loop.close()` (no iter_args).
+- `b.openForOpts(lower, upper, step, inits, .{ .num_stages = 3 })` sets the
+  loop's options (`tt.num_stages`, `.unsigned_cmp`).
 
 ### `openIf` — scf.if without else (side-effects only)
 
@@ -774,17 +766,17 @@ const total = loop.results[0];
 var i = b.openIf(cond);
 {
     // then body
-    i.yieldThen(.{});   // closes scope, builds scf.if with empty else
+    i.close();   // closes scope, builds scf.if with empty else
 }
 ```
 
-Use for conditional side-effects (no results). There is no `yieldElse` — the
+Use for conditional side-effects (no results). There is no else branch — the
 else block is auto-built empty.
 
 ### `openIfElse` — scf.if with else and optional results
 
 ```zig
-var i = b.openIfElse(cond, .{ b.scalarTy(.f32) });   // result types
+var i = b.openIfElse(cond, .{.f32});   // result types
 {
     // then body
     i.yieldThen(.{ x });
@@ -796,16 +788,17 @@ var i = b.openIfElse(cond, .{ b.scalarTy(.f32) });   // result types
 const r = i.results[0];
 ```
 
-- `result_types` is a tuple of `*const mlir.Type` — use `b.scalarTy(dtype)` or
-  `b.tensorTy(shape, dtype)`. Pass `.{}` for an if/else with no results but
-  distinct then/else bodies.
+- `result_types` is a tuple or array of dtypes (`.f32`), Values (for their
+  types) or `*const mlir.Type`s such as `b.tensorTy(shape, dtype)`. Pass
+  `.{}` for an if/else with no results but distinct then/else bodies, then
+  end them with `elseBranch()` and `close()`.
 - `yieldThen` swaps to the else block; `yieldElse` builds the `scf.if` op.
 - Both branches must yield arity-matching tuples.
 
 ### `openWhile` — scf.while
 
 ```zig
-var w = b.openWhile(.{ i0 }, .{ b.scalarTy(.i32) });
+var w = b.openWhile(.{ i0 }, .{.i32});
 {
     // before region (condition)
     const s = w.before_carried[0];
@@ -819,9 +812,10 @@ var w = b.openWhile(.{ i0 }, .{ b.scalarTy(.i32) });
 const r = w.results[0];
 ```
 
-- `inits` — tuple of `Value`s; before-region arg types = their types.
-- `after_types` — tuple of `*const mlir.Type`; after-region arg types + the
-  scf.while's result types.
+- `inits` — a tuple or array of `Value`s; before-region arg types = their types.
+- `after_types` — a tuple or array of dtypes (`.f32`), Values (for their
+  types) or `*const mlir.Type`s; after-region arg types + the scf.while's
+  result types.
 - `yieldBefore(cond, forwarded)` — `forwarded` arity must match `after_types`.
 - `yieldAfter(values)` — arity must match `inits`.
 
@@ -830,7 +824,7 @@ const r = w.results[0];
 ```zig
 // Python: if pid_m * BLOCK >= num_tokens_post_padded: return
 const out_of_range = pid_m.mul(block).ge(num_tokens);
-b.returnIf(out_of_range, .{});
+b.returnIf(out_of_range);
 // ... ops here live in a fresh fall-through block ...
 ```
 
@@ -844,20 +838,19 @@ cf.cond_br %out_of_range, ^ret, ^cont
   // subsequent ops
 ```
 
-- `values` is a tuple of `Value`s matching the `tt.func`'s declared result
-  types (pass `.{}` for a void kernel).
+- Kernels return nothing, so neither form takes return values.
 - Works **only at the top-level `tt.func` body** — don't call inside an
   `scf.if`/`scf.for`/`scf.while` region (those must stay structured; cf
   branches can't escape their parent scf region).
 - After `returnIf`, the kernel's current block is swapped to a fresh
   fall-through block — any subsequent `b.*` calls emit into that block, and
-  `b.finish(...)` appends the final `tt.return` there.
+  `b.finish()` appends the final `tt.return` there.
 - Use this to match Python Triton's `if cond: return` lowering exactly.
   Python emits `cf.cond_br` for early-return idioms while using `scf.for` /
   `scf.if` for structured loops and value-carrying branches; our DSL does
   the same.
 
-**`returnIfOpts(cond, values, .{ .inline_return = true })` — match Python's
+**`returnIfOpts(cond, .{ .inline_return = true })` — match Python's
 per-`return` block layout.** By default `returnIf` routes every return path
 (every early `returnIf` / `openReturnIf` plus the natural fall-through from
 `b.finish`) through one **shared exit block** holding the single `tt.return`.
@@ -868,8 +861,8 @@ but differ in the function-exit block's label and position — which renumbers
 every `$L__BB` label downstream and blows up the PTX diff. When the Python source contains *any* literal `return` statement (it then
 has ≥2 `ret` blocks in LLVM — the explicit one(s) plus the implicit
 function-end one — which SimplifyCFG merges into `common.ret`), pass
-`.{ .inline_return = true }` on *every* return site, and set
-`scope.inline_return = true` on each `openReturnIf` (see below). Each one
+`.{ .inline_return = true }` on *every* return site, including each
+`openReturnIfOpts` (see below). Each one
 then emits `tt.return` inline and SimplifyCFG reproduces Python's
 `common.ret`. The default shared exit block emits exactly one `tt.return`,
 so the merge never fires and the function-exit block lands somewhere else.
@@ -878,11 +871,10 @@ so the merge never fires and the function-exit block lands somewhere else.
 
 ```zig
 // Python: if off_experts == -1: write_zeros_to_output(...); return
-var scope = b.openReturnIf(is_dead);
-scope.inline_return = true;              // optional — see `returnIfOpts` above
+var scope = b.openReturnIf(is_dead);   // or openReturnIfOpts, see `returnIfOpts` above
 {
     writeZerosToOutput(k, c_ptr, ...);   // ops here emit into ^ret
-    scope.yieldReturn(.{});              // closes ^ret with tt.return (or cf.br ^exit)
+    scope.close();                       // closes ^ret with tt.return (or cf.br ^exit)
 }
 // ... ops here emit into ^cont (fall-through) ...
 ```
@@ -890,15 +882,14 @@ scope.inline_return = true;              // optional — see `returnIfOpts` abov
 Lowers to the same `cf.cond_br ^ret, ^cont` shape as `returnIf`, but the
 taken branch can carry arbitrary side-effects between the `cf.cond_br` and
 the `tt.return`. Use this instead of the
-`openIf(cond){body}yieldThen; returnIf(cond, values)` pair — that pattern
+`openIf(cond){body}close; returnIf(cond)` pair — that pattern
 duplicates the predicate (emits both `scf.if` and `cf.cond_br` on the same
 boolean) and drifts from Triton's reference IR.
 
-`scope.inline_return` is the per-scope twin of `returnIfOpts`'s
-`.inline_return` (default `false`): set it before `yieldReturn` to make
-`^ret` close with `tt.return` directly instead of `cf.br ^exit`. Flip it on
-every `returnIf` / `openReturnIf` of a kernel when matching a Python source
-that has literal `return` statements.
+`openReturnIfOpts(cond, .{ .inline_return = true })` makes `close` end
+`^ret` with `tt.return` directly instead of `cf.br ^exit`. Use it on every
+`returnIf` / `openReturnIf` of a kernel when matching a Python source that has
+literal `return` statements.
 
 Same restrictions as `returnIf`: top-level `tt.func` body only.
 
@@ -906,9 +897,9 @@ Same restrictions as `returnIf`: top-level `tt.func` body only.
 
 | Python source                          | Emits | DSL builder                     |
 |----------------------------------------|-------|---------------------------------|
-| `if cond: return`                      | `cf`  | `b.returnIf(cond, .{})`         |
-| `if cond: <side-effects>; return`      | `cf`  | `var s = b.openReturnIf(cond); {...; s.yieldReturn(.{})}` |
-| `if cond: <side-effects>`              | `scf` | `b.openIf(cond) {...; yieldThen(.{})}` |
+| `if cond: return`                      | `cf`  | `b.returnIf(cond)`              |
+| `if cond: <side-effects>; return`      | `cf`  | `var s = b.openReturnIf(cond); {...; s.close()}` |
+| `if cond: <side-effects>`              | `scf` | `b.openIf(cond) {...; close()}` |
 | `if cond: x=A else: x=B` (value-carrying) | `scf` | `b.openIfElse(cond, .{ty}) {...; yieldThen(.{a})} {...; yieldElse(.{b})}` |
 | `for i in range(...)`                  | `scf` | `b.openFor(lo, hi, step, .{inits})` |
 | `while cond:`                          | `scf` | `b.openWhile(.{inits}, .{after_types})` |
@@ -935,7 +926,8 @@ built-in reductions cover the common cases.
 - Scopes stack naturally: `openFor { openIf { openFor { ... } } }` all just
   push/pop the kernel's current-block stack (same for `openIfElse` /
   `openWhile`).
-- Empty yields are legal: `loop.yield(.{})`, `i.yieldThen(.{})`, etc.
+- Scopes without values end with `close()`: `loop.close()`, `i.close()`, and
+  `elseBranch()` then `close()` for an if/else.
 - After any `yield*`, the scope's `.results` field holds the scf op's results
   as a `[N]Value`.
 
@@ -961,12 +953,11 @@ is the manual form.
 
 ---
 
-## Lower layer — `Builder.build`
+## Lower layer — `Builder.open`
 
 The declarative `zml.kernel.triton.Kernel(Config, spec)` form covers most
-cases. For existing code, dynamic-arity arg lists, or escape-hatch scenarios
-where you want to drive the IR construction yourself, the lower-layer
-`Builder.build` API is still available:
+cases. For dynamic-arity arg lists, or escape-hatch scenarios where you want
+to drive the IR construction yourself, use the `Builder` directly:
 
 ```zig
 const Builder = tri.Builder;
@@ -976,38 +967,32 @@ pub fn fusedMoeKernel(
     ctx: *mlir.Context,
     config: GenerationConfig,
 ) ![:0]const u8 {
-    var spec = try Builder.build(allocator, ctx, "fused_moe_kernel", .{
+    var b = try Builder.open(allocator, ctx, "fused_moe_kernel");
+    defer b.deinit();
+    const a = try b.declareArgs(.{
         .a_ptr = .{ .ptr = config.a_dtype },
         .b_ptr = .{ .ptr = config.b_dtype },
         // ...
-    }, &.{});
-    defer spec.deinit();
-    const b = &spec.kernel;
-    const a = spec.args;
+    });
 
     // ... emit body via b.* helpers; same DSL as inside `Kernel(...)` ...
 
-    return b.finish(&.{});
+    return b.finish();
 }
 ```
 
-`Builder.build(allocator, ctx, name, spec, result_types)` returns a
-heap-allocated `*Built(Spec)`:
-
-- `spec.kernel` — the runtime `Builder`; pass `&spec.kernel` to helpers.
-- `spec.args` — the same `NamedArgs(Spec)` struct that the declarative
-  `b.declareArgs(...)` returns.
-- `spec.deinit()` — frees the module + bundle.
-- `b.finish(results)` — terminates with `tt.return`, verifies, serializes
-  to `[:0]const u8`. Pass `&.{}` for kernels with no return values.
+- `Builder.open(allocator, ctx, name)` creates an empty builder, and
+  `b.declareArgs(spec)` creates the `tt.func` and returns its arguments as
+  the same `NamedArgs(Spec)` struct as inside `Kernel(...)` — exactly what
+  `zml.kernel.triton.Kernel(...)` does internally.
+  `b.declareArgsOpts(spec, .{ .@"noinline" = true })` sets the function's
+  options.
+- `b.finish()` terminates with `tt.return`, verifies, and serializes to a
+  `[:0]const u8` owned by `allocator`. `b.deinit()` frees the module.
 
 For dynamic-arg-count construction, `Builder.init(allocator, ctx, name,
-args: []const ArgSpec, result_types)` takes a runtime slice of arg specs
-instead of a comptime struct literal; you grab block args with `b.arg(i)`.
-
-You can also use `Builder.open(allocator, ctx, name)` to create an empty
-builder and call `b.declareArgs(spec)` mid-stream — that's exactly what
-`zml.kernel.triton.Kernel(...)` does internally.
+args)` takes a runtime `[]const ArgSpec` instead of a comptime struct
+literal; you grab block args with `b.arg(i)`.
 
 Pass these constructors a `zml.kernel.triton.newContext()`, not a
 `Compilation`'s `mlir_ctx`; `defer ctx.deinit()` once you have the IR
@@ -1027,7 +1012,7 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
 | `x.to(tl.int64)`                              | `x.to(.i64)`                                                       |
 | `a + b`, `a * b`, `a // b`                    | `a.add(b)`, `a.mul(b)`, `a.div(b)`                                 |
 | `a < b`                                       | `a.lt(b)`                                                          |
-| `mask & other`                                | `masb.bitAnd(other)`                                               |
+| `mask & other`                                | `mask.bitAnd(other)`                                               |
 | `tl.where(c, a, b)`                           | `b.where(c, a, b)` (alias of `b.select`)                           |
 | `vec[:, None]`                                | `vec.expandDims(1)`                                                |
 | `vec[None, :]`                                | `vec.expandDims(0)`                                                |
@@ -1078,19 +1063,20 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
 | `tl.extern_elementwise(...)`                  | `b.externElementwise(srcs, shape, dtype, lib, path, sym)`          |
 | `for i in range(0, N, S): ...`                | `var loop = b.openFor(0, N, S, .{inits...}); { ...; loop.yield(.{...}); }`                 |
 | `while cond: ...`                             | `var w = b.openWhile(.{inits}, .{after_types}); { ...; w.yieldBefore(cond, .{...}); }; { ...; w.yieldAfter(.{...}); }` |
-| `if cond: ...` (side-effects, no else)        | `var i = b.openIf(cond); { ...; i.yieldThen(.{}); }`                                         |
+| `if cond: ...` (side-effects, no else)        | `var i = b.openIf(cond); { ...; i.close(); }`                                                |
 | `if cond: ... else: ...`                      | `var i = b.openIfElse(cond, .{result_types}); { ...; i.yieldThen(.{...}); }; { ...; i.yieldElse(.{...}); }` |
-| `if cond: return` (early exit)                | `b.returnIf(cond, .{});` — emits `cf.cond_br` + `tt.return`, continues in fall-through block (add `b.returnIfOpts(cond, .{}, .{ .inline_return = true })` when matching a Python source that has literal `return`s) |
-| `if cond: <stores>; return` (early exit, with side-effects) | `var s = b.openReturnIf(cond); { ...; s.yieldReturn(.{}); }` — single `cf.cond_br`; body emits into `^ret` before the `tt.return` (set `s.inline_return = true` to match, alongside `returnIfOpts`) |
+| `if cond: return` (early exit)                | `b.returnIf(cond);` — emits `cf.cond_br` + `tt.return`, continues in fall-through block (`b.returnIfOpts(cond, .{ .inline_return = true })` when matching a Python source that has literal `return`s) |
+| `if cond: <stores>; return` (early exit, with side-effects) | `var s = b.openReturnIf(cond); { ...; s.close(); }` — single `cf.cond_br`; body emits into `^ret` before the `tt.return` (`b.openReturnIfOpts(cond, .{ .inline_return = true })` to match, alongside `returnIfOpts`) |
 
 ---
 
 ## Pitfalls
 
-1. **Width mismatches between runtime operands.** `v_i32.mul(v_i64)` will hit
-   `arith.muli requires the same type` at verify time. Either cast one with
-   `.to(...)` or reshape the kernel to stay within a single int width. Comptime
-   literals adapt automatically — runtime values don't.
+1. **Mixed integer widths widen.** `v_i32.mul(v_i64)` is an i64 multiply
+   with an `arith.extsi` on the i32 side, and so is `v_i32.mul(x)` for a
+   runtime Zig `i64` `x`. Narrow with `@as(i32, @intCast(x))` or `.to(.i32)`
+   when the result must stay i32. Comptime literals take the other operand's
+   type instead.
 
 2. **Tensor-of-pointers via `.addPtr`.** Auto-splats either side: scalar
    `!tt.ptr<T>` + tensor offset (`x_ptr.addPtr(tensor_offs)`) and tensor
@@ -1099,7 +1085,7 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
 
 3. **Scope-based control flow — no closures needed.** `openFor` / `openIf` /
    `openIfElse` / `openWhile` push a block onto the kernel's insertion stack;
-   body ops emitted in the bare `{}` that follows go into that blocb. Captures
+   body ops emitted in the bare `{}` that follows go into that block. Captures
    are plain lexical scope, so you can reference outer Values, sizes, etc.
    directly — no `ctx` struct, no function literal.
 
@@ -1115,10 +1101,10 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
    way to PTX, so the generated code is identical whether you emit one
    constant or a hundred. Optimize for readability at the builder level.
 
-6. **`finish(results, allocator)` verifies before serializing.** A verifier
-   failure here almost always means an operand-type mismatch (see #1) or a
+6. **`finish()` verifies before serializing.** A verifier
+   failure here almost always means an operand-type mismatch or a
    missing block terminator — a common one is forgetting that `scf.yield`
-   operand count must match the loop's result types.
+   operand types must match the loop's result types.
 
 7. **Yielding from loop / if / while bodies.** Inside a scope (`openFor`,
    `openIf`, `openIfElse`, `openWhile`), you *don't* return values — you call
@@ -1126,5 +1112,5 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
    `yieldAfter`) with a tuple of Values matching the scope's declared arity.
    Scopes with results (`openFor`, `openIfElse`, `openWhile`) store the scf
    op's results in `scope.results` as a fixed-size `[N]Value` array. `openIf`
-   has no results — `yieldThen(.{})` closes and builds scf.if with an empty
+   has no results — `close()` closes and builds scf.if with an empty
    else block in one step.

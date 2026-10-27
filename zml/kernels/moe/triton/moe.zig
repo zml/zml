@@ -116,10 +116,10 @@ pub const PerTokenGroupQuantFp8 = struct {
                 // It is unclear whether power-of-two scaling is best for this kernel,
                 // but it keeps activation quantization consistent with that function.
                 // Round up from the FP32 bits, including values just above a power of two.
-                const bits = b.bitcast(scale_raw, .i32);
+                const bits = scale_raw.bitCast(.i32);
                 const exponent = bits.div(0x800000);
                 const fractional = bits.bitAnd(0x7fffff).ne(0).to(.i32);
-                const scale = b.bitcast(exponent.add(fractional).mul(0x800000), .f32);
+                const scale = exponent.add(fractional).mul(0x800000).bitCast(.f32);
                 break :blk .{ scale, scale.to(scale_dt) };
             },
             .mxfp4, .nvfp4 => unreachable,
@@ -315,7 +315,7 @@ pub const FusedMoe = struct {
         const num_tokens_post_padded = num_tokens_post_padded_i32.to(.i64);
         const out_of_range = pid_m_block.ge(num_tokens_post_padded);
 
-        b.returnIfOpts(out_of_range, .{}, .{ .inline_return = true });
+        b.returnIfOpts(out_of_range, .{ .inline_return = true });
 
         const offs_token = if (cfg.naive_block_assignment)
             b.select(
@@ -336,8 +336,7 @@ pub const FusedMoe = struct {
         const is_dead = off_experts.eq(-1);
 
         // Python: if off_experts == -1: write_zeros_to_output(...); return
-        var dead_ret = b.openReturnIf(is_dead);
-        dead_ret.inline_return = true;
+        var dead_ret = b.openReturnIfOpts(is_dead, .{ .inline_return = true });
         {
             writeZerosToOutput(
                 b,
@@ -351,7 +350,7 @@ pub const FusedMoe = struct {
                 block_size_n,
                 compute_type,
             );
-            dead_ret.yieldReturn(.{});
+            dead_ret.close();
         }
 
         // CSE `pid_n * BLOCK_SIZE_N` so it reuses across offs_bn / offs_cn.
@@ -391,7 +390,7 @@ pub const FusedMoe = struct {
         // Loop bounds stay i64 because `k_block` is i64. iter_args order
         // matches Python's TTIR for the matrix and accumulator state.
         const num_k_iters = k_block.cdiv(block_size_k);
-        var loop = b.openFor(@as(i64, 0), num_k_iters, @as(i64, 1), .{ a_ptrs_init, b_ptrs_init, acc_init });
+        var loop = b.openFor(0, num_k_iters, 1, .{ a_ptrs_init, b_ptrs_init, acc_init });
         {
             const k_iter = loop.iv;
             const a_ptrs = loop.carried[0];
@@ -682,8 +681,7 @@ pub const MoeAlignBlockSize = struct {
         const fill_offs = b.arange(0, hist_block, .i32);
 
         // if pid == 1: fill sorted_token_ids with NUMEL; return
-        var fill_branch = b.openReturnIf(pid.eq(1));
-        fill_branch.inline_return = true;
+        var fill_branch = b.openReturnIfOpts(pid.eq(1), .{ .inline_return = true });
         {
             var fill_loop = b.openFor(0, max_num_tokens_padded, hist_block, .{});
             {
@@ -694,9 +692,9 @@ pub const MoeAlignBlockSize = struct {
                     b.splat(numel, &.{hist_block}),
                     .{ .mask = mask },
                 );
-                fill_loop.yield(.{});
+                fill_loop.close();
             }
-            fill_branch.yieldReturn(.{});
+            fill_branch.close();
         }
 
         // pid != 1: histogram + cumsum + block assignment.
@@ -742,7 +740,7 @@ pub const MoeAlignBlockSize = struct {
             const block_ids = starts.div(block_size_m).add(scatter.iv);
             const mask = expert_mask.bitAnd(block_counts.gt(scatter.iv));
             b.storeOpts(a.expert_ids_ptr.addPtr(block_ids), expert_offs, .{ .mask = mask });
-            scatter.yield(.{});
+            scatter.close();
         }
     }
 };
@@ -787,7 +785,7 @@ pub const CountAndSortExpertTokens = struct {
         const token_start_init = pid.mul(block_i32);
 
         // while token_start < NUMEL:
-        var w = b.openWhile(.{token_start_init}, .{b.scalarTy(.i32)});
+        var w = b.openWhile(.{token_start_init}, .{.i32});
         {
             const ts = w.before_carried[0];
             w.yieldBefore(ts.lt(numel), .{ts});
@@ -843,11 +841,11 @@ fn ar(b: *Builder, n: i64) Value {
 }
 
 fn ld(b: *Builder, p: Value, mask: Value, dt: tri.DType, other: i64) Value {
-    return b.loadOpts(p, .{ .mask = mask, .other = if (p.isTensor()) b.full(p.shape().constSlice(), other, dt) else b.liftAs(other, dt) });
+    return b.loadOpts(p, .{ .mask = mask, .other = if (p.isTensor()) b.full(p.shape().constSlice(), other, dt) else b.constant(dt, other) });
 }
 
 fn ci(b: *Builder, n: i64) Value {
-    return b.liftAs(n, .i32);
+    return b.constant(.i32, n);
 }
 
 fn quant32(b: *Builder, x: Value) struct { q: Value, s: Value } {
@@ -863,12 +861,12 @@ fn quant32(b: *Builder, x: Value) struct { q: Value, s: Value } {
         // SM89 lowers FP32 -> FP8 through FP16 with truncation. Round to odd at
         // FP16 precision first so that this intermediate cannot turn a value just
         // above an FP8 midpoint into an exact tie. Direct FP8 conversion is unchanged.
-        const scaled_bits = b.bitcast(scaled, .i32);
+        const scaled_bits = scaled.bitCast(.i32);
         const sticky = b.select(scaled_bits.bitAnd(0x1fff).ne(0), b.full(scaled.shape().constSlice(), 0x2000, .i32), b.zeros(scaled.shape().constSlice(), .i32));
-        const prepared = b.bitcast(scaled_bits.bitAnd(-0x2000).bitOr(sticky), .f32);
+        const prepared = scaled_bits.bitAnd(-0x2000).bitOr(sticky).bitCast(.f32);
         break :b prepared.to(.f8e4m3fn);
     };
-    const bits = b.shrui(b.bitcast(sf, .i32), b.full(sf.shape().constSlice(), 23, .i32)).bitAnd(255).to(.i8);
+    const bits = b.shrui(sf.bitCast(.i32), b.full(sf.shape().constSlice(), 23, .i32)).bitAnd(255).to(.i8);
     return .{ .q = b.reshape(q, &.{ rows, cols }), .s = b.reshape(bits, &.{ rows, groups }) };
 }
 
@@ -1000,8 +998,10 @@ pub const Schedule = struct {
         const ts = counts.cdiv(group);
         const starts = ts.cumsum().sub(ts);
         var first = b.openIf(b.programId(.x).eq(0));
-        b.store(a.sched.addPtr(2 * nt), ts.sum());
-        first.yieldThen(.{});
+        {
+            b.store(a.sched.addPtr(2 * nt), ts.sum());
+            first.close();
+        }
         const live = p.lt(cfg.tokens * cfg.topk).bitAnd(e.ge(0)).bitAnd(e.lt(cfg.experts));
         const safe = e.maximum(0).minimum(pow2(cfg.experts) - 1);
         const pos = ld(b, a.pos.addPtr(p), live, .i32, 0);
@@ -1109,65 +1109,69 @@ fn gemm(b: *Builder, c: GemmConfig, comptime projection: Projection) tri.FinishE
     const expert = if (c.tokens == 1) b.load(a.ids.addPtr(tile)).sub(ci(b, c.expert_offset)) else ld(b, a.sched.addPtr(tile), tile.lt(b.load(a.sched.addPtr(2 * nt))), .i32, 0);
     const valid = if (c.tokens == 1) expert.ge(0).bitAnd(expert.lt(c.experts)) else tile.lt(b.load(a.sched.addPtr(2 * nt)));
     var live = b.openIf(valid);
-    const count = if (c.tokens == 1) ci(b, 1) else b.load(a.sched.addPtr(nt).addPtr(tile));
-    const pair = if (c.tokens == 1) b.full(&.{c.bn}, 0, .i32).add(tile) else if (is_up) ld(b, a.map.addPtr(tile.mul(c.bn).add(n)), n.lt(count), .i32, 0) else n;
-    const width: i64 = if (is_up and c.tokens > 8) 256 else 128;
-    const ksize = if (is_up) c.hidden else c.intermediate;
-    const rows = if (is_up) 2 * c.intermediate else c.hidden;
-    const m = block.mul(width).add(ar(b, width));
-    const k = ar(b, c.bk);
-    const ks = ar(b, @divExact(c.bk, 32));
-    const row = if (is_up) pair.div(c.topk) else tile.mul(c.bn).add(n);
-    const wd = b.makeTensorDescriptor(a.w.addPtr(expert.to(.i64).mul(@divTrunc(rows * ksize, 2))), &.{ ci(b, rows), ci(b, @divTrunc(ksize, 2)) }, &.{ b.liftAs(@divTrunc(ksize, 2), .i64), b.liftAs(1, .i64) }, .pad_zero, &.{ width, @divExact(c.bk, 2) }, .i8);
-    var loop = b.openFor(0, @divTrunc(ksize + c.bk - 1, c.bk), 1, .{b.zeros(&.{ width, c.bn }, .f32)});
-    const sk = loop.iv.mul(@divExact(c.bk, 32)).add(ks);
-    const kk = loop.iv.mul(c.bk).add(k);
-    const w = b.descriptorLoad(wd, &.{ block.mul(ci(b, width)), loop.iv.mul(ci(b, @divExact(c.bk, 2))) }, &.{ width, @divExact(c.bk, 2) }, .i8);
-    const scale_offset = m.expandDims(1).mul(c.scale_stride).add(sk.expandDims(0));
-    const ws = ld(b, a.ws.addPtr(expert.to(.i64).mul(rows * c.scale_stride)).addPtr(scale_offset), sk.expandDims(0).lt(@divTrunc(ksize, 32)), .i8, 127);
-    var mask = kk.expandDims(0).lt(ksize);
-    var smask = sk.expandDims(0).lt(@divTrunc(ksize, 32));
-    // The small-batch epilogue leaves padded rows unwritten.
-    if (is_up or c.tokens <= 8) {
-        mask = mask.bitAnd(n.lt(count).expandDims(1));
-        smask = smask.bitAnd(n.lt(count).expandDims(1));
+    {
+        const count = if (c.tokens == 1) ci(b, 1) else b.load(a.sched.addPtr(nt).addPtr(tile));
+        const pair = if (c.tokens == 1) b.full(&.{c.bn}, 0, .i32).add(tile) else if (is_up) ld(b, a.map.addPtr(tile.mul(c.bn).add(n)), n.lt(count), .i32, 0) else n;
+        const width: i64 = if (is_up and c.tokens > 8) 256 else 128;
+        const ksize = if (is_up) c.hidden else c.intermediate;
+        const rows = if (is_up) 2 * c.intermediate else c.hidden;
+        const m = block.mul(width).add(ar(b, width));
+        const k = ar(b, c.bk);
+        const ks = ar(b, @divExact(c.bk, 32));
+        const row = if (is_up) pair.div(c.topk) else tile.mul(c.bn).add(n);
+        const wd = b.makeTensorDescriptor(a.w.addPtr(expert.to(.i64).mul(@divTrunc(rows * ksize, 2))), &.{ ci(b, rows), ci(b, @divTrunc(ksize, 2)) }, &.{ b.constant(.i64, @divTrunc(ksize, 2)), b.constant(.i64, 1) }, .pad_zero, &.{ width, @divExact(c.bk, 2) }, .i8);
+        var loop = b.openFor(0, @divTrunc(ksize + c.bk - 1, c.bk), 1, .{b.zeros(&.{ width, c.bn }, .f32)});
+        {
+            const sk = loop.iv.mul(@divExact(c.bk, 32)).add(ks);
+            const kk = loop.iv.mul(c.bk).add(k);
+            const w = b.descriptorLoad(wd, &.{ block.mul(ci(b, width)), loop.iv.mul(ci(b, @divExact(c.bk, 2))) }, &.{ width, @divExact(c.bk, 2) }, .i8);
+            const scale_offset = m.expandDims(1).mul(c.scale_stride).add(sk.expandDims(0));
+            const ws = ld(b, a.ws.addPtr(expert.to(.i64).mul(rows * c.scale_stride)).addPtr(scale_offset), sk.expandDims(0).lt(@divTrunc(ksize, 32)), .i8, 127);
+            var mask = kk.expandDims(0).lt(ksize);
+            var smask = sk.expandDims(0).lt(@divTrunc(ksize, 32));
+            // The small-batch epilogue leaves padded rows unwritten.
+            if (is_up or c.tokens <= 8) {
+                mask = mask.bitAnd(n.lt(count).expandDims(1));
+                smask = smask.bitAnd(n.lt(count).expandDims(1));
+            }
+            const x = ld(b, a.q.addPtr(row.expandDims(1).mul(ksize).add(kk.expandDims(0))), mask, .f8e4m3fn, 0);
+            const xs = ld(b, a.s.addPtr(row.expandDims(1).mul(@divTrunc(ksize, 32)).add(sk.expandDims(0))), smask, .i8, 127);
+            loop.yield(.{b.dotScaled(w, b.permute(x, &.{ 1, 0 }), loop.carried[0], ws, xs, .e2m1, .e4m3)});
+        }
+        const epilogue_n: i64 = if (c.tokens == 1) 1 else c.bn;
+        const out_n = ar(b, epilogue_n);
+        const acc = if (c.tokens == 1) live_row: {
+            // The remaining MMA columns are padding during single-token decode.
+            // Extract column zero before activation/reduction and output stores.
+            var v = loop.results[0];
+            var cols: i64 = c.bn;
+            while (cols > 1) : (cols = @divTrunc(cols, 2)) {
+                v = b.split(b.reshape(v, &.{ width, @divTrunc(cols, 2), 2 }))[0];
+            }
+            break :live_row b.reshape(v, &.{ 1, width }).to(.bf16);
+        } else b.permute(loop.results[0], &.{ 1, 0 }).to(.bf16);
+        if (is_up) {
+            const columns = @divExact(width, 2);
+            const halves = b.split(b.reshape(acc.to(.f32), &.{ epilogue_n, columns, 2 }));
+            var g = halves[0];
+            var u = halves[1];
+            if (c.swiglu_limit > 0) {
+                g = g.minimum(c.swiglu_limit);
+                u = u.minimum(c.swiglu_limit).maximum(-c.swiglu_limit);
+            }
+            const ex = b.externElementwise(&.{g.mul(-1.0)}, &.{ epilogue_n, columns }, .f32, "libdevice", "", "__nv_expf");
+            var mid = u.mul(b.divRn(g, ex.add(1.0)));
+            if (c.routing_weight_placement == .before_down) {
+                const rw = if (c.tokens == 1) b.load(a.rw.addPtr(tile)) else ld(b, a.rw.addPtr(pair), n.lt(count), .f32, 0).expandDims(1);
+                mid = mid.mul(rw);
+            }
+            // Compute scales and quantize directly from the FP32 SwiGLU result.
+            const q = quant32(b, mid);
+            const col = block.mul(columns).add(ar(b, columns));
+            b.store(a.mid.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(c.intermediate).add(col.expandDims(0))), q.q);
+            const scale_cols = block.mul(@divExact(columns, 32)).add(ar(b, @divExact(columns, 32)));
+            b.store(a.ms.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(@divTrunc(c.intermediate, 32)).add(scale_cols.expandDims(0))), q.s);
+        } else b.store(a.d.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(c.hidden).add(m.expandDims(0))), acc);
+        live.close();
     }
-    const x = ld(b, a.q.addPtr(row.expandDims(1).mul(ksize).add(kk.expandDims(0))), mask, .f8e4m3fn, 0);
-    const xs = ld(b, a.s.addPtr(row.expandDims(1).mul(@divTrunc(ksize, 32)).add(sk.expandDims(0))), smask, .i8, 127);
-    loop.yield(.{b.dotScaled(w, b.permute(x, &.{ 1, 0 }), loop.carried[0], ws, xs, .e2m1, .e4m3)});
-    const epilogue_n: i64 = if (c.tokens == 1) 1 else c.bn;
-    const out_n = ar(b, epilogue_n);
-    const acc = if (c.tokens == 1) live_row: {
-        // The remaining MMA columns are padding during single-token decode.
-        // Extract column zero before activation/reduction and output stores.
-        var v = loop.results[0];
-        var cols: i64 = c.bn;
-        while (cols > 1) : (cols = @divTrunc(cols, 2)) {
-            v = b.split(b.reshape(v, &.{ width, @divTrunc(cols, 2), 2 }))[0];
-        }
-        break :live_row b.reshape(v, &.{ 1, width }).to(.bf16);
-    } else b.permute(loop.results[0], &.{ 1, 0 }).to(.bf16);
-    if (is_up) {
-        const columns = @divExact(width, 2);
-        const halves = b.split(b.reshape(acc.to(.f32), &.{ epilogue_n, columns, 2 }));
-        var g = halves[0];
-        var u = halves[1];
-        if (c.swiglu_limit > 0) {
-            g = g.minimum(c.swiglu_limit);
-            u = u.minimum(c.swiglu_limit).maximum(-c.swiglu_limit);
-        }
-        const ex = b.externElementwise(&.{g.mul(-1.0)}, &.{ epilogue_n, columns }, .f32, "libdevice", "", "__nv_expf");
-        var mid = u.mul(b.divRn(g, ex.add(1.0)));
-        if (c.routing_weight_placement == .before_down) {
-            const rw = if (c.tokens == 1) b.load(a.rw.addPtr(tile)) else ld(b, a.rw.addPtr(pair), n.lt(count), .f32, 0).expandDims(1);
-            mid = mid.mul(rw);
-        }
-        // Compute scales and quantize directly from the FP32 SwiGLU result.
-        const q = quant32(b, mid);
-        const col = block.mul(columns).add(ar(b, columns));
-        b.store(a.mid.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(c.intermediate).add(col.expandDims(0))), q.q);
-        const scale_cols = block.mul(@divExact(columns, 32)).add(ar(b, @divExact(columns, 32)));
-        b.store(a.ms.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(@divTrunc(c.intermediate, 32)).add(scale_cols.expandDims(0))), q.s);
-    } else b.store(a.d.addPtr(tile.mul(c.bn).add(out_n).expandDims(1).mul(c.hidden).add(m.expandDims(0))), acc);
-    live.yieldThen(.{});
 }

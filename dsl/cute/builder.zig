@@ -2,10 +2,10 @@ const std = @import("std");
 
 const arith = @import("mlir/dialects/arith");
 const cf = @import("mlir/dialects/cf");
+const common = @import("dsl/common/builder");
 const cuda = @import("mlir/dialects/cuda");
 const cute_ir = @import("mlir/dialects/cute_ir");
 const cute_nvgpu = @import("mlir/dialects/cute_nvgpu");
-const dsl = @import("dsl/common");
 const func = @import("mlir/dialects/func");
 const gpu = @import("mlir/dialects/gpu");
 const llvm = @import("mlir/dialects/llvm");
@@ -13,7 +13,6 @@ const math = @import("mlir/dialects/math");
 const nvvm = @import("mlir/dialects/nvvm");
 const scf = @import("mlir/dialects/scf");
 const vector = @import("mlir/dialects/vector");
-const tupleArity = dsl.tupleArity;
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
@@ -157,7 +156,7 @@ pub const Value = struct {
     pub fn neg(self: Value) Value {
         const k = self.kern();
         if (self.isFloat()) return k.emit(arith.negf(k.ctx, self.inner, k.loc()));
-        return k.cst(self.dtype(), 0).sub(self);
+        return k.constant(self.dtype(), 0).sub(self);
     }
 
     pub fn abs(self: Value) Value {
@@ -373,7 +372,7 @@ pub const Tensor = struct {
     pub fn set(self: Tensor, coord: anytype, value_: anytype) void {
         const k = self.kernel;
         const c = k.makeCoord(coord);
-        const v = k.liftAs(value_, self.dtype).to(self.dtype);
+        const v = k.constant(self.dtype, value_).to(self.dtype);
         _ = cute_ir.memref_store(k.ctx, self.inner, c, v.inner, k.loc()).appendTo(k.currentBlock());
     }
 
@@ -549,18 +548,18 @@ pub const LayoutOpts = struct {
     stride: ?[]const i64 = null,
 };
 
-pub const IfOnlyScope = dsl.IfOnlyScope(Builder, Value);
+pub const IfOnlyScope = common.IfOnlyScope(Builder, Value);
 
 pub fn IfScope(comptime N: usize) type {
-    return dsl.IfScope(Builder, Value, N);
+    return common.IfScope(Builder, Value, N);
 }
 
 pub fn ForScope(comptime N: usize) type {
-    return dsl.ForScope(Builder, Value, N);
+    return common.ForScope(Builder, Value, N);
 }
 
 pub fn WhileScope(comptime N: usize, comptime M: usize) type {
-    return dsl.WhileScope(Builder, Value, N, M);
+    return common.WhileScope(Builder, Value, N, M);
 }
 
 pub const Builder = struct {
@@ -575,7 +574,7 @@ pub const Builder = struct {
     function_kind: FunctionKind = .func_only_kernel,
     func_op: ?*mlir.Operation = null,
     entry_block: ?*mlir.Block = null,
-    block_stack: std.ArrayList(*mlir.Block) = .empty,
+    block_stack: common.BlockStack = .{},
     args: []const ArgSpec = &.{},
     tensors: []?Tensor = &.{},
 
@@ -738,6 +737,7 @@ pub const Builder = struct {
 
         self.func_op = func_op;
         self.entry_block = entry;
+        self.block_stack.push(self.arena.allocator(), entry);
         self.args = args;
 
         self.tensors = try scratch.alloc(?Tensor, args.len);
@@ -758,18 +758,15 @@ pub const Builder = struct {
     }
 
     pub fn pushBlock(self: *Builder, b: *mlir.Block) void {
-        self.block_stack.append(self.arena.allocator(), b) catch @panic("Builder.pushBlock OOM");
+        self.block_stack.push(self.arena.allocator(), b);
     }
 
     pub fn popBlock(self: *Builder) void {
-        _ = self.block_stack.pop();
+        self.block_stack.pop();
     }
 
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        if (self.block_stack.items.len > 0) {
-            return self.block_stack.items[self.block_stack.items.len - 1];
-        }
-        return self.entry_block orelse @panic("Builder has no current block; call declareArgs first");
+        return self.block_stack.current();
     }
 
     pub fn emit(self: *Builder, op: *mlir.Operation) Value {
@@ -860,7 +857,7 @@ pub const Builder = struct {
     /// CUDA stream. The native CuTe host bridge substitutes XLA's current
     /// stream when it executes the wrapper.
     pub fn cudaStream(self: *Builder) Value {
-        return self.emit(cuda.cast(self.ctx, cuda.streamType(self.ctx), self.cst(.i64, 0).inner, self.loc()));
+        return self.emit(cuda.cast(self.ctx, cuda.streamType(self.ctx), self.constant(.i64, 0).inner, self.loc()));
     }
 
     pub const LaunchOptions = struct {
@@ -886,8 +883,8 @@ pub const Builder = struct {
         if (opts.cluster) |cluster| {
             self.emitVoid(cuda.launch_cfg_cluster_dim(self.ctx, config.inner, .{ cluster[0].inner, cluster[1].inner, cluster[2].inner }, self.loc()));
         }
-        self.emitVoid(cuda.launch_cfg_cooperative(self.ctx, config.inner, self.cst(.i32, @intFromBool(opts.cooperative)).inner, self.loc()));
-        self.emitVoid(cuda.launch_cfg_programmatic_stream_serialization_allowed(self.ctx, config.inner, self.cst(.i32, @intFromBool(opts.use_pdl)).inner, self.loc()));
+        self.emitVoid(cuda.launch_cfg_cooperative(self.ctx, config.inner, self.constant(.i32, @intFromBool(opts.cooperative)).inner, self.loc()));
+        self.emitVoid(cuda.launch_cfg_programmatic_stream_serialization_allowed(self.ctx, config.inner, self.constant(.i32, @intFromBool(opts.use_pdl)).inner, self.loc()));
         return .{ .inner = config.inner, .kernel = self };
     }
 
@@ -930,14 +927,14 @@ pub const Builder = struct {
         }
         self.func_op = null;
         self.entry_block = null;
-        self.block_stack.clearRetainingCapacity();
+        self.block_stack.clear();
         self.args = &.{};
         self.tensors = &.{};
     }
 
     pub fn finishProgram(self: *Builder) FinishError![:0]const u8 {
         std.debug.assert(self.entry_block == null and self.func_op == null);
-        if (!self.module.operation().verify()) return error.InvalidMlir;
+        try common.verify(self.module, "dsl/cute");
         return self.renderModule();
     }
 
@@ -1900,7 +1897,7 @@ pub const Builder = struct {
         if (cfg.m != 128 or cfg.k != 32 or cfg.n < 8 or cfg.n > 256 or cfg.n % 8 != 0) {
             std.debug.panic("unsupported SM100 block-scaled MMA shape {d}x{d}x{d}", .{ cfg.m, cfg.n, cfg.k });
         }
-        const disabled = self.cst(.i1, false);
+        const disabled = self.constant(.i1, false);
         const atom = self.makeAtom(self.blockScaledAtomType(cfg), .{ disabled, disabled, disabled, scale_ptr, scale_ptr });
         const tiled = self.emit(cute_ir.make_tiled_mma(self.ctx, atom.inner, self.blockScaledMmaType(cfg), self.loc()));
         return .{ .atom = atom, .tiled = .{ .inner = tiled.inner, .kernel = self } };
@@ -1935,7 +1932,7 @@ pub const Builder = struct {
     pub fn allocTmem(self: *Builder, columns: u16, holding_ptr: anytype, opts: TmemOptions) void {
         self.emitVoid(cute_nvgpu.arch_sm100_alloc_tmem(
             self.ctx,
-            self.cst(.i32, columns).inner,
+            self.constant(.i32, columns).inner,
             self.asValue(holding_ptr).inner,
             .{ .is_two_cta = if (opts.two_cta) .unit(self.ctx) else null, .exclusive = if (opts.exclusive) .unit(self.ctx) else null },
             self.loc(),
@@ -1955,7 +1952,7 @@ pub const Builder = struct {
         self.emitVoid(cute_nvgpu.arch_sm100_dealloc_tmem(
             self.ctx,
             self.asValue(pointer).inner,
-            self.cst(.i32, columns).inner,
+            self.constant(.i32, columns).inner,
             .{ .is_two_cta = if (opts.two_cta) .unit(self.ctx) else null, .exclusive = if (opts.exclusive) .unit(self.ctx) else null },
             self.loc(),
         ));
@@ -2225,7 +2222,7 @@ pub const Builder = struct {
         const shuffled = self.emit(llvm.inline_asm(
             self.ctx,
             "shfl.sync.bfly.b32 $0, $1, $2, 31, 0xffffffff;",
-            &.{ bits.inner, self.cst(.i32, offset).inner },
+            &.{ bits.inner, self.constant(.i32, offset).inner },
             .{ .constraints = "=r,r,r", .result_type = .int(self.ctx, .i32) },
             self.loc(),
         ));
@@ -2241,7 +2238,7 @@ pub const Builder = struct {
         const shuffled = self.emit(llvm.inline_asm(
             self.ctx,
             "shfl.sync.idx.b32 $0, $1, $2, 31, 0xffffffff;",
-            &.{ bits.inner, self.liftAs(lane, .i32).inner },
+            &.{ bits.inner, self.constant(.i32, lane).inner },
             .{ .constraints = "=r,r,r", .result_type = .int(self.ctx, .i32) },
             self.loc(),
         ));
@@ -2307,17 +2304,17 @@ pub const Builder = struct {
 
     /// Initialize a shared-memory mbarrier expecting `arrivals` per phase.
     pub fn mbarrierInit(self: *Builder, barrier: Value, arrivals: u32) void {
-        self.emitVoid(nvvm.mbarrier_init(self.ctx, self.sharedBarrierPtr(barrier).inner, self.cst(.i32, arrivals).inner, self.loc()));
+        self.emitVoid(nvvm.mbarrier_init(self.ctx, self.sharedBarrierPtr(barrier).inner, self.constant(.i32, arrivals).inner, self.loc()));
     }
 
     /// Arrive and expect `bytes` of asynchronous transactions (SM90+), as a
     /// TMA producer does before issuing its copies.
     pub fn mbarrierArriveExpectTx(self: *Builder, barrier: Value, bytes: u32) void {
-        self.emitVoid(nvvm.mbarrier_arrive_expect_tx(self.ctx, self.sharedBarrierPtr(barrier).inner, self.cst(.i32, bytes).inner, .cta, self.loc()));
+        self.emitVoid(nvvm.mbarrier_arrive_expect_tx(self.ctx, self.sharedBarrierPtr(barrier).inner, self.constant(.i32, bytes).inner, .cta, self.loc()));
     }
 
     pub fn mbarrierArrive(self: *Builder, barrier: Value, count: u32) void {
-        self.emitVoid(nvvm.mbarrier_arrive(self.ctx, self.sharedBarrierPtr(barrier).inner, self.cst(.i32, count).inner, .cta, self.loc()));
+        self.emitVoid(nvvm.mbarrier_arrive(self.ctx, self.sharedBarrierPtr(barrier).inner, self.constant(.i32, count).inner, .cta, self.loc()));
     }
 
     /// Test whether phase `phase` has completed, without suspending (SM90+).
@@ -2328,7 +2325,7 @@ pub const Builder = struct {
     /// Wait for phase `phase`, letting the warp sleep for up to
     /// `suspend_time` cycles per attempt (SM90+).
     pub fn mbarrierTryWaitParity(self: *Builder, barrier: Value, phase: Value, suspend_time: u32) void {
-        self.emitVoid(nvvm.mbarrier_try_wait_parity(self.ctx, self.sharedBarrierPtr(barrier).inner, phase.inner, self.cst(.i32, suspend_time).inner, self.loc()));
+        self.emitVoid(nvvm.mbarrier_try_wait_parity(self.ctx, self.sharedBarrierPtr(barrier).inner, phase.inner, self.constant(.i32, suspend_time).inner, self.loc()));
     }
 
     /// Wait for a pipeline phase with the two-step sequence of CuTe's
@@ -2339,8 +2336,10 @@ pub const Builder = struct {
     pub fn mbarrierWait(self: *Builder, barrier: Value, phase: Value) void {
         const ready = self.mbarrierWaitParity(barrier, phase);
         var pending = self.openIf(ready.eq(false));
-        self.mbarrierTryWaitParity(barrier, phase, 10_000_000);
-        pending.yieldThen(.{});
+        {
+            self.mbarrierTryWaitParity(barrier, phase, 10_000_000);
+            pending.close();
+        }
     }
 
     /// Make mbarrier initialization visible to the async proxy (SM90+).
@@ -2432,18 +2431,18 @@ pub const Builder = struct {
 
     /// `bar.sync id, threads`: named barrier over `threads` threads.
     pub fn barrierSync(self: *Builder, id: i32, threads: i32) void {
-        _ = self.callIntrinsic("llvm.nvvm.barrier.cta.sync.aligned.count", &.{ self.cst(.i32, id), self.cst(.i32, threads) }, null);
+        _ = self.callIntrinsic("llvm.nvvm.barrier.cta.sync.aligned.count", &.{ self.constant(.i32, id), self.constant(.i32, threads) }, null);
     }
 
     /// `bar.red.or.pred`: named barrier over `threads` threads that also returns whether
     /// `predicate` (i1) is true in any of them.
     pub fn barrierReduceOr(self: *Builder, id: i32, threads: i32, predicate: Value) Value {
-        return self.callIntrinsic("llvm.nvvm.barrier.cta.red.or.aligned.count", &.{ self.cst(.i32, id), self.cst(.i32, threads), predicate }, mlir.Type.int(self.ctx, .i1)).?;
+        return self.callIntrinsic("llvm.nvvm.barrier.cta.red.or.aligned.count", &.{ self.constant(.i32, id), self.constant(.i32, threads), predicate }, mlir.Type.int(self.ctx, .i1)).?;
     }
 
     /// `bar.warp.sync 0xffffffff`.
     pub fn syncWarp(self: *Builder) void {
-        self.emitVoid(nvvm.bar_warp_sync(self.ctx, self.cst(.i32, -1).inner, self.loc()));
+        self.emitVoid(nvvm.bar_warp_sync(self.ctx, self.constant(.i32, -1).inner, self.loc()));
     }
 
     /// Non-blocking test of mbarrier phase `parity` (i1).
@@ -2471,7 +2470,7 @@ pub const Builder = struct {
         const d = self.addressPtr(dst, .shared);
         const g = self.addressPtr(src, .global);
         if (valid) |v| {
-            _ = self.callIntrinsic("llvm.nvvm.cp.async.cg.shared.global.16.s", &.{ d, g, self.select(v, self.cst(.i32, 16), self.cst(.i32, 0)) }, null);
+            _ = self.callIntrinsic("llvm.nvvm.cp.async.cg.shared.global.16.s", &.{ d, g, self.select(v, self.constant(.i32, 16), self.constant(.i32, 0)) }, null);
         } else {
             _ = self.callIntrinsic("llvm.nvvm.cp.async.cg.shared.global.16", &.{ d, g }, null);
         }
@@ -2496,11 +2495,11 @@ pub const Builder = struct {
 
     /// Warp-wide TMEM allocation of `columns`; the base address is written to `holder` (i32 smem).
     pub fn tmemAllocAt(self: *Builder, holder: Value, columns: u32) void {
-        self.emitVoid(nvvm.tcgen05_alloc(self.ctx, self.addressPtr(holder, .shared).inner, self.cst(.i32, columns).inner, self.loc()));
+        self.emitVoid(nvvm.tcgen05_alloc(self.ctx, self.addressPtr(holder, .shared).inner, self.constant(.i32, columns).inner, self.loc()));
     }
 
     pub fn tmemDeallocAt(self: *Builder, taddr: Value, columns: u32) void {
-        self.emitVoid(nvvm.tcgen05_dealloc(self.ctx, self.addressPtr(taddr, .tensor).inner, self.cst(.i32, columns).inner, self.loc()));
+        self.emitVoid(nvvm.tcgen05_dealloc(self.ctx, self.addressPtr(taddr, .tensor).inner, self.constant(.i32, columns).inner, self.loc()));
     }
 
     pub const Tcgen05Fence = nvvm.Tcgen05FenceKind;
@@ -2553,7 +2552,7 @@ pub const Builder = struct {
 
     /// Warp-wide maximum of an f32 (`redux.sync.max.f32`, SM100).
     pub fn warpMaxF32(self: *Builder, value: Value) Value {
-        return self.callIntrinsic("llvm.nvvm.redux.sync.fmax", &.{ value, self.cst(.i32, -1) }, mlir.Type.float(self.ctx, .f32)).?;
+        return self.callIntrinsic("llvm.nvvm.redux.sync.fmax", &.{ value, self.constant(.i32, -1) }, mlir.Type.float(self.ctx, .f32)).?;
     }
 
     /// Fast approximate 2^x (`ex2.approx.ftz.f32`).
@@ -2637,7 +2636,11 @@ pub const Builder = struct {
 
     // ==================== scalars ====================
 
-    pub fn cst(self: *Builder, dt: DType, value: anytype) Value {
+    /// `value` as a constant of `dt`; a Value passes through. An integer is
+    /// signed or an unsigned bit pattern of `dt`'s width; anything else
+    /// panics.
+    pub fn constant(self: *Builder, dt: DType, value: anytype) Value {
+        if (@TypeOf(value) == Value) return value;
         const ctx = self.ctx;
         const T = @TypeOf(value);
         if (isFloatDtype(dt)) {
@@ -2646,21 +2649,29 @@ pub const Builder = struct {
                 .int => @floatFromInt(value),
                 .bool => @floatFromInt(@intFromBool(value)),
                 .float => @floatCast(value),
-                else => @compileError("Builder.cst: unsupported value type " ++ @typeName(T)),
+                else => @compileError("Builder.constant: unsupported value type " ++ @typeName(T)),
             };
             return self.emit(switch (dt) {
                 inline .f16, .bf16, .f32, .f64, .f4e2m1fn, .f8e4m3fn, .f8e5m2, .f8e8m0fnu => |ft| arith.constant_float(ctx, f, @field(mlir.FloatTypes, @tagName(ft)), self.loc()),
                 else => unreachable,
             });
         }
-        const i: i64 = switch (@typeInfo(T)) {
-            .comptime_int, .int => @intCast(value),
+        const i: i128 = switch (@typeInfo(T)) {
+            .comptime_int, .int => value,
             .bool => @intFromBool(value),
             .comptime_float, .float => @intFromFloat(value),
-            else => @compileError("Builder.cst: unsupported value type " ++ @typeName(T)),
+            else => @compileError("Builder.constant: unsupported value type " ++ @typeName(T)),
         };
-        if (!fitsInt(i, dt)) std.debug.panic("Builder.cst: {d} does not fit {s}", .{ i, @tagName(dt) });
-        return self.emit(arith.constant_int(ctx, i, dt.toMlir(ctx), self.loc()));
+        return self.emit(arith.constant_int(ctx, intBits(i, @intCast(dtypeBitwidth(dt)), @tagName(dt)), dt.toMlir(ctx), self.loc()));
+    }
+
+    /// `value` as the `i64` an integer constant of `bits` bits is built from.
+    /// It may be signed or an unsigned bit pattern, so it must lie in
+    /// [-2^(bits-1), 2^bits).
+    fn intBits(value: i128, bits: u7, dtype: []const u8) i64 {
+        if (value < -(@as(i128, 1) << (bits - 1)) or value >= @as(i128, 1) << bits)
+            std.debug.panic("Builder.constant: {d} does not fit {s}", .{ value, dtype });
+        return @truncate(value);
     }
 
     fn fitsInt(i: i64, dt: DType) bool {
@@ -2685,27 +2696,27 @@ pub const Builder = struct {
         const T = @TypeOf(value);
         if (T == Value) return value;
         return switch (@typeInfo(T)) {
-            .comptime_int, .int => if (literalFits(value, .i32)) self.cst(.i32, value) else self.cst(.i64, value),
-            .bool => self.cst(.i1, value),
-            .comptime_float => self.cst(.f32, value),
+            .comptime_int, .int => if (literalFits(value, .i32)) self.constant(.i32, value) else self.constant(.i64, value),
+            .bool => self.constant(.i1, value),
+            .comptime_float => self.constant(.f32, value),
             .float => |info| switch (info.bits) {
-                16 => self.cst(.f16, value),
-                32 => self.cst(.f32, value),
-                64 => self.cst(.f64, value),
+                16 => self.constant(.f16, value),
+                32 => self.constant(.f32, value),
+                64 => self.constant(.f64, value),
                 else => @compileError("Builder.lift: unsupported float bitwidth"),
             },
             else => @compileError("Builder.lift: unsupported type " ++ @typeName(T)),
         };
     }
 
-    pub fn liftAs(self: *Builder, value: anytype, dt: DType) Value {
-        if (@TypeOf(value) == Value) return value;
-        return self.cst(dt, value);
+    /// `value` as a constant of `like`'s element type; a Value passes through.
+    pub fn constantLike(self: *Builder, value: anytype, like: Value) Value {
+        return self.constant(like.dtype(), value);
     }
 
     fn liftLike(self: *Builder, value: anytype, ref: Value) Value {
         const dt = ref.dtype();
-        return if (literalFits(value, dt)) self.cst(dt, value) else self.lift(value);
+        return if (literalFits(value, dt)) self.constant(dt, value) else self.lift(value);
     }
 
     /// Lift a literal to the other operand's dtype when it fits, else to its
@@ -2734,56 +2745,41 @@ pub const Builder = struct {
 
     // ==================== scf ====================
 
+    pub fn scalarTy(self: *const Builder, dtype: DType) *const mlir.Type {
+        return dtype.toMlir(self.ctx);
+    }
+
     pub fn openIf(self: *Builder, cond: Value) IfOnlyScope {
-        const then_block = mlir.Block.init(&.{}, &.{});
-        self.pushBlock(then_block);
-        return .{ .kernel = self, .cond_inner = cond.inner, .then_block = then_block };
+        return common.openIf(self, Value, cond);
     }
 
-    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
-        const N = comptime tupleArity(@TypeOf(result_types), "openIfElse: result_types");
-        var types: [N]*const mlir.Type = undefined;
-        inline for (@typeInfo(@TypeOf(result_types)).@"struct".field_names, 0..) |f, i| {
-            types[i] = @field(result_types, f);
-        }
-        const then_block = mlir.Block.init(&.{}, &.{});
-        const else_block = mlir.Block.init(&.{}, &.{});
-        self.pushBlock(then_block);
-        return .{ .kernel = self, .cond_inner = cond.inner, .then_block = then_block, .else_block = else_block, .result_types = types };
+    pub fn openIfElse(self: *Builder, cond: Value, result_types: anytype) IfScope(common.arity(@TypeOf(result_types), "openIfElse: result_types")) {
+        return common.openIfElse(self, Value, cond, result_types);
     }
 
-    /// `for iv in range(lower, upper, step)` with loop-carried `inits`.
-    pub fn openFor(self: *Builder, lower: anytype, upper: anytype, step: anytype, inits: anytype) ForScope(tupleArity(@TypeOf(inits), "openFor: inits")) {
-        const N = comptime tupleArity(@TypeOf(inits), "openFor: inits");
-        const lb = self.lift(lower);
-        const ub = self.liftAs(upper, lb.dtype());
-        const st = self.liftAs(step, lb.dtype());
+    /// `for iv in range(lower, upper, step)` with loop-carried `inits`. Literal
+    /// bounds take the type of a Value bound, else `lower` is lifted (`i32`
+    /// when it fits).
+    pub fn openFor(
+        self: *Builder,
+        lower: anytype,
+        upper: anytype,
+        step: anytype,
+        inits: anytype,
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
+        return self.openForOpts(lower, upper, step, inits, .{});
+    }
 
-        var block_types: [N + 1]*const mlir.Type = undefined;
-        var block_locs: [N + 1]*const mlir.Location = undefined;
-        block_types[0] = lb.type_();
-        block_locs[0] = self.loc();
-        var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (@typeInfo(@TypeOf(inits)).@"struct".field_names, 0..) |f, i| {
-            const v = self.lift(@field(inits, f));
-            block_types[i + 1] = v.type_();
-            block_locs[i + 1] = self.loc();
-            inits_inner[i] = v.inner;
-        }
-        const body = mlir.Block.init(&block_types, &block_locs);
-        self.pushBlock(body);
-        var carried: [N]Value = undefined;
-        for (0..N) |i| carried[i] = .{ .inner = body.argument(i + 1), .kernel = self };
-        return .{
-            .kernel = self,
-            .body = body,
-            .lb_inner = lb.inner,
-            .ub_inner = ub.inner,
-            .step_inner = st.inner,
-            .inits_inner = inits_inner,
-            .iv = .{ .inner = body.argument(0), .kernel = self },
-            .carried = carried,
-        };
+    /// `openFor` with `scf.for` options.
+    pub fn openForOpts(
+        self: *Builder,
+        lower: anytype,
+        upper: anytype,
+        step: anytype,
+        inits: anytype,
+        opts: common.ForOpts,
+    ) ForScope(common.arity(@TypeOf(inits), "openFor: inits")) {
+        return common.openFor(self, Value, common.forBounds(self, Value, lower, upper, step, Builder.lift), inits, opts);
     }
 
     /// `scf.while` with explicit loop-carried values. The before region sees
@@ -2794,43 +2790,8 @@ pub const Builder = struct {
         self: *Builder,
         inits: anytype,
         after_types: anytype,
-    ) WhileScope(
-        tupleArity(@TypeOf(inits), "openWhile: inits"),
-        tupleArity(@TypeOf(after_types), "openWhile: after_types"),
-    ) {
-        const N = comptime tupleArity(@TypeOf(inits), "openWhile: inits");
-        const M = comptime tupleArity(@TypeOf(after_types), "openWhile: after_types");
-
-        var init_types: [N]*const mlir.Type = undefined;
-        var init_locs: [N]*const mlir.Location = undefined;
-        var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (@typeInfo(@TypeOf(inits)).@"struct".field_names, 0..) |f, i| {
-            const v = self.lift(@field(inits, f));
-            init_types[i] = v.type_();
-            init_locs[i] = self.loc();
-            inits_inner[i] = v.inner;
-        }
-
-        var result_types: [M]*const mlir.Type = undefined;
-        var result_locs: [M]*const mlir.Location = undefined;
-        inline for (@typeInfo(@TypeOf(after_types)).@"struct".field_names, 0..) |f, i| {
-            result_types[i] = @field(after_types, f);
-            result_locs[i] = self.loc();
-        }
-
-        const before = mlir.Block.init(&init_types, &init_locs);
-        const after = mlir.Block.init(&result_types, &result_locs);
-        self.pushBlock(before);
-        var before_carried: [N]Value = undefined;
-        for (0..N) |i| before_carried[i] = .{ .inner = before.argument(i), .kernel = self };
-        return .{
-            .kernel = self,
-            .before_block = before,
-            .after_block = after,
-            .inits_inner = inits_inner,
-            .after_types = result_types,
-            .before_carried = before_carried,
-        };
+    ) WhileScope(common.arity(@TypeOf(inits), "openWhile: inits"), common.arity(@TypeOf(after_types), "openWhile: after_types")) {
+        return common.openWhile(self, Value, inits, after_types);
     }
 
     // ==================== module ====================
@@ -2846,7 +2807,7 @@ pub const Builder = struct {
         }
         const func_op = self.func_op orelse return error.InvalidMlir;
         func_op.setAttributeByName("nvvm.reqntid", .denseArray(self.ctx, .i32, &block));
-        if (!self.module.operation().verify()) return error.InvalidMlir;
+        try common.verify(self.module, "dsl/cute");
 
         return self.renderModule();
     }
@@ -2928,12 +2889,16 @@ test "guard, shared memory, sync, layouts, for loop" {
     b.namedBarrier(2, 128);
     b.launchDependents();
     b.waitForDependency();
-    const j = b.cst(.i32, 127).sub(tid);
+    const j = b.constant(.i32, 127).sub(tid);
     var guard = b.openIf(i.lt(4096));
-    var acc = b.openFor(0, 4, 1, .{b.cst(.f32, 0.0)});
-    acc.yield(.{acc.carried[0].add(smem.get(.{j}).mul(acc.iv.to(.f32)))});
-    a.out.set(.{i}, acc.results[0]);
-    guard.yieldThen(.{});
+    {
+        var acc = b.openFor(0, 4, 1, .{b.constant(.f32, 0.0)});
+        {
+            acc.yield(.{acc.carried[0].add(smem.get(.{j}).mul(acc.iv.to(.f32)))});
+        }
+        a.out.set(.{i}, acc.results[0]);
+        guard.close();
+    }
 
     const kernel = try b.finish(.{ 128, 1, 1 });
     defer std.testing.allocator.free(kernel);
@@ -2998,9 +2963,13 @@ test "casts, select, if-else, integer widening" {
     try std.testing.expectEqual(DType.i32, bound.to(.i32).dtype());
 
     const picked = b.select(bound, shuffled, 2.0);
-    var scope = b.openIfElse(tid.lt(4), .{DType.f16.toMlir(ctx)});
-    scope.yieldThen(.{picked.to(.f16)});
-    scope.yieldElse(.{b.cst(.f16, 1)});
+    var scope = b.openIfElse(tid.lt(4), .{.f16});
+    {
+        scope.yieldThen(.{picked.to(.f16)});
+    }
+    {
+        scope.yieldElse(.{b.constant(.f16, 1)});
+    }
     a.p.set(.{tid}, scope.results[0]);
 
     const kernel = try b.finish(.{ 1, 1, 1 });
@@ -3042,10 +3011,10 @@ test "complete program emits a Zig-built CUDA host launch" {
         .input = .{ .ptr = DType.f32 },
         .output = .{ .ptr = DType.f32 },
     });
-    const one = b.cst(.i32, 1);
+    const one = b.constant(.i32, 1);
     const config = b.makeLaunchConfig(.{
         .grid = .{ one, one, one },
-        .block = .{ b.cst(.i32, 128), one, one },
+        .block = .{ b.constant(.i32, 128), one, one },
         .dynamic_smem = b.kernelSmemSize("program_add"),
         .stream = b.cudaStream(),
         .use_pdl = true,
