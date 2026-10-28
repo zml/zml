@@ -18,6 +18,7 @@ def repo():
             "//third_party/iree:match-hf-tokenizer.patch",
             "//third_party/iree:laguna-tokenizer-compat.patch",
             "//third_party/iree:fix-normalizer-lifetime-and-boundaries.patch",
+            "//third_party/iree:mistral-right-aligned-numbers.patch",
         ],
         patch_args = ["-p1"],
     )
