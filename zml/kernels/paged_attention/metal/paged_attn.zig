@@ -105,9 +105,6 @@ pub const FaVecPaged = struct {
         const BS = cfg.block_size;
         const PS = cfg.position_stride;
         const NWG = cfg.nwg;
-        const q = b.localPointer(a.q);
-        const k_cache = b.localPointer(a.k_cache);
-        const v_cache = b.localPointer(a.v_cache);
 
         const r = a.tgpig.at(2).to(.int);
         const iq2 = a.tgpig.at(1).to(.ushort);
@@ -142,8 +139,7 @@ pub const FaVecPaged = struct {
                     var lane0 = b.openIf(a.tiisg.eq(0));
                     {
                         dst1.store(rid.mul(2 * NWG).add(b.lift(2).mul(iwg)).add(0), 0.0);
-                        const lowest = b.lift(-flt_max).div(2);
-                        dst1.store(rid.mul(2 * NWG).add(b.lift(2).mul(iwg)).add(1), lowest);
+                        dst1.store(rid.mul(2 * NWG).add(b.lift(2).mul(iwg)).add(1), -flt_max / 2.0);
                         lane0.close();
                     }
                 }
@@ -153,41 +149,31 @@ pub const FaVecPaged = struct {
             padding.close();
         }
 
-        const seq_idx = b.local(.int, null);
+        const first_seq = b.local(.int, 0);
+        const last_seq = b.local(.int, a.args.field("num_seqs").sub(1));
+        var search = b.openLoop(.{});
         {
-            const lo = b.local(.int, 0);
-            const hi = b.local(.int, a.args.field("num_seqs").sub(1));
-            var search = b.openLoop(.{});
-            {
-                search.body(lo.lt(hi));
-            }
-            {
-                const mid = lo.add(hi).add(1).div(2);
-                var half = b.openIfElse(a.cu_seqlens_q.load(mid).le(r), .{});
-                {
-                    lo.assign(mid);
-                    half.elseBranch();
-                }
-                {
-                    hi.assign(mid.sub(1));
-                    half.close();
-                }
-                search.close();
-            }
-            seq_idx.assign(lo);
+            search.body(first_seq.lt(last_seq));
         }
+        {
+            const mid = first_seq.add(last_seq).add(1).div(2);
+            var half = b.openIfElse(a.cu_seqlens_q.load(mid).le(r), .{});
+            {
+                first_seq.assign(mid);
+                half.elseBranch();
+            }
+            {
+                last_seq.assign(mid.sub(1));
+                half.close();
+            }
+            search.close();
+        }
+        const seq_idx = first_seq.rvalue();
         const q_pos = r.sub(a.cu_seqlens_q.load(seq_idx));
         const query_len = a.cu_seqlens_q.load(seq_idx.add(1)).sub(a.cu_seqlens_q.load(seq_idx));
         const kv_total = a.seq_lens.load(seq_idx);
         const kv_len = kv_total.sub(query_len).add(q_pos).add(1);
-        var window = b.openIfElse(a.args.field("sliding_window").lt(0), .{.int});
-        {
-            window.yieldThen(.{0});
-        }
-        {
-            window.yieldElse(.{b.max(0, kv_len.sub(a.args.field("sliding_window")))});
-        }
-        const kv_lo = window.results[0];
+        const kv_lo = b.ternary(a.args.field("sliding_window").lt(0), 0, b.max(0, kv_len.sub(a.args.field("sliding_window"))));
 
         const pt = a.block_tables.add(seq_idx.to(.ulong).mul(a.args.field("max_blocks").to(.uint)));
 
@@ -204,49 +190,38 @@ pub const FaVecPaged = struct {
         const ss = shmem.add(a.sgitg.mul(SH)).add(NSG * PK).to(.float);
         const ss4 = shmem.add(a.sgitg.mul(SH)).add(NSG * PK).to(.float4);
         const sm = shmem.add(a.sgitg.mul(SH)).add(2 * C).add(NSG * PK);
-        const so4 = b.localPointer(shmem.add(b.lift(2).mul(a.sgitg).mul(PV)).add(NSG * PK).add(NSG * SH).to(.float4));
+        const so4 = shmem.add(b.lift(2).mul(a.sgitg).mul(PV)).add(NSG * PK).add(NSG * SH).to(.float4);
+        // This lane's output, until the simdgroups merge theirs.
+        const lane_so4 = so4.add(a.tiisg);
 
-        so4.assign(so4.add(a.tiisg));
-
-        {
-            const by = r.to(.ulong).mul(a.args.field("num_heads").to(.uint)).add(iq2).mul(DK).mul(2);
-            q.assign(q.add(by));
-            const ikv2 = iq2.div(a.args.field("num_heads").div(a.args.field("n_kv"))).to(.short);
-            const k_by = ikv2.to(.ulong).mul(DK).mul(2);
-            k_cache.assign(k_cache.add(k_by));
-            const v_by = ikv2.to(.ulong).mul(DK).mul(2);
-            v_cache.assign(v_cache.add(v_by));
-        }
+        const q = a.q.add(r.to(.ulong).mul(a.args.field("num_heads").to(.uint)).add(iq2).mul(DK).mul(2));
+        const ikv2 = iq2.div(a.args.field("num_heads").div(a.args.field("n_kv"))).to(.short);
+        const k_cache = a.k_cache.add(ikv2.to(.ulong).mul(DK).mul(2));
+        const v_cache = a.v_cache.add(ikv2.to(.ulong).mul(DK).mul(2));
 
         const q4 = q.to(.bfloat4);
+        var load_q = b.openFor(a.tiisg.to(.short), PK4, NW);
         {
-            var loop = b.openFor(a.tiisg.to(.short), PK4, NW);
+            const i = load_q.iv;
+            var value = b.openIfElse(i.lt(DK4), .{.half4});
             {
-                const i = loop.iv;
-                var value = b.openIfElse(i.lt(DK4), .{.half4});
-                {
-                    value.yieldThen(.{q4.load(i).to(.half4)});
-                }
-                {
-                    value.yieldElse(.{b.constant(.half4, 0)});
-                }
-                sq4.store(i, value.results[0]);
-                loop.close();
+                value.yieldThen(.{q4.load(i).to(.half4)});
             }
+            {
+                value.yieldElse(.{b.constant(.half4, 0)});
+            }
+            sq4.store(i, value.results[0]);
+            load_q.close();
         }
+        var zero_o = b.openFor(b.constant(.short, 0), @divExact(DV4, NL), 1);
         {
-            var loop = b.openFor(b.constant(.short, 0), @divExact(DV4, NL), 1);
-            {
-                so4.store(loop.iv.mul(NL), b.constant(.float4, 0));
-                loop.close();
-            }
+            lane_so4.store(zero_o.iv.mul(NL), b.constant(.float4, 0));
+            zero_o.close();
         }
+        var zero_s = b.openFor(a.tiisg.to(.short), SH / 4, NW);
         {
-            var loop = b.openFor(a.tiisg.to(.short), SH / 4, NW);
-            {
-                ss4.store(loop.iv, b.constant(.float4, 0));
-                loop.close();
-            }
+            ss4.store(zero_s.iv, b.constant(.float4, 0));
+            zero_s.close();
         }
 
         b.threadgroupBarrier(.mem_threadgroup);
@@ -255,198 +230,169 @@ pub const FaVecPaged = struct {
         // `ty == 0` guard is dropped at comptime.
         const all_lanes = @rem(@divExact(DV4, NL), NW) == 0;
         const full: metal.LoopOpts = .{ .unroll = .full };
+        const S = b.local(.float, 0.0);
+        const M = b.local(.float, -flt_max / 2.0);
+
+        const tx = a.tiisg.rem(NL).to(.short);
+        const ty = a.tiisg.div(NL).to(.short);
+
+        const ic0_lo = kv_lo.div(C);
+        const ic0 = b.local(.int, ic0_lo.add(iwg.mul(NSG)).add(a.sgitg));
+        var blocks = b.openLoop(.{});
         {
-            const S = b.local(.float, 0.0);
-            const M = b.local(.float, b.lift(-flt_max).div(2));
-
-            const tx = a.tiisg.rem(NL).to(.short);
-            const ty = a.tiisg.div(NL).to(.short);
-
-            const ic0_lo = kv_lo.div(C);
-            const ic0 = b.local(.int, ic0_lo.add(iwg.mul(NSG)).add(a.sgitg));
-            var blocks = b.openLoop(.{});
+            const ic = ic0.mul(C);
+            var past = b.openIf(ic.ge(kv_len));
             {
-                const ic = ic0.mul(C);
-                var past = b.openIf(ic.ge(kv_len));
-                {
-                    blocks.breakLoop();
-                    past.close();
-                }
-
-                var and_ = b.openAnd();
-                and_.term(ic.add(a.tiisg).lt(kv_len));
-                sm.store(a.tiisg, b.ternary(and_.close(ic.add(a.tiisg).ge(kv_lo)), b.constant(.half, 0), b.constant(.half, -max_half)));
-
-                {
-                    const pq4 = b.localPointer(sq4);
-                    pq4.assign(pq4.add(tx));
-
-                    const mqk = b.zeroedArray(.float, C / NE);
-
-                    var qk = b.openForOpts(b.constant(.short, 0), C / NE, 1, full);
-                    {
-                        const cc = qk.iv;
-                        const p = b.min(ic.add(cc), kv_len.sub(1));
-                        const pk4 = b.localPointer(pagedRow(b, k_cache, pt, p, BS, PS).to(.bfloat4));
-                        pk4.assign(pk4.add(ty.mul(PS).div(4).add(tx)));
-                        var dots = b.openForOpts(b.constant(.short, 0), @divExact(DK4, NL), 1, full);
-                        {
-                            const ii = dots.iv;
-                            const dot = b.dot(pk4.load(ii.mul(NL)).to(.float4), pq4.load(ii.mul(NL)).to(.float4));
-                            mqk.store(cc, mqk.load(cc).add(dot));
-                            dots.close();
-                        }
-                        mqk.store(cc, b.simdSum(mqk.load(cc)));
-                        qk.close();
-                    }
-
-                    const score = b.fma(mqk.load(tx), a.args.field("scale"), sm.load(b.lift(NE).mul(tx).add(ty)).to(.float));
-                    ss.store(b.lift(NE).mul(tx).add(ty), score);
-                }
-
-                b.simdgroupBarrier(.mem_threadgroup);
-
-                {
-                    const m = M.rvalue();
-                    const s = ss.load(a.tiisg);
-
-                    M.assign(b.simdMax(b.max(M.rvalue(), s)));
-
-                    const ms = b.exp(m.sub(M));
-                    const vs = b.exp(s.sub(M));
-
-                    S.assign(S.mul(ms).add(b.simdSum(vs)));
-
-                    ss.store(a.tiisg, vs);
-
-                    var lanes = if (all_lanes) null else b.openIf(ty.eq(0));
-                    var loop = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
-                    {
-                        const at = loop.iv.mul(NL);
-                        so4.store(at, so4.load(at).mul(ms));
-                        loop.close();
-                    }
-                    if (lanes) |*l| l.close();
-                }
-
-                b.simdgroupBarrier(.mem_threadgroup);
-
-                {
-                    const lo = b.array(.float4, @intCast(@divExact(DV4, NL)));
-                    {
-                        var loop = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
-                        {
-                            lo.store(loop.iv, b.constant(.float4, 0));
-                            loop.close();
-                        }
-                    }
-
-                    const sst = ss.add(ty);
-
-                    var pv = b.openForOpts(b.constant(.short, 0), C / NE, 1, full);
-                    {
-                        const cc = pv.iv;
-                        const p = b.min(ic.add(cc), kv_len.sub(1));
-                        const pv4 = b.localPointer(pagedRow(b, v_cache, pt, p, BS, PS).to(.bfloat4));
-                        pv4.assign(pv4.add(ty.mul(PS).div(4).add(tx)));
-                        var loop = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
-                        {
-                            const ii = loop.iv;
-                            const weighted = pv4.load(ii.mul(NL)).to(.float4).mul(b.vec(.float4, .{sst.load(cc.mul(NE))}));
-                            lo.store(ii, lo.load(ii).add(weighted));
-                            loop.close();
-                        }
-                        pv.close();
-                    }
-
-                    var lanes = if (all_lanes) null else b.openIf(ty.eq(0));
-                    var loop = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
-                    {
-                        const ii = loop.iv;
-                        const partial = lo.load(ii);
-                        so4.store(ii.mul(NL), so4.load(ii.mul(NL)).add(partial));
-                        loop.close();
-                    }
-                    if (lanes) |*l| l.close();
-                }
-                blocks.next();
-                ic0.assign(ic0.add(NWG * NSG));
-                blocks.close();
+                blocks.breakLoop();
+                past.close();
             }
 
-            var lane0 = b.openIf(a.tiisg.eq(0));
+            const in_kv = ic.add(a.tiisg).lt(kv_len).bitAnd(ic.add(a.tiisg).ge(kv_lo));
+            sm.store(a.tiisg, b.ternary(in_kv, b.constant(.half, 0), b.constant(.half, -max_half)));
+
+            const pq4 = sq4.add(tx);
+            const mqk = b.zeroedArray(.float, C / NE);
+            var qk = b.openForOpts(b.constant(.short, 0), C / NE, 1, full);
             {
-                ss.store(0, S);
-                ss.store(1, M);
-                lane0.close();
+                const cc = qk.iv;
+                const p = b.min(ic.add(cc), kv_len.sub(1));
+                const pk4 = pagedRow(b, k_cache, pt, p, BS, PS).to(.bfloat4).add(ty.mul(PS).div(4).add(tx));
+                var dots = b.openForOpts(b.constant(.short, 0), @divExact(DK4, NL), 1, full);
+                {
+                    const ii = dots.iv;
+                    const dot = b.dot(pk4.load(ii.mul(NL)).to(.float4), pq4.load(ii.mul(NL)).to(.float4));
+                    mqk.store(cc, mqk.load(cc).add(dot));
+                    dots.close();
+                }
+                mqk.store(cc, b.simdSum(mqk.load(cc)));
+                qk.close();
             }
+
+            const score = b.fma(mqk.load(tx), a.args.field("scale"), sm.load(b.lift(NE).mul(tx).add(ty)).to(.float));
+            ss.store(b.lift(NE).mul(tx).add(ty), score);
+
+            b.simdgroupBarrier(.mem_threadgroup);
+
+            const m = M.rvalue();
+            const s = ss.load(a.tiisg);
+
+            M.assign(b.simdMax(b.max(M.rvalue(), s)));
+
+            const ms = b.exp(m.sub(M));
+            const vs = b.exp(s.sub(M));
+
+            S.assign(S.mul(ms).add(b.simdSum(vs)));
+
+            ss.store(a.tiisg, vs);
+
+            var rescale_lanes = if (all_lanes) null else b.openIf(ty.eq(0));
+            var rescale = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
+            {
+                const at = rescale.iv.mul(NL);
+                lane_so4.store(at, lane_so4.load(at).mul(ms));
+                rescale.close();
+            }
+            if (rescale_lanes) |*l| l.close();
+
+            b.simdgroupBarrier(.mem_threadgroup);
+
+            const lo = b.array(.float4, @intCast(@divExact(DV4, NL)));
+            var zero_lo = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
+            {
+                lo.store(zero_lo.iv, b.constant(.float4, 0));
+                zero_lo.close();
+            }
+
+            const sst = ss.add(ty);
+
+            var pv = b.openForOpts(b.constant(.short, 0), C / NE, 1, full);
+            {
+                const cc = pv.iv;
+                const p = b.min(ic.add(cc), kv_len.sub(1));
+                const pv4 = pagedRow(b, v_cache, pt, p, BS, PS).to(.bfloat4).add(ty.mul(PS).div(4).add(tx));
+                var dims = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
+                {
+                    const ii = dims.iv;
+                    const weighted = pv4.load(ii.mul(NL)).to(.float4).mul(b.vec(.float4, .{sst.load(cc.mul(NE))}));
+                    lo.store(ii, lo.load(ii).add(weighted));
+                    dims.close();
+                }
+                pv.close();
+            }
+
+            var add_lanes = if (all_lanes) null else b.openIf(ty.eq(0));
+            var add_o = b.openForOpts(b.constant(.short, 0), @divExact(DV4, NL), 1, full);
+            {
+                const ii = add_o.iv;
+                const partial = lo.load(ii);
+                lane_so4.store(ii.mul(NL), lane_so4.load(ii.mul(NL)).add(partial));
+                add_o.close();
+            }
+            if (add_lanes) |*l| l.close();
+            blocks.next();
+            ic0.assign(ic0.add(NWG * NSG));
+            blocks.close();
         }
 
-        so4.assign(so4.sub(a.tiisg));
+        var stats = b.openIf(a.tiisg.eq(0));
+        {
+            ss.store(0, S);
+            ss.store(1, M);
+            stats.close();
+        }
 
         b.threadgroupBarrier(.mem_threadgroup);
 
+        const rr = b.local(.short, @divFloor(NSG, 2));
+        var halving = b.openLoop(.{});
         {
-            const rr = b.local(.short, @divFloor(NSG, 2));
-            var halving = b.openLoop(.{});
+            halving.body(rr.gt(0));
+        }
+        {
+            var group = b.openIf(a.sgitg.lt(rr));
             {
-                halving.body(rr.gt(0));
-            }
-            {
+                const S0 = ss.load(0);
+                const S1 = ss.load(rr.mul(@divExact(SH, 2)).add(0));
+
+                const M0 = ss.load(1);
+                const M1 = ss.load(rr.mul(@divExact(SH, 2)).add(1));
+
+                const M_ = b.max(M0, M1);
+
+                const ms0 = b.exp(M0.sub(M_));
+                const ms1 = b.exp(M1.sub(M_));
+
+                const S_ = S0.mul(ms0).add(S1.mul(ms1));
+
+                var lane0 = b.openIf(a.tiisg.eq(0));
                 {
-                    var group = b.openIf(a.sgitg.lt(rr));
-                    {
-                        const S0 = ss.load(0);
-                        const S1 = ss.load(rr.mul(@divExact(SH, 2)).add(0));
-
-                        const M0 = ss.load(1);
-                        const M1 = ss.load(rr.mul(@divExact(SH, 2)).add(1));
-
-                        const M_ = b.max(M0, M1);
-
-                        const ms0 = b.exp(M0.sub(M_));
-                        const ms1 = b.exp(M1.sub(M_));
-
-                        const S_ = S0.mul(ms0).add(S1.mul(ms1));
-
-                        var lane0 = b.openIf(a.tiisg.eq(0));
-                        {
-                            ss.store(0, S_);
-                            ss.store(1, M_);
-                            lane0.close();
-                        }
-
-                        var loop = b.openFor(a.tiisg.to(.short), DV4, NW);
-                        {
-                            const i = loop.iv;
-                            so4.store(i, so4.load(i).mul(ms0).add(so4.load(i.add(rr.mul(PV4))).mul(ms1)));
-                            loop.close();
-                        }
-                        group.close();
-                    }
+                    ss.store(0, S_);
+                    ss.store(1, M_);
+                    lane0.close();
                 }
-                b.threadgroupBarrier(.mem_threadgroup);
-                rr.assign(rr.shr(1));
-                halving.close();
+
+                var merge = b.openFor(a.tiisg.to(.short), DV4, NW);
+                {
+                    const i = merge.iv;
+                    so4.store(i, so4.load(i).mul(ms0).add(so4.load(i.add(rr.mul(PV4))).mul(ms1)));
+                    merge.close();
+                }
+                group.close();
             }
+            b.threadgroupBarrier(.mem_threadgroup);
+            rr.assign(rr.shr(1));
+            halving.close();
         }
 
         var first = b.openIf(a.sgitg.eq(0));
         {
             const rid = r.to(.long).mul(a.args.field("num_heads").to(.uint)).add(iq2);
             if (NWG == 1) {
-                var norm = b.openIfElse(ss.load(0).eq(0.0), .{.float});
-                {
-                    norm.yieldThen(.{0.0});
-                }
-                {
-                    norm.yieldElse(.{b.lift(1.0).div(ss.load(0))});
-                }
-                const S = norm.results[0];
+                const inv_sum = b.ternary(ss.load(0).eq(0.0), 0.0, b.lift(1.0).div(ss.load(0)));
                 const dst4 = a.dst.to(.bfloat4);
                 var loop = b.openFor(a.tiisg.to(.short), DV4, NW);
                 {
-                    const out = so4.load(loop.iv).mul(S).to(.bfloat4);
+                    const out = so4.load(loop.iv).mul(inv_sum).to(.bfloat4);
                     dst4.store(rid.mul(DV4).add(loop.iv), out);
                     loop.close();
                 }
@@ -523,9 +469,9 @@ pub const FaVecPagedReduce = struct {
             max.yieldThen(.{ss.load(rid.mul(2 * nwg).add(b.lift(2).mul(iwg)).add(1))});
         }
         {
-            max.yieldElse(.{b.lift(-flt_max).div(2)});
+            max.yieldElse(.{-flt_max / 2.0});
         }
-        const M = b.local(.float, max.results[0]);
+        const M = max.results[0];
         var sum = b.openIfElse(iwg.lt(nwg), .{.float});
         {
             sum.yieldThen(.{ss.load(rid.mul(2 * nwg).add(b.lift(2).mul(iwg)).add(0))});
@@ -533,19 +479,11 @@ pub const FaVecPagedReduce = struct {
         {
             sum.yieldElse(.{0.0});
         }
-        const S = b.local(.float, sum.results[0]);
 
-        const m = b.simdMax(M.rvalue());
+        const m = b.simdMax(M);
         const ms = b.exp(M.sub(m));
-        S.assign(b.simdSum(S.mul(ms)));
-        var norm = b.openIfElse(S.eq(0.0), .{.float});
-        {
-            norm.yieldThen(.{0.0});
-        }
-        {
-            norm.yieldElse(.{b.lift(1.0).div(S)});
-        }
-        S.assign(norm.results[0]);
+        const S = b.simdSum(sum.results[0].mul(ms));
+        const inv_sum = b.ternary(S.eq(0.0), 0.0, b.lift(1.0).div(S));
 
         const DV4 = @divTrunc(DV, 4);
         const htmp4 = a.htmp.to(.float4).add(rid.mul(DV4).mul(nwg));
@@ -564,7 +502,7 @@ pub const FaVecPagedReduce = struct {
             const v = b.simdSum(part);
             var lane0 = b.openIf(iwg.eq(0));
             {
-                dst4.store(i, v.mul(S).to(.bfloat4));
+                dst4.store(i, v.mul(inv_sum).to(.bfloat4));
                 lane0.close();
             }
             loop.close();
@@ -601,14 +539,9 @@ pub const ZeroPaddingRows = struct {
         const row = a.tgp.x().to(.int);
         b.returnIf(row.lt(a.cu_seqlens_q.load(a.num_seqs)));
         const dst = a.out.add(row.to(.ulong).mul(a.row_stride.to(.ulong)));
-        const i = b.local(.int, a.tpt.x().to(.int));
-        var loop = b.openLoop(.{});
+        var loop = b.openFor(a.tpt.x().to(.int), a.row_stride, a.ntg.x().to(.int));
         {
-            loop.body(i.lt(a.row_stride));
-        }
-        {
-            dst.store(i, b.constant(cfg.dtype, 0));
-            i.assign(i.add(a.ntg.x().to(.int)));
+            dst.store(loop.iv, b.constant(cfg.dtype, 0));
             loop.close();
         }
     }
@@ -738,41 +671,28 @@ pub const PagedAttentionTiled = struct {
         const kv_head_idx = head_idx.div(num_queries_per_kv);
         const kv_token_stride = a.num_kv_heads.mul(a.kv_head_stride);
 
-        const seq_idx = b.local(.int, null);
+        const first_seq = b.local(.int, 0);
+        const last_seq = b.local(.int, a.num_seqs);
+        var search = b.openLoop(.{});
         {
-            const lo = b.local(.int, 0);
-            const hi = b.local(.int, a.num_seqs);
-            var search = b.openLoop(.{});
+            search.body(first_seq.lt(last_seq));
+        }
+        {
+            const mid = first_seq.add(last_seq).add(1).div(2);
+            var half = b.openIfElse(a.cu_seqlens_q.load(mid).div(BQ).add(mid).le(q_block_global_idx), .{});
             {
-                search.body(lo.lt(hi));
+                first_seq.assign(mid);
+                half.elseBranch();
             }
             {
-                const mid = b.local(.int, lo.add(hi).add(1).div(2));
-                var half = b.openIfElse(a.cu_seqlens_q.load(mid).div(BQ).add(mid).le(q_block_global_idx), .{});
-                {
-                    lo.assign(mid);
-                    half.elseBranch();
-                }
-                {
-                    hi.assign(mid.sub(1));
-                    half.close();
-                }
-                search.close();
+                last_seq.assign(mid.sub(1));
+                half.close();
             }
-            seq_idx.assign(lo);
+            search.close();
         }
         // The grid is an upper bound on the query blocks: the extra ones land past
         // the last sequence and clamp to it.
-        {
-            var clamp = b.openIfElse(seq_idx.lt(a.num_seqs.sub(1)), .{.int});
-            {
-                clamp.yieldThen(.{seq_idx});
-            }
-            {
-                clamp.yieldElse(.{a.num_seqs.sub(1)});
-            }
-            seq_idx.assign(clamp.results[0]);
-        }
+        const seq_idx = b.min(first_seq.rvalue(), a.num_seqs.sub(1));
 
         const q_seq_start = a.cu_seqlens_q.load(seq_idx);
         const cur_batch_query_len = a.cu_seqlens_q.load(seq_idx.add(1)).sub(q_seq_start);
@@ -799,37 +719,32 @@ pub const PagedAttentionTiled = struct {
         const scale_log2 = a.scale.mul(log2e);
 
         const q_base = a.q.add(q_seq_start.add(q_pos_start).mul(a.q_stride)).add(head_idx.mul(HEAD_SIZE));
+        var load_q = b.openFor(thread_idx, BQ * HEAD_SIZE, NUM_THREADS);
         {
-            var loop = b.openFor(thread_idx, BQ * HEAD_SIZE, NUM_THREADS);
+            const i = load_q.iv;
+            const r = i.div(HEAD_SIZE);
+            const d = i.rem(HEAD_SIZE);
+            var value = b.openIfElse(r.lt(valid_q), .{T});
             {
-                const i = loop.iv;
-                const r = i.div(HEAD_SIZE);
-                const d = i.rem(HEAD_SIZE);
-                var value = b.openIfElse(r.lt(valid_q), .{T});
-                {
-                    value.yieldThen(.{q_base.load(r.mul(a.q_stride).add(d))});
-                }
-                {
-                    value.yieldElse(.{b.constant(T, 0)});
-                }
-                const q_elem = value.results[0];
-                Q_smem.store(r.mul(LD).add(d), q_elem);
-                loop.close();
+                value.yieldThen(.{q_base.load(r.mul(a.q_stride).add(d))});
             }
+            {
+                value.yieldElse(.{b.constant(T, 0)});
+            }
+            Q_smem.store(r.mul(LD).add(d), value.results[0]);
+            load_q.close();
         }
 
         b.threadgroupBarrier(.mem_threadgroup);
 
         const T2: Type = .vec(T.scalar, 2);
         const q_reg = b.array(T2, @intCast(TD));
+        var load_q_reg = b.openForOpts(0, TD, 1, unroll);
         {
-            var loop = b.openForOpts(0, TD, 1, unroll);
-            {
-                const d = loop.iv;
-                const tmp = b.simdgroupLoad(Q_smem.add(a.sg_idx.mul(8).mul(LD)).add(d.mul(8)), LD, .{});
-                q_reg.store(d, tmp.threadElements());
-                loop.close();
-            }
+            const d = load_q_reg.iv;
+            const tmp = b.simdgroupLoad(Q_smem.add(a.sg_idx.mul(8).mul(LD)).add(d.mul(8)), LD, .{});
+            q_reg.store(d, tmp.threadElements());
+            load_q_reg.close();
         }
 
         const fc = fragCoord(b, a.lane.to(.ushort));
@@ -840,12 +755,10 @@ pub const PagedAttentionTiled = struct {
         const sum_score = b.local(.float, 0.0);
 
         const o_reg = b.array(.float2, @intCast(TD));
+        var zero_o = b.openForOpts(0, TD, 1, unroll);
         {
-            var loop = b.openForOpts(0, TD, 1, unroll);
-            {
-                o_reg.store(loop.iv, b.constant(.float2, 0));
-                loop.close();
-            }
+            o_reg.store(zero_o.iv, b.constant(.float2, 0));
+            zero_o.close();
         }
 
         const block_table = a.block_tables.add(seq_idx.mul(a.max_num_blocks_per_seq));
@@ -906,126 +819,44 @@ pub const PagedAttentionTiled = struct {
             b.threadgroupBarrier(.mem_threadgroup);
 
             const s_reg = b.array(.float2, @intCast(TK));
+            var zero_s = b.openForOpts(0, TK, 1, unroll);
             {
-                var loop = b.openForOpts(0, TK, 1, unroll);
-                {
-                    s_reg.store(loop.iv, b.constant(.float2, 0));
-                    loop.close();
-                }
+                s_reg.store(zero_s.iv, b.constant(.float2, 0));
+                zero_s.close();
             }
 
+            var qk_dims = b.openForOpts(0, TD, 1, unroll);
             {
-                var dims = b.openForOpts(0, TD, 1, unroll);
+                const d = qk_dims.iv;
+                const q_frag = b.matrix(T.scalar, q_reg.load(d));
+                var qk_keys = b.openForOpts(0, TK, 1, unroll);
                 {
-                    const d = dims.iv;
-                    const q_frag = b.matrix(T.scalar, q_reg.load(d));
-                    var keys = b.openForOpts(0, TK, 1, unroll);
-                    {
-                        const k = keys.iv;
-                        const k_frag = b.simdgroupLoad(K_smem.add(k.mul(8).mul(LD)).add(d.mul(8)), LD, .{ .transpose = true });
-                        const s_frag = b.matrix(.float, s_reg.load(k));
-                        s_reg.store(k, b.simdgroupMultiplyAccumulate(q_frag, k_frag, s_frag).threadElements());
-                        keys.close();
-                    }
-                    dims.close();
+                    const k = qk_keys.iv;
+                    const k_frag = b.simdgroupLoad(K_smem.add(k.mul(8).mul(LD)).add(d.mul(8)), LD, .{ .transpose = true });
+                    const s_frag = b.matrix(.float, s_reg.load(k));
+                    s_reg.store(k, b.simdgroupMultiplyAccumulate(q_frag, k_frag, s_frag).threadElements());
+                    qk_keys.close();
                 }
+                qk_dims.close();
             }
 
             const q_abs_pos = context_len.add(q_pos_start).add(a.sg_idx.mul(8)).add(fm).to(.int);
-            const row_masked = b.local(.bool, a.sg_idx.mul(8).add(fm).ge(valid_q));
+            const row_masked = a.sg_idx.mul(8).add(fm).ge(valid_q);
             const min_q_abs_pos = context_len.add(q_pos_start);
-            var in_tile = b.openAnd();
-            if (cfg.causal) in_tile.term(tile_start.add(TILE_KV).sub(1).lt(min_q_abs_pos));
-            in_tile.term(tile_start.add(TILE_KV).le(seq_len));
-            in_tile.term(a.softcapping.le(0.0));
-            const tile_no_mask = b.local(.bool, in_tile.close(a.sliding_window.lt(0)));
+            var tile_no_mask = tile_start.add(TILE_KV).le(seq_len).bitAnd(a.softcapping.le(0.0)).bitAnd(a.sliding_window.lt(0));
+            if (cfg.causal) tile_no_mask = tile_no_mask.bitAnd(tile_start.add(TILE_KV).sub(1).lt(min_q_abs_pos));
 
+            var masking = b.openIfElse(tile_no_mask.bitAnd(row_masked.eq(false)), .{});
             {
-                var c = b.condition();
-                c.and_(tile_no_mask);
-                var masking = c.openIfElseNot(row_masked, .{});
+                var scale = b.openForOpts(0, TK, 1, unroll);
                 {
-                    var loop = b.openForOpts(0, TK, 1, unroll);
-                    {
-                        const k = loop.iv;
-                        setLane(s_reg, k, 0, s_reg.load(k).at(0).mul(scale_log2));
-                        setLane(s_reg, k, 1, s_reg.load(k).at(1).mul(scale_log2));
-                        loop.close();
-                    }
-                    masking.elseBranch();
+                    const k = scale.iv;
+                    setLane(s_reg, k, 0, s_reg.load(k).at(0).mul(scale_log2));
+                    setLane(s_reg, k, 1, s_reg.load(k).at(1).mul(scale_log2));
+                    scale.close();
                 }
-                {
-                    var keys = b.openForOpts(0, TK, 1, unroll);
-                    {
-                        const k = keys.iv;
-                        var pair = b.openForOpts(0, 2, 1, unroll);
-                        {
-                            const jj = pair.iv;
-                            const s = b.local(.float, s_reg.load(k).at(jj).mul(scale_log2));
-                            var capped = b.openIf(a.softcapping.gt(0.0));
-                            {
-                                const s_orig = s.div(log2e);
-                                s.assign(a.softcapping.mul(b.precise().tanh(s_orig.div(a.softcapping))).mul(log2e));
-                                capped.close();
-                            }
-                            const kv_pos = tile_start.add(k.mul(8)).add(fn_).add(jj);
-                            var any = b.openOr();
-                            any.term(row_masked);
-                            if (cfg.causal) any.term(kv_pos.gt(q_abs_pos));
-                            const masked = b.local(.bool, any.close(kv_pos.ge(seq_len)));
-                            var window = b.openIf(a.sliding_window.ge(0));
-                            {
-                                var before = b.openOr();
-                                before.term(masked);
-                                masked.assign(before.close(kv_pos.lt(q_abs_pos.add(1).sub(a.sliding_window))));
-                                window.close();
-                            }
-                            setLane(s_reg, k, jj, b.ternary(masked, -std.math.inf(f32), s));
-                            pair.close();
-                        }
-                        keys.close();
-                    }
-                    masking.close();
-                }
+                masking.elseBranch();
             }
-
-            const local_max = b.local(.float, -std.math.inf(f32));
-            {
-                var loop = b.openForOpts(0, TK, 1, unroll);
-                {
-                    const k = loop.iv;
-                    local_max.assign(b.max(local_max.rvalue(), b.max(s_reg.load(k).at(0), s_reg.load(k).at(1))));
-                    loop.close();
-                }
-            }
-            const row_max = fragRowReduce(b, .max, local_max);
-
-            const new_max = b.local(.float, b.max(max_score.rvalue(), row_max));
-            const factor = b.local(.float, null);
-            var grew = b.openIfElse(new_max.gt(max_score), .{});
-            {
-                var first = b.openIfElse(max_score.eq(-std.math.inf(f32)), .{.float});
-                {
-                    first.yieldThen(.{0.0});
-                }
-                {
-                    first.yieldElse(.{b.fast().exp2(max_score.sub(new_max))});
-                }
-                factor.assign(first.results[0]);
-                grew.elseBranch();
-            }
-            {
-                factor.assign(1.0);
-                var empty = b.openIf(max_score.eq(-std.math.inf(f32)));
-                {
-                    new_max.assign(0.0);
-                    empty.close();
-                }
-                grew.close();
-            }
-            max_score.assign(new_max);
-
-            const local_sum = b.local(.float, 0.0);
             {
                 var keys = b.openForOpts(0, TK, 1, unroll);
                 {
@@ -1033,48 +864,81 @@ pub const PagedAttentionTiled = struct {
                     var pair = b.openForOpts(0, 2, 1, unroll);
                     {
                         const jj = pair.iv;
-                        var exp = b.openIfElse(s_reg.load(k).at(jj).eq(-std.math.inf(f32)), .{.float});
+                        const s = b.local(.float, s_reg.load(k).at(jj).mul(scale_log2));
+                        var capped = b.openIf(a.softcapping.gt(0.0));
                         {
-                            exp.yieldThen(.{0.0});
+                            const s_orig = s.div(log2e);
+                            s.assign(a.softcapping.mul(b.precise().tanh(s_orig.div(a.softcapping))).mul(log2e));
+                            capped.close();
                         }
-                        {
-                            exp.yieldElse(.{b.fast().exp2(s_reg.load(k).at(jj).sub(new_max))});
-                        }
-                        const p = b.local(.float, exp.results[0]);
-                        setLane(s_reg, k, jj, p.rvalue());
-                        local_sum.assign(local_sum.add(p));
+                        const kv_pos = tile_start.add(k.mul(8)).add(fn_).add(jj);
+                        var masked = row_masked.bitOr(kv_pos.ge(seq_len));
+                        if (cfg.causal) masked = masked.bitOr(kv_pos.gt(q_abs_pos));
+                        const before_window = a.sliding_window.ge(0).bitAnd(kv_pos.lt(q_abs_pos.add(1).sub(a.sliding_window)));
+                        masked = masked.bitOr(before_window);
+                        setLane(s_reg, k, jj, b.ternary(masked, -std.math.inf(f32), s));
                         pair.close();
                     }
                     keys.close();
                 }
+                masking.close();
+            }
+
+            const local_max = b.local(.float, -std.math.inf(f32));
+            var max_keys = b.openForOpts(0, TK, 1, unroll);
+            {
+                const k = max_keys.iv;
+                local_max.assign(b.max(local_max.rvalue(), b.max(s_reg.load(k).at(0), s_reg.load(k).at(1))));
+                max_keys.close();
+            }
+            const row_max = fragRowReduce(b, .max, local_max);
+
+            const prev_max = max_score.rvalue();
+            const grown_max = b.max(prev_max, row_max);
+            const grew = grown_max.gt(prev_max);
+            const was_empty = prev_max.eq(-std.math.inf(f32));
+            const factor = b.ternary(grew, b.ternary(was_empty, 0.0, b.fast().exp2(prev_max.sub(grown_max))), 1.0);
+            const new_max = b.ternary(grew.eq(false).bitAnd(was_empty), 0.0, grown_max);
+            max_score.assign(new_max);
+
+            const local_sum = b.local(.float, 0.0);
+            var p_keys = b.openForOpts(0, TK, 1, unroll);
+            {
+                const k = p_keys.iv;
+                var pair = b.openForOpts(0, 2, 1, unroll);
+                {
+                    const jj = pair.iv;
+                    const s = s_reg.load(k).at(jj);
+                    const p = b.ternary(s.eq(-std.math.inf(f32)), 0.0, b.fast().exp2(s.sub(new_max)));
+                    setLane(s_reg, k, jj, p);
+                    local_sum.assign(local_sum.add(p));
+                    pair.close();
+                }
+                p_keys.close();
             }
             const row_sum = fragRowReduce(b, .sum, local_sum);
 
             sum_score.assign(sum_score.mul(factor).add(row_sum));
 
+            var rescale_o = b.openForOpts(0, TD, 1, unroll);
             {
-                var loop = b.openForOpts(0, TD, 1, unroll);
-                {
-                    o_reg.store(loop.iv, o_reg.load(loop.iv).mul(factor));
-                    loop.close();
-                }
+                o_reg.store(rescale_o.iv, o_reg.load(rescale_o.iv).mul(factor));
+                rescale_o.close();
             }
 
+            var pv_keys = b.openForOpts(0, TK, 1, unroll);
             {
-                var keys = b.openForOpts(0, TK, 1, unroll);
+                const k = pv_keys.iv;
+                const p_frag = b.matrix(.float, s_reg.load(k));
+                var pv_dims = b.openForOpts(0, TD, 1, unroll);
                 {
-                    const k = keys.iv;
-                    const p_frag = b.matrix(.float, s_reg.load(k));
-                    var dims = b.openForOpts(0, TD, 1, unroll);
-                    {
-                        const d = dims.iv;
-                        const v_frag = b.simdgroupLoad(V_smem.add(k.mul(8).mul(LD)).add(d.mul(8)), LD, .{});
-                        const o_frag = b.matrix(.float, o_reg.load(d));
-                        o_reg.store(d, b.simdgroupMultiplyAccumulate(p_frag, v_frag, o_frag).threadElements());
-                        dims.close();
-                    }
-                    keys.close();
+                    const d = pv_dims.iv;
+                    const v_frag = b.simdgroupLoad(V_smem.add(k.mul(8).mul(LD)).add(d.mul(8)), LD, .{});
+                    const o_frag = b.matrix(.float, o_reg.load(d));
+                    o_reg.store(d, b.simdgroupMultiplyAccumulate(p_frag, v_frag, o_frag).threadElements());
+                    pv_dims.close();
                 }
+                pv_keys.close();
             }
 
             b.threadgroupBarrier(.mem_threadgroup);
@@ -1082,37 +946,33 @@ pub const PagedAttentionTiled = struct {
         }
 
         const inv_sum = b.lift(1.0).div(sum_score.add(@as(f32, 1e-6)));
+        var normalize = b.openForOpts(0, TD, 1, unroll);
         {
-            var loop = b.openForOpts(0, TD, 1, unroll);
-            {
-                o_reg.store(loop.iv, o_reg.load(loop.iv).mul(inv_sum));
-                loop.close();
-            }
+            o_reg.store(normalize.iv, o_reg.load(normalize.iv).mul(inv_sum));
+            normalize.close();
         }
 
         const O_smem = Q_smem.to(.float);
+        var store_o = b.openForOpts(0, TD, 1, unroll);
         {
-            var loop = b.openForOpts(0, TD, 1, unroll);
-            {
-                const d = loop.iv;
-                const o_frag = b.matrix(.float, o_reg.load(d));
-                b.simdgroupStore(o_frag, O_smem.add(a.sg_idx.mul(8).mul(LD)).add(d.mul(8)), LD, .{});
-                loop.close();
-            }
+            const d = store_o.iv;
+            const o_frag = b.matrix(.float, o_reg.load(d));
+            b.simdgroupStore(o_frag, O_smem.add(a.sg_idx.mul(8).mul(LD)).add(d.mul(8)), LD, .{});
+            store_o.close();
         }
 
         b.threadgroupBarrier(.mem_threadgroup);
 
         const out_base = a.out.add(q_seq_start.add(q_pos_start).mul(a.q_stride)).add(head_idx.mul(HEAD_SIZE));
         const total = valid_q.mul(HEAD_SIZE);
-        var loop = b.openFor(thread_idx, total, NUM_THREADS);
+        var write_out = b.openFor(thread_idx, total, NUM_THREADS);
         {
-            const i = loop.iv;
+            const i = write_out.iv;
             const r = i.div(HEAD_SIZE);
             const d = i.rem(HEAD_SIZE);
             const value = O_smem.load(r.mul(LD).add(d)).to(T);
             out_base.store(r.mul(a.q_stride).add(d), value);
-            loop.close();
+            write_out.close();
         }
     }
 };
