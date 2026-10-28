@@ -32,7 +32,8 @@ pub const Session = struct {
         var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
-        const token_index_buffers = try allocator.alloc(zml.Buffer, compiled_model.params.seqlen);
+        const positions = if (platform.target == .furiosa) 1 else compiled_model.params.seqlen;
+        const token_index_buffers = try allocator.alloc(zml.Buffer, positions);
         errdefer allocator.free(token_index_buffers);
         var initialized_token_index_buffers: usize = 0;
         errdefer {
@@ -180,6 +181,8 @@ pub const Session = struct {
         defer current_token_buffer.deinit();
         var active_length_buffer: zml.Buffer = try .scalar(self.io, self.platform, 1, .u32);
         defer active_length_buffer.deinit();
+        var position: ?zml.Buffer = if (self.platform.target == .furiosa) try .scalar(self.io, self.platform, all_tokens.items.len, .u32) else null;
+        defer if (position) |*buffer| buffer.deinit();
 
         const params = self.compiled_model.params;
         var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform);
@@ -200,11 +203,12 @@ pub const Session = struct {
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
                 .next_token_buf = &current_token_buffer,
-                .token_index_buf = &self.token_index_buffers[token_position],
+                .token_index_buf = if (position) |*buffer| buffer else &self.token_index_buffers[token_position],
                 .active_length_buf = &active_length_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
                 .attention_metadata_buffers = &attention_metadata_buffers,
+                .advance_position = position != null,
             });
             last_token_id = try current_token_buffer.getValue(u32, self.io);
         }

@@ -2,6 +2,25 @@ const std = @import("std");
 
 const zml = @import("zml");
 
+pub fn nextPosition(position: zml.Tensor) zml.Tensor {
+    return position.addConstant(1).reuseBuffer(position);
+}
+
+test "nextPosition: donated decode positions advance from the consumed token" {
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    var exe = try platform.compileFn(std.testing.allocator, io, nextPosition, .{zml.Tensor.init(.{}, .u32)}, .{});
+    defer exe.deinit();
+    for ([_]u32{ 0, 3, 511, 1022 }) |start| {
+        var position = try zml.Buffer.scalar(io, platform, start, .u32);
+        defer position.deinit();
+        for (1..4) |step| {
+            position = try exe.eval(std.testing.allocator, io, .{position});
+            try std.testing.expectEqual(start + @as(u32, @intCast(step)), try position.getValue(u32, io));
+        }
+    }
+}
+
 /// Furiosa Llama uses compile-time rotation tables for valid integer positions
 /// in [0, capacity), where capacity is the model's KV-cache length.
 pub fn rope(x: zml.Tensor, positions: zml.Tensor, opts: zml.nn.RopeOpts, capacity: u32) zml.Tensor {

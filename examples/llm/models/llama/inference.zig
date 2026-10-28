@@ -54,6 +54,8 @@ pub const Args = struct {
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
     attention_metadata_buffers: *const zml.Bufferized(zml.attention.Metadata),
+    // Furiosa decode must replace the donated position handle; prefill must not.
+    advance_position: bool = false,
 };
 
 pub const CompiledModel = struct {
@@ -101,12 +103,14 @@ const Forward = struct {
         rng: zml.Tensor.Rng,
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
+        decode: bool,
     };
 
     pub const Output = struct {
         tokens: zml.Tensor,
         kv_cache: model.KvCache,
         rng: zml.Tensor.Rng,
+        token_index: ?zml.Tensor = null,
     };
 
     pub fn forward(input: Input) Output {
@@ -139,6 +143,10 @@ const Forward = struct {
             .tokens = if (input.tokens.dim(.s) == 1) result.tokens.reuseBuffer(input.tokens) else result.tokens,
             .kv_cache = kv_cache.reuseBuffer(input.kv_cache),
             .rng = .{ ._state = result.rng._state.reuseBuffer(input.rng._state) },
+            .token_index = if (zml.Compiler.current().platform.target == .furiosa and input.decode)
+                @import("furiosa.zig").nextPosition(input.token_index)
+            else
+                null,
         };
     }
 };
@@ -158,6 +166,7 @@ pub const KernelRunner = struct {
 };
 
 pub fn run(runner: *KernelRunner, args: Args) void {
+    var token_index: ?zml.Buffer = if (args.advance_position) args.token_index_buf.* else null;
     runner.forward.run(args.io, .{
         .inputs = .{
             .tokens = args.tokens_buf.*,
@@ -171,8 +180,10 @@ pub fn run(runner: *KernelRunner, args: Args) void {
             .tokens = args.next_token_buf,
             .kv_cache = args.kv_cache_buffers,
             .rng = args.rng_buffers,
+            .token_index = &token_index,
         },
     }, .{});
+    if (token_index) |buffer| args.token_index_buf.* = buffer;
 }
 
 fn compileKernel(
@@ -205,5 +216,6 @@ fn compileKernel(
         .rng = parameters.rng,
         .attention_metadata = parameters.attention_metadata,
         .attention_parameters = attention_parameters,
+        .decode = phase == .decode,
     }});
 }
