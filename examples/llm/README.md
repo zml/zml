@@ -114,21 +114,43 @@ until the timer stops; its prediction IDs and the repeated cache state are
 then checked against the serial reference. It is not useful-token generation
 throughput and does not measure a speculative decoder.
 
-Recorded on one P150a, Llama-3.1-8B-Instruct BF16, capacity 128, the prompt above,
-first decode position 23, and four continuation steps (2026-10-28):
+On one P150a with Llama-3.1-8B-Instruct BF16 and capacity 128 (2026-10-28),
+the initial arithmetic trial passed the one-row gate at 32.35 ms/block.
+Two-row offset multi-query attention (41.90 ms/block) and decode attention per
+query (41.63 ms/block) initially matched tested token IDs but failed full-cache
+comparison, first at layer 1, row 23; layer 0 K/V were identical.
 
-| Query rows | Attention | Mean block call | Exact serial gate |
-| --- | --- | --- | --- |
-| 1 | Native decode | 32.35 ms, 5 repeats | Passed |
-| 2 | Native offset multi-query | 41.90 ms, 10 repeats | Failed: K/V drift |
-| 2 | Native decode per query | 41.63 ms, 10 repeats | Failed: K/V drift |
+The TTNN compiler's `LinearOpRewritePattern` was splitting a multi-row fused
+matmul/residual operation into a BF16 matmul followed by a separate add,
+introducing a rounding boundary absent from serial decode. The XLA integration
+now preserves the fused multi-row residual operation under the wider-decode
+opt-in (XLA fork commit `db8fe2c86c`; native regression tests `bbb36e8914`).
+The successful results below require a plugin built with that fix and
+`--serial-attention`; merely splitting attention did not fix the cache drift.
 
-Both two-row runs matched all four teacher-forced predictions and four
-continuation IDs in this small trial, but caches first differed at layer 1,
-row 23; layer 0 K/V were identical. Splitting attention changed the differences
-without restoring exact cache state. These results do not establish serial
-state equivalence or authorize a production speculative path. Offset coverage
-and broader prompt validation remain pending while the drift is investigated.
+With the corrected plugin, all predictions, final timed-repeat predictions,
+full K/V snapshots, and serial continuation tokens passed the unchanged exact
+gate in these trials. Each run used two consecutive two-row blocks:
+
+| Prompt | Block base positions | Continuation steps | Mean block call | Exact gate |
+| --- | --- | --- | --- | --- |
+| Arithmetic prompt above | 23, 25 | 4 | 41.51 ms, 10 repeats | Passed |
+| Count from 1 to 20, separated by commas. | 31, 33 | 16 | 41.66 ms, 3 repeats | Passed |
+| Explain why ice floats in water. Use two short paragraphs. | 32, 34 | 16 | 41.62 ms, 3 repeats | Passed |
+| Write a short story about a robot learning to paint. | 63, 65 | 16 | 41.62 ms, 3 repeats | Passed |
+
+For the corpus runs, use `--rows=2 --serial-attention --window=2
+--continuation=16 --repeats=3`, the exact prompt text in the table, and
+`--offset` equal to the first block position. All used the flags above.
+These are teacher-forced block latencies, not speculative generation rates.
+The full prompt/offset matrix and acceptance/rollback behavior remain untested;
+these finite trials do not prove universal serial equivalence.
+
+The corrected plugin's default offset multi-query attention mode still failed
+the arithmetic cache gate at 41.61 ms/block, despite matching all tested IDs.
+After two blocks, 98,450 K elements and 112,207 V elements differed, first at
+layer 1. The validated path therefore requires `--serial-attention`; the
+default multi-query mode remains a failing diagnostic.
 
 A separate diagnostic with XLA fusion/codegen disabled aborted before the
 numerical comparison because a feed-forward matmul's static circular buffers
