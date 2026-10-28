@@ -54,14 +54,20 @@ pub fn forward(
     const mod1, const mod2 = modulation.chunkExact(-1, 2);
     const img_modulated1, const img_gate1 = modulate(self.img_norm1.forward(x), mod1, target_token_mask);
 
-    const attn = self.attn.forward(img_modulated1, rotary_emb, text_len, args);
+    const attn = self.attn.forward(replicated(img_modulated1), rotary_emb, text_len, args);
     x = x.add(img_gate1.tanh().mul(attn));
 
     const img_modulated2, const img_gate2 = modulate(self.img_norm2.forward(x), mod2, target_token_mask);
-    const mlp = self.img_mlp.forward(img_modulated2).withTags(.{ .bs, .seq_len, .d });
+    const mlp = self.img_mlp.forward(replicated(img_modulated2)).withTags(.{ .bs, .seq_len, .d });
     x = x.add(img_gate2.tanh().mul(mlp));
 
     return x;
+}
+
+// The residual stream is .d-sharded after the reduce-scatters. Without these constraints XLA gathers
+// it once per projection (3x for q/k/v, 2x for gate/proj) instead of once for all of them.
+fn replicated(x: zml.Tensor) zml.Tensor {
+    return x.withPartitioning(.{ .bs = .replicated, .seq_len = .replicated, .d = .replicated });
 }
 
 fn modulate(
