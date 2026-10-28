@@ -722,11 +722,12 @@ pub fn invFreq(N: i64, opts: RopeOpts) Tensor {
     const inv_freq = allocator.alloc(f32, num_freqs) catch @panic("OOM");
     defer allocator.free(inv_freq);
 
-    _invFreq(opts, inv_freq, N_half);
+    fillInvFreq(opts, inv_freq, N_half);
     return .constantTensor(.init(.{num_freqs}, .f32), @ptrCast(inv_freq));
 }
 
-fn _invFreq(opts: RopeOpts, inv_freq: []f32, half_head_dim: u32) void {
+/// Fill host frequencies using the same scaling formulas as invFreq.
+pub fn fillInvFreq(opts: RopeOpts, inv_freq: []f32, half_head_dim: u32) void {
     const N: u32 = @intCast(inv_freq.len);
     // Default frequencies
     for (0.., inv_freq) |n, *f| {
@@ -813,7 +814,7 @@ test "invFreq Llama3" {
     const llama_freq = [_]f32{ 1.000000000000e+00, 6.636012792587e-01, 4.403666257858e-01, 2.922278344631e-01, 1.939227581024e-01, 1.286873817444e-01, 8.539710193872e-02, 5.666961893439e-02, 3.760603070259e-02, 2.495540864766e-02, 1.656044088304e-02, 1.098952908069e-02, 7.292665075511e-03, 4.839421249926e-03, 3.211446106434e-03, 1.290548010729e-03, 4.295567050576e-04, 9.708286233945e-05, 1.946163865796e-05, 1.291476746701e-05, 8.570255886298e-06, 5.687232260243e-06, 3.774054448513e-06, 2.504467147446e-06, 1.661967417022e-06, 1.102883629756e-06, 7.318749339902e-07, 4.856731266045e-07, 3.222932889457e-07, 2.138742303259e-07, 1.419272024350e-07, 9.418306490261e-08 };
 
     var inv_freq: @TypeOf(llama_freq) = undefined;
-    _invFreq(llama_conf, &inv_freq, 32);
+    fillInvFreq(llama_conf, &inv_freq, 32);
     for (llama_freq, inv_freq, 0..) |expected, actual, i| {
         errdefer log.err("Mismatch at position {d}.\nExpected: {any}\nActual:   {any}", .{ i, llama_freq, inv_freq });
         try std.testing.expectApproxEqRel(expected, actual, 1e-5);
@@ -834,7 +835,7 @@ test "invFreq Yarn" {
     const yarn_freq = [_]f32{ 1.000000000000e+00, 6.890442967415e-01, 4.747820496559e-01, 3.271458745003e-01, 2.254180014133e-01, 1.553229838610e-01, 1.070244237781e-01, 7.374456524849e-02, 5.081327259541e-02, 3.162075206637e-02, 1.945096626878e-02, 1.179219130427e-02, 7.015713956207e-03, 4.069554619491e-03, 2.277272054926e-03, 1.206130953506e-03, 5.809474969283e-04, 2.279478358105e-04, 3.830881178146e-05, 2.639646845637e-05, 1.818833698053e-05, 1.253256959899e-05, 8.635495760245e-06, 5.950239483354e-06, 4.099978468730e-06, 2.825066758305e-06, 1.946596285052e-06, 1.341290953860e-06, 9.242089618056e-07, 6.368209142238e-07, 4.387978549403e-07, 3.023511396805e-07 };
 
     var inv_freq: @TypeOf(yarn_freq) = undefined;
-    _invFreq(yarn_conf, &inv_freq, 32);
+    fillInvFreq(yarn_conf, &inv_freq, 32);
     for (yarn_freq, inv_freq, 0..) |expected, actual, i| {
         errdefer log.err("Mismatch at position {d}.\nExpected: {d}\nActual:   {d}", .{ i, stdx.fmt.slice(&yarn_freq), stdx.fmt.slice(&inv_freq) });
         try std.testing.expectApproxEqRel(expected, actual, 1e-5);

@@ -1,0 +1,97 @@
+const std = @import("std");
+
+const zml = @import("zml");
+
+/// Furiosa Llama uses compile-time rotation tables for valid integer positions
+/// in [0, capacity), where capacity is the model's KV-cache length.
+pub fn rope(x: zml.Tensor, positions: zml.Tensor, opts: zml.nn.RopeOpts, capacity: u32) zml.Tensor {
+    std.debug.assert(zml.Compiler.current().platform.target == .furiosa);
+    std.debug.assert(capacity > 0 and positions.dtype().isInteger());
+    const head_dim = x.dim(.hd);
+    const rotary_dim = opts.scaling.partialRotaryDim(head_dim);
+    std.debug.assert(@mod(head_dim, 2) == 0 and rotary_dim > 0 and @mod(rotary_dim, 2) == 0);
+    const allocator = zml.Compiler.current().allocator;
+    const frequencies = allocator.alloc(f32, rotary_dim / 2) catch @panic("OOM");
+    defer allocator.free(frequencies);
+    zml.nn.fillInvFreq(opts, frequencies, @intCast(@divExact(head_dim, 2)));
+    const elements = @as(usize, capacity) * frequencies.len;
+    const cos_values = allocator.alloc(f32, elements) catch @panic("OOM");
+    defer allocator.free(cos_values);
+    const sin_values = allocator.alloc(f32, elements) catch @panic("OOM");
+    defer allocator.free(sin_values);
+    const scaling = opts.scaling.attentionScaling();
+    for (0..capacity) |position| {
+        for (frequencies, 0..) |frequency, frequency_index| {
+            const angle: f32 = @as(f32, @floatFromInt(position)) * frequency;
+            const i = position * frequencies.len + frequency_index;
+            cos_values[i] = @cos(angle) * scaling;
+            sin_values[i] = @sin(angle) * scaling;
+        }
+    }
+    const shape = zml.Shape.init(.{ .rope_position = capacity, .hd = rotary_dim / 2 }, .f32);
+    const cos_table = zml.Tensor.constantTensor(shape, @ptrCast(cos_values)).convert(x.dtype());
+    const sin_table = zml.Tensor.constantTensor(shape, @ptrCast(sin_values)).convert(x.dtype());
+    const real, const imag, const pass = zml.nn.splitRealImgPass(x, opts.layout, rotary_dim);
+    const cos = cos_table.gather(.{ .rope_position = positions }, .{}).broad(real.shape());
+    const sin = sin_table.gather(.{ .rope_position = positions }, .{}).broad(real.shape());
+    return zml.nn.mergeRealImgPass(real.mul(cos).sub(imag.mul(sin)), real.mul(sin).add(imag.mul(cos)), pass, opts.layout);
+}
+
+test "rope: cached BF16 rotations match dynamic scaling, layouts and boundaries" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    const Bf16 = zml.floats.BFloat16;
+    const Local = struct {
+        fn forward(x: zml.Tensor, positions: zml.Tensor, opts: zml.nn.RopeOpts) zml.Tensor {
+            return zml.nn.rope(x, positions, opts);
+        }
+
+        fn cached(x: zml.Tensor, positions: zml.Tensor, opts: zml.nn.RopeOpts) zml.Tensor {
+            return rope(x, positions, opts, 1024);
+        }
+    };
+    const llama3: zml.nn.RopeOpts.Scaling = .{ .llama3 = .{ .factor = 8, .low_freq_factor = 1, .high_freq_factor = 4, .original_max_position_embeddings = 8192, .rope_theta = 500_000 } };
+    const Case = struct { opts: zml.nn.RopeOpts, queries: usize };
+    for ([_]Case{
+        .{ .opts = .{ .scaling = llama3 }, .queries = 1 },
+        .{ .opts = .{ .scaling = llama3 }, .queries = 8 },
+        .{ .opts = .{ .layout = .interleaved }, .queries = 1 },
+        .{ .opts = .{ .layout = .real_pass_im_pass, .scaling = .{ .proportional = .{ .partial_rotary_factor = 0.5 } } }, .queries = 8 },
+        .{ .opts = .{ .layout = .interleaved, .scaling = .{ .yarn = .{ .factor = 4, .original_max_position_embeddings = 8192, .partial_rotary_factor = 0.5 } } }, .queries = 1 },
+        .{ .opts = .{ .scaling = .{ .linear = .{ .factor = 4 } } }, .queries = 8 },
+    }) |case| {
+        const x: zml.Tensor = .init(.{ .b = 1, .s = case.queries, .hd = 128 }, .bf16);
+        const positions: zml.Tensor = .init(.{ .s = case.queries }, .u32);
+        var direct_exe = try platform.compileFn(allocator, io, Local.forward, .{ x, positions, case.opts }, .{});
+        defer direct_exe.deinit();
+        var cached_exe = try platform.compileFn(allocator, io, Local.cached, .{ x, positions, case.opts }, .{});
+        defer cached_exe.deinit();
+
+        const input = try zml.Slice.alloc(allocator, x.shape());
+        defer input.free(allocator);
+        for (input.items(Bf16), 0..) |*value, i| {
+            value.* = .fromF32(@as(f32, @floatFromInt(@as(i32, @intCast(i % 37)) - 18)) / 16);
+        }
+        var x_buffer = try zml.Buffer.fromSlice(io, platform, input);
+        defer x_buffer.deinit();
+        const indices = try zml.Slice.alloc(allocator, positions.shape());
+        defer indices.free(allocator);
+        // Changing runtime indices include each benchmark size's final row.
+        for ([_]usize{ 0, 63, 256 - case.queries, 512 - case.queries, 1024 - case.queries }) |start| {
+            for (indices.items(u32), 0..) |*position, i| position.* = @intCast(start + i);
+            var positions_buffer = try zml.Buffer.fromSlice(io, platform, indices);
+            defer positions_buffer.deinit();
+            var direct = try direct_exe.eval(allocator, io, .{ x_buffer, positions_buffer });
+            defer direct.deinit();
+            var cached = try cached_exe.eval(allocator, io, .{ x_buffer, positions_buffer });
+            defer cached.deinit();
+            errdefer std.log.err("cached RoPE mismatch: layout={t}, scaling={t}, queries={}, start={}", .{ case.opts.layout, std.meta.activeTag(case.opts.scaling), case.queries, start });
+            try zml.testing.expectClose(io, direct, cached, .{
+                .absolute_tolerance = 0.008,
+                .relative_tolerance = 0.01,
+                .minimum_close_fraction = 1.0,
+            });
+        }
+    }
+}
