@@ -191,6 +191,8 @@ pub const Session = struct {
             try stdout.writeAll(try decoder.feedOne(last_token_id, decoder_out_buffer));
             try stdout.flush();
 
+            // Appending the feedback token must not advance its RoPE/KV position.
+            const token_position = all_tokens.items.len;
             try all_tokens.append(self.allocator, last_token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
@@ -198,7 +200,7 @@ pub const Session = struct {
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
                 .next_token_buf = &current_token_buffer,
-                .token_index_buf = &self.token_index_buffers[all_tokens.items.len],
+                .token_index_buf = &self.token_index_buffers[token_position],
                 .active_length_buf = &active_length_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
