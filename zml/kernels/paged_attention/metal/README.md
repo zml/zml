@@ -24,9 +24,3 @@ ordinary paged attention.
 When sharding heads, keep complete GQA groups together with matching query and
 cache head ownership. Each local computation needs the full required key range,
 features, and matching sequence metadata.
-
-The shared tests in [paged_attention.zig](../paged_attention.zig) compare this
-backend against StableHLO for causal attention and include option-specific
-comparisons. They exercise `bf16`, mixed prefill/decode, shared prefix pages,
-partial final KV pages, and trailing inactive sequences. These cases do not
-establish support for every shape or dtype.
