@@ -42,6 +42,14 @@ build_test(
     targets = [":llm"],
 )
 
+zig_test(
+    name = "qwen3_5_test",
+    srcs = glob(["**/*.zig"]),
+    main = "qwen3_5_test.zig",
+    zigopts = ["--test-filter", "Qwen recurrent decay"],
+    deps = ["//zml"],
+)
+
 mtree_spec(
     name = "mtree",
     srcs = [":llm"],

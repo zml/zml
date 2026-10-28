@@ -8,6 +8,47 @@ const inference = @import("inference.zig");
 
 const log = std.log.scoped(.qwen3_5);
 
+fn decayGate(a: zml.Tensor, a_log: zml.Tensor, dt_bias: zml.Tensor) zml.Tensor {
+    // The reference evaluates the decay in FP32 even with BF16 parameters:
+    // g = -exp(A_log.float()) * softplus(a.float() + dt_bias).
+    const shifted = a.convert(.f32).add(dt_bias.convert(.f32).broad(a.shape()));
+    return a_log.convert(.f32).broad(a.shape()).exp().mul(zml.nn.softplus(shifted, .{})).negate();
+}
+
+test "Qwen recurrent decay gate uses FP32 with BF16 parameters" {
+    const platform = zml.testing.env();
+    const activations = [_]f32{ -20, -1, 0, 1, 2, 20, 30, 88 };
+    const logs = [_]f32{ 0, 0.5, -0.5, 1 };
+    const biases = [_]f32{ 0, -0.25, 0.5, 1 };
+    const Local = struct {
+        fn run(a: zml.Tensor, a_log: zml.Tensor, dt_bias: zml.Tensor) zml.Tensor {
+            return decayGate(a.convert(.bf16), a_log.convert(.bf16), dt_bias.convert(.bf16));
+        }
+    };
+    const a: zml.Tensor = .init(.{ .b = 1, .s = 2, .vh = 4 }, .f32);
+    const a_log: zml.Tensor = .init(.{ .vh = 4 }, .f32);
+    const dt_bias: zml.Tensor = .init(.{ .vh = 4 }, .f32);
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.run, .{ a, a_log, dt_bias }, .{});
+    defer exe.deinit();
+    var a_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&activations));
+    defer a_buffer.deinit();
+    var log_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, a_log.shape(), std.mem.sliceAsBytes(&logs));
+    defer log_buffer.deinit();
+    var bias_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, dt_bias.shape(), std.mem.sliceAsBytes(&biases));
+    defer bias_buffer.deinit();
+    var result = try exe.eval(std.testing.allocator, std.testing.io, .{ a_buffer, log_buffer, bias_buffer });
+    defer result.deinit();
+    const actual = try result.toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer actual.free(std.testing.allocator);
+    try std.testing.expectEqual(zml.DataType.f32, actual.dtype());
+    for (activations, actual.items(f32), 0..) |activation, value, index| {
+        const shifted: f64 = @as(f64, activation) + @as(f64, biases[index % 4]);
+        const softplus = if (shifted > 20) shifted else std.math.log1p(@exp(shifted));
+        const expected: f32 = @floatCast(-@exp(@as(f64, logs[index % 4])) * softplus);
+        try std.testing.expectApproxEqRel(expected, value, 1e-3);
+    }
+}
+
 pub const Config = struct {
     text_config: TextConfig,
 };
@@ -925,8 +966,7 @@ pub const GatedDeltaNet = struct {
             .splitAxis(.mix, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim });
 
         const beta = b.sigmoid();
-        const aLog_type = self.aLog.dtype();
-        const g = self.aLog.broad(a.shape()).exp().mul(zml.nn.softplus(a.convert(aLog_type).add(self.dt_bias.convert(aLog_type).broad(a.shape())), .{})).negate();
+        const g = decayGate(a, self.aLog, self.dt_bias);
 
         const query_for_rule = b: {
             if (self.qk_head_repetition == 1) break :b query;
