@@ -65,6 +65,7 @@ pub const Chat = struct {
     pub const RunOnceOptions = struct {
         profile: bool = false,
         output: ?*std.Io.Writer = null,
+        dump_token_ids: bool = false,
     };
 
     pub fn runOnce(self: *Chat, prompt: []const u8, opts: RunOnceOptions) !void {
@@ -92,6 +93,15 @@ pub const Chat = struct {
         try self.runPrefill(prompt_tokens, output);
         try self.runDecodeTurn(output);
         _ = if (profiler) |*p| try p.stop() else null;
+
+        // Keep correctness diagnostics outside the measured decode interval.
+        if (opts.dump_token_ids) {
+            try output.writeAll("generated_token_ids:");
+            for (self.tokens.items[prompt_tokens.len..]) |token| {
+                try output.print(" {d}", .{token});
+            }
+            try output.writeByte('\n');
+        }
 
         try output.flush();
     }

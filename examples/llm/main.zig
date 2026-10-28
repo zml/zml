@@ -20,6 +20,7 @@ const Args = struct {
     topk: u32 = 4,
     backend: ?enum { stablehlo, cute, nki, metal, tenstorrent } = null,
     profile: bool = false,
+    dump_token_ids: bool = false,
     warmup_runs: u32 = 0,
     benchmark_runs: u32 = 1,
     tt_devices: enum { single, all } = .single,
@@ -35,6 +36,7 @@ const Args = struct {
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([stablehlo, cute, nki, metal], default: auto-selection)
+        \\   --dump-token-ids    Print generated token IDs after timed decode
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\   --warmup-runs=<n>    Generate n discarded responses before timing a fresh session (requires --prompt; default: 0)
         \\   --benchmark-runs=<n> Time n fresh sessions after warm-up (requires --prompt when n > 1; default: 1)
@@ -212,6 +214,7 @@ pub fn main(init: std.process.Init) !void {
         } else {
             try llm_chat.runOnce(prompt, .{
                 .profile = args.profile,
+                .dump_token_ids = args.dump_token_ids,
             });
         }
     }
