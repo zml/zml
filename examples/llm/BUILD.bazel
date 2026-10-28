@@ -131,3 +131,19 @@ oci_load(
     repo_tags = ["zmlai/llm:debug"],
     tags = ["manual"],
 )
+
+zig_binary(
+    name = "llama_verifier",
+    srcs = glob(["**/*.zig"]),
+    main = "llama_verifier.zig",
+    tags = ["manual"],
+    deps = ["//zml"],
+)
+
+zig_test(
+    name = "llama_verifier_head_test",
+    srcs = glob(["**/*.zig"]),
+    main = "models/llama_verifier_head_test.zig",
+    tags = ["exclusive", "manual"],
+    deps = ["//zml"],
+)

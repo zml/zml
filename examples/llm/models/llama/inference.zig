@@ -107,6 +107,7 @@ const Forward = struct {
         rng: ?zml.Tensor.Rng,
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
+        serial_attention: bool = false,
     };
 
     pub const Output = struct {
@@ -116,24 +117,7 @@ const Forward = struct {
     };
 
     pub fn forward(input: Input) Output {
-        var hidden = model.EmbedTokens.forward(.{
-            .embedding = .{ .embed_tokens = input.weights.model.embed_tokens },
-            .tokens = input.tokens,
-        }).hidden;
-        var kv_cache = input.kv_cache;
-        for (input.weights.model.layers, 0..) |layer, index| {
-            const result = model.TransformerLayer.forward(.{
-                .layer = layer,
-                .hidden = hidden,
-                .token_index = input.token_index,
-                .kv_cache = kv_cache,
-                .kv_cache_index = .scalar(@as(u32, @intCast(index)), .u32),
-                .attention_metadata = input.attention_metadata,
-                .attention_parameters = input.attention_parameters,
-            });
-            hidden = result.hidden;
-            kv_cache = result.kv_cache;
-        }
+        const hidden, const kv_cache = hiddenStates(input);
         // LmHead owns final normalization; Llama.forward would apply it twice.
         const result = model.LmHead.forward(.{
             .lm_head = .init(input.weights),
@@ -148,6 +132,29 @@ const Forward = struct {
             .kv_cache = kv_cache.reuseBuffer(input.kv_cache),
             .rng = if (input.rng) |rng| .{ ._state = result.rng._state.reuseBuffer(rng._state) } else null,
         };
+    }
+
+    fn hiddenStates(input: Input) struct { zml.Tensor, model.KvCache } {
+        var hidden = model.EmbedTokens.forward(.{
+            .embedding = .{ .embed_tokens = input.weights.model.embed_tokens },
+            .tokens = input.tokens,
+        }).hidden;
+        var kv_cache = input.kv_cache;
+        for (input.weights.model.layers, 0..) |layer, index| {
+            const result = model.TransformerLayer.forward(.{
+                .layer = layer,
+                .hidden = hidden,
+                .token_index = input.token_index,
+                .kv_cache = kv_cache,
+                .kv_cache_index = .scalar(@as(u32, @intCast(index)), .u32),
+                .attention_metadata = input.attention_metadata,
+                .attention_parameters = input.attention_parameters,
+                .serial_attention = input.serial_attention,
+            });
+            hidden = result.hidden;
+            kv_cache = result.kv_cache;
+        }
+        return .{ hidden, kv_cache };
     }
 };
 
@@ -213,5 +220,54 @@ fn compileKernel(
         .rng = parameters.rng,
         .attention_metadata = parameters.attention_metadata,
         .attention_parameters = attention_parameters,
+    }});
+}
+
+/// Experimental teacher-forced verifier. Explicit input rows produce one greedy
+/// prediction each; acceptance and cache commit policy belong to its caller.
+pub const VerifierForward = struct {
+    pub const Input = Forward.Input;
+    pub const Output = struct {
+        tokens: zml.Tensor,
+        kv_cache: model.KvCache,
+    };
+
+    pub fn forward(input: Input) Output {
+        const hidden, const kv_cache = Forward.hiddenStates(input);
+        return .{
+            // Input tokens remain caller-owned, including for the row-one gate.
+            .tokens = model.LmHead.init(input.weights).forwardAllGreedy(hidden),
+            .kv_cache = kv_cache.reuseBuffer(input.kv_cache),
+        };
+    }
+};
+
+pub const VerifierExe = zml.FnExe(VerifierForward.forward);
+
+pub fn compileVerifier(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    weights: model.Model,
+    parameters: CompilationParameters,
+    rows: u32,
+    serial_attention: bool,
+) !VerifierExe {
+    if (rows != 1 and rows != 2) return error.InvalidVerifierRows;
+    if (weights.gen_opts.topk != 1) return error.VerifierRequiresGreedy;
+    if (weights.model.embed_tokens.weight.dtype() != .bf16) return error.VerifierRequiresBF16;
+    return VerifierExe.compile(allocator, io, platform, .{
+        .meshes = &parameters.meshes.all(),
+        .program_name = "llm_llama_teacher_forced_verifier",
+    }, .{.{
+        .weights = weights,
+        .tokens = zml.Tensor.init(.{ .s = rows }, .u32),
+        .token_index = parameters.token_index,
+        .active_length = .init(.{}, .u32),
+        .kv_cache = parameters.kv_cache,
+        .rng = null,
+        .attention_metadata = parameters.attention_metadata,
+        .attention_parameters = parameters.decode_attention_parameters,
+        .serial_attention = serial_attention,
     }});
 }

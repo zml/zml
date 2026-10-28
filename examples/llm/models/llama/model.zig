@@ -365,6 +365,21 @@ pub const LmHead = struct {
         const last_index = input.active_length.convert(.i32).addConstant(-1);
         const hidden = self.norm.forward(input.hidden.withPartialTags(.{ .s, .d }).slice(.s, .dyn(last_index, 1)));
 
+        const logits = self.project(hidden);
+
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_opts, input.rng);
+        return .{ .tokens = next_tokens.convert(.u32), .rng = new_rng };
+    }
+
+    /// One greedy prediction per query row for the teacher-forced verifier.
+    pub fn forwardAllGreedy(self: LmHead, hidden: zml.Tensor) zml.Tensor {
+        stdx.debug.assert(self.gen_opts.topk == 1, "Verifier requires topk=1", .{});
+        const logits = self.project(self.norm.forward(hidden.withPartialTags(.{ .s, .d })));
+        const tokens, _ = zml.nn.sampleTokens(logits, self.gen_opts, zml.Tensor.Rng.init());
+        return tokens.convert(.u32);
+    }
+
+    fn project(self: LmHead, hidden: zml.Tensor) zml.Tensor {
         var logits = blk: {
             if (self.lm_head) |lm_head| {
                 break :blk lm_head.forward(hidden, hidden.dtype()).rename(.{ .dout = .d });
@@ -376,8 +391,7 @@ pub const LmHead = struct {
         if (logits.shape().hasTag(.voc) == null)
             logits = logits.rename(.{ .d = .voc });
 
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_opts, input.rng);
-        return .{ .tokens = next_tokens.convert(.u32), .rng = new_rng };
+        return logits;
     }
 };
 
@@ -411,6 +425,7 @@ pub const TransformerLayer = struct {
         kv_cache_index: zml.Tensor,
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
+        serial_attention: bool = false,
     };
 
     pub const Output = struct {
@@ -428,13 +443,14 @@ pub const TransformerLayer = struct {
         // Keep the residual stream replicated to avoid repeated gathers before q/k/v.
         const x0_replicated = x0.withPartitioning(.model, .{ .d = .replicated });
         const x0_normalized = self.input_layernorm.forward(x0_replicated);
-        const delta0, const updated_kv_cache = self.self_attn.forward(
+        const delta0, const updated_kv_cache = self.self_attn.forwardWithSerialAttention(
             x0_normalized,
             input.token_index,
             input.kv_cache,
             input.kv_cache_index,
             input.attention_metadata,
             input.attention_parameters,
+            input.serial_attention,
         );
 
         // Fully Connected
@@ -551,6 +567,19 @@ const SelfAttn = struct {
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
+        return self.forwardWithSerialAttention(x, token_index, kv_cache, kv_cache_index, attention_metadata, attention_parameters, false);
+    }
+
+    fn forwardWithSerialAttention(
+        self: SelfAttn,
+        x: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: KvCache,
+        kv_cache_index: zml.Tensor,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
+        serial_attention: bool,
+    ) struct { zml.Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
         // Make hidden state replicated once and reuse it across q/k/v projections.
@@ -580,7 +609,28 @@ const SelfAttn = struct {
         k = new_kv_cache.keysAt(kv_cache_index).convert(dtype);
         v = new_kv_cache.valuesAt(kv_cache_index).convert(dtype);
 
-        const attn_output = zml.attention.attention(
+        const attn_output = if (serial_attention and q.dim(.q) > 1) blk: {
+            // Preserve the native one-query decode attention arithmetic while
+            // keeping projections and feed-forward layers in one wide call.
+            stdx.debug.assert(q.dim(.q) <= 32, "Serial attention supports at most 32 verifier rows", .{});
+            var rows: [32]zml.Tensor = undefined;
+            const count: usize = @intCast(q.dim(.q));
+            for (rows[0..count], 0..) |*row, i| {
+                // Static slices need an explicit end; default end takes
+                // precedence over len in Tensor.Slice.absolute.
+                const query = q.slice(.q, .{ .start = @intCast(i), .end = @intCast(i + 1) });
+                stdx.debug.assert(query.dim(.q) == 1, "Serial attention requires a single query row", .{});
+                row.* = zml.attention.attention(
+                    query,
+                    k,
+                    v,
+                    token_index.addConstant(@as(u32, @intCast(i))),
+                    attention_metadata,
+                    attention_parameters,
+                );
+            }
+            break :blk zml.Tensor.concatenate(rows[0..count], .q);
+        } else zml.attention.attention(
             q,
             k,
             v,
