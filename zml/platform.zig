@@ -183,6 +183,12 @@ pub const Device = struct {
         return self.pjrt_desc.kind(self.platform.pjrt_api);
     }
 
+    /// Returns a PJRT device-description attribute without exposing the
+    /// underlying PJRT handles. Attribute storage is owned by the platform.
+    pub fn attribute(self: Device, name: []const u8) ?pjrt.NamedValue.Value {
+        return self.pjrt_desc.attribute(self.platform.pjrt_api, name);
+    }
+
     pub fn debugString(self: Device) []const u8 {
         return self.pjrt_desc.debugString(self.platform.pjrt_api);
     }
@@ -195,7 +201,8 @@ pub const Device = struct {
         return self.pjrt_device.memoryStats(self.platform.pjrt_api) catch .zeroes;
     }
 
-    /// NUMA node closest to the device, when the plugin reports one.
+    /// NUMA node closest to the device, when the plugin reports a valid one.
+    /// NUMA is a runtime device attribute, not part of the static topology description.
     pub fn numaNode(self: Device) ?u32 {
         const attributes = self.pjrt_device.attributes(self.platform.pjrt_api) catch return null;
         defer attributes.deinit();
@@ -313,10 +320,11 @@ pub const Platform = struct {
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
+        errdefer pjrt_client.deinit(api);
         const pjrt_devices = pjrt_client.addressableDevices(api);
         try validateDeviceCount(target, pjrt_devices.len);
         if (pjrt_devices.len > MAX_NUM_DEVICES) {
-            log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
+            log.warn("platform {} got {} devices, but ZML supports up to {}: the loader and multi-device buffers will refuse or fail on this platform", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
         }
 
         const pjrt_memories = pjrt_client.addressableMemories(api);
@@ -351,6 +359,7 @@ pub const Platform = struct {
 
         const arena = platform.arena.allocator();
         errdefer platform.arena.deinit();
+        errdefer if (comptime Target.cuda.isEnabled()) platform.state.deinit();
         try platform.meshes.ensureTotalCapacity(arena, 8);
 
         {
@@ -376,6 +385,7 @@ pub const Platform = struct {
                 .auto => zml.Sharding.PhysicalMesh.auto(arena, target, devices),
                 .custom => |builder| builder(arena, target, devices),
             };
+            errdefer platform.physical_mesh.deinit(arena);
             platform.replicated_mesh = try platform.registerMesh("replicated", .mesh(.{ .all = .high_bandwidth }));
         }
 
@@ -422,6 +432,49 @@ pub const Platform = struct {
         return for (ordered_targets) |target| {
             break init(allocator, io, target, options) catch continue;
         } else error.Unavailable;
+    }
+
+    /// Forces lazy device allocators to materialize their backing pools.
+    ///
+    /// In particular, a preallocated GPU BFC allocator does not reserve its
+    /// fixed arena until its first non-empty allocation. The temporary buffer
+    /// is released immediately; caching allocators retain their initialized
+    /// pools for subsequent allocations. Calling this more than once is safe.
+    /// Devices are warmed concurrently: a serial pass over eight GPUs costs
+    /// measurable milliseconds ahead of a load.
+    pub fn warmupDeviceAllocators(self: *const Platform, io: std.Io) !void {
+        const Worker = struct {
+            platform: *const Platform,
+            device_index: usize,
+            first_error: *std.atomic.Value(u16),
+
+            fn run(worker: @This()) void {
+                const dims: []const i64 = &.{1};
+                const memory = worker.platform.devices[worker.device_index].memory(.default).?;
+                const buffer = worker.platform.pjrt_client.createUninitializedBuffer(worker.platform.pjrt_api, .{
+                    .dims = dims,
+                    .element_type = pjrtx.bufferTypeFromDtype(.u8),
+                    .layout = worker.platform.defaultMemoryLayout(dims, .u8),
+                    .dst = .{ .memory = memory.pjrt_memory },
+                }) catch |err| {
+                    _ = worker.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+                    return;
+                };
+                buffer.deinit(worker.platform.pjrt_api);
+            }
+        };
+        var first_error: std.atomic.Value(u16) = .init(0);
+        var group: std.Io.Group = .init;
+        // A failed spawn leaves the earlier tasks writing `first_error`.
+        errdefer group.cancel(io);
+        for (self.devices, 0..) |_, device_index| try group.concurrent(io, Worker.run, .{Worker{
+            .platform = self,
+            .device_index = device_index,
+            .first_error = &first_error,
+        }});
+        try group.await(io);
+        const error_code = first_error.load(.acquire);
+        if (error_code != 0) return @as(pjrt.ApiError, @errorCast(@errorFromInt(error_code)));
     }
 
     pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -601,6 +654,14 @@ pub const Platform = struct {
             if (i < self.devices.len - 1) try writer.writeAll(", ");
         }
         try writer.writeAll(" }");
+    }
+
+    /// `shape` placed as a buffer places it: on its mesh, or replicated on
+    /// every device (`replicated_mesh`) when it names none.
+    pub fn placedShape(self: *const Platform, shape: zml.Shape) zml.Shape {
+        var placed = shape;
+        if (placed._sharding.mesh == null) placed._sharding.mesh = self.replicated_mesh;
+        return placed;
     }
 
     pub fn memoryKind(self: *const Platform, kind: Memory.Kind) []const u8 {
@@ -1063,4 +1124,11 @@ test "platform defaultMemoryLayout is boring" {
             },
         });
     }
+}
+
+test "platform device allocators can be warmed repeatedly" {
+    const platform = zml.testing.env();
+
+    try platform.warmupDeviceAllocators(std.testing.io);
+    try platform.warmupDeviceAllocators(std.testing.io);
 }

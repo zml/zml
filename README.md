@@ -168,21 +168,16 @@ const Mnist = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
-        meshes: []const *const zml.Mesh,
     ) !zml.Bufferized(Mnist) {
-        return zml.io.load(Mnist, self, allocator, io, platform, store, .{
-            .meshes = meshes,
-            .parallelism = 1,
-            .dma_chunks = 1,
-            .dma_chunk_size = 16 * 1024 * 1024,
-        });
-    }
+        var buffers = try zml.mem.bufferize(allocator, Mnist, self);
+        errdefer zml.mem.deinitBufferized(allocator, Mnist, &buffers);
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {
-        self.fc1.weight.deinit();
-        self.fc1.bias.deinit();
-        self.fc2.weight.deinit();
-        self.fc2.bias.deinit();
+        var loader = try zml.io.Loader.init(allocator, io, platform, .{});
+        defer loader.deinit();
+        try loader.start(self, &buffers, store, .none);
+        try loader.wait();
+
+        return buffers;
     }
 
     /// just two linear layers + relu activation
@@ -196,6 +191,12 @@ const Mnist = struct {
     }
 };
 ```
+
+`Loader.init` returns at once and calibrates its transfers on a task of its
+own, so initialize the loader early and compile the model meanwhile; the
+first `start` waits for what is left.
+[Loading checkpoints](./docs/learn/loader.md) gives the full recipe, with
+remote checkpoints, placement, lifetimes and errors.
 
 For a full walkthrough, see:
 

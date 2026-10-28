@@ -45,22 +45,14 @@ const Mnist = struct {
         store: *const zml.io.TensorStore,
     ) !zml.Bufferized(Mnist) {
         var buffers = try zml.mem.bufferize(allocator, Mnist, self);
-        errdefer unloadBuffers(&buffers);
+        errdefer zml.mem.deinitBufferized(allocator, Mnist, &buffers);
 
-        var loader: zml.io.Loader = try .init(allocator, platform, .default);
-        errdefer loader.deinit();
-
-        try loader.load(io, Mnist, self, &buffers, store, .{});
-        try loader.await(io);
+        var loader = try zml.io.Loader.init(allocator, io, platform, .{});
+        defer loader.deinit();
+        try loader.start(self, &buffers, store, .none);
+        try loader.wait();
 
         return buffers;
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {
-        self.fc1.weight.deinit();
-        self.fc1.bias.deinit();
-        self.fc2.weight.deinit();
-        self.fc2.bias.deinit();
     }
 
     /// just two linear layers + relu activation
@@ -87,17 +79,16 @@ pub fn main(init: std.process.Init) !void {
     const model_path = process_args[1];
     const t10kfilename = process_args[2];
 
-    // Read model shapes.
-    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
-    defer registry.deinit();
-
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
-    // Init model
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{platform.replicated_mesh});
+    // Read model shapes. The store owns the registry.
+    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
+    var store: zml.io.TensorStore = .init(allocator, registry, .{});
     defer store.deinit();
+
+    // Init model
     const mnist_model: Mnist = .init(store.view());
 
     // // Compile model
@@ -119,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
         });
         break :blk try mnist_model.load(init.arena.allocator(), io, platform, &store);
     };
-    defer Mnist.unloadBuffers(&mnist_buffers);
+    defer zml.mem.deinitBufferized(init.arena.allocator(), Mnist, &mnist_buffers);
 
     var args = try exe.args(allocator);
     defer args.deinit(allocator);
@@ -147,7 +138,7 @@ pub fn main(init: std.process.Init) !void {
     printDigit(&sample);
 
     args.set(.{ mnist_buffers, input_buffer });
-    exe.call(io, args, &results, .{});
+    try exe.call(io, args, &results, .{});
     var result: zml.Buffer = results.get(zml.Buffer);
     defer result.deinit();
 

@@ -3,12 +3,15 @@ const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
-const parallel_read = @import("parallel_read.zig");
+const range_read = @import("range_read.zig");
+const request = @import("request.zig");
 const VFSBase = @import("base.zig").VFSBase;
+const Backend = @import("base.zig").Backend;
+const ReadFailure = @import("base.zig").ReadFailure;
+const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
-const log = std.log.scoped(.@"zml/vfs/gcs");
+const log = @import("base.zig").scopedLog(.@"zml/vfs/gcs");
 
-const EndpointUrl = "https://storage.googleapis.com";
 const MetadataUrl = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 
 /// Check if running on Google Compute Engine / Cloud Run host infrastructure,
@@ -51,29 +54,11 @@ const Credentials = union(enum) {
     };
 
     const ServiceAccount = struct {
-        pub const JwtAssertion = struct {
-            iss: []const u8,
-            scope: []const u8 = "https://www.googleapis.com/auth/devstorage.read_only",
-            aud: []const u8 = "https://oauth2.googleapis.com/token",
-            exp: i64,
-            iat: i64,
-            sub: ?[]const u8 = null,
-        };
-
         type: []const u8,
         client_email: []const u8,
         private_key: []const u8,
         token_uri: []const u8,
         quota_project_id: ?[]const u8 = null,
-
-        pub fn makeAssertion(self: *const ServiceAccount, io_: std.Io) JwtAssertion {
-            const now: std.Io.Timestamp = .now(io_, .real);
-            return .{
-                .iss = self.client_email,
-                .iat = now.toSeconds(),
-                .exp = now.addDuration(.fromSeconds(3600)).toSeconds(),
-            };
-        }
     };
 
     authorized_user: AuthorizedUser,
@@ -119,162 +104,43 @@ const Credentials = union(enum) {
     }
 };
 
+test "GCS authorization copies remain stable" {
+    var token_storage: [64]u8 = undefined;
+    const token_header = try std.fmt.bufPrint(&token_storage, "Bearer {s}", .{"first-token"});
+    var authorization_storage: [64]u8 = undefined;
+    const authorization = try GCS.copyAuthorization(token_header, &authorization_storage);
+
+    @memset(token_storage[0..token_header.len], 'x');
+    const copied = switch (authorization) {
+        .override => |value| value,
+        else => return error.UnexpectedAuthorizationValue,
+    };
+    try std.testing.expectEqualStrings("Bearer first-token", copied);
+}
+
 const ReadState = struct { index: usize, objects: [][]const u8 };
 
 pub const GCS = struct {
-    const ParallelRead = struct {
-        const Pool = parallel_read.Pool(Job);
-
-        const Batch = struct {
-            state: parallel_read.BatchState,
-            backend: *GCS,
-            uri: std.Uri,
-            path: []const u8,
-            authorization: std.http.Client.Request.Headers.Value,
-        };
-
-        const Job = struct {
-            data: []const []u8,
-            file_offset: u64,
-            chunk_offset: usize,
-            chunk_len: usize,
-            batch: *Batch,
-
-            pub fn perform(job: Job, client: *std.http.Client) anyerror!parallel_read.Status {
-                var range_buf: [64]u8 = undefined;
-                const range_header = std.fmt.bufPrint(
-                    &range_buf,
-                    "bytes={d}-{d}",
-                    .{ job.file_offset, job.file_offset + @as(u64, @intCast(job.chunk_len - 1)) },
-                ) catch unreachable;
-
-                var req = client.request(
-                    .GET,
-                    job.batch.uri,
-                    .{
-                        .headers = .{
-                            .accept_encoding = .{ .override = "identity" },
-                            .authorization = job.batch.authorization,
-                        },
-                        .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-                    },
-                ) catch |err| {
-                    switch (err) {
-                        // transient connect failures
-                        error.ConnectionRefused,
-                        error.ConnectionResetByPeer,
-                        error.HostUnreachable,
-                        error.NetworkUnreachable,
-                        error.NetworkDown,
-                        error.Timeout,
-                        error.NameServerFailure,
-                        => {
-                            log.warn("Failed to connect: {}", .{err});
-                            return .retry();
-                        },
-                        else => {
-                            log.err("Failed to connect: {}", .{err});
-                            return err;
-                        },
-                    }
-                };
-                defer req.deinit();
-
-                req.sendBodiless() catch |err| switch (err) {
-                    error.WriteFailed => {
-                        log.warn("Failed to send headers: {}", .{err});
-                        return .retry();
-                    },
-                };
-
-                var redirect_buffer: [8 * 1024]u8 = undefined;
-                var res = req.receiveHead(&redirect_buffer) catch |err| {
-                    switch (err) {
-                        // stale keep-alive / peer closed while waiting for response head
-                        error.HttpConnectionClosing,
-                        error.HttpRequestTruncated,
-
-                        // transport read/write failure; retry on a fresh connection
-                        error.ReadFailed,
-                        error.WriteFailed,
-
-                        // transient connect failures
-                        error.ConnectionRefused,
-                        error.ConnectionResetByPeer,
-                        error.HostUnreachable,
-                        error.NetworkUnreachable,
-                        error.NetworkDown,
-                        error.Timeout,
-                        error.NameServerFailure,
-                        => {
-                            log.warn("Failed to receive headers: {}", .{err});
-                            return .retry();
-                        },
-
-                        else => {
-                            log.err("Failed to receive headers: {}", .{err});
-                            return err;
-                        },
-                    }
-                };
-
-                if (res.head.status != .partial_content and res.head.status != .ok) {
-                    const status: parallel_read.Status = switch (res.head.status) {
-                        .request_timeout, .too_many_requests => .retry(),
-                        else => if (res.head.status.class() == .server_error) .retry() else {
-                            log.err("Failed to read {s}: {s}", .{ job.batch.path, res.head.bytes });
-                            return error.RequestFailed;
-                        },
-                    };
-                    log.warn("Failed to read {s}: {s}", .{ job.batch.path, res.head.bytes });
-                    return status;
-                }
-
-                const content_range = blk: {
-                    var it = res.head.iterateHeaders();
-                    while (it.next()) |header| {
-                        if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                            break :blk parallel_read.parseContentRange(header.value);
-                        }
-                    }
-                    break :blk null;
-                };
-
-                const reader = res.reader(&.{});
-                parallel_read.readChunk(reader, content_range, job.file_offset, job.data, job.chunk_offset, job.chunk_len) catch |err| {
-                    switch (err) {
-                        error.EndOfStream,
-                        error.ReadFailed,
-                        => {
-                            log.warn("Failed to read from response: {}", .{err});
-                            return .retry();
-                        },
-                        else => {
-                            log.err("Failed to read from response: {}", .{err});
-                            return err;
-                        },
-                    }
-                };
-
-                return .success;
-            }
-        };
-    };
+    const authorization_header_size = "Bearer ".len + OAuthToken.Size;
 
     const Token = struct {
-        header: []u8,
+        header_storage: []u8,
+        header_len: usize = 0,
         expires_at: std.Io.Timestamp,
 
         fn expired(self: *const Token, io_: std.Io) bool {
             const now: std.Io.Timestamp = .now(io_, .real);
             return now.toSeconds() >= self.expires_at.toSeconds();
         }
+
+        fn header(self: *const Token) []const u8 {
+            return self.header_storage[0..self.header_len];
+        }
     };
 
     pub const Config = struct {
         credentials: ?Credentials = null,
         endpoint_uri: std.Uri,
-        region: []const u8 = "auto",
     };
 
     const Handle = struct {
@@ -305,27 +171,20 @@ pub const GCS = struct {
     client: *std.http.Client,
     config: Config,
     token: Token,
-    read_pool: *ParallelRead.Pool,
+    governor: request.Governor,
+    read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
     base: VFSBase,
 
-    pub const InitOpts = struct {
+    pub const Options = struct {
         credentials: ?union(enum) {
             json: *std.Io.Reader,
             metadata_server: void,
         } = null,
         endpoint_url: []const u8 = "https://storage.googleapis.com",
-        region: []const u8 = "auto",
-        read_pool: parallel_read.InitOpts = .{
-            .chunk_size = 16 << 20,
-            .num_workers = 32,
-            .queue_capacity = 128,
-            .max_retries = 5,
-            .retry_initial_delay = .fromMilliseconds(500),
-            .retry_max_delay = .fromSeconds(30),
-        },
+        retry: request.Retry = .{},
     };
 
     pub const InitError = error{
@@ -333,18 +192,11 @@ pub const GCS = struct {
         Unexpected,
     } || std.mem.Allocator.Error || std.Io.ConcurrentError;
 
-    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, opts: InitOpts) InitError!GCS {
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, options: Options) InitError!GCS {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         errdefer arena.deinit();
-
-        const read_pool = try allocator.create(ParallelRead.Pool);
-        errdefer allocator.destroy(read_pool);
-
-        try read_pool.init(allocator, inner, http_client, opts.read_pool);
-        errdefer read_pool.deinit(allocator, inner);
-
         const config: Config = .{
-            .credentials = if (opts.credentials) |creds| switch (creds) {
+            .credentials = if (options.credentials) |creds| switch (creds) {
                 .json => |reader| blk: {
                     var json_reader: std.json.Reader = .init(allocator, reader);
                     defer json_reader.deinit();
@@ -358,12 +210,11 @@ pub const GCS = struct {
                 },
                 .metadata_server => .{ .metadata_server = {} },
             } else null,
-            .endpoint_uri = std.Uri.parse(try arena.allocator().dupe(u8, opts.endpoint_url)) catch return InitError.Unexpected,
-            .region = try arena.allocator().dupe(u8, opts.region),
+            .endpoint_uri = std.Uri.parse(try arena.allocator().dupe(u8, options.endpoint_url)) catch return InitError.Unexpected,
         };
 
         const token: Token = .{
-            .header = try arena.allocator().alloc(u8, "Bearer ".len + OAuthToken.Size),
+            .header_storage = try arena.allocator().alloc(u8, authorization_header_size),
             .expires_at = .zero,
         };
 
@@ -374,7 +225,7 @@ pub const GCS = struct {
             .client = http_client,
             .config = config,
             .token = token,
-            .read_pool = read_pool,
+            .governor = .init(options.retry),
         };
     }
 
@@ -419,49 +270,98 @@ pub const GCS = struct {
         return std.Io.Dir.openFile(.cwd(), io_, path, .{}) catch null;
     }
 
-    fn refreshMetadataServerToken(client: *std.http.Client, buffer: []u8) !?[]const u8 {
-        var response_writer: std.Io.Writer = .fixed(buffer);
-        const result = try client.fetch(.{
-            .location = .{ .url = MetadataUrl },
-            .method = .GET,
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-            },
-            .extra_headers = &.{
-                .{ .name = "Metadata-Flavor", .value = "Google" },
-            },
-            .response_writer = &response_writer,
-        });
-
-        if (result.status != .ok) {
-            return null;
-        }
-
-        return response_writer.buffered();
+    /// The metadata server's token, through the governed loop: a throttled
+    /// token endpoint holds the backend like any other request. Null when
+    /// the server answers something other than a token.
+    fn refreshMetadataServerToken(self: *GCS, buffer: []u8) !?[]const u8 {
+        var token: TokenRequest = .{
+            .gcs = self,
+            .uri = try .parse(MetadataUrl),
+            .target = "the metadata server",
+            .buffer = buffer,
+            .extra_headers = &.{.{ .name = "Metadata-Flavor", .value = "Google" }},
+            .accept_any = true,
+        };
+        return request.perform(?[]const u8, self.requestContext(), token.spec(), &token, TokenRequest.attempt);
     }
 
-    fn refreshAuthorizedUserToken(client: *std.http.Client, authorized_user: Credentials.AuthorizedUser, buffer: []u8) ![]const u8 {
-        var response_writer: std.Io.Writer = .fixed(buffer);
-        const result = try client.fetch(.{
-            .location = .{ .url = "https://oauth2.googleapis.com/token" },
+    fn refreshAuthorizedUserToken(self: *GCS, authorized_user: Credentials.AuthorizedUser, buffer: []u8) ![]const u8 {
+        // The payload shares the caller's buffer with the response, as it
+        // did before: it is consumed by the time the body is read.
+        var payload_buffer: [2 * 1024]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&payload_buffer, "grant_type=refresh_token&client_id={f}&client_secret={f}&refresh_token={f}", .{
+            std.fmt.alt(std.Uri.Component{ .raw = authorized_user.client_id }, .formatQuery),
+            std.fmt.alt(std.Uri.Component{ .raw = authorized_user.client_secret }, .formatQuery),
+            std.fmt.alt(std.Uri.Component{ .raw = authorized_user.refresh_token }, .formatQuery),
+        });
+        var token: TokenRequest = .{
+            .gcs = self,
+            .uri = try .parse("https://oauth2.googleapis.com/token"),
+            .target = "the ADC token endpoint",
+            .buffer = buffer,
             .method = .POST,
-            .payload = try std.fmt.bufPrint(buffer, "grant_type=refresh_token&client_id={f}&client_secret={f}&refresh_token={f}", .{
-                std.fmt.alt(std.Uri.Component{ .raw = authorized_user.client_id }, .formatQuery),
-                std.fmt.alt(std.Uri.Component{ .raw = authorized_user.client_secret }, .formatQuery),
-                std.fmt.alt(std.Uri.Component{ .raw = authorized_user.refresh_token }, .formatQuery),
-            }),
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-                .content_type = .{ .override = "application/x-www-form-urlencoded" },
-            },
-            .response_writer = &response_writer,
-        });
-        if (result.status != .ok) {
-            log.err("Failed to refresh ADC token: {s}", .{response_writer.buffered()});
-            return error.RequestFailed;
-        }
-        return response_writer.buffered();
+            .payload = payload,
+            .content_type = .{ .override = "application/x-www-form-urlencoded" },
+        };
+        return try request.perform(?[]const u8, self.requestContext(), token.spec(), &token, TokenRequest.attempt) orelse
+            error.RequestFailed;
     }
+
+    /// One OAuth token exchange: `null` when the endpoint answered a status
+    /// the caller tolerates (the metadata server on a host without one).
+    const TokenRequest = struct {
+        gcs: *GCS,
+        uri: std.Uri,
+        target: []const u8,
+        buffer: []u8,
+        method: std.http.Method = .GET,
+        payload: ?[]u8 = null,
+        content_type: std.http.Client.Request.Headers.Value = .default,
+        extra_headers: []const std.http.Header = &.{},
+        /// The metadata server's non-200 is an answer, not a failure.
+        accept_any: bool = false,
+
+        fn spec(self: *const TokenRequest) request.RequestSpec {
+            return .{
+                .backend = "gcs",
+                .target = self.target,
+                .unavailable = unavailable,
+                .key = request.authorityOf(self.uri),
+            };
+        }
+
+        fn attempt(self: *TokenRequest, current: request.Attempt) anyerror!request.Outcome(?[]const u8) {
+            var head_buffer: [8 * 1024]u8 = undefined;
+            return request.exchange(?[]const u8, current, self.uri, .{
+                .method = self.method,
+                .headers = .{
+                    .accept_encoding = .{ .override = "identity" },
+                    .content_type = self.content_type,
+                },
+                .extra_headers = self.extra_headers,
+                .payload = self.payload,
+                .accept = if (self.accept_any) .{ .statuses = &all_client_errors } else .{},
+                .redirects = .follow,
+                .head_buffer = &head_buffer,
+            }, self, TokenRequest.consume);
+        }
+
+        fn consume(self: *TokenRequest, res: *std.http.Client.Response) anyerror!?[]const u8 {
+            if (res.head.status != .ok) return null;
+            var writer: std.Io.Writer = .fixed(self.buffer);
+            _ = try res.reader(&.{}).streamRemaining(&writer);
+            return writer.buffered();
+        }
+    };
+
+    /// Statuses the metadata-server probe treats as "no token here".
+    const all_client_errors = [_]std.http.Status{
+        .bad_request,
+        .unauthorized,
+        .forbidden,
+        .not_found,
+        .method_not_allowed,
+    };
 
     fn refreshServiceAccountToken(io_: std.Io, client: *std.http.Client, service_account: Credentials.ServiceAccount, buffer: []u8) ![]const u8 {
         _ = io_;
@@ -469,79 +369,60 @@ pub const GCS = struct {
         _ = service_account;
         _ = buffer;
         return error.Unimplemented;
-
-        // const assertion = service_account.makeAssertion(io_);
-
-        // var tmp_buffer: [8 * 1024]u8 = undefined;
-
-        // var buffer_writer: std.Io.Writer = .fixed(buffer);
-        // var signing_input_buffer: [2 * 1024]u8 = undefined;
-        // var signing_input_writer: std.Io.Writer = .fixed(signing_input_buffer);
-
-        // const encoded_rs256_header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
-        // try signing_input_writer.print("{s}.", .{encoded_rs256_header});
-        // std.base64.url_safe_no_pad.Encoder.encodeWriter(
-        //     signing_input_writer,
-        //     try std.fmt.bufPrint(tmp_buffer, "{f}", .{
-        //         std.json.fmt(assertion, .{}),
-        //     }),
-        // );
-        // const signing_input = signing_input_writer.buffered();
-        // _ = signing_input;
-
-        // const result = try client.fetch(.{
-        //     .location = .{ .url = "https://oauth2.googleapis.com/token" },
-        //     .method = .POST,
-        //     .payload = try std.fmt.bufPrint(buffer, "grant_type=refresh_token&client_id={f}&client_secret={f}&refresh_token={f}", .{
-        //         std.fmt.alt(std.Uri.Component{ .raw = service_account.client_id }, .formatQuery),
-        //         std.fmt.alt(std.Uri.Component{ .raw = authorized_user.client_secret }, .formatQuery),
-        //         std.fmt.alt(std.Uri.Component{ .raw = authorized_user.refresh_token }, .formatQuery),
-        //     }),
-        //     .headers = .{
-        //         .accept_encoding = .{ .override = "identity" },
-        //         .content_type = .{ .override = "application/x-www-form-urlencoded" },
-        //     },
-        //     .response_writer = &response_writer,
-        // });
-        // if (result.status != .ok) {
-        //     log.err("Failed to refresh ADC token: {s}", .{response_writer.buffered()});
-        //     return error.RequestFailed;
-        // }
     }
 
     fn refreshToken(self: *GCS) !void {
         var buffer: [4 * 1024]u8 = undefined;
         const payload = switch (self.config.credentials.?) {
-            .authorized_user => |authorized_user| try refreshAuthorizedUserToken(self.client, authorized_user, &buffer),
+            .authorized_user => |authorized_user| try self.refreshAuthorizedUserToken(authorized_user, &buffer),
             .service_account => |service_account| try refreshServiceAccountToken(self.base.inner, self.client, service_account, &buffer),
-            .metadata_server => try refreshMetadataServerToken(self.client, &buffer) orelse return error.RequestFailed,
+            .metadata_server => try self.refreshMetadataServerToken(&buffer) orelse return error.RequestFailed,
         };
         const oauth_token = try std.json.parseFromSlice(OAuthToken, self.allocator, payload, .{
             .allocate = .alloc_if_needed,
             .ignore_unknown_fields = true,
         });
         defer oauth_token.deinit();
-        self.token = .{
-            .header = try std.fmt.bufPrint(self.token.header, "Bearer {s}", .{oauth_token.value.access_token}),
-            .expires_at = std.Io.Clock.now(.real, self.base.inner).addDuration(.fromSeconds(@intCast(oauth_token.value.expires_in))),
-        };
+        const header = try std.fmt.bufPrint(self.token.header_storage, "Bearer {s}", .{oauth_token.value.access_token});
+        self.token.header_len = header.len;
+        self.token.expires_at = std.Io.Clock.now(.real, self.base.inner).addDuration(
+            .fromSeconds(@intCast(oauth_token.value.expires_in)),
+        );
     }
 
-    fn getOrRefreshToken(self: *GCS) !std.http.Client.Request.Headers.Value {
+    /// `getOrRefreshToken` from inside an attempt: a refresh is a governed
+    /// request of its own, so the attempt's stall clock does not run.
+    fn watchedToken(self: *GCS, attempt: request.Attempt, authorization_buffer: []u8) !std.http.Client.Request.Headers.Value {
+        attempt.setWaiting(true);
+        defer attempt.setWaiting(false);
+        return self.getOrRefreshToken(authorization_buffer);
+    }
+
+    fn getOrRefreshToken(
+        self: *GCS,
+        authorization_buffer: []u8,
+    ) !std.http.Client.Request.Headers.Value {
         if (self.config.credentials == null) {
             return .omit;
         }
 
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
         if (self.token.expired(self.base.inner)) {
             try self.refreshToken();
         }
-        return .{ .override = self.token.header };
+        return copyAuthorization(self.token.header(), authorization_buffer);
+    }
+
+    fn copyAuthorization(
+        header: []const u8,
+        authorization_buffer: []u8,
+    ) !std.http.Client.Request.Headers.Value {
+        return .{ .override = try std.fmt.bufPrint(authorization_buffer, "{s}", .{header}) };
     }
 
     pub fn deinit(self: *GCS) void {
-        self.read_pool.deinit(self.allocator, self.base.inner);
-        self.allocator.destroy(self.read_pool);
-
+        self.read_stats.logTotals("gcs");
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -588,6 +469,13 @@ pub const GCS = struct {
                 .fileSeekTo = fileSeekTo,
                 .fileRealPath = fileRealPath,
             }),
+        };
+    }
+
+    pub fn backend(self: *GCS) Backend {
+        return .{
+            .io = self.io(),
+            .read_hints = .{ .high_latency = true },
         };
     }
 
@@ -640,9 +528,12 @@ pub const GCS = struct {
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
-                const total = self.performRead(handle, o.data, handle.pos) catch |err| {
-                    log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                    return .{ .file_read_streaming = error.EndOfStream };
+                const total = self.performRead(handle, o.data, handle.pos) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => {
+                        log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
+                        return .{ .file_read_streaming = error.InputOutput };
+                    },
                 };
 
                 if (total == 0) {
@@ -688,11 +579,9 @@ pub const GCS = struct {
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
         const self: *GCS = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
-        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
-            error.FileNotFound => return std.Io.File.OpenError.FileNotFound,
-            error.PermissionDenied => return std.Io.File.OpenError.PermissionDenied,
-            else => return std.Io.File.OpenError.Unexpected,
-        };
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
+        const size = self.fetchSize(path) catch |err| return request.openFailure("gcs", path, err);
 
         return .{
             .inode = 0,
@@ -707,18 +596,19 @@ pub const GCS = struct {
         };
     }
 
-    fn dirAccess(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {}
+    fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+        const self: *GCS = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
+        _ = self.fetchSize(path) catch |err| return request.openFailure("gcs", path, err);
+    }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *GCS = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
-        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
-            error.FileNotFound => return std.Io.File.OpenError.FileNotFound,
-            error.PermissionDenied => return std.Io.File.OpenError.PermissionDenied,
-            else => return std.Io.File.OpenError.Unexpected,
-        };
-
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
+        const size = self.fetchSize(path) catch |err| return request.openFailure("gcs", path, err);
+
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, path, size) catch return std.Io.File.OpenError.Unexpected;
 
@@ -744,7 +634,10 @@ pub const GCS = struct {
             }
 
             const handle = self.getDirHandle(reader.dir);
-            const objects = self.listObjects(handle.uri) catch return std.Io.Dir.Reader.Error.Unexpected;
+            const objects = self.listObjects(handle.uri) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return std.Io.Dir.Reader.Error.Unexpected,
+            };
 
             self.dir_read_states.put(self.allocator, reader, .{
                 .index = 0,
@@ -829,9 +722,14 @@ pub const GCS = struct {
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
         const self: *GCS = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
-        return self.performRead(handle, data, offset) catch |err| {
-            log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-            return std.Io.File.ReadPositionalError.Unexpected;
+        return self.performRead(handle, data, offset) catch |err| switch (err) {
+            // A cancelled task must not surface as an I/O failure: every
+            // wait in the governed loop is a cancellation point.
+            error.Canceled => return error.Canceled,
+            else => {
+                log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
+                return std.Io.File.ReadPositionalError.Unexpected;
+            },
         };
     }
 
@@ -839,16 +737,11 @@ pub const GCS = struct {
         const self: *GCS = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
 
-        if (relative_offset >= 0) {
-            handle.pos = handle.pos +| @as(u64, @intCast(relative_offset));
-        } else {
-            const abs_offset: u64 = @intCast(-relative_offset);
-            if (abs_offset > handle.pos) {
-                handle.pos = 0;
-            } else {
-                handle.pos -= abs_offset;
-            }
-        }
+        // Saturates at both ends; `@abs` takes `minInt(i64)` too.
+        handle.pos = if (relative_offset >= 0)
+            handle.pos +| @abs(relative_offset)
+        else
+            handle.pos -| @abs(relative_offset);
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
@@ -864,25 +757,6 @@ pub const GCS = struct {
         return path.len;
     }
 
-    fn getTimestamp(self: *GCS, buf: []u8) ![]const u8 {
-        const now_ts = std.Io.Clock.now(.real, self.base.inner);
-
-        const now: u64 = @intCast(@divFloor(now_ts.nanoseconds, std.time.ns_per_s));
-        const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = now };
-        const year_day = epoch_secs.getEpochDay().calculateYearDay();
-        const month_day = year_day.calculateMonthDay();
-        const day_seconds = epoch_secs.getDaySeconds();
-
-        return try std.fmt.bufPrint(buf, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
-            year_day.year,
-            @backingInt(month_day.month),
-            month_day.day_index + 1,
-            day_seconds.getHoursIntoDay(),
-            day_seconds.getMinutesIntoHour(),
-            day_seconds.getSecondsIntoMinute(),
-        });
-    }
-
     fn pathComponents(_: *GCS, path_: []const u8) struct { []const u8, []const u8 } {
         const path = std.mem.trim(u8, path_, "/");
 
@@ -893,42 +767,15 @@ pub const GCS = struct {
         }
     }
 
-    fn gcsUri(self: *GCS, path: []const u8) std.Uri {
+    /// The object's URI. A VFS path is `bucket/key`; the request target
+    /// needs `/bucket/key`, formatted into `buffer`, which the URI borrows.
+    fn gcsUri(self: *GCS, path: []const u8, buffer: []u8) !std.Uri {
         var uri = self.config.endpoint_uri;
-        uri.path = .{ .raw = path };
+        const absolute = if (std.mem.startsWith(u8, path, "/")) path else std.fmt.bufPrint(buffer, "/{s}", .{path}) catch return error.NameTooLong;
+        uri.path = .{ .raw = absolute };
         uri.query = .{ .percent_encoded = "alt=media" };
         return uri;
     }
-
-    // fn authHeaders(self: *GCS, _: std.http.Method, _: std.Uri, _: []const u8, authorization_buffer: []u8) !struct {
-    //     authorization: ?[]const u8,
-    //     extra_headers: [3]?std.http.Header,
-    //     extra_len: usize,
-    // } {
-    //     if (self.config.oauth_access_token == null) {
-    //         if (self.config.googleCredentialsJsonStr) |json| {
-    //             const oauth = try refreshAuthorizedUserTokenFromJson(self.allocator, self.base.inner, json);
-    //             if (self.config.oauth_access_token) |old_token| self.allocator.free(old_token);
-    //             if (self.config.quota_project_id) |old_project| self.allocator.free(old_project);
-    //             self.config.oauth_access_token = oauth.access_token;
-    //             self.config.quota_project_id = oauth.quota_project_id;
-    //         }
-    //     }
-
-    //     const token = self.config.oauth_access_token orelse return error.MissingCredentials;
-    //     const authorization = try std.fmt.bufPrint(authorization_buffer, "Bearer {s}", .{token});
-    //     var extra_headers: [3]?std.http.Header = .{ null, null, null };
-    //     var extra_len: usize = 0;
-    //     if (self.config.quota_project_id) |project| {
-    //         extra_headers[0] = .{ .name = "x-goog-user-project", .value = project };
-    //         extra_len = 1;
-    //     }
-    //     return .{
-    //         .authorization = authorization,
-    //         .extra_headers = extra_headers,
-    //         .extra_len = extra_len,
-    //     };
-    // }
 
     fn listObjectsBody(self: *GCS, bucket: []const u8, key_prefix: []const u8) ![]u8 {
         var query_buf: [4096]u8 = undefined;
@@ -951,35 +798,46 @@ pub const GCS = struct {
         uri.path = .{ .percent_encoded = try std.fmt.bufPrint(&path_buf, "/{s}", .{bucket}) };
         uri.query = .{ .percent_encoded = query_writer.buffered() };
 
-        var req = try self.client.request(.GET, uri, .{
-            .redirect_behavior = .not_allowed,
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-                .authorization = try self.getOrRefreshToken(),
-            },
-            .extra_headers = if (self.quotaProjectId()) |project|
-                &.{.{ .name = "x-goog-user-project", .value = project }}
-            else
-                &.{},
-        });
-        defer req.deinit();
+        var listing: Listing = .{ .gcs = self, .uri = uri };
+        return request.perform([]u8, self.requestContext(), .{
+            .backend = "gcs",
+            .target = bucket,
+            .unavailable = unavailable,
+            .key = request.authorityOf(uri),
+        }, &listing, Listing.attempt);
+    }
 
-        try req.sendBodiless();
+    /// The bucket listing. The bearer token is copied per attempt, so one
+    /// that expired during a hold is refreshed before the next try.
+    const Listing = struct {
+        gcs: *GCS,
+        uri: std.Uri,
+        authorization: [authorization_header_size]u8 = undefined,
 
-        var redirect_buffer: [2 * 1024]u8 = undefined;
-        var res = try req.receiveHead(&redirect_buffer);
-
-        if (res.head.status != .ok) {
-            log.err("Failed to list object {f}", .{uri});
-            log.err("{s}", .{res.head.bytes});
-            return error.RequestFailed;
+        fn attempt(self: *Listing, current: request.Attempt) anyerror!request.Outcome([]u8) {
+            var head_buffer: [2 * 1024]u8 = undefined;
+            const authorization = try self.gcs.watchedToken(current, &self.authorization);
+            return request.exchange([]u8, current, self.uri, .{
+                .headers = .{
+                    .accept_encoding = .{ .override = "identity" },
+                    .authorization = authorization,
+                },
+                .extra_headers = if (self.gcs.quotaProjectId()) |project|
+                    &.{.{ .name = "x-goog-user-project", .value = project }}
+                else
+                    &.{},
+                .head_buffer = &head_buffer,
+            }, self, Listing.consume);
         }
 
-        return if (res.head.content_length) |content_len|
-            try res.reader(&.{}).readAlloc(self.allocator, content_len)
-        else
-            try res.reader(&.{}).allocRemaining(self.allocator, .limited(1024 * 1024));
-    }
+        fn consume(self: *Listing, res: *std.http.Client.Response) anyerror![]u8 {
+            const allocator = self.gcs.allocator;
+            return if (res.head.content_length) |content_len|
+                try res.reader(&.{}).readAlloc(allocator, content_len)
+            else
+                try res.reader(&.{}).allocRemaining(allocator, .limited(1024 * 1024));
+        }
+    };
 
     fn listObjects(self: *GCS, prefix: []const u8) ![][]const u8 {
         const bucket, const key_prefix = self.pathComponents(prefix);
@@ -1030,75 +888,92 @@ pub const GCS = struct {
         return try results.toOwnedSlice(self.allocator);
     }
 
-    fn fetchSize(self: *GCS, dir: std.Io.Dir, sub_path: []const u8) !u64 {
-        var path_buffer: [8 * 1024]u8 = undefined;
-        const path = try self.resolvePath(dir, sub_path, &path_buffer);
-        const uri = self.gcsUri(path);
-        var req = try self.client.request(.HEAD, uri, .{
-            .redirect_behavior = .not_allowed,
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-                .authorization = try self.getOrRefreshToken(),
-            },
-            .extra_headers = &.{},
-        });
-        defer req.deinit();
+    fn fetchSize(self: *GCS, path: []const u8) !u64 {
+        var uri_path_buffer: [8 * 1024 + 1]u8 = undefined;
+        const uri = try self.gcsUri(path, &uri_path_buffer);
+        var head: SizeRequest = .{ .gcs = self, .uri = uri };
+        return request.perform(u64, self.requestContext(), .{
+            .backend = "gcs",
+            .target = path,
+            .unavailable = unavailable,
+            .key = request.authorityOf(uri),
+        }, &head, SizeRequest.attempt);
+    }
 
-        try req.sendBodiless();
+    /// The object's size: one HEAD. An absent or denied object fails as
+    /// `request.openStatus` says.
+    const SizeRequest = struct {
+        gcs: *GCS,
+        uri: std.Uri,
+        authorization: [authorization_header_size]u8 = undefined,
 
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        const res = try req.receiveHead(&redirect_buffer);
-
-        const size = switch (res.head.status.class()) {
-            .success => res.head.content_length.?,
-            else => switch (res.head.status) {
-                .not_found => return error.FileNotFound,
-                .unauthorized, .forbidden => return error.PermissionDenied,
-                else => blk: {
-                    log.err("Failed to fetch size for {f}: {s}", .{ uri, res.head.bytes });
-                    break :blk error.ServerError;
+        fn attempt(self: *SizeRequest, current: request.Attempt) anyerror!request.Outcome(u64) {
+            var head_buffer: [8 * 1024]u8 = undefined;
+            const authorization = try self.gcs.watchedToken(current, &self.authorization);
+            return request.exchange(u64, current, self.uri, .{
+                .method = .HEAD,
+                .headers = .{
+                    .accept_encoding = .{ .override = "identity" },
+                    .authorization = authorization,
                 },
-            },
+                .accept = .{ .statuses = request.open_statuses },
+                .head_buffer = &head_buffer,
+            }, self, SizeRequest.consume);
+        }
+
+        fn consume(_: *SizeRequest, res: *std.http.Client.Response) anyerror!u64 {
+            if (request.openStatus(res.head.status)) |err| return err;
+            return res.head.content_length orelse error.MissingContentLength;
+        }
+    };
+
+    /// Everything a governed request needs from this backend.
+    fn requestContext(self: *GCS) request.Context {
+        return .{
+            .io = self.base.inner,
+            .client = self.client,
+            .governor = &self.governor,
+            .stats = &self.read_stats,
         };
-        return size;
     }
 
     fn performRead(self: *GCS, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        const read_size = parallel_read.readSize(handle.size, offset, data);
-        if (read_size == 0) return 0;
-
-        const uri = self.gcsUri(handle.uri);
-        const job_count = std.math.divCeil(usize, read_size, self.read_pool.chunk_size) catch unreachable;
-        const jobs = try self.allocator.alloc(ParallelRead.Job, job_count);
-        defer self.allocator.free(jobs);
-        const pending: u32 = @intCast(job_count);
-
-        var batch: ParallelRead.Batch = .{
-            .state = .{ .pending = .init(pending) },
-            .backend = self,
-            .uri = uri,
-            .path = handle.uri,
-            .authorization = try self.getOrRefreshToken(),
-        };
-
-        for (jobs, 0..) |*job, i| {
-            const chunk_offset = i * self.read_pool.chunk_size;
-            job.* = .{
-                .data = data,
-                .file_offset = offset + @as(u64, @intCast(chunk_offset)),
-                .chunk_offset = chunk_offset,
-                .chunk_len = @min(self.read_pool.chunk_size, read_size - chunk_offset),
-                .batch = &batch,
-            };
-        }
-
-        try self.read_pool.job_queue.putAll(self.base.inner, jobs);
-        batch.state.waitUncancelable(self.base.inner);
-        if (batch.state.anyError()) |err| return err;
-
-        return read_size;
+        var uri_path_buffer: [8 * 1024 + 1]u8 = undefined;
+        var bearer: BearerRequest = .{ .gcs = self, .uri = try self.gcsUri(handle.uri, &uri_path_buffer) };
+        return range_read.performRangeRead(self.requestContext(), .{
+            .request = .{
+                .backend = "gcs",
+                .target = handle.uri,
+                .unavailable = unavailable,
+                .key = request.authorityOf(bearer.uri),
+            },
+            .context = &bearer,
+            .prepare = BearerRequest.prepare,
+        }, data, offset, range_read.readSize(handle.size, offset, data));
     }
+
+    /// GCS answers rate limiting with `503` as well as `429`.
+    const unavailable: ReadFailure = .throttle;
+
+    /// The bearer token is copied per attempt, so one that expired during a
+    /// retry delay is refreshed before the next GET.
+    const BearerRequest = struct {
+        gcs: *GCS,
+        uri: std.Uri,
+        authorization: [authorization_header_size]u8 = undefined,
+
+        fn prepare(context: *anyopaque, _: request.Attempt, _: std.http.Header) anyerror!range_read.PreparedRequest {
+            const self: *BearerRequest = @ptrCast(@alignCast(context));
+            return .{ .uri = self.uri, .authorization = try self.gcs.getOrRefreshToken(&self.authorization) };
+        }
+    };
 };
+
+test "GCS classifies 503 as throttling" {
+    try std.testing.expectEqual(ReadFailure.throttle, request.classifyStatus(.service_unavailable, GCS.unavailable).?);
+    try std.testing.expectEqual(ReadFailure.server_failure, request.classifyStatus(.bad_gateway, GCS.unavailable).?);
+    try std.testing.expect(request.classifyStatus(.forbidden, GCS.unavailable) == null);
+}
 
 test "GCS parses XML bucket listing objects and common prefixes" {
     const xml =

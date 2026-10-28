@@ -53,28 +53,12 @@ pub fn main(init: std.process.Init) !void {
     //
     // Virtual File Systems
     //
-    var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
-    defer vfs_file.deinit();
-
-    var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
-    defer http_client.deinit();
-
-    var hf_vfs: zml.io.VFS.HF = try .auto(allocator, init.io, &http_client, init.environ_map);
-    defer hf_vfs.deinit();
-
-    var s3_vfs: zml.io.VFS.S3 = try .auto(allocator, init.io, &http_client, init.environ_map);
-    defer s3_vfs.deinit();
-
-    var gcs_vfs: zml.io.VFS.GCS = try .auto(allocator, init.io, &http_client, init.environ_map);
-    defer gcs_vfs.deinit();
-
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
 
-    try vfs.register("file", vfs_file.io());
-    try vfs.register("gs", gcs_vfs.io());
-    try vfs.register("hf", hf_vfs.io());
-    try vfs.register("s3", s3_vfs.io());
+    var remotes: zml.io.VFS.Remotes = undefined;
+    try remotes.init(allocator, &vfs, init.environ_map);
+    defer remotes.deinit();
 
     const io = vfs.io();
 
@@ -83,8 +67,13 @@ pub fn main(init: std.process.Init) !void {
     //
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
-
     log.info("\n{f}", .{platform.fmtVerbose()});
+
+    // Returns at once: the loader calibrates on its own task while the model
+    // is initialized and compiled. Load buffers after compilation to leave
+    // enough device memory for autotuning.
+    var loader: ?zml.io.Loader = try zml.io.Loader.init(allocator, io, platform, .{ .checkpoint = args.model });
+    defer if (loader) |*l| l.deinit();
 
     const backend: zml.attention.Backend = if (args.backend) |selected| switch (selected) {
         .stablehlo => .{ .stablehlo = {} },
@@ -100,14 +89,22 @@ pub fn main(init: std.process.Init) !void {
     log.info("Resolving model repository..", .{});
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
     defer repo.close(io);
+    var progress = std.Progress.start(io, .{ .root_name = args.model });
+    errdefer progress.end();
+    var tokenizer_fut = try io.concurrent(
+        loadTokenizer,
+        .{ allocator, io, repo, &progress },
+    );
+    defer if (tokenizer_fut.cancel(io)) |tokenizer| {
+        var t = tokenizer;
+        t.deinit();
+    } else |_| {};
 
     log.info("Initializing model..", .{});
-    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
-    defer registry.deinit();
-
     // Defines how the model's tensors are sharded across the available devices.
     const meshes: models.Meshes = try .init(platform);
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &meshes.all());
+    const registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
+    var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &meshes.all() });
     defer store.deinit();
 
     const generation: models.GenerationOptions = .{
@@ -122,20 +119,18 @@ pub fn main(init: std.process.Init) !void {
     //
     // Load the model and compile it
     //
-    var progress = std.Progress.start(io, .{ .root_name = args.model });
-    errdefer progress.end();
-
-    var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
-    defer tokenizer.deinit();
-
     var compiled_model = try allocator.create(models.CompiledModel);
     defer allocator.destroy(compiled_model);
     compiled_model.* = try models.LoadedModel.compile(&model, allocator, io, platform, backend, meshes, args.seqlen, &progress);
     defer compiled_model.deinit();
 
-    // Load buffers after the model compilation to be sure to give enough room to the autotune.
-    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress);
+    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, &loader.?, progress, &store);
     defer model.unloadBuffers(&model_buffers, allocator);
+    // Release the pinned staging pools as soon as the weights are loaded.
+    loader.?.deinit();
+    loader = null;
+
+    const tokenizer = try tokenizer_fut.await(io);
 
     progress.end();
 

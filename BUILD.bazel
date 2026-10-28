@@ -37,9 +37,9 @@ zls_completion(
     deps = [
         "//bin/zml-smi",
         "//examples/llm",
+        "//examples/io",
         "//examples/mnist",
         "//examples/sharding",
-        "//examples/io:playground",
         "//stdx",
         "//zml",
         "//zml/tokenizer/iree",

@@ -160,7 +160,6 @@ bazel build //my_project:torch2zml
 ./bazel-bin/my_project/torch2zml /path/to/my/model.safetensors.index.json ./my_project/Llama-3.2-1B-Instruct.activations.safetensors
 
 info: Found 564 activations in /Users/corendos/dev/zml/python/temp/Llama-3.2-1B-Instruct.activations.safetensors
-debug(zml/safetensors): Added new metadata key=format with value=pt
 info: Found 146 activations in /Users/corendos/models/Llama-3.2-1B-Instruct/model.safetensors
 ```
 
@@ -185,12 +184,14 @@ The `zml.nn.Linear` is the equivalent of `torch.nn.Linear` and is defined by
 its `weight` and optional `bias` tensors.
 
 To create such a struct from our `model_registry` dictionary, we first need to
-convert it to a `TensorStore`:
+convert it to a `TensorStore`. The store takes ownership of the registry and
+frees it in `deinit`, so declare `model_registry` with `const` and remove its
+`defer model_registry.deinit();` above:
 
 ```zig
 pub fn main(init: std.process.Init) !void {
     ...
-    var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry, &.{});
+    var model_store: zml.io.TensorStore = .init(allocator, model_registry, .{});
     defer model_store.deinit();
 }
 ```
@@ -206,17 +207,17 @@ pub fn main(init: std.process.Init) !void {
     const mlp: Mlp = .{
         .up_proj = .init(
             mlp_view.createReplicatedTensor("up_proj.weight", .{ .dout, .d }),
-            mlp_view.maybeCreateReplicatedTensor("up_proj.bias", .{.dout}),
+            mlp_view.maybeCreateTensor("up_proj.bias", .{.dout}, .replicated, .{}),
             .d,
         ),
         .gate_proj = .init(
             mlp_view.createReplicatedTensor("gate_proj.weight", .{ .dout, .d }),
-            mlp_view.maybeCreateReplicatedTensor("gate_proj.bias", .{.dout}),
+            mlp_view.maybeCreateTensor("gate_proj.bias", .{.dout}, .replicated, .{}),
             .d,
         ),
         .down_proj = .init(
             mlp_view.createReplicatedTensor("down_proj.weight", .{ .d, .dout }),
-            mlp_view.maybeCreateReplicatedTensor("down_proj.bias", .{.d}),
+            mlp_view.maybeCreateTensor("down_proj.bias", .{.d}, .replicated, .{}),
             .dout,
         ),
     };
@@ -235,15 +236,24 @@ Python script. Alternatively, Huggingface's web-interface allows to peek into
 ## Loading an individual layer
 
 Currently, the layer is initialized but the weights are still on the disk.
-ZML provides a convenience to automatically load weights from an initialized model:
+`zml.io.Loader` loads the weights of an initialized model into device buffers.
+Each tensor is placed as its shape says (here replicated):
 
 ```zig
 pub fn main(init: std.process.Init) !void {
     ...
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator);
-    var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, &model_store, .auto);
+    defer platform.deinit(allocator, io);
+
+    var mlp_weights = try zml.mem.bufferize(allocator, Mlp, &mlp);
+    defer zml.mem.deinitBufferized(allocator, Mlp, &mlp_weights);
+    {
+        var loader = try zml.io.Loader.init(allocator, io, platform, .{});
+        defer loader.deinit();
+        try loader.start(&mlp, &mlp_weights, &model_store, .none);
+        try loader.wait();
+    }
 }
 ```
 
@@ -287,7 +297,9 @@ pub const Wrapper = struct {
 pub fn main(init: std.process.Init) !void {
     ...
 
-    var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry, &.{});
+    // The store owns the registry: declare `activations_registry` with `const`
+    // and remove `defer activations_registry.deinit();`.
+    var activations_store: zml.io.TensorStore = .init(allocator, activations_registry, .{});
     defer activations_store.deinit();
 
     try zml.testing.testLayer(allocator, io, platform, Wrapper{ .mlp = mlp }, .forward, activations_store.view(), "model.model.layers.0.mlp", .{ .mlp = mlp_weights }, &.{}, .{});

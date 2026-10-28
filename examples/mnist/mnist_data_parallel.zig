@@ -39,13 +39,12 @@ const Mnist = struct {
         store: *const zml.io.TensorStore,
     ) !zml.Bufferized(Mnist) {
         var buffers = try zml.mem.bufferize(allocator, Mnist, self);
-        errdefer zml.Buffer.deinitAll(Mnist, &buffers);
+        errdefer zml.mem.deinitBufferized(allocator, Mnist, &buffers);
 
-        var loader: zml.io.Loader = try .init(allocator, platform, .default);
-        errdefer loader.deinit();
-
-        try loader.load(io, Mnist, self, &buffers, store, .{});
-        try loader.await(io);
+        var loader = try zml.io.Loader.init(allocator, io, platform, .{});
+        defer loader.deinit();
+        try loader.start(self, &buffers, store, .none);
+        try loader.wait();
 
         return buffers;
     }
@@ -85,10 +84,6 @@ pub fn main(init: std.process.Init) !void {
     const model_path = process_args[1];
     const t10kfilename = process_args[2];
 
-    // Read model shapes.
-    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
-    defer registry.deinit();
-
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
@@ -105,7 +100,9 @@ pub fn main(init: std.process.Init) !void {
     var profiler = try platform.profiler(allocator, io, .{ .session_id = "mnist" });
     defer profiler.deinit();
 
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry, &.{dp_mp});
+    // Read model shapes. The store owns the registry.
+    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
+    var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &.{dp_mp} });
     defer store.deinit();
     const mnist_model: Mnist = .init(store.view());
 
@@ -140,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
         });
         break :blk try mnist_model.load(init.arena.allocator(), io, platform, &store);
     };
-    defer zml.Buffer.deinitAll(Mnist, &mnist_buffers);
+    defer zml.mem.deinitBufferized(init.arena.allocator(), Mnist, &mnist_buffers);
 
     var args = try exe.args(allocator);
     defer args.deinit(allocator);
@@ -176,7 +173,7 @@ pub fn main(init: std.process.Init) !void {
     args.set(.{ mnist_buffers, input_buffer });
 
     try profiler.start();
-    exe.call(io, args, &results, .{});
+    try exe.call(io, args, &results, .{});
     if (try profiler.stop()) |report| {
         log.info("Wrote profiler files to {s} and {s}", .{ report.protobuf_path, report.perfetto_path });
     }

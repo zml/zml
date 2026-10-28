@@ -4,238 +4,382 @@ const DataType = @import("dtype.zig").DataType;
 const Shape = @import("shape.zig").Shape;
 const Dims = Shape.DimsArray;
 
-const StringBuilder = std.ArrayListUnmanaged(u8);
-
 pub const Tensors = std.StringArrayHashMapUnmanaged(Tensor);
-pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
 
 const log = std.log.scoped(.@"zml/safetensors");
 
 const BYTES_HEADER = 8;
+pub const max_positional_iovecs: usize = if (@TypeOf(std.posix.IOV_MAX) == void) 64 else std.posix.IOV_MAX;
 
-pub const FileType = enum {
-    index,
-    safetensors,
-    unknown,
+pub const ExactPositionalError = std.Io.File.ReadPositionalError || error{
+    OutOfBounds,
+    UnexpectedEndOfFile,
 };
 
-pub fn fetchRegistry(
-    allocator: std.mem.Allocator,
+/// Completes an exact absolute positional scatter read, resuming short reads
+/// and respecting the platform iovec limit.
+/// Scatters `[file_offset, file_offset + total)` into `buffers`, where
+/// `total` is their combined length. The file may end early only past
+/// `minimum` bytes: the bytes after it are padding a caller added to align
+/// the read, and the end of the file cuts them. Returns the bytes read.
+pub fn readFilePositionalAllV(
     io: std.Io,
-    repo: std.Io.Dir,
-    model: std.Io.File,
-    model_path: []const u8,
-) !TensorRegistry {
-    const file_type = resolveFiletype(model_path);
+    file: std.Io.File,
+    buffers: []const []u8,
+    file_offset: u64,
+    minimum: u64,
+) ExactPositionalError!u64 {
+    var read_size: u64 = 0;
+    for (buffers) |buffer| {
+        const len = std.math.cast(u64, buffer.len) orelse return error.OutOfBounds;
+        read_size = std.math.add(u64, read_size, len) catch return error.OutOfBounds;
+    }
+    _ = std.math.add(u64, file_offset, read_size) catch return error.OutOfBounds;
+    if (minimum > read_size) return error.OutOfBounds;
+    if (read_size == 0) return 0;
 
-    return switch (file_type) {
-        .index => blk: {
-            const file_reader_buf = try allocator.alloc(u8, 64 * 1024);
-            defer allocator.free(file_reader_buf);
+    var batch: [max_positional_iovecs][]u8 = undefined;
+    var buffer_index: usize = 0;
+    var buffer_offset: usize = 0;
+    var completed: u64 = 0;
+    while (completed < read_size) {
+        var batch_len: usize = 0;
+        var batch_size: u64 = 0;
+        var scan_index = buffer_index;
+        var scan_offset = buffer_offset;
+        while (scan_index < buffers.len and batch_len < batch.len) : (scan_index += 1) {
+            const buffer = buffers[scan_index];
+            if (scan_offset >= buffer.len) {
+                scan_offset = 0;
+                continue;
+            }
+            batch[batch_len] = buffer[scan_offset..];
+            batch_size += batch[batch_len].len;
+            batch_len += 1;
+            scan_offset = 0;
+        }
+        if (batch_len == 0) return error.UnexpectedEndOfFile;
 
-            var index_reader = model.reader(io, file_reader_buf);
+        const absolute_offset = std.math.add(u64, file_offset, completed) catch return error.OutOfBounds;
+        const bytes_read = try file.readPositional(io, batch[0..batch_len], absolute_offset);
+        if (bytes_read == 0) {
+            if (completed >= minimum) return completed;
+            return error.UnexpectedEndOfFile;
+        }
+        completed += @intCast(bytes_read);
+        // A short read past `minimum` leaves only padding unread, which no
+        // caller addresses; the call that would fetch it (or confirm the
+        // end of the file) starts at an unaligned offset, which a file read
+        // directly rejects.
+        if (bytes_read < batch_size and completed >= minimum) return completed;
 
-            var safetensors_index = try parseSafetensorsIndex(
-                allocator,
-                &index_reader.interface,
-            );
-            defer safetensors_index.deinit();
-
-            var registry: TensorRegistry = try .initWithMetadata(allocator, safetensors_index.metadata);
-
-            try parseSafetensorsIndexFiles(
-                allocator,
-                io,
-                &registry,
-                safetensors_index,
-                repo,
-            );
-
-            break :blk registry;
-        },
-        .safetensors => blk: {
-            var registry: TensorRegistry = .init(allocator);
-
-            try parseSafetensors(allocator, io, &registry, model);
-
-            break :blk registry;
-        },
-        else => return error.InvalidPath,
-    };
+        try advanceScatter(buffers, &buffer_index, &buffer_offset, bytes_read);
+    }
+    return completed;
 }
 
-pub const TensorReader = struct {
-    tensor: Tensor,
-    file: std.Io.File,
-    file_reader: std.Io.File.Reader,
-    alignment: ?std.mem.Alignment,
-    remaining: u64,
-    padding_remaining: u64,
+fn advanceScatter(
+    buffers: []const []u8,
+    buffer_index: *usize,
+    buffer_offset: *usize,
+    bytes: usize,
+) error{UnexpectedEndOfFile}!void {
+    var remaining = bytes;
+    while (remaining > 0) {
+        while (buffer_index.* < buffers.len and buffer_offset.* == buffers[buffer_index.*].len) {
+            buffer_index.* += 1;
+            buffer_offset.* = 0;
+        }
+        if (buffer_index.* >= buffers.len) return error.UnexpectedEndOfFile;
+        const available = buffers[buffer_index.*].len - buffer_offset.*;
+        if (remaining < available) {
+            buffer_offset.* += remaining;
+            return;
+        }
+        remaining -= available;
+        buffer_index.* += 1;
+        buffer_offset.* = 0;
+    }
+}
 
-    io: std.Io,
-    interface: std.Io.Reader,
+const CountingPositionalIo = struct {
+    calls: usize = 0,
+    largest_scatter: usize = 0,
+    last_offset: u64 = 0,
+    max_result: ?usize = null,
 
-    pub const InitOpts = struct {
-        alignment: ?std.mem.Alignment = null,
+    const vtable: std.Io.VTable = blk: {
+        var result = std.testing.io.vtable.*;
+        result.fileReadPositional = fileReadPositional;
+        break :blk result;
     };
 
-    pub fn init(
-        io: std.Io,
-        tensor: Tensor,
-        buffer: []u8,
-        opts: InitOpts,
-    ) !TensorReader {
-        const file = try std.Io.Dir.openFile(.cwd(), io, tensor.file_uri, .{ .mode = .read_only });
-        errdefer file.close(io);
-
-        const offset, const padding_remaining = if (opts.alignment) |alignment| blk: {
-            const aligned_offset = std.mem.alignBackward(u64, tensor.offset, alignment.toByteUnits());
-            break :blk .{ aligned_offset, tensor.offset - aligned_offset };
-        } else blk: {
-            break :blk .{ tensor.offset, 0 };
-        };
-
-        var file_reader = file.reader(io, buffer);
-        try file_reader.seekTo(offset);
-
+    fn io(self: *CountingPositionalIo) std.Io {
         return .{
-            .tensor = tensor,
-            .file = file,
-            .file_reader = file_reader,
-            .alignment = opts.alignment,
-            .remaining = tensor.byteSize(),
-            .padding_remaining = padding_remaining,
-            .io = io,
-            .interface = .{
-                .vtable = if (opts.alignment) |_| blk: {
-                    break :blk &.{
-                        .stream = streamAligned,
-                        .discard = discardAligned,
-                    };
-                } else blk: {
-                    break :blk &.{
-                        .stream = stream,
-                        .discard = discard,
-                    };
-                },
-                .buffer = &.{},
-                .seek = 0,
-                .end = 0,
-            },
+            .userdata = self,
+            .vtable = &vtable,
         };
     }
 
-    pub fn deinit(self: *TensorReader) void {
-        self.file.close(self.io);
-    }
+    fn fileReadPositional(
+        userdata: ?*anyopaque,
+        _: std.Io.File,
+        data: []const []u8,
+        offset: u64,
+    ) std.Io.File.ReadPositionalError!usize {
+        const self: *CountingPositionalIo = @ptrCast(@alignCast(userdata.?));
+        self.calls += 1;
+        self.largest_scatter = @max(self.largest_scatter, data.len);
+        self.last_offset = offset;
 
-    // Limit single reads to 1GB to avoid issues on macOS where pread returns
-    // INT_MAX when the requested size is larger than 2GB
-    const max_single_read_bytes: u64 = 1 << 30;
-
-    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const self: *TensorReader = @fieldParentPtr("interface", r);
-        if (self.remaining == 0) {
-            return error.EndOfStream;
-        }
-
-        const combined_limit = limit.min(.limited64(self.remaining)).min(.limited64(max_single_read_bytes));
-        const n = try self.file_reader.interface.stream(w, combined_limit);
-        self.remaining -= n;
-        return n;
-    }
-
-    fn discard(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
-        const self: *TensorReader = @fieldParentPtr("interface", r);
-        if (self.remaining == 0) {
-            return error.EndOfStream;
-        }
-
-        const combined_limit = limit.min(.limited64(self.remaining));
-        const n = try self.file_reader.interface.discard(combined_limit);
-        self.remaining -= n;
-        return n;
-    }
-
-    fn streamAligned(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const self: *TensorReader = @fieldParentPtr("interface", r);
-        if (self.remaining == 0) {
-            return error.EndOfStream;
-        }
-
-        const requested_bytes = @min(limit.minInt64(self.remaining), max_single_read_bytes);
-
-        if (self.padding_remaining > 0) {
-            _ = try self.file_reader.interface.discard(.limited64(self.padding_remaining));
-            self.padding_remaining = 0;
-        }
-
-        const align_bytes = self.alignment.?.toByteUnits();
-        const file_offset = self.file_reader.pos - std.mem.alignBackward(u64, self.file_reader.pos, align_bytes);
-        const writer_addr = @intFromPtr(w.buffer.ptr) + w.end;
-        const writer_offset = writer_addr - std.mem.alignBackward(usize, writer_addr, align_bytes);
-
-        if (file_offset != writer_offset) {
-            const skip = if (file_offset >= writer_offset) blk: {
-                break :blk file_offset - writer_offset;
-            } else blk: {
-                break :blk align_bytes - writer_offset + file_offset;
-            };
-
-            w.advance(skip);
-        }
-
-        if (w.writableSliceGreedy(align_bytes)) |dest| {
-            const phys_buf = dest.ptr - file_offset;
-            const phys_pos = self.file_reader.pos - file_offset;
-            const phys_size = std.mem.alignBackward(usize, @min(dest.len, requested_bytes) + file_offset, align_bytes);
-
-            if (phys_size > file_offset) {
-                const phys_read = self.file.readPositional(self.io, &.{phys_buf[0..phys_size]}, phys_pos) catch unreachable;
-                if (phys_read > file_offset) {
-                    const bytes_read = phys_read - file_offset;
-                    w.advance(bytes_read);
-                    self.file_reader.pos += bytes_read;
-                    self.remaining -= bytes_read;
-                    return bytes_read;
-                }
+        var requested: usize = 0;
+        for (data) |buffer| requested +|= buffer.len;
+        var remaining = @min(requested, self.max_result orelse requested);
+        var position: usize = 0;
+        for (data) |buffer| {
+            const take = @min(remaining, buffer.len);
+            for (buffer[0..take]) |*byte| {
+                byte.* = @truncate(offset + position);
+                position += 1;
             }
-        } else |_| {}
-
-        const bytes_read = try self.file_reader.interface.stream(w, .limited64(requested_bytes));
-        self.remaining -= bytes_read;
-
-        return bytes_read;
-    }
-
-    fn discardAligned(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
-        const self: *TensorReader = @fieldParentPtr("interface", r);
-        if (self.remaining == 0) return 0;
-
-        if (self.padding_remaining > 0) {
-            _ = try self.file_reader.interface.discard(.limited64(self.padding_remaining));
-            self.padding_remaining = 0;
+            remaining -= take;
+            if (remaining == 0) break;
         }
-
-        const combined_limit = limit.min(.limited64(self.remaining));
-        const n = try self.file_reader.interface.discard(combined_limit);
-        self.remaining -= n;
-        return n;
+        return position;
     }
 };
 
+test "Tensor.readRange reads tensor-relative ranges within the tensor" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "prefix0123456789", 0);
+
+    var tensor: Tensor = .{
+        .file_uri = "unused",
+        .name = "tensor",
+        .shape = .init(.{10}, .u8),
+        .offset = "prefix".len,
+    };
+    var middle: [4]u8 = undefined;
+    try tensor.readRange(io, file, &middle, 3);
+    try std.testing.expectEqualStrings("3456", &middle);
+
+    var empty: [0]u8 = .{};
+    try tensor.readRange(io, file, &empty, 10);
+    try std.testing.expectError(error.OutOfBounds, tensor.readRange(io, file, &empty, 11));
+
+    var too_large: [2]u8 = undefined;
+    try std.testing.expectError(error.OutOfBounds, tensor.readRange(io, file, &too_large, 9));
+
+    tensor.offset = std.math.maxInt(u64);
+    var overflow: [1]u8 = undefined;
+    try std.testing.expectError(error.OutOfBounds, tensor.readRange(io, file, &overflow, 0));
+    try std.testing.expectError(error.OutOfBounds, tensor.readRange(io, file, &overflow, 1));
+}
+
+test "Tensor.read reads the whole tensor from its file" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    try file.writePositionalAll(io, "prefix0123456789", 0);
+
+    var path_buffer: [1024]u8 = undefined;
+    const path_len = try file.realPath(io, &path_buffer);
+    file.close(io);
+
+    const tensor: Tensor = .{
+        .file_uri = path_buffer[0..path_len],
+        .name = "tensor",
+        .shape = .init(.{10}, .u8),
+        .offset = "prefix".len,
+    };
+    var whole: [10]u8 = undefined;
+    try tensor.read(io, &whole);
+    try std.testing.expectEqualStrings("0123456789", &whole);
+    try std.testing.expectError(error.OutOfBounds, tensor.read(io, whole[0..9]));
+}
+
+test "readFilePositionalAllV batches more than IOV_MAX buffers" {
+    const io = std.testing.io;
+    const len = max_positional_iovecs + 1;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    defer file.close(io);
+    var contents: [len]u8 = undefined;
+    for (&contents, 0..) |*byte, i| byte.* = @truncate(i);
+    try file.writePositionalAll(io, &contents, 0);
+
+    var output: [len]u8 = undefined;
+    var buffers: [len][]u8 = undefined;
+    for (&buffers, 0..) |*buffer, i| buffer.* = output[i..][0..1];
+    try std.testing.expectEqual(@as(u64, len), try readFilePositionalAllV(io, file, &buffers, 0, len));
+    try std.testing.expectEqualSlices(u8, &contents, &output);
+}
+
+test "readFilePositionalAllV resumes short reads" {
+    var counting: CountingPositionalIo = .{ .max_result = 1 };
+    const io = counting.io();
+    const file: std.Io.File = .{ .handle = 0, .flags = .{ .nonblocking = false } };
+
+    var output: [4]u8 = undefined;
+    _ = try readFilePositionalAllV(io, file, &.{ output[0..1], output[1..3], output[3..4] }, 7, output.len);
+    try std.testing.expectEqual(@as(usize, 4), counting.calls);
+    try std.testing.expectEqualSlices(u8, &.{ 7, 8, 9, 10 }, &output);
+}
+
+test "advanceScatter resumes partial reads across boundaries" {
+    var storage: [6]u8 = undefined;
+    const buffers = [_][]u8{ storage[0..2], storage[2..2], storage[2..5], storage[5..6] };
+    var index: usize = 0;
+    var offset: usize = 0;
+    try advanceScatter(&buffers, &index, &offset, 1);
+    try std.testing.expectEqual(@as(usize, 0), index);
+    try std.testing.expectEqual(@as(usize, 1), offset);
+    try advanceScatter(&buffers, &index, &offset, 2);
+    try std.testing.expectEqual(@as(usize, 2), index);
+    try std.testing.expectEqual(@as(usize, 1), offset);
+    try advanceScatter(&buffers, &index, &offset, 3);
+    try std.testing.expectEqual(@as(usize, 4), index);
+    try std.testing.expectEqual(@as(usize, 0), offset);
+    try std.testing.expectError(error.UnexpectedEndOfFile, advanceScatter(&buffers, &index, &offset, 1));
+}
+
+test "Tensor.readRange reports a truncated backing file" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "prefix0123456789", 0);
+
+    const tensor: Tensor = .{
+        .file_uri = "unused",
+        .name = "tensor",
+        .shape = .init(.{12}, .u8),
+        .offset = "prefix".len,
+    };
+    var tail: [3]u8 = undefined;
+    try std.testing.expectError(error.UnexpectedEndOfFile, tensor.readRange(io, file, &tail, 9));
+}
+
+test "concurrent Tensor.readRange calls on one file preserve offsets" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "prefixABCDEFGHI", 0);
+
+    const tensor: Tensor = .{
+        .file_uri = "unused",
+        .name = "tensor",
+        .shape = .init(.{9}, .u8),
+        .offset = "prefix".len,
+    };
+
+    var chunks: [3][3]u8 = undefined;
+    var start: std.Io.Event = .unset;
+    var read_done: [3]std.Io.Event = @splat(.unset);
+    var release_completion: [3]std.Io.Event = @splat(.unset);
+    var completed: [3]std.Io.Event = @splat(.unset);
+    var group: std.Io.Group = .init;
+    const Job = struct {
+        fn run(
+            tensor_: *const Tensor,
+            file_: std.Io.File,
+            destination: []u8,
+            offset: u64,
+            start_: *std.Io.Event,
+            read_done_: *std.Io.Event,
+            release_completion_: *std.Io.Event,
+            completed_: *std.Io.Event,
+            io_: std.Io,
+        ) std.Io.Cancelable!void {
+            try start_.wait(io_);
+            tensor_.readRange(io_, file_, destination, offset) catch unreachable;
+            read_done_.set(io_);
+            try release_completion_.wait(io_);
+            completed_.set(io_);
+        }
+    };
+    for (0..3) |i| {
+        try group.concurrent(io, Job.run, .{
+            &tensor,
+            file,
+            &chunks[i],
+            i * 3,
+            &start,
+            &read_done[i],
+            &release_completion[i],
+            &completed[i],
+            io,
+        });
+    }
+
+    start.set(io);
+    for (&read_done) |*event| try event.wait(io);
+    for ([_]usize{ 2, 0, 1 }) |i| {
+        release_completion[i].set(io);
+        try completed[i].wait(io);
+    }
+    try group.await(io);
+
+    var assembled: [9]u8 = undefined;
+    for (&chunks, 0..) |*chunk, i| @memcpy(assembled[i * 3 ..][0..3], chunk);
+    try std.testing.expectEqualStrings("ABCDEFGHI", &assembled);
+}
+
+/// A checkpoint tensor: its name, its shape, and where its bytes are, at
+/// `offset` of the file `file_uri` names. The URI is what the io that read
+/// the header resolved, a VFS URI under a VFS, so read the tensor through
+/// an io that resolves it alike. A registry's entries own nothing; the
+/// registry owns their strings.
 pub const Tensor = struct {
     file_uri: []const u8,
     name: []const u8,
     shape: Shape,
     offset: u64,
 
+    pub const ReadError = std.Io.File.OpenError || ExactPositionalError;
+
     pub fn byteSize(self: Tensor) u64 {
         return self.shape.byteSize();
     }
 
-    pub fn reader(self: Tensor, io: std.Io, buffer: []u8, opts: TensorReader.InitOpts) !TensorReader {
-        return TensorReader.init(io, self, buffer, opts);
+    /// Reads the whole tensor into `buffer`, which holds exactly its bytes
+    /// (`OutOfBounds` otherwise). Opens `file_uri` through `io` for the
+    /// call, failing as that io's open does (under a VFS, see its error
+    /// contract); a file that ends inside the tensor is
+    /// `UnexpectedEndOfFile`.
+    pub fn read(self: Tensor, io: std.Io, buffer: []u8) ReadError!void {
+        if (buffer.len != self.byteSize()) return error.OutOfBounds;
+        const file = try std.Io.Dir.openFile(.cwd(), io, self.file_uri, .{ .mode = .read_only });
+        defer file.close(io);
+        return self.readRange(io, file, buffer, 0);
+    }
+
+    /// Reads `buffer.len` bytes of the tensor from `tensor_offset`, relative
+    /// to its data, out of `file`, which the caller opened at `file_uri`. A
+    /// range past the tensor is `OutOfBounds`, a file that ends inside it
+    /// `UnexpectedEndOfFile`. The reads are positional, so concurrent calls
+    /// may share one file.
+    pub fn readRange(self: Tensor, io: std.Io, file: std.Io.File, buffer: []u8, tensor_offset: u64) ExactPositionalError!void {
+        const tensor_size = self.byteSize();
+        if (tensor_offset > tensor_size or buffer.len > tensor_size - tensor_offset) return error.OutOfBounds;
+        if (buffer.len == 0) return;
+        const file_offset = std.math.add(u64, self.offset, tensor_offset) catch return error.OutOfBounds;
+        _ = try readFilePositionalAllV(io, file, &.{buffer}, file_offset, buffer.len);
     }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
@@ -249,47 +393,46 @@ pub const Tensor = struct {
     }
 };
 
+/// The tensors of one or more checkpoints by name, read from their
+/// safetensors headers; no tensor data is read. It owns every name and URI.
+/// Build it complete, then hand it to `zml.io.TensorStore.init`, which owns
+/// it from then on and frees it.
 pub const TensorRegistry = struct {
     arena: std.heap.ArenaAllocator,
 
     tensors: Tensors,
-    metadata: Metadatas,
 
-    mutex: std.Io.Mutex = .init,
-
+    /// An empty registry.
     pub fn init(allocator: std.mem.Allocator) TensorRegistry {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .tensors = .{},
-            .metadata = .{},
         };
     }
 
-    pub fn initWithMetadata(
-        allocator: std.mem.Allocator,
-        metadata: Metadatas,
-    ) !TensorRegistry {
-        var self: TensorRegistry = .{
-            .arena = std.heap.ArenaAllocator.init(allocator),
-            .tensors = .{},
-            .metadata = .empty,
-        };
-
-        try self.mergeMetadata(metadata);
-
-        return self;
-    }
-
+    /// The checkpoint in `repo` (`addRepo` with no prefix). `repo` stays
+    /// the caller's to close.
     pub fn fromRepo(
         allocator: std.mem.Allocator,
         io: std.Io,
         repo: std.Io.Dir,
     ) !TensorRegistry {
-        const entrypoint_file, const entrypoint_path = try resolveModelEntrypoint(io, repo);
-        defer entrypoint_file.close(io);
-        return try fetchRegistry(allocator, io, repo, entrypoint_file, entrypoint_path);
+        var registry: TensorRegistry = .init(allocator);
+        errdefer registry.deinit();
+        try registry.addRepo(io, repo, "");
+        return registry;
     }
 
+    /// The checkpoint at `path`, read through `io`: a `.safetensors` file,
+    /// a `.safetensors.index.json` and the files it lists, or a directory
+    /// holding `model.safetensors.index.json` or `model.safetensors`. A
+    /// relative path is from the cwd; under a VFS, `path` may be a remote
+    /// URI. A missing path or entrypoint is `FileNotFound`, a denied
+    /// directory or entrypoint `PermissionDenied`; a file opened by name,
+    /// the one given or one an index lists, fails as `io`'s open does (a
+    /// denied local file is `AccessDenied`). A header whose offsets leave
+    /// the file, as in a truncated download, is `InvalidSafetensorsHeader`,
+    /// logged.
     pub fn fromPath(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -298,56 +441,54 @@ pub const TensorRegistry = struct {
         var repo = try resolveModelRepo(io, path);
         defer repo.close(io);
 
+        // `repo` is the file's directory: the file opens by its base name.
         const entrypoint_file, const entrypoint_path = if (std.mem.endsWith(u8, path, ".safetensors.index.json") or std.mem.endsWith(u8, path, ".safetensors"))
-            .{ try repo.openFile(io, path, .{ .mode = .read_only }), path }
+            .{ try repo.openFile(io, std.fs.path.basename(path), .{ .mode = .read_only }), path }
         else
             try resolveModelEntrypoint(io, repo);
         defer entrypoint_file.close(io);
 
-        return try fetchRegistry(allocator, io, repo, entrypoint_file, entrypoint_path);
+        var registry: TensorRegistry = .init(allocator);
+        errdefer registry.deinit();
+        try addCheckpoint(allocator, io, &registry, repo, entrypoint_file, entrypoint_path, "");
+        return registry;
     }
 
+    /// Adds every tensor of the checkpoint in `repo` (its
+    /// `model.safetensors.index.json` and the files it lists, else
+    /// `model.safetensors`) under `prefix` followed by its name. A second
+    /// checkpoint, such as a speculative drafter's, joins the registry under
+    /// a prefix of its own, and one store then holds both; reach the second
+    /// through `View.withPrefix`. Adding under a prefix that a tensor
+    /// already here is named under fails with `error.DuplicateTensor`,
+    /// before anything is read. `repo` stays the caller's to close. A
+    /// registry a store owns takes no more (`TensorStore.init`).
+    pub fn addRepo(self: *TensorRegistry, io: std.Io, repo: std.Io.Dir, prefix: []const u8) !void {
+        // A checkpoint added beside another owns its prefix: no tensor already
+        // here may be named under it.
+        for (self.tensors.keys()) |name| {
+            if (std.mem.startsWith(u8, name, prefix)) return error.DuplicateTensor;
+        }
+        const entrypoint_file, const entrypoint_path = try resolveModelEntrypoint(io, repo);
+        defer entrypoint_file.close(io);
+        try addCheckpoint(self.arena.child_allocator, io, self, repo, entrypoint_file, entrypoint_path, prefix);
+    }
+
+    /// Frees every entry, its name and URI. Not for a registry handed to a
+    /// store, which `TensorStore.deinit` frees.
     pub fn deinit(self: *TensorRegistry) void {
         const allocator = self.arena.allocator();
         self.tensors.deinit(allocator);
-        self.metadata.deinit(allocator);
         self.arena.deinit();
     }
 
-    pub fn mergeMetadata(
-        self: *TensorRegistry,
-        other: Metadatas,
-    ) !void {
-        // self.mutex.lock();
-        // defer self.mutex.unlock();
-
-        const allocator = self.arena.allocator();
-
-        var it = other.iterator();
-        while (it.next()) |entry| {
-            const key = try allocator.dupe(u8, entry.key_ptr.*);
-            const value = try entry.value_ptr.*.clone(allocator);
-
-            const gop = try self.metadata.getOrPut(allocator, key);
-            if (gop.found_existing) {
-                gop.value_ptr.*.deinit(allocator);
-                gop.value_ptr.* = value;
-                log.debug("Overwrote existing metadata key={s} with value={f}", .{ key, value });
-            } else {
-                gop.value_ptr.* = value;
-                log.debug("Added new metadata key={s} with value={f}", .{ key, value });
-            }
-        }
-    }
-
+    /// Adds `tensor`, its name and file URI copied. A registry a store owns
+    /// takes no more (`TensorStore.init`).
     pub fn registerTensor(
         self: *TensorRegistry,
         tensor: Tensor,
     ) !void {
         const allocator = self.arena.allocator();
-
-        // self.mutex.lock();
-        // defer self.mutex.unlock();
 
         var tensor_copy = tensor;
 
@@ -355,20 +496,6 @@ pub const TensorRegistry = struct {
         tensor_copy.file_uri = try allocator.dupe(u8, tensor.file_uri);
 
         try self.tensors.put(allocator, tensor_copy.name, tensor_copy);
-    }
-
-    pub fn reader(
-        self: *TensorRegistry,
-        io: std.Io,
-        tensor_name: []const u8,
-        buffer: []u8,
-    ) !TensorReader {
-        const tensor = self.tensors.get(tensor_name) orelse {
-            log.err("Tensor {s} not found in registry", .{tensor_name});
-            return error.TensorNotFound;
-        };
-
-        return try .init(io, tensor, buffer, .{});
     }
 
     pub fn iterator(self: *TensorRegistry) Tensors.Iterator {
@@ -387,11 +514,53 @@ pub const TensorRegistry = struct {
     }
 };
 
+/// Adds the tensors of the checkpoint whose entrypoint `model` is open at
+/// `model_path` in `repo`, one safetensors file or an index of the files of
+/// `repo` to read, to `registry` under `prefix`.
+fn addCheckpoint(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    registry: *TensorRegistry,
+    repo: std.Io.Dir,
+    model: std.Io.File,
+    model_path: []const u8,
+    prefix: []const u8,
+) !void {
+    if (std.mem.endsWith(u8, model_path, ".safetensors.index.json")) {
+        const file_reader_buf = try allocator.alloc(u8, 64 * 1024);
+        defer allocator.free(file_reader_buf);
+
+        var index_reader = model.reader(io, file_reader_buf);
+
+        var safetensors_index = try parseSafetensorsIndex(
+            allocator,
+            &index_reader.interface,
+        );
+        defer safetensors_index.deinit();
+
+        return parseSafetensorsIndexFiles(
+            allocator,
+            io,
+            registry,
+            safetensors_index,
+            repo,
+            prefix,
+        );
+    }
+    if (std.mem.endsWith(u8, model_path, ".safetensors")) {
+        return parseSafetensors(allocator, io, registry, model, prefix);
+    }
+    return error.InvalidPath;
+}
+
+/// Adds the tensors of the safetensors `file` to `registry`, each named
+/// `prefix` followed by its key in the header.
 pub fn parseSafetensors(
     allocator: std.mem.Allocator,
     io: std.Io,
     registry: *TensorRegistry,
     file: std.Io.File,
+    prefix: []const u8,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -406,6 +575,12 @@ pub fn parseSafetensors(
     const file_uri = file_uri_buf[0..file_uri_len];
 
     const json_header_length: u64 = try reader.interface.takeInt(u64, .little);
+    // The header and every tensor's data must lie inside the file.
+    const file_length = try file.length(io);
+    if (json_header_length > file_length -| BYTES_HEADER) {
+        log.warn("Invalid safetensors header in {s}: {d} bytes of header in a file of {d}", .{ file_uri, json_header_length, file_length });
+        return error.InvalidSafetensorsHeader;
+    }
     const data_start_offset = BYTES_HEADER + json_header_length;
     const json_data = try arena.allocator().alloc(u8, @intCast(json_header_length));
 
@@ -423,17 +598,8 @@ pub fn parseSafetensors(
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
 
-        if (std.mem.eql(u8, key, "__metadata__")) {
-            // Parse metadata into a local arena to avoid concurrent allocations
-            // against registry.arena (which is not thread-safe).
-            var local_arena = std.heap.ArenaAllocator.init(allocator);
-            defer local_arena.deinit();
-
-            const metas = try parseMetadata(local_arena.allocator(), value);
-            try registry.mergeMetadata(metas);
-
-            continue;
-        }
+        // Free-form strings, which nothing reads.
+        if (std.mem.eql(u8, key, "__metadata__")) continue;
 
         const shape_field = value.object.get("shape").?.array;
 
@@ -443,7 +609,10 @@ pub fn parseSafetensors(
         }
 
         const offset_field = value.object.get("data_offsets").?;
-        const start: u64 = @intCast(offset_field.array.items[0].integer);
+        const start = dataStart(offset_field, file_length - data_start_offset) orelse {
+            log.warn("Invalid safetensors header in {s}: tensor {s} has data_offsets {f}, which must run forward within the file's {d} data bytes", .{ file_uri, key, std.json.fmt(offset_field, .{}), file_length - data_start_offset });
+            return error.InvalidSafetensorsHeader;
+        };
         const dtype = try stringToDtype(value.object.get("dtype").?.string);
 
         var dims: Dims = .empty;
@@ -453,7 +622,7 @@ pub fn parseSafetensors(
 
         const tensor: Tensor = .{
             .file_uri = file_uri,
-            .name = key,
+            .name = if (prefix.len == 0) key else try std.mem.concat(arena.allocator(), u8, &.{ prefix, key }),
             .shape = .init(dims.slice(), dtype),
             .offset = data_start_offset + start,
         };
@@ -462,30 +631,163 @@ pub fn parseSafetensors(
     }
 }
 
-const SafetensorsIndex = struct {
-    pub const Map = std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8));
+/// The start of a tensor's `data_offsets`, `[start, end)` after the header,
+/// when they run forward and end within `data_len` bytes.
+fn dataStart(offsets: std.json.Value, data_len: u64) ?u64 {
+    if (offsets != .array or offsets.array.items.len != 2) return null;
+    var bounds: [2]u64 = undefined;
+    for (&bounds, offsets.array.items) |*bound, item| bound.* = switch (item) {
+        .integer => |integer| std.math.cast(u64, integer) orelse return null,
+        // Integers past i64.
+        .number_string => |digits| std.fmt.parseInt(u64, digits, 10) catch return null,
+        else => return null,
+    };
+    if (bounds[0] > bounds[1] or bounds[1] > data_len) return null;
+    return bounds[0];
+}
 
+test "parseSafetensors rejects a header or data_offsets that run backward, overflow or end past the file" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const max = "18446744073709551615";
+    // One tensor of 4 bytes, the file's only data. `header_len` overrides
+    // the header's length field.
+    const cases = [_]struct { offsets: []const u8, header_len: ?u64 = null, valid: bool = false }{
+        .{ .offsets = "[0,4]", .valid = true },
+        .{ .offsets = "[4,0]" },
+        .{ .offsets = "[0,5]" },
+        .{ .offsets = "[-4,4]" },
+        .{ .offsets = "[0," ++ max ++ "]" },
+        .{ .offsets = "[" ++ max ++ "," ++ max ++ "]" },
+        .{ .offsets = "[0,18446744073709551616]" },
+        .{ .offsets = "[0]" },
+        .{ .offsets = "[0,4]", .header_len = 1 << 20 },
+        .{ .offsets = "[0,4]", .header_len = std.math.maxInt(u64) },
+    };
+    for (cases, 0..) |case, index| {
+        var header_buffer: [128]u8 = undefined;
+        const header = try std.fmt.bufPrint(&header_buffer, "{{\"x\":{{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":{s}}}}}", .{case.offsets});
+        var name_buffer: [32]u8 = undefined;
+        const file = try tmp.dir.createFile(io, try std.fmt.bufPrint(&name_buffer, "{d}.safetensors", .{index}), .{ .read = true });
+        defer file.close(io);
+        var length: [BYTES_HEADER]u8 = undefined;
+        std.mem.writeInt(u64, &length, case.header_len orelse header.len, .little);
+        try file.writePositionalAll(io, &length, 0);
+        try file.writePositionalAll(io, header, length.len);
+        try file.writePositionalAll(io, &.{ 1, 2, 3, 4 }, length.len + header.len);
+
+        var registry: TensorRegistry = .init(allocator);
+        defer registry.deinit();
+        const result = parseSafetensors(allocator, io, &registry, file, "");
+        if (case.valid) {
+            try result;
+            try std.testing.expectEqual(@as(u64, BYTES_HEADER + header.len), registry.tensors.get("x").?.offset);
+        } else {
+            try std.testing.expectError(error.InvalidSafetensorsHeader, result);
+        }
+    }
+}
+
+test "addRepo adds a second checkpoint under a prefix" {
+    const TensorStore = @import("io/TensorStore.zig");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const writeCheckpoint = struct {
+        /// A safetensors file of one tensor, `w`, of 4 bytes.
+        fn call(io_: std.Io, dir: std.Io.Dir, sub_path: []const u8, bytes: *const [4]u8) !void {
+            const header = "{\"w\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}";
+            const file = try dir.createFile(io_, sub_path, .{});
+            defer file.close(io_);
+            var length: [BYTES_HEADER]u8 = undefined;
+            std.mem.writeInt(u64, &length, header.len, .little);
+            try file.writePositionalAll(io_, &length, 0);
+            try file.writePositionalAll(io_, header, length.len);
+            try file.writePositionalAll(io_, bytes, length.len + header.len);
+        }
+    }.call;
+    // The target is one file, the drafter an index over one shard; both name
+    // their tensor `w`.
+    const target = try tmp.dir.createDirPathOpen(io, "target", .{});
+    defer target.close(io);
+    try writeCheckpoint(io, target, "model.safetensors", &.{ 1, 2, 3, 4 });
+    const drafter = try tmp.dir.createDirPathOpen(io, "drafter", .{});
+    defer drafter.close(io);
+    try writeCheckpoint(io, drafter, "shard.safetensors", &.{ 5, 6, 7, 8 });
+    try drafter.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"w\":\"shard.safetensors\"}}" });
+
+    var store: TensorStore = store: {
+        var registry: TensorRegistry = try .fromRepo(allocator, io, target);
+        errdefer registry.deinit();
+        try registry.addRepo(io, drafter, "drafter.");
+        try std.testing.expectError(error.DuplicateTensor, registry.addRepo(io, drafter, "drafter."));
+        break :store .init(allocator, registry, .{});
+    };
+    defer store.deinit();
+
+    const root = store.view();
+    try std.testing.expectEqual(@as(usize, 2), root.count());
+    const cases = [_]struct { view: TensorStore.View, name: []const u8, bytes: [4]u8 }{
+        .{ .view = root, .name = "w", .bytes = .{ 1, 2, 3, 4 } },
+        .{ .view = root.withPrefix("drafter"), .name = "drafter.w", .bytes = .{ 5, 6, 7, 8 } },
+    };
+    for (cases) |case| {
+        const tensor = case.view.get("w").?;
+        try std.testing.expectEqualStrings(case.name, tensor.name);
+        var bytes: [4]u8 = undefined;
+        try tensor.read(io, &bytes);
+        try std.testing.expectEqualSlices(u8, &case.bytes, &bytes);
+    }
+}
+
+test "fromPath opens a file or an index by a path relative to the cwd" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        const header = "{\"w\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}";
+        const file = try tmp.dir.createFile(io, "layer.safetensors", .{});
+        defer file.close(io);
+        var length: [BYTES_HEADER]u8 = undefined;
+        std.mem.writeInt(u64, &length, header.len, .little);
+        try file.writePositionalAll(io, &length, 0);
+        try file.writePositionalAll(io, header, length.len);
+        try file.writePositionalAll(io, &.{ 1, 2, 3, 4 }, length.len + header.len);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "layer.safetensors.index.json", .data = "{\"weight_map\":{\"w\":\"layer.safetensors\"}}" });
+
+    for ([_][]const u8{ "layer.safetensors", "layer.safetensors.index.json" }) |name| {
+        // `tmpDir` is `.zig-cache/tmp/<sub_path>` under the cwd.
+        var path_buffer: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/{s}", .{ &tmp.sub_path, name });
+        var registry: TensorRegistry = try .fromPath(allocator, io, path);
+        defer registry.deinit();
+        var bytes: [4]u8 = undefined;
+        try registry.tensors.get("w").?.read(io, &bytes);
+        try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, &bytes);
+    }
+}
+
+const SafetensorsIndex = struct {
     arena: std.heap.ArenaAllocator,
 
-    map: Map,
-    metadata: Metadatas,
+    /// The files the index's `weight_map` names, each once.
+    files: std.StringArrayHashMapUnmanaged(void),
 
     pub fn init(allocator: std.mem.Allocator) SafetensorsIndex {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .map = .empty,
-            .metadata = .empty,
+            .files = .empty,
         };
-    }
-
-    pub fn iterator(self: *SafetensorsIndex) Map.Iterator {
-        return self.map.iterator();
     }
 
     pub fn deinit(self: *SafetensorsIndex) void {
         const allocator = self.arena.allocator();
-        self.map.deinit(allocator);
-        self.metadata.deinit(allocator);
+        self.files.deinit(allocator);
         self.arena.deinit();
     }
 };
@@ -513,23 +815,10 @@ fn parseSafetensorsIndex(
         var it = wm.object.iterator();
 
         while (it.next()) |entry| {
-            const weight_name = entry.key_ptr.*;
-            const filename = entry.value_ptr.string;
-
-            const map_entry = try safetensors_index.map.getOrPut(arena_allocator, filename);
-
-            if (!map_entry.found_existing) {
-                map_entry.value_ptr.* = .empty;
-            }
-
-            try map_entry.value_ptr.append(arena_allocator, try arena_allocator.dupe(u8, weight_name));
+            try safetensors_index.files.put(arena_allocator, entry.value_ptr.string, {});
         }
     } else {
         log.warn("No weight_map attribute found in index", .{});
-    }
-
-    if (index.object.get("metadata")) |metadata_val| {
-        safetensors_index.metadata = try parseMetadata(arena_allocator, metadata_val);
     }
 
     return safetensors_index;
@@ -541,28 +830,21 @@ fn parseSafetensorsIndexFiles(
     registry: *TensorRegistry,
     safetensors_index: SafetensorsIndex,
     repo: std.Io.Dir,
+    prefix: []const u8,
 ) !void {
-    const filenames = safetensors_index.map.keys();
+    const filenames = safetensors_index.files.keys();
     for (filenames) |filename| {
         const file = try repo.openFile(io, filename, .{});
         defer file.close(io);
-        try parseSafetensors(allocator, io, registry, file);
-    }
-}
-
-pub fn resolveFiletype(path: []const u8) FileType {
-    if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
-        return .index;
-    } else if (std.mem.endsWith(u8, path, ".safetensors")) {
-        return .safetensors;
-    } else {
-        return .unknown;
+        try parseSafetensors(allocator, io, registry, file, prefix);
     }
 }
 
 pub const ModelPathResolutionError = error{
     FileNotFound,
+    PermissionDenied,
     InvalidPath,
+    Canceled,
 } || std.mem.Allocator.Error;
 
 pub fn resolveModelRepo(
@@ -572,11 +854,13 @@ pub fn resolveModelRepo(
     if (std.mem.endsWith(u8, path, ".safetensors.index.json") or
         std.mem.endsWith(u8, path, ".safetensors"))
     {
-        const dir_path = std.fs.path.dirname(path) orelse return ModelPathResolutionError.InvalidPath;
+        const dir_path = std.fs.path.dirname(path) orelse ".";
 
         const dir = std.Io.Dir.openDir(.cwd(), io, dir_path, .{}) catch |e| {
             return switch (e) {
                 error.FileNotFound => ModelPathResolutionError.FileNotFound,
+                error.AccessDenied, error.PermissionDenied => ModelPathResolutionError.PermissionDenied,
+                error.Canceled => ModelPathResolutionError.Canceled,
                 else => ModelPathResolutionError.InvalidPath,
             };
         };
@@ -587,6 +871,8 @@ pub fn resolveModelRepo(
     const dir = std.Io.Dir.openDir(.cwd(), io, path, .{}) catch |e| {
         return switch (e) {
             error.FileNotFound => ModelPathResolutionError.FileNotFound,
+            error.AccessDenied, error.PermissionDenied => ModelPathResolutionError.PermissionDenied,
+            error.Canceled => ModelPathResolutionError.Canceled,
             else => ModelPathResolutionError.InvalidPath,
         };
     };
@@ -594,160 +880,75 @@ pub fn resolveModelRepo(
     return dir;
 }
 
-pub fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionError!struct { std.Io.File, []const u8 } {
-    {
-        const index_name = "model.safetensors.index.json";
-        if (repo.openFile(io, index_name, .{ .mode = .read_only })) |index_file| {
-            return .{ index_file, "model.safetensors.index.json" };
-        } else |_| {}
-    }
-
-    {
-        const model_name = "model.safetensors";
-        if (repo.openFile(io, model_name, .{ .mode = .read_only })) |model_file| {
-            return .{ model_file, "model.safetensors" };
-        } else |_| {}
-    }
-
-    return ModelPathResolutionError.FileNotFound;
-}
-
-const Metadata = union(enum) {
-    null: void,
-    int: i64,
-    float: f64,
-    bool: bool,
-    string: []const u8,
-
-    array_bool: []const bool,
-    array_int: []const i64,
-    array_float: []const f64,
-    array_string: []const []const u8,
-
-    pub const ItemType = enum {
-        int,
-        float,
-        bool,
-        string,
-
-        pub fn toZigType(comptime kind: ItemType) type {
-            return switch (kind) {
-                .int => i64,
-                .float => f64,
-                .bool => bool,
-                .string => []const u8,
-            };
-        }
-    };
-
-    pub fn wrap(x: anytype) Metadata {
-        return switch (@TypeOf(x)) {
-            inline u8, i8, u16, i16, u32, i32, u64, i64 => .{ .int = @intCast(x) },
-            inline f16, f32, f64 => .{ .float = @floatCast(x) },
-            bool => .{ .bool = x },
-            []const u8 => .{ .string = x },
-            else => @panic("Unsupported type for Value: " ++ @typeName(@TypeOf(x))),
-        };
-    }
-
-    pub fn copySlice(allocator: std.mem.Allocator, any_slice: anytype) !Metadata {
-        return switch (@TypeOf(any_slice[0])) {
-            inline u8, i8, u16, i16, u32, i32, u64, i64 => {
-                const res = try allocator.alloc(i64, any_slice.len);
-                for (res, any_slice) |*r, val| r.* = @intCast(val);
-                return .{ .array_int = res };
-            },
-            inline f16, f32, f64 => {
-                const res = try allocator.alloc(f64, any_slice.len);
-                for (res, any_slice) |*r, val| r.* = @floatCast(val);
-                return .{ .array_float = res };
-            },
-            bool => .{ .array_bool = try allocator.dupe(bool, any_slice) },
-            []const u8 => .{ .array_string = try allocator.dupe([]const u8, @alignCast(any_slice)) },
-            else => @panic("Unsupported type for Value: " ++ @typeName(@TypeOf(any_slice))),
-        };
-    }
-
-    pub fn format(
-        self: Metadata,
-        writer: *std.Io.Writer,
-    ) !void {
-        switch (self) {
-            .null => _ = try writer.write("null"),
-            .string => |s| try writer.print("{s}", .{s}),
-            .bool => |b| try writer.print("{}", .{b}),
-            .int => |i| try writer.print("{d}", .{i}),
-            .float => |f| try writer.print("{d}", .{f}),
-            .array_bool => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("{}", .{v});
-                }
-                try writer.writeByte(']');
-            },
-            .array_int => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("{d}", .{v});
-                }
-                try writer.writeByte(']');
-            },
-            .array_float => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("{d}", .{v});
-                }
-                try writer.writeByte(']');
-            },
-            .array_string => |arr| {
-                try writer.writeByte('[');
-                for (arr, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.print("\"{s}\"", .{v});
-                }
-                try writer.writeByte(']');
-            },
-        }
-    }
-
-    pub fn deinit(self: Metadata, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .string => |s| allocator.free(s),
-            .array_bool => |s| allocator.free(s),
-            .array_int => |s| allocator.free(s),
-            .array_float => |s| allocator.free(s),
-            .array_string => |s| {
-                for (s) |str| allocator.free(str);
-                allocator.free(s);
-            },
+fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionError!struct { std.Io.File, []const u8 } {
+    // When neither opens, a denied probe is what is reported. On S3 it may
+    // mean absent: a bucket that may not be listed answers 403 for a
+    // missing key.
+    var denied = false;
+    for ([_][]const u8{ "model.safetensors.index.json", "model.safetensors" }) |name| {
+        if (repo.openFile(io, name, .{ .mode = .read_only })) |file| {
+            return .{ file, name };
+        } else |err| switch (err) {
+            error.Canceled => return ModelPathResolutionError.Canceled,
+            error.AccessDenied, error.PermissionDenied => denied = true,
             else => {},
         }
     }
+    return if (denied) ModelPathResolutionError.PermissionDenied else ModelPathResolutionError.FileNotFound;
+}
 
-    pub fn clone(self: Metadata, allocator: std.mem.Allocator) !Metadata {
-        return switch (self) {
-            .null => .null,
-            .int => |v| .{ .int = v },
-            .float => |v| .{ .float = v },
-            .bool => |v| .{ .bool = v },
-            .string => |s| .{ .string = try allocator.dupe(u8, s) },
-            .array_bool => |s| .{ .array_bool = try allocator.dupe(bool, s) },
-            .array_int => |s| .{ .array_int = try allocator.dupe(i64, s) },
-            .array_float => |s| .{ .array_float = try allocator.dupe(f64, s) },
-            .array_string => |s| blk: {
-                const new_slice = try allocator.alloc([]const u8, s.len);
-                errdefer allocator.free(new_slice);
-                for (s, 0..) |str, i| {
-                    new_slice[i] = try allocator.dupe(u8, str);
-                }
-                break :blk .{ .array_string = new_slice };
-            },
-        };
+test "resolveModelEntrypoint falls back past a denied index and reports a denied probe" {
+    const VFS = @import("vfs");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    // `served` has only the single file, behind an index S3 refuses with the
+    // 403 a principal without `s3:ListBucket` gets for a missing key.
+    var object: [8]u8 = @splat(0);
+    var server = try VFS.mock_server.MockServer.init(io, &object, .{
+        .objects = &.{.{ .path = "/bucket/served/model.safetensors", .bytes = &object }},
+        .refusals = &.{
+            .{ .path = "/bucket/served/model.safetensors.index.json", .status = .forbidden },
+            .{ .path = "/bucket/denied/model.safetensors.index.json", .status = .forbidden },
+            .{ .path = "/bucket/denied/model.safetensors", .status = .forbidden },
+            .{ .path = "/bucket/missing/model.safetensors.index.json", .status = .not_found },
+            .{ .path = "/bucket/missing/model.safetensors", .status = .not_found },
+        },
+    });
+    var server_group: std.Io.Group = .init;
+    try VFS.mock_server.startMockServer(&server, &server_group, io);
+    var server_joined = false;
+    defer VFS.mock_server.cleanupMockServer(&server, &server_group, io, server_joined);
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    var endpoint_buffer: [64]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.port()});
+    var s3: VFS.S3 = try .init(allocator, io, &client, .{ .endpoint_url = endpoint, .region = "us-east-1" });
+    defer s3.deinit();
+
+    {
+        const repo = try std.Io.Dir.openDir(.cwd(), s3.io(), "bucket/served", .{});
+        defer repo.close(s3.io());
+        const file, const name = try resolveModelEntrypoint(s3.io(), repo);
+        defer file.close(s3.io());
+        try std.testing.expectEqualStrings("model.safetensors", name);
     }
-};
+    {
+        const repo = try std.Io.Dir.openDir(.cwd(), s3.io(), "bucket/denied", .{});
+        defer repo.close(s3.io());
+        try std.testing.expectError(error.PermissionDenied, resolveModelEntrypoint(s3.io(), repo));
+    }
+    {
+        const repo = try std.Io.Dir.openDir(.cwd(), s3.io(), "bucket/missing", .{});
+        defer repo.close(s3.io());
+        try std.testing.expectError(error.FileNotFound, resolveModelEntrypoint(s3.io(), repo));
+    }
+
+    server_group.cancel(io);
+    server_joined = true;
+    try server.check();
+}
 
 fn stringToDtype(safetensor_type: []const u8) !DataType {
     const map = std.StaticStringMap(DataType).initComptime(.{
@@ -773,97 +974,4 @@ fn stringToDtype(safetensor_type: []const u8) !DataType {
         log.err("Unsupported safetensor data type: {s}", .{safetensor_type});
         return error.UnsupportedDataType;
     };
-}
-
-fn parseMetadata(allocator: std.mem.Allocator, val: std.json.Value) !Metadatas {
-    var metadatas: Metadatas = .{};
-    var prefix_buf: [1024]u8 = undefined;
-    var prefix = StringBuilder.initBuffer(&prefix_buf);
-
-    try populateMetadata(allocator, &prefix, val, &metadatas);
-
-    return metadatas;
-}
-
-fn populateMetadata(allocator: std.mem.Allocator, prefix: *StringBuilder, val: std.json.Value, metadatas: *Metadatas) !void {
-    const key = prefix.items;
-    return switch (val) {
-        .null => try metadatas.put(allocator, try allocator.dupe(u8, key), .null),
-        .bool => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .bool = v }),
-        .integer => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .int = v }),
-        .float => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .float = v }),
-        .number_string, .string => |v| try metadatas.put(allocator, try allocator.dupe(u8, key), .{ .string = try allocator.dupe(u8, v) }),
-        .array => |v| {
-            if (v.items.len == 0) return;
-            if (validSlice(v)) |item_type| {
-                const data: Metadata = switch (item_type) {
-                    .bool => blk: {
-                        const values = try allocator.alloc(bool, v.items.len);
-                        for (v.items, 0..) |item, i| values[i] = item.bool;
-                        break :blk .{ .array_bool = values };
-                    },
-                    .integer => blk: {
-                        const values = try allocator.alloc(i64, v.items.len);
-                        for (v.items, 0..) |item, i| values[i] = item.integer;
-                        break :blk .{ .array_int = values };
-                    },
-                    .float => blk: {
-                        const values = try allocator.alloc(f64, v.items.len);
-                        for (v.items, 0..) |item, i| values[i] = item.float;
-                        break :blk .{ .array_float = values };
-                    },
-                    inline .string, .number_string => |tag| blk: {
-                        const values = try allocator.alloc([]const u8, v.items.len);
-                        for (v.items, 0..) |item, i| {
-                            values[i] = try allocator.dupe(u8, @field(item, @tagName(tag)));
-                        }
-                        break :blk .{ .array_string = values };
-                    },
-                    .null, .array, .object => unreachable,
-                };
-                try metadatas.put(allocator, try allocator.dupe(u8, key), data);
-            } else {
-                for (v.items, 0..) |item, i| {
-                    const old_len = prefix.items.len;
-                    if (prefix.items.len > 0) {
-                        prefix.appendAssumeCapacity('.');
-                    }
-                    prefix.items.len += std.fmt.printInt(prefix.unusedCapacitySlice(), i, 10, .lower, .{});
-                    try populateMetadata(allocator, prefix, item, metadatas);
-                    prefix.items.len = old_len;
-                }
-            }
-        },
-        .object => |v| {
-            var obj_iter = v.iterator();
-            while (obj_iter.next()) |entry| {
-                const old_len = prefix.items.len;
-                if (prefix.items.len > 0) {
-                    prefix.appendAssumeCapacity('.');
-                }
-                prefix.appendSliceAssumeCapacity(entry.key_ptr.*);
-                try populateMetadata(allocator, prefix, entry.value_ptr.*, metadatas);
-                prefix.items.len = old_len;
-            }
-        },
-    };
-}
-
-/// We can only create a Zig slice out of json array, if all values
-/// in the array have the same type.
-fn validSlice(v: std.json.Array) ?std.meta.Tag(std.json.Value) {
-    if (v.items.len == 0) return null;
-
-    const item_type: std.meta.Tag(std.json.Value) = v.items[0];
-    switch (item_type) {
-        .null, .array, .object => return null,
-        else => {},
-    }
-
-    for (v.items[1..]) |item| {
-        if (item != item_type)
-            return null;
-    }
-
-    return item_type;
 }

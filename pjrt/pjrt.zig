@@ -484,11 +484,6 @@ pub const Client = opaque {
         return @ptrCast(ret.executable.?);
     }
 
-    pub fn compile(self: *const Client, api: *const Api, io: std.Io, args: CompileArgs) ApiError!*LoadedExecutable {
-        var future = io.async(compileRaw, .{ self, api, args });
-        return future.await(io);
-    }
-
     pub const BufferFromHostBufferArgs = struct {
         data: [*]const u8,
         buffer_type: BufferType,
@@ -1595,6 +1590,10 @@ pub const AsyncHostToDeviceTransferManager = opaque {
             .error_message = error_message.ptr,
             .error_message_size = error_message.len,
         });
+    }
+
+    pub fn setBufferErrorUnknown(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, error_message: []const u8) ApiError!void {
+        return self.setBufferError(api, buffer_index, c.PJRT_Error_Code_UNKNOWN, error_message);
     }
 
     pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) ApiError!void {

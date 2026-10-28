@@ -6,8 +6,6 @@ const stdx = zml.stdx;
 const common = @import("../common.zig");
 const inference = @import("inference.zig");
 
-const log = std.log.scoped(.lfm);
-
 pub const Config = struct {
     architectures: []const []const u8,
     block_auto_adjust_ff_dim: bool,
@@ -72,43 +70,6 @@ pub const LoadedModel = struct {
         self.parsed_config.deinit();
     }
 
-    pub fn loadBuffers(
-        self: *const LoadedModel,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *zml.io.TensorStore,
-        progress: *std.Progress.Node,
-    ) !Buffers {
-        progress.increaseEstimatedTotalItems(store.view().count());
-        const now: std.Io.Timestamp = .now(io, .awake);
-
-        var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
-        errdefer self.unloadBuffers(&buffers, allocator);
-
-        var loader: zml.io.Loader = try .init(allocator, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
-        });
-        defer loader.deinit();
-
-        try loader.load(io, Model, &self.inner, &buffers, store, .{ .progress = progress });
-        try loader.await(io);
-
-        const took = now.untilNow(io, .awake);
-        const total_bytes: u64 = loader.bytes_loaded.raw;
-        const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-        log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-
-        return buffers;
-    }
-
-    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        _ = self;
-        Model.unloadBuffers(buffers, allocator);
-    }
-
     pub fn compile(
         self: *const LoadedModel,
         allocator: std.mem.Allocator,
@@ -162,47 +123,6 @@ pub const Model = struct {
             .num_attention_layers = num_attention_layers,
             .num_conv_layers = num_conv_layers,
         };
-    }
-
-    pub fn loadBuffers(
-        self: *const Model,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *zml.io.TensorStore,
-        progress: *std.Progress.Node,
-    ) !zml.Bufferized(Model) {
-        progress.increaseEstimatedTotalItems(store.view().count());
-        const now: std.Io.Timestamp = .now(io, .awake);
-
-        var buffers = try zml.mem.bufferize(allocator, Model, self);
-        errdefer Model.unloadBuffers(&buffers, allocator);
-
-        var loader: zml.io.Loader = try .init(allocator, platform, .{
-            .dma_chunks = 8,
-            .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
-        });
-        defer loader.deinit();
-
-        loader.load(io, Model, self, &buffers, store);
-        try loader.await(io);
-
-        const took = now.untilNow(io, .awake);
-        const total_bytes: u64 = loader.bytes_loaded.raw;
-        const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-        log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-
-        return buffers;
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
-        self.embed_tokens.weight.deinit();
-        LmHead.unloadBuffers(&self.lm_head);
-        for (self.layers) |*layer| {
-            DecoderLayer.unloadBuffers(layer);
-        }
-        allocator.free(self.layers);
     }
 
     pub fn forward(
@@ -324,10 +244,6 @@ pub const LmHead = struct {
         const tokens = new_tokens.convert(.u32);
         return .{ .tokens = if (input.tokens.dim(.seq) == 1) tokens.reuseBuffer(input.tokens) else tokens, .rng = new_rng };
     }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(LmHead)) void {
-        RmsNorm.unloadBuffers(&self.embedding_norm);
-    }
 };
 
 pub const OperatorKind = enum { conv, full_attention };
@@ -426,16 +342,6 @@ pub const DecoderLayer = struct {
             .kv_cache_index = kv_cache_index.reuseBuffer(input.kv_cache_index),
         };
     }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(DecoderLayer)) void {
-        switch (self.operator) {
-            .conv => |*operator| ShortConv.unloadBuffers(operator),
-            .self_attn => |*operator| Attention.unloadBuffers(operator),
-        }
-        RmsNorm.unloadBuffers(&self.operator_norm);
-        RmsNorm.unloadBuffers(&self.ffn_norm);
-        Mlp.unloadBuffers(&self.feed_forward);
-    }
 };
 
 pub const ConvParameters = struct { is_prefill: bool };
@@ -500,12 +406,6 @@ pub const ShortConv = struct {
 
         const output = self.out_proj.forward(y);
         return .{ output.reuseBuffer(input), cache.reuseBuffer(cache_) };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(ShortConv)) void {
-        Linear.unloadBuffers(&self.in_proj);
-        Linear.unloadBuffers(&self.out_proj);
-        self.kernel.deinit();
     }
 };
 
@@ -594,15 +494,6 @@ pub const Attention = struct {
 
         return .{ self.out_proj.forward(attn).reuseBuffer(x), new_kv_cache.reuseBuffer(kv_cache) };
     }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
-        Linear.unloadBuffers(&self.q_proj);
-        Linear.unloadBuffers(&self.k_proj);
-        Linear.unloadBuffers(&self.v_proj);
-        Linear.unloadBuffers(&self.out_proj);
-        RmsNorm.unloadBuffers(&self.q_layernorm);
-        RmsNorm.unloadBuffers(&self.k_layernorm);
-    }
 };
 
 pub const Cache = struct {
@@ -611,11 +502,6 @@ pub const Cache = struct {
 
     pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Cache) {
         return .{ .conv = try self.conv.initBuffers(allocator, io, platform), .kv = try self.kv.initBuffers(io, platform) };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Cache)) void {
-        ConvCache.unloadBuffers(&self.conv);
-        KvCache.unloadBuffers(&self.kv);
     }
 
     pub fn reuseBuffer(self: Cache, other: Cache) Cache {
@@ -638,10 +524,6 @@ pub const ConvCache = struct {
         return .{ .state = try zml.Buffer.fromBytes(io, platform, sh, host) };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(ConvCache)) void {
-        self.state.deinit();
-    }
-
     pub fn reuseBuffer(self: ConvCache, other: ConvCache) ConvCache {
         return .{ .state = self.state.reuseBuffer(other.state) };
     }
@@ -658,11 +540,6 @@ pub const KvCache = struct {
 
     pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
         return .{ .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}), .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}) };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(KvCache)) void {
-        self.k.deinit();
-        self.v.deinit();
     }
 
     pub fn reuseBuffer(self: KvCache, other: KvCache) KvCache {
@@ -700,11 +577,6 @@ pub const Linear = struct {
         return .{ .weight = weight, .bias = bias, .in_tag = zml.Shape.toTag(tag), .out_tag = out_tag };
     }
 
-    pub fn unloadBuffers(linear: *zml.Bufferized(Linear)) void {
-        linear.weight.deinit();
-        if (linear.bias) |*bias| bias.deinit();
-    }
-
     pub fn forward(self: Linear, x: zml.Tensor) zml.Tensor {
         var y = x.dot(self.weight, self.in_tag).renameTag(self.out_tag, self.in_tag);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())).reuseBuffer(x) else y;
@@ -724,12 +596,6 @@ const Mlp = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
-        Linear.unloadBuffers(&self.w1);
-        Linear.unloadBuffers(&self.w2);
-        Linear.unloadBuffers(&self.w3);
-    }
-
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         return self.w2.forward(self.w1.forward(x).silu().mul(self.w3.forward(x))).reuseBuffer(x);
     }
@@ -742,10 +608,6 @@ const RmsNorm = struct {
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32, tag: anytype) RmsNorm {
         return .{ .weight = store.createReplicatedTensor("weight", .{tag}), .eps = eps, .tag = zml.Shape.toTag(tag) };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
-        self.weight.deinit();
     }
 
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {

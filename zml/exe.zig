@@ -310,7 +310,7 @@ pub const Exe = struct {
         /// Non-donated inputs remain owned by the caller.
         pub fn run(self: *Runner, io: std.Io, input_values: anytype, output_refs: anytype, opts: CallOpts) void {
             self.args.set(input_values);
-            self.exe.call(io, self.args, &self.results, opts);
+            self.exe.call(io, self.args, &self.results, opts) catch |err| std.debug.panic("PJRT execution failed with: {}", .{err});
             self.exe.deinitDonatedInputs(self.args);
             self.results.fill(output_refs);
         }
@@ -334,7 +334,9 @@ pub const Exe = struct {
     /// Executes with optional waiting. The caller owns all input handles, including donated inputs.
     /// Donated input contents cannot be used after the call; output buffers have their own handles.
     /// Use a runner to destroy donated handles automatically and replace buffers through output destinations.
-    pub fn call(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
+    /// A failed launch writes no outputs; with `wait`, a failed execution destroys the outputs it
+    /// wrote, so `results_` holds no buffer after any error.
+    pub fn call(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) pjrt.ApiError!void {
         var span = tracer.span("zml.exe.call", .{
             .wait = opts.wait,
             .arg_count = arguments.expected_shapes.len,
@@ -342,6 +344,7 @@ pub const Exe = struct {
         });
         defer span.end();
 
+        const api = self.platform.pjrt_api;
         var events: [Platform.MAX_NUM_DEVICES]?*pjrt.Event = @splat(null);
 
         const partition_events = events[0..@intCast(self.num_partitions)];
@@ -350,7 +353,7 @@ pub const Exe = struct {
             .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => if (opts.wait) partition_events else null,
         };
 
-        self.exe.execute(self.platform.pjrt_api, .{
+        try self.exe.execute(api, .{
             .arguments = arguments.flat_buffers.buffers,
             .num_args = arguments.expected_shapes.len,
             .results = results_.flat_buffers.buffers,
@@ -358,33 +361,20 @@ pub const Exe = struct {
             // TODO: Set this flag for undonatable buffers.
             .non_donatable_input_indices = &.{},
             .context = self.context,
-        }) catch |err| {
-            std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
-        };
+        });
 
-        switch (self.platform.target) {
-            .neuron => {
-                for (events_slice.?) |e| {
-                    if (e) |ev| {
-                        if (opts.wait) {
-                            ev.await(self.platform.pjrt_api, io) catch |err| {
-                                std.debug.panic("PJRT execution failed with: {}", .{err});
-                            };
-                        }
-                        ev.deinit(self.platform.pjrt_api);
-                    }
-                }
-            },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .furiosa => if (opts.wait) {
-                for (events_slice.?) |e| {
-                    if (e) |ev| {
-                        ev.await(self.platform.pjrt_api, io) catch |err| {
-                            std.debug.panic("PJRT execution failed with: {}", .{err});
-                        };
-                        ev.deinit(self.platform.pjrt_api);
-                    }
-                }
-            },
+        // Every partition's event is destroyed, awaited first when waiting.
+        var failure: ?pjrt.ApiError = null;
+        if (events_slice) |slice| for (slice) |e| {
+            const ev = e orelse continue;
+            if (opts.wait) ev.await(api, io) catch |err| {
+                failure = failure orelse err;
+            };
+            ev.deinit(api);
+        };
+        if (failure) |err| {
+            for (results_.flat_buffers.raw_buffers) |buffer| buffer.deinit(api);
+            return err;
         }
     }
 };
@@ -470,7 +460,7 @@ pub fn FnExe(comptime function_: anytype) type {
                 /// Destroys donated input handles before filling outputs; non-donated inputs remain caller-owned.
                 pub fn run(self: *RunnerSelf, io: std.Io, call: Call, opts: Exe.CallOpts) void {
                     self.args.set(call.inputs);
-                    self.exe.call(io, self.args, &self.results, opts);
+                    self.exe.call(io, self.args, &self.results, opts) catch |err| std.debug.panic("PJRT execution failed with: {}", .{err});
                     self.exe.deinitDonatedInputs(self.args);
                     self.results.fill(call.outputs);
                 }
@@ -620,7 +610,7 @@ test "Exe raw calls leave donated input handle cleanup to the caller" {
         var value_buffer = try Buffer.fromBytes(io, platform, value.shape(), std.mem.asBytes(&[2]i32{ 1, 2 }));
         defer value_buffer.deinit();
         args.set(.{ value_buffer, weight_buffer });
-        exe.call(io, args, &results, .{ .wait = wait });
+        try exe.call(io, args, &results, .{ .wait = wait });
         var output = results.get(Buffer);
         defer output.deinit();
 
@@ -628,6 +618,8 @@ test "Exe raw calls leave donated input handle cleanup to the caller" {
         for (value_buffer._shards.constSlice()) |shard| {
             try std.testing.expect(shard.isDeleted(platform.pjrt_api));
         }
+        // Executing over the deleted input is an error, not a panic.
+        try std.testing.expect(std.meta.isError(exe.call(io, args, &results, .{ .wait = true })));
         value_buffer.deinit();
         try std.testing.expectEqual([2]i32{ 11, 22 }, try output.getValue([2]i32, io));
         try std.testing.expectEqual([2]i32{ 10, 20 }, try weight_buffer.getValue([2]i32, io));
