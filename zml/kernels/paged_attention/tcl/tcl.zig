@@ -5,11 +5,12 @@
 //! it fails the required unit-scale tolerance and is not a selectable backend.
 //!
 //! Queries are cut in blocks of rows of one sequence (one token per block for
-//! decode). A context of at most `chunk_keys` keys runs Furiosa's one-shot
+//! decode). A block table that fits one chunk runs Furiosa's one-shot
 //! attention: gather the keys by token slot, contract, mask, one softmax,
-//! contract. Longer contexts run Furiosa's flash attention: a device loop over
-//! chunks of `chunk_keys` keys up to the longest sequence, gathering whole
-//! pages and accumulating the softmax statistics in f32.
+//! contract. Wider tables run Furiosa's flash attention: a device loop over
+//! chunks (at most `prefill_chunk_keys` keys for prefill, `chunk_keys` for
+//! decode) up to the longest sequence, gathering whole pages and accumulating
+//! the softmax statistics in f32.
 //!
 //! Decode without sinks or windows instead runs fusible kernels in the layer,
 //! with the token metadata every layer shares computed once per forward pass:
@@ -32,7 +33,28 @@ const triton = @import("../triton/triton.zig");
 
 const chunk_keys = 4096;
 const flash_chunk_pairs = 512 * 2048;
+/// Keys a prefill chunk holds at most: its loop runs only the chunks under
+/// the longest sequence, so finer chunks skip more of the table.
+const prefill_chunk_keys = 2048;
 const prefill_block = 32;
+
+/// Query blocks a prefill step needs: each sequence's queries start a block,
+/// so its last block may be partial. Regular (power of two) capacities keep
+/// TCC's layout search short; 12 blocks of 32 rows panic its allocator. Extra
+/// blocks keep zero valid lengths and invalid query positions.
+fn prefillBlocks(tokens: i64, sequences: i64, block: i64) i64 {
+    const blocks = @divTrunc(tokens + sequences * (block - 1), block);
+    return @intCast(std.math.ceilPowerOfTwo(u64, @intCast(blocks)) catch unreachable);
+}
+
+/// Rows of a prefill query block: the larger one of the fewest rows in all.
+/// Many sequences fill short blocks better: 16 sequences of a 256-token step
+/// take 32 blocks of 16 rows instead of 32 of 32, prefilling Llama 3.1 8B at
+/// 2406 instead of 1963 tokens/s; 4 sequences keep 32 rows (2785 vs 1946).
+fn prefillBlock(tokens: i64, sequences: i64) i64 {
+    const short = prefill_block / 2;
+    return if (short * prefillBlocks(tokens, sequences, short) < prefill_block * prefillBlocks(tokens, sequences, prefill_block)) short else prefill_block;
+}
 
 pub const paged = struct {
     pub const Options = triton.paged.Options;
@@ -70,21 +92,19 @@ pub const paged = struct {
         const key_alignment = @divExact(page, @as(i64, @intCast(std.math.gcd(@as(u64, @intCast(page)), 64)))) * 64;
         const alignment = if (key_alignment <= chunk_keys) key_alignment else page;
         const decode = !parameters.options_.is_prefill and q.dim(.b) == parameters.seq_lens.dim(.b);
-        const blocks = (std.math.divCeil(i64, q.dim(.b), prefill_block) catch unreachable) + parameters.seq_lens.dim(.b);
-        // Regular block capacities limit layout-search cost for the fused graph.
-        // Extra blocks retain zero valid lengths and invalid query positions.
-        const block_count: i64 = if (decode) q.dim(.b) else @intCast(std.math.ceilPowerOfTwo(u64, @intCast(blocks)) catch unreachable);
-        const rows = block_count * @as(i64, if (decode) 1 else prefill_block);
+        const block = if (decode) 1 else prefillBlock(q.dim(.b), parameters.seq_lens.dim(.b));
+        const block_count = if (decode) q.dim(.b) else prefillBlocks(q.dim(.b), parameters.seq_lens.dim(.b), block);
+        const rows = block_count * block;
         // Bound a flash chunk's query-key pairs: TCC 2026.5 takes 80 s on 512
         // query rows by 2048 keys and 430 s on 4096 keys for the same speed,
         // and does not finish 2048 rows by 4096 keys in 50 minutes.
-        const chunk_limit = @max(1, @divTrunc(@min(chunk_keys, @divTrunc(flash_chunk_pairs, rows)), alignment)) * alignment;
-        const chunk = if (keys <= chunk_keys) keys else @min(keys, chunk_limit);
+        const chunk_limit = @max(1, @divTrunc(@min(@as(i64, if (decode) chunk_keys else prefill_chunk_keys), @divTrunc(flash_chunk_pairs, rows)), alignment)) * alignment;
+        const chunk = @min(keys, chunk_limit);
         const cfg: Cfg = .{
             .tokens = q.dim(.b),
             .sequences = parameters.seq_lens.dim(.b),
             .b = block_count,
-            .i = if (decode) 1 else prefill_block,
+            .i = block,
             .a = (std.math.divCeil(i64, keys, chunk) catch unreachable) * chunk,
             .chunk = chunk,
             .hkv = q.dim(.hkv),
@@ -707,8 +727,14 @@ const Cfg = struct {
 /// Attention tuning inherited from the original TCL backend, informed by
 /// `furiosa.kernels.llama.config` and `common.attention`. Keep the compiler's
 /// default lowering mode and omit the adaptive-einsum and half-VRF settings
-/// removed in TCC 2026.5.
+/// removed in TCC 2026.5. Prefill searches a bounded number of tactic shapes,
+/// with TCC's pruning: Llama 3.1 8B's flash kernel compiles in 20 to 50 s
+/// instead of 2 to 15 minutes under the compute-bound hint, and runs a 16K
+/// prompt in 3.5 s instead of 4.1. Narrow heads search fewer shapes: sixteen
+/// took 11 minutes on one kv head of 32 dimensions, eight 40 s; eight fail to
+/// schedule Llama's kernel for 4 sequences at 128K max context.
 fn configure(b: *tcl.Builder, cfg: Cfg) void {
+    const shapes: i64 = if (cfg.hkv * cfg.g * cfg.d >= 1024) 16 else 8;
     if (cfg.decode) b.compilerConfig(.{
         .enable_einsum_fusion = true,
         .padding_policy = .{ .Small = 1.1 },
@@ -731,11 +757,10 @@ fn configure(b: *tcl.Builder, cfg: Cfg) void {
         .reshape_einsum_mode = .{ .Reshape = .{ .permute = false } },
         .tensor_unit_bridge_threshold_in_page = 12,
         .allow_external_operators = false,
-        .enable_tactic_pruning = false,
         .scheduler_beam_search = true,
         .allow_reduce_by_ve_cluster_chip_reduce = false,
         .allow_reduce_by_ve_cluster_chip_reduce_base_population = false,
-        .tactic_hint = .{ .ForLlmModelComputeBound = 200 },
+        .tactic_hint = .{ .DefaultWithMaxNumUniqueShapes = shapes },
         .dma_preference = 1.2,
     });
 }
@@ -876,9 +901,9 @@ fn prepareQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, t: NativeInputs) tcl.Finis
         };
     }
 
-    const shift = std.math.log2_int(u64, prefill_block);
+    const shift = std.math.log2_int(u64, @intCast(cfg.i));
     op = b.tensorOperation(.{});
-    const blocks = try op.commit(op.fetch(qlen, .{}).addi(prefill_block - 1).binary(.shr_arith, shift), .{});
+    const blocks = try op.commit(op.fetch(qlen, .{}).addi(cfg.i - 1).binary(.shr_arith, shift), .{});
     op = b.tensorOperation(.{});
     const block_end = try op.commit(op.fetch(blocks, .{}).cumsum(&.{a.S}), .{});
     op = b.tensorOperation(.{});
@@ -898,7 +923,7 @@ fn prepareQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, t: NativeInputs) tcl.Finis
     const key_length = try selectMetadata(b, t.seq_lens, pick, a.S);
     const local_rows = try b.arange(cfg.i, .i32, &.{a.I}, .{});
     op = b.tensorOperation(.{});
-    const first_row = try op.commit(op.fetch(block_ids, .{}).subi(op.fetch(block_begin, .{})).muli(prefill_block), .{});
+    const first_row = try op.commit(op.fetch(block_ids, .{}).subi(op.fetch(block_begin, .{})).muli(cfg.i), .{});
     op = b.tensorOperation(.{ .tactic = .einsum_by_ve });
     const qi = try op.commit(op.fetch(first_row, .{}).addi(op.fetch(local_rows, .{})), .{});
     op = b.tensorOperation(.{});
@@ -921,7 +946,7 @@ fn prepareQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, t: NativeInputs) tcl.Finis
     const token_begin = try selectMetadata(b, starts, token_pick, a.S);
     const token_block = try selectMetadata(b, block_start, token_pick, a.S);
     op = b.tensorOperation(.{});
-    const row = try op.commit(op.fetch(token_block, .{}).muli(prefill_block).addi(op.fetch(tokens, .{})).subi(op.fetch(token_begin, .{})).binary(.maxi, 0).binary(.mini, cfg.b * cfg.i - 1), .{});
+    const row = try op.commit(op.fetch(token_block, .{}).muli(cfg.i).addi(op.fetch(tokens, .{})).subi(op.fetch(token_begin, .{})).binary(.maxi, 0).binary(.mini, cfg.b * cfg.i - 1), .{});
     return .{ .q = q, .pages = t.pages, .pick = pick, .qpos = qpos, .kvlen = kvlen, .row = row, .active = active };
 }
 
@@ -1140,9 +1165,10 @@ const Flash = tcl.Kernel(Cfg, .{
                 op = b.tensorOperation(.{});
                 const cvl = try op.commit(op.fetch(live_pages, .{}).reduce(&.{Cp}, .addi), .{});
                 const mask = try attentionMask(b, cfg, prepared.qpos, prepared.kvlen, position, valid_keys);
-                const valid_cache = try cacheMask(b, valid_keys, prepared.kvlen, position);
-                const k = try maskCacheValues(b, try b.reshape(try b.gather(t.k_cache, idx, a.P, &.{ a.B, Cp, a.PG, a.Hkv, a.D }, .{ .valid_length = cvl }), &.{ a.B, Ck, a.Hkv, a.D }, .{}), valid_cache);
-                const v = try maskCacheValues(b, try b.reshape(try b.gather(t.v_cache, idx, a.P, &.{ a.B, Cp, a.PG, a.Hkv, a.D }, .{ .valid_length = cvl }), &.{ a.B, Ck, a.Hkv, a.D }, .{}), valid_cache);
+                // The cache is contracted as is (see `unmasked_decode_keys`):
+                // masked scores and zero weights drop the keys past the bound.
+                const k = try b.reshape(try b.gather(t.k_cache, idx, a.P, &.{ a.B, Cp, a.PG, a.Hkv, a.D }, .{ .valid_length = cvl }), &.{ a.B, Ck, a.Hkv, a.D }, .{});
+                const v = try b.reshape(try b.gather(t.v_cache, idx, a.P, &.{ a.B, Cp, a.PG, a.Hkv, a.D }, .{ .valid_length = cvl }), &.{ a.B, Ck, a.Hkv, a.D }, .{});
                 const masked = try maskedScores(b, a, cfg, prepared.q, k, mask, Ck);
                 op = b.tensorOperation(.{});
                 const max_cur = try op.commit(op.fetch(masked, .{}).reduce(&.{Ck}, .maxf), .{});
