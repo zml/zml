@@ -117,6 +117,11 @@ type. `0.5h` is `b.constant(.half, 0.5)`.
 | `x = a && b && c` | `var l = b.openAnd()`, `l.term(a)`, `l.term(b)`, `l.close(c)` |
 | `return;` | `b.return_()`, or `b.returnIf(c)` |
 
+`condition`, `openAnd`, `openOr` and a ternary `openIfElse` skip a term or an
+operand, so use them only when one must not run, such as a load past the end
+of a buffer. Combine comparisons with `bitAnd` and `bitOr`, and pick between
+values that are safe to compute with `b.ternary`.
+
 Put each `if` or loop body in a Zig `{ ... }` block right after the opener,
 one block per region, each ending with the call that ends the region:
 `elseBranch()` or `yieldThen`, then `close()` or `yieldElse` for an `if`;
@@ -126,8 +131,9 @@ outside, so its `results` stay readable after the blocks.
 A value is evaluated where it is written; a Zig `const` holds it, and an MSL
 function is a Zig function that emits its body. A value a loop or branch
 changes is a local, which lives in memory until the pipeline promotes it.
-The terms of `&&`, `||` and `openIfElse(c, .{T})` run only when the ones
-before leave the result open, each in its own block. Loops follow C++: every
+The terms of `&&` and `||` run only when the ones before leave the result
+open, and an `openIfElse(c, .{T})` operand only when `c` selects it, each in
+its own block. Loops follow C++: every
 loop is `mustprogress`, and its condition and increment follow C++'s
 conversions, so a `short` loop variable compares as an `int` and `++i` steps
 it as a `short`.

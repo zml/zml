@@ -2205,83 +2205,72 @@ test "pragmas, conditions and casts" {
     });
 
     const r = a.o.load(a.lane).mul(2.0);
+    // float acc[4] = {};
+    const acc = b.zeroedArray(.float, 4);
+    // #pragma clang loop unroll(full)
+    var full = b.openForOpts(0, 4, 1, .{ .unroll = .full });
     {
-        // float acc[4] = {};
-        const acc = b.zeroedArray(.float, 4);
-        {
-            // #pragma clang loop unroll(full)
-            var l = b.openForOpts(0, 4, 1, .{ .unroll = .full });
-            {
-                acc.store(l.iv, r);
-                l.close();
-            }
-        }
-        {
-            // #pragma unroll
-            var l = b.openForOpts(0, a.n, 2, .{ .unroll = .enable });
-            {
-                acc.store(0, acc.load(0).add(l.iv.to(.float)));
-                l.close();
-            }
-        }
-        {
-            // for (int i = 0; i < 4; i += 1) {}
-            const i = b.local(.int, 0);
-            var l = b.openLoop(.{});
-            {
-                l.body(i.lt(4));
-            }
-            {
-                i.assign(i.add(1));
-                l.close();
-            }
-        }
-        // const uint bits = as_type<uint>(acc[0]);
-        const bits = acc.load(0).asType(.uint);
-        // float t = r; *&t = 2.0f;
-        const t = b.local(.float, r);
-        t.address().store(0, 2.0);
-        // bool ok = n > 0 && bits != 0;
-        var both = b.openAnd();
-        both.term(a.n.gt(0));
-        const ok = b.local(.bool, both.close(bits.ne(0)));
-        {
-            // if (!(n > 1) || ok) { ... } else { ... }
-            var c = b.condition();
-            c.orNot(a.n.gt(1));
-            var s1 = c.openIfElse(ok, .{});
-            {
-                a.o.store(1, 1.0);
-                s1.elseBranch();
-            }
-            {
-                a.o.store(1, 2.0);
-                s1.close();
-            }
-        }
-        {
-            // if (!ok && !(n == 3)) { ... } else { ... }
-            var c = b.condition();
-            c.andNot(ok);
-            var s2 = c.openIfElseNot(a.n.eq(3), .{});
-            {
-                a.o.store(2, 1.0);
-                s2.elseBranch();
-            }
-            {
-                s2.close();
-            }
-        }
-        // o[lane] = n > 2 ? fast::exp(t) : t;
-        var choice = b.openIfElse(a.n.gt(2), .{.float});
-        {
-            choice.yieldThen(.{b.fast().exp(t)});
-        }
-        {
-            choice.yieldElse(.{t});
-        }
-        a.o.store(a.lane, choice.results[0]);
+        acc.store(full.iv, r);
+        full.close();
     }
+    // #pragma unroll
+    var enabled = b.openForOpts(0, a.n, 2, .{ .unroll = .enable });
+    {
+        acc.store(0, acc.load(0).add(enabled.iv.to(.float)));
+        enabled.close();
+    }
+    // for (int i = 0; i < 4; i += 1) {}
+    const i = b.local(.int, 0);
+    var counted = b.openLoop(.{});
+    {
+        counted.body(i.lt(4));
+    }
+    {
+        counted.next();
+        i.assign(i.add(1));
+        counted.close();
+    }
+    // const uint bits = as_type<uint>(acc[0]);
+    const bits = acc.load(0).asType(.uint);
+    // float t = r; *&t = 2.0f;
+    const t = b.local(.float, r);
+    t.address().store(0, 2.0);
+    // bool ok = n > 0 && bits != 0;
+    var both = b.openAnd();
+    both.term(a.n.gt(0));
+    const ok = both.close(bits.ne(0));
+    // if (!(n > 1) || ok) { ... } else { ... }
+    var c1 = b.condition();
+    c1.orNot(a.n.gt(1));
+    var s1 = c1.openIfElse(ok, .{});
+    {
+        a.o.store(1, 1.0);
+        s1.elseBranch();
+    }
+    {
+        a.o.store(1, 2.0);
+        s1.close();
+    }
+    // if (!ok && !(n == 3)) { ... } else { ... }
+    var c2 = b.condition();
+    c2.andNot(ok);
+    var s2 = c2.openIfElseNot(a.n.eq(3), .{});
+    {
+        a.o.store(2, 1.0);
+        s2.elseBranch();
+    }
+    {
+        s2.close();
+    }
+    // o[lane] = n > 2 ? fast::exp(t) : t;
+    var choice = b.openIfElse(a.n.gt(2), .{.float});
+    {
+        choice.yieldThen(.{b.fast().exp(t)});
+    }
+    {
+        choice.yieldElse(.{t});
+    }
+    a.o.store(a.lane, choice.results[0]);
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
     try expectContains(ir, &.{ "llvm.memset.p0.i64", "full = true", "disable = false", "llvm.bitcast" });
