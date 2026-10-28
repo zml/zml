@@ -104,12 +104,20 @@ pub const Converter = struct {
     context: dump_context.Context = .{},
     reference: ?*const hlo.HloComputationProto = null,
     entry_id: i64 = -1,
+    device_count: ?u64 = null,
+    stack_frame_index: ?hlo.StackFrameIndexProto = null,
 
     const Assigned = struct { physical: i64, start: i64, len: i64 };
 
     pub fn emitModule(self: *Converter, writer: anytype, hlo_proto: hlo.HloProto) !void {
         const module = hlo_proto.hlo_module orelse return error.NoModule;
         self.entry_id = module.entry_computation_id;
+        if (module.device_assignment) |assignment| {
+            if (assignment.replica_count > 0 and assignment.computation_count > 0) {
+                self.device_count = std.math.mul(u64, @intCast(assignment.replica_count), @intCast(assignment.computation_count)) catch null;
+            }
+        }
+        self.stack_frame_index = module.stack_frame_index;
 
         if (hlo_proto.buffer_assignment) |buffer_assignement| {
             // Logical buffer id to instruction id
@@ -259,57 +267,40 @@ pub const Converter = struct {
         try list.write(.{ .key = "opcode", .value = instr.opcode });
         if (instr.custom_call_target.len > 0) try list.write(.{ .key = "custom call target", .value = instr.custom_call_target });
         if (isCollective(instr.opcode)) {
-            try list.write(.{ .key = "channel", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{instr.channel_id}) });
-            try list.write(.{ .key = "global device IDs", .value = if (instr.use_global_device_ids) "true" else "false" });
-            if (instr.replica_group_list) |groups| try list.write(.{ .key = "collective groups (XLA proto)", .value = try collectiveGroupsText(self.allocator, groups) });
-            if (instr.replica_groups.items.len > 0) try list.write(.{ .key = "replica groups", .value = try std.fmt.allocPrint(self.allocator, "{any}", .{instr.replica_groups.items}) });
-            if (instr.dimensions.items.len > 0) try list.write(.{ .key = "collective dimensions", .value = try std.fmt.allocPrint(self.allocator, "{any}", .{instr.dimensions.items}) });
-            for (instr.operand_ids.items, 0..) |id, index| {
-                if (self.instructions.get(id)) |operand| {
-                    if (operand.shape) |shape| {
-                        if (logicalBytes(shape)) |bytes| try list.write(.{ .key = try std.fmt.allocPrint(self.allocator, "input {d} payload bytes per device", .{index}), .value = try std.fmt.allocPrint(self.allocator, "{d}", .{bytes}) });
-                    }
-                }
+            var input_bytes: ?u64 = if (instr.operand_ids.items.len > 0) 0 else null;
+            for (instr.operand_ids.items) |id| {
+                const operand = self.instructions.get(id) orelse {
+                    input_bytes = null;
+                    break;
+                };
+                const shape = operand.shape orelse {
+                    input_bytes = null;
+                    break;
+                };
+                const bytes = logicalBytes(shape) orelse {
+                    input_bytes = null;
+                    break;
+                };
+                input_bytes = std.math.add(u64, input_bytes.?, bytes) catch null;
+                if (input_bytes == null) break;
             }
-            if (instr.shape) |shape| {
-                if (logicalBytes(shape)) |bytes| try list.write(.{ .key = "output payload bytes per device", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{bytes}) });
-            }
-            if (collectiveGroupSize(instr)) |count| {
-                try list.write(.{ .key = "devices per collective group", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{count}) });
-                if (instr.operand_ids.items.len == 1 and count > 0) {
-                    if (self.instructions.get(instr.operand_ids.items[0])) |operand| {
-                        if (operand.shape) |shape| {
-                            if (logicalBytes(shape)) |bytes| {
-                                if (ringSendBytes(instr.opcode, bytes, count)) |traffic| {
-                                    try list.write(.{ .key = "estimated ring send bytes per device", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{traffic}) });
-                                    try list.write(.{ .key = "estimated ring receive bytes per device", .value = try std.fmt.allocPrint(self.allocator, "{d}", .{traffic}) });
-                                    try list.write(.{ .key = "estimate model", .value = "Ideal ring, no protocol overhead: gather=(P-1)*input; reduce=2*(P-1)*input/P. Not a runtime measurement." });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if (std.mem.eql(u8, instr.opcode, "all-reduce")) {
-                try list.write(.{ .key = "collective result", .value = "reduced value replicated within each collective group; input may contain partial sums" });
-                if (instr.called_computation_ids.items.len == 1) {
-                    if (self.computations.get(instr.called_computation_ids.items[0])) |reducer| {
-                        if (self.instructions.get(reducer.root_id)) |root| try list.write(.{ .key = "reduction root opcode", .value = root.opcode });
-                    }
-                }
-            }
-            try self.context.writeAttrs(self.allocator, list, instr);
-            try list.write(.{ .key = "traffic accounting", .value = "Logical payload and ideal-ring estimates for this HLO stage, not measured executable traffic. See optimized collective and sibling diagnostics." });
+            const output_bytes = if (instr.shape) |shape| logicalBytes(shape) else null;
+            try list.write(.{ .key = "bytes/device", .value = try std.fmt.allocPrint(self.allocator, "out: {s}, in: {s}", .{ try compactBytes(self.allocator, output_bytes), try compactBytes(self.allocator, input_bytes) }) });
+            const connected = collectiveGroupSize(instr);
+            const total = self.context.device_count orelse self.device_count orelse collectiveDeviceCount(instr);
+            try list.write(.{ .key = "device connected", .value = try std.fmt.allocPrint(self.allocator, "{s} / {s}", .{ try compactCount(self.allocator, connected), try compactCount(self.allocator, total) }) });
         }
+
         if (instr.metadata) |meta| {
-            try list.write(.{ .key = "loc", .value = try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ meta.source_file, meta.source_line }) });
+            if (try self.sourceLocation(meta)) |location| {
+                try list.write(.{ .key = "loc", .value = location });
+            }
             if (meta.op_name.len != 0) {
                 try list.write(.{ .key = "op_name", .value = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ meta.op_type, meta.op_name }) });
             }
             if (meta.deduplicated_name.len != 0) {
                 try list.write(.{ .key = "deduplicated_name", .value = meta.deduplicated_name });
             }
-            // stack_frame_id doesn't seem interesting
         }
 
         if (self.physical_buffer.get(instr.id)) |assigned| {
@@ -331,6 +322,25 @@ pub const Converter = struct {
                 }
             }
         }
+    }
+
+    fn sourceLocation(self: *const Converter, meta: hlo.OpMetadata) !?[]const u8 {
+        if (self.stack_frame_index) |index| {
+            // All references in StackFrameIndexProto are 1-based; zero is absent.
+            // Resolve only the instruction's frame, not its parent call stack.
+            if (indexed(index.stack_frames.items, meta.stack_frame_id)) |frame| {
+                if (indexed(index.file_locations.items, frame.file_location_id)) |location| {
+                    if (indexed(index.file_names.items, location.file_name_id)) |file| {
+                        if (file.len > 0 and location.line > 0) {
+                            if (location.column > 0) return try std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}", .{ file, location.line, location.column });
+                            return try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ file, location.line });
+                        }
+                    }
+                }
+            }
+        }
+        if (meta.source_file.len > 0) return try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ meta.source_file, meta.source_line });
+        return null;
     }
 
     fn referenceInstruction(self: *const Converter, instr: hlo.HloInstructionProto) ?*const hlo.HloInstructionProto {
@@ -774,4 +784,102 @@ test "global references match parameter numbers and reject ambiguous provenance"
 
 test {
     _ = dump_context;
+}
+
+fn indexed(items: anytype, id: i32) ?@typeInfo(@TypeOf(items)).pointer.child {
+    if (id <= 0 or id > items.len) return null;
+    return items[@intCast(id - 1)];
+}
+
+test "source locations resolve protobuf stack frames and safely fall back" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var index: hlo.StackFrameIndexProto = .{};
+    try index.file_names.append(allocator, "mnist.zig");
+    try index.file_locations.append(allocator, .{ .file_name_id = 1, .line = 71, .column = 38 });
+    try index.stack_frames.append(allocator, .{ .file_location_id = 1, .parent_frame_id = 1 });
+    var module: hlo.HloModuleProto = .{ .name = "locations", .stack_frame_index = index };
+    var comp: hlo.HloComputationProto = .{ .name = "entry" };
+    try comp.instructions.append(allocator, .{ .name = "layer", .opcode = "copy", .shape = .{ .element_type = .F32 }, .metadata = .{ .stack_frame_id = 1 } });
+    try module.computations.append(allocator, comp);
+    var encoded: std.Io.Writer.Allocating = .init(allocator);
+    try (hlo.HloProto{ .hlo_module = module }).encode(&encoded.writer, allocator);
+    var reader: std.Io.Reader = .fixed(encoded.written());
+    const decoded = try hlo.HloProto.decode(&reader, allocator);
+    var converter: Converter = .{ .allocator = allocator };
+    var json: std.Io.Writer.Allocating = .init(allocator);
+    try converter.emitModule(&json.writer, decoded);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json.written(), .{});
+    const attrs = parsed.value.object.get("graphs").?.array.items[0].object.get("nodes").?.array.items[0].object.get("attrs").?.array.items;
+    var found = false;
+    for (attrs) |attr| {
+        if (std.mem.eql(u8, attr.object.get("key").?.string, "loc")) {
+            try std.testing.expectEqualStrings("mnist.zig:71:38", attr.object.get("value").?.string);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+    try std.testing.expectEqualStrings("legacy.zig:42", (try converter.sourceLocation(.{ .stack_frame_id = 99, .source_file = "legacy.zig", .source_line = 42 })).?);
+    try std.testing.expect(try converter.sourceLocation(.{ .stack_frame_id = -1 }) == null);
+    try std.testing.expect(try converter.sourceLocation(.{}) == null);
+    converter.stack_frame_index.?.stack_frames.items[0].file_location_id = 99;
+    try std.testing.expect(try converter.sourceLocation(.{ .stack_frame_id = 1 }) == null);
+    converter.stack_frame_index.?.stack_frames.items[0].file_location_id = 1;
+    converter.stack_frame_index.?.file_locations.items[0].file_name_id = 99;
+    try std.testing.expect(try converter.sourceLocation(.{ .stack_frame_id = 1 }) == null);
+}
+
+fn compactCount(allocator: std.mem.Allocator, count: ?u64) ![]const u8 {
+    return if (count) |value| try std.fmt.allocPrint(allocator, "{d}", .{value}) else "?";
+}
+
+fn compactBytes(allocator: std.mem.Allocator, bytes: ?u64) ![]const u8 {
+    const value = bytes orelse return "?";
+    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB", "PB", "EB" };
+    var unit: usize = 0;
+    var divisor: u64 = 1;
+    while (unit + 1 < units.len and value / divisor >= 1024) : (unit += 1) divisor *= 1024;
+    if (value % divisor == 0) return std.fmt.allocPrint(allocator, "{d}{s}", .{ value / divisor, units[unit] });
+    return std.fmt.allocPrint(allocator, "{d:.1}{s}", .{ @as(f64, @floatFromInt(value)) / @as(f64, @floatFromInt(divisor)), units[unit] });
+}
+
+fn collectiveDeviceCount(instr: hlo.HloInstructionProto) ?u64 {
+    if (instr.replica_group_list) |groups| switch (groups) {
+        .mesh_axes_replica_group_list => |list| {
+            const mesh = list.mesh orelse return null;
+            var count: u64 = 1;
+            for (mesh.axes.items) |axis| {
+                if (axis.size <= 0) return null;
+                count = std.math.mul(u64, count, @intCast(axis.size)) catch return null;
+            }
+            return if (mesh.axes.items.len > 0) count else null;
+        },
+        .iota_collective_device_list => |list| {
+            if (list.num_replica_groups <= 0 or list.num_devices_per_group <= 0) return null;
+            return std.math.mul(u64, @intCast(list.num_replica_groups), @intCast(list.num_devices_per_group)) catch null;
+        },
+        // Explicit groups can cover only a subset of the available devices.
+        .collective_device_list => return null,
+    };
+    return null;
+}
+
+test "compact collective bytes and device summaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try std.testing.expectEqualStrings("16KB", try compactBytes(allocator, 16384));
+    try std.testing.expectEqualStrings("1.5KB", try compactBytes(allocator, 1536));
+    try std.testing.expectEqualStrings("0B", try compactBytes(allocator, 0));
+    try std.testing.expectEqualStrings("?", try compactBytes(allocator, null));
+    var group: hlo.ReplicaGroup = .{};
+    try group.replica_ids.appendSlice(allocator, &.{ 0, 1 });
+    var instr: hlo.HloInstructionProto = .{ .opcode = "all-reduce" };
+    try instr.replica_groups.append(allocator, group);
+    try std.testing.expectEqual(@as(?u64, 2), collectiveGroupSize(instr));
+    try group.replica_ids.appendSlice(allocator, &.{ 2, 3 });
+    instr.replica_groups.items[0] = group;
+    instr.opcode = "all-to-all";
+    try std.testing.expectEqual(@as(?u64, 4), collectiveGroupSize(instr));
 }

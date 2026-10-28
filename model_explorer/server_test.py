@@ -112,7 +112,7 @@ class ServerTest(unittest.TestCase):
                 graph = self.convert(path, "model_explorer_hlo")[0]["graphs"][0]
                 return {a["key"]: a["value"] for a in graph["nodes"][0]["attrs"]}
 
-            self.assertNotIn("GPU topology (PJRT)", attrs())
+            self.assertEqual(attrs()["device connected"], "? / ?")
             stem.mkdir()
             gpu = field(3, "test GPU") + field(4, 1) + field(5, 1) + field(6, 2)
             topology = field(9, field(1, "type.googleapis.com/xla.GpuTopologyProto") + field(2, gpu))
@@ -120,12 +120,13 @@ class ServerTest(unittest.TestCase):
             final = Path(str(stem) + ".sm_8.9_gpu_after_optimizations.hlo.pb")
             final.write_bytes(proto)
             enriched = attrs()
-            self.assertIn("test GPU", enriched["GPU topology (PJRT)"])
-            self.assertIn("matched by opcode and channel 3", enriched["optimized collective"])
+            self.assertEqual(enriched["device connected"], "? / 2")
+            self.assertNotIn("optimized collective", enriched)
+            self.assertEqual(enriched["bytes/device"], "out: 4B, in: ?")
             (stem / "topology.pb").write_bytes(b"\xff")
-            self.assertIn("topology diagnostic", attrs())
+            self.assertEqual(attrs()["device connected"], "? / ?")
             Path(str(stem) + ".sm_9.0_gpu_after_optimizations.hlo.pb").write_bytes(proto)
-            self.assertIn("Multiple optimized", attrs()["optimized HLO diagnostic"])
+            self.assertEqual(attrs()["bytes/device"], "out: 4B, in: ?")
 
     def test_mlir_conversion(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -5,6 +5,7 @@ const hlo = @import("@xla//xla/service:hlo_proto").proto;
 pub const Attribute = struct { key: []const u8, value: []const u8 };
 
 pub const Context = struct {
+    device_count: ?u64 = null,
     attrs: std.ArrayList(Attribute) = .empty,
     optimized: ?hlo.HloModuleProto = null,
     optimized_path: []const u8 = "",
@@ -55,6 +56,10 @@ pub const Context = struct {
         if (!std.mem.eql(u8, specific.type_url, "type.googleapis.com/xla.GpuTopologyProto")) return error.UnsupportedTopology;
         var inner: std.Io.Reader = .fixed(specific.value);
         const gpu = try topology.GpuTopologyProto.decode(&inner, allocator);
+        if (gpu.num_partitions > 0 and gpu.num_hosts_per_partition > 0 and gpu.num_devices_per_host > 0) {
+            const hosts = try std.math.mul(u64, @intCast(gpu.num_partitions), @intCast(gpu.num_hosts_per_partition));
+            self.device_count = try std.math.mul(u64, hosts, @intCast(gpu.num_devices_per_host));
+        }
         try self.add(allocator, "topology source", path);
         try self.add(allocator, "GPU topology (PJRT)", try std.fmt.allocPrint(allocator, "{s}; {d} topology partitions, {d} hosts/partition, {d} devices/host. PJRT partitions are not HLO SPMD partitions; this is not a physical link map.", .{ gpu.platform_version, gpu.num_partitions, gpu.num_hosts_per_partition, gpu.num_devices_per_host }));
         if (gpu.gpu_target_config) |target| {

@@ -19,12 +19,17 @@ Select a node to inspect its attributes and output metadata:
   of all-reduces may hold partial sums.
 - Payload sizes count logical tensor bytes, excluding layout padding and protocol
   overhead. Unsupported element types and dynamic shapes have no byte estimate.
-- Ring send/receive estimates assume an ideal ring within each recorded group.
-  They are per device, per invocation, and exclude protocol overhead. The dump
-  does not establish the runtime algorithm or measured network traffic.
+- `bytes/device` shows logical output and summed input payloads as
+  `out: 16KB, in: 64KB`. Units use powers of 1024; these are tensor sizes, not
+  measured send/receive traffic. Unknown sizes appear as `?`.
+- `device connected` shows collective group size / total available devices,
+  including the current device. The total comes from PJRT topology, then module
+  device assignment, then a complete mesh/iota group description. It describes
+  participation, not physical links or ring neighbors. Unknown counts use `?`.
 
-Collectives expose channels, dimensions, device-group descriptions and reduction
-root opcodes. Copies retain the `copy` label even if their historical name starts
+The rendered collective summary contains only those two fields; detailed
+compiler and runtime interpretation is documented below rather than repeated
+on each node. Copies retain the `copy` label even if their historical name starts
 with `custom-call`. Real custom calls show their target.
 
 ## Inspected Llama layer
@@ -60,12 +65,12 @@ The converter also automatically discovers, for the same dump stem:
   partitions are distinct from the module's SPMD partition count.
 - `<stem>.*gpu_after_optimizations.hlo.pb`: a unique final GPU dump. Collectives
   are correlated by opcode and nonzero channel ID. Multiple matches or multiple
-  final dumps are left ambiguous. The actual backend-config JSON is displayed;
+  final dumps are left ambiguous. Backend-config JSON is available in that sibling;
   `DEFAULT` is not interpreted as a specific NCCL algorithm.
 - `<stem>.thunk_sequence_after_thunk_passes.txt`: module-wide collective thunk
   lines, without pretending to associate an unlabelled thunk with a channel.
 
-Absent optional files are skipped; malformed optional files produce diagnostics.
+Absent optional files are skipped; malformed topology leaves its count unknown.
 Arbitrary HLO filenames without a recognized dump-stage suffix are not searched.
 
 For the inspected layer, the final HLO has only two all-reduces (channels 3 and 4),
