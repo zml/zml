@@ -11,9 +11,14 @@
 //! chunks of `chunk_keys` keys up to the longest sequence, gathering whole
 //! pages and accumulating the softmax statistics in f32.
 //!
-//! Decode without sinks or windows, up to `decode_keys` keys, instead runs one
-//! fusible kernel per layer over the whole pages each token sees, with the
-//! token metadata every layer shares computed once per forward pass.
+//! Decode without sinks or windows instead runs fusible kernels in the layer,
+//! with the token metadata every layer shares computed once per forward pass:
+//! one straight-line kernel over the whole pages each token sees, or, for one
+//! token past `straight_decode_keys` keys, a straight-line head over its first
+//! keys and a device loop over the chunks holding its other keys, so that the
+//! work follows the sequence's length instead of the block table's width.
+//! `chunked_decode_tokens` tokens past `straight_batch_decode_keys` keys run
+//! flash attention for the same reason.
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -26,7 +31,7 @@ const paged_attention = @import("../paged_attention.zig");
 const triton = @import("../triton/triton.zig");
 
 const chunk_keys = 4096;
-const flash_chunk_pairs = 512 * chunk_keys;
+const flash_chunk_pairs = 512 * 2048;
 const prefill_block = 32;
 
 pub const paged = struct {
@@ -70,9 +75,9 @@ pub const paged = struct {
         // Extra blocks retain zero valid lengths and invalid query positions.
         const block_count: i64 = if (decode) q.dim(.b) else @intCast(std.math.ceilPowerOfTwo(u64, @intCast(blocks)) catch unreachable);
         const rows = block_count * @as(i64, if (decode) 1 else prefill_block);
-        // TCC 2026.5 compiles flash chunks of 512 query rows by 4096 keys or
-        // 2048 rows by 1024 keys in minutes, but not 2048 rows by 4096 keys in
-        // 50 minutes: bound the pairs.
+        // Bound a flash chunk's query-key pairs: TCC 2026.5 takes 80 s on 512
+        // query rows by 2048 keys and 430 s on 4096 keys for the same speed,
+        // and does not finish 2048 rows by 4096 keys in 50 minutes.
         const chunk_limit = @max(1, @divTrunc(@min(chunk_keys, @divTrunc(flash_chunk_pairs, rows)), alignment)) * alignment;
         const chunk = if (keys <= chunk_keys) keys else @min(keys, chunk_limit);
         const cfg: Cfg = .{
@@ -93,7 +98,11 @@ pub const paged = struct {
             .is_causal = opts.mask.isCausal(),
             .window = @intCast(opts.mask.slidingWindow() orelse 0),
         };
-        if (decode and !cfg.use_sink and cfg.window == 0 and keys <= decode_keys) {
+        const plain_decode = decode and !cfg.use_sink and cfg.window == 0;
+        // The hybrid kernel needs tail pages past its head's.
+        if (plain_decode and cfg.tokens == 1 and parameters.block_table.dim(.p) > std.math.divCeil(i64, straight_decode_keys, page) catch unreachable)
+            return hybridDecodeAttention(parameters, q, k_cache, v_cache, cfg.scale, cfg.is_causal).convert(q.dtype());
+        if (plain_decode and keys <= decode_keys and (cfg.tokens < chunked_decode_tokens or keys <= straight_batch_decode_keys)) {
             return decodeAttention(parameters, q, k_cache, v_cache, .{
                 .t = cfg.tokens,
                 .a = keys,
@@ -125,9 +134,41 @@ pub const paged = struct {
     }
 };
 
-/// Keys a decode kernel attends to in one pass: TCC 2026.5 fails on the
-/// decode metadata for 131072 keys in pages of 16.
+/// Widest block table the straight-line decode kernel takes for one token.
+/// Its work follows the table's width, while the hybrid kernel's loop costs
+/// about 15 us per layer whether it runs or not, and about 50 us more per
+/// chunk it runs. Llama 3.1 8B decode layer on RNGD over a 32K table, straight
+/// vs hybrid: 436 vs 437 us at 300 keys, 482 vs 554 at 16K, 536 vs 651 at 32K.
+/// Several tokens do not run it: over a token axis TCC cannot propagate the
+/// bounds of gathers outside a loop, and without them a 4-token layer took 11
+/// minutes and 75 GB to compile.
+const straight_decode_keys = 32768;
+
+/// Keys a straight-line decode kernel attends to in one pass: TCC 2026.5 fails
+/// on the decode metadata for 131072 keys in pages of 16.
 const decode_keys = 65536;
+
+/// Tokens from which decode over more than `straight_batch_decode_keys` keys
+/// runs flash attention, whose loop computes only the chunks under the longest
+/// sequence. Llama 3.1 8B, 16 tokens, straight vs chunked: over 32K keys 513
+/// vs 585 tok/s with short sequences but 388 vs 356 at 8K tokens; over 64K
+/// keys 365 vs 586 and 270 vs 356.
+const chunked_decode_tokens = 16;
+const straight_batch_decode_keys = 32768;
+
+/// Decode contracts the gathered cache as is: keys past the valid ones hold
+/// anything, NaN included, but the scores' select drops them and the tensor
+/// units multiply their zero weights to zero, which a cache filled with NaN
+/// and infinities confirms on RNGD. Masking them would cost a vector pass over
+/// every key. TCC 2026.5 panics ("slice out of bounds") populating the score
+/// contraction of more tokens times keys than this.
+const unmasked_decode_keys = 1 << 17;
+
+/// Keys up to which one token's decode masks the gathered cache anyway: 2 us
+/// per layer faster over 4K keys. Several tokens never mask: unmasked, 4
+/// tokens over 4K keys decode at 241 tok/s instead of 224, 16 at 861 instead
+/// of 705.
+const masked_decode_keys = 4096;
 
 const DecodeCfg = struct {
     t: i64,
@@ -235,12 +276,8 @@ const DecodeMeta = tcl.Kernel(MetaCfg, .{
     }.run,
 });
 
-/// Gathers the key and value pages a token sees, contracts with the query,
-/// masks keys past the sequence, normalizes in one softmax times `keyed` (zero
-/// for tokens without keys, whose softmax is uniform) and contracts with the
-/// values. A token's pages are gathered up to its bound, and the operations
-/// reading them skip the rest: the work follows the sequence's length, not the
-/// table's. Fusible: it joins the layer around it, one launch per layer.
+/// `decodeTokens` over every token, in groups when they are many and the table
+/// wide. Fusible: it joins the layer around it, one launch per layer.
 const Decode = tcl.Kernel(DecodeCfg, .{
     .name = "paged_decode_attention",
     .inputs = &.{ "q", "pages", "bounds", "mask", "keyed", "k_cache", "v_cache" },
@@ -266,24 +303,385 @@ const Decode = tcl.Kernel(DecodeCfg, .{
                 .k_cache = .{ .dtype = .bf16, .axes = &.{ P, PG, Hkv, D } },
                 .v_cache = .{ .dtype = .bf16, .axes = &.{ P, PG, Hkv, D } },
             });
-            const mask = try b.reshape(t.mask, &.{ T, AP, PG }, .{});
-            const k = try maskCacheValues(b, try b.gather(t.k_cache, t.pages, P, &.{ T, AP, PG, Hkv, D }, .{ .valid_length = t.bounds }), mask);
-            const v = try maskCacheValues(b, try b.gather(t.v_cache, t.pages, P, &.{ T, AP, PG, Hkv, D }, .{ .valid_length = t.bounds }), mask);
-            const keys: []const tcl.Axis = &.{ AP, PG };
-            var op = b.tensorOperation(.{});
-            const scores = try op.commit(op.contract(t.q, k, &.{ Hkv, G, T, AP, PG }).mulf(cfg.scale), .{});
-            op = b.tensorOperation(.{});
-            const s = op.fetch(scores, .{});
-            const masked = try op.commit(op.where(op.fetch(mask, .{}), .ne, 0, s, score_min), .{});
-            op = b.tensorOperation(.{});
-            const x = op.fetch(masked, .{});
-            const e = x.subf(x.reduce(keys, .maxf)).exp();
-            const p = try op.commit(e.divf(e.reduce(keys, .addf)).mulf(op.fetch(t.keyed, .{})), .{ .dtype = .bf16 });
-            op = b.tensorOperation(.{});
-            b.ret(&.{try op.commit(op.contract(v, p, &.{ T, Hkv, G, D }), .{ .dtype = .bf16 })});
+            const groups = decodeGroups(cfg.t, cfg.a);
+            if (groups == 1) return b.ret(&.{try decodeTokens(b, cfg.scale, t.q, t.pages, t.bounds, t.mask, t.keyed, t.k_cache, t.v_cache)});
+            // Several tokens over a wide table: a static loop over groups of
+            // them, which costs nothing at runtime.
+            const NG = b.axis("NG", groups);
+            const TG = b.axis("TG", @divExact(cfg.t, groups));
+            var loop = b.openFor(groups, .{try b.scratchpad(.bf16, &.{ NG, TG, Hkv, G, D })});
+            {
+                const q = try b.indexRead(try b.reshape(t.q, &.{ NG, TG, Hkv, G, D }, .{}), loop.iv);
+                const pages = try b.indexRead(try b.reshape(t.pages, &.{ NG, TG, AP }, .{}), loop.iv);
+                const bounds = try b.indexRead(try b.reshape(t.bounds, &.{ NG, TG }, .{}), loop.iv);
+                const mask = try b.indexRead(try b.reshape(t.mask, &.{ NG, TG, A }, .{}), loop.iv);
+                const keyed = try b.indexRead(try b.reshape(t.keyed, &.{ NG, TG }, .{}), loop.iv);
+                const out = try decodeTokens(b, cfg.scale, q, pages, bounds, mask, keyed, t.k_cache, t.v_cache);
+                try loop.yield(.{try b.indexWrite(loop.carried[0], loop.iv, out)});
+            }
+            b.ret(&.{try b.reshape(loop.results[0], &.{ T, Hkv, G, D }, .{})});
         }
     }.run,
 });
+
+/// Tokens one unmasked decode group contracts at most: in llmd Llama 8B, 16
+/// tokens in one group decode at 122 tok/s over 8K keys, 4 groups of 4 at 515
+/// over 32K.
+const unmasked_group_tokens = 4;
+
+/// Groups of tokens a decode step attends in turn: their tokens times keys
+/// within `unmasked_decode_keys`, and at most `unmasked_group_tokens` over an
+/// unmasked cache.
+fn decodeGroups(tokens: i64, keys: i64) i64 {
+    var groups: i64 = 1;
+    while ((@divExact(tokens, groups) > unmasked_group_tokens or @divExact(tokens, groups) * keys > unmasked_decode_keys) and groups < tokens) {
+        groups += 1;
+        while (@rem(tokens, groups) != 0) groups += 1;
+    }
+    return groups;
+}
+
+/// Decode attention of `q`'s tokens over the pages each one sees: gathers
+/// their keys and values up to their bound, contracts with the queries, masks
+/// the scores of keys past the sequence, normalizes in one softmax times
+/// `keyed` (zero for tokens without keys, whose softmax is uniform) and
+/// contracts with the values, gathered as is (see `unmasked_decode_keys`)
+/// unless one token sees at most `masked_decode_keys`.
+fn decodeTokens(b: *tcl.Builder, scale: f32, q: builder.Tensor, pages: builder.Tensor, bounds: builder.Tensor, mask: builder.Tensor, keyed: builder.Tensor, k_cache: builder.Tensor, v_cache: builder.Tensor) tcl.FinishError!builder.Tensor {
+    const T = q.axes[0];
+    const Hkv = q.axes[1];
+    const G = q.axes[2];
+    const D = q.axes[3];
+    const AP = pages.axes[1];
+    const P = k_cache.axes[0];
+    const PG = k_cache.axes[1];
+    const keys: []const tcl.Axis = &.{ AP, PG };
+    const key_mask = try b.reshape(mask, &.{ T, AP, PG }, .{});
+    var k = try b.gather(k_cache, pages, P, &.{ T, AP, PG, Hkv, D }, .{ .valid_length = bounds });
+    var v = try b.gather(v_cache, pages, P, &.{ T, AP, PG, Hkv, D }, .{ .valid_length = bounds });
+    if (T.size == 1 and AP.size * PG.size <= masked_decode_keys) {
+        k = try maskCacheValues(b, k, key_mask);
+        v = try maskCacheValues(b, v, key_mask);
+    }
+    var op = b.tensorOperation(.{});
+    const scores = try op.commit(op.contract(q, k, &.{ Hkv, G, T, AP, PG }).mulf(scale), .{});
+    op = b.tensorOperation(.{});
+    const s = op.fetch(scores, .{});
+    const masked = try op.commit(op.where(op.fetch(key_mask, .{}), .ne, 0, s, score_min), .{});
+    op = b.tensorOperation(.{});
+    const x = op.fetch(masked, .{});
+    const e = x.subf(x.reduce(keys, .maxf)).exp();
+    const p = try op.commit(e.divf(e.reduce(keys, .addf)).mulf(op.fetch(keyed, .{})), .{ .dtype = .bf16 });
+    op = b.tensorOperation(.{});
+    return op.commit(op.contract(v, p, &.{ T, Hkv, G, D }), .{ .dtype = .bf16 });
+}
+
+/// The hybrid kernel runs a token's first `head_keys` keys straight line and
+/// the rest in a loop over `tail_chunk_keys`-key chunks, so that its work
+/// follows each step's longest sequence instead of the block table's width.
+const head_keys = 4096;
+const tail_chunk_keys = 8192;
+
+const HybridCfg = struct {
+    t: i64,
+    s: i64,
+    /// Head pages, tail chunks and pages per tail chunk.
+    hp: i64,
+    nc: i64,
+    cp: i64,
+    pg: i64,
+    hkv: i64,
+    g: i64,
+    d: i64,
+    pages: i64,
+    scale: f32,
+    is_causal: bool,
+};
+
+/// Decode attention whose work follows the longest sequence: a straight-line
+/// head over every token's first keys, which the layer's schedule overlaps
+/// like any straight-line kernel, and a device loop over the chunks holding
+/// keys past it. Short contexts, which skip the loop, still pay for it: the
+/// work it needs ends the layer's first stretch (the query), and nothing past
+/// it overlaps that stretch.
+fn hybridDecodeAttention(parameters: paged.Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, scale: f32, is_causal: bool) Tensor {
+    const pg = k_cache.dim(.k_chunk);
+    const t = q.dim(.b);
+    const s = parameters.seq_lens.dim(.b);
+    const hp = std.math.divCeil(i64, head_keys, pg) catch unreachable;
+    const cp = std.math.divCeil(i64, tail_chunk_keys, pg) catch unreachable;
+    const nc = std.math.divCeil(i64, parameters.block_table.dim(.p) - hp, cp) catch unreachable;
+    const cfg: HybridCfg = .{ .t = t, .s = s, .hp = hp, .nc = nc, .cp = cp, .pg = pg, .hkv = q.dim(.hkv), .g = q.dim(.hg), .d = q.dim(.hd), .pages = k_cache.dim(.page), .scale = scale, .is_causal = is_causal };
+    const table = parameters.block_table.pad(-1, .{ .p = Tensor.Pad{ .high = hp + nc * cp - parameters.block_table.dim(.p) } });
+    const meta = HybridMeta.call(.{ .seq_lens = parameters.seq_lens, .query_offsets = parameters.query_start_len, .table = table }, .{
+        .hpages = zml.Shape.init(.{ .t = t, .p = hp }, .i32),
+        .hmask = zml.Shape.init(.{ .t = t, .a = hp * pg }, .i32),
+        .hbounds = zml.Shape.init(.{ .t = t }, .i32),
+        .tpages = zml.Shape.init(.{ .c = nc, .t = t, .p = cp }, .i32),
+        .tmask = zml.Shape.init(.{ .c = nc, .t = t, .a = cp * pg }, .i32),
+        .tbounds = zml.Shape.init(.{ .c = nc, .t = t }, .i32),
+        .limits = zml.Shape.init(.{ .t = t }, .i32),
+        .keyed = zml.Shape.init(.{ .t = t }, .f32),
+    }, .{ .cfg = cfg });
+    return HybridDecode.call(.{
+        .q = q.convert(.bf16),
+        .hpages = meta.hpages,
+        .hmask = meta.hmask,
+        .hbounds = meta.hbounds,
+        .tpages = meta.tpages,
+        .tmask = meta.tmask,
+        .tbounds = meta.tbounds,
+        .limits = meta.limits,
+        .keyed = meta.keyed,
+        .k_cache = k_cache.convert(.bf16),
+        .v_cache = v_cache.convert(.bf16),
+    }, .{ .out = q.shape().withDtype(.bf16) }, .{ .cfg = cfg }).out;
+}
+
+/// Per token, once per forward pass: the head's pages, key mask and valid
+/// page count, the same per tail chunk (chunk-major, for the chunks holding
+/// keys of the longest token only), the visible key count and whether the
+/// token sees any key.
+const HybridMeta = tcl.Kernel(HybridCfg, .{
+    .name = "paged_hybrid_metadata",
+    .inputs = &.{ "seq_lens", "query_offsets", "table" },
+    .outputs = &.{ "hpages", "hmask", "hbounds", "tpages", "tmask", "tbounds", "limits", "keyed" },
+    .run = struct {
+        fn run(b: *tcl.Builder, cfg: HybridCfg) tcl.FinishError!void {
+            const total = (cfg.hp + cfg.nc * cfg.cp) * cfg.pg;
+            const T = b.axis("T", cfg.t);
+            const S = b.axis("S", cfg.s);
+            const O = b.axis("O", cfg.s + 1);
+            const AP = b.axis("AP", cfg.hp + cfg.nc * cfg.cp);
+            const HP = b.axis("HP", cfg.hp);
+            const RP = b.axis("RP", cfg.nc * cfg.cp);
+            const NC = b.axis("NC", cfg.nc);
+            const CP = b.axis("CP", cfg.cp);
+            const HA = b.axis("HA", cfg.hp * cfg.pg);
+            const CK = b.axis("CK", cfg.cp * cfg.pg);
+            const t = try b.declareArgs(.{
+                .seq_lens = .{ .dtype = .i32, .axes = &.{S} },
+                .query_offsets = .{ .dtype = .i32, .axes = &.{O} },
+                .table = .{ .dtype = .i32, .axes = &.{ S, AP } },
+            });
+            const ends = try selectMetadata(b, t.query_offsets, try selector(b, try b.arange(cfg.s + 1, .i32, &.{S}, .{ .start = 1 }), O, cfg.s + 1), O);
+            const tokens = try b.arange(cfg.t, .i32, &.{T}, .{});
+            const seq = try countBefore(b, ends, tokens, S);
+            const own = try selector(b, seq, S, cfg.s);
+            var op = b.tensorOperation(.{});
+            const active = try op.commit(op.fetch(seq, .{}).muli(-1).addi(cfg.s).binary(.maxi, 0).binary(.mini, 1), .{});
+            var visible = try selectMetadata(b, t.seq_lens, own, S);
+            if (cfg.is_causal) {
+                // Causal tokens see their sequence up to their own position.
+                const end = try selectMetadata(b, ends, own, S);
+                op = b.tensorOperation(.{});
+                visible = try op.commit(op.fetch(visible, .{}).subi(op.fetch(end, .{})).addi(op.fetch(tokens, .{})).addi(1), .{});
+            }
+            op = b.tensorOperation(.{});
+            const limit = try op.commit(op.fetch(visible, .{}).binary(.maxi, 0).binary(.mini, total).muli(op.fetch(active, .{})), .{});
+
+            // Tail chunks first: a runtime loop at the start of the unit costs
+            // nothing. A 2-D selection per chunk; a 3-D one-hot product over
+            // [chunks, tokens, sequences, pages] computes garbage.
+            const rows1 = try b.reshape(try b.slice(t.table, AP, cfg.hp, &.{ S, RP }, .{}), &.{ S, NC, CP }, .{});
+            op = b.tensorOperation(.{});
+            const rows = try op.commit(op.fetch(rows1, .{}), .{ .axes = &.{ NC, S, CP } });
+            // Trips never exceed nc: `limit` is at most the table's keys.
+            const trips = try b.symExpr(.div, try b.symExpr(.add, try b.reduceMaxI32(limit), cfg.cp * cfg.pg - 1 - cfg.hp * cfg.pg), cfg.cp * cfg.pg);
+            var loop = b.openFor(trips, .{ try b.scratchpad(.i32, &.{ NC, T, CP }), try b.scratchpad(.i32, &.{ NC, T, CK }), try b.scratchpad(.i32, &.{ NC, T }), try b.full(0, .i32, &.{T}) });
+            {
+                const reads, const masks, const counts, const seen = loop.carried;
+                const first = try b.symExpr(.add, try b.symExpr(.mul, loop.iv, cfg.cp * cfg.pg), cfg.hp * cfg.pg);
+                const chunk = try hybridColumns(b, cfg, own, try b.indexRead(rows, loop.iv), limit, first, CP, CK);
+                op = b.tensorOperation(.{});
+                const any = try op.commit(op.fetch(seen, .{}).binary(.maxi, op.fetch(chunk.any, .{})), .{});
+                try loop.yield(.{
+                    try b.indexWrite(reads, loop.iv, chunk.pages),
+                    try b.indexWrite(masks, loop.iv, chunk.mask),
+                    try b.indexWrite(counts, loop.iv, chunk.bounds),
+                    any,
+                });
+            }
+            const head = try hybridColumns(b, cfg, own, try b.slice(t.table, AP, 0, &.{ S, HP }, .{}), limit, 0, HP, HA);
+            // Like the straight kernel's: tokens whose visible pages are all
+            // outside the cache see no key.
+            op = b.tensorOperation(.{});
+            const keyed = try op.commit(op.fetch(head.any, .{}).binary(.maxi, op.fetch(loop.results[3], .{})).toFloat(), .{});
+            b.ret(&.{ head.pages, head.mask, head.bounds, loop.results[0], loop.results[1], loop.results[2], limit, keyed });
+        }
+    }.run,
+});
+
+/// The cache page of each column of `table` (sequence rows) for every token,
+/// its key mask (below the token's limit, page in the cache), how many
+/// columns hold keys the token sees and whether one of them is in the cache.
+/// Columns start at key `first`. Sparse gathers never read the columns past a
+/// token's count.
+fn hybridColumns(b: *tcl.Builder, cfg: HybridCfg, own: builder.Tensor, table: builder.Tensor, limit: builder.Tensor, first: anytype, cols: tcl.Axis, keys: tcl.Axis) tcl.FinishError!struct { pages: builder.Tensor, mask: builder.Tensor, bounds: builder.Tensor, any: builder.Tensor } {
+    const T = own.axes[0];
+    const S = own.axes[1];
+    const PG = b.axis("PG", cfg.pg);
+    const pages = try validIndices(b, try selectMetadata(b, table, own, S), cfg.pages);
+    var op = b.tensorOperation(.{});
+    const firsts = try op.commit(op.fetch(try b.arange(cols.size * cfg.pg, .i32, &.{cols}, .{ .step = cfg.pg }), .{}).addi(if (@TypeOf(first) == builder.Tensor) op.fetch(first, .{}) else first), .{});
+    op = b.tensorOperation(.{ .tactic = .einsum_by_ve });
+    const used = try op.commit(op.fetch(limit, .{}).subi(op.fetch(firsts, .{})).binary(.maxi, 0).binary(.mini, 1), .{});
+    op = b.tensorOperation(.{});
+    const bounds = try op.commit(op.fetch(used, .{}).reduce(&.{cols}, .addi), .{});
+    op = b.tensorOperation(.{});
+    const any = try op.commit(op.fetch(used, .{}).muli(op.fetch(pages.valid, .{})).reduce(&.{cols}, .maxi), .{});
+    op = b.tensorOperation(.{});
+    const key_ids = try op.commit(op.fetch(try b.arange(keys.size, .i32, &.{keys}, .{}), .{}).addi(if (@TypeOf(first) == builder.Tensor) op.fetch(first, .{}) else first), .{});
+    const to: []const tcl.Axis = &.{ T, cols, PG };
+    op = b.tensorOperation(.{});
+    const position = try op.commit(op.fetch(try b.reshape(key_ids, &.{ cols, PG }, .{}), .{ .broadcast_to = to }), .{});
+    op = b.tensorOperation(.{});
+    const valid = try op.commit(op.fetch(pages.valid, .{ .broadcast_to = to }), .{});
+    op = b.tensorOperation(.{ .tactic = .elementwise });
+    const mask = try op.commit(op.fetch(position, .{}).muli(-1).addi(op.fetch(limit, .{})).binary(.maxi, 0).binary(.mini, 1).muli(op.fetch(valid, .{})), .{});
+    return .{ .pages = pages.safe, .mask = try b.reshape(mask, &.{ T, keys }, .{}), .bounds = bounds, .any = any };
+}
+
+const SoftmaxState = struct { max: builder.Tensor, sum: builder.Tensor, out: builder.Tensor };
+
+/// The tail loop first, then the head with the tail's state folded in.
+/// Fusible: in its own unit the loop costs about 100 us more per layer.
+const HybridDecode = tcl.Kernel(HybridCfg, .{
+    .name = "paged_hybrid_decode_attention",
+    .inputs = &.{ "q", "hpages", "hmask", "hbounds", "tpages", "tmask", "tbounds", "limits", "keyed", "k_cache", "v_cache" },
+    .outputs = &.{"out"},
+    .run = struct {
+        fn run(b: *tcl.Builder, cfg: HybridCfg) tcl.FinishError!void {
+            b.fuse();
+            const a = hybridAxes(b, cfg);
+            const t = try b.declareArgs(.{
+                .q = .{ .dtype = .bf16, .axes = &.{ a.T, a.Hkv, a.G, a.D } },
+                .hpages = .{ .dtype = .i32, .axes = &.{ a.T, a.HP } },
+                .hmask = .{ .dtype = .i32, .axes = &.{ a.T, a.HA } },
+                .hbounds = .{ .dtype = .i32, .axes = &.{a.T} },
+                .tpages = .{ .dtype = .i32, .axes = &.{ a.NC, a.T, a.CP } },
+                .tmask = .{ .dtype = .i32, .axes = &.{ a.NC, a.T, a.CK } },
+                .tbounds = .{ .dtype = .i32, .axes = &.{ a.NC, a.T } },
+                .limits = .{ .dtype = .i32, .axes = &.{a.T} },
+                .keyed = .{ .dtype = .f32, .axes = &.{a.T} },
+                .k_cache = .{ .dtype = .bf16, .axes = &.{ a.P, a.PG, a.Hkv, a.D } },
+                .v_cache = .{ .dtype = .bf16, .axes = &.{ a.P, a.PG, a.Hkv, a.D } },
+            });
+            const tail = try hybridTail(b, cfg, a, t.q, t.tpages, t.tmask, t.tbounds, t.limits, t.k_cache, t.v_cache);
+            b.ret(&.{try hybridHead(b, cfg, a, t.q, t.hpages, t.hmask, t.hbounds, t.keyed, t.k_cache, t.v_cache, tail)});
+        }
+    }.run,
+});
+
+const HybridAxes = struct { T: tcl.Axis, HP: tcl.Axis, HA: tcl.Axis, NC: tcl.Axis, CP: tcl.Axis, CK: tcl.Axis, Hkv: tcl.Axis, G: tcl.Axis, D: tcl.Axis, P: tcl.Axis, PG: tcl.Axis };
+
+fn hybridAxes(b: *tcl.Builder, cfg: HybridCfg) HybridAxes {
+    return .{
+        .T = b.axis("T", cfg.t),
+        .HP = b.axis("HP", cfg.hp),
+        .HA = b.axis("HA", cfg.hp * cfg.pg),
+        .NC = b.axis("NC", cfg.nc),
+        .CP = b.axis("CP", cfg.cp),
+        .CK = b.axis("CK", cfg.cp * cfg.pg),
+        .Hkv = b.axis("Hkv", cfg.hkv),
+        .G = b.axis("G", cfg.g),
+        .D = b.axis("D", cfg.d),
+        .P = b.axis("P", cfg.pages),
+        .PG = b.axis("PG", cfg.pg),
+    };
+}
+
+/// The softmax state of the keys past the head: a loop over the chunks
+/// holding the longest token's keys, none for short contexts.
+fn hybridTail(b: *tcl.Builder, cfg: HybridCfg, a: HybridAxes, q: builder.Tensor, tpages: builder.Tensor, tmask: builder.Tensor, tbounds: builder.Tensor, limits: builder.Tensor, k_cache: builder.Tensor, v_cache: builder.Tensor) tcl.FinishError!SoftmaxState {
+    const stats: []const tcl.Axis = &.{ a.Hkv, a.G, a.T };
+    const trips = try b.symExpr(.div, try b.symExpr(.add, try b.reduceMaxI32(limits), cfg.cp * cfg.pg - 1 - cfg.hp * cfg.pg), cfg.cp * cfg.pg);
+    var loop = b.openFor(trips, .{ try b.full(score_min, .f32, stats), try b.full(0, .f32, stats), try b.full(0, .f32, &.{ a.T, a.Hkv, a.G, a.D }) });
+    {
+        const max, const sum, const out = loop.carried;
+        const mask = try b.reshape(try b.indexRead(tmask, loop.iv), &.{ a.T, a.CP, a.PG }, .{});
+        const bounds = try b.indexRead(tbounds, loop.iv);
+        const pages = try b.indexRead(tpages, loop.iv);
+        const k = try b.gather(k_cache, pages, a.P, &.{ a.T, a.CP, a.PG, a.Hkv, a.D }, .{ .valid_length = bounds });
+        const v = try b.gather(v_cache, pages, a.P, &.{ a.T, a.CP, a.PG, a.Hkv, a.D }, .{ .valid_length = bounds });
+        const merged = try mergeSoftmax(b, .{ .max = max, .sum = sum, .out = out }, try chunkSoftmax(b, cfg, q, k, v, mask));
+        try loop.yield(.{ merged.max, merged.sum, merged.out });
+    }
+    return .{ .max = loop.results[0], .sum = loop.results[1], .out = loop.results[2] };
+}
+
+/// The head's keys with the tail's state folded into their softmax: one
+/// maximum over both, the tail's rescaled sum in the head's denominator, the
+/// tail's output rescaled by the same factor.
+fn hybridHead(b: *tcl.Builder, cfg: HybridCfg, a: HybridAxes, q: builder.Tensor, hpages: builder.Tensor, hmask: builder.Tensor, hbounds: builder.Tensor, keyed: builder.Tensor, k_cache: builder.Tensor, v_cache: builder.Tensor, tail: SoftmaxState) tcl.FinishError!builder.Tensor {
+    const head_mask = try b.reshape(hmask, &.{ a.T, a.HP, a.PG }, .{});
+    const head_k = try b.gather(k_cache, hpages, a.P, &.{ a.T, a.HP, a.PG, a.Hkv, a.D }, .{ .valid_length = hbounds });
+    const head_v = try b.gather(v_cache, hpages, a.P, &.{ a.T, a.HP, a.PG, a.Hkv, a.D }, .{ .valid_length = hbounds });
+    const keys: []const tcl.Axis = &.{ a.HP, a.PG };
+    var op = b.tensorOperation(.{});
+    const scores = try op.commit(op.contract(q, head_k, &.{ a.Hkv, a.G, a.T, a.HP, a.PG }).mulf(cfg.scale), .{});
+    op = b.tensorOperation(.{});
+    const sv = op.fetch(scores, .{});
+    const masked = try op.commit(op.where(op.fetch(head_mask, .{}), .ne, 0, sv, score_min), .{});
+    op = b.tensorOperation(.{});
+    const max = try op.commit(op.fetch(masked, .{}).reduce(keys, .maxf).maxf(op.fetch(tail.max, .{})), .{});
+    const alpha = try expDifference(b, tail.max, max);
+    op = b.tensorOperation(.{});
+    const carried = try op.commit(op.fetch(tail.sum, .{}).mulf(op.fetch(alpha, .{})), .{});
+    op = b.tensorOperation(.{});
+    const denominator = try op.commit(op.fetch(masked, .{}).subf(op.fetch(max, .{})).exp().reduce(keys, .addf).addf(op.fetch(carried, .{})), .{});
+    op = b.tensorOperation(.{});
+    // Tokens without keys weigh their garbage values zero, not uniformly.
+    const p = try op.commit(op.fetch(masked, .{}).subf(op.fetch(max, .{})).exp().divf(op.fetch(denominator, .{})).mulf(op.fetch(keyed, .{})), .{ .dtype = .bf16 });
+    op = b.tensorOperation(.{});
+    const head = try op.commit(op.contract(head_v, p, &.{ a.T, a.Hkv, a.G, a.D }), .{});
+    op = b.tensorOperation(.{});
+    const factor = try op.commit(op.fetch(alpha, .{}).divf(op.fetch(denominator, .{})), .{});
+    // Tokens without keys have no defined attention: `keyed` zeroes them.
+    op = b.tensorOperation(.{});
+    return op.commit(op.fetch(tail.out, .{}).mulf(op.fetch(factor, .{})).addf(op.fetch(head, .{})).mulf(op.fetch(keyed, .{})), .{ .dtype = .bf16 });
+}
+
+/// Softmax state of every token over one chunk of masked keys: max and sum of
+/// the scores and the unnormalized output, all f32.
+fn chunkSoftmax(b: *tcl.Builder, cfg: HybridCfg, q: builder.Tensor, k: builder.Tensor, v: builder.Tensor, mask: builder.Tensor) tcl.FinishError!SoftmaxState {
+    const T = q.axes[0];
+    const Hkv = q.axes[1];
+    const G = q.axes[2];
+    const D = q.axes[3];
+    const keys = mask.axes[1..];
+    var op = b.tensorOperation(.{});
+    const scores = try op.commit(op.contract(q, k, &.{ Hkv, G, T, keys[0], keys[1] }).mulf(cfg.scale), .{});
+    op = b.tensorOperation(.{});
+    const sv = op.fetch(scores, .{});
+    const masked = try op.commit(op.where(op.fetch(mask, .{}), .ne, 0, sv, score_min), .{});
+    op = b.tensorOperation(.{});
+    const max = try op.commit(op.fetch(masked, .{}).reduce(keys, .maxf), .{});
+    const exps = try maskedExp(b, masked, max, mask);
+    op = b.tensorOperation(.{});
+    const sum = try op.commit(op.fetch(exps, .{}).reduce(keys, .addf), .{});
+    op = b.tensorOperation(.{});
+    const p = try op.commit(op.fetch(exps, .{}).mulf(1.0), .{ .dtype = .bf16 });
+    op = b.tensorOperation(.{});
+    const out = try op.commit(op.contract(v, p, &.{ T, Hkv, G, D }), .{});
+    return .{ .max = max, .sum = sum, .out = out };
+}
+
+fn mergeSoftmax(b: *tcl.Builder, x: SoftmaxState, y: SoftmaxState) tcl.FinishError!SoftmaxState {
+    var op = b.tensorOperation(.{ .tactic = .elementwise });
+    const max = try op.commit(op.fetch(x.max, .{}).maxf(op.fetch(y.max, .{})), .{});
+    const alpha = try expDifference(b, x.max, max);
+    const beta = try expDifference(b, y.max, max);
+    op = b.tensorOperation(.{});
+    const xs = try op.commit(op.fetch(x.sum, .{}).mulf(op.fetch(alpha, .{})), .{});
+    op = b.tensorOperation(.{});
+    const sum = try op.commit(op.fetch(y.sum, .{}).mulf(op.fetch(beta, .{})).addf(op.fetch(xs, .{})), .{});
+    op = b.tensorOperation(.{});
+    const xo = try op.commit(op.fetch(x.out, .{}).mulf(op.fetch(alpha, .{})), .{});
+    op = b.tensorOperation(.{});
+    const out = try op.commit(op.fetch(y.out, .{}).mulf(op.fetch(beta, .{})).addf(op.fetch(xo, .{})), .{});
+    return .{ .max = max, .sum = sum, .out = out };
+}
 
 const Cfg = struct {
     tokens: i64,
@@ -940,6 +1338,9 @@ const TestDims = struct {
     page: usize = 16,
     uniform: bool = false,
     uniform_scores: bool = false,
+    /// Keys of every sequence valued 32768, the others 0: with equal scores
+    /// each one moves the output by 32768 over the sequence's length.
+    spikes: []const usize = &.{},
     dtype: zml.DataType = .bf16,
 };
 
@@ -1161,6 +1562,31 @@ test "tcl paged attention chunked decode on furiosa" {
     try runCases(257, 514, &cases, .{ .hkv = 1, .g = 1, .d = 32 });
 }
 
+test "tcl paged attention hybrid decode on furiosa" {
+    if (zml.testing.env().target != .furiosa) return error.SkipZigTest;
+    // One decode token over a table wider than the straight-line kernel's,
+    // unused cache slots poisoned: head only, the first tail key, every tail
+    // chunk, no keys, no page in the cache.
+    try runCases(2049, 2101, &.{
+        .{ .prefill = false, .seqs = &.{.{ 1, 300 }}, .poison = .both },
+        .{ .prefill = false, .seqs = &.{.{ 1, 4097 }}, .poison = .both },
+        .{ .prefill = false, .seqs = &.{.{ 1, 32784 }}, .poison = .both, .poison_value = std.math.inf(f32) },
+        .{ .prefill = false, .seqs = &.{.{ 0, 0 }}, .padding = 1, .poison = .both },
+        .{ .prefill = false, .seqs = &.{.{ 1, 17 }}, .mask_all = true, .poison = .both },
+    }, .{ .batch = 1, .hkv = 1, .g = 2, .d = 32 });
+    // Equal scores and spikes at the head's last key, the tail's first, a
+    // chunk boundary and the last key: each one lost or counted twice moves
+    // the output by about 1.
+    try runCases(2049, 2101, &.{.{ .prefill = false, .seqs = &.{.{ 1, 32784 }}, .poison = .both }}, .{ .batch = 1, .hkv = 1, .g = 2, .d = 32, .uniform_scores = true, .spikes = &.{ 4095, 4096, 12287, 12288, 32783 } });
+}
+
+test "tcl paged attention flash decode of many tokens on furiosa" {
+    if (zml.testing.env().target != .furiosa) return error.SkipZigTest;
+    // 16 decode tokens over more than 32K keys, unused cache slots poisoned.
+    const seqs = [_][2]i32{ .{ 1, 32784 }, .{ 1, 4097 }, .{ 1, 1 }, .{ 0, 0 } } ++ @as([12][2]i32, @splat(.{ 1, 300 }));
+    try runCases(2049, 2600, &.{.{ .prefill = false, .seqs = &seqs, .padding = 1, .poison = .both }}, .{ .batch = 16, .hkv = 1, .g = 2, .d = 32 });
+}
+
 test "tcl paged attention uniform probabilities on furiosa" {
     if (zml.testing.env().target != .furiosa) return error.SkipZigTest;
     try runCases(257, 514, &.{.{ .prefill = false, .seqs = &.{ .{ 1, 64 }, .{ 1, 65 }, .{ 1, 66 }, .{ 0, 0 } }, .padding = 1 }}, .{ .hkv = 1, .g = 1, .d = 32, .uniform_scores = true });
@@ -1227,6 +1653,15 @@ fn runCases(comptime max_pages: usize, comptime num_pages: usize, cases: []const
 
         for (kc) |*v| v.* = .fromF32(if (dims.uniform or dims.uniform_scores) 0 else r.floatNorm(f32));
         for (vc, 0..) |*v, i| v.* = .fromF32(if (dims.uniform) @as(f32, @floatFromInt(i % d)) / d else r.floatNorm(f32));
+        if (dims.spikes.len > 0) {
+            for (case.seqs[0..batch], 0..) |seq, row| {
+                for (0..@intCast(seq[1])) |key| {
+                    const slot: usize = @intCast(table[row][key / page] * @as(i32, page) + @as(i32, @intCast(key % page)));
+                    const spike = std.mem.indexOfScalar(usize, dims.spikes, key) != null;
+                    @memset(vc[slot * hkv * d ..][0 .. hkv * d], bf16.fromF32(if (spike) 32768 else 0));
+                }
+            }
+        }
         if (case.poison != .none) {
             // Mark the union of live physical slots before poisoning: reordered
             // or shared pages must retain every token a live sequence can read.
