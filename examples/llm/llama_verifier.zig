@@ -94,7 +94,7 @@ pub fn main(init: std.process.Init) !void {
     const prompt = try session.tokenizePrompt(allocator, args.prompt);
     defer allocator.free(prompt);
     if (prompt.len >= args.seqlen) return error.PromptTooLong;
-    const first_position: u32 = @intCast(prompt.len + 1);
+    const first_position: u32 = @intCast(prompt.len);
     const offset = if (args.offset == 0) first_position else args.offset;
     if (offset < first_position or @as(u64, offset) + @as(u64, args.rows) * args.window > args.seqlen) return error.InvalidOffsetOrWindow;
     log.info("prompt_tokens={any}, first_position={d}, offset={d}, rows={d}, window={d}, serial_attention={}", .{ prompt, first_position, offset, args.rows, args.window, args.serial_attention });

@@ -96,6 +96,11 @@ pub const Chat = struct {
 
         // Keep correctness diagnostics outside the measured decode interval.
         if (opts.dump_token_ids) {
+            try output.writeAll("prompt_token_ids:");
+            for (prompt_tokens) |token| {
+                try output.print(" {d}", .{token});
+            }
+            try output.writeByte('\n');
             try output.writeAll("generated_token_ids:");
             for (self.tokens.items[prompt_tokens.len..]) |token| {
                 try output.print(" {d}", .{token});

@@ -198,7 +198,7 @@ pub const Session = struct {
                 .io = self.io,
                 .tokens_buf = &current_token_buffer,
                 .next_token_buf = &current_token_buffer,
-                .token_index_buf = &self.token_index_buffers[all_tokens.items.len],
+                .token_index_buf = &self.token_index_buffers[decodePosition(all_tokens.items.len)],
                 .active_length_buf = &active_length_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
@@ -219,4 +219,11 @@ fn isEosToken(config: *const model.Config, token_id: u32) bool {
             if (token_id == eos) break true;
         } else false,
     };
+}
+
+// The just-published token is not in KV yet. Prefill cached exactly the
+// preceding tokens, so its zero-based position is the final list index.
+pub fn decodePosition(token_count: usize) usize {
+    std.debug.assert(token_count > 0);
+    return token_count - 1;
 }

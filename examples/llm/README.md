@@ -44,11 +44,17 @@ bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/
 
 - `--benchmark-runs=<n>`: Optional. Generate and time `n` fresh sessions after warm-up, printing each response and decode rate. Defaults to `1`; must be positive, and requires `--prompt` for multiple runs. Executables and weights are reused, while conversation, cache, recurrent state, and RNG are reset for every session. Use, for example, `--warmup-runs=1 --benchmark-runs=5 --topk=1` to measure repeated greedy generations.
 
+- `--dump-token-ids`: Print both prompt and generated token IDs after timed decode, so benchmark comparisons can verify the actual input and output sequences.
+
 For a warm generation measurement, use `--warmup-runs=1` with a fixed prompt,
 sequence length, and sampling strategy. Compilation, weight loading, prefill,
 and warm-up are outside the printed decode duration. That duration still
 includes token transfer, text decoding, and output, as it does without warm-up.
 Report the warm-up count alongside throughput when comparing configurations.
+The published-token count includes the first token selected during prefill and
+excludes EOS; the timed loop includes the decode call that produces EOS.
+For Llama, the first generated token is consumed at cache position equal to the
+prompt length. The session must not skip that position after publishing the token.
 
 ## Teacher-forced Llama verifier experiment
 
@@ -113,6 +119,12 @@ acceptance, and cache diagnostics. The last timed-repeat output is retained
 until the timer stops; its prediction IDs and the repeated cache state are
 then checked against the serial reference. It is not useful-token generation
 throughput and does not measure a speculative decoder.
+
+The verifier trials below predate the session's first-decode-position correction
+from `prompt.len + 1` to `prompt.len`. The verifier now follows the corrected
+session boundary. These historical corpus results have not been revalidated
+with the corrected starting position; the new native cache regression and
+matched TTNN/ZML counting benchmark cover the ordinary session fix.
 
 On one P150a with Llama-3.1-8B-Instruct BF16 and capacity 128 (2026-10-28),
 the initial arithmetic trial passed the one-row gate at 32.35 ms/block.
