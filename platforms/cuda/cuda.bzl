@@ -202,6 +202,42 @@ NVSHMEM_PACKAGES = {
 }
 
 _UBUNTU_PACKAGES = {
+    "ibverbs-providers": [
+        packages.filegroup(
+            name = "rdma",
+            srcs = [
+                "usr/lib/aarch64-linux-gnu/libmlx5.so.1",
+                "usr/share/doc/ibverbs-providers/copyright",
+            ],
+        ),
+    ],
+    "libibverbs1": [
+        packages.filegroup(
+            name = "rdma",
+            srcs = [
+                "usr/lib/aarch64-linux-gnu/libibverbs.so.1",
+                "usr/share/doc/libibverbs1/copyright",
+            ],
+        ),
+    ],
+    "libnl-3-200": [
+        packages.filegroup(
+            name = "rdma",
+            srcs = [
+                "usr/lib/aarch64-linux-gnu/libnl-3.so.200",
+                "usr/share/doc/libnl-3-200/copyright",
+            ],
+        ),
+    ],
+    "libnl-route-3-200": [
+        packages.filegroup(
+            name = "rdma",
+            srcs = [
+                "usr/lib/aarch64-linux-gnu/libnl-route-3.so.200",
+                "usr/share/doc/libnl-route-3-200/copyright",
+            ],
+        ),
+    ],
     "llvm-libunwind1": [
         """filegroup(
             name = "libunwind",
@@ -228,8 +264,8 @@ _PLUGINS = {
         "url": "https://mirror.zml.ai/plugins/202610231441.290.1.a3a89b67baa7/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "3e68acc44829a4afe695146b5e9b98cabc24b530d1dab74f3ed438bbe33d0fbd",
-        "url": "file:///tmp/benjamin/llmd-cp-20261023/followup-candidates/cp-transport-review/commit-partition/clean-plugin/archive.tar.zst",
+        "sha256": "ed83318a36d86e195046e9bec2f8fbb75116b09a26f10247db2e02147b91350e",
+        "url": "file:///tmp/benjamin/llmd-cp-kernel-tuning-20261027/engram/gin-full/archive-v1/archive.tar.zst",
     },
 }
 
@@ -239,8 +275,10 @@ _NCCL_ASSETS = {
         "sha256": "534dbf3058cadb625f08ab0d17f1dffad3b961a2bfa360d66633fcf21be53f57",
     },
     "arm64": {
-        "url": "https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.30.4-py3-none-manylinux_2_18_aarch64.whl",
-        "sha256": "e99308a3a89fba78918d50886e81072a6c8b0b4199feb02c3903e63713a6525a",
+        # Complete NCCL 2.30.4 build with the upstream single-HOST-window GIN
+        # cache fix; reproducible with XLA //zml/cuda/nccl_native:package.
+        "url": "file:///tmp/benjamin/llmd-cp-kernel-tuning-20261027/nccl-single-host-backport-review/v1/gnu9-build/frozen/nccl-2.30.4-host-cache-arm64.zip",
+        "sha256": "38cc66b24f83adfe9e2ae8d96642ef3f0b8674bf6fae048e0fbda4e86fe02c41",
     },
 }
 
@@ -262,6 +300,7 @@ def _read_redist_json(mctx, url, sha256):
 def _cuda_impl(mctx):
     loaded_packages = packages.read(mctx, [
         "@zml//platforms/cuda:packages.lock.json",
+        "@zml//platforms/cuda:rdma.packages.lock.json",
     ])
 
     CUDA_REDIST = _read_redist_json(

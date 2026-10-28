@@ -1,0 +1,41 @@
+{
+	"scope": "Only the four unmodified ARM64 GIN transport payloads and their package copyright files. System glibc is not bundled; the pinned Ubuntu libraries require glibc 2.38 or later.",
+	"packages": [
+		{
+			"name": "libnl-3-200",
+			"version": "3.7.0-0.3build1.1",
+			"arch": "arm64",
+			"urls": [
+				"https://ports.ubuntu.com/ubuntu-ports/pool/main/libn/libnl3/libnl-3-200_3.7.0-0.3build1.1_arm64.deb"
+			],
+			"sha256": "be2e96607e4c6e745b9ef1ec11d8192f5603721a7a5a9989524ea3d7a7f6db16"
+		},
+		{
+			"name": "libnl-route-3-200",
+			"version": "3.7.0-0.3build1.1",
+			"arch": "arm64",
+			"urls": [
+				"https://ports.ubuntu.com/ubuntu-ports/pool/main/libn/libnl3/libnl-route-3-200_3.7.0-0.3build1.1_arm64.deb"
+			],
+			"sha256": "cce89a1737de041f03f47f71a7b177c3c22b4bc8085a39d84158ce56a8d07032"
+		},
+		{
+			"name": "libibverbs1",
+			"version": "50.0-2ubuntu0.2",
+			"arch": "arm64",
+			"urls": [
+				"https://ports.ubuntu.com/ubuntu-ports/pool/main/r/rdma-core/libibverbs1_50.0-2ubuntu0.2_arm64.deb"
+			],
+			"sha256": "20b72b2c6b882ee4c155658be8a0a01d6edc2ee580eaeb330d9bb3ad643f386d"
+		},
+		{
+			"name": "ibverbs-providers",
+			"version": "50.0-2ubuntu0.2",
+			"arch": "arm64",
+			"urls": [
+				"https://ports.ubuntu.com/ubuntu-ports/pool/main/r/rdma-core/ibverbs-providers_50.0-2ubuntu0.2_arm64.deb"
+			],
+			"sha256": "39e91a145faaa332aad6837783d6b600b7e1b136fa805fb7fc824a87d21897ab"
+		}
+	]
+}

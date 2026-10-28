@@ -15,11 +15,31 @@ patchelf(
     set_rpath = "$ORIGIN",
 )
 
+# GIN's optional ARM64 host transport. These are unmodified pinned DSOs;
+# LLMD loads them by absolute SONAME path only when selecting that transport.
+filegroup(
+    name = "rdma_runtime",
+    srcs = select({
+        "@llvm//platforms/config:linux_aarch64": [
+            "@ibverbs-providers_linux_arm64//:rdma",
+            "@libibverbs1_linux_arm64//:rdma",
+            "@libnl-3-200_linux_arm64//:rdma",
+            "@libnl-route-3-200_linux_arm64//:rdma",
+            "@zml//platforms/cuda:rdma_license_texts",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
 copy_to_directory(
     name = "sandbox",
-    srcs = [
+    # Some plugin archives include the separately loaded Engram device module.
+    # Keep those files beside the plugin; older archives need no such assets.
+    srcs = glob(["lib/engram_gin.*"]) + [
         "lib/cutlass_ir.so",
         ":libzml_cuda_so",
+        ":rdma_runtime",
         "@zml//platforms/cuda:compat_probe",
         "@zml//platforms/cuda:zmlxcuda",
     ] + select({
@@ -75,6 +95,8 @@ copy_to_directory(
         "lib/aarch64-linux-gnu": "lib",
         "usr/lib/x86_64-linux-gnu": "lib",
         "usr/lib/aarch64-linux-gnu": "lib",
+        "usr/share/doc": "share/licenses/rdma",
+        "platforms/cuda/rdma": "share/licenses/rdma",
         "platforms/cuda/compat_probe": "bin/compat_probe",
         "platforms/cuda/libzmlxcuda": "lib/libzmlxcuda",
     } | {
