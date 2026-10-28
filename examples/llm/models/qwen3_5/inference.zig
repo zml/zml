@@ -13,7 +13,7 @@ pub const CompilationParameters = struct {
     decode_tokens: zml.Tensor,
     token_index: zml.Tensor,
     kv_cache: model.KvCache,
-    rng: zml.Tensor.Rng,
+    rng: ?zml.Tensor.Rng,
     seqlen: u32,
     meshes: common.Meshes,
 
@@ -24,7 +24,7 @@ pub const CompilationParameters = struct {
             .decode_tokens = .init(.{ .b = 1, .s = 1 }, .u32),
             .token_index = .init(.{}, .u32),
             .kv_cache = .init(config, 1, seqlen, dtype, .f32, meshes.model),
-            .rng = .init(),
+            .rng = if (mdl.gen_options.sampling_strategy.topk > 1) zml.Tensor.Rng.init() else null,
             .seqlen = seqlen,
             .meshes = meshes,
         };
@@ -40,7 +40,7 @@ pub const Args = struct {
     token_index_buf: *zml.Buffer,
     active_length_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
-    rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
+    rng_buffers: *?zml.Bufferized(zml.Tensor.Rng),
 };
 
 pub const CompiledModel = struct {

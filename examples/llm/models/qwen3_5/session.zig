@@ -14,7 +14,7 @@ pub const Session = struct {
     decode: inference.KernelRunner,
     layer_index_buffers: []zml.Buffer,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
-    rng_buffers: zml.Bufferized(zml.Tensor.Rng),
+    rng_buffers: ?zml.Bufferized(zml.Tensor.Rng),
     tokenizer: zml.tokenizer.Tokenizer,
     generated_token_slice: zml.Slice,
     seqlen: u32,
@@ -35,8 +35,8 @@ pub const Session = struct {
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
-        var rng_buffers = try zml.Tensor.Rng.init().initBuffer(io, platform, seed);
-        errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
+        var rng_buffers = if (compiled_model.params.rng) |rng| try rng.initBuffer(io, platform, seed) else null;
+        errdefer if (rng_buffers) |*rng| zml.Tensor.Rng.deinitBuffer(rng);
 
         const layer_types = compiled_model.loaded_model.inner.config.text_config.layer_types;
         const layer_index_buffers = try allocator.alloc(zml.Buffer, layer_types.len);
@@ -92,7 +92,7 @@ pub const Session = struct {
         for (self.layer_index_buffers) |*buffer| buffer.deinit();
         self.allocator.free(self.layer_index_buffers);
         model.KvCache.deinitBuffer(&self.kv_cache_buffers);
-        zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
+        if (self.rng_buffers) |*rng| zml.Tensor.Rng.deinitBuffer(rng);
         self.generated_token_slice.free(self.allocator);
     }
 

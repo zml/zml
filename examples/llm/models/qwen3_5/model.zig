@@ -268,7 +268,7 @@ pub const Model = struct {
             .rng = rng,
             .token_index = token_index,
         });
-        return .{ result.tokens, updated_kv_cache, result.rng };
+        return .{ result.tokens, updated_kv_cache, result.rng.? };
     }
 
     pub fn sampler(self: Model) Sampler {
@@ -290,13 +290,13 @@ pub const Sampler = struct {
         hidden: zml.Tensor,
         tokens: zml.Tensor,
         active_length: zml.Tensor,
-        rng: zml.Tensor.Rng,
+        rng: ?zml.Tensor.Rng,
         token_index: zml.Tensor,
     };
 
     pub const Output = struct {
         tokens: zml.Tensor,
-        rng: zml.Tensor.Rng,
+        rng: ?zml.Tensor.Rng,
         token_index: zml.Tensor,
     };
 
@@ -305,15 +305,59 @@ pub const Sampler = struct {
         const last_index = input.active_length.convert(.i32).addConstant(-1);
         const x = self.norm.forward(input.hidden.slice(.s, .dyn(last_index, 1)));
         const logits = self.lm_head.forward(x.withPartialTags(.{.d}), x.dtype()).rename(.{ .dout = .voc });
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, input.rng);
+        stdx.debug.assert(input.rng != null or self.gen_options.sampling_strategy.topk <= 1, "Sampling requires RNG state", .{});
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, input.rng orelse zml.Tensor.Rng.init());
         const tokens = next_tokens.convert(.u32);
         return .{
             .tokens = if (input.tokens.dim(.s) == 1) tokens.reuseBuffer(input.tokens) else tokens,
-            .rng = new_rng,
+            .rng = if (input.rng != null) new_rng else null,
             .token_index = input.token_index.addConstant(1).reuseBuffer(input.token_index),
         };
     }
 };
+
+test "Qwen greedy sampler omits RNG and selects the last active token" {
+    const platform = zml.testing.env();
+    const Local = struct {
+        fn run(hidden: zml.Tensor, active_length: zml.Tensor, token_index: zml.Tensor) Sampler.Output {
+            return Sampler.sampleTokens(.{
+                .sampler = .{
+                    .norm = .{ .weight = zml.Tensor.scalar(0, .bf16).broad(zml.Shape.init(.{ .d = 32 }, .bf16)) },
+                    .lm_head = .init(zml.Tensor.iota(zml.Shape.init(.{ .dout = 32, .d = 32 }, .bf16), .dout), null, .d),
+                    .gen_options = .{ .sampling_strategy = .{ .topk = 1 }, .max_seq_len = 3 },
+                },
+                .hidden = hidden.convert(.bf16),
+                .tokens = zml.Tensor.scalar(0, .u32).broad(zml.Shape.init(.{ .b = 1, .s = 3 }, .u32)),
+                .active_length = active_length,
+                .rng = null,
+                .token_index = token_index,
+            });
+        }
+    };
+    const hidden: zml.Tensor = .init(.{ .b = 1, .s = 3, .d = 32 }, .f32);
+    const active_length: zml.Tensor = .init(.{}, .u32);
+    const token_index: zml.Tensor = .init(.{}, .u32);
+    var exe = try platform.compileFn(std.testing.allocator, std.testing.io, Local.run, .{ hidden, active_length, token_index }, .{});
+    defer exe.deinit();
+    var runner = try exe.runner(std.testing.allocator);
+    defer runner.deinit(std.testing.allocator);
+    const values = [_][32]f32{ @splat(-1), @splat(1), @splat(-1) };
+    var hidden_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, hidden.shape(), std.mem.sliceAsBytes(&values));
+    defer hidden_buffer.deinit();
+    for ([_]u32{ 0, 31, 0 }, 1..) |expected, active| {
+        var length = try zml.Buffer.scalar(std.testing.io, platform, @as(u32, @intCast(active)), .u32);
+        defer length.deinit();
+        // sampleTokens donates the index; only the returned buffer remains live.
+        const index = try zml.Buffer.scalar(std.testing.io, platform, @as(u32, 7), .u32);
+        var result: zml.Bufferized(Sampler.Output) = .{ .tokens = undefined, .rng = null, .token_index = undefined };
+        runner.run(std.testing.io, .{ hidden_buffer, length, index }, .{&result}, .{ .wait = true });
+        defer result.tokens.deinit();
+        defer result.token_index.deinit();
+        try std.testing.expect(result.rng == null);
+        try std.testing.expectEqual(expected, (try result.tokens.getValue([1][1]u32, std.testing.io))[0][0]);
+        try std.testing.expectEqual(@as(u32, 8), try result.token_index.getValue(u32, std.testing.io));
+    }
+}
 
 pub const EmbedTokens = struct {
     embed_tokens: zml.nn.TokenEmbedding,
