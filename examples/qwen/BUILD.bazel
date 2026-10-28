@@ -16,7 +16,7 @@ zig_binary(
         "store.zig",
         "testing.zig",
         "torch2zml.zig",
-    ] + glob(["blocks/*.zig"]) + glob(["blocks/generation/*.zig"]) + glob(["blocks/language/*.zig"]) + glob(["blocks/vae/*.zig"]) + glob(["store/*.zig"]),
+    ] + glob(["blocks/*.zig"]) + glob(["blocks/generation/*.zig"]) + glob(["blocks/language/*.zig"]) + glob(["blocks/noise/*.zig"]) + glob(["blocks/vae/*.zig"]) + glob(["store/*.zig"]),
     main = "torch2zml.zig",
     deps = [
         "@stb",
@@ -35,7 +35,7 @@ zig_binary(
             "store.zig",
             "testing.zig",
             "torch2zml.zig",
-        ] + glob(["blocks/*.zig"]) + glob(["blocks/generation/*.zig"]) + glob(["blocks/language/*.zig"]) + glob(["blocks/vae/*.zig"]) + glob(["store/*.zig"]),
+        ] + glob(["blocks/*.zig"]) + glob(["blocks/generation/*.zig"]) + glob(["blocks/language/*.zig"]) + glob(["blocks/noise/*.zig"]) + glob(["blocks/vae/*.zig"]) + glob(["store/*.zig"]),
         main = file,
         deps = [
             "@zml//stdx",

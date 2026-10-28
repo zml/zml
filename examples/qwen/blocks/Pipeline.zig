@@ -5,7 +5,8 @@ const c = @import("c");
 
 const tokenizer = @import("./tokenizer.zig");
 const Scheduler = @import("./Scheduler.zig");
-const TorchGenerator = @import("./TorchGenerator.zig");
+const CpuGenerator = @import("./noise/CpuGenerator.zig");
+const GpuGenerator = @import("./noise/GpuGenerator.zig");
 const CompileArgs = @import("../compiler.zig").CompileArgs;
 const blocks = @import("../blocks.zig");
 const store = @import("../store.zig");
@@ -54,15 +55,18 @@ pub fn deinit(self: *Pipeline, allocator: std.mem.Allocator) void {
     self.vae_model_store.deinit(allocator);
 }
 
+/// The `torch.Generator` device diffusers draws the initial noise with.
+pub const Noise = enum { cpu, cuda };
+
 const Params = struct {
     seq_len: usize,
     compile_args: CompileArgs,
     compile_args_buffers: zml.Bufferized(CompileArgs),
-    /// Same noise as diffusers with `generator=torch.Generator("cpu").manual_seed(seed)`, unused with `noise_path`
+    /// Same noise as diffusers with `generator=torch.Generator(noise).manual_seed(seed)`
     seed: u64 = 42,
-    /// safetensors file holding the initial noise of a diffusers run under the `noise` key, {bs, C, H * W} f32.
-    /// Written by the patched `prepare_latents`, needed for `torch.Generator("cuda")` which TorchGenerator can't replay.
-    noise_path: ?[]const u8 = null,
+    noise: Noise = .cpu,
+    /// The GPU the `.cuda` noise is replayed for: torch's CUDA randn depends on its SM count (see `noise/gpu.zig`).
+    cuda_device: GpuGenerator.Device = .rtx_5090,
 };
 
 pub fn run_once(
@@ -117,17 +121,18 @@ pub fn run_once(
     const latent_h = 2 * (params.compile_args.height / (params.compile_args.vae_scale_factor * 2));
     const latent_w = 2 * (params.compile_args.width / (params.compile_args.vae_scale_factor * 2));
     const noise_shape = zml.Shape.init(.{ .bs = 1, .d = params.compile_args.in_channels, .seq_len = latent_h * latent_w }, .f32);
-    const noise_slice = if (params.noise_path) |path|
-        try loadNoise(self.allocator, self.io, path, noise_shape)
-    else b: {
-        var generator: TorchGenerator = .init(params.seed);
-        const noise_data = try generator.randn(self.allocator, @intCast(noise_shape.count()));
-        defer self.allocator.free(noise_data);
-        const slice = try zml.Slice.alloc(self.allocator, noise_shape);
-        @memcpy(slice.items(f32), noise_data);
-        break :b slice;
+    const noise_data = switch (params.noise) {
+        .cpu => cpu: {
+            var generator: CpuGenerator = .init(params.seed);
+            break :cpu try generator.randn(self.allocator, @intCast(noise_shape.count()));
+        },
+        .cuda => cuda: {
+            var generator: GpuGenerator = .init(params.seed, params.cuda_device);
+            break :cuda try generator.randn(self.allocator, @intCast(noise_shape.count()));
+        },
     };
-    defer noise_slice.free(self.allocator);
+    defer self.allocator.free(noise_data);
+    const noise_slice = zml.Slice.init(noise_shape, std.mem.sliceAsBytes(noise_data));
     var noise_buffer = try zml.Buffer.fromSlice(self.io, self.platform, noise_slice, .replicated);
     defer noise_buffer.deinit();
     const noise_tensor: zml.Tensor = .fromShape(noise_shape);
@@ -202,32 +207,6 @@ pub fn run_once(
     }
 }
 
-/// Reads the `noise` tensor of `path` into a new slice of `shape`. Only the element count has to match: the saved
-/// tensor may keep diffusers' (bs, 1, C, H, W) layout, which is the same memory as {bs, C, H * W}.
-fn loadNoise(allocator: std.mem.Allocator, io: std.Io, path: []const u8, shape: zml.Shape) !zml.Slice {
-    var registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, path);
-    defer registry.deinit();
-    var tensor_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
-    defer tensor_store.deinit();
-
-    const saved_shape = tensor_store.getShape("noise") orelse {
-        std.log.err("No `noise` tensor in {s}", .{path});
-        return error.NotFound;
-    };
-    if (saved_shape.dtype() != shape.dtype() or saved_shape.count() != shape.count()) {
-        std.log.err("Expected the noise in {s} to be {f}, got {f}", .{ path, shape, saved_shape });
-        return error.InvalidNoiseShape;
-    }
-
-    const slice = try zml.Slice.alloc(allocator, shape);
-    errdefer slice.free(allocator);
-    var reader_buffer: [4096]u8 = undefined;
-    var reader = try tensor_store.getReader("noise", io, &reader_buffer);
-    defer reader.deinit();
-    try reader.interface.readSliceAll(slice.data());
-    return slice;
-}
-
 // This value is the start of the system prompt
 const DROP_IDX = 14;
 
@@ -287,7 +266,7 @@ pub const PipelineWrapper = struct {
     ) zml.Tensor {
         const prompt_embeds = self.encode_prompt(input_ids);
 
-        // `noise` is {bs, d, seq_len} f32 from TorchGenerator. diffusers' _pack_latents transposes it to
+        // `noise` is {bs, d, seq_len} f32 from CpuGenerator. diffusers' _pack_latents transposes it to
         // {bs, seq_len, d}, and torch's bf16 randn is the f32 sample rounded to nearest-even, like convert.
         const latents = noise.transpose(.{ .bs, .seq_len, .d }).convert(.bf16);
 

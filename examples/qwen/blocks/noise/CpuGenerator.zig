@@ -6,11 +6,11 @@
 //!
 //! `torch.randn(..., dtype=torch.bfloat16)` is exactly these f32 samples rounded to nearest-even, so convert
 //! them with `Tensor.convert(.bf16)` rather than truncating the bits.
-//! Note: `torch.Generator("cuda")` uses Philox, a different algorithm, this only matches CPU generators.
+//! Note: `torch.Generator("cuda")` uses Philox, a different algorithm, see `gpu.zig`.
 
 const std = @import("std");
 
-const TorchGenerator = @This();
+const CpuGenerator = @This();
 
 const MERSENNE_STATE_N = 624;
 const MERSENNE_STATE_M = 397;
@@ -25,8 +25,8 @@ next_idx: u32,
 has_cached: bool,
 cached_normal: f32,
 
-pub fn init(seed: u64) TorchGenerator {
-    var self: TorchGenerator = undefined;
+pub fn init(seed: u64) CpuGenerator {
+    var self: CpuGenerator = undefined;
     self.has_cached = false;
     self.cached_normal = 0;
 
@@ -48,7 +48,7 @@ fn twist(u_val: u32, v_val: u32) u32 {
     return (mixBits(u_val, v_val) >> 1) ^ (if (v_val & 1 != 0) MATRIX_A else 0);
 }
 
-fn nextState(self: *TorchGenerator) void {
+fn nextState(self: *CpuGenerator) void {
     self.left = MERSENNE_STATE_N;
     self.next_idx = 0;
 
@@ -63,7 +63,7 @@ fn nextState(self: *TorchGenerator) void {
 }
 
 /// One tempered u32, like mt19937_engine::operator()
-fn random(self: *TorchGenerator) u32 {
+fn random(self: *CpuGenerator) u32 {
     self.left -= 1;
     if (self.left == 0) {
         self.nextState();
@@ -79,7 +79,7 @@ fn random(self: *TorchGenerator) u32 {
 }
 
 /// PyTorch's uniform_real<float>: the low 24 bits scaled to [0, 1).
-fn uniformFloat(self: *TorchGenerator) f32 {
+fn uniformFloat(self: *CpuGenerator) f32 {
     const val = self.random();
     const mask: u32 = (1 << 24) - 1;
     const divisor: f32 = 1.0 / @as(f32, @floatFromInt(@as(u32, 1 << 24)));
@@ -99,14 +99,14 @@ fn normalFill16(data: *[16]f32) void {
 }
 
 /// Two tempered u32s combined, like generator->random64()
-fn random64(self: *TorchGenerator) u64 {
+fn random64(self: *CpuGenerator) u64 {
     const hi = self.random();
     const lo = self.random();
     return (@as(u64, hi) << 32) | @as(u64, lo);
 }
 
 /// PyTorch's uniform_real<double>: the low 53 bits scaled to [0, 1).
-fn uniformDouble(self: *TorchGenerator) f64 {
+fn uniformDouble(self: *CpuGenerator) f64 {
     const val = self.random64();
     const mask: u64 = (@as(u64, 1) << 53) - 1;
     const divisor: f64 = 1.0 / @as(f64, @floatFromInt(@as(u64, 1) << 53));
@@ -114,7 +114,7 @@ fn uniformDouble(self: *TorchGenerator) f64 {
 }
 
 /// PyTorch's sequential `normal_distribution<double>` path, used for tensors of less than 16 elements.
-fn normalFloat(self: *TorchGenerator) f32 {
+fn normalFloat(self: *CpuGenerator) f32 {
     if (self.has_cached) {
         self.has_cached = false;
         return self.cached_normal;
@@ -137,7 +137,7 @@ fn normalFloat(self: *TorchGenerator) f32 {
 ///
 /// For 16 elements or more, PyTorch's `normal_fill`: fill the whole buffer with uniforms, transform it in
 /// blocks of 16 with Box-Muller, and if the size isn't a multiple of 16 regenerate and transform the last 16.
-pub fn randn(self: *TorchGenerator, allocator: std.mem.Allocator, count: usize) ![]f32 {
+pub fn randn(self: *CpuGenerator, allocator: std.mem.Allocator, count: usize) ![]f32 {
     const result = try allocator.alloc(f32, count);
     errdefer allocator.free(result);
 
@@ -173,7 +173,7 @@ fn expectSamples(expected: []const f32, actual: []const f32) !void {
 }
 
 test "randn matches torch for the Qwen-Image 2.1 2048x2048 latents" {
-    var gen: TorchGenerator = .init(42);
+    var gen: CpuGenerator = .init(42);
     // (1, 1, 64, 128, 128), what diffusers' prepare_latents draws
     const samples = try gen.randn(std.testing.allocator, 64 * 128 * 128);
     defer std.testing.allocator.free(samples);
@@ -184,7 +184,7 @@ test "randn matches torch for the Qwen-Image 2.1 2048x2048 latents" {
 }
 
 test "randn matches torch when the size isn't a multiple of 16" {
-    var gen: TorchGenerator = .init(42);
+    var gen: CpuGenerator = .init(42);
     const samples = try gen.randn(std.testing.allocator, 20);
     defer std.testing.allocator.free(samples);
 
@@ -192,7 +192,7 @@ test "randn matches torch when the size isn't a multiple of 16" {
 }
 
 test "randn matches torch for less than 16 elements" {
-    var gen: TorchGenerator = .init(42);
+    var gen: CpuGenerator = .init(42);
     const samples = try gen.randn(std.testing.allocator, 5);
     defer std.testing.allocator.free(samples);
 
