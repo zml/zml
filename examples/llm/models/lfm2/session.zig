@@ -31,7 +31,7 @@ pub const Session = struct {
     ) !Session {
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
         var cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform);
-        errdefer zml.mem.deinitBufferized(allocator, model.Cache, &cache_buffers);
+        errdefer zml.mem.deinitBufferized(allocator, &cache_buffers);
         var rng_buf = try zml.Tensor.Rng.init().initBuffer(io, platform, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buf);
         const generated_token_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{ .batch = 1, .seq = 1 }, .u32));
@@ -62,7 +62,7 @@ pub const Session = struct {
     pub fn deinit(self: *Session) void {
         self.prefill.deinit(self.allocator);
         self.decode.deinit(self.allocator);
-        zml.mem.deinitBufferized(self.allocator, model.Cache, &self.cache_buffers);
+        zml.mem.deinitBufferized(self.allocator, &self.cache_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buf);
         self.generated_token_slice.free(self.allocator);
     }

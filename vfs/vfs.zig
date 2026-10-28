@@ -11,9 +11,10 @@
 //!
 //! Errors of a remote path, alike on every backend: opening, stat-ing or
 //! probing it (`access`) fails with `FileNotFound` for a missing object
-//! (404, 410), `PermissionDenied` for a denied one (401, 403), and
-//! `Canceled` for a canceled task. Any other failure is logged at err with
-//! the backend and the path, and surfaces as `Unexpected`. On S3 a
+//! (404, 410), `PermissionDenied` for a denied one (401, 403),
+//! `Canceled` for a canceled task, and `SystemResources` for a failed
+//! allocation. Any other failure is logged at err with the backend and
+//! the path, and surfaces as `Unexpected`. On S3 a
 //! principal without `s3:ListBucket` gets 403 for a missing key too, so a
 //! probe of an optional object treats both as absent. A positional read
 //! that still fails after its retries is logged at err and surfaces as
@@ -33,9 +34,9 @@ pub const GCS = @import("gcs.zig").GCS;
 pub const HF = @import("hf.zig").HF;
 pub const HTTP = @import("http.zig").HTTP;
 pub const S3 = @import("s3.zig").S3;
-/// A test-only HTTP origin and its harness, so a caller above this layer
-/// (the loader) can exercise a real socket without its own server.
-pub const mock_server = @import("mock_server.zig");
+/// A test-only HTTP origin, so a test above this layer (the loader's,
+/// safetensors') can exercise a real socket without its own server.
+pub const MockServer = @import("mock_server.zig").MockServer;
 const base_module = @import("base.zig");
 const direct_io = @import("direct_io.zig");
 pub const Backend = base_module.Backend;
@@ -68,11 +69,8 @@ const Handle = struct {
     handle: u32,
     backend_idx: ?usize,
     flags: std.Io.File.Flags = .{ .nonblocking = false },
-    /// Opened for reading only. `useDirectIo` needs it: the flag constrains
-    /// writes too.
-    read_only: bool = false,
-    /// A local file's read mode (`useDirectIo`). Transitions that touch the
-    /// descriptor's flag happen under the VFS mutex; reads only load it.
+    /// A local file's read mode (`useDirectIo`). Every transition happens
+    /// under the VFS mutex (`settle`, `leaveDirect`); reads only load it.
     direct: std.atomic.Value(direct_io.State) = .init(.undecided),
 
     fn innerFile(self: *const Handle) std.Io.File {
@@ -88,30 +86,6 @@ const Handle = struct {
         if (comptime !direct_io.supported) return false;
         return self.direct.load(.acquire) == .direct;
     }
-};
-
-/// Source request size is independent of DMA block size and source width.
-/// In historical warm Llama loads on one B70 at fixed width 12, 8/16/32 MiB
-/// requests achieved 27.05/24.21/21.33 GiB/s and used 96/192/384 MiB pinned
-/// high-water. Real AWS instead plateaued near 950 MiB/s: 16 MiB at width 24
-/// was within 3% of peak; 32 MiB cut GET count 39% but did not improve speed.
-/// A universal 32 MiB policy would trade a local regression for no remote
-/// throughput gain. Profiles supply minima; the loader also respects its
-/// independently calibrated DMA block and the supported request-size limit.
-pub const LoadProfile = struct {
-    /// Local files, through a VFS or not. Also the loader's profile when it
-    /// is given no checkpoint or no VFS.
-    pub const local: LoadProfile = .{
-        .name = "local",
-        .read_chunk_size = 8 * 1024 * 1024,
-        .high_latency = false,
-    };
-
-    name: []const u8,
-    /// Minimum source request size. The loader may increase it to match the
-    /// independently calibrated DMA block size.
-    read_chunk_size: usize,
-    high_latency: bool,
 };
 
 allocator: std.mem.Allocator,
@@ -146,15 +120,10 @@ pub fn deinit(self: *VFS) void {
     self.backends.deinit(self.allocator);
 }
 
-pub const RegisterError = error{
-    /// `file` is the VFS's own scheme (`local_scheme`).
-    ReservedScheme,
-} || std.mem.Allocator.Error;
-
 /// Serves `scheme` with `backend`, replacing any backend registered under
 /// it. `scheme` is kept, not copied: it must outlive the VFS.
-pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) RegisterError!void {
-    if (std.mem.eql(u8, scheme, local_scheme)) return error.ReservedScheme;
+pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) std.mem.Allocator.Error!void {
+    std.debug.assert(!std.mem.eql(u8, scheme, local_scheme)); // file is the VFS's own (local_scheme)
     self.mutex.lockUncancelable(self.base.inner);
     defer self.mutex.unlock(self.base.inner);
 
@@ -263,21 +232,14 @@ const io_vtable: std.Io.VTable = VFSBase.vtable(.{
     .fileRealPath = fileRealPath,
 });
 
-/// The source tuning for one model load (`Loader.init` asks for its
-/// checkpoint's). A path resolves as it does for `openFile`: a bare path or
-/// a `file://` URI is local, served by the inner `Io`. The name borrows the
-/// registered scheme, so this VFS must outlive its use.
-pub fn loadProfile(self: *VFS, path: []const u8) !LoadProfile {
+/// The read hints of the backend serving `path` (`Loader.init` asks for its
+/// checkpoint's). A path resolves as it does for `openFile`: a bare path or a
+/// `file://` URI is local (`ReadHints.local`), and a scheme no backend serves
+/// is `VFSNotRegistered`.
+pub fn readHints(self: *VFS, path: []const u8) !ReadHints {
     const backend_idx, _, _ = try self.lookupDir(.cwd(), path);
     const index = backend_idx orelse return .local;
-    self.mutex.lockUncancelable(self.base.inner);
-    defer self.mutex.unlock(self.base.inner);
-    const backend = self.backends.entries.items(.value)[index];
-    return .{
-        .name = self.backends.entries.items(.key)[index],
-        .read_chunk_size = backend.read_hints.read_chunk_size,
-        .high_latency = backend.read_hints.high_latency,
-    };
+    return self.backends.entries.items(.value)[index].read_hints;
 }
 
 /// Whether `path` resolves to a local file, the only kind `useDirectIo` can
@@ -314,8 +276,8 @@ fn getFileHandle(self: *VFS, file: std.Io.File) struct { *Handle, std.Io } {
     return .{ handle, self.getBackend(handle.backend_idx) };
 }
 
-/// Direct reads for a local file under `policy`: sets the flag on the
-/// descriptor of a read-only regular file at least one alignment unit long
+/// Direct reads for a local file under `policy`: sets the flag on a
+/// read-only descriptor of a regular file at least one alignment unit long
 /// (and, under `auto`, mostly out of the page cache) and returns true, after
 /// which every read of the file must meet `direct_io_alignment` in offset,
 /// buffers and total. False leaves the file buffered: another
@@ -343,65 +305,50 @@ pub fn useDirectIo(self: *VFS, file: std.Io.File, policy: DirectIo) bool {
         .buffered => return false,
         .undecided => {},
     }
-    if (!handle.read_only) return decideBuffered(handle);
-    const stat = handle.innerFile().stat(self.base.inner) catch return decideBuffered(handle);
-    if (stat.kind != .file or stat.size < direct_io.alignment) return decideBuffered(handle);
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const name = self.localName(handle, &path_buffer);
+    const stat = handle.innerFile().stat(self.base.inner) catch return self.settle(handle, false, name);
+    if (stat.kind != .file or stat.size < direct_io.alignment) return self.settle(handle, false, name);
     if (policy == .auto) {
         var shift: u64 = undefined;
         self.base.inner.random(std.mem.asBytes(&shift));
         const cached = direct_io.cachedFraction(handle.fd(), stat.size, shift) orelse {
             log.debug("{s}: page cache residency unknown; reading buffered", .{name});
-            return decideBuffered(handle);
+            return self.settle(handle, false, name);
         };
         if (cached > direct_io.cold_fraction) {
             log.debug("{s}: {d:.0}% cached; reading buffered", .{ name, cached * 100 });
-            return decideBuffered(handle);
+            return self.settle(handle, false, name);
         }
         log.debug("{s}: {d:.0}% cached", .{ name, cached * 100 });
     }
-    switch (self.enterDirect(handle)) {
-        .direct => {
-            log.debug("{s}: reading direct", .{name});
-            return true;
-        },
-        .buffered => return false,
-        .refused => |err| {
-            log.debug("{s}: O_DIRECT refused ({t}); reading buffered", .{ name, err });
-            return false;
-        },
-    }
+    return self.settle(handle, true, name);
 }
 
-/// Decides buffered for an undecided handle; a decision already taken
-/// stands.
-fn decideBuffered(handle: *Handle) bool {
-    _ = handle.direct.cmpxchgStrong(.undecided, .buffered, .acq_rel, .acquire);
-    return handle.direct.load(.acquire) == .direct;
-}
-
-const DirectEntry = union(enum) { direct, buffered, refused: std.os.linux.E };
-
-/// Sets the flag on an undecided handle's descriptor and records the
-/// decision, under the mutex: the flag and the state change together, so a
-/// demotion racing with this call cannot leave the flag on a buffered
-/// handle. A filesystem that refuses the flag leaves the handle buffered.
-fn enterDirect(self: *VFS, handle: *Handle) DirectEntry {
+/// Decides an undecided handle's read mode under the mutex, setting the
+/// flag first when `direct`, and returns whether the handle reads direct:
+/// the flag and the state change together, and a decision already taken
+/// (by a racing call, or a demotion) stands. A descriptor the flag cannot
+/// go on (`direct_io.enable`) is read buffered.
+fn settle(self: *VFS, handle: *Handle, direct: bool, name: []const u8) bool {
     self.mutex.lockUncancelable(self.base.inner);
     defer self.mutex.unlock(self.base.inner);
     switch (handle.direct.load(.acquire)) {
-        .direct => return .direct,
-        .buffered => return .buffered,
+        .direct => return true,
+        .buffered => return false,
         .undecided => {},
     }
-    const err = direct_io.enable(handle.fd());
-    if (err != .SUCCESS) {
-        handle.direct.store(.buffered, .release);
-        return .{ .refused = err };
+    if (direct) {
+        const err = direct_io.enable(handle.fd());
+        if (err == .SUCCESS) {
+            handle.direct.store(.direct, .release);
+            log.debug("{s}: reading direct", .{name});
+            return true;
+        }
+        log.debug("{s}: O_DIRECT refused ({t}); reading buffered", .{ name, err });
     }
-    handle.direct.store(.direct, .release);
-    return .direct;
+    handle.direct.store(.buffered, .release);
+    return false;
 }
 
 /// Takes a direct handle back to buffered: the flag comes off the
@@ -496,30 +443,25 @@ fn lookupDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8) !struct { ?usiz
     if (sub_path) |sp| {
         if (std.mem.indexOf(u8, sp, "://") != null) {
             const uri = std.Uri.parse(sp) catch return error.VFSNotRegistered;
-            return self.schemeRoot(uri.scheme);
+            if (std.mem.eql(u8, uri.scheme, local_scheme)) return .{ null, std.Io.Dir.cwd(), self.base.inner };
+            const backend_idx: usize = for (self.backends.entries.items(.key), 0..) |s, idx| {
+                if (std.mem.eql(u8, uri.scheme, s)) break idx;
+            } else return error.VFSNotRegistered;
+            return .{ backend_idx, std.Io.Dir.cwd(), self.getBackend(backend_idx) };
         }
     }
 
-    // Without "://", a path from cwd is local, a colon in it included.
-    if (std.meta.eql(dir, std.Io.Dir.cwd())) return self.localRoot();
-    const handle = self.getDirHandle(dir);
-    if (handle.backend_idx) |backend_idx| {
-        return .{ backend_idx, .{ .handle = @intCast(handle.handle) }, self.getBackend(backend_idx) };
+    if (std.meta.eql(dir, std.Io.Dir.cwd())) {
+        // Without "://", a path from cwd is local, a colon in it included.
+        return .{ null, dir, self.base.inner };
     } else {
-        return .{ null, .{ .handle = @intCast(handle.handle) }, self.base.inner };
+        const handle = self.getDirHandle(dir);
+        if (handle.backend_idx) |backend_idx| {
+            return .{ backend_idx, .{ .handle = @intCast(handle.handle) }, self.getBackend(backend_idx) };
+        } else {
+            return .{ null, .{ .handle = @intCast(handle.handle) }, self.base.inner };
+        }
     }
-}
-
-/// The root of a scheme: the inner `Io` for local files, otherwise the
-/// backend registered for it.
-fn schemeRoot(self: *VFS, scheme: []const u8) !struct { ?usize, std.Io.Dir, std.Io } {
-    if (std.mem.eql(u8, scheme, local_scheme)) return self.localRoot();
-    const backend_idx = self.backends.getIndex(scheme) orelse return error.VFSNotRegistered;
-    return .{ backend_idx, std.Io.Dir.cwd(), self.getBackend(backend_idx) };
-}
-
-fn localRoot(self: *VFS) struct { ?usize, std.Io.Dir, std.Io } {
-    return .{ null, std.Io.Dir.cwd(), self.base.inner };
 }
 
 /// `path` without its "scheme://" prefix; a name with a colon and no "://"
@@ -557,7 +499,7 @@ fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable
         .file_write_streaming => |o| {
             const handle, const backend = self.getFileHandle(o.file);
             return backend.vtable.operate(backend.userdata, .{ .file_write_streaming = .{
-                .file = handle.innerFile(),
+                .file = .{ .handle = @intCast(handle.handle), .flags = handle.flags },
                 .header = o.header,
                 .data = o.data,
                 .splat = o.splat,
@@ -619,7 +561,7 @@ fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.D
     return backend.vtable.dirStat(backend.userdata, dir_);
 }
 
-fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
+pub fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     _, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
         log.err("Failed to lookup backend for dir stat file '{s}' : {any}", .{ sub_path, err });
@@ -628,7 +570,7 @@ fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, opt
     return backend.vtable.dirStatFile(backend.userdata, dir_, stripScheme(sub_path), options);
 }
 
-fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+pub fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     _, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
         log.err("Failed to lookup backend for dir access '{s}' : {any}", .{ sub_path, err });
@@ -637,7 +579,7 @@ fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, optio
     return backend.vtable.dirAccess(backend.userdata, dir_, stripScheme(sub_path), options);
 }
 
-fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const dir_ = try self.writableDir(dir, sub_path, "create file");
     const inner = self.base.inner;
@@ -676,7 +618,6 @@ fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, fla
         .handle = @intCast(file.handle),
         .backend_idx = backend_idx,
         .flags = file.flags,
-        .read_only = flags.mode == .read_only,
     };
     return .{ .handle = @intCast(idx), .flags = handle.flags };
 }
@@ -732,10 +673,10 @@ fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8
 
     if (self.getScheme(backend_idx)) |s| {
         const prefix = try std.fmt.bufPrint(out_buffer, "{s}://", .{s});
-        const path_len = try backend.vtable.dirRealPathFile(backend.userdata, dir_, path_name, out_buffer[prefix.len..]);
+        const path_len = try backend.vtable.dirRealPathFile(backend.userdata, dir_, stripScheme(path_name), out_buffer[prefix.len..]);
         return prefix.len + path_len;
     } else {
-        return try backend.vtable.dirRealPathFile(backend.userdata, dir_, path_name, out_buffer);
+        return try backend.vtable.dirRealPathFile(backend.userdata, dir_, stripScheme(path_name), out_buffer);
     }
 }
 
@@ -754,20 +695,20 @@ fn dirDeleteDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8) st
 fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const handle, const backend = self.getFileHandle(file);
-    return backend.vtable.fileStat(backend.userdata, handle.innerFile());
+    return backend.vtable.fileStat(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags });
 }
 
 fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const handle, const backend = self.getFileHandle(file);
-    return backend.vtable.fileLength(backend.userdata, handle.innerFile());
+    return backend.vtable.fileLength(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags });
 }
 
 fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     for (files) |file| {
         const handle, const backend = self.getFileHandle(file);
-        backend.vtable.fileClose(backend.userdata, &.{handle.innerFile()});
+        backend.vtable.fileClose(backend.userdata, &.{.{ .handle = @intCast(handle.handle), .flags = handle.flags }});
         self.closeHandle(@intCast(file.handle)) catch unreachable;
     }
 }
@@ -775,7 +716,7 @@ fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
 fn fileWritePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const handle, const backend = self.getFileHandle(file);
-    return backend.vtable.fileWritePositional(backend.userdata, handle.innerFile(), header, data, splat, offset);
+    return backend.vtable.fileWritePositional(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, header, data, splat, offset);
 }
 
 fn fileWriteFileStreaming(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.File.Writer.WriteFileError!usize {
@@ -796,7 +737,7 @@ fn fileWriteFileStreaming(userdata: ?*anyopaque, file: std.Io.File, header: []co
         reader.file = original_src_handle;
     }
 
-    return dst_backend.vtable.fileWriteFileStreaming(dst_backend.userdata, dst_handle.innerFile(), header, reader, limit);
+    return dst_backend.vtable.fileWriteFileStreaming(dst_backend.userdata, .{ .handle = @intCast(dst_handle.handle), .flags = dst_handle.flags }, header, reader, limit);
 }
 
 fn fileWriteFilePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit, offset: u64) std.Io.File.WriteFilePositionalError!usize {
@@ -817,7 +758,7 @@ fn fileWriteFilePositional(userdata: ?*anyopaque, file: std.Io.File, header: []c
         reader.file = original_src_handle;
     }
 
-    return dst_backend.vtable.fileWriteFilePositional(dst_backend.userdata, dst_handle.innerFile(), header, reader, limit, offset);
+    return dst_backend.vtable.fileWriteFilePositional(dst_backend.userdata, .{ .handle = @intCast(dst_handle.handle), .flags = dst_handle.flags }, header, reader, limit, offset);
 }
 
 fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
@@ -831,19 +772,19 @@ fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []
             }
         }
     }
-    return backend.vtable.fileReadPositional(backend.userdata, handle.innerFile(), data, offset);
+    return backend.vtable.fileReadPositional(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, data, offset);
 }
 
 fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const handle, const backend = self.getFileHandle(file);
-    return backend.vtable.fileSeekBy(backend.userdata, handle.innerFile(), relative_offset);
+    return backend.vtable.fileSeekBy(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, relative_offset);
 }
 
 fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const handle, const backend = self.getFileHandle(file);
-    return backend.vtable.fileSeekTo(backend.userdata, handle.innerFile(), absolute_offset);
+    return backend.vtable.fileSeekTo(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, absolute_offset);
 }
 
 fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
@@ -852,48 +793,33 @@ fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.
 
     if (self.getScheme(handle.backend_idx)) |s| {
         const prefix = try std.fmt.bufPrint(out_buffer, "{s}://", .{s});
-        const path_len = try backend.vtable.fileRealPath(backend.userdata, handle.innerFile(), out_buffer[prefix.len..]);
+        const path_len = try backend.vtable.fileRealPath(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, out_buffer[prefix.len..]);
         return prefix.len + path_len;
     } else {
-        return try backend.vtable.fileRealPath(backend.userdata, handle.innerFile(), out_buffer);
+        return try backend.vtable.fileRealPath(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, out_buffer);
     }
 }
 
-test "VFS prepares load profiles for local and registered paths" {
+test "VFS gives the read hints of local and registered paths" {
     var filesystem = try VFS.init(std.testing.allocator, std.testing.io);
     defer filesystem.deinit();
-    try filesystem.registerBackend("test", .{
-        .io = std.testing.io,
-        .read_hints = .{
-            .read_chunk_size = 32 * 1024 * 1024,
-            .high_latency = true,
-        },
-    });
+    const hints: ReadHints = .{ .read_chunk_size = 32 * 1024 * 1024, .high_latency = true };
+    try filesystem.registerBackend("test", .{ .io = std.testing.io, .read_hints = hints });
 
-    const profile = try filesystem.loadProfile("test://bucket/object");
-    try std.testing.expectEqualStrings("test", profile.name);
-    try std.testing.expectEqual(@as(usize, 32 * 1024 * 1024), profile.read_chunk_size);
-    try std.testing.expect(profile.high_latency);
+    try std.testing.expectEqual(hints, try filesystem.readHints("test://bucket/object"));
     try std.testing.expect(!filesystem.isLocal("test://bucket/object"));
 
     for ([_][]const u8{ "/tmp/model.safetensors", "models/model.safetensors", "file:///tmp/model.safetensors" }) |path| {
-        const local = try filesystem.loadProfile(path);
-        try std.testing.expectEqualStrings("local", local.name);
-        try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), local.read_chunk_size);
-        try std.testing.expect(!local.high_latency);
+        try std.testing.expectEqual(ReadHints{ .read_chunk_size = 8 * 1024 * 1024, .high_latency = false }, try filesystem.readHints(path));
         try std.testing.expect(filesystem.isLocal(path));
     }
-    try std.testing.expectError(
-        error.VFSNotRegistered,
-        filesystem.loadProfile("missing://bucket/object"),
-    );
+    try std.testing.expectError(error.VFSNotRegistered, filesystem.readHints("missing://bucket/object"));
     try std.testing.expect(!filesystem.isLocal("missing://bucket/object"));
-    try std.testing.expectError(error.ReservedScheme, filesystem.registerBackend("file", .{ .io = std.testing.io }));
     try std.testing.expectEqual(@as(?*VFS, &filesystem), VFS.fromIo(filesystem.io()));
     try std.testing.expectEqual(@as(?*VFS, null), VFS.fromIo(std.testing.io));
 }
 
-test "Remotes registers every remote scheme with its load profile" {
+test "Remotes registers every remote scheme with its read hints" {
     var filesystem = try VFS.init(std.testing.allocator, std.testing.io);
     defer filesystem.deinit();
     // No credentials and no proxies: nothing is read from the user's home.
@@ -903,27 +829,24 @@ test "Remotes registers every remote scheme with its load profile" {
     try remotes.init(std.testing.allocator, &filesystem, &environ);
     defer remotes.deinit();
 
-    const Case = struct {
-        path: []const u8,
-        name: []const u8,
-        read_chunk_size: usize,
-        high_latency: bool,
-    };
+    const Case = struct { path: []const u8, local: bool = false, hints: ReadHints };
+    const remote: ReadHints = .{ .read_chunk_size = 16 * 1024 * 1024, .high_latency = true };
     const cases = [_]Case{
-        .{ .path = "file:///tmp/model", .name = "local", .read_chunk_size = 8 * 1024 * 1024, .high_latency = false },
-        .{ .path = "/var/models/model", .name = "local", .read_chunk_size = 8 * 1024 * 1024, .high_latency = false },
-        .{ .path = "https://example.com/model", .name = "https", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
-        .{ .path = "s3://bucket/model", .name = "s3", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
-        .{ .path = "gs://bucket/model", .name = "gs", .read_chunk_size = 16 * 1024 * 1024, .high_latency = true },
-        .{ .path = "hf://owner/model", .name = "hf", .read_chunk_size = 32 * 1024 * 1024, .high_latency = true },
+        .{ .path = "file:///tmp/model", .local = true, .hints = .local },
+        .{ .path = "/var/models/model", .local = true, .hints = .local },
+        .{ .path = "https://example.com/model", .hints = remote },
+        .{ .path = "s3://bucket/model", .hints = remote },
+        .{ .path = "gs://bucket/model", .hints = remote },
+        .{ .path = "hf://owner/model", .hints = .{ .read_chunk_size = 32 * 1024 * 1024, .high_latency = true } },
     };
     for (cases) |case| {
-        const profile = try filesystem.loadProfile(case.path);
-        try std.testing.expectEqualStrings(case.name, profile.name);
-        try std.testing.expectEqual(case.read_chunk_size, profile.read_chunk_size);
-        try std.testing.expectEqual(case.high_latency, profile.high_latency);
+        try std.testing.expectEqual(case.hints, try filesystem.readHints(case.path));
         // Only a local file can be read directly; nothing is opened to ask.
-        try std.testing.expectEqual(std.mem.eql(u8, case.name, "local"), filesystem.isLocal(case.path));
+        try std.testing.expectEqual(case.local, filesystem.isLocal(case.path));
+        if (case.local) continue;
+        // A remote real path carries its scheme once, resolved without a request.
+        var real_path: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(case.path, real_path[0..try std.Io.Dir.cwd().realPathFile(filesystem.io(), case.path, &real_path)]);
     }
 }
 
@@ -944,6 +867,8 @@ test "VFS serves bare paths and file:// URIs from the inner Io" {
     var uri_buffer: [std.fs.max_path_bytes + 8]u8 = undefined;
     const uri = try std.fmt.bufPrint(&uri_buffer, "file://{s}", .{path});
     for ([_][]const u8{ path, uri }) |open_path| {
+        var real_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(path, real_buffer[0..try std.Io.Dir.cwd().realPathFile(vfs_io, open_path, &real_buffer)]);
         const opened = try std.Io.Dir.openFile(.cwd(), vfs_io, open_path, .{ .mode = .read_only });
         defer opened.close(vfs_io);
         const handle, _ = filesystem.getFileHandle(opened);
@@ -1015,6 +940,14 @@ test "VFS reads the same bytes under every direct I/O policy" {
         try std.testing.expectEqualSlices(u8, contents[alignment + 3 ..][0..tail.len], &tail);
         try std.testing.expectEqual(@as(usize, 0), try file.readPositional(vfs_io, &.{plain}, contents.len));
     }
+
+    // A descriptor opened for writing is never direct: the flag would
+    // constrain its writes too.
+    const writable = try std.Io.Dir.openFile(.cwd(), vfs_io, path, .{ .mode = .read_write });
+    defer writable.close(vfs_io);
+    try std.testing.expect(!filesystem.useDirectIo(writable, .on));
+    const writable_handle, _ = filesystem.getFileHandle(writable);
+    if (comptime direct_io.supported) try std.testing.expectEqual(std.os.linux.E.BADF, direct_io.enable(writable_handle.fd()));
 }
 
 test "auto keeps reading a cold file direct after probing it" {
@@ -1145,11 +1078,9 @@ test "creates and deletes on a remote path fail and write nothing anywhere" {
     const allocator = std.testing.allocator;
     const testing_io = std.testing.io;
     var object: [16]u8 = @splat(0x2a);
-    var server = try mock_server.MockServer.init(testing_io, &object, .{});
-    var server_group: std.Io.Group = .init;
-    try mock_server.startMockServer(&server, &server_group, testing_io);
-    var server_joined = false;
-    defer mock_server.cleanupMockServer(&server, &server_group, testing_io, server_joined);
+    var server = try MockServer.init(testing_io, &object, .{});
+    defer server.deinit(testing_io);
+    try server.start(testing_io);
 
     var client: std.http.Client = .{ .allocator = allocator, .io = testing_io };
     defer client.deinit();
@@ -1182,8 +1113,6 @@ test "creates and deletes on a remote path fail and write nothing anywhere" {
     for ([_][]const u8{ "s3:", "bucket" }) |name| {
         try std.testing.expectError(error.FileNotFound, cwd.access(testing_io, name, .{}));
     }
-    server_group.cancel(testing_io);
-    server_joined = true;
-    try server.check();
+    try server.stop(testing_io);
     try std.testing.expectEqual(0, server.head_requests.load(.acquire) + server.get_requests.load(.acquire));
 }

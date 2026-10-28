@@ -58,8 +58,8 @@ Since R16 (forty-eighth pass) the contracts live in the pub doc comments,
 and docs/learn/loader.md is the guide. This section points to them:
 
 - API, lifetimes and errors: `Loader` (`init`, `start`, `wait`, `cancel`,
-  `deinit`, `Options`, `Error`), `TensorStore` (`View`, `Binding`,
-  `Program`), `Source`, `Quantization.Target`, and the registry
+  `deinit`, `Options`), `TensorStore` (`View`, `Binding`, `Program`),
+  `Source` and `Source.Placed`, `Quantization.Target`, and the registry
   (`TensorRegistry.fromPath`, `addRepo`, `Tensor.read`, `readRange`).
 - From bindings to specs, program groups, admission and accounting: the
   loader.zig `//!` header. Where admission cannot measure the room (a
@@ -76,11 +76,13 @@ and docs/learn/loader.md is the guide. This section points to them:
 
 ### Source and VFS data plane
 
-- `safetensors.readFilePositionalAllV` is the one exact positional scatter
-  for tensor readers and direct-loader pinned reads (short-read resumption,
-  local `IOV_MAX` batching); `Tensor.readRange` adds range validation over
-  a shared open file. The direct backend opens each distinct safetensor
-  object once and keeps it open until the loader's `deinit`.
+- The direct backend's pinned reads go through its private
+  `readFilePositionalAllV`, the one exact positional scatter (short-read
+  resumption, local `IOV_MAX` batching; out of safetensors.zig since the
+  fifty-fifth pass). `Tensor.readRange` validates the range and reads with
+  std's `readPositionalAll` over a shared open file. The direct backend
+  opens each distinct safetensor object once and keeps it open until the
+  loader's `deinit`.
 - HTTP, S3, GCS and HF share one range read loop,
   `range_read.performRangeRead`, over the governed loop of
   `vfs/request.zig`: one whole Range request per admitted positional call,
@@ -88,19 +90,24 @@ and docs/learn/loader.md is the guide. This section points to them:
   backend-local `parallel_read` pools must not return). Every other request
   a backend makes (HF tree and redirect chain, S3/GCS listings and HEADs,
   GCS token exchanges, the HTTP HEAD chain) uses the same loop, so one
-  governor covers a backend's whole quota. A backend contributes a
-  `RequestSpec` (name and object for logs, what a 503 means, the rate-limit
-  scope); a range read adds a per-attempt `prepare` hook returning URI,
-  authorization and extra headers, and the loop appends `Range`. S3
-  recomputes the SigV4 timestamp and signature per attempt, GCS copies
-  (refreshing when expired) its bearer, HTTP and HF are static. Backends
-  keep URL construction, credentials and `backend()` read hints; retry
-  settings are one `request.Retry` (each backend's `retry` option); each
-  backend counts reads in an `AtomicReadStats` and logs totals at debug
-  from `deinit` (forty-seventh pass).
-- Registration, `Remotes`, load profiles, the remote error contract and the
+  governor covers a backend's whole quota. Each backend owns one
+  `request.Governor` (io, client, its name for logs, what a 503 means, the
+  read stats); a request is a `RequestSpec` (`target` for logs, the
+  rate-limit `key`, `retry_once`), and a range read adds a per-attempt
+  `prepare` hook returning URI, authorization and extra headers; the loop
+  appends `Range`. S3 recomputes the SigV4 timestamp and signature per
+  attempt, GCS copies (refreshing when expired) its bearer, HTTP is static,
+  HF re-resolves an expired signed URL once (`retry_once` on 401 and 403).
+  `exchange` watches each exchange for `Retry.stall_timeout` and maps an
+  open's 404, 410, 401 and 403 (`ExchangeOptions.open`). Backends keep URL
+  construction, credentials and `backend()` read hints; retry settings are
+  one `request.Retry` (each backend's `retry` option);
+  `Governor.logTotals` logs a backend's totals at debug from its `deinit`
+  (fifty-fifth pass).
+- Registration, `Remotes`, read hints, the remote error contract and the
   VFS's lifetime: the vfs/vfs.zig header and the doc comments of
-  `registerBackend`, `Remotes`, `io` and `loadProfile`.
+  `registerBackend`, `Remotes`, `io` and `readHints` (`ReadHints` is in
+  vfs/base.zig).
 - Range handling reads `Content-Range` before taking the body reader (which
   releases the head bytes), validates that it covers the request, handles a
   `200` that ignores Range by discarding the prefix, then scatters into
@@ -110,9 +117,10 @@ and docs/learn/loader.md is the guide. This section points to them:
   and GCS but a server failure on HTTP and HF. A throttle arms the
   backend's hold instead of charging the retry budget (sixteenth pass); any
   other retried status naming a delay (`Retry-After` delta-seconds, or HF's
-  `RateLimit` `t=`; HTTP-date is not parsed) sleeps that long instead of
-  the jittered delay. Backends count requests, retries, timeouts, server
-  failures, throttles, bytes, delay, holds and hold waits.
+  `RateLimit` `t=`; HTTP-date is not parsed) sleeps that long, at most
+  `Retry.max_delay`, instead of the jittered delay. Backends count
+  requests, retries, timeouts, server failures, throttles, bytes, delay,
+  holds and hold waits.
 - Rate limiting is a hold, in `vfs/request.zig`. One `Governor` per backend
   instance (keyed by URI authority, so a per-authority scope is a one-
   function change) holds a deadline: a throttle arms it at `max(server
@@ -252,10 +260,10 @@ only the first file's planning delays the first claim (Llama: 4 plans,
   call `eventCompleted` (which may pump on the callback's thread), push the
   context onto the pipeline's `retired` stack, then call `block.complete()`
   last, because the block's completion may free the batch.
-- A planning failure before the first publish destroys the batch and
-  returns the error; after it, `submit` fails the pipeline (a partial
-  submission can never complete), seals, awaits and retires the batch, so
-  the caller sees only the sticky error. `awaitBatch` waits `done` (after
+- A planning failure, before or after the first publish, fails the
+  pipeline (a partial submission can never complete): `submit` records
+  it, seals, awaits and retires the batch, so the caller sees only the
+  sticky error (fifty-fourth pass). `awaitBatch` waits `done` (after
   which nothing touches the batch), marks unsubmitted targets when the
   pipeline failed, retires the contexts under `metadata_mutex` (so neither
   `abortReady` nor a pump draining `retired` can race the free), logs the
@@ -265,13 +273,14 @@ only the first file's planning delays the first claim (Llama: 4 plans,
   buffered backend mirrors this with `BufferedBatch{pending, done}` over
   its `LimitedGroup` read tasks.
 - The source width is fixed for the load (fifteenth pass) and never
-  changes during it (sixteenth pass): the profile's default
-  (`limits.defaultReadParallelism`: 16 for local files, 32 for a
-  high-latency source; sweeps in the fifteenth pass) or
-  `Options.read_parallelism`, clipped to one less than the requests the
-  pre-grown pinned set holds. The adaptive controller (fourth to sixth
-  passes) is gone. Rate limiting is handled one layer down by the VFS
-  governor; the loader reads no VFS statistics (forty-seventh pass).
+  changes during it (sixteenth pass): `Options.read_parallelism`, else
+  `Loader.Options.local_read_parallelism` (16) or, when the checkpoint's
+  read hints say `high_latency`, `high_latency_read_parallelism` (32;
+  sweeps in the fifteenth pass), resolved once by `backendOptions`. The
+  direct backend clips it to one less than the requests the pre-grown
+  pinned set holds. The adaptive controller (fourth to sixth passes) is
+  gone. Rate limiting is handled one layer down by the VFS governor; the
+  loader reads no VFS statistics (forty-seventh pass).
 - Two gates, both constant for the load (sixteenth pass). Lifecycle
   capacity is the pre-grown pinned capacity in requests
   (`pool.capacity / blocks_per_request`): `width + 1` source requests plus
@@ -286,7 +295,7 @@ only the first file's planning delays the first claim (Llama: 4 plans,
   once from the blocks the mapped ceiling leaves beside the reserve
   (264 MiB for width 16 with 8 MiB requests on CPU, against 528 MiB for the
   former 32-wide set) and returns `OutOfMemory`, logged at err, when it fits
-  no request (direct_loader.zig:232-237). Nothing maps inside a load
+  no request (direct_loader.zig:214-216). Nothing maps inside a load
   (146-230 ms of hipHostMalloc on MI300X when it did) and `pinned_mapped ==
   high_water` on every recorded run. A pregrowth line logs `retained`,
   `pregrown` and `pregrowth_ms`.
@@ -461,11 +470,13 @@ GiB/s (selected artifact 26.83-26.90).
 ### Performance/control experiments not in the current design
 
 - **Universal fixed 32 MiB reads:** a measured 21% B70 local regression and
-  4x pinned high-water versus 8 MiB. Replaced by one VFS profile per load.
+  4x pinned high-water versus 8 MiB. Replaced by the checkpoint backend's
+  read hints (`VFS.readHints`).
 - **Joint adaptive request size + source width:** coupled size probes to
   modeled width, handicapped larger sizes, drained between generations,
   and often finished a load before useful candidates. Request size comes
-  from the profile; source width stayed adaptive until the fifteenth pass.
+  from the read hints; source width stayed adaptive until the fifteenth
+  pass.
 - **Source-order mid-read block yielding:** cut leased high-water 12-34%
   for multi-block requests, but speed was neutral, local requests often
   equal one block, and it cannot shrink retained arenas. Remote use needs a
@@ -4870,7 +4881,253 @@ monorepo `oxtrzwyy`, on zml `zoyytxpt`.
   the n-grams `host_mapped` (23.84 GiB per device,
   `--cache-memory-fraction=0.3`). llmd 7/7 and its build pass.
 
+## Fifty-third pass: design review, do more with less (2026-10-28)
+
+A read-only review of the API and the design's simplicity, on zml
+93428bd0 and monorepo 0bf031d9 (after the master merge). Report:
+`LOADER_DESIGN_REVIEW.md` (Part 2 nineteen moves M1-M19 in three waves
+plus M20 for llmd, Part 3 decisions D1-D9). 21 reviewers (16 surfaces, 5
+lenses) produced 159 findings in 105 groups; refuting verifiers kept 102
+(65 confirmed, 37 partial) and refuted 3. Nothing was built or run.
+
+- Verdict: the byte pipeline earns its place; the excess is at the seams:
+  placement as a flag plus `Bound` (`Source.Placed` replaces both),
+  `LoadPart`/`Part` restating `Lattice`, `backendError` over six error
+  sets, spec copies forced by the front end freeing at publish, backends
+  re-checking front-end guarantees, four copied remote shells (S3's and
+  GCS's vtable blocks are identical), llmd's drafter decided in five
+  places and its load split over two optional hooks.
+- About -2,500 lines over the 19 moves (wave 1 -1,630, no measured path
+  changes); the D4 remote core would remove about 1,030 more.
+- Bugs met: a server-named retry delay is slept unbounded (`failure.delay
+  orelse` jitter, vfs/request.zig:195); HTTP's `fetchSize` copies a
+  redirect over the buffer its base URI points into (vfs/http.zig:350);
+  `dirRealPathFile` keeps the scheme; buffered helper reads run inline
+  under a busy Threaded io; S3 and GCS listings stop at 1000 keys
+  (unverified lead).
+- Spot-checked against the code: the placed-flag guards, the S3/GCS diff,
+  `backendError`, the spec-copy rule, llmd's hooks, `LimitedGroup`'s
+  growth over master, the two request-layer bugs.
+
+## Fifty-fourth pass: errors by two rules, and the HTTP fixes (2026-10-28)
+
+The user's calls on the fifty-third pass: reworking the VFS is not part of
+this work (its M5, M6 and D4 are out; its two HTTP bugs are fixed). Errors
+follow two rules: log at the place with the most context, once; keep an
+explicit error only where the caller can act on it or the information
+helps, and otherwise let an inferred `!` (or a stored `anyerror`) carry it,
+since a gigantic union helps nobody. Uncommitted, on zml 93428bd0 and
+monorepo 0bf031d9.
+
+VFS:
+- A server-named delay on a retry that is not a throttle is clamped to
+  `Retry.max_delay` (it was slept unbounded: `Retry-After: 3600` on an HTTP
+  503). Throttles and holds are unchanged.
+- HTTP `fetchSize` resolved each `Location` over the buffer its base URI
+  pointed into: three rotating buffers as in hf.zig, at most
+  `request.max_redirects` (3) hops, `try` for `catch unreachable`. HTTP
+  range GETs follow redirects (`RangeSpec.redirects`; S3, GCS and HF still
+  forbid them), with redirect room for that many hops (LOADER_REVIEW #13).
+  The mock server serves redirects; the new test fails against the old
+  walker (`UnsupportedUriScheme`).
+
+Loader:
+- `Loader.Error` (about 57 names), `backend.SubmitError`/`AwaitError`, the
+  per-backend sets, `StickyError` and `ShardGrid.InitError` are gone;
+  `start`, `wait` and the backends infer, and the sticky errors are
+  `anyerror`. Kept explicit: `init`'s `{InvalidOptions, OutOfMemory}`,
+  `PrepareError`, `TransferInitError` (host memory or PJRT),
+  `checkPlacement`, `checkOutput`, `backendOptions`, `lowerPiece`.
+- `backendError` is gone. Bug found by the inventory: its
+  `error.Internal => panic` arm also matched PJRT's `Internal`, so a device
+  INTERNAL aborted the process instead of failing the load. The direct
+  backend returns `InvalidBinding` where it logs a refusal (strided read
+  too long, range past u64); placement and memory kind are asserted where
+  the front end checked them; `maximumJobLen` asserts what `init` checked;
+  an unsubmitted target at batch end panics, naming the tensor; an
+  impossible overflow is plain arithmetic.
+- A direct submit whose planning fails always fails the backend and returns
+  the sticky error (before, a failure ahead of the first publish left it
+  usable, which nothing used); two tests changed to say so.
+- Logging once: `log.failure` logs `InvalidBinding` at debug (logged where
+  its rule was checked); a gather extent's failed read or open is recorded
+  with its own file (`FileReader.read`, `Reads.failed_source`); create no
+  longer re-logs a workspace failure, which logs its own (now including a
+  failed page allocation); the worker spawn failure is logged. A plain
+  allocation failure and `Canceled` are returned unlogged, as the docs now
+  say.
+- llmd: `weights.unsupported` beside `mismatch`, each logging the full key
+  once; `UnsupportedWeightDtype` and `UnsupportedFp8NormalizationProgram`
+  fold into `UnsupportedQuantization`, `MissingQkvScale` into
+  `CheckpointMismatch`; a refused MoE kernel or layout is logged with its
+  key. qwen4's n-gram test passed `loader.start` an `undefined` buffer tree
+  with an optional field; it bufferizes now.
+
+Review: an error inventory (5 agents) and an adversarial review (5 lenses,
+a refuting verifier per finding; 8 confirmed, 7 refuted), all confirmed
+ones fixed or recorded here. Left: a compile failure is still logged twice
+(the Compiler with its MLIR, then the loader with the program); safetensors
+header errors (several names, panics on malformed fields) are untouched.
+Checks: `//zml:test` 371 passed, 29 skipped; `//vfs:test` 54; examples
+build; llmd 10/10 (`llmd:test` 257, `weights_test` 26). "one throttled GET
+holds every reader" failed once (2 holds) beside the zml suite and passed
+the 8 runs after: timing, on a path the change does not touch.
+
+## Fifty-fifth pass: wave 1 of the design review, and the VFS against master (2026-10-29)
+
+The user's calls on the fifty-third and fifty-fourth passes: the VFS is part
+of this work after all (the governor came with the rework), but its diff
+against master stays as small as possible: rate limits and direct I/O are
+reworked, not everything, and there is no comptime remote core (D4). This
+replaces the fifty-fourth pass's "reworking the VFS is not part of this
+work". `RequestSpec.key` (the host) stays, since rate limits will be scoped
+by it (D2). Sharding is always explicit: [87] is declined, `checkOutput` and
+`withLayout(x, output)` stay (D6). Uncommitted, on zml 93428bd0 and monorepo
+0bf031d9, after the fifty-fourth pass.
+
+Loader, moves of `LOADER_DESIGN_REVIEW.md` Part 2 (M5 and M6 are replaced by
+the VFS steps below; M11-M19 are waves 2 and 3):
+- M1: `bufferize(allocator, &model)` and `deinitBufferized(allocator,
+  &buffers)` without the type; `pairBufferized` returns `[]Pair`;
+  `addRepo(io, repo, "drafter")`; `resolveModelRepo` takes directories only;
+  `readFilePositionalAllV` is private to the direct backend. It also deletes
+  `Shape.partitioning()`, `Logical.set` and `Partitioning.parse`, the user's
+  own commits (D9, the user's call).
+- M2: `Program` answers name, eql and compile through a private vtable;
+  `fail(err)` is the one writer of failure; `retire` is folded into
+  `retireOldest`; `backend.Options` copies `dma_block_sizes`
+  (`DmaBlockSizes`, at most 16) and holds a resolved `read_parallelism`;
+  `program_group_bytes` is a Loader option; `Platform.init` refuses more than
+  `MAX_NUM_DEVICES` devices (`InvalidDeviceCount`).
+- M3: `LoadPart{source, lattice}` and direct's `Part{source, source_slot,
+  destination, lattice}`. Everything a spec names lives until its await, and
+  the backends borrow parts and dims (the pending submission owns the specs'
+  arena until release; no copies at submit). `checkParts` is one loop with
+  one floor, keeping the strided rule that parts cover at most the
+  destination; `ShardGrid.locate`; the buffered backend asserts `.default`.
+- M4: `Source.Placed` (store, shape, pieces) is what `withPartitioning` and
+  `as` return and what binds (`bind`, `unplaced`, `lower`, the one
+  bits-to-bytes rule, and `whole` as a test probe), so a misuse is a compile
+  error. `Source.Bound`, `emptyOf`, `keepEmpty`, `maybeCreateBinding` and
+  `hasPrefix` are gone; one empty rule, a source that reads no bytes, whose
+  log names no key (the cost Part 2 accepted); `View.prefix()` is
+  `[]const u8`.
+- M7, llmd weights (-249 lines): one `expertStack` loop with a `Projection`;
+  one `layOutExperts` expression, evaluated by the loader or by the
+  LayOutExperts program; block-FP8 experts are asserted concatenated and
+  plain (the `UnsupportedFp8NormalizationProgram` refusal is an assert);
+  `bindQuantized` returns `{ Tensor, Quantization }`; `linear.createBf16`;
+  routers, gates and optional heads go through `linear.create` or
+  `maybeCreate`, so a quantized lm_head or g_proj now loads quantized
+  instead of as raw bytes; `splitTensor` is gone. The expert tests' program
+  counts and bytes were measured before and after: unchanged. Fixed on the
+  way: `DSparkDrafter.init` leaked its backbone when its head failed.
+- M8: `speculative.Drafter.open` decides the drafter once, before the store
+  (a model without drafters warns and gets null, a wrong drafter is
+  `UnsupportedSpeculativeDrafter`, logged once); `Model.init` takes
+  `?*const Drafter`; each model holds one `Bufferized(Weights)` and has one
+  `load` that starts (base, then drafter), waits and bakes.
+  `View.hostMappedBytes()` replaces `engramHostPinnedBytes` and qwen4's
+  `offload_ngram_size`. zoo's unread `--gpu-memory-fraction` is gone, and
+  its token budget follows `Drafter.open`.
+- M9: mnist and the README teach the in-main recipe with a plain VFS
+  (mnist's path is a local Bazel file, and `Remotes` would print credential
+  warnings on every run). examples/io's load path runs in straight lines,
+  its checks compare against the registry entries, and its own load timer
+  is gone: only the loader's `Loaded weights` line is left, so earlier
+  passes' examples/io figures (the `vfs` line, with init and calibration)
+  are not comparable.
+- M10: `Buffer.from`, `uninitialized`, `HostAccessible.init`, `toSlice` and
+  `toSliceAlloc` walk the shape's mesh (`buffer.deviceMemory` asserts the
+  device is the platform's). This fixes a buffered load onto a sub-mesh and
+  the sub-mesh half of the toSlice open item. zml/io/testing.zig is folded
+  into `zml.testing`, with a rank-N `expectShards(..., memory)`.
+
+A review of the whole wave (five dimensions on a frozen copy, a refuting
+skeptic per dimension; 12 confirmed, 2 refuted) was fixed in turn:
+- `log.failure` logs `OutOfMemory` at debug. Every `OutOfMemory` that
+  reaches it is a plain allocation or host memory that logged its own
+  failure (checked caller by caller), so this replaces four guards and fixes
+  both backends' `recordError`.
+- `Buffer.deinitAll(&buffers)` without the type (it refuses a tree with no
+  Buffer); `LoadedModel.unloadBuffers`, `ReshardedLmHead.Buffers` and
+  `deinitOwnedParameterBuffers` are gone; llmd says `Model.load` and
+  `buffers` everywhere.
+- Leaks on an init failure: qwen4's `TextModel.init` (the sampler is built
+  before the layers) and DeepSeek's `Model.init` (its executables' errdefers
+  sat inside a labeled block; older than the wave).
+
+VFS, by the re-scope study's plan. Against master the vfs/ diff went from
+6,810 changed lines to 6,294, and the net addition from 2,884 to 2,526:
+- V1: `dirRealPathFile` strips its scheme (it gave `hf://hf://a`); direct
+  I/O is decided in one locked transition (`settle`), which fixes an
+  overwrite race; `Handle.read_only` is gone and `direct_io.enable` refuses
+  a descriptor not opened read-only.
+- V2: `VFS.readHints(path)` replaces `LoadProfile` and `loadProfile`
+  (`backend.Options.read_hints`; the refusals log `checkpoint=` instead of
+  the scheme); one read-stats record (`AtomicReadStats`); `MockServer` owns
+  its group (`start`, `stop` returning its first error, `deinit`, `path`).
+- V3: each backend has one `request.Governor` (io, client, name, what a 503
+  means, stats); `request.Context` and `RequestSpec.backend`/`.unavailable`
+  are gone, and a spec is target, key and `retry_once`;
+  `ExchangeOptions.open` maps 404, 410, 401 and 403 before `consume`. GCS's
+  token and HF's tree cache have locks of their own, so neither holds the
+  handle table across a governed request (the HF lock is older than this
+  pass). A non-2xx from the GCS metadata server now logs one err line.
+- V4: the inactivity watch runs in `exchange`, so a nested request (HF's
+  re-resolve, GCS's token refresh) is watched by its own exchange;
+  `Attempt.waiting`, `watchedToken` and range_read's pause are gone.
+  `VFSBase.inner` is 16-aligned (the Governor's i96 durations raised the
+  backends' alignment), so http, s3 and hf use master's `@fieldParentPtr`
+  without `@alignCast`.
+- A final review of the whole diff against master (a skeptic confirmed 17):
+  a canceled read returns `Canceled`, unlogged (it surfaced as
+  `ReadFailed`, so an unwatched exchange retried a caller's cancel and a
+  stall logged twice); `openFailure` and `fatal` no longer log a logged
+  failure again or a plain `OutOfMemory`; a refused range body logs once;
+  registering `file` is an assert (`RegisterError` is gone); an oversized
+  GCS token response fails once instead of retrying. Back to master's lines:
+  vfs/BUILD.bazel, twelve forwarders, `lookupDir`, three `pub`s, S3's and
+  GCS's `fileSeekBy` (the overflow fix is one line each), `Protocol`, hf's
+  logger.
+- "one throttled GET holds every reader" was a test race: a reader held
+  before its first GET sent it after the hold, still among the mock's first
+  8, and armed a second hold. The mock now parks every reader's first GET
+  (`barrier_gets`); 35 uncached runs clean since.
+
+Lines: zml +2,593/-3,372 over 56 files (vfs/ -358, the rest -421), monorepo
++864/-1,366 (-502). Each move and step was implemented, reviewed read-only
+and verified by a fixer who first tried to refute each finding, with both
+gates after each.
+
+Checks: `//zml:test` 373 passed, 29 skipped (+1 `hostMappedBytes`, +1
+sub-mesh buffer); `//vfs:test` 54; examples build; llmd 10/10 (`llmd:test`
+256, 9 skipped; `weights_test` 25: the `splitTensor` test went with it). The
+CUDA-only cute kernels compile with `--@zml//platforms:cuda=true`. Nothing
+ran on a GPU or a real remote.
+
+Left:
+- On a GPU (Open work lists them): the direct backend borrowing dims; M10's
+  walks on an accelerator with more devices than a test asks for; M7's
+  block-FP8, MXFP4 and NVFP4 paths on GB300 and MI300; the routers and heads
+  now detected, on real checkpoints; llmd with a drafter (M8) and
+  `hostMappedBytes` against the old values.
+- The user's calls: the study's optional X2 (master's dead code deleted in
+  the remote backends, about 130 lines) and X3 (constructor shapes, about
+  45; GCS's `InitOpts` rename alone is free to undo); D9; `VFSBase` stays
+  private (thirty-ninth pass).
+- A compile failure is still logged twice (fifty-fourth pass);
+  `//examples/mnist:mnist_dp` aborts at `profiler.stop()` on CPU, before and
+  after the wave; `Buffer.uninitialized` on a sub-mesh has no test;
+  `ops/mla/state.zig` keeps a dead `deinitOwnedParameterBuffers` (older than
+  the wave).
+
 ## Open work
+
+Status on 2026-10-29: wave 1 of `LOADER_DESIGN_REVIEW.md` (M1-M4,
+M7-M10) and the VFS re-scope's steps are in the tree, uncommitted, none
+run on a GPU or a real remote (fifty-fifth pass); waves 2 and 3 (M11-M19)
+are open.
 
 Status on 2026-10-24: R1-R16 and the audit's "Do now" items are in. The
 fifty-first and fifty-second passes' GB300 runs closed the GPU and
@@ -4891,43 +5148,77 @@ only).
 
 Loader and llmd:
 - MI300 / ROCm, not run since the rework: R9's block-FP8 accuracy on
-  CDNA3 (every block-FP8 model, re-encoded blocks especially), the FNUZ
-  conversion of experts laid out by a program, the FP8 expert log
-  (forty-second, forty-ninth passes).
-- GB300 MoE kernel tests and the aarch64 CPU plugin (fifty-first pass).
-- No real remote (HF, S3, GCS, HTTPS) since R5, R6 and R15: the remote
-  totals line was never seen printed, hf's streaming and seek fixes are
-  untested (thirty-eighth, thirty-ninth, forty-seventh, fiftieth passes).
+  CDNA3 (every block-FP8 model, re-encoded blocks especially), now with
+  stacked block-FP8 experts converted by `bindQuantized`, and a MoE run
+  showing no MI300 path reaches M7's block-FP8 expert assert
+  (forty-second, forty-ninth, fifty-fifth passes).
+- GB300 MoE kernel tests and the aarch64 CPU plugin (fifty-first pass);
+  M7's paths there: `bindQuantized`'s swizzled block-FP8 scales, cute
+  MXFP4 and FlashInfer NVFP4 experts through `layOutExperts`, the NVFP4
+  global programs (fifty-fifth pass).
+- Wave 1 on a GPU, not run (fifty-fifth pass): the direct backend
+  borrowing spec parts and dims (M3); M10's mesh walks on an accelerator
+  with more devices than a test asks for, and `expectShards`' memory
+  argument against real host spaces; the buffered backend on TPU, neuron
+  or metal (M3's `.default` assert, M10); llmd with a drafter (M8:
+  `Drafter.open`, two starts before one wait, DSpark native);
+  `hostMappedBytes` against the old `extra_device_memory_bytes` on an
+  offloaded DeepSeek-V4.1 or Qwen3.8-Flash-Next run; examples/io's load
+  path on CUDA, ROCm or oneAPI (M9), a remote checkpoint included.
+- Real checkpoints for M7's detect changes: the routers, gates and heads
+  now built by `linear.create` or `maybeCreate`, a quantized lm_head or
+  g_proj (now loaded quantized), DeepSeek's `createBf16` `wo_a`. zoo was
+  built, not run (it needs network and an accelerator).
+- No real remote (HF, S3, GCS, HTTPS) since R5, R6 and R15, nor since the
+  fifty-fifth pass's VFS steps: the remote totals line was never seen
+  printed; untested are hf's streaming and seek fixes, signed S3 through
+  the governor, any GCS request with a token (the token lock, the
+  metadata server), HF's tree fetch no longer stalling reads, and a real
+  peer stalling mid-body (thirty-eighth, thirty-ninth, forty-seventh,
+  fiftieth, fifty-fifth passes).
 - The handle-table move (LOADER_REVIEW Move 10, remote backends as
   stores; high risk, to be staged with `http_acceptance_test` through a
   VFS): rename, symlink and hardlink to remote paths, VFSBase's
   forwarders, atomic create's handles (forty-seventh, fiftieth passes).
-  Also from Move 10: GCS fetching its metadata token as a plain request.
+  Also from Move 10: GCS fetching its metadata token as a plain request
+  (the re-scope's X7, not taken; a non-2xx from the metadata server logs
+  one err line since the fifty-fifth pass).
 - `testLayer` cannot fail; the user's call (forty-ninth pass).
+- The user's calls from the fifty-fifth pass: the VFS re-scope's optional
+  X2 (master's dead code in the remote backends, about 130 lines) and X3
+  (master's constructor shapes, about 45); D9; `VFSBase` stays private.
+- Left by the fifty-fourth and fifty-fifth passes: a compile failure is
+  logged twice (the Compiler with its MLIR, then the loader);
+  `//examples/mnist:mnist_dp` aborts at `profiler.stop()` on CPU, before
+  and after the wave; no test shows examples/io's `checkLoaded` catches a
+  corrupted buffer; llmd's ops/mla/state.zig keeps a dead
+  `deinitOwnedParameterBuffers`.
 - Docs: the tutorial has no build target; "Current design" keeps
-  sixteenth-pass names in its direct backend sections; loader.md is 207
+  sixteenth-pass names in its direct backend sections; loader.md is 221
   lines; LOADER_*.md say `getSourcesById`; `bazel/huggingface.bzl` reads
   `HUGGINGFACE_TOKEN` (forty-eighth, forty-ninth passes).
 - Known limits, documented: a denied local file opened by name in
   `fromPath` is `AccessDenied`; the `deinit` warning fires on a caller's
-  own failure without `errdefer loader.cancel()`; a source that reads
-  nothing after `pad` or `slice` logs no key, and a whole sub-byte tensor
-  whose bits are not a multiple of 8 is `InvalidBinding` (forty-fifth
-  pass); a `dma_block_sizes` block under 32 KiB makes longer jobs
-  (fiftieth pass).
+  own failure without `errdefer loader.cancel()`; a source that reads no
+  bytes (after `pad` or `slice`, or an empty checkpoint tensor) logs its
+  target but no key, and so does a sub-byte refusal, and a whole sub-byte
+  tensor whose bits are not a multiple of 8 is `InvalidBinding`
+  (forty-fifth, fifty-fifth passes); a `dma_block_sizes` block under
+  32 KiB makes longer jobs (fiftieth pass).
 - Not checked on their own on a GPU (may be stale: see fifty-first
   pass): the unlanded-bytes room, temporaries charged as a maximum,
-  host-pinned routing (forty-fifth); a model's free path (thirty-sixth);
-  a progress bar watched to the end (thirty-seventh).
+  host-pinned routing (forty-fifth); a model's free path (thirty-sixth)
+  and a progress bar watched to the end (thirty-seventh), both changed by
+  M8 (fifty-fifth pass).
 - ExpertLayout (`.loader` or `.device`) stays the user's call
   (forty-fourth pass).
 - LOADER_REVIEW items open since the thirty-first pass: S3 credentials
-  and key encoding (#5, #12), https redirects (#13), GCS key files (#16),
-  and the rest of #20's header checks (a tensor's byte size against
-  `end - start`, `F8_E5M2`, duplicate names across shards; other missing
-  or mistyped fields still panic; thirty-fifth pass). #6 went with R6, #8
-  in the thirty-fifth pass; #21 is moot (`loadExecute` went in the
-  thirty-fourth).
+  and key encoding (#5, #12), GCS key files (#16), and the rest of #20's
+  header checks (a tensor's byte size against `end - start`, `F8_E5M2`,
+  duplicate names across shards; other missing or mistyped fields still
+  panic; thirty-fifth pass). #6 went with R6, #8 in the thirty-fifth
+  pass, #13 (https redirects) in the fifty-fourth; #21 is moot
+  (`loadExecute` went in the thirty-fourth).
 - Laguna under zio: the zio coroutine stack overflow compiling Laguna
   (twenty-fourth pass) is likely fixed by the thirty-first pass's
   `vqkkvptr` and `lmnpvsso`; unverified, since the B70 rule (threaded io)
@@ -4973,9 +5264,9 @@ setup changed since are marked.
   `d426dde4`; may be stale).
 - `Buffer.toSliceAlloc` places sub-byte shards by element stride, so a
   4-bit tensor partitioned over several devices lands at twice its offset
-  (out of bounds in safe builds; the load check skips them; fifth pass),
-  and `toSlice`/`toSliceAlloc` misread a buffer placed on a sub-mesh (they
-  walk the platform's full physical mesh; twentieth pass).
+  (out of bounds in safe builds; the load check skips them; fifth pass).
+  The sub-mesh half (twentieth pass) went in M10; `Buffer.uninitialized`
+  on a sub-mesh has no test (fifty-fifth pass).
 - oneAPI: master's plugin `202610011939` serializes piece completions (3x
   on tiny-piece loads) and segfaults compiling llmd's Llama; master's moe
   Triton test aborts on Level Zero. Host-resident destinations are
@@ -5020,7 +5311,7 @@ fifteenth pass) and `load`/`loadInto` (gone since the thirty-fourth).
    migration with conservative fixed DMA settings.
 5. DMA block calibration and fixed per-device width eight.
 6. Adaptive source width and aggregate VFS feedback.
-7. `LoadProfile` and model-wrapper plumbing.
+7. `LoadProfile` (now `VFS.readHints`) and model-wrapper plumbing.
 
 ## Cross-machine handoff rules
 
@@ -5038,8 +5329,8 @@ fifteenth pass) and `load`/`loadInto` (gone since the thirty-fourth).
   at the last audit; local experimental allocator/completion patches were
   rejected.
 - The adjacent production monorepo previously needed VFS registrations to
-  use `registerBackend` so file/HTTP/HF/S3/GCS profiles and counters
-  reached the loader. Re-check that integration rather than assuming a
-  historical uncommitted edit still exists (may be stale: `VFS.Remotes`
-  registers the remote schemes since R6, and the loader reads no VFS
-  counters since R15).
+  use `registerBackend` so file/HTTP/HF/S3/GCS read hints (then load
+  profiles) and counters reached the loader. Re-check that integration
+  rather than assuming a historical uncommitted edit still exists (may be
+  stale: `VFS.Remotes` registers the remote schemes since R6, and the
+  loader reads no VFS counters since R15).

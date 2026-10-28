@@ -117,7 +117,7 @@ pub fn main(init: std.process.Init) !void {
 
             const root = try TensorNode.init(init.arena.allocator(), "");
 
-            var registry_it = registry.iterator();
+            var registry_it = registry.tensors.iterator();
             while (registry_it.next()) |kv| {
                 const name = kv.key_ptr.*;
                 const tensor = kv.value_ptr.*;
@@ -204,20 +204,37 @@ pub fn main(init: std.process.Init) !void {
             const tp_partitioning: zml.Sharding.Partitioning = .init(&.{.sharded(@intCast(tensor_parallel.resolveLogicalAxis("model").?))});
             const column_partitioning: zml.Sharding.Partitioning = .init(&.{ .replicated, .sharded(@intCast(tensor_parallel.resolveLogicalAxis("model").?)) });
 
-            const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
-            var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &.{tensor_parallel} });
-            defer store.deinit();
-
             // Expert-pack instrument: N tensors a stack program computes
             // from W same-shape rank-2 tensors each.
             const pack_options: PackOptions = .{
                 .packs = try envUsize(init.environ_map, "ZML_LOAD_PACKS", 0),
                 .width = try envUsize(init.environ_map, "ZML_LOAD_PACK_WIDTH", 64),
-                .group_bytes = try envOptionalUsize(init.environ_map, "ZML_LOAD_PACK_GROUP_BYTES"),
+                .group_bytes = try envUsize(init.environ_map, "ZML_LOAD_PACK_GROUP_BYTES", (zml.io.Loader.Options{}).program_group_bytes),
                 .check = try envUsize(init.environ_map, "ZML_LOAD_PACK_CHECK", 1) != 0,
                 .max_elements = try envUsize(init.environ_map, "ZML_LOAD_PACK_MAX_ELEMENTS", std.math.maxInt(i32)),
             };
             if (pack_options.width == 0) return error.InvalidArgument;
+            const check_stride = try envUsize(init.environ_map, "ZML_LOAD_CHECK", 0);
+
+            // Returns at once: the loader calibrates while the checkpoint's
+            // headers are read and the model is bound.
+            var loader: zml.io.Loader = try .init(allocator, io, platform, .{
+                .checkpoint = path,
+                // Null takes the checkpoint's default width (16 locally, 32 remote).
+                .read_parallelism = try envOptionalUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM"),
+                .dma_block_sizes = load_dma_block_sizes,
+                .direct_io = std.meta.stringToEnum(zml.io.VFS.DirectIo, init.environ_map.get("ZML_DIRECT_IO") orelse "auto") orelse {
+                    log.err("ZML_DIRECT_IO must be off, on or auto", .{});
+                    return error.InvalidArgument;
+                },
+                .program_group_bytes = pack_options.group_bytes,
+            });
+            defer loader.deinit();
+
+            const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+            var store: zml.io.TensorStore = .init(allocator, registry, .{ .meshes = &.{tensor_parallel} });
+            defer store.deinit();
+
             const pack_plan = try planPacks(init.arena.allocator(), platform, &store, pack_options);
             if (pack_options.packs > 0) {
                 log.info("pack plan: packs={d} requested={d} width={d} bytes={Bi:.2}", .{
@@ -233,10 +250,13 @@ pub fn main(init: std.process.Init) !void {
                 packs: []zml.Tensor,
             };
 
-            const tensor_count = store.registry.tensors.count() - pack_plan.packed_count;
+            const tensor_count = store.registry.tensors.count() - pack_plan.sources.len;
 
             const tensors = try allocator.alloc(zml.Tensor, tensor_count);
             defer allocator.free(tensors);
+            // The checkpoint tensor each one is bound to, for the load check.
+            const sources = try allocator.alloc(zml.safetensors.Tensor, tensor_count);
+            defer allocator.free(sources);
 
             // `ZML_LOAD_MEMORY=host_pinned` (or `host_mapped`) binds every
             // tensor into pinned host memory instead of device memory.
@@ -245,7 +265,7 @@ pub fn main(init: std.process.Init) !void {
                 return error.InvalidArgument;
             };
 
-            var registry_it = store.registry.iterator();
+            var registry_it = store.registry.tensors.iterator();
             var registry_index: usize = 0;
             var load_count: usize = 0;
             while (registry_it.next()) |entry| : (registry_index += 1) {
@@ -264,6 +284,7 @@ pub fn main(init: std.process.Init) !void {
                     else
                         store.view().createReplicatedTensor(entry.key_ptr.*, null),
                 };
+                sources[load_count] = entry.value_ptr.*;
                 if (load_memory != .default) store.view().setMemory(tensors[load_count], load_memory);
                 load_count += 1;
             }
@@ -276,64 +297,16 @@ pub fn main(init: std.process.Init) !void {
             });
             defer progress.end();
 
-            try platform.warmupDeviceAllocators(io);
+            var loaded = try zml.mem.bufferize(allocator, &model);
+            defer zml.mem.deinitBufferized(allocator, &loaded);
+            // One start: the bulk is published at once while the stack
+            // programs compile, and wait publishes the packs in groups the
+            // devices admit.
+            try loader.start(&model, &loaded, &store, progress);
+            try loader.wait();
 
-            var check_error: ?anyerror = null;
-            // Stamped before the read-back check so the summary excludes it.
-            var load_took: ?std.Io.Duration = null;
-            {
-                const now: std.Io.Timestamp = .now(io, .awake);
-                var total_bytes: usize = 0;
-                defer {
-                    const took = load_took orelse now.untilNow(io, .awake);
-                    const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-                    log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-                }
-
-                // Null takes the profile's width (16 locally, 32 remote).
-                const load_read_parallelism = try envOptionalUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM");
-                const check_stride = try envUsize(init.environ_map, "ZML_LOAD_CHECK", 0);
-
-                var loaded = try zml.mem.bufferize(init.arena.allocator(), AllTensorsModel, &model);
-                errdefer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
-                var loader = try zml.io.Loader.init(init.arena.allocator(), io, platform, .{
-                    .checkpoint = path,
-                    .read_parallelism = load_read_parallelism,
-                    .dma_block_sizes = load_dma_block_sizes,
-                    .direct_io = std.meta.stringToEnum(zml.io.VFS.DirectIo, init.environ_map.get("ZML_DIRECT_IO") orelse "auto") orelse {
-                        log.err("ZML_DIRECT_IO must be off, on or auto", .{});
-                        return error.InvalidArgument;
-                    },
-                });
-                defer loader.deinit();
-                if (pack_options.group_bytes) |bytes| loader.program_group_bytes = bytes;
-
-                // One start: the bulk is published at once while the stack
-                // programs compile, and wait publishes the packs in groups
-                // the devices admit.
-                try loader.start(&model, &loaded, &store, progress);
-                try loader.wait();
-                // What the loader counts: each tensor once, and a pack's
-                // inputs, which are as many bytes as the pack.
-                total_bytes = pack_plan.bytes;
-                for (tensors) |tensor| total_bytes += tensor.shape().byteSize();
-                defer zml.mem.deinitBufferized(init.arena.allocator(), AllTensorsModel, &loaded);
-
-                load_took = now.untilNow(io, .awake);
-                // Not `try`: the `errdefer` above and the `defer` just
-                // registered both release the buffers.
-                if (check_stride != 0) {
-                    checkLoaded(allocator, io, &store, tensors, loaded.tensors, check_stride) catch |err| {
-                        check_error = err;
-                    };
-                }
-                if (check_error == null and pack_options.check and pack_plan.packs.len > 0) {
-                    checkPacks(allocator, io, &store, pack_plan.packs, loaded.packs) catch |err| {
-                        check_error = err;
-                    };
-                }
-            }
-            if (check_error) |err| return err;
+            if (check_stride != 0) try checkLoaded(allocator, io, sources, loaded.tensors, check_stride);
+            if (pack_options.check and pack_plan.packs.len > 0) try checkPacks(allocator, io, pack_plan, loaded.packs);
         },
     }
 }
@@ -343,8 +316,8 @@ const PackOptions = struct {
     packs: usize,
     /// Sources per pack.
     width: usize,
-    /// The loader's program group size; null keeps its default.
-    group_bytes: ?usize,
+    /// The loader's program group size (`Loader.Options.program_group_bytes`).
+    group_bytes: usize,
     /// Read sample packs back and compare with the source bytes.
     check: bool,
     /// Largest pack output in elements. The oneAPI PJRT plugin launches
@@ -354,9 +327,10 @@ const PackOptions = struct {
 
 const PackPlan = struct {
     packs: []zml.Tensor,
+    /// The checkpoint tensors the packs stack, `width` per pack, in order.
+    sources: []const zml.safetensors.Tensor,
     /// Indexed like the registry: true for keys owned by a pack.
     packed_mask: []const bool,
-    packed_count: usize,
     bytes: usize,
 };
 
@@ -377,7 +351,7 @@ fn planPacks(
     @memset(packed_mask, false);
 
     var packs: std.ArrayListUnmanaged(zml.Tensor) = .empty;
-    var packed_count: usize = 0;
+    var sources: std.ArrayListUnmanaged(zml.safetensors.Tensor) = .empty;
     var bytes: usize = 0;
 
     if (options.packs > 0) {
@@ -428,16 +402,16 @@ fn planPacks(
             try class.members.append(arena, index);
             if (class.members.items.len < options.width) continue;
 
-            const source_keys = try arena.alloc([]const u8, options.width);
-            for (source_keys, class.members.items) |*key, member| {
-                key.* = keys[member];
+            const inputs = try arena.alloc(zml.io.TensorStore.Source.Placed, options.width);
+            for (inputs, class.members.items) |*input, member| {
+                input.* = store.view().source(keys[member], null).withPartitioning(.replicated, .{});
+                try sources.append(arena, entries[member]);
                 packed_mask[member] = true;
             }
             class.members.clearRetainingCapacity();
-            packed_count += options.width;
 
             const shape = packShape(platform, entry.shape, options.width);
-            const tensor = store.view().maybeCreateBinding(source_keys, shape, StackPack{}) orelse return error.MissingPackSource;
+            const tensor = zml.io.TensorStore.Source.bindProgram(inputs, shape, StackPack{});
             try packs.append(arena, tensor);
             bytes += shape.byteSize();
             if (packs.items.len == options.packs) break;
@@ -446,8 +420,8 @@ fn planPacks(
 
     return .{
         .packs = packs.items,
+        .sources = sources.items,
         .packed_mask = packed_mask,
-        .packed_count = packed_count,
         .bytes = bytes,
     };
 }
@@ -472,28 +446,27 @@ const StackPack = struct {
 };
 
 /// Reads the first, middle and last pack back to host and compares each
-/// expert slice with the bytes of its source tensor.
+/// expert slice with the bytes of the checkpoint tensor the plan stacked.
 fn checkPacks(
     allocator: std.mem.Allocator,
     io: std.Io,
-    store: *const zml.io.TensorStore,
-    packs: []const zml.Tensor,
+    plan: PackPlan,
     outputs: []const zml.Buffer,
 ) !void {
-    const samples = [_]usize{ 0, packs.len / 2, packs.len - 1 };
+    const width = plan.sources.len / plan.packs.len;
+    const samples = [_]usize{ 0, plan.packs.len / 2, plan.packs.len - 1 };
     var checked: usize = 0;
     for (samples, 0..) |sample, i| {
         if (std.mem.indexOfScalar(usize, samples[0..i], sample) != null) continue;
-        const inputs = (store.bindingOf(packs[sample].id) orelse return error.NotFound).compute.inputs;
+        const sources = plan.sources[sample * width ..][0..width];
         const slice = try outputs[sample].toSliceAlloc(allocator, io);
         defer slice.free(allocator);
         const packed_bytes = slice.constData();
-        const source_bytes: usize = @intCast(inputs[0].whole().?.byteSize());
-        if (packed_bytes.len != source_bytes * inputs.len) return error.PackContentMismatch;
+        const source_bytes: usize = @intCast(sources[0].byteSize());
+        if (packed_bytes.len != source_bytes * width) return error.PackContentMismatch;
         const expected = try allocator.alloc(u8, source_bytes);
         defer allocator.free(expected);
-        for (inputs, 0..) |input, expert| {
-            const source = input.whole().?;
+        for (sources, 0..) |source, expert| {
             try source.read(io, expected);
             const actual = packed_bytes[expert * source_bytes ..][0..source_bytes];
             if (!std.mem.eql(u8, expected, actual)) {
@@ -503,42 +476,36 @@ fn checkPacks(
         }
         checked += 1;
     }
-    log.info("pack check: ok packs_checked={d} of {d}", .{ checked, packs.len });
+    log.info("pack check: ok packs_checked={d} of {d}", .{ checked, plan.packs.len });
 }
 
-/// `ZML_LOAD_CHECK=n`: reads every n-th loaded tensor and the largest
-/// eligible one back to host and compares the bytes with the source, so a
-/// buffer that reported ready before every piece landed is caught. A fully
-/// replicated buffer is compared on every replica; a partitioned one is
-/// assembled with `toSliceAlloc`, which keeps the last replica of a region
-/// that several devices hold. Each source file is opened once (an
-/// `hf://` open is a HEAD plus a redirect). Skipped: tensors that are not
-/// one whole checkpoint tensor, and sub-byte tensors partitioned over
-/// several devices (`toSliceAlloc` places their shards by element stride).
+/// `ZML_LOAD_CHECK=n`: reads every n-th of `buffers` and the largest
+/// eligible one back to host and compares the bytes with the checkpoint
+/// tensor each was bound to, `sources` at the same index, so a buffer that
+/// reported ready before every piece landed is caught. A fully replicated
+/// buffer is compared on every replica; a partitioned one is assembled
+/// with `toSliceAlloc`, which keeps the last replica of a region that
+/// several devices hold. Each source file is opened once (an `hf://` open
+/// is a HEAD plus a redirect). Skipped: sub-byte tensors partitioned over several
+/// devices (`toSliceAlloc` places their shards by element stride).
 fn checkLoaded(
     allocator: std.mem.Allocator,
     io: std.Io,
-    store: *const zml.io.TensorStore,
-    tensors: []const zml.Tensor,
+    sources: []const zml.safetensors.Tensor,
     buffers: []const zml.Buffer,
     stride: usize,
 ) !void {
-    std.debug.assert(tensors.len == buffers.len);
+    std.debug.assert(sources.len == buffers.len);
     const Eligibility = struct {
-        fn source(store_: *const zml.io.TensorStore, tensor: zml.Tensor, buffer: zml.Buffer) ?*const zml.safetensors.Tensor {
-            const whole = switch (store_.bindingOf(tensor.id) orelse return null) {
-                .load => |load| load.source.whole() orelse return null,
-                .compute => return null,
-            };
-            const partitioned = buffer.byteSize() / buffer.numShards() != tensor.byteSize();
-            if (partitioned and tensor.dtype().bitSizeOf() < 8) return null;
-            return whole;
+        fn checkable(source: zml.safetensors.Tensor, buffer: zml.Buffer) bool {
+            const partitioned = buffer.byteSize() / buffer.numShards() != source.byteSize();
+            return !partitioned or source.shape.dtype().bitSizeOf() >= 8;
         }
     };
     var largest: ?usize = null;
-    for (tensors, buffers, 0..) |tensor, buffer, i| {
-        if (Eligibility.source(store, tensor, buffer) == null) continue;
-        if (largest == null or tensor.byteSize() > tensors[largest.?].byteSize()) largest = i;
+    for (sources, buffers, 0..) |source, buffer, i| {
+        if (!Eligibility.checkable(source, buffer)) continue;
+        if (largest == null or source.byteSize() > sources[largest.?].byteSize()) largest = i;
     }
     var files: std.StringHashMapUnmanaged(std.Io.File) = .empty;
     defer {
@@ -554,12 +521,12 @@ fn checkLoaded(
     var checked: usize = 0;
     var skipped: usize = 0;
     var checked_bytes: usize = 0;
-    for (tensors, buffers, 0..) |tensor, buffer, i| {
+    for (sources, buffers, 0..) |source, buffer, i| {
         if (i % stride != 0 and i != largest) continue;
-        const source = Eligibility.source(store, tensor, buffer) orelse {
+        if (!Eligibility.checkable(source, buffer)) {
             skipped += 1;
             continue;
-        };
+        }
         const file = files.get(source.file_uri) orelse blk: {
             const opened = try std.Io.Dir.openFile(.cwd(), io, source.file_uri, .{ .mode = .read_only });
             errdefer opened.close(io);
@@ -598,7 +565,7 @@ fn checkLoaded(
     }
     log.info("load check: ok tensors_checked={d} of {d} skipped={d} bytes={Bi:.2} elapsed={f}", .{
         checked,
-        tensors.len,
+        sources.len,
         skipped,
         checked_bytes,
         started.untilNow(io, .awake),
@@ -616,12 +583,6 @@ fn expectSameBytes(name: []const u8, replica: ?usize, expected: []const u8, actu
         first_bad,
     });
     return error.LoadContentMismatch;
-}
-
-fn gibPerSecond(bytes: usize, took: anytype) f64 {
-    const seconds = @as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s;
-    if (seconds <= 0) return 0;
-    return @as(f64, @floatFromInt(bytes)) / @as(f64, @floatFromInt(zml.GiB)) / seconds;
 }
 
 fn envUsize(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {

@@ -162,24 +162,6 @@ const Mnist = struct {
         };
     }
 
-    pub fn load(
-        self: *const Mnist,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *const zml.io.TensorStore,
-    ) !zml.Bufferized(Mnist) {
-        var buffers = try zml.mem.bufferize(allocator, Mnist, self);
-        errdefer zml.mem.deinitBufferized(allocator, Mnist, &buffers);
-
-        var loader = try zml.io.Loader.init(allocator, io, platform, .{});
-        defer loader.deinit();
-        try loader.start(self, &buffers, store, .none);
-        try loader.wait();
-
-        return buffers;
-    }
-
     /// just two linear layers + relu activation
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
         var x = input.flatten().convert(.f32).withTags(.{.d});
@@ -190,11 +172,42 @@ const Mnist = struct {
         return x.argMax(0).indices.convert(.u8);
     }
 };
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const path = ...;
+
+    // Local paths. `zml.io.VFS.Remotes` adds hf://, s3://, gs:// and https://.
+    var vfs: zml.io.VFS = try .init(allocator, init.io);
+    defer vfs.deinit();
+    const io = vfs.io();
+
+    const platform: *zml.Platform = try .auto(allocator, io, .{});
+    defer platform.deinit(allocator, io);
+
+    // Returns at once: the loader calibrates while the model is compiled.
+    var loader: zml.io.Loader = try .init(allocator, io, platform, .{ .checkpoint = path });
+    defer loader.deinit();
+
+    const registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+    var store: zml.io.TensorStore = .init(allocator, registry, .{});
+    defer store.deinit();
+    const model: Mnist = .init(store.view());
+
+    const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
+    var exe = try platform.compile(allocator, io, model, .forward, .{input}, .{});
+    defer exe.deinit();
+
+    var weights = try zml.mem.bufferize(allocator, &model);
+    defer zml.mem.deinitBufferized(allocator, &weights);
+    try loader.start(&model, &weights, &store, .none);
+    try loader.wait(); // logs "Loaded weights"
+
+    // ... call `exe` on the weights and an image
+}
 ```
 
-`Loader.init` returns at once and calibrates its transfers on a task of its
-own, so initialize the loader early and compile the model meanwhile; the
-first `start` waits for what is left.
+The first `start` waits for whatever calibration is left.
 [Loading checkpoints](./docs/learn/loader.md) gives the full recipe, with
 remote checkpoints, placement, lifetimes and errors.
 

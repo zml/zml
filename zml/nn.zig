@@ -293,7 +293,7 @@ test "block128 scaled dot layouts" {
                 var runner = try exe.runner(allocator);
                 defer runner.deinit(allocator);
                 runner.run(io, .{ buffers[0], buffers[1], buffers[2] }, .{&output}, .{ .wait = true });
-                defer zml.Buffer.deinitAll(Local.Outputs, &output);
+                defer zml.Buffer.deinitAll(&output);
                 var expected = try output.expected.toSliceAlloc(allocator, io);
                 defer expected.free(allocator);
                 try zml.testing.expectClose(io, expected, output.actual, .{ .absolute_tolerance = 0.125, .relative_tolerance = 0.02 });

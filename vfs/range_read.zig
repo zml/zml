@@ -7,8 +7,6 @@ const std = @import("std");
 
 const request = @import("request.zig");
 
-const log = std.log.scoped(.@"zml/vfs/range_read");
-
 pub const ContentRange = struct {
     start: u64,
     end: u64,
@@ -39,6 +37,9 @@ pub const RangeSpec = struct {
         attempt: request.Attempt,
         range: std.http.Header,
     ) anyerror!PreparedRequest,
+    /// The object stores and a resolved download URL never redirect a
+    /// read; a plain HTTP server may.
+    redirects: request.Redirects = .forbid,
 };
 
 /// `RangeSpec.prepare` for backends whose request is the same on every
@@ -57,7 +58,7 @@ pub fn prepareStatic(context: *anyopaque, _: request.Attempt, _: std.http.Header
 /// width 96 reached ~11.5 GiB/s), but real AWS plateaued near 950 MiB/s at
 /// widths 24-128; the proxy is not evidence for production defaults.
 pub fn performRangeRead(
-    ctx: request.Context,
+    governor: *request.Governor,
     spec: RangeSpec,
     data: []const []u8,
     offset: u64,
@@ -80,8 +81,8 @@ pub fn performRangeRead(
         .offset = offset,
         .size = size,
     };
-    try request.perform(void, ctx, spec.request, &state, RangeRead.attempt);
-    ctx.stats.recordSuccess(size);
+    try request.perform(void, governor, spec.request, &state, RangeRead.attempt);
+    governor.stats.recordSuccess(size);
     return size;
 }
 
@@ -91,29 +92,26 @@ const RangeRead = struct {
     data: []const []u8,
     offset: u64,
     size: usize,
-    progress: ?*std.atomic.Value(u64) = null,
+    progress: *std.atomic.Value(u64) = undefined,
 
     fn attempt(self: *RangeRead, current: request.Attempt) anyerror!request.Outcome(void) {
         self.progress = current.progress;
-        // A hook may run a governed request of its own (a re-resolve, a
-        // token refresh), which its own `perform` watches.
-        const prepared = prepared: {
-            current.setWaiting(true);
-            defer current.setWaiting(false);
-            break :prepared try self.spec.prepare(self.spec.context, current, self.range);
-        };
+        const prepared = try self.spec.prepare(self.spec.context, current, self.range);
         std.debug.assert(prepared.extra_headers.len <= max_extra_headers);
         var headers: [max_extra_headers + 1]std.http.Header = undefined;
         @memcpy(headers[0..prepared.extra_headers.len], prepared.extra_headers);
         headers[prepared.extra_headers.len] = self.range;
 
-        var head_buffer: [8 * 1024]u8 = undefined;
+        // A followed redirect keeps each hop's Location and merged path
+        // here, as much as `fetchSize` resolves per hop, 8 KiB of each.
+        var head_buffer: [2 * request.max_redirects * 8 * 1024]u8 = undefined;
         return request.exchange(void, current, prepared.uri, .{
             .headers = .{
                 .accept_encoding = .{ .override = "identity" },
                 .authorization = prepared.authorization,
             },
             .extra_headers = headers[0 .. prepared.extra_headers.len + 1],
+            .redirects = self.spec.redirects,
             .head_buffer = &head_buffer,
         }, self, RangeRead.consume);
     }
@@ -121,27 +119,7 @@ const RangeRead = struct {
     fn consume(self: *RangeRead, res: *std.http.Client.Response) anyerror!void {
         // The head bytes are released when the body reader is taken.
         const content_range = contentRange(res.head);
-        return readResponse(
-            res.reader(&.{}),
-            res.head.status,
-            content_range,
-            self.offset,
-            self.data,
-            self.size,
-            self.progress,
-        ) catch |err| switch (err) {
-            // The loop retries a truncated body; anything else is a
-            // malformed answer to a valid request.
-            error.EndOfStream, error.ReadFailed => err,
-            else => {
-                log.err("{s}: read of {s} returned an unusable body: {}", .{
-                    self.spec.request.backend,
-                    self.spec.request.target,
-                    err,
-                });
-                return err;
-            },
-        };
+        return readResponse(res.reader(&.{}), res.head.status, content_range, self.offset, self.data, self.size, self.progress);
     }
 };
 

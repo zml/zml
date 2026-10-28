@@ -448,7 +448,7 @@ test "block FP8 quantization preserves axes and reconstructs constant blocks in 
         var runner = try exe.runner(allocator);
         defer runner.deinit(allocator);
         runner.run(io, .{buffer}, .{&output}, .{ .wait = true });
-        defer zml.Buffer.deinitAll(Local.Outputs, &output);
+        defer zml.Buffer.deinitAll(&output);
         var values = try output.values.toSliceAlloc(allocator, io);
         defer values.free(allocator);
         var scales = try output.scales.toSliceAlloc(allocator, io);
@@ -507,7 +507,7 @@ test "block FP8 E8M0 scales preserve power-of-two boundaries and nonminor axes" 
         var runner = try exe.runner(allocator);
         defer runner.deinit(allocator);
         runner.run(io, .{buffer}, .{&output}, .{ .wait = true });
-        defer zml.Buffer.deinitAll(Local.Outputs, &output);
+        defer zml.Buffer.deinitAll(&output);
         var values = try output.values.toSliceAlloc(allocator, io);
         defer values.free(allocator);
         var scales = try output.scales.toSliceAlloc(allocator, io);

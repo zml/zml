@@ -6,8 +6,6 @@ const range_read = @import("range_read.zig");
 const request = @import("request.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
-const ReadFailure = @import("base.zig").ReadFailure;
-const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
 const log = @import("base.zig").scopedLog(.@"zml/vfs/s3");
 
@@ -189,10 +187,8 @@ pub const S3 = struct {
 
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
-    client: *std.http.Client,
     config: Config,
     governor: request.Governor,
-    read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
@@ -202,8 +198,8 @@ pub const S3 = struct {
         return .{
             .allocator = allocator,
             .base = .init(inner),
-            .client = http_client,
-            .governor = .init(options.retry),
+            // S3 rate limiting is `503 SlowDown` as well as `429`.
+            .governor = .init(inner, http_client, "s3", .throttle, options.retry),
             .config = .{
                 .access_key = if (options.access_key) |k| try allocator.dupe(u8, k) else null,
                 .secret_key = if (options.secret_key) |k| try allocator.dupe(u8, k) else null,
@@ -259,7 +255,7 @@ pub const S3 = struct {
     }
 
     pub fn deinit(self: *S3) void {
-        self.read_stats.logTotals("s3");
+        self.governor.logTotals();
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -365,7 +361,7 @@ pub const S3 = struct {
     }
 
     fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
@@ -391,7 +387,7 @@ pub const S3 = struct {
     }
 
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.OpenError.SystemResources;
 
@@ -402,7 +398,7 @@ pub const S3 = struct {
     }
 
     fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getDirHandle(dir);
 
         return .{
@@ -419,10 +415,10 @@ pub const S3 = struct {
     }
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
-        const size = self.fetchSize(path) catch |err| return request.openFailure("s3", path, err);
+        const size = self.fetchSize(path) catch |err| return self.governor.openFailure(path, err);
 
         return .{
             .inode = 0,
@@ -438,17 +434,17 @@ pub const S3 = struct {
     }
 
     fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
-        _ = self.fetchSize(path) catch |err| return request.openFailure("s3", path, err);
+        _ = self.fetchSize(path) catch |err| return self.governor.openFailure(path, err);
     }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
-        const size = self.fetchSize(path) catch |err| return request.openFailure("s3", path, err);
+        const size = self.fetchSize(path) catch |err| return self.governor.openFailure(path, err);
 
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, path, size) catch return std.Io.File.OpenError.Unexpected;
@@ -457,14 +453,14 @@ pub const S3 = struct {
     }
 
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         for (dirs) |dir| {
             self.closeHandle(@intCast(dir.handle)) catch unreachable;
         }
     }
 
     fn dirRead(userdata: ?*anyopaque, reader: *std.Io.Dir.Reader, entries: []std.Io.Dir.Entry) std.Io.Dir.Reader.Error!usize {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
 
         if (reader.state == .finished) return 0;
 
@@ -519,20 +515,20 @@ pub const S3 = struct {
     }
 
     fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getDirHandle(dir);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.Dir.RealPathError.SystemResources;
         return path.len;
     }
 
     fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8, out_buffer: []u8) std.Io.Dir.RealPathFileError!usize {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         const real_path = self.resolvePath(dir, path_name, out_buffer) catch return std.Io.Dir.RealPathFileError.NameTooLong;
         return real_path.len;
     }
 
     fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
 
         return .{
@@ -549,19 +545,19 @@ pub const S3 = struct {
     }
 
     fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         return self.getFileHandle(file).size;
     }
 
     fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         for (files) |file| {
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| switch (err) {
             // A cancelled task must not surface as an I/O failure: every
@@ -575,24 +571,29 @@ pub const S3 = struct {
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
 
-        // Saturates at both ends; `@abs` takes `minInt(i64)` too.
-        handle.pos = if (relative_offset >= 0)
-            handle.pos +| @abs(relative_offset)
-        else
-            handle.pos -| @abs(relative_offset);
+        if (relative_offset >= 0) {
+            handle.pos = handle.pos +| @as(u64, @intCast(relative_offset));
+        } else {
+            const abs_offset: u64 = @abs(relative_offset);
+            if (abs_offset > handle.pos) {
+                handle.pos = 0;
+            } else {
+                handle.pos -= abs_offset;
+            }
+        }
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
         handle.pos = absolute_offset;
     }
 
     fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
-        const self: *S3 = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.File.RealPathError.SystemResources;
         return path.len;
@@ -664,10 +665,8 @@ pub const S3 = struct {
 
         var listing: Listing = .{ .s3 = self, .uri = uri };
         var target_buffer: [256]u8 = undefined;
-        return request.perform([]u8, self.requestContext(), .{
-            .backend = "s3",
+        return request.perform([]u8, &self.governor, .{
             .target = std.fmt.bufPrint(&target_buffer, "{s}/{s}", .{ bucket, key_prefix }) catch bucket,
-            .unavailable = unavailable,
             .key = request.authorityOf(uri),
         }, &listing, Listing.attempt);
     }
@@ -750,17 +749,12 @@ pub const S3 = struct {
         const uri = std.Uri.parse(url) catch return error.BadPathName;
 
         var head: SizeRequest = .{ .s3 = self, .uri = uri };
-        return request.perform(u64, self.requestContext(), .{
-            .backend = "s3",
-            .target = url,
-            .unavailable = unavailable,
-            .key = request.authorityOf(uri),
-        }, &head, SizeRequest.attempt);
+        return request.perform(u64, &self.governor, .{ .target = url, .key = request.authorityOf(uri) }, &head, SizeRequest.attempt);
     }
 
     /// The object's size: one signed HEAD. An absent object is
     /// `FileNotFound` and a denied one `PermissionDenied`
-    /// (`request.openStatus`). A principal without `s3:ListBucket` gets 403
+    /// (`ExchangeOptions.open`). A principal without `s3:ListBucket` gets 403
     /// for a missing key too, so on S3 `PermissionDenied` may mean absent: a
     /// caller probing an optional object treats both as absent.
     const SizeRequest = struct {
@@ -778,45 +772,26 @@ pub const S3 = struct {
                     .authorization = authorization,
                 },
                 .extra_headers = &self.signature.headers,
-                .accept = .{ .statuses = request.open_statuses },
+                .open = true,
                 .head_buffer = &head_buffer,
             }, self, SizeRequest.consume);
         }
 
         fn consume(_: *SizeRequest, res: *std.http.Client.Response) anyerror!u64 {
-            if (request.openStatus(res.head.status)) |err| return err;
             return res.head.content_length orelse error.MissingContentLength;
         }
     };
-
-    /// Everything a governed request needs from this backend.
-    fn requestContext(self: *S3) request.Context {
-        return .{
-            .io = self.base.inner,
-            .client = self.client,
-            .governor = &self.governor,
-            .stats = &self.read_stats,
-        };
-    }
 
     fn performRead(self: *S3, handle: *Handle, data: []const []u8, offset: u64) !usize {
         var url_buf: [8 * 1024]u8 = undefined;
         const url = try self.s3Url(handle.uri, &url_buf);
         var signed: SignedRequest = .{ .s3 = self, .uri = std.Uri.parse(url) catch return error.BadPathName };
-        return range_read.performRangeRead(self.requestContext(), .{
-            .request = .{
-                .backend = "s3",
-                .target = url,
-                .unavailable = unavailable,
-                .key = request.authorityOf(signed.uri),
-            },
+        return range_read.performRangeRead(&self.governor, .{
+            .request = .{ .target = url, .key = request.authorityOf(signed.uri) },
             .context = &signed,
             .prepare = SignedRequest.prepare,
         }, data, offset, range_read.readSize(handle.size, offset, data));
     }
-
-    /// S3 rate limiting is `503 SlowDown` as well as `429`.
-    const unavailable: ReadFailure = .throttle;
 
     /// One SigV4-signed GET. The signature covers `x-amz-date` and `Range`,
     /// so it is recomputed for every attempt.
@@ -868,11 +843,3 @@ pub const S3 = struct {
         }
     };
 };
-
-test "S3 classifies 503 SlowDown as throttling" {
-    try std.testing.expectEqual(ReadFailure.throttle, request.classifyStatus(.service_unavailable, S3.unavailable).?);
-    try std.testing.expectEqual(ReadFailure.throttle, request.classifyStatus(.too_many_requests, S3.unavailable).?);
-    try std.testing.expectEqual(ReadFailure.server_failure, request.classifyStatus(.internal_server_error, S3.unavailable).?);
-    try std.testing.expectEqual(ReadFailure.timeout, request.classifyStatus(.request_timeout, S3.unavailable).?);
-    try std.testing.expect(request.classifyStatus(.not_found, S3.unavailable) == null);
-}

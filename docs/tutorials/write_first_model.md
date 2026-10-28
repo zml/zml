@@ -532,8 +532,8 @@ pub fn main(init: std.process.Init) !void {
     defer executable.deinit();
 
     // Load the weights: one buffer per tensor of the layer.
-    var layer_buffers = try zml.mem.bufferize(allocator, Layer, &layer);
-    defer zml.mem.deinitBufferized(allocator, Layer, &layer_buffers);
+    var layer_buffers = try zml.mem.bufferize(allocator, &layer);
+    defer zml.mem.deinitBufferized(allocator, &layer_buffers);
     try loader.start(&layer, &layer_buffers, &store, .none);
     try loader.wait();
 

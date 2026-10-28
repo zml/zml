@@ -64,19 +64,12 @@ pub const LoadedModel = union(ModelType) {
     ) !Buffers {
         switch (self.*) {
             inline else => |*m, t| {
-                const Model = @TypeOf(m.inner);
-                var buffers = try zml.mem.bufferize(allocator, Model, &m.inner);
-                errdefer zml.mem.deinitBufferized(allocator, Model, &buffers);
+                var buffers = try zml.mem.bufferize(allocator, &m.inner);
+                errdefer zml.mem.deinitBufferized(allocator, &buffers);
                 try loader.start(&m.inner, &buffers, store, progress);
                 try loader.wait();
                 return @unionInit(Buffers, @tagName(t), buffers);
             },
-        }
-    }
-
-    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            inline else => |*m, t| zml.mem.deinitBufferized(allocator, @TypeOf(m.inner), &@field(buffers, @tagName(t))),
         }
     }
 

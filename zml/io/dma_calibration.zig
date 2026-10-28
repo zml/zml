@@ -15,7 +15,6 @@ const std = @import("std");
 const pjrt = @import("pjrt");
 
 const Platform = @import("../platform.zig").Platform;
-const Target = @import("../platform.zig").Target;
 const backend = @import("backend.zig");
 const host_memory = @import("host_memory.zig");
 const log = @import("log.zig").io;
@@ -79,18 +78,15 @@ pub const max_block_parallelism: usize = 32;
 /// Measures as the direct loader's creation does, without a loader and with
 /// every knob of `opts`: warms the device allocators, then screens the
 /// blocks in a workspace of its own, released before it returns. CPU
-/// returns the defaults without measuring; TPU, neuron and metal load
-/// through the buffered backend and return `UnsupportedPlatform`. A knob
-/// out of range is `InvalidOptions`, logged. For `examples/io`'s
-/// `dma-bench`.
+/// returns the defaults without measuring; a platform that loads through
+/// the buffered backend (`backend.loadsDirect`) returns
+/// `UnsupportedPlatform`. A knob out of range is `InvalidOptions`, logged.
+/// For `examples/io`'s `dma-bench`.
 pub fn measure(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: Options) !Result {
     try validate(opts);
-    switch (platform.target) {
-        .cuda, .rocm, .oneapi, .cpu, .furiosa => {},
-        .tpu, .neuron, .metal => {
-            log.err("DMA calibration: {t} loads through the buffered backend, which has no DMA to measure: UnsupportedPlatform", .{platform.target});
-            return error.UnsupportedPlatform;
-        },
+    if (!backend.loadsDirect(platform)) {
+        log.err("DMA calibration: {t} loads through the buffered backend, which has no DMA to measure: UnsupportedPlatform", .{platform.target});
+        return error.UnsupportedPlatform;
     }
     try platform.warmupDeviceAllocators(io);
     var workspace = try host_memory.Workspace.init(allocator, io, platform);

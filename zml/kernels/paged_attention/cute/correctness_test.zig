@@ -77,7 +77,7 @@ fn runCorrectness(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platfor
     }
 
     var buffers = try fixtures.upload(io, platform, Inputs.init(c), fixture);
-    defer zml.Buffer.deinitAll(Inputs, &buffers);
+    defer zml.Buffer.deinitAll(&buffers);
 
     var output: zml.Buffer = undefined;
     runner.run(io, .{buffers}, .{&output}, .{ .wait = true });

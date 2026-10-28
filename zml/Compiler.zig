@@ -84,7 +84,8 @@ pub const Options = struct {
     /// device memory, because XLA only supports a few GPU operations reading host-pinned memory.
     /// XLA then counts them against device memory, leaves no budget for temporary buffers and
     /// rematerializes aggressively. Callers set this to the per-device size of such buffers to
-    /// compensate. Remove once XLA properly supports host-pinned inputs.
+    /// compensate: `TensorStore.View.hostMappedBytes` for those the loader delivers
+    /// `.host_mapped`. Remove once XLA properly supports host-pinned inputs.
     extra_device_memory_bytes: u64 = 0,
     // Debugging options
     program_name: []const u8 = "zml",

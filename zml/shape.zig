@@ -420,11 +420,12 @@ pub const Shape = struct {
         const other_mesh: Sharding.Mesh = .initTest(.other, .{ .batch, .feature });
         const shape = Shape.init(.{ .out = 8, .in = 16 }, .f32)
             .withPartitioning(&test_mesh, .{ .out = .feature, .in = .replicated });
-        const specs: []const Sharding.PartitionSpec = &.{ .sharded(1), .sharded(0), .replicated, .open };
+        const Spec = Sharding.Partitioning.Logical.Spec;
+        const specs: []const Spec = &.{ .init(.feature), .init(.batch), .replicated, .open };
         for (specs) |spec| {
             const other = shape.withPartitioning(&test_mesh, .{ .out = spec, .in = .replicated });
             try testing.expect(shape.eqlWithTags(other));
-            try testing.expectEqual(spec == Sharding.PartitionSpec.sharded(1), shape.eqlWithTagsAndPartitioning(other));
+            try testing.expectEqual(spec.eql(.init(.feature)), shape.eqlWithTagsAndPartitioning(other));
         }
         try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.withPartitioning(&other_mesh, .{ .out = .feature, .in = .replicated })));
         try testing.expect(!shape.eqlWithTagsAndPartitioning(shape.withDtype(.bf16)));
@@ -855,9 +856,11 @@ pub const Shape = struct {
         .grid = undefined,
     };
 
+    /// Partitions this shape on `mesh` as `Tensor.withPartitioning` takes `partition_`, except
+    /// that axes it leaves unspecified are `.replicated`.
     pub fn withPartitioning(self: Shape, mesh: *const Sharding.Mesh, partition_: anytype) Shape {
         if (@TypeOf(partition_) != Sharding.Partitioning) {
-            return self.withPartitioning(mesh, Sharding.Partitioning.parse(self.tags(), mesh, .replicated, partition_));
+            return self.withPartitioning(mesh, Sharding.Partitioning.Logical.init(partition_).resolve(self.tags(), mesh, .replicated));
         }
         var res = self;
         res._sharding = .{ .mesh = mesh, .partition = partition_ };
@@ -1012,40 +1015,6 @@ pub const Shape = struct {
         try testing.expectEqual(Sharding.PartitionSpec.sharded(0), shape.partition(.a));
         try testing.expectEqual(.open, shape.partition(.b));
         try testing.expectEqual(Sharding.PartitionSpec.sharded(1), shape.partition(.c));
-    }
-
-    /// Returns the partitioning keyed by tensor tags, using `_0`, `_1`, etc. for untagged axes.
-    /// Re-applying it with `.withPartitioning(mesh, ...)` is robust to axis reordering.
-    pub fn partitioning(self: Shape) Sharding.Partitioning.Logical {
-        const positional_tags: [MAX_RANK]Tag = .{ "_0", "_1", "_2", "_3", "_4", "_5", "_6", "_7" };
-        var result: Sharding.Partitioning.Logical = .{};
-        for (self.tags(), 0..) |axis_tag, ax| {
-            const spec: Sharding.Partitioning.Logical.Spec = switch (self.partition(ax)) {
-                .replicated => .replicated,
-                .open => .open,
-                .out_of_bound => unreachable,
-                else => |s| .{ .axis = self._sharding.mesh.?.logical.axes.get(s.meshAxis().?) },
-            };
-            result = result.set(if (axis_tag == TagUnknown) positional_tags[ax] else axis_tag, spec);
-        }
-        return result;
-    }
-
-    test partitioning {
-        const shape = Shape.init(.{ .a = 8, .b = 16, .c = 32 }, .f32)
-            .withPartitioning(&test_mesh, .{ .a = .feature, .b = .replicated, .c = .open });
-        const reordered = shape.transpose(.{ 2, 0, 1 }).withDefaultPartitioning().withPartitioning(&test_mesh, shape.partitioning());
-        for (shape.tags()) |axis_tag| {
-            try testing.expectEqual(shape.partition(axis_tag), reordered.partition(axis_tag));
-        }
-
-        const untagged = Shape.init(.{ 8, 16 }, .f32).withPartitioning(&test_mesh, .{ ._0 = .batch, ._1 = .replicated });
-        const restored = untagged.withDefaultPartitioning().withPartitioning(&test_mesh, untagged.partitioning());
-        try testing.expect(restored.eqlWithTagsAndPartitioning(untagged));
-
-        const replicated = Shape.init(.{ .a = 8 }, .f32).partitioning();
-        try testing.expect(replicated.get(.a).?.eql(.replicated));
-        try testing.expectEqual(0, Shape.init(.{}, .f32).partitioning().entries.len);
     }
 
     pub fn containsPartitionSpec(self: Shape, part: Sharding.PartitionSpec) bool {

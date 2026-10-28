@@ -86,9 +86,7 @@ pub const Backend = enum {
     metal,
     tcl,
 
-    pub fn auto(platform: *const zml.Platform, scheme: ?zml.Quantization.Scheme, dtype: zml.DataType) !Backend {
-        // Keep the dtype as an argument because non scheme-specific backends may depend on it later
-        _ = dtype;
+    pub fn auto(platform: *const zml.Platform, scheme: ?zml.Quantization.Scheme) !Backend {
         return switch (platform.target) {
             .cuda => b: {
                 const s = scheme orelse break :b .triton;

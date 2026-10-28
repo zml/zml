@@ -21,6 +21,8 @@ const safetensors = @import("../safetensors.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 const Tensor = @import("../tensor.zig").Tensor;
+const load_log = @import("log.zig").load;
+const testing = @import("../testing.zig");
 
 const TensorStore = @This();
 
@@ -37,7 +39,7 @@ pub const Memory = enum {
     /// buffer is a device-kind view of it (`createViewOfDeviceBuffer`),
     /// and the memory goes with the last view. For a table too large for
     /// device memory, of which a step reads a few rows. XLA counts the
-    /// views against device memory (`Compiler.Options.extra_device_memory_bytes`).
+    /// views against device memory (`View.hostMappedBytes`).
     host_mapped,
 
     /// Whether the bytes live in host memory, written by the CPU.
@@ -57,15 +59,15 @@ pub const Memory = enum {
 /// What the loader reads of a bound tensor (`bindingOf`): the source
 /// it fills the tensor from, or the program that computes it.
 pub const Binding = union(enum) {
-    /// The loader fills the tensor from `source` (`Source.bind`), every
-    /// byte no piece covers zero.
+    /// The loader fills the tensor from `source` (`Source.Placed.bind`),
+    /// every byte no piece covers zero.
     load: Load,
     /// A program computes the tensor while loading (`Source.bindProgram`).
     /// Its output lands in default device memory.
     compute: Compute,
 
     pub const Load = struct {
-        source: Source.Bound,
+        source: Source.Placed,
         /// Where the loader delivers this tensor (`View.setMemory`).
         memory: Memory = .default,
     };
@@ -74,29 +76,37 @@ pub const Binding = union(enum) {
         program: Program,
         /// The program's inputs in order, each landed in default device
         /// memory, placed by its shape.
-        inputs: []const Source.Bound,
+        inputs: []const Source.Placed,
 
         /// Whether this computing `output` and `other` computing
-        /// `other_output` compile to the same executable: programs of one
-        /// type and equal values, over the same shapes placed alike.
+        /// `other_output` compile to the same executable: equal programs
+        /// over the same shapes placed alike.
         pub fn sameExecutable(self: Compute, output: Shape, other: Compute, other_output: Shape) bool {
-            if (self.program.vtable != other.program.vtable or !self.program.vtable.eql(self.program.value, other.program.value)) return false;
-            if (!samePlacedShape(output, other_output) or self.inputs.len != other.inputs.len) return false;
+            if (!self.program.eql(other.program)) return false;
+            if (!output.eqlWithTagsAndPartitioning(other_output) or self.inputs.len != other.inputs.len) return false;
             for (self.inputs, other.inputs) |a, b| {
-                if (!samePlacedShape(a.shape, b.shape)) return false;
+                if (!a.shape.eqlWithTagsAndPartitioning(b.shape)) return false;
             }
             return true;
         }
+
+        /// Compiles the program computing a tensor of `output` from inputs
+        /// of the shapes it binds, its module named after the program.
+        pub fn compile(
+            self: Compute,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            platform: *const Platform,
+            meshes: []const *const Sharding.Mesh,
+            output: Shape,
+        ) Compiler.Error!Exe {
+            const inputs = try allocator.alloc(Tensor, self.inputs.len);
+            defer allocator.free(inputs);
+            for (inputs, self.inputs) |*input, source| input.* = .fromShape(source.shape);
+            return self.program.compile(allocator, io, platform, meshes, output, inputs);
+        }
     };
 };
-
-fn samePlacedShape(a: Shape, b: Shape) bool {
-    if (!a.eqlWithTags(b) or a._sharding.mesh != b._sharding.mesh) return false;
-    for (0..a.rank()) |axis| {
-        if (a.partition(axis) != b.partition(axis)) return false;
-    }
-    return true;
-}
 
 /// A program the loader compiles and runs to compute a tensor while loading
 /// (`Binding.compute`): `forward(output, inputs)` of the program's value.
@@ -107,9 +117,7 @@ pub const Program = struct {
     value: *const anyopaque,
     vtable: *const VTable,
 
-    pub const VTable = struct {
-        /// The program's type name, which names its compiled module in
-        /// traces, dumps and logs.
+    const VTable = struct {
         name: []const u8,
         compile: *const fn (
             value: *const anyopaque,
@@ -132,12 +140,9 @@ pub const Program = struct {
         comptime {
             if (!isPlainData(T)) @compileError("TensorStore.Program: " ++ @typeName(T) ++ " must be plain data, without pointers");
         }
-        const value: *const anyopaque = if (@sizeOf(T) == 0) &no_value else value: {
-            const copy = try arena.create(T);
-            copy.* = program;
-            break :value copy;
-        };
-        return .{ .value = value, .vtable = &Erased(T).vtable };
+        const copy = try arena.create(T);
+        copy.* = program;
+        return .{ .value = copy, .vtable = &Erased(T).vtable };
     }
 
     /// The program's value, if it is a `T`.
@@ -146,20 +151,40 @@ pub const Program = struct {
         return Erased(T).typed(self.value);
     }
 
-    /// What a program of a zero-sized type points to.
-    const no_value: u8 = 0;
+    /// The program's type name, which names its compiled module in traces,
+    /// dumps and logs.
+    pub fn name(self: Program) []const u8 {
+        return self.vtable.name;
+    }
+
+    /// Whether `a` and `b` are programs of one type with equal values.
+    pub fn eql(a: Program, b: Program) bool {
+        return a.vtable == b.vtable and a.vtable.eql(a.value, b.value);
+    }
+
+    /// Compiles `forward(output, inputs)`, its module named after the program.
+    fn compile(
+        self: Program,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        meshes: []const *const Sharding.Mesh,
+        output: Shape,
+        inputs: []const Tensor,
+    ) Compiler.Error!Exe {
+        return self.vtable.compile(self.value, allocator, io, platform, .{ .meshes = meshes, .program_name = self.name() }, output, inputs);
+    }
 
     /// The vtable of programs of type `T`, one per type.
     fn Erased(comptime T: type) type {
         return struct {
-            const vtable: VTable = .{ .name = @typeName(T), .compile = compile, .eql = eql };
+            const vtable: VTable = .{ .name = @typeName(T), .compile = compileValue, .eql = eqlValues };
 
             fn typed(erased: *const anyopaque) T {
-                if (@sizeOf(T) == 0) return undefined;
                 return @as(*const T, @ptrCast(@alignCast(erased))).*;
             }
 
-            fn compile(
+            fn compileValue(
                 erased: *const anyopaque,
                 allocator: std.mem.Allocator,
                 io: std.Io,
@@ -171,7 +196,7 @@ pub const Program = struct {
                 return Compiler.compile(allocator, io, platform, T.forward, .{ typed(erased), output, inputs }, opts);
             }
 
-            fn eql(a: *const anyopaque, b: *const anyopaque) bool {
+            fn eqlValues(a: *const anyopaque, b: *const anyopaque) bool {
                 return std.meta.eql(typed(a), typed(b));
             }
         };
@@ -248,7 +273,7 @@ pub fn bindingOf(self: *const TensorStore, id: Tensor.Id) ?Binding {
 }
 
 /// A new tensor of `shape`, bound to `binding`. Model code binds through
-/// `Source` (`bind`, `bindProgram`), whose pieces are disjoint by
+/// `Source` (`Placed.bind`, `bindProgram`), whose pieces are disjoint by
 /// construction; the loader relies on it and does not check a hand-built
 /// binding's.
 pub fn bindNew(self: *TensorStore, shape: Shape, binding: Binding) Tensor {
@@ -300,7 +325,7 @@ pub const View = struct {
     /// nothing is bound.
     pub fn withPrefix(self: *const View, prefix_: []const u8) View {
         var buffer: [256]u8 = undefined;
-        const new_prefix = makeKey(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ });
+        const new_prefix = makeKey(&buffer, "{s}{s}.", .{ self.prefix(), prefix_ });
 
         return .{
             .store = self.store,
@@ -312,7 +337,7 @@ pub const View = struct {
     /// This view under `index` and a dot, as `withPrefix` of the number.
     pub fn withLayer(self: *const View, index: usize) View {
         var buffer: [256]u8 = undefined;
-        const new_prefix = makeKey(&buffer, "{s}{d}.", .{ self.prefix() orelse "", index });
+        const new_prefix = makeKey(&buffer, "{s}{d}.", .{ self.prefix(), index });
 
         return .{
             .store = self.store,
@@ -321,26 +346,18 @@ pub const View = struct {
         };
     }
 
-    pub fn prefix(self: *const View) ?[]const u8 {
-        return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
+    /// The keys' prefix under this view, with its trailing dot; "" at the
+    /// root.
+    pub fn prefix(self: *const View) []const u8 {
+        return self.prefix_buffer[0..self.prefix_length];
     }
 
     /// The checkpoint tensor `subkey`, the registry's own entry, whose
     /// address is the tensor's identity. Null when the checkpoint has none.
     pub fn get(self: View, subkey: []const u8) ?*const safetensors.Tensor {
         var buffer: [256]u8 = undefined;
-        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix(), subkey });
         return self.store.registry.tensors.getPtr(key);
-    }
-
-    /// Whether some checkpoint key starts with `subkey` under this view:
-    /// a scan of every key. `get` answers whether one key exists.
-    pub fn hasPrefix(self: View, subkey: []const u8) bool {
-        var buffer: [256]u8 = undefined;
-        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-        return for (self.store.registry.tensors.keys()) |k| {
-            if (std.mem.startsWith(u8, k, key)) break true;
-        } else false;
     }
 
     /// The checkpoint tensor `subkey`, with `tags` (null keeps the
@@ -349,20 +366,13 @@ pub const View = struct {
     /// Panics when the checkpoint has no such tensor.
     pub fn createTensor(self: View, subkey: []const u8, comptime tags: anytype, comptime mesh_: @EnumLiteral(), partitioning: anytype) Tensor {
         return self.maybeCreateTensor(subkey, tags, mesh_, partitioning) orelse
-            stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+            stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix(), subkey });
     }
 
     /// Like `createTensor`, but null when the checkpoint has no such tensor.
     pub fn maybeCreateTensor(self: View, subkey: []const u8, comptime tags: anytype, comptime mesh_: @EnumLiteral(), partitioning: anytype) ?Tensor {
         const source_ = self.maybeSource(subkey, tags) orelse return null;
-        return self.keepEmpty(subkey, source_.withPartitioning(mesh_, partitioning)).bind();
-    }
-
-    /// `placed`, the whole checkpoint tensor `subkey`; when that tensor is
-    /// empty, a source that keeps it (`Source.emptyOf`), so that
-    /// `Loader.start` names the key it rejects.
-    fn keepEmpty(self: View, subkey: []const u8, placed: Source) Source {
-        return if (placed.count() != 0) placed else .emptyOf(self.store, self.get(subkey).?, placed.shape());
+        return source_.withPartitioning(mesh_, partitioning).bind();
     }
 
     /// `createTensor` replicated on every device, without a mesh.
@@ -379,8 +389,31 @@ pub const View = struct {
             stdx.debug.panic("Tensor {} {f} has no binding in this store", .{ tensor.id, tensor.shape() });
         switch (binding.*) {
             .load => |*load| load.memory = kind,
-            .compute => |compute| stdx.debug.panic("setMemory: program {s} computes tensor {} {f}, whose output lands in default device memory", .{ compute.program.vtable.name, tensor.id, tensor.shape() }),
+            .compute => |compute| stdx.debug.panic("setMemory: program {s} computes tensor {} {f}, whose output lands in default device memory", .{ compute.program.name(), tensor.id, tensor.shape() }),
         }
+    }
+
+    /// The bytes on one device of every tensor the store delivers
+    /// `.host_mapped`, each counted by its shard: what XLA counts against
+    /// device memory for those views, which a model gives back through
+    /// `Compiler.Options.extra_device_memory_bytes`. The whole store's,
+    /// whatever this view's prefix; ask once every binding and `setMemory`
+    /// is done. A tensor whose mesh partitions do not divide its dimensions
+    /// is `IncompatibleSharding`, logged.
+    pub fn hostMappedBytes(self: View) error{IncompatibleSharding}!u64 {
+        var bytes: u64 = 0;
+        var it = self.store.id_to_sources.iterator();
+        while (it.next()) |entry| switch (entry.value_ptr.*) {
+            .load => |load| if (load.memory == .host_mapped) {
+                const shard = Sharding.shardedShape(load.source.shape) catch |err| {
+                    load_log.err("tensor {} {f}, delivered host_mapped: its dimensions are not divisible by its mesh partitions", .{ entry.key_ptr.*, load.source.shape });
+                    return err;
+                };
+                bytes += shard.byteSize();
+            },
+            .compute => {},
+        };
+        return bytes;
     }
 
     /// See `TensorStore.mesh`.
@@ -397,7 +430,7 @@ pub const View = struct {
     /// the checkpoint's). Panics when the checkpoint has no such tensor.
     pub fn source(self: View, subkey: []const u8, comptime tags: anytype) Source {
         return self.maybeSource(subkey, tags) orelse
-            stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix() orelse "", subkey });
+            stdx.debug.panic("Checkpoint has no tensor named {s}{s}", .{ self.prefix(), subkey });
     }
 
     /// Like `source`, but null when the checkpoint has no such tensor.
@@ -408,23 +441,10 @@ pub const View = struct {
         return .init(self.store, entry, if (has_tags) parsed_tags.constSlice() else null);
     }
 
-    /// A tensor of `shape` that `program` computes while loading
-    /// (`Source.bindProgram`) from the checkpoint tensors `sources`, each
-    /// whole and replicated, in this order. Null when one is missing.
-    pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape, program: anytype) ?Tensor {
-        const inputs = self.store.allocator.alloc(Source, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
-        defer self.store.allocator.free(inputs);
-        for (sources, inputs) |subkey, *input| {
-            const source_ = self.maybeSource(subkey, null) orelse return null;
-            input.* = self.keepEmpty(subkey, source_.withPartitioning(.replicated, .{}));
-        }
-        return Source.bindProgram(inputs, shape, program);
-    }
-
     /// The checkpoint tensors under this view's prefix: a scan of every key.
     pub fn count(self: View) usize {
         var count_: usize = 0;
-        const prefix_ = self.prefix() orelse "";
+        const prefix_ = self.prefix();
         var it = self.store.registry.tensors.iterator();
         while (it.next()) |item| {
             const key = item.key_ptr.*;
@@ -442,7 +462,7 @@ pub const View = struct {
     }
 };
 
-test "get finds exact keys, the registry's own entries, and hasPrefix any key under a prefix" {
+test "get finds exact keys, the registry's own entries, and count the keys under a prefix" {
     var store: TensorStore = store: {
         var registry: safetensors.TensorRegistry = .init(std.testing.allocator);
         errdefer registry.deinit();
@@ -456,14 +476,14 @@ test "get finds exact keys, the registry's own entries, and hasPrefix any key un
     try std.testing.expectEqual(entry, store.registry.tensors.getPtr("layer.experts.0.down_proj.weight").?);
     try std.testing.expectEqual(null, layer.get("experts.0.down_proj"));
     try std.testing.expectEqual(null, layer.get("weights"));
-    try std.testing.expect(layer.hasPrefix("experts"));
-    try std.testing.expect(layer.withPrefix("experts").hasPrefix(""));
-    try std.testing.expect(!layer.hasPrefix("gate"));
+    try std.testing.expectEqualStrings("layer.", layer.prefix());
+    try std.testing.expectEqualStrings("", layer.root().prefix());
+    try std.testing.expectEqual(1, layer.withPrefix("experts").count());
+    try std.testing.expectEqual(0, layer.withPrefix("gate").count());
 
     // Every binding of the entry holds the entry itself.
     const tensor = layer.createReplicatedTensor("experts.0.down_proj.weight", null);
     try std.testing.expectEqual(entry, store.bindingOf(tensor.id).?.load.source.whole().?);
-    try std.testing.expectEqual(entry, layer.source("experts.0.down_proj.weight", null)._pieces[0].tensor);
 }
 
 test "programs of one type and equal values over the same placed shapes share an executable" {
@@ -489,12 +509,12 @@ test "programs of one type and equal values over the same placed shapes share an
         }
     };
     const shape: Shape = .init(.{4}, .u8);
-    const root = store.view();
+    const input = store.view().source("t", null).withPartitioning(.replicated, .{});
     const tensors = [_]Tensor{
-        root.maybeCreateBinding(&.{"t"}, shape, Scale{ .factor = 1 }).?,
-        root.maybeCreateBinding(&.{"t"}, shape, Scale{ .factor = 1 }).?,
-        root.maybeCreateBinding(&.{"t"}, shape, Scale{ .factor = 2 }).?,
-        root.maybeCreateBinding(&.{"t"}, shape, Shift{ .factor = 1 }).?,
+        Source.bindProgram(&.{input}, shape, Scale{ .factor = 1 }),
+        Source.bindProgram(&.{input}, shape, Scale{ .factor = 1 }),
+        Source.bindProgram(&.{input}, shape, Scale{ .factor = 2 }),
+        Source.bindProgram(&.{input}, shape, Shift{ .factor = 1 }),
     };
     var computes: [tensors.len]Binding.Compute = undefined;
     for (&computes, tensors) |*compute, tensor| compute.* = store.bindingOf(tensor.id).?.compute;
@@ -504,17 +524,6 @@ test "programs of one type and equal values over the same placed shapes share an
     try std.testing.expect(!computes[0].sameExecutable(shape, computes[1], shape.withDtype(.i8)));
     try std.testing.expectEqual(1, computes[3].program.as(Shift).?.factor);
     try std.testing.expect(computes[3].program.as(Scale) == null);
-}
-
-test "placed shapes on different meshes or partitionings differ" {
-    var meshes: [2]Sharding.Mesh = undefined;
-    meshes[0].name = "first";
-    meshes[1].name = "second";
-    const first = Shape.init(.{ .qout = 8, .qk = 16 }, .bf16).withPartitioning(&meshes[0], .{ .qout = .replicated, .qk = .replicated });
-    const second = first.withPartitioning(&meshes[1], .{ .qout = .replicated, .qk = .replicated });
-    try std.testing.expect(samePlacedShape(first, first));
-    try std.testing.expect(!samePlacedShape(first, second));
-    try std.testing.expect(!samePlacedShape(first, first.withPartitioning(first._sharding.mesh.?, .{ .qout = .open })));
 }
 
 test "setMemory changes where the loader delivers a bound tensor" {
@@ -533,4 +542,37 @@ test "setMemory changes where the loader delivers a bound tensor" {
     try std.testing.expectEqual(Memory.host_mapped, store.bindingOf(tensor.id).?.load.memory);
     view_.setMemory(tensor, .default);
     try std.testing.expectEqual(Memory.default, store.bindingOf(tensor.id).?.load.memory);
+}
+
+test "hostMappedBytes counts one device's shard of each host_mapped tensor" {
+    const allocator = std.testing.allocator;
+    var devices: testing.Devices = undefined;
+    try devices.init(allocator, std.testing.io, 2);
+    defer devices.deinit();
+    const tp = try devices.mesh("tp");
+    var store: TensorStore = store: {
+        var registry: safetensors.TensorRegistry = .init(allocator);
+        errdefer registry.deinit();
+        try registry.registerTensor(.{ .file_uri = "weights", .name = "rows", .shape = .init(.{ 8, 2 }, .u8), .offset = 0 });
+        try registry.registerTensor(.{ .file_uri = "weights", .name = "scale", .shape = .init(.{4}, .u8), .offset = 16 });
+        try registry.registerTensor(.{ .file_uri = "weights", .name = "dense", .shape = .init(.{4}, .u8), .offset = 20 });
+        try registry.registerTensor(.{ .file_uri = "weights", .name = "odd", .shape = .init(.{ 3, 2 }, .u8), .offset = 24 });
+        break :store .init(allocator, registry, .{ .meshes = &.{&tp} });
+    };
+    defer store.deinit();
+
+    const view_ = store.view();
+    const rows = view_.createTensor("rows", .{ .row, .col }, .tp, .{ .row = .model });
+    const scale = view_.createReplicatedTensor("scale", null);
+    _ = view_.createReplicatedTensor("dense", null);
+    try std.testing.expectEqual(0, try view_.hostMappedBytes());
+    view_.setMemory(rows, .host_mapped);
+    view_.setMemory(scale, .host_mapped);
+    // Half the rows, and the whole replicated scale, from any prefix.
+    try std.testing.expectEqual(8 + 4, try view_.withPrefix("rows").hostMappedBytes());
+
+    // Three rows do not split over two devices.
+    const odd = view_.createTensor("odd", .{ .row, .col }, .tp, .{ .row = .model });
+    view_.setMemory(odd, .host_mapped);
+    try std.testing.expectError(error.IncompatibleSharding, view_.hostMappedBytes());
 }

@@ -14,81 +14,52 @@ pub fn Bufferized(comptime T: type) type {
     return meta.MapRestrict(Tensor, Buffer).map(T);
 }
 
-/// Convert a model to its bufferized form by replacing Tensor fields with Buffer
-/// and allocating any required slices using the provided allocator.
-pub inline fn bufferize(allocator: std.mem.Allocator, comptime ModelType: type, model: *const ModelType) !Bufferized(ModelType) {
-    var bufferized: Bufferized(ModelType) = undefined;
+/// Convert the model `model` points to into its bufferized form by replacing
+/// Tensor fields with Buffer and allocating any required slices using the
+/// provided allocator.
+pub inline fn bufferize(allocator: std.mem.Allocator, model: anytype) !Bufferized(@TypeOf(model.*)) {
+    var bufferized: Bufferized(@TypeOf(model.*)) = undefined;
     try bufferizeInner(allocator, model.*, &bufferized);
     return bufferized;
 }
 
-/// Deinitializes every accelerator buffer and frees the recursive slice
-/// storage allocated by `bufferize`.
-pub fn deinitBufferized(allocator: std.mem.Allocator, comptime ModelType: type, bufferized: *Bufferized(ModelType)) void {
-    deinitBufferizedInner(allocator, bufferized);
-}
+/// A tensor of a model and the buffer at its place in the model's buffers.
+pub const Pair = struct { tensor: *const Tensor, buffer: *Buffer };
 
-/// Calls `callback(context, tensor, buffer)` for each tensor of `model` and
-/// the buffer at its place in `bufferized`, in the order `meta.visit` finds
-/// the tensors. The two trees must have the structure `bufferize` gives:
-/// the same union arms, the same optionals set, slices of the same lengths.
-/// At the first place they differ the walk stops and returns
-/// `error.Mismatch`, the pairs before it already passed to `callback`, and
-/// `report` (a fixed writer, cut short when full) ends with the field path
-/// from the root, as `.layers[1].ffn`, and what differs there.
+/// Pairs each tensor of the model `model` points to with the buffer at its
+/// place in `bufferized`, in the order `meta.visit` finds the tensors. The
+/// caller frees the pairs. The two trees must have the structure `bufferize`
+/// gives: the same union arms, the same optionals set, slices of the same
+/// lengths. At the first place they differ the walk stops and returns
+/// `error.Mismatch`, and `report` (a fixed writer, cut short when full) ends
+/// with the field path from the root, as `.layers[1].ffn`, and what differs
+/// there.
 pub fn pairBufferized(
-    comptime ModelType: type,
-    model: *const ModelType,
-    bufferized: *Bufferized(ModelType),
+    allocator: std.mem.Allocator,
+    model: anytype,
+    bufferized: *Bufferized(@TypeOf(model.*)),
     report: *std.Io.Writer,
-    context: anytype,
-    comptime callback: fn (@TypeOf(context), *const Tensor, *Buffer) void,
-) error{Mismatch}!void {
-    return pairBufferizedInner(model, bufferized, report, context, callback);
+) error{ Mismatch, OutOfMemory }![]Pair {
+    var pairs: std.ArrayList(Pair) = try .initCapacity(allocator, meta.count(Tensor, model));
+    errdefer pairs.deinit(allocator);
+    try pairBufferizedInner(model, bufferized, report, &pairs);
+    return pairs.toOwnedSlice(allocator);
 }
 
-pub const FixedBufferPool = struct {
-    buffer: []u8,
-    block_size: usize,
-    q_buf: []const u16,
-    q: std.Io.Queue(u16),
-
-    pub fn init(allocator: std.mem.Allocator, buffer_: []u8, blocks_: u16) !FixedBufferPool {
-        const block_size = @divExact(buffer_.len, blocks_);
-        const q_buf = try allocator.alloc(u16, blocks_);
-        for (q_buf, 0..) |*idx, i| {
-            idx.* = @intCast(i);
-        }
-        var q: std.Io.Queue(u16) = .init(q_buf);
-        q.type_erased.len = q.type_erased.buffer.len; // make the queue full
-        return .{
-            .buffer = buffer_,
-            .block_size = block_size,
-            .q = q,
-            .q_buf = q_buf,
-        };
+/// The field of `Bufferized(Model)` that holds the struct `Model`'s field
+/// `name`, or null when `Bufferized` strips it. `Bufferized` keeps the
+/// fields holding tensors, in order, and renumbers a tuple's.
+fn bufferizedField(comptime Model: type, comptime name: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(10_000);
+    const info = @typeInfo(Model).@"struct";
+    var index: usize = 0;
+    for (info.field_names, info.field_types, info.field_attrs) |field_name, Field, attrs| {
+        if (attrs.@"comptime" or !meta.Contains(Field, Tensor)) continue;
+        if (std.mem.eql(u8, field_name, name)) return @typeInfo(Bufferized(Model)).@"struct".field_names[index];
+        index += 1;
     }
-
-    pub fn deinit(self: *FixedBufferPool, allocator: std.mem.Allocator) void {
-        allocator.free(self.q_buf);
-    }
-
-    pub fn get(self: *FixedBufferPool, io: std.Io) ![]u8 {
-        const idx = try self.q.getOneUncancelable(io);
-        return self.buffer[idx * self.block_size ..][0..self.block_size];
-    }
-
-    pub fn put(self: *FixedBufferPool, io: std.Io, buf: []u8) void {
-        std.debug.assert(inRange(buf, self.buffer));
-        const idx = @divExact(@intFromPtr(buf.ptr) - @intFromPtr(self.buffer.ptr), self.block_size);
-        self.q.putOneUncancelable(io, @intCast(idx)) catch unreachable;
-    }
-
-    fn inRange(sub_buffer: []const u8, buffer: []const u8) bool {
-        return @intFromPtr(sub_buffer.ptr) >= @intFromPtr(buffer.ptr) and
-            @intFromPtr(sub_buffer[sub_buffer.len - 1 ..].ptr) <= @intFromPtr(buffer[buffer.len - 1 ..].ptr);
-    }
-};
+    return null;
+}
 
 fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bufferized(@TypeOf(model))) !void {
     @setEvalBranchQuota(10_000);
@@ -111,11 +82,13 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
             var initialized_fields: usize = 0;
             errdefer inline for (struct_type_info.field_names, 0..) |field_name, index| {
                 if (index < initialized_fields)
-                    deinitBufferizedInner(allocator, &@field(bufferized_, field_name));
+                    deinitBufferized(allocator, &@field(bufferized_, field_name));
             };
-            inline for (struct_type_info.field_names) |field_name| {
-                try bufferizeInner(allocator, @field(model, field_name), &@field(bufferized_, field_name));
-                initialized_fields += 1;
+            inline for (@typeInfo(Model).@"struct".field_names) |field_name| {
+                if (comptime bufferizedField(Model, field_name)) |buffer_field| {
+                    try bufferizeInner(allocator, @field(model, field_name), &@field(bufferized_, buffer_field));
+                    initialized_fields += 1;
+                }
             }
         },
         .@"union" => {
@@ -140,7 +113,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
                     const allocated = try allocator.alignedAlloc(p.child, .fromByteUnits(p.attrs.@"align" orelse @alignOf(p.child)), model.len);
                     var initialized: usize = 0;
                     errdefer {
-                        for (allocated[0..initialized]) |*element| deinitBufferizedInner(allocator, element);
+                        for (allocated[0..initialized]) |*element| deinitBufferized(allocator, element);
                         allocator.free(allocated);
                     }
                     for (model, allocated) |src, *dst| {
@@ -154,7 +127,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
         },
         .array => |info| {
             var initialized: usize = 0;
-            errdefer for (bufferized_.*[0..initialized]) |*element| deinitBufferizedInner(allocator, element);
+            errdefer for (bufferized_.*[0..initialized]) |*element| deinitBufferized(allocator, element);
             inline for (0..info.len) |index| {
                 try bufferizeInner(allocator, model[index], &bufferized_.*[index]);
                 initialized = index + 1;
@@ -165,9 +138,12 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
     }
 }
 
-fn deinitBufferizedInner(allocator: std.mem.Allocator, value: anytype) void {
+/// Deinitializes every accelerator buffer of the tree `value` points to and
+/// frees the recursive slice storage allocated by `bufferize`.
+pub fn deinitBufferized(allocator: std.mem.Allocator, value: anytype) void {
     const Ptr = @TypeOf(value);
     const T = @typeInfo(Ptr).pointer.child;
+    if (T == Tensor) @compileError("mem.deinitBufferized takes the buffers bufferize returns, not the model");
     if (T == Buffer) {
         const buffer: *Buffer = @constCast(value);
         buffer.deinit();
@@ -175,22 +151,22 @@ fn deinitBufferizedInner(allocator: std.mem.Allocator, value: anytype) void {
     }
     switch (@typeInfo(T)) {
         .@"struct" => |info| inline for (info.field_names) |field_name| {
-            deinitBufferizedInner(allocator, &@field(value, field_name));
+            deinitBufferized(allocator, &@field(value, field_name));
         },
         .@"union" => switch (value.*) {
-            inline else => |*payload| deinitBufferizedInner(allocator, payload),
+            inline else => |*payload| deinitBufferized(allocator, payload),
         },
         .optional => if (value.*) |*payload| {
-            deinitBufferizedInner(allocator, payload);
+            deinitBufferized(allocator, payload);
         },
         .pointer => |info| switch (info.size) {
             .slice => {
-                for (value.*) |*element| deinitBufferizedInner(allocator, element);
+                for (value.*) |*element| deinitBufferized(allocator, element);
                 allocator.free(value.*);
             },
             else => unreachable,
         },
-        .array => for (&value.*) |*element| deinitBufferizedInner(allocator, element),
+        .array => for (&value.*) |*element| deinitBufferized(allocator, element),
         .void, .int, .@"enum", .bool, .enum_literal, .float, .vector => {},
         else => unreachable,
     }
@@ -198,25 +174,19 @@ fn deinitBufferizedInner(allocator: std.mem.Allocator, value: anytype) void {
 
 /// `report.end` is restored after each part that pairs, so on a mismatch the
 /// report holds the path down to it.
-fn pairBufferizedInner(model: anytype, bufferized: anytype, report: *std.Io.Writer, context: anytype, comptime callback: anytype) error{Mismatch}!void {
+fn pairBufferizedInner(model: anytype, bufferized: anytype, report: *std.Io.Writer, pairs: *std.ArrayList(Pair)) error{Mismatch}!void {
     const Model = @typeInfo(@TypeOf(model)).pointer.child;
     if (comptime !meta.Contains(Model, Tensor)) return;
     // `bufferize` allocates every slice mutable, a `[]const` one included.
-    if (Model == Tensor) return callback(context, model, @constCast(bufferized));
+    if (Model == Tensor) return pairs.appendAssumeCapacity(.{ .tensor = model, .buffer = @constCast(bufferized) });
 
     const depth = report.end;
     switch (@typeInfo(Model)) {
-        .@"struct" => |info| {
-            // Bufferized fields are the model's fields holding tensors, in
-            // order; a tuple's are renumbered.
-            const buffer_fields = @typeInfo(Bufferized(Model)).@"struct".field_names;
-            comptime var index: usize = 0;
-            inline for (info.field_names, info.field_types, info.field_attrs) |name, Field, attrs| {
-                if (attrs.@"comptime" or comptime !meta.Contains(Field, Tensor)) continue;
+        .@"struct" => |info| inline for (info.field_names) |name| {
+            if (comptime bufferizedField(Model, name)) |buffer_field| {
                 report.print(".{s}", .{name}) catch {};
-                try pairBufferizedInner(&@field(model, name), &@field(bufferized, buffer_fields[index]), report, context, callback);
+                try pairBufferizedInner(&@field(model, name), &@field(bufferized, buffer_field), report, pairs);
                 report.end = depth;
-                index += 1;
             }
         },
         .@"union" => {
@@ -228,7 +198,7 @@ fn pairBufferizedInner(model: anytype, bufferized: anytype, report: *std.Io.Writ
             switch (model.*) {
                 inline else => |*payload, arm| {
                     report.print(".{s}", .{@tagName(arm)}) catch {};
-                    try pairBufferizedInner(payload, &@field(bufferized, @tagName(arm)), report, context, callback);
+                    try pairBufferizedInner(payload, &@field(bufferized, @tagName(arm)), report, pairs);
                     report.end = depth;
                 },
             }
@@ -238,7 +208,7 @@ fn pairBufferizedInner(model: anytype, bufferized: anytype, report: *std.Io.Writ
                 report.print(": {s} in the model, {s} in the buffers", .{ if (model.* == null) "null" else "set", if (bufferized.* == null) "null" else "set" }) catch {};
                 return error.Mismatch;
             }
-            if (model.*) |*payload| try pairBufferizedInner(payload, &bufferized.*.?, report, context, callback);
+            if (model.*) |*payload| try pairBufferizedInner(payload, &bufferized.*.?, report, pairs);
         },
         .pointer => |info| {
             if (info.size != .slice) @compileError("mem.pairBufferized: " ++ @typeName(Model) ++ " is not a slice");
@@ -248,13 +218,13 @@ fn pairBufferizedInner(model: anytype, bufferized: anytype, report: *std.Io.Writ
             }
             for (model.*, bufferized.*, 0..) |*element, *buffer, i| {
                 report.print("[{d}]", .{i}) catch {};
-                try pairBufferizedInner(element, buffer, report, context, callback);
+                try pairBufferizedInner(element, buffer, report, pairs);
                 report.end = depth;
             }
         },
         .array => for (model, bufferized, 0..) |*element, *buffer, i| {
             report.print("[{d}]", .{i}) catch {};
-            try pairBufferizedInner(element, buffer, report, context, callback);
+            try pairBufferizedInner(element, buffer, report, pairs);
             report.end = depth;
         },
         else => @compileError("mem.pairBufferized: cannot walk " ++ @typeName(Model)),
@@ -270,9 +240,9 @@ test "bufferize rolls back earlier slice fields on allocation failure" {
     const model: Model = .{ .first = &tensors, .second = &tensors };
     var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 1 });
 
-    if (bufferize(failing.allocator(), Model, &model)) |result| {
+    if (bufferize(failing.allocator(), &model)) |result| {
         var unexpected = result;
-        deinitBufferized(failing.allocator(), Model, &unexpected);
+        deinitBufferized(failing.allocator(), &unexpected);
         return error.ExpectedOutOfMemory;
     } else |err| {
         try std.testing.expect(err == error.OutOfMemory);
@@ -293,8 +263,8 @@ test "deinitBufferized frees recursive const slices" {
         .{ .weights = weights[1..2] },
     };
     const model: Model = .{ .layers = &layers, .fixed = undefined };
-    var bufferized = try bufferize(std.testing.allocator, Model, &model);
-    deinitBufferized(std.testing.allocator, Model, &bufferized);
+    var bufferized = try bufferize(std.testing.allocator, &model);
+    deinitBufferized(std.testing.allocator, &bufferized);
 }
 
 test "deinitBufferized frees slices under optionals and unions" {
@@ -312,8 +282,17 @@ test "deinitBufferized frees slices under optionals and unions" {
         .absent = null,
         .ffns = .{ .{ .dense = .{ .weights = weights[2..3] } }, .{ .experts = &experts }, .none },
     };
-    var bufferized = try bufferize(std.testing.allocator, Model, &model);
-    deinitBufferized(std.testing.allocator, Model, &bufferized);
+    var bufferized = try bufferize(std.testing.allocator, &model);
+    deinitBufferized(std.testing.allocator, &bufferized);
+}
+
+test "bufferize maps a tuple's fields as Bufferized renumbers them" {
+    const Model = struct { u32, Tensor, []const Tensor };
+    var tensors: [2]Tensor = undefined;
+    const model: Model = .{ 3, undefined, &tensors };
+    var bufferized = try bufferize(std.testing.allocator, &model);
+    defer deinitBufferized(std.testing.allocator, &bufferized);
+    try std.testing.expectEqual(2, bufferized[1].len);
 }
 
 test "pairBufferized pairs tensors and buffers in visit order" {
@@ -327,47 +306,41 @@ test "pairBufferized pairs tensors and buffers in visit order" {
         .head = undefined,
         .layers = 2,
     };
-    var bufferized = try bufferize(std.testing.allocator, Model, &model);
-    defer deinitBufferized(std.testing.allocator, Model, &bufferized);
+    var bufferized = try bufferize(std.testing.allocator, &model);
+    defer deinitBufferized(std.testing.allocator, &bufferized);
 
-    const Pairs = struct {
-        tensors: [8]*const Tensor = undefined,
-        buffers: [8]*Buffer = undefined,
-        len: usize = 0,
-
-        fn add(self: *@This(), tensor: *const Tensor, buffer: *Buffer) void {
-            self.tensors[self.len] = tensor;
-            self.buffers[self.len] = buffer;
-            self.len += 1;
-        }
-    };
-    var pairs: Pairs = .{};
     var report_buffer: [64]u8 = undefined;
     var report: std.Io.Writer = .fixed(&report_buffer);
-    try pairBufferized(Model, &model, &bufferized, &report, &pairs, Pairs.add);
+    const pairs = try pairBufferized(std.testing.allocator, &model, &bufferized, &report);
+    defer std.testing.allocator.free(pairs);
     try std.testing.expectEqual(0, report.end);
 
-    var tensors: Pairs = .{};
+    const Visited = struct {
+        tensors: [8]*const Tensor = undefined,
+        buffers: [8]*Buffer = undefined,
+        tensor_count: usize = 0,
+        buffer_count: usize = 0,
+    };
+    var visited: Visited = .{};
     meta.forEachVisit(&model, *const Tensor, struct {
-        fn call(_: usize, tensor: *const Tensor, out: *Pairs) void {
-            out.tensors[out.len] = tensor;
-            out.len += 1;
+        fn call(_: usize, tensor: *const Tensor, out: *Visited) void {
+            out.tensors[out.tensor_count] = tensor;
+            out.tensor_count += 1;
         }
-    }.call, .{&tensors});
-    var buffers: Pairs = .{};
+    }.call, .{&visited});
     meta.forEachVisit(&bufferized, *Buffer, struct {
-        fn call(_: usize, buffer: *Buffer, out: *Pairs) void {
-            out.buffers[out.len] = buffer;
-            out.len += 1;
+        fn call(_: usize, buffer: *Buffer, out: *Visited) void {
+            out.buffers[out.buffer_count] = buffer;
+            out.buffer_count += 1;
         }
-    }.call, .{&buffers});
+    }.call, .{&visited});
     try std.testing.expectEqual(7, pairs.len);
-    try std.testing.expectEqual(pairs.len, tensors.len);
-    try std.testing.expectEqual(pairs.len, buffers.len);
+    try std.testing.expectEqual(pairs.len, visited.tensor_count);
+    try std.testing.expectEqual(pairs.len, visited.buffer_count);
     // Not `expectEqualSlices`: printing a `*Buffer` reaches code a CPU test build lacks.
-    for (0..pairs.len) |i| {
-        try std.testing.expect(pairs.tensors[i] == tensors.tensors[i]);
-        try std.testing.expect(pairs.buffers[i] == buffers.buffers[i]);
+    for (pairs, 0..) |pair, i| {
+        try std.testing.expect(pair.tensor == visited.tensors[i]);
+        try std.testing.expect(pair.buffer == visited.buffers[i]);
     }
 }
 
@@ -378,35 +351,31 @@ test "pairBufferized stops at the first place the trees differ and names it" {
     var weights: [3]Tensor = undefined;
     var built = [_]Ffn{ .{ .dense = .{ .weights = weights[0..2], .scale = null } }, .none };
     const built_model: Model = .{ .ffns = &built, .head = undefined };
-    var bufferized = try bufferize(std.testing.allocator, Model, &built_model);
-    defer deinitBufferized(std.testing.allocator, Model, &bufferized);
+    var bufferized = try bufferize(std.testing.allocator, &built_model);
+    defer deinitBufferized(std.testing.allocator, &bufferized);
 
-    const Case = struct { ffns: [2]Ffn, pairs: usize, report: []const u8 };
+    const Case = struct { ffns: [2]Ffn, report: []const u8 };
     const cases = [_]Case{
-        .{ .ffns = .{ .none, .none }, .pairs = 0, .report = ".ffns[0]: union arm .none in the model, .dense in the buffers" },
+        .{ .ffns = .{ .none, .none }, .report = ".ffns[0]: union arm .none in the model, .dense in the buffers" },
         .{
             .ffns = .{ .{ .dense = .{ .weights = weights[0..2], .scale = weights[2] } }, .none },
-            .pairs = 2,
             .report = ".ffns[0].dense.scale: set in the model, null in the buffers",
         },
         .{
             .ffns = .{ .{ .dense = .{ .weights = weights[0..1], .scale = null } }, .none },
-            .pairs = 0,
             .report = ".ffns[0].dense.weights: a slice of 1 in the model, of 2 in the buffers",
         },
     };
     for (cases) |case| {
         var ffns = case.ffns;
         const model: Model = .{ .ffns = &ffns, .head = undefined };
-        var pairs: usize = 0;
         var report_buffer: [128]u8 = undefined;
         var report: std.Io.Writer = .fixed(&report_buffer);
-        try std.testing.expectError(error.Mismatch, pairBufferized(Model, &model, &bufferized, &report, &pairs, struct {
-            fn call(count: *usize, _: *const Tensor, _: *Buffer) void {
-                count.* += 1;
-            }
-        }.call));
-        try std.testing.expectEqual(case.pairs, pairs);
+        // Not `expectError`: printing a `*Buffer` reaches code a CPU test build lacks.
+        if (pairBufferized(std.testing.allocator, &model, &bufferized, &report)) |pairs| {
+            std.testing.allocator.free(pairs);
+            return error.TestExpectedMismatch;
+        } else |err| try std.testing.expectEqual(error.Mismatch, err);
         try std.testing.expectEqualStrings(case.report, report.buffered());
     }
 }

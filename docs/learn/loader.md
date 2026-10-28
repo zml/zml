@@ -35,8 +35,8 @@ defer store.deinit();
 const model: Model = .init(store.view()); // binds every tensor
 // ... compile the model ...
 
-var buffers = try zml.mem.bufferize(allocator, Model, &model);
-defer zml.mem.deinitBufferized(allocator, Model, &buffers);
+var buffers = try zml.mem.bufferize(allocator, &model);
+defer zml.mem.deinitBufferized(allocator, &buffers);
 try loader.start(&model, &buffers, &store, .none);
 try loader.wait(); // logs "Loaded weights [bytes, time, rate]"
 ```
@@ -46,7 +46,7 @@ it, or without a VFS, reads are sized for local files. `start` adds its own
 items to the progress node it is given. Several loads may be started before
 one `wait`, from one store or several. A second checkpoint, such as a
 drafter's, joins the registry under a prefix before the store takes it:
-`registry.addRepo(io, drafter_repo, "drafter.")`, then
+`registry.addRepo(io, drafter_repo, "drafter")`, then
 `store.view().withPrefix("drafter")` reaches its tensors.
 
 ## Placement
@@ -60,7 +60,10 @@ called after binding, names a host kind (`TensorStore.Memory`):
 `.host_pinned` gives buffers in pinned host memory, and `.host_mapped` gives
 device buffers that are views of pinned host memory, which kernels read in
 place. The second suits a table too large for device memory, of which each
-step reads a few rows; the memory goes with the last view.
+step reads a few rows; the memory goes with the last view. XLA counts those
+views against device memory: give their size on one device,
+`view.hostMappedBytes()`, back through the compile option
+`extra_device_memory_bytes`.
 
 ```zig
 const tp = try platform.registerMesh("tp", .mesh(.{ .model = .high_bandwidth }));
@@ -73,7 +76,7 @@ view.setMemory(rows, .host_mapped);
 ```
 
 `View.get(subkey)` returns the registry's entry for a key, or null, and
-`hasPrefix` asks whether any key starts with a prefix. Binding cannot fail:
+`count()` the number of keys under the view's prefix. Binding cannot fail:
 `createTensor` and `source` panic on a missing key, `maybeCreateTensor` and
 `maybeSource` return null. `TensorStore.Options.quantization`
 (`Quantization.Target.of(platform)`) is for code binding block-FP8 weights.
@@ -89,8 +92,9 @@ same names, tags and arguments: `slice`, `split`, `chunkExact`, `splitAxis`,
 `concatenate` and `stack`. Placement comes last, after every op:
 `withPartitioning(mesh, partitioning)`, keyed by the source's final tags, or
 `as(shape)`, a shape built elsewhere with the source's element count and
-dtype. An op on a placed source panics, and `unplaced()` drops the
-placement. `bind()` then makes the model tensor.
+dtype. Both return a `Source.Placed`, which has no shape ops (its `.shape`
+is the placed shape) and drops its placement with `unplaced()`; its
+`bind()` makes the model tensor.
 
 ```zig
 const Source = zml.io.TensorStore.Source;
@@ -131,15 +135,15 @@ const weight = Source.bindProgram(&.{ w.as(placed), s.as(scales) }, placed.withD
 
 `bindProgram(inputs, output, program)` binds a tensor of `output` that
 `program.forward(output, inputs)` computes during the load. Each input is a
-placed source and lands placed by its own shape, so every device reads only
-its slice. `View.maybeCreateBinding(keys, shape, program)` is the shorthand
-for whole checkpoint tensors, replicated. `start` starts one compile, on a
-task of its own, for all the tensors of an equal program (same type, equal
-value) over the same placed shapes. `wait` lands the inputs in groups of at
-most `Loader.program_group_bytes` of outputs (8 GiB), each once the devices
-have room for it, runs the programs on the calling task and frees the
-inputs. A program's output lands in default device memory: `setMemory`
-panics on it.
+`Source.Placed` and lands placed by its own shape, so every device reads
+only its slice; a whole checkpoint tensor, replicated, is
+`view.source(key, null).withPartitioning(.replicated, .{})`. `start`
+starts one compile, on a task of its own, for all the tensors of an equal
+program (same type, equal value) over the same placed shapes. `wait` lands
+the inputs in groups of at most `Loader.Options.program_group_bytes` of
+outputs (8 GiB), each once the devices have room for it, runs the programs
+on the calling task and frees the inputs. A program's output lands in
+default device memory: `setMemory` panics on it.
 
 ## Lifetime and failure
 
@@ -148,19 +152,20 @@ panics on it.
 | `Loader` | the platform; `io`, and the VFS behind it, through which it keeps its source files open | its `deinit` |
 | `Loader.start` | the store, the buffers and the progress node | `wait` or `cancel` returns |
 | `TensorStore` | the meshes; it owns the registry, the bindings, sources and programs | its `deinit` |
-| `View`, `Source` | their store, which must not move | their last use |
+| `View`, `Source`, `Source.Placed` | their store, which must not move | their last use |
 | `VFS.Remotes` | the VFS; it must not move | its `deinit`, once every file opened through it is closed |
 | Loaded buffers | the platform | `deinitBufferized` |
 
-`start` reads the model during the call only. `Options.checkpoint` is read
-by `init`, and `Options.dma_block_sizes` until the first `start` or
-`deinit`. The loader copies each file's path, so nothing of the store is kept past `wait`. The
-loaded buffers are the caller's and outlive the loader: free the loader
-right after the load to release its pinned memory and workers. Deferred
-cleanup in the recipe's order is right; if code between `start` and `wait`
-can fail, `errdefer loader.cancel();` after `start`. The loader is a value
-that may be moved until its first `start`. Start and wait on one task: the
-backend reads and transfers concurrently.
+`init` reads its options and `start` the model during the call only. The
+loader copies each file's path, so nothing of the store is kept past `wait`.
+The loaded buffers are the caller's and outlive the loader, which holds its
+pinned memory and workers until `deinit`: the recipe's deferred `deinit`
+keeps them until the function returns, which suits a program that does
+little after the load; one that keeps running frees the loader right after
+`wait`, or loads in a block of its own. Deferred cleanup in the recipe's
+order is right; if code between `start` and `wait` can fail,
+`errdefer loader.cancel();` after `start`. The loader is a value. Start and
+wait on one task: the backend reads and transfers concurrently.
 
 Every error of `start` or `wait` fails the loader: everything started is
 canceled, and every later call returns the first error. `cancel` gives up on
@@ -172,8 +177,10 @@ That holds for the buffers `bufferize` made, which `start` empties again.
 ## Errors
 
 `Loader.init` returns `InvalidOptions`, logged with the option it refuses,
-or `OutOfMemory`. `start` and `wait` return one error set, `Loader.Error`.
-Each failure is logged once, at err, with what explains it.
+or `OutOfMemory`. `start` and `wait` return the error where it was
+detected, under its own name, and that is where it is logged, once, at
+err, with what explains it; a plain allocation failure and `Canceled` are
+returned unlogged.
 
 A model whose bindings are wrong is `InvalidBinding`, whichever rule it
 breaks; the log names the tensor, the checkpoint key its source reads and
@@ -182,11 +189,13 @@ the rule:
 - buffers shaped unlike the model: another union arm, optional or slice
   length (the log names the field path instead);
 - a tensor the store did not bind;
-- a source that reads no bytes, or reads an empty checkpoint tensor;
+- a source that reads no bytes, such as an empty checkpoint tensor (the log
+  names the tensor, not the key);
 - a source whose bytes differ from its tensor's;
 - a source the loader cannot assemble: a run that starts or ends inside a
-  byte (sub-byte dtypes), strided parts into host memory, or a broadcast or
-  transpose whose source range does not fit one request (8 to 32 MiB);
+  byte (sub-byte dtypes; the log names the tensor and its source's shape,
+  not the key), strided parts into host memory, or a broadcast or transpose
+  whose source range does not fit one request (8 to 32 MiB);
 - a placement its mesh does not divide, or on devices the platform lacks;
 - a memory kind the platform cannot take;
 - a program that does not return its tensor's shape, placed alike.
@@ -198,13 +207,15 @@ The errors a caller can act on:
 | `FileNotFound` | A checkpoint file is missing |
 | `AccessDenied`, `PermissionDenied` | A file is denied: `AccessDenied` locally, `PermissionDenied` remotely (on S3, a missing key without `s3:ListBucket` too) |
 | `UnexpectedEndOfFile` | A file ends inside a tensor: it changed after its header was read, or the tensor's shape needs more bytes than its `data_offsets` give |
-| `OutOfMemory` | Host memory the backend cannot allocate, pin or fit under its mapped ceiling: the log says why |
+| `OutOfMemory` | Host memory the backend cannot allocate, pin or fit under its mapped ceiling, which the log explains; or a plain allocation that failed, unlogged |
 | `ResourceExhausted` | Device memory ran out, for a buffer or a program's run (from PJRT) |
-| `UnsupportedPlatform` | More devices than the direct backend addresses (`Platform.MAX_NUM_DEVICES`) |
 | `ConcurrencyUnavailable` | An `io` that cannot run the loader's tasks concurrently |
 | `Canceled` | The load was canceled |
 
-PJRT and compile errors pass through. A remote failure other than a missing
-or denied object is logged by the VFS and surfaces as `Unexpected`. A
-truncated checkpoint fails before the loader: `TensorRegistry.fromPath`
-returns `InvalidSafetensorsHeader`, logged with the file.
+PJRT and compile errors pass through. A platform with more devices than ZML
+addresses (`Platform.MAX_NUM_DEVICES`) fails before the loader:
+`Platform.init` returns `InvalidDeviceCount`, logged. A remote failure other
+than a missing or denied object is logged by the VFS and surfaces as
+`Unexpected`. A truncated checkpoint fails before the loader:
+`TensorRegistry.fromPath` returns `InvalidSafetensorsHeader`, logged with
+the file.

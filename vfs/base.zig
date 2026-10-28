@@ -3,8 +3,6 @@ const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
-const log = std.log.scoped(.@"zml/vfs");
-
 /// `std.log.scoped`, except that test builds log `err` at `debug`: the test
 /// runner counts logged errors as failures, and a test of a failure path
 /// checks the error it returns.
@@ -21,7 +19,20 @@ pub fn scopedLog(comptime scope: @EnumLiteral()) type {
     };
 }
 
+/// How a backend's files are best read, for the loader (`VFS.readHints`).
+/// Source request size is independent of DMA block size and source width.
+/// In historical warm Llama loads on one B70 at fixed width 12, 8/16/32 MiB
+/// requests achieved 27.05/24.21/21.33 GiB/s and used 96/192/384 MiB pinned
+/// high-water. Real AWS instead plateaued near 950 MiB/s: 16 MiB at width 24
+/// was within 3% of peak; 32 MiB cut GET count 39% but did not improve speed.
+/// A universal 32 MiB policy would trade a local regression for no remote
+/// throughput gain. Hints supply minima; the loader also respects its
+/// independently calibrated DMA block and the supported request-size limit.
 pub const ReadHints = struct {
+    /// Local files, through a VFS or not. Also the loader's hints when it
+    /// is given no checkpoint or no VFS.
+    pub const local: ReadHints = .{ .read_chunk_size = 8 * 1024 * 1024 };
+
     /// Smallest source request expected to avoid excessive per-request cost
     /// or backend rate limiting. The loader may increase it to match the
     /// calibrated DMA block size.
@@ -29,36 +40,6 @@ pub const ReadHints = struct {
     /// The backend benefits from opening enough source calls to hide request
     /// latency before the first response arrives.
     high_latency: bool = false,
-};
-
-pub const ReadStats = struct {
-    physical_requests: u64 = 0,
-    physical_bytes: u64 = 0,
-    retries: u64 = 0,
-    transient_retries: u64 = 0,
-    timeouts: u64 = 0,
-    server_failures: u64 = 0,
-    throttles: u64 = 0,
-    retry_delay_ns: u64 = 0,
-    /// Backend-wide holds armed by rate limiting, and the time requests
-    /// spent waiting them out.
-    holds: u64 = 0,
-    hold_wait_ns: u64 = 0,
-
-    pub fn sub(self: ReadStats, previous: ReadStats) ReadStats {
-        return .{
-            .physical_requests = self.physical_requests -| previous.physical_requests,
-            .physical_bytes = self.physical_bytes -| previous.physical_bytes,
-            .retries = self.retries -| previous.retries,
-            .transient_retries = self.transient_retries -| previous.transient_retries,
-            .timeouts = self.timeouts -| previous.timeouts,
-            .server_failures = self.server_failures -| previous.server_failures,
-            .throttles = self.throttles -| previous.throttles,
-            .retry_delay_ns = self.retry_delay_ns -| previous.retry_delay_ns,
-            .holds = self.holds -| previous.holds,
-            .hold_wait_ns = self.hold_wait_ns -| previous.hold_wait_ns,
-        };
-    }
 };
 
 pub const ReadFailure = enum {
@@ -77,6 +58,8 @@ pub const AtomicReadStats = struct {
     server_failures: std.atomic.Value(u64) = .init(0),
     throttles: std.atomic.Value(u64) = .init(0),
     retry_delay_ns: std.atomic.Value(u64) = .init(0),
+    /// Backend-wide holds armed by rate limiting, and the time requests
+    /// spent waiting them out.
     holds: std.atomic.Value(u64) = .init(0),
     hold_wait_ns: std.atomic.Value(u64) = .init(0),
 
@@ -115,42 +98,6 @@ pub const AtomicReadStats = struct {
     pub fn recordHoldWait(self: *AtomicReadStats, waited: std.Io.Duration) void {
         _ = self.hold_wait_ns.fetchAdd(@intCast(@max(waited.nanoseconds, 0)), .monotonic);
     }
-
-    pub fn snapshot(self: *const AtomicReadStats) ReadStats {
-        return .{
-            .physical_requests = self.physical_requests.load(.acquire),
-            .physical_bytes = self.physical_bytes.load(.acquire),
-            .retries = self.retries.load(.acquire),
-            .transient_retries = self.transient_retries.load(.acquire),
-            .timeouts = self.timeouts.load(.acquire),
-            .server_failures = self.server_failures.load(.acquire),
-            .throttles = self.throttles.load(.acquire),
-            .retry_delay_ns = self.retry_delay_ns.load(.acquire),
-            .holds = self.holds.load(.acquire),
-            .hold_wait_ns = self.hold_wait_ns.load(.acquire),
-        };
-    }
-
-    /// Logs the totals at debug, once, from its backend's `deinit`; nothing
-    /// when the backend sent no request. Holds, retries and failures are
-    /// logged at warn as they happen (`request.zig`).
-    pub fn logTotals(self: *const AtomicReadStats, backend: []const u8) void {
-        const totals = self.snapshot();
-        if (totals.physical_requests == 0) return;
-        log.debug("{s} read totals: requests={d}, bytes={Bi:.2}, retries={d}, transient_retries={d}, timeouts={d}, server_failures={d}, throttles={d}, holds={d}, hold_wait_ms={d:.3}, retry_delay_ms={d:.3}", .{
-            backend,
-            totals.physical_requests,
-            totals.physical_bytes,
-            totals.retries,
-            totals.transient_retries,
-            totals.timeouts,
-            totals.server_failures,
-            totals.throttles,
-            totals.holds,
-            @as(f64, @floatFromInt(totals.hold_wait_ns)) / std.time.ns_per_ms,
-            @as(f64, @floatFromInt(totals.retry_delay_ns)) / std.time.ns_per_ms,
-        });
-    }
 };
 
 test "atomic read stats retain aggregate retry feedback" {
@@ -165,14 +112,13 @@ test "atomic read stats retain aggregate retry feedback" {
     stats.recordAttempt();
     stats.recordSuccess(request_size);
 
-    const snapshot = stats.snapshot();
-    try std.testing.expectEqual(@as(u64, 2), snapshot.physical_requests);
-    try std.testing.expectEqual(@as(u64, request_size), snapshot.physical_bytes);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.retries);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.timeouts);
-    try std.testing.expectEqual(@as(u64, 25 * std.time.ns_per_ms), snapshot.retry_delay_ns);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.holds);
-    try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_ms), snapshot.hold_wait_ns);
+    try std.testing.expectEqual(@as(u64, 2), stats.physical_requests.load(.acquire));
+    try std.testing.expectEqual(@as(u64, request_size), stats.physical_bytes.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), stats.retries.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), stats.timeouts.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 25 * std.time.ns_per_ms), stats.retry_delay_ns.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), stats.holds.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_ms), stats.hold_wait_ns.load(.acquire));
 }
 
 pub const Backend = struct {
@@ -181,7 +127,10 @@ pub const Backend = struct {
 };
 
 pub const VFSBase = struct {
-    inner: std.Io,
+    /// Aligned like the i96 durations and timestamps a backend holds (its
+    /// `request.Governor`), so `@fieldParentPtr("base", ...)` needs no
+    /// `@alignCast`.
+    inner: std.Io align(@alignOf(std.Io.Duration)),
 
     pub fn init(io: std.Io) VFSBase {
         return .{ .inner = io };

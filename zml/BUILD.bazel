@@ -96,7 +96,6 @@ zig_library(
         "io/host_memory.zig",
         "io/loader.zig",
         "io/log.zig",
-        "io/testing.zig",
         "kernel.zig",
         "kernels/flash_attention/flash_attention.zig",
         "kernels/moe/moe.zig",

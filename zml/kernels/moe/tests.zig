@@ -50,7 +50,7 @@ const Case = struct {
         defer runner.deinit(allocator);
         var output: zml.Bufferized(Outputs) = undefined;
         runner.run(io, .{input}, .{&output}, .{ .wait = true });
-        defer zml.Buffer.deinitAll(Outputs, &output);
+        defer zml.Buffer.deinitAll(&output);
 
         // BF16 intermediate rounding and different GEMM reduction orders. Every
         // element must pass; near-zero values use the absolute bound.

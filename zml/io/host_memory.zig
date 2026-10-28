@@ -240,8 +240,10 @@ const Backend = union(enum) {
         fn alloc(self: *HugePageAllocator, len: usize) Allocator.Error![]align(std.heap.page_size_min) u8 {
             const alignment: Alignment = comptime .fromByteUnits(std.heap.page_size_min);
             const effective_alignment = effectiveAlignment(alignment, len);
-            const ptr = self.parent.rawAlloc(len, effective_alignment, @returnAddress()) orelse
+            const ptr = self.parent.rawAlloc(len, effective_alignment, @returnAddress()) orelse {
+                log.err("host memory allocation failed for {Bi:.2}: OutOfMemory", .{len});
                 return error.OutOfMemory;
+            };
             const data: []align(std.heap.page_size_min) u8 = @alignCast(ptr[0..len]);
             self.place(data);
             adviseHugePages(data);
@@ -676,4 +678,3 @@ test "blocks are carved from retained arenas of unequal size, tails left out" {
     try std.testing.expectEqual(first.ptr, blocks[0].ptr);
     try std.testing.expectEqual(first.ptr + 64, blocks[1].ptr);
 }
-

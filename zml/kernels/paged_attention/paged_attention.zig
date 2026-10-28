@@ -407,7 +407,7 @@ test pagedAttention {
         .seq_lens = try .fromBytes(io, platform, triton_parameters.triton.seq_lens.shape(), @ptrCast(&seq_lens)),
         .query_start_len = try .fromBytes(io, platform, triton_parameters.triton.query_start_len.shape(), @ptrCast(&query_start_len)),
     } };
-    defer zml.Buffer.deinitAll(Parameters, &triton_parameters_d);
+    defer zml.Buffer.deinitAll(&triton_parameters_d);
 
     const all_backends = std.enums.values(Backend);
     // stablehlo ignores these options, mosaic_tpu requires a dense

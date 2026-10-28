@@ -10,12 +10,12 @@
 //! freed before `TensorStore.deinit`, and the store must not move while
 //! sources point to it. The ops touch neither the registry nor the
 //! bindings. Sources of different stores do not mix: `concatenate`,
-//! `stack` and `bindProgram` panic on them. Placement comes last
-//! (`withPartitioning` or `as`): an op on a placed source panics, and
-//! `unplaced` drops the placement. `bind` and `bindProgram` are the only
-//! terminals, and take only placed sources: `bind` records the model
-//! tensor the loader fills from the source, `bindProgram` one a program
-//! computes from several. Sources are built during model init.
+//! `stack` and `bindProgram` panic on them. Placement comes last:
+//! `withPartitioning` and `as` return a `Placed`, which has no ops and
+//! drops its placement with `unplaced`. A `Placed` is what binds:
+//! `Placed.bind` records the model tensor the loader fills from it,
+//! `bindProgram` one a program computes from several. Sources are built
+//! during model init.
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -34,13 +34,9 @@ const Source = @This();
 store: *TensorStore,
 _shape: Shape,
 /// Disjoint lattices of elements read from checkpoint tensors; elements no
-/// piece covers are zero. zml/io's own: a binding keeps them (`Bound`) and
-/// the loader lowers them to bytes (`lowerPiece`).
+/// piece covers are zero. zml/io's own: a binding keeps them (`Placed`)
+/// and the loader lowers them to bytes (`Placed.lower`).
 _pieces: []const Piece,
-/// Set by `withPartitioning` and `as`, whose placement `_shape` then
-/// carries. A placed source only binds, or drops its placement
-/// (`unplaced`).
-_placed: bool = false,
 
 /// Checkpoint bits read through an affine lattice: for every `j` with
 /// `j[k] < dims[k].count`, the element at row-major index
@@ -123,42 +119,34 @@ pub fn format(self: Source, writer: *std.Io.Writer) !void {
 // Reshapes: the row-major order is unchanged, so are the pieces.
 
 pub fn withTags(self: Source, tags: anytype) Source {
-    self.expectUnplaced("withTags");
     return self.reshaped(self._shape.withTags(tags));
 }
 
 pub fn rename(self: Source, renames: anytype) Source {
-    self.expectUnplaced("rename");
     return self.reshaped(self._shape.rename(renames));
 }
 
 pub fn renameTag(self: Source, old: anytype, new: anytype) Source {
-    self.expectUnplaced("renameTag");
     return self.reshaped(self._shape.setTag(old, new));
 }
 
 pub fn splitAxis(self: Source, ax: anytype, split_shape: anytype) Source {
-    self.expectUnplaced("splitAxis");
     return self.reshaped(self._shape.splitAxis(ax, split_shape));
 }
 
 pub fn merge(self: Source, merges: anytype) Source {
-    self.expectUnplaced("merge");
     return self.reshaped(self._shape.mergeAxes(merges));
 }
 
 pub fn reshape(self: Source, output_shape: anytype) Source {
-    self.expectUnplaced("reshape");
     return self.reshaped(self._shape.reshape(output_shape));
 }
 
 pub fn flatten(self: Source) Source {
-    self.expectUnplaced("flatten");
     return self.reshape(.{self.count()});
 }
 
 pub fn insertAxes(self: Source, axis_: anytype, tags: anytype) Source {
-    self.expectUnplaced("insertAxes");
     const tags_ = Shape.parseTags(tags);
     const ax = if (@TypeOf(axis_) == @EnumLiteral() and axis_ == .last) self.rank() else self.axis(axis_);
     var res = self._shape;
@@ -169,12 +157,10 @@ pub fn insertAxes(self: Source, axis_: anytype, tags: anytype) Source {
 }
 
 pub fn appendAxes(self: Source, tags: anytype) Source {
-    self.expectUnplaced("appendAxes");
     return self.insertAxes(.last, tags);
 }
 
 pub fn squeeze(self: Source, axis_: anytype) Source {
-    self.expectUnplaced("squeeze");
     const a = self.axis(axis_);
     stdx.debug.assert(self.dim(a) == 1, "squeeze expects axis to be squeezed to have a dimension of 1, got {}", .{self.dim(a)});
     return self.reshaped(self._shape.remove(a));
@@ -192,7 +178,6 @@ fn reshaped(self: Source, new_shape: Shape) Source {
 /// each element becomes the elements of a new last axis `.bitcast`; to a
 /// wider one, the last axis must hold one element of `dt`.
 pub fn bitCast(self: Source, dt: DataType) Source {
-    self.expectUnplaced("bitCast");
     const src_bits: u64 = self.dtype().bitSizeOf();
     const tgt_bits: u64 = dt.bitSizeOf();
     if (src_bits == tgt_bits) return .{ .store = self.store, ._shape = self._shape.withDtype(dt), ._pieces = self._pieces };
@@ -218,18 +203,18 @@ pub fn bitCast(self: Source, dt: DataType) Source {
     res_shape._sharding = .replicated;
     for (self._pieces) |piece| {
         ctx.decompose(self._shape, piece);
-        for (ctx.placed.items) |*placed| {
+        for (ctx.axis_pieces.items) |*axis_piece| {
             // The elements merged into one must be one contiguous run of bits.
-            const inner: ?usize = for (placed.dims.constSlice(), 0..) |d, k| {
+            const inner: ?usize = for (axis_piece.dims.constSlice(), 0..) |d, k| {
                 if (d.axis == last) break k;
             } else null;
-            const whole = placed.origin[last] == 0 and inner != null and blk: {
-                const d = placed.dims.get(inner.?);
+            const whole = axis_piece.origin[last] == 0 and inner != null and blk: {
+                const d = axis_piece.dims.get(inner.?);
                 break :blk d.count == ratio and d.step == 1 and d.stride == src_bits;
             };
             if (!whole) std.debug.panic("bitCast of {f} to {t}: an element of {t} would gather bits that are not contiguous in the checkpoint", .{ self._shape, dt, dt });
-            _ = placed.dims.orderedRemove(inner.?);
-            ctx.emit(res_shape, placed.*);
+            _ = axis_piece.dims.orderedRemove(inner.?);
+            ctx.emit(res_shape, axis_piece.*);
         }
     }
     return ctx.finish(res_shape);
@@ -239,7 +224,6 @@ pub fn bitCast(self: Source, dt: DataType) Source {
 
 /// Like `Tensor.slice`, for a static, contiguous slice (`step` 1).
 pub fn slice(self: Source, axis_: anytype, s: Tensor.Slice) Source {
-    self.expectUnplaced("slice");
     stdx.debug.assert(s.dyn_start == null, "Source.slice takes static slices, got {f}", .{s});
     stdx.debug.assert(s.step == 1, "Source.slice takes contiguous slices, got {f}", .{s});
     const a = self.axis(axis_);
@@ -251,10 +235,10 @@ pub fn slice(self: Source, axis_: anytype, s: Tensor.Slice) Source {
     defer ctx.deinit();
     for (self._pieces) |piece| {
         ctx.decompose(self._shape, piece);
-        for (ctx.placed.items) |placed| ctx.clip(placed, a, lo, hi);
-        for (ctx.clipped.items) |*placed| {
-            placed.origin[a] -= lo;
-            ctx.emit(res_shape, placed.*);
+        for (ctx.axis_pieces.items) |axis_piece| ctx.clip(axis_piece, a, lo, hi);
+        for (ctx.clipped.items) |*axis_piece| {
+            axis_piece.origin[a] -= lo;
+            ctx.emit(res_shape, axis_piece.*);
         }
     }
     const sliced = ctx.finish(res_shape);
@@ -263,7 +247,6 @@ pub fn slice(self: Source, axis_: anytype, s: Tensor.Slice) Source {
 
 /// Like `Tensor.split`; the result lives in the store's arena.
 pub fn split(self: Source, axis_: anytype, split_sizes: []const i64) []Source {
-    self.expectUnplaced("split");
     const a = self.axis(axis_);
     var total: i64 = 0;
     for (split_sizes) |n| total += n;
@@ -278,7 +261,6 @@ pub fn split(self: Source, axis_: anytype, split_sizes: []const i64) []Source {
 }
 
 pub fn chunkExact(self: Source, axis_: anytype, comptime n_chunks: comptime_int) [n_chunks]Source {
-    self.expectUnplaced("chunkExact");
     const a = self.axis(axis_);
     const size = @divExact(self.dim(a), n_chunks);
     var chunks: [n_chunks]Source = undefined;
@@ -291,7 +273,6 @@ pub fn chunkExact(self: Source, axis_: anytype, comptime n_chunks: comptime_int)
 
 /// Like `Tensor.transpose`: no axes reverses them.
 pub fn transpose(self: Source, axes_: anytype) Source {
-    self.expectUnplaced("transpose");
     const given = self._shape.axes(axes_);
     const r = self.rank();
     var permutation: [constants.MAX_RANK]u3 = undefined;
@@ -319,9 +300,9 @@ pub fn transpose(self: Source, axes_: anytype) Source {
     defer ctx.deinit();
     for (self._pieces) |piece| {
         ctx.decompose(self._shape, piece);
-        for (ctx.placed.items) |placed| {
-            var moved = placed;
-            for (0..r) |i| moved.origin[i] = placed.origin[permutation[i]];
+        for (ctx.axis_pieces.items) |axis_piece| {
+            var moved = axis_piece;
+            for (0..r) |i| moved.origin[i] = axis_piece.origin[permutation[i]];
             for (moved.dims.slice()) |*d| d.axis = inverse[d.axis];
             ctx.emit(res_shape, moved);
         }
@@ -331,7 +312,6 @@ pub fn transpose(self: Source, axes_: anytype) Source {
 
 /// Like `Tensor.pad`, with zero as the only padding value.
 pub fn pad(self: Source, padding_value: anytype, paddings: anytype) Source {
-    self.expectUnplaced("pad");
     stdx.debug.assert(isZero(padding_value), "Source.pad pads with zeros, got {any}", .{padding_value});
     const options = self._shape.parseAxesOptions(Tensor.Pad, paddings, .{});
     var res_shape = self._shape;
@@ -348,12 +328,12 @@ pub fn pad(self: Source, padding_value: anytype, paddings: anytype) Source {
     defer ctx.deinit();
     for (self._pieces) |piece| {
         ctx.decompose(self._shape, piece);
-        for (ctx.placed.items) |*placed| {
+        for (ctx.axis_pieces.items) |*axis_piece| {
             for (options.constSlice(), 0..) |p, a| {
-                placed.origin[a] = @as(u64, @intCast(p.low)) + placed.origin[a] * @as(u64, @intCast(p.interior + 1));
+                axis_piece.origin[a] = @as(u64, @intCast(p.low)) + axis_piece.origin[a] * @as(u64, @intCast(p.interior + 1));
             }
-            for (placed.dims.slice()) |*d| d.step *= @intCast(options.get(d.axis).interior + 1);
-            ctx.emit(res_shape, placed.*);
+            for (axis_piece.dims.slice()) |*d| d.step *= @intCast(options.get(d.axis).interior + 1);
+            ctx.emit(res_shape, axis_piece.*);
         }
     }
     return ctx.finish(res_shape);
@@ -363,7 +343,6 @@ pub fn pad(self: Source, padding_value: anytype, paddings: anytype) Source {
 /// grows from 1. The loader reads a few large repetitions once each, and
 /// copies many small ones from one read of the source per job.
 pub fn broad(self: Source, other: Shape) Source {
-    self.expectUnplaced("broad");
     stdx.debug.assert(self._shape.canBroadcastTo(other), "Can't broadcast {f} to {f}", .{ self._shape, other });
     if (std.mem.eql(i64, self.dims(), other.dims())) return self;
     const r = self.rank();
@@ -384,10 +363,10 @@ pub fn broad(self: Source, other: Shape) Source {
     defer ctx.deinit();
     for (self._pieces) |piece| {
         ctx.decompose(self._shape, piece);
-        for (ctx.placed.items) |placed| {
-            var moved: Placed = .{ .tensor = placed.tensor, .offset = placed.offset };
-            for (0..r) |i| moved.origin[axes_map[i]] = placed.origin[i];
-            for (placed.dims.constSlice()) |d| {
+        for (ctx.axis_pieces.items) |axis_piece| {
+            var moved: AxisPiece = .{ .tensor = axis_piece.tensor, .offset = axis_piece.offset };
+            for (0..r) |i| moved.origin[axes_map[i]] = axis_piece.origin[i];
+            for (axis_piece.dims.constSlice()) |d| {
                 var mapped = d;
                 mapped.axis = axes_map[d.axis];
                 moved.dims.append(mapped) catch tooManyDims();
@@ -406,7 +385,6 @@ pub fn broad(self: Source, other: Shape) Source {
 /// `axis_`, and the dtype.
 pub fn concatenate(sources: []const Source, axis_: anytype) Source {
     stdx.debug.assert(sources.len > 0, "concatenate expects at least one source", .{});
-    for (sources) |s| s.expectUnplaced("concatenate");
     if (sources.len == 1) return sources[0];
     const first = sources[0];
     const a = first.axis(axis_);
@@ -434,9 +412,9 @@ pub fn concatenate(sources: []const Source, axis_: anytype) Source {
                 continue;
             }
             ctx.decompose(s._shape, piece);
-            for (ctx.placed.items) |*placed| {
-                placed.origin[a] += offset;
-                ctx.emit(res_shape, placed.*);
+            for (ctx.axis_pieces.items) |*axis_piece| {
+                axis_piece.origin[a] += offset;
+                ctx.emit(res_shape, axis_piece.*);
             }
         }
         offset += @intCast(s.dim(a));
@@ -447,7 +425,6 @@ pub fn concatenate(sources: []const Source, axis_: anytype) Source {
 /// Like `Tensor.stack`; the sources must have the same shape and tags.
 pub fn stack(sources: []const Source, axis_: anytype, tag: anytype) Source {
     stdx.debug.assert(sources.len > 0, "stack expects at least one source", .{});
-    for (sources) |s| s.expectUnplaced("stack");
     const first = sources[0];
     for (sources[1..]) |s| {
         stdx.debug.assert(s.store == first.store, "stack expects sources of one store", .{});
@@ -468,9 +445,9 @@ pub fn stack(sources: []const Source, axis_: anytype, tag: anytype) Source {
                 continue;
             }
             ctx.decompose(s._shape, piece);
-            for (ctx.placed.items) |placed| {
-                var moved = placed;
-                std.mem.copyBackwards(u64, moved.origin[a + 1 .. r + 1], placed.origin[a..r]);
+            for (ctx.axis_pieces.items) |axis_piece| {
+                var moved = axis_piece;
+                std.mem.copyBackwards(u64, moved.origin[a + 1 .. r + 1], axis_piece.origin[a..r]);
                 moved.origin[a] = i;
                 for (moved.dims.slice()) |*d| {
                     if (d.axis >= a) d.axis += 1;
@@ -485,52 +462,29 @@ pub fn stack(sources: []const Source, axis_: anytype, tag: anytype) Source {
 /// This source placed on `mesh_` by `partitioning`: a struct keyed by the
 /// source's tags (axes it does not name are replicated), or a
 /// `Sharding.Partitioning`. `.replicated` places it on every device without
-/// a mesh, and takes only `.{}`. Placement comes last: a placed source only
-/// binds (`bind`, `bindProgram`) or drops its placement (`unplaced`).
-pub fn withPartitioning(self: Source, comptime mesh_: @EnumLiteral(), partitioning: anytype) Source {
-    self.expectUnplaced("withPartitioning");
-    var res = self;
+/// a mesh, and takes only `.{}`. Placement comes last: a `Placed` only
+/// binds (`Placed.bind`, `bindProgram`) or drops its placement
+/// (`Placed.unplaced`).
+pub fn withPartitioning(self: Source, comptime mesh_: @EnumLiteral(), partitioning: anytype) Placed {
+    var placed = self._shape;
     if (mesh_ == .replicated) {
         const T = @TypeOf(partitioning);
         if (comptime !(stdx.meta.isStruct(T) and std.meta.fieldNames(T).len == 0))
             @compileError("Source.withPartitioning(.replicated, ...) takes .{}: a replicated source has no partitioning, got " ++ @typeName(T));
-        res._shape._sharding = .replicated;
+        placed._sharding = .replicated;
     } else {
-        res._shape = self._shape.withPartitioning(self.store.mesh(mesh_), partitioning);
+        placed = self._shape.withPartitioning(self.store.mesh(mesh_), partitioning);
     }
-    res._placed = true;
-    return res;
+    return .{ .store = self.store, .shape = placed, ._pieces = self._pieces };
 }
 
 /// This source in `placed`, a shape built elsewhere: its dimensions, tags
 /// and sharding. Like `reshape`, it moves no element: `placed` has the
-/// source's element count and dtype. Placement comes last: a placed source
-/// only binds (`bind`, `bindProgram`) or drops its placement (`unplaced`).
-pub fn as(self: Source, placed: Shape) Source {
-    self.expectUnplaced("as");
+/// source's element count and dtype. Placement comes last, as for
+/// `withPartitioning`.
+pub fn as(self: Source, placed: Shape) Placed {
     stdx.debug.assert(placed.dtype() == self.dtype() and placed.count() == self.count(), "Source {f} cannot be placed as {f}", .{ self._shape, placed });
-    var res = self;
-    res._shape = placed;
-    res._placed = true;
-    return res;
-}
-
-/// This source without its placement, for code that takes a placed source
-/// and reworks it by its placement (a layout per device), then places the
-/// result again.
-pub fn unplaced(self: Source) Source {
-    var res = self;
-    res._shape._sharding = .replicated;
-    res._placed = false;
-    return res;
-}
-
-/// Makes the model tensor the loader fills from this placed source, in
-/// default memory unless `View.setMemory` names another. The binding keeps
-/// the source as it is (`Bound`); the loader lowers it to bytes.
-pub fn bind(self: Source) Tensor {
-    self.expectPlaced("bind");
-    return self.store.bindNew(self._shape, .{ .load = .{ .source = self.asBound() } });
+    return .{ .store = self.store, .shape = placed, ._pieces = self._pieces };
 }
 
 /// Makes a model tensor of `output` that `program` computes while loading,
@@ -540,42 +494,46 @@ pub fn bind(self: Source) Tensor {
 /// compiles the program once for every tensor of an equal program over the
 /// same placed shapes; runs it, and frees the inputs. `forward` returns a
 /// tensor of `output`, placed alike, in default device memory.
-pub fn bindProgram(inputs: []const Source, output: Shape, program: anytype) Tensor {
+pub fn bindProgram(inputs: []const Placed, output: Shape, program: anytype) Tensor {
     stdx.debug.assert(inputs.len != 0, "Source.bindProgram: a program computing {f} needs an input", .{output});
     const store = inputs[0].store;
-    const arena = store.arena.allocator();
-    const bound_inputs = arena.alloc(Bound, inputs.len) catch oom();
-    for (inputs, bound_inputs) |input, *bound_input| {
-        input.expectPlaced("bindProgram");
+    for (inputs) |input| {
         stdx.debug.assert(input.store == store, "Source.bindProgram: the inputs of {f} come from different stores", .{output});
-        bound_input.* = input.asBound();
     }
+    const arena = store.arena.allocator();
+    const kept = arena.dupe(Placed, inputs) catch oom();
     const erased = TensorStore.Program.init(arena, program) catch oom();
-    return store.bindNew(output, .{ .compute = .{ .program = erased, .inputs = bound_inputs } });
+    return store.bindNew(output, .{ .compute = .{ .program = erased, .inputs = kept } });
 }
 
-/// `entry`, an empty checkpoint tensor, placed in `shape_`, for the `View`
-/// shorthands that bind a checkpoint tensor whole. A source of no element
-/// has no piece, so this one keeps one of `entry`, by which `Loader.start`
-/// names the key it rejects. It only binds: an op would read the piece as
-/// an element.
-pub fn emptyOf(store: *TensorStore, entry: *const safetensors.Tensor, shape_: Shape) Source {
-    stdx.debug.assert(entry.byteSize() == 0, "Source.emptyOf: {s} holds {d} bytes", .{ entry.name, entry.byteSize() });
-    const pieces = store.arena.allocator().dupe(Piece, &.{.{ .tensor = entry, .offset = 0, .origin = 0, .dims = &.{} }}) catch oom();
-    return .{ .store = store, ._shape = shape_, ._pieces = pieces, ._placed = true };
-}
-
-/// A placed source as a binding keeps it (`TensorStore.Binding`): its
-/// shape and pieces, without its store.
-pub const Bound = struct {
+/// A source with its placement (`withPartitioning`, `as`): the only thing
+/// that binds, and what a binding keeps (`TensorStore.Binding`).
+pub const Placed = struct {
+    store: *TensorStore,
     /// The placed shape, whose row-major elements the pieces index.
     shape: Shape,
     /// See `Source._pieces`.
     _pieces: []const Piece,
 
+    /// Makes the model tensor the loader fills from this source, in default
+    /// memory unless `View.setMemory` names another. The binding keeps the
+    /// source as it is; the loader lowers it to bytes (`lower`).
+    pub fn bind(self: Placed) Tensor {
+        return self.store.bindNew(self.shape, .{ .load = .{ .source = self } });
+    }
+
+    /// This source without its placement, for code that takes a placed
+    /// source and reworks it by its placement (a layout per device), then
+    /// places the result again.
+    pub fn unplaced(self: Placed) Source {
+        var shape_ = self.shape;
+        shape_._sharding = .replicated;
+        return .{ .store = self.store, ._shape = shape_, ._pieces = self._pieces };
+    }
+
     /// The checkpoint tensor this source is, whole and alone, if it is: one
     /// piece that reads all of its bits in order.
-    pub fn whole(self: Bound) ?*const safetensors.Tensor {
+    pub fn whole(self: Placed) ?*const safetensors.Tensor {
         if (self._pieces.len != 1) return null;
         const piece = self._pieces[0];
         if (piece.offset != 0 or piece.origin != 0 or piece.tensor.byteSize() != self.shape.byteSize()) return null;
@@ -586,28 +544,24 @@ pub const Bound = struct {
         };
         return if (contiguous) piece.tensor else null;
     }
+
+    /// The bytes the loader moves, one part per piece in piece order, in
+    /// `arena`; none for a source that reads no bytes. The one rule from a
+    /// source's bits to bytes: each part's dimensions outermost first, the
+    /// innermost run that is contiguous on both sides as its width.
+    /// `error.SubBytePosition` when a run starts or ends inside a byte.
+    pub fn lower(self: Placed, arena: std.mem.Allocator) error{ OutOfMemory, SubBytePosition }![]backend.LoadPart {
+        const parts = try arena.alloc(backend.LoadPart, self._pieces.len);
+        for (parts, self._pieces) |*part, piece| part.* = try lowerPiece(arena, self.shape, piece);
+        return parts;
+    }
 };
 
-fn asBound(self: Source) Bound {
-    return .{ .shape = self._shape, ._pieces = self._pieces };
-}
-
-fn expectUnplaced(self: Source, op: []const u8) void {
-    stdx.debug.assert(!self._placed, "Source.{s} on {f}, which is placed: placement comes last, after every op", .{ op, self });
-}
-
-fn expectPlaced(self: Source, terminal: []const u8) void {
-    stdx.debug.assert(self._placed, "Source.{s} takes a placed source: place {f} last, with withPartitioning or as", .{ terminal, self });
-}
-
-/// `piece` of a source placed in `shape`, in the bytes the loader moves:
-/// its dimensions outermost first, the innermost run that is contiguous on
-/// both sides as the width. The one rule from a source's bits to bytes;
-/// `error.SubBytePosition` when a run starts or ends inside a byte. The
-/// dimensions are allocated with `allocator`, none for one run.
-pub fn lowerPiece(allocator: std.mem.Allocator, shape_: Shape, piece: Piece) error{ OutOfMemory, SubBytePosition }!backend.LoadPart {
+/// `piece` of a source placed in `shape_` as one part (`Placed.lower`), its
+/// dimensions allocated with `allocator`, none for one run.
+fn lowerPiece(allocator: std.mem.Allocator, shape_: Shape, piece: Piece) error{ OutOfMemory, SubBytePosition }!backend.LoadPart {
     const ebits: u64 = shape_.dtype().bitSizeOf();
-    var lowered: stdx.BoundedArray(backend.LoadPart.Dim, max_dims) = .empty;
+    var lowered: stdx.BoundedArray(backend.Lattice.Dim, backend.max_part_dims) = .empty;
     for (piece.dims) |d| lowered.appendAssumeCapacity(.{ .count = d.count, .src_stride = d.stride, .dst_stride = d.step * ebits });
     var width: u64 = ebits;
     if (lowered.len != 0) {
@@ -625,27 +579,24 @@ pub fn lowerPiece(allocator: std.mem.Allocator, shape_: Shape, piece: Piece) err
         d.dst_stride /= 8;
     }
     if (!aligned) return error.SubBytePosition;
-    return .{
-        .source = piece.tensor,
+    return .{ .source = piece.tensor, .lattice = .{
         .src_offset = piece.offset / 8,
         .dst_offset = dst_bits / 8,
         .width = width / 8,
-        .dims = if (lowered.len == 0) &.{} else try allocator.dupe(backend.LoadPart.Dim, lowered.constSlice()),
-    };
+        .dims = if (lowered.len == 0) &.{} else try allocator.dupe(backend.Lattice.Dim, lowered.constSlice()),
+    } };
 }
 
 // The machinery. A piece is kept flat; an op that addresses axes rewrites it
-// in coordinates of the input shape (`Placed`, every dimension moving one
+// in coordinates of the input shape (`AxisPiece`, every dimension moving one
 // axis), moves the coordinates, then flattens it in the result's shape.
-
-const max_dims = 2 * constants.MAX_RANK;
 
 /// A piece while an op rewrites it, its dimensions inline.
 const Flat = struct {
     tensor: *const safetensors.Tensor,
     offset: u64,
     origin: u64,
-    dims: stdx.BoundedArray(Dim, max_dims) = .empty,
+    dims: stdx.BoundedArray(Dim, backend.max_part_dims) = .empty,
 
     fn fromPiece(piece: Piece) Flat {
         var flat: Flat = .{ .tensor = piece.tensor, .offset = piece.offset, .origin = piece.origin };
@@ -666,11 +617,11 @@ const Flat = struct {
 
 /// A piece in coordinates of a shape: the element at
 /// `origin + sum(j[k] * dims[k].step along dims[k].axis)`.
-const Placed = struct {
+const AxisPiece = struct {
     tensor: *const safetensors.Tensor,
     offset: u64,
     origin: [constants.MAX_RANK]u64 = @splat(0),
-    dims: stdx.BoundedArray(AxisDim, max_dims) = .empty,
+    dims: stdx.BoundedArray(AxisDim, backend.max_part_dims) = .empty,
 };
 
 const AxisDim = struct {
@@ -686,9 +637,9 @@ const Rewrite = struct {
     scratch: std.heap.ArenaAllocator,
     work: std.ArrayList(Flat) = .empty,
     /// The current piece in coordinates of its shape (`decompose`).
-    placed: std.ArrayList(Placed) = .empty,
+    axis_pieces: std.ArrayList(AxisPiece) = .empty,
     /// What `clip` kept of them.
-    clipped: std.ArrayList(Placed) = .empty,
+    clipped: std.ArrayList(AxisPiece) = .empty,
     out: std.ArrayList(Piece) = .empty,
 
     fn init(store: *TensorStore) Rewrite {
@@ -709,18 +660,18 @@ const Rewrite = struct {
         };
     }
 
-    /// Rewrites `piece` in coordinates of `shape` into `placed`, cutting it
-    /// where a dimension would carry from one axis into the next.
+    /// Rewrites `piece` in coordinates of `shape` into `axis_pieces`,
+    /// cutting it where a dimension would carry from one axis into the next.
     fn decompose(self: *Rewrite, shape_: Shape, piece: Piece) void {
         const scratch = self.scratch.allocator();
-        self.placed.clearRetainingCapacity();
+        self.axis_pieces.clearRetainingCapacity();
         self.clipped.clearRetainingCapacity();
         self.work.clearRetainingCapacity();
         self.work.append(scratch, .fromPiece(piece)) catch oom();
         const strides = elementStrides(shape_);
         while (self.work.pop()) |flat| {
             switch (placeFlat(shape_, strides, flat)) {
-                .placed => |placed| self.placed.append(scratch, placed) catch oom(),
+                .piece => |axis_piece| self.axis_pieces.append(scratch, axis_piece) catch oom(),
                 .overflow => |overflowing| self.cut(shape_, strides, flat, overflowing),
             }
         }
@@ -776,32 +727,32 @@ const Rewrite = struct {
         }
     }
 
-    /// Appends the elements of `placed` whose coordinate on `a` is in
+    /// Appends the elements of `axis_piece` whose coordinate on `a` is in
     /// `[lo, hi)` to `clipped`.
-    fn clip(self: *Rewrite, placed: Placed, a: u3, lo: u64, hi: u64) void {
+    fn clip(self: *Rewrite, axis_piece: AxisPiece, a: u3, lo: u64, hi: u64) void {
         const scratch = self.scratch.allocator();
         var span: u64 = 0;
         var outer: ?usize = null;
-        for (placed.dims.constSlice(), 0..) |d, k| {
+        for (axis_piece.dims.constSlice(), 0..) |d, k| {
             if (d.axis != a or d.count <= 1) continue;
             span += (d.count - 1) * d.step;
-            if (outer == null or d.step > placed.dims.get(outer.?).step) outer = k;
+            if (outer == null or d.step > axis_piece.dims.get(outer.?).step) outer = k;
         }
-        const o = placed.origin[a];
+        const o = axis_piece.origin[a];
         if (o >= lo and o + span < hi) {
-            self.clipped.append(scratch, placed) catch oom();
+            self.clipped.append(scratch, axis_piece) catch oom();
             return;
         }
         if (o + span < lo or o >= hi) return;
         // Cut along the outermost dimension on `a`: the steps whose whole
         // sub-lattice is inside stay one piece, the partial ones recurse.
         const k = outer.?;
-        const d = placed.dims.get(k);
+        const d = axis_piece.dims.get(k);
         const inner = span - (d.count - 1) * d.step;
         const full_lo: u64 = if (o >= lo) 0 else std.math.divCeil(u64, lo - o, d.step) catch unreachable;
         const full_hi: u64 = if (o + inner >= hi) 0 else @min(d.count, (hi - 1 - inner - o) / d.step + 1);
         if (full_lo < full_hi) {
-            var kept = placed;
+            var kept = axis_piece;
             kept.dims.buffer[k].count = full_hi - full_lo;
             kept.origin[a] = o + full_lo * d.step;
             kept.offset += full_lo * d.stride;
@@ -816,7 +767,7 @@ const Rewrite = struct {
         for (partial) |range| {
             var j = range[0];
             while (j < range[1]) : (j += 1) {
-                var part = placed;
+                var part = axis_piece;
                 part.origin[a] = o + j * d.step;
                 part.offset += j * d.stride;
                 _ = part.dims.orderedRemove(k);
@@ -825,12 +776,12 @@ const Rewrite = struct {
         }
     }
 
-    /// Flattens `placed` in `res_shape` into the result.
-    fn emit(self: *Rewrite, res_shape: Shape, placed: Placed) void {
+    /// Flattens `axis_piece` in `res_shape` into the result.
+    fn emit(self: *Rewrite, res_shape: Shape, axis_piece: AxisPiece) void {
         const strides = elementStrides(res_shape);
-        var flat: Flat = .{ .tensor = placed.tensor, .offset = placed.offset, .origin = 0 };
-        for (0..res_shape.rank()) |b| flat.origin += placed.origin[b] * strides[b];
-        for (placed.dims.constSlice()) |d| {
+        var flat: Flat = .{ .tensor = axis_piece.tensor, .offset = axis_piece.offset, .origin = 0 };
+        for (0..res_shape.rank()) |b| flat.origin += axis_piece.origin[b] * strides[b];
+        for (axis_piece.dims.constSlice()) |d| {
             if (d.count <= 1) continue;
             flat.dims.append(.{ .count = d.count, .step = d.step * strides[d.axis], .stride = d.stride }) catch tooManyDims();
         }
@@ -840,7 +791,7 @@ const Rewrite = struct {
     /// Adds `flat` to the result, its dimensions outermost first and merged
     /// where one continues the other.
     fn emitFlat(self: *Rewrite, flat: Flat) void {
-        var sorted: stdx.BoundedArray(Dim, max_dims) = .empty;
+        var sorted: stdx.BoundedArray(Dim, backend.max_part_dims) = .empty;
         for (flat.dims.constSlice()) |d| {
             if (d.count > 1) sorted.appendAssumeCapacity(d);
         }
@@ -849,7 +800,7 @@ const Rewrite = struct {
                 return lhs.step > rhs.step;
             }
         }.moreOuter);
-        var merged: stdx.BoundedArray(Dim, max_dims) = .empty;
+        var merged: stdx.BoundedArray(Dim, backend.max_part_dims) = .empty;
         for (sorted.constSlice()) |d| {
             if (merged.len != 0) {
                 const last = &merged.slice()[merged.len - 1];
@@ -871,7 +822,7 @@ const Rewrite = struct {
 };
 
 const Placement = union(enum) {
-    placed: Placed,
+    piece: AxisPiece,
     /// The axis some coordinate would run past.
     overflow: u3,
 };
@@ -880,20 +831,20 @@ const Placement = union(enum) {
 /// axis: each dimension moves the outermost axis its step is a multiple of.
 fn placeFlat(shape_: Shape, strides: [constants.MAX_RANK]u64, flat: Flat) Placement {
     const r = shape_.rank();
-    var placed: Placed = .{ .tensor = flat.tensor, .offset = flat.offset };
-    for (0..r) |b| placed.origin[b] = (flat.origin / strides[b]) % @as(u64, @intCast(shape_.dim(b)));
-    var extent = placed.origin;
+    var axis_piece: AxisPiece = .{ .tensor = flat.tensor, .offset = flat.offset };
+    for (0..r) |b| axis_piece.origin[b] = (flat.origin / strides[b]) % @as(u64, @intCast(shape_.dim(b)));
+    var extent = axis_piece.origin;
     for (flat.dims.constSlice()) |d| {
         if (d.count <= 1) continue;
         const b = axisOfStep(r, strides, d.step);
         const step = d.step / strides[b];
-        placed.dims.appendAssumeCapacity(.{ .count = d.count, .axis = b, .step = step, .stride = d.stride });
+        axis_piece.dims.appendAssumeCapacity(.{ .count = d.count, .axis = b, .step = step, .stride = d.stride });
         extent[b] += (d.count - 1) * step;
     }
     for (0..r) |b| {
         if (extent[b] >= @as(u64, @intCast(shape_.dim(b)))) return .{ .overflow = @intCast(b) };
     }
-    return .{ .placed = placed };
+    return .{ .piece = axis_piece };
 }
 
 fn axisOfStep(r: u4, strides: [constants.MAX_RANK]u64, step: u64) u3 {
@@ -928,7 +879,7 @@ fn oom() noreturn {
 }
 
 fn tooManyDims() noreturn {
-    std.debug.panic("a Source piece needs more than {d} dimensions", .{max_dims});
+    std.debug.panic("a Source piece needs more than {d} dimensions", .{backend.max_part_dims});
 }
 
 // Tests: every op is checked against the same function run as a program
@@ -975,24 +926,24 @@ const TestCheckpoint = struct {
     }
 
     /// The bytes the loader would assemble for `tensor`, placed on the host:
-    /// each piece lowered as the loader lowers it (`lowerPiece`), the bytes
-    /// no piece covers zero. Fails when a piece writes a byte another wrote,
-    /// so that every byte is written exactly once, by a piece or the zero
-    /// fill: the loader relies on disjoint pieces and does not check them.
+    /// its source lowered as the loader lowers it (`Placed.lower`), the
+    /// bytes no part covers zero. Fails when a part writes a byte another
+    /// wrote, so that every byte is written exactly once, by a part or the
+    /// zero fill: the loader relies on disjoint pieces and does not check
+    /// them.
     fn assemble(self: *TestCheckpoint, tensor: Tensor) ![]u8 {
-        const source = self.store.bindingOf(tensor.id).?.load.source;
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const parts = try self.store.bindingOf(tensor.id).?.load.source.lower(arena.allocator());
         const out = try self.allocator.alloc(u8, tensor.shape().byteSize());
         errdefer self.allocator.free(out);
         @memset(out, 0);
-        const written = try self.allocator.alloc(bool, out.len);
-        defer self.allocator.free(written);
+        const written = try arena.allocator().alloc(bool, out.len);
         @memset(written, false);
-        for (source._pieces) |piece| {
-            const part = try lowerPiece(self.allocator, source.shape, piece);
-            defer self.allocator.free(part.dims);
+        for (parts) |part| {
             const src = self.bytes.get(part.source.name).?;
-            const width: usize = @intCast(part.width);
-            var runs: backend.Lattice.Cursor = .init(part.lattice(), 0, part.lattice().runs());
+            const width: usize = @intCast(part.lattice.width);
+            var runs: backend.Lattice.Cursor = .init(part.lattice, 0, part.lattice.runs());
             while (runs.next()) |run| {
                 const at: usize = @intCast(run.dst);
                 for (written[at..][0..width]) |*byte| {
@@ -1256,14 +1207,6 @@ test "every Source op places the bytes the same Tensor ops compute" {
     try std.testing.expect(ran > 0);
 }
 
-/// The byte parts the loader lowers `tensor`'s pieces to, in piece order.
-fn testParts(arena: std.mem.Allocator, store: *const TensorStore, tensor: Tensor) ![]backend.LoadPart {
-    const source = store.bindingOf(tensor.id).?.load.source;
-    const parts = try arena.alloc(backend.LoadPart, source._pieces.len);
-    for (parts, source._pieces) |*part, piece| part.* = try lowerPiece(arena, source.shape, piece);
-    return parts;
-}
-
 test "a source binds as its pieces, which the loader lowers to byte parts" {
     var checkpoint: TestCheckpoint = undefined;
     try checkpoint.init(std.testing.allocator, &.{
@@ -1279,38 +1222,39 @@ test "a source binds as its pieces, which the loader lowers to byte parts" {
     const entries = [_]*const safetensors.Tensor{ view.get("q").?, view.get("k").?, view.get("v").? };
 
     // Relabels keep the whole tensor, one run of it; only `bind` records
-    // anything.
+    // anything, and the binding keeps the placed source as it is.
     const relabeled = q.splitAxis(.row, .{ .h = 2, .hd = 2 }).merge(.{ .row = .{ .h, .hd } }).withPartitioning(.replicated, .{});
     try std.testing.expectEqual(@as(usize, 0), checkpoint.store.id_to_sources.count());
-    const plain = relabeled.bind();
-    try std.testing.expectEqual(entries[0], checkpoint.store.bindingOf(plain.id).?.load.source.whole().?);
-    try std.testing.expectEqualDeep(&[_]backend.LoadPart{.whole(entries[0])}, try testParts(arena.allocator(), &checkpoint.store, plain));
+    const bound = checkpoint.store.bindingOf(relabeled.bind().id).?.load.source;
+    try std.testing.expectEqual(relabeled._pieces, bound._pieces);
+    try std.testing.expectEqual(entries[0], bound.whole().?);
+    try std.testing.expectEqualDeep(&[_]backend.LoadPart{.whole(entries[0])}, try bound.lower(arena.allocator()));
     // One checkpoint tensor read twice is two pieces of it.
-    const twice = Source.concatenate(&.{ q, view.source("q", .{ .row, .col }) }, .row).withPartitioning(.replicated, .{}).bind();
-    try std.testing.expectEqual(null, checkpoint.store.bindingOf(twice.id).?.load.source.whole());
+    const twice = Source.concatenate(&.{ q, view.source("q", .{ .row, .col }) }, .row).withPartitioning(.replicated, .{});
+    try std.testing.expectEqual(null, twice.whole());
     try std.testing.expectEqualDeep(&[_]backend.LoadPart{
-        .{ .source = entries[0], .dst_offset = 0, .width = 24 },
-        .{ .source = entries[0], .dst_offset = 24, .width = 24 },
-    }, try testParts(arena.allocator(), &checkpoint.store, twice));
+        .{ .source = entries[0], .lattice = .{ .dst_offset = 0, .width = 24 } },
+        .{ .source = entries[0], .lattice = .{ .dst_offset = 24, .width = 24 } },
+    }, try twice.lower(arena.allocator()));
 
     // q, k and v in two groups: each member is one part of two runs, its
     // rows of a group side by side with the others'.
     const members = [_]Source{ q, view.source("k", .{ .row, .col }), view.source("v", .{ .row, .col }) };
-    const fused = cases.interleave(Source, &members, 2).withPartitioning(.replicated, .{}).bind();
+    const fused = cases.interleave(Source, &members, 2).withPartitioning(.replicated, .{});
     try std.testing.expectEqualDeep(&[_]backend.LoadPart{
-        .{ .source = entries[0], .src_offset = 0, .dst_offset = 0, .width = 12, .dims = &.{.{ .count = 2, .src_stride = 12, .dst_stride = 24 }} },
-        .{ .source = entries[1], .src_offset = 0, .dst_offset = 12, .width = 6, .dims = &.{.{ .count = 2, .src_stride = 6, .dst_stride = 24 }} },
-        .{ .source = entries[2], .src_offset = 0, .dst_offset = 18, .width = 6, .dims = &.{.{ .count = 2, .src_stride = 6, .dst_stride = 24 }} },
-    }, try testParts(arena.allocator(), &checkpoint.store, fused));
+        .{ .source = entries[0], .lattice = .{ .src_offset = 0, .dst_offset = 0, .width = 12, .dims = &.{.{ .count = 2, .src_stride = 12, .dst_stride = 24 }} } },
+        .{ .source = entries[1], .lattice = .{ .src_offset = 0, .dst_offset = 12, .width = 6, .dims = &.{.{ .count = 2, .src_stride = 6, .dst_stride = 24 }} } },
+        .{ .source = entries[2], .lattice = .{ .src_offset = 0, .dst_offset = 18, .width = 6, .dims = &.{.{ .count = 2, .src_stride = 6, .dst_stride = 24 }} } },
+    }, try fused.lower(arena.allocator()));
 
     // A transpose is one part of single elements.
-    const transposed = q.transpose(.{}).withPartitioning(.replicated, .{}).bind();
+    const transposed = q.transpose(.{}).withPartitioning(.replicated, .{});
     try std.testing.expectEqualDeep(&[_]backend.LoadPart{
-        .{ .source = entries[0], .src_offset = 0, .dst_offset = 0, .width = 2, .dims = &.{
+        .{ .source = entries[0], .lattice = .{ .src_offset = 0, .dst_offset = 0, .width = 2, .dims = &.{
             .{ .count = 3, .src_stride = 2, .dst_stride = 8 },
             .{ .count = 4, .src_stride = 6, .dst_stride = 2 },
-        } },
-    }, try testParts(arena.allocator(), &checkpoint.store, transposed));
+        } } },
+    }, try transposed.lower(arena.allocator()));
 }
 
 test "assembling fails on a byte two pieces write" {
@@ -1320,7 +1264,7 @@ test "assembling fails on a byte two pieces write" {
     // Only a hand-built binding can repeat a piece.
     const q = checkpoint.store.view().source("q", .{ .row, .col });
     const pieces = try checkpoint.store.arena.allocator().dupe(Piece, &.{ q._pieces[0], q._pieces[0] });
-    const tensor = checkpoint.store.bindNew(q.shape(), .{ .load = .{ .source = .{ .shape = q.shape(), ._pieces = pieces } } });
+    const tensor = checkpoint.store.bindNew(q.shape(), .{ .load = .{ .source = .{ .store = &checkpoint.store, .shape = q.shape(), ._pieces = pieces } } });
     try std.testing.expectError(error.DoubleWrite, checkpoint.assemble(tensor));
 }
 
@@ -1344,7 +1288,6 @@ test "a source is placed last, by as or withPartitioning, and binds in its place
     try std.testing.expectEqual(null, replicated.shape()._sharding.mesh);
     // `unplaced` keeps the placed dimensions and tags, without the sharding.
     const dropped = placed_source.unplaced();
-    try std.testing.expect(!dropped._placed);
     try std.testing.expect(dropped.shape().eqlWithTags(placed));
     try std.testing.expectEqual(null, dropped.shape()._sharding.mesh);
 
@@ -1373,15 +1316,15 @@ test "lattices stay one piece per source at checkpoint sizes" {
     // One row per group: two pieces, each 14336 runs of one row.
     const finest = cases.interleave(Source, &members, 14336);
     try std.testing.expectEqual(@as(usize, 2), finest._pieces.len);
-    for (try testParts(arena.allocator(), &store, finest.withPartitioning(.replicated, .{}).bind())) |part| {
-        try std.testing.expectEqual(@as(u64, 14336), part.lattice().runs());
-        try std.testing.expectEqual(@as(u64, 8192), part.width);
+    for (try finest.withPartitioning(.replicated, .{}).lower(arena.allocator())) |part| {
+        try std.testing.expectEqual(@as(u64, 14336), part.lattice.runs());
+        try std.testing.expectEqual(@as(u64, 8192), part.lattice.width);
     }
     // One group per device of four: four runs of 28 MiB each.
     const per_shard = cases.interleave(Source, &members, 4);
-    for (try testParts(arena.allocator(), &store, per_shard.withPartitioning(.replicated, .{}).bind())) |part| {
-        try std.testing.expectEqual(@as(u64, 4), part.lattice().runs());
-        try std.testing.expectEqual(@as(u64, 3584 * 8192), part.width);
+    for (try per_shard.withPartitioning(.replicated, .{}).lower(arena.allocator())) |part| {
+        try std.testing.expectEqual(@as(u64, 4), part.lattice.runs());
+        try std.testing.expectEqual(@as(u64, 3584 * 8192), part.lattice.width);
     }
     // Slicing through the interleave cuts at most a few pieces.
     const sliced = finest.slice(.row, .{ .start = 1001, .end = 20001 });

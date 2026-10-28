@@ -70,12 +70,16 @@ pub const State = enum(u8) { undecided, buffered, direct };
 const max_iovecs: usize = if (@TypeOf(std.posix.IOV_MAX) == void) 64 else std.posix.IOV_MAX;
 const direct_flag: usize = @as(u32, @bitCast(std.posix.O{ .DIRECT = true }));
 
-/// Sets the flag; a filesystem without direct I/O refuses it.
+/// Sets the flag on a descriptor opened for reading only, since the flag
+/// constrains writes too: one opened for writing is refused with `BADF`. A
+/// filesystem without direct I/O refuses the flag.
 pub fn enable(fd: std.posix.fd_t) linux.E {
     const current = switch (getStatusFlags(fd)) {
         .flags => |flags| flags,
         .err => |err| return err,
     };
+    const status: std.posix.O = @bitCast(@as(u32, @truncate(current)));
+    if (status.ACCMODE != .RDONLY) return .BADF;
     return setStatusFlags(fd, current | direct_flag);
 }
 

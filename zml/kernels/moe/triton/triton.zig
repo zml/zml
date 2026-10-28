@@ -712,7 +712,7 @@ test "FP8 routed GEMM with bias matches dequantized weights" {
                 var runner = try exe.runner(allocator);
                 defer runner.deinit(allocator);
                 runner.run(io, .{ buffers[0], buffers[1], buffers[2], buffers[3], buffers[4], buffers[5] }, .{&output}, .{ .wait = true });
-                defer zml.Buffer.deinitAll(Local.Outputs, &output);
+                defer zml.Buffer.deinitAll(&output);
                 zml.testing.expectClose(io, output.expected, output.actual, .{ .absolute_tolerance = 0.03125, .relative_tolerance = 0.01 }) catch |err| {
                     log.warn("FP8 routed GEMM failed for scheme={s}, quantize_input={}, tokens={}", .{ @tagName(scheme), quantize_input, tokens });
                     return err;

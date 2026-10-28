@@ -1,7 +1,8 @@
 //! A minimal HTTP origin for the VFS and loader tests: one object per path,
 //! range reads, and injectable failures and rate limiting. Exported as
-//! `VFS.MockServer` so the loader's own tests can serve a fixture over the
-//! `http` backend; nothing outside a test build references it.
+//! `VFS.MockServer` so tests above this layer (the loader's, safetensors')
+//! can serve a fixture over a real socket; nothing outside a test build
+//! references it.
 
 const std = @import("std");
 
@@ -21,10 +22,6 @@ pub const MockServer = struct {
         /// At most `gets` GETs per `per_ms` milliseconds; the rest are
         /// throttled.
         window: ?struct { gets: usize, per_ms: i64 } = null,
-
-        fn any(self: Throttle) bool {
-            return self.first_gets != 0 or self.first_heads != 0 or self.always or self.window != null;
-        }
     };
 
     /// One extra path the server serves beside `/object`.
@@ -33,6 +30,9 @@ pub const MockServer = struct {
     /// A path answered with `status` and no object, on purpose.
     pub const Refusal = struct { path: []const u8, status: std.http.Status };
 
+    /// A path answered with a 302 to `location`, for HEAD and GET alike.
+    pub const Redirect = struct { path: []const u8, location: []const u8 };
+
     const Options = struct {
         fail_first_gets: usize = 0,
         barrier_gets: usize = 0,
@@ -40,23 +40,24 @@ pub const MockServer = struct {
         objects: []const Object = &.{},
         /// Paths answered with a status of their own (404, 403, ...).
         refusals: []const Refusal = &.{},
+        redirects: []const Redirect = &.{},
     };
 
     tcp: std.Io.net.Server,
+    /// The accept loop and its connections, from `start` to `stop`.
+    group: std.Io.Group = .init,
     object: []const u8,
     fail_first_gets: usize,
     barrier_gets: usize,
     throttle: Throttle,
     objects: []const Object,
     refusals: []const Refusal,
+    redirects: []const Redirect,
     get_barrier: std.Io.Event = .unset,
     head_requests: std.atomic.Value(usize) = .init(0),
     get_requests: std.atomic.Value(usize) = .init(0),
-    throttled_requests: std.atomic.Value(usize) = .init(0),
     active_gets: std.atomic.Value(usize) = .init(0),
     peak_gets: std.atomic.Value(usize) = .init(0),
-    attempt_header_gets: std.atomic.Value(usize) = .init(0),
-    peak_attempt: std.atomic.Value(usize) = .init(0),
     first_error: std.atomic.Value(u16) = .init(0),
     /// Awake nanoseconds of the first throttled answer and of the first
     /// answer served after one; zero until they happen.
@@ -81,13 +82,33 @@ pub const MockServer = struct {
             .throttle = opts.throttle,
             .objects = opts.objects,
             .refusals = opts.refusals,
+            .redirects = opts.redirects,
         };
     }
 
-    /// `peak_gets` is a monotone maximum; a test that measures two phases
-    /// clears it between them.
-    pub fn resetPeak(self: *MockServer) void {
-        self.peak_gets.store(0, .release);
+    /// Serves on a task of its own until `stop`. The server must not move
+    /// from here on.
+    pub fn start(self: *MockServer, io: std.Io) !void {
+        try self.group.concurrent(io, run, .{ self, io });
+    }
+
+    /// Stops serving, each connection canceled and joined, and returns the
+    /// first error the server met.
+    pub fn stop(self: *MockServer, io: std.Io) !void {
+        self.group.cancel(io);
+        const error_code = self.first_error.load(.acquire);
+        if (error_code != 0) return @errorFromInt(error_code);
+    }
+
+    /// Stops serving if `stop` did not, and closes the listening socket.
+    pub fn deinit(self: *MockServer, io: std.Io) void {
+        self.group.cancel(io);
+        self.tcp.deinit(io);
+    }
+
+    /// The path of `/object` for an `http` backend: `127.0.0.1:<port>/object`.
+    pub fn path(self: *const MockServer, buffer: []u8) ![]const u8 {
+        return std.fmt.bufPrint(buffer, "127.0.0.1:{d}/object", .{self.port()});
     }
 
     fn bodyFor(self: *const MockServer, target: []const u8) ?[]const u8 {
@@ -101,6 +122,13 @@ pub const MockServer = struct {
     fn refusalFor(self: *const MockServer, target: []const u8) ?std.http.Status {
         for (self.refusals) |refusal| {
             if (std.mem.eql(u8, refusal.path, target)) return refusal.status;
+        }
+        return null;
+    }
+
+    fn redirectFor(self: *const MockServer, target: []const u8) ?[]const u8 {
+        for (self.redirects) |redirect| {
+            if (std.mem.eql(u8, redirect.path, target)) return redirect.location;
         }
         return null;
     }
@@ -126,7 +154,6 @@ pub const MockServer = struct {
     }
 
     fn respondThrottled(self: *MockServer, io: std.Io, request: *std.http.Server.Request) !void {
-        _ = self.throttled_requests.fetchAdd(1, .monotonic);
         _ = self.first_throttle_ns.cmpxchgStrong(0, nowNs(io), .release, .monotonic);
         var headers: [2]std.http.Header = undefined;
         var header_count: usize = 0;
@@ -159,11 +186,6 @@ pub const MockServer = struct {
 
     fn recordError(self: *MockServer, err: anyerror) void {
         _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
-    }
-
-    pub fn check(self: *const MockServer) !void {
-        const error_code = self.first_error.load(.acquire);
-        if (error_code != 0) return @errorFromInt(error_code);
     }
 
     fn run(self: *MockServer, io: std.Io) std.Io.Cancelable!void {
@@ -206,6 +228,15 @@ pub const MockServer = struct {
         var server: std.http.Server = .init(&reader.interface, &writer.interface);
         var request = try server.receiveHead();
 
+        if (self.redirectFor(request.head.target)) |location| {
+            try request.respond("", .{
+                .status = .found,
+                .keep_alive = false,
+                .extra_headers = &.{.{ .name = "Location", .value = location }},
+            });
+            return;
+        }
+
         const body = self.bodyFor(request.head.target) orelse {
             const refusal = self.refusalFor(request.head.target);
             try request.respond("refused", .{
@@ -231,10 +262,6 @@ pub const MockServer = struct {
                 const active = self.active_gets.fetchAdd(1, .acq_rel) + 1;
                 _ = self.peak_gets.fetchMax(active, .acq_rel);
                 defer _ = self.active_gets.fetchSub(1, .release);
-                if (requestHeader(&request, "x-attempt")) |value| {
-                    _ = self.attempt_header_gets.fetchAdd(1, .monotonic);
-                    _ = self.peak_attempt.fetchMax(try std.fmt.parseInt(usize, value, 10), .monotonic);
-                }
 
                 if (self.barrier_gets != 0 and get_ordinal <= self.barrier_gets) {
                     if (get_ordinal == self.barrier_gets) self.get_barrier.set(io);
@@ -286,14 +313,6 @@ pub const MockServer = struct {
         end: usize,
     };
 
-    fn requestHeader(request: *const std.http.Server.Request, name: []const u8) ?[]const u8 {
-        var headers = request.iterateHeaders();
-        while (headers.next()) |header| {
-            if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
-        }
-        return null;
-    }
-
     fn parseRequestRange(request: *const std.http.Server.Request, object_len: usize) !Range {
         var value: ?[]const u8 = null;
         var headers = request.iterateHeaders();
@@ -324,25 +343,3 @@ pub const MockServer = struct {
         return result;
     }
 };
-
-pub fn startMockServer(
-    server: *MockServer,
-    group: *std.Io.Group,
-    io: std.Io,
-) !void {
-    try group.concurrent(io, MockServer.run, .{ server, io });
-}
-
-pub fn cleanupMockServer(
-    server: *MockServer,
-    group: *std.Io.Group,
-    io: std.Io,
-    joined: bool,
-) void {
-    if (!joined) group.cancel(io);
-    server.tcp.deinit(io);
-}
-
-pub fn serverPath(buffer: []u8, server: *const MockServer) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "127.0.0.1:{d}/object", .{server.port()});
-}

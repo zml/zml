@@ -6,9 +6,8 @@ const range_read = @import("range_read.zig");
 const request = @import("request.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
-const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
-const log = @import("base.zig").scopedLog(.@"zml/vfs/hf");
+const log = std.log.scoped(.@"zml/vfs/hf");
 
 pub const API = struct {
     const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}?expand=false&recursive=true&limit=1000";
@@ -95,13 +94,7 @@ pub const HF = struct {
         pos: u64,
         size: u64,
 
-        pub fn init(
-            allocator: std.mem.Allocator,
-            handle_type: Type,
-            uri: []const u8,
-            download_url: ?[]const u8,
-            size: u64,
-        ) !Handle {
+        pub fn init(allocator: std.mem.Allocator, handle_type: Type, uri: []const u8, download_url: ?[]const u8, size: u64) !Handle {
             const owned_uri = try allocator.dupe(u8, uri);
             errdefer allocator.free(owned_uri);
             return .{
@@ -120,14 +113,17 @@ pub const HF = struct {
     };
 
     allocator: std.mem.Allocator,
+    /// Guards the handle table and the handles' download URLs.
     mutex: std.Io.Mutex = .init,
-    client: *std.http.Client,
     authorization: std.http.Client.Request.Headers.Value,
     governor: request.Governor,
-    read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
+    /// Guards `trees`. A tree fetch is a governed request that may wait out
+    /// a hold or retry for minutes, so it runs under this lock, not under
+    /// `mutex`, which every read takes.
+    trees_mutex: std.Io.Mutex = .init,
     trees: std.StringHashMapUnmanaged(std.ArrayList(TreeNode)) = .{},
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
 
@@ -135,7 +131,6 @@ pub const HF = struct {
         var self: HF = .{
             .allocator = allocator,
             .base = .init(inner),
-            .client = http_client,
             .authorization = if (options.token) |token| blk: {
                 break :blk .{
                     .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{std.mem.trim(u8, token, " \t\n\r")}),
@@ -143,7 +138,7 @@ pub const HF = struct {
             } else blk: {
                 break :blk .default;
             },
-            .governor = .init(options.retry),
+            .governor = .init(inner, http_client, "hf", .server_failure, options.retry),
         };
         errdefer switch (self.authorization) {
             .default, .omit => {},
@@ -179,7 +174,7 @@ pub const HF = struct {
     }
 
     pub fn deinit(self: *HF) void {
-        self.read_stats.logTotals("hf");
+        self.governor.logTotals();
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -291,18 +286,19 @@ pub const HF = struct {
         return try std.fmt.bufPrint(out_buffer, "{s}/{s}", .{ trimmed_uri, trimmed_sub_path });
     }
 
-    /// The repository's listing, fetched once. The map is read and written
-    /// under `self.mutex`, since an insert may move its entries; the nodes
-    /// themselves never move once fetched, so the returned slice stays valid
-    /// without the lock.
+    /// The repository's listing, fetched once. The lock is held across the
+    /// fetch, so every open, stat or listing of this backend waits for it,
+    /// cached or not. The map is read and written under `trees_mutex`, since
+    /// an insert may move its entries; the nodes themselves never move once
+    /// fetched, so the returned slice stays valid without the lock.
     fn getOrFetchTree(self: *HF, repo: Repo) ![]const TreeNode {
         const key = repo.toKey();
 
         var cache_key_buffer: [512]u8 = undefined;
         const cache_key_lookup = try key.format(&cache_key_buffer);
 
-        self.mutex.lockUncancelable(self.base.inner);
-        defer self.mutex.unlock(self.base.inner);
+        try self.trees_mutex.lock(self.base.inner);
+        defer self.trees_mutex.unlock(self.base.inner);
 
         if (self.trees.get(cache_key_lookup)) |tree| return tree.items;
 
@@ -316,9 +312,8 @@ pub const HF = struct {
     }
 
     /// The repository listing, through the governed loop like every other
-    /// request. It runs under `self.mutex` from `getOrFetchTree`, which is
-    /// fine: the hold is a deadline, not a permit, so a concurrent open
-    /// waits on the mutex for the hold it would have waited on anyway.
+    /// request. It runs under `trees_mutex` from `getOrFetchTree`, never
+    /// under `mutex`, so reads of open files go on while it waits.
     fn fetchTreeFromAPI(self: *HF, repo: Repo) !std.ArrayList(TreeNode) {
         var url_buffer: [8 * 1024]u8 = undefined;
         const url = try std.fmt.bufPrint(&url_buffer, API.TREE_URL_TEMPLATE, .{
@@ -331,12 +326,7 @@ pub const HF = struct {
         log.info("Fetching from HF: {s}", .{url});
 
         var fetch: TreeFetch = .{ .hf = self, .uri = uri };
-        return request.perform(std.ArrayList(TreeNode), self.requestContext(), .{
-            .backend = "hf",
-            .target = url,
-            .unavailable = .server_failure,
-            .key = request.authorityOf(uri),
-        }, &fetch, TreeFetch.attempt);
+        return request.perform(std.ArrayList(TreeNode), &self.governor, .{ .target = url, .key = request.authorityOf(uri) }, &fetch, TreeFetch.attempt);
     }
 
     const TreeFetch = struct {
@@ -350,14 +340,13 @@ pub const HF = struct {
                     .accept_encoding = .{ .override = "identity" },
                     .authorization = self.hf.authorization,
                 },
-                .accept = .{ .statuses = request.open_statuses },
+                .open = true,
                 .redirects = .follow,
                 .head_buffer = &head_buffer,
             }, self, TreeFetch.consume);
         }
 
         fn consume(self: *TreeFetch, res: *std.http.Client.Response) anyerror!std.ArrayList(TreeNode) {
-            if (request.openStatus(res.head.status)) |err| return err;
             const allocator = self.hf.allocator;
             const body = try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse return error.MissingContentLength);
             defer allocator.free(body);
@@ -401,12 +390,7 @@ pub const HF = struct {
             var hop: ResolveHop = .{ .hf = self, .uri = uri, .url = url };
             // Each hop is one governed request: a CDN that rate limits the
             // HEAD holds the backend exactly as a throttled GET does.
-            const location = try request.perform(?[]const u8, self.requestContext(), .{
-                .backend = "hf",
-                .target = target,
-                .unavailable = .server_failure,
-                .key = request.authorityOf(uri),
-            }, &hop, ResolveHop.attempt) orelse
+            const location = try request.perform(?[]const u8, &self.governor, .{ .target = target, .key = request.authorityOf(uri) }, &hop, ResolveHop.attempt) orelse
                 return std.fmt.bufPrint(out_buffer, "{s}", .{url});
 
             if (remaining_redirects == 0) return error.TooManyHttpRedirects;
@@ -440,7 +424,7 @@ pub const HF = struct {
                     // Credentials only travel to the Hub itself.
                     .authorization = if (std.mem.startsWith(u8, self.url, "https://huggingface.co/")) self.hf.authorization else .omit,
                 },
-                .accept = .{ .statuses = request.open_statuses },
+                .open = true,
                 .redirects = .surface,
                 .head_buffer = &head_buffer,
             }, self, ResolveHop.consume);
@@ -448,7 +432,6 @@ pub const HF = struct {
 
         fn consume(self: *ResolveHop, res: *std.http.Client.Response) anyerror!?[]const u8 {
             if (res.head.status.class() == .success) return null;
-            if (request.openStatus(res.head.status)) |err| return err;
             const location = res.head.location orelse return error.HttpRedirectLocationMissing;
             if (location.len > self.location.len) return error.HttpRedirectLocationOversize;
             @memcpy(self.location[0..location.len], location);
@@ -585,7 +568,7 @@ pub const HF = struct {
     }
 
     fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
@@ -611,13 +594,13 @@ pub const HF = struct {
     }
 
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.OpenError.SystemResources;
 
         const repo = Repo.parse(full_path) catch return std.Io.Dir.OpenError.BadPathName;
-        const tree = self.getOrFetchTree(repo) catch |err| return request.openFailure("hf", full_path, err);
+        const tree = self.getOrFetchTree(repo) catch |err| return self.governor.openFailure(full_path, err);
         const size = getSizeFromTree(tree, repo.path) orelse return std.Io.Dir.OpenError.FileNotFound;
 
         const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
@@ -627,7 +610,7 @@ pub const HF = struct {
     }
 
     fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getDirHandle(dir);
 
         return .{
@@ -644,13 +627,13 @@ pub const HF = struct {
     }
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
 
         const repo = Repo.parse(full_path) catch return std.Io.Dir.StatFileError.Unexpected;
-        const tree = self.getOrFetchTree(repo) catch |err| return request.openFailure("hf", full_path, err);
+        const tree = self.getOrFetchTree(repo) catch |err| return self.governor.openFailure(full_path, err);
         // The repository itself is a directory.
         if (repo.path.len == 0) return std.Io.Dir.StatFileError.IsDir;
         const node = findNode(tree, repo.path) orelse return std.Io.Dir.StatFileError.FileNotFound;
@@ -670,13 +653,13 @@ pub const HF = struct {
     }
 
     fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
 
         const repo = Repo.parse(full_path) catch return std.Io.Dir.AccessError.FileNotFound;
-        const tree = self.getOrFetchTree(repo) catch |err| return request.openFailure("hf", full_path, err);
+        const tree = self.getOrFetchTree(repo) catch |err| return self.governor.openFailure(full_path, err);
 
         if (repo.path.len == 0) return;
 
@@ -685,18 +668,18 @@ pub const HF = struct {
     }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
 
         const repo = Repo.parse(full_path) catch return std.Io.File.OpenError.BadPathName;
-        const tree = self.getOrFetchTree(repo) catch |err| return request.openFailure("hf", full_path, err);
+        const tree = self.getOrFetchTree(repo) catch |err| return self.governor.openFailure(full_path, err);
         const size = getSizeFromTree(tree, repo.path) orelse return std.Io.File.OpenError.FileNotFound;
 
         var download_url_buffer: [16 * 1024]u8 = undefined;
         // Logged by the file's path: its signed URL would be a credential.
-        const download_url = self.resolveDownloadUrl(repo, &download_url_buffer) catch |err| return request.openFailure("hf", full_path, err);
+        const download_url = self.resolveDownloadUrl(repo, &download_url_buffer) catch |err| return self.governor.openFailure(full_path, err);
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, full_path, download_url, size) catch return std.Io.File.OpenError.Unexpected;
 
@@ -704,14 +687,14 @@ pub const HF = struct {
     }
 
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         for (dirs) |d| {
             self.closeHandle(@intCast(d.handle)) catch {};
         }
     }
 
     fn dirRead(userdata: ?*anyopaque, reader: *std.Io.Dir.Reader, entries: []std.Io.Dir.Entry) std.Io.Dir.Reader.Error!usize {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
 
         if (reader.state == .finished) return 0;
 
@@ -759,20 +742,20 @@ pub const HF = struct {
     }
 
     fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getDirHandle(dir);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.Dir.RealPathError.SystemResources;
         return path.len;
     }
 
     fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8, out_buffer: []u8) std.Io.Dir.RealPathFileError!usize {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         const real_path = self.resolvePath(dir, path_name, out_buffer) catch return std.Io.Dir.RealPathFileError.NameTooLong;
         return real_path.len;
     }
 
     fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
 
         return .{
@@ -789,19 +772,19 @@ pub const HF = struct {
     }
 
     fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         return self.getFileHandle(file).size;
     }
 
     fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         for (files) |file| {
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| switch (err) {
             // A cancelled task must not surface as an I/O failure: every
@@ -815,7 +798,7 @@ pub const HF = struct {
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
 
         // Saturates at both ends; `@abs` takes `minInt(i64)` too.
@@ -826,26 +809,16 @@ pub const HF = struct {
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
         handle.pos = absolute_offset;
     }
 
     fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
-        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.File.RealPathError.SystemResources;
         return path.len;
-    }
-
-    /// Everything a governed request needs from this backend.
-    fn requestContext(self: *HF) request.Context {
-        return .{
-            .io = self.base.inner,
-            .client = self.client,
-            .governor = &self.governor,
-            .stats = &self.read_stats,
-        };
     }
 
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
@@ -861,13 +834,11 @@ pub const HF = struct {
         defer self.allocator.free(url);
         var download: DataRequest = .{ .hf = self, .handle = handle, .uri = try .parse(url), .url = url };
         defer if (download.re_resolved) |owned| self.allocator.free(owned);
-        return range_read.performRangeRead(self.requestContext(), .{
+        return range_read.performRangeRead(&self.governor, .{
             .request = .{
-                .backend = "hf",
                 // The file, not its signed URL: that is a credential, and
                 // a re-resolve replaces it.
                 .target = handle.uri,
-                .unavailable = .server_failure,
                 .key = request.authorityOf(download.uri),
                 // A signed CDN URL can expire while the backend is held;
                 // the Hub then answers 401 or 403, which is not retryable in

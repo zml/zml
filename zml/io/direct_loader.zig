@@ -7,9 +7,9 @@
 //! per-device depth (dma_calibration.zig). A source request is the larger of
 //! the checkpoint backend's minimum read (8 MiB for local files, 16 MiB over
 //! https, s3 and gs, 32 MiB on hf) and the block: at most 32 MiB, and a
-//! whole number of blocks. The source width is `read_parallelism`, or 16
-//! for a local checkpoint and 32 for a high-latency one
-//! (`backend.Options.readWidth`), clipped to what the mapped ceiling fits.
+//! whole number of blocks. The source width is `read_parallelism` (16 for a
+//! local checkpoint and 32 for a high-latency one unless the caller set it),
+//! clipped to what the mapped ceiling fits.
 //! The workspace then maps, once and before the first read, `width + 1`
 //! requests, the DMA reserve and the zero block, and cuts them into blocks
 //! (`Workspace.carve`): nothing maps during a load. A read gate holds the
@@ -77,14 +77,12 @@ const Memory = @import("TensorStore.zig").Memory;
 const dma_calibration = @import("dma_calibration.zig");
 const host_memory = @import("host_memory.zig");
 const load_log = @import("log.zig").load;
-const load_testing = @import("testing.zig");
+const testing = @import("../testing.zig");
 
-/// Creating a tensor's device state; `LazyOnce` replays it to every later
-/// reader of the tensor.
-const TransferInitError = std.mem.Allocator.Error || pjrt.ApiError || error{ IncompatibleSharding, UnsupportedMemoryKind };
-/// Everything a worker, a pump callback or a partially published plan can
-/// record as the loader's sticky error (`Loader.recordError`).
-const StickyError = TransferInitError || std.Io.File.OpenError || safetensors.ExactPositionalError || error{ InvalidOptions, UnsupportedLayout, InvalidTensorRange, Internal, Closed };
+/// Creating a tensor's device state: host memory or PJRT, since the front
+/// end checked its placement and memory kind. `LazyOnce` replays it to every
+/// later reader of the tensor.
+const TransferInitError = std.mem.Allocator.Error || pjrt.ApiError;
 
 /// Bounds per-device event overhead for tiny tensors. This is not a measured
 /// optimum: 64 pieces smaller than block_size / 8 cannot fill an eight-block
@@ -97,9 +95,6 @@ const max_dma_pieces_per_device: usize = 64;
 /// The direct DMA backend. Submissions and awaits come from one task at a
 /// time; the workers and the pumps run concurrently with them.
 pub const Loader = struct {
-    pub const AwaitError = StickyError;
-    pub const SubmitError = StickyError;
-
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
@@ -166,12 +161,8 @@ pub const Loader = struct {
         opts: BackendOptions,
     ) !*Loader {
         // A destination's shards and a transfer's writers (a u64 mask) are
-        // per device; Platform keeps devices past its maximum, with a warning.
+        // per device; Platform refuses devices past its maximum.
         comptime std.debug.assert(Platform.MAX_NUM_DEVICES <= ShardGrid.max_boxes);
-        if (platform.devices.len > Platform.MAX_NUM_DEVICES) {
-            load_log.err("the direct loader addresses up to {d} devices, got {d}: UnsupportedPlatform", .{ Platform.MAX_NUM_DEVICES, platform.devices.len });
-            return error.UnsupportedPlatform;
-        }
         const self = try allocator.create(Loader);
         errdefer allocator.destroy(self);
         const submitted_bytes = try allocator.alloc(u64, platform.devices.len);
@@ -183,9 +174,10 @@ pub const Loader = struct {
 
         var workspace: host_memory.Workspace = try .init(allocator, io, platform);
         errdefer workspace.deinit();
-        // At debug when canceled: `Loader.deinit` cancels a set-up no `start`
-        // waited for.
-        const calibration = dma_calibration.calibrate(&workspace, platform, .{ .block_sizes = opts.dma_block_sizes }) catch |err| {
+        // At debug when canceled (`Loader.deinit` cancels a set-up no
+        // `start` waited for) or out of memory (the workspace logs what it
+        // fails to map or pin).
+        const calibration = dma_calibration.calibrate(&workspace, platform, .{ .block_sizes = opts.dma_block_sizes.constSlice() }) catch |err| {
             load_log.failure(err, "calibrate DMA: target={t}, mapped_ceiling={d}", .{
                 platform.target,
                 workspace.max_mapped_bytes,
@@ -193,13 +185,13 @@ pub const Loader = struct {
             return err;
         };
         const block_size = calibration.block_size;
-        // The larger of the profile's minimum read and the block. A request
+        // The larger of the hints' minimum read and the block. A request
         // is a whole number of blocks, so the pinned set is an exact number
         // of requests and the lifecycle credits are the capacity in
         // requests: `Loader.init` checked it for every block calibration may
-        // select, and every shipped profile satisfies it (8, 16 and 32 MiB
-        // chunks over power-of-two blocks).
-        const request_size = @max(opts.load_profile.read_chunk_size, block_size);
+        // select, and every shipped backend's hints satisfy it (8, 16 and 32
+        // MiB chunks over power-of-two blocks).
+        const request_size = @max(opts.read_hints.read_chunk_size, block_size);
         std.debug.assert(request_size <= backend.max_read_request_size and request_size % block_size == 0);
         const blocks_per_request = request_size / block_size;
         // The DMA stage of every device, kept mapped beside the source
@@ -216,27 +208,25 @@ pub const Loader = struct {
         const zero_blocks = 1;
         const available = workspace.capacity(block_size);
         const width = @min(
-            opts.readWidth(),
+            opts.read_parallelism,
             (available -| dma_reserve -| zero_blocks) / blocks_per_request -| 1,
         );
         if (width == 0) {
             load_log.err("host memory ceiling {Bi:.2} fits no source request beside the DMA reserve: available_blocks={d}, reserve_blocks={d}, blocks_per_request={d}: OutOfMemory", .{ workspace.max_mapped_bytes, available, dma_reserve, blocks_per_request });
             return error.OutOfMemory;
         }
-        if (width < opts.readWidth()) {
+        if (width < opts.read_parallelism) {
             load_log.debug("DMA source working set clipped by the mapped ceiling: width={d} of {d}", .{
                 width,
-                opts.readWidth(),
+                opts.read_parallelism,
             });
         }
         // Two arenas, the reserve first: ROCm balances bytes across its host
         // nodes per allocation, and that split is recorded.
         const pregrowth_started: std.Io.Timestamp = .now(io, .awake);
         const retained_before = workspace.mapped_bytes;
-        const blocks = workspace.carve(block_size, dma_reserve, (width + 1) * blocks_per_request + dma_reserve + zero_blocks) catch |err| {
-            load_log.err("grow and carve host workspace: block_size={d}, source_width={d}, reserve_blocks={d}, mapped={d}, ceiling={d}: {s}", .{ block_size, width, dma_reserve, workspace.mapped_bytes, workspace.max_mapped_bytes, @errorName(err) });
-            return err;
-        };
+        // The workspace logs what it fails to map.
+        const blocks = try workspace.carve(block_size, dma_reserve, (width + 1) * blocks_per_request + dma_reserve + zero_blocks);
         errdefer allocator.free(blocks);
         const pregrowth_ns: u64 = @intCast(@max(pregrowth_started.untilNow(io, .awake).nanoseconds, 0));
         load_log.debug("host workspace pregrown: retained={Bi:.2}, pregrown={Bi:.2}, pregrowth_ms={d:.3}", .{
@@ -281,16 +271,14 @@ pub const Loader = struct {
         };
         std.debug.assert(self.dma_budget_bytes > 0);
         errdefer self.scheduler.deinit();
-        _ = Planner.maximumJobLen(self.plan_config) catch |err| {
-            load_log.err("invalid read alignment: alignment={d}, request_size={d}, block_size={d}: {s}", .{ self.plan_config.alignment, self.plan_config.request_size, self.plan_config.block_size, @errorName(err) });
-            return err;
-        };
 
         errdefer self.stopWorkers();
-        for (0..workers) |_| try self.worker_group.concurrent(io, workerMain, .{self});
-        load_log.debug("live loader ready: target={s}, profile={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, source_width={d}, lifecycle_credits={d}, workers={d}, retained={Bi:.2}", .{
+        for (0..workers) |_| self.worker_group.concurrent(io, workerMain, .{self}) catch |err| {
+            load_log.err("start {d} source workers: {s}", .{ workers, @errorName(err) });
+            return err;
+        };
+        load_log.debug("live loader ready: target={s}, request_size={Bi:.2}, direct_io={t}, source_alignment={d}, dma_block_size={Bi:.2}, dma_budget_per_device={Bi:.2}, source_width={d}, lifecycle_credits={d}, workers={d}, retained={Bi:.2}", .{
             @tagName(platform.target),
-            opts.load_profile.name,
             request_size,
             opts.direct_io,
             source_alignment,
@@ -309,14 +297,13 @@ pub const Loader = struct {
     /// batch: work on the first file starts while the rest is planned. The
     /// batch owns its destinations and parts until `awaitBatch` retires it.
     /// The specs keep the `LoadSpec` contract, which the front end checked;
-    /// a strided part that does not fit one read fails before anything is
-    /// published (`Planner.checkGatherReads`). Nothing is published when a
-    /// failure precedes the first plan; a later planning
-    /// failure fails the loader (a partial submission can never complete),
-    /// the batch is awaited here and the caller sees only the error. The
-    /// batch's host-resident destinations are then created ahead of their
-    /// reads (`startAllocations`).
-    pub fn submit(self: *Loader, specs: []const LoadSpec, progress: std.Progress.Node) SubmitError!*Batch {
+    /// a strided part that does not fit one read is `InvalidBinding` before
+    /// anything is published (`Planner.checkGatherReads`). A planning
+    /// failure fails the loader (a partial submission can never complete):
+    /// the batch is awaited here and the caller sees only the first error.
+    /// The batch's host-resident destinations are then created ahead of
+    /// their reads (`startAllocations`).
+    pub fn submit(self: *Loader, specs: []const LoadSpec, progress: std.Progress.Node) !*Batch {
         try self.checkOpen();
         const batch = batch: {
             const batch = try Batch.create(self.allocator, self.io, .{ .sequence = self.batch_count });
@@ -325,22 +312,14 @@ pub const Loader = struct {
             break :batch batch;
         };
         Planner.publishFiles(&self.scheduler, self.io, batch, batch.parts, self.plan_config, self.direct_io) catch |err| {
-            if (batch.plans.items.len == 0) {
-                load_log.debug("reject batch {d} before publication: source={s}: {s}", .{ batch.diagnostics.sequence, batch.planning_source, @errorName(err) });
-                self.destroyBatch(batch);
-                // An older batch that failed since `checkOpen` stopped the
-                // scheduler, whose publish then says only `Closed`.
-                return self.errorValue() orelse err;
-            }
-            // Planning failed after part of the batch was published: fail
-            // the loader, seal and await this batch, and return the sticky
-            // error instead of a batch the caller could not complete.
-            self.recordError(err, "plan partially published batch {d}, source={s}, published_plans={d}", .{ batch.diagnostics.sequence, batch.planning_source, batch.plans.items.len });
+            // Fail the loader, seal and await what was published of this
+            // batch, and return the loader's first error.
+            self.recordError(err, "plan batch {d}, source={s}, published_plans={d}", .{ batch.diagnostics.sequence, batch.planning_source, batch.plans.items.len });
             batch.diagnostics.sealed_at = .now(self.io, .awake);
             self.batch_count += 1;
             batch.finishJobs(1);
-            self.awaitBatch(batch) catch |sticky| return sticky;
-            return err;
+            try self.awaitBatch(batch);
+            unreachable;
         };
         // Stamped before the sentinel goes, so before the batch can complete.
         batch.diagnostics.sealed_at = .now(self.io, .awake);
@@ -416,21 +395,20 @@ pub const Loader = struct {
     /// buffer fails its execution, which the front end returns; a bulk
     /// buffer shows the error at its first use. Either way an output of a
     /// failed submission holds buffers whose contents are unspecified, or
-    /// was never written. A batch that
-    /// completed without an error must have closed every target (the pump
-    /// flagged the submission that completed its bytes); one that did not
-    /// would leave a buffer that never becomes ready, so it fails the
-    /// loader instead.
-    pub fn awaitBatch(self: *Loader, batch: *Batch) AwaitError!void {
+    /// was never written. A batch that completed without an error closed
+    /// every target (the pump flagged the submission that completed its
+    /// bytes); one that did not would leave a buffer that never becomes
+    /// ready, a bookkeeping bug this panics on.
+    pub fn awaitBatch(self: *Loader, batch: *Batch) !void {
         batch.done.waitUncancelable(self.io);
         const done_at: std.Io.Timestamp = .now(self.io, .awake);
         // Every request of this batch has completed: no worker or callback
         // touches its managers or contexts any more.
-        var load_error = self.errorValue();
-        if (load_error == null and !batch.fullySubmitted()) {
-            self.recordError(error.Internal, "batch {d} completed without submitting every target's bytes", .{batch.diagnostics.sequence});
-            load_error = self.errorValue();
-        }
+        const load_error = self.errorValue();
+        if (load_error == null) for (batch.destinations) |*destination| {
+            const submitted = if (destination.state.readyValue()) |state| state.fullySubmitted() else false;
+            if (!submitted) std.debug.panic("loader: batch {d} completed without submitting every byte of tensor {s} {f}", .{ batch.diagnostics.sequence, destination.name(), destination.shape });
+        };
         // Each destination completed its progress item.
         if (load_error == null) for (batch.destinations) |*destination| std.debug.assert(destination.unread_bytes.load(.acquire) == 0);
         if (load_error != null) {
@@ -521,10 +499,11 @@ pub const Loader = struct {
         if (self.errorValue()) |err| return err;
     }
 
-    /// Creates the batch's destinations, one per spec, with copies of their
-    /// parts and dimensions; on failure nothing stays allocated. A
-    /// destination's device state is created lazily by the first worker that
-    /// reads or fills for it, or by the allocation task.
+    /// Creates the batch's destinations, one per spec, and their parts,
+    /// whose sources and dimensions stay the specs' until the batch is
+    /// awaited (`backend.LoadSpec`); on failure nothing stays allocated.
+    /// A destination's device state is created lazily by the first worker
+    /// that reads or fills for it, or by the allocation task.
     fn createDestinations(
         self: *Loader,
         batch: *Batch,
@@ -532,19 +511,12 @@ pub const Loader = struct {
         progress: std.Progress.Node,
     ) !void {
         var part_count: usize = 0;
-        var dim_count: usize = 0;
-        for (specs) |spec| {
-            part_count += spec.parts.len;
-            for (spec.parts) |part| dim_count += part.dims.len;
-        }
+        for (specs) |spec| part_count += spec.parts.len;
         const destinations = try self.allocator.alloc(Destination, specs.len);
         errdefer self.allocator.free(destinations);
         const parts = try self.allocator.alloc(Part, part_count);
         errdefer self.allocator.free(parts);
-        const dims = try self.allocator.alloc(LoadPart.Dim, dim_count);
-        errdefer self.allocator.free(dims);
         var next_part: usize = 0;
-        var next_dim: usize = 0;
         var logical_bytes: usize = 0;
         for (specs, destinations) |spec, *destination| {
             const placed_shape = self.platform.placedShape(spec.shape).packedShape();
@@ -553,25 +525,19 @@ pub const Loader = struct {
             var covered_bytes: u64 = 0;
             var gathered = false;
             for (spec.parts, destination_parts) |part, *slot| {
-                const part_dims = dims[next_dim..][0..part.dims.len];
-                next_dim += part.dims.len;
-                @memcpy(part_dims, part.dims);
                 slot.* = .{
                     .source = part.source,
                     .source_slot = try self.sourceSlot(part.source.file_uri),
                     .destination = destination,
-                    .src_offset = part.src_offset,
-                    .dst_offset = part.dst_offset,
-                    .width = part.width,
-                    .dims = part_dims,
+                    .lattice = part.lattice,
                 };
-                covered_bytes += part.width;
-                gathered = gathered or part.dims.len != 0;
+                covered_bytes += part.lattice.width;
+                gathered = gathered or part.lattice.dims.len != 0;
             }
             destination.* = .{
                 .shape = spec.shape,
                 .placed_shape = placed_shape,
-                .grid = try .init(placed_shape),
+                .grid = .init(placed_shape),
                 .memory = spec.memory,
                 .output = spec.output,
                 .parts = destination_parts,
@@ -593,7 +559,6 @@ pub const Loader = struct {
         }
         batch.destinations = destinations;
         batch.parts = parts;
-        batch.dims = dims;
         batch.diagnostics.source_items = parts.len;
         batch.diagnostics.logical_bytes = logical_bytes;
     }
@@ -666,9 +631,9 @@ pub const Loader = struct {
         return self.first_error.load(.acquire) != 0;
     }
 
-    fn errorValue(self: *const Loader) ?StickyError {
+    fn errorValue(self: *const Loader) ?anyerror {
         const value = self.first_error.load(.acquire);
-        return if (value == 0) null else @errorCast(@errorFromInt(value));
+        return if (value == 0) null else @errorFromInt(value);
     }
 
     /// Keeps `err` as the sticky error unless one is kept already and logs
@@ -683,7 +648,7 @@ pub const Loader = struct {
     /// while each queued transfer holds its request, so `abortReady` also
     /// reaches only live batches; and `destroy` waits for the worker group
     /// before it frees what the workers use.
-    fn recordError(self: *Loader, err: StickyError, comptime fmt: []const u8, args: anytype) void {
+    fn recordError(self: *Loader, err: anyerror, comptime fmt: []const u8, args: anytype) void {
         if (self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic) == null) {
             load_log.failure(err, fmt, args);
             self.scheduler.fail(self.io);
@@ -900,11 +865,12 @@ pub const Batch = struct {
         /// Bytes a staged or gather job places in its blocks: the runs
         /// `first` to `end` of `lattice`, its source offsets in the file
         /// and its destination offsets logical, clipped to the logical
-        /// range `[clip_start, clip_end)`. A byte at logical offset `l` in
-        /// box `b` of the destination's grid lands at
-        /// `landings[landing_start + b] +% grid.boxOffset(l)` of the job's
-        /// blocks taken end to end (`walkItem`). A staged job's items come
-        /// from its read, a gather job's from the extent of the same index.
+        /// range `[clip_start, clip_end)`. A byte at logical offset `l`,
+        /// which `grid.locate(l)` puts at offset `o` of box `b` of the
+        /// destination's grid, lands at `landings[landing_start + b] +% o`
+        /// of the job's blocks taken end to end (`walkItem`). A staged
+        /// job's items come from its read, a gather job's from the extent
+        /// of the same index.
         const Item = struct {
             destination: *Destination,
             lattice: backend.Lattice,
@@ -1033,7 +999,9 @@ pub const Batch = struct {
         sealed_at: ?std.Io.Timestamp = null,
     };
 
-    // Borrowed source URI of the file currently being planned.
+    /// Borrowed URI of the file being planned, or of the file a gather job
+    /// of its plan failed to open (`Planner.Reads`): what a planning
+    /// failure names.
     planning_source: []const u8 = "",
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1046,8 +1014,6 @@ pub const Batch = struct {
     /// The destinations' parts, each destination's consecutive and in its
     /// destination order: what the planner sorts by file offset.
     parts: []Part = &.{},
-    /// The strided parts' dimensions.
-    dims: []LoadPart.Dim = &.{},
     remaining: std.atomic.Value(usize),
     done: std.Io.Event = .unset,
     diagnostics: Diagnostics,
@@ -1085,22 +1051,11 @@ pub const Batch = struct {
     /// Frees the destinations, the parts and the plans with their contexts,
     /// which `Dma.retireBatch` must already have retired.
     fn destroy(self: *Batch) void {
-        self.allocator.free(self.dims);
         self.allocator.free(self.parts);
         self.allocator.free(self.destinations);
         for (self.plans.items) |plan| plan.destroy();
         self.plans.deinit(self.allocator);
         self.allocator.destroy(self);
-    }
-
-    /// After `done`: every destination was touched and every target
-    /// received its last transfer.
-    fn fullySubmitted(self: *const Batch) bool {
-        for (self.destinations) |*destination| {
-            const state = destination.state.readyValue() orelse return false;
-            if (!state.fullySubmitted()) return false;
-        }
-        return true;
     }
 };
 
@@ -1177,30 +1132,23 @@ const Part = struct {
     source: *const safetensors.Tensor,
     source_slot: *SourceSlot,
     destination: *Destination,
-    /// `width` bytes of the source from `src_offset` land at `dst_offset`
-    /// of the destination's logical bytes, repeated over `dims` for a
-    /// strided part (`backend.Lattice`).
-    src_offset: u64 = 0,
-    dst_offset: u64 = 0,
-    width: u64,
-    dims: []const LoadPart.Dim = &.{},
-
-    fn lattice(self: *const Part) backend.Lattice {
-        return .{ .src_offset = self.src_offset, .dst_offset = self.dst_offset, .width = self.width, .dims = self.dims };
-    }
+    /// The spec part's; its dimensions are borrowed until the await
+    /// (`backend.LoadSpec`).
+    lattice: backend.Lattice,
 
     /// The part's bytes in its file.
-    fn fileRange(self: *const Part) error{InvalidTensorRange}!struct { start: u64, end: u64 } {
-        const start = std.math.add(u64, self.source.offset, self.src_offset) catch return self.rangeError(self.src_offset);
-        const end = std.math.add(u64, start, self.width) catch return self.rangeError(self.src_offset +| self.width);
+    fn fileRange(self: *const Part) error{InvalidBinding}!struct { start: u64, end: u64 } {
+        const lattice = self.lattice;
+        const start = std.math.add(u64, self.source.offset, lattice.src_offset) catch return self.rangeError(lattice.src_offset);
+        const end = std.math.add(u64, start, lattice.width) catch return self.rangeError(lattice.src_offset +| lattice.width);
         return .{ .start = start, .end = end };
     }
 
     /// The part's source bytes up to `source_end`, from the source's file
     /// offset, pass the largest file offset.
-    fn rangeError(self: *const Part, source_end: u64) error{InvalidTensorRange} {
+    fn rangeError(self: *const Part, source_end: u64) error{InvalidBinding} {
         load_log.err("destination {f} from {s} in {s}: {d} source bytes from offset {d} pass the largest file offset", .{ self.destination.shape, self.source.name, self.source.file_uri, source_end, self.source.offset });
-        return error.InvalidTensorRange;
+        return error.InvalidBinding;
     }
 };
 
@@ -1300,7 +1248,8 @@ const TensorTransfer = struct {
         if (destination.hostResident()) return initHost(direct, destination);
         const allocator = direct.allocator;
         const platform = direct.platform;
-        const packed_placement: Sharding.Placement = try .init(&destination.placed_shape);
+        // `ShardGrid.init` placed this shape already.
+        const packed_placement = Sharding.Placement.init(&destination.placed_shape) catch unreachable;
         const packed_local = packed_placement.localShape(destination.placed_shape);
         const ordered_devices = packed_placement.mesh().?.devicesInCanonicalOrder();
         const targets = try allocator.alloc(Target, ordered_devices.len);
@@ -1318,7 +1267,7 @@ const TensorTransfer = struct {
             pjrtx.bufferTypeFromDtype(packed_local.dtype()),
         );
         for (ordered_devices, 0..) |device, i| {
-            const memory = platform.devices[device.id].memory(.default) orelse return error.UnsupportedMemoryKind;
+            const memory = platform.devices[device.id].memory(.default).?;
             const manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
                 .shape_specs = &.{shape_spec},
                 .memory = memory.pjrt_memory,
@@ -1363,7 +1312,8 @@ const TensorTransfer = struct {
         const allocator = direct.allocator;
         const platform = direct.platform;
         const api = platform.pjrt_api;
-        const placement: Sharding.Placement = try .init(&destination.placed_shape);
+        // `ShardGrid.init` placed this shape already.
+        const placement = Sharding.Placement.init(&destination.placed_shape) catch unreachable;
         const local = placement.localShape(destination.placed_shape);
         const ordered_devices = placement.mesh().?.devicesInCanonicalOrder();
         const shard_count = ordered_devices.len;
@@ -1392,13 +1342,13 @@ const TensorTransfer = struct {
         errdefer for (pjrt_buffers.constSlice()) |buffer| buffer.deinit(api);
         for (ordered_devices, shards, 0..) |device, *shard, index| {
             // The front end only submits host kinds when every device has
-            // a pinned host space.
-            const host = (platform.devices[device.id].memory(.host_pinned) orelse return error.UnsupportedMemoryKind).pjrt_memory;
+            // a pinned host space (`backend.supportsMemory`).
+            const host = platform.devices[device.id].memory(.host_pinned).?.pjrt_memory;
             if (grid.replicas() > 1 or destination.memory == .host_mapped) {
                 const first: usize = @ctz(box_writers[index]);
                 if (first == index) shared[index] = try .create(direct.io, platform, dims, element_type, layout, host);
                 const allocation = shared[first].?;
-                const space = (platform.devices[device.id].memory(destination.memory.space()) orelse return error.UnsupportedMemoryKind).pjrt_memory;
+                const space = platform.devices[device.id].memory(destination.memory.space()).?.pjrt_memory;
                 pjrt_buffers.appendAssumeCapacity(try allocation.view(platform, dims, element_type, layout, space));
                 shard.* = allocation.data;
             } else {
@@ -1588,11 +1538,16 @@ const Planner = struct {
         vfs: ?*VFS = null,
         policy: VFS.DirectIo = .auto,
         alignment: usize,
+        /// Set to the file that fails to open, when a batch's failure names it.
+        failed_source: ?*[]const u8 = null,
 
         fn alignmentOf(self: Reads, slot: *SourceSlot) !usize {
             const vfs = self.vfs orelse return self.alignment;
             if (slot.alignment) |known| return known;
-            const direct = vfs.isLocal(slot.uri) and vfs.useDirectIo(try slot.ensure(self.io), self.policy);
+            const direct = vfs.isLocal(slot.uri) and vfs.useDirectIo(slot.ensure(self.io) catch |err| {
+                if (self.failed_source) |source| source.* = slot.uri;
+                return err;
+            }, self.policy);
             const alignment = if (direct) self.alignment else 0;
             slot.alignment = alignment;
             return alignment;
@@ -1630,6 +1585,7 @@ const Planner = struct {
             .vfs = if (config.alignment != 0) VFS.fromIo(io) else null,
             .policy = policy,
             .alignment = config.alignment,
+            .failed_source = &batch.planning_source,
         };
         var file_start: usize = 0;
         while (file_start < order.len) {
@@ -1715,8 +1671,8 @@ const Planner = struct {
             .parts = parts,
             .config = config,
             .reads = reads,
-            .maximum_job_len = try maximumJobLen(config),
-            .gather_len = try maximumJobLen(gather_config),
+            .maximum_job_len = maximumJobLen(config),
+            .gather_len = maximumJobLen(gather_config),
             .read_limit = readLimit(config),
         };
         defer cut.deinit();
@@ -1873,11 +1829,8 @@ const Planner = struct {
                     const job_end = if (jobs_remaining == 1)
                         run_end
                     else boundary: {
-                        const remaining_capacity = std.math.mul(
-                            u64,
-                            @intCast(jobs_remaining - 1),
-                            @intCast(maximum_job_len),
-                        ) catch return error.Internal;
+                        // Less than the run's length, which is a u64.
+                        const remaining_capacity = @as(u64, @intCast(jobs_remaining - 1)) * maximum_job_len_u64;
                         const minimum_end = @max(job_start + 1, run_end - remaining_capacity);
                         const maximum_end = @min(
                             hard_end,
@@ -1905,7 +1858,7 @@ const Planner = struct {
                         u64,
                         std.math.add(u64, job_end, alignment - 1) catch {
                             load_log.err("{s}: a read ending at byte {d} overflows when widened to the {d}-byte alignment", .{ parts[order[run_cursor]].source.file_uri, job_end, alignment });
-                            return error.InvalidTensorRange;
+                            return error.InvalidBinding;
                         },
                         alignment,
                     );
@@ -1926,7 +1879,7 @@ const Planner = struct {
                         const intersection_start = @max(job_start, range.start);
                         const intersection_end = @min(job_end, range.end);
                         if (intersection_start >= intersection_end) continue;
-                        const logical_start = part.dst_offset + (intersection_start - range.start);
+                        const logical_start = part.lattice.dst_offset + (intersection_start - range.start);
                         try self.pieces.append(allocator, .{
                             .destination = part.destination,
                             .start = logical_start,
@@ -2110,12 +2063,13 @@ const Planner = struct {
             var at = piece.start;
             while (at < piece.end) {
                 const stop = grid.runEnd(at, piece.end);
+                const box, const box_offset = grid.locate(at);
                 try appendBlocked(self.allocator, &self.transfers, transfer_start, .{
                     .destination = destination,
                     .block_index = 0,
                     .block_offset = 0,
-                    .writer_mask = grid.writers[grid.boxOf(at)],
-                    .destination_offset = @intCast(grid.boxOffset(at)),
+                    .writer_mask = grid.writers[box],
+                    .destination_offset = @intCast(box_offset),
                     .len = @intCast(stop - at),
                 }, @intCast(piece.file_offset + (at - piece.start) - read_start), block_size);
                 at = stop;
@@ -2130,7 +2084,7 @@ const Planner = struct {
         /// one transfer per box and block, its bytes no part covers zero.
         /// A part whose source runs are out of order (a broadcast repeats
         /// them, a transpose permutes them) reads its whole source range
-        /// in every job, which must fit one read: `UnsupportedLayout`
+        /// in every job, which must fit one read: `InvalidBinding`
         /// otherwise. An interleave of members reads each member's rows of
         /// the range, so the range lands in one piece per box and block
         /// whatever the interleave's granularity.
@@ -2145,8 +2099,8 @@ const Planner = struct {
             defer allocator.free(reach);
             var furthest: u64 = 0;
             for (parts, reach) |*part, *at| {
-                const spans = part.lattice().spans().?;
-                furthest = @max(furthest, part.dst_offset + spans.dst);
+                const spans = part.lattice.spans().?;
+                furthest = @max(furthest, part.lattice.dst_offset + spans.dst);
                 at.* = furthest;
             }
             var start: u64 = 0;
@@ -2181,14 +2135,13 @@ const Planner = struct {
                         return at <= limit;
                     }
                 }.below);
-                while (index < parts.len and parts[index].dst_offset < end) : (index += 1) {
+                while (index < parts.len and parts[index].lattice.dst_offset < end) : (index += 1) {
                     const part = &parts[index];
-                    const lattice = part.lattice();
-                    const first = lattice.firstEndingAfter(start);
-                    const last = lattice.firstStartingFrom(end);
+                    const first = part.lattice.firstEndingAfter(start);
+                    const last = part.lattice.firstStartingFrom(end);
                     if (first >= last) continue;
-                    covered += lattice.coveredIn(start, end);
-                    try self.appendExtent(part, lattice, first, last, start, end, landing_start);
+                    covered += part.lattice.coveredIn(start, end);
+                    try self.appendExtent(part, first, last, start, end, landing_start);
                 }
                 std.debug.assert(covered <= end - start);
                 const job_len: usize = @intCast(end - start);
@@ -2216,10 +2169,11 @@ const Planner = struct {
         /// run's first byte in the range to the last run's last one when
         /// the part's source runs are in order, else the part's whole
         /// source range.
-        fn appendExtent(self: *JobCut, part: *const Part, lattice: backend.Lattice, first: u64, last: u64, start: u64, end: u64, landing_start: usize) !void {
-            const width = part.width;
-            var source_start = part.src_offset;
-            var source_end = part.src_offset + lattice.spans().?.src;
+        fn appendExtent(self: *JobCut, part: *const Part, first: u64, last: u64, start: u64, end: u64, landing_start: usize) !void {
+            const lattice = part.lattice;
+            const width = lattice.width;
+            var source_start = lattice.src_offset;
+            var source_end = lattice.src_offset + lattice.spans().?.src;
             const ordered = lattice.srcOrdered();
             if (ordered) {
                 const head = lattice.at(first);
@@ -2244,7 +2198,7 @@ const Planner = struct {
             });
             try self.items.append(self.allocator, .{
                 .destination = part.destination,
-                .lattice = .{ .src_offset = part.source.offset + part.src_offset, .dst_offset = part.dst_offset, .width = width, .dims = part.dims },
+                .lattice = .{ .src_offset = part.source.offset + lattice.src_offset, .dst_offset = lattice.dst_offset, .width = width, .dims = lattice.dims },
                 .first = first,
                 .end = last,
                 .clip_start = start,
@@ -2353,28 +2307,28 @@ const Planner = struct {
     /// A strided part whose source runs are not back to back reads its whole
     /// source range in every job (`JobCut.appendExtent`): refused before
     /// anything is published when that range does not fit one read.
-    fn checkGatherReads(config: Config, part: *const Part) error{UnsupportedLayout}!void {
-        const lattice = part.lattice();
+    fn checkGatherReads(config: Config, part: *const Part) error{InvalidBinding}!void {
+        const lattice = part.lattice;
         if (lattice.srcTiled()) return;
         const read_limit = readLimit(config);
         const alignment = @max(config.alignment, 1);
-        const start = part.source.offset + part.src_offset;
+        const start = part.source.offset + lattice.src_offset;
         const end = start + lattice.spans().?.src;
         if (std.mem.alignForward(u64, end, alignment) - std.mem.alignBackward(u64, start, alignment) > read_limit) {
             load_log.err("destination {f} from {s}: a strided part reads {d} source bytes for every job, more than a read of {d}", .{ part.destination.shape, part.source.name, end - start, read_limit });
-            return error.UnsupportedLayout;
+            return error.InvalidBinding;
         }
     }
 
     /// The longest tensor range one job may cover: the request size, less
     /// the two alignment units its widened read can add, so a widened job
-    /// still fits a request (a credit's slot).
-    fn maximumJobLen(config: Config) error{InvalidOptions}!usize {
-        const unpadded = config.request_size;
-        if (unpadded == 0) return error.InvalidOptions;
-        if (config.alignment == 0) return unpadded;
-        if (!std.math.isPowerOfTwo(config.alignment) or config.alignment > (unpadded - 1) / 2) return error.InvalidOptions;
-        return unpadded - 2 * config.alignment;
+    /// still fits a request (a credit's slot). `Loader.init` refused a
+    /// request that cannot hold them.
+    fn maximumJobLen(config: Config) usize {
+        std.debug.assert(config.request_size != 0);
+        if (config.alignment == 0) return config.request_size;
+        std.debug.assert(std.math.isPowerOfTwo(config.alignment) and 2 * config.alignment < config.request_size);
+        return config.request_size - 2 * config.alignment;
     }
 
     /// Part indices sorted by file URI, offset, size and index: the planner's
@@ -2391,10 +2345,10 @@ const Planner = struct {
                 const right = ctx.parts[rhs];
                 const uri_order = std.mem.order(u8, left.source.file_uri, right.source.file_uri);
                 if (uri_order != .eq) return uri_order == .lt;
-                const left_offset = left.source.offset +| left.src_offset;
-                const right_offset = right.source.offset +| right.src_offset;
+                const left_offset = left.source.offset +| left.lattice.src_offset;
+                const right_offset = right.source.offset +| right.lattice.src_offset;
                 if (left_offset != right_offset) return left_offset < right_offset;
-                if (left.width != right.width) return left.width < right.width;
+                if (left.lattice.width != right.lattice.width) return left.lattice.width < right.lattice.width;
                 return lhs < rhs;
             }
         };
@@ -2425,8 +2379,9 @@ const Planner = struct {
     ) !void {
         var covered_end: u64 = 0;
         for (destination.parts) |part| {
-            if (part.dst_offset > covered_end) try appendFillRange(allocator, output, transfer_start, destination, covered_end, part.dst_offset, block_size);
-            covered_end = part.dst_offset + part.width;
+            const lattice = part.lattice;
+            if (lattice.dst_offset > covered_end) try appendFillRange(allocator, output, transfer_start, destination, covered_end, lattice.dst_offset, block_size);
+            covered_end = lattice.dst_offset + lattice.width;
         }
         if (covered_end < destination.grid.total) try appendFillRange(allocator, output, transfer_start, destination, covered_end, destination.grid.total, block_size);
     }
@@ -2614,7 +2569,7 @@ const ReadRequest = struct {
             errdefer allocator.free(iovecs);
             const queue_counts = try allocator.alloc(usize, device_count);
             errdefer allocator.free(queue_counts);
-            const host_iovecs = try allocator.alloc([]u8, safetensors.max_positional_iovecs);
+            const host_iovecs = try allocator.alloc([]u8, max_positional_iovecs);
             return .{
                 .allocator = allocator,
                 .iovecs = iovecs,
@@ -2849,13 +2804,102 @@ const ReadRequest = struct {
     }
 };
 
+/// The most ranges one positional read takes.
+const max_positional_iovecs: usize = if (@TypeOf(std.posix.IOV_MAX) == void) 64 else std.posix.IOV_MAX;
+
+/// Completes an exact absolute positional scatter read, resuming short reads
+/// and respecting the platform iovec limit.
+/// Scatters `[file_offset, file_offset + total)` into `buffers`, where
+/// `total` is their combined length. The file may end early only past
+/// `minimum` bytes: the bytes after it are padding a caller added to align
+/// the read, and the end of the file cuts them. Returns the bytes read.
+fn readFilePositionalAllV(
+    io: std.Io,
+    file: std.Io.File,
+    buffers: []const []u8,
+    file_offset: u64,
+    minimum: u64,
+) !u64 {
+    var read_size: u64 = 0;
+    for (buffers) |buffer| {
+        const len = std.math.cast(u64, buffer.len) orelse return error.OutOfBounds;
+        read_size = std.math.add(u64, read_size, len) catch return error.OutOfBounds;
+    }
+    _ = std.math.add(u64, file_offset, read_size) catch return error.OutOfBounds;
+    if (minimum > read_size) return error.OutOfBounds;
+    if (read_size == 0) return 0;
+
+    var batch: [max_positional_iovecs][]u8 = undefined;
+    var buffer_index: usize = 0;
+    var buffer_offset: usize = 0;
+    var completed: u64 = 0;
+    while (completed < read_size) {
+        var batch_len: usize = 0;
+        var batch_size: u64 = 0;
+        var scan_index = buffer_index;
+        var scan_offset = buffer_offset;
+        while (scan_index < buffers.len and batch_len < batch.len) : (scan_index += 1) {
+            const buffer = buffers[scan_index];
+            if (scan_offset >= buffer.len) {
+                scan_offset = 0;
+                continue;
+            }
+            batch[batch_len] = buffer[scan_offset..];
+            batch_size += batch[batch_len].len;
+            batch_len += 1;
+            scan_offset = 0;
+        }
+        if (batch_len == 0) return error.UnexpectedEndOfFile;
+
+        const absolute_offset = std.math.add(u64, file_offset, completed) catch return error.OutOfBounds;
+        const bytes_read = try file.readPositional(io, batch[0..batch_len], absolute_offset);
+        if (bytes_read == 0) {
+            if (completed >= minimum) return completed;
+            return error.UnexpectedEndOfFile;
+        }
+        completed += @intCast(bytes_read);
+        // A short read past `minimum` leaves only padding unread, which no
+        // caller addresses; the call that would fetch it (or confirm the
+        // end of the file) starts at an unaligned offset, which a file read
+        // directly rejects.
+        if (bytes_read < batch_size and completed >= minimum) return completed;
+
+        try advanceScatter(buffers, &buffer_index, &buffer_offset, bytes_read);
+    }
+    return completed;
+}
+
+fn advanceScatter(
+    buffers: []const []u8,
+    buffer_index: *usize,
+    buffer_offset: *usize,
+    bytes: usize,
+) error{UnexpectedEndOfFile}!void {
+    var remaining = bytes;
+    while (remaining > 0) {
+        while (buffer_index.* < buffers.len and buffer_offset.* == buffers[buffer_index.*].len) {
+            buffer_index.* += 1;
+            buffer_offset.* = 0;
+        }
+        if (buffer_index.* >= buffers.len) return error.UnexpectedEndOfFile;
+        const available = buffers[buffer_index.*].len - buffer_offset.*;
+        if (remaining < available) {
+            buffer_offset.* += remaining;
+            return;
+        }
+        remaining -= available;
+        buffer_index.* += 1;
+        buffer_offset.* = 0;
+    }
+}
+
 /// One source read under the read gate, counted in the loader's metrics.
 fn readGated(loader: *Loader, file: std.Io.File, iovecs: []const []u8, file_offset: u64, minimum_len: usize) !void {
     const io = loader.io;
     if (!loader.read_gate.acquire(io)) return error.Closed;
     defer loader.read_gate.release(io);
     const read_started = awakeNs(io);
-    const read_result = safetensors.readFilePositionalAllV(io, file, iovecs, file_offset, minimum_len);
+    const read_result = readFilePositionalAllV(io, file, iovecs, file_offset, minimum_len);
     _ = loader.metrics.read_ns.fetchAdd(awakeNs(io) -| read_started, .monotonic);
     const bytes_read = try read_result;
     _ = loader.metrics.read_operations.fetchAdd(1, .monotonic);
@@ -2868,7 +2912,17 @@ const FileReader = struct {
     loader: *Loader,
 
     fn read(self: FileReader, slot: *SourceSlot, iovecs: []const []u8, file_offset: u64, minimum_len: usize) !void {
-        try readGated(self.loader, try slot.ensure(self.loader.io), iovecs, file_offset, minimum_len);
+        // A job's extents may sit in other files than its plan's, so a
+        // failure is recorded here, where its file is known; the worker's
+        // record of it then changes nothing.
+        readSlot(self.loader, slot, iovecs, file_offset, minimum_len) catch |err| {
+            self.loader.recordError(err, "read {s} at {d}, {d} bytes at least", .{ slot.uri, file_offset, minimum_len });
+            return err;
+        };
+    }
+
+    fn readSlot(loader: *Loader, slot: *SourceSlot, iovecs: []const []u8, file_offset: u64, minimum_len: usize) !void {
+        try readGated(loader, try slot.ensure(loader.io), iovecs, file_offset, minimum_len);
     }
 };
 
@@ -2992,7 +3046,8 @@ fn walkRuns(lattice: backend.Lattice, first: u64, end: u64, clip_start: u64, cli
         var source = run.src + (at - run.dst);
         while (at < stop) {
             const piece_end = grid.runEnd(at, stop);
-            try sink.place(source, table[grid.boxOf(at)] +% grid.boxOffset(at), piece_end - at);
+            const box, const box_offset = grid.locate(at);
+            try sink.place(source, table[box] +% box_offset, piece_end - at);
             source += piece_end - at;
             at = piece_end;
         }
@@ -3018,7 +3073,8 @@ fn copyItem(item: Batch.Plan.Item, landings: []const u64, sink: *CopySink) !void
     const source = @intFromPtr(sink.bounce.ptr) -% @as(usize, @intCast(sink.file_offset));
     var at = start;
     while (at < stop) {
-        const landing: usize = @intCast(table[grid.boxOf(at)] +% grid.boxOffset(at));
+        const box, const box_offset = grid.locate(at);
+        const landing: usize = @intCast(table[box] +% box_offset);
         const in_block = landing % sink.block_size;
         const stretch_end = @min(grid.runEnd(at, stop), at + (sink.block_size - in_block));
         // The address logical offset zero would have, were the whole
@@ -3833,7 +3889,6 @@ test "loader releases the pinned set when its workers cannot start" {
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     const result: anyerror!void = if (Loader.create(allocator, io, platform, .{
         .read_parallelism = 2,
-        .load_profile = .local,
         .direct_io = .off,
     })) |loader| unexpected: {
         loader.destroy();
@@ -3879,7 +3934,6 @@ test "loader failures clean up before publication, after publication and during 
         defer for (&outputs) |*output| output.deinit();
         const loader = try Loader.create(allocator, io, platform, .{
             .read_parallelism = 2,
-            .load_profile = .local,
             .direct_io = .off,
         });
         defer loader.destroy();
@@ -3898,7 +3952,7 @@ test "loader failures clean up before publication, after publication and during 
                     loader.awaitBatch(batch) catch {};
                     break :unexpected {};
                 } else |err| err;
-                try std.testing.expectError(error.InvalidTensorRange, result);
+                try std.testing.expectError(error.InvalidBinding, result);
                 sources[0].offset = 0;
             },
             .after_publication => {
@@ -3909,7 +3963,7 @@ test "loader failures clean up before publication, after publication and during 
                     loader.awaitBatch(batch) catch {};
                     break :unexpected {};
                 } else |err| err;
-                try std.testing.expectError(error.InvalidTensorRange, result);
+                try std.testing.expectError(error.InvalidBinding, result);
             },
             .reading => {
                 // Planning succeeds, but the source ends after four of five bytes.
@@ -3924,24 +3978,15 @@ test "loader failures clean up before publication, after publication and during 
         try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
         try std.testing.expectEqual(@as(usize, 0), loader.read_gate.inUse(io));
 
-        if (failure == .before_publication) {
-            try std.testing.expectEqual(@as(usize, 0), loader.batch_count);
-            try loader.checkOpen();
-            const batch = try loader.submit(specs[0..1], .none);
-            try loader.awaitBatch(batch);
-            const loaded = try outputs[0].toSliceAlloc(allocator, io);
-            defer loaded.free(allocator);
-            try std.testing.expectEqualSlices(u8, &contents, loaded.constData());
-        } else {
-            try std.testing.expectEqual(@as(usize, 1), loader.batch_count);
-            const expected = if (failure == .reading) error.UnexpectedEndOfFile else error.InvalidTensorRange;
-            try std.testing.expectError(expected, loader.checkOpen());
-            const result: anyerror!void = if (loader.submit(specs[0..1], .none)) |batch| unexpected: {
-                loader.awaitBatch(batch) catch {};
-                break :unexpected {};
-            } else |err| err;
-            try std.testing.expectError(expected, result);
-        }
+        // Each failure fails the loader: a later submission gets it.
+        try std.testing.expectEqual(@as(usize, 1), loader.batch_count);
+        const expected = if (failure == .reading) error.UnexpectedEndOfFile else error.InvalidBinding;
+        try std.testing.expectError(expected, loader.checkOpen());
+        const result: anyerror!void = if (loader.submit(specs[0..1], .none)) |batch| unexpected: {
+            loader.awaitBatch(batch) catch {};
+            break :unexpected {};
+        } else |err| err;
+        try std.testing.expectError(expected, result);
     };
 }
 
@@ -4010,7 +4055,6 @@ test "a submit the loader fails between its open check and its first publish ret
     defer output.deinit();
     const loader = try Loader.create(failing.allocator(), io, platform, .{
         .read_parallelism = 2,
-        .load_profile = .local,
         .direct_io = .off,
     });
     defer loader.destroy();
@@ -4021,7 +4065,6 @@ test "a submit the loader fails between its open check and its first publish ret
         break :unexpected {};
     } else |err| err;
     try std.testing.expectError(error.UnexpectedEndOfFile, result);
-    try std.testing.expectEqual(@as(usize, 0), loader.batch_count);
 }
 
 test "source slots keep their own copy of each path" {
@@ -4043,7 +4086,6 @@ test "source slots keep their own copy of each path" {
     };
     const loader = try Loader.create(allocator, io, platform, .{
         .read_parallelism = 2,
-        .load_profile = .local,
         .direct_io = .off,
     });
     defer loader.destroy();
@@ -4058,9 +4100,7 @@ test "source slots keep their own copy of each path" {
         const submitted = loader.submit(&.{.{ .shape = source.shape, .output = &output, .parts = &parts }}, .none);
         allocator.free(uri);
         try loader.awaitBatch(try submitted);
-        const loaded = try output.toSliceAlloc(allocator, io);
-        defer loaded.free(allocator);
-        try std.testing.expectEqualSlices(u8, &contents, loaded.constData());
+        try testing.expectShards(allocator, io, &output, &contents, .default);
     }
     // The testing allocator overwrites freed bytes: a slot keyed by the
     // first string would miss the second lookup.
@@ -4082,13 +4122,13 @@ fn initPlainParts(
             .source = source,
             .source_slot = slot,
             .destination = destination,
-            .width = source.byteSize(),
+            .lattice = .{ .width = source.byteSize() },
         };
         const placed = platform.placedShape(source.shape).packedShape();
         destination.* = .{
             .shape = source.shape,
             .placed_shape = placed,
-            .grid = ShardGrid.init(placed) catch unreachable,
+            .grid = .init(placed),
             .output = output,
             .parts = @as(*[1]Part, part),
             .unread_bytes = .init(source.byteSize()),
@@ -4308,22 +4348,6 @@ test "source planner coalesces exact adjacent and overlapping tensor ranges per 
     try std.testing.expectEqual(@as(usize, 8), widened_plan.jobs[2].kind.dma_read.minimum_len);
     try std.testing.expectEqual(@as(usize, 3), widened_plan.transfers[widened_plan.jobs[2].transfer_start].block_offset);
     try std.testing.expectEqual(@as(u64, 20), widened_plan.source_bytes);
-
-    // No room for the widening: two alignment units must fit in a request.
-    const invalid_plan: anyerror!void = if (Planner.prepareTestPlan(allocator, &aligned_items, &.{ 0, 1, 2 }, .{
-        .block_size = 4,
-        .request_size = 8,
-        .alignment = 4,
-    })) |plan| unexpected: {
-        plan.destroy();
-        break :unexpected {};
-    } else |err| err;
-    try std.testing.expectError(error.InvalidOptions, invalid_plan);
-    try std.testing.expectError(error.InvalidOptions, Planner.maximumJobLen(.{
-        .block_size = 4,
-        .request_size = 16,
-        .alignment = 3,
-    }));
 }
 
 test "scheduler publishes a submission one file at a time and claims the files in order" {
@@ -4955,15 +4979,15 @@ const CompositeTest = struct {
         var outputs: [2]Buffer = undefined;
         var destinations: [2]Destination = undefined;
         var parts = [_]Part{
-            .{ .source = &sources[0], .source_slot = &slots[0], .destination = &destinations[0], .dst_offset = 0, .width = 48 },
-            .{ .source = &sources[1], .source_slot = &slots[0], .destination = &destinations[0], .dst_offset = 48, .width = 32 },
-            .{ .source = &sources[2], .source_slot = &slots[1], .destination = &destinations[0], .dst_offset = 160, .width = 64 },
-            .{ .source = &sources[3], .source_slot = &slots[1], .destination = &destinations[1], .width = 64 },
+            .{ .source = &sources[0], .source_slot = &slots[0], .destination = &destinations[0], .lattice = .{ .dst_offset = 0, .width = 48 } },
+            .{ .source = &sources[1], .source_slot = &slots[0], .destination = &destinations[0], .lattice = .{ .dst_offset = 48, .width = 32 } },
+            .{ .source = &sources[2], .source_slot = &slots[1], .destination = &destinations[0], .lattice = .{ .dst_offset = 160, .width = 64 } },
+            .{ .source = &sources[3], .source_slot = &slots[1], .destination = &destinations[1], .lattice = .{ .width = 64 } },
         };
         const plain_shape = shape.setDim(0, 4);
         destinations = .{
-            .{ .shape = shape, .placed_shape = platform.placedShape(shape).packedShape(), .grid = try .init(platform.placedShape(shape).packedShape()), .memory = memory, .output = &outputs[0], .parts = parts[0..3], .unread_bytes = .init(144) },
-            .{ .shape = plain_shape, .placed_shape = platform.placedShape(plain_shape).packedShape(), .grid = try .init(platform.placedShape(plain_shape).packedShape()), .memory = memory, .output = &outputs[1], .parts = parts[3..4], .unread_bytes = .init(64) },
+            .{ .shape = shape, .placed_shape = platform.placedShape(shape).packedShape(), .grid = .init(platform.placedShape(shape).packedShape()), .memory = memory, .output = &outputs[0], .parts = parts[0..3], .unread_bytes = .init(144) },
+            .{ .shape = plain_shape, .placed_shape = platform.placedShape(plain_shape).packedShape(), .grid = .init(platform.placedShape(plain_shape).packedShape()), .memory = memory, .output = &outputs[1], .parts = parts[3..4], .unread_bytes = .init(64) },
         };
         const host = destinations[0].hostResident();
 
@@ -5223,23 +5247,15 @@ test "concurrent loader failures preserve the first error" {
     var group: std.Io.Group = .init;
     defer group.await(io) catch {};
     const Worker = struct {
-        fn run(loader_: *Loader, err: StickyError) void {
+        fn run(loader_: *Loader, err: anyerror) void {
             loader_.recordError(err, "concurrent source failure", .{});
         }
     };
-    for (0..8) |i| try group.concurrent(io, Worker.run, .{ loader, @as(StickyError, if (i % 2 == 0) error.FileNotFound else error.UnexpectedEndOfFile) });
+    for (0..8) |i| try group.concurrent(io, Worker.run, .{ loader, @as(anyerror, if (i % 2 == 0) error.FileNotFound else error.UnexpectedEndOfFile) });
     try group.await(io);
     const first = loader.errorValue().?;
     loader.recordError(error.Internal, "later failure", .{});
     try std.testing.expectEqual(first, loader.errorValue().?);
-}
-
-test "read alignment overflow is an invalid option" {
-    try std.testing.expectError(error.InvalidOptions, Planner.maximumJobLen(.{
-        .block_size = 4096,
-        .request_size = 4096,
-        .alignment = @as(usize, 1) << (@bitSizeOf(usize) - 1),
-    }));
 }
 
 test "lazy initialization preserves its finite error across repeated callers" {
@@ -5274,14 +5290,14 @@ test "host-resident and DMA parts never share a job, and overlapping host parts 
     var outputs: [4]Buffer = undefined;
     var destinations: [4]Destination = undefined;
     var parts = [_]Part{
-        .{ .source = &sources[0], .source_slot = &slot, .destination = &destinations[0], .width = 64 },
-        .{ .source = &sources[1], .source_slot = &slot, .destination = &destinations[1], .width = 64 },
-        .{ .source = &sources[0], .source_slot = &slot, .destination = &destinations[2], .width = 64 },
-        .{ .source = &sources[2], .source_slot = &slot, .destination = &destinations[3], .width = 64 },
+        .{ .source = &sources[0], .source_slot = &slot, .destination = &destinations[0], .lattice = .{ .width = 64 } },
+        .{ .source = &sources[1], .source_slot = &slot, .destination = &destinations[1], .lattice = .{ .width = 64 } },
+        .{ .source = &sources[0], .source_slot = &slot, .destination = &destinations[2], .lattice = .{ .width = 64 } },
+        .{ .source = &sources[2], .source_slot = &slot, .destination = &destinations[3], .lattice = .{ .width = 64 } },
     };
     const memories = [_]Memory{ .host_pinned, .default, .host_pinned, .host_pinned };
     for (&destinations, &outputs, &parts, memories) |*destination, *output, *part, memory| {
-        destination.* = .{ .shape = shape, .placed_shape = platform.placedShape(shape).packedShape(), .grid = try .init(platform.placedShape(shape).packedShape()), .memory = memory, .output = output, .parts = @as(*[1]Part, part), .unread_bytes = .init(64) };
+        destination.* = .{ .shape = shape, .placed_shape = platform.placedShape(shape).packedShape(), .grid = .init(platform.placedShape(shape).packedShape()), .memory = memory, .output = output, .parts = @as(*[1]Part, part), .unread_bytes = .init(64) };
     }
 
     const order = try Planner.sortedPartOrder(allocator, &parts);
@@ -5317,7 +5333,7 @@ test "host-resident and DMA parts never share a job, and overlapping host parts 
 test "column-sharded tensors load as one DMA piece per device and block, read exact or widened" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var devices: load_testing.Devices = undefined;
+    var devices: testing.Devices = undefined;
     try devices.init(allocator, io, 4);
     defer devices.deinit();
     const mesh = try devices.mesh("tp");
@@ -5327,14 +5343,14 @@ test "column-sharded tensors load as one DMA piece per device and block, read ex
     var rows: [64 * 32]u8 = undefined;
     var cols: [1024 * 32]u8 = undefined;
     var narrow: [3000 * 4]u8 = undefined;
-    load_testing.pattern(&rows, 1);
-    load_testing.pattern(&cols, 2);
-    load_testing.pattern(&narrow, 3);
+    testing.pattern(&rows, 1);
+    testing.pattern(&cols, 2);
+    testing.pattern(&narrow, 3);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var registry: safetensors.TensorRegistry = .init(allocator);
     defer registry.deinit();
-    try load_testing.writeSafetensors(allocator, io, tmp.dir, "staged.safetensors", &registry, &.{
+    try testing.writeSafetensors(allocator, io, tmp.dir, "staged.safetensors", &registry, &.{
         .{ .name = "rows", .dtype = "U16", .dims = &.{ 64, 16 }, .bytes = &rows },
         .{ .name = "cols", .dtype = "U16", .dims = &.{ 1024, 16 }, .bytes = &cols },
         .{ .name = "narrow", .dtype = "U8", .dims = &.{ 3000, 4 }, .bytes = &narrow },
@@ -5369,7 +5385,7 @@ test "column-sharded tensors load as one DMA piece per device and block, read ex
         }
         try loader.awaitBatch(batch);
         defer for (&outputs) |*output| output.deinit();
-        for (&outputs, globals) |*output, global| try load_testing.expectShards(allocator, io, output, global);
+        for (&outputs, globals) |*output, global| try testing.expectShards(allocator, io, output, global, .default);
         try std.testing.expect(staged_jobs >= 1);
         try std.testing.expect(submissions < row_pieces / 100);
         try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
@@ -5379,24 +5395,24 @@ test "column-sharded tensors load as one DMA piece per device and block, read ex
 test "a strided part whose source does not fit one read is refused before anything is published" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var devices: load_testing.Devices = undefined;
+    var devices: testing.Devices = undefined;
     try devices.init(allocator, io, 1);
     defer devices.deinit();
     var bytes: [32 * 16]u8 = undefined;
-    load_testing.pattern(&bytes, 1);
+    testing.pattern(&bytes, 1);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var registry: safetensors.TensorRegistry = .init(allocator);
     defer registry.deinit();
-    try load_testing.writeSafetensors(allocator, io, tmp.dir, "wide.safetensors", &registry, &.{
+    try testing.writeSafetensors(allocator, io, tmp.dir, "wide.safetensors", &registry, &.{
         .{ .name = "wide", .dtype = "U8", .dims = &.{ 32, 16 }, .bytes = &bytes },
     });
     // [32, 16] transposed: 512 runs of one byte, its source read whole by
     // every job.
-    const part: LoadPart = .{ .source = registry.tensors.getPtr("wide").?, .width = 1, .dims = &.{
+    const part: LoadPart = .{ .source = registry.tensors.getPtr("wide").?, .lattice = .{ .width = 1, .dims = &.{
         .{ .count = 16, .src_stride = 1, .dst_stride = 32 },
         .{ .count = 32, .src_stride = 16, .dst_stride = 1 },
-    } };
+    } } };
     var output: Buffer = undefined;
     const spec: LoadSpec = .{ .shape = .init(.{ 16, 32 }, .u8), .output = &output, .parts = (&part)[0..1] };
     const loader = try Loader.create(allocator, io, devices.platform, .{ .read_parallelism = 2, .direct_io = .off });
@@ -5406,7 +5422,7 @@ test "a strided part whose source does not fit one read is refused before anythi
         try loader.awaitBatch(batch);
         output.deinit();
         return error.TestUnexpectedResult;
-    } else |err| try std.testing.expectEqual(error.UnsupportedLayout, err);
+    } else |err| try std.testing.expectEqual(error.InvalidBinding, err);
     // Nothing went out, so the loader takes the next submission.
     loader.plan_config.request_size = 1024;
     try loader.awaitBatch(try loader.submit(&.{spec}, .none));
@@ -5415,22 +5431,22 @@ test "a strided part whose source does not fit one read is refused before anythi
     for (0..16) |column| {
         for (0..32) |row| transposed[column * 32 + row] = bytes[row * 16 + column];
     }
-    try load_testing.expectShards(allocator, io, &output, &transposed);
+    try testing.expectShards(allocator, io, &output, &transposed, .default);
 }
 
 test "a strided part of a remote file is checked against its exact source range" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var devices: load_testing.Devices = undefined;
+    var devices: testing.Devices = undefined;
     try devices.init(allocator, io, 1);
     defer devices.deinit();
     var bytes: [128 * 128]u8 = undefined;
-    load_testing.pattern(&bytes, 1);
+    testing.pattern(&bytes, 1);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var registry: safetensors.TensorRegistry = .init(allocator);
     defer registry.deinit();
-    try load_testing.writeSafetensors(allocator, io, tmp.dir, "square.safetensors", &registry, &.{
+    try testing.writeSafetensors(allocator, io, tmp.dir, "square.safetensors", &registry, &.{
         .{ .name = "square", .dtype = "U8", .dims = &.{ 128, 128 }, .bytes = &bytes },
     });
     var vfs: VFS = try .init(allocator, io);
@@ -5449,7 +5465,7 @@ test "a strided part of a remote file is checked against its exact source range"
     }
     // Transposed: its source read whole by every job, a request exactly,
     // at an offset off the direct I/O alignment.
-    const dims = [_]LoadPart.Dim{
+    const dims = [_]backend.Lattice.Dim{
         .{ .count = 128, .src_stride = 1, .dst_stride = 128 },
         .{ .count = 128, .src_stride = 128, .dst_stride = 1 },
     };
@@ -5459,23 +5475,23 @@ test "a strided part of a remote file is checked against its exact source range"
     loader.plan_config.request_size = bytes.len;
 
     var output: Buffer = undefined;
-    const part: LoadPart = .{ .source = &remote, .width = 1, .dims = &dims };
+    const part: LoadPart = .{ .source = &remote, .lattice = .{ .width = 1, .dims = &dims } };
     const spec: LoadSpec = .{ .shape = .init(.{ 128, 128 }, .u8), .output = &output, .parts = (&part)[0..1] };
     try loader.awaitBatch(try loader.submit(&.{spec}, .none));
     defer output.deinit();
-    try load_testing.expectShards(allocator, io, &output, &transposed);
+    try testing.expectShards(allocator, io, &output, &transposed, .default);
 
     // A local file may be read directly: its range widened to the alignment
     // no longer fits.
     if (VFS.direct_io_alignment != 0) {
         var refused: Buffer = undefined;
-        const local_part: LoadPart = .{ .source = &local, .width = 1, .dims = &dims };
+        const local_part: LoadPart = .{ .source = &local, .lattice = .{ .width = 1, .dims = &dims } };
         const local_spec: LoadSpec = .{ .shape = .init(.{ 128, 128 }, .u8), .output = &refused, .parts = (&local_part)[0..1] };
         if (loader.submit(&.{local_spec}, .none)) |batch| {
             try loader.awaitBatch(batch);
             refused.deinit();
             return error.TestUnexpectedResult;
-        } else |err| try std.testing.expectEqual(error.UnsupportedLayout, err);
+        } else |err| try std.testing.expectEqual(error.InvalidBinding, err);
     }
 }
 
@@ -5486,7 +5502,7 @@ test "a strided part of a remote file is checked against its exact source range"
 const HostResidentTest = struct {
     /// Each run writes its own file from `seed`: a buffer that lands on
     /// memory an earlier run freed must not find the expected bytes there.
-    fn run(devices: *const load_testing.Devices, seed: u8, alignment: usize) !void {
+    fn run(devices: *const testing.Devices, seed: u8, alignment: usize) !void {
         const allocator = std.testing.allocator;
         const io = std.testing.io;
         const platform = devices.platform;
@@ -5497,11 +5513,11 @@ const HostResidentTest = struct {
         var cols: [2048 * 8]u8 = undefined;
         var rep: [96 * 4]u8 = undefined;
         var twice: [32 * 4]u8 = undefined;
-        load_testing.pattern(&rows, seed);
-        load_testing.pattern(&dev, seed +% 1);
-        load_testing.pattern(&cols, seed +% 2);
-        load_testing.pattern(&rep, seed +% 3);
-        load_testing.pattern(&twice, seed +% 4);
+        testing.pattern(&rows, seed);
+        testing.pattern(&dev, seed +% 1);
+        testing.pattern(&cols, seed +% 2);
+        testing.pattern(&rep, seed +% 3);
+        testing.pattern(&twice, seed +% 4);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var registry: safetensors.TensorRegistry = .init(allocator);
@@ -5509,7 +5525,7 @@ const HostResidentTest = struct {
         // The device tensor separates the host runs: an overlap sends its
         // whole job through blocks, so the twice-bound source must not share
         // a job with the others.
-        try load_testing.writeSafetensors(allocator, io, tmp.dir, "host.safetensors", &registry, &.{
+        try testing.writeSafetensors(allocator, io, tmp.dir, "host.safetensors", &registry, &.{
             .{ .name = "rows", .dtype = "U16", .dims = &.{ 64, 8 }, .bytes = &rows },
             .{ .name = "cols", .dtype = "U8", .dims = &.{ 2048, 8 }, .bytes = &cols },
             .{ .name = "rep", .dtype = "U8", .dims = &.{ 96, 4 }, .bytes = &rep },
@@ -5545,18 +5561,13 @@ const HostResidentTest = struct {
             const batch = try loader.submit(&specs, .none);
             try loader.awaitBatch(batch);
             defer for (&outputs) |*output| output.deinit();
-            for (&outputs, globals) |*output, global| try load_testing.expectShards(allocator, io, output, global);
+            // Host shards in each device's host memory, or its default
+            // memory for views.
+            for (&outputs, globals, memories) |*output, global, memory| try testing.expectShards(allocator, io, output, global, memory);
             // Every credit, with its blocks, came back.
             try std.testing.expectEqual(@as(usize, 0), loader.credits.inUse(io));
 
-            // Host shards in each device's host memory, or its default
-            // memory for views; the replicated ones one allocation.
-            for (outputs, memories) |output, memory| {
-                const ordered = platform.placedShape(output.shape())._sharding.mesh.?.devicesInCanonicalOrder();
-                for (ordered, output._shards.constSlice()) |device, shard| {
-                    try std.testing.expect(shard.memory(platform.pjrt_api) == platform.devices[device.id].memory(memory.space()).?.pjrt_memory);
-                }
-            }
+            // The replicated host ones are one allocation.
             for (outputs[3..5]) |output| {
                 const shards = output._shards.constSlice();
                 const first = try shards[0].opaqueDeviceMemoryDataPointer(platform.pjrt_api);
@@ -5578,7 +5589,7 @@ const HostResidentTest = struct {
 test "host-resident destinations are written in place, through blocks when reads are widened or overlap, and replicas share one allocation" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var devices: load_testing.Devices = undefined;
+    var devices: testing.Devices = undefined;
     try devices.init(allocator, io, 4);
     defer devices.deinit();
     if (!backend.supportsMemory(devices.platform, .host_pinned)) return error.SkipZigTest;
@@ -5586,4 +5597,95 @@ test "host-resident destinations are written in place, through blocks when reads
     for ([_]usize{ 0, 64 }, [_]u8{ 1, 5 }) |alignment, seed| {
         try HostResidentTest.run(&devices, seed, alignment);
     }
+}
+
+const CountingPositionalIo = struct {
+    calls: usize = 0,
+    max_result: ?usize = null,
+
+    const vtable: std.Io.VTable = blk: {
+        var result = std.testing.io.vtable.*;
+        result.fileReadPositional = fileReadPositional;
+        break :blk result;
+    };
+
+    fn io(self: *CountingPositionalIo) std.Io {
+        return .{
+            .userdata = self,
+            .vtable = &vtable,
+        };
+    }
+
+    fn fileReadPositional(
+        userdata: ?*anyopaque,
+        _: std.Io.File,
+        data: []const []u8,
+        offset: u64,
+    ) std.Io.File.ReadPositionalError!usize {
+        const self: *CountingPositionalIo = @ptrCast(@alignCast(userdata.?));
+        self.calls += 1;
+
+        var requested: usize = 0;
+        for (data) |buffer| requested +|= buffer.len;
+        var remaining = @min(requested, self.max_result orelse requested);
+        var position: usize = 0;
+        for (data) |buffer| {
+            const take = @min(remaining, buffer.len);
+            for (buffer[0..take]) |*byte| {
+                byte.* = @truncate(offset + position);
+                position += 1;
+            }
+            remaining -= take;
+            if (remaining == 0) break;
+        }
+        return position;
+    }
+};
+
+test "readFilePositionalAllV batches more than IOV_MAX buffers" {
+    const io = std.testing.io;
+    const len = max_positional_iovecs + 1;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    defer file.close(io);
+    var contents: [len]u8 = undefined;
+    for (&contents, 0..) |*byte, i| byte.* = @truncate(i);
+    try file.writePositionalAll(io, &contents, 0);
+
+    var output: [len]u8 = undefined;
+    var buffers: [len][]u8 = undefined;
+    for (&buffers, 0..) |*buffer, i| buffer.* = output[i..][0..1];
+    try std.testing.expectEqual(@as(u64, len), try readFilePositionalAllV(io, file, &buffers, 0, len));
+    try std.testing.expectEqualSlices(u8, &contents, &output);
+}
+
+test "readFilePositionalAllV resumes short reads" {
+    var counting: CountingPositionalIo = .{ .max_result = 1 };
+    const io = counting.io();
+    const file: std.Io.File = .{ .handle = 0, .flags = .{ .nonblocking = false } };
+
+    var output: [4]u8 = undefined;
+    _ = try readFilePositionalAllV(io, file, &.{ output[0..1], output[1..3], output[3..4] }, 7, output.len);
+    try std.testing.expectEqual(@as(usize, 4), counting.calls);
+    try std.testing.expectEqualSlices(u8, &.{ 7, 8, 9, 10 }, &output);
+}
+
+test "advanceScatter resumes partial reads across boundaries" {
+    var storage: [6]u8 = undefined;
+    const buffers = [_][]u8{ storage[0..2], storage[2..2], storage[2..5], storage[5..6] };
+    var index: usize = 0;
+    var offset: usize = 0;
+    try advanceScatter(&buffers, &index, &offset, 1);
+    try std.testing.expectEqual(@as(usize, 0), index);
+    try std.testing.expectEqual(@as(usize, 1), offset);
+    try advanceScatter(&buffers, &index, &offset, 2);
+    try std.testing.expectEqual(@as(usize, 2), index);
+    try std.testing.expectEqual(@as(usize, 1), offset);
+    try advanceScatter(&buffers, &index, &offset, 3);
+    try std.testing.expectEqual(@as(usize, 4), index);
+    try std.testing.expectEqual(@as(usize, 0), offset);
+    try std.testing.expectError(error.UnexpectedEndOfFile, advanceScatter(&buffers, &index, &offset, 1));
 }

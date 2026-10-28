@@ -50,8 +50,8 @@ pub fn main(init: std.process.Init) !void {
 
     var loader = try zml.io.Loader.init(allocator, io, platform, .{});
     defer loader.deinit();
-    var model_buffers = try zml.mem.bufferize(allocator, model.Model, &repo_model.inner);
-    defer zml.mem.deinitBufferized(allocator, model.Model, &model_buffers);
+    var model_buffers = try zml.mem.bufferize(allocator, &repo_model.inner);
+    defer zml.mem.deinitBufferized(allocator, &model_buffers);
     try loader.start(&repo_model.inner, &model_buffers, &store, progress);
     try loader.wait();
     progress.end();

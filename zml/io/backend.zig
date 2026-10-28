@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const stdx = @import("stdx");
 const VFS = @import("vfs");
 
 const Buffer = @import("../buffer.zig").Buffer;
@@ -11,9 +12,6 @@ const constants = @import("../constants.zig");
 const buffered_loader = @import("buffered_loader.zig");
 const direct_loader = @import("direct_loader.zig");
 const dma_calibration = @import("dma_calibration.zig");
-
-pub const SubmitError = direct_loader.Loader.SubmitError || buffered_loader.Loader.SubmitError;
-pub const AwaitError = direct_loader.Loader.AwaitError || buffered_loader.Loader.AwaitError;
 
 /// The largest source request, and so the largest DMA block: a request is
 /// a whole number of blocks, at least one.
@@ -28,35 +26,25 @@ pub fn readAlignment(io: std.Io, direct_io: VFS.DirectIo) usize {
     return VFS.direct_io_alignment;
 }
 
+/// The most block sizes `Options.dma_block_sizes` holds; `Loader.init`
+/// refuses a longer `Loader.Options.dma_block_sizes`.
+pub const max_dma_block_sizes = 16;
+pub const DmaBlockSizes = stdx.BoundedArray(usize, max_dma_block_sizes);
+
 /// `Loader.Options` as `Loader.init` checked them, the checkpoint resolved
-/// to its VFS backend's read hints. See `Loader.Options` for each field.
+/// to its VFS backend's read hints and the read width to its default. See
+/// `Loader.Options` for each field.
 pub const Options = struct {
-    read_parallelism: ?usize = null,
-    load_profile: VFS.LoadProfile = .local,
-    dma_block_sizes: []const usize = &dma_calibration.default_block_sizes,
+    read_parallelism: usize,
+    read_hints: VFS.ReadHints = .local,
+    dma_block_sizes: DmaBlockSizes = .init(&dma_calibration.default_block_sizes),
     direct_io: VFS.DirectIo = .auto,
-
-    /// Concurrent source reads by latency class, from the recorded
-    /// width sweeps. Local sources knee at 12 to 16 on every host
-    /// measured: the B70 peaks at 12 to 16 and loses 11% at 24, one MI300X
-    /// prefers 12, the RTX 5090 host 16 over 12, and the GB300 plateau from 12
-    /// to 48 has 16 within 5% of its best rung, so 16 is the width with the
-    /// smallest regret. Remote sources plateau from 24 to 32: hf:// reads 32
-    /// and 64 alike and AWS was flat from 24, while pinned memory grows with
-    /// the width (32 x 32 MiB requests pin 1.5 GiB).
-    const local_read_parallelism: usize = 16;
-    const high_latency_read_parallelism: usize = 32;
-
-    /// The width the backend uses: the option, or the profile's default.
-    pub fn readWidth(self: Options) usize {
-        return self.read_parallelism orelse if (self.load_profile.high_latency) high_latency_read_parallelism else local_read_parallelism;
-    }
 };
 
 /// One destination, its caller-owned output and the source ranges that fill
-/// it, as the front end checked them (`checkParts`): backends trust them. A
-/// backend copies each spec, its parts and their dimensions during
-/// submission; the sources and the output stay alive until await.
+/// it, as the front end checked them (`checkParts`): backends trust them.
+/// Everything a spec names (its parts, their dimensions, the sources, the
+/// output) stays alive until its await; backends borrow it.
 pub const LoadSpec = struct {
     /// The destination's global shape, which the output buffer keeps. Its
     /// sharding places the bytes on the devices; a shape without a mesh is
@@ -73,35 +61,17 @@ pub const LoadSpec = struct {
     parts: []const LoadPart,
 };
 
-/// `width` bytes of `source` from `src_offset` (relative to the tensor's
-/// data) land at `dst_offset` of the destination's logical bytes: the
-/// row-major bytes of its packed shape, before the sharding splits them.
-/// With `dims` the part is strided: that run repeats for every index of
-/// `dims`, each step adding its strides to both offsets (`Lattice`).
+/// The bytes of `source` that `lattice` moves: its source offsets relative
+/// to the tensor's data, its destination offsets into the destination's
+/// logical bytes, the row-major bytes of its packed shape before the
+/// sharding splits them.
 pub const LoadPart = struct {
     source: *const safetensors.Tensor,
-    src_offset: u64 = 0,
-    dst_offset: u64 = 0,
-    width: u64,
-    /// Outermost first; empty for one contiguous run.
-    dims: []const Dim = &.{},
-
-    /// A step of the part's runs: `count` of them, each moving the source
-    /// and destination offsets by their strides. A zero `src_stride`
-    /// repeats the same bytes.
-    pub const Dim = struct {
-        count: u64,
-        src_stride: u64,
-        dst_stride: u64,
-    };
+    lattice: Lattice,
 
     /// The whole of `source`, at the start of the destination.
     pub fn whole(source: *const safetensors.Tensor) LoadPart {
-        return .{ .source = source, .width = source.byteSize() };
-    }
-
-    pub fn lattice(self: LoadPart) Lattice {
-        return .{ .src_offset = self.src_offset, .dst_offset = self.dst_offset, .width = self.width, .dims = self.dims };
+        return .{ .source = source, .lattice = .{ .width = source.byteSize() } };
     }
 };
 
@@ -109,15 +79,25 @@ pub const LoadPart = struct {
 /// most two.
 pub const max_part_dims = 2 * constants.MAX_RANK;
 
-/// A strided part's byte moves: the run of `width` bytes at `src_offset`
-/// and `dst_offset`, and one more for every index of `dims` (outermost
-/// first), each offset moved by the index times its strides. A zero source
-/// stride repeats the same bytes. Runs are numbered row-major over `dims`.
+/// A part's byte moves: the run of `width` bytes at `src_offset` and
+/// `dst_offset`, and, for a strided part, one more for every index of
+/// `dims` (outermost first), each offset moved by the index times its
+/// strides. A zero source stride repeats the same bytes. Runs are numbered
+/// row-major over `dims`.
 pub const Lattice = struct {
-    src_offset: u64,
-    dst_offset: u64,
+    src_offset: u64 = 0,
+    dst_offset: u64 = 0,
     width: u64,
-    dims: []const LoadPart.Dim = &.{},
+    /// Empty for one contiguous run.
+    dims: []const Dim = &.{},
+
+    /// A step of the runs: `count` of them, each moving the source and
+    /// destination offsets by their strides.
+    pub const Dim = struct {
+        count: u64,
+        src_stride: u64,
+        dst_stride: u64,
+    };
 
     pub const Run = struct { src: u64, dst: u64 };
 
@@ -173,7 +153,7 @@ pub const Lattice = struct {
         return ordered(self.dims, self.width, .src, true);
     }
 
-    fn ordered(dims: []const LoadPart.Dim, width: u64, comptime side: enum { src, dst }, exact: bool) bool {
+    fn ordered(dims: []const Dim, width: u64, comptime side: enum { src, dst }, exact: bool) bool {
         var extent = width;
         var d = dims.len;
         while (d > 0) {
@@ -318,7 +298,7 @@ pub const Lattice = struct {
         while (cursor.next()) |run| copyRun(width, self.width, dst +% run.dst, src +% run.src);
     }
 
-    inline fn copyLine(comptime width: usize, len: u64, d: LoadPart.Dim, dst: usize, src: usize) void {
+    inline fn copyLine(comptime width: usize, len: u64, d: Dim, dst: usize, src: usize) void {
         var to = dst;
         var from = src;
         for (0..d.count) |_| {
@@ -342,36 +322,24 @@ pub const Lattice = struct {
 /// Whether `parts` keep the `LoadSpec` contract for a destination of
 /// `destination_bytes`: there is at least one, each is non-empty and inside
 /// its source and the destination, and they come in ascending destination
-/// order, contiguous ones without overlapping. Strided parts must land in
-/// index order (`Lattice.dstOrdered`); interleaving ones are not checked
-/// against each other, since only `Source` makes them, disjoint by
-/// construction.
+/// order, each starting at or after the previous contiguous part's end or
+/// strided part's start. Strided parts must land in index order
+/// (`Lattice.dstOrdered`); interleaving ones are only checked against each
+/// other by the bytes they cover together, since only `Source` makes them,
+/// disjoint by construction.
 pub fn checkParts(parts: []const LoadPart, destination_bytes: u64) bool {
     if (parts.len == 0) return false;
-    for (parts) |part| {
-        if (part.dims.len != 0) return checkStridedParts(parts, destination_bytes);
-    }
-    var end: u64 = 0;
-    for (parts) |part| {
-        const source_end = std.math.add(u64, part.src_offset, part.width) catch return false;
-        if (part.width == 0 or source_end > part.source.byteSize() or part.dst_offset < end) return false;
-        end = std.math.add(u64, part.dst_offset, part.width) catch return false;
-    }
-    return end <= destination_bytes;
-}
-
-fn checkStridedParts(parts: []const LoadPart, destination_bytes: u64) bool {
+    var floor: u64 = 0;
     var covered: u64 = 0;
-    var previous_start: u64 = 0;
     for (parts) |part| {
-        const lattice = part.lattice();
-        if (part.width == 0 or part.dims.len > max_part_dims or !lattice.dstOrdered()) return false;
+        const lattice = part.lattice;
+        if (lattice.width == 0 or lattice.dims.len > max_part_dims or !lattice.dstOrdered()) return false;
         const spans = lattice.spans() orelse return false;
-        const source_end = std.math.add(u64, part.src_offset, spans.src) catch return false;
-        const part_end = std.math.add(u64, part.dst_offset, spans.dst) catch return false;
-        if (source_end > part.source.byteSize() or part_end > destination_bytes or part.dst_offset < previous_start) return false;
-        previous_start = part.dst_offset;
-        covered += lattice.runs() * part.width;
+        const source_end = std.math.add(u64, lattice.src_offset, spans.src) catch return false;
+        const end = std.math.add(u64, lattice.dst_offset, spans.dst) catch return false;
+        if (source_end > part.source.byteSize() or end > destination_bytes or lattice.dst_offset < floor) return false;
+        floor = if (lattice.dims.len == 0) end else lattice.dst_offset;
+        covered +|= lattice.runs() * lattice.width;
     }
     return covered <= destination_bytes;
 }
@@ -388,7 +356,7 @@ fn checkStridedParts(parts: []const LoadPart, destination_bytes: u64) bool {
 /// transfers without pinning pages per request). TPU symbols alone did not
 /// prove a working transfer implementation; TPU, neuron and metal keep the
 /// buffered path pending runtime checks.
-fn loadsDirect(platform: *const Platform) bool {
+pub fn loadsDirect(platform: *const Platform) bool {
     return switch (platform.target) {
         .cuda, .rocm, .oneapi, .cpu, .furiosa => true,
         .tpu, .neuron, .metal => false,
@@ -426,7 +394,11 @@ pub const Backend = union(enum) {
             .{ .buffered = try buffered_loader.Loader.create(allocator, io, platform, opts) };
     }
 
-    pub fn submit(self: Backend, specs: []const LoadSpec, progress: std.Progress.Node) SubmitError!Submission {
+    /// Fails with what the backend detected, logged there (a plain
+    /// allocation failure is `OutOfMemory`, unlogged): a binding it cannot
+    /// assemble is `InvalidBinding`; the rest comes from the files, host
+    /// memory and PJRT.
+    pub fn submit(self: Backend, specs: []const LoadSpec, progress: std.Progress.Node) !Submission {
         return switch (self) {
             inline else => |loader, tag| @unionInit(Submission, @tagName(tag), try loader.submit(specs, progress)),
         };
@@ -434,7 +406,7 @@ pub const Backend = union(enum) {
 
     /// Waits for and retires `submission`, which this backend published.
     /// Its batch is dangling afterwards.
-    pub fn await(self: Backend, submission: Submission) AwaitError!void {
+    pub fn await(self: Backend, submission: Submission) !void {
         return switch (self) {
             inline else => |loader, tag| loader.awaitBatch(@field(submission, @tagName(tag))),
         };
@@ -463,7 +435,7 @@ pub const Submission = union(enum) {
 
 /// A random lattice whose runs land in order (`Lattice.dstOrdered`), its
 /// source strides anything, zero (a broadcast) included.
-fn randomLattice(random: std.Random, dims: []LoadPart.Dim) Lattice {
+fn randomLattice(random: std.Random, dims: []Lattice.Dim) Lattice {
     const width = random.intRangeAtMost(u64, 1, 17);
     var extent = width;
     var d = dims.len;
@@ -486,7 +458,7 @@ test "copyRuns lands every run of a range where the cursor does" {
     for (&source, 0..) |*byte, i| byte.* = @truncate(i * 7 + 1);
     var expected: [4096]u8 = undefined;
     var actual: [4096]u8 = undefined;
-    var dims_buffer: [5]LoadPart.Dim = undefined;
+    var dims_buffer: [5]Lattice.Dim = undefined;
     for (0..2000) |_| {
         var lattice = randomLattice(random, dims_buffer[0..random.intRangeAtMost(usize, 0, dims_buffer.len)]);
         // The widths `copyRuns` loads as one word, and others.
@@ -512,33 +484,37 @@ test "checkParts refuses parts outside their source or destination, out of order
     // A source of 16 bytes into a destination of 32.
     const source: safetensors.Tensor = .{ .file_uri = "memory", .name = "s", .shape = .init(.{16}, .u8), .offset = 0 };
     // Runs of 4 bytes, every other 4 bytes of the destination.
-    const every_other: []const LoadPart.Dim = &.{.{ .count = 4, .src_stride = 4, .dst_stride = 8 }};
+    const every_other: []const Lattice.Dim = &.{.{ .count = 4, .src_stride = 4, .dst_stride = 8 }};
     const refused = [_][]const LoadPart{
         &.{},
-        &.{.{ .source = &source, .width = 0 }},
+        &.{.{ .source = &source, .lattice = .{ .width = 0 } }},
         // Past the source, past the destination, and an overflow.
-        &.{.{ .source = &source, .src_offset = 8, .width = 9 }},
-        &.{.{ .source = &source, .dst_offset = 24, .width = 9 }},
-        &.{.{ .source = &source, .src_offset = std.math.maxInt(u64), .width = 1 }},
+        &.{.{ .source = &source, .lattice = .{ .src_offset = 8, .width = 9 } }},
+        &.{.{ .source = &source, .lattice = .{ .dst_offset = 24, .width = 9 } }},
+        &.{.{ .source = &source, .lattice = .{ .src_offset = std.math.maxInt(u64), .width = 1 } }},
         // Overlapping, and descending.
-        &.{ .{ .source = &source, .width = 8 }, .{ .source = &source, .dst_offset = 4, .width = 8 } },
-        &.{ .{ .source = &source, .dst_offset = 8, .width = 4 }, .{ .source = &source, .width = 4 } },
+        &.{ .{ .source = &source, .lattice = .{ .width = 8 } }, .{ .source = &source, .lattice = .{ .dst_offset = 4, .width = 8 } } },
+        &.{ .{ .source = &source, .lattice = .{ .dst_offset = 8, .width = 4 } }, .{ .source = &source, .lattice = .{ .width = 4 } } },
         // Strided: runs that overlap on the destination, a dimension of no
         // step, past the source, past the destination, and descending.
-        &.{.{ .source = &source, .width = 4, .dims = &.{.{ .count = 2, .src_stride = 4, .dst_stride = 2 }} }},
-        &.{.{ .source = &source, .width = 4, .dims = &.{.{ .count = 0, .src_stride = 4, .dst_stride = 8 }} }},
-        &.{.{ .source = &source, .src_offset = 4, .width = 4, .dims = every_other }},
-        &.{.{ .source = &source, .dst_offset = 8, .width = 4, .dims = every_other }},
-        &.{ .{ .source = &source, .dst_offset = 4, .width = 4, .dims = every_other }, .{ .source = &source, .width = 4, .dims = every_other } },
+        &.{.{ .source = &source, .lattice = .{ .width = 4, .dims = &.{.{ .count = 2, .src_stride = 4, .dst_stride = 2 }} } }},
+        &.{.{ .source = &source, .lattice = .{ .width = 4, .dims = &.{.{ .count = 0, .src_stride = 4, .dst_stride = 8 }} } }},
+        &.{.{ .source = &source, .lattice = .{ .src_offset = 4, .width = 4, .dims = every_other } }},
+        &.{.{ .source = &source, .lattice = .{ .dst_offset = 8, .width = 4, .dims = every_other } }},
+        &.{ .{ .source = &source, .lattice = .{ .dst_offset = 4, .width = 4, .dims = every_other } }, .{ .source = &source, .lattice = .{ .width = 4, .dims = every_other } } },
+        // Interleaving strided parts that cover more than the destination,
+        // and contiguous parts overlapping beside a strided one.
+        &.{ .{ .source = &source, .lattice = .{ .width = 4, .dims = every_other } }, .{ .source = &source, .lattice = .{ .width = 4, .dims = every_other } }, .{ .source = &source, .lattice = .{ .dst_offset = 4, .width = 4, .dims = every_other } } },
+        &.{ .{ .source = &source, .lattice = .{ .width = 8 } }, .{ .source = &source, .lattice = .{ .dst_offset = 4, .width = 8 } }, .{ .source = &source, .lattice = .{ .dst_offset = 16, .width = 4, .dims = &.{.{ .count = 2, .src_stride = 4, .dst_stride = 8 }} } } },
     };
     for (refused) |parts| try std.testing.expect(!checkParts(parts, 32));
     const accepted = [_][]const LoadPart{
         // Back to back.
-        &.{ .{ .source = &source, .width = 16 }, .{ .source = &source, .dst_offset = 16, .width = 16 } },
+        &.{ .{ .source = &source, .lattice = .{ .width = 16 } }, .{ .source = &source, .lattice = .{ .dst_offset = 16, .width = 16 } } },
         // Two strided parts interleaving their runs.
-        &.{ .{ .source = &source, .width = 4, .dims = every_other }, .{ .source = &source, .dst_offset = 4, .width = 4, .dims = every_other } },
+        &.{ .{ .source = &source, .lattice = .{ .width = 4, .dims = every_other } }, .{ .source = &source, .lattice = .{ .dst_offset = 4, .width = 4, .dims = every_other } } },
         // A contiguous part, then a strided one.
-        &.{ .{ .source = &source, .width = 8 }, .{ .source = &source, .dst_offset = 8, .width = 4, .dims = &.{.{ .count = 2, .src_stride = 4, .dst_stride = 8 }} } },
+        &.{ .{ .source = &source, .lattice = .{ .width = 8 } }, .{ .source = &source, .lattice = .{ .dst_offset = 8, .width = 4, .dims = &.{.{ .count = 2, .src_stride = 4, .dst_stride = 8 }} } } },
     };
     for (accepted) |parts| try std.testing.expect(checkParts(parts, 32));
 }

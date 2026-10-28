@@ -125,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
     defer compiled_model.deinit();
 
     var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, &loader.?, progress, &store);
-    defer model.unloadBuffers(&model_buffers, allocator);
+    defer zml.mem.deinitBufferized(allocator, &model_buffers);
     // Release the pinned staging pools as soon as the weights are loaded.
     loader.?.deinit();
     loader = null;

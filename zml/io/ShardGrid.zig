@@ -26,8 +26,6 @@ const constants = @import("../constants.zig");
 const Shape = @import("../shape.zig").Shape;
 const Sharding = @import("../Sharding.zig");
 
-pub const InitError = error{IncompatibleSharding};
-
 const ShardGrid = @This();
 
 const max_rank = constants.MAX_RANK;
@@ -52,10 +50,12 @@ box_count: usize,
 /// The canonical device indices holding each box.
 writers: [max_boxes]u64 = @splat(0),
 
-/// `shape`'s sharding must name a mesh (`Platform.placedShape`): its
-/// devices, in canonical order, are the writers the masks index.
-pub fn init(shape: Shape) InitError!ShardGrid {
-    const placement: Sharding.Placement = try .init(&shape);
+/// `shape`'s sharding must name a mesh (`Platform.placedShape`) and place
+/// on it, as the loader's front end checked: its devices, in canonical
+/// order, are the writers the masks index.
+pub fn init(shape: Shape) ShardGrid {
+    const placement = Sharding.Placement.init(&shape) catch |err|
+        std.debug.panic("ShardGrid: {f} does not place, though checked: {s}", .{ shape, @errorName(err) });
     const local = placement.localShape(shape);
     const devices = placement.mesh().?.devicesInCanonicalOrder();
     std.debug.assert(devices.len <= max_boxes);
@@ -87,7 +87,8 @@ pub fn init(shape: Shape) InitError!ShardGrid {
         // The innermost split axis cuts the runs.
         if (count > 1 and grid.run == grid.total) grid.run = shard * grid.strides[axis];
     }
-    if (index_stride > max_boxes) return error.IncompatibleSharding;
+    // A placement holds every box on at least one of its devices.
+    std.debug.assert(index_stride <= devices.len);
     grid.box_count = @intCast(index_stride);
     for (0..devices.len) |writer| {
         const slices = placement.slices(writer, shape);
@@ -95,9 +96,7 @@ pub fn init(shape: Shape) InitError!ShardGrid {
         for (slices.constSlice(), 0..) |slice, i| box += @as(u64, @intCast(slice.start)) / grid.shard[i] * grid.index_strides[i];
         grid.writers[@intCast(box)] |= @as(u64, 1) << @intCast(writer);
     }
-    for (grid.writers[0..grid.box_count]) |mask| {
-        if (mask == 0) return error.IncompatibleSharding;
-    }
+    for (grid.writers[0..grid.box_count]) |mask| std.debug.assert(mask != 0);
     return grid;
 }
 
@@ -105,18 +104,16 @@ fn coordinate(self: *const ShardGrid, offset: u64, axis: usize) u64 {
     return offset / self.strides[axis] % self.dims[axis];
 }
 
-/// The box holding logical byte `offset`.
-pub fn boxOf(self: *const ShardGrid, offset: u64) usize {
+/// The box holding logical byte `offset`, and where the byte lands inside it.
+pub fn locate(self: *const ShardGrid, offset: u64) struct { usize, u64 } {
     var box: u64 = 0;
-    for (0..self.rank) |i| box += self.coordinate(offset, i) / self.shard[i] * self.index_strides[i];
-    return @intCast(box);
-}
-
-/// Where logical byte `offset` lands inside its box.
-pub fn boxOffset(self: *const ShardGrid, offset: u64) u64 {
     var at = offset % self.element;
-    for (0..self.rank) |i| at += self.coordinate(offset, i) % self.shard[i] * self.box_strides[i];
-    return at;
+    for (0..self.rank) |i| {
+        const c = self.coordinate(offset, i);
+        box += c / self.shard[i] * self.index_strides[i];
+        at += c % self.shard[i] * self.box_strides[i];
+    }
+    return .{ @intCast(box), at };
 }
 
 /// The bytes of box `box` before logical offset `offset`: a logical range
@@ -208,7 +205,7 @@ const testing = struct {
     /// `rankIn` bounds the range's bytes on each box and that `runCount`
     /// counts the runs.
     fn expectPlaces(allocator: std.mem.Allocator, shape: Shape, step: u64) !void {
-        const grid: ShardGrid = try .init(shape);
+        const grid: ShardGrid = .init(shape);
         const placement: Sharding.Placement = try .init(&shape);
         const devices = placement.mesh().?.devicesInCanonicalOrder();
         const box_bytes: usize = @intCast(grid.box_bytes);
@@ -250,8 +247,7 @@ const testing = struct {
             var at = start;
             while (at < end) : (runs += 1) {
                 const stop = grid.runEnd(at, end);
-                const box = grid.boxOf(at);
-                const landing = grid.boxOffset(at);
+                const box, const landing = grid.locate(at);
                 low[box] = @min(low[box], landing);
                 high[box] = @max(high[box], landing + stop - at);
                 var mask = grid.writers[box];

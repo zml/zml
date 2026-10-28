@@ -70,7 +70,7 @@ fn runBenchmark(a: std.mem.Allocator, io: std.Io, platform: *const zml.Platform,
     const fixture = try fixtures.Fixture.init(arena.allocator(), global_case);
 
     var buffers = try fixtures.upload(io, platform, inputs, fixture);
-    defer zml.Buffer.deinitAll(Inputs, &buffers);
+    defer zml.Buffer.deinitAll(&buffers);
 
     var output: zml.Buffer = undefined;
 

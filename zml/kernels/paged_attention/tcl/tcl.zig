@@ -1242,12 +1242,12 @@ fn runCases(comptime max_pages: usize, comptime num_pages: usize, cases: []const
             .seq_lens = try .fromBytes(io, platform, params.seq_lens.shape(), std.mem.sliceAsBytes(&seq_lens)),
             .query_start_len = try .fromBytes(io, platform, params.query_start_len.shape(), std.mem.sliceAsBytes(&starts)),
         };
-        defer zml.Buffer.deinitAll(paged.Parameters, &bp);
+        defer zml.Buffer.deinitAll(&bp);
         var opts_d: zml.Bufferized(paged_attention.AttentionOptions) = .{
             .mask = .{ .standard = {} },
             .sink = if (case.opts.sink) |s| try .fromBytes(io, platform, opts.sink.?.shape(), std.mem.sliceAsBytes(s)) else null,
         };
-        defer zml.Buffer.deinitAll(paged_attention.AttentionOptions, &opts_d);
+        defer zml.Buffer.deinitAll(&opts_d);
         var result = try exe.eval(allocator, io, .{ bp, bq, bk, bv, opts_d });
         defer result.deinit();
         const host = try result.toSliceAlloc(allocator, io);

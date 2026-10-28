@@ -37,6 +37,10 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         log.err("The selected platform requires at least 1 device, got {}", .{num_devices});
         return error.MissingDevices;
     }
+    if (num_devices > Platform.MAX_NUM_DEVICES) {
+        log.err("Platform {} got {} devices, but ZML supports up to {}", .{ target, num_devices, Platform.MAX_NUM_DEVICES });
+        return error.InvalidDeviceCount;
+    }
     switch (target) {
         .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi, .furiosa => {
             if (!std.math.isPowerOfTwo(num_devices)) {
@@ -183,12 +187,6 @@ pub const Device = struct {
         return self.pjrt_desc.kind(self.platform.pjrt_api);
     }
 
-    /// Returns a PJRT device-description attribute without exposing the
-    /// underlying PJRT handles. Attribute storage is owned by the platform.
-    pub fn attribute(self: Device, name: []const u8) ?pjrt.NamedValue.Value {
-        return self.pjrt_desc.attribute(self.platform.pjrt_api, name);
-    }
-
     pub fn debugString(self: Device) []const u8 {
         return self.pjrt_desc.debugString(self.platform.pjrt_api);
     }
@@ -323,9 +321,6 @@ pub const Platform = struct {
         errdefer pjrt_client.deinit(api);
         const pjrt_devices = pjrt_client.addressableDevices(api);
         try validateDeviceCount(target, pjrt_devices.len);
-        if (pjrt_devices.len > MAX_NUM_DEVICES) {
-            log.warn("platform {} got {} devices, but ZML supports up to {}: the loader and multi-device buffers will refuse or fail on this platform", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
-        }
 
         const pjrt_memories = pjrt_client.addressableMemories(api);
 
