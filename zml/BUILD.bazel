@@ -98,6 +98,7 @@ zig_library(
         "nn.zig",
         "ops.zig",
         "ops/manual_computation.zig",
+        "packed_scale_layout.zig",
         "pjrtx.zig",
         "platform.zig",
         "profiling/profiler.zig",
@@ -197,4 +198,9 @@ zig_library(
 zig_test(
     name = "test",
     deps = ["//zml"],
+)
+
+zig_test(
+    name = "packed_scale_layout_test",
+    main = "packed_scale_layout.zig",
 )

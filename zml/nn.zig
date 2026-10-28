@@ -68,7 +68,9 @@ pub const Linear = struct {
         const scales = if (q.scheme.isMx() and q.scales.dtype() == .u8) q.scales.bitCast(.f8e8m0) else q.scales;
         const acc = scaledDot(lhs, weight, lhs_scale, scales, output_dtype, self.tag, .{
             .lhs_scale_swizzled = scale_layout == .blackwell_128x4,
-            .rhs_scale_swizzled = q.swizzled_scales,
+            .rhs_scale_swizzled = q.scaleStorageLayout() == .blackwell_128x4,
+            .lhs_scale_packed_column = scale_layout == .packed_column_4,
+            .rhs_scale_packed_column = q.scaleStorageLayout() == .packed_column_4,
         });
         const y = applyGlobalScale(acc, input_global_scale, weight_global_scale).convert(output_dtype);
         return if (self.bias) |bias| y.add(bias.convert(y.dtype()).broad(y.shape())) else y;
@@ -205,8 +207,9 @@ pub fn scaledDot(
             .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
         }),
     });
-    var attributes: stdx.BoundedArray(mlir.NamedAttribute, 3) = .empty;
+    var attributes: stdx.BoundedArray(mlir.NamedAttribute, 5) = .empty;
     attributes.appendAssumeCapacity(.named(mlir_ctx, "dimension_numbers", dnums));
+    stdx.debug.assert(!(opts.lhs_scale_swizzled and opts.lhs_scale_packed_column) and !(opts.rhs_scale_swizzled and opts.rhs_scale_packed_column), "scaledDot: conflicting scale storage layouts", .{});
     if (opts.lhs_scale_swizzled) {
         stdx.debug.assert(lhs_scale != null and lhs.rank() == 2 and lhs_scale_operand.rank() == 2 and lhs_contracting_axes.get(0) == 1, "scaledDot: a swizzled lhs scale needs a [m, k] lhs with scales, got {f}", .{lhs});
         attributes.appendAssumeCapacity(.named(mlir_ctx, "lhs_scale_swizzled", .boolean(mlir_ctx, true)));
@@ -214,6 +217,14 @@ pub fn scaledDot(
     if (opts.rhs_scale_swizzled) {
         stdx.debug.assert(rhs.rank() == 2 and rhs_scale.rank() == 2 and rhs_contracting_axes.get(0) == 1, "scaledDot: a swizzled rhs scale needs a [n, k] rhs, got {f}", .{rhs});
         attributes.appendAssumeCapacity(.named(mlir_ctx, "rhs_scale_swizzled", .boolean(mlir_ctx, true)));
+    }
+    if (opts.lhs_scale_packed_column) {
+        stdx.debug.assert(lhs_scale != null and lhs.rank() == 2 and lhs_scale_operand.rank() == 2 and lhs_contracting_axes.get(0) == 1, "scaledDot: a packed-column lhs scale needs a [m, k] lhs with scales, got {f}", .{lhs});
+        attributes.appendAssumeCapacity(.named(mlir_ctx, "lhs_scale_packed_column", .boolean(mlir_ctx, true)));
+    }
+    if (opts.rhs_scale_packed_column) {
+        stdx.debug.assert(rhs.rank() == 2 and rhs_scale.rank() == 2 and rhs_contracting_axes.get(0) == 1, "scaledDot: a packed-column rhs scale needs a [n, k] rhs, got {f}", .{rhs});
+        attributes.appendAssumeCapacity(.named(mlir_ctx, "rhs_scale_packed_column", .boolean(mlir_ctx, true)));
     }
     return ops.composite("xla.scaled_dot", &.{ lhs, rhs, lhs_scale_operand, rhs_scale_operand }, &.{res_shape}, scaledDotReference, res_shape, .{
         .composite_attributes = attributes.constSlice(),
@@ -227,6 +238,10 @@ pub const ScaledDotOpts = struct {
     /// each device's slice on its own.
     // TODO: fine for now, but we should find a better way to express how a scale is laid out.
     rhs_scale_swizzled: bool = false,
+    /// The lhs scale uses `quantization.PackedColumnScaleLayout`, per device.
+    lhs_scale_packed_column: bool = false,
+    /// The rhs scale uses `quantization.PackedColumnScaleLayout`, per device.
+    rhs_scale_packed_column: bool = false,
 };
 
 test "block128 scaled dot layouts" {

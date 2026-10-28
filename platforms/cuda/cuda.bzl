@@ -264,8 +264,8 @@ _PLUGINS = {
         "url": "https://mirror.zml.ai/plugins/202610231441.290.1.a3a89b67baa7/zml-cuda-linux-amd64.tar.zst",
     },
     "arm64": {
-        "sha256": "ed83318a36d86e195046e9bec2f8fbb75116b09a26f10247db2e02147b91350e",
-        "url": "file:///tmp/benjamin/llmd-cp-kernel-tuning-20261027/engram/gin-full/archive-v1/archive.tar.zst",
+        "sha256": "90925141f100cb25699aa66dc127f9d9a7e4727819bb9f71fc814eece32bcace",
+        "url": "file:///tmp/benjamin/llmd-cp-kernel-tuning-20261027/xla-kernel-cache-tma-v3/archive-v1/archive.tar.zst",
     },
 }
 
