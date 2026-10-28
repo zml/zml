@@ -101,8 +101,14 @@ common:debug    --strategy=ZigBuildTestLib=local
 # Keep Zig compiler state between builds. See docs/howtos/incremental_builds.md.
 common:incremental --config=debug
 common:incremental --@rules_zig//zig/settings:incremental_worker=//bazel/zig_worker:worker
-# Zig 0.17's self-hosted incremental archives are not accepted by the C linker.
-common:incremental --@rules_zig//zig/settings:zigopt=-fllvm
+# Let Zig own code generation and the final incremental link.
+common:incremental --@rules_zig//zig/settings:use_cc_common_link=false
+common:incremental --@rules_zig//zig/settings:zigopt=-fno-llvm
+common:incremental --@rules_zig//zig/settings:zigopt=-fno-lld
+common:incremental --@rules_zig//zig/settings:zigopt=-fnew-linker
+common:incremental --extra_toolchains=//bazel/zig_worker:linux_target_toolchain
+# Elf2 does not yet synthesize the section boundaries used by this optional feature.
+common:incremental --copt=-DPROTOBUF_DISABLE_DESCRIPTOR_WEAK_MESSAGES
 build:incremental  --strategy=ZigIncremental=worker
 build:incremental  --worker_max_instances=ZigIncremental=1
 # Zig retains open input directories; they must survive between requests.

@@ -1,7 +1,66 @@
+diff --git a/zig/private/common/cdeps.bzl b/zig/private/common/cdeps.bzl
+index e784b62..e057a37 100644
+--- a/zig/private/common/cdeps.bzl
++++ b/zig/private/common/cdeps.bzl
+@@ -74,5 +74,13 @@ def zig_cdeps_linker_inputs(*, linking_context, solib_parents, os, inputs, args,
+     for link in linking_context.linker_inputs.to_list():
+-        args.add_all(link.user_link_flags)
++        args.add_all(link.user_link_flags, map_each = zig_cdeps_link_flag)
+         inputs.extend(link.additional_inputs)
+         for lib in link.libraries:
++            # Bazel's alwayslink .lo files are archives, but Zig treats .lo as
++            # relocatable ELF. Passing their members also preserves alwayslink.
++            if lib.alwayslink:
++                objects = lib.pic_objects or lib.objects
++                if objects:
++                    inputs.extend(objects)
++                    all_libraries.extend([(obj, False) for obj in objects])
++                    continue
+             file = None
+@@ -122,12 +130,6 @@ def zig_cdeps_linker_inputs(*, linking_context, solib_parents, os, inputs, args,
+ def _lib_flags(arg):
+-    (file, dynamic) = arg
+-    if dynamic:
+-        ext_skip = len(file.extension) + 1
+-        if file.basename.startswith("lib"):
+-            libname = file.basename[3:-ext_skip]
+-        else:
+-            libname = file.basename[:-ext_skip]
+-        return ["-L" + file.dirname, "-l" + libname]
+-    else:
+-        return file.path
++    (file, _) = arg
++
++    # Preserve version suffixes and Bazel's library names verbatim.
++    return file.path
+ 
+@@ -147 +149,13 @@ def _make_to_rpath(solib_parents, os):
+     return to_rpath
++
++def zig_cdeps_link_flag(flag):
++    """Translate compiler-driver linker flags used by C dependencies."""
++    if flag.startswith("-Wl,-u,"):
++        return ["--force_undefined", flag[len("-Wl,-u,"):]]
++    if flag.startswith("-Wl,-z,"):
++        return ["-z", flag[len("-Wl,-z,"):]]
++    if flag.startswith("-Wl,-rpath,"):
++        return ["-rpath", flag[len("-Wl,-rpath,"):]]
++    if flag == "-pthread":
++        return "-lpthread"
++    return flag
 diff --git a/zig/private/common/zig_build.bzl b/zig/private/common/zig_build.bzl
-index c5750ed..163a2bb 100644
+index c5750ed..a03358f 100644
 --- a/zig/private/common/zig_build.bzl
 +++ b/zig/private/common/zig_build.bzl
+@@ -12,7 +12,7 @@ load(
+     "bazel_builtin_module",
+     BAZEL_BUILTIN_ATTRS = "ATTRS",
+ )
+-load("//zig/private/common:cdeps.bzl", "zig_cdeps_linker_inputs")
++load("//zig/private/common:cdeps.bzl", "zig_cdeps_link_flag", "zig_cdeps_linker_inputs")
+ load("//zig/private/common:csrcs.bzl", "zig_csrcs")
+ load("//zig/private/common:data.bzl", "zig_collect_data", "zig_create_runfiles")
+ load("//zig/private/common:escape_label.bzl", "escape_label")
 @@ -55,6 +55,10 @@ load(
  )
  
@@ -82,7 +141,33 @@ index c5750ed..163a2bb 100644
  
      if use_cc_common_link:
          global_args.add_all([
-@@ -559,7 +609,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -492,6 +542,16 @@ def zig_build_impl(ctx, *, kind):
+                 data = direct_data,
+             )
+ 
++            # CcInfo excludes the C++ runtime normally injected by cc_common.link.
++            # Use the same runtime as the toolchain that compiled these objects.
++            if kind != "zig_static_library":
++                args.add("-lc")
++                runtime_toolchain, runtime_features = find_cc_toolchain(ctx, mandatory = False)
++                if runtime_toolchain:
++                    runtime = runtime_toolchain.static_runtime_lib(feature_configuration = runtime_features)
++                    args.add_all(runtime)
++                    transitive_inputs.append(runtime)
++
+             transitive_inputs.append(depset(cdeps_inputs))
+ 
+     if use_test_obj:
+@@ -535,7 +595,7 @@ def zig_build_impl(ctx, *, kind):
+     )
+ 
+     if not use_cc_common_link and kind != "zig_static_library":
+-        args.add_all(linkopts)
++        args.add_all(linkopts, map_each = zig_cdeps_link_flag)
+ 
+     auxiliary_outputs = []
+     if ctx.attr.emit_asm:
+@@ -559,7 +619,8 @@ def zig_build_impl(ctx, *, kind):
          if use_cc_common_link:
              static_lib = ctx.actions.declare_file(ctx.label.name + _static_lib_extension(zigtargetinfo.triple.os))
              args.add(static_lib, format = "-femit-bin=%s")
@@ -92,7 +177,7 @@ index c5750ed..163a2bb 100644
                  outputs = [static_lib] + auxiliary_outputs,
                  inputs = inputs,
                  executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -596,7 +647,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -596,7 +657,8 @@ def zig_build_impl(ctx, *, kind):
              )
          else:
              args.add(bin_output, format = "-femit-bin=%s")
@@ -102,7 +187,7 @@ index c5750ed..163a2bb 100644
                  outputs = [bin_output] + auxiliary_outputs,
                  inputs = inputs,
                  executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -610,9 +662,10 @@ def zig_build_impl(ctx, *, kind):
+@@ -610,9 +672,10 @@ def zig_build_impl(ctx, *, kind):
              test_artifact = None
              if use_test_obj:
                  test_obj = ctx.actions.declare_file(ctx.label.name + _object_extension(zigtargetinfo.triple.os))
@@ -115,7 +200,7 @@ index c5750ed..163a2bb 100644
                      outputs = [test_obj] + auxiliary_outputs,
                      inputs = inputs,
                      executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -624,14 +677,15 @@ def zig_build_impl(ctx, *, kind):
+@@ -624,14 +687,15 @@ def zig_build_impl(ctx, *, kind):
                  test_artifact = test_obj
              else:
                  bc = ctx.actions.declare_file(ctx.label.name + ".bc")
@@ -133,7 +218,7 @@ index c5750ed..163a2bb 100644
                      outputs = [bc] + auxiliary_outputs,
                      inputs = inputs,
                      executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -643,14 +697,15 @@ def zig_build_impl(ctx, *, kind):
+@@ -643,14 +707,15 @@ def zig_build_impl(ctx, *, kind):
                  test_artifact = bc
  
              static_lib = ctx.actions.declare_file(ctx.label.name + _static_lib_extension(zigtargetinfo.triple.os))
@@ -151,7 +236,7 @@ index c5750ed..163a2bb 100644
                  outputs = [static_lib],
                  inputs = [test_artifact, zigtoolchaininfo.validation] + ([zigtoolchaininfo.zig_lib.file] if zigtoolchaininfo.zig_lib.file else []),
                  executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -687,7 +742,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -687,7 +752,8 @@ def zig_build_impl(ctx, *, kind):
              )
          else:
              args.add(bin_output, format = "-femit-bin=%s")
@@ -161,7 +246,7 @@ index c5750ed..163a2bb 100644
                  outputs = [bin_output] + auxiliary_outputs,
                  inputs = inputs,
                  executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -701,7 +757,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -701,7 +767,8 @@ def zig_build_impl(ctx, *, kind):
              args.add(bin_output, format = "-femit-bin=%s")
          else:
              args.add("-fno-emit-bin")
@@ -171,7 +256,7 @@ index c5750ed..163a2bb 100644
              outputs = ([bin_output] if ctx.attr.emit_bin else []) + auxiliary_outputs,
              inputs = inputs,
              executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -725,7 +782,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -725,7 +792,8 @@ def zig_build_impl(ctx, *, kind):
          if use_cc_common_link:
              static_lib = ctx.actions.declare_file(ctx.label.name + _static_lib_extension(zigtargetinfo.triple.os))
              args.add(static_lib, format = "-femit-bin=%s")
@@ -181,7 +266,7 @@ index c5750ed..163a2bb 100644
                  outputs = [static_lib] + auxiliary_outputs,
                  inputs = inputs,
                  executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -777,7 +835,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -777,7 +845,8 @@ def zig_build_impl(ctx, *, kind):
              # Here we explicitly set the SONAME to match the output filename.
              args.add(bin_output_name, format = "-fsoname=%s")
  

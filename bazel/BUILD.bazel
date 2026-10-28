@@ -1,13 +1,10 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 cc_library(
     name = "retain_runfiles_init",
-    # Mach-O adds an underscore to the exported Zig symbol.
-    linkopts = select({
-        "@platforms//os:macos": ["-Wl,-u,__bazel_runfiles_init"],
-        "//conditions:default": ["-Wl,-u,_bazel_runfiles_init"],
-    }),
+    srcs = ["runfiles_init.c"],
+    alwayslink = True,
 )
 
 zig_library(
@@ -20,4 +17,11 @@ zig_library(
         "//stdx",
         "@rules_zig//zig/runfiles",
     ],
+)
+
+zig_test(
+    name = "test",
+    data = ["runfiles_init.c"],
+    main = "bazel_test.zig",
+    deps = [":bazel"],
 )
