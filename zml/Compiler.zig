@@ -973,7 +973,6 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
             },
             .metal => {
-                // Flush denormals in fusions, as the Metal backend always did.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_ftz", true, upb_arena);
             },
             .oneapi => {
