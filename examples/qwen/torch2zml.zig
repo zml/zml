@@ -66,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
             .seq_len = 16415,
             .compile_args = compile_args,
             .compile_args_buffers = compile_args_buffers,
-            .noise_path = "/home/erwan/zml/examples/qwen/pytorch/gpu_noise.safetensors",
+            .noise = .cuda,
         });
         return;
     }
@@ -189,5 +189,6 @@ test {
     _ = @import("./blocks/tokenizer.zig");
     _ = @import("./blocks/vae/AutoencoderKLQwenImage21.zig");
     _ = @import("./blocks/Scheduler.zig");
-    _ = @import("./blocks/TorchGenerator.zig");
+    _ = @import("./blocks/noise/CpuGenerator.zig");
+    _ = @import("./blocks/noise/GpuGenerator.zig");
 }
