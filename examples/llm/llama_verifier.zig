@@ -190,13 +190,25 @@ pub fn main(init: std.process.Init) !void {
     if (args.repeats > 0) {
         var warm = runVerifier(&runner, io, &verifier_cache, last_input.?, session.token_index_buffers[last_position], active, metadata);
         warm.deinit();
+        var last_repeated: ?zml.Buffer = null;
+        defer if (last_repeated) |*output| output.deinit();
         const start: std.Io.Timestamp = .now(io, .awake);
-        for (0..args.repeats) |_| {
+        for (0..args.repeats) |iteration| {
             var output = runVerifier(&runner, io, &verifier_cache, last_input.?, session.token_index_buffers[last_position], active, metadata);
-            output.deinit();
+            if (iteration + 1 == args.repeats) last_repeated = output else output.deinit();
         }
         const elapsed = start.untilNow(io, .awake);
         log.info("teacher_forced_upper_bound rows={d}, calls={d}, total={f}, mean_ns_per_block={d}; excludes upload/readback/acceptance; not generation throughput", .{ args.rows, args.repeats, elapsed, @divTrunc(elapsed.toNanoseconds(), args.repeats) });
+        const repeated_output = last_repeated.?;
+        try repeated_output.toSlice(io, .init(repeated_output.shape(), std.mem.sliceAsBytes(predicted[0..args.rows])));
+        const expected_start = block_steps - args.rows;
+        for (predicted[0..args.rows], 0..) |prediction, row| {
+            if (prediction != reference.items[expected_start + row]) {
+                log.err("repeated token mismatch position={d} serial={d} verifier={d}", .{ last_position + row, reference.items[expected_start + row], prediction });
+                exact = false;
+            }
+        }
+        log.info("last_repeated_predictions={any}", .{predicted[0..args.rows]});
         const after_repeats = try Snapshot.read(allocator, io, verifier_cache);
         defer after_repeats.deinit(allocator);
         exact = compareCache(snapshots.items[snapshots.items.len - 1], after_repeats, "repeated verifier block") and exact;

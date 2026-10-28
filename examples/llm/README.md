@@ -109,8 +109,9 @@ an error, even when the immediate predicted IDs agree.
 
 `teacher_forced_upper_bound` reports mean warmed executable-call latency for
 repeating the final fixed-input block. It excludes uploads, prediction readback,
-acceptance, and cache diagnostics. Timed-repeat output IDs are not read back;
-repeated cache state is checked afterward. It is not useful-token generation
+acceptance, and cache diagnostics. The last timed-repeat output is retained
+until the timer stops; its prediction IDs and the repeated cache state are
+then checked against the serial reference. It is not useful-token generation
 throughput and does not measure a speculative decoder.
 
 Recorded on one P150a, Llama-3.1-8B-Instruct BF16, capacity 128, the prompt above,
