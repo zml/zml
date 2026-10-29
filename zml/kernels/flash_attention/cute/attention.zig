@@ -316,13 +316,19 @@ fn merge(b: *B, cfg: Config) cute.FinishError!void {
 // output stay in `mma.sync` accumulators, so P is reused from registers as the A operand of P @ V,
 // without cross-warp reductions. Q, K and V tiles go through swizzled shared memory: V_j is copied
 // while S_j = Q K_j^T is computed, K_{j+1} while O += P_j V_j is.
+//
+// It is a program, not a bare kernel: its host function launches the kernel with the dynamic shared
+// memory the kernel allocates (up to 96 KiB). A bare kernel's shared memory is static, which ptxas
+// caps at 48 KiB before sm_120.
 
-pub const Prefill = cute.Kernel(Config, .{
+pub const Prefill = cute.Program(Config, .{
     .name = "flash_attention_cute_prefill",
     .inputs = &.{ "q", "k", "v", "positions" },
     .outputs = &.{"out"},
-    .run = prefill,
+    .run = prefillProgram,
 });
+
+const prefill_kernel_name = "flash_attention_cute_prefill_kernel";
 
 /// Keys per tile (FA2's kBlockN).
 const prefill_keys = 64;
@@ -346,15 +352,38 @@ fn prefillRows(cfg: Config) i64 {
 }
 
 /// Query tiles on x, so the blocks resident at the same time share the K/V of one head in L2.
-pub fn prefillGrid(cfg: Config) [3]i32 {
+fn prefillGrid(cfg: Config) [3]i32 {
     return .{ @intCast(@divTrunc(cfg.query_length + prefillRows(cfg) - 1, prefillRows(cfg))), @intCast(cfg.query_heads), @intCast(cfg.batch) };
 }
 
-fn prefill(b: *B, cfg: Config) cute.FinishError!void {
+fn prefillProgram(b: *B, cfg: Config) cute.FinishError!void {
     std.debug.assert(prefillSupported(cfg));
     switch (cfg.head_dim) {
         inline 32, 64, 128, 256 => |d| switch (cfg.dtype) {
-            inline .bf16, .f16 => |dt| return prefillSized(b, cfg, d, dt),
+            inline .bf16, .f16 => |dt| {
+                b.beginFunction(prefill_kernel_name, .cuda_kernel);
+                try prefillSized(b, cfg, d, dt);
+                b.endFunction(block);
+
+                b.beginFunction(Prefill.name, .host);
+                const host = try b.declareArgs(.{
+                    .q = .{ .ptr = dt },
+                    .k = .{ .ptr = dt },
+                    .v = .{ .ptr = dt },
+                    .positions = .{ .ptr = cute.DType.i32 },
+                    .out = .{ .ptr = dt },
+                });
+                const grid = prefillGrid(cfg);
+                const config = b.makeLaunchConfig(.{
+                    .grid = .{ b.constant(.i32, grid[0]), b.constant(.i32, grid[1]), b.constant(.i32, grid[2]) },
+                    .block = .{ b.constant(.i32, block[0]), b.constant(.i32, block[1]), b.constant(.i32, block[2]) },
+                    .dynamic_smem = b.kernelSmemSize(prefill_kernel_name),
+                    .stream = b.cudaStream(),
+                });
+                const launch = b.launchEx(prefill_kernel_name, config, .{ host.q, host.k, host.v, host.positions, host.out });
+                b.returnHostStatus(b.cudaResultStatus(launch));
+                b.endFunction(null);
+            },
             else => unreachable,
         },
         else => unreachable,
@@ -674,7 +703,17 @@ fn prefillSized(b: *B, cfg: Config, comptime d: i64, comptime dt: cute.DType) cu
     const head = b.blockIdx().y;
     const batch = b.blockIdx().z;
     const kv_head = head.div(@divExact(cfg.query_heads, cfg.kv_heads));
-    const shared = b.ptrToInt(b.allocSmem(.i8, T.q_bytes + 2 * T.kv_bytes, 128), .i32);
+    // One shared storage object (like a Python CuTe `SharedStorage`): the host compiler sizes the
+    // launch's dynamic shared memory from it, which `kernelSmemSize` returns. `allocSmem` and
+    // `allocSmemView` both become static shared memory instead.
+    b.setFunctionAttribute(.named(b.ctx, "smem.partition_num", .int(b.ctx, .i32, 1)));
+    const fields = [_][]const u8{
+        std.fmt.comptimePrint("sQ:{d}:0", .{T.q_bytes}),
+        std.fmt.comptimePrint("sK:{d}:{d}", .{ T.kv_bytes, T.q_bytes }),
+        std.fmt.comptimePrint("sV:{d}:{d}", .{ T.kv_bytes, T.q_bytes + T.kv_bytes }),
+    };
+    const smem = b.allocSmemStorage(.i8, 128, b.layoutType(b.layoutSpec(.{T.q_bytes + 2 * T.kv_bytes}, .{1})), 0, &fields);
+    const shared = b.ptrToInt(b.getIter(smem, b.ptrTy(.i8, .smem, 128) catch @panic("bad shared memory pointer")).value(), .i32);
     const q_ptr = b.ptrToInt(a.q, .i64);
     const out_ptr = b.ptrToInt(a.out, .i64);
     const start = b.loadWords(1, b.ptrToInt(a.positions, .i64).add(batch.to(.i64).mul(4)), .global, .{})[0];

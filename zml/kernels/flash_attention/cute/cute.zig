@@ -70,11 +70,7 @@ const Context = struct {
         };
 
         const out = if (kernel.prefillSupported(cfg))
-            kernel.Prefill.call(.{ .q = q, .k = k, .v = v, .positions = self.positions }, .{ .out = q.shape() }, .{
-                .cfg = cfg,
-                .grid = kernel.prefillGrid(cfg),
-                .block = kernel.block,
-            }).out
+            kernel.Prefill.call(.{ .q = q, .k = k, .v = v, .positions = self.positions }, .{ .out = q.shape() }, .{ .cfg = cfg }).out
         else if (cfg.splits > 1) b: {
             const partials = kernel.Kernel.call(.{ .q = q, .k = k, .v = v, .positions = self.positions }, .{
                 .out = zml.Shape.init(.{ cfg.batch, cfg.splits, cfg.query_length, cfg.query_heads, cfg.head_dim + 2 }, .f32),
