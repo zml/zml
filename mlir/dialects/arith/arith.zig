@@ -128,6 +128,12 @@ pub const IntegerOverflowAttr = opaque {
     }
 };
 
+/// `overflowFlags = #arith.overflow<flags>`: the overflow flags of an
+/// integer operation.
+pub fn overflowFlags(ctx: *mlir.Context, flags: IntegerOverflowFlags) mlir.Error!mlir.NamedAttribute {
+    return .named(ctx, "overflowFlags", (try IntegerOverflowAttr.get(ctx, .{ .value = flags })).attribute());
+}
+
 // =============================================================================
 // Constants
 // =============================================================================

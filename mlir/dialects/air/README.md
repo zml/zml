@@ -44,8 +44,9 @@ Float operations carry `fastmath` flags, which become the call's flags (Apple's
 compiler marks every float call `fast` under fast math). SIMD-group, barrier
 and matrix operations have unknown effects, so they are not speculated or
 moved across divergent control flow. Arithmetic, memory and control flow use
-the arith, llvm and scf dialects, with pointers as `!llvm.ptr` in AIR's address
-spaces: 0 private, 1 device, 2 constant, 3 threadgroup.
+the arith, cf, scf, vector and llvm dialects, with pointers as `!llvm.ptr` in
+AIR's address spaces: 0 thread, 1 device, 2 constant, 3 threadgroup (a buffer
+is never in thread memory).
 
 ## Kernels
 

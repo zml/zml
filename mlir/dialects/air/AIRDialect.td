@@ -44,11 +44,6 @@ def AIR_Dialect : Dialect {
     static constexpr ::llvm::StringLiteral getFastMathEnableAttrName() {
       return ::llvm::StringLiteral("air.fast_math_enable");
     }
-
-    static constexpr unsigned kPrivateAddressSpace = 0;
-    static constexpr unsigned kDeviceAddressSpace = 1;
-    static constexpr unsigned kConstantAddressSpace = 2;
-    static constexpr unsigned kThreadgroupAddressSpace = 3;
   }];
 }
 

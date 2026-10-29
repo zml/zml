@@ -4,6 +4,7 @@ const cuda_tile_builder = @import("dsl/cuda_tile/builder");
 const cute_builder = @import("dsl/cute/builder");
 const fly_builder = @import("dsl/fly/builder");
 const func = @import("mlir/dialects/func");
+const metal_builder = @import("dsl/metal/builder");
 const mlir = @import("mlir");
 const mosaic_tpu_builder = @import("dsl/mosaic_tpu/builder");
 const mosaic_tpu_dialect = @import("mlir/dialects/mosaic_tpu");
@@ -854,6 +855,186 @@ pub const tcl = struct {
     }
 };
 
+pub const metal = struct {
+    pub const Builder = metal_builder.Builder;
+    pub const Value = metal_builder.Value;
+    pub const Type = metal_builder.Type;
+    pub const Struct = metal_builder.Struct;
+    pub const ArgSpec = metal_builder.ArgSpec;
+    pub const LoopOpts = metal_builder.LoopOpts;
+    pub const FinishError = metal_builder.FinishError;
+
+    pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
+        return makeKernelContext(metal_builder.registerDialects);
+    }
+
+    pub fn from(dt: DataType) Type {
+        return switch (dt) {
+            .bool => .bool,
+            .i8 => .char,
+            .i16 => .short,
+            .i32 => .int,
+            .i64 => .long,
+            .u8 => .uchar,
+            .u16 => .ushort,
+            .u32 => .uint,
+            .u64 => .ulong,
+            .f16 => .half,
+            .bf16 => .bfloat,
+            .f32 => .float,
+            else => std.debug.panic("zml.kernel.metal.from: dtype {s} has no MSL equivalent", .{@tagName(dt)}),
+        };
+    }
+
+    /// The bytes of a `constant T &` argument: `.of(@as(i32, n))`, or a host
+    /// `extern struct` laid out like a `constant S &` argument.
+    pub const Constant = struct {
+        buffer: [256]u8 = undefined,
+        len: usize = 0,
+
+        pub fn of(value: anytype) Constant {
+            const raw = std.mem.asBytes(&value);
+            var c: Constant = .{ .len = raw.len };
+            @memcpy(c.buffer[0..raw.len], raw);
+            return c;
+        }
+
+        pub fn bytes(self: *const Constant) []const u8 {
+            return self.buffer[0..self.len];
+        }
+    };
+
+    fn Spec(comptime Config: type) type {
+        return struct {
+            name: [:0]const u8,
+            /// The arguments bound to input tensors.
+            inputs: []const [:0]const u8,
+            /// The arguments bound to output tensors; one named like an
+            /// input updates it in place.
+            outputs: []const [:0]const u8,
+            /// The `constant` arguments given by value at the call.
+            constants: []const [:0]const u8 = &.{},
+            run: *const fn (*Builder, Config) FinishError!void,
+            fast_math: bool = true,
+        };
+    }
+
+    /// A Metal kernel: `run` declares its arguments with `declareArgs`, by
+    /// name, and builds its body.
+    pub fn Kernel(
+        comptime ConfigT: type,
+        comptime spec: Spec(ConfigT),
+    ) type {
+        return struct {
+            pub const name: [:0]const u8 = spec.name;
+            pub const Config = ConfigT;
+            pub const Inputs = StructOf(spec.inputs, Tensor);
+            pub const Outputs = StructOf(spec.outputs, Shape);
+            pub const Results = StructOf(spec.outputs, Tensor);
+            pub const Constants = StructOf(spec.constants, Constant);
+
+            pub const CallOpts = struct {
+                cfg: ConfigT,
+                /// Threadgroups per grid.
+                grid: [3]u32,
+                /// Threads per threadgroup.
+                threadgroup: [3]u32,
+                /// Bytes of `[[threadgroup(0)]]` memory.
+                threadgroup_memory: u64 = 0,
+                constants: Constants = std.mem.zeroes(Constants),
+            };
+
+            pub fn emit(allocator: std.mem.Allocator, cfg: ConfigT) ![:0]const u8 {
+                var arguments: std.ArrayList(metal_builder.Argument) = .empty;
+                defer arguments.deinit(allocator);
+                return build(allocator, cfg, &arguments);
+            }
+
+            fn build(allocator: std.mem.Allocator, cfg: ConfigT, arguments: *std.ArrayList(metal_builder.Argument)) ![:0]const u8 {
+                const ctx = try newContext();
+                defer ctx.deinit();
+                var b = Builder.open(allocator, ctx, name, .{ .fast_math = spec.fast_math });
+                defer b.deinit();
+                try spec.run(&b, cfg);
+                const ir = try b.finish();
+                errdefer allocator.free(ir);
+                try arguments.appendSlice(allocator, b.arguments.items);
+                return ir;
+            }
+
+            fn indexOf(names: []const [:0]const u8, arg: []const u8) ?usize {
+                for (names, 0..) |n, i| if (std.mem.eql(u8, n, arg)) return i;
+                return null;
+            }
+
+            pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
+                const cur = Compiler.current();
+                const allocator = cur.allocator;
+
+                var arguments: std.ArrayList(metal_builder.Argument) = .empty;
+                defer arguments.deinit(allocator);
+                const ir = build(allocator, opts.cfg, &arguments) catch |err|
+                    std.debug.panic("zml.kernel.metal.Kernel({s}).call: emit failed: {}", .{ name, err });
+                defer allocator.free(ir);
+
+                var inputs_arr: [spec.inputs.len]Tensor = undefined;
+                inline for (spec.inputs, 0..) |field, i| inputs_arr[i] = @field(inputs, field);
+                var outputs_arr: [spec.outputs.len]Shape = undefined;
+                inline for (spec.outputs, 0..) |field, i| outputs_arr[i] = @field(outputs, field);
+                var constants: [spec.constants.len][]const u8 = undefined;
+                inline for (spec.constants, 0..) |field, i| constants[i] = @field(opts.constants, field).bytes();
+
+                var bound: [spec.outputs.len]bool = @splat(false);
+                var bound_inputs: [spec.inputs.len]bool = @splat(false);
+                var bound_constants: [spec.constants.len]bool = @splat(false);
+                var aliases: stdx.BoundedArray(stablehlo.CustomCallOpts.OutputOperandAlias, spec.outputs.len) = .empty;
+                var bindings: std.ArrayList(i32) = .empty;
+                defer bindings.deinit(allocator);
+                for (arguments.items) |arg| {
+                    if (arg.kind == .threadgroup) {
+                        // `threadgroup_memory` sizes `[[threadgroup(0)]]` alone.
+                        if (arg.index != 0) std.debug.panic("zml.kernel.metal.Kernel({s}): threadgroup argument {s} is [[threadgroup({d})]], and only [[threadgroup(0)]] gets memory", .{ name, arg.name, arg.index });
+                        continue;
+                    }
+                    std.debug.assert(arg.index == bindings.items.len);
+                    const input = indexOf(spec.inputs, arg.name);
+                    const output = indexOf(spec.outputs, arg.name);
+                    if (input) |i| bound_inputs[i] = true;
+                    if (output) |o| bound[o] = true;
+                    const binding: i32 = if (input) |i| blk: {
+                        if (output) |o| aliases.appendAssumeCapacity(.{ .output_index = @intCast(o), .operand_index = @intCast(i) });
+                        break :blk @intCast(i);
+                    } else if (output) |o|
+                        @intCast(spec.inputs.len + o)
+                    else if (indexOf(spec.constants, arg.name)) |k| blk: {
+                        if (constants[k].len != arg.size) std.debug.panic("zml.kernel.metal.Kernel({s}): constant {s} has {d} bytes, the argument {d}", .{ name, arg.name, constants[k].len, arg.size });
+                        bound_constants[k] = true;
+                        break :blk -1 - @as(i32, @intCast(k));
+                    } else std.debug.panic("zml.kernel.metal.Kernel({s}): argument {s} is no input, output or constant", .{ name, arg.name });
+                    bindings.append(allocator, binding) catch @panic("OOM");
+                }
+                for (bound, spec.outputs) |b, output| if (!b) std.debug.panic("zml.kernel.metal.Kernel({s}): output {s} is no argument", .{ name, output });
+                for (bound_inputs, spec.inputs) |b, input| if (!b) std.debug.panic("zml.kernel.metal.Kernel({s}): input {s} is no argument", .{ name, input });
+                for (bound_constants, spec.constants) |b, constant| if (!b) std.debug.panic("zml.kernel.metal.Kernel({s}): constant {s} is no argument", .{ name, constant });
+
+                const tensor_results = ops.metal(inputs_arr, outputs_arr, .{
+                    .name = name,
+                    .ir = ir,
+                    .grid = opts.grid,
+                    .threadgroup = opts.threadgroup,
+                    .threadgroup_memory = opts.threadgroup_memory,
+                    .arguments = bindings.items,
+                    .constants = &constants,
+                    .output_operand_aliases = aliases.constSlice(),
+                });
+                var results: Results = undefined;
+                inline for (spec.outputs, 0..) |field, i| @field(results, field) = tensor_results[i];
+                return results;
+            }
+        };
+    }
+};
+
 pub const fly = struct {
     /// Threads per wavefront: 64 on CDNA, 32 on RDNA.
     pub fn waveSize(p: *const platform_.Platform) i32 {
@@ -1362,4 +1543,72 @@ test "tcl multi-chip kernels run on two furiosa chips" {
         defer host.free(allocator);
         for (host.items(f32), 0..) |v, i| try std.testing.expectApproxEqRel(@exp(hx[i]), v, 1e-4);
     }
+}
+
+/// `out[i] = a[i] * scale + b[i]` over `n` floats.
+const MetalAxpy = struct {
+    const Cfg = struct {};
+    const K = metal.Kernel(Cfg, .{
+        .name = "axpy",
+        .inputs = &.{ "a", "b" },
+        .outputs = &.{"out"},
+        .constants = &.{ "scale", "n" },
+        .run = run,
+    });
+
+    fn run(b: *metal.Builder, _: Cfg) metal.FinishError!void {
+        const a = try b.declareArgs(.{
+            .a = .{ .buffer = .{ .type = .float, .const_ = true } },
+            .b = .{ .buffer = .{ .type = .float, .const_ = true } },
+            .out = .{ .buffer = .{ .type = .float } },
+            .scale = .{ .constant = .float },
+            .n = .{ .constant = .uint },
+            .tid = .{ .thread_position_in_grid = .uint },
+        });
+        b.returnIf(a.tid.ge(a.n));
+        a.out.store(a.tid, b.fma(a.a.load(a.tid), a.scale, a.b.load(a.tid)));
+    }
+};
+
+test "metal kernels run on metal" {
+    const zml = @import("zml.zig");
+    const allocator = std.testing.allocator;
+
+    const ir = try MetalAxpy.K.emit(allocator, .{});
+    defer allocator.free(ir);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "air.fma") != null);
+
+    const platform = zml.testing.env();
+    if (platform.target != .metal) return error.SkipZigTest;
+
+    const n = 1000;
+    const Mod = struct {
+        pub fn forward(x: Tensor, y: Tensor) Tensor {
+            return MetalAxpy.K.call(.{ .a = x, .b = y }, .{ .out = x.shape() }, .{
+                .cfg = .{},
+                .grid = .{ (n + 255) / 256, 1, 1 },
+                .threadgroup = .{ 256, 1, 1 },
+                .constants = .{ .scale = .of(@as(f32, 0.5)), .n = .of(@as(u32, n)) },
+            }).out;
+        }
+    };
+    const x: Tensor = .init(.{n}, .f32);
+    var exe = try zml.module.compile(allocator, std.testing.io, Mod.forward, .{ x, Tensor.init(.{n}, .f32) }, platform, .{});
+    defer exe.deinit();
+
+    var hx: [n]f32 = undefined;
+    var hy: [n]f32 = undefined;
+    for (&hx, &hy, 0..) |*a, *b, i| {
+        a.* = @floatFromInt(i);
+        b.* = 1;
+    }
+    var bx: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&hx));
+    defer bx.deinit();
+    var by: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&hy));
+    defer by.deinit();
+    var result = try exe.eval(allocator, std.testing.io, .{ bx, by });
+    defer result.deinit();
+    var host = try result.toSliceAlloc(allocator, std.testing.io);
+    defer host.free(allocator);
+    for (host.items(f32), hx, hy) |out, a, b| try std.testing.expectEqual(a * 0.5 + b, out);
 }

@@ -113,6 +113,8 @@ LogicalResult AIRDialect::verifyOperationAttribute(Operation *op,
         "air.kernel requires a function and a unit attribute");
   if (failed(op->getName().verifyInvariants(op)))
     return failure();
+  if (function.isExternal())
+    return op->emitOpError("AIR kernels need a body");
   if (function.getNumResults() != 0)
     return op->emitOpError("AIR kernels cannot return values");
   if (auto llvmFunction = dyn_cast<LLVM::LLVMFuncOp>(op))

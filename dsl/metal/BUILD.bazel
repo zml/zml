@@ -1,0 +1,25 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "builder",
+    srcs = ["types.zig"],
+    import_name = "dsl/metal/builder",
+    main = "builder.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//dsl/common:builder",
+        "//mlir",
+        "//mlir/dialects/air",
+        "//mlir/dialects/arith",
+        "//mlir/dialects/cf",
+        "//mlir/dialects/func",
+        "//mlir/dialects/llvm",
+        "//mlir/dialects/vector",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":builder"],
+)

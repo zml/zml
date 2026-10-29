@@ -28,7 +28,7 @@ pub const Builtin = enum(u32) {
     thread_index_in_threadgroup,
 };
 
-pub const AddressSpace = enum(u32) { device = 1, constant = 2, threadgroup = 3 };
+pub const AddressSpace = enum(u32) { thread = 0, device = 1, constant = 2, threadgroup = 3 };
 
 pub const Access = enum(u32) { read, read_write };
 

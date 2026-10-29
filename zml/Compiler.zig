@@ -973,7 +973,7 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
             },
             .metal => {
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_metal_fast_math", false, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_ftz", true, upb_arena);
             },
             .oneapi => {
                 // More efficient for the allgather/broadcast implementation of the collective permute.
