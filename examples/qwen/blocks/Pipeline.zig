@@ -59,7 +59,6 @@ pub fn deinit(self: *Pipeline, allocator: std.mem.Allocator) void {
 pub const Noise = enum { cpu, cuda };
 
 const Params = struct {
-    seq_len: usize,
     compile_args: CompileArgs,
     compile_args_buffers: zml.Bufferized(CompileArgs),
     /// Same noise as diffusers with `generator=torch.Generator(noise).manual_seed(seed)`

@@ -5,8 +5,6 @@ pub const CompileArgs = struct {
     height: usize,
     vae_scale_factor: usize,
 
-    seq_len: usize,
-
     // Transformer
     in_channels: usize,
     num_inference_steps: i64,

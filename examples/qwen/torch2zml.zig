@@ -40,7 +40,6 @@ pub fn main(init: std.process.Init) !void {
         .num_inference_steps = 40,
         .vae_scale_factor = 16,
 
-        .seq_len = 16415,
         .num_attention_heads = 32,
         .head_dim = 128,
         .rope_theta = 5000000,
@@ -62,7 +61,6 @@ pub fn main(init: std.process.Init) !void {
         var pipeline = try block.Pipeline.init(allocator, io, platform, cli_args.folder);
         const prompt = "A neon shop sign that reads \"QWEN IMAGE 2.1\", rainy night, reflections on wet pavement";
         try pipeline.run_once(prompt, .{
-            .seq_len = 16415,
             .compile_args = compile_args,
             .compile_args_buffers = compile_args_buffers,
             .noise = .cuda,
