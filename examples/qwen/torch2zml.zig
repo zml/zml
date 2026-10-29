@@ -26,11 +26,10 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
-    const model_sharding = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth }));
+    _ = try platform.registerMesh("model", .mesh(.{ .model = .high_bandwidth }));
     const backend = zml.attention.Backend.auto(platform);
-    // const backend: zml.attention.Backend = .vanilla;
-    // 32 from num_attention_heads in text_encoder/config.json and 16415 is a dynamic value
-    const attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, 16415, 32));
+    // const backend: zml.attention.Backend = .stablehlo;
+    const attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend));
     const attention_parameters: zml.attention.Parameters = .init(.fromBackend(backend));
 
     const compile_args: CompileArgs = .{
@@ -53,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
         .max_shift = 0.9,
     };
     const compile_args_buffers: zml.Bufferized(CompileArgs) = .{
-        .attention_metadata = try attention_metadata.initBuffer(io, platform, model_sharding),
+        .attention_metadata = try attention_metadata.initBuffer(io, platform),
     };
 
     if (cli_args.activations == null) {
@@ -74,14 +73,14 @@ pub fn main(init: std.process.Init) !void {
     const activations_path = cli_args.activations.?;
 
     var activations_store: store.ActivationStore = undefined;
-    try activations_store.load(allocator, io, activations_path);
+    try activations_store.load(allocator, io, platform.meshes.values(), activations_path);
     defer activations_store.deinit();
 
     if (std.mem.containsAtLeast(u8, activations_path, 1, "block.")) {
         std.debug.print("\n\nStarting testing > TransformerBlock\n\n", .{});
 
         var transformer_store: store.TransformerStore = undefined;
-        try transformer_store.load_tensors(allocator, io, cli_args.folder);
+        try transformer_store.load_tensors(allocator, io, platform.meshes.values(), cli_args.folder);
         try transformer_store.load_buffers(allocator, io, platform);
         defer transformer_store.deinit(allocator);
 
@@ -98,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("\n\nStarting testing > LanguageModel\n\n", .{});
 
         var language_model_store: store.LanguageModelStore = undefined;
-        try language_model_store.load_tensors(allocator, io, cli_args.folder);
+        try language_model_store.load_tensors(allocator, io, platform.meshes.values(), cli_args.folder);
         try language_model_store.load_buffers(allocator, io, platform);
         defer language_model_store.deinit(allocator);
 
@@ -115,7 +114,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("\n\nStarting testing > VaeModel\n\n", .{});
 
         var vae_model_store: store.VaeModelStore = undefined;
-        try vae_model_store.load_tensors(allocator, io, cli_args.folder);
+        try vae_model_store.load_tensors(allocator, io, platform.meshes.values(), cli_args.folder);
         try vae_model_store.load_buffers(allocator, io, platform);
         defer vae_model_store.deinit(allocator);
 

@@ -33,6 +33,7 @@ pub fn load_tensors(
     self: *LanguageModelStore,
     allocator: std.mem.Allocator,
     io: std.Io,
+    meshes: []const *const zml.Mesh,
     folder: []const u8,
 ) !void {
     var buffer: [256]u8 = undefined;
@@ -40,10 +41,10 @@ pub fn load_tensors(
     self.registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, model_registry_path);
     log.info("LanguageModel: Found {} tensors in {s}", .{ self.registry.tensors.count(), model_registry_path });
 
-    self.store = .fromRegistry(allocator, &self.registry);
+    self.store = .fromRegistry(allocator, &self.registry, meshes);
     const language_model_view = self.store.view().withPrefix("model.language_model");
 
-    const embedding = zml.nn.TokenEmbedding{ .weight = language_model_view.createTensor("embed_tokens.weight", .{ .tokens, .d }, .{ .d = .model }) };
+    const embedding = zml.nn.TokenEmbedding{ .weight = language_model_view.createTensor("embed_tokens.weight", .{ .tokens, .d }, .model, .{ .d = .model }) };
     const layers: []block.Qwen3VLTextDecoderLayer =
         try allocator.alloc(block.Qwen3VLTextDecoderLayer, TEXT_DECODE_LAYER_COUNT);
 
@@ -53,23 +54,23 @@ pub fn load_tensors(
         const attn_view = layer_view.withPrefix("self_attn");
         const self_attn: block.Qwen3VLTextAttention = .{
             .head_dim = 128,
-            .k_norm = .init(attn_view.createTensor("k_norm.weight", .{.dim}, .replicated), .d),
-            .k_proj = .init(attn_view.createTensor("k_proj.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
-            .o_proj = .init(attn_view.createTensor("o_proj.weight", .{ .dup, .d }, .{ .d = .model }), null, .d),
-            .q_norm = .init(attn_view.createTensor("q_norm.weight", .{.dim}, .replicated), .d),
-            .q_proj = .init(attn_view.createTensor("q_proj.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
-            .v_proj = .init(attn_view.createTensor("v_proj.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
+            .k_norm = .init(attn_view.createTensor("k_norm.weight", .{.dim}, .replicated, .{}), .d),
+            .k_proj = .init(attn_view.createTensor("k_proj.weight", .{ .dup, .d }, .model, .{ .dup = .model }), null, .d),
+            .o_proj = .init(attn_view.createTensor("o_proj.weight", .{ .dup, .d }, .model, .{ .d = .model }), null, .d),
+            .q_norm = .init(attn_view.createTensor("q_norm.weight", .{.dim}, .replicated, .{}), .d),
+            .q_proj = .init(attn_view.createTensor("q_proj.weight", .{ .dup, .d }, .model, .{ .dup = .model }), null, .d),
+            .v_proj = .init(attn_view.createTensor("v_proj.weight", .{ .dup, .d }, .model, .{ .dup = .model }), null, .d),
         };
 
         const mlp_view = layer_view.withPrefix("mlp");
         const mlp = block.Qwen3VLTextMLP{
-            .down_proj = .init(mlp_view.createTensor("down_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
-            .gate_proj = .init(mlp_view.createTensor("gate_proj.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
-            .up_proj = .init(mlp_view.createTensor("up_proj.weight", .{ .dup, .d }, .{ .dup = .model }), null, .d),
+            .down_proj = .init(mlp_view.createTensor("down_proj.weight", .{ .dout, .d }, .model, .{ .d = .model }), null, .d),
+            .gate_proj = .init(mlp_view.createTensor("gate_proj.weight", .{ .dup, .d }, .model, .{ .dup = .model }), null, .d),
+            .up_proj = .init(mlp_view.createTensor("up_proj.weight", .{ .dup, .d }, .model, .{ .dup = .model }), null, .d),
         };
 
-        const input_layernorm = block.Qwen3VLTextRMSNorm.init(layer_view.createTensor("input_layernorm.weight", .{.dim}, .replicated), .d);
-        const post_attention_layernorm = block.Qwen3VLTextRMSNorm.init(layer_view.createTensor("post_attention_layernorm.weight", .{.dim}, .replicated), .d);
+        const input_layernorm = block.Qwen3VLTextRMSNorm.init(layer_view.createTensor("input_layernorm.weight", .{.dim}, .replicated, .{}), .d);
+        const post_attention_layernorm = block.Qwen3VLTextRMSNorm.init(layer_view.createTensor("post_attention_layernorm.weight", .{.dim}, .replicated, .{}), .d);
 
         layers[i] = block.Qwen3VLTextDecoderLayer{
             .self_attn = self_attn,

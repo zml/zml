@@ -39,15 +39,15 @@ pub fn main(init: std.process.Init) !void {
     const weight_slice: zml.Slice = .init(layer.weight.shape(), std.mem.sliceAsBytes(&[3]f16{ 1.0, 2.0, 3.0 }));
     const bias_slice: zml.Slice = .init(layer.bias.?.shape(), std.mem.sliceAsBytes(&[3]f16{ 1.0, 1.0, 1.0 }));
     var layer_buffers: zml.Bufferized(Layer) = .{
-        .weight = try zml.Buffer.fromSlice(io, platform, weight_slice, .replicated),
-        .bias = try zml.Buffer.fromSlice(io, platform, bias_slice, .replicated),
+        .weight = try zml.Buffer.fromSlice(io, platform, weight_slice),
+        .bias = try zml.Buffer.fromSlice(io, platform, bias_slice),
     };
     defer layer_buffers.weight.deinit();
     defer layer_buffers.bias.?.deinit();
 
     // create the input buffer
     const input_slice: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[3]f16{ 5.0, 5.0, 5.0 }));
-    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, .replicated);
+    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
     defer input_buffer.deinit();
 
     // create the Args and Results structs
@@ -61,7 +61,7 @@ pub fn main(init: std.process.Init) !void {
     args.set(.{ layer_buffers, input_buffer });
 
     // call our executable
-    executable.call(args, &results);
+    executable.call(io, args, &results, .{ .wait = true });
 
     // Retrieve the resulting buffer
     var result = results.get(zml.Buffer);

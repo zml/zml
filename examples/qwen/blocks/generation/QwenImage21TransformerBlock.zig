@@ -67,7 +67,7 @@ pub fn forward(
 // The residual stream is .d-sharded after the reduce-scatters. Without these constraints XLA gathers
 // it once per projection (3x for q/k/v, 2x for gate/proj) instead of once for all of them.
 fn replicated(x: zml.Tensor) zml.Tensor {
-    return x.withPartitioning(.{ .bs = .replicated, .seq_len = .replicated, .d = .replicated });
+    return x.withPartitioning(.model, .{ .bs = .replicated, .seq_len = .replicated, .d = .replicated });
 }
 
 fn modulate(

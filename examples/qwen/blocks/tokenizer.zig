@@ -91,8 +91,8 @@ pub fn bufferize(
     // @memset(attention_mask_slice.items(bool)[0..sliced_tokens.len], true);
     // @memset(attention_mask_slice.items(bool)[sliced_tokens.len..], false);
 
-    const tokens_buffer = try zml.Buffer.fromSlice(io, platform, tokens_slice, .replicated);
-    // const attention_mask_buffer = try zml.Buffer.fromSlice(io, platform, attention_mask_slice, .replicated);
+    const tokens_buffer = try zml.Buffer.fromSlice(io, platform, tokens_slice);
+    // const attention_mask_buffer = try zml.Buffer.fromSlice(io, platform, attention_mask_slice);
 
     return BufferizedPrompt{
         .input_ids = tokens_buffer,

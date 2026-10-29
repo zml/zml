@@ -65,17 +65,8 @@ pub fn forward(
 }
 
 fn full_attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, args: CompileArgs) zml.Tensor {
-    return switch (args.attention_parameters) {
-        .vanilla => zml.nn.sdpa(q, k, v, .{}),
-        .cuda_fa2 => |parameters| b: {
-            var non_causal = parameters;
-            non_causal.is_causal = false;
-            // fa2 uses `token_index + q` keys per sequence, which must be all of them.
-            const token_index = zml.Tensor.scalar(k.dim(.k) - q.dim(.q), .i32).broad(.init(.{ .b = q.dim(.b) }, .i32));
-            break :b zml.attention.flashattn.fa2.attention(q, k, v, token_index, args.attention_metadata.cuda_fa2, non_causal);
-        },
-        else => |backend| std.debug.panic("QwenImage21Attention: unsupported attention backend {t}", .{backend}),
-    };
+    const token_index = zml.Tensor.scalar(0, .i32).broad(.init(.{ .b = q.dim(.b) }, .i32));
+    return zml.attention.attention(q, k, v, token_index, args.attention_metadata, args.attention_parameters);
 }
 
 fn apply_rotary_emb(x: zml.Tensor, freqs_cis: zml.Tensor) zml.Tensor {

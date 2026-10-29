@@ -30,13 +30,13 @@ pub fn init(
     model_dir: [:0]const u8,
 ) !Pipeline {
     var language_model_store: store.LanguageModelStore = undefined;
-    try language_model_store.load_tensors(allocator, io, model_dir);
+    try language_model_store.load_tensors(allocator, io, platform.meshes.values(), model_dir);
 
     var transformer_model_store: store.TransformerStore = undefined;
-    try transformer_model_store.load_tensors(allocator, io, model_dir);
+    try transformer_model_store.load_tensors(allocator, io, platform.meshes.values(), model_dir);
 
     var vae_model_store: store.VaeModelStore = undefined;
-    try vae_model_store.load_tensors(allocator, io, model_dir);
+    try vae_model_store.load_tensors(allocator, io, platform.meshes.values(), model_dir);
 
     return .{
         .allocator = allocator,
@@ -105,7 +105,7 @@ pub fn run_once(
     const latents_mean_slice = try zml.Slice.alloc(self.allocator, latents_mean_shape);
     defer latents_mean_slice.free(self.allocator);
     @memcpy(latents_mean_slice.items(f32)[0..latents_mean_data.len], &latents_mean_data.*);
-    var latents_mean_buffer = try zml.Buffer.fromSlice(self.io, self.platform, latents_mean_slice, .replicated);
+    var latents_mean_buffer = try zml.Buffer.fromSlice(self.io, self.platform, latents_mean_slice);
     defer latents_mean_buffer.deinit();
     const latents_mean_tensor = zml.Tensor.init(latents_mean_shape, .f32);
 
@@ -113,7 +113,7 @@ pub fn run_once(
     const latents_std_slice = try zml.Slice.alloc(self.allocator, latents_std_shape);
     defer latents_std_slice.free(self.allocator);
     @memcpy(latents_std_slice.items(f32)[0..latents_std_data.len], &latents_std_data.*);
-    var latents_std_buffer = try zml.Buffer.fromSlice(self.io, self.platform, latents_std_slice, .replicated);
+    var latents_std_buffer = try zml.Buffer.fromSlice(self.io, self.platform, latents_std_slice);
     defer latents_std_buffer.deinit();
     const latents_std_tensor = zml.Tensor.init(latents_std_shape, .f32);
 
@@ -133,7 +133,7 @@ pub fn run_once(
     };
     defer self.allocator.free(noise_data);
     const noise_slice = zml.Slice.init(noise_shape, std.mem.sliceAsBytes(noise_data));
-    var noise_buffer = try zml.Buffer.fromSlice(self.io, self.platform, noise_slice, .replicated);
+    var noise_buffer = try zml.Buffer.fromSlice(self.io, self.platform, noise_slice);
     defer noise_buffer.deinit();
     const noise_tensor: zml.Tensor = .fromShape(noise_shape);
 
@@ -146,7 +146,7 @@ pub fn run_once(
         wrapper,
         .forward,
         .{ input_tensor, noise_tensor, latents_mean_tensor, latents_std_tensor },
-        .{ .shardings = self.platform.shardings.values() },
+        .{ .meshes = self.platform.meshes.values() },
     );
     defer exe.deinit();
 
@@ -185,7 +185,7 @@ pub fn run_once(
     });
 
     std.debug.print("\n\nStart exec\n\n", .{});
-    exe.callOpts(self.io, exe_args, &exe_results, .{ .wait = true });
+    exe.call(self.io, exe_args, &exe_results, .{ .wait = true });
     std.debug.print("\n\nEnd exec\n\n", .{});
 
     const results = try self.allocator.alloc(zml.Buffer, 1);

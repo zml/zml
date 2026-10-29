@@ -29,7 +29,7 @@ pub fn load(
     });
     defer loader.deinit();
 
-    try loader.load(io, AutoencoderKLQwenImage21, self, &buffers, store, platform.shardings.values(), .{});
+    try loader.load(io, AutoencoderKLQwenImage21, self, &buffers, store, .{});
     try loader.await(io);
 
     return buffers;
@@ -336,12 +336,13 @@ test "blend_v and blend_h match the PyTorch reference" {
         const exe = try zml.module.compile(std.testing.allocator, std.testing.io, case[0], .{ a, b }, platform, .{});
         defer exe.deinit();
 
-        var a_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, shape, .replicated, std.mem.sliceAsBytes(&a_data));
+        var a_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, shape, std.mem.sliceAsBytes(&a_data));
         defer a_buffer.deinit();
-        var b_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, shape, .replicated, std.mem.sliceAsBytes(&b_data));
+        var b_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, shape, std.mem.sliceAsBytes(&b_data));
         defer b_buffer.deinit();
 
-        const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, case[0], .{ a_buffer, b_buffer });
+        var output = try exe.eval(std.testing.allocator, std.testing.io, .{ a_buffer, b_buffer });
+        defer output.deinit();
         try zml.testing.expectClose(std.testing.io, zml.Slice.init(shape, std.mem.sliceAsBytes(&case[1])), output, .{});
     }
 }
@@ -396,11 +397,12 @@ test "stitch matches the PyTorch reference" {
     var buffers: [4]zml.Buffer = undefined;
     inline for (&buffers, shapes, data, 0..) |*buffer, shape, values, k| {
         _ = k;
-        buffer.* = try zml.Buffer.fromBytes(std.testing.io, platform, shape, .replicated, std.mem.sliceAsBytes(&values));
+        buffer.* = try zml.Buffer.fromBytes(std.testing.io, platform, shape, std.mem.sliceAsBytes(&values));
     }
     defer for (&buffers) |*buffer| buffer.deinit();
 
-    const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.run, .{ buffers[0], buffers[1], buffers[2], buffers[3] });
+    var output = try exe.eval(std.testing.allocator, std.testing.io, .{ buffers[0], buffers[1], buffers[2], buffers[3] });
+    defer output.deinit();
 
     // Computed with the diffusers loops (tiled_decode's blend_v / blend_h / crop / cat) on the same inputs
     const expected = [25]f32{ -8, -1, 6, -4, -1, -7, 0, 7, -3, 1.5, -6, 1, 8, -2, 4, -5, 2, -8, -1, 6.25, -1, -2.5, -4, 3, 2.875 };

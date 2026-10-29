@@ -26,8 +26,8 @@ pub fn env() *const Platform {
             },
         ) catch @panic("Pjrt not available");
 
-        // Register shardings required by flash attention.
-        _ = platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;
+        // Register the mesh required by flash attention.
+        _ = platform.registerMesh("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;
         _platform = platform;
     }
 
@@ -392,7 +392,7 @@ pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Ex
     defer results.deinit(allocator);
 
     args.set(inputs);
-    exe.callOpts(io, args, &results, .{ .wait = true });
+    exe.call(io, args, &results, .{ .wait = true });
 
     var output: zml.Bufferized(stdx.meta.FnReturn(func)) = undefined;
     results.fill(.{&output});
@@ -468,7 +468,7 @@ pub fn testLayerReport(
     layer: anytype,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
 ) !LayerResult {
-    const shardings: []const zml.Sharding = platform.shardings.values();
+    const meshes = platform.meshes.values();
     const opts: CompareOpts = .{};
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -499,12 +499,12 @@ pub fn testLayerReport(
             var buffer: [256]u8 = undefined;
             const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
 
-            tensor.* = ctx_.activation_store.createTensor(subkey, null, .replicated);
+            tensor.* = ctx_.activation_store.createTensor(subkey, null, .replicated, .{});
             ctx_.index += 1;
         }
     }.cb, &ctx, &args);
 
-    const exe = try platform.compile(allocator, io, layer, .forward, args, .{ .shardings = if (shardings.len != 0) shardings else &.{} });
+    const exe = try platform.compile(allocator, io, layer, .forward, args, .{ .meshes = if (meshes.len != 0) meshes else &.{} });
     defer exe.deinit();
 
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});
@@ -528,13 +528,13 @@ pub fn testLayerReport(
     var loader: zml.io.Loader = try .init(allocator, platform, .default);
     defer loader.deinit();
 
-    try loader.load(io, ArgsT, &args, &args_buffers, activation_store, &.{}, .{});
+    try loader.load(io, ArgsT, &args, &args_buffers, activation_store, .{});
     try loader.await(io);
 
     exe_args.set(.{ layer_weights, args_buffers });
 
     std.debug.print("\n\nStart exec\n\n", .{});
-    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+    exe.call(io, exe_args, &exe_results, .{ .wait = true });
     std.debug.print("\n\nEnd exec\n\n", .{});
 
     var results = try allocator.alloc(zml.Buffer, output_count);
