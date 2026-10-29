@@ -212,24 +212,24 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libigc2_2.40.13-p-ds1-1_24.04_amd64",
+			"key": "libigc2_2.41.15-1_24.04_amd64",
 			"name": "libigc2",
-			"sha256": "c57e4ca8c780dc85a309e35b4d3249fc866251fea7bf3ebe68a5ab5ef5f71362",
+			"sha256": "c3e5f181eecd40dc8b656c3ff5b7e3d4f690e93181255726516416e61ade1d1f",
 			"urls": [
-				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260930T000000Z/pool/main/i/intel-graphics-compiler/libigc2_2.40.13+ds1-1~24.04_amd64.deb"
+				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-graphics-compiler/libigc2_2.41.15-1~24.04_amd64.deb"
 			],
-			"version": "2.40.13+ds1-1~24.04"
+			"version": "2.41.15-1~24.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libigdfcl2_2.40.13-p-ds1-1_24.04_amd64",
+			"key": "libigdfcl2_2.41.15-1_24.04_amd64",
 			"name": "libigdfcl2",
-			"sha256": "e71f41b4dd54c9cda7024680528034204cd911a1c2f644ec2bc3c06e968f5afe",
+			"sha256": "8a2058fd9f5e7d0a4b05001ff861780d2f72529135fa70fb7fbba0f0ff8cd74f",
 			"urls": [
-				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260930T000000Z/pool/main/i/intel-graphics-compiler/libigdfcl2_2.40.13+ds1-1~24.04_amd64.deb"
+				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-graphics-compiler/libigdfcl2_2.41.15-1~24.04_amd64.deb"
 			],
-			"version": "2.40.13+ds1-1~24.04"
+			"version": "2.41.15-1~24.04"
 		},
 		{
 			"arch": "amd64",

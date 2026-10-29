@@ -68,11 +68,11 @@ filegroup(
     "libigc2": """
 filegroup(
     name = "libigc_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libigc.so.2.40.13+0"],
+    srcs = ["lib/x86_64-linux-gnu/libigc.so.2.41.15+0"],
 )
 filegroup(
     name = "libiga64_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libiga64.so.2.40.13+0"],
+    srcs = ["lib/x86_64-linux-gnu/libiga64.so.2.41.15+0"],
 )
 filegroup(
     name = "libigc2",
@@ -84,11 +84,11 @@ filegroup(
     "libigdfcl2": """
 filegroup(
     name = "libigdfcl_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libigdfcl.so.2.40.13+0"],
+    srcs = ["lib/x86_64-linux-gnu/libigdfcl.so.2.41.15+0"],
 )
 filegroup(
     name = "libopencl_clang",
-    srcs = ["lib/x86_64-linux-gnu/libopencl-clang.so.17"],
+    srcs = ["lib/x86_64-linux-gnu/libopencl-clang.so.22.1"],
 )
 filegroup(
     name = "libigdfcl2",
