@@ -17,6 +17,8 @@ pub const Config = struct {
     head_dim: i64,
     dtype: cute.DType,
     splits: i64 = 1,
+    /// Query j sees the keys up to positions + j. Otherwise every query sees every key and positions is ignored.
+    causal: bool = true,
 };
 
 /// Planning uses local (post-sharding) dimensions. XLA owns the compiled CUDA
@@ -147,13 +149,16 @@ fn runSized(b: *B, cfg: Config, comptime fragments: usize) cute.FinishError!void
     const query = row.div(group).minimum(cfg.query_length - 1);
     const head = kv_head.mul(group).add(row.rem(group));
     const start = a.positions.get(.{batch});
-    const position = start.add(query);
-    const causal_end = start.add(first_row.add(3).div(group).minimum(cfg.query_length - 1)).add(1);
+    const position = if (cfg.causal) start.add(query) else b.constant(.i32, cfg.key_length - 1);
+    const live_end = if (cfg.causal)
+        start.add(first_row.add(3).div(group).minimum(cfg.query_length - 1)).add(1)
+    else
+        b.constant(.i32, cfg.key_length);
     // Partition the live cache, rather than its capacity, so decode uses all
     // blocks even when only a prefix of the cache is populated.
-    const chunk = causal_end.add(cfg.splits - 1).div(cfg.splits);
+    const chunk = live_end.add(cfg.splits - 1).div(cfg.splits);
     const begin = if (split) b.blockIdx().z.mul(chunk) else b.constant(.i32, 0);
-    const end = if (split) begin.add(chunk).minimum(causal_end) else causal_end;
+    const end = if (split) begin.add(chunk).minimum(live_end) else live_end;
     const zero = b.constant(.f32, 0);
     const neg_inf = b.constant(.f32, -std.math.inf(f32));
 
@@ -607,7 +612,8 @@ fn PrefillTile(comptime d: i64, comptime dt: cute.DType) type {
                     inline for (0..score_tiles) |ni| {
                         inline for (0..4) |j| {
                             const key = key_base.add(ni * 8).add(lane.rem(4).mul(2)).add(j % 2);
-                            const visible = key.lt(t.cfg.key_length).bitAnd(key.le(t.start.add(t.queryOf(mi, j / 2))));
+                            const in_range = key.lt(t.cfg.key_length);
+                            const visible = if (t.cfg.causal) in_range.bitAnd(key.le(t.start.add(t.queryOf(mi, j / 2)))) else in_range;
                             s[mi][ni][j] = b.select(visible, s[mi][ni][j], neg_inf);
                         }
                     }
@@ -724,10 +730,17 @@ fn prefillSized(b: *B, cfg: Config, comptime d: i64, comptime dt: cute.DType) cu
     const kv_base = batch.to(.i64).mul(cfg.key_length * cfg.kv_heads * d).add(kv_head.to(.i64).mul(d));
 
     // Causal: the last query of the block sees keys up to start + last_query, and every query of the
-    // block sees the keys up to start + first_query.
+    // block sees the keys up to start + first_query. Otherwise only the last tile, past the end of the
+    // keys, is masked.
     const last_query = first_query.add(T.rows).minimum(cfg.query_length).sub(1);
-    const tiles = start.add(last_query).add(1).minimum(cfg.key_length).add(T.n - 1).div(T.n);
-    const full_tiles = start.add(first_query).add(1).minimum(cfg.key_length).div(T.n).minimum(tiles);
+    const tiles = if (cfg.causal)
+        start.add(last_query).add(1).minimum(cfg.key_length).add(T.n - 1).div(T.n)
+    else
+        b.constant(.i32, @divTrunc(cfg.key_length + T.n - 1, T.n));
+    const full_tiles = if (cfg.causal)
+        start.add(first_query).add(1).minimum(cfg.key_length).div(T.n).minimum(tiles)
+    else
+        b.constant(.i32, @divTrunc(cfg.key_length, T.n));
 
     const t: T = .init(b, cfg, tid, first_query, start, shared, b.ptrToInt(a.k, .i64), b.ptrToInt(a.v, .i64), kv_base, tiles);
 
