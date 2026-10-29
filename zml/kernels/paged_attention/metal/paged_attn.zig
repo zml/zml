@@ -585,7 +585,7 @@ pub const PagedAttentionTiled = struct {
     /// The (bq, tile_kv, num_threads) of a head size, null when unsupported.
     pub fn tileConfig(head_size: i64) ?[3]i32 {
         return switch (head_size) {
-            64, 96, 128 => .{ 32, 32, 128 },
+            32, 64, 96, 128 => .{ 32, 32, 128 },
             256 => .{ 16, 16, 64 },
             512 => .{ 8, 8, 32 },
             else => null,
@@ -993,7 +993,7 @@ test "the paged attention kernels emit verified modules" {
     allocator.free(try FaVecPagedReduce.Kernel.emit(allocator, .{ .nwg = 4, .head_dim = 512 }));
     for ([_]Type{ .half, .bfloat }) |dtype| {
         allocator.free(try ZeroPaddingRows.Kernel.emit(allocator, .{ .dtype = dtype }));
-        for ([_]i32{ 64, 96, 128, 256, 512 }) |head_size| {
+        for ([_]i32{ 32, 64, 96, 128, 256, 512 }) |head_size| {
             const tile = PagedAttentionTiled.tileConfig(head_size).?;
             for ([_]bool{ true, false }) |causal| {
                 allocator.free(try PagedAttentionTiled.Kernel.emit(allocator, .{ .dtype = dtype, .head_size = head_size, .block_size = 16, .bq = tile[0], .tile_kv = tile[1], .num_threads = tile[2], .causal = causal }));
