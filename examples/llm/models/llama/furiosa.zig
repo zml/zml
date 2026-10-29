@@ -2,6 +2,21 @@ const std = @import("std");
 
 const zml = @import("zml");
 
+// LmHead's greedy vocabulary reduction returns the same U32 token on every rank.
+pub fn readGreedyToken(buffer: zml.Buffer, io: std.Io) !u32 {
+    std.debug.assert(buffer._platform.target == .furiosa);
+    std.debug.assert(buffer.shape().dtype() == .u32 and buffer.shape().count() == 1);
+    // Donation copies and tuple writes can fail after the shared group finishes.
+    try buffer.await(io);
+    var token: u32 = undefined;
+    const api = buffer._platform.pjrt_api;
+    if (try buffer._shards.get(0).toHostBuffer(api, std.mem.asBytes(&token))) |event| {
+        defer event.deinit(api);
+        try event.await(api, io);
+    }
+    return token;
+}
+
 pub fn nextPosition(position: zml.Tensor) zml.Tensor {
     return position.addConstant(1).reuseBuffer(position);
 }
@@ -113,4 +128,88 @@ test "rope: cached BF16 rotations match dynamic scaling, layouts and boundaries"
             });
         }
     }
+}
+
+test "readGreedyToken: global vocabulary winners agree on every rank" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .furiosa) return error.SkipZigTest;
+    const Local = struct {
+        fn greedy(logits: zml.Tensor) zml.Tensor {
+            const result = zml.nn.sampleTokens(logits, .{ .topk = 1 }, .init());
+            return result[0].convert(.u32);
+        }
+    };
+    const mesh = zml.testing.tpMesh();
+    const logits = zml.Tensor.init(.{ .s = 1, .voc = 8 }, .bf16)
+        .withPartitioning(mesh, .{ .s = .replicated, .voc = .model });
+    var exe = try platform.compileFn(allocator, io, Local.greedy, .{logits}, .{ .meshes = &.{mesh} });
+    defer exe.deinit();
+    const Case = struct { values: [8]f32, expected: u32 };
+    for ([_]Case{
+        .{ .values = .{ 9, 0, 0, 0, 1, 0, 0, 0 }, .expected = 0 },
+        .{ .values = .{ 0, 0, 0, 0, 0, 9, 0, 0 }, .expected = 5 },
+        .{ .values = .{ 0, 9, 0, 0, 0, 9, 0, 0 }, .expected = 1 },
+    }) |case| {
+        var values: [8]zml.floats.BFloat16 = undefined;
+        for (&values, case.values) |*dst, value| dst.* = .fromF32(value);
+        var input = try zml.Buffer.fromBytes(io, platform, logits.shape(), std.mem.sliceAsBytes(&values));
+        defer input.deinit();
+        var token = try exe.eval(allocator, io, .{input});
+        defer token.deinit();
+        try std.testing.expectEqual(case.expected, try readGreedyToken(token, io));
+        const api = platform.pjrt_api;
+        for (token._shards.constSlice()) |shard| {
+            var actual: u32 = undefined;
+            if (try shard.toHostBuffer(api, std.mem.asBytes(&actual))) |event| {
+                defer event.deinit(api);
+                try event.await(api, io);
+            }
+            try std.testing.expectEqual(case.expected, actual);
+        }
+    }
+}
+
+test "readGreedyToken: a later rank error precedes every download" {
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+    if (platform.target != .furiosa or platform.devices.len < 2) return error.SkipZigTest;
+    const real_api = platform.pjrt_api;
+    var token = try zml.Buffer.scalar(io, platform, 7, .u32);
+    defer token.deinit();
+    const rank1 = platform.physical_mesh.devices_in_canonical_order[1];
+    const manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(real_api, .{
+        .shape_specs = &.{zml.pjrt.ShapeSpec.init(&.{}, .u32)},
+        .memory = platform.devices[rank1.id].memory(.default).?.pjrt_memory,
+    });
+    defer manager.deinit(real_api);
+    try manager.setBufferError(real_api, 0, @backingInt(zml.pjrt.ErrorCode.internal), "rank-1 readiness failure");
+    const failed = try manager.retrieveBuffer(real_api, 0);
+    token._shards.slice()[1].deinit(real_api);
+    token._shards.slice()[1] = failed;
+
+    // Count only this token's download requests; retain the real API for all work.
+    const Copy = @FieldType(@FieldType(zml.pjrt.Api, "inner"), "PJRT_Buffer_ToHostBuffer");
+    const Signature = @typeInfo(@typeInfo(@typeInfo(Copy).optional.child).pointer.child).@"fn";
+    const Spy = struct {
+        var calls: usize = 0;
+        var original: Copy = null;
+
+        fn copy(args: Signature.param_types[0].?) callconv(.c) Signature.return_type.? {
+            calls += 1;
+            return original.?(args);
+        }
+    };
+    Spy.calls = 0;
+    Spy.original = real_api.inner.PJRT_Buffer_ToHostBuffer;
+    var api = real_api.*;
+    api.inner.PJRT_Buffer_ToHostBuffer = Spy.copy;
+    var local_platform = platform.*;
+    local_platform.pjrt_api = &api;
+    token._platform = &local_platform;
+    defer token._platform = platform;
+
+    try std.testing.expectError(error.Internal, readGreedyToken(token, io));
+    try std.testing.expectEqual(@as(usize, 0), Spy.calls);
 }

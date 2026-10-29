@@ -166,7 +166,14 @@ pub const Session = struct {
         });
 
         defer next_token_buffer.deinit();
-        self.last_generated_token = try next_token_buffer.getValue(u32, self.io);
+        self.last_generated_token = try self.readToken(next_token_buffer);
+    }
+
+    fn readToken(self: *const Session, buffer: zml.Buffer) !u32 {
+        return if (self.platform.target == .furiosa and self.compiled_model.greedy_tokens and buffer.numShards() > 1)
+            @import("furiosa.zig").readGreedyToken(buffer, self.io)
+        else
+            buffer.getValue(u32, self.io);
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
@@ -210,7 +217,7 @@ pub const Session = struct {
                 .attention_metadata_buffers = &attention_metadata_buffers,
                 .advance_position = position != null,
             });
-            last_token_id = try current_token_buffer.getValue(u32, self.io);
+            last_token_id = try self.readToken(current_token_buffer);
         }
 
         try stdout.writeAll(try decoder.finalize(decoder_out_buffer));

@@ -63,6 +63,7 @@ pub const CompiledModel = struct {
     prefill: KernelExe,
     decode: KernelExe,
     params: CompilationParameters,
+    greedy_tokens: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -82,6 +83,7 @@ pub const CompiledModel = struct {
             .prefill = prefill,
             .decode = decode,
             .params = parameters,
+            .greedy_tokens = llama_model.gen_opts.topk <= 1,
         };
     }
 
