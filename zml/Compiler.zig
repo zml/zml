@@ -967,6 +967,10 @@ fn compileModuleToPjrtExecutable(compiler: *Compiler, opts: Options) !*pjrt.Load
                 // Enable user buffers to assign color 1 and receive the reclaim exemption:
                 // https://github.com/openxla/xla/pull/46029
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_nccl_user_buffers", true, upb_arena);
+                // Enables fusion to produce output for multiple separate output.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_unsupported_enable_triton_multi_output_fusion", true, upb_arena);
+                // Rearranges operations so that communication between GPUs happens in the background while the compute units are busy doing computation.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
             },
             .metal => {
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_metal_fast_math", false, upb_arena);
