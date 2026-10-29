@@ -185,6 +185,49 @@ test "attention: q=8,qh=64,kh=8" {
     );
 }
 
+test "attention: prefill, q=k=300,qh=8,kh=4" {
+    // Neither length is a multiple of the query (128) or key (64) tiles.
+    try testAttention(
+        .init(.{ .q = 300, .h = 8, .hd = 128 }, .bf16),
+        .init(.{ .k = 300, .h = 4, .hd = 128 }, .bf16),
+        &.{0},
+    );
+}
+
+test "attention: prefill, q=200,k=1000,qh=4,kh=4,hd=64" {
+    // Queries start at 800: every query tile sees full key tiles before the diagonal.
+    try testAttention(
+        .init(.{ .q = 200, .h = 4, .hd = 64 }, .bf16),
+        .init(.{ .k = 1000, .h = 4, .hd = 64 }, .bf16),
+        &.{800},
+    );
+}
+
+test "attention: prefill, q=k=200,qh=4,kh=2,hd=32" {
+    // Rows of 32 features only hold 4 16-byte vectors: the shared memory swizzle must stay inside them.
+    try testAttention(
+        .init(.{ .q = 200, .h = 4, .hd = 32 }, .bf16),
+        .init(.{ .k = 200, .h = 2, .hd = 32 }, .bf16),
+        &.{0},
+    );
+}
+
+test "attention: prefill, q=k=130,qh=4,kh=2,hd=256" {
+    try testAttention(
+        .init(.{ .q = 130, .h = 4, .hd = 256 }, .bf16),
+        .init(.{ .k = 130, .h = 2, .hd = 256 }, .bf16),
+        &.{0},
+    );
+}
+
+test "attention: prefill, b=2,q=150,k=300,qh=4,kh=2" {
+    try testAttention(
+        .init(.{ .b = 2, .q = 150, .h = 4, .hd = 128 }, .bf16),
+        .init(.{ .b = 2, .k = 300, .h = 2, .hd = 128 }, .bf16),
+        &.{ 150, 100 },
+    );
+}
+
 pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []const u32) !void {
     return testAttentionBackends(q_shape, k_shape, token_index_h, std.enums.values(Backend));
 }
