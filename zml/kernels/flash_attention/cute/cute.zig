@@ -15,7 +15,8 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
     return cc.major >= 8;
 }
 
-pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor) zml.Tensor {
+/// `causal`: query j sees the keys up to token_index + j. Otherwise every key, and token_index is ignored.
+pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, causal: bool) zml.Tensor {
     stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }) and k.shape().hasTags(.{ .k, .h, .hd }) and v.shape().hasTags(.{ .k, .h, .hd }), "CuTe attention requires q/h/hd and k/h/hd tags", .{});
     const batched = q.shape().hasTag(.b) != null;
     const rank: usize = if (batched) 4 else 3;
@@ -24,7 +25,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
     stdx.debug.assert(q.dtype() == .bf16 or q.dtype() == .f16 or q.dtype() == .f32, "CuTe attention supports bf16, f16, and f32", .{});
     stdx.debug.assert(q.dim(.hd) > 0 and q.dim(.hd) <= 512 and q.dim(.hd) == k.dim(.hd) and k.dim(.hd) == v.dim(.hd), "CuTe attention requires matching head dimensions in [1, 512]", .{});
     stdx.debug.assert(k.dim(.h) > 0 and q.dim(.h) > 0 and @rem(q.dim(.h), k.dim(.h)) == 0 and k.dim(.h) == v.dim(.h), "CuTe attention requires Hq divisible by Hkv and matching K/V heads", .{});
-    stdx.debug.assert(q.dim(.q) > 0 and q.dim(.q) <= k.dim(.k) and k.dim(.k) == v.dim(.k), "CuTe attention requires 0 < Lq <= Lk and matching K/V lengths", .{});
+    stdx.debug.assert(q.dim(.q) > 0 and (!causal or q.dim(.q) <= k.dim(.k)) and k.dim(.k) == v.dim(.k), "CuTe attention requires 0 < Lq, Lq <= Lk when causal, and matching K/V lengths", .{});
     stdx.debug.assert(token_index.dtype().isInteger(), "CuTe attention requires integer token positions", .{});
     if (batched) {
         stdx.debug.assert(k.shape().hasTag(.b) != null and v.shape().hasTag(.b) != null and q.dim(.b) == k.dim(.b) and q.dim(.b) == v.dim(.b), "CuTe attention requires matching batch dimensions", .{});
@@ -41,7 +42,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         token_index.convert(.i32).broad(zml.Shape.init(.{ .b = q.dim(.b) }, .i32))
     else
         token_index.convert(.i32);
-    return zml.ops.manualComputation(Context.body, Context{ .q = q_sharded, .k = k_sharded, .v = v_sharded, .positions = positions }, q_sharded.shape());
+    return zml.ops.manualComputation(Context.body, Context{ .q = q_sharded, .k = k_sharded, .v = v_sharded, .positions = positions, .causal = causal }, q_sharded.shape());
 }
 
 const Context = struct {
@@ -49,6 +50,7 @@ const Context = struct {
     k: zml.Tensor,
     v: zml.Tensor,
     positions: zml.Tensor,
+    causal: bool,
 
     fn body(self: Context, output_shape: zml.Shape) zml.Tensor {
         const batched = self.q.shape().hasTag(.b) != null;
@@ -67,9 +69,12 @@ const Context = struct {
             .head_dim = q.dim(.hd),
             .dtype = zml.kernel.cute.from(q.dtype()),
             .splits = splits,
+            .causal = self.causal,
         };
 
-        const out = if (cfg.splits > 1) b: {
+        const out = if (kernel.prefillSupported(cfg))
+            kernel.Prefill.call(.{ .q = q, .k = k, .v = v, .positions = self.positions }, .{ .out = q.shape() }, .{ .cfg = cfg }).out
+        else if (cfg.splits > 1) b: {
             const partials = kernel.Kernel.call(.{ .q = q, .k = k, .v = v, .positions = self.positions }, .{
                 .out = zml.Shape.init(.{ cfg.batch, cfg.splits, cfg.query_length, cfg.query_heads, cfg.head_dim + 2 }, .f32),
             }, .{

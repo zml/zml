@@ -126,11 +126,12 @@ pub const Metadata = union(Backend) {
 ///   - .q is the number of queries
 ///   - .k is the number of keys
 ///   - .hd is the head dimension
-pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
+pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters, opts: zml.attention.Options) zml.Tensor {
     return switch (parameters) {
-        .cute => cute.attention(q, k, v, token_index),
-        .nki => nki.attention(q, k, v, token_index, parameters.nki),
-        .metal => metal.attention(q, k, v, token_index, metadata.metal),
+        .cute => cute.attention(q, k, v, token_index, opts.causal),
+        // The NKI and Metal kernels are causal only.
+        .nki => if (opts.causal) nki.attention(q, k, v, token_index, parameters.nki) else zml.nn.sdpa(q, k, v, .{}),
+        .metal => if (opts.causal) metal.attention(q, k, v, token_index, metadata.metal) else zml.nn.sdpa(q, k, v, .{}),
     };
 }
 
@@ -185,11 +186,95 @@ test "attention: q=8,qh=64,kh=8" {
     );
 }
 
-pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []const u32) !void {
-    return testAttentionBackends(q_shape, k_shape, token_index_h, std.enums.values(Backend));
+test "attention: prefill, q=k=300,qh=8,kh=4" {
+    // Neither length is a multiple of the query (128) or key (64) tiles.
+    try testAttention(
+        .init(.{ .q = 300, .h = 8, .hd = 128 }, .bf16),
+        .init(.{ .k = 300, .h = 4, .hd = 128 }, .bf16),
+        &.{0},
+    );
 }
 
-fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []const u32, backends: []const Backend) !void {
+test "attention: prefill, q=200,k=1000,qh=4,kh=4,hd=64" {
+    // Queries start at 800: every query tile sees full key tiles before the diagonal.
+    try testAttention(
+        .init(.{ .q = 200, .h = 4, .hd = 64 }, .bf16),
+        .init(.{ .k = 1000, .h = 4, .hd = 64 }, .bf16),
+        &.{800},
+    );
+}
+
+test "attention: prefill, q=k=200,qh=4,kh=2,hd=32" {
+    // Rows of 32 features only hold 4 16-byte vectors: the shared memory swizzle must stay inside them.
+    try testAttention(
+        .init(.{ .q = 200, .h = 4, .hd = 32 }, .bf16),
+        .init(.{ .k = 200, .h = 2, .hd = 32 }, .bf16),
+        &.{0},
+    );
+}
+
+test "attention: prefill, q=k=130,qh=4,kh=2,hd=256" {
+    try testAttention(
+        .init(.{ .q = 130, .h = 4, .hd = 256 }, .bf16),
+        .init(.{ .k = 130, .h = 2, .hd = 256 }, .bf16),
+        &.{0},
+    );
+}
+
+test "attention: prefill, b=2,q=150,k=300,qh=4,kh=2" {
+    try testAttention(
+        .init(.{ .b = 2, .q = 150, .h = 4, .hd = 128 }, .bf16),
+        .init(.{ .b = 2, .k = 300, .h = 2, .hd = 128 }, .bf16),
+        &.{ 150, 100 },
+    );
+}
+
+test "attention: non-causal prefill, q=k=300,qh=8,kh=4" {
+    try testAttentionOpts(
+        .init(.{ .q = 300, .h = 8, .hd = 128 }, .bf16),
+        .init(.{ .k = 300, .h = 4, .hd = 128 }, .bf16),
+        &.{0},
+        .{ .causal = false },
+    );
+}
+
+test "attention: non-causal prefill, b=2,q=200,k=1000,qh=4,kh=4,hd=64" {
+    // Queries are a suffix of the keys, as for the image tokens of a joint text/image attention.
+    try testAttentionOpts(
+        .init(.{ .b = 2, .q = 200, .h = 4, .hd = 64 }, .bf16),
+        .init(.{ .b = 2, .k = 1000, .h = 4, .hd = 64 }, .bf16),
+        &.{ 0, 0 },
+        .{ .causal = false },
+    );
+}
+
+test "attention: non-causal prefill, more queries than keys, q=300,k=100,qh=4,kh=2" {
+    try testAttentionOpts(
+        .init(.{ .q = 300, .h = 4, .hd = 128 }, .bf16),
+        .init(.{ .k = 100, .h = 2, .hd = 128 }, .bf16),
+        &.{0},
+        .{ .causal = false },
+    );
+}
+
+test "attention: non-causal decode ignores token_index, q=1,k=1000,qh=64,kh=8" {
+    try testAttentionOpts(
+        .init(.{ .q = 1, .h = 64, .hd = 64 }, .bf16),
+        .init(.{ .k = 1000, .h = 8, .hd = 64 }, .bf16),
+        &.{5},
+        .{ .causal = false },
+    );
+}
+
+pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []const u32) !void {
+    return testAttentionOpts(q_shape, k_shape, token_index_h, .{});
+}
+
+fn testAttentionOpts(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []const u32, opts: zml.attention.Options) !void {
+    return testAttentionBackends(q_shape, k_shape, token_index_h, opts, std.enums.values(Backend));
+}
+
+fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []const u32, opts: zml.attention.Options, backends: []const Backend) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
 
@@ -206,9 +291,11 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
 
     const max_k_idx: i64 = k_shape.dim(.k) - 1;
     const max_q_idx: i64 = q_shape.dim(.q) - 1;
-    for (token_index_h) |index| {
-        // Check for out of bound reads
-        std.debug.assert(index + max_q_idx <= max_k_idx);
+    if (opts.causal) {
+        // Check for out of bound reads, token_index is ignored by non-causal attention.
+        for (token_index_h) |index| {
+            std.debug.assert(index + max_q_idx <= max_k_idx);
+        }
     }
 
     const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor } = .{
@@ -230,7 +317,7 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
     const meshes = platform.meshes.values();
     const reference_metadata: zml.attention.Metadata = .{ .stablehlo = {} };
     const reference_parameters: zml.attention.Parameters = .{ .stablehlo = {} };
-    const reference_exe = try platform.compileFn(allocator, io, zml.attention.attention, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, reference_metadata, reference_parameters }, .{
+    const reference_exe = try platform.compileFn(allocator, io, zml.attention.attentionOpts, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, reference_metadata, reference_parameters, opts }, .{
         .program_name = "attention_stablehlo",
         .meshes = meshes,
     });
@@ -251,7 +338,7 @@ fn testAttentionBackends(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: 
             allocator,
             io,
             attention,
-            .{ tensors.q, tensors.k, tensors.v, tensors.token_index, metadata, parameters },
+            .{ tensors.q, tensors.k, tensors.v, tensors.token_index, metadata, parameters, opts },
             .{
                 .program_name = try std.fmt.allocPrint(arena, "attention_{t}", .{backend}),
                 .meshes = meshes,
