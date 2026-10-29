@@ -902,7 +902,9 @@ pub const PagedAttentionTiled = struct {
             const was_empty = prev_max.eq(masked_score);
             const factor = b.ternary(grew, b.ternary(was_empty, 0.0, b.fast().exp2(prev_max.sub(grown_max))), 1.0);
             const new_max = b.ternary(grew.eq(false).bitAnd(was_empty), 0.0, grown_max);
-            max_score.assign(new_max);
+            // A tile masking a whole row leaves the maximum masked: zero would
+            // pin it, and later scores far below zero would underflow.
+            max_score.assign(grown_max);
 
             const local_sum = b.local(.float, 0.0);
             var p_keys = b.openForOpts(0, TK, 1, unroll);
