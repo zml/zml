@@ -66,7 +66,7 @@ pub fn forward(
 
 fn full_attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, args: CompileArgs) zml.Tensor {
     const token_index = zml.Tensor.scalar(0, .i32).broad(.init(.{ .b = q.dim(.b) }, .i32));
-    return zml.attention.attention(q, k, v, token_index, args.attention_metadata, args.attention_parameters);
+    return zml.attention.attentionOpts(q, k, v, token_index, args.attention_metadata, args.attention_parameters, .{ .causal = false });
 }
 
 fn apply_rotary_emb(x: zml.Tensor, freqs_cis: zml.Tensor) zml.Tensor {
