@@ -46,7 +46,10 @@ pub const Backend = enum {
             .cute => cute.isAvailable(platform),
             .stablehlo => true,
             .tcl => platform.target == .furiosa,
-            .triton => platform.target != .cpu and platform.target != .furiosa,
+            .triton => switch (platform.target) {
+                .cuda, .rocm, .oneapi => true,
+                .cpu, .tpu, .neuron, .metal, .furiosa => false,
+            },
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
         };
@@ -310,7 +313,12 @@ test "Backend.auto selects triton on oneAPI" {
 
 test pagedAttention {
     const platform = zml.testing.env();
-    if (!Backend.triton.isAvailable(platform)) return error.SkipZigTest;
+    const reference_backend: Backend = if (Backend.triton.isAvailable(platform))
+        .triton
+    else if (Backend.metal.isAvailable(platform))
+        .stablehlo
+    else
+        return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var arena_state: std.heap.ArenaAllocator = .init(allocator);
@@ -477,8 +485,10 @@ test pagedAttention {
             results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
         }
 
-        const reference_backend: Backend = .triton;
-        const reference = results_per_backend.get(reference_backend) orelse return error.SkipZigTest;
+        const reference = results_per_backend.get(reference_backend) orelse {
+            std.log.warn("test pagedAttention {s} has no {t} reference", .{ test_case.name, reference_backend });
+            continue;
+        };
 
         var num_failed: u32 = 0;
         for (std.enums.values(Backend)) |backend| {

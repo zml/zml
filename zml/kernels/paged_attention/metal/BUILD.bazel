@@ -2,5 +2,8 @@ package(default_visibility = ["//zml:__pkg__"])
 
 filegroup(
     name = "metal",
-    srcs = ["metal.zig"],
+    srcs = [
+        "metal.zig",
+        "paged_attn.zig",
+    ],
 )
