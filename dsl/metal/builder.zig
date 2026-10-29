@@ -1442,7 +1442,7 @@ pub const Builder = struct {
     fn simdType(x: Value, comptime name: []const u8) Type {
         const t = x.type_();
         switch (t.scalar) {
-            .half, .float, .short, .ushort, .int, .uint => {},
+            .half, .float, .char, .uchar, .short, .ushort, .int, .uint => {},
             else => std.debug.panic("dsl/metal: no {s} of a {s}", .{ name, t.name() }),
         }
         return t;
@@ -2067,6 +2067,49 @@ test "integer max, min, abs and clamp read locals and constant arguments" {
     try expectContains(ir, &.{ "air.max.s", "air.min.s", "air.abs.s", "air.clamp.s", "air.max.u", "air.min.u", "air.clamp.u", "air.fast_clamp", "air.fast_fabs", "air.fast_fmax" });
     // abs of a uint is the value itself.
     try std.testing.expect(std.mem.find(u8, ir, "air.abs.u") == null);
+}
+
+test "char and uchar take the same functions as wider integers" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = Builder.open(std.testing.allocator, ctx, "k", .{});
+    defer b.deinit();
+    const a = try b.declareArgs(.{
+        .c = .{ .buffer = .{ .type = .char } },
+        .u = .{ .buffer = .{ .type = .uchar } },
+        .v = .{ .buffer = .{ .type = .char2 } },
+        .f = .{ .buffer = .{ .type = .float } },
+        .w = .{ .buffer = .{ .type = .float2 } },
+        .lane = .{ .thread_index_in_simdgroup = .ushort },
+    });
+    const c = a.c.load(a.lane);
+    const u = a.u.load(a.lane);
+    const v = a.v.load(a.lane);
+    // f[0] = float(c) + float(u); c[0] = char(f[1]); u[0] = uchar(f[2]);
+    a.f.store(0, c.to(.float).add(u.to(.float)));
+    a.c.store(0, a.f.load(1).to(.char));
+    a.u.store(0, a.f.load(2).to(.uchar));
+    // w[0] = float2(v); v[0] = char2(w[1]);
+    a.w.store(0, v.to(.float2));
+    a.v.store(0, a.w.load(1).to(.char2));
+    // c[1] = max(c, c); u[1] = min(u, u); c[2] = abs(c); c[3] = clamp(c, 1, 5); v[1] = max(v, v);
+    a.c.store(1, b.max(c, c));
+    a.u.store(1, b.min(u, u));
+    a.c.store(2, b.abs(c));
+    a.c.store(3, b.clamp(c, 1, 5));
+    a.v.store(1, b.max(v, v));
+    // c[4] = simd_shuffle(c, lane); c[5] = simd_sum(c); u[2] = simd_max(u);
+    a.c.store(4, b.simdShuffle(c, a.lane));
+    a.c.store(5, b.simdSum(c));
+    a.u.store(2, b.simdMax(u));
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+    try expectContains(ir, &.{
+        "air.convert.s",                   ": i8 to f32",                     "air.convert.u",      ": f32 to i8",
+        ": vector<2xi8> to vector<2xf32>", ": vector<2xf32> to vector<2xi8>", "air.max.s",          "air.min.u",
+        "air.abs.s",                       "air.clamp.s",                     "air.simd_shuffle.s", "air.simd_sum.s",
+        "air.simd_max.u",
+    });
 }
 
 test "bitwise operators and shifts" {
