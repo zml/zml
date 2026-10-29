@@ -167,6 +167,16 @@ pub const Tokenizer = struct {
         transform_buffer: []u8,
         state: *c.iree_tokenizer_encode_state_t,
 
+        fn checkEncodeStatus(status: c.iree_status_t) !void {
+            // Output exhaustion is normal streaming backpressure. The caller
+            // commits any produced tokens and retries with more output space.
+            if (status != null and statusCode(status) == c.IREE_STATUS_RESOURCE_EXHAUSTED) {
+                _ = c.iree_status_ignore(status);
+                return Error.ResourceExhausted;
+            }
+            try checkOk(status);
+        }
+
         fn init(tokenizer: *const Tokenizer) !Encoder {
             var state_size: usize = undefined;
             try checkOk(c.iree_tokenizer_encode_state_calculate_size(tokenizer.inner, &state_size));
@@ -298,7 +308,7 @@ pub const Tokenizer = struct {
                 var consumed: usize = 0;
                 var produced: usize = 0;
 
-                checkOk(c.iree_tokenizer_encode_state_feed(
+                checkEncodeStatus(c.iree_tokenizer_encode_state_feed(
                     self.state,
                     stringView(remaining),
                     tokenOutput(try writableTokenSliceGreedy(out, min_tokens)),
@@ -333,7 +343,7 @@ pub const Tokenizer = struct {
             while (true) {
                 var produced: usize = 0;
 
-                checkOk(c.iree_tokenizer_encode_state_finalize(
+                checkEncodeStatus(c.iree_tokenizer_encode_state_finalize(
                     self.state,
                     tokenOutput(try writableTokenSliceGreedy(out, min_tokens)),
                     &produced,
@@ -937,6 +947,116 @@ test "loads bpe tokenizer with newline lookahead split and added unk" {
     const ids = try encoder.encodeAlloc(allocator, "hello");
     defer allocator.free(ids);
     try std.testing.expectEqualSlices(u32, &.{ 5, 6, 4 }, ids);
+}
+
+const test_mistral_tokenizer_json =
+    \\{
+    \\  "model": {
+    \\    "type": "BPE",
+    \\    "vocab": {
+    \\      "1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5, "7": 6,
+    \\      "12": 7, "23": 8, "34": 9, "45": 10, "56": 11, "67": 12,
+    \\      "123": 13, "234": 14, "345": 15, "456": 16, "567": 17,
+    \\      "1234": 18
+    \\    },
+    \\    "merges": ["1 2", "2 3", "3 4", "4 5", "5 6", "6 7",
+    \\               "12 3", "23 4", "34 5", "45 6", "56 7", "123 4"]
+    \\  },
+    \\  "pre_tokenizer": {
+    \\    "type": "Sequence",
+    \\    "pretokenizers": [
+    \\      {
+    \\        "type": "Split",
+    \\        "pattern": {"Regex": "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*|\\p{N}{1,3}(?=(?:\\p{N}{3})*(?!\\p{N}))|\\p{N}{1,2}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"},
+    \\        "behavior": "Isolated",
+    \\        "invert": false
+    \\      },
+    \\      {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": false}
+    \\    ]
+    \\  },
+    \\  "decoder": {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true}
+    \\}
+;
+
+test "Mistral right-aligned number lookahead" {
+    const allocator = std.testing.allocator;
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_mistral_tokenizer_json);
+    defer tokenizer.deinit();
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    const cases = .{
+        .{ "1", &[_]u32{0} },
+        .{ "12", &[_]u32{7} },
+        .{ "123", &[_]u32{13} },
+        .{ "1234", &[_]u32{ 0, 14 } },
+        .{ "12345", &[_]u32{ 7, 15 } },
+        .{ "123456", &[_]u32{ 13, 16 } },
+        .{ "1234567", &[_]u32{ 0, 14, 17 } },
+    };
+    inline for (cases) |case| {
+        encoder.reset();
+        const ids = try encoder.encodeAlloc(allocator, case[0]);
+        defer allocator.free(ids);
+        try std.testing.expectEqualSlices(u32, case[1], ids);
+
+        encoder.reset();
+        var streamed: std.Io.Writer.Allocating = .initAligned(allocator, .of(u32));
+        defer streamed.deinit();
+        for (0..case[0].len) |i| {
+            try encoder.feed(case[0][i .. i + 1], &streamed.writer);
+        }
+        try encoder.finalize(&streamed.writer);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(case[1]), streamed.written());
+    }
+}
+
+test "Mistral Unicode number grouping and output overflow" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, test_mistral_tokenizer_json, .{});
+    defer parsed.deinit();
+    var model = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{"type": "WordPiece", "unk_token": "<unk>", "continuing_subword_prefix": "", "vocab": {
+        \\  "<unk>": 0, "١": 1, "٢٣٤": 2, "１２": 3, "３４５": 4,
+        \\  "Ⅷ": 5, "²3४": 6, "1": 7, "111": 8
+        \\}}
+    , .{});
+    defer model.deinit();
+    const arena = parsed.arena.allocator();
+    try parsed.value.object.put(arena, "model", model.value);
+    // Test the Split segmenter directly, before ByteLevel maps UTF-8 bytes.
+    const split = parsed.value.object.get("pre_tokenizer").?.object.get("pretokenizers").?.array.items[0];
+    try parsed.value.object.put(arena, "pre_tokenizer", split);
+    const json = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
+    defer allocator.free(json);
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, json);
+    defer tokenizer.deinit();
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    const cases = .{
+        .{ "١٢٣٤", &[_]u32{ 1, 2 } },
+        .{ "１２３４５", &[_]u32{ 3, 4 } },
+        .{ "Ⅷ²3४", &[_]u32{ 5, 6 } },
+    };
+    inline for (cases) |case| {
+        encoder.reset();
+        var streamed: std.Io.Writer.Allocating = .initAligned(allocator, .of(u32));
+        defer streamed.deinit();
+        for (0..case[0].len) |i| {
+            try encoder.feed(case[0][i .. i + 1], &streamed.writer);
+        }
+        try encoder.finalize(&streamed.writer);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(case[1]), streamed.written());
+    }
+
+    encoder.reset();
+    const ids = try encoder.encodeAlloc(allocator, &(@as([1000]u8, @splat('1'))));
+    defer allocator.free(ids);
+    try std.testing.expectEqual(@as(usize, 334), ids.len);
+    try std.testing.expectEqual(@as(u32, 7), ids[0]);
+    for (ids[1..]) |id| try std.testing.expectEqual(@as(u32, 8), id);
 }
 
 test "writer" {

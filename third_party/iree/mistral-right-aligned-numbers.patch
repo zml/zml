@@ -1,0 +1,303 @@
+diff --git a/runtime/src/iree/tokenizer/format/huggingface/segmenter_json.c b/runtime/src/iree/tokenizer/format/huggingface/segmenter_json.c
+--- a/runtime/src/iree/tokenizer/format/huggingface/segmenter_json.c
++++ b/runtime/src/iree/tokenizer/format/huggingface/segmenter_json.c
+@@ -225,6 +225,29 @@
+     return iree_ok_status();
+   }
+ 
++  // Tekken groups numbers from the right using a positive lookahead. Match the
++  // entire number run with the DFA, then subdivide it in the Split segmenter.
++  // Restrict this lowering to the exact known pattern and isolated behavior.
++  bool right_aligned_numbers = false;
++  if (behavior == IREE_TOKENIZER_UTIL_REGEX_SPLIT_ISOLATED && !invert &&
++      iree_string_view_equal(
++          pattern,
++          IREE_SV("[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*"
++                  "[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+|"
++                  "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+"
++                  "[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*|"
++                  "\\p{N}{1,3}(?=(?:\\p{N}{3})*(?!\\p{N}))|\\p{N}{1,2}|"
++                  " ?[^\\s\\p{L}\\p{N}]+[\\r\\n/"
++                  "]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"))) {
++    pattern = IREE_SV(
++        "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*"
++        "[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+|"
++        "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+"
++        "[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*|\\p{N}+|"
++        " ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+");
++    right_aligned_numbers = true;
++  }
++
+   // Compile the regex pattern to a DFA.
+   iree_tokenizer_regex_dfa_t dfa;
+   uint8_t* dfa_data = NULL;
+@@ -239,8 +262,13 @@
+   }
+ 
+   // Create the Split segmenter. On failure, free DFA data.
+-  status = iree_tokenizer_segmenter_split_allocate(
+-      dfa, dfa_data, behavior, invert, allocator, out_segmenter);
++  if (right_aligned_numbers) {
++    status = iree_tokenizer_segmenter_split_right_aligned_numbers_allocate(
++        dfa, dfa_data, allocator, out_segmenter);
++  } else {
++    status = iree_tokenizer_segmenter_split_allocate(
++        dfa, dfa_data, behavior, invert, allocator, out_segmenter);
++  }
+   if (!iree_status_is_ok(status)) {
+     iree_allocator_free(allocator, dfa_data);
+   }
+diff --git a/runtime/src/iree/tokenizer/segmenter/BUILD.bazel b/runtime/src/iree/tokenizer/segmenter/BUILD.bazel
+--- a/runtime/src/iree/tokenizer/segmenter/BUILD.bazel
++++ b/runtime/src/iree/tokenizer/segmenter/BUILD.bazel
+@@ -188,6 +188,7 @@
+     hdrs = ["split.h"],
+     deps = [
+         "//runtime/src/iree/base",
++        "//runtime/src/iree/base/internal:unicode",
+         "//runtime/src/iree/tokenizer:segmenter",
+         "//runtime/src/iree/tokenizer/regex:exec",
+     ],
+diff --git a/runtime/src/iree/tokenizer/segmenter/CMakeLists.txt b/runtime/src/iree/tokenizer/segmenter/CMakeLists.txt
+--- a/runtime/src/iree/tokenizer/segmenter/CMakeLists.txt
++++ b/runtime/src/iree/tokenizer/segmenter/CMakeLists.txt
+@@ -201,6 +201,7 @@
+     "split.c"
+   DEPS
+     iree::base
++    iree::base::internal::unicode
+     iree::tokenizer::regex::exec
+     iree::tokenizer::segmenter
+   PUBLIC
+diff --git a/runtime/src/iree/tokenizer/segmenter/split.c b/runtime/src/iree/tokenizer/segmenter/split.c
+--- a/runtime/src/iree/tokenizer/segmenter/split.c
++++ b/runtime/src/iree/tokenizer/segmenter/split.c
+@@ -7,6 +7,8 @@
+ #include "iree/tokenizer/segmenter/split.h"
+ 
+ #include <string.h>
++
++#include "iree/base/internal/unicode.h"
+ 
+ //===----------------------------------------------------------------------===//
+ // Types
+@@ -19,6 +21,7 @@
+   bool invert;
+   // false = regex mode, true = literal mode.
+   bool is_literal;
++  bool right_aligned_numbers;
+   union {
+     struct {
+       iree_tokenizer_regex_dfa_t dfa;
+@@ -361,7 +364,46 @@
+   iree_tokenizer_regex_split_behavior_t behavior;
+   bool invert;
+   bool absolute;
++  bool right_aligned_numbers;
++  iree_string_view_t input;
+ } iree_tokenizer_split_callback_context_t;
++
++// The caller has recognized a number-only match. Count codepoints, rather than
++// bytes, so mixed Unicode number categories retain the same grouping as \p{N}.
++static iree_status_t iree_tokenizer_split_emit_number_match(
++    iree_tokenizer_split_callback_context_t* context,
++    iree_tokenizer_regex_match_t match, iree_string_view_t text) {
++  iree_host_size_t position = 0;
++  iree_host_size_t count = 0;
++  while (position < text.size) {
++    iree_unicode_utf8_decode(text, &position);
++    ++count;
++  }
++
++  iree_tokenizer_split_emit(context->emitter, context->last_emit_end,
++                            match.start, context->absolute);
++  position = 0;
++  iree_host_size_t start = match.start;
++  iree_host_size_t group_size = (count - 1) % 3 + 1;
++  while (position < text.size) {
++    for (iree_host_size_t i = 0; i < group_size; ++i) {
++      iree_unicode_utf8_decode(text, &position);
++    }
++    iree_host_size_t end = match.start + position;
++    // finalize() can retry the same match after partially filling the output.
++    if (end > context->last_emit_end) {
++      iree_tokenizer_split_emit(context->emitter, start, end,
++                                context->absolute);
++      if (context->emitter->full) {
++        return iree_status_from_code(IREE_STATUS_RESOURCE_EXHAUSTED);
++      }
++    }
++    start = end;
++    group_size = 3;
++  }
++  context->last_emit_end = match.end;
++  return iree_ok_status();
++}
+ 
+ // Processes each regex match inline: computes behavior result, emits segments,
+ // and commits state. Returns RESOURCE_EXHAUSTED if output capacity is
+@@ -370,6 +412,20 @@
+     void* user_data, iree_tokenizer_regex_match_t match) {
+   iree_tokenizer_split_callback_context_t* context =
+       (iree_tokenizer_split_callback_context_t*)user_data;
++
++  if (context->right_aligned_numbers && match.end > match.start) {
++    iree_host_size_t base = context->emitter->chunk_base;
++    if (match.start < base || match.end - base > context->input.size) {
++      return iree_make_status(IREE_STATUS_INTERNAL,
++                              "number match outside retained input");
++    }
++    iree_string_view_t text = iree_make_string_view(
++        context->input.data + match.start - base, match.end - match.start);
++    iree_host_size_t position = 0;
++    if (iree_unicode_is_number(iree_unicode_utf8_decode(text, &position))) {
++      return iree_tokenizer_split_emit_number_match(context, match, text);
++    }
++  }
+ 
+   // Compute behavior result (pure, no side effects).
+   // Gap is the region between the last emit and the current match start.
+@@ -590,6 +646,7 @@
+   segmenter->behavior = behavior;
+   segmenter->invert = invert;
+   segmenter->is_literal = false;
++  segmenter->right_aligned_numbers = false;
+   segmenter->regex.dfa = dfa;
+   segmenter->regex.dfa_data = dfa_data;
+ 
+@@ -605,6 +662,17 @@
+   }
+   IREE_TRACE_ZONE_END(z0);
+   return status;
++}
++
++iree_status_t iree_tokenizer_segmenter_split_right_aligned_numbers_allocate(
++    iree_tokenizer_regex_dfa_t dfa, uint8_t* dfa_data,
++    iree_allocator_t allocator, iree_tokenizer_segmenter_t** out_segmenter) {
++  IREE_RETURN_IF_ERROR(iree_tokenizer_segmenter_split_allocate(
++      dfa, dfa_data, IREE_TOKENIZER_UTIL_REGEX_SPLIT_ISOLATED, false, allocator,
++      out_segmenter));
++  ((iree_tokenizer_segmenter_split_t*)*out_segmenter)->right_aligned_numbers =
++      true;
++  return iree_ok_status();
+ }
+ 
+ iree_status_t iree_tokenizer_segmenter_split_literal_allocate(
+@@ -641,6 +709,7 @@
+     segmenter->behavior = behavior;
+     segmenter->invert = invert;
+     segmenter->is_literal = true;
++    segmenter->right_aligned_numbers = false;
+     segmenter->literal.pattern_data = pattern_data;
+     segmenter->literal.pattern =
+         iree_make_string_view((const char*)pattern_data, pattern.size);
+@@ -739,6 +808,8 @@
+       .behavior = self->behavior,
+       .invert = self->invert,
+       .absolute = false,
++      .right_aligned_numbers = segmenter->right_aligned_numbers,
++      .input = input,
+   };
+ 
+   // Feed pattern matcher; matches are processed inline via callback.
+@@ -882,6 +953,8 @@
+       .behavior = self->behavior,
+       .invert = self->invert,
+       .absolute = false,
++      .right_aligned_numbers = segmenter->right_aligned_numbers,
++      .input = remaining_input,
+   };
+ 
+   iree_host_size_t input_end = chunk_base + remaining_input.size;
+diff --git a/runtime/src/iree/tokenizer/segmenter/split.h b/runtime/src/iree/tokenizer/segmenter/split.h
+--- a/runtime/src/iree/tokenizer/segmenter/split.h
++++ b/runtime/src/iree/tokenizer/segmenter/split.h
+@@ -81,6 +81,14 @@
+     iree_tokenizer_regex_split_behavior_t behavior, bool invert,
+     iree_allocator_t allocator, iree_tokenizer_segmenter_t** out_segmenter);
+ 
++// Like ISOLATED splitting, but subdivides number-only matches into groups of
++// three Unicode numbers from the right. The DFA must match entire number runs
++// separately from other text. This implements Tekken's numeric lookahead
++// without requiring general positive lookahead support in the regex compiler.
++iree_status_t iree_tokenizer_segmenter_split_right_aligned_numbers_allocate(
++    iree_tokenizer_regex_dfa_t dfa, uint8_t* dfa_data,
++    iree_allocator_t allocator, iree_tokenizer_segmenter_t** out_segmenter);
++
+ // Allocates a segmenter that splits text on literal string matches.
+ // Unlike the regex version, this uses efficient byte-by-byte substring search.
+ // The |pattern| is copied and owned by the segmenter.
+diff --git a/runtime/src/iree/tokenizer/segmenter/split_test.cc b/runtime/src/iree/tokenizer/segmenter/split_test.cc
+--- a/runtime/src/iree/tokenizer/segmenter/split_test.cc
++++ b/runtime/src/iree/tokenizer/segmenter/split_test.cc
+@@ -28,7 +28,8 @@
+  public:
+   ScopedSplitSegmenter(const char* pattern,
+                        iree_tokenizer_regex_split_behavior_t behavior,
+-                       bool invert = false) {
++                       bool invert = false,
++                       bool right_aligned_numbers = false) {
+     iree_tokenizer_regex_compile_error_t error = {0};
+     status_ = iree_tokenizer_regex_compile_and_load(
+         iree_make_cstring_view(pattern),
+@@ -37,8 +38,13 @@
+     if (!iree_status_is_ok(status_)) return;
+ 
+     iree_tokenizer_segmenter_t* raw = nullptr;
+-    status_ = iree_tokenizer_segmenter_split_allocate(
+-        dfa_, dfa_storage_, behavior, invert, iree_allocator_system(), &raw);
++    if (right_aligned_numbers) {
++      status_ = iree_tokenizer_segmenter_split_right_aligned_numbers_allocate(
++          dfa_, dfa_storage_, iree_allocator_system(), &raw);
++    } else {
++      status_ = iree_tokenizer_segmenter_split_allocate(
++          dfa_, dfa_storage_, behavior, invert, iree_allocator_system(), &raw);
++    }
+     if (!iree_status_is_ok(status_)) return;
+ 
+     segmenter_ = ScopedSegmenter(raw);
+@@ -72,6 +78,44 @@
+                                  IREE_TOKENIZER_UTIL_REGEX_SPLIT_ISOLATED);
+   IREE_ASSERT_OK(segmenter.status());
+   ASSERT_NE(segmenter.get(), nullptr);
++}
++
++TEST(SplitSegmenterTest, RightAlignedNumbers) {
++  ScopedSplitSegmenter segmenter("\\p{N}+|\\p{L}+|\\s+",
++                                 IREE_TOKENIZER_UTIL_REGEX_SPLIT_ISOLATED,
++                                 false, true);
++  IREE_ASSERT_OK(segmenter.status());
++  auto input = IREE_SV("a1 12 123 1234 12345 123456 1234567z");
++  std::vector<std::string> expected = {
++      "a",  "1",   " ", "12",  " ",   "123", " ", "1",   "234", " ",
++      "12", "345", " ", "123", "456", " ",   "1", "234", "567", "z"};
++  TestWithAllChunkSizes(segmenter.get(), input, expected, false);
++  TestLimitedOutputCapacity(segmenter.get(), input, expected);
++  TestZeroCapacityOutput(segmenter.get(), input);
++}
++
++TEST(SplitSegmenterTest, RightAlignedUnicodeNumbers) {
++  ScopedSplitSegmenter segmenter("\\p{N}+|\\p{L}+|\\s+",
++                                 IREE_TOKENIZER_UTIL_REGEX_SPLIT_ISOLATED,
++                                 false, true);
++  IREE_ASSERT_OK(segmenter.status());
++  // Nd, Nl and No, including mixed UTF-8 lengths within a number run.
++  auto input = IREE_SV("١٢٣٤ １２３４５ Ⅷ²3४");
++  std::vector<std::string> expected = {"١",      "٢٣٤", " ", "１２",
++                                       "３４５", " ",   "Ⅷ", "²3४"};
++  TestWithAllChunkSizesUtf8(segmenter.get(), input, expected, false);
++  TestLimitedOutputCapacity(segmenter.get(), input, expected);
++}
++
++TEST(SplitSegmenterTest, RightAlignedNumbersLongRun) {
++  ScopedSplitSegmenter segmenter(
++      "\\p{N}+", IREE_TOKENIZER_UTIL_REGEX_SPLIT_ISOLATED, false, true);
++  IREE_ASSERT_OK(segmenter.status());
++  std::string input(1000, '1');
++  std::vector<std::string> expected(334, "111");
++  expected[0] = "1";
++  TestLimitedOutputCapacity(segmenter.get(),
++                            iree_make_cstring_view(input.c_str()), expected);
+ }
+ 
+ TEST(SplitSegmenterTest, StateSizeIsReasonable) {
