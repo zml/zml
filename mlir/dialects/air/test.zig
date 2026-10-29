@@ -348,6 +348,28 @@ test "AIR verifier rejects types Apple's compiler has no intrinsic for" {
     for (rejected) |source| try std.testing.expectError(error.InvalidMlir, mlir.Module.parse(ctx, source));
 }
 
+test "AIR verifier takes the 8-bit integers Apple's compiler emits for char" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    const module = try mlir.Module.parse(ctx,
+        \\func.func @f(%c: i8, %v: vector<2xi8>, %f: f32, %w: vector<2xf32>, %l: i16) {
+        \\  %0 = air.convert.s %c fastmath<fast> : i8 to f32
+        \\  %1 = air.convert.u %f : f32 to i8
+        \\  %2 = air.convert.s %v fastmath<fast> : vector<2xi8> to vector<2xf32>
+        \\  %3 = air.convert.s %w : vector<2xf32> to vector<2xi8>
+        \\  %4 = air.max.s %c, %c : i8
+        \\  %5 = air.min.u %v, %v : vector<2xi8>
+        \\  %6 = air.abs.s %c : i8
+        \\  %7 = air.clamp.u %c, %c, %c : i8
+        \\  %8 = air.simd_shuffle.s %c, %l : i8
+        \\  %9 = air.simd_sum.s %c : i8
+        \\  %10 = air.simd_max.u %c : i8
+        \\  return
+        \\}
+    );
+    module.deinit();
+}
+
 test "AIR kernel ABI" {
     const ctx = try testContext();
     defer ctx.deinit();

@@ -17,9 +17,9 @@ class AIR_ScalarOrVectorOf<list<Type> types>
 
 def AIR_FloatLike : AIR_ScalarOrVectorOf<[F16, F32]>;
 def AIR_F32Like : AIR_ScalarOrVectorOf<[F32]>;
-def AIR_IntLike : AIR_ScalarOrVectorOf<[I16, I32, I64]>;
-def AIR_SimdIntLike : AIR_ScalarOrVectorOf<[I16, I32]>;
-def AIR_ConvertLike : AIR_ScalarOrVectorOf<[F16, BF16, F32, I16, I32, I64]>;
+def AIR_IntLike : AIR_ScalarOrVectorOf<[I8, I16, I32, I64]>;
+def AIR_SimdIntLike : AIR_ScalarOrVectorOf<[I8, I16, I32]>;
+def AIR_ConvertLike : AIR_ScalarOrVectorOf<[F16, BF16, F32, I8, I16, I32, I64]>;
 def AIR_Matrix : FixedVectorOfRankAndLengthAndType<[1], [64], [F16, BF16, F32]>;
 def AIR_MatrixVector : FixedVectorOfShapeAndType<[2], I64>;
 def AIR_MatrixPointer : AnyTypeOf<[LLVM_PointerInAddressSpace<1>,
