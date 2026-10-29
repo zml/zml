@@ -12,6 +12,9 @@ const Type = metal.Type;
 const Value = metal.Value;
 
 const flt_max = std.math.floatMax(f32);
+/// A masked score: below any real one yet finite, since fast math assumes
+/// no infinities. Halved so subtracting a running maximum cannot overflow.
+const masked_score = -flt_max / 2.0;
 const max_half = 65504.0;
 const simd_width = 32;
 
@@ -751,7 +754,7 @@ pub const PagedAttentionTiled = struct {
         const fm = fc.y();
         const fn_ = fc.x();
 
-        const max_score = b.local(.float, -std.math.inf(f32));
+        const max_score = b.local(.float, masked_score);
         const sum_score = b.local(.float, 0.0);
 
         const o_reg = b.array(.float2, @intCast(TD));
@@ -876,7 +879,7 @@ pub const PagedAttentionTiled = struct {
                         if (cfg.causal) masked = masked.bitOr(kv_pos.gt(q_abs_pos));
                         const before_window = a.sliding_window.ge(0).bitAnd(kv_pos.lt(q_abs_pos.add(1).sub(a.sliding_window)));
                         masked = masked.bitOr(before_window);
-                        setLane(s_reg, k, jj, b.ternary(masked, -std.math.inf(f32), s));
+                        setLane(s_reg, k, jj, b.ternary(masked, masked_score, s));
                         pair.close();
                     }
                     keys.close();
@@ -884,7 +887,7 @@ pub const PagedAttentionTiled = struct {
                 masking.close();
             }
 
-            const local_max = b.local(.float, -std.math.inf(f32));
+            const local_max = b.local(.float, masked_score);
             var max_keys = b.openForOpts(0, TK, 1, unroll);
             {
                 const k = max_keys.iv;
@@ -896,7 +899,7 @@ pub const PagedAttentionTiled = struct {
             const prev_max = max_score.rvalue();
             const grown_max = b.max(prev_max, row_max);
             const grew = grown_max.gt(prev_max);
-            const was_empty = prev_max.eq(-std.math.inf(f32));
+            const was_empty = prev_max.eq(masked_score);
             const factor = b.ternary(grew, b.ternary(was_empty, 0.0, b.fast().exp2(prev_max.sub(grown_max))), 1.0);
             const new_max = b.ternary(grew.eq(false).bitAnd(was_empty), 0.0, grown_max);
             max_score.assign(new_max);
@@ -909,7 +912,7 @@ pub const PagedAttentionTiled = struct {
                 {
                     const jj = pair.iv;
                     const s = s_reg.load(k).at(jj);
-                    const p = b.ternary(s.eq(-std.math.inf(f32)), 0.0, b.fast().exp2(s.sub(new_max)));
+                    const p = b.ternary(s.eq(masked_score), 0.0, b.fast().exp2(s.sub(new_max)));
                     setLane(s_reg, k, jj, p);
                     local_sum.assign(local_sum.add(p));
                     pair.close();
