@@ -97,23 +97,6 @@ fn argSpec(raw: anytype) ArgSpec {
     };
 }
 
-/// `raw` as a `ParamSpec`: a `ParamSpec`, or a literal of one of its variants
-/// such as `.{ .value = .float }`.
-fn paramSpec(raw: anytype) ParamSpec {
-    if (@TypeOf(raw) == ParamSpec) return raw;
-    const variant = comptime literalVariant(@TypeOf(raw), "ParamSpec");
-    const inner = @field(raw, variant);
-    return switch (@field(std.meta.Tag(ParamSpec), variant)) {
-        .value => .{ .value = typeOf(inner) },
-        .pointer => blk: {
-            comptime knownFields(@TypeOf(inner), Pointer, "ParamSpec.pointer");
-            break :blk .{ .pointer = .{ .space = inner.space, .pointee = typeOf(inner.pointee) } };
-        },
-        .constant => .{ .constant = typeOf(inner) },
-        .constant_struct => .{ .constant_struct = inner },
-    };
-}
-
 /// The variant a spec literal names: one, as a union literal does.
 fn literalVariant(Literal: type, what: []const u8) []const u8 {
     const names = @typeInfo(Literal).@"struct".field_names;
@@ -165,41 +148,17 @@ pub const Value = struct {
         /// A `constant T &` argument or a local: an lvalue, read where it is
         /// used as C++ reads it.
         reference: Pointer,
-        /// A `simdgroup_matrix<T, 8, 8>` local.
-        matrix_reference: Scalar,
-        /// `reinterpret_cast<thread vec<T, 2> &>(m.thread_elements())` of a
-        /// `simdgroup_matrix` local, which each read and write calls.
-        thread_elements: Scalar,
+        /// A `simdgroup_matrix<T, 8, 8>`: its 64 elements, of which a lane
+        /// holds the first two.
+        matrix: Scalar,
         /// A pointer local.
         pointer_reference: Pointer,
-        /// The slot of a `constant T &` parameter.
-        reference_slot: Pointer,
-        /// The slot of a `constant S &` parameter.
-        struct_slot: Struct,
     };
 
-    /// The reference a parameter's slot holds, read where it is used.
-    fn bound(self: Value) Value {
-        const kind: Kind = switch (self.kind) {
-            .reference_slot => |p| .{ .reference = p },
-            .struct_slot => |s| .{ .constant_struct = s },
-            else => return self,
-        };
-        const k = self.kern();
-        const space: AddressSpace = if (kind == .reference) kind.reference.space else .constant;
-        return k.emit(llvm.load(k.ctx, self.inner, llvm.pointerType(k.ctx, space), .{ .alignment = 8 }, k.loc()), kind);
-    }
-
     /// The value itself, an lvalue read.
-    pub fn rvalue(value: Value) Value {
-        const self = value.bound();
+    pub fn rvalue(self: Value) Value {
         return switch (self.kind) {
             .reference => |p| (Value{ .inner = self.inner, .kernel = self.kernel, .kind = .{ .pointer = p } }).load(0),
-            .thread_elements => |s| blk: {
-                const k = self.kern();
-                const t: Type = .vec(s, 2);
-                break :blk k.emit(llvm.load(k.ctx, self.inner, t.mlirType(k.ctx), .{ .alignment = Builder.matrixAlignment(s) }, k.loc()), .{ .value = t });
-            },
             .pointer_reference => |p| blk: {
                 const k = self.kern();
                 break :blk k.emit(llvm.load(k.ctx, self.inner, llvm.pointerType(k.ctx, p.space), .{ .alignment = 8 }, k.loc()), .{ .pointer = p });
@@ -224,10 +183,6 @@ pub const Value = struct {
                 if (p.space != .thread) std.debug.panic("dsl/metal: assigning to a {t} reference", .{p.space});
                 (Value{ .inner = self.inner, .kernel = k, .kind = .{ .pointer = p } }).store(0, value);
             },
-            .thread_elements => |s| {
-                const v = k.convert(k.lift(value), .vec(s, 2));
-                _ = llvm.store(k.ctx, v.inner, self.inner, .{ .alignment = Builder.matrixAlignment(s) }, k.loc()).appendTo(k.currentBlock());
-            },
             .pointer_reference => |p| {
                 const v = k.lift(value);
                 if (v.kind != .pointer or v.kind.pointer.space != p.space) std.debug.panic("dsl/metal: assigning a {t} to a {t} pointer", .{ v.kind, p.space });
@@ -245,8 +200,7 @@ pub const Value = struct {
     pub fn type_(self: Value) Type {
         return switch (self.kind) {
             .value => |t| t,
-            .reference, .reference_slot => |p| p.pointee,
-            .thread_elements => |s| .vec(s, 2),
+            .reference => |p| p.pointee,
             else => std.debug.panic("dsl/metal: expected a scalar or vector, got a {t}", .{self.kind}),
         };
     }
@@ -433,123 +387,83 @@ pub const Value = struct {
         return k.loadMemory(gep.result(0), f.type);
     }
 
-    /// `reinterpret_cast<thread vec<T, 2> &>(m.thread_elements())` of a
-    /// `simdgroup_matrix` local: read and written where it is used.
+    /// `m.thread_elements()` of a `simdgroup_matrix`: the lane's two
+    /// elements.
     pub fn threadElements(m: Value) Value {
-        const scalar = switch (m.kind) {
-            .matrix_reference => |s| s,
-            else => std.debug.panic("dsl/metal: thread_elements of a {t}", .{m.kind}),
-        };
-        return .{ .inner = m.inner, .kernel = m.kernel, .kind = .{ .thread_elements = scalar } };
+        const k = m.kern();
+        const t: Type = .vec(Builder.matrixScalar(m), 2);
+        return k.emit(llvm.shufflevector(k.ctx, m.inner, m.inner, t.mlirType(k.ctx), &.{ 0, 1 }, k.loc()), .{ .value = t });
     }
 };
 
-/// A loop as clang emits it, its condition first: `while (c)` or
-/// `for (init; c; inc)` branch to the body with `body(c)`, `for (;;)` has its
-/// body right away; `next()` starts the increment and `close()` ends the loop.
+/// A loop: `while (c)` and `for (init; c; inc)` branch to the body with
+/// `body(c)`, `for (;;)` has its body right away; `next()` ends the body
+/// and starts the increment, and `close()` ends the loop.
+///
+/// A `break` and the end of the body meet in a latch that reads whether to
+/// leave from a local, as clang's cleanup does: Apple's compiler then keeps
+/// the loop's test at the top instead of rotating the loop, which is faster
+/// (paged attention's decode loop by 2%).
 pub const LoopScope = struct {
     kernel: *Builder,
     cond_block: *mlir.Block,
     end_block: *mlir.Block,
     loop_annotation: *const llvm.LoopAnnotationAttr,
+    /// Where a `break` goes after setting `leave`; null until the first one.
+    latch: ?*mlir.Block = null,
+    leave: Value = undefined,
     exits: bool = false,
-    /// The scope of the `for` statement's init locals, which the loop's exits
-    /// end, and the scope of its body.
-    init_scope: ?usize,
-    body_scope: usize,
-    /// Where a `break` past the body's locals goes, as clang ends their
-    /// scope: their lifetimes end, and a switch on `cleanup.dest.slot` picks
-    /// the next iteration or the exit.
-    cleanup_block: ?*mlir.Block = null,
-    /// The body's locals the `break` left open.
-    break_locals: usize = 0,
-    exit_block: ?*mlir.Block = null,
-    body_left: bool = false,
 
     /// Leaves the loop when `cond` is false.
     pub fn body(self: *LoopScope, cond: Value) void {
         const k = self.kernel;
         const body_block = mlir.Block.init(&.{}, &.{});
-        if (self.init_scope) |init| {
-            const cond_cleanup = mlir.Block.init(&.{}, &.{});
-            k.condBranch(cond, body_block, cond_cleanup);
-            k.startBlock(cond_cleanup);
-            k.endLifetimes(k.state.scopes.items[init].items);
-            _ = k.branch(self.end_block);
-        } else {
-            k.condBranch(cond, body_block, self.end_block);
-        }
+        k.condBranch(cond, body_block, self.end_block);
         self.exits = true;
         k.startBlock(body_block);
     }
 
     /// `break;`.
     pub fn breakLoop(self: *LoopScope) void {
+        if (self.kernel.insert == null) return;
+        self.toLatch(true);
+        self.exits = true;
+    }
+
+    fn toLatch(self: *LoopScope, leave: bool) void {
         const k = self.kernel;
-        if (k.state.insert == null) return;
-        const scopes = k.state.scopes.items;
-        for (scopes[self.body_scope + 1 ..]) |scope| if (scope.items.len != 0) @panic("dsl/metal: a break past the locals of an inner scope");
-        const locals = scopes[self.body_scope].items.len;
-        if (locals == 0) {
-            // Past the for statement's locals alone, clang ends them here.
-            if (self.init_scope) |init| k.endLifetimes(scopes[init].items);
-            if (k.branch(self.end_block)) self.exits = true;
-            return;
+        if (self.latch == null) {
+            self.latch = mlir.Block.init(&.{}, &.{});
+            self.leave = k.local(.bool, null);
         }
-        if (self.cleanup_block != null) @panic("dsl/metal: a second break out of a loop");
-        k.ensureCleanupSlot();
-        k.storeCleanupDestination(2);
-        self.cleanup_block = mlir.Block.init(&.{}, &.{});
-        self.break_locals = locals;
-        _ = k.branch(self.cleanup_block.?);
+        self.leave.assign(leave);
+        _ = k.branch(self.latch.?);
     }
 
-    fn leaveBody(self: *LoopScope) void {
-        self.body_left = true;
-        const k = self.kernel;
-        if (k.state.scopes.items.len != self.body_scope + 1) @panic("dsl/metal: a loop body closed with a scope open");
-        const locals = k.state.scopes.pop().?.items;
-        const cleanup = self.cleanup_block orelse return k.endLifetimes(locals);
-        k.endLifetimes(locals[self.break_locals..]);
-        if (k.state.insert != null) k.storeCleanupDestination(0);
-        _ = k.branch(cleanup);
-        k.startBlock(cleanup);
-        k.endLifetimes(locals[0..self.break_locals]);
-        const destination = k.emit(llvm.load(k.ctx, k.state.cleanup_slot.?, Type.int.mlirType(k.ctx), .{ .alignment = 4 }, k.loc()), .{ .value = .int });
-        const cont = mlir.Block.init(&.{}, &.{});
-        self.exit_block = mlir.Block.init(&.{}, &.{});
-        _ = cf.switch_(k.ctx, destination.inner, self.exit_block.?, &.{}, &.{0}, &.{cont}, &.{&.{}}, k.loc()).appendTo(cleanup);
-        k.state.insert = null;
-        k.startBlock(cont);
-    }
-
-    /// The increment expression.
+    /// Ends the body: the increment of `for (...; ...; inc)` follows.
     pub fn next(self: *LoopScope) void {
         const k = self.kernel;
-        self.leaveBody();
-        if (self.cleanup_block != null) return;
-        const inc_block = mlir.Block.init(&.{}, &.{});
-        if (k.branch(inc_block)) k.startBlock(inc_block) else inc_block.deinit();
+        const inc = mlir.Block.init(&.{}, &.{});
+        if (self.latch) |latch| {
+            if (k.insert != null) self.toLatch(false);
+            k.startBlock(latch);
+            k.condBranch(self.leave, self.end_block, inc);
+            self.latch = null;
+        } else _ = k.branch(inc);
+        k.startBlock(inc);
     }
 
     pub fn close(self: *LoopScope) void {
         const k = self.kernel;
-        if (!self.body_left) self.leaveBody();
+        if (self.latch != null) self.next();
         k.branchLoop(self.cond_block, self.loop_annotation);
-        if (self.exit_block) |exit| {
-            k.startBlock(exit);
-            if (self.init_scope) |init| k.endLifetimes(k.state.scopes.items[init].items);
-            _ = k.branch(self.end_block);
-            self.exits = true;
-        }
-        if (self.init_scope != null) _ = k.state.scopes.pop();
         if (self.exits) k.startBlock(self.end_block) else self.end_block.deinit();
     }
 };
 
-/// `for (T i = lower; i < upper; i += step)` as clang emits it: `i` is the local
-/// `iv`, the condition and the increment follow C++'s conversions, and a
-/// step of 1 is `++i`.
+/// `for (T i = lower; i < upper; i += step)`: `i` is the local `iv`, the
+/// condition and the increment follow C++'s conversions, and a step of 1 is
+/// `++i`.
 pub const ForScope = struct {
     loop: LoopScope,
     iv: Value,
@@ -564,7 +478,7 @@ pub const ForScope = struct {
     pub fn close(self: *ForScope) void {
         const k = self.loop.kernel;
         self.loop.next();
-        if (k.state.insert != null) switch (self.step) {
+        if (k.insert != null) switch (self.step) {
             .one => self.iv.assign(k.increment(self.iv)),
             .value => |v| {
                 const s = v.rvalue();
@@ -577,7 +491,7 @@ pub const ForScope = struct {
 };
 
 /// `if (c) { ... }`, or `if (c) { ... } else { ... }` with `elseBranch()`
-/// between the two, as clang emits them.
+/// between the two.
 pub const IfScope = struct {
     kernel: *Builder,
     else_block: ?*mlir.Block,
@@ -587,34 +501,22 @@ pub const IfScope = struct {
     pub fn elseBranch(self: *IfScope) void {
         const k = self.kernel;
         const else_block = self.else_block orelse @panic("dsl/metal: elseBranch of an if without else (open it with openIfElse(c, .{})), or a second one");
-        k.popScope();
         if (k.branch(self.end_block)) self.joins = true;
         k.startBlock(else_block);
-        k.pushScope();
         self.else_block = null;
     }
 
     pub fn close(self: *IfScope) void {
         const k = self.kernel;
-        k.popScope();
         if (k.branch(self.end_block)) self.joins = true;
         if (self.joins) k.startBlock(self.end_block) else self.end_block.deinit();
     }
 };
 
-/// A `{ ... }` block: `close` ends the lifetimes of its locals.
-pub const Scope = struct {
-    kernel: *Builder,
-
-    pub fn close(self: Scope) void {
-        self.kernel.popScope();
-    }
-};
-
-/// A condition of `&&`, `||` and `!` terms, branched on as clang branches on
-/// it: a term's code runs only when the terms before it leave the outcome
-/// open. `and_(x)` is `x && ...`, `or_(x)` is `x || ...`; the last term opens
-/// what the condition guards. A group of `&&` terms ends a `||` chain and the
+/// A condition of `&&`, `||` and `!` terms, short-circuited: a term's code
+/// runs only when the terms before it leave the outcome open. `and_(x)` is
+/// `x && ...`, `or_(x)` is `x || ...`; the last term opens what the condition
+/// guards. A group of `&&` terms ends a `||` chain and the
 /// other way around, as in `a || (b && c)`.
 pub const Condition = struct {
     kernel: *Builder,
@@ -677,13 +579,12 @@ pub const Condition = struct {
         const k = self.kernel;
         self.last(x, negate);
         k.startBlock(self.true_block);
-        k.pushScope();
         if (!with_else) return .{ .kernel = k, .else_block = null, .end_block = self.false_block, .joins = true };
         return .{ .kernel = k, .else_block = self.false_block, .end_block = mlir.Block.init(&.{}, &.{}) };
     }
 };
 
-/// `a && b && ...` or `a || b || ...` as a bool, as clang evaluates it: a
+/// `a && b && ...` or `a || b || ...` as a bool, short-circuited: a
 /// term's code runs only when the terms before it leave the result open.
 /// `term(x)` adds a term followed by more, `close(x)` the last one.
 pub const Logical = struct {
@@ -700,7 +601,7 @@ pub const Logical = struct {
             .@"and" => cf.cond_br(k.ctx, c.inner, next, &.{}, self.end_block, decided, .{}, k.loc()),
             .@"or" => cf.cond_br(k.ctx, c.inner, self.end_block, decided, next, &.{}, .{}, k.loc()),
         }.appendTo(k.currentBlock());
-        k.state.insert = null;
+        k.insert = null;
         k.startBlock(next);
     }
 
@@ -708,15 +609,15 @@ pub const Logical = struct {
         const k = self.kernel;
         const c = k.convert(x, .bool);
         _ = cf.br(k.ctx, self.end_block, &.{c.inner}, k.loc()).appendTo(k.currentBlock());
-        k.state.insert = null;
+        k.insert = null;
         k.startBlock(self.end_block);
         return .{ .inner = self.end_block.argument(0), .kernel = k, .kind = .{ .value = .bool } };
     }
 };
 
-/// `c ? a : b` as clang emits it when an operand is not a constant: the
-/// true operand's code, then `yieldThen(.{a})`, the false operand's code, then
-/// `yieldElse(.{b})`; `results[0]` is the value.
+/// `c ? a : b` evaluating one operand: the true operand's code, then
+/// `yieldThen(.{a})`, the false operand's code, then `yieldElse(.{b})`;
+/// `results[0]` is the value.
 pub const TernaryScope = struct {
     kernel: *Builder,
     type: Type,
@@ -742,7 +643,7 @@ pub const TernaryScope = struct {
         const k = self.kernel;
         const v = k.convert(k.lift(values[0]), self.type);
         _ = cf.br(k.ctx, self.end_block, &.{v.inner}, k.loc()).appendTo(k.currentBlock());
-        k.state.insert = null;
+        k.insert = null;
     }
 };
 
@@ -755,78 +656,12 @@ fn IfElseScope(comptime n: usize) type {
     };
 }
 
-/// A parameter of an MSL function a kernel calls, as `Builder.openFunction`
-/// takes it.
-pub const ParamSpec = union(enum) {
-    /// `T x`.
-    value: Type,
-    /// `device T *p`, `threadgroup T *p`, ...
-    pointer: Pointer,
-    /// `constant T &x`.
-    constant: Type,
-    /// `constant S &s`.
-    constant_struct: Struct,
-};
-
-/// How MSL declares a function a kernel calls: `inline` ones, or ones defined
-/// in their class, hint inlining.
-pub const FunctionOpts = struct {
-    inline_: bool = false,
-    /// The parameters the body assigns, which it reads back from memory.
-    assigned: []const []const u8 = &.{},
-};
-
-/// A function a kernel calls, for `Builder.call`.
-pub const Function = struct {
-    name: []const u8,
-    params: []const ParamSpec,
-    result: ?Type,
-};
-
-/// The body of a function `Builder.openFunction` declared: `args` are its
-/// parameters, and `close` ends it, returning `result` if it has one.
-pub fn FunctionScope(comptime Spec: type) type {
-    return struct {
-        kernel: *Builder,
-        function: Function,
-        caller: Builder.FunctionState,
-        args: common.NamedArgs(Spec, Value),
-
-        pub fn close(self: *@This(), result: anytype) Function {
-            const k = self.kernel;
-            if (@TypeOf(result) == @TypeOf(null)) {
-                if (self.function.result != null) std.debug.panic("dsl/metal: {s} returns a value", .{self.function.name});
-                k.endFunction();
-            } else {
-                const t = self.function.result.?;
-                const v = k.convert(k.lift(result), t);
-                if (k.state.return_block) |ret| {
-                    if (k.liveLocals()) std.debug.panic("dsl/metal: a return of a value past live locals", .{});
-                    _ = llvm.store(k.ctx, v.inner, k.retvalSlot(), .{ .alignment = t.alignment() }, k.loc()).appendTo(k.currentBlock());
-                    _ = k.branch(ret);
-                    k.startBlock(ret);
-                    const r = llvm.load(k.ctx, k.state.retval.?, t.mlirType(k.ctx), .{ .alignment = t.alignment() }, k.loc()).appendTo(ret).result(0);
-                    _ = func.returns(k.ctx, &.{r}, k.loc()).appendTo(ret);
-                } else {
-                    k.endLifetimes(k.state.scopes.items[0].items);
-                    _ = func.returns(k.ctx, &.{v.inner}, k.loc()).appendTo(k.currentBlock());
-                }
-            }
-            k.state = self.caller;
-            return self.function;
-        }
-    };
-}
-
 /// A loop pragma: `full` is `#pragma clang loop unroll(full)`, `enable`
 /// `#pragma unroll`.
 pub const Unroll = enum { full, enable };
 
 pub const LoopOpts = struct {
     unroll: ?Unroll = null,
-    /// `for (init; ...)`: the locals declared just before, whose lifetimes
-    /// the loop's exits end.
-    init: u32 = 0,
 };
 
 /// MSL's `metal::fast` and `metal::precise` functions.
@@ -880,44 +715,12 @@ pub const Builder = struct {
     name: []const u8,
     fast_math: bool,
     func_op: ?*mlir.Operation = null,
-    /// The function being built: the kernel, or a function it calls.
-    state: FunctionState = .{},
+    entry_block: ?*mlir.Block = null,
+    /// The kernel's body; blocks join it in the order they start.
+    body: ?*mlir.Region = null,
+    /// The block code goes to; null after a `break` or a `return`.
+    insert: ?*mlir.Block = null,
     arguments: std.ArrayList(Argument) = .empty,
-
-    pub const FunctionState = struct {
-        entry_block: ?*mlir.Block = null,
-        /// The function's body; blocks join it in the order clang emits them.
-        body: ?*mlir.Region = null,
-        /// The block code goes to; null after a `break` or a `return`, where
-        /// clang has no insertion point.
-        insert: ?*mlir.Block = null,
-        /// Allocas go before `alloca_point`, in declaration order, as clang
-        /// places them.
-        alloca_point: ?*mlir.Operation = null,
-        alloca_size: ?*mlir.Operation = null,
-        /// The C++ scopes open, innermost last, each with the slots of the
-        /// locals it ends; the first is the function body.
-        scopes: std.ArrayList(std.ArrayList(*const mlir.Value)) = .empty,
-        /// Each `return` enters the cleanup block that ends the function
-        /// body's locals declared so far: clang ends them segment by segment,
-        /// from the last `return` back.
-        segments: std.ArrayList(Segment) = .empty,
-        /// Parameters are spilled without lifetimes.
-        spilling: bool = false,
-        /// clang's `cleanup.dest.slot`, made by the first `return`: the
-        /// return block switches on it.
-        cleanup_slot: ?*const mlir.Value = null,
-        /// The slots allocated so far.
-        locals: u32 = 0,
-        /// The block every `return` reaches, and the function's result:
-        /// clang's `retval` slot holds it when a `return` comes before the
-        /// end.
-        return_block: ?*mlir.Block = null,
-        result: ?Type = null,
-        retval: ?*const mlir.Value = null,
-    };
-
-    const Segment = struct { end: usize, block: *mlir.Block };
 
     pub const Opts = struct {
         /// MSL's default; `-fno-fast-math` otherwise.
@@ -985,7 +788,7 @@ pub const Builder = struct {
                         .typeAlignment = t.alignment(),
                         .bufferSize = t.size(),
                     }, opts) catch return error.InvalidMlir;
-                    kinds[i] = .{ .pointer = .{ .space = .constant, .pointee = t } };
+                    kinds[i] = .{ .reference = .{ .space = .constant, .pointee = t } };
                     try self.arguments.append(arena, .{ .name = name, .kind = .constant, .index = buffers, .size = t.size() });
                     buffers += 1;
                 },
@@ -1038,7 +841,7 @@ pub const Builder = struct {
         }
         var locs: [fields.len]*const mlir.Location = @splat(location);
         const block = mlir.Block.init(&arg_types, &locs);
-        self.state.entry_block = block;
+        self.entry_block = block;
         self.func_op = air.kernel(ctx, .{
             .name = self.name,
             .block = block,
@@ -1046,22 +849,11 @@ pub const Builder = struct {
             .location = location,
             .verify = false,
         }).appendTo(self.module.body());
-        self.state.body = block.parentRegion();
-        self.state.insert = block;
-        self.pushScope();
-        self.state.spilling = true;
-        defer self.state.spilling = false;
+        self.body = block.parentRegion();
+        self.insert = block;
 
         var out: common.NamedArgs(@TypeOf(spec), Value) = undefined;
-        inline for (fields, 0..) |name, i| {
-            const arg: Value = .{ .inner = block.argument(i), .kernel = self, .kind = kinds[i] };
-            const spec_ = argSpec(@field(spec, name));
-            @field(out, name) = switch (spec_) {
-                .constant => |t| .{ .inner = arg.inner, .kernel = self, .kind = .{ .reference = .{ .space = .constant, .pointee = t } } },
-                else => arg,
-            };
-            @field(out, name) = self.shadow(@field(out, name));
-        }
+        inline for (fields, 0..) |name, i| @field(out, name) = .{ .inner = block.argument(i), .kernel = self, .kind = kinds[i] };
         return out;
     }
 
@@ -1072,173 +864,77 @@ pub const Builder = struct {
     /// The block code goes to: a fresh, unreachable one after a `break` or
     /// a `return`.
     pub fn currentBlock(self: *Builder) *mlir.Block {
-        if (self.state.insert == null) self.startBlock(mlir.Block.init(&.{}, &.{}));
-        return self.state.insert.?;
+        if (self.insert == null) self.startBlock(mlir.Block.init(&.{}, &.{}));
+        return self.insert.?;
     }
 
     fn startBlock(self: *Builder, block: *mlir.Block) void {
-        self.state.body.?.appendOwnedBlock(block);
-        self.state.insert = block;
+        self.body.?.appendOwnedBlock(block);
+        self.insert = block;
     }
 
     /// Branches to `dest` unless the code here is unreachable; true if it did.
     fn branch(self: *Builder, dest: *mlir.Block) bool {
-        const block = self.state.insert orelse return false;
+        const block = self.insert orelse return false;
         _ = cf.br(self.ctx, dest, &.{}, self.loc()).appendTo(block);
-        self.state.insert = null;
+        self.insert = null;
         return true;
     }
 
     fn condBranch(self: *Builder, cond: Value, on_true: *mlir.Block, on_false: *mlir.Block) void {
         const c = self.convert(cond, .bool);
         _ = cf.cond_br(self.ctx, c.inner, on_true, &.{}, on_false, &.{}, .{}, self.loc()).appendTo(self.currentBlock());
-        self.state.insert = null;
+        self.insert = null;
     }
 
     /// The back edge of a loop, which carries its `llvm.loop` metadata.
     fn branchLoop(self: *Builder, dest: *mlir.Block, annotation: *const llvm.LoopAnnotationAttr) void {
-        const block = self.state.insert orelse return;
+        const block = self.insert orelse return;
         _ = llvm.br(self.ctx, dest, &.{}, .{ .loop_annotation = annotation }, self.loc()).appendTo(block);
-        self.state.insert = null;
+        self.insert = null;
     }
 
-    /// A thread-memory slot of `t` in the entry block.
+    /// A thread-memory slot of `t`, at the top of the entry block.
     fn allocate(self: *Builder, t: *const mlir.Type, alignment: u64) *const mlir.Value {
-        return self.allocateAt(t, alignment, false);
-    }
-
-    /// A slot, after those allocated so far or, `before_all`, before them.
-    fn allocateAt(self: *Builder, t: *const mlir.Type, alignment: u64, before_all: bool) *const mlir.Value {
         const ctx = self.ctx;
-        const entry = self.state.entry_block.?;
-        if (self.state.alloca_point == null) {
-            const size = arith.constant_int(ctx, 1, .int(ctx, .i32), self.loc());
-            const point = arith.constant_int(ctx, 0, .int(ctx, .i32), self.loc());
-            if (entry.firstOperation()) |first| {
-                entry.insertOwnedOperationBefore(first, size);
-                entry.insertOwnedOperationBefore(first, point);
-            } else {
-                _ = size.appendTo(entry);
-                _ = point.appendTo(entry);
-            }
-            self.state.alloca_size = size;
-            self.state.alloca_point = point;
-        }
-        const alloca = llvm.alloca(ctx, self.state.alloca_size.?.result(0), llvm.pointerType(ctx, AddressSpace.thread), t, .{ .alignment = alignment }, self.loc());
-        entry.insertOwnedOperationBefore(if (before_all) @constCast(self.state.alloca_size.?.nextInBlock()) else self.state.alloca_point.?, alloca);
-        self.state.locals += 1;
+        const entry = self.entry_block.?;
+        const size = arith.constant_int(ctx, 1, .int(ctx, .i32), self.loc());
+        const alloca = llvm.alloca(ctx, size.result(0), llvm.pointerType(ctx, AddressSpace.thread), t, .{ .alignment = alignment }, self.loc());
+        if (entry.firstOperation()) |first| entry.insertOwnedOperationBefore(first, alloca) else _ = alloca.appendTo(entry);
+        entry.insertOwnedOperationBefore(alloca, size);
         return alloca.result(0);
-    }
-
-    fn pushScope(self: *Builder) void {
-        self.state.scopes.append(self.arena.allocator(), .empty) catch @panic("dsl/metal: out of memory");
-    }
-
-    /// Closes the innermost scope, ending its locals here.
-    fn popScope(self: *Builder) void {
-        self.endLifetimes(self.state.scopes.pop().?.items);
-    }
-
-    /// Ends the lifetimes of `slots`, last declared first, unless the code
-    /// here is unreachable.
-    fn endLifetimes(self: *Builder, slots: []const *const mlir.Value) void {
-        if (self.state.insert == null) return;
-        var i = slots.len;
-        while (i > 0) {
-            i -= 1;
-            _ = llvm.intr_lifetime_end(self.ctx, slots[i], self.loc()).appendTo(self.currentBlock());
-        }
-    }
-
-    /// A local's slot, live from here to the end of its scope, as clang
-    /// marks it.
-    fn localSlot(self: *Builder, t: *const mlir.Type, alignment: u64) *const mlir.Value {
-        const slot = self.allocate(t, alignment);
-        if (self.state.spilling) return slot;
-        _ = llvm.intr_lifetime_start(self.ctx, slot, self.loc()).appendTo(self.currentBlock());
-        const scopes = self.state.scopes.items;
-        scopes[scopes.len - 1].append(self.arena.allocator(), slot) catch @panic("dsl/metal: out of memory");
-        return slot;
-    }
-
-    /// `{ ... }`: a block, whose locals end at `close`.
-    pub fn openScope(self: *Builder) Scope {
-        self.pushScope();
-        return .{ .kernel = self };
     }
 
     /// `T x;`, or `T x = init;`: a local, read where it is used and written by
     /// `assign`.
     pub fn local(self: *Builder, t: Type, init: anytype) Value {
         const memory = t.memory();
-        const x: Value = .{ .inner = self.localSlot(memory.mlirType(self.ctx), memory.alignment()), .kernel = self, .kind = .{ .reference = .{ .space = .thread, .pointee = t } } };
+        const x: Value = .{ .inner = self.allocate(memory.mlirType(self.ctx), memory.alignment()), .kernel = self, .kind = .{ .reference = .{ .space = .thread, .pointee = t } } };
         if (@TypeOf(init) != @TypeOf(null)) x.assign(init);
         return x;
     }
 
-    /// `const T x = v;`: a local the code only reads, from its slot as clang
-    /// reads it; a constant `v` is used as itself.
-    pub fn declare(self: *Builder, value: Value) Value {
-        const v = value.rvalue();
-        const x = self.shadow(v);
-        return if (isConstant(v)) v else x;
-    }
-
-    /// `constexpr T x = value;`.
-    pub fn declareConstant(self: *Builder, t: Type, value: anytype) void {
-        _ = self.shadow(self.constant(t, value));
-    }
-
-    /// A slot holding `v`, as clang gives every local and parameter, and
-    /// `v` read from it where it is used.
-    fn shadow(self: *Builder, v: Value) Value {
-        switch (v.kind) {
-            .value => |t| {
-                const memory = t.memory();
-                const slot: Value = .{ .inner = self.localSlot(memory.mlirType(self.ctx), memory.alignment()), .kernel = self, .kind = .{ .pointer = .{ .space = .thread, .pointee = t } } };
-                slot.store(0, v);
-                return .{ .inner = slot.inner, .kernel = self, .kind = .{ .reference = slot.kind.pointer } };
-            },
-            .pointer, .constant_struct, .reference => {
-                const space: AddressSpace = switch (v.kind) {
-                    .pointer => |p| p.space,
-                    .reference => |p| p.space,
-                    else => .constant,
-                };
-                const slot = self.localSlot(llvm.pointerType(self.ctx, space), 8);
-                _ = llvm.store(self.ctx, v.inner, slot, .{ .alignment = 8 }, self.loc()).appendTo(self.currentBlock());
-                const kind: Value.Kind = switch (v.kind) {
-                    .pointer => |p| .{ .pointer_reference = p },
-                    .reference => |p| .{ .reference_slot = p },
-                    .constant_struct => |st| .{ .struct_slot = st },
-                    else => unreachable,
-                };
-                return .{ .inner = slot, .kernel = self, .kind = kind };
-            },
-            else => std.debug.panic("dsl/metal: no slot for a {t}", .{v.kind}),
-        }
-    }
-
     /// `T *p = init;`: a pointer local.
     pub fn localPointer(self: *Builder, init: Value) Value {
-        // The type, without reading a pointer local before the lifetime
-        // starts: `assign` reads it after, as clang does.
         const p: Pointer = switch (init.kind) {
             .pointer, .pointer_reference => |q| q,
             else => std.debug.panic("dsl/metal: a pointer local of a {t}", .{init.kind}),
         };
-        const x: Value = .{ .inner = self.localSlot(llvm.pointerType(self.ctx, p.space), 8), .kernel = self, .kind = .{ .pointer_reference = p } };
+        const x: Value = .{ .inner = self.allocate(llvm.pointerType(self.ctx, p.space), 8), .kernel = self, .kind = .{ .pointer_reference = p } };
         x.assign(init);
         return x;
     }
 
-    /// `simdgroup_matrix<T, 8, 8> m;`: a slot of its 64 elements, which the
-    /// `air.simdgroup_matrix_8x8_*` builtins read and write.
-    pub fn matrix(self: *Builder, scalar: Scalar) Value {
-        return .{ .inner = self.localSlot(self.matrixType(scalar), matrixAlignment(scalar)), .kernel = self, .kind = .{ .matrix_reference = scalar } };
+    /// A `simdgroup_matrix<T, 8, 8>` whose lane holds `elements`, two values
+    /// converted to `T`: what assigning `m.thread_elements()` makes.
+    pub fn matrix(self: *Builder, scalar: Scalar, elements: anytype) Value {
+        const v = self.convert(self.lift(elements), .vec(scalar, 2));
+        var mask: [64]i32 = @splat(-1);
+        mask[0..2].* = .{ 0, 1 };
+        return self.emit(llvm.shufflevector(self.ctx, v.inner, v.inner, self.matrixType(scalar), &mask, self.loc()), .{ .matrix = scalar });
     }
 
-    /// `++i`: a narrow integer steps in its own type, as clang steps it.
+    /// `++i`: a narrow integer steps in its own type, as C++ steps it.
     fn increment(self: *Builder, i: Value) Value {
         const v = i.rvalue();
         const t = v.type_();
@@ -1556,40 +1252,12 @@ pub const Builder = struct {
         return self.emit(gep, p.kind);
     }
 
-    /// `cond ? a : b` of evaluated operands: a select when both are constants
-    /// or `cond` is a vector, as clang emits it, branches otherwise, with a
-    /// local operand read in its branch. `openIfElse(cond, .{T})` evaluates one
-    /// operand.
+    /// `cond ? a : b` of evaluated operands, a select;
+    /// `openIfElse(cond, .{T})` evaluates one operand.
     pub fn ternary(self: *Builder, cond: Value, a: anytype, b: anytype) Value {
-        const constants = isConstant(a) and isConstant(b);
-        if (constants or cond.type_().isVector()) {
-            const l, const r = self.usualConversions(self.lift(a), b);
-            const c = self.convert(cond, if (l.type_().isVector() and cond.type_().isVector()) l.type_().withScalar(.bool) else .bool);
-            return self.emit(arith.select(self.ctx, c.inner, l.inner, r.inner, self.loc()), l.kind);
-        }
-        const t = self.operandsType(a, b);
-        var scope = self.openTernary(cond, t);
-        scope.yieldThen(.{a});
-        scope.yieldElse(.{b});
-        return scope.results[0];
-    }
-
-    fn isConstant(x: anytype) bool {
-        if (@TypeOf(x) != Value) return true;
-        if (x.kind != .value or x.inner.isA(mlir.OpResult) == null) return false;
-        return std.mem.eql(u8, x.inner.owner().name(), "arith.constant");
-    }
-
-    /// The type of `a op b` after the usual arithmetic conversions.
-    fn operandsType(self: *Builder, a: anytype, b: anytype) Type {
-        _ = self;
-        const ta: ?Type = if (@TypeOf(a) == Value) a.type_() else null;
-        const tb: ?Type = if (@TypeOf(b) == Value) b.type_() else null;
-        if (ta == null) return tb.?;
-        if (tb == null) return ta.?;
-        if (ta.?.isVector()) return ta.?;
-        if (tb.?.isVector()) return tb.?;
-        return .{ .scalar = types.commonScalar(ta.?.scalar, tb.?.scalar) };
+        const l, const r = self.usualConversions(self.lift(a), b);
+        const c = self.convert(cond, if (l.type_().isVector() and cond.type_().isVector()) l.type_().withScalar(.bool) else .bool);
+        return self.emit(arith.select(self.ctx, c.inner, l.inner, r.inner, self.loc()), l.kind);
     }
 
     fn openTernary(self: *Builder, cond: Value, t: Type) TernaryScope {
@@ -1613,7 +1281,7 @@ pub const Builder = struct {
 
     /// `T a[n];` in thread memory, as a pointer to its first element.
     pub fn array(self: *Builder, t: Type, n: u32) Value {
-        return .{ .inner = self.localSlot(llvm.arrayType(t.memory().mlirType(self.ctx), n), t.alignment()), .kernel = self, .kind = .{ .pointer = .{ .space = .thread, .pointee = t } } };
+        return .{ .inner = self.allocate(llvm.arrayType(t.memory().mlirType(self.ctx), n), t.alignment()), .kernel = self, .kind = .{ .pointer = .{ .space = .thread, .pointee = t } } };
     }
 
     fn floatMath(self: *Builder, comptime name: []const u8, mode: MathMode, args: anytype) Value {
@@ -1792,7 +1460,8 @@ pub const Builder = struct {
         return self.emit(op, .{ .value = t });
     }
 
-    /// A function moving `x` across lanes, which clang freezes `x` for.
+    /// A function moving `x` across lanes; `x` is frozen, so that a poison
+    /// lane does not poison the others.
     fn shuffle(self: *Builder, comptime name: []const u8, x_: Value, lane: anytype) Value {
         const read = x_.rvalue();
         const t = simdType(read, name);
@@ -1862,107 +1531,60 @@ pub const Builder = struct {
         transpose: bool = false,
     };
 
-    fn matrixAlignment(scalar: Scalar) u64 {
-        return 64 * scalar.bits() / 8;
-    }
-
     fn matrixType(self: *Builder, scalar: Scalar) *const mlir.Type {
         return .vector(&.{64}, scalar.mlirType(self.ctx));
     }
 
-    fn rawLoad(self: *Builder, ptr: *const mlir.Value, t: *const mlir.Type, alignment: u64) *const mlir.Value {
-        return llvm.load(self.ctx, ptr, t, .{ .alignment = alignment }, self.loc()).appendTo(self.currentBlock()).result(0);
-    }
-
-    fn rawStore(self: *Builder, v: *const mlir.Value, ptr: *const mlir.Value, alignment: u64) void {
-        _ = llvm.store(self.ctx, v, ptr, .{ .alignment = alignment }, self.loc()).appendTo(self.currentBlock());
-    }
-
-    /// `&s->first` of a struct of type `t`.
-    fn ulong2Insert(self: *Builder, v: *const mlir.Value, x: *const mlir.Value, i: i64) *const mlir.Value {
-        return llvm.insertelement(self.ctx, v, x, self.constant(.long, i).inner, self.loc()).appendTo(self.currentBlock()).result(0);
-    }
-
-    fn ulong2Undef(self: *Builder) *const mlir.Value {
-        return llvm.mlir_undef(self.ctx, Type.vec(.ulong, 2).mlirType(self.ctx), self.loc()).appendTo(self.currentBlock()).result(0);
-    }
-
-    /// `v.yx`.
-    fn ulong2Swap(self: *Builder, v: *const mlir.Value) *const mlir.Value {
-        const t = Type.vec(.ulong, 2).mlirType(self.ctx);
-        const poison = llvm.mlir_poison(self.ctx, t, self.loc()).appendTo(self.currentBlock()).result(0);
-        return llvm.shufflevector(self.ctx, v, poison, t, &.{ 1, 0 }, self.loc()).appendTo(self.currentBlock()).result(0);
-    }
-
-    fn ulong2Select(self: *Builder, c: *const mlir.Value, a: *const mlir.Value, b: *const mlir.Value) *const mlir.Value {
-        return arith.select(self.ctx, c, a, b, self.loc()).appendTo(self.currentBlock()).result(0);
-    }
-
-    /// The extents, strides and origin an access passes the builtin, from its
-    /// `elements_per_row`, `matrix_origin` slot and `transpose_matrix`.
-    fn accessLayout(self: *Builder, epr: *const mlir.Value, origin: *const mlir.Value, transpose: *const mlir.Value) [3]*const mlir.Value {
-        const eight = self.constant(.ulong, 8).inner;
-        const one = self.constant(.ulong, 1).inner;
-        const rows = self.ulong2Insert(self.ulong2Insert(self.ulong2Undef(), epr, 0), eight, 1);
-        const columns = self.ulong2Insert(self.ulong2Insert(self.ulong2Undef(), eight, 0), epr, 1);
-        const extents = self.ulong2Select(transpose, columns, rows);
-        const unit = self.ulong2Insert(self.ulong2Insert(self.ulong2Undef(), one, 0), epr, 1);
-        const strides = self.ulong2Select(transpose, self.ulong2Swap(unit), unit);
-        const o = origin;
-        return .{ extents, strides, self.ulong2Select(transpose, self.ulong2Swap(o), o) };
-    }
-
     fn matrixScalar(m: Value) Scalar {
         return switch (m.kind) {
-            .matrix_reference => |s| s,
+            .matrix => |s| s,
             else => std.debug.panic("dsl/metal: expected a simdgroup_matrix, got a {t}", .{m.kind}),
         };
     }
 
-    /// The `elements_per_row`, `matrix_origin` and `transpose_matrix`
-    /// arguments of a matrix load or store.
-    fn accessArguments(self: *Builder, elements_per_row: anytype, opts: MatrixOpts) [3]*const mlir.Value {
-        const epr = self.convert(self.lift(elements_per_row), .ulong).inner;
-        const i64x2: *const mlir.Type = .vector(&.{2}, .int(self.ctx, .i64));
-        const origin = vector.from_elements(self.ctx, &.{ self.constant(.ulong, opts.origin[0]).inner, self.constant(.ulong, opts.origin[1]).inner }, i64x2, self.loc()).appendTo(self.currentBlock()).result(0);
-        return .{ epr, origin, self.constant(.bool, opts.transpose).inner };
+    /// The extents, strides and origin a matrix load or store passes the
+    /// builtin, from its `elements_per_row`, `matrix_origin` and
+    /// `transpose_matrix`.
+    fn accessLayout(self: *Builder, elements_per_row: anytype, opts: MatrixOpts) [3]*const mlir.Value {
+        const ulong2: Type = .vec(.ulong, 2);
+        const epr = self.convert(self.lift(elements_per_row), .ulong);
+        const eight = self.constant(.ulong, 8);
+        const one = self.constant(.ulong, 1);
+        const o0 = self.constant(.ulong, opts.origin[0]);
+        const o1 = self.constant(.ulong, opts.origin[1]);
+        const layout: [3]Value = if (opts.transpose)
+            .{ self.vec(ulong2, .{ eight, epr }), self.vec(ulong2, .{ epr, one }), self.vec(ulong2, .{ o1, o0 }) }
+        else
+            .{ self.vec(ulong2, .{ epr, eight }), self.vec(ulong2, .{ one, epr }), self.vec(ulong2, .{ o0, o1 }) };
+        return .{ layout[0].inner, layout[1].inner, layout[2].inner };
     }
 
-    /// `simdgroup_load(d, src, elements_per_row, matrix_origin,
-    /// transpose_matrix)` into the `simdgroup_matrix` local `d`.
-    pub fn simdgroupLoad(self: *Builder, d: Value, src_: Value, elements_per_row: anytype, opts: MatrixOpts) void {
-        const t = matrixScalar(d);
+    /// `simdgroup_load(m, src, elements_per_row, matrix_origin,
+    /// transpose_matrix)`: the matrix `m` it loads.
+    pub fn simdgroupLoad(self: *Builder, src_: Value, elements_per_row: anytype, opts: MatrixOpts) Value {
         const src = src_.rvalue();
-        const p = src.pointer();
-        if (p.pointee.scalar != t) std.debug.panic("dsl/metal: simdgroup_load of a {s} pointer", .{p.pointee.name()});
-        const rest = self.accessArguments(elements_per_row, opts);
-        const layout = self.accessLayout(rest[0], rest[1], rest[2]);
-        const m = air.simdgroup_matrix_8x8_load(self.ctx, src.inner, layout[0], layout[1], layout[2], self.matrixType(t), self.fastmath(), self.loc()).appendTo(self.currentBlock()).result(0);
-        self.rawStore(m, d.inner, matrixAlignment(t));
+        const t = src.pointer().pointee.scalar;
+        const layout = self.accessLayout(elements_per_row, opts);
+        return self.emit(air.simdgroup_matrix_8x8_load(self.ctx, src.inner, layout[0], layout[1], layout[2], self.matrixType(t), self.fastmath(), self.loc()), .{ .matrix = t });
     }
 
     /// `simdgroup_store(m, dst, elements_per_row, matrix_origin,
-    /// transpose_matrix)` of the `simdgroup_matrix` local `m`.
+    /// transpose_matrix)`.
     pub fn simdgroupStore(self: *Builder, m: Value, dst_: Value, elements_per_row: anytype, opts: MatrixOpts) void {
         const t = matrixScalar(m);
-        const value = self.rawLoad(m.inner, self.matrixType(t), matrixAlignment(t));
         const dst = dst_.rvalue();
         const p = dst.pointer();
         if (p.pointee.scalar != t) std.debug.panic("dsl/metal: simdgroup_store to a {s} pointer", .{p.pointee.name()});
-        const rest = self.accessArguments(elements_per_row, opts);
-        const layout = self.accessLayout(rest[0], rest[1], rest[2]);
-        _ = air.simdgroup_matrix_8x8_store(self.ctx, value, dst.inner, layout[0], layout[1], layout[2], self.loc()).appendTo(self.currentBlock());
+        const layout = self.accessLayout(elements_per_row, opts);
+        _ = air.simdgroup_matrix_8x8_store(self.ctx, m.inner, dst.inner, layout[0], layout[1], layout[2], self.loc()).appendTo(self.currentBlock());
     }
 
-    /// `simdgroup_multiply_accumulate(d, a, b, c)`: `d = a * b + c` of
-    /// `simdgroup_matrix` locals.
-    pub fn simdgroupMultiplyAccumulate(self: *Builder, d: Value, a: Value, b: Value, c: Value) void {
-        const ta, const tb, const tc, const td = .{ matrixScalar(a), matrixScalar(b), matrixScalar(c), matrixScalar(d) };
-        const va = self.rawLoad(a.inner, self.matrixType(ta), matrixAlignment(ta));
-        const vb = self.rawLoad(b.inner, self.matrixType(tb), matrixAlignment(tb));
-        const vc = self.rawLoad(c.inner, self.matrixType(tc), matrixAlignment(tc));
-        const r = air.simdgroup_matrix_8x8_multiply_accumulate(self.ctx, va, vb, vc, self.matrixType(td), self.fastmath(), self.loc()).appendTo(self.currentBlock()).result(0);
-        self.rawStore(r, d.inner, matrixAlignment(td));
+    /// `simdgroup_multiply_accumulate(d, a, b, c)`: the matrix `d = a * b + c`,
+    /// of `c`'s type.
+    pub fn simdgroupMultiplyAccumulate(self: *Builder, a: Value, b: Value, c: Value) Value {
+        _ = .{ matrixScalar(a), matrixScalar(b) };
+        const t = matrixScalar(c);
+        return self.emit(air.simdgroup_matrix_8x8_multiply_accumulate(self.ctx, a.inner, b.inner, c.inner, self.matrixType(t), self.fastmath(), self.loc()), .{ .matrix = t });
     }
 
     /// The `llvm.loop` metadata of an MSL loop: C++ loops must make progress.
@@ -1990,13 +1612,10 @@ pub const Builder = struct {
         return self.openForOpts(lower, upper, step, .{});
     }
 
-    /// `openFor` under a loop pragma; `.init` is for `openLoop`.
+    /// `openFor` under a loop pragma.
     pub fn openForOpts(self: *Builder, lower: anytype, upper: anytype, step: anytype, opts: LoopOpts) ForScope {
-        if (opts.init != 0) std.debug.panic("dsl/metal: openFor declares its own init local, not {d}; use openLoop for more", .{opts.init});
         const i = self.local(if (@TypeOf(lower) == Value) lower.type_() else literalType(lower), lower);
-        var with_init = opts;
-        with_init.init = 1;
-        var loop = self.openLoop(with_init);
+        var loop = self.openLoop(opts);
         _ = loopComparison(i.type_(), if (@TypeOf(upper) == Value) upper.type_() else literalType(upper));
         loop.body(i.lt(upper));
         const step_: ForScope.Step = switch (@typeInfo(@TypeOf(step))) {
@@ -2008,21 +1627,10 @@ pub const Builder = struct {
 
     /// A loop: `while (c)`, `for (init; c; inc)` or `for (;;)`.
     pub fn openLoop(self: *Builder, opts: LoopOpts) LoopScope {
-        var init_scope: ?usize = null;
-        if (opts.init > 0) {
-            const outer = &self.state.scopes.items[self.state.scopes.items.len - 1];
-            const moved = outer.items[outer.items.len - opts.init ..];
-            self.pushScope();
-            const scopes = self.state.scopes.items;
-            scopes[scopes.len - 1].appendSlice(self.arena.allocator(), moved) catch @panic("dsl/metal: out of memory");
-            scopes[scopes.len - 2].shrinkRetainingCapacity(scopes[scopes.len - 2].items.len - opts.init);
-            init_scope = scopes.len - 1;
-        }
         const cond_block = mlir.Block.init(&.{}, &.{});
         _ = self.branch(cond_block);
         self.startBlock(cond_block);
-        self.pushScope();
-        return .{ .kernel = self, .cond_block = cond_block, .end_block = mlir.Block.init(&.{}, &.{}), .loop_annotation = self.loopAnnotation(opts), .init_scope = init_scope, .body_scope = self.state.scopes.items.len - 1 };
+        return .{ .kernel = self, .cond_block = cond_block, .end_block = mlir.Block.init(&.{}, &.{}), .loop_annotation = self.loopAnnotation(opts) };
     }
 
     /// `if (cond) { ... }`.
@@ -2063,61 +1671,9 @@ pub const Builder = struct {
 
     /// `return;`.
     pub fn return_(self: *Builder) void {
-        if (self.state.insert == null) return;
-        if (self.state.result != null) std.debug.panic("dsl/metal: a return without the value", .{});
-        if (!self.liveLocals()) {
-            _ = self.branch(self.returnBlock());
-            return;
-        }
-        const scopes = self.state.scopes.items;
-        for (scopes[1..]) |scope| if (scope.items.len != 0) @panic("dsl/metal: a return past the locals of an inner scope");
-        self.ensureCleanupSlot();
-        self.storeCleanupDestination(1);
-        const count = scopes[0].items.len;
-        const segments = &self.state.segments;
-        if (segments.items.len == 0 or segments.items[segments.items.len - 1].end < count)
-            segments.append(self.arena.allocator(), .{ .end = count, .block = mlir.Block.init(&.{}, &.{}) }) catch @panic("dsl/metal: out of memory");
-        _ = self.branch(segments.items[segments.items.len - 1].block);
-    }
-
-    /// `return value;` before the end of a function that returns a value.
-    pub fn returnValue(self: *Builder, value: anytype) void {
-        if (self.state.insert == null) return;
-        const t = self.state.result orelse std.debug.panic("dsl/metal: a return of a value from a void function", .{});
-        const v = self.convert(self.lift(value), t);
-        if (self.liveLocals()) std.debug.panic("dsl/metal: a return of a value past live locals", .{});
-        _ = llvm.store(self.ctx, v.inner, self.retvalSlot(), .{ .alignment = t.alignment() }, self.loc()).appendTo(self.currentBlock());
-        _ = self.branch(self.returnBlock());
-    }
-
-    fn liveLocals(self: *const Builder) bool {
-        for (self.state.scopes.items) |scope| if (scope.items.len != 0) return true;
-        return false;
-    }
-
-    fn returnBlock(self: *Builder) *mlir.Block {
-        if (self.state.return_block == null) self.state.return_block = mlir.Block.init(&.{}, &.{});
-        return self.state.return_block.?;
-    }
-
-    /// clang's `retval`, its function's first slot.
-    fn retvalSlot(self: *Builder) *const mlir.Value {
-        if (self.state.retval == null) {
-            const t = self.state.result.?;
-            self.state.retval = self.allocateAt(t.mlirType(self.ctx), t.alignment(), true);
-            self.state.locals -= 1;
-        }
-        return self.state.retval.?;
-    }
-
-    fn ensureCleanupSlot(self: *Builder) void {
-        if (self.state.cleanup_slot != null) return;
-        self.state.cleanup_slot = self.allocate(Type.int.mlirType(self.ctx), 4);
-        self.state.locals -= 1;
-    }
-
-    fn storeCleanupDestination(self: *Builder, destination: i32) void {
-        _ = llvm.store(self.ctx, self.constant(.int, destination).inner, self.state.cleanup_slot.?, .{ .alignment = 4 }, self.loc()).appendTo(self.currentBlock());
+        const block = self.insert orelse return;
+        _ = func.returns(self.ctx, &.{}, self.loc()).appendTo(block);
+        self.insert = null;
     }
 
     /// `if (cond) return;`.
@@ -2129,163 +1685,9 @@ pub const Builder = struct {
         }
     }
 
-    /// Ends a function that returns nothing; after a `return`, through the
-    /// switch clang ends the function with.
-    fn endFunction(self: *Builder) void {
-        const locals = self.state.scopes.items[0].items;
-        const segments = self.state.segments.items;
-        if (segments.len != 0) {
-            self.endLifetimes(locals[segments[segments.len - 1].end..]);
-            if (self.state.insert != null) self.storeCleanupDestination(0);
-            var k = segments.len;
-            while (k > 0) {
-                k -= 1;
-                _ = self.branch(segments[k].block);
-                self.startBlock(segments[k].block);
-                self.endLifetimes(locals[if (k == 0) 0 else segments[k - 1].end..segments[k].end]);
-            }
-            const ret = segments[0].block;
-            const done = self.returnBlock();
-            const unreachable_ = mlir.Block.init(&.{}, &.{});
-            const destination = self.emit(llvm.load(self.ctx, self.state.cleanup_slot.?, Type.int.mlirType(self.ctx), .{ .alignment = 4 }, self.loc()), .{ .value = .int });
-            _ = cf.switch_(self.ctx, destination.inner, unreachable_, &.{}, &.{ 0, 1 }, &.{ done, done }, &.{ &.{}, &.{} }, self.loc()).appendTo(ret);
-            self.state.insert = null;
-            self.startBlock(done);
-            _ = func.returns(self.ctx, &.{}, self.loc()).appendTo(done);
-            self.startBlock(unreachable_);
-            _ = llvm.unreachable_(self.ctx, self.loc()).appendTo(unreachable_);
-            self.state.insert = null;
-            return;
-        }
-        self.endLifetimes(locals);
-        if (self.state.return_block) |ret| {
-            _ = self.branch(ret);
-            self.startBlock(ret);
-        }
-        _ = func.returns(self.ctx, &.{}, self.loc()).appendTo(self.currentBlock());
-    }
-
-    /// Declares a function the kernel calls, with parameters from a struct
-    /// literal of `ParamSpec`s and a `result` type or null, and starts its
-    /// body: emit it, then `close` the scope.
-    pub fn openFunction(self: *Builder, name: []const u8, spec: anytype, result: ?Type, opts: FunctionOpts) FinishError!FunctionScope(@TypeOf(spec)) {
-        const ctx = self.ctx;
-        const fields = @typeInfo(@TypeOf(spec)).@"struct".field_names;
-        var types_: [fields.len]*const mlir.Type = undefined;
-        var attrs: [fields.len]*const mlir.Attribute = undefined;
-        var kinds: [fields.len]Value.Kind = undefined;
-        inline for (fields, 0..) |field, i| {
-            const param = paramSpec(@field(spec, field));
-            var named: [4]mlir.NamedAttribute = undefined;
-            var n: usize = 0;
-            named[n] = llvm.noundef(ctx);
-            n += 1;
-            switch (param) {
-                .value => |t| {
-                    types_[i] = t.mlirType(ctx);
-                    kinds[i] = .{ .value = t };
-                    if (!t.isVector() and t.scalar.bits() < 32 and !t.scalar.isFloat()) {
-                        named[n] = if (t.scalar.isUnsigned() or t.scalar == .bool) llvm.zeroext(ctx) else llvm.signext(ctx);
-                        n += 1;
-                    }
-                },
-                // `llvm.elementtype`: the pointee of the parameter's C++ type.
-                .pointer => |p| {
-                    types_[i] = llvm.pointerType(ctx, p.space);
-                    kinds[i] = .{ .pointer = p };
-                    named[n] = llvm.elementtype(ctx, p.pointee.memory().mlirType(ctx));
-                    n += 1;
-                },
-                .constant => |t| {
-                    types_[i] = llvm.pointerType(ctx, AddressSpace.constant);
-                    kinds[i] = .{ .reference = .{ .space = .constant, .pointee = t } };
-                    named[n] = llvm.alignment(ctx, t.alignment());
-                    named[n + 1] = llvm.dereferenceable(ctx, t.size());
-                    named[n + 2] = llvm.elementtype(ctx, t.memory().mlirType(ctx));
-                    n += 3;
-                },
-                .constant_struct => |st| {
-                    types_[i] = llvm.pointerType(ctx, AddressSpace.constant);
-                    kinds[i] = .{ .constant_struct = st };
-                    named[n] = llvm.alignment(ctx, st.alignment());
-                    named[n + 1] = llvm.dereferenceable(ctx, st.size());
-                    named[n + 2] = llvm.elementtype(ctx, self.structType(st));
-                    n += 3;
-                },
-            }
-            attrs[i] = .dict(ctx, named[0..n]);
-        }
-        var locs: [fields.len]*const mlir.Location = @splat(self.loc());
-        const block = mlir.Block.init(&types_, &locs);
-        const params = try self.arena.allocator().alloc(ParamSpec, fields.len);
-        inline for (fields, 0..) |field, i| params[i] = paramSpec(@field(spec, field));
-        var results: [1]*const mlir.Type = undefined;
-        if (result) |t| results[0] = t.mlirType(ctx);
-        var extra: [2]mlir.NamedAttribute = undefined;
-        extra[0] = llvm.linkage(ctx, .internal);
-        var n_extra: usize = 1;
-        if (opts.inline_) {
-            extra[1] = llvm.inlineHint(ctx);
-            n_extra = 2;
-        }
-        _ = func.func(ctx, .{
-            .name = name,
-            .args = &types_,
-            .args_attributes = &attrs,
-            .results = results[0..@intFromBool(result != null)],
-            .block = block,
-            .visibility = .private,
-            .extra_attributes = extra[0..n_extra],
-            .location = self.loc(),
-            .verify = false,
-        }).appendTo(self.module.body());
-        const caller = self.state;
-        self.state = .{ .entry_block = block, .body = block.parentRegion(), .insert = block, .result = result };
-        self.pushScope();
-        self.state.spilling = true;
-        defer self.state.spilling = false;
-        var args: common.NamedArgs(@TypeOf(spec), Value) = undefined;
-        inline for (fields, 0..) |field, i| {
-            const arg: Value = .{ .inner = block.argument(i), .kernel = self, .kind = kinds[i] };
-            const assigned = for (opts.assigned) |a| {
-                if (std.mem.eql(u8, a, field)) break true;
-            } else false;
-            @field(args, field) = if (!assigned) self.shadow(arg) else switch (arg.kind) {
-                .pointer => self.localPointer(arg),
-                .value => |t| self.local(t, arg),
-                else => std.debug.panic("dsl/metal: assigning the {t} parameter {s}", .{ arg.kind, field }),
-            };
-        }
-        return .{ .kernel = self, .function = .{ .name = name, .params = params, .result = result }, .caller = caller, .args = args };
-    }
-
-    /// `f(args...)`: a value converts to its parameter's type and a
-    /// reference parameter binds its argument. The result, if `f` has one.
-    pub fn call(self: *Builder, f: Function, args: anytype) ?Value {
-        if (args.len != f.params.len) std.debug.panic("dsl/metal: {s} takes {d} arguments", .{ f.name, f.params.len });
-        var operands: [args.len]*const mlir.Value = undefined;
-        inline for (0..args.len) |i| {
-            operands[i] = switch (f.params[i]) {
-                .value => |t| self.convert(self.lift(args[i]), t).inner,
-                .pointer => |p| blk: {
-                    const v = self.lift(args[i]);
-                    if (v.pointer().space != p.space) std.debug.panic("dsl/metal: passing a {t} pointer as a {t} one", .{ v.pointer().space, p.space });
-                    break :blk v.inner;
-                },
-                .constant, .constant_struct => @as(Value, args[i]).bound().inner,
-            };
-        }
-        var results: [1]*const mlir.Type = undefined;
-        if (f.result) |t| results[0] = t.mlirType(self.ctx);
-        const op = func.call(self.ctx, f.name, &operands, results[0..@intFromBool(f.result != null)], self.loc());
-        _ = op.appendTo(self.currentBlock());
-        if (f.result) |t| return .{ .inner = op.result(0), .kernel = self, .kind = .{ .value = t } };
-        return null;
-    }
-
     /// Terminates the kernel and returns its module, verified.
     pub fn finish(self: *Builder) FinishError![:0]const u8 {
-        self.endFunction();
+        self.return_();
         if (self.fast_math) air.enableFastMath(self.ctx, self.module.operation());
         try common.verify(self.module, "dsl/metal");
         var writer: std.Io.Writer.Allocating = .init(self.allocator);
@@ -2387,7 +1789,8 @@ test "math, SIMD-group and barrier functions" {
     a.v.store(a.lane, b.simdSum(v));
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
-    try expectContains(ir, &.{ "air.fast_exp2", "air.fast_fmax", "air.simd_max", "air.fast_exp", "air.simd_sum", "air.dot", "air.fma", "air.tanh", "air.simd_shuffle_xor", "air.simdgroup.barrier <threadgroup>", "air.wg.barrier <device|threadgroup>", "air.min.s", "cf.cond_br", "arith.select", ": vector<4xf32>" });
+    try expectContains(ir, &.{ "air.fast_exp2", "air.fast_fmax", "air.simd_max", "air.fast_exp", "air.simd_sum", "air.dot", "air.fma", "air.tanh", "air.simd_shuffle_xor", "air.simdgroup.barrier <threadgroup>", "air.wg.barrier <device|threadgroup>", "air.min.s", "arith.select", ": vector<4xf32>" });
+    try std.testing.expect(std.mem.find(u8, ir, "cf.cond_br") == null);
 }
 
 test "loops, ifs and early returns" {
@@ -2460,6 +1863,78 @@ test "loops, ifs and early returns" {
     defer std.testing.allocator.free(ir);
     try expectContains(ir, &.{ "cf.cond_br", "llvm.br", "loop_annotation", "mustProgress = true", "llvm.alloca", "!llvm.array<8 x f32>", "arith.remui" });
     try std.testing.expect(std.mem.find(u8, ir, "scf.") == null);
+    // The two early returns and the last one, each where it is.
+    try std.testing.expectEqual(3, std.mem.count(u8, ir, "\n    return\n"));
+    // Every local is allocated in the entry block, before any branch.
+    try std.testing.expect(std.mem.findLast(u8, ir, "llvm.alloca").? < std.mem.find(u8, ir, "cf.cond_br").?);
+}
+
+test "a return inside a loop and in both branches of an if" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = Builder.open(std.testing.allocator, ctx, "k", .{});
+    defer b.deinit();
+    const a = try b.declareArgs(.{
+        .x = .{ .buffer = .{ .type = .float } },
+        .n = .{ .constant = .int },
+    });
+    // for (;;) { if (n <= 0) break; if (x[0] < 0) return; x[0] -= 1; }
+    var forever = b.openLoop(.{});
+    {
+        var stop = b.openIf(a.n.le(0));
+        {
+            forever.breakLoop();
+            stop.close();
+        }
+        b.returnIf(a.x.load(0).lt(0.0));
+        a.x.store(0, a.x.load(0).sub(1.0));
+        forever.close();
+    }
+    // if (n > 1) { x[1] = 1; return; } else { x[1] = 2; return; }
+    var both = b.openIfElse(a.n.gt(1), .{});
+    {
+        a.x.store(1, 1.0);
+        b.return_();
+        both.elseBranch();
+    }
+    {
+        a.x.store(1, 2.0);
+        b.return_();
+        both.close();
+    }
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+    // The loop's return and one per branch; `finish` adds none after them.
+    try std.testing.expectEqual(3, std.mem.count(u8, ir, "\n    return\n"));
+    try expectContains(ir, &.{"loop_annotation"});
+}
+
+test "a break and the end of the body meet in the latch" {
+    const ctx = try testContext();
+    defer ctx.deinit();
+    var b = Builder.open(std.testing.allocator, ctx, "k", .{});
+    defer b.deinit();
+    const a = try b.declareArgs(.{
+        .x = .{ .buffer = .{ .type = .float } },
+        .n = .{ .constant = .int },
+    });
+    // for (int i = 0; i < n; ++i) { if (x[i] < 0) break; x[i] = 1; }
+    var loop = b.openFor(0, a.n, 1);
+    {
+        var neg = b.openIf(a.x.load(loop.iv).lt(0.0));
+        {
+            loop.breakLoop();
+            neg.close();
+        }
+        a.x.store(loop.iv, 1.0);
+        loop.close();
+    }
+    const ir = try b.finish();
+    defer std.testing.allocator.free(ir);
+    // `i`, and the flag the break and the end of the body set for the latch.
+    try std.testing.expectEqual(2, std.mem.count(u8, ir, "llvm.alloca"));
+    // `i < n`, `x[i] < 0`, and the latch's choice between leaving and `++i`.
+    try std.testing.expectEqual(3, std.mem.count(u8, ir, "cf.cond_br"));
 }
 
 test "simdgroup matrices" {
@@ -2473,19 +1948,18 @@ test "simdgroup matrices" {
         .f = .{ .constant = .int },
         .lane = .{ .thread_index_in_simdgroup = .uint },
     });
-    const k = b.matrix(.bfloat);
-    b.simdgroupLoad(k, a.s.add(8), 40, .{ .transpose = true });
-    const q = b.matrix(.bfloat);
-    b.simdgroupLoad(q, a.s, a.f, .{});
-    const acc = b.matrix(.float);
-    acc.threadElements().assign(a.o.load(a.lane));
-    b.simdgroupMultiplyAccumulate(acc, q, k, acc);
+    const k = b.simdgroupLoad(a.s.add(8), 40, .{ .transpose = true });
+    const q = b.simdgroupLoad(a.s, a.f, .{});
+    const acc = b.simdgroupMultiplyAccumulate(q, k, b.matrix(.float, a.o.load(a.lane)));
     a.o.store(a.lane, acc.threadElements());
     b.simdgroupStore(acc, a.s.to(.float), 8, .{});
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
-    try expectContains(ir, &.{ "air.simdgroup_matrix_8x8_load", "-> vector<64xbf16>", "air.simdgroup_matrix_8x8_multiply_accumulate", "vector<64xbf16>, vector<64xbf16>, vector<64xf32> -> vector<64xf32>", "air.simdgroup_matrix_8x8_store", "llvm.alloca %c1_i32 x vector<64xf32>" });
-    try std.testing.expect(std.mem.find(u8, ir, "func.call") == null);
+    try expectContains(ir, &.{ "air.simdgroup_matrix_8x8_load", "-> vector<64xbf16>", "air.simdgroup_matrix_8x8_multiply_accumulate", "vector<64xbf16>, vector<64xbf16>, vector<64xf32> -> vector<64xf32>", "air.simdgroup_matrix_8x8_store" });
+    // `b.matrix` widens two elements to a matrix, `threadElements` takes them back.
+    try std.testing.expectEqual(2, std.mem.count(u8, ir, "llvm.shufflevector"));
+    try expectContains(ir, &.{"[0, 1] : vector<64xf32>"});
+    try std.testing.expect(std.mem.find(u8, ir, "llvm.alloca") == null);
 }
 
 test "constant struct arguments" {
@@ -2549,7 +2023,7 @@ test "subscripts index with the index's type, swizzles with an int" {
     try expectCount(ir, ": i32] : vector<3xi32>", 1);
 }
 
-test "a pointer local reads its initializer once its lifetime starts" {
+test "a pointer local" {
     const ctx = try testContext();
     defer ctx.deinit();
     var b = Builder.open(std.testing.allocator, ctx, "k", .{});
@@ -2558,19 +2032,14 @@ test "a pointer local reads its initializer once its lifetime starts" {
         .o = .{ .buffer = .{ .type = .float } },
         .lane = .{ .thread_index_in_simdgroup = .ushort },
     });
-    // device float *const q = o + 4; device float *p = q; p += lane; *p = 1.0f;
-    const q = b.declare(a.o.add(4));
-    const p = b.localPointer(q);
+    // device float *p = o + 4; p += lane; *p = 1.0f;
+    const p = b.localPointer(a.o.add(4));
     p.assign(p.add(a.lane));
     p.store(0, 1.0);
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
-    // clang: q's store, p's lifetime.start, then the load of q.
-    const lifetime = "llvm.intr.lifetime.start";
-    const q_start = std.mem.find(u8, ir, lifetime).?;
-    const p_start = q_start + lifetime.len + std.mem.find(u8, ir[q_start + lifetime.len ..], lifetime).?;
-    try std.testing.expect(std.mem.find(u8, ir[q_start..p_start], "llvm.load") == null);
-    try std.testing.expect(std.mem.find(u8, ir[p_start..], "llvm.load") != null);
+    try expectCount(ir, "llvm.alloca", 1);
+    try expectCount(ir, "llvm.getelementptr", 2);
 }
 
 test "integer max, min, abs and clamp read locals and constant arguments" {
@@ -2591,7 +2060,7 @@ test "integer max, min, abs and clamp read locals and constant arguments" {
     // w[0] = max(u, 3u) + min(3u, u) + abs(u) + clamp(u, 1u, 2u);
     a.w.store(0, b.max(a.u, 3).add(b.min(3, a.u)).add(b.abs(a.u)).add(b.clamp(a.u, 1, 2)));
     // const float x = f[0]; f[1] = clamp(x, 0.0f, 1.0f) + fabs(x) + max(x, x);
-    const x = b.declare(a.f.load(0));
+    const x = a.f.load(0);
     a.f.store(1, b.clamp(x, 0.0, 1.0).add(b.abs(x)).add(b.max(x, x)));
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
@@ -2648,8 +2117,8 @@ test "a shift reads its amount once" {
     a.o.store(0, s.shl(s));
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
-    // n's reference and value, s twice and o.
-    try expectCount(ir, "llvm.load", 5);
+    // n, and s twice.
+    try expectCount(ir, "llvm.load", 3);
 }
 
 test "math functions" {
@@ -2661,7 +2130,7 @@ test "math functions" {
         .x = .{ .buffer = .{ .type = .float } },
         .h = .{ .buffer = .{ .type = .half } },
     });
-    const v = b.declare(a.x.load(0));
+    const v = a.x.load(0);
     var sum = b.local(.float, 0.0);
     for ([_]Value{
         b.exp2(v),  b.log(v),  b.log2(v),     b.tanh(v),      b.sqrt(v),
@@ -2703,9 +2172,9 @@ test "SIMD-group functions" {
         .u = .{ .buffer = .{ .type = .uint } },
         .lane = .{ .thread_index_in_simdgroup = .ushort },
     });
-    const f = b.declare(a.x.load(a.lane));
-    const n = b.declare(a.i.load(a.lane));
-    const m = b.declare(a.u.load(a.lane));
+    const f = a.x.load(a.lane);
+    const n = a.i.load(a.lane);
+    const m = a.u.load(a.lane);
     a.x.store(0, b.simdMin(f).add(b.simdPrefixExclusiveSum(f)).add(b.simdShuffle(f, a.lane)).add(b.simdShuffleDown(f, 1)).add(b.simdBroadcast(f, 0)));
     a.i.store(0, b.simdMin(n).add(b.simdShuffle(n, 3)).add(b.simdShuffleDown(n, a.lane)).add(b.simdBroadcast(n, 0)));
     a.u.store(0, b.simdMin(m).add(b.simdShuffleXor(m, 1)));
@@ -2724,7 +2193,7 @@ test "SIMD-group functions" {
     try expectContains(ir, &.{ "air.wg.barrier <device>", "air.simdgroup.barrier <texture>", "air.wg.barrier <none>" });
 }
 
-test "functions, scopes, constants and casts" {
+test "pragmas, conditions and casts" {
     const ctx = try testContext();
     defer ctx.deinit();
     var b = Builder.open(std.testing.allocator, ctx, "k", .{});
@@ -2735,26 +2204,8 @@ test "functions, scopes, constants and casts" {
         .lane = .{ .thread_index_in_simdgroup = .ushort },
     });
 
-    // static float scale(float x, device float *p, constant int &k) {
-    //   if (x < 0) return 0; return x * p[k]; }
-    var f = try b.openFunction("scale", .{
-        .x = .{ .value = .float },
-        .p = .{ .pointer = .{ .space = .device, .pointee = .float } },
-        .k = .{ .constant = .int },
-    }, .float, .{});
-    var negative = b.openIf(f.args.x.lt(0.0));
+    const r = a.o.load(a.lane).mul(2.0);
     {
-        b.returnValue(0.0);
-        negative.close();
-    }
-    const scale = f.close(f.args.x.mul(f.args.p.load(f.args.k)));
-    const r = b.declare(b.call(scale, .{ a.o.load(a.lane), a.o, a.n }).?);
-
-    // constexpr short K = 4;
-    b.declareConstant(.short, 4);
-    {
-        const s = b.openScope();
-        defer s.close();
         // float acc[4] = {};
         const acc = b.zeroedArray(.float, 4);
         {
@@ -2776,12 +2227,9 @@ test "functions, scopes, constants and casts" {
         {
             // for (int i = 0; i < 4; i += 1) {}
             const i = b.local(.int, 0);
-            var l = b.openLoop(.{ .init = 1 });
+            var l = b.openLoop(.{});
             {
                 l.body(i.lt(4));
-            }
-            {
-                l.next();
             }
             {
                 i.assign(i.add(1));
@@ -2789,7 +2237,7 @@ test "functions, scopes, constants and casts" {
             }
         }
         // const uint bits = as_type<uint>(acc[0]);
-        const bits = b.declare(acc.load(0).asType(.uint));
+        const bits = acc.load(0).asType(.uint);
         // float t = r; *&t = 2.0f;
         const t = b.local(.float, r);
         t.address().store(0, 2.0);
@@ -2836,5 +2284,5 @@ test "functions, scopes, constants and casts" {
     }
     const ir = try b.finish();
     defer std.testing.allocator.free(ir);
-    try expectContains(ir, &.{ "func.func private @scale", "#llvm.linkage<internal>", "call @scale", "llvm.memset.p0.i64", "full = true", "disable = false", "llvm.bitcast" });
+    try expectContains(ir, &.{ "llvm.memset.p0.i64", "full = true", "disable = false", "llvm.bitcast" });
 }

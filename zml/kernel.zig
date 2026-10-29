@@ -861,8 +861,6 @@ pub const metal = struct {
     pub const Type = metal_builder.Type;
     pub const Struct = metal_builder.Struct;
     pub const ArgSpec = metal_builder.ArgSpec;
-    pub const ParamSpec = metal_builder.ParamSpec;
-    pub const Function = metal_builder.Function;
     pub const LoopOpts = metal_builder.LoopOpts;
     pub const FinishError = metal_builder.FinishError;
 
