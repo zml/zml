@@ -821,7 +821,7 @@ pub const TextRotaryEmbedding = struct {
     }
 
     pub fn getCosAndSin(self: TextRotaryEmbedding, position_ids: zml.Tensor, dtype: zml.DataType) struct { zml.Tensor, zml.Tensor } {
-        const inv_freq = zml.nn.invFreq(self.rotary_dim, self.rope_opts).withTags(.{.hd});
+        const inv_freq = zml.nn.invFreq(self.rotary_dim, self.rope_opts.scaling).withTags(.{.hd});
 
         const freqs_t = position_ids.convert(.f32).outer(inv_freq);
 

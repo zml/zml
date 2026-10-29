@@ -21,7 +21,7 @@ pub const Config = struct {
     rms_norm_eps: f32,
     hf_rope_impl: bool = true,
     tie_word_embeddings: bool = false,
-    rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
+    rope_scaling: zml.nn.RopeOpts.Scaling.Config = .{ .default = .{} },
 
     pub const EosTokens = union(enum) {
         int: u32,
@@ -526,7 +526,7 @@ const SelfAttn = struct {
             .num_kv_heads = @intCast(config.num_key_value_heads),
             .rope_opts = .{
                 .layout = if (config.hf_rope_impl) .real_im_pass else .interleaved,
-                .scaling = rope_scaling,
+                .scaling = rope_scaling.toScaling(),
             },
         };
     }

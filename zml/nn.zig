@@ -474,6 +474,7 @@ pub const RopeOpts = struct {
         yarn: Yarn,
         linear: Scaling.Linear,
         proportional: Scaling.Proportional,
+        custom: Custom,
 
         pub const Default = struct {
             rope_theta: f32 = 10000,
@@ -510,6 +511,48 @@ pub const RopeOpts = struct {
         pub const Proportional = struct {
             partial_rotary_factor: f32 = 1.0,
             rope_theta: f32 = 10000,
+        };
+
+        pub const Custom = struct {
+            /// Inverse frequencies; twice the length of this rank-1 tensor is the rotary dimension.
+            inv_freq: Tensor,
+            attention_factor: f32 = 1.0,
+        };
+
+        /// Tensor-free scaling settings for parsed model configurations.
+        pub const Config = union(enum) {
+            default: Default,
+            llama3: Llama3,
+            yarn: Yarn,
+            linear: Linear,
+            proportional: Proportional,
+
+            pub fn toScaling(self: Config) Scaling {
+                return switch (self) {
+                    inline else => |value, tag| @unionInit(Scaling, @tagName(tag), value),
+                };
+            }
+
+            pub fn setRopeTheta(self: *Config, rope_theta: f32) void {
+                switch (self.*) {
+                    inline else => |*s| s.rope_theta = rope_theta,
+                }
+            }
+
+            pub fn getRopeTheta(self: *const Config) f32 {
+                return self.toScaling().getRopeTheta();
+            }
+
+            pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Config {
+                return jsonParseFromValue(allocator, try std.json.innerParse(std.json.Value, allocator, source, options), options);
+            }
+
+            pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) std.json.ParseFromValueError!Config {
+                return switch (try Scaling.jsonParseFromValue(allocator, source, options)) {
+                    .custom => unreachable,
+                    inline else => |value, tag| @unionInit(Config, @tagName(tag), value),
+                };
+            }
         };
 
         /// Read a Rope scaling config from HF config.json format.
@@ -557,6 +600,7 @@ pub const RopeOpts = struct {
 
         pub fn attentionScaling(scaling: Scaling) f32 {
             return switch (scaling) {
+                .custom => |custom| custom.attention_factor,
                 .yarn => |yarn| yarn_scaling: {
                     const attention_factor = if (yarn.attention_factor) |af| af else b: {
                         break :b if (yarn.mscale != null and yarn.mscale_all_dim != null)
@@ -571,21 +615,25 @@ pub const RopeOpts = struct {
         }
 
         pub fn setRopeTheta(self: *Scaling, rope_theta: f32) void {
-            // NOTE(Corendos): We can use a "inline else" because `rope_theta` is mandatory in each variant.
             return switch (self.*) {
+                .custom => @panic("Custom RoPE frequencies have no rope_theta"),
                 inline else => |*s| s.rope_theta = rope_theta,
             };
         }
 
         pub fn getRopeTheta(self: *const Scaling) f32 {
-            // NOTE(Corendos): We can use a "inline else" because `rope_theta` is mandatory in each variant.
             return switch (self.*) {
+                .custom => @panic("Custom RoPE frequencies have no rope_theta"),
                 inline else => |s| s.rope_theta,
             };
         }
 
         pub fn partialRotaryDim(self: *const Scaling, head_dim: i64) u32 {
             return switch (self.*) {
+                .custom => |custom| blk: {
+                    stdx.debug.assert(custom.inv_freq.rank() == 1, "Custom RoPE frequencies must have rank 1, got {f}", .{custom.inv_freq});
+                    break :blk @intCast(custom.inv_freq.dim(0) * 2);
+                },
                 inline .yarn, .proportional => |s| @intFromFloat(@floor(
                     @as(f32, @floatFromInt(head_dim)) * std.math.clamp(s.partial_rotary_factor, 0.0, 1.0),
                 )),
@@ -617,13 +665,14 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
     };
 
     const rotary_dim: u32 = opts.scaling.partialRotaryDim(head_dim);
-    stdx.debug.assert(rotary_dim > 0 and @mod(rotary_dim, 2) == 0, "partial rope expects a even head dim (.hd), got {d}", .{rotary_dim});
+    stdx.debug.assert(rotary_dim > 0 and rotary_dim <= head_dim and @mod(rotary_dim, 2) == 0, "rope expects an even rotary dimension in (0, {d}], got {d}", .{ head_dim, rotary_dim });
 
     const x_real, const x_imag, const x_pass = zml.nn.splitRealImgPass(x, opts.layout, rotary_dim);
-    const inv_freq = invFreq(head_dim, opts).withTags(.{.hd});
+    const inv_freq = invFreq(head_dim, opts.scaling);
+    stdx.debug.assert(inv_freq.rank() == 1 and inv_freq.dim(0) == rotary_dim / 2, "rope expects {d} inverse frequencies, got {f}", .{ rotary_dim / 2, inv_freq });
 
     // compute sin and cos in f32 before downcasting to x type.
-    const inv_freq_pos = zml.Tensor.outer(idx.convert(.f32), inv_freq);
+    const inv_freq_pos = zml.Tensor.outer(idx.convert(.f32), inv_freq.convert(.f32).withTags(.{.hd}));
     const scaling = opts.scaling.attentionScaling();
     const cos = inv_freq_pos.cos().scale(scaling).convert(x.dtype()).broad(x_real.shape());
     const sin = inv_freq_pos.sin().scale(scaling).convert(x.dtype()).broad(x_real.shape());
@@ -713,33 +762,36 @@ pub fn mergeRealImgPass(x_real: Tensor, x_imag: Tensor, x_pass: ?Pass, layout: R
     };
 }
 
-/// {exp( - n * ln(10_000) / N ) | n in [0..N] }
-pub fn invFreq(N: i64, opts: RopeOpts) Tensor {
+/// Returns custom inverse frequencies, or generates them from the scaling configuration.
+pub fn invFreq(N: i64, scaling: RopeOpts.Scaling) Tensor {
+    if (scaling == .custom) return scaling.custom.inv_freq;
+
     const allocator = zml.Compiler.current().allocator;
     const N_half: u32 = @intCast(@divExact(N, 2));
-    const num_freqs: u32 = opts.scaling.partialRotaryDim(N_half);
+    const num_freqs: u32 = scaling.partialRotaryDim(N_half);
 
     const inv_freq = allocator.alloc(f32, num_freqs) catch @panic("OOM");
     defer allocator.free(inv_freq);
 
-    _invFreq(opts, inv_freq, N_half);
+    _invFreq(scaling, inv_freq, N_half);
     return .constantTensor(.init(.{num_freqs}, .f32), @ptrCast(inv_freq));
 }
 
-fn _invFreq(opts: RopeOpts, inv_freq: []f32, half_head_dim: u32) void {
+fn _invFreq(scaling: RopeOpts.Scaling, inv_freq: []f32, half_head_dim: u32) void {
     const N: u32 = @intCast(inv_freq.len);
     // Default frequencies
     for (0.., inv_freq) |n, *f| {
-        f.* = @exp(-@log(opts.scaling.getRopeTheta()) * stdx.math.divFloat(f32, n, N));
+        f.* = @exp(-@log(scaling.getRopeTheta()) * stdx.math.divFloat(f32, n, N));
     }
 
-    switch (opts.scaling) {
+    switch (scaling) {
+        .custom => unreachable,
         .default => {},
         .proportional => {
             // proportional uses the original number of dimensions,
             // instead of the actual number of rotated dims.
             for (0.., inv_freq[0..]) |n, *f| {
-                f.* = @exp(-@log(opts.scaling.getRopeTheta()) * stdx.math.divFloat(f32, n, half_head_dim));
+                f.* = @exp(-@log(scaling.getRopeTheta()) * stdx.math.divFloat(f32, n, half_head_dim));
             }
         },
         .linear => |l| {
@@ -776,8 +828,8 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32, half_head_dim: u32) void {
             const downscaling = 1.0 / s.factor.?;
 
             // This isn't a typo: low n have a high frequency, high n have a low frequency.
-            var n_low: f64 = -@log(f_high) / @log(opts.scaling.getRopeTheta()) * N_f;
-            var n_high: f64 = -@log(f_low) / @log(opts.scaling.getRopeTheta()) * N_f;
+            var n_low: f64 = -@log(f_high) / @log(scaling.getRopeTheta()) * N_f;
+            var n_high: f64 = -@log(f_low) / @log(scaling.getRopeTheta()) * N_f;
             if (s.truncate) {
                 n_high = std.math.ceil(n_high);
                 n_low = std.math.floor(n_low);
@@ -813,7 +865,7 @@ test "invFreq Llama3" {
     const llama_freq = [_]f32{ 1.000000000000e+00, 6.636012792587e-01, 4.403666257858e-01, 2.922278344631e-01, 1.939227581024e-01, 1.286873817444e-01, 8.539710193872e-02, 5.666961893439e-02, 3.760603070259e-02, 2.495540864766e-02, 1.656044088304e-02, 1.098952908069e-02, 7.292665075511e-03, 4.839421249926e-03, 3.211446106434e-03, 1.290548010729e-03, 4.295567050576e-04, 9.708286233945e-05, 1.946163865796e-05, 1.291476746701e-05, 8.570255886298e-06, 5.687232260243e-06, 3.774054448513e-06, 2.504467147446e-06, 1.661967417022e-06, 1.102883629756e-06, 7.318749339902e-07, 4.856731266045e-07, 3.222932889457e-07, 2.138742303259e-07, 1.419272024350e-07, 9.418306490261e-08 };
 
     var inv_freq: @TypeOf(llama_freq) = undefined;
-    _invFreq(llama_conf, &inv_freq, 32);
+    _invFreq(llama_conf.scaling, &inv_freq, 32);
     for (llama_freq, inv_freq, 0..) |expected, actual, i| {
         errdefer log.err("Mismatch at position {d}.\nExpected: {any}\nActual:   {any}", .{ i, llama_freq, inv_freq });
         try std.testing.expectApproxEqRel(expected, actual, 1e-5);
@@ -834,7 +886,7 @@ test "invFreq Yarn" {
     const yarn_freq = [_]f32{ 1.000000000000e+00, 6.890442967415e-01, 4.747820496559e-01, 3.271458745003e-01, 2.254180014133e-01, 1.553229838610e-01, 1.070244237781e-01, 7.374456524849e-02, 5.081327259541e-02, 3.162075206637e-02, 1.945096626878e-02, 1.179219130427e-02, 7.015713956207e-03, 4.069554619491e-03, 2.277272054926e-03, 1.206130953506e-03, 5.809474969283e-04, 2.279478358105e-04, 3.830881178146e-05, 2.639646845637e-05, 1.818833698053e-05, 1.253256959899e-05, 8.635495760245e-06, 5.950239483354e-06, 4.099978468730e-06, 2.825066758305e-06, 1.946596285052e-06, 1.341290953860e-06, 9.242089618056e-07, 6.368209142238e-07, 4.387978549403e-07, 3.023511396805e-07 };
 
     var inv_freq: @TypeOf(yarn_freq) = undefined;
-    _invFreq(yarn_conf, &inv_freq, 32);
+    _invFreq(yarn_conf.scaling, &inv_freq, 32);
     for (yarn_freq, inv_freq, 0..) |expected, actual, i| {
         errdefer log.err("Mismatch at position {d}.\nExpected: {d}\nActual:   {d}", .{ i, stdx.fmt.slice(&yarn_freq), stdx.fmt.slice(&inv_freq) });
         try std.testing.expectApproxEqRel(expected, actual, 1e-5);
