@@ -12,14 +12,16 @@
 //! decode) up to the longest sequence, gathering whole pages and accumulating
 //! the softmax statistics in f32.
 //!
-//! Decode without sinks or windows instead runs fusible kernels in the layer,
-//! with the token metadata every layer shares computed once per forward pass:
-//! one straight-line kernel over the whole pages each token sees, or, for one
-//! token past `straight_decode_keys` keys, a straight-line head over its first
-//! keys and a device loop over the chunks holding its other keys, so that the
-//! work follows the sequence's length instead of the block table's width.
-//! `chunked_decode_tokens` tokens past `straight_batch_decode_keys` keys run
-//! flash attention for the same reason.
+//! Decode over BF16 caches in power-of-two pages instead runs fusible kernels
+//! in the layer, with the token metadata every layer shares computed once per
+//! forward pass: one straight-line kernel over the whole pages each token
+//! sees, or, for one token without sink or window past `straight_decode_keys`
+//! keys, a straight-line head over its first keys and a device loop over the
+//! chunks holding its other keys, so that the work follows the sequence's
+//! length instead of the block table's width. `chunked_decode_tokens` tokens past
+//! `straight_batch_decode_keys` keys, and windows past `window_flash_chunks`
+//! chunks, run flash attention for the same reason; a window's loop starts at
+//! the chunk holding its first key.
 const std = @import("std");
 
 const stdx = @import("stdx");
@@ -55,6 +57,20 @@ fn prefillBlock(tokens: i64, sequences: i64) i64 {
     const short = prefill_block / 2;
     return if (short * prefillBlocks(tokens, sequences, short) < prefill_block * prefillBlocks(tokens, sequences, prefill_block)) short else prefill_block;
 }
+
+/// How a call attends: a straight-line head over each token's first `head`
+/// keys, a device loop over chunks of `chunk` keys past the head (none when
+/// zero), and tokens in groups of `group`. Every route is a plan: straight
+/// (the whole table as head, no loop), hybrid (head and loop, one token) and
+/// flash (no head, all tokens or query blocks at once).
+pub const Plan = struct {
+    head: i64,
+    chunk: i64,
+    group: i64,
+};
+
+/// Forces every call's plan, for calibration.
+pub var calibration_plan: ?Plan = null;
 
 pub const paged = struct {
     pub const Options = triton.paged.Options;
@@ -118,7 +134,7 @@ pub const paged = struct {
         // and does not finish 2048 rows by 4096 keys in 50 minutes.
         const chunk_limit = @max(1, @divTrunc(@min(@as(i64, if (decode) chunk_keys else prefill_chunk_keys), @divTrunc(flash_chunk_pairs, rows)), alignment)) * alignment;
         const chunk = @min(keys, chunk_limit);
-        const cfg: Cfg = .{
+        var cfg: Cfg = .{
             .tokens = q.dim(.b),
             .sequences = parameters.seq_lens.dim(.b),
             .b = block_count,
@@ -137,13 +153,22 @@ pub const paged = struct {
             .window = @intCast(opts.mask.slidingWindow() orelse 0),
         };
         const plain_decode = decode and !cfg.use_sink and cfg.window == 0;
-        // The hybrid kernel needs tail pages past its head's.
-        if (plain_decode and cfg.tokens == 1 and parameters.block_table.dim(.p) > std.math.divCeil(i64, straight_decode_keys, page) catch unreachable)
-            return hybridDecodeAttention(parameters, q, k_cache, v_cache, cfg.scale, cfg.is_causal).convert(q.dtype());
-        if (plain_decode and keys <= decode_keys and (cfg.tokens < chunked_decode_tokens or keys <= straight_batch_decode_keys)) {
-            return decodeAttention(parameters, q, k_cache, v_cache, .{
+        // Converting the cache inside the unit stops TCC 2026.5's sparse
+        // propagation ("Not implemented: Transmute"): straight decode reads
+        // BF16 caches. It also takes power-of-two pages: TCC fails on its
+        // metadata for 88 or 96 pages of 48 ("Fail to cover valid range").
+        const straight = decode and k_cache.dtype() == .bf16 and v_cache.dtype() == .bf16 and std.math.isPowerOfTwo(page);
+        const plan = calibration_plan orelse defaultPlan(cfg, keys, parameters.block_table.dim(.p), plain_decode and straight, straight, chunk);
+        const sink = if (opts.sink) |s| s.convert(.f32).reshape(.{ .hkv = cfg.hkv, .hg = cfg.g }) else Tensor.zeroes(.init(.{ .hkv = cfg.hkv, .hg = cfg.g }, .f32));
+        if (plan.head > 0 and plan.chunk > 0) {
+            stdx.debug.assert(plain_decode and cfg.tokens == 1, "TCL hybrid attention takes one plain decode token", .{});
+            return hybridDecodeAttention(parameters, q, k_cache, v_cache, cfg.scale, cfg.is_causal, plan).convert(q.dtype());
+        }
+        if (plan.chunk == 0 and straight) {
+            return decodeAttention(parameters, q, k_cache, v_cache, sink, .{
                 .t = cfg.tokens,
                 .a = keys,
+                .group = plan.group,
                 .hkv = cfg.hkv,
                 .g = cfg.g,
                 .d = cfg.d,
@@ -151,8 +176,13 @@ pub const paged = struct {
                 .pg = page,
                 .scale = cfg.scale,
                 .is_causal = cfg.is_causal,
+                .window = cfg.window,
+                .use_sink = cfg.use_sink,
             }).convert(q.dtype());
         }
+        // Without a loop, one chunk holds the table.
+        cfg.chunk = if (plan.chunk > 0) plan.chunk else keys;
+        cfg.a = (std.math.divCeil(i64, keys, cfg.chunk) catch unreachable) * cfg.chunk;
         const table = parameters.block_table.pad(-1, .{ .p = Tensor.Pad{ .high = @divExact(cfg.a, page) - parameters.block_table.dim(.p) } });
         const inputs: OneShot.Inputs = .{
             .q = q.convert(.bf16),
@@ -161,7 +191,7 @@ pub const paged = struct {
             .query_offsets = parameters.query_start_len,
             .k_cache = k_cache.convert(.bf16),
             .v_cache = v_cache.convert(.bf16),
-            .sink = if (opts.sink) |s| s.convert(.f32).reshape(.{ .hkv = cfg.hkv, .hg = cfg.g }) else Tensor.zeroes(.init(.{ .hkv = cfg.hkv, .hg = cfg.g }, .f32)),
+            .sink = sink,
         };
         const outputs: OneShot.Outputs = .{ .out = q.shape().withDtype(.bf16) };
         const out = if (cfg.a == cfg.chunk)
@@ -171,6 +201,35 @@ pub const paged = struct {
         return out.convert(q.dtype());
     }
 };
+
+/// Today's routes: hybrid for one plain token past `straight_decode_keys`,
+/// flash over a window's chunks past `window_flash_chunks` of them, straight
+/// decode up to `decode_keys` (flash past `straight_batch_decode_keys` from
+/// `chunked_decode_tokens`), else flash, in one chunk when it holds the table.
+fn defaultPlan(cfg: Cfg, keys: i64, columns: i64, plain_decode: bool, straight: bool, chunk: i64) Plan {
+    // The hybrid kernel needs tail pages past its head's.
+    if (plain_decode and cfg.tokens == 1 and columns > std.math.divCeil(i64, straight_decode_keys, cfg.pg) catch unreachable)
+        return .{ .head = head_keys, .chunk = tail_chunk_keys, .group = 1 };
+    // Flash bounds a window's loop with power-of-two chunks.
+    if (straight and cfg.window > 0) {
+        const window_chunk = @max(window_chunk_keys, @as(i64, @intCast(std.math.ceilPowerOfTwo(u64, @intCast(cfg.window)) catch unreachable)));
+        if (window_chunk <= chunk and keys >= window_flash_chunks * window_chunk)
+            return .{ .head = 0, .chunk = window_chunk, .group = cfg.tokens };
+    }
+    if (straight and keys <= decode_keys and (cfg.tokens < chunked_decode_tokens or keys <= straight_batch_decode_keys))
+        return .{ .head = keys, .chunk = 0, .group = @divExact(cfg.tokens, decodeGroups(cfg.tokens, keys)) };
+    if (chunk == keys) return .{ .head = keys, .chunk = 0, .group = cfg.tokens };
+    return .{ .head = 0, .chunk = chunk, .group = cfg.b * cfg.i };
+}
+
+/// Decode over a window from `window_flash_chunks` chunks of at least
+/// `window_chunk_keys` keys runs flash attention, whose loop runs only the
+/// window's chunks. Gemma 4 12B sliding layer (window 1024) over a 32K table,
+/// straight vs flash in 1024-key chunks, per layer: one token 469 vs 480 us at
+/// 300 keys, 520 vs 503 at 8K, 649 vs 505 at 30K; 16 tokens 993 vs 656, 1682
+/// vs 852, 3861 vs 799. 4096-key chunks: 522, 505, 514.
+const window_chunk_keys = 1024;
+const window_flash_chunks = 4;
 
 /// Widest block table the straight-line decode kernel takes for one token.
 /// Its work follows the table's width, while the hybrid kernel's loop costs
@@ -211,6 +270,8 @@ const masked_decode_keys = 4096;
 const DecodeCfg = struct {
     t: i64,
     a: i64,
+    /// Tokens attended together.
+    group: i64,
     hkv: i64,
     g: i64,
     d: i64,
@@ -218,6 +279,8 @@ const DecodeCfg = struct {
     pg: i64,
     scale: f32,
     is_causal: bool,
+    window: i64,
+    use_sink: bool,
 };
 
 /// Decode attention in Furiosa's form: the kernel gathers whole pages, then
@@ -225,7 +288,7 @@ const DecodeCfg = struct {
 /// past each sequence's end, selecting zero for those unused cache entries.
 /// The token metadata depends only on the attention parameters, which every
 /// layer shares: one kernel computes it once per forward pass.
-fn decodeAttention(parameters: paged.Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, cfg: DecodeCfg) Tensor {
+fn decodeAttention(parameters: paged.Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, sink: Tensor, cfg: DecodeCfg) Tensor {
     const columns = @divExact(cfg.a, cfg.pg);
     const table = parameters.block_table.pad(0, .{ .p = Tensor.Pad{ .high = columns - parameters.block_table.dim(.p) } });
     const meta = DecodeMeta.call(.{ .seq_lens = parameters.seq_lens, .query_offsets = parameters.query_start_len, .table = table }, .{
@@ -233,7 +296,7 @@ fn decodeAttention(parameters: paged.Parameters, q: Tensor, k_cache: Tensor, v_c
         .bounds = zml.Shape.init(.{ .t = cfg.t }, .i32),
         .mask = zml.Shape.init(.{ .t = cfg.t, .a = cfg.a }, .i32),
         .keyed = zml.Shape.init(.{ .t = cfg.t }, .f32),
-    }, .{ .cfg = .{ .t = cfg.t, .s = parameters.seq_lens.dim(.b), .ap = columns, .pg = cfg.pg, .pages = cfg.pages, .is_causal = cfg.is_causal } });
+    }, .{ .cfg = .{ .t = cfg.t, .s = parameters.seq_lens.dim(.b), .ap = columns, .pg = cfg.pg, .pages = cfg.pages, .is_causal = cfg.is_causal, .window = cfg.window } });
     return Decode.call(.{
         .q = q.convert(.bf16),
         .pages = meta.pages,
@@ -242,10 +305,11 @@ fn decodeAttention(parameters: paged.Parameters, q: Tensor, k_cache: Tensor, v_c
         .keyed = meta.keyed,
         .k_cache = k_cache.convert(.bf16),
         .v_cache = v_cache.convert(.bf16),
+        .sink = sink,
     }, .{ .out = q.shape().withDtype(.bf16) }, .{ .cfg = cfg }).out;
 }
 
-const MetaCfg = struct { t: i64, s: i64, ap: i64, pg: i64, pages: i64, is_causal: bool };
+const MetaCfg = struct { t: i64, s: i64, ap: i64, pg: i64, pages: i64, is_causal: bool, window: i64 };
 
 /// For each token: the cache page of each column, how many columns hold keys
 /// it sees, the keys it sees (below its limit, in pages inside the cache) and
@@ -308,7 +372,12 @@ const DecodeMeta = tcl.Kernel(MetaCfg, .{
             op = b.tensorOperation(.{});
             const position = try op.commit(op.fetch(try b.arange(cfg.ap * cfg.pg, .i32, &.{A}, .{}), .{ .broadcast_to = &.{ T, A } }), .{});
             op = b.tensorOperation(.{ .tactic = .elementwise });
-            const mask = try op.commit(op.fetch(position, .{}).muli(-1).addi(op.fetch(limit, .{})).binary(.maxi, 0).binary(.mini, 1).muli(op.fetch(try b.reshape(valid, &.{ T, A }, .{}), .{})), .{});
+            var mask = try op.commit(op.fetch(position, .{}).muli(-1).addi(op.fetch(limit, .{})).binary(.maxi, 0).binary(.mini, 1).muli(op.fetch(try b.reshape(valid, &.{ T, A }, .{}), .{})), .{});
+            if (cfg.window > 0) {
+                // A window drops the keys more than its size before the limit.
+                op = b.tensorOperation(.{ .tactic = .elementwise });
+                mask = try op.commit(op.fetch(position, .{}).subi(op.fetch(limit, .{})).addi(cfg.window + 1).binary(.maxi, 0).binary(.mini, 1).muli(op.fetch(mask, .{})), .{});
+            }
             b.ret(&.{ read, bounds, mask, keyed });
         }
     }.run,
@@ -318,7 +387,7 @@ const DecodeMeta = tcl.Kernel(MetaCfg, .{
 /// wide. Fusible: it joins the layer around it, one launch per layer.
 const Decode = tcl.Kernel(DecodeCfg, .{
     .name = "paged_decode_attention",
-    .inputs = &.{ "q", "pages", "bounds", "mask", "keyed", "k_cache", "v_cache" },
+    .inputs = &.{ "q", "pages", "bounds", "mask", "keyed", "k_cache", "v_cache", "sink" },
     .outputs = &.{"out"},
     .run = struct {
         fn run(b: *tcl.Builder, cfg: DecodeCfg) tcl.FinishError!void {
@@ -340,9 +409,11 @@ const Decode = tcl.Kernel(DecodeCfg, .{
                 .keyed = .{ .dtype = .f32, .axes = &.{T} },
                 .k_cache = .{ .dtype = .bf16, .axes = &.{ P, PG, Hkv, D } },
                 .v_cache = .{ .dtype = .bf16, .axes = &.{ P, PG, Hkv, D } },
+                .sink = .{ .dtype = .f32, .axes = &.{ Hkv, G } },
             });
-            const groups = decodeGroups(cfg.t, cfg.a);
-            if (groups == 1) return b.ret(&.{try decodeTokens(b, cfg.scale, t.q, t.pages, t.bounds, t.mask, t.keyed, t.k_cache, t.v_cache)});
+            const sink = if (cfg.use_sink) t.sink else null;
+            const groups = @divExact(cfg.t, cfg.group);
+            if (groups == 1) return b.ret(&.{try decodeTokens(b, cfg.scale, t.q, t.pages, t.bounds, t.mask, t.keyed, t.k_cache, t.v_cache, sink)});
             // Several tokens over a wide table: a static loop over groups of
             // them, which costs nothing at runtime.
             const NG = b.axis("NG", groups);
@@ -354,7 +425,7 @@ const Decode = tcl.Kernel(DecodeCfg, .{
                 const bounds = try b.indexRead(try b.reshape(t.bounds, &.{ NG, TG }, .{}), loop.iv);
                 const mask = try b.indexRead(try b.reshape(t.mask, &.{ NG, TG, A }, .{}), loop.iv);
                 const keyed = try b.indexRead(try b.reshape(t.keyed, &.{ NG, TG }, .{}), loop.iv);
-                const out = try decodeTokens(b, cfg.scale, q, pages, bounds, mask, keyed, t.k_cache, t.v_cache);
+                const out = try decodeTokens(b, cfg.scale, q, pages, bounds, mask, keyed, t.k_cache, t.v_cache, sink);
                 try loop.yield(.{try b.indexWrite(loop.carried[0], loop.iv, out)});
             }
             b.ret(&.{try b.reshape(loop.results[0], &.{ T, Hkv, G, D }, .{})});
@@ -384,8 +455,9 @@ fn decodeGroups(tokens: i64, keys: i64) i64 {
 /// the scores of keys past the sequence, normalizes in one softmax times
 /// `keyed` (zero for tokens without keys, whose softmax is uniform) and
 /// contracts with the values, gathered as is (see `unmasked_decode_keys`)
-/// unless one token sees at most `masked_decode_keys`.
-fn decodeTokens(b: *tcl.Builder, scale: f32, q: builder.Tensor, pages: builder.Tensor, bounds: builder.Tensor, mask: builder.Tensor, keyed: builder.Tensor, k_cache: builder.Tensor, v_cache: builder.Tensor) tcl.FinishError!builder.Tensor {
+/// unless one token sees at most `masked_decode_keys`. A sink adds one zero
+/// value to every head's softmax.
+fn decodeTokens(b: *tcl.Builder, scale: f32, q: builder.Tensor, pages: builder.Tensor, bounds: builder.Tensor, mask: builder.Tensor, keyed: builder.Tensor, k_cache: builder.Tensor, v_cache: builder.Tensor, sink: ?builder.Tensor) tcl.FinishError!builder.Tensor {
     const T = q.axes[0];
     const Hkv = q.axes[1];
     const G = q.axes[2];
@@ -407,9 +479,21 @@ fn decodeTokens(b: *tcl.Builder, scale: f32, q: builder.Tensor, pages: builder.T
     const s = op.fetch(scores, .{});
     const masked = try op.commit(op.where(op.fetch(key_mask, .{}), .ne, 0, s, score_min), .{});
     op = b.tensorOperation(.{});
-    const x = op.fetch(masked, .{});
-    const e = x.subf(x.reduce(keys, .maxf)).exp();
-    const p = try op.commit(e.divf(e.reduce(keys, .addf)).mulf(op.fetch(keyed, .{})), .{ .dtype = .bf16 });
+    const p = if (sink) |logits| blk: {
+        const maximum = try op.commit(op.fetch(masked, .{}).reduce(keys, .maxf).maxf(op.fetch(logits, .{ .broadcast_to = &.{ Hkv, G, T } })), .{});
+        op = b.tensorOperation(.{});
+        const e = try op.commit(op.fetch(masked, .{}).subf(op.fetch(maximum, .{})).exp(), .{});
+        op = b.tensorOperation(.{});
+        const sink_exp = try op.commit(op.fetch(maximum, .{}).mulf(-1).addf(op.fetch(logits, .{})).exp(), .{});
+        op = b.tensorOperation(.{});
+        const denominator = try op.commit(op.fetch(e, .{}).reduce(keys, .addf).addf(op.fetch(sink_exp, .{})), .{});
+        op = b.tensorOperation(.{});
+        break :blk try op.commit(op.fetch(e, .{}).divf(op.fetch(denominator, .{})).mulf(op.fetch(keyed, .{})), .{ .dtype = .bf16 });
+    } else blk: {
+        const x = op.fetch(masked, .{});
+        const e = x.subf(x.reduce(keys, .maxf)).exp();
+        break :blk try op.commit(e.divf(e.reduce(keys, .addf)).mulf(op.fetch(keyed, .{})), .{ .dtype = .bf16 });
+    };
     op = b.tensorOperation(.{});
     return op.commit(op.contract(v, p, &.{ T, Hkv, G, D }), .{ .dtype = .bf16 });
 }
@@ -442,12 +526,12 @@ const HybridCfg = struct {
 /// keys past it. Short contexts, which skip the loop, still pay for it: the
 /// work it needs ends the layer's first stretch (the query), and nothing past
 /// it overlaps that stretch.
-fn hybridDecodeAttention(parameters: paged.Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, scale: f32, is_causal: bool) Tensor {
+fn hybridDecodeAttention(parameters: paged.Parameters, q: Tensor, k_cache: Tensor, v_cache: Tensor, scale: f32, is_causal: bool, plan: Plan) Tensor {
     const pg = k_cache.dim(.k_chunk);
     const t = q.dim(.b);
     const s = parameters.seq_lens.dim(.b);
-    const hp = std.math.divCeil(i64, head_keys, pg) catch unreachable;
-    const cp = std.math.divCeil(i64, tail_chunk_keys, pg) catch unreachable;
+    const hp = std.math.divCeil(i64, plan.head, pg) catch unreachable;
+    const cp = std.math.divCeil(i64, plan.chunk, pg) catch unreachable;
     const nc = std.math.divCeil(i64, parameters.block_table.dim(.p) - hp, cp) catch unreachable;
     const cfg: HybridCfg = .{ .t = t, .s = s, .hp = hp, .nc = nc, .cp = cp, .pg = pg, .hkv = q.dim(.hkv), .g = q.dim(.hg), .d = q.dim(.hd), .pages = k_cache.dim(.page), .scale = scale, .is_causal = is_causal };
     const table = parameters.block_table.pad(-1, .{ .p = Tensor.Pad{ .high = hp + nc * cp - parameters.block_table.dim(.p) } });
@@ -846,6 +930,9 @@ const Prepared = struct {
     kvlen: builder.Tensor,
     row: builder.Tensor,
     active: builder.Tensor,
+    /// Per page row: the first query position and the keys.
+    first: builder.Tensor,
+    keys: builder.Tensor,
 
     /// The pages of each block. TCC 2026.5 has no tactic for selecting
     /// whole rows of 8192 pages: flash attention selects them per chunk.
@@ -916,6 +1003,8 @@ fn prepareQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, t: NativeInputs) tcl.Finis
             .kvlen = try b.reshape(lengths, &.{a.B}, .{}),
             .row = token_seq,
             .active = active,
+            .first = try b.reshape(qpos, &.{a.B}, .{}),
+            .keys = try b.reshape(lengths, &.{a.B}, .{}),
         };
     }
 
@@ -965,7 +1054,9 @@ fn prepareQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, t: NativeInputs) tcl.Finis
     const token_block = try selectMetadata(b, block_start, token_pick, a.S);
     op = b.tensorOperation(.{});
     const row = try op.commit(op.fetch(token_block, .{}).muli(cfg.i).addi(op.fetch(tokens, .{})).subi(op.fetch(token_begin, .{})).binary(.maxi, 0).binary(.mini, cfg.b * cfg.i - 1), .{});
-    return .{ .q = q, .pages = t.pages, .pick = pick, .qpos = qpos, .kvlen = kvlen, .row = row, .active = active };
+    op = b.tensorOperation(.{});
+    const first = try op.commit(op.fetch(t.seq_lens, .{}).subi(op.fetch(qlen, .{})), .{});
+    return .{ .q = q, .pages = t.pages, .pick = pick, .qpos = qpos, .kvlen = kvlen, .row = row, .active = active, .first = first, .keys = t.seq_lens };
 }
 
 fn restoreQueries(b: *tcl.Builder, cfg: Cfg, a: Axes, prepared: Prepared, output: builder.Tensor) tcl.FinishError!builder.Tensor {
@@ -1010,7 +1101,7 @@ fn maskCacheValues(b: *tcl.Builder, values: builder.Tensor, valid: builder.Tenso
 
 /// Build the sequence, query, page and window mask for the current keys.
 fn attentionMask(b: *tcl.Builder, cfg: Cfg, qpos: builder.Tensor, kvlen: builder.Tensor, position: builder.Tensor, valid_keys: builder.Tensor) tcl.FinishError!builder.Tensor {
-    const axes = &.{ qpos.axes[0], qpos.axes[1], position.axes[0] };
+    const axes = &.{ qpos.axes[0], qpos.axes[1], position.axes[position.axes.len - 1] };
     const read: builder.TensorOperation.FetchOptions = .{ .broadcast_to = axes };
     // Elementwise operations require their first read to cover the output
     // axes, and each VE instruction must consume the current accumulator.
@@ -1160,22 +1251,62 @@ const Flash = tcl.Kernel(Cfg, .{
             const stats = &.{ a.Hkv, a.G, a.B, a.I };
             const out_axes = &.{ a.B, a.I, a.Hkv, a.G, a.D };
             var op = b.tensorOperation(.{});
-            const n = try b.symExpr(.div, try b.symExpr(.add, try b.reduceMaxI32(prepared.kvlen), cfg.chunk - 1), cfg.chunk);
+            const shift = std.math.log2_int(u64, @intCast(cfg.chunk));
+            // With a window, each page row's loop starts at the chunk holding
+            // its first query's first visible key: the loop runs the window's
+            // chunks, not the sequence's. TCL divides by shifts, so other
+            // chunks run every chunk and the mask applies the window.
+            const window = if (cfg.window > 0 and std.math.isPowerOfTwo(cfg.chunk)) blk: {
+                op = b.tensorOperation(.{});
+                const start = try op.commit(op.fetch(prepared.first, .{}).subi(cfg.window - 1).binary(.maxi, 0).binary(.shr_arith, shift), .{});
+                op = b.tensorOperation(.{});
+                const count = try op.commit(op.fetch(prepared.keys, .{}).addi(cfg.chunk - 1).binary(.shr_arith, shift).subi(op.fetch(start, .{})), .{});
+                // Each trip's chunk per row: TCC reads the loop index only
+                // as an index, so the table is built before the loop.
+                const trip = try b.arange(C.size, .i32, &.{C}, .{});
+                op = b.tensorOperation(.{ .tactic = .einsum_by_ve });
+                const chunks = try op.commit(op.fetch(trip, .{}).addi(op.fetch(start, .{})), .{ .axes = &.{ C, rows } });
+                break :blk .{ .chunks = chunks, .trips = try b.reduceMaxI32(count) };
+            } else null;
+            const n = if (window) |w| w.trips else try b.symExpr(.div, try b.symExpr(.add, try b.reduceMaxI32(prepared.kvlen), cfg.chunk - 1), cfg.chunk);
             var loop = b.openFor(n, .{ try b.full(0, .f32, stats), try b.full(0, .f32, out_axes), try b.full(score_min, .f32, stats) });
             {
                 const sum_acc, const qkv_acc, const max_acc = loop.carried;
-                const indices = try validIndices(b, try prepared.blockPages(b, a, try b.indexRead(pages, loop.iv)), cfg.pages);
+                const local_pos = try b.arange(cfg.chunk, .i32, &.{Ck}, .{});
+                const local_pages = try b.arange(@divExact(cfg.chunk, cfg.pg), .i32, &.{Cp}, .{});
+                // This trip's chunk: the same for every row, or each row's own.
+                var row_pages: builder.Tensor = undefined;
+                var position: builder.Tensor = undefined;
+                var first_keys: builder.Tensor = undefined;
+                if (window) |w| {
+                    const chunk_index = try b.indexRead(w.chunks, loop.iv);
+                    // Rows with fewer chunks reread the table's last one, past
+                    // their keys, which the mask drops.
+                    op = b.tensorOperation(.{});
+                    const read_index = try op.commit(op.fetch(chunk_index, .{}).binary(.mini, @divExact(cfg.a, cfg.chunk) - 1), .{});
+                    // A batched gather of the chunk does not lower for every
+                    // shape in TCC 2026.5; a one-hot product does.
+                    row_pages = try selectMetadata(b, by_row, try selector(b, read_index, C, C.size), C);
+                    op = b.tensorOperation(.{});
+                    const row_offset = try op.commit(op.fetch(chunk_index, .{}).muli(cfg.chunk), .{});
+                    const offset = if (prepared.pick) |pick| try selectMetadata(b, row_offset, pick, a.S) else row_offset;
+                    op = b.tensorOperation(.{});
+                    position = try op.commit(op.fetch(local_pos, .{ .broadcast_to = &.{ a.B, Ck } }).addi(op.fetch(offset, .{})), .{});
+                    op = b.tensorOperation(.{});
+                    first_keys = try op.commit(op.fetch(local_pages, .{ .broadcast_to = &.{ a.B, Cp } }).muli(cfg.pg).addi(op.fetch(offset, .{})), .{});
+                } else {
+                    row_pages = try b.indexRead(pages, loop.iv);
+                    const offset = try b.symExpr(.mul, loop.iv, cfg.chunk);
+                    op = b.tensorOperation(.{});
+                    position = try op.commit(op.fetch(local_pos, .{}).addi(op.fetch(offset, .{})), .{});
+                    op = b.tensorOperation(.{});
+                    first_keys = try op.commit(op.fetch(local_pages, .{}).muli(cfg.pg).addi(op.fetch(offset, .{})), .{});
+                }
+                const indices = try validIndices(b, try prepared.blockPages(b, a, row_pages), cfg.pages);
                 const idx = indices.safe;
                 op = b.tensorOperation(.{});
                 const valid_pages = try op.commit(op.fetch(indices.valid, .{ .broadcast_to = &.{ a.B, Cp, a.PG } }), .{});
                 const valid_keys = try b.reshape(valid_pages, &.{ a.B, Ck }, .{});
-                const offset = try b.symExpr(.mul, loop.iv, cfg.chunk);
-                const local_pos = try b.arange(cfg.chunk, .i32, &.{Ck}, .{});
-                op = b.tensorOperation(.{});
-                const position = try op.commit(op.fetch(local_pos, .{}).addi(op.fetch(offset, .{})), .{});
-                const local_pages = try b.arange(@divExact(cfg.chunk, cfg.pg), .i32, &.{Cp}, .{});
-                op = b.tensorOperation(.{});
-                const first_keys = try op.commit(op.fetch(local_pages, .{}).muli(cfg.pg).addi(op.fetch(offset, .{})), .{});
                 op = b.tensorOperation(.{ .tactic = .einsum_by_ve });
                 const remaining = try op.commit(op.fetch(prepared.kvlen, .{}).subi(op.fetch(first_keys, .{})), .{});
                 op = b.tensorOperation(.{});
@@ -1493,7 +1624,7 @@ test "tcl paged attention cache masking emits a BF16 select without query replic
     try std.testing.expect(std.mem.indexOf(u8, ir, "#tcl.ve_opcode<\"mulf\">") == null);
     try std.testing.expect(std.mem.indexOf(u8, ir, "#tcl.symbol<\"I\">") == null);
 
-    const decode = try Decode.emit(std.testing.allocator, .{ .t = 2, .a = 64, .hkv = 2, .g = 4, .d = 32, .pages = 8, .pg = 16, .scale = 0.125, .is_causal = true });
+    const decode = try Decode.emit(std.testing.allocator, .{ .t = 2, .a = 64, .group = 2, .hkv = 2, .g = 4, .d = 32, .pages = 8, .pg = 16, .scale = 0.125, .is_causal = true, .window = 0, .use_sink = false });
     defer std.testing.allocator.free(decode);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, decode, "\"tcl.dpe\""));
     try std.testing.expect(std.mem.indexOf(u8, decode, "tcl.fusible") != null);
@@ -1626,9 +1757,19 @@ test "tcl paged attention hybrid decode on furiosa" {
 
 test "tcl paged attention flash decode of many tokens on furiosa" {
     if (zml.testing.env().target != .furiosa) return error.SkipZigTest;
-    // 16 decode tokens over more than 32K keys, unused cache slots poisoned.
+    // 16 decode tokens over more than 32K keys, unused cache slots poisoned;
+    // with a window, each token's loop starts at its own window.
     const seqs = [_][2]i32{ .{ 1, 32784 }, .{ 1, 4097 }, .{ 1, 1 }, .{ 0, 0 } } ++ @as([12][2]i32, @splat(.{ 1, 300 }));
-    try runCases(2049, 2600, &.{.{ .prefill = false, .seqs = &seqs, .padding = 1, .poison = .both }}, .{ .batch = 16, .hkv = 1, .g = 2, .d = 32 });
+    try runCases(2049, 2600, &.{
+        .{ .prefill = false, .seqs = &seqs, .padding = 1, .poison = .both },
+        .{ .prefill = false, .seqs = &seqs, .padding = 1, .poison = .both, .opts = .{ .sliding_window = 1024 } },
+        .{ .prefill = false, .seqs = &seqs, .padding = 1, .poison = .both, .opts = .{ .sliding_window = 5000, .sink = &.{ 0, -std.math.inf(f32) } } },
+    }, .{ .batch = 16, .hkv = 1, .g = 2, .d = 32 });
+    // Prefill rows whose windows start deep in long sequences.
+    try runCases(2049, 2700, &.{
+        .{ .prefill = true, .seqs = &.{ .{ 37, 32784 }, .{ 5, 9000 } }, .padding = 2, .poison = .both, .opts = .{ .sliding_window = 1024 } },
+        .{ .prefill = true, .seqs = &.{ .{ 70, 32784 }, .{ 0, 0 } }, .padding = 1, .poison = .both, .opts = .{ .sliding_window = 3000 } },
+    }, .{ .batch = 2, .hkv = 1, .g = 2, .d = 32 });
 }
 
 test "tcl paged attention uniform probabilities on furiosa" {
