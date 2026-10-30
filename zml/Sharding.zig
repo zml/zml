@@ -21,10 +21,22 @@ mesh: ?*const Mesh,
 partition: Partitioning,
 
 pub const MAX_MESH_RANK = 4;
+
+/// Full replication across participating devices.
+/// For buffers, each device holds a complete copy. Applied as a graph constraint,
+/// this closes every dimension to partitioning. `Shape.init` uses this sharding;
+/// unconstrained graph results use `open` instead.
 pub const replicated: Sharding = .{ .mesh = null, .partition = .replicated(Shape.MAX_RANK) };
 
+/// Unspecified sharding for graph results. During compilation, the partitioner
+/// may infer sharding from surrounding constraints or leave the value replicated.
+/// Executable inputs require closed sharding. An executable output with this
+/// unspecified sharding defaults to replication; an explicitly declared output
+/// sharding containing open dimensions is rejected.
+pub const open: Sharding = .{ .mesh = null, .partition = .open(Shape.MAX_RANK) };
+
 pub fn get(sharding: Sharding, ax: usize) PartitionSpec {
-    return if (sharding.mesh == null) .replicated else sharding.partition.get(ax);
+    return sharding.partition.get(ax);
 }
 
 pub fn set(self: Sharding, ax: usize, spec: PartitionSpec) Sharding {
@@ -52,7 +64,6 @@ pub fn toArray(self: Sharding) [Shape.MAX_RANK]PartitionSpec {
 }
 
 pub fn isFullyReplicated(self: Sharding) bool {
-    if (self.mesh == null) return true;
     for (self.partition.toArray()) |spec| {
         if (spec != .replicated and spec != .out_of_bound) return false;
     }
@@ -98,8 +109,18 @@ test isCompatible {
     }
 }
 
+/// Formats the declared sharding, not the partitioner's inferred sharding.
+/// Without a mesh, prints `{replicated}` for full replication or `{open}` for
+/// unspecified graph sharding.
+///
+/// With a mesh, entries follow tensor dimension order, e.g. `{data,replicated,?}@dp`:
+/// - `data`: split this dimension over the logical mesh axis named `data`.
+/// - `replicated`: keep this dimension whole on each shard.
+/// - `?`: leave this dimension to partitioner inference during compilation.
+/// - `@dp`: the mesh name.
+/// Trailing `.out_of_bound` entries are omitted; any remaining ones print as `!`.
 pub fn format(self: Sharding, writer: *std.Io.Writer) !void {
-    const mesh = self.mesh orelse return writer.writeAll("{replicated}");
+    const mesh = self.mesh orelse return writer.writeAll(if (self.isFullyReplicated()) "{replicated}" else "{open}");
     const specs = self.partition.toArray();
     var rank = specs.len;
     while (rank > 0 and specs[rank - 1] == .out_of_bound) rank -= 1;
@@ -117,8 +138,10 @@ pub fn format(self: Sharding, writer: *std.Io.Writer) !void {
     try writer.print("}}@{s}", .{mesh.name});
 }
 
-/// Describes how a given Shape axis behaves inside a mesh.
-/// Is it replicated ? sharded along a specific logical axis ? or open to replication ?
+/// Describes how one tensor dimension is distributed across a logical mesh.
+/// A mesh axis splits the dimension; `.replicated` keeps it whole on each shard.
+/// In a graph constraint, `.open` lets the partitioner choose either behavior.
+/// Executable buffers require closed sharding specs: a mesh axis or `.replicated`.
 pub const PartitionSpec = enum(u4) {
     mesh_axis_0 = 0,
     mesh_axis_1 = 1,
@@ -1676,6 +1699,50 @@ pub const Mesh = struct {
         unreachable;
     }
 
+    /// Converts `shape`'s declared partitioning into a `#sdy.sharding` attribute
+    /// referencing this mesh. Entries in `[...]` follow tensor dimension order;
+    /// mesh axis indices in the specs resolve to this mesh's logical axis names.
+    /// The tensor rank and logical mesh rank are independent.
+    ///
+    /// Each dimension spec is encoded as follows:
+    /// - `PartitionSpec.sharded(i)` -> `{"axis_name"}`: split the dimension over
+    ///   logical mesh axis `i`. The dimension is closed to further partitioning.
+    /// - `.replicated` -> `{}`: keep the dimension whole on each shard. It is
+    ///   closed, so the partitioner cannot assign a mesh axis to it.
+    /// - `.open` -> `{?}`: let the partitioner infer sharding from the graph.
+    ///   It may acquire available mesh axes or remain replicated.
+    /// Closed therefore means no additional mesh axes, not necessarily replicated.
+    /// Every dimension within `shape.rank()` must have a spec other than `.out_of_bound`.
+    ///
+    /// Dimension replication (`{}`) applies to one tensor dimension. The optional
+    /// tensor-wide `replicated={...}` instead names mesh axes: each listed axis
+    /// must carry identical tensor data across its coordinates and cannot be used
+    /// to split any dimension, including an open one.
+    ///
+    /// For example, take a mesh `@dp_mp` with `data=2`, `model=2`, no extra replicas,
+    /// and a shape whose dimensions are ordered `batch`, `hidden`:
+    ///
+    /// ```
+    /// Partitioning: .{ .batch = .data, .hidden = .open }
+    /// #sdy.sharding<@dp_mp, [{"data"}, {?}]>
+    /// ```
+    /// `batch` is split over `data`; the partitioner may assign `model` to `hidden`.
+    /// The unused `model` axis stays available because an open dimension exists.
+    ///
+    /// ```
+    /// Partitioning: .{ .batch = .data, .hidden = .replicated }
+    /// #sdy.sharding<@dp_mp, [{"data"}, {}], replicated={"model"}>
+    /// ```
+    /// Both dimensions are closed. Unused logical axes are explicitly replicated,
+    /// so devices differing only in their `model` coordinate hold the same shard.
+    ///
+    /// ```
+    /// Partitioning: .{ .batch = .open, .hidden = .replicated }
+    /// #sdy.sharding<@dp_mp, [{?}, {}]>
+    /// ```
+    /// Only `batch` may acquire axes, and both `data` and `model` are available.
+    /// Adding `replicated={"data", "model"}` would prevent either axis from being
+    /// inferred for `batch`, despite its `{?}` entry.
     pub fn sdyShardingAttrForShape(
         data: *const Mesh,
         parent_allocator: std.mem.Allocator,
@@ -1687,6 +1754,7 @@ pub const Mesh = struct {
         const allocator = arena.allocator();
         const dimensions = try allocator.alloc(*const shardy.DimensionShardingAttr, shape.rank());
         var used: [MAX_MESH_RANK]bool = @splat(false);
+        const has_open_dimension = shape.containsPartitionSpec(.open);
         for (0.., dimensions) |ax, *d| {
             d.* = switch (shape.partition(ax)) {
                 .out_of_bound => @panic("undefined"),
@@ -1704,7 +1772,9 @@ pub const Mesh = struct {
         var tile_count: usize = 1;
         for (data.logical.axes.slice(), 0..) |axis, i| {
             tile_count *= data.grid.axis_sizes[i];
-            if (!used[i]) replicated_axes.appendAssumeCapacity(.named(ctx, std.mem.span(axis)));
+            // Open dimensions can acquire unused logical axes during inference.
+            // Only reserve those axes for replication when every dimension is closed.
+            if (!has_open_dimension and !used[i]) replicated_axes.appendAssumeCapacity(.named(ctx, std.mem.span(axis)));
         }
         if (tile_count < data.grid.device_count) {
             replicated_axes.appendAssumeCapacity(.named(ctx, data.sdyReplicaAxis()));
@@ -2741,7 +2811,7 @@ test "mesh: open and replicated dimension mix" {
         .expected_num_replicas = 1,
         .mesh = &mesh,
         .shape = Shape.init(.{ .batch = 8, .model = 8 }, .f32).withPartitioning(&mesh, .{ .batch = .open, .model = .replicated }),
-        .expected_sdy = "#sdy.sharding<@mix_mesh, [{?}, {}], replicated={\"batch\", \"model\"}>",
+        .expected_sdy = "#sdy.sharding<@mix_mesh, [{?}, {}]>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 8 }, .{ 0, 8 } } },
             .{ .device_id = 1, .slices = &.{ .{ 0, 8 }, .{ 0, 8 } } },
