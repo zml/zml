@@ -230,15 +230,9 @@ const ChosenMesh = union(enum) {
 
 fn chooseCommonMesh(inputs: []const *const Tensor, fallback: *const Sharding.Mesh) ChosenMesh {
     var mesh: ?*const Sharding.Mesh = null;
-    var replicated_mesh: ?*const Sharding.Mesh = null;
     var mesh_source_id: u32 = @intCast(inputs.len);
     for (0.., inputs) |i, input| {
         if (input.shape()._sharding.mesh) |shape_mesh| {
-            if (input.shape().isFullyReplicated()) {
-                // Replicated inputs impose no partition axes on the computation.
-                replicated_mesh = replicated_mesh orelse shape_mesh;
-                continue;
-            }
             if (mesh) |m| {
                 if (m != shape_mesh)
                     return .{ .incompatible = .{ mesh_source_id, @intCast(i) } };
@@ -248,7 +242,7 @@ fn chooseCommonMesh(inputs: []const *const Tensor, fallback: *const Sharding.Mes
             }
         }
     }
-    return .{ .mesh = mesh orelse replicated_mesh orelse fallback };
+    return .{ .mesh = mesh orelse fallback };
 }
 
 test chooseCommonMesh {
@@ -258,14 +252,11 @@ test chooseCommonMesh {
     const replicated = Tensor.init(.{ .a = 8 }, .f32);
     const sharded = Tensor.init(.{ .a = 8 }, .f32).withPartitioning(&first, .{ .a = .data });
     const other = Tensor.init(.{ .a = 8 }, .f32).withPartitioning(&second, .{ .a = .experts });
-    const explicit_replicated = replicated.withPartitioning(&second, .{ .a = .replicated });
 
     try std.testing.expectEqual(ChosenMesh{ .mesh = &fallback }, chooseCommonMesh(&.{}, &fallback));
     try std.testing.expectEqual(ChosenMesh{ .mesh = &fallback }, chooseCommonMesh(&.{&replicated}, &fallback));
     try std.testing.expectEqual(ChosenMesh{ .mesh = &first }, chooseCommonMesh(&.{&sharded}, &fallback));
     try std.testing.expectEqual(ChosenMesh{ .mesh = &first }, chooseCommonMesh(&.{ &replicated, &sharded, &sharded }, &fallback));
-    try std.testing.expectEqual(ChosenMesh{ .mesh = &first }, chooseCommonMesh(&.{ &explicit_replicated, &sharded }, &fallback));
-    try std.testing.expectEqual(ChosenMesh{ .mesh = &second }, chooseCommonMesh(&.{&explicit_replicated}, &fallback));
     try std.testing.expectEqual(ChosenMesh{ .incompatible = .{ 0, 1 } }, chooseCommonMesh(&.{ &sharded, &other }, &fallback));
 }
 
@@ -273,7 +264,7 @@ fn collectManualAxes(mesh: *const Sharding.Mesh, inputs: []const *const Tensor) 
     var used: [Sharding.MAX_MESH_RANK]bool = @splat(false);
     for (inputs) |input| {
         const sharding = input.shape()._sharding;
-        if (sharding.mesh == null or sharding.isFullyReplicated()) continue;
+        if (sharding.mesh == null) continue;
         std.debug.assert(sharding.mesh.? == mesh);
         for (0..input.rank()) |dim| {
             if (sharding.partition.get(dim).meshAxis()) |axis| used[axis] = true;
