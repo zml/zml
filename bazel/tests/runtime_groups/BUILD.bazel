@@ -1,0 +1,207 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//bazel:runtime_groups.bzl", "runtime_group")
+load(":fixtures.bzl", "binary", "report", "runtime", "wrapper")
+load(":tests.bzl", "contents", "groups_test", "invalid_test")
+
+package(default_testonly = True)
+
+runtime_group(
+    name = "cuda_group",
+    group = "cuda",
+)
+
+runtime_group(
+    name = "rocm_group",
+    group = "rocm",
+)
+
+runtime_group(
+    name = "shared_group",
+    group = "shared",
+)
+
+runtime_group(
+    name = "crashpad_group",
+    group = "crashpad",
+)
+
+runtime(
+    name = "cuda",
+    aspect_hints = [":cuda_group"],
+)
+
+runtime(
+    name = "cuda_extra",
+    aspect_hints = [":cuda_group"],
+)
+
+runtime(
+    name = "shared",
+    aspect_hints = [":shared_group"],
+)
+
+runtime(
+    name = "tool",
+    aspect_hints = [":rocm_group"],
+)
+
+binary(
+    name = "crashpad",
+    aspect_hints = [":crashpad_group"],
+    make_executable = True,
+)
+
+runtime(
+    name = "left",
+    deps = [":cuda"],
+)
+
+runtime(
+    name = "right",
+    deps = [":cuda"],
+)
+
+cc_library(
+    name = "native_bridge",
+    data = [
+        ":left",
+        ":right",
+    ],
+)
+
+binary(
+    name = "app",
+    keyed_deps = {":cuda_extra": "runtime"},
+    make_executable = True,
+    tool = ":tool",
+    deps = [
+        ":crashpad",
+        ":native_bridge",
+        ":shared",
+    ],
+)
+
+report(
+    name = "complete",
+    binary = ":app",
+)
+
+groups_test(
+    name = "complete_test",
+    executable_group = "application",
+    expected = {
+        "cuda": sorted(contents("cuda") + contents("cuda_extra")),
+        "crashpad": contents(
+            "crashpad",
+            executable = True,
+        ),
+        "shared": sorted(contents("shared") + contents("left") + contents("right") + ["file:app.txt"]),
+        "application": [
+            "file:app",
+            "root_symlink:app/root_alias=app",
+            "symlink:app/alias=app",
+        ],
+    },
+    target_under_test = ":complete",
+)
+
+runtime(
+    name = "assembled",
+    aspect_hints = [":rocm_group"],
+    deps = [":cuda"],
+)
+
+report(
+    name = "nested",
+    binary = ":assembled",
+)
+
+groups_test(
+    name = "nested_test",
+    expected = {
+        "rocm": sorted(contents("assembled") + contents("cuda")),
+        "shared": [],
+    },
+    target_under_test = ":nested",
+)
+
+binary(
+    name = "plain",
+    make_executable = True,
+)
+
+report(
+    name = "unannotated",
+    binary = ":plain",
+)
+
+groups_test(
+    name = "unannotated_test",
+    executable_group = "application",
+    expected = {
+        "shared": ["file:plain.txt"],
+        "application": [
+            "file:plain",
+            "root_symlink:plain/root_alias=plain",
+            "symlink:plain/alias=plain",
+        ],
+    },
+    target_under_test = ":unannotated",
+)
+
+binary(
+    name = "contaminated",
+    annotation_inputs = [":tool"],
+    make_executable = True,
+    deps = [":cuda"],
+)
+
+report(
+    name = "contamination",
+    binary = ":contaminated",
+    tags = ["manual"],
+)
+
+invalid_test(
+    name = "contamination_test",
+    message = "absent from",
+    target_under_test = ":contamination",
+)
+
+report(
+    name = "root_executable",
+    binary = ":crashpad",
+    tags = ["manual"],
+)
+
+invalid_test(
+    name = "root_executable_test",
+    message = "contains an application file",
+    target_under_test = ":root_executable",
+)
+
+wrapper(
+    name = "wrapped",
+    binary = ":plain",
+)
+
+report(
+    name = "wrapped_report",
+    application_binary = ":plain",
+    binary = ":wrapped",
+)
+
+groups_test(
+    name = "wrapper_test",
+    executable_group = "application",
+    expected = {
+        "shared": ["file:plain.txt"],
+        "application": [
+            "file:plain",
+            "file:wrapped",
+            "root_symlink:plain/root_alias=plain",
+            "symlink:plain/alias=plain",
+        ],
+    },
+    target_under_test = ":wrapped_report",
+)
