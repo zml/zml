@@ -215,7 +215,7 @@ noinline fn manualComputationInternal(
         },
     };
 
-    // reuse local_outputs buffer to store the final result.
+    // Returned tensors describe the operation's global output shapes and layouts.
     for (0.., local_outputs, global_output_shapes) |o, output_tensor_ptr, output_shape| {
         output_tensor_ptr.* = Tensor._result(output_shape, op.result(o));
         output_tensor_ptr._shape = output_shape;
@@ -235,6 +235,7 @@ fn chooseCommonMesh(inputs: []const *const Tensor, fallback: *const Sharding.Mes
     for (0.., inputs) |i, input| {
         if (input.shape()._sharding.mesh) |shape_mesh| {
             if (input.shape().isFullyReplicated()) {
+                // Replicated inputs impose no partition axes on the computation.
                 replicated_mesh = replicated_mesh orelse shape_mesh;
                 continue;
             }

@@ -75,10 +75,8 @@ pub const Tensor = struct {
         return self._shape.byteSize();
     }
 
-    /// Internal use
-    ///
-    /// Creates a tensor from a Shape and an mlir.Value.
-    /// Ordinary results have no sharding declaration. Shardy infers their layout.
+    /// Internal: creates a graph tensor with dimensions, dtype and tags from `sh`,
+    /// and open sharding for the partitioner to infer from graph constraints.
     pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
         var res: Tensor = .{ ._shape = sh, ._value = val, .id = nextTensorId() };
         res._shape._sharding = .open;
@@ -94,10 +92,8 @@ pub const Tensor = struct {
         return res;
     }
 
-    /// Creates a Tensor from a mlir.Value
-    ///
-    /// The shape is derived from the type of the mlir.Value.
-    /// Sharding is unspecified.
+    /// Wraps an MLIR tensor value, deriving dimensions and dtype from its type.
+    /// Dimension tags are unknown and sharding is open for partitioner inference.
     pub fn fromMlirValue(val: *const mlir.Value) Tensor {
         const ctx = Compiler.current();
         const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
@@ -159,16 +155,22 @@ pub const Tensor = struct {
         return res;
     }
 
-    /// Specify the mesh of the input tensor.
-    /// * mesh: *const zml.Mesh, but during compilation the `.meshe_name` syntax can used to get
-    /// a known mesh from the compilation options.
-    /// * partition spec: a struct where the field names match the axis of the given mesh
+    /// Declares this tensor's layout on `mesh_`.
+    /// Pass a `*const Mesh`, or a mesh name such as `.tp` during compilation.
+    /// `partitioning` accepts a `Sharding.Partitioning` or a mapping from dimension
+    /// tags to logical mesh axes, `.replicated`, or `.open`.
     ///
-    /// eg `x.withPartitioning(tp, .{ .h = .model }))` or `x.withPartitioning(.tp, .{ .h = .model }))`
+    /// During compilation, emits a graph constraint. For example,
+    /// `x.withPartitioning(.tp, .{ .h = .model })` splits dimension `h` over `model`
+    /// and leaves omitted dimensions open for inference. Use `.replicated` to
+    /// keep a dimension whole on each shard.
     ///
-    /// During compilation, omitted dimensions are open for Shardy to infer.
-    /// Outside compilation, this describes an input buffer and omitted dimensions
-    /// are replicated. Explicit output layouts must have no open dimensions.
+    /// Outside compilation, updates the tensor's shape to describe an executable
+    /// input layout. Omitted dimensions are replicated and no graph constraint is
+    /// emitted. An explicit `Sharding.Partitioning` uses its supplied specs in both contexts.
+    ///
+    /// Executable inputs and explicitly annotated outputs must have no open
+    /// dimensions. An output with no declared layout defaults to replication.
     pub fn withPartitioning(self: Tensor, mesh_: anytype, partitioning: anytype) Tensor {
         if (@TypeOf(mesh_) == @EnumLiteral()) {
             const compiler = Compiler.currentOrNull() orelse @panic("Out side of compilation, withPartitioning expects an explicit *const zml.Mesh object as input");
@@ -225,8 +227,9 @@ pub const Tensor = struct {
         return res;
     }
 
-    /// Force the input tensor to be fully replicated.
-    /// This can be detrimental for performance.
+    /// Emits a graph constraint requiring a complete copy on every device.
+    /// Requires active compilation. For a replicated input or buffer description,
+    /// use the default layout from `Tensor.init` or `Shape.init`.
     pub fn replicate(self: Tensor) Tensor {
         const compiler = Compiler.current();
         const partitioning: Sharding.Partitioning = .repeat(.replicated, self.rank());

@@ -659,6 +659,8 @@ fn collectOutputInfo(compiler: *Compiler, scope: *Scope, v: anytype) error{ OutO
         infos: std.MultiArrayList(TensorInfo) = .empty,
 
         fn cb(ctx: *@This(), tensor: *const Tensor) !void {
+            // Outputs with no declared layout default to replication. The graph
+            // constraint makes the partitioner produce the output buffer's layout.
             const output = if (tensor.shape().hasSharding()) tensor.* else tensor.replicate();
             const og_shape = output.shape();
             if (og_shape.containsPartitionSpec(.open)) {

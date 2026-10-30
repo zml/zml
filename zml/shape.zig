@@ -827,6 +827,9 @@ pub const Shape = struct {
         .grid = undefined,
     };
 
+    /// Returns shape metadata with the requested layout on `mesh`.
+    /// Omitted dimensions in a mapping are replicated, including during compilation.
+    /// Use `Tensor.withPartitioning` to emit a constraint on a graph value.
     pub fn withPartitioning(self: Shape, mesh: *const Sharding.Mesh, partitioning: anytype) Shape {
         if (@TypeOf(partitioning) != Sharding.Partitioning) {
             return self.withPartitioning(mesh, Sharding.Partitioning.parse(self.tags(), mesh, .replicated, partitioning));
@@ -963,8 +966,9 @@ pub const Shape = struct {
         try testing.expect(!shape.isFullyPartitioned());
     }
 
-    /// Whether the shape declares a layout, including replication.
-    /// A declared layout may still contain open dimensions.
+    /// Returns whether this shape declares a layout, including full replication.
+    /// A partially specified layout also returns true. Use
+    /// `containsPartitionSpec(.open)` to check for undecided dimensions.
     pub fn hasSharding(self: Shape) bool {
         return self._sharding.isSpecified();
     }
