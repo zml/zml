@@ -103,6 +103,18 @@ initializer. Zig 0.17's incremental linker handles constructor sections from C
 objects, but falls back to an ordinary data section for the previous Zig
 `linksection(".init_array")` declaration when its section attributes conflict.
 
+Two further Zig 0.17 workarounds allow the CUDA executable to link and start:
+
+- The generated C bindings module uses `-fstrip`. Self-hosted debug-info
+  generation otherwise creates link-time references to extern functions used
+  only in `@TypeOf`, including FlashInfer functions loaded with `DynLib.lookup`.
+  Application Zig modules retain their debug information and inferred C function
+  signatures. See the [type-only extern reproducer](../../tools/reproducers/zig-typeof-extern/README.md).
+- `--linkopt=-Wl,-z,now` overrides dependencies requesting lazy binding. The new
+  ELF linker leaves deleted `R_X86_64_NONE` relocations in `.rela.plt`, which
+  glibc rejects during lazy binding. Eager binding handles these entries. See
+  the [PLT relocation reproducer](../../tools/reproducers/zig-plt-relocations/README.md).
+
 Zig rejects explicit output paths with `--listen=-`. Each compiler therefore owns
 a private temporary cache, and the adapter copies successful outputs from the
 reported cache digest into Bazel's declared output paths. These are independent
@@ -122,10 +134,10 @@ on Linux x86_64. The adapter requires its compiler's exact Zig version; that
 internal protocol must be reviewed before upgrading the toolchain.
 
 The full `//...` build is not yet supported: `//bin/zml-smi` reaches linker
-limitations involving type-only references to external driver functions and
-upb's `__start_linkarr_upb_AllExts` / `__stop_linkarr_upb_AllExts` section symbols.
+limitations involving upb's `__start_linkarr_upb_AllExts` /
+`__stop_linkarr_upb_AllExts` section symbols.
 The dependent completion build-config test also fails to build. MNIST and the
-core CPU tests use the self-hosted path successfully; there is no LLVM fallback.
+core CPU and CUDA tests use the self-hosted path successfully; there is no LLVM fallback.
 
 Worker sandboxing is disabled in this configuration because Zig retains open
 input directories across requests. Bazel 9.3 applies that switch to all workers

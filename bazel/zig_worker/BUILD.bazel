@@ -1,3 +1,5 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_test")
 load("@rules_zig//zig:toolchain.bzl", "zig_target_toolchain")
 load(":bootstrap.bzl", "worker_binary", "worker_test")
 
@@ -13,6 +15,18 @@ worker_test(
     srcs = ["worker.zig"],
     main = "worker_test.zig",
     worker = ":worker",
+)
+
+cc_library(
+    name = "extern_type_header",
+    hdrs = ["extern_type.h"],
+)
+
+zig_test(
+    name = "extern_type_test",
+    size = "small",
+    main = "extern_type_test.zig",
+    deps = [":extern_type_header"],
 )
 
 # Match the C/C++ toolchain's minimum glibc when Zig performs the final link.

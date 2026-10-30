@@ -141,7 +141,17 @@ index c5750ed..a03358f 100644
  
      if use_cc_common_link:
          global_args.add_all([
-@@ -492,6 +542,16 @@ def zig_build_impl(ctx, *, kind):
+@@ -476,5 +526,9 @@ def zig_build_impl(ctx, *, kind):
+             global_args = global_args,
+             cc_infos = [root_module.cc_info],
+             translatectoolchaininfo = translatectoolchaininfo,
++            # Self-hosted DWARF emits references to extern functions used only
++            # for their types. Omit debug info for translated C declarations;
++            # keep debug info for the application's Zig modules.
++            zigopts = ["-fstrip"] if ctx.attr._incremental_worker[DefaultInfo].files_to_run.executable != None and ctx.genfiles_dir.path.find("-exec") == -1 else [],
+         )
+         transitive_inputs.append(c_module.transitive_inputs)
+@@ -492,6 +546,16 @@ def zig_build_impl(ctx, *, kind):
                  data = direct_data,
              )
  
@@ -158,16 +168,16 @@ index c5750ed..a03358f 100644
              transitive_inputs.append(depset(cdeps_inputs))
  
      if use_test_obj:
-@@ -535,7 +595,7 @@ def zig_build_impl(ctx, *, kind):
+@@ -535,7 +599,7 @@ def zig_build_impl(ctx, *, kind):
      )
  
      if not use_cc_common_link and kind != "zig_static_library":
 -        args.add_all(linkopts)
-+        args.add_all(linkopts, map_each = zig_cdeps_link_flag)
++        args.add_all(linkopts + ctx.fragments.cpp.linkopts, map_each = zig_cdeps_link_flag)
  
      auxiliary_outputs = []
      if ctx.attr.emit_asm:
-@@ -559,7 +619,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -559,7 +623,8 @@ def zig_build_impl(ctx, *, kind):
          if use_cc_common_link:
              static_lib = ctx.actions.declare_file(ctx.label.name + _static_lib_extension(zigtargetinfo.triple.os))
              args.add(static_lib, format = "-femit-bin=%s")
@@ -177,7 +187,7 @@ index c5750ed..a03358f 100644
                  outputs = [static_lib] + auxiliary_outputs,
                  inputs = inputs,
                  executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -596,7 +657,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -596,7 +661,8 @@ def zig_build_impl(ctx, *, kind):
              )
          else:
              args.add(bin_output, format = "-femit-bin=%s")
@@ -187,7 +197,7 @@ index c5750ed..a03358f 100644
                  outputs = [bin_output] + auxiliary_outputs,
                  inputs = inputs,
                  executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -610,9 +672,10 @@ def zig_build_impl(ctx, *, kind):
+@@ -610,9 +676,10 @@ def zig_build_impl(ctx, *, kind):
              test_artifact = None
              if use_test_obj:
                  test_obj = ctx.actions.declare_file(ctx.label.name + _object_extension(zigtargetinfo.triple.os))
@@ -200,7 +210,7 @@ index c5750ed..a03358f 100644
                      outputs = [test_obj] + auxiliary_outputs,
                      inputs = inputs,
                      executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -624,14 +687,15 @@ def zig_build_impl(ctx, *, kind):
+@@ -624,14 +691,15 @@ def zig_build_impl(ctx, *, kind):
                  test_artifact = test_obj
              else:
                  bc = ctx.actions.declare_file(ctx.label.name + ".bc")
@@ -218,7 +228,7 @@ index c5750ed..a03358f 100644
                      outputs = [bc] + auxiliary_outputs,
                      inputs = inputs,
                      executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -643,14 +707,15 @@ def zig_build_impl(ctx, *, kind):
+@@ -643,14 +711,15 @@ def zig_build_impl(ctx, *, kind):
                  test_artifact = bc
  
              static_lib = ctx.actions.declare_file(ctx.label.name + _static_lib_extension(zigtargetinfo.triple.os))
@@ -236,7 +246,7 @@ index c5750ed..a03358f 100644
                  outputs = [static_lib],
                  inputs = [test_artifact, zigtoolchaininfo.validation] + ([zigtoolchaininfo.zig_lib.file] if zigtoolchaininfo.zig_lib.file else []),
                  executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -687,7 +752,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -687,7 +756,8 @@ def zig_build_impl(ctx, *, kind):
              )
          else:
              args.add(bin_output, format = "-femit-bin=%s")
@@ -246,7 +256,7 @@ index c5750ed..a03358f 100644
                  outputs = [bin_output] + auxiliary_outputs,
                  inputs = inputs,
                  executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -701,7 +767,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -701,7 +771,8 @@ def zig_build_impl(ctx, *, kind):
              args.add(bin_output, format = "-femit-bin=%s")
          else:
              args.add("-fno-emit-bin")
@@ -256,7 +266,7 @@ index c5750ed..a03358f 100644
              outputs = ([bin_output] if ctx.attr.emit_bin else []) + auxiliary_outputs,
              inputs = inputs,
              executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -725,7 +792,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -725,7 +796,8 @@ def zig_build_impl(ctx, *, kind):
          if use_cc_common_link:
              static_lib = ctx.actions.declare_file(ctx.label.name + _static_lib_extension(zigtargetinfo.triple.os))
              args.add(static_lib, format = "-femit-bin=%s")
@@ -266,7 +276,7 @@ index c5750ed..a03358f 100644
                  outputs = [static_lib] + auxiliary_outputs,
                  inputs = inputs,
                  executable = zig_toolchain_executable(zigtoolchaininfo),
-@@ -777,7 +845,8 @@ def zig_build_impl(ctx, *, kind):
+@@ -777,7 +849,8 @@ def zig_build_impl(ctx, *, kind):
              # Here we explicitly set the SONAME to match the output filename.
              args.add(bin_output_name, format = "-fsoname=%s")
  
@@ -294,3 +304,13 @@ index 417a898..1628776 100644
 +)
 +
 +filegroup(name = "no_incremental_worker")
+diff --git a/zig/private/common/translate_c.bzl b/zig/private/common/translate_c.bzl
+--- a/zig/private/common/translate_c.bzl
++++ b/zig/private/common/translate_c.bzl
+@@ -301 +301 @@
+-def zig_translate_c(*, ctx, name, zigtoolchaininfo, global_args, cc_infos, output_prefix = "", canonical_name = None, translatectoolchaininfo = None):
++def zig_translate_c(*, ctx, name, zigtoolchaininfo, global_args, cc_infos, output_prefix = "", canonical_name = None, translatectoolchaininfo = None, zigopts = []):
+@@ -315,0 +316 @@
++      zigopts: List of string, per-module options for the generated Zig declarations.
+@@ -349,0 +351 @@
++        zigopts = zigopts,

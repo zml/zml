@@ -106,6 +106,8 @@ common:incremental --@rules_zig//zig/settings:use_cc_common_link=false
 common:incremental --@rules_zig//zig/settings:zigopt=-fno-llvm
 common:incremental --@rules_zig//zig/settings:zigopt=-fno-lld
 common:incremental --@rules_zig//zig/settings:zigopt=-fnew-linker
+# Elf2 leaves R_*_NONE entries in .rela.plt; glibc rejects them during lazy binding.
+common:incremental --linkopt=-Wl,-z,now
 common:incremental --extra_toolchains=//bazel/zig_worker:linux_target_toolchain
 # Elf2 does not yet synthesize the section boundaries used by this optional feature.
 common:incremental --copt=-DPROTOBUF_DISABLE_DESCRIPTOR_WEAK_MESSAGES
