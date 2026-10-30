@@ -5,6 +5,13 @@ load(":tests.bzl", "contents", "groups_test", "invalid_test")
 
 package(default_testonly = True)
 
+# cquery //... also selects manual targets. Only make these fixtures invalid
+# under the configuration installed by analysistest's expect_failure mode.
+config_setting(
+    name = "expect_failure",
+    values = {"allow_analysis_failures": "true"},
+)
+
 runtime_group(
     name = "cuda_group",
     group = "cuda",
@@ -158,7 +165,10 @@ binary(
 
 report(
     name = "contamination",
-    binary = ":contaminated",
+    binary = select({
+        ":expect_failure": ":contaminated",
+        "//conditions:default": ":plain",
+    }),
     tags = ["manual"],
 )
 
@@ -170,7 +180,10 @@ invalid_test(
 
 report(
     name = "root_executable",
-    binary = ":crashpad",
+    binary = select({
+        ":expect_failure": ":crashpad",
+        "//conditions:default": ":plain",
+    }),
     tags = ["manual"],
 )
 
