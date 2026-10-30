@@ -47,6 +47,7 @@ zig_binary(
     name = "hlo2json",
     srcs = [
         "dump_context.zig",
+        "graph_partitioner.zig",
         "json_writer.zig",
     ],
     main = "hlo2json.zig",
@@ -67,6 +68,7 @@ zig_test(
     name = "test",
     srcs = [
         "dump_context.zig",
+        "graph_partitioner.zig",
         "json_writer.zig",
     ],
     main = "hlo2json.zig",

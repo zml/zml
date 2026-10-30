@@ -5,6 +5,7 @@ const log = std.log.scoped(.hlo2json);
 
 const dump_context = @import("dump_context.zig");
 const json_writer = @import("json_writer.zig");
+const graph_partitioner = @import("graph_partitioner.zig");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -158,6 +159,9 @@ pub const Converter = struct {
             }
         }
 
+        var partitions = try graph_partitioner.partitionModule(self.allocator, module);
+        defer partitions.deinit(self.allocator);
+
         const W = @TypeOf(writer);
         var top_level = try json_writer.dict(writer);
 
@@ -166,14 +170,14 @@ pub const Converter = struct {
 
         for (module.computations.items) |computation| {
             var graph = try graphs.openDict();
-            try self.emitComputation(W, &graph, computation);
+            try self.emitComputation(W, &graph, computation, partitions.computations.getPtr(computation.id).?);
             try graph.close();
         }
         try graphs.close();
         try top_level.close();
     }
 
-    pub fn emitComputation(self: *const Converter, Writer: type, graph: *json_writer.Dict(Writer), computation: hlo.HloComputationProto) !void {
+    pub fn emitComputation(self: *const Converter, Writer: type, graph: *json_writer.Dict(Writer), computation: hlo.HloComputationProto, partition: *const graph_partitioner.ComputationPartition) !void {
         const comp_caller = self.computation_caller.get(computation.id);
         // The name of the caller node is better cause computation name is typically just "fusion".
         try graph.write("id", if (comp_caller) |caller| caller.name else computation.name);
@@ -184,7 +188,10 @@ pub const Converter = struct {
             var node = try nodes.openDict();
             // node name + attrs
             try node.writeTemplate("id", "\"{d}\"", .{instr.id});
-            try node.write("namespace", "");
+            try node.write("namespace", if (partition.node_counts.len > 1)
+                try std.fmt.allocPrint(self.allocator, "stage_{d:0>3}", .{partition.instructions.get(instr.id).?})
+            else
+                "");
             try node.write("label", try std.fmt.allocPrint(self.allocator, "{f}", .{self.instrLabel(instr)}));
             {
                 var attrs = try node.openList("attrs");
@@ -784,6 +791,7 @@ test "global references match parameter numbers and reject ambiguous provenance"
 
 test {
     _ = dump_context;
+    _ = graph_partitioner;
 }
 
 fn indexed(items: anytype, id: i32) ?@typeInfo(@TypeOf(items)).pointer.child {
@@ -882,4 +890,34 @@ test "compact collective bytes and device summaries" {
     instr.replica_groups.items[0] = group;
     instr.opcode = "all-to-all";
     try std.testing.expectEqual(@as(?u64, 4), collectiveGroupSize(instr));
+}
+
+test "partition namespaces retain edges and called computations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const shape: hlo.ShapeProto = .{ .element_type = .F32 };
+    var instructions = [_]hlo.HloInstructionProto{
+        .{ .id = 1, .opcode = "parameter", .shape = shape },
+        .{ .id = 2, .opcode = "all-gather", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{1}), .capacity = 1 } },
+        .{ .id = 3, .opcode = "call", .shape = shape, .operand_ids = .{ .items = @constCast(&[_]i64{2}), .capacity = 1 }, .called_computation_ids = .{ .items = @constCast(&[_]i64{20}), .capacity = 1 } },
+    };
+    var callee = [_]hlo.HloInstructionProto{.{ .id = 4, .opcode = "parameter", .shape = shape }};
+    var computations = [_]hlo.HloComputationProto{
+        .{ .id = 10, .name = "entry", .instructions = .{ .items = &instructions, .capacity = instructions.len } },
+        .{ .id = 20, .name = "callee", .instructions = .{ .items = &callee, .capacity = callee.len } },
+    };
+    var converter: Converter = .{ .allocator = allocator };
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    try converter.emitModule(&output.writer, .{ .hlo_module = .{ .computations = .{ .items = &computations, .capacity = computations.len } } });
+    const json = try std.json.parseFromSlice(std.json.Value, allocator, output.written(), .{});
+    const graphs = json.value.object.get("graphs").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), graphs.len);
+    const nodes = graphs[0].object.get("nodes").?.array.items;
+    try std.testing.expectEqualStrings("stage_000", nodes[0].object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("stage_001", nodes[1].object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("stage_001", nodes[2].object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("1", nodes[1].object.get("incomingEdges").?.array.items[0].object.get("sourceNodeId").?.string);
+    try std.testing.expectEqualStrings("callee", nodes[2].object.get("subgraphIds").?.array.items[0].string);
+    try std.testing.expectEqualStrings("", graphs[1].object.get("nodes").?.array.items[0].object.get("namespace").?.string);
 }
